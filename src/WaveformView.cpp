@@ -12,6 +12,11 @@ WaveformView::WaveformView (Application& appIn)
     : app (appIn), engine (appIn.audioEngine)
 {
     setMouseCursor (juce::MouseCursor::NormalCursor);
+    // Grab keyboard focus when clicked so the arrow keys keep controlling
+    // the playhead/selection even after the user has interacted with other
+    // widgets (combo boxes, text fields, ...). The view itself never consumes
+    // key events, so they bubble up to MainWindow's KeyListener.
+    setWantsKeyboardFocus (true);
 }
 
 WaveformView::~WaveformView() {}
@@ -444,12 +449,36 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
 
     g.setColour (juce::Colour::fromRGB (0, 212, 170));
 
-    // Initialise to centre so out-of-range columns render as a flat line
-    std::vector<float> tops ((size_t) w, center), bots ((size_t) w, center);
     const float rowTop = (float) chanY, rowBottom = (float) (chanY + chanH);
 
-    // Pick the finest mipmap level that still covers >= samples per column
+    // When zoomed in to roughly one-to-few samples per pixel column, draw the
+    // individual samples as a connected polyline so the true sample shape is
+    // visible instead of blocky min/max columns (classic DAW sample-level view).
     const double samplesPerColumn = (double) (s1 - s0) / w;
+    if (samplesPerColumn <= 4.0)
+    {
+        const int64_t n = s1 - s0;
+        std::vector<float> buf ((size_t) n);
+        if (!engine.readSamples (ch, s0, n, buf.data()))
+            return;
+
+        juce::Path path;
+        bool started = false;
+        for (int64_t i = 0; i < n; ++i)
+        {
+            const float x = (float) pr.getX() + ((float) (i + 0.5) / (float) n) * (float) w;
+            const float y = std::clamp (center - buf[i] * amp, rowTop, rowBottom);
+            if (!started) { path.startNewSubPath (x, y); started = true; }
+            else           path.lineTo (x, y);
+        }
+        g.strokePath (path, juce::PathStrokeType (1.0f));
+        return;
+    }
+
+    // Initialise to centre so out-of-range columns render as a flat line
+    std::vector<float> tops ((size_t) w, center), bots ((size_t) w, center);
+
+    // Pick the finest mipmap level that still covers >= samples per column
     const AudioEngine::MipLevel* best = nullptr;
     for (const auto& lv : engine.mipmaps())
         if ((double) lv.factor >= samplesPerColumn) { best = &lv; break; }

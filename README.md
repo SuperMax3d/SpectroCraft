@@ -19,7 +19,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 - **Waveform view**: mipmap pyramid overview, own time window + horizontal zoom,
   own vertical amplitude axis with dB gridlines and its own vertical zoom level,
   selection with optional zero-crossing snapping, persistent playhead (click to
-  move it), loop playback.
+  move it), loop playback. When zoomed in to ~4 samples per pixel or fewer the
+  view switches from min/max envelope columns to a **per-sample polyline** —
+  every individual sample is drawn as a connected line, so at high zoom you see
+  the actual sample values (flat tops and vertical jumps on square waves,
+  fine detail on anything else) instead of blocky columns.
 - **Synchronized horizontal view**: zooming or panning in either view moves the
   shared time range of *both* views (they always show exactly the same slice of
   the file), while each keeps its own vertical axis/zoom — waveform amplitude
@@ -343,6 +347,14 @@ The test executable accepts the same flags (useful for CI without a display).
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
 | Zoom to fit (both views) | Ctrl+0 |
 | Vertical zoom in / out (waveform amplitude + spectral frequency) | Ctrl+Shift+= / Ctrl+Shift+- |
+
+Keyboard focus follows the mouse: clicking either view puts keyboard focus on
+that view, so ←/→ and Shift+←/→ work immediately after any click inside a plot.
+Clicking neutral areas (splitters, scrollbars, empty space) lands focus on the
+main window itself — arrow keys keep working there too. Interactive widgets
+(combo boxes, text fields, the marker table) take focus when clicked and keep
+the standard Windows behaviour for arrow keys while focused; click back into a
+view to return playhead control.
 
 Menus: **File, Edit, View, Transport, Tools, Help**. Tools offers Silence,
 Fade In/Out, Normalize, Reverse and **Change Gain...** (a dB dialog that

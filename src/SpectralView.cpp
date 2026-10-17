@@ -42,6 +42,11 @@ static std::vector<juce::Rectangle<int>> spectralRowRects (int w, int h, int nRo
 SpectralView::SpectralView (Application& appIn)
     : app (appIn), engine (appIn.audioEngine), spectral (appIn.spectralEngine)
 {
+    // Grab keyboard focus when clicked so the arrow keys keep controlling
+    // the playhead/selection even after the user has interacted with other
+    // widgets. The view never consumes key events; they bubble up to
+    // MainWindow's KeyListener.
+    setWantsKeyboardFocus (true);
     settings_ = appIn.settings;
     freqMin = std::max (1.0, (double) appIn.settings.minFrequency);
     freqMax = std::min (engine.sampleRate() * 0.5, (double) appIn.settings.maxFrequency);

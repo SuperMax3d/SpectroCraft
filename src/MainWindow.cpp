@@ -105,6 +105,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // called otherwise, and we don't override that).
     addKeyListener (this);
 
+    // Be keyboard-focusable so clicking neutral areas (splitters, bars, empty
+    // space) lands focus here instead of leaving it on a previously clicked
+    // widget - the arrow keys then keep controlling the playhead/selection.
+    setWantsKeyboardFocus (true);
+
     menuBar.setModel (this);
     // DocumentWindow inherits ResizableWindow, whose addAndMakeVisible() asserts;
     // our layout adds children directly to the window and positions them in

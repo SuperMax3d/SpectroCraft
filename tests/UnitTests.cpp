@@ -418,6 +418,58 @@ static void testWaveformViewPaint()
     wav.deleteFile();
 }
 
+// ---------------- Waveform per-sample zoom (high-zoom sample-level rendering) ----------------
+// When zoomed in to <= ~4 samples per pixel column the view must draw the
+// individual samples as a thin polyline instead of blocky min/max columns.
+static void testWaveformPerSampleZoom()
+{
+    // Square wave: with a min/max envelope every column would be filled from
+    // -0.5 to +0.5 (blocky); per-sample mode draws a thin line instead.
+    const juce::File wav = makeTempFile ("wave_persample.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double)
+    {
+        return (f % 20 < 10) ? 0.5f : -0.5f;   // 400 Hz square wave at 8 kHz
+    });
+
+    Application app;
+    CHECK (app.audioEngine.loadFile (wav), "load wav for per-sample zoom test");
+
+    WaveformView view (app);
+    view.setSize (256, 128);
+    // Plot width = 256 - 60 (left axis) = 196 px; a 400-sample window gives
+    // ~2 samples/px, below the per-sample threshold of 4.
+    view.setViewRange (0.0, 0.05);
+    view.setVisibleChannels ({ 0 });
+
+    juce::Image img (juce::Image::ARGB, 256, 128, true);
+    { juce::Graphics g (img); view.paint (g); }
+
+    auto isWave = [] (const juce::Colour& p) { return p.getGreen() > 150 && p.getRed() < 120; };
+
+    int wavePx = 0, totalPx = 0;
+    for (int y = 24; y < 128; ++y)
+        for (int x = 60; x < 256; ++x)
+        {
+            ++totalPx;
+            if (isWave (img.getPixelAt (x, y))) ++wavePx;
+        }
+
+    CHECK (wavePx > 50, "per-sample zoom draws a waveform line");
+    CHECK ((double) wavePx / totalPx < 0.10,
+           "per-sample zoom is a thin line, not filled min/max columns");
+
+    // The curve must pass through the expected sample position: window sample
+    // 5 is +0.5 => y = centre - 0.5*amp = 76 - 23.4 ~= row 52/53 and
+    // x = 60 + (5.5/400)*196 ~= column 63.
+    bool foundPeak = false;
+    for (int y = 48; y <= 58 && !foundPeak; ++y)
+        for (int x = 60; x <= 67; ++x)
+            if (isWave (img.getPixelAt (x, y))) { foundPeak = true; break; }
+    CHECK (foundPeak, "per-sample curve passes through the expected sample point");
+
+    wav.deleteFile();
+}
+
 // ---------------- FFT analysis panel headless paint (crash regression) ----------------
 static void testFFTAnalysisViewPaint()
 {
@@ -2161,6 +2213,7 @@ static int scRunUnitTestsImpl()
     progress ("spectral engine");testSpectral();
     progress ("spectral view paint"); testSpectralViewPaint();
     progress ("waveform view paint"); testWaveformViewPaint();
+    progress ("per-sample zoom");     testWaveformPerSampleZoom();
     progress ("FFT panel paint");testFFTAnalysisViewPaint();
     progress ("markers+channels");testMarkersAndChannels();
     progress ("marker panel details"); testMarkerPanelDetails();
