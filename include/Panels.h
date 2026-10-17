@@ -387,8 +387,8 @@ private:
 
 // ---------------------------------------------------------------- Status bar
 
-// Thin strip at the bottom of the window: mouse probe info on the left, playhead
-// and selection times on the right.
+// Thin strip at the bottom of the window: active file name + mouse probe info
+// on the left, playhead and selection times on the right.
 class StatusBar : public juce::Component
 {
 public:
@@ -407,9 +407,15 @@ public:
     // Right side: selection range and playhead position.
     void setSelection (double t0, double t1);
     void setPlayhead (double t);
+    // Left side: name of the currently active file (empty when none is loaded).
+    void setFileName (const juce::String& s)
+    {
+        if (s != fileName) { fileName = s; repaint(); }
+    }
+    juce::String getFileName() const { return fileName; }
 
 private:
-    juce::String mouseText, selPart, playPart;
+    juce::String mouseText, selPart, playPart, fileName;
 
     JUCE_DECLARE_NON_COPYABLE (StatusBar)
 };

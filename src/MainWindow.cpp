@@ -189,6 +189,10 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 
     setupViews();
     updateTitle();   // a file may already be loaded (opened from the CLI)
+    if (statusBar)   // ...and the footer must show its name too
+        statusBar->setFileName (app.audioEngine().isFileLoaded()
+                                ? app.audioEngine().getFile().getFileName()
+                                : juce::String());
 
     // Panels notify us when they change shared state
     app.onStateChange = [this] { syncSharedState(); };
@@ -617,6 +621,17 @@ void MainWindow::activateDocUI()
 
     syncSharedState();
     updateTitle();
+
+    // The footer always shows the name of the file currently in the views.
+    if (statusBar)
+        statusBar->setFileName (app.audioEngine().isFileLoaded()
+                                ? app.audioEngine().getFile().getFileName()
+                                : juce::String());
+}
+
+juce::String MainWindow::statusBarFileName() const
+{
+    return statusBar ? statusBar->getFileName() : juce::String();
 }
 
 // useOSNativeDialogBox = false: the native Win32 IFileDialog is unavailable on some

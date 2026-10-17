@@ -45,6 +45,7 @@ public:
     void updateTitle();
     void setupViews();
     void activateDocUI();   // reset both views + sync panels after a doc switch
+    juce::String statusBarFileName() const;   // name currently shown in the footer
     void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
     void refreshAfterEdit();   // clamp ranges, repaint waveform, re-render spectral image
     void refreshPanels();

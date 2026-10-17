@@ -1605,10 +1605,27 @@ void StatusBar::paint (juce::Graphics& g)
     g.drawLine (0.0f, 0.0f, (float) b.getWidth(), 0.0f);
 
     g.setFont (12.0f);
-    if (!mouseText.isEmpty())
+    int leftX = 6;
+    if (!fileName.isEmpty())
+    {
+        // The active file's name sits at the far left; the mouse probe text
+        // starts to its right when both are present.
+        g.setColour (juce::Colour::fromRGB (235, 235, 240));
+        const juce::Font f (12.0f);
+        const int w = std::min (b.getWidth() / 2 - leftX,
+                                (int) juce::GlyphArrangement::getStringWidth (f, fileName) + 8);
+        if (w > 10)
+        {
+            g.drawText (fileName, leftX, 0, w, b.getHeight(),
+                        juce::Justification::left, false);
+            leftX += w + 12;
+        }
+    }
+    if (!mouseText.isEmpty() && leftX < b.getWidth() - 8)
     {
         g.setColour (juce::Colour::fromRGB (205, 205, 215));
-        g.drawText (mouseText, 6, 0, std::max (10, b.getWidth() / 2), b.getHeight(),
+        const int w = std::max (10, b.getWidth() / 2 + 60 - leftX);
+        g.drawText (mouseText, leftX, 0, w, b.getHeight(),
                     juce::Justification::left, false);
     }
 

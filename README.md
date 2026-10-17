@@ -132,11 +132,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - Main area: waveform view on top, spectral view below, separated by a
     **draggable divider** — drag it up/down to resize the two views. A time
     scrollbar runs along the bottom; each view has its own vertical scrollbar.
-  - Bottom status bar: left side shows a live cursor probe (time + amplitude)
-    while hovering over either view; right side shows the **selection start
-    and stop times** (`Sel: t0 - t1 s`) whenever a selection exists — updated
-    continuously while dragging it in either view — plus the current
-    **playhead position** (`Pos: t s`), which tracks playback at 30 Hz.
+  - Bottom status bar: left side shows the **name of the file currently in
+    the views** (updated on open, when switching between loaded files and
+    after closing; empty while no file is loaded) followed by a live cursor
+    probe (time + amplitude) while hovering over either view; right side
+    shows the **selection start and stop times** (`Sel: t0 - t1 s`) whenever a
+    selection exists — updated continuously while dragging it in either view —
+    plus the current **playhead position** (`Pos: t s`), which tracks playback
+    at 30 Hz.
   - The File menu offers **Save Spectrogram As...** (Ctrl+Shift+E), which writes
     the current spectrogram content (per-channel rows included, no axes or
     overlays) to a PNG file.

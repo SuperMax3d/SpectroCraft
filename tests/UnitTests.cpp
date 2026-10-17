@@ -2101,6 +2101,69 @@ static void testStatusBar()
     { juce::Graphics g (img2); bar.paint (g); }
     CHECK (!brightIn (img2, 6, 300), "cleared mouse info leaves the left side empty");
     CHECK (brightIn (img2, 300, 594), "right side still shows selection/playhead");
+
+    // The active file name sits at the far left of the footer.
+    bar.setFileName ("tone.wav");
+    juce::Image img3 (juce::Image::ARGB, 600, 20, true);
+    { juce::Graphics g (img3); bar.paint (g); }
+    CHECK (brightIn (img3, 6, 300), "file name is shown on the left");
+
+    // With both file name and mouse probe present, the probe starts to the
+    // right of the name instead of overlapping it.
+    const juce::Font f (12.0f);
+    const int nameW = std::min (600 / 2 - 6,
+                                (int) juce::GlyphArrangement::getStringWidth (f, "tone.wav") + 8);
+    const int probeX = 6 + nameW + 12;
+    bar.setMouseInfo ("t=1.234 s   ch L: +0.72");
+    juce::Image img4 (juce::Image::ARGB, 600, 20, true);
+    { juce::Graphics g (img4); bar.paint (g); }
+    CHECK (brightIn (img4, 6, probeX), "file name still at the far left");
+    CHECK (brightIn (img4, probeX + 2, 300), "mouse probe starts after the file name");
+
+    // Clearing the name sends the mouse probe back to its original spot.
+    bar.setFileName ("");
+    juce::Image img5 (juce::Image::ARGB, 600, 20, true);
+    { juce::Graphics g (img5); bar.paint (g); }
+    CHECK (brightIn (img5, 6, probeX), "mouse probe returns to the far left");
+}
+
+// ------------------------------------------------- footer file name wiring
+// The status bar must always show the name of the file currently in the
+// views: on open, when switching between loaded files and after closing.
+static void testStatusBarFileName()
+{
+    const juce::File wavA = makeTempFile ("footer_a.wav");
+    const juce::File wavB = makeTempFile ("footer_b.wav");
+    writeWav (wavA, 1, 8000.0, 2000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * (double) f / rate); });
+    writeWav (wavB, 1, 8000.0, 2000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 500.0 * (double) f / rate); });
+
+    Application app;
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "footer name test"));
+
+    CHECK (win->statusBarFileName().isEmpty(), "no file loaded: footer name is empty");
+
+    win->openFile (wavA);
+    CHECK (win->statusBarFileName() == wavA.getFileName(),
+           "opening a file shows its name in the footer");
+
+    win->openFile (wavB);
+    CHECK (win->statusBarFileName() == wavB.getFileName(),
+           "switching to another loaded file updates the footer");
+
+    app.closeFile();   // closes the active B, activates A again
+    CHECK (win->statusBarFileName() == wavA.getFileName(),
+           "closing the active file falls back to the previous one");
+
+    app.closeFile();   // no documents left
+    CHECK (win->statusBarFileName().isEmpty(), "closing every file clears the footer name");
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wavA.deleteFile();
+    wavB.deleteFile();
 }
 
 // ------------------------------------------------------- spectral point probe
@@ -2440,6 +2503,7 @@ static int scRunUnitTestsImpl()
     progress ("snapshot store/recompute"); testSnapshotStoreAndRecompute();
     progress ("snapshot overlay paint");  testSnapshotOverlayPaint();
     progress ("status bar");          testStatusBar();
+    progress ("footer file name");    testStatusBarFileName();
     progress ("spectral probe");      testSpectralProbe();
     progress ("arrow key selection"); testArrowKeySelection();
     progress ("ctrl+number channels"); testCtrlNumberChannelToggle();
