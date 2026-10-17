@@ -1031,6 +1031,25 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     // Note: KeyPress::operator== compares modifiers too, so compare key codes.
     const int keyCode = key.getKeyCode();
     const juce::ModifierKeys mods = key.getModifiers();
+
+    // Channel visibility, like the View menu items: Ctrl+1..9 toggles that
+    // channel in both views; Ctrl+Shift+1..9 shows ONLY it (solo), matching
+    // the menu's Ctrl/Shift-click behaviour.
+    if (mods.isCommandDown() && !mods.isAltDown() && keyCode >= '1' && keyCode <= '9')
+    {
+        const int ch = keyCode - '1';   // 0-based channel index
+        if (app.audioEngine().isFileLoaded() && ch < app.audioEngine().numChannels())
+        {
+            if (mods.isShiftDown())
+                app.visibleChannels = { ch };
+            else
+                app.toggleChannelVisible (ch);
+            app.syncActiveDoc ();   // keep the active document's copy in step
+            syncSharedState();
+            return true;
+        }
+    }
+
     if (app.audioEngine().isFileLoaded() && !mods.isCommandDown() && !mods.isAltDown()
             && !mods.isCtrlDown()
             && (keyCode == juce::KeyPress::leftKey || keyCode == juce::KeyPress::rightKey))

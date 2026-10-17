@@ -374,6 +374,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
 | Zoom to fit (both views) | Ctrl+0 |
 | Vertical zoom in / out (waveform amplitude + spectral frequency) | Ctrl+Shift+= / Ctrl+Shift+- |
+| Toggle a channel's visibility (like the View menu items); show ONLY that channel with Shift held | Ctrl+1..9 / Ctrl+Shift+1..9 |
 
 Keyboard focus follows the mouse: clicking either view puts keyboard focus on
 that view, so ←/→ and Shift+←/→ work immediately after any click inside a plot.

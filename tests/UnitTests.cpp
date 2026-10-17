@@ -2206,6 +2206,60 @@ static void testArrowKeySelection()
     wav.deleteFile();
 }
 
+// ------------------------------------------------- Ctrl+number channel toggle
+// Ctrl+1..9 toggles a channel's visibility like the View menu items;
+// Ctrl+Shift+1..9 shows ONLY that channel (solo), matching the menu's
+// Ctrl/Shift-click behaviour.
+static void testCtrlNumberChannelToggle()
+{
+    const juce::File wav = makeTempFile ("ctrl_num_chans.wav");
+    writeWav (wav, 2, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (ch == 0 ? 300.0 : 500.0) * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for ctrl+number test");
+
+    // A MessageManager is required before constructing the top-level window;
+    // it must still be alive when the window is destroyed.
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "ctrl number test"));
+
+    auto press = [&] (char c, juce::ModifierKeys mods)
+    { return win->keyPressed (juce::KeyPress (c, mods, 0), nullptr); };
+
+    CHECK (app.isChannelVisible (0) && app.isChannelVisible (1), "both channels visible initially");
+
+    // A plain number key does nothing.
+    CHECK (!press ('1', juce::ModifierKeys::noModifiers), "plain 1 is left unhandled");
+    CHECK (app.isChannelVisible (0) && app.isChannelVisible (1), "plain key leaves visibility alone");
+
+    // Ctrl+1 hides channel 1; Ctrl+2 hides channel 2.
+    CHECK (press ('1', juce::ModifierKeys::commandModifier), "Ctrl+1 is handled");
+    CHECK (!app.isChannelVisible (0) && app.isChannelVisible (1), "Ctrl+1 toggles channel 1 off");
+    CHECK (press ('2', juce::ModifierKeys::commandModifier), "Ctrl+2 is handled");
+    CHECK (!app.isChannelVisible (0) && !app.isChannelVisible (1), "Ctrl+2 toggles channel 2 off");
+
+    // Ctrl+Shift+1 shows ONLY channel 1 (solo, like the menu).
+    CHECK (press ('1', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier),
+           "Ctrl+Shift+1 is handled");
+    CHECK (app.isChannelVisible (0) && !app.isChannelVisible (1), "Ctrl+Shift+1 solos channel 1");
+
+    // Ctrl+9: a stereo file has no channel 9 -> unhandled, state untouched.
+    CHECK (!press ('9', juce::ModifierKeys::commandModifier), "Ctrl+9 is left unhandled for a stereo file");
+    CHECK (app.isChannelVisible (0) && !app.isChannelVisible (1), "unhandled key leaves visibility alone");
+
+    // Ctrl+2 toggles channel 2 back on.
+    CHECK (press ('2', juce::ModifierKeys::commandModifier), "Ctrl+2 is handled again");
+    CHECK (app.isChannelVisible (0) && app.isChannelVisible (1), "both channels visible again");
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile();
+}
+
 // ------------------------------------------------- multi-file support
 // Multiple files can be open at once. Each file remembers its own playhead,
 // selection, markers and undo history; switching restores them. Snapshots are
@@ -2388,6 +2442,7 @@ static int scRunUnitTestsImpl()
     progress ("status bar");          testStatusBar();
     progress ("spectral probe");      testSpectralProbe();
     progress ("arrow key selection"); testArrowKeySelection();
+    progress ("ctrl+number channels"); testCtrlNumberChannelToggle();
     progress ("multi-file support");  testMultiFileSupport();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
