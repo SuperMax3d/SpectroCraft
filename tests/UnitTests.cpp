@@ -332,7 +332,7 @@ static void testSpectralViewPaint()
     });
 
     Application app;
-    CHECK (app.audioEngine.loadFile (wav), "load wav for view paint test");
+    CHECK (app.audioEngine().loadFile (wav), "load wav for view paint test");
 
     SpectralView view (app);
     view.setSize (256, 128);
@@ -349,7 +349,7 @@ static void testSpectralViewPaint()
     // The 400 Hz tone should produce a bright row at its log-scale position.
     // Note: the engine clamps fMax to Nyquist (rate/2), so for this 8 kHz file
     // the axis is 20 Hz .. 4000 Hz:
-    const double rate = app.audioEngine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     const double fMin = 20.0, fMax = std::min (rate * 0.5, 20000.0);
     const int expectedRow = (int) std::lround (128.0 * (1.0 - std::log (400.0 / fMin)
                                                         / std::log (fMax / fMin)));
@@ -384,7 +384,7 @@ static void testWaveformViewPaint()
     });
 
     Application app;
-    CHECK (app.audioEngine.loadFile (wav), "load wav for waveform view test");
+    CHECK (app.audioEngine().loadFile (wav), "load wav for waveform view test");
 
     WaveformView view (app);
     view.setSize (256, 128);
@@ -432,7 +432,7 @@ static void testWaveformPerSampleZoom()
     });
 
     Application app;
-    CHECK (app.audioEngine.loadFile (wav), "load wav for per-sample zoom test");
+    CHECK (app.audioEngine().loadFile (wav), "load wav for per-sample zoom test");
 
     WaveformView view (app);
     view.setSize (256, 128);
@@ -480,7 +480,7 @@ static void testFFTAnalysisViewPaint()
     });
 
     Application app;
-    CHECK (app.audioEngine.loadFile (wav), "load wav for fft view test");
+    CHECK (app.audioEngine().loadFile (wav), "load wav for fft view test");
 
     FFTAnalysisView view (app);
     view.setSize (320, 300);
@@ -542,7 +542,7 @@ static void testMarkersAndChannels()
     app.setSelection ({ 1.0, 3.5 });
     const int id = app.addMarkerAtCursor();
     const Marker* m = nullptr;
-    for (const auto& mk : app.markers.markers())
+    for (const auto& mk : app.markers().markers())
         if (mk.id == id) { m = &mk; break; }
     CHECK (m != nullptr, "marker created at cursor");
     if (m)
@@ -556,7 +556,7 @@ static void testMarkersAndChannels()
     app.playhead = 2.25;
     const int id2 = app.addMarkerAtCursor();
     m = nullptr;
-    for (const auto& mk : app.markers.markers())
+    for (const auto& mk : app.markers().markers())
         if (mk.id == id2) { m = &mk; break; }
     CHECK (m != nullptr && std::abs (m->start - 2.25) < 1e-9 && m->end < 0,
            "point marker at playhead when no selection");
@@ -591,8 +591,8 @@ static void testMarkerPanelDetails()
     Application app;
     CHECK (app.openFile (wav), "open wav for marker panel test");
 
-    const int rid = app.markers.addRegionMarker (1.0, 3.0, "RegionA");
-    app.markers.addPointMarker (2.5, "PointB");
+    const int rid = app.markers().addRegionMarker (1.0, 3.0, "RegionA");
+    app.markers().addPointMarker (2.5, "PointB");
 
     MarkerListPanel panel (app);
     panel.setSize (300, 420);
@@ -614,7 +614,7 @@ static void testMarkerPanelDetails()
 
     auto markerById = [&] (int id) -> const Marker*
     {
-        for (const auto& mk : app.markers.markers())
+        for (const auto& mk : app.markers().markers())
             if (mk.id == id) return &mk;
         return nullptr;
     };
@@ -653,10 +653,10 @@ static void testMarkerPanelDetails()
     CHECK (m != nullptr && m->end < 0, "clearing length makes it a point marker");
 
     // --- Copy all markers: tab-separated fields, CRLF between rows ---
-    app.markers.clear();
-    const int r1 = app.markers.addRegionMarker (0.5, 2.5, "Alpha");
-    app.markers.setComment (r1, "first line\nsecond line"); // flattened on copy
-    app.markers.addPointMarker (3.0, "Beta");
+    app.markers().clear();
+    const int r1 = app.markers().addRegionMarker (0.5, 2.5, "Alpha");
+    app.markers().setComment (r1, "first line\nsecond line"); // flattened on copy
+    app.markers().addPointMarker (3.0, "Beta");
     panel.refresh();
 
     panel.copyAllMarkers();
@@ -666,17 +666,17 @@ static void testMarkerPanelDetails()
            "copy produces tab/CRLF separated rows");
 
     // --- Paste markers from the clipboard ---
-    const int before = (int) app.markers.count();
+    const int before = (int) app.markers().count();
     juce::SystemClipboard::copyTextToClipboard (
         "Gamma\t0:01.250\t0:02.750\tpasted comment\r\nDelta\t0:03.500\t-\t");
 
     const int added = panel.pasteMarkersFromClipboard();
     CHECK (added == 2, "paste adds two markers");
-    CHECK ((int) app.markers.count() == before + 2, "marker count grew by two");
+    CHECK ((int) app.markers().count() == before + 2, "marker count grew by two");
 
     const Marker* g = nullptr;
     const Marker* d = nullptr;
-    for (const auto& mk : app.markers.markers())
+    for (const auto& mk : app.markers().markers())
     {
         if (mk.name == "Gamma") g = &mk;
         if (mk.name == "Delta") d = &mk;
@@ -708,8 +708,8 @@ static void testMarkerPanelLayout()
 
     Application app;
     CHECK (app.openFile (wav), "open wav for marker layout test");
-    const int rid = app.markers.addRegionMarker (1.0, 3.0, "Alpha");
-    app.markers.setComment (rid, "a comment\nwith two lines");
+    const int rid = app.markers().addRegionMarker (1.0, 3.0, "Alpha");
+    app.markers().setComment (rid, "a comment\nwith two lines");
 
     MarkerListPanel panel (app);
     panel.setSize (280, 420);
@@ -815,7 +815,7 @@ static void testIndependentViews()
     spec.zoomFrequencyBy (1.5); // zoom in on frequency axis
     {
         // After zooming, the top row must correspond to a lower max frequency:
-        const double rate = app.audioEngine.sampleRate();
+        const double rate = app.audioEngine().sampleRate();
         const double fTop = spec.yToFreq (0.0f, 200);
         CHECK (fTop < std::min (rate * 0.5, 20000.0) - 1.0,
                "spectral frequency axis zoomed in");
@@ -1430,7 +1430,7 @@ static void testPlayheadSync()
     });
 
     Application app;
-    CHECK (app.audioEngine.loadFile (wav), "load wav for playhead sync test");
+    CHECK (app.audioEngine().loadFile (wav), "load wav for playhead sync test");
 
     WaveformView wave (app);
     SpectralView spec (app);
@@ -1813,15 +1813,15 @@ static void testChangeGain()
     app.changeGain (6.0f);   // +6 dB = x10^(6/20)
 
     float inSel = -1.0f, outSel = -1.0f;
-    CHECK (app.audioEngine.readSamples (0, 4000, 1, &inSel), "read inside selection");
-    CHECK (app.audioEngine.readSamples (0, 1000, 1, &outSel), "read outside selection");
+    CHECK (app.audioEngine().readSamples (0, 4000, 1, &inSel), "read inside selection");
+    CHECK (app.audioEngine().readSamples (0, 1000, 1, &outSel), "read outside selection");
     const float expected = 0.5f * std::pow (10.0f, 6.0f / 20.0f);
     CHECK (std::abs (inSel - expected) < 1e-4,
            "+6 dB scales the selected samples by 10^(dB/20)");
     CHECK (std::abs (outSel - 0.5f) < 1e-4, "samples outside the selection are untouched");
 
     app.undoStep();
-    CHECK (app.audioEngine.readSamples (0, 4000, 1, &inSel), "read after undo");
+    CHECK (app.audioEngine().readSamples (0, 4000, 1, &inSel), "read after undo");
     CHECK (std::abs (inSel - 0.5f) < 1e-4, "undo restores the original level");
 }
 
@@ -1982,7 +1982,8 @@ static void testSnapshotStoreAndRecompute()
     view.handleSnapshotClick (1, juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
     CHECK (view.snapshotN (1) == 0 && !view.snapshotShown (1), "Shift+click cleared the snapshot slot");
 
-    // Loading a different file invalidates all stored snapshots.
+    // Multi-file: opening another file does NOT clear stored snapshots - they
+    // are shared across all open files and each one remembers its source doc.
     const juce::File wav2 = makeTempFile ("snap_other.wav");
     writeWav (wav2, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
     {
@@ -1990,9 +1991,11 @@ static void testSnapshotStoreAndRecompute()
                                         * 300.0 * (double) f / rate);
     });
     CHECK (app.openFile (wav2), "open second file");
-    view.recomputeIfNeeded();
-    CHECK (view.snapshotN (0) == 0 && view.snapshotN (1) == 0,
-          "snapshots cleared when the file changes");
+    view.recomputeIfNeeded();   // live spectrum now follows the new active file...
+    CHECK (view.snapshotN (0) == 4096 && !view.snapshotMags (0).empty(),
+          "snapshots survive opening another file (shared across files)");
+    CHECK (std::abs (peakHzOf (view.snapshotMags (0), view.snapshotN (0)) - 440.0) < 8.0,
+          "snapshot still peaks at its source file's tone after switching");
 }
 
 // ------------------------------------------------- snapshot overlay paint
@@ -2118,8 +2121,8 @@ static void testSpectralProbe()
 
     SpectralEngine engine;
     const Settings s = app.settings;   // default: 2048-point Hann, hop 512
-    const float peak = engine.probeMagnitude (app.audioEngine, 0, 1.0, 400.0, s, 0);
-    const float off  = engine.probeMagnitude (app.audioEngine, 0, 1.0, 300.0, s, 0);
+    const float peak = engine.probeMagnitude (app.audioEngine(), 0, 1.0, 400.0, s, 0);
+    const float off  = engine.probeMagnitude (app.audioEngine(), 0, 1.0, 300.0, s, 0);
 
     CHECK (peak > -35.0f && peak < -5.0f, "probe finds the 400 Hz tone");
     CHECK (off < peak - 15.0f, "probe is much quieter off the tone frequency");
@@ -2144,7 +2147,7 @@ static void testArrowKeySelection()
     juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "arrow key test"));
 
-    const double step = 1.0 / app.audioEngine.sampleRate();
+    const double step = 1.0 / app.audioEngine().sampleRate();
     auto pressRight = [&] (juce::ModifierKeys mods)
     { return win->keyPressed (juce::KeyPress (juce::KeyPress::rightKey, mods, 0), nullptr); };
     auto pressLeft  = [&] (juce::ModifierKeys mods)
@@ -2203,6 +2206,152 @@ static void testArrowKeySelection()
     wav.deleteFile();
 }
 
+// ------------------------------------------------- multi-file support
+// Multiple files can be open at once. Each file remembers its own playhead,
+// selection, markers and undo history; switching restores them. Snapshots are
+// shared across all files but each one tracks the document it was stored
+// from; closing a file clears only that file's snapshot entries.
+static void testMultiFileSupport()
+{
+    // Two clearly distinct files: A = 8 kHz mono 2 s (440 Hz),
+    //                          B = 16 kHz stereo 1 s (300/600 Hz).
+    const juce::File wavA = makeTempFile ("multi_a.wav");
+    writeWav (wavA, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 440.0 * (double) f / rate); });
+
+    const juce::File wavB = makeTempFile ("multi_b.wav");
+    writeWav (wavB, 2, 16000.0, 16000, [] (int ch, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * (ch == 0 ? 300.0 : 600.0) * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wavA), "open file A");
+    CHECK (app.numDocs() == 1 && app.activeDocIndex == 0, "one doc after first open");
+
+    // Remember per-file state on A.
+    app.setPlayhead (0.25);
+    app.setSelection ({ 0.1, 0.4 });
+
+    CHECK (app.openFile (wavB), "open file B");
+    CHECK (app.numDocs() == 2 && app.activeDocIndex == 1, "two docs; new one is active");
+    CHECK (std::abs (app.audioEngine().sampleRate() - 16000.0) < 1e-9,
+          "active engine is B's");
+    CHECK (app.playhead == 0.0 && app.selection.isEmpty(), "new doc starts with empty state");
+
+    // Give B its own state too...
+    app.setPlayhead (0.5);
+    app.setSelection ({ 0.2, 0.7 });
+
+    // ...switch back to A: the remembered playhead/selection must be restored.
+    app.activate (0);
+    CHECK (std::abs (app.playhead - 0.25) < 1e-9, "A's playhead restored on switch");
+    CHECK (std::abs (app.selection.getStart() - 0.1) < 1e-9
+          && std::abs (app.selection.getEnd() - 0.4) < 1e-9,
+          "A's selection restored on switch");
+    CHECK (std::abs (app.audioEngine().sampleRate() - 8000.0) < 1e-9,
+          "active engine is A's again");
+
+    // ...and B must still hold its own state while inactive.
+    app.activate (1);
+    CHECK (std::abs (app.playhead - 0.5) < 1e-9
+          && std::abs (app.selection.getStart() - 0.2) < 1e-9,
+          "B's state kept while A was active");
+
+    // Ctrl+Tab cycling: forward wraps around the doc list.
+    app.cycleActiveDoc (true);   // B -> A
+    CHECK (app.activeDocIndex == 0, "cycle forward moves to previous doc");
+    app.cycleActiveDoc (true);   // A -> B (wrap)
+    CHECK (app.activeDocIndex == 1, "cycle wraps around the list");
+
+    // Markers are per-file.
+    app.activate (0);
+    app.markers().addRegionMarker (0.1, 0.2, "A marker");
+    app.activate (1);
+    CHECK (app.markers().count() == 0, "B has no markers of its own");
+    app.activate (0);
+    CHECK (app.markers().count() == 1 && app.markers().markers()[0].name == "A marker",
+          "A keeps its own marker list");
+
+    // Undo history is per-file: an edit on A must not be undoable from B.
+    app.setSelection ({ 0.5, 1.0 });
+    app.silence();
+    CHECK (app.undo().canUndo(), "edit recorded in A's undo history");
+    app.activate (1);
+    CHECK (!app.undo().canUndo(), "B has an empty undo history");
+    app.activate (0);
+    CHECK (app.undo().canUndo(), "A still remembers its edit");
+
+    // Closing a non-active doc leaves the active one and its state untouched.
+    app.activate (1);
+    const double bPlay = app.playhead;   // 0.5
+    app.closeDoc (0);                    // close A while B is active
+    CHECK (app.numDocs() == 1 && app.activeDocIndex == 0, "closing non-active doc keeps B");
+    CHECK (std::abs (app.playhead - bPlay) < 1e-9, "B's playhead untouched by closing A");
+
+    // Closing the last doc resets to the empty state.
+    app.closeFile();
+    CHECK (!app.audioEngine().isFileLoaded() && app.numDocs() == 0,
+          "no docs after closing all");
+    CHECK (app.playhead == 0.0 && app.selection.isEmpty(), "state reset when no file loaded");
+
+    // Re-opening an already-loaded file just activates it (no duplicate doc).
+    CHECK (app.openFile (wavA), "re-open A");
+    CHECK (app.numDocs() == 1, "single doc after re-open");
+    app.setPlayhead (0.3);
+    CHECK (app.openFile (wavB), "open B again");
+    CHECK (app.openFile (wavA), "opening an already-loaded file activates it");
+    CHECK (app.numDocs() == 2, "no duplicate doc created");
+    CHECK (app.activeDocIndex == 0 && std::abs (app.playhead - 0.3) < 1e-9,
+          "re-opened A is active with its remembered playhead");
+
+    // Shared snapshots: store one from each file; closing a file clears only
+    // that file's snapshot entries. (The panel clamps the FFT size to >=1024.)
+    app.settings.fftSize = 1024;
+    FFTAnalysisView view (app);
+    view.setSize (300, 200);
+
+    // Wire the close-time snapshot cleanup exactly like MainWindow does.
+    app.onFileClosed = [&view] (const FileDoc& d) { view.clearSnapshotsFor (&d); };
+
+    app.activate (0);                    // A active
+    app.setSelection ({ 0.2, 0.8 });
+    view.recomputeIfNeeded();
+    view.handleSnapshotClick (0);        // snapshot 1 <- from A
+    CHECK (view.snapshotN (0) == 1024 && view.snapshotShown (0), "snapshot stored from A");
+
+    app.activate (1);                    // B active
+    app.setSelection ({ 0.1, 0.4 });
+    std::this_thread::sleep_for (std::chrono::milliseconds (80));
+    view.recomputeIfNeeded();
+    view.handleSnapshotClick (1);        // snapshot 2 <- from B
+    CHECK (view.snapshotN (1) == 1024 && view.snapshotShown (1), "snapshot stored from B");
+
+    // Both snapshots survive the switch and keep their own source.
+    app.activate (0);
+    CHECK (view.snapshotN (0) == 1024 && view.snapshotN (1) == 1024,
+          "both snapshots alive across files");
+
+    // Convert snapshot 2 to a marker: it must land in B's marker list even
+    // though A is active.
+    CHECK (view.convertSnapshotToMarker (1), "convert snapshot 2 to marker");
+    app.activate (1);
+    const auto& bMarkers = app.markers().markers();
+    CHECK (bMarkers.size() == 1 && bMarkers[0].name == "Snapshot 2",
+          "marker created in the snapshot's source file (B)");
+    CHECK (std::abs (bMarkers[0].start - 0.1) < 1e-9
+          && std::abs (bMarkers[0].end - 0.4) < 1e-9,
+          "marker spans the snapshot's time range");
+
+    // Closing B clears only B's snapshots; A's stays.
+    app.closeDoc (app.activeDocIndex);   // close B (active)
+    CHECK (view.snapshotN (1) == 0 && !view.snapshotShown (1), "B's snapshot cleared on close");
+    CHECK (view.snapshotN (0) == 1024, "A's snapshot survives closing B");
+
+    wavA.deleteFile();
+    wavB.deleteFile();
+}
+
 static int scRunUnitTestsImpl()
 {
     progress ("FFT");            testFFT();
@@ -2239,6 +2388,7 @@ static int scRunUnitTestsImpl()
     progress ("status bar");          testStatusBar();
     progress ("spectral probe");      testSpectralProbe();
     progress ("arrow key selection"); testArrowKeySelection();
+    progress ("multi-file support");  testMultiFileSupport();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
     return failures == 0 ? 0 : 1;

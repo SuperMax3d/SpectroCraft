@@ -7,13 +7,14 @@
 
 Application::Application()
 {
-    audioEngine.setUndoManager (&undo);
-    audioEngine.setMarkersForSave (&markers.markers()); // embedded as RIFF cue/adtl in WAV saves
+    emptyEngine.setUndoManager (&emptyUndo);
+    emptyEngine.setMarkersForSave (&emptyMarkers.markers()); // embedded as RIFF cue/adtl in WAV saves
+
     spectralEngine.setColourMap (colourMap);
 
-    // Real-time output: the player streams from the engine's transport into
-    // the default output device, so play/pause/loop actually produce sound.
-    sourcePlayer.setSource (&audioEngine);
+    // Real-time output: the player streams from the active engine's transport
+    // into the default output device, so play/pause/loop actually produce sound.
+    sourcePlayer.setSource (&emptyEngine);
     audioDevice = std::make_unique<juce::AudioDeviceManager>();
     audioDevice->addAudioCallback (&sourcePlayer);
     audioDevice->initialiseWithDefaultDevices (0, 2); // no input, stereo output
@@ -21,53 +22,148 @@ Application::Application()
 
 Application::~Application() {}
 
+FileDoc* Application::doc() const
+{
+    return (activeDocIndex >= 0 && activeDocIndex < (int) docs.size())
+           ? docs[(size_t) activeDocIndex].get() : nullptr;
+}
+
+AudioEngine& Application::audioEngine() { return doc() ? doc()->engine : emptyEngine; }
+MarkerManager& Application::markers()   { return doc() ? doc()->markers : emptyMarkers; }
+::UndoManager& Application::undo()      { return doc() ? doc()->undo : emptyUndo; }
+
+bool Application::isDocLoaded (const FileDoc* d) const
+{
+    for (auto& p : docs)
+        if (p.get() == d) return true;
+    return false;
+}
+
 bool Application::openFile (const juce::File& file)
 {
-    audioEngine.stop(); // stop any playback of the previous file
-    spectralEngine.clearCache(); // tiles are keyed by sample position only
+    // Already loaded? Just make it active again.
+    for (int i = 0; i < (int) docs.size(); ++i)
+        if (docs[(size_t) i]->file == file)
+        { activate (i); return true; }
 
-    if (!audioEngine.loadFile (file))
+    auto d = std::make_unique<FileDoc>();
+    if (!d->load (file))
         return false;
 
-    // Prefer the sidecar when one exists; otherwise recover markers embedded
-    // in WAV files (RIFF cue/adtl chunks, classic DAW marker layout).
-    if (!markers.loadSidecar (file) && file.getFileExtension().equalsIgnoreCase (".wav"))
-        markers.loadFromWavFile (file, audioEngine.sampleRate());
-
-    selection = { 0, 0 };
-    playhead = 0.0;
-    viewStart = 0;
-    viewEnd = audioEngine.duration();
-    visibleChannels.resize (audioEngine.numChannels());
-    for (size_t i = 0; i < visibleChannels.size(); ++i)
-        visibleChannels[i] = (int) i;
-    undo.clear();
+    FileDoc* raw = d.get();
+    docs.push_back (std::move (d));
+    activate ((int) docs.size() - 1);
     return true;
+}
+
+void Application::activate (int index)
+{
+    if (index < 0 || index >= (int) docs.size()) return;
+    FileDoc* d = docs[(size_t) index].get();
+
+    // Save the current UI state back into the doc being left and stop its
+    // playback. (The bounds check matters when activate() is called right
+    // after a close: the old index may already be out of range.)
+    if (activeDocIndex >= 0 && activeDocIndex != index
+        && activeDocIndex < (int) docs.size())
+    {
+        syncActiveDoc ();
+        FileDoc& prev = *docs[(size_t) activeDocIndex];
+        if (prev.engine.isPlaying())
+            prev.engine.stop();
+    }
+
+    activeDocIndex = index;
+    selection = d->selection;
+    playhead = d->playhead;
+    visibleChannels = d->visibleChannels;
+    viewStart = 0.0;
+    viewEnd = std::max (d->engine.duration(), 1e-6);
+
+    sourcePlayer.setSource (&d->engine);
+    d->engine.setPosition (d->playhead);
+    spectralEngine.clearCache();   // tiles are keyed by sample position only
+
+    if (onActiveDocChanged) onActiveDocChanged ();
+}
+
+void Application::cycleActiveDoc (bool forward)
+{
+    const int n = (int) docs.size();
+    if (n < 2) return;
+    const int i = (activeDocIndex >= 0 && activeDocIndex < n) ? activeDocIndex : 0;
+    activate ((i + (forward ? 1 : -1) + n) % n);
+}
+
+void Application::syncActiveDoc()
+{
+    FileDoc* d = doc();
+    if (!d) return;
+    d->selection = selection;
+    d->playhead = playhead;
+    d->visibleChannels = visibleChannels;
 }
 
 void Application::closeFile()
 {
-    audioEngine.stop();
-    audioEngine.closeFile();
-    spectralEngine.clearCache();
-    selection = { 0, 0 };
-    playhead = 0.0;
-    viewStart = 0; viewEnd = 10;
+    if (docs.empty()) return;
+    const int idx = (activeDocIndex >= 0 && activeDocIndex < (int) docs.size()) ? activeDocIndex : 0;
+    closeDoc (idx);
+}
+
+void Application::closeDoc (int index)
+{
+    if (index < 0 || index >= (int) docs.size()) return;
+    FileDoc& d = *docs[(size_t) index];
+
+    const bool wasActive = (index == activeDocIndex);
+    if (wasActive) syncActiveDoc ();
+    d.engine.stop();
+    if (onFileClosed) onFileClosed (d);    // e.g. clear snapshots stored from this file
+
+    // Detach the player BEFORE destroying the engine: AudioSourcePlayer::setSource()
+    // calls releaseResources() on the old source, which must still be alive.
+    if (wasActive)
+        sourcePlayer.setSource (&emptyEngine);
+
+    docs.erase (docs.begin() + index);
+    if (!wasActive && activeDocIndex > index)
+        --activeDocIndex;   // indices shifted left of the removed doc
+
+    if (!docs.empty())
+    {
+        if (wasActive)
+            activate (std::min (std::max (0, index - 1), (int) docs.size() - 1));
+            // fires onActiveDocChanged: views reset to the new file
+        else if (onStateChange)
+            onStateChange ();   // file list changed; current view state untouched
+    }
+    else
+    {
+        activeDocIndex = -1;
+        selection = { 0, 0 };
+        playhead = 0.0;
+        visibleChannels.clear();
+        viewStart = 0; viewEnd = 10;
+        sourcePlayer.setSource (&emptyEngine);
+        if (onActiveDocChanged) onActiveDocChanged ();
+    }
 }
 
 void Application::selectAll()
 {
     // Go through setSelection() so the UI (both views + status bar) is
     // notified of the new range.
-    if (audioEngine.isFileLoaded())
-        setSelection ({ 0, audioEngine.duration() });
+    if (audioEngine().isFileLoaded())
+        setSelection ({ 0, audioEngine().duration() });
 }
 
 void Application::setSelection (juce::Range<double> s)
 {
-    const juce::Range<double> clamped = s.getIntersectionWith ({ 0, audioEngine.duration() });
+    const juce::Range<double> clamped = s.getIntersectionWith ({ 0, audioEngine().duration() });
     if (clamped == selection) return;
     selection = clamped;
+    syncActiveDoc ();   // keep the active document's copy in step
 
     // Notify the UI: both views need the new range and the status bar shows
     // the selection start/stop times. Firing on every change keeps the readout
@@ -83,7 +179,7 @@ bool Application::isChannelVisible (int ch) const
 
 void Application::toggleChannelVisible (int ch)
 {
-    if (ch < 0 || ch >= audioEngine.numChannels())
+    if (ch < 0 || ch >= audioEngine().numChannels())
         return;
     auto it = std::find (visibleChannels.begin(), visibleChannels.end(), ch);
     if (it != visibleChannels.end())
@@ -93,19 +189,20 @@ void Application::toggleChannelVisible (int ch)
         visibleChannels.push_back (ch);
         std::sort (visibleChannels.begin(), visibleChannels.end());
     }
+    syncActiveDoc ();   // keep the active document's copy in step
 }
 
 int Application::addMarkerAtCursor()
 {
-    juce::String name = "Marker " + juce::String ((int) markers.count() + 1).paddedLeft ('0', 2);
+    juce::String name = "Marker " + juce::String ((int) markers().count() + 1).paddedLeft ('0', 2);
     if (!selection.isEmpty())
-        return markers.addRegionMarker (selection.getStart(), selection.getEnd(), name);
-    return markers.addPointMarker (playhead, name);
+        return markers().addRegionMarker (selection.getStart(), selection.getEnd(), name);
+    return markers().addPointMarker (playhead, name);
 }
 
-static juce::Range<int64_t> selectionSamples (const Application& app)
+static juce::Range<int64_t> selectionSamples (Application& app)
 {
-    const double rate = app.audioEngine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     return { (int64_t) (app.selection.getStart() * rate),
              (int64_t) (app.selection.getEnd() * rate) };
 }
@@ -120,27 +217,28 @@ void Application::cut()
 void Application::copy()
 {
     if (selection.getLength() <= 0) return;
-    audioEngine.copySelection (selectionSamples (*this));
+    audioEngine().copySelection (selectionSamples (*this));
 }
 
 void Application::paste()
 {
-    if (!audioEngine.canPaste()) return;
+    if (!audioEngine().canPaste()) return;
     // Paste at the start of the selection, or at the cursor when nothing is
     // selected.
     const double t = !selection.isEmpty() ? selection.getStart() : playhead;
-    audioEngine.pasteAt ((int64_t) (t * audioEngine.sampleRate()));
+    audioEngine().pasteAt ((int64_t) (t * audioEngine().sampleRate()));
 }
 
 void Application::del()
 {
     if (selection.getLength() <= 0) return;
-    audioEngine.deleteSamples (selectionSamples (*this));
+    audioEngine().deleteSamples (selectionSamples (*this));
     selection = { 0, 0 };
+    syncActiveDoc ();
 }
 
 // Effects apply only to the currently selected (visible) channels.
-static const std::vector<int>& visibleChans (const Application& app)
+static const std::vector<int>& visibleChans (Application& app)
 {
     return app.visibleChannels;
 }
@@ -148,56 +246,56 @@ static const std::vector<int>& visibleChans (const Application& app)
 void Application::silence()
 {
     if (selection.getLength() <= 0) return;
-    audioEngine.silenceSamples (selectionSamples (*this), &visibleChans (*this));
+    audioEngine().silenceSamples (selectionSamples (*this), &visibleChans (*this));
 }
 
 void Application::fadeIn()
 {
     if (selection.getLength() <= 0) return;
-    audioEngine.fadeInSamples (selectionSamples (*this), &visibleChans (*this));
+    audioEngine().fadeInSamples (selectionSamples (*this), &visibleChans (*this));
 }
 
 void Application::fadeOut()
 {
     if (selection.getLength() <= 0) return;
-    audioEngine.fadeOutSamples (selectionSamples (*this), &visibleChans (*this));
+    audioEngine().fadeOutSamples (selectionSamples (*this), &visibleChans (*this));
 }
 
 void Application::normalize()
 {
     if (selection.getLength() <= 0) return;
-    audioEngine.normalizeSamples (selectionSamples (*this), 1.0f, &visibleChans (*this));
+    audioEngine().normalizeSamples (selectionSamples (*this), 1.0f, &visibleChans (*this));
 }
 
 void Application::reverse()
 {
     if (selection.getLength() <= 0) return;
-    audioEngine.reverseSamples (selectionSamples (*this), &visibleChans (*this));
+    audioEngine().reverseSamples (selectionSamples (*this), &visibleChans (*this));
 }
 
 void Application::changeGain (float gainDb)
 {
     if (selection.getLength() <= 0 || gainDb == 0.0f) return;
-    audioEngine.gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this));
+    audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this));
 }
 
 void Application::undoStep()
 {
     Patch p;
-    if (undo.popUndo (p))
-        audioEngine.applyPatch (p, false);
+    if (undo().popUndo (p))
+        audioEngine().applyPatch (p, false);
 }
 
 void Application::redoStep()
 {
     Patch p;
-    if (undo.popRedo (p))
-        audioEngine.applyPatch (p, true);
+    if (undo().popRedo (p))
+        audioEngine().applyPatch (p, true);
 }
 
 void Application::play()
 {
-    if (!audioEngine.isFileLoaded()) return;
+    if (!audioEngine().isFileLoaded()) return;
 
     // Self-heal: if no output device is running (initialisation can fail at
     // startup when the default device isn't available yet), try again now.
@@ -205,33 +303,34 @@ void Application::play()
         audioDevice->initialiseWithDefaultDevices (0, 2);
 
     // Restart from the beginning when playback is at (or past) the end.
-    if (audioEngine.position() >= audioEngine.duration() - 1e-6)
+    if (audioEngine().position() >= audioEngine().duration() - 1e-6)
         setPlayhead (0.0);
-    audioEngine.play();
+    audioEngine().play();
 }
-void Application::stop() { audioEngine.stop(); }
-void Application::pause() { audioEngine.pause(); }
+void Application::stop() { audioEngine().stop(); }
+void Application::pause() { audioEngine().pause(); }
 
 void Application::toggleLoop()
 {
-    if (!audioEngine.isFileLoaded()) return;
-    if (audioEngine.isLooping())
+    if (!audioEngine().isFileLoaded()) return;
+    if (audioEngine().isLooping())
     {
-        audioEngine.setLooping (false);
+        audioEngine().setLooping (false);
         return;
     }
     // Loop the current selection, or the whole file when nothing is selected.
     juce::Range<double> r = selection;
     if (r.getLength() <= 1e-6)
-        r = { 0.0, audioEngine.duration() };
-    audioEngine.setLoopRange (r);
-    audioEngine.setLooping (true);
+        r = { 0.0, audioEngine().duration() };
+    audioEngine().setLoopRange (r);
+    audioEngine().setLooping (true);
 }
 
 void Application::setPlayhead (double t)
 {
-    playhead = std::clamp (t, 0.0, audioEngine.duration());
-    audioEngine.setPosition (playhead);
+    playhead = std::clamp (t, 0.0, audioEngine().duration());
+    audioEngine().setPosition (playhead);
+    syncActiveDoc ();   // keep the active document's copy in step
 
     // Notify the UI so both views show the same cursor position.
     if (onPlayheadChanged)

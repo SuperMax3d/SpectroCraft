@@ -102,8 +102,7 @@ public:
     juce::Rectangle<int> plotRect() const;
 
 private:
-    Application& app;
-    AudioEngine& engine;
+    Application& app;   // audio data read live via app.audioEngine() (active doc)
     SpectralEngine& spectral;
     double viewStart = 0, viewEnd = 10;
     double freqMin = 20.0, freqMax = 20000.0;   // local frequency axis limits

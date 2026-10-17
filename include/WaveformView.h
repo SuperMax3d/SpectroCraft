@@ -78,8 +78,7 @@ public:
     static constexpr int kRulerH = 24;  // top time ruler height
 
 private:
-    Application& app;
-    AudioEngine& engine;
+    Application& app;   // audio data read live via app.audioEngine() (active doc)
     double viewStart = 0, viewEnd = 10, vZoom = 1;
     juce::Range<double> selection{ 0, 0 };
     double playhead = 0;

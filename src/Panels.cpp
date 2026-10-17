@@ -42,34 +42,82 @@ FileListPanel::FileListPanel (Application& appIn)
 {
     openBtn.onClick = [this] { if (onOpenRequested) onOpenRequested(); };
     closeBtn.onClick = [this] {
+        // Closes the ACTIVE file; Application fires the callbacks that refresh
+        // this list and reset the views to whatever remains.
         app.closeFile();
-        refresh();
-        if (app.onStateChange) app.onStateChange();
     };
 
     openBtn.setTooltip ("Open an audio file (WAV, AIFF, FLAC, MP3 or Ogg). "
-                        "You can also drag & drop a file onto the window.");
-    closeBtn.setTooltip ("Close the currently loaded file and clear all views.");
+                        "You can also drag & drop files onto the window - every "
+                        "dropped file is added to this list.");
+    closeBtn.setTooltip ("Close the active file. Its playhead, selection and "
+                         "stored snapshots are discarded; other open files keep their state.");
     addAndMakeVisible (&openBtn);
     addAndMakeVisible (&closeBtn);
 }
 
 void FileListPanel::refresh()
 {
-    fileInfoLines.clear();
-    if (app.audioEngine.isFileLoaded())
-    {
-        const auto& f = app.audioEngine.getFile();
-        fileInfoLines.push_back (f.getFileName());
-        fileInfoLines.push_back (juce::String ((int) app.audioEngine.sampleRate()) + " Hz | "
-            + juce::String (app.audioEngine.numChannels()) + " ch | "
-            + formatTimeCode (app.audioEngine.duration()));
-    }
-    else
-        fileInfoLines.push_back ("(no file loaded)");
+    closeBtn.setEnabled (app.numDocs() > 0);
+    repaint();
+}
 
-    openBtn.setEnabled (true);
-    closeBtn.setEnabled (app.audioEngine.isFileLoaded());
+juce::Rectangle<int> FileListPanel::rowRect (int i) const
+{
+    return { 2, kListTop + (i - listScroll) * kRowH, getWidth() - 4, kRowH };
+}
+
+int FileListPanel::rowAt (int x, int y) const
+{
+    for (int i = 0; i < app.numDocs(); ++i)
+        if (rowRect (i).contains (x, y))
+            return i;
+    return -1;
+}
+
+void FileListPanel::activateDoc (int i)
+{
+    if (i >= 0 && i < app.numDocs())
+        app.activate (i);   // fires onActiveDocChanged: views + panels sync to it
+}
+
+void FileListPanel::closeDoc (int i)
+{
+    if (i >= 0 && i < app.numDocs())
+        app.closeDoc (i);
+}
+
+void FileListPanel::showFileMenu (int row)
+{
+    juce::PopupMenu m;
+    m.addItem (1, "Activate", true, false);
+    m.addItem (2, "Close", true, false);
+    const int r = m.showMenu (juce::PopupMenu::Options().withMousePosition());
+    if (r == 1) activateDoc (row);
+    else if (r == 2) closeDoc (row);
+}
+
+void FileListPanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (!e.mods.isRightButtonDown()) return;
+    const int row = rowAt ((int) e.x, (int) e.y);
+    if (row < 0) return;
+    showFileMenu (row);
+}
+
+void FileListPanel::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    if (!e.mods.isLeftButtonDown()) return;
+    const int row = rowAt ((int) e.x, (int) e.y);
+    if (row >= 0) activateDoc (row);
+}
+
+void FileListPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+{
+    if (app.numDocs() <= 1 || juce::approximatelyEqual (wheel.deltaY, 0.0f)) return;
+    // Negative deltaY = wheel pushed down = scroll the list forward.
+    listScroll += (wheel.deltaY < 0.0f ? 1 : -1)
+                 * std::max (1, std::abs ((int) wheel.deltaY));
     repaint();
 }
 
@@ -82,13 +130,51 @@ void FileListPanel::resized()
 
 void FileListPanel::paint (juce::Graphics& g)
 {
+    auto b = getLocalBounds();
     g.fillAll (juce::Colour::fromRGB (45, 45, 48));
-    const auto b = getLocalBounds().reduced (8, 30);
-    g.setColour (juce::Colours::white);
-    g.setFont (12.0f);
-    for (size_t i = 0; i < fileInfoLines.size(); ++i)
-        g.drawText (fileInfoLines[i], b.getX(), b.getY() + (int) i * 18, b.getWidth(), 16,
-                    juce::Justification::left, false);
+
+    const auto listArea = juce::Rectangle<int> (2, kListTop,
+                                                std::max (1, b.getWidth() - 4),
+                                                std::max (1, b.getHeight() - kListTop));
+
+    if (app.numDocs() == 0)
+    {
+        g.setColour (juce::Colours::grey);
+        g.setFont (11.0f);
+        g.drawText ("No files open", listArea, juce::Justification::centred);
+        return;
+    }
+
+    const int totalRows = app.numDocs();
+    const int visibleRows = std::max (1, listArea.getHeight() / kRowH);
+    listScroll = std::clamp (listScroll, 0, std::max (0, totalRows - visibleRows));
+
+    g.setFont (11.0f);
+    for (int i = 0; i < totalRows; ++i)
+    {
+        auto r = rowRect (i).getIntersection (listArea);
+        if (r.isEmpty()) continue;
+
+        const FileDoc& d = *app.docs[(size_t) i];
+        const bool active = (i == app.activeDocIndex);
+
+        if (active)
+        {
+            g.setColour (juce::Colour::fromRGB (48, 72, 100));
+            g.fillRect (r);
+        }
+
+        // Line 1: file name. Line 2: its actual properties.
+        const auto line1 = r.removeFromTop (kRowH / 2);
+        g.setColour (active ? juce::Colours::white : juce::Colour::fromRGB (190, 195, 205));
+        g.drawText (d.name, line1.reduced (4, 1), juce::Justification::centredLeft, false);
+
+        const auto props = juce::String ((int) d.engine.sampleRate()) + " Hz | "
+                         + juce::String (d.engine.numChannels()) + " ch | "
+                         + formatTimeCode (d.engine.duration());
+        g.setColour (juce::Colour::fromRGB (130, 135, 145));
+        g.drawText (props, r.reduced (4, 1), juce::Justification::centredLeft, false);
+    }
 }
 
 // ================================================================= FFTAnalysisView
@@ -199,6 +285,13 @@ void SnapshotButton::paintButton (juce::Graphics& g, bool shouldDrawButtonAsHigh
     g.drawText (getButtonText(), b, juce::Justification::centred, false);
 }
 
+void SnapshotButton::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.mods.isRightButtonDown() && onRightClick)
+    { onRightClick (); return; }
+    juce::Button::mouseDown (e);
+}
+
 FFTAnalysisView::FFTAnalysisView (Application& appIn)
     : app (appIn)
 {
@@ -247,6 +340,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         snapBtns[i].setButtonText (juce::String (i + 1));
         snapBtns[i].setClickingTogglesState (true);
         snapBtns[i].onClick = [this, i] { handleSnapshotClick (i); };
+        snapBtns[i].onRightClick = [this, i] { showSnapshotMenu (i); };
         updateSnapshotTooltip (i);
     }
 
@@ -278,11 +372,12 @@ static void fftAxisLimits (int mode, double rate, double& fLo, double& fHi)
 // evenly spaced windows whose linear magnitudes are averaged (the classic
 // "average over the selection" behaviour); a point or short region gets a
 // single window centred on it.
-void FFTAnalysisView::computeRegion (double t0, double t1, int n,
-                                     std::vector<std::vector<float>>& outMags)
+void FFTAnalysisView::computeRegionFrom (AudioEngine& eng, const std::vector<int>& chans,
+                                         double t0, double t1, int n,
+                                         std::vector<std::vector<float>>& outMags)
 {
-    const double rate = app.audioEngine.sampleRate();
-    const double dur = app.audioEngine.duration();
+    const double rate = eng.sampleRate();
+    const double dur = eng.duration();
 
     // Where to place the FFT windows (sample offsets).
     std::vector<int64_t> winStarts;
@@ -323,9 +418,9 @@ void FFTAnalysisView::computeRegion (double t0, double t1, int n,
     }
 
     const double dBMin = -(double) app.settings.dBRange;
-    for (int ch : app.visibleChannels)
+    for (int ch : chans)
     {
-        if (ch < 0 || ch >= app.audioEngine.numChannels()) continue;
+        if (ch < 0 || ch >= eng.numChannels()) continue;
 
         // Average the linear magnitudes of all windows in this channel.
         std::vector<double> acc ((size_t) (n / 2 + 1), 0.0);
@@ -334,7 +429,7 @@ void FFTAnalysisView::computeRegion (double t0, double t1, int n,
         for (int64_t s : winStarts)
         {
             std::fill (samples.begin(), samples.end(), 0.0f);
-            if (!app.audioEngine.readSamples (ch, s, n, samples.data())) continue;
+            if (!eng.readSamples (ch, s, n, samples.data())) continue;
             for (int i = 0; i < n; ++i)
                 buf[i] = samples[i] * win[(size_t) i];
             scfft::realForward (buf.data(), order);      // AVX2 when available via scfft
@@ -359,7 +454,7 @@ void FFTAnalysisView::computeRegion (double t0, double t1, int n,
 void FFTAnalysisView::recomputeIfNeeded()
 {
     const int w = getWidth(), h = getHeight();
-    if (w <= 0 || !app.audioEngine.isFileLoaded()) return;
+    if (w <= 0 || !app.audioEngine().isFileLoaded()) return;
 
     // Region to analyse: the selection when non-empty, otherwise the playhead
     // position.
@@ -368,18 +463,10 @@ void FFTAnalysisView::recomputeIfNeeded()
     else                          { t0 = app.playhead;          t1 = app.playhead; }
 
     const int n = localN;
-    const auto file = app.audioEngine.getFile();
+    const auto file = app.audioEngine().getFile();
 
-    // A new file invalidates every stored snapshot: their time segments belong
-    // to the previous file.
-    if (!mags.empty() && cachedFile != file)
-        for (int i = 0; i < 10; ++i)
-        {
-            snapshots[i] = Snapshot{};
-            snapBtns[i].setToggleState (false, juce::dontSendNotification);
-            snapBtns[i].setStored (false);
-            updateSnapshotTooltip (i);
-        }
+    // NOTE: switching files does NOT clear stored snapshots - they are shared
+    // across all open files and each one remembers its own source document.
 
     if (mags.size() == app.visibleChannels.size() && cachedN == n && cachedT0 == t0
         && cachedT1 == t1 && cachedFile == file
@@ -392,7 +479,7 @@ void FFTAnalysisView::recomputeIfNeeded()
     // run on every click or playhead move, and the first compute of a new
     // region always runs so clicks stay responsive.
     const int64_t now = juce::Time::getMillisecondCounter();
-    const double regionLenS = std::max (0.0, (t1 - t0) * app.audioEngine.sampleRate());
+    const double regionLenS = std::max (0.0, (t1 - t0) * app.audioEngine().sampleRate());
     if (!mags.empty() && regionLenS > (double) n && lastComputeWasExpensive
         && now - lastComputeMs < 60)
         return;
@@ -405,7 +492,7 @@ void FFTAnalysisView::recomputeIfNeeded()
     thirdOctMags.clear();
     if (axisMode_ == 2)
         for (auto& m : mags)
-            thirdOctMags.push_back (toThirdOctBands (m, n, app.audioEngine.sampleRate(),
+            thirdOctMags.push_back (toThirdOctBands (m, n, app.audioEngine().sampleRate(),
                                                      app.settings.dBRange));
 
     cachedN = n; cachedT0 = t0; cachedT1 = t1;
@@ -417,30 +504,40 @@ void FFTAnalysisView::recomputeIfNeeded()
 
 void FFTAnalysisView::recomputeSnapshots()
 {
-    if (!app.audioEngine.isFileLoaded()) return;
-    for (auto& s : snapshots)
-        if (s.n > 0 && s.gen != settingsGen)
-        {
-            // Recompute this snapshot from its own stored time segment using
-            // the current FFT size and window type.
-            computeRegion (s.t0, s.t1, localN, s.mags);
-            s.n = localN;
-            s.gen = settingsGen;
-        }
+    // Snapshots are shared across all open files: each one is recomputed from
+    // the engine of the file it was stored from (not necessarily the active
+    // one), at its own time segment and the current FFT size / window type.
+    for (int i = 0; i < 10; ++i)
+    {
+        auto& s = snapshots[i];
+        if (!(s.n > 0 && s.gen != settingsGen)) continue;
+
+        // If the source file has been closed, drop the slot (closeFile normally
+        // clears it already - this is defensive).
+        if (!s.source || !app.isDocLoaded (s.source))
+        { clearSnapshotSlot (i); continue; }
+
+        computeRegionFrom (s.source->engine, s.chans, s.t0, s.t1, localN, s.mags);
+        s.n = localN;
+        s.gen = settingsGen;
+    }
     refreshSnapshotBands();
 }
 
 void FFTAnalysisView::refreshSnapshotBands()
 {
-    if (!app.audioEngine.isFileLoaded()) return;
-    const double rate = app.audioEngine.sampleRate();
-    for (auto& s : snapshots)
-        if (s.n > 0 && !s.mags.empty())
-        {
-            s.bands.clear();
-            for (auto& m : s.mags)
-                s.bands.push_back (toThirdOctBands (m, s.n, rate, app.settings.dBRange));
-        }
+    for (int i = 0; i < 10; ++i)
+    {
+        auto& s = snapshots[i];
+        if (!(s.n > 0 && !s.mags.empty())) continue;
+        // Band conversion needs the source file's sample rate, which may
+        // differ from the active file's.
+        const double rate = (s.source != nullptr)
+            ? s.source->engine.sampleRate() : app.audioEngine().sampleRate();
+        s.bands.clear();
+        for (auto& m : s.mags)
+            s.bands.push_back (toThirdOctBands (m, s.n, rate, app.settings.dBRange));
+    }
 }
 
 juce::Rectangle<int> FFTAnalysisView::plotBounds() const
@@ -457,7 +554,7 @@ float FFTAnalysisView::xToFreq (int x) const
 {
     const auto plot = plotBounds();
     if (plot.getWidth() <= 0) return 0.0f;
-    const double rate = app.audioEngine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
     const double t = std::clamp ((double) (x - plot.getX()) / (double) plot.getWidth(), 0.0, 1.0);
     if (axisMode_ == 0)
@@ -469,7 +566,7 @@ double FFTAnalysisView::freqToX (double f) const
 {
     const auto plot = plotBounds();
     if (plot.getWidth() <= 0) return (float) plot.getX();
-    const double rate = app.audioEngine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
     double t;
     if (axisMode_ == 0)
@@ -515,7 +612,7 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     const int readoutH = 16; // cursor info strip at the very bottom
     const auto plot = plotBounds();
 
-    if (!app.audioEngine.isFileLoaded())
+    if (!app.audioEngine().isFileLoaded())
     {
         g.setColour (juce::Colours::grey);
         g.setFont (12.0f);
@@ -525,7 +622,7 @@ void FFTAnalysisView::paint (juce::Graphics& g)
 
     recomputeIfNeeded();
 
-    const double rate = app.audioEngine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
     const int n = cachedN;
     const bool haveSpectrum = (n > 1) && !mags.empty()
@@ -743,10 +840,7 @@ void FFTAnalysisView::handleSnapshotClick (int i, juce::ModifierKeys mods)
     if (mods.isShiftDown())
     {
         // Shift+click clears the slot.
-        s = Snapshot{};
-        snapBtns[i].setToggleState (false, juce::dontSendNotification);
-        snapBtns[i].setStored (false);
-        updateSnapshotTooltip (i);
+        clearSnapshotSlot (i);
         repaint();
         return;
     }
@@ -756,7 +850,8 @@ void FFTAnalysisView::handleSnapshotClick (int i, juce::ModifierKeys mods)
         // Empty slot: store it. Stored slot + Ctrl+click: re-store the time
         // segment currently being analysed. The live cache is exactly this
         // region at the current settings, so a copy suffices; later changes
-        // of FFT size / window type recompute it from t0..t1.
+        // of FFT size / window type recompute it from t0..t1 (from its source
+        // file's engine - snapshots are shared across all open files).
         if (!(cachedN > 1) || mags.empty())
         {
             snapBtns[i].setToggleState (false, juce::dontSendNotification); // nothing to store yet
@@ -768,6 +863,8 @@ void FFTAnalysisView::handleSnapshotClick (int i, juce::ModifierKeys mods)
         s.n = cachedN;
         s.gen = settingsGen;
         s.mags = mags;
+        s.source = app.doc();           // remember which file this came from
+        s.chans = app.visibleChannels;  // channels visible at store time
         refreshSnapshotBands();
         s.shown = true;   // newly captured data is shown
     }
@@ -788,11 +885,65 @@ void FFTAnalysisView::updateSnapshotTooltip (int i)
     auto& s = snapshots[i];
     const juce::String num = juce::String (i + 1);
     if (s.n > 0)
+    {
+        const juce::String from = (s.source != nullptr) ? (" from " + s.source->name)
+                                                         : juce::String();
         snapBtns[i].setTooltip ("Snapshot " + num + ": stores " + formatTimeCode (s.t0)
-                                + " - " + formatTimeCode (s.t1)
-                                + ". Click shows/hides the stored curve. Ctrl+Click re-stores it from the current selection/cursor. Shift+Click clears it.");
+                                + " - " + formatTimeCode (s.t1) + from
+                                + ". Click shows/hides the stored curve. Ctrl+Click re-stores it from the current selection/cursor. Shift+Click clears it. Right-click: convert to marker / clear.");
+    }
     else
-        snapBtns[i].setTooltip ("Snapshot " + num + " is empty. Click stores the currently analysed time segment here and shows its curve.");
+        snapBtns[i].setTooltip ("Snapshot " + num + " is empty. Click stores the currently analysed time segment here and shows its curve. Snapshots are shared across all open files.");
+}
+
+void FFTAnalysisView::clearSnapshotSlot (int i)
+{
+    auto& s = snapshots[i];
+    s = Snapshot{};
+    snapBtns[i].setToggleState (false, juce::dontSendNotification);
+    snapBtns[i].setStored (false);
+    updateSnapshotTooltip (i);
+}
+
+void FFTAnalysisView::clearSnapshotsFor (const FileDoc* d)
+{
+    for (int i = 0; i < 10; ++i)
+        if (snapshots[i].source == d)
+            clearSnapshotSlot (i);
+}
+
+bool FFTAnalysisView::convertSnapshotToMarker (int i)
+{
+    auto& s = snapshots[i];
+    if (!(s.n > 1 && !s.mags.empty()) || s.source == nullptr) return false;
+
+    const double dur = s.source->engine.duration();
+    const double t0 = std::clamp (s.t0, 0.0, dur);
+    const double t1 = std::clamp (s.t1, t0, dur);
+    if (t1 <= t0) return false;
+
+    // The marker is created in the snapshot's SOURCE file (which may not be
+    // the active one); it appears in that file's marker list when it becomes
+    // active.
+    s.source->markers.addRegionMarker (t0, t1, "Snapshot " + juce::String (i + 1));
+
+    if (app.doc() == s.source && app.onStateChange)
+        app.onStateChange ();   // refresh the marker list when that file is active
+    return true;
+}
+
+void FFTAnalysisView::showSnapshotMenu (int i)
+{
+    auto& s = snapshots[i];
+    juce::PopupMenu m;
+    const bool hasData = (s.n > 1 && !s.mags.empty());
+    m.addItem (1, "Convert to marker", hasData, false);
+    m.addItem (2, "Clear", s.n > 0 || s.shown, false);
+
+    const int r = m.showMenu (juce::PopupMenu::Options().withMousePosition());
+    if (r == 1) convertSnapshotToMarker (i);
+    else if (r == 2)
+    { clearSnapshotSlot (i); repaint(); }
 }
 
 void FFTAnalysisView::mouseDown (const juce::MouseEvent& e)
@@ -809,7 +960,7 @@ void FFTAnalysisView::mouseDown (const juce::MouseEvent& e)
 
 void FFTAnalysisView::copySpectrumToClipboard()
 {
-    const double rate = app.audioEngine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
 
     juce::StringArray lines;
@@ -974,7 +1125,7 @@ void SpectralControlsPanel::paint (juce::Graphics& g)
 
 MarkerListPanel::Model::Model (MarkerListPanel* ownerIn) : owner (ownerIn) {}
 
-int MarkerListPanel::Model::getNumRows() { return (int) owner->app.markers.count(); }
+int MarkerListPanel::Model::getNumRows() { return (int) owner->app.markers().count(); }
 
 void MarkerListPanel::Model::paintRowBackground (juce::Graphics& g, int, int width, int height,
                                                  bool selected)
@@ -990,7 +1141,7 @@ void MarkerListPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int co
                                         int width, int height, bool)
 {
     if (rowNumber < 0 || rowNumber >= getNumRows()) return;
-    const auto& m = owner->app.markers.markers()[(size_t) rowNumber];
+    const auto& m = owner->app.markers().markers()[(size_t) rowNumber];
 
     g.setFont (11.0f);
     if (columnId == 1)   // Label
@@ -1016,7 +1167,7 @@ void MarkerListPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::
         owner->updateDetails(); // Title/Comment are edited in the detail editors below
 
         // Double-clicking a marker sets the time selection to its range.
-        const Marker& m = owner->app.markers.markers()[(size_t) rowNumber];
+        const Marker& m = owner->app.markers().markers()[(size_t) rowNumber];
         const double end = (m.end > m.start) ? m.end : m.start;
         owner->app.setSelection ({ m.start, end });
         if (owner->app.onStateChange)
@@ -1037,9 +1188,9 @@ void MarkerListPanel::Model::deleteKeyPressed (int row)
 {
     if (row >= 0 && row < getNumRows())
     {
-        const int id = owner->app.markers.markers()[(size_t) row].id;
-        owner->app.markers.removeMarker (id);
-        owner->app.markers.saveSidecar (owner->app.audioEngine.getFile());
+        const int id = owner->app.markers().markers()[(size_t) row].id;
+        owner->app.markers().removeMarker (id);
+        owner->app.markers().saveSidecar (owner->app.audioEngine().getFile());
         owner->selectedRow = -1;
         owner->refresh();
     }
@@ -1085,17 +1236,17 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
         // Region marker spanning the current selection if there is one,
         // otherwise a point marker at the cursor.
         app.addMarkerAtCursor();
-        app.markers.saveSidecar (app.audioEngine.getFile());
+        app.markers().saveSidecar (app.audioEngine().getFile());
         refresh();
         if (app.onStateChange) app.onStateChange();
     };
 
     deleteBtn.onClick = [this] {
-        if (selectedRow >= 0 && selectedRow < (int) app.markers.count())
+        if (selectedRow >= 0 && selectedRow < (int) app.markers().count())
         {
-            const int id = app.markers.markers()[(size_t) selectedRow].id;
-            app.markers.removeMarker (id);
-            app.markers.saveSidecar (app.audioEngine.getFile());
+            const int id = app.markers().markers()[(size_t) selectedRow].id;
+            app.markers().removeMarker (id);
+            app.markers().saveSidecar (app.audioEngine().getFile());
             selectedRow = -1;
             refresh();
             if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
@@ -1131,50 +1282,50 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
 // Title / Comment editors below the table edit the selected marker in place.
 void MarkerListPanel::onTitleCommentChanged (bool isTitle)
 {
-    if (editing || selectedRow < 0 || selectedRow >= (int) app.markers.count()) return;
-    const auto& m = app.markers.markers()[(size_t) selectedRow];
+    if (editing || selectedRow < 0 || selectedRow >= (int) app.markers().count()) return;
+    const auto& m = app.markers().markers()[(size_t) selectedRow];
     const juce::String text = (isTitle ? titleEdit : commentEdit).getText().trim();
 
     if (isTitle)
-        app.markers.renameMarker (m.id, text.isEmpty() ? m.name : text);
+        app.markers().renameMarker (m.id, text.isEmpty() ? m.name : text);
     else
-        app.markers.setComment (m.id, text);
+        app.markers().setComment (m.id, text);
 
     editing = true;
     updateDetails();
     editing = false;
     table.repaint();
-    app.markers.saveSidecar (app.audioEngine.getFile());
+    app.markers().saveSidecar (app.audioEngine().getFile());
     if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
 
 void MarkerListPanel::onBeginEndChanged (bool isBegin)
 {
-    if (editing || selectedRow < 0 || selectedRow >= (int) app.markers.count()) return;
-    const auto& m = app.markers.markers()[(size_t) selectedRow];
+    if (editing || selectedRow < 0 || selectedRow >= (int) app.markers().count()) return;
+    const auto& m = app.markers().markers()[(size_t) selectedRow];
     double begin = parseTimeCode (beginEdit.getText());
     double end = parseTimeCode (endEdit.getText());
 
-    const double dur = app.audioEngine.duration();
+    const double dur = app.audioEngine().duration();
 
     if (m.end < 0) // point marker: begin moves it; typing an end turns it into a region
     {
         if (isBegin && begin >= 0.0 && begin <= dur)
-            app.markers.moveMarker (m.id, begin);
+            app.markers().moveMarker (m.id, begin);
         else if (!isBegin && begin >= 0.0 && end > begin + 1e-9)
-            app.markers.setRegion (m.id, std::min (begin, dur), std::min (end, dur));
+            app.markers().setRegion (m.id, std::min (begin, dur), std::min (end, dur));
     }
     else
     {
         if (begin >= 0.0 && end > begin && end <= dur + 1e-6)
-            app.markers.setRegion (m.id, begin, std::min (end, dur));
+            app.markers().setRegion (m.id, begin, std::min (end, dur));
     }
 
     editing = true;
     updateDetails();
     editing = false;
     table.repaint();
-    app.markers.saveSidecar (app.audioEngine.getFile());
+    app.markers().saveSidecar (app.audioEngine().getFile());
     if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
 
@@ -1182,37 +1333,37 @@ void MarkerListPanel::onBeginEndChanged (bool isBegin)
 // marker back into a point marker. (Editing End updates this box via updateDetails.)
 void MarkerListPanel::onLengthChanged()
 {
-    if (editing || selectedRow < 0 || selectedRow >= (int) app.markers.count()) return;
-    const auto& m = app.markers.markers()[(size_t) selectedRow];
+    if (editing || selectedRow < 0 || selectedRow >= (int) app.markers().count()) return;
+    const auto& m = app.markers().markers()[(size_t) selectedRow];
 
     double len = parseTimeCode (lengthEdit.getText()); // empty text parses to 0.0
     if (!(len > 0.0))
     {
         if (m.end >= 0)
-            app.markers.setPoint (m.id);
+            app.markers().setPoint (m.id);
     }
     else
     {
         double end = m.start + len;
-        const double dur = app.audioEngine.duration();
+        const double dur = app.audioEngine().duration();
         if (end > dur) end = dur;
         if (end <= m.start + 1e-9)
-            app.markers.setPoint (m.id); // too short to be a region
+            app.markers().setPoint (m.id); // too short to be a region
         else
-            app.markers.setRegion (m.id, m.start, end);
+            app.markers().setRegion (m.id, m.start, end);
     }
 
     editing = true;
     updateDetails();
     editing = false;
     table.repaint();
-    app.markers.saveSidecar (app.audioEngine.getFile());
+    app.markers().saveSidecar (app.audioEngine().getFile());
     if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
 
 void MarkerListPanel::updateDetails()
 {
-    if (selectedRow < 0 || selectedRow >= (int) app.markers.count())
+    if (selectedRow < 0 || selectedRow >= (int) app.markers().count())
     {
         beginEdit.setText ("", juce::dontSendNotification);
         endEdit.setText ("", juce::dontSendNotification);
@@ -1222,7 +1373,7 @@ void MarkerListPanel::updateDetails()
         return;
     }
 
-    const auto& m = app.markers.markers()[(size_t) selectedRow];
+    const auto& m = app.markers().markers()[(size_t) selectedRow];
     editing = true;
     beginEdit.setText (formatTimeCode (m.start), juce::dontSendNotification);
     endEdit.setText (m.end < 0 ? "" : formatTimeCode (m.end), juce::dontSendNotification);
@@ -1242,7 +1393,7 @@ void MarkerListPanel::refresh()
 
 void MarkerListPanel::selectRow (int row)
 {
-    selectedRow = (row >= 0 && row < (int) app.markers.count()) ? row : -1;
+    selectedRow = (row >= 0 && row < (int) app.markers().count()) ? row : -1;
     updateDetails();
 }
 
@@ -1289,7 +1440,7 @@ void MarkerListPanel::mouseDown (const juce::MouseEvent& e)
 void MarkerListPanel::showMarkerContextMenu()
 {
     juce::PopupMenu m;
-    m.addItem (1, "Copy All Markers", app.markers.count() > 0);
+    m.addItem (1, "Copy All Markers", app.markers().count() > 0);
     m.addItem (2, "Paste Markers from Clipboard",
                !juce::SystemClipboard::getTextFromClipboard().trim().isEmpty());
 
@@ -1312,7 +1463,7 @@ void MarkerListPanel::copyAllMarkers()
     };
 
     juce::String out;
-    for (const auto& m : app.markers.markers())
+    for (const auto& m : app.markers().markers())
     {
         if (!out.isEmpty())
             out << "\r\n";
@@ -1331,7 +1482,7 @@ void MarkerListPanel::copyAllMarkers()
 // with an empty or "-" End creating a point marker.
 int MarkerListPanel::pasteMarkersFromClipboard()
 {
-    if (!app.audioEngine.isFileLoaded())
+    if (!app.audioEngine().isFileLoaded())
         return 0;
 
     const juce::String text = juce::SystemClipboard::getTextFromClipboard();
@@ -1341,7 +1492,7 @@ int MarkerListPanel::pasteMarkersFromClipboard()
     juce::StringArray lines;
     lines.addLines (text);
 
-    const double dur = app.audioEngine.duration();
+    const double dur = app.audioEngine().duration();
     int added = 0;
 
     for (const auto& line : lines)
@@ -1377,16 +1528,16 @@ int MarkerListPanel::pasteMarkersFromClipboard()
             comment = f[3].trim();
 
         const juce::String label = name.isEmpty() ? "Marker" : name;
-        const int id = (end < 0.0) ? app.markers.addPointMarker (begin, label)
-                                   : app.markers.addRegionMarker (begin, end, label);
+        const int id = (end < 0.0) ? app.markers().addPointMarker (begin, label)
+                                   : app.markers().addRegionMarker (begin, end, label);
         if (!comment.isEmpty())
-            app.markers.setComment (id, comment);
+            app.markers().setComment (id, comment);
         ++added;
     }
 
     if (added > 0)
     {
-        app.markers.saveSidecar (app.audioEngine.getFile());
+        app.markers().saveSidecar (app.audioEngine().getFile());
         refresh();
         if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
     }

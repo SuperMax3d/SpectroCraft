@@ -207,6 +207,16 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (statusBar) statusBar->setPlayhead (t);
     };
 
+    // Multi-file support: whenever a document becomes active (open, switch,
+    // close), reset both views to that file and push its state into every panel.
+    app.onActiveDocChanged = [this] { activateDocUI(); };
+
+    // When a file is closed, drop the stored snapshots that came from it.
+    app.onFileClosed = [this] (const FileDoc& d)
+    {
+        if (fftPanel) fftPanel->clearSnapshotsFor (&d);
+    };
+
     startTimerHz (30); // playhead animation
     centreWithSize (1400, 900);
     setVisible (true);
@@ -261,7 +271,7 @@ void MainWindow::setupViews()
     };
 
     // Reset both views to the whole file with default zoom levels.
-    const double dur = app.audioEngine.duration();
+    const double dur = app.audioEngine().duration();
     app.playhead = 0.0;
     if (waveformView) waveformView->fitAll();
     if (spectralView)
@@ -277,7 +287,7 @@ void MainWindow::setupViews()
 // the canonical app.viewStart/viewEnd in sync for the Frequency Analysis panel.
 void MainWindow::applyTimeWindow (double t0, double t1)
 {
-    const double dur = app.audioEngine.duration();
+    const double dur = app.audioEngine().duration();
     if (dur > 0.0)
     {
         t0 = std::clamp (t0, 0.0, dur);
@@ -307,7 +317,7 @@ void MainWindow::refreshAfterEdit()
     // re-clamp the selection, repaint the waveform and force a full spectral
     // re-render. The tile cache must be cleared too — tiles are keyed by sample
     // position only, so they would otherwise show pre-edit data.
-    const double dur = app.audioEngine.duration();
+    const double dur = app.audioEngine().duration();
     auto r = [&] (double a, double b) -> std::pair<double, double>
     {
         if (b <= 0.0 || dur <= 0.0) return { 0.0, dur };
@@ -336,7 +346,7 @@ void MainWindow::resized()
     if (statusBar)
         statusBar->setBounds (bounds.removeFromBottom (20));
 
-    const bool haveFile = app.audioEngine.isFileLoaded();
+    const bool haveFile = app.audioEngine().isFileLoaded();
 
     // Left panel column with the two tab groups and draggable dividers:
     // a vertical one between the column and the main area, a horizontal one
@@ -484,12 +494,13 @@ void MainWindow::timerCallback()
         shiftAnchorTime = -1.0;
 
     // The Frequency Analysis panel follows the playhead while playing.
-    if (fftPanel) { fftPanel->setFollowPlayhead (app.audioEngine.isPlaying()); fftPanel->repaint(); }
+    if (fftPanel) { fftPanel->setFollowPlayhead (app.audioEngine().isPlaying()); fftPanel->repaint(); }
 
-    if (!app.audioEngine.isPlaying() || !waveformView || !spectralView)
+    if (!app.audioEngine().isPlaying() || !waveformView || !spectralView)
         return;
-    const double pos = app.audioEngine.position();
+    const double pos = app.audioEngine().position();
     app.playhead = pos; // the UI cursor follows playback
+    app.syncActiveDoc ();   // remember it in the active document
     waveformView->setPlayhead (pos);
     spectralView->setPlayhead (pos);
     if (statusBar) statusBar->setPlayhead (pos);
@@ -528,10 +539,7 @@ void MainWindow::filesDropped (const juce::StringArray& files, int, int)
     {
         const juce::File file (f);
         if (file.existsAsFile())
-        {
-            openFile (file);
-            break; // single-file editor: load the first valid drop
-        }
+            openFile (file);   // multi-file editor: every valid drop becomes a document
     }
 }
 
@@ -546,7 +554,7 @@ void MainWindow::syncSharedState()
         waveformView->setSelection (app.selection);
         waveformView->setVisibleChannels (app.visibleChannels);
         waveformView->setPlayhead (app.playhead);
-        waveformView->setMarkers (&app.markers.markers());
+        waveformView->setMarkers (&app.markers().markers());
     }
     if (spectralView)
     {
@@ -554,7 +562,7 @@ void MainWindow::syncSharedState()
         spectralView->setVisibleChannels (app.visibleChannels);
         spectralView->setSettings (app.settings);
         spectralView->setPlayhead (app.playhead);
-        spectralView->setMarkers (&app.markers.markers());
+        spectralView->setMarkers (&app.markers().markers());
         // Cheap overlay-only repaint: marker list contents may have changed
         // even though the pointer did not.
         spectralView->repaint();
@@ -588,10 +596,26 @@ void MainWindow::refreshPanels()
 
 void MainWindow::openFile (const juce::File& file)
 {
+    // app.openFile() activates the new document and fires onActiveDocChanged,
+    // which resets both views to this file and syncs every panel.
     if (!app.openFile (file))
         return;
-    setupViews();
-    resized();
+}
+
+void MainWindow::activateDocUI()
+{
+    // Reset both views to the whole file with default zoom levels, then push
+    // the document's playhead/selection/channels/markers into all panels and
+    // views. Works for a freshly opened file, a switched-to file (restoring
+    // its remembered state) and the "no files left" case.
+    if (waveformView) waveformView->fitAll();
+    if (spectralView)
+    {
+        spectralView->fitAll();
+        spectralView->resetFrequencyRange();
+    }
+
+    syncSharedState();
     updateTitle();
 }
 
@@ -603,7 +627,7 @@ static constexpr bool kUseNativeFileChooser = false;
 void MainWindow::handleFileOpen()
 {
     juce::FileChooser chooser ("Open Audio File",
-        app.audioEngine.isFileLoaded() ? app.audioEngine.getFile().getParentDirectory()
+        app.audioEngine().isFileLoaded() ? app.audioEngine().getFile().getParentDirectory()
                                        : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
         "*.wav;*.aiff;*.aif;*.flac;*.mp3;*.ogg;*.m4a",
         kUseNativeFileChooser);
@@ -614,8 +638,8 @@ void MainWindow::handleFileOpen()
 
 void MainWindow::handleFileSave()
 {
-    if (app.audioEngine.isFileLoaded())
-        app.audioEngine.saveFile (app.audioEngine.getFile());
+    if (app.audioEngine().isFileLoaded())
+        app.audioEngine().saveFile (app.audioEngine().getFile());
     else
         handleFileSaveAs();
 }
@@ -628,16 +652,16 @@ void MainWindow::handleFileSaveAs()
         kUseNativeFileChooser);
 
     if (chooser.browseForFileToSave (true))
-        app.audioEngine.saveFileAs (chooser.getResult());
+        app.audioEngine().saveFileAs (chooser.getResult());
 }
 
 void MainWindow::updateTitle()
 {
     juce::String title = "SpectroCraft";
-    if (app.audioEngine.isFileLoaded())
+    if (app.audioEngine().isFileLoaded())
     {
-        title = app.audioEngine.getFile().getFileName() + " - " + title;
-        if (app.audioEngine.hasUnsavedChanges())
+        title = app.audioEngine().getFile().getFileName() + " - " + title;
+        if (app.audioEngine().hasUnsavedChanges())
             title = "*" + title;
     }
     // setName() updates the native window caption; Component::setTitle() only
@@ -661,7 +685,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 
     // Per-channel visibility toggles: ChannelBase + channel index.
     // Ctrl/Shift+click on a channel shows ONLY that channel (solo).
-    if (menuItemID >= ChannelBase && menuItemID < ChannelBase + app.audioEngine.numChannels())
+    if (menuItemID >= ChannelBase && menuItemID < ChannelBase + app.audioEngine().numChannels())
     {
         const int ch = menuItemID - ChannelBase;
         const auto mods = juce::ModifierKeys::getCurrentModifiers();
@@ -669,6 +693,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             app.visibleChannels = { ch };
         else
             app.toggleChannelVisible (ch);
+        app.syncActiveDoc ();   // keep the active document's copy in step
         syncSharedState();
         return;
     }
@@ -677,8 +702,9 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     if (menuItemID == ViewShowAllChannels)
     {
         app.visibleChannels.clear();
-        for (int i = 0; i < app.audioEngine.numChannels(); ++i)
+        for (int i = 0; i < app.audioEngine().numChannels(); ++i)
             app.visibleChannels.push_back (i);
+        app.syncActiveDoc ();   // keep the active document's copy in step
         syncSharedState();
         return;
     }
@@ -703,18 +729,17 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     {
         case FileOpen: handleFileOpen(); break;
         case FileClose:
+            // closeFile() fires onActiveDocChanged (or resets the empty state),
+            // which refreshes every panel and view.
             app.closeFile();
-            app.playhead = 0.0;
-            syncSharedState();
-            updateTitle();
             break;
         case FileSave: handleFileSave(); break;
         case FileSaveAs: handleFileSaveAs(); break;
         case FileExportSpectral:
-            if (spectralView && app.audioEngine.isFileLoaded())
+            if (spectralView && app.audioEngine().isFileLoaded())
             {
                 juce::FileChooser chooser ("Save Spectrogram As",
-                    app.audioEngine.getFile().getParentDirectory(), "*.png",
+                    app.audioEngine().getFile().getParentDirectory(), "*.png",
                     kUseNativeFileChooser);
                 if (chooser.browseForFileToSave (true))
                     spectralView->saveAsPng (chooser.getResult());
@@ -772,7 +797,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 // Zoom the shared time window around its centre (applies to both views).
 void MainWindow::zoomHorizontal (double factor)
 {
-    if (!app.audioEngine.isFileLoaded()) return;
+    if (!app.audioEngine().isFileLoaded()) return;
 
     const double t0 = app.viewStart, t1 = app.viewEnd;
     const double c = 0.5 * (t0 + t1);
@@ -782,15 +807,15 @@ void MainWindow::zoomHorizontal (double factor)
 
 void MainWindow::zoomVerticalBoth (double factor)
 {
-    if (!app.audioEngine.isFileLoaded()) return;
+    if (!app.audioEngine().isFileLoaded()) return;
     if (waveformView) { waveformView->zoomVerticalBy (factor); waveformView->repaint(); }   // amplitude axis
     if (spectralView) { spectralView->zoomFrequencyBy (factor); spectralView->repaint(); }  // frequency axis
 }
 
 void MainWindow::zoomToFit()
 {
-    if (!app.audioEngine.isFileLoaded()) return;
-    double t0 = 0.0, t1 = app.audioEngine.duration();
+    if (!app.audioEngine().isFileLoaded()) return;
+    double t0 = 0.0, t1 = app.audioEngine().duration();
     if (!app.selection.isEmpty())
     {
         t0 = app.selection.getStart();
@@ -801,14 +826,14 @@ void MainWindow::zoomToFit()
 
 void MainWindow::zoomToSelection()
 {
-    if (!app.audioEngine.isFileLoaded() || app.selection.isEmpty()) return;
+    if (!app.audioEngine().isFileLoaded() || app.selection.isEmpty()) return;
     applyTimeWindow (app.selection.getStart(), app.selection.getEnd());
 }
 
 void MainWindow::zoomOutFull()
 {
-    if (!app.audioEngine.isFileLoaded()) return;
-    applyTimeWindow (0.0, app.audioEngine.duration());
+    if (!app.audioEngine().isFileLoaded()) return;
+    applyTimeWindow (0.0, app.audioEngine().duration());
 }
 
 // Actions from the right-click context menu shown by either view.
@@ -831,7 +856,7 @@ void MainWindow::handleContextMenuAction (int id)
 // selection on the visible channels (undoable).
 void MainWindow::showChangeGainDialog()
 {
-    if (!app.audioEngine.isFileLoaded() || app.selection.isEmpty()) return;
+    if (!app.audioEngine().isFileLoaded() || app.selection.isEmpty()) return;
 
     juce::AlertWindow w ("Change Gain",
                          "Apply gain to the selection (dB):",
@@ -852,7 +877,7 @@ void MainWindow::showChangeGainDialog()
 // from any of the feedback paths.
 void MainWindow::updateScrollBars()
 {
-    const double dur = app.audioEngine.duration();
+    const double dur = app.audioEngine().duration();
     if (timeBar)
     {
         timeBar->setDuration (dur);
@@ -861,7 +886,7 @@ void MainWindow::updateScrollBars()
 
     // Waveform: track is [-1, +1]; the thumb shows the visible amplitude range
     // centred on zero (the waveform view is always vertically centred).
-    if (waveVScroll && waveformView && app.audioEngine.isFileLoaded())
+    if (waveVScroll && waveformView && app.audioEngine().isFileLoaded())
     {
         waveVScroll->setRange (-1.0, 1.0);
         const double h = std::min (1.0, waveformView->getVisibleAmpHalf());
@@ -869,9 +894,9 @@ void MainWindow::updateScrollBars()
     }
 
     // Spectrogram: track is [1 Hz, Nyquist]; the thumb shows the visible range.
-    if (specVScroll && spectralView && app.audioEngine.isFileLoaded())
+    if (specVScroll && spectralView && app.audioEngine().isFileLoaded())
     {
-        const double nyq = 0.5 * app.audioEngine.sampleRate();
+        const double nyq = 0.5 * app.audioEngine().sampleRate();
         specVScroll->setRange (1.0, nyq);
         specVScroll->setWindow (spectralView->getFreqMin(), spectralView->getFreqMax());
     }
@@ -885,25 +910,25 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     if (menuName == "File")
     {
         menu.addItem (FileOpen, "Open...\tCtrl+O", true, false); // always available
-        menu.addItem (FileClose, "Close\tCtrl+W", app.audioEngine.isFileLoaded(), false);
+        menu.addItem (FileClose, "Close\tCtrl+W", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
-        menu.addItem (FileSave, "Save\tCtrl+S", app.audioEngine.isFileLoaded(), false);
-        menu.addItem (FileSaveAs, "Save As...\tCtrl+Shift+S", app.audioEngine.isFileLoaded(), false);
+        menu.addItem (FileSave, "Save\tCtrl+S", app.audioEngine().isFileLoaded(), false);
+        menu.addItem (FileSaveAs, "Save As...\tCtrl+Shift+S", app.audioEngine().isFileLoaded(), false);
         menu.addItem (FileExportSpectral, "Save Spectrogram As...\tCtrl+Shift+E",
-                      app.audioEngine.isFileLoaded() && showSpectralView, false);
+                      app.audioEngine().isFileLoaded() && showSpectralView, false);
         menu.addSeparator();
         menu.addItem (FileQuit, "Quit\tCtrl+Q", true, false);
     }
     else if (menuName == "Edit")
     {
-        menu.addItem (EditUndo, "Undo\tCtrl+Z", app.undo.canUndo(), false);
-        menu.addItem (EditRedo, "Redo\tCtrl+Y", app.undo.canRedo(), false);
+        menu.addItem (EditUndo, "Undo\tCtrl+Z", app.undo().canUndo(), false);
+        menu.addItem (EditRedo, "Redo\tCtrl+Y", app.undo().canRedo(), false);
         menu.addSeparator();
         menu.addItem (EditCut, "Cut\tCtrl+X", !app.selection.isEmpty(), false);
         menu.addItem (EditCopy, "Copy\tCtrl+C", !app.selection.isEmpty(), false);
-        menu.addItem (EditPaste, "Paste\tCtrl+V", app.audioEngine.canPaste(), false);
+        menu.addItem (EditPaste, "Paste\tCtrl+V", app.audioEngine().canPaste(), false);
         menu.addItem (EditDelete, "Delete\tDel", !app.selection.isEmpty(), false);
-        menu.addItem (EditSelectAll, "Select All\tCtrl+A", app.audioEngine.isFileLoaded(), false);
+        menu.addItem (EditSelectAll, "Select All\tCtrl+A", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         menu.addItem (EditSnapToZeroCrossings, "Snap to Zero Crossings", true, app.settings.snapToZeroCrossings);
     }
@@ -911,16 +936,16 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     {
         menu.addItem (ViewZoomIn, "Zoom In\tCtrl++", true, false);
         menu.addItem (ViewZoomOut, "Zoom Out\tCtrl+-", true, false);
-        menu.addItem (ViewZoomFit, "Zoom Fit\tCtrl+0", app.audioEngine.isFileLoaded(), false);
+        menu.addItem (ViewZoomFit, "Zoom Fit\tCtrl+0", app.audioEngine().isFileLoaded(), false);
         menu.addItem (ViewZoomToSelection, "Zoom to Selection", !app.selection.isEmpty(), false);
-        menu.addItem (ViewZoomOutFull, "Zoom Out Full", app.audioEngine.isFileLoaded(), false);
+        menu.addItem (ViewZoomOutFull, "Zoom Out Full", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         menu.addItem (ViewVerticalZoomIn, "Vertical Zoom In\tCtrl+Shift+=", true, false);
         menu.addItem (ViewVerticalZoomOut, "Vertical Zoom Out\tCtrl+Shift+-", true, false);
         menu.addSeparator();
         menu.addItem (ViewShowWaveform, "Waveform View", true, showWaveformView);
         menu.addItem (ViewShowSpectral, "Spectrogram View", true, showSpectralView);
-        menu.addItem (ViewShowAllChannels, "Show All Channels", app.audioEngine.isFileLoaded(), false);
+        menu.addItem (ViewShowAllChannels, "Show All Channels", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         juce::PopupMenu colourMapMenu;
         colourMapMenu.addItem (ColourMapClassic, "Classic (Default)", true, app.colourMap == ColourMap::Classic);
@@ -935,7 +960,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
 
         // Per-channel visibility toggles (applies to both views).
         // Ctrl/Shift+click shows only that channel.
-        const int nch = app.audioEngine.numChannels();
+        const int nch = app.audioEngine().numChannels();
         if (nch > 0)
         {
             menu.addSeparator();
@@ -946,11 +971,11 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     }
     else if (menuName == "Transport")
     {
-        menu.addItem (TransportPlay, "Play\tSpace", app.audioEngine.isFileLoaded() && !app.audioEngine.isPlaying(), false);
-        menu.addItem (TransportStop, "Stop\tCtrl+.", app.audioEngine.isPlaying(), false);
-        menu.addItem (TransportPause, "Pause\tSpace", app.audioEngine.isPlaying(), false);
+        menu.addItem (TransportPlay, "Play\tSpace", app.audioEngine().isFileLoaded() && !app.audioEngine().isPlaying(), false);
+        menu.addItem (TransportStop, "Stop\tCtrl+.", app.audioEngine().isPlaying(), false);
+        menu.addItem (TransportPause, "Pause\tSpace", app.audioEngine().isPlaying(), false);
         menu.addSeparator();
-        menu.addItem (TransportLoop, "Loop (Selection/All)\tL", true, app.audioEngine.isLooping());
+        menu.addItem (TransportLoop, "Loop (Selection/All)\tL", true, app.audioEngine().isLooping());
     }
     else if (menuName == "Tools")
     {
@@ -977,10 +1002,16 @@ juce::StringArray MainWindow::getMenuBarNames()
 
 bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
 {
+    // Ctrl+Tab / Ctrl+Shift+Tab cycles through the loaded files.
+    if (key.getKeyCode() == juce::KeyPress::tabKey && key.getModifiers().isCommandDown())
+    {
+        app.cycleActiveDoc (!key.getModifiers().isShiftDown());
+        return true;
+    }
     if (key == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { handleFileOpen(); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0)) { handleFileSave(); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleFileSaveAs(); return true; }
-    if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); app.playhead = 0.0; syncSharedState(); updateTitle(); return true; }
+    if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }
     if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) { app.undoStep(); refreshAfterEdit(); return true; }
     if (key == juce::KeyPress ('y', juce::ModifierKeys::commandModifier, 0)) { app.redoStep(); refreshAfterEdit(); return true; }
     if (key == juce::KeyPress ('x', juce::ModifierKeys::commandModifier, 0)) { app.cut(); refreshAfterEdit(); return true; }
@@ -991,7 +1022,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress::spaceKey)
     {
         // Space toggles play/pause (not stop).
-        if (app.audioEngine.isPlaying()) app.pause(); else app.play();
+        if (app.audioEngine().isPlaying()) app.pause(); else app.play();
         return true;
     }
     // Arrow keys nudge the playhead by one frame. Holding Shift selects from
@@ -1000,11 +1031,11 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     // Note: KeyPress::operator== compares modifiers too, so compare key codes.
     const int keyCode = key.getKeyCode();
     const juce::ModifierKeys mods = key.getModifiers();
-    if (app.audioEngine.isFileLoaded() && !mods.isCommandDown() && !mods.isAltDown()
+    if (app.audioEngine().isFileLoaded() && !mods.isCommandDown() && !mods.isAltDown()
             && !mods.isCtrlDown()
             && (keyCode == juce::KeyPress::leftKey || keyCode == juce::KeyPress::rightKey))
     {
-        const double step = 1.0 / app.audioEngine.sampleRate();
+        const double step = 1.0 / app.audioEngine().sampleRate();
         const bool right = (keyCode == juce::KeyPress::rightKey);
 
         if (mods.isShiftDown())
@@ -1033,7 +1064,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     }
     if (key == juce::KeyPress::endKey)
     {
-        app.setPlayhead (app.audioEngine.duration());
+        app.setPlayhead (app.audioEngine().duration());
         syncSharedState();
         return true;
     }
@@ -1055,7 +1086,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         // Region marker spanning the selection if there is one,
         // otherwise a point marker at the cursor.
         app.addMarkerAtCursor();
-        app.markers.saveSidecar (app.audioEngine.getFile());
+        app.markers().saveSidecar (app.audioEngine().getFile());
         if (markersPanel) markersPanel->refresh();
         syncSharedState();
         return true;

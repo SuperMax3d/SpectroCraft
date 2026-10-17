@@ -1,9 +1,10 @@
 # SpectroCraft
 
-A high-performance, single-file waveform audio editor in the style of classic
-DAW waveform editors. No multitrack/mixer — one file at a time, with a tiled,
-multithreaded FFT spectral view that stays interactive on multi-hour, 96 kHz,
-32-bit multichannel files without ever loading the whole file into RAM.
+A high-performance waveform audio editor in the style of classic DAW waveform
+editors. No multitrack/mixer — one *active* file at a time (any number of
+files can be open and switched between), with a tiled, multithreaded FFT
+spectral view that stays interactive on multi-hour, 96 kHz, 32-bit
+multichannel files without ever loading the whole file into RAM.
 
 Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 
@@ -59,8 +60,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   LIST/`adtl` chunks (the classic DAW marker layout — files saved with that
   layout load their markers back automatically). Sorted access, find-near. "Add Marker" (button or `M`) creates a **region
   marker spanning the current selection** if there is one, otherwise a point
-  marker at the cursor. The list is cleared when a new file is loaded (a
-  sidecar next to the file is re-read if present), and **double-clicking a
+  marker at the cursor. Every file has its own marker list — switching files
+  shows that file's markers, and a sidecar next to a file is re-read when it
+  loads (if present) — and **double-clicking a
   marker** — in the Markers tab or on its line/region in either view — sets the
   time selection to that marker's range.
   Right-clicking a row in the marker table shows a context menu with **Copy All
@@ -76,7 +78,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   (title) and one `ltxt` (comment) entry per marker. The audio data is written
   as IEEE float32 exactly as before; other formats keep the plain JUCE writer.
 - **Classic DAW waveform-editor layout**:
-  - Top-left tab group: **Files** (open/close + file info) and
+  - Top-left tab group: **Files** (lists every loaded file with its sample
+    rate, channel count and duration; double-click a row to make it active,
+    right-click for Activate/Close) and
     **Frequency Analysis** (visible by default): live FFT with dB/Hz axes and
     a cursor readout.
     A single click in either view re-analyses immediately: with no selection
@@ -102,7 +106,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     **Ctrl+click** re-stores/updates from the current selection/cursor position
     and shows the curve. **Shift+click** clears the slot. Stored curves are
     drawn as dim (alpha 90) overlays beneath the live curves, at their own
-    stored FFT size, in all three axis modes. A right-click menu copies the
+    stored FFT size, in all three axis modes. Snapshots are **shared across
+    all open files**: each one stores its source file and channel list, so a
+    curve captured from another file keeps working (and is recomputed from
+    that file's engine when the FFT size or window type changes). The tooltip
+    shows the stored time segment plus the source file name. **Right-clicking
+    a snapshot button** offers **Convert to marker** (creates a region marker
+    spanning the snapshot's time range in its source file) and **Clear**
+    (same as Shift+click). A right-click menu on the plot area copies the
     spectrum data to the clipboard.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
     range, Log/Linear toggle, Reset Freq, FFT size) and **Markers** (table with
@@ -135,7 +146,22 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   taskbar and Alt-Tab. It is set at runtime rather than through a `.rc`
   resource file because this toolchain's rc.exe emits ICON statements as
   RT_CURSOR entries, which Windows ignores for window icons.
-- **Drag & drop**: drop a WAV/AIFF/FLAC/MP3/Ogg file onto the window to load it.
+- **Multi-file support**: any number of files can be open at once. The **Files**
+  tab lists every loaded file with its properties (sample rate, channel count,
+  duration); **double-click a row to make that file active** — it is loaded
+  into the tracks/views and its markers appear in the marker list. Each file
+  remembers its own playhead position, selection range, visible channels,
+  markers and undo history; switching files restores all of them.
+  **Ctrl+Tab / Ctrl+Shift+Tab** cycles through the loaded files (forward /
+  backwards). Closing a file (right-click → Close, or File → Close for the
+  active one) removes it from the list. The live frequency analysis always
+  follows the playhead of the *active* file, and **the ten stored snapshots
+  are shared across all open files** — each snapshot remembers which file it
+  was stored from (shown in its tooltip), so curves from different files can be
+  compared side by side. Closing a file clears only the snapshots that came
+  from it.
+- **Drag & drop**: drop one or more WAV/AIFF/FLAC/MP3/Ogg files onto the window;
+  every valid dropped file becomes its own document.
 - **Edits** with 50-level undo/redo (patch-based: old/new sample data + length
   delta — memory efficient): silence, fade in/out, normalize, reverse, gain,
   cut/copy/paste, delete, insert. The destructive effects (silence/fade/
@@ -333,6 +359,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Action | Shortcut |
 |---|---|
 | Open / Close file | Ctrl+O / Ctrl+W |
+| Cycle through loaded files (forward / backwards) | Ctrl+Tab / Ctrl+Shift+Tab |
 | Save / Save As | Ctrl+S / Ctrl+Shift+S |
 | Undo / Redo | Ctrl+Z / Ctrl+Y |
 | Cut / Copy / Paste | Ctrl+X / Ctrl+C / Ctrl+V |
@@ -394,11 +421,12 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
-| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel` | Classic DAW-style left column: file open/close + info, live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x) and a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size) and the marker table. Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x) and a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size) and the marker table. Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near, JSON sidecar persistence next to the audio file. |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
-| `Application` | Owns engine instances, settings and colour map; wires edit actions to undo. |
+| `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range and visible-channel list. Created by `Application::openFile`; destroyed on close (the audio player is detached from its engine *before* destruction). |
+| `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop, playhead animation timer and view-range state sync between views/panels. |
 
 Threading model: the UI thread only draws and dispatches; FFT tiles are computed
@@ -410,7 +438,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (164 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (303 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -460,6 +488,14 @@ by a single mutex (short critical sections, no lock held during FFT work).
   - **Effect channel scoping**: stereo ramp/DC fixture; silence/normalize/reverse
     restricted to one visible channel leave the other bit-exact and undo
     restores everything.
+  - **Multi-file support**: two files open at once — per-file playhead/
+    selection restoration on switch, Ctrl+Tab cycling (with wrap-around),
+    independent marker lists and undo histories per file, closing a non-active
+    doc leaves the active one untouched, closing the last doc resets to the
+    empty state, re-opening an already-loaded file activates it without
+    duplicating. Shared snapshots: one stored from each file survives switching,
+    "Convert to marker" lands in the snapshot's source file (even when another
+    file is active), and closing a file clears only that file's snapshots.
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,

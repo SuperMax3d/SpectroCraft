@@ -40,7 +40,7 @@ static std::vector<juce::Rectangle<int>> spectralRowRects (int w, int h, int nRo
 }
 
 SpectralView::SpectralView (Application& appIn)
-    : app (appIn), engine (appIn.audioEngine), spectral (appIn.spectralEngine)
+    : app (appIn), spectral (appIn.spectralEngine)   // audio read live via app.audioEngine()
 {
     // Grab keyboard focus when clicked so the arrow keys keep controlling
     // the playhead/selection even after the user has interacted with other
@@ -49,7 +49,7 @@ SpectralView::SpectralView (Application& appIn)
     setWantsKeyboardFocus (true);
     settings_ = appIn.settings;
     freqMin = std::max (1.0, (double) appIn.settings.minFrequency);
-    freqMax = std::min (engine.sampleRate() * 0.5, (double) appIn.settings.maxFrequency);
+    freqMax = std::min (app.audioEngine().sampleRate() * 0.5, (double) appIn.settings.maxFrequency);
 }
 
 SpectralView::~SpectralView() {}
@@ -85,7 +85,7 @@ double SpectralView::timeToX (double t) const
 
 float SpectralView::freqToY (double freq, int height) const
 {
-    const double rate = engine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     const double fMin = std::max (1.0, freqMin);
     const double fMax = std::min (rate * 0.5, freqMax);
     if (fMax <= fMin) return 0;
@@ -101,7 +101,7 @@ float SpectralView::freqToY (double freq, int height) const
 
 double SpectralView::yToFreq (float y, int height) const
 {
-    const double rate = engine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     const double fMin = std::max (1.0, freqMin);
     const double fMax = std::min (rate * 0.5, freqMax);
     const double t = 1.0 - (double) y / std::max (1, height);
@@ -129,13 +129,13 @@ static void showViewContextMenu (Application& app,
     const bool hasSel = !app.selection.isEmpty();
     m.addItem (CtxZoomToSelection, "Zoom to Selection", hasSel, false);
     m.addItem (CtxZoomOutFull,     "Zoom Out Full",
-               app.audioEngine.isFileLoaded(), false);
+               app.audioEngine().isFileLoaded(), false);
     m.addItem (CtxSelectAll,       "Select All\tCtrl+A",
-               app.audioEngine.isFileLoaded(), false);
+               app.audioEngine().isFileLoaded(), false);
     m.addSeparator();
     m.addItem (CtxCut,   "Cut\tCtrl+X",   hasSel, false);
     m.addItem (CtxCopy,  "Copy\tCtrl+C",  hasSel, false);
-    m.addItem (CtxPaste, "Paste\tCtrl+V", app.audioEngine.canPaste(), false);
+    m.addItem (CtxPaste, "Paste\tCtrl+V", app.audioEngine().canPaste(), false);
     m.addItem (CtxDelete,"Delete\tDel",   hasSel, false);
 
     if (const int sel = m.showMenu (juce::PopupMenu::Options().withMousePosition());
@@ -145,7 +145,7 @@ static void showViewContextMenu (Application& app,
 
 void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
-    if (!engine.isFileLoaded()) return;
+    if (!app.audioEngine().isFileLoaded()) return;
 
     // Right-click shows the context menu; middle-drag still pans.
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
@@ -179,7 +179,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 
 void SpectralView::mouseDrag (const juce::MouseEvent& e)
 {
-    if (!engine.isFileLoaded()) return;
+    if (!app.audioEngine().isFileLoaded()) return;
 
     switch (dragMode)
     {
@@ -239,14 +239,14 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
     const double freq = yToFreq (e.y - row.getY(), row.getHeight());
 
     // Use the same mipmap level as the rendered image so the tiles are cached.
-    const double rate = engine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     const int64_t s0 = std::max ((int64_t) 0, (int64_t) (viewStart * rate));
-    const int64_t s1 = std::min (engine.numSamples(), (int64_t) (viewEnd * rate));
+    const int64_t s1 = std::min (app.audioEngine().numSamples(), (int64_t) (viewEnd * rate));
     const double spp = (s1 > s0)
         ? ((double) (s1 - s0) / std::max (1, pr.getWidth())) : 0.0;
     const int level = SpectralEngine::pickMipLevel (spp, settings_.hopSize);
 
-    const float dB = spectral.probeMagnitude (engine, ch, t, freq, settings_, level);
+    const float dB = spectral.probeMagnitude (app.audioEngine(), ch, t, freq, settings_, level);
 
     onCursorInfo ("t=" + juce::String (t, 3) + " s   f="
                   + ((freq >= 1000.0)
@@ -262,7 +262,7 @@ void SpectralView::mouseExit (const juce::MouseEvent&)
 
 void SpectralView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
-    if (!engine.isFileLoaded()) return;
+    if (!app.audioEngine().isFileLoaded()) return;
     const double factor = wheel.deltaY > 0 ? 1.2 : (1.0 / 1.2);
 
     // Wheel over the left frequency axis (or Shift+wheel anywhere) zooms the
@@ -278,7 +278,7 @@ void SpectralView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
 void SpectralView::mouseDoubleClick (const juce::MouseEvent& e)
 {
     // Only left-button double-clicks select; middle/right are pan/menu buttons.
-    if (!e.mods.isLeftButtonDown() || !engine.isFileLoaded())
+    if (!e.mods.isLeftButtonDown() || !app.audioEngine().isFileLoaded())
         return;
 
     // Double-clicking a marker sets the selection to its range.
@@ -322,8 +322,8 @@ void SpectralView::zoomAtX (int x, double factor)
     double ns = tCursor - newHalf * (2.0 * ratio);
     double ne = tCursor + newHalf * (2.0 - 2.0 * ratio);
     const double w = ne - ns;
-    if (ns < 0.0) { ns = 0.0; ne = std::min (w, engine.duration()); }
-    if (ne > engine.duration()) { ne = engine.duration(); ns = std::max (0.0, ne - w); }
+    if (ns < 0.0) { ns = 0.0; ne = std::min (w, app.audioEngine().duration()); }
+    if (ne > app.audioEngine().duration()) { ne = app.audioEngine().duration(); ns = std::max (0.0, ne - w); }
     if (ne <= ns) return; // zoomed past the limits
 
     setWindow (ns, ne);
@@ -337,12 +337,12 @@ void SpectralView::zoomHorizontalAtCenter (double factor)
 
 void SpectralView::fitAll()
 {
-    setWindow (0.0, engine.duration());
+    setWindow (0.0, app.audioEngine().duration());
 }
 
 void SpectralView::resetFrequencyRange()
 {
-    const double rate = engine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     const double lo = std::max (1.0, (double) app.settings.minFrequency);
     const double hi = std::min (rate * 0.5, (double) app.settings.maxFrequency);
     if (lo == freqMin && hi == freqMax)
@@ -355,7 +355,7 @@ void SpectralView::resetFrequencyRange()
 
 void SpectralView::setFrequencyRange (double lo, double hi)
 {
-    const double rate = engine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     lo = std::clamp (lo, 1.0, rate * 0.5);
     hi = std::clamp (hi, 1.0, rate * 0.5);
     if (hi <= lo * 1.01) return; // degenerate range
@@ -370,11 +370,11 @@ void SpectralView::setFrequencyRange (double lo, double hi)
 
 bool SpectralView::saveAsPng (const juce::File& file)
 {
-    if (!engine.isFileLoaded() || channels.empty()) return false;
+    if (!app.audioEngine().isFileLoaded() || channels.empty()) return false;
     const auto pr = plotRect();
     Settings rs = settings_;
     rs.minFrequency = (float) std::max (1.0, freqMin);
-    rs.maxFrequency = (float) std::min (engine.sampleRate() * 0.5, freqMax);
+    rs.maxFrequency = (float) std::min (app.audioEngine().sampleRate() * 0.5, freqMax);
 
     juce::Image img (juce::Image::ARGB, pr.getWidth(), pr.getHeight(), true);
     renderSpectralContent (img, rs);
@@ -397,13 +397,13 @@ bool SpectralView::saveAsPng (const juce::File& file)
 void SpectralView::zoomFrequencyBy (double factor)
 {
     // Keyboard vertical zoom: zoom the frequency range around its centre.
-    if (!engine.isFileLoaded()) return;
+    if (!app.audioEngine().isFileLoaded()) return;
     zoomFreqAtY ((float) getHeight() * 0.5f, factor);
 }
 
 void SpectralView::panByTime (double dt)
 {
-    const double dur = engine.duration();
+    const double dur = app.audioEngine().duration();
     const double w = viewEnd - viewStart;
     const double ns = std::clamp (viewStart + dt, 0.0, std::max (0.0, dur - w));
     setWindow (ns, ns + w);
@@ -411,7 +411,7 @@ void SpectralView::panByTime (double dt)
 
 void SpectralView::zoomFreqAtY (float y, double factor)
 {
-    const double rate = engine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     const double fCursor = std::clamp (yToFreq (y, getHeight()), 1.0, rate * 0.5);
     double lo = std::max (1.0, freqMin);
     double hi = std::min (rate * 0.5, freqMax);
@@ -443,7 +443,7 @@ void SpectralView::paint (juce::Graphics& g)
     const auto bounds = getLocalBounds();
     g.fillAll (juce::Colours::black);
 
-    if (!engine.isFileLoaded() || channels.empty())
+    if (!app.audioEngine().isFileLoaded() || channels.empty())
     {
         g.setColour (juce::Colour::fromRGBA (200, 200, 200, 120));
         g.setFont (14.0f);
@@ -461,7 +461,7 @@ void SpectralView::paint (juce::Graphics& g)
         // view's local frequency limits.
         Settings rs = settings_;
         rs.minFrequency = (float) std::max (1.0, freqMin);
-        rs.maxFrequency = (float) std::min (engine.sampleRate() * 0.5, freqMax);
+        rs.maxFrequency = (float) std::min (app.audioEngine().sampleRate() * 0.5, freqMax);
 
         cachedImage = juce::Image (juce::Image::ARGB, w, h, true);
         renderSpectralContent (cachedImage, rs);
@@ -485,7 +485,7 @@ void SpectralView::paint (juce::Graphics& g)
 
     // Channel labels on the left of each track: "L"/"R" for stereo files,
     // channel numbers when several tracks are shown at once.
-    if (channels.size() > 1 || engine.numChannels() == 2)
+    if (channels.size() > 1 || app.audioEngine().numChannels() == 2)
     {
         const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
         g.setFont (10.0f);
@@ -493,7 +493,7 @@ void SpectralView::paint (juce::Graphics& g)
         {
             const int ch = channels[r];
             const auto& rr = rows[r];
-            const juce::String lab = (engine.numChannels() == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
+            const juce::String lab = (app.audioEngine().numChannels() == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
             g.setColour (juce::Colour::fromRGB (190, 190, 190));
             g.drawText (lab, 4, rr.getY() + rr.getHeight() / 2 - 8, kLeftAxisWidth - 6, 16,
                        juce::Justification::centredRight, false);
@@ -522,7 +522,7 @@ void SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs)
         if (rr.getHeight() <= 0) continue;
 
         std::vector<uint8_t> pixels;
-        spectral.renderToPixels (engine, rs, w, rr.getHeight(), viewStart, viewEnd, { ch }, pixels);
+        spectral.renderToPixels (app.audioEngine(), rs, w, rr.getHeight(), viewStart, viewEnd, { ch }, pixels);
 
         for (int y = 0; y < rr.getHeight(); ++y)
         {
@@ -554,13 +554,13 @@ void SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs)
 // labels in the left ruler area for each row.
 void SpectralView::drawFrequencyRuler (juce::Graphics& g)
 {
-    const double rate = engine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     const double fMax = std::min (rate * 0.5, freqMax);
     const double fMin = std::max (1.0, freqMin);
 
     // A channel label sits at the vertical centre of each row; keep tick
     // labels out of that zone.
-    const bool hasChanLabel = (channels.size() > 1 || engine.numChannels() == 2);
+    const bool hasChanLabel = (channels.size() > 1 || app.audioEngine().numChannels() == 2);
 
     const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
     g.setFont (10.0f);

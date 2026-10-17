@@ -9,7 +9,7 @@
 #include <cmath>
 
 WaveformView::WaveformView (Application& appIn)
-    : app (appIn), engine (appIn.audioEngine)
+    : app (appIn)   // audio data is read live via app.audioEngine() (active doc)
 {
     setMouseCursor (juce::MouseCursor::NormalCursor);
     // Grab keyboard focus when clicked so the arrow keys keep controlling
@@ -40,7 +40,7 @@ double WaveformView::timeToX (double t) const
 
 void WaveformView::setVisibleChannels (const std::vector<int>& chs)
 {
-    std::vector<uint8_t> newVis (std::max (1, engine.numChannels()), 0);
+    std::vector<uint8_t> newVis (std::max (1, app.audioEngine().numChannels()), 0);
     for (int c : chs)
         if (c >= 0 && c < (int) newVis.size())
             newVis[c] = 1;
@@ -63,13 +63,13 @@ static void showViewContextMenu (Application& app,
     const bool hasSel = !app.selection.isEmpty();
     m.addItem (CtxZoomToSelection, "Zoom to Selection", hasSel, false);
     m.addItem (CtxZoomOutFull,     "Zoom Out Full",
-               app.audioEngine.isFileLoaded(), false);
+               app.audioEngine().isFileLoaded(), false);
     m.addItem (CtxSelectAll,       "Select All\tCtrl+A",
-               app.audioEngine.isFileLoaded(), false);
+               app.audioEngine().isFileLoaded(), false);
     m.addSeparator();
     m.addItem (CtxCut,   "Cut\tCtrl+X",   hasSel, false);
     m.addItem (CtxCopy,  "Copy\tCtrl+C",  hasSel, false);
-    m.addItem (CtxPaste, "Paste\tCtrl+V", app.audioEngine.canPaste(), false);
+    m.addItem (CtxPaste, "Paste\tCtrl+V", app.audioEngine().canPaste(), false);
     m.addItem (CtxDelete,"Delete\tDel",   hasSel, false);
 
     if (const int sel = m.showMenu (juce::PopupMenu::Options().withMousePosition());
@@ -79,7 +79,7 @@ static void showViewContextMenu (Application& app,
 
 void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
-    if (!engine.isFileLoaded()) return;
+    if (!app.audioEngine().isFileLoaded()) return;
 
     // Right-click shows the context menu; middle-drag still pans.
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
@@ -114,7 +114,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 
 void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
-    if (!engine.isFileLoaded()) return;
+    if (!app.audioEngine().isFileLoaded()) return;
 
     switch (dragMode)
     {
@@ -162,7 +162,7 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
         return;
     }
 
-    const int chans = engine.numChannels();
+    const int chans = app.audioEngine().numChannels();
     int visCount = 0;
     for (int ch = 0; ch < chans; ++ch)
         if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
@@ -198,7 +198,7 @@ void WaveformView::mouseExit (const juce::MouseEvent&)
 
 void WaveformView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
-    if (!engine.isFileLoaded()) return;
+    if (!app.audioEngine().isFileLoaded()) return;
     const double factor = wheel.deltaY > 0 ? 1.2 : (1.0 / 1.2);
 
     // Wheel over the left amplitude axis (or Shift+wheel anywhere) zooms vertically;
@@ -214,7 +214,7 @@ void WaveformView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
 void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
 {
     // Only left-button double-clicks select; middle/right are pan/menu buttons.
-    if (!e.mods.isLeftButtonDown() || !engine.isFileLoaded())
+    if (!e.mods.isLeftButtonDown() || !app.audioEngine().isFileLoaded())
         return;
 
     // Double-clicking a marker sets the selection to its range.
@@ -257,8 +257,8 @@ void WaveformView::zoomAtX (int x, double factor)
     double ns = tCursor - newHalf * (2.0 * ratio);
     double ne = tCursor + newHalf * (2.0 - 2.0 * ratio);
     const double w = ne - ns;
-    if (ns < 0.0) { ns = 0.0; ne = std::min (w, engine.duration()); }
-    if (ne > engine.duration()) { ne = engine.duration(); ns = std::max (0.0, ne - w); }
+    if (ns < 0.0) { ns = 0.0; ne = std::min (w, app.audioEngine().duration()); }
+    if (ne > app.audioEngine().duration()) { ne = app.audioEngine().duration(); ns = std::max (0.0, ne - w); }
     if (ne <= ns) return; // zoomed past the limits
 
     setWindow (ns, ne);
@@ -282,13 +282,13 @@ void WaveformView::fitAll()
     const bool zoomChanged = (vZoom != 1.0);
     vZoom = 1.0;
     dirty = true;
-    setWindow (0.0, engine.duration());
+    setWindow (0.0, app.audioEngine().duration());
     if (zoomChanged && onVerticalZoomChanged) onVerticalZoomChanged();
 }
 
 void WaveformView::panByTime (double dt)
 {
-    const double dur = engine.duration();
+    const double dur = app.audioEngine().duration();
     const double w = viewEnd - viewStart;
     const double ns = std::clamp (viewStart + dt, 0.0, std::max (0.0, dur - w));
     setWindow (ns, ns + w);
@@ -301,8 +301,8 @@ void WaveformView::paint (juce::Graphics& g)
     const auto bounds = getLocalBounds();
     g.fillAll (juce::Colour::fromRGB (30, 30, 30));
 
-    const int chans = engine.numChannels();
-    if (chans == 0 || !engine.isFileLoaded())
+    const int chans = app.audioEngine().numChannels();
+    if (chans == 0 || !app.audioEngine().isFileLoaded())
     {
         g.setColour (juce::Colour::fromRGBA (200, 200, 200, 120));
         g.setFont (14.0f);
@@ -441,9 +441,9 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
 {
     const auto pr = plotRect();
     const int w = std::max (1, pr.getWidth());
-    const double rate = engine.sampleRate();
+    const double rate = app.audioEngine().sampleRate();
     const int64_t s0 = std::max ((int64_t) 0, (int64_t) (viewStart * rate));
-    const int64_t s1 = std::min (engine.numSamples(), (int64_t) (viewEnd * rate));
+    const int64_t s1 = std::min (app.audioEngine().numSamples(), (int64_t) (viewEnd * rate));
     if (s1 <= s0)
         return;
 
@@ -459,7 +459,7 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
     {
         const int64_t n = s1 - s0;
         std::vector<float> buf ((size_t) n);
-        if (!engine.readSamples (ch, s0, n, buf.data()))
+        if (!app.audioEngine().readSamples (ch, s0, n, buf.data()))
             return;
 
         juce::Path path;
@@ -480,7 +480,7 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
 
     // Pick the finest mipmap level that still covers >= samples per column
     const AudioEngine::MipLevel* best = nullptr;
-    for (const auto& lv : engine.mipmaps())
+    for (const auto& lv : app.audioEngine().mipmaps())
         if ((double) lv.factor >= samplesPerColumn) { best = &lv; break; }
 
     if (best && ch < (int) best->min.size() && !best->min[ch].empty())
@@ -502,7 +502,7 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
         // Zoomed in past finest level: read raw samples (O(n) total)
         const int64_t n = s1 - s0;
         std::vector<float> buf ((size_t) n);
-        if (!engine.readSamples (ch, s0, n, buf.data()))
+        if (!app.audioEngine().readSamples (ch, s0, n, buf.data()))
             return;
 
         for (int x = 0; x < w; ++x)
@@ -536,7 +536,7 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
     static const double levels[] = { 0.0, -6.0, -12.0, -18.0, -24.0 };
 
     int row = 0;
-    for (int ch = 0; ch < engine.numChannels(); ++ch)
+    for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
     {
         if (ch >= (int) chanVis.size() || !chanVis[ch]) continue;
         const float center = pr.getY() + row * chanH + chanH * 0.5f;

@@ -66,6 +66,9 @@ private:
 
 // ---------------------------------------------------------------- Files panel
 
+// Lists every loaded file with its actual properties. Double-clicking a row
+// makes that file active (loads it into the views + marker list); right-click
+// offers Activate/Close.
 class FileListPanel : public juce::Component
 {
 public:
@@ -80,7 +83,20 @@ public:
 private:
     Application& app;
     juce::TextButton openBtn, closeBtn;
-    std::vector<juce::String> fileInfoLines;
+    int listScroll = 0;   // first visible row (mouse-wheel scrolling)
+
+    static constexpr int kRowH = 32;      // two text lines per file entry
+    static constexpr int kListTop = 34;   // button strip height above the list
+
+    void mouseDown (const juce::MouseEvent& e) override;        // right-click = menu
+    void mouseDoubleClick (const juce::MouseEvent& e) override; // activate the file
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override; // scroll
+
+    juce::Rectangle<int> rowRect (int i) const;
+    int rowAt (int x, int y) const;       // -1 when no row is under the point
+    void activateDoc (int i);
+    void closeDoc (int i);
+    void showFileMenu (int row);
 
     JUCE_DECLARE_NON_COPYABLE (FileListPanel)
 };
@@ -115,8 +131,12 @@ public:
     }
     bool isStored() const { return stored; }
 
+    // Right-click on the button: context menu (Convert to marker / Clear).
+    std::function<void()> onRightClick;
+
     void paintButton (juce::Graphics& g, bool shouldDrawButtonAsHighlighted,
                       bool /*shouldDrawButtonAsDown*/) override;
+    void mouseDown (const juce::MouseEvent& e) override;
 
 private:
     juce::Colour col = juce::Colours::grey;
@@ -160,6 +180,14 @@ public:
     bool snapshotShown (int i) const { return snapshots[i].shown; }
     const std::vector<std::vector<float>>& snapshotMags (int i) const { return snapshots[i].mags; }
 
+    // Snapshots are shared across all open files: each one remembers the file it
+    // was stored from, so closing a file clears exactly its own entries.
+    void clearSnapshotsFor (const FileDoc* d);
+    // Clear slot i (same as Shift+click / Ctrl+click-clear).
+    void clearSnapshotSlot (int i);
+    // Create a region marker in the snapshot's source file spanning [t0, t1].
+    bool convertSnapshotToMarker (int i);
+
     // Programmatic setting changes (same code path as the UI combos).
     void setFftSize (int n) { fftSizeCombo.setSelectedId (n, juce::sendNotificationSync); }
     void setWindowType (int t) { windowCombo.setSelectedId (t + 1, juce::sendNotificationSync); }
@@ -198,8 +226,10 @@ private:
         bool shown = false;
         std::vector<std::vector<float>> mags;   // per channel, dB-normalized 0..1
         std::vector<std::vector<float>> bands;  // 1/3-octave conversion (per channel)
+        FileDoc* source = nullptr;              // file this snapshot was stored from
+        std::vector<int> chans;                 // visible channels at store time
     };
-    Snapshot snapshots[10];     // stored curve overlays (buttons 1..10)
+    Snapshot snapshots[10];     // stored curve overlays, shared across all files
 
     // Cached spectrum data
     std::vector<std::vector<float>> mags;   // per channel, dB-normalized 0..1
@@ -225,13 +255,23 @@ private:
     void copySpectrumToClipboard();
 
     // Core averaging computation: analyse region [t0, t1] with windows of n
-    // samples at the current window type; one magnitude vector per visible
-    // channel. Shared by the live spectrum and every stored snapshot.
+    // samples at the current window type; one magnitude vector per channel in
+    // chans. Shared by the live spectrum and every stored snapshot (each from
+    // its own source file's engine).
+    void computeRegionFrom (AudioEngine& eng, const std::vector<int>& chans,
+                            double t0, double t1, int n,
+                            std::vector<std::vector<float>>& outMags);
+    // Live-analysis convenience wrapper: uses the active document.
     void computeRegion (double t0, double t1, int n,
-                        std::vector<std::vector<float>>& outMags);
+                        std::vector<std::vector<float>>& outMags)
+    {
+        computeRegionFrom (app.audioEngine(), app.visibleChannels, t0, t1, n, outMags);
+    }
     // Recompute all valid snapshots from their stored time segments using the
     // current FFT size / window type, then refresh their 1/3-octave bands.
     void recomputeSnapshots();
+    // Right-click context menu on snapshot button i (Convert to marker / Clear).
+    void showSnapshotMenu (int i);
     // Re-derive the 1/3-octave band values of every snapshot (cheap: no FFT).
     void refreshSnapshotBands();
     // Refresh button i's tooltip to describe its current stored state.

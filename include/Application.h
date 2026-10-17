@@ -1,12 +1,14 @@
 #pragma once
-// SpectroCraft - Application state (owns engines, views, markers, undo)
+// SpectroCraft - Application state (owns documents, views, markers, undo)
 #include <JuceHeader.h>
 #include "Settings.h"
 #include "AudioEngine.h"
 #include "SpectralEngine.h"
 #include "MarkerManager.h"
 #include "UndoManager.h"
+#include "FileDoc.h"
 #include <vector>
+#include <memory>
 #include <functional>
 
 class Application
@@ -15,21 +17,30 @@ public:
     Application();
     ~Application();
 
-    AudioEngine audioEngine;
-    SpectralEngine spectralEngine;
-    MarkerManager markers;
-    ::UndoManager undo;
+    // All loaded files. The active document is what the views and panels show.
+    std::vector<std::unique_ptr<FileDoc>> docs;
+    int activeDocIndex = -1;
 
-    // Real-time output: a player callback streaming from the engine, attached
-    // to an AudioDeviceManager. Declared after audioEngine (destroyed before
-    // it) and in this order so the manager stops the device before the player
-    // is destroyed.
+    // Fallback objects used while no file is loaded. Every code path guards on
+    // isFileLoaded(), so these are never actually edited or played.
+    AudioEngine emptyEngine;
+    MarkerManager emptyMarkers;
+    ::UndoManager emptyUndo;
+
+    SpectralEngine spectralEngine;   // shared across files (cache cleared on switch)
+
+    // Real-time output: a player callback streaming from the active engine,
+    // attached to an AudioDeviceManager. Declared after all engines so it is
+    // destroyed before them, and in this order so the manager stops the device
+    // before the player is destroyed.
     juce::AudioSourcePlayer sourcePlayer;
     std::unique_ptr<juce::AudioDeviceManager> audioDevice;
 
     Settings settings;
     ColourMap colourMap = ColourMap::Classic;
 
+    // Current UI state - mirrors the active document (kept in sync on switch
+    // and through setSelection()/setPlayhead()/toggleChannelVisible()).
     juce::Range<double> selection{ 0, 0 };
     double viewStart = 0, viewEnd = 10;   // canonical time window (follows the waveform view)
 
@@ -37,8 +48,24 @@ public:
     // clicked it; tracks playback while playing).
     double playhead = 0.0;
 
+    std::vector<int> visibleChannels;   // sorted list of visible channel indices (any subset)
+
+    FileDoc* doc() const;               // active document, or nullptr
+    AudioEngine& audioEngine();         // engine of the active doc (or empty fallback)
+    MarkerManager& markers();           // markers of the active doc (or empty fallback)
+    ::UndoManager& undo();              // edit history of the active doc (or empty fallback)
+    bool isDocLoaded (const FileDoc* d) const;
+
+    int numDocs() const { return (int) docs.size(); }
+
     bool openFile (const juce::File& file);
-    void closeFile();
+    void closeFile();                  // closes the ACTIVE document
+    void closeDoc (int index);         // closes one specific loaded document
+    void activate (int index);         // make a loaded document active
+    void cycleActiveDoc (bool forward);// Ctrl+Tab / Ctrl+Shift+Tab
+    // Copy the current UI state (playhead/selection/channels) into the active doc.
+    void syncActiveDoc();
+
     void selectAll();
     void setSelection (juce::Range<double> s);
     void cut(); void copy(); void paste(); void del();
@@ -52,8 +79,6 @@ public:
     // selection (or the whole file if there is no selection).
     void toggleLoop();
     void setPlayhead (double t);
-
-    std::vector<int> visibleChannels;   // sorted list of visible channel indices (any subset)
 
     bool isChannelVisible (int ch) const;
     void toggleChannelVisible (int ch);
@@ -69,6 +94,14 @@ public:
     // Set by MainWindow: called whenever setPlayhead() moves the cursor, so both
     // views always show the same playhead position.
     std::function<void(double)> onPlayheadChanged;
+
+    // Set by MainWindow: fired before a document is destroyed, so panels can
+    // drop state that belongs to it (e.g. snapshots stored from that file).
+    std::function<void(const FileDoc&)> onFileClosed;
+
+    // Set by MainWindow: fired after open/switch/close so the UI can adapt
+    // (reset views to the new file, push its state into every panel).
+    std::function<void()> onActiveDocChanged;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Application)
 };
