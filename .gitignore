@@ -1,0 +1,21 @@
+# Build output (root-level only — JUCE has its own extras/Build dir)
+/build/
+/out/
+cmake-build-*/
+*.user
+.vs/
+.idea/
+
+# Compiler artifacts
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store
