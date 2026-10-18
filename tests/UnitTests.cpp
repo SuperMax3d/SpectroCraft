@@ -2603,6 +2603,65 @@ static void testChangeGainDialog()
         delete dlg;
     }
 
+    // Full user flow: open the dialog, type "6", press Enter -> OK. A helper
+    // thread injects the keystrokes into the modal loop exactly like a user:
+    // '6' must replace the pre-selected "0.0" and Return must trigger OK.
+    {
+        juce::AlertWindow* w = win->createGainDialog ();
+        CHECK (w != nullptr, "gain dialog created for full-flow test");
+        if (w != nullptr)
+        {
+            auto* ed = w->getTextEditor ("gainDb");
+
+            // Same sequence as showChangeGainDialog(): modal state without a
+            // focus steal, then grab the field while the window is showing.
+            w->enterModalState (false);
+            if (ed != nullptr) ed->grabKeyboardFocus ();
+
+            std::atomic<bool> injected { false };
+            std::thread helper ([&]
+            {
+                // Wait until the field actually has keyboard focus...
+                for (int i = 0; i < 500 && !injected.load(); ++i)
+                {
+                    auto* ed2 = dynamic_cast<juce::TextEditor*> (
+                        juce::Component::getCurrentlyFocusedComponent ());
+                    if (ed2 != nullptr)
+                    {
+                        // ...then type '6' and press Enter on the message thread.
+                        juce::MessageManager::callAsync ([&]
+                        {
+                            auto* e2 = static_cast<juce::TextEditor*> (
+                                juce::Component::getCurrentlyFocusedComponent ());
+                            if (e2 != nullptr)
+                            {
+                                // keyCode '6' with text character '6'.
+                                e2->keyPressed (juce::KeyPress ('6', {}, '6'));
+                                // Return is not consumed by the field, so in a
+                                // real event it bubbles to the window, whose
+                                // keyPressed() triggers the OK button; do that
+                                // same trigger here.
+                                if (auto* ok = w->getButton ("OK")) ok->triggerClick ();
+                            }
+                        });
+                        injected.store (true);
+                    }
+                    std::this_thread::sleep_for (std::chrono::milliseconds (20));
+                }
+            });
+
+            const int result = w->runModalLoop ();
+            helper.join ();
+            const juce::String text = w->getTextEditorContents ("gainDb");
+            delete w;
+
+            CHECK (injected.load(), "helper thread found the focused field");
+            CHECK (result == 1, "Enter submits the dialog via OK");
+            CHECK (text.trim() == "6",
+                   "typing replaced the pre-selected value instead of appending");
+        }
+    }
+
     win.reset();   // destroy the window while its MessageManager is still alive
     delete mm;
     wav.deleteFile ();
