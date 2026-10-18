@@ -2644,6 +2644,122 @@ static void testSetScaleDialog()
     wav.deleteFile ();
 }
 
+// ------------------------------------- spectral controls level scale labels
+// The gradient preview in the Spectral Controls tab shows the absolute level
+// of each end of the colour map above it, in the active file's unit. The
+// labels must follow both the dB-range slider and Set Scale calibration.
+static void testSpectralScaleLabels()
+{
+    const juce::File wav = makeTempFile ("scale_labels.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for scale label test");
+
+    SpectralControlsPanel panel (app);
+    panel.setSize (240, 170);
+
+    // The preview sits at y 32..88 inside the panel (6 px padding plus a 28 px
+    // colour-map row); its top 18 px are the level label row.
+    const juce::Rectangle<int> labelRow (6, 32, 240 - 12, 18);
+
+    auto snapshotLabels = [&] () -> std::vector<juce::Colour>
+    {
+        const juce::Image img = panel.createComponentSnapshot (panel.getLocalBounds());
+        std::vector<juce::Colour> px;
+        px.reserve ((size_t) labelRow.getWidth() * labelRow.getHeight());
+        for (int y = labelRow.getY(); y < labelRow.getBottom(); ++y)
+            for (int x = labelRow.getX(); x < labelRow.getRight(); ++x)
+                px.push_back (img.getPixelAt (x, y));
+        return px;
+    };
+
+    auto countTextPixels = [] (const std::vector<juce::Colour>& px) -> int
+    {
+        int n = 0;
+        for (auto c : px)
+            if (c.getBrightness () > 0.5f) ++n;   // lightgrey text on the dark panel
+        return n;
+    };
+
+    auto labelsDiffer = [] (const std::vector<juce::Colour>& a,
+                            const std::vector<juce::Colour>& b) -> int
+    {
+        if (a.size() != b.size())
+            return (int) std::max (a.size(), b.size());
+        int n = 0;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (a[i] != b[i]) ++n;
+        return n;
+    };
+
+    const auto base = snapshotLabels();
+    CHECK (countTextPixels (base) > 20, "level labels drawn above the gradient");
+
+    // Changing the dB range must change the label values.
+    app.settings.dBRange = 100.0f;
+    panel.refresh();
+    const auto afterRange = snapshotLabels();
+    CHECK (countTextPixels (afterRange) > 20, "labels still drawn after dB range change");
+    CHECK (labelsDiffer (base, afterRange) > 5,
+          "dB range change updates the labels");
+
+    // Calibrating the file switches to absolute units (dB-SPL).
+    FileDoc& d = *app.docs[0];
+    d.scale.unit = ScaleCalibration::Unit::Pascal;
+    d.scale.fullScaleValue = 2.0;
+    panel.refresh();
+    const auto afterScale = snapshotLabels();
+    CHECK (countTextPixels (afterScale) > 20, "labels still drawn after calibration");
+    CHECK (labelsDiffer (afterRange, afterScale) > 5,
+          "calibration updates the labels to absolute units");
+
+    // Exact label values: uncalibrated files show plain relative dB.
+    {
+        ScaleCalibration none;
+        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, none);
+        CHECK (l[0] == "-80.0 dB", "uncalibrated bottom label");
+        CHECK (l[1] == "-40.0 dB", "uncalibrated middle label");
+        CHECK (l[2] == "0.0 dB",   "uncalibrated full-scale label");
+    }
+
+    // 2 Pa calibration: +100 dB offset, labels in dB-SPL.
+    {
+        ScaleCalibration sc;
+        sc.unit = ScaleCalibration::Unit::Pascal;
+        sc.fullScaleValue = 2.0;
+        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, sc);
+        CHECK (l[0] == "20.0 dB-SPL",  "calibrated bottom label");
+        CHECK (l[1] == "60.0 dB-SPL",  "calibrated middle label");
+        CHECK (l[2] == "100.0 dB-SPL", "calibrated full-scale label");
+    }
+
+    // 1 Pa calibration: +93.98 dB offset, rounded to one decimal.
+    {
+        ScaleCalibration sc;
+        sc.unit = ScaleCalibration::Unit::Pascal;
+        sc.fullScaleValue = 1.0;
+        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, sc);
+        CHECK (l[0] == "14.0 dB-SPL",  "1 Pa bottom label");
+        CHECK (l[1] == "54.0 dB-SPL",  "1 Pa middle label");
+        CHECK (l[2] == "94.0 dB-SPL",  "1 Pa full-scale label");
+    }
+
+    // The labels must follow the dB-range slider.
+    {
+        ScaleCalibration none;
+        const auto l = SpectralControlsPanel::levelScaleLabels (120.0f, none);
+        CHECK (l[0] == "-120.0 dB", "wider range bottom label");
+        CHECK (l[2] == "0.0 dB",    "full-scale label independent of range");
+    }
+
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------- multi-file support
 // Multiple files can be open at once. Each file remembers its own playhead,
 // selection, markers and undo history; switching restores them. Snapshots are
@@ -2955,6 +3071,7 @@ static int scRunUnitTestsImpl()
     progress ("change gain dialog");  testChangeGainDialog();
     progress ("scale calibration");   testScaleCalibration();
     progress ("set scale dialog");    testSetScaleDialog();
+    progress ("spectral scale labels"); testSpectralScaleLabels();
     progress ("right-drag box zoom"); testRightDragZoom();
     progress ("multi-file support");  testMultiFileSupport();
 

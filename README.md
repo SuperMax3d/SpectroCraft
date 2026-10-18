@@ -117,7 +117,13 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     (same as Shift+click). A right-click menu on the plot area copies the
     spectrum data to the clipboard.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
-    range, Log/Linear toggle, Reset Freq, FFT size) and **Markers** (table with
+    range, Log/Linear toggle, Reset Freq, FFT size). Above the colour-map
+    gradient the panel shows the absolute level of each end of the scale in
+    the active file's unit — plain `dB` when uncalibrated, or `dB-SPL` / `dBV`
+    / `dB-g` after **Set Scale** (e.g. `-80.0 dB … 0.0 dB`, or
+    `14.0 dB-SPL … 94.0 dB-SPL` for a 1 Pa full scale). The labels follow both
+    the dB-range slider and calibration changes.
+    **Markers** (table with
     a Comment column; select a row to edit its Title, multi-line Comments,
     Begin, End and Length in the detail editors below the table — the comments
     box starts beside its label and extends to the bottom of the panel;

@@ -296,6 +296,19 @@ public:
     void resized() override;
     void refresh(); // call after file open/close or settings change
 
+    /** The three level labels drawn above the colour-map gradient:
+        left = bottom of the dB range, centre = middle, right = full scale.
+        Values are absolute levels in the calibration's unit. */
+    static std::array<juce::String, 3> levelScaleLabels (float dBRange,
+                                                         const ScaleCalibration& sc)
+    {
+        // formatLevelDb() takes a RELATIVE level (dB below full scale) and adds
+        // the calibration offset itself.
+        return { ScaleCalibration::formatLevelDb (- (double) dBRange, sc),
+                 ScaleCalibration::formatLevelDb (- 0.5 * (double) dBRange, sc),
+                 ScaleCalibration::formatLevelDb (0.0, sc) };
+    }
+
     // Set by MainWindow: resets the spectral view's frequency axis.
     std::function<void()> onResetFreq;
 
@@ -314,14 +327,41 @@ private:
         void paint (juce::Graphics& g) override
         {
             const auto b = getLocalBounds();
-            for (int x = 0; x < b.getWidth(); ++x)
+            const int labelH = 18;
+            const auto grad = juce::Rectangle<int> (b.getX(), b.getY() + labelH,
+                                                    b.getWidth(), std::max (1, b.getHeight() - labelH));
+
+            // Colour-map gradient: left end = quietest (bottom of the dB range),
+            // right end = full scale.
+            const auto lut = buildColourLUT (app.colourMap);
+            for (int x = 0; x < grad.getWidth(); ++x)
             {
-                const float t = (float) x / std::max (1, b.getWidth() - 1);
-                const auto lut = buildColourLUT (app.colourMap);
+                const float t = (float) x / std::max (1, grad.getWidth() - 1);
                 const int i = (int) (t * 255.0f + 0.5f);
                 g.setColour (juce::Colour ((int) lut[i * 4], (int) lut[i * 4 + 1], (int) lut[i * 4 + 2]));
-                g.fillRect (x, b.getY(), 1, b.getHeight());
+                g.fillRect (grad.getX() + x, grad.getY(), 1, grad.getHeight());
             }
+
+            // Level scale above the gradient: absolute values in the active file's
+            // unit (dB / dB-SPL / dBV / dB-g). refresh() repaints this component,
+            // so the labels follow both the dB-range slider and Set Scale changes.
+            const auto labs = levelScaleLabels (app.settings.dBRange, app.scale());
+
+            g.setFont (11.0f);
+            g.setColour (juce::Colours::lightgrey);
+            auto drawTick = [&] (const juce::String& lab, int x, juce::Justification j)
+            {
+                const int tw = std::max (1, juce::GlyphArrangement::getStringWidthInt
+                                                (g.getCurrentFont(), lab));
+                const int tx = (j == juce::Justification::left)  ? x
+                               : (j == juce::Justification::right) ? x - tw
+                                                                   : x - tw / 2;
+                g.drawText (lab, std::max (0, tx), b.getY(), tw, labelH,
+                           juce::Justification::centredLeft);
+            };
+            drawTick (labs[0], grad.getX() + 1, juce::Justification::left);
+            drawTick (labs[1], b.getCentreX(), juce::Justification::centred);
+            drawTick (labs[2], b.getRight() - 1, juce::Justification::right);
         }
     private:
         Application& app;
