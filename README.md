@@ -136,9 +136,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       **left-drag on the right dB strip** pans the level window (log-aware in
       log mode).
     - The frequency axis uses adaptive ticks — every digit per decade at mid
-      zooms, a nice linear step inside sub-decade ranges, and even divisions
-      when a deep 1/3-octave zoom lands between band centres — so the axis
-      keeps its labels no matter how far in you zoom.
+      zooms (with nice linear subdivisions filling wide gaps such as 1k–2k),
+      a nice linear step inside sub-decade ranges, and even divisions when a
+      deep 1/3-octave zoom lands between band centres — so the axis keeps its
+      labels no matter how far in you zoom. The spectrogram's frequency ruler
+      uses the same scheme.
     - The cursor readout shows the frequency under the mouse plus each
       visible channel's level at that bin; when the mouse is within a few
       pixels of a curve it **snaps to the nearest one**, showing the exact

@@ -3470,6 +3470,95 @@ static void testFFTViewExtremeZoom()
                "frequency axis keeps labels after a deep linear-mode zoom");
     }
 
+    // --- Spectrogram ruler: multi-decade range gets subdivisions inside the
+    // partial decade between 1k and 2k (the old digit-only scheme left it empty)
+    {
+        const juce::File sil = makeTempFile ("gapfill_silence.wav");
+        writeWav (sil, 1, 8000.0, 32000, [] (int, int64_t, double) { return 0.0f; });
+
+        Application appS;
+        CHECK (appS.openFile (sil), "open silence for gap-fill test");
+
+        SpectralView view (appS);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+        view.setFrequencyRange (100.0, 2000.0);
+
+        juce::Image img (juce::Image::ARGB, 400, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+
+        auto yOf = [&] (double f) -> int
+        { return (int) std::floor ((float) view.freqToY (f, 200)); };
+        auto brightness = [&] (int yy) -> int
+        { const auto c = img.getPixelAt (100, yy); return (c.getRed() + c.getGreen() + c.getBlue()) / 3; };
+
+        // Structural decade/digit ticks are still there...
+        CHECK (brightness (yOf (200.0)) > 20, "digit tick at 200 Hz is drawn");
+        CHECK (brightness (yOf (1000.0)) > 25, "decade tick at 1 kHz is drawn");
+
+        // ...and the partial decade between 1k and 2k now has subdivisions.
+        CHECK (brightness (yOf (1400.0)) > 20,
+               "subdivision ticks are drawn between 1k and 2k");
+        CHECK (brightness (yOf (1600.0)) > 20,
+               "second subdivision tick is drawn between 1k and 2k");
+        CHECK (brightness (yOf (1500.0)) < 12,
+               "no stray tick between two subdivisions");
+
+        // The wide gap inside the lower decade (200 -> 500) is filled too.
+        CHECK (brightness (yOf (300.0)) > 20, "subdivision ticks fill the 200-500 Hz gap");
+        CHECK (brightness (yOf (320.0)) < 12, "no stray tick inside the lower decade");
+
+        sil.deleteFile ();
+    }
+
+    // --- FFT view: same multi-decade range gets subdivisions between 1k and 2k ---
+    {
+        Application appF;
+        CHECK (appF.openFile (wav), "open wav for FFT gap-fill test");
+        FFTAnalysisView view (appF);
+        view.setSize (300, 200);
+        const auto plot = view.plotBounds();
+
+        // Box-zoom to roughly [100 Hz, 2 kHz].
+        int xa = -1, xb = -1;
+        for (int x = plot.getX() + 4; x < plot.getRight() - 4 && xa < 0; ++x)
+            if (view.xToFreq ((float) x) >= 95.0) xa = x;
+        for (int x = plot.getRight() - 4; x > plot.getX() + 4 && xb < 0; --x)
+            if (view.xToFreq ((float) x) <= 2050.0) xb = x;
+        CHECK (xa >= 0 && xb > xa, "FFT gap-fill drag endpoints found");
+
+        view.mouseDown (mkMouse (view, xa, plot.getY() + 30, rmb));
+        view.mouseDrag (mkMouse (view, xb, plot.getY() + 60, rmb));
+        view.mouseUp   (mkMouse (view, xb, plot.getY() + 60, rmb));
+
+        const double fLo = view.getFreqLo(), fHi = view.getFreqHi();
+        CHECK (fLo < 120.0 && fHi > 1900.0,
+               "FFT gap-fill zoom lands around [100 Hz, 2 kHz]");
+
+        juce::Image img (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+
+        // Count vertical grid-line columns between x(1.05k) and x(1.95k):
+        // the old digit-only scheme drew none there. A column counts only if
+        // it is bright in most sample rows, so horizontal level lines don't
+        // produce false positives.
+        int lines = 0;
+        for (int x = (int) view.freqToX (1050.0); x <= (int) view.freqToX (1950.0); ++x)
+        {
+            int brightRows = 0;
+            for (int i = 1; i <= 5; ++i)
+            {
+                const int y = plot.getY() + plot.getHeight() * i / 6;
+                const auto c = img.getPixelAt (x, y);
+                if ((c.getRed() + c.getGreen() + c.getBlue()) / 3 > 20) ++brightRows;
+            }
+            if (brightRows >= 4) ++lines;
+        }
+        CHECK (lines >= 3,
+               "FFT view draws subdivision grid lines between 1k and 2k");
+    }
+
     // --- 1/3-octave mode: wheel-zoom deep; band centres or fallback ticks ---
     {
         Application app3;

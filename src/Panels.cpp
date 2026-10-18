@@ -930,6 +930,8 @@ void FFTAnalysisView::paint (juce::Graphics& g)
 
     // Frequency grid ticks for the current axis mode
     std::vector<double> freqTicks;
+    // Linear subdivisions inserted into wide log gaps (freq, hasLabel).
+    std::vector<std::pair<double, bool>> subTicks;
     bool thirdOctFallback = false;   // deep zoom between band centres
     if (axisMode_ == 2)
     {
@@ -991,6 +993,40 @@ void FFTAnalysisView::paint (juce::Graphics& g)
             static const int fewD[] = { 1, 2, 5 };
             auto ticks = collect (allD, 9);
             if ((int) ticks.size() > 14) ticks = collect (fewD, 3);
+
+            // Gap-fill: where two adjacent structural points are far apart on
+            // screen — e.g. the partial decade between 1k and 2k when zoomed
+            // to [100 Hz, 2 kHz] — add nice linear subdivisions so sub-decade
+            // regions never look empty.
+            const double gapThresh = std::max (24.0, plot.getHeight() * 0.18);
+            auto fillGap = [&] (double a, double b)
+            {
+                if (b <= a * 1.0001) return;
+                const double gapPx = std::abs ((double) freqToX (b) - (double) freqToX (a));
+                if (gapPx < gapThresh) return;
+                const double span = b - a;
+                bool done = false;
+                for (double e = std::floor (std::log10 (span / 8.0));
+                     !done && e <= std::ceil (std::log10 (span / 3.0)) + 1.0; ++e)
+                    for (double m : { 1.0, 2.0, 5.0 })
+                    {
+                        const double step = m * std::pow (10.0, e);
+                        if (span / step >= 3.0 && span / step <= 8.0)
+                        {
+                            const int nDiv = (int) std::lround (span / step);
+                            const bool label = gapPx / (nDiv + 1) >= 16.0;
+                            for (double f = std::ceil (a / step - 1e-9) * step;
+                                 f < b - step * 1e-3; f += step)
+                                if (f > a + step * 1e-3) subTicks.emplace_back (f, label);
+                            done = true;
+                            break;
+                        }
+                    }
+            };
+            double prev = fLo;
+            for (double f : ticks) { fillGap (prev, f); prev = f; }
+            fillGap (prev, fHi);
+
             freqTicks.insert (freqTicks.end(), ticks.begin(), ticks.end());
         }
     }
@@ -1028,6 +1064,8 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     g.setColour (juce::Colour::fromRGB (40, 40, 46));
     for (double f : freqTicks)
         g.drawVerticalLine ((float) freqToX (f), plot.getY(), plot.getBottom());
+    for (const auto& st : subTicks)
+        g.drawVerticalLine ((float) freqToX (st.first), plot.getY(), plot.getBottom());
     for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
         g.drawHorizontalLine ((int) levelToY (L), plot.getX(), plot.getRight());
 
@@ -1134,6 +1172,17 @@ void FFTAnalysisView::paint (juce::Graphics& g)
             label = juce::String (f / 1000.0, std::abs (f - std::round (f)) < 1e-6 ? 0 : 1) + "k";
         else
             label = juce::String ((int) std::lround (f));
+        g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
+    }
+    for (const auto& st : subTicks)
+    {
+        if (!st.second) continue;
+        const float x = (float) freqToX (st.first);
+        juce::String label;
+        if (st.first >= 1000.0)
+            label = juce::String (st.first / 1000.0, std::abs (st.first - std::round (st.first)) < 1e-6 ? 0 : 1) + "k";
+        else
+            label = juce::String ((int) std::lround (st.first));
         g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
     }
     // With a scale calibration the grid lines show absolute levels

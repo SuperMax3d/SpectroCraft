@@ -705,13 +705,13 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
         // Labels only when the row is tall enough to hold them.
         const bool showLabels = rr.getHeight() >= 48;
 
-        auto drawTickAndLabel = [&](double f, bool minor = false)
+        auto drawTickAndLabel = [&](double f, bool minor = false, bool withLabel = true)
         {
             const float y = (float) rr.getY() + freqToY (f, rr.getHeight());
             g.setColour (minor ? juce::Colour::fromRGB (48, 48, 52)
                                : juce::Colour::fromRGB (60, 60, 60));
             g.drawLine ((float) kLeftAxisWidth, y, (float) getWidth(), y, 1.0f);
-            if (!showLabels) return;
+            if (!showLabels || !withLabel) return;
             if (hasChanLabel && std::abs (y - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
                 return; // room for the channel label
             g.setColour (minor ? juce::Colour::fromRGB (130, 130, 138)
@@ -767,6 +767,41 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
                 static const int fewD[] = { 1, 2, 5 };
                 auto ticks = collect (allD, 9);
                 if ((int) ticks.size() > 14) ticks = collect (fewD, 3);
+
+                // Gap-fill: where two adjacent structural points are far apart
+                // on screen — e.g. the partial decade between 1k and 2k when
+                // zoomed to [100 Hz, 2 kHz] — add nice linear subdivisions so
+                // sub-decade regions never look empty.
+                const double gapThresh = std::max (24.0, rr.getHeight() * 0.18);
+                auto yOf = [&] (double f) { return (float) rr.getY() + freqToY (f, rr.getHeight()); };
+                auto fillGap = [&] (double a, double b)
+                {
+                    if (b <= a * 1.0001) return;
+                    const double gapPx = std::abs (yOf (b) - yOf (a));
+                    if (gapPx < gapThresh) return;
+                    const double span = b - a;
+                    bool done = false;
+                    for (double e = std::floor (std::log10 (span / 8.0));
+                         !done && e <= std::ceil (std::log10 (span / 3.0)) + 1.0; ++e)
+                        for (double m : { 1.0, 2.0, 5.0 })
+                        {
+                            const double step = m * std::pow (10.0, e);
+                            if (span / step >= 3.0 && span / step <= 8.0)
+                            {
+                                const int nDiv = (int) std::lround (span / step);
+                                const bool label = gapPx / (nDiv + 1) >= 16.0;
+                                for (double f = std::ceil (a / step - 1e-9) * step;
+                                     f < b - step * 1e-3; f += step)
+                                    if (f > a + step * 1e-3) drawTickAndLabel (f, true, label);
+                                done = true;
+                                break;
+                            }
+                        }
+                };
+                double prev = fMin;
+                for (double f : ticks) { fillGap (prev, f); prev = f; }
+                fillGap (prev, fMax);
+
                 for (double f : ticks)
                     drawTickAndLabel (f,
                                      std::abs (std::log10 (f) - std::round (std::log10 (f))) > 1e-9);
