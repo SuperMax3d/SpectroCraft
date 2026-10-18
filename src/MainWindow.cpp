@@ -123,11 +123,26 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     fftPanel      = std::make_unique<FFTAnalysisView> (app);
     controlsPanel = std::make_unique<SpectralControlsPanel> (app);
     markersPanel  = std::make_unique<MarkerListPanel> (app);
+    historyPanel  = std::make_unique<HistoryPanel> (app);
 
     fileListPanel->onOpenRequested = [this] { handleFileOpen(); };
 
+    // Clicking a history row jumps to that state: undo or redo as many steps
+    // as needed in one batched operation, then refresh everything.
+    historyPanel->onJumpToState = [this] (int target) {
+        const int current = (int) app.undo().undoSize();
+        if (target < 0 || target > current + (int) app.undo().redoSize()) return;
+        if (target < current)
+            app.undoSteps (current - target);
+        else if (target > current)
+            app.redoSteps (target - current);
+        refreshAfterEdit();
+        historyPanel->refresh();
+    };
+
     topTabs.addTab ("Files", kDarkTabBg, fileListPanel.get(), false);
     topTabs.addTab ("Frequency Analysis", kDarkTabBg, fftPanel.get(), false);
+    topTabs.addTab ("History", kDarkTabBg, historyPanel.get(), false);
     bottomTabs.addTab ("Spectral Controls", kDarkTabBg, controlsPanel.get(), false);
     bottomTabs.addTab ("Markers", kDarkTabBg, markersPanel.get(), false);
     // Frequency Analysis is the default tab in the top group.
@@ -188,6 +203,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     juce::Component::addAndMakeVisible (specVScroll.get());
 
     lastSyncedColourMap = app.colourMap;
+    lastSyncedSettings  = app.settings;   // baseline for the settings-save trigger
 
     setupViews();
     updateTitle();   // a file may already be loaded (opened from the CLI)
@@ -572,6 +588,15 @@ void MainWindow::syncSharedState()
     }
     refreshPanels();
 
+    // Persist the session settings whenever any of the persisted fields
+    // changed (spectral log/linear + FFT size, frequency-analysis axis mode
+    // + FFT size, zero-crossing snap).
+    if (!app.settings.samePersistent (lastSyncedSettings))
+    {
+        lastSyncedSettings = app.settings;
+        app.saveSettings();
+    }
+
     // The colour map is not part of Settings, so detect it separately and
     // force a full spectral re-render when it changes.
     if (spectralView && app.colourMap != lastSyncedColourMap)
@@ -594,6 +619,7 @@ void MainWindow::refreshPanels()
     if (fileListPanel)  fileListPanel->refresh();
     if (controlsPanel)  controlsPanel->refresh();
     if (markersPanel)   markersPanel->refresh();
+    if (historyPanel)   historyPanel->refresh();
     if (fftPanel)       fftPanel->repaint();
 }
 
@@ -894,7 +920,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case EditPaste: app.paste(); refreshAfterEdit(); break;
         case EditDelete: app.del(); refreshAfterEdit(); break;
         case EditSelectAll: app.selectAll(); syncSharedState(); break;
-        case EditSnapToZeroCrossings: app.settings.snapToZeroCrossings = !app.settings.snapToZeroCrossings; break;
+        case EditSnapToZeroCrossings:
+            app.settings.snapToZeroCrossings = !app.settings.snapToZeroCrossings;
+            if (app.onStateChange) app.onStateChange();   // persist the new state
+            break;
 
         case ViewZoomIn: zoomHorizontal (1.5); break;
         case ViewZoomOut: zoomHorizontal (1.0 / 1.5); break;

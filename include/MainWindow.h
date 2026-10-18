@@ -106,6 +106,7 @@ private:
     double topRatio = 0.52;                   // fraction of left column used by top tabs
     bool showWaveformView = true, showSpectralView = true;  // View menu visibility
     ColourMap lastSyncedColourMap;            // to detect colour-map changes
+    Settings lastSyncedSettings;              // baseline for the settings-save trigger
     double shiftAnchorTime = -1.0;           // Shift+arrow selection anchor (-1 = inactive)
     bool iconApplied = false;                 // window icon set once HWND is available
 
@@ -114,6 +115,7 @@ private:
     std::unique_ptr<FFTAnalysisView> fftPanel;
     std::unique_ptr<SpectralControlsPanel> controlsPanel;
     std::unique_ptr<MarkerListPanel> markersPanel;
+    std::unique_ptr<HistoryPanel> historyPanel;
 
     // Zoom/pan scrollbars: time bar at the bottom, one vertical
     // scrollbar per view on its right edge.

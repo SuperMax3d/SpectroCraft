@@ -384,19 +384,138 @@ void SnapshotButton::mouseDown (const juce::MouseEvent& e)
     juce::Button::mouseDown (e);
 }
 
+// ------------------------------------------------- History panel
+
+HistoryPanel::HistoryPanel (Application& appIn)
+    : app (appIn)
+{
+    refresh();
+}
+
+void HistoryPanel::refresh()
+{
+    rows_.clear();
+    currentState_ = 0;
+
+    if (FileDoc* d = app.doc())
+    {
+        ::UndoManager& u = d->undo;
+        // Row 0 is the state right after the file was loaded; one row per
+        // recorded action follows, oldest first. Redoable actions come last.
+        rows_.push_back ({ "Loaded " + d->name, false });
+        for (size_t i = 0; i < u.undoSize(); ++i)
+            rows_.push_back ({ u.undoAt(i).description.isEmpty() ? juce::String ("Edit") : u.undoAt(i).description,
+                               false });
+        for (size_t i = 0; i < u.redoSize(); ++i)
+            rows_.push_back ({ u.redoAt(i).description.isEmpty() ? juce::String ("Edit") : u.redoAt(i).description,
+                               true });
+        currentState_ = (int) u.undoSize();
+    }
+
+    repaint();
+}
+
+juce::Rectangle<int> HistoryPanel::listArea() const
+{
+    auto b = getLocalBounds();
+    return { 2, kHeaderH, std::max (1, b.getWidth() - 4), std::max (1, b.getHeight() - kHeaderH) };
+}
+
+juce::Rectangle<int> HistoryPanel::rowRect (int i) const
+{
+    const auto list = listArea();
+    return { list.getX(), list.getY() + (i - scroll_) * kRowH, list.getWidth(), kRowH };
+}
+
+int HistoryPanel::rowAt (int x, int y) const
+{
+    const auto list = listArea();
+    if (!list.contains (x, y)) return -1;
+    const int i = scroll_ + (y - list.getY()) / kRowH;
+    return (i >= 0 && i < (int) rows_.size()) ? i : -1;
+}
+
+void HistoryPanel::mouseDown (const juce::MouseEvent& e)
+{
+    const int r = rowAt (e.x, e.y);
+    if (r < 0 || !onJumpToState) return;
+    onJumpToState (r);   // MainWindow performs the jump and refreshes everything
+}
+
+void HistoryPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+{
+    if (juce::approximatelyEqual (wheel.deltaY, 0.0f)) return;
+    scroll_ += (wheel.deltaY < 0.0f ? 1 : -1) * std::max (1, std::abs ((int) wheel.deltaY));
+    repaint();
+}
+
+void HistoryPanel::paint (juce::Graphics& g)
+{
+    auto b = getLocalBounds();
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+
+    // Header: title left, applied-count right.
+    g.setFont (12.0f);
+    g.setColour (juce::Colours::white);
+    g.drawText ("History", juce::Rectangle<int> (8, 3, 160, kHeaderH - 6),
+                juce::Justification::left, false);
+
+    const int totalActions = std::max (0, (int) rows_.size() - 1);
+    g.setFont (11.0f);
+    g.setColour (juce::Colour::fromRGB (170, 170, 180));
+    g.drawText (juce::String (currentState_) + " of " + juce::String (totalActions) + " applied",
+                juce::Rectangle<int> (b.getWidth() - 168, 4, 160, kHeaderH - 8),
+                juce::Justification::right, false);
+
+    const auto list = listArea();
+    if (app.doc() == nullptr)
+    {
+        g.setColour (juce::Colours::grey);
+        g.setFont (11.0f);
+        g.drawText ("No file open", list, juce::Justification::centred);
+        return;
+    }
+
+    const int totalRows = (int) rows_.size();
+    const int visibleRows = std::max (1, list.getHeight() / kRowH);
+    scroll_ = std::clamp (scroll_, 0, std::max (0, totalRows - visibleRows));
+
+    g.setFont (11.0f);
+    for (int i = 0; i < totalRows; ++i)
+    {
+        auto r = rowRect (i).getIntersection (list);
+        if (r.isEmpty()) continue;
+
+        const bool current = (i == currentState_);
+        if (current)
+            g.fillAll (juce::Colour::fromRGB (58, 64, 80));
+
+        // Past rows are bright, future (redoable) ones dimmed.
+        g.setColour (rows_[(size_t) i].future ? juce::Colour::fromRGB (120, 120, 128)
+                                               : juce::Colours::white);
+        g.drawText (juce::String (i) + ". " + rows_[(size_t) i].text,
+                    r.reduced (6, 1), juce::Justification::left, false);
+    }
+}
+
 FFTAnalysisView::FFTAnalysisView (Application& appIn)
     : app (appIn)
 {
+    // Restore the persisted frequency-analysis state (axis mode + FFT size).
+    axisMode_ = std::clamp (app.settings.fftAxisMode, 0, 2);
+
     for (int n = 1024; n <= 65536; n *= 2)
         fftSizeCombo.addItem (juce::String (n), n);
-    localN = std::clamp (app.settings.fftSize, 1024, 65536);
+    localN = std::clamp (app.settings.fftLocalN, 1024, 65536);
     fftSizeCombo.setSelectedId (localN, juce::dontSendNotification);
     fftSizeCombo.onChange = [this] {
         // Independent from the spectrogram's FFT size.
         localN = fftSizeCombo.getSelectedId();
+        app.settings.fftLocalN = localN;   // persisted between sessions
         settingsGen++;               // stored snapshots must be recomputed too
         mags.clear(); cachedN = 0;   // invalidate cached spectrum
         recomputeSnapshots();
+        if (app.onStateChange) app.onStateChange();   // triggers the settings save
         repaint();
     };
 
@@ -419,9 +538,11 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
     axisCombo.setSelectedId (axisMode_ + 1, juce::dontSendNotification);
     axisCombo.onChange = [this] {
         axisMode_ = axisCombo.getSelectedId() - 1;
+        app.settings.fftAxisMode = axisMode_;   // persisted between sessions
         thirdOctMags.clear();   // band cache is only valid for mode 2
         refreshSnapshotBands(); // re-derive stored snapshots' bands for the new mode
         resetDisplayRanges();   // each mode has its own default frequency window
+        if (app.onStateChange) app.onStateChange();   // triggers the settings save
     };
 
     for (int i = 0; i < 10; ++i)

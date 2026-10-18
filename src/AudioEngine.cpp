@@ -300,11 +300,13 @@ void AudioEngine::clearMipmaps() { mips.clear(); baseFactor = 1; }
 // may still need it afterwards. oldData is read from the buffer at call time,
 // so this must be called BEFORE the region is modified in place.
 void recordReplace (AudioEngine& eng, const juce::Range<int64_t>& region,
-                           const std::vector<std::vector<float>>& newData)
+                           const std::vector<std::vector<float>>& newData,
+                           const juce::String& description)
 {
     Patch p;
     p.oldStart = region.getStart();
     p.oldEnd = region.getEnd();
+    p.description = description;
     p.oldData.resize (eng.numChannels());
     for (int ch = 0; ch < eng.numChannels(); ++ch)
     {
@@ -343,7 +345,7 @@ void AudioEngine::pasteAt (int64_t samplePos)
     }
 
     // Insert = replace empty region [pos, pos) with newData
-    recordReplace (*this, { samplePos, samplePos }, std::move (newData));
+    recordReplace (*this, { samplePos, samplePos }, std::move (newData), "Pasted samples");
 
     // Apply forward patch
     Patch p; // re-apply manually since recordReplace only records
@@ -368,7 +370,7 @@ void AudioEngine::deleteSamples (juce::Range<int64_t> samples)
     if (!buffer) return;
     samples = samples.getIntersectionWith ({ 0, totalSamples });
     if (samples.getLength() <= 0) return;
-    recordReplace (*this, samples, {});
+    recordReplace (*this, samples, {}, "Deleted samples");
 
     const int64_t delLen = samples.getLength();
     const int64_t newTotal = totalSamples - delLen;
@@ -409,7 +411,7 @@ void AudioEngine::silenceSamples (juce::Range<int64_t> samples, const std::vecto
         if (!channelAffected (chans, ch))
             readSamples (ch, samples.getStart(), len, newData[ch].data());
     }
-    recordReplace (*this, samples, std::move (newData));
+    recordReplace (*this, samples, std::move (newData), "Silenced selection");
 
     for (int ch = 0; ch < nchans; ++ch)
         if (channelAffected (chans, ch))
@@ -421,7 +423,8 @@ void AudioEngine::silenceSamples (juce::Range<int64_t> samples, const std::vecto
 // Applies fn to the selected channels only; other channels are copied
 // unchanged so the recorded undo patch stays complete for all channels.
 void applyPerSample (AudioEngine& eng, juce::Range<int64_t> samples,
-                            std::function<float (float, int, int)> fn, const std::vector<int>* chans)
+                            std::function<float (float, int, int)> fn, const std::vector<int>* chans,
+                            const juce::String& description)
 {
     if (!eng.buffer) return;
     samples = samples.getIntersectionWith ({ 0, eng.totalSamples });
@@ -441,7 +444,7 @@ void applyPerSample (AudioEngine& eng, juce::Range<int64_t> samples,
     }
 
     // Record the patch BEFORE touching the buffer so oldData is pristine.
-    recordReplace (eng, samples, newData);
+    recordReplace (eng, samples, newData, description);
 
     for (int ch = 0; ch < eng.numChannels(); ++ch)
         if (channelAffected (chans, ch))
@@ -457,7 +460,7 @@ void AudioEngine::fadeInSamples (juce::Range<int64_t> samples, const std::vector
     applyPerSample (*this, samples, [] (float v, int i, int len)
     {
         return v * (float) i / (float) std::max (1, len - 1);
-    }, chans);
+    }, chans, "Faded in");
 }
 
 void AudioEngine::fadeOutSamples (juce::Range<int64_t> samples, const std::vector<int>* chans)
@@ -465,7 +468,7 @@ void AudioEngine::fadeOutSamples (juce::Range<int64_t> samples, const std::vecto
     applyPerSample (*this, samples, [] (float v, int i, int len)
     {
         return v * (1.0f - (float) i / (float) std::max (1, len - 1));
-    }, chans);
+    }, chans, "Faded out");
 }
 
 void AudioEngine::normalizeSamples (juce::Range<int64_t> samples, float target,
@@ -488,7 +491,8 @@ void AudioEngine::normalizeSamples (juce::Range<int64_t> samples, float target,
         return;
 
     const float g = target / peak;
-    applyPerSample (*this, samples, [g] (float v, int, int) { return v * g; }, chans);
+    applyPerSample (*this, samples, [g] (float v, int, int) { return v * g; }, chans,
+                   "Normalized");
 }
 
 void AudioEngine::gainSamples (juce::Range<int64_t> samples, float gainDb,
@@ -499,7 +503,10 @@ void AudioEngine::gainSamples (juce::Range<int64_t> samples, float gainDb,
     if (samples.getLength() <= 0) return;
 
     const float g = std::pow (10.0f, gainDb / 20.0f);
-    applyPerSample (*this, samples, [g] (float v, int, int) { return v * g; }, chans);
+    applyPerSample (*this, samples, [g] (float v, int, int) { return v * g; }, chans,
+                   juce::String ("Changed gain by ")
+                       + juce::String (gainDb >= 0.0f ? "+" : "")
+                       + juce::String (gainDb, 2) + " dB");
 }
 
 void AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vector<int>* chans)
@@ -522,7 +529,7 @@ void AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vecto
             std::copy (d, d + len, newData[ch].begin());
     }
     // Record BEFORE writing so the patch captures the pre-reverse data.
-    recordReplace (*this, samples, newData);
+    recordReplace (*this, samples, newData, "Reversed selection");
 
     for (int ch = 0; ch < nchans; ++ch)
         if (channelAffected (chans, ch))
@@ -532,7 +539,7 @@ void AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vecto
     rebuildMipmaps();
 }
 
-bool AudioEngine::applyPatch (const Patch& p, bool forward)
+bool AudioEngine::applyPatch (const Patch& p, bool forward, bool rebuild)
 {
     if (!buffer)
         return false;
@@ -574,7 +581,8 @@ bool AudioEngine::applyPatch (const Patch& p, bool forward)
     }
 
     durationSecs = (double) totalSamples / rate;
-    rebuildMipmaps();
+    if (rebuild)
+        rebuildMipmaps();
     return true;
 }
 
@@ -850,9 +858,9 @@ bool AudioEngine::saveFileAs (const juce::File& file)
     return ok;
 }
 
-double AudioEngine::snapToZeroCrossing (double timeSecs, double windowSecs) const
+double AudioEngine::snapToZeroCrossing (double timeSecs, double windowSecs, int channel) const
 {
-    if (!hasFile)
+    if (!hasFile || channel < 0 || channel >= nchans)
         return timeSecs;
 
     const int64_t center = (int64_t) (timeSecs * rate);
@@ -865,7 +873,7 @@ double AudioEngine::snapToZeroCrossing (double timeSecs, double windowSecs) cons
     // Read the window (bounded size)
     const int64_t n = hi - lo + 1;
     std::vector<float> buf ((size_t) n);
-    if (!readSamples (0, lo, n, buf.data()))
+    if (!readSamples (channel, lo, n, buf.data()))
         return timeSecs;
 
     // Find nearest sign change to center

@@ -77,6 +77,10 @@ public:
     std::vector<juce::File> recentFiles;
     std::unique_ptr<juce::PropertiesFile> recentStore;   // no default ctor, so heap-held
     void addRecentFile (const juce::File& file);   // move to front, dedupe, cap at 10
+    // Persist the session settings (spectral log/linear + FFT size,
+    // frequency-analysis axis mode + FFT size, zero-crossing snap) into the
+    // same PropertiesFile as the recent-files list.
+    void saveSettings();
     void removeRecentFile (const juce::File& file);// drop one entry and persist
     void clearRecentFiles();                        // empty the list and persist it
 
@@ -88,12 +92,18 @@ public:
     void syncActiveDoc();
 
     void selectAll();
-    void setSelection (juce::Range<double> s);
+    // snapEdges = true snaps both selection edges to the nearest zero crossing
+    // of the first visible channel when settings.snapToZeroCrossings is ON.
+    // Used by the views' drag-to-select so cuts land on silent points.
+    void setSelection (juce::Range<double> s, bool snapEdges = false);
     void cut(); void copy(); void paste(); void del();
     void silence(); void fadeIn(); void fadeOut(); void normalize(); void reverse();
     // Multiply the selection by 10^(gainDb/20) on the visible channels.
     void changeGain (float gainDb);
     void undoStep(); void redoStep();
+    // Batched variants used by the History tab: apply up to n patches in one
+    // go with a single mipmap rebuild at the end (fast for long jumps).
+    void undoSteps (int n); void redoSteps (int n);
 
     void play(); void stop(); void pause();
     // Toggle looping. When enabling, the loop range is taken from the current
@@ -123,6 +133,9 @@ public:
     // Set by MainWindow: fired after open/switch/close so the UI can adapt
     // (reset views to the new file, push its state into every panel).
     std::function<void()> onActiveDocChanged;
+
+private:
+    void loadSettings();   // restore persisted session settings from recentStore
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Application)
 };

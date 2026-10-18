@@ -107,6 +107,50 @@ private:
     JUCE_DECLARE_NON_COPYABLE (FileListPanel)
 };
 
+// ------------------------------------------------- History panel
+// Lists every undo state of the ACTIVE file, oldest first:
+//   row 0      = "Loaded <file name>" (the state right after opening),
+//   rows 1..N  = one per recorded edit action ("Deleted samples", ...).
+// The row matching the current state is highlighted; rows beyond it are
+// dimmed (they can be redone). Clicking any row jumps straight to that
+// state, undoing or redoing as many steps as needed in one go.
+class HistoryPanel : public juce::Component
+{
+public:
+    explicit HistoryPanel (Application& app);
+    void paint (juce::Graphics& g) override;
+    void refresh();   // rebuild the row list from the active doc's undo stacks
+
+    // Set by MainWindow: called with a target STATE index (0 = right after
+    // file load, N = end of history). The window undoes/redo-es to it.
+    std::function<void(int)> onJumpToState;
+
+    // Unit-test accessors.
+    int numRows() const { return (int) rows_.size(); }
+    juce::String rowText (int i) const { return rows_[(size_t) i].text; }
+    bool rowIsFuture (int i) const { return rows_[(size_t) i].future; }
+    int currentState() const { return currentState_; }
+
+private:
+    Application& app;
+    struct Row { juce::String text; bool future = false; };
+    std::vector<Row> rows_;
+    int currentState_ = 0;   // number of applied actions (== undo stack size)
+    int scroll_ = 0;         // first visible row
+
+    static constexpr int kHeaderH = 24;
+    static constexpr int kRowH = 20;
+
+    juce::Rectangle<int> listArea() const;
+    juce::Rectangle<int> rowRect (int i) const;
+    int rowAt (int x, int y) const;   // -1 when no row is under the point
+
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+    JUCE_DECLARE_NON_COPYABLE (HistoryPanel)
+};
+
 // ------------------------------------------------- Frequency Analysis panel
 // The FFT size / window / axis here are INDEPENDENT of the spectrogram's
 // settings: this panel analyses a short region around the selection or the
@@ -183,6 +227,12 @@ public:
     void handleSnapshotClick (int i,
                               juce::ModifierKeys mods =
                                   juce::ModifierKeys::getCurrentModifiers());
+
+    // Local analysis parameters (unit tests + persistence wiring checks).
+    int fftSize() const { return localN; }
+    int axisMode() const { return axisMode_; }
+    juce::ComboBox& fftSizeComboRef() { return fftSizeCombo; }
+    juce::ComboBox& axisComboRef() { return axisCombo; }
 
     // Stored-snapshot state (unit tests).
     double snapshotT0 (int i) const { return snapshots[i].t0; }

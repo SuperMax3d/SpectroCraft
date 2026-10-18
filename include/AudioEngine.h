@@ -76,7 +76,9 @@ public:
     void reverseSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr);
 
     // Apply an undo/redo patch to the in-memory buffer
-    bool applyPatch (const ::Patch& p, bool forward);
+    // rebuild = false is used by batched undo/redo jumps so the mipmap
+    // pyramid is rebuilt only once for the whole run of patches.
+    bool applyPatch (const ::Patch& p, bool forward, bool rebuild = true);
 
     // ---- Saving ----
     bool saveFile (const juce::File& file) const;
@@ -89,9 +91,14 @@ public:
     struct MipLevel { int64_t factor; std::vector<std::vector<float>> min, max; };
     const std::vector<MipLevel>& mipmaps() const { return mips; }
     int64_t mipmapBaseFactor() const { return baseFactor; }
+    // Public so batched undo/redo jumps can rebuild once for a whole run.
+    void rebuildMipmaps(std::function<void(float)> onProgress = nullptr);
 
-    // ---- Zero-crossing snapping (nearest sign change within windowSecs) ----
-    double snapToZeroCrossing (double timeSecs, double windowSecs) const;
+    // ---- Zero-crossing snapping (nearest sign change of `channel` within
+    //      +/- windowSecs around timeSecs; returns the crossing in seconds,
+    //      quantised to a sample boundary). Falls back to timeSecs when no
+    //      crossing exists in the window. ----
+    double snapToZeroCrossing (double timeSecs, double windowSecs, int channel = 0) const;
 
 private:
     mutable juce::File currentFile;
@@ -122,15 +129,15 @@ private:
     ::UndoManager* undo = nullptr;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks
 
-    void rebuildMipmaps(std::function<void(float)> onProgress = nullptr);
     void clearMipmaps();
     bool saveWavWithMarkers (const juce::File& file) const;
 
     // friends: static edit helpers in AudioEngine.cpp
     friend void recordReplace (AudioEngine&, const juce::Range<int64_t>&,
-                               const std::vector<std::vector<float>>&);
+                               const std::vector<std::vector<float>>&, const juce::String&);
     friend void applyPerSample (AudioEngine&, juce::Range<int64_t>,
-                                std::function<float (float, int, int)>, const std::vector<int>*);
+                                std::function<float (float, int, int)>, const std::vector<int>*,
+                                const juce::String&);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)
 };

@@ -517,6 +517,7 @@ static void testFFTAnalysisViewPaint()
     // magnitude vector beyond n/2+1 entries (this used to read out of bounds
     // for x > half width and crash with large FFT sizes).
     app.settings.fftSize = 65536;
+    app.settings.fftLocalN = 65536;   // analysis view uses its own persisted size
     {
         juce::Image img (juce::Image::ARGB, 320, 300, true);
         juce::Graphics g (img);
@@ -1469,7 +1470,8 @@ static void testFFTFollowPlayhead()
 
     Application app;
     CHECK (app.openFile (wav), "open wav for fft follow test");
-    app.settings.fftSize = 1024;   // picked up as the panel's localN at construction
+    app.settings.fftSize = 1024;
+    app.settings.fftLocalN = 1024;   // picked up as the panel's localN at construction
 
     FFTAnalysisView view (app);
     view.setSize (300, 200);
@@ -1644,6 +1646,7 @@ static void testThirdOctaveClickUpdates()
     Application app;
     CHECK (app.openFile (wav), "open wav for third-octave click test");   // openFile sets visible channels
     app.settings.fftSize = 1024;
+    app.settings.fftLocalN = 1024;
 
     FFTAnalysisView view (app);
     view.setSize (300, 200);
@@ -1701,6 +1704,7 @@ static void testFFTClickAndAverage()
     Application app;
     CHECK (app.openFile (wav), "open wav for click/average test");   // openFile sets visible channels
     app.settings.fftSize = 1024;
+    app.settings.fftLocalN = 1024;
 
     FFTAnalysisView view (app);
     view.setSize (300, 200);
@@ -1902,6 +1906,7 @@ static void testSnapshotStoreAndRecompute()
     Application app;
     CHECK (app.openFile (wav), "open wav for snapshot test");
     app.settings.fftSize = 1024;
+    app.settings.fftLocalN = 1024;
 
     FFTAnalysisView view (app);
     view.setSize (300, 200);
@@ -3184,7 +3189,8 @@ static void testFFTViewInteractions()
 
     Application app;
     CHECK (app.openFile (wav), "open wav for FFT interaction test");   // openFile sets visible channels
-    app.settings.fftSize = 1024;   // bin width 7.8125 Hz -> bins around 440 Hz
+    app.settings.fftSize = 1024;
+    app.settings.fftLocalN = 1024;   // bin width 7.8125 Hz -> bins around 440 Hz
 
     const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
     const juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
@@ -3391,6 +3397,277 @@ static void testSpectralControlsAndAsyncLoad()
     }
 }
 
+// ---------------- History tab + batched undo/redo ----------------
+
+static bool vecClose (const std::vector<float>& a, const std::vector<float>& b)
+{
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (std::abs (a[i] - b[i]) > 2e-3f) return false;
+    return true;
+}
+
+static void testHistoryPanel()
+{
+    const juce::File wav = makeTempFile ("history.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open file for history test");
+    AudioEngine& eng = app.audioEngine();
+
+    const auto readRegion = [&] (int64_t a, int64_t b) {
+        std::vector<float> v ((size_t) (b - a));
+        eng.readSamples (0, a, b - a, v.data());
+        return v;
+    };
+    const auto r1 = readRegion (8000, 9600);   // gain region [1.0s, 1.2s)
+    const auto r2 = readRegion (10400, 12000); // silence region [1.3s, 1.5s)
+
+    HistoryPanel panel (app);
+    CHECK (panel.numRows() == 1, "history starts with the load row only");
+    CHECK (panel.rowText (0) == juce::String ("Loaded ") + wav.getFileName(),
+          "load row names the file");
+    CHECK (panel.currentState() == 0, "current state is right after load");
+
+    // Three edits -> three named rows.
+    app.setSelection ({ 1.0, 1.2 });
+    app.changeGain (6.0f);
+    app.setSelection ({ 1.3, 1.5 });
+    app.silence();
+    app.setSelection ({ 1.6, 1.8 });
+    app.reverse();
+
+    panel.refresh();
+    CHECK (panel.numRows() == 4, "one row per edit plus the load row");
+    CHECK (panel.rowText (1) == "Changed gain by +6.00 dB", "gain action is named");
+    CHECK (panel.rowText (2) == "Silenced selection", "silence action is named");
+    CHECK (panel.rowText (3) == "Reversed selection", "reverse action is named");
+    CHECK (panel.currentState() == 3, "all three actions applied");
+    CHECK (!panel.rowIsFuture (0) && !panel.rowIsFuture (1)
+          && !panel.rowIsFuture (2) && !panel.rowIsFuture (3), "no future rows yet");
+
+    // Undo one step: the last row becomes a dimmed, redoable entry.
+    app.undoStep();
+    panel.refresh();
+    CHECK (panel.numRows() == 4, "undo keeps all rows listed");
+    CHECK (panel.currentState() == 2, "current state moved back one action");
+    CHECK (panel.rowIsFuture (3), "undone action is marked future");
+
+    // Jump straight to the load state (two undos in one go).
+    auto jump = [&] (int target) {
+        const int cur = (int) app.undo().undoSize();
+        if (target < cur)
+            app.undoSteps (cur - target);
+        else if (target > cur)
+            app.redoSteps (target - cur);
+    };
+
+    jump (0);
+    panel.refresh();
+    CHECK (panel.currentState() == 0, "jump landed on the load state");
+    CHECK (vecClose (readRegion (8000, 9600), r1), "batched undo restored the gain region");
+    CHECK (vecClose (readRegion (10400, 12000), r2), "batched undo restored the silence region");
+
+    // Jump forward to state 1: only the gain is re-applied.
+    jump (1);
+    panel.refresh();
+    CHECK (panel.currentState() == 1, "jump landed after the first action");
+    const float g = std::pow (10.0f, 6.0f / 20.0f);
+    std::vector<float> r1g ((size_t) r1.size());
+    for (size_t i = 0; i < r1.size(); ++i) r1g[i] = r1[i] * g;
+    CHECK (vecClose (readRegion (8000, 9600), r1g), "gain re-applied after jump");
+    CHECK (vecClose (readRegion (10400, 12000), r2), "silence NOT re-applied at state 1");
+
+    // Jump to the end: everything is applied again.
+    jump (3);
+    panel.refresh();
+    CHECK (panel.currentState() == 3, "jump landed at the end of history");
+    auto r2now = readRegion (10400, 12000);
+    bool allZero = true;
+    for (float v : r2now) if (v != 0.0f) { allZero = false; break; }
+    CHECK (allZero, "silence re-applied after jump to the end");
+
+    wav.deleteFile();
+}
+
+// ---------------- Settings persistence between sessions ----------------
+static void testSettingsPersistence()
+{
+    const juce::File store = makeTempFile ("session.props");
+    if (store.existsAsFile()) store.deleteFile();
+
+    {
+        Application a (store);
+        // Defaults with an empty store.
+        CHECK (!a.settings.snapToZeroCrossings, "zero-crossing snap is OFF by default");
+        CHECK (a.settings.logFrequency, "spectral log mode on by default");
+        CHECK (a.settings.fftSize == 2048, "default spectral fft size");
+        CHECK (a.settings.fftAxisMode == 1, "default analysis axis is log");
+        CHECK (a.settings.fftLocalN == 2048, "default analysis fft size");
+
+        a.settings.logFrequency = false;
+        a.settings.fftSize = 4096;
+        a.settings.snapToZeroCrossings = true;
+        a.settings.fftAxisMode = 2;
+        a.settings.fftLocalN = 8192;
+        a.saveSettings();
+    }
+
+    {
+        Application b (store);
+        CHECK (!b.settings.logFrequency, "spectral log/linear state restored");
+        CHECK (b.settings.fftSize == 4096, "spectral fft size restored");
+        CHECK (b.settings.snapToZeroCrossings, "zero-crossing snap setting restored");
+        CHECK (b.settings.fftAxisMode == 2, "analysis axis mode restored");
+        CHECK (b.settings.fftLocalN == 8192, "analysis fft size restored");
+    }
+
+    // Non-power-of-two stored values are rounded up to the next power of two
+    // on load (simulated here by saving raw values directly).
+    {
+        Application d (store);
+        d.settings.fftSize = 3000;
+        d.settings.fftLocalN = 700;
+        d.saveSettings();
+    }
+    {
+        Application c (store);
+        CHECK (c.settings.fftSize == 4096, "stored 3000 rounds up to 4096");
+        CHECK (c.settings.fftLocalN == 1024, "stored 700 clamps to the minimum 1024");
+    }
+
+    store.deleteFile();
+}
+
+// ---------------- Zero-crossing snap in setSelection ----------------
+static void testZeroCrossingSnapSelection()
+{
+    const juce::File wav = makeTempFile ("snap.wav");
+    writeWav (wav, 1, 44100.0, 88200, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open tone for snap test");
+    AudioEngine& eng = app.audioEngine();
+
+    // OFF by default: the selection is untouched even with snapEdges requested.
+    CHECK (!app.settings.snapToZeroCrossings, "snap off by default");
+    app.setSelection ({ 1.001, 1.903 }, true);
+    CHECK (std::abs (app.selection.getStart() - 1.001) < 1e-9, "no snap when disabled (start)");
+    CHECK (std::abs (app.selection.getEnd() - 1.903) < 1e-9, "no snap when disabled (end)");
+
+    // ON: both edges land on zero crossings of the tone.
+    app.settings.snapToZeroCrossings = true;
+    app.setSelection ({ 1.001, 1.903 }, true);
+    const double s = app.selection.getStart(), e = app.selection.getEnd();
+    CHECK (std::abs (s - 1.001) < 0.0015, "snapped start within half a period of the raw edge");
+    CHECK (std::abs (e - 1.903) < 0.0015, "snapped end within half a period of the raw edge");
+
+    auto valAt = [&] (double t) {
+        float v;
+        eng.readSamples (0, (int64_t) std::llround (t * 44100.0), 1, &v);
+        return v;
+    };
+    CHECK (std::abs (valAt (s)) < 0.05f, "snapped start sits on a zero crossing");
+    CHECK (std::abs (valAt (e)) < 0.05f, "snapped end sits on a zero crossing");
+
+    // A degenerate (zero-length) selection must survive snapping unchanged.
+    app.setSelection ({ 1.234, 1.234 }, true);
+    CHECK (app.selection.getStart() == 1.234 && app.selection.getEnd() == 1.234,
+          "zero-length selection untouched by snap");
+
+    // Programmatic selections (no snap flag) are never snapped, even with the setting ON.
+    app.setSelection ({ 1.001, 1.903 });
+    CHECK (std::abs (app.selection.getStart() - 1.001) < 1e-9,
+          "programmatic selection not snapped");
+
+    wav.deleteFile();
+}
+
+// ---------------- Frequency-analysis view persistence wiring ----------------
+static void testFFTViewPersistence()
+{
+    const juce::File store = makeTempFile ("fftview.props");
+    if (store.existsAsFile()) store.deleteFile();
+
+    Application app (store);
+    app.settings.fftAxisMode = 2;   // 1/3 octave
+    app.settings.fftLocalN = 8192;
+
+    FFTAnalysisView view (app);
+    CHECK (view.axisMode() == 2, "axis mode restored from settings");
+    CHECK (view.fftSize() == 8192, "fft size restored from settings");
+
+    // Changing the combos writes back to the shared (persisted) settings.
+    view.fftSizeComboRef().setSelectedId (4096, juce::NotificationType::sendNotificationSync);
+    CHECK (app.settings.fftLocalN == 4096, "combo change updates settings.fftLocalN");
+    CHECK (view.fftSize() == 4096, "combo change updates the local size");
+
+    view.axisComboRef().setSelectedId (1, juce::NotificationType::sendNotificationSync);   // FFT Linear
+    CHECK (app.settings.fftAxisMode == 0, "axis combo writes back to settings");
+    CHECK (view.axisMode() == 0, "axis mode follows the combo");
+
+    store.deleteFile();
+}
+
+// ---------------- Batched undo/redo jumps ----------------
+static void testBatchedUndoRedo()
+{
+    const juce::File wav = makeTempFile ("batch.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open file for batched undo test");
+    AudioEngine& eng = app.audioEngine();
+
+    const auto readRegion = [&] (int64_t a, int64_t b) {
+        std::vector<float> v ((size_t) (b - a));
+        eng.readSamples (0, a, b - a, v.data());
+        return v;
+    };
+    const auto r1 = readRegion (8000, 9600);
+    const auto r2 = readRegion (10400, 12000);
+
+    app.setSelection ({ 1.0, 1.2 });
+    app.changeGain (6.0f);
+    app.setSelection ({ 1.3, 1.5 });
+    app.silence();
+    CHECK (app.undo().undoSize() == 2, "two actions recorded");
+
+    // Undo both in one batched call: data fully restored.
+    app.undoSteps (2);
+    CHECK (app.undo().undoSize() == 0 && app.undo().redoSize() == 2,
+          "stacks moved as a pair");
+    CHECK (vecClose (readRegion (8000, 9600), r1), "batched undo restored the gain region");
+    CHECK (vecClose (readRegion (10400, 12000), r2), "batched undo restored the silence region");
+
+    // Redo one step, then ask for more than is available: it must clamp.
+    app.redoStep();
+    const float g = std::pow (10.0f, 6.0f / 20.0f);
+    std::vector<float> r1g ((size_t) r1.size());
+    for (size_t i = 0; i < r1.size(); ++i) r1g[i] = r1[i] * g;
+    CHECK (vecClose (readRegion (8000, 9600), r1g), "single redo re-applies the gain");
+
+    app.redoSteps (5);
+    CHECK (app.undo().undoSize() == 2 && app.undo().redoSize() == 0,
+          "batched redo clamps to the available steps");
+    auto r2now = readRegion (10400, 12000);
+    bool allZero = true;
+    for (float v : r2now) if (v != 0.0f) { allZero = false; break; }
+    CHECK (allZero, "silence re-applied after batched redo");
+
+    wav.deleteFile();
+}
+
 static void testMultiFileSupport()
 {
     // Two clearly distinct files: A = 8 kHz mono 2 s (440 Hz),
@@ -3488,6 +3765,7 @@ static void testMultiFileSupport()
     // Shared snapshots: store one from each file; closing a file clears only
     // that file's snapshot entries. (The panel clamps the FFT size to >=1024.)
     app.settings.fftSize = 1024;
+    app.settings.fftLocalN = 1024;
     FFTAnalysisView view (app);
     view.setSize (300, 200);
 
@@ -3611,6 +3889,11 @@ static int scRunUnitTestsImpl()
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("FFT view interactions"); testFFTViewInteractions();
     progress ("spectral controls + async load"); testSpectralControlsAndAsyncLoad();
+    progress ("history tab");             testHistoryPanel();
+    progress ("settings persistence");    testSettingsPersistence();
+    progress ("zero-crossing snap sel");  testZeroCrossingSnapSelection();
+    progress ("fft view persistence");    testFFTViewPersistence();
+    progress ("batched undo/redo");       testBatchedUndoRedo();
     progress ("multi-file support");  testMultiFileSupport();
     progress ("version string");      testVersionString();
 

@@ -140,7 +140,9 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
         case DragMode::Select:
         {
             const double t = xToTime (e.x);
-            app.setSelection ({ std::min (dragStartTime, t), std::max (dragStartTime, t) });
+            // snapEdges: with "Snap to Zero Crossings" enabled, both edges
+            // land on the nearest zero crossing of the first visible channel.
+            app.setSelection ({ std::min (dragStartTime, t), std::max (dragStartTime, t) }, true);
             selection = app.selection;
             if (onChange) onChange (viewStart, viewEnd);
             repaint();

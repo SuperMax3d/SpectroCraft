@@ -21,6 +21,13 @@ public:
     bool canRedo() const { return !redoStack.empty(); }
     size_t depth() const { return undoStack.size(); }
 
+    // Read-only enumeration for the History tab. Index 0 is always the
+    // OLDEST entry of each stack; back() is the most recent.
+    size_t undoSize() const { return undoStack.size(); }
+    const Patch& undoAt (size_t i) const { return undoStack[(size_t) i]; }
+    size_t redoSize() const { return redoStack.size(); }
+    const Patch& redoAt (size_t i) const { return redoStack[(size_t) i]; }
+
     bool popUndo (Patch& out)
     {
         if (undoStack.empty()) return false;

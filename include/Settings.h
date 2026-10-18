@@ -32,7 +32,12 @@ struct Settings
     float gain = 1.0f;
     float bias = 0.0f;
     int smoothing = 1;          // 0=off, 1=light box blur on magnitudes
-    bool snapToZeroCrossings = true;
+    bool snapToZeroCrossings = false;   // OFF by default; persisted between sessions
+
+    // Frequency Analysis tab state (independent of the spectrogram settings).
+    // Persisted between sessions: axis mode and its own FFT size.
+    int fftAxisMode = 1;        // 0=FFT Linear, 1=FFT Log, 2=1/3 Octave
+    int fftLocalN = 2048;       // Frequency Analysis FFT size (power of two)
 
     bool operator== (const Settings& o) const
     {
@@ -40,6 +45,15 @@ struct Settings
             && logFrequency == o.logFrequency && minFrequency == o.minFrequency
             && maxFrequency == o.maxFrequency && dBRange == o.dBRange
             && gain == o.gain && bias == o.bias && smoothing == o.smoothing;
+    }
+
+    // Compares exactly the fields that are persisted between sessions. Used by
+    // MainWindow to trigger a settings save when any of them changes.
+    bool samePersistent (const Settings& o) const
+    {
+        return fftSize == o.fftSize && logFrequency == o.logFrequency
+            && snapToZeroCrossings == o.snapToZeroCrossings
+            && fftAxisMode == o.fftAxisMode && fftLocalN == o.fftLocalN;
     }
 };
 

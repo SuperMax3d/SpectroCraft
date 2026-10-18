@@ -81,7 +81,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - Top-left tab group: **Files** (lists every loaded file with its sample
     rate, channel count and duration — plus its scale calibration when set;
     double-click a row to make it active, right-click for Activate / Close /
-    Set Scale...) and
+    Set Scale...), **History**, and
     **Frequency Analysis** (visible by default): live FFT with dB/Hz axes and
     a cursor readout.
     A single click in either view re-analyses immediately: with no selection
@@ -138,6 +138,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       visible channel's level at that bin; when the mouse is within a few
       pixels of a curve it **snaps to the nearest one**, showing the exact
       bin-centre frequency and that channel's value with a marker dot.
+  - **History**: lists every stored undo state of the active file — row 0 is
+    "Loaded <file name>", then one row per edit with a human-readable action
+    name ("Changed gain by +6.00 dB", "Deleted samples", "Silenced selection",
+    "Faded in/out", "Normalized", "Reversed selection", "Pasted samples"). The
+    current state is highlighted; states you can still redo are dimmed below it.
+    **Clicking any row jumps straight to that state**, undoing or redoing as
+    many steps as needed in one batched operation (a single mipmap rebuild for
+    the whole run instead of one per step). The header shows "N of M applied".
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
     range, Log/Linear toggle, Reset Freq, FFT size — from **512**, the finest
     frequency resolution, up to 65536). Above the colour-map
@@ -467,7 +475,12 @@ main window itself — arrow keys keep working there too. Interactive widgets
 the standard Windows behaviour for arrow keys while focused; click back into a
 view to return playhead control.
 
-Menus: **File, Edit, View, Transport, Effects, Help**. Effects offers Silence,
+Menus: **File, Edit, View, Transport, Effects, Help**. The Edit menu has a
+checkable **Snap to Zero Crossings** toggle (**off by default**): when on,
+dragging out a new time selection snaps both edges to the nearest zero
+crossing of the first visible channel (within ±50 ms), so cuts and effects
+start/end where the waveform crosses zero instead of clipping mid-cycle.
+Programmatic selections (markers, keyboard steps) are never snapped. Effects offers Silence,
 Fade In/Out, Normalize, Reverse and **Change Gain...** (a dB dialog whose
 field opens focused with its value pre-selected so a new one can be typed in
 right away; it multiplies the selection by 10^(dB/20)) — all applied only to
@@ -476,6 +489,11 @@ a **Colour Map** submenu
 (Classic default), checkable **Waveform View / Spectrogram View** items (at
 least one always stays visible) and one checkable item per channel; plain click
 toggles that channel, **Ctrl/Shift+click shows only it**.
+
+**Remembered between sessions**: the spectrogram's Log/Linear state and FFT
+size, the Frequency Analysis axis mode (FFT Linear / FFT Log / 1/3 Octave) and
+its independent FFT size, and the Snap to Zero Crossings toggle are saved to
+the same properties file as the recent-files list and restored on startup.
 
 Mouse (waveform *and* spectral views):
 
@@ -590,6 +608,21 @@ by a single mutex (short critical sections, no lock held during FFT work).
     caps at ten, persists across app instances via the `PropertiesFile`, clear
     empties the list, stale paths are skipped on load, and the menu handler
     re-opens a live entry while silently dropping a deleted one.
+  - **History tab**: rows carry human-readable action names ("Changed gain by
+    +6.00 dB", "Silenced selection", ...), undone actions are marked as future
+    entries, and jumping to any row applies the right batch of undo/redo steps —
+    verified against captured original data at every jump target.
+  - **Batched undo/redo**: `undoSteps`/`redoSteps` move several patches in one
+    call (single mipmap rebuild), clamp when more steps are requested than
+    available, and restore/re-apply the exact sample data.
+  - **Settings persistence**: spectrogram log/linear + FFT size, frequency-
+    analysis axis mode + its independent FFT size, and the zero-crossing snap
+    toggle all survive an app restart via the properties file; stored
+    non-power-of-two sizes round up to the next power of two on load.
+  - **Zero-crossing snap selection**: with the toggle off (the default) drag
+    edges are untouched; with it on both edges land on tone zero crossings;
+    zero-length and programmatic selections are never snapped. The analysis
+    view's combos write their axis mode / FFT size back to the shared settings.
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,

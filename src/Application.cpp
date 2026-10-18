@@ -39,6 +39,37 @@ Application::Application (const juce::File& recentStorePath)
         const juce::File f (p);
         if (f.existsAsFile()) recentFiles.push_back (f);   // skip stale entries
     }
+
+    // Session settings: restore the persisted values (defaults when absent).
+    loadSettings ();
+}
+
+// Round v up to the next power of two, then clamp into [lo, hi].
+static int roundUpPow2Clamped (int v, int lo, int hi)
+{
+    if (v < 1) v = 1;
+    int p = 1;
+    while (p < v && p <= hi / 2) p <<= 1;
+    return std::clamp (p, lo, hi);
+}
+
+void Application::loadSettings ()
+{
+    settings.fftSize       = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_size", settings.fftSize), 512, 65536);
+    settings.logFrequency  = recentStore->getIntValue ("log_freq", settings.logFrequency ? 1 : 0) != 0;
+    settings.snapToZeroCrossings = recentStore->getIntValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0) != 0;
+    settings.fftAxisMode   = std::clamp ((int) recentStore->getIntValue ("fft_axis_mode", settings.fftAxisMode), 0, 2);
+    settings.fftLocalN     = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_local_n", settings.fftLocalN), 1024, 65536);
+}
+
+void Application::saveSettings ()
+{
+    recentStore->setValue ("fft_size", settings.fftSize);
+    recentStore->setValue ("log_freq", settings.logFrequency ? 1 : 0);
+    recentStore->setValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0);
+    recentStore->setValue ("fft_axis_mode", settings.fftAxisMode);
+    recentStore->setValue ("fft_local_n", settings.fftLocalN);
+    recentStore->save ();
 }
 
 Application::~Application() {}
@@ -247,8 +278,20 @@ void Application::selectAll()
         setSelection ({ 0, audioEngine().duration() });
 }
 
-void Application::setSelection (juce::Range<double> s)
+void Application::setSelection (juce::Range<double> s, bool snapEdges)
 {
+    if (snapEdges && settings.snapToZeroCrossings && audioEngine().isFileLoaded())
+    {
+        // Snap each edge to the nearest zero crossing of the first visible
+        // channel within +/- 50 ms. If snapping would invert or collapse the
+        // range, keep the raw edges instead.
+        const int ch = visibleChannels.empty() ? 0 : visibleChannels.front();
+        const double a = audioEngine().snapToZeroCrossing (s.getStart(), 0.05, ch);
+        const double b = audioEngine().snapToZeroCrossing (s.getEnd(), 0.05, ch);
+        if (a < b)
+            s = { a, b };
+    }
+
     const juce::Range<double> clamped = s.getIntersectionWith ({ 0, audioEngine().duration() });
     if (clamped == selection) return;
     selection = clamped;
@@ -368,19 +411,42 @@ void Application::changeGain (float gainDb)
     audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this));
 }
 
-void Application::undoStep()
+void Application::undoSteps (int n)
 {
-    Patch p;
-    if (undo().popUndo (p))
-        audioEngine().applyPatch (p, false);
+    FileDoc* d = doc();
+    if (!d || n <= 0) return;
+
+    int done = 0;
+    while (done < n)
+    {
+        Patch p;
+        if (!d->undo.popUndo (p)) break;
+        d->engine.applyPatch (p, false, /*rebuild=*/false);
+        ++done;
+    }
+    if (done > 0)
+        d->engine.rebuildMipmaps();   // one rebuild for the whole jump
 }
 
-void Application::redoStep()
+void Application::redoSteps (int n)
 {
-    Patch p;
-    if (undo().popRedo (p))
-        audioEngine().applyPatch (p, true);
+    FileDoc* d = doc();
+    if (!d || n <= 0) return;
+
+    int done = 0;
+    while (done < n)
+    {
+        Patch p;
+        if (!d->undo.popRedo (p)) break;
+        d->engine.applyPatch (p, true, /*rebuild=*/false);
+        ++done;
+    }
+    if (done > 0)
+        d->engine.rebuildMipmaps();
 }
+
+void Application::undoStep() { undoSteps (1); }
+void Application::redoStep() { redoSteps (1); }
 
 void Application::play()
 {
