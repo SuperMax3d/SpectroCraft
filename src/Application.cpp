@@ -51,6 +51,8 @@ FileDoc* Application::doc() const
 AudioEngine& Application::audioEngine() { return doc() ? doc()->engine : emptyEngine; }
 MarkerManager& Application::markers()   { return doc() ? doc()->markers : emptyMarkers; }
 ::UndoManager& Application::undo()      { return doc() ? doc()->undo : emptyUndo; }
+const ScaleCalibration& Application::scale() const
+{ return doc() ? doc()->scale : emptyScale; }
 
 bool Application::isDocLoaded (const FileDoc* d) const
 {

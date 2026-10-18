@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "MarkerManager.h"
+#include "ScaleCalibration.h"
 #include "UndoManager.h"
 
 /** Everything that belongs to one loaded audio file: its audio data, markers,
@@ -22,6 +23,7 @@ public:
     double playhead = 0.0;             // UI cursor position (seconds)
     juce::Range<double> selection { 0, 0 };
     std::vector<int> visibleChannels;  // sorted channel indices to display
+    ScaleCalibration scale;            // physical-unit calibration (Set Scale menu)
 
     /** Load the file into this document: audio + markers (sidecar JSON first,
         embedded RIFF cue/adtl as fallback for .wav) + initial UI state. */

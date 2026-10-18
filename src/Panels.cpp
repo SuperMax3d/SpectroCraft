@@ -92,9 +92,95 @@ void FileListPanel::showFileMenu (int row)
     juce::PopupMenu m;
     m.addItem (1, "Activate", true, false);
     m.addItem (2, "Close", true, false);
+    m.addItem (3, "Set Scale...", true, false);
     const int r = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (r == 1) activateDoc (row);
     else if (r == 2) closeDoc (row);
+    else if (r == 3) showScaleDialog (row);
+}
+
+juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
+{
+    auto* dlg = new juce::AlertWindow (
+        "Set Scale",
+        "Calibrate the physical units of this file.\n"
+        "Full scale (|1.0|) equals the value you enter below.",
+        juce::AlertWindow::NoIcon);
+    dlg->setColour (juce::AlertWindow::backgroundColourId,
+                   juce::Colour::fromRGB (45, 45, 48));
+
+    dlg->addComboBox ("unit", { "None", "Volts", "Pascal", "g" }, "Units:");
+    auto* unitCombo = dlg->getComboBoxComponent ("unit");
+
+    dlg->addTextEditor (
+        "value",
+        d.scale.fullScaleValue > 0.0 ? juce::String (d.scale.fullScaleValue) : "1.0",
+        "Full scale:");
+    auto* valEdit = dlg->getTextEditor ("value");
+
+    if (unitCombo == nullptr || valEdit == nullptr)
+    {
+        delete dlg;
+        return nullptr;
+    }
+
+    // Item ids are 1..4 in the same order as ScaleCalibration::Unit (0..3).
+    unitCombo->setSelectedId ((int) d.scale.unit + 1,
+                             juce::NotificationType::dontSendNotification);
+
+    // The value field only makes sense when a unit is selected.
+    auto syncEnabled = [unitCombo, valEdit] {
+        valEdit->setEnabled (unitCombo->getSelectedId() != 1);
+    };
+    unitCombo->onChange = syncEnabled;
+    syncEnabled();
+
+    dlg->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // Focus the field with its text pre-selected so a new value can be typed
+    // in immediately. AlertWindow disables keyboard focus on its editors, so
+    // re-enable it first or grabKeyboardFocus() would bounce to a button.
+    valEdit->setWantsKeyboardFocus (true);
+    valEdit->selectAll();
+    valEdit->grabKeyboardFocus();
+
+    return dlg;
+}
+
+void FileListPanel::showScaleDialog (int row)
+{
+    if (row < 0 || row >= app.numDocs()) return;
+    FileDoc& d = *app.docs[(size_t) row];
+
+    auto* dlg = createScaleDialog (d);
+    const int result = dlg->runModalLoop();
+    juce::ComboBox* unitCombo = dlg->getComboBoxComponent ("unit");
+    juce::TextEditor* valEdit = dlg->getTextEditor ("value");
+
+    if (result == 1 && unitCombo != nullptr && valEdit != nullptr)
+    {
+        const auto unit = (ScaleCalibration::Unit) (unitCombo->getSelectedId() - 1);
+        const double v = valEdit->getText().trim().getDoubleValue();
+        if (unit == ScaleCalibration::Unit::None || v > 0.0)
+        {
+            d.scale.unit = unit;
+            d.scale.fullScaleValue = (unit == ScaleCalibration::Unit::None) ? 0.0 : v;
+            refresh();   // file list shows the new scale under the entry
+            if (app.onStateChange) app.onStateChange();   // repaint views with the new units
+        }
+        else
+        {
+            juce::AlertWindow err ("Set Scale",
+                                   "Please enter a positive value for the full-scale level.",
+                                   juce::AlertWindow::NoIcon);
+            err.setColour (juce::AlertWindow::backgroundColourId,
+                           juce::Colour::fromRGB (45, 45, 48));
+            err.addButton ("OK", 1);
+            err.runModalLoop();
+        }
+    }
+    delete dlg;
 }
 
 void FileListPanel::mouseDown (const juce::MouseEvent& e)
@@ -169,9 +255,11 @@ void FileListPanel::paint (juce::Graphics& g)
         g.setColour (active ? juce::Colours::white : juce::Colour::fromRGB (190, 195, 205));
         g.drawText (d.name, line1.reduced (4, 1), juce::Justification::centredLeft, false);
 
-        const auto props = juce::String ((int) d.engine.sampleRate()) + " Hz | "
-                         + juce::String (d.engine.numChannels()) + " ch | "
-                         + formatTimeCode (d.engine.duration());
+        juce::String props = juce::String ((int) d.engine.sampleRate()) + " Hz | "
+                           + juce::String (d.engine.numChannels()) + " ch | "
+                           + formatTimeCode (d.engine.duration());
+        if (!d.scale.shortDescription().isEmpty())
+            props += " | " + d.scale.shortDescription();
         g.setColour (juce::Colour::fromRGB (130, 135, 145));
         g.drawText (props, r.reduced (4, 1), juce::Justification::centredLeft, false);
     }
@@ -754,10 +842,13 @@ void FFTAnalysisView::paint (juce::Graphics& g)
             label = juce::String ((int) std::lround (f));
         g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
     }
+    // With a scale calibration the grid lines show absolute levels
+    // (e.g. dB-SPL for Pascal files) instead of relative dB.
+    const ScaleCalibration& sc = app.scale();
     for (int db = 0; db >= -(int) app.settings.dBRange; db -= 12)
     {
         const float y = plot.getY() + (float) ((double) -db / (double) app.settings.dBRange) * plot.getHeight();
-        g.drawText (juce::String (db), plot.getRight() + 4, (int) y - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
+        g.drawText (ScaleCalibration::formatAxisDbLabel (db, sc), plot.getRight() + 4, (int) y - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
     }
 
     // Cursor readout
@@ -786,7 +877,7 @@ void FFTAnalysisView::paint (juce::Graphics& g)
                 for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                     if (b < (int) thirdOctMags[c].size())
                         info += ",  Ch" + juce::String ((int) c + 1) + "="
-                              + juce::String (-app.settings.dBRange + thirdOctMags[c][(size_t) b] * app.settings.dBRange, 2) + " dB";
+                              + ScaleCalibration::formatLevelDb (-app.settings.dBRange + thirdOctMags[c][(size_t) b] * app.settings.dBRange, sc);
             }
         }
         else
@@ -798,7 +889,8 @@ void FFTAnalysisView::paint (juce::Graphics& g)
                 const int maxBin = std::min ((int) (n / 2), (int) mags[c].size() - 1);
                 const int bin = (int) std::clamp ((double) (int) std::lround (f * rate / n),
                                                   0.0, (double) maxBin);
-                info += ",  Ch" + juce::String ((int) c + 1) + "=" + juce::String (-app.settings.dBRange + mags[c][bin] * app.settings.dBRange, 2) + " dB";
+                info += ",  Ch" + juce::String ((int) c + 1) + "="
+                      + ScaleCalibration::formatLevelDb (-app.settings.dBRange + mags[c][bin] * app.settings.dBRange, sc);
             }
         }
         g.setColour (juce::Colours::white);
@@ -963,10 +1055,14 @@ void FFTAnalysisView::copySpectrumToClipboard()
     const double rate = app.audioEngine().sampleRate();
     double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
 
+    // With a scale calibration the exported values are absolute levels.
+    const ScaleCalibration& sc = app.scale();
+    const double off = sc.levelOffsetDb();
+
     juce::StringArray lines;
     juce::String header = "freq_Hz";
     for (size_t c = 0; c < mags.size() && c < 4; ++c)
-        header += ",ch" + juce::String ((int) c + 1) + "_dB";
+        header += ",ch" + juce::String ((int) c + 1) + "_" + sc.levelUnitLabel();
     lines.add (header);
 
     if (axisMode_ == 2 && !thirdOctMags.empty())
@@ -977,7 +1073,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
             juce::String line = juce::String (kThirdOctCenters[b], 1);
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < thirdOctMags[c].size())
-                    line += "," + juce::String (-app.settings.dBRange + thirdOctMags[c][b] * app.settings.dBRange, 2);
+                    line += "," + juce::String (-app.settings.dBRange + thirdOctMags[c][b] * app.settings.dBRange + off, 2);
             lines.add (line);
         }
         juce::SystemClipboard::copyTextToClipboard (lines.joinIntoString ("\n"));
@@ -992,7 +1088,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
         for (size_t c = 0; c < mags.size() && c < 4; ++c)
         {
             const int bin = std::min (k, (int) mags[c].size() - 1);
-            line += "," + juce::String (-app.settings.dBRange + mags[c][(size_t) bin] * app.settings.dBRange, 2);
+            line += "," + juce::String (-app.settings.dBRange + mags[c][(size_t) bin] * app.settings.dBRange + off, 2);
         }
         lines.add (line);
     }
@@ -1646,7 +1742,7 @@ void StatusBar::paint (juce::Graphics& g)
 void StatusBar::setSelection (double t0, double t1)
 {
     const juce::String s = (t1 > t0)
-        ? "Sel: " + juce::String (t0, 3) + " - " + juce::String (t1, 3) + " s"
+        ? "Sel: " + juce::String (t0, 3) + " - " + juce::String (t1, 3) + " s (" + juce::String (t1 - t0, 3) + " s)"
         : juce::String();
     if (s != selPart) { selPart = s; repaint(); }
 }

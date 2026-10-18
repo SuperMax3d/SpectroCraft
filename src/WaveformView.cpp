@@ -188,7 +188,7 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
     const juce::String lab = (chans == 2) ? (ch == 0 ? "L" : "R")
                                           : juce::String (ch + 1);
     onCursorInfo ("t=" + juce::String (t, 3) + " s   ch " + lab
-                  + ": " + juce::String (value, 2));
+                  + ": " + ScaleCalibration::formatLinearValue (value, app.scale()));
 }
 
 void WaveformView::mouseExit (const juce::MouseEvent&)
@@ -532,8 +532,10 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
     const auto pr = plotRect();
     if (pr.getHeight() <= 0) return;
 
-    // dB grid levels relative to full scale (1.0)
+    // dB grid levels relative to full scale (1.0). With a scale calibration the
+    // labels show physical values in the file's unit instead of dB.
     static const double levels[] = { 0.0, -6.0, -12.0, -18.0, -24.0 };
+    const ScaleCalibration& sc = app.scale();
 
     int row = 0;
     for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
@@ -569,8 +571,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
                     && (!showChanLabels || std::abs (yUp - center) >= 9.0f))
                 {
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
-                    g.drawText (juce::String ((int) dB), 2, (int) yUp - 7, kLeftAxisWidth - 4, 14,
-                               juce::Justification::centredRight, false);
+                    g.drawText (ScaleCalibration::formatWaveformAxisValue (dB, sc), 2, (int) yUp - 7,
+                               kLeftAxisWidth - 4, 14, juce::Justification::centredRight, false);
                 }
 
                 // Lower side label (negative dB below the centre line)
@@ -579,8 +581,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
                     && (!showChanLabels || std::abs (yDown - center) >= 9.0f))
                 {
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
-                    g.drawText (juce::String ((int) dB), 2, (int) yDown - 7, kLeftAxisWidth - 4, 14,
-                               juce::Justification::centredRight, false);
+                    g.drawText (ScaleCalibration::formatWaveformAxisValue (dB, sc), 2, (int) yDown - 7,
+                               kLeftAxisWidth - 4, 14, juce::Justification::centredRight, false);
                 }
             }
         }
@@ -590,7 +592,7 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
     // Axis title
     g.setFont (9.0f);
     g.setColour (juce::Colour::fromRGB (150, 150, 150));
-    g.drawText ("dB", 2, pr.getY() + 2, kLeftAxisWidth - 4, 12, juce::Justification::centredLeft, false);
+    g.drawText (sc.unitTitle(), 2, pr.getY() + 2, kLeftAxisWidth - 4, 12, juce::Justification::centredLeft, false);
 }
 
 void WaveformView::drawRuler (juce::Graphics& g)

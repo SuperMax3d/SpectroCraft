@@ -2192,8 +2192,9 @@ static void testSpectralProbe()
 }
 
 // ------------------------------------------------------------------ arrow keys / Shift+arrow selection
-// Left/Right arrows move the playhead by one frame; holding Shift selects from
-// where the shift-drag started to the current playhead position.
+// Plain Left/Right moves the playhead in 10 ms steps; Ctrl+Left/Right moves it
+// one sample at a time. Holding Shift extends the selection from where the
+// shift-drag started to the current playhead position (in either step size).
 static void testArrowKeySelection()
 {
     const juce::File wav = makeTempFile ("arrow_keys.wav");
@@ -2210,47 +2211,75 @@ static void testArrowKeySelection()
     juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "arrow key test"));
 
-    const double step = 1.0 / app.audioEngine().sampleRate();
+    const double fine = 1.0 / app.audioEngine().sampleRate();   // one sample
+    const double coarse = 0.010;                                // 10 ms step
     auto pressRight = [&] (juce::ModifierKeys mods)
     { return win->keyPressed (juce::KeyPress (juce::KeyPress::rightKey, mods, 0), nullptr); };
     auto pressLeft  = [&] (juce::ModifierKeys mods)
     { return win->keyPressed (juce::KeyPress (juce::KeyPress::leftKey, mods, 0), nullptr); };
 
+    // Tolerance-based selection comparison: repeated +/- steps accumulate
+    // floating-point rounding that exact Range equality would reject.
+    auto selClose = [&] (double lo, double hi)
+    { return std::abs (app.selection.getStart () - lo) < 1e-9
+          && std::abs (app.selection.getEnd ()   - hi) < 1e-9; };
+
     app.setPlayhead (0.1);
     app.setSelection ({ 0.25, 0.3 });   // pre-existing selection must survive plain moves
 
     CHECK (pressRight (juce::ModifierKeys::noModifiers), "plain Right is handled");
-    CHECK (std::abs (app.playhead - (0.1 + step)) < 1e-9,
-           "plain Right moves the playhead one frame to the right");
+    CHECK (std::abs (app.playhead - (0.1 + coarse)) < 1e-9,
+           "plain Right moves the playhead one 10 ms step to the right");
     CHECK (app.selection == juce::Range<double> (0.25, 0.3),
            "plain movement does not touch the selection");
 
-    CHECK (!pressRight (juce::ModifierKeys::commandModifier), "Ctrl+Right is left unhandled");
-    CHECK (std::abs (app.playhead - (0.1 + step)) < 1e-9, "unhandled key leaves the playhead alone");
+    CHECK (pressRight (juce::ModifierKeys::commandModifier), "Ctrl+Right is handled");
+    CHECK (std::abs (app.playhead - (0.1 + coarse + fine)) < 1e-9,
+           "Ctrl+Right moves the playhead one sample to the right");
 
-    // Shift+Right: anchor at the current position, extend rightwards.
+    // Shift+Right: anchor at the current position, extend rightwards in 10 ms steps.
     const double anchor = app.playhead;
     CHECK (pressRight (juce::ModifierKeys::shiftModifier), "Shift+Right is handled");
-    CHECK (std::abs (app.playhead - (anchor + step)) < 1e-9,
-           "Shift+Right moves the playhead one frame to the right");
-    CHECK (app.selection == juce::Range<double> (anchor, anchor + step),
+    CHECK (std::abs (app.playhead - (anchor + coarse)) < 1e-9,
+           "Shift+Right moves the playhead one 10 ms step to the right");
+    CHECK (selClose (anchor, anchor + coarse),
            "selection spans from the anchor to the new position");
 
     pressRight (juce::ModifierKeys::shiftModifier);
     pressRight (juce::ModifierKeys::shiftModifier);
-    CHECK (std::abs (app.playhead - (anchor + 3.0 * step)) < 1e-9, "repeated Shift+Right keeps moving");
-    CHECK (app.selection == juce::Range<double> (anchor, anchor + 3.0 * step),
+    CHECK (std::abs (app.playhead - (anchor + 3.0 * coarse)) < 1e-9, "repeated Shift+Right keeps moving");
+    CHECK (selClose (anchor, anchor + 3.0 * coarse),
            "selection follows the playhead to the right");
+
+    // Release Shift between the two shift-drag sequences so the next one
+    // anchors at a fresh position (the 30 Hz timer clears the anchor once it
+    // sees no physical Shift key held).
+    for (int i = 0; i < 12; ++i)
+    {
+        std::this_thread::sleep_for (std::chrono::milliseconds (50));
+        mm->runDispatchLoopUntil (1);
+    }
+
+    // Ctrl+Shift+Right: fine one-sample selection extension.
+    const double anchor2 = app.playhead;
+    CHECK (pressRight (juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier),
+           "Ctrl+Shift+Right is handled");
+    CHECK (std::abs (app.playhead - (anchor2 + fine)) < 1e-9,
+           "Ctrl+Shift+Right moves the playhead one sample to the right");
+    CHECK (selClose (anchor2, anchor2 + fine),
+           "fine selection spans from the anchor to the new position");
 
     // Shift+Left: shrink back across the anchor and flip direction.
     pressLeft (juce::ModifierKeys::shiftModifier);
-    CHECK (app.selection == juce::Range<double> (anchor, anchor + 2.0 * step),
-           "Shift+Left shrinks the selection");
-    for (int i = 0; i < 5; ++i)
-        pressLeft (juce::ModifierKeys::shiftModifier);
-    CHECK (std::abs (app.playhead - (anchor - 3.0 * step)) < 1e-9, "crossing the anchor keeps moving left");
-    CHECK (app.selection == juce::Range<double> (anchor - 3.0 * step, anchor),
+    CHECK (std::abs (app.playhead - (anchor2 + fine - coarse)) < 1e-9,
+           "Shift+Left moves one 10 ms step left");
+    CHECK (selClose (anchor2 + fine - coarse, anchor2),
            "selection flips to [playhead, anchor] when crossing");
+    for (int i = 0; i < 3; ++i)
+        pressLeft (juce::ModifierKeys::shiftModifier);
+    CHECK (std::abs (app.playhead - (anchor2 + fine - 4.0 * coarse)) < 1e-9, "repeated Shift+Left keeps moving");
+    CHECK (selClose (anchor2 + fine - 4.0 * coarse, anchor2),
+           "selection follows the playhead to the left");
 
     // Release Shift: no physical key is held in this process, so the 30 Hz timer
     // clears the anchor within a few ticks; plain moves must then stop touching
@@ -2481,6 +2510,140 @@ static void testChangeGainDialog()
     wav.deleteFile ();
 }
 
+// ------------------------------------------------------------------ scale calibration
+// Per-file physical-unit calibration: "2 Pascal" means full-scale (|1.0|) is
+// 2 Pa, so relative-dB readouts become absolute dB-SPL (ref 20 uPa). Volts ->
+// dBV (ref 1 V), g -> dB/g (ref 1 g); None leaves plain relative dB.
+static void testScaleCalibration()
+{
+    using U = ScaleCalibration::Unit;
+
+    // Pascal: offset = 20*log10(2 / 2e-5) = exactly 100 dB.
+    ScaleCalibration pa;
+    pa.unit = U::Pascal;
+    pa.fullScaleValue = 2.0;
+    CHECK (pa.isCalibrated(), "pascal calibration is active");
+    CHECK (std::abs (pa.levelOffsetDb() - 100.0) < 0.01, "2 Pa full scale is +100 dB-SPL offset");
+    CHECK (pa.levelUnitLabel () == "dB-SPL", "pascal level label is dB-SPL");
+    CHECK (pa.unitTitle () == "Pa", "pascal axis title is Pa");
+    CHECK (pa.shortDescription () == "2 Pa", "file list shows '2 Pa'");
+
+    // Relative -60 dB -> absolute 40.0 dB-SPL.
+    CHECK (ScaleCalibration::formatLevelDb (-60.0, pa) == "40.0 dB-SPL",
+           "-60 dB relative reads as ~40 dB-SPL");
+
+    // Volts: ref 1 V -> offset = 20*log10(scale).
+    ScaleCalibration v;
+    v.unit = U::Volts;
+    v.fullScaleValue = 1.0;
+    CHECK (std::abs (v.levelOffsetDb ()) < 1e-9, "1 V full scale has zero dBV offset");
+    CHECK (v.levelUnitLabel () == "dBV", "volts level label is dBV");
+    CHECK (ScaleCalibration::formatLevelDb (-60.0, v) == "-60.0 dBV",
+           "relative readout unchanged for a 1 V scale");
+
+    // Grams: ref 1 g -> offset = 20*log10(0.1) = -20 dB/g.
+    ScaleCalibration g;
+    g.unit = U::Grams;
+    g.fullScaleValue = 0.1;
+    CHECK (std::abs (g.levelOffsetDb () + 20.0) < 1e-9, "0.1 g full scale is -20 dB/g");
+    CHECK (g.shortDescription () == "0.1 g", "file list shows '0.1 g'");
+
+    // None: plain relative dB everywhere.
+    ScaleCalibration none;
+    CHECK (!none.isCalibrated (), "default calibration is off");
+    CHECK (std::abs (none.levelOffsetDb ()) < 1e-9, "no offset without a unit");
+    CHECK (none.levelUnitLabel () == "dB", "plain dB label when uncalibrated");
+    CHECK (none.shortDescription ().isEmpty (), "no scale text in the file list");
+    CHECK (ScaleCalibration::formatLevelDb (-60.0, none) == "-60.0 dB",
+           "relative readout unchanged when uncalibrated");
+
+    // Waveform axis: grid line at -12 dB with 2 Pa full scale -> 2*10^-0.6 ~= 0.502 Pa.
+    CHECK (ScaleCalibration::formatWaveformAxisValue (-12.0, pa) == "0.502",
+           "-12 dB grid line shows the physical value");
+    CHECK (ScaleCalibration::formatWaveformAxisValue (-12.0, none) == "-12",
+           "uncalibrated axis keeps integer dB labels");
+
+    // Linear probe: 0.84 of full scale with 2 Pa -> 1.68 Pa.
+    CHECK (ScaleCalibration::formatLinearValue (0.84, pa) == "1.68 Pa",
+           "probe shows physical value + unit");
+    CHECK (ScaleCalibration::formatLinearValue (0.84, none) == "0.84",
+           "uncalibrated probe stays normalized");
+
+    // FFT axis labels: grid line at -12 dB with the pascal offset -> 88.
+    CHECK (ScaleCalibration::formatAxisDbLabel (-12, pa) == "88", "FFT axis shows absolute level");
+    CHECK (ScaleCalibration::formatAxisDbLabel (-12, none) == "-12",
+           "uncalibrated FFT axis unchanged");
+
+    // Value formatting trims trailing zeros.
+    CHECK (ScaleCalibration::formatPhysicalValue (2.0) == "2", "trailing zeros trimmed (2)");
+    CHECK (ScaleCalibration::formatPhysicalValue (0.5) == "0.5", "trailing zeros trimmed (0.5)");
+    CHECK (ScaleCalibration::formatPhysicalValue (123.456) == "123",
+           "large values get no decimals");
+}
+
+// ------------------------------------------------- set scale dialog
+static void testSetScaleDialog()
+{
+    const juce::File wav = makeTempFile ("scale_dialog.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for scale dialog test");
+
+    // A MessageManager is required before grabbing keyboard focus in the dialog.
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<FileListPanel> panel (new FileListPanel (app));
+
+    FileDoc& d = *app.docs[0];
+    juce::AlertWindow* dlg = panel->createScaleDialog (d);
+    CHECK (dlg != nullptr, "scale dialog created");
+    if (dlg != nullptr)
+    {
+        auto* combo = dlg->getComboBoxComponent ("unit");
+        CHECK (combo != nullptr, "units combo exists");
+        if (combo != nullptr)
+        {
+            CHECK (combo->getNumItems () == 4, "four unit choices");
+            // getItemText() takes a 0-based index in JUCE 9.
+            CHECK (combo->getItemText (0) == "None" && combo->getItemText (1) == "Volts"
+                  && combo->getItemText (2) == "Pascal" && combo->getItemText (3) == "g",
+                  "unit items in the expected order");
+            CHECK (combo->getSelectedId () == 1, "defaults to None for an uncalibrated file");
+        }
+
+        auto* editor = dlg->getTextEditor ("value");
+        CHECK (editor != nullptr, "scale value field exists");
+        if (editor != nullptr)
+        {
+            CHECK (editor->getHighlightedRegion () == juce::Range<int> (0, 3),
+                  "initial '1.0' value is fully pre-selected");
+            CHECK (!editor->isEnabled (), "value field disabled while the unit is None");
+        }
+
+        // Picking a unit re-enables the value field; getWantsKeyboardFocus()
+        // only reports true for enabled components, so check it here.
+        if (combo != nullptr && editor != nullptr)
+        {
+            combo->setSelectedId (3, juce::NotificationType::sendNotificationSync);
+            CHECK (editor->isEnabled (), "value field enabled once a unit is picked");
+            CHECK (editor->getWantsKeyboardFocus (),
+                  "value field is keyboard-focusable when enabled");
+        }
+
+        delete dlg;
+    }
+
+    // The document's calibration is untouched until the dialog is confirmed.
+    CHECK (!d.scale.isCalibrated (), "dialog does not modify the doc before OK");
+
+    panel.reset();
+    delete mm;
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------- multi-file support
 // Multiple files can be open at once. Each file remembers its own playhead,
 // selection, markers and undo history; switching restores them. Snapshots are
@@ -2667,6 +2830,8 @@ static int scRunUnitTestsImpl()
     progress ("ctrl+number channels"); testCtrlNumberChannelToggle();
     progress ("open recent files");   testOpenRecentFiles();
     progress ("change gain dialog");  testChangeGainDialog();
+    progress ("scale calibration");   testScaleCalibration();
+    progress ("set scale dialog");    testSetScaleDialog();
     progress ("multi-file support");  testMultiFileSupport();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

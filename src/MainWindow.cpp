@@ -559,6 +559,9 @@ void MainWindow::syncSharedState()
         waveformView->setVisibleChannels (app.visibleChannels);
         waveformView->setPlayhead (app.playhead);
         waveformView->setMarkers (&app.markers().markers());
+        // Unconditional repaint: state that only affects the paint output
+        // (e.g. a changed scale calibration) must not rely on the setters.
+        waveformView->repaint();
     }
     if (spectralView)
     {
@@ -1132,11 +1135,12 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         }
     }
 
-    if (app.audioEngine().isFileLoaded() && !mods.isCommandDown() && !mods.isAltDown()
-            && !mods.isCtrlDown()
+    if (app.audioEngine().isFileLoaded() && !mods.isAltDown()
             && (keyCode == juce::KeyPress::leftKey || keyCode == juce::KeyPress::rightKey))
     {
-        const double step = 1.0 / app.audioEngine().sampleRate();
+        // Ctrl = fine 1-sample steps; plain / Shift arrows move in 10 ms steps.
+        const bool ctrl = mods.isCommandDown() || mods.isCtrlDown();
+        const double step = ctrl ? (1.0 / app.audioEngine().sampleRate()) : 0.010;
         const bool right = (keyCode == juce::KeyPress::rightKey);
 
         if (mods.isShiftDown())

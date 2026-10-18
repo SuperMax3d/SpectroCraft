@@ -28,6 +28,7 @@ public:
     AudioEngine emptyEngine;
     MarkerManager emptyMarkers;
     ::UndoManager emptyUndo;
+    ScaleCalibration emptyScale;        // uncalibrated fallback (no file loaded)
 
     SpectralEngine spectralEngine;   // shared across files (cache cleared on switch)
 
@@ -56,6 +57,7 @@ public:
     AudioEngine& audioEngine();         // engine of the active doc (or empty fallback)
     MarkerManager& markers();           // markers of the active doc (or empty fallback)
     ::UndoManager& undo();              // edit history of the active doc (or empty fallback)
+    const ScaleCalibration& scale() const;   // calibration of the active doc
     bool isDocLoaded (const FileDoc* d) const;
 
     int numDocs() const { return (int) docs.size(); }
