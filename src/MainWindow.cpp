@@ -826,7 +826,11 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case HelpAbout:
             juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
                 "About SpectroCraft",
-                "SpectroCraft v1.0.0\nHigh-performance waveform + spectral editor",
+                "SpectroCraft v1.0.0\nHigh-performance waveform + spectral editor\n"
+                "\nThis software is licensed under the GNU Affero General Public License v3.0.\n"
+                "\nSource code is available at:\nhttps://github.com/SuperMax3d/SpectroCraft\n"
+                "\nThis software uses the JUCE framework (https://juce.com), dual-licensed under "
+                "AGPLv3 and a commercial licence. This project uses the AGPLv3 option.",
                 "OK");
             break;
     }
