@@ -19,3 +19,4 @@ cmake-build-*/
 Thumbs.db
 desktop.ini
 .DS_Store
+/VERSION.txt

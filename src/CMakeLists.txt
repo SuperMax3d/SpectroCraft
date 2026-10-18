@@ -25,9 +25,39 @@ target_sources (SpectroCraft
 
 # Application icon (icon.ico) is embedded at runtime: include/IconData.h holds
 # the raw ICO bytes and MainWindow applies them via CreateIconFromResourceEx +
-# WM_SETICON. A .rc resource file is not used because this toolchain's rc.exe
-# emits ICON statements as RT_CURSOR entries, which Windows ignores for window
-# icons.
+# WM_SETICON. A .rc resource file with ICON statements is not used because this
+# toolchain's rc.exe emits them as RT_CURSOR entries, which Windows ignores for
+# window icons. (The version resource below is a VERSIONINFO-only .rc, which
+# rc.exe handles correctly.)
+
+# Version handling: sc_bump_version (root CMakeLists) bumps VERSION.txt on every
+# build and regenerates generated/Version.h (About box). sc_patch_generated then
+# rewrites the version into JUCE's generated resources.rc (VS_VERSION_INFO ->
+# Windows file properties) and JuceHeader.h, after juceaide has written them but
+# before they are compiled. (JUCE's JUCE_USER_DEFINED_RC_FILE mechanism is not
+# usable here: this environment's rc.exe ignores /D preprocessor definitions.)
+add_dependencies (SpectroCraft sc_bump_version)
+target_include_directories (SpectroCraft PRIVATE ${CMAKE_BINARY_DIR}/generated)
+
+get_target_property (SC_JUCE_CODE_DIR SpectroCraft JUCE_GENERATED_SOURCES_DIRECTORY)
+set (SC_RC_FILE "${SC_JUCE_CODE_DIR}/SpectroCraft_resources.rc")
+set (SC_HEADER_FILE "${SC_JUCE_CODE_DIR}/JuceHeader.h")
+add_custom_command (
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp
+    COMMAND ${CMAKE_COMMAND}
+            -DRC_FILE=${SC_RC_FILE}
+            -DHEADER_FILE=${SC_HEADER_FILE}
+            -DVERSION_FILE=${CMAKE_BINARY_DIR}/generated/SC_VERSION.txt
+            -DSTAMP_FILE=${CMAKE_BINARY_DIR}/generated/generated_patched.stamp
+            -P ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake
+    DEPENDS ${SC_RC_FILE} ${SC_HEADER_FILE}
+    COMMENT "Applying bumped version to generated resources.rc / JuceHeader.h")
+add_custom_target (sc_patch_generated
+    DEPENDS ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp)
+if (TARGET SpectroCraft_rc_lib)   # must compile the rc only after it is patched
+    add_dependencies (SpectroCraft_rc_lib sc_bump_version sc_patch_generated)
+endif()
+add_dependencies (SpectroCraft sc_patch_generated)
 
 # AVX2 FFT: compile this one translation unit with /arch:AVX2 on MSVC so the
 # intrinsics are available; runtime CPUID dispatch falls back to scalar otherwise.
@@ -63,5 +93,4 @@ target_compile_definitions (SpectroCraft
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SpectroCraft,JUCE_PRODUCT_NAME>"
-        JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:SpectroCraft,JUCE_VERSION>"
 )

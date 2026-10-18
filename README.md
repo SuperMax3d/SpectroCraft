@@ -228,6 +228,24 @@ Notes:
 - On other platforms, point CMake at your JUCE (the vendored copy works anywhere;
   you may also use `FetchContent` instead).
 
+### Versioning
+
+The version number is **auto-incremented on every build**: a custom target runs the
+`cmake/bump_version.cmake` script before compilation, which bumps the patch number in
+`VERSION.txt` (first build on a fresh checkout uses `1.0.0`, then `1.0.1`, `1.0.2`, …)
+and writes `generated/Version.h` — defining `SC_VERSION_STRING`, shown in **Help > About**.
+
+A second custom command (`cmake/patch_generated.cmake`) then rewrites the freshly bumped
+version into JUCE's generated files *after* juceaide has written them but *before* they are
+compiled:
+
+- `SpectroCraft_resources.rc` — the `VS_VERSION_INFO` resource embedded in the exe, so
+  Windows **file properties** (File version / Product version) always carry the new version;
+- `JuceHeader.h` — keeps `ProjectInfo::versionString` / `versionNumber` in sync.
+
+(In-place patching is used because this environment's `rc.exe` ignores `/D`
+preprocessor definitions, so JUCE's `JUCE_USER_DEFINED_RC_FILE` mechanism cannot be relied on.)
+
 ### CPU erratum & SIMD dispatch
 
 The AVX2 FFT path (`src/FFTAvx.cpp`) is guarded by a one-time hardware self-test:

@@ -24,8 +24,10 @@ if (MSVC)
         PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 endif()
 
-juce_generate_juce_header (SpectroCraftTests)
-target_include_directories (SpectroCraftTests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+# MainWindow.cpp includes the auto-generated Version.h, so the tests need the
+# same generated directory and must wait for sc_bump_version to run.
+add_dependencies (SpectroCraftTests sc_bump_version)
+target_include_directories (SpectroCraftTests PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/generated)
 
 target_link_libraries (SpectroCraftTests
     PRIVATE
@@ -44,4 +46,5 @@ target_compile_definitions (SpectroCraftTests
         JUCE_MODAL_LOOPS_PERMITTED=1
         SC_TESTS_EXE=1
         SC_NO_AUDIO_DEVICE=1   # headless tests: no real output device
+        SC_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
