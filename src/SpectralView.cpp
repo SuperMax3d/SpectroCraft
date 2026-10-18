@@ -235,15 +235,26 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
 
                 const double f0 = yToFreq ((float) (dragStartY - row.getY()), row.getHeight());
                 const double f1 = yToFreq ((float) (e.y - row.getY()), row.getHeight());
+                const double nyq = app.audioEngine().sampleRate() * 0.5;
                 if (settings_.logFrequency && f0 > 0.0 && f1 > 0.0)
-                    setFrequencyRange (freqMin * (f0 / f1), freqMax * (f0 / f1));
+                {
+                    // Grab-and-drag in log space: scale both bounds by the same
+                    // ratio so the zoom level is preserved.
+                    const double R = f0 / f1;
+                    double lo2 = freqMin * R, hi2 = freqMax * R;
+                    // Pin at most one edge to its limit; shifting both would
+                    // silently change the span and make reversing direction
+                    // feel sticky (the range could never return to where it was).
+                    if (lo2 < 1.0) lo2 = 1.0;
+                    else if (hi2 > nyq) hi2 = nyq;
+                    setFrequencyRange (lo2, hi2);
+                }
                 else
                 {
                     const double d = f0 - f1;
                     double lo2 = freqMin + d, hi2 = freqMax + d;
-                    if (lo2 < 1.0) { const double s = 1.0 - lo2; lo2 += s; hi2 += s; }
-                    const double nyq = app.audioEngine().sampleRate() * 0.5;
-                    if (hi2 > nyq) { const double s = hi2 - nyq; hi2 -= s; lo2 -= s; }
+                    if (lo2 < 1.0) lo2 = 1.0;          // pin the bottom edge
+                    else if (hi2 > nyq) hi2 = nyq;     // pin the top edge
                     setFrequencyRange (lo2, hi2);
                 }
             }
@@ -711,14 +722,54 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
 
         if (settings_.logFrequency)
         {
-            // Major ticks at each decade; intermediate 2x/5x ticks are drawn a
-            // bit darker so the log axis stays readable when zoomed in.
-            for (double p = std::ceil (std::log10 (fMin)); p <= std::floor (std::log10 (fMax)); ++p)
+            // Adaptive log ticks so the axis never goes empty when zoomed in:
+            // decades stay major and every digit per decade is drawn a bit
+            // darker at mid zooms (thinned to 1-2-5 when crowded); inside a
+            // sub-decade range a nice linear step provides the divisions.
+            const double spanDec = std::log10 (std::max (1e-9, fMax / fMin));
+            if (spanDec < 0.7)
             {
-                drawTickAndLabel (std::pow (10.0, p), false);
-                for (double m : { 2.0 * std::pow (10.0, p), 5.0 * std::pow (10.0, p) })
-                    if (m > fMin && m < fMax)
-                        drawTickAndLabel (m, true);
+                const double span = std::max (1e-9, fMax - fMin);
+                bool done = false;
+                for (double e = std::floor (std::log10 (span / 8.0));
+                     !done && e <= std::ceil (std::log10 (span / 3.0)) + 1.0; ++e)
+                    for (double m : { 1.0, 2.0, 5.0 })
+                    {
+                        const double step = m * std::pow (10.0, e);
+                        if (span / step >= 3.0 && span / step <= 8.0)
+                        {
+                            for (double f = std::ceil (fMin / step - 1e-9) * step;
+                                 f <= fMax + 1e-6; f += step)
+                                drawTickAndLabel (f, false);
+                            done = true;
+                            break;
+                        }
+                    }
+                if (!done)
+                    for (int i = 0; i <= 4; ++i)
+                        drawTickAndLabel (fMin + span * (double) i / 4.0, false);
+            }
+            else
+            {
+                auto collect = [&] (const int* digs, int n)
+                {
+                    std::vector<double> t;
+                    for (double p = std::ceil (std::log10 (fMin)) - 1.0;
+                         p <= std::floor (std::log10 (fMax)); ++p)
+                        for (int i = 0; i < n; ++i)
+                        {
+                            const double f = (double) digs[i] * std::pow (10.0, p);
+                            if (f >= fMin - 1e-6 && f <= fMax + 1e-6) t.push_back (f);
+                        }
+                    return t;
+                };
+                static const int allD[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+                static const int fewD[] = { 1, 2, 5 };
+                auto ticks = collect (allD, 9);
+                if ((int) ticks.size() > 14) ticks = collect (fewD, 3);
+                for (double f : ticks)
+                    drawTickAndLabel (f,
+                                     std::abs (std::log10 (f) - std::round (std::log10 (f))) > 1e-9);
             }
         }
         else

@@ -2589,6 +2589,16 @@ static void testChangeGainDialog()
             CHECK (editor->getWantsKeyboardFocus (), "gain field is keyboard-focusable on open");
             CHECK (editor->getHighlightedRegion () == juce::Range<int> (0, 3),
                   "initial value is fully pre-selected");
+
+            // Replicate showChangeGainDialog(): enter modal state WITHOUT taking
+            // focus, then grab the field while the window is showing. JUCE
+            // ignores focus grabs for components that are not visible yet,
+            // so this order is what makes typing work immediately.
+            dlg->enterModalState (false);
+            editor->grabKeyboardFocus();
+            CHECK (editor->hasKeyboardFocus (false),
+                   "field has keyboard focus once the dialog is showing");
+            dlg->exitModalState (0);
         }
         delete dlg;
     }
@@ -3065,8 +3075,10 @@ static void testAxisPanAndLogTicks()
         view.mouseDown (mkMouse (view, 20, 50, lmb));
         view.mouseDrag (mkMouse (view, 20, 90, lmb));
 
-        CHECK (std::abs (view.getVerticalOffset() - (-40.0 / ampPx)) < 1e-9,
-               "axis drag shifts the vertical offset by the dragged distance");
+        // Dragging down moves the content down with the cursor; panning runs
+        // at half speed so a full-scale view does not saturate the +/-2 clamp.
+        CHECK (std::abs (view.getVerticalOffset() - (20.0 / ampPx)) < 1e-9,
+               "axis drag shifts the vertical offset with the cursor (half speed)");
         CHECK (app.playhead == 0.0, "waveform axis drag does not move the playhead");
 
         // Dragging back restores the centre.
@@ -3140,8 +3152,8 @@ static void testAxisPanAndLogTicks()
         view.setViewRange (0.0, 4.0);
         view.setVisibleChannels ({ 0 });
 
-        // Range [80, 900] Hz: one decade tick at 100 Hz plus minor ticks at
-        // 200 and 500 Hz.
+        // Range [80, 900] Hz: decade tick at 100 Hz plus minor ticks at every
+        // other digit per decade (200 ... 900).
         view.setFrequencyRange (80.0, 900.0);
         juce::Image img (juce::Image::ARGB, 400, 200, true);
         { juce::Graphics g (img); view.paint (g); }
@@ -3167,7 +3179,21 @@ static void testAxisPanAndLogTicks()
                "decade tick is brighter than the intermediate ticks");
 
         // A position without a tick stays dark.
-        CHECK (brightness (yOf (300.0)) < 12, "no tick line where none is expected");
+        CHECK (brightness (yOf (150.0)) < 12, "no tick line where none is expected");
+
+        // Sub-decade zoom [1k, 2k]: a nice linear step must provide divisions
+        // inside the range instead of an empty axis.
+        view.setFrequencyRange (1000.0, 2000.0);
+        juce::Image img2 (juce::Image::ARGB, 400, 200, true);
+        { juce::Graphics g (img2); view.paint (g); }
+        auto yOf2 = [&] (double f) -> int
+        { return (int) std::floor ((float) view.freqToY (f, 200)); };
+        auto brightness2 = [&] (int yy) -> int
+        { const auto c = img2.getPixelAt (100, yy); return (c.getRed() + c.getGreen() + c.getBlue()) / 3; };
+        CHECK (brightness2 (yOf2 (1400.0)) > 25,
+               "sub-decade zoom draws division ticks inside the range");
+        CHECK (brightness2 (yOf2 (1500.0)) < 12,
+               "no tick between two sub-decade divisions");
 
         sil.deleteFile();
     }
@@ -3248,12 +3274,6 @@ static void testFFTViewInteractions()
         view.mouseDown (mkMouse (view, x1, y1, rmb));
         view.mouseDrag (mkMouse (view, x2, y2, rmb));
         view.mouseUp   (mkMouse (view, x2, y2, rmb));
-
-        std::fprintf (stderr, "  boxzoom: rect coords x1=%d x2=%d y1=%d y2=%d\n", x1, x2, y1, y2);
-        std::fprintf (stderr, "  boxzoom: got f [%.3f, %.3f] want [%.3f, %.3f]\n",
-                      view.getFreqLo(), view.getFreqHi(), fA, fB);
-        std::fprintf (stderr, "  boxzoom: got db [%.3f, %.3f] want [%.3f, %.3f]\n",
-                      view.getDbTop(), view.getDbBottom(), dbA, dbB);
 
         CHECK (std::abs (view.getFreqLo() - fA) / fA < 1e-6
               && std::abs (view.getFreqHi() - fB) / fB < 1e-6,

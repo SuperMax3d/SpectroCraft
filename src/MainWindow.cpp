@@ -1059,14 +1059,14 @@ juce::AlertWindow* MainWindow::createGainDialog()
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
-    // Focus the field with its text pre-selected so a new value can be typed
-    // in immediately. AlertWindow disables keyboard focus on its editors, so
-    // re-enable it first or grabKeyboardFocus() would bounce to a button.
+    // AlertWindow disables keyboard focus on its editors, so re-enable it and
+    // pre-select the text. The actual grabKeyboardFocus() happens in
+    // showChangeGainDialog() once the window is showing: JUCE silently ignores
+    // focus grabs for components that are not visible yet.
     if (auto* editor = w->getTextEditor ("gainDb"))
     {
         editor->setWantsKeyboardFocus (true);
         editor->selectAll();
-        editor->grabKeyboardFocus();
     }
 
     return w;
@@ -1080,8 +1080,14 @@ void MainWindow::showChangeGainDialog()
 
     // Enter modal state WITHOUT taking keyboard focus: runModalLoop() would
     // otherwise re-enter the modal state and grab focus for the window itself,
-    // stealing it from the text field that createGainDialog() focused.
+    // stealing it from the text field.
     w->enterModalState (false);
+
+    // Now that the window is showing, give the field the keyboard focus so a
+    // new value can be typed in immediately (the old text is pre-selected).
+    if (auto* editor = w->getTextEditor ("gainDb"))
+        editor->grabKeyboardFocus();
+
     const int result = w->runModalLoop();
     const juce::String text = w->getTextEditorContents ("gainDb");
     delete w;

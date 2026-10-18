@@ -116,7 +116,7 @@ private:
     bool dirty = true;
 
     // Interaction state
-    enum class DragMode { None, Select, Pan, VPan, ZoomDrag };
+    enum class DragMode { None, Select, Pan, VPan, TimePan, ZoomDrag };
     DragMode dragMode = DragMode::None;
     int dragStartX = 0;
     int dragStartY = 0;

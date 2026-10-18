@@ -98,6 +98,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 
     const bool leftOnAxis = e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
                             && !e.mods.isMiddleButtonDown() && e.x < kLeftAxisWidth;
+    const bool onTimeRuler = e.y < kRulerH;
 
     if (!leftOnAxis)
     {
@@ -109,7 +110,13 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && !e.mods.isMiddleButtonDown())
     {
-        if (leftOnAxis)
+        if (onTimeRuler)
+        {
+            // Left-drag on the top time ruler pans the shared time window
+            // (same as middle-button drag); it does not select.
+            dragMode = DragMode::TimePan;
+        }
+        else if (leftOnAxis)
         {
             // Left-drag on the amplitude axis pans the vertical range; it must
             // not move the playhead.
@@ -155,13 +162,20 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
             panByTime (dt);
             break;
         }
+        case DragMode::TimePan:
+        {
+            // Same semantics as middle-button panning: the time under the
+            // cursor at drag start stays under the cursor.
+            panByTime (dragStartTime - xToTime (e.x));
+            break;
+        }
         case DragMode::VPan:
         {
-            // Grab-and-drag: the amplitude value under the cursor at drag start
-            // stays under the cursor. All rows share the same height, so one
-            // pixels-per-unit scale applies to the whole view.
+            // Grab-and-drag: content follows the cursor (drag down -> the
+            // waveform moves down). Panned at half speed so a full-scale view
+            // does not saturate the +/-2 offset clamp after a few pixels.
             const double ampPx = rowAmpPx();
-            vOffset = std::clamp (vOffset + (dragStartY - e.y) / ampPx, -2.0, 2.0);
+            vOffset = std::clamp (vOffset + 0.5 * (e.y - dragStartY) / ampPx, -2.0, 2.0);
             dirty = true;
             if (onVerticalZoomChanged) onVerticalZoomChanged();
             repaint();

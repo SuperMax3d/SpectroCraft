@@ -125,9 +125,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     - **Mouse wheel** over the plot zooms the frequency window around the
       cursor; **Shift+wheel** (or wheel over the right level axis) zooms the
       level window instead.
-    - **Right-drag a box**: horizontal span sets the frequency window,
-      vertical span sets the level window (both at once if you drag in both
-      directions). A plain right-click shows a context menu with **Zoom Out
+    - **Right-drag a box** (a rubber-band rectangle is shown while dragging):
+      horizontal span sets the frequency window, vertical span sets the level
+      window (both at once if you drag in both directions). A plain right-click
+      shows a context menu with **Zoom Out
       Full** and **Copy Spectrum to Clipboard**; right-clicking the *level*
       axis resets only the level window, the *frequency* axis only the
       frequency window.
@@ -501,7 +502,8 @@ Mouse (waveform *and* spectral views):
 |---|---|
 | Click | Move the playhead to that position in **both** views (selection drags start from it) |
 | Left-drag | Select a time range |
-| Left-drag on the left axis | **Vertical pan**: drag up/down to shift the amplitude window (waveform) or frequency window (spectral, log-aware). Does not move the playhead |
+| Left-drag on the left axis | **Vertical pan**: drag up/down to shift the amplitude window (waveform) or frequency window (spectral, log-aware). The content follows the cursor at half speed; panning against a range limit pins that edge and keeps the span. Does not move the playhead |
+| Left-drag on the top time ruler | Pan the shared time window (same as middle-drag); does not create a selection |
 | Middle-drag | Pan the shared time window (both views stay in sync) |
 | Right-drag a region | **Box zoom**: a mostly-horizontal drag zooms both views to that time range; a mostly-vertical drag scales the amplitude axis (waveform) or frequency axis (spectral) so the dragged span fills the view. A rubber-band rectangle is shown while dragging |
 | Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete. On the **left axis**, "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window |

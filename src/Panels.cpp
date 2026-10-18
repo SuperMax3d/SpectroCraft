@@ -893,15 +893,6 @@ void FFTAnalysisView::resized()
 
 void FFTAnalysisView::paint (juce::Graphics& g)
 {
-    // Rubber band for a right-drag box zoom.
-    if (dragMode == DragMode::ZoomDrag && haveZoomRect)
-    {
-        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 48));
-        g.fillRoundedRectangle (zoomRect.toFloat(), 3.0f);
-        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 160));
-        g.drawRoundedRectangle (zoomRect.toFloat(), 3.0f, 1.0f);
-    }
-
     const auto fullBounds = getLocalBounds();
     g.fillAll (juce::Colours::black);
 
@@ -947,8 +938,52 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     }
     else if (axisMode_ == 1)
     {
-        for (double p = std::ceil (std::log10 (fLo)); p <= std::floor (std::log10 (fHi)); ++p)
-            freqTicks.push_back (std::pow (10.0, p));
+        // Adaptive log ticks so the axis never disappears when zoomed in:
+        // every digit per decade at mid zooms (thinned to 1-2-5 when that
+        // would crowd the labels), and a nice linear step inside sub-decade
+        // ranges where no whole decades are visible.
+        const double spanDec = std::log10 (std::max (1e-9, fHi / fLo));
+        if (spanDec < 0.7)
+        {
+            const double span = std::max (1e-9, fHi - fLo);
+            bool done = false;
+            for (double e = std::floor (std::log10 (span / 8.0));
+                 !done && e <= std::ceil (std::log10 (span / 3.0)) + 1.0; ++e)
+                for (double m : { 1.0, 2.0, 5.0 })
+                {
+                    const double step = m * std::pow (10.0, e);
+                    if (span / step >= 3.0 && span / step <= 8.0)
+                    {
+                        for (double f = std::ceil (fLo / step - 1e-9) * step;
+                             f <= fHi + 1e-6; f += step)
+                            freqTicks.push_back (f);
+                        done = true;
+                        break;
+                    }
+                }
+            if (!done)
+                for (int i = 1; i <= 4; ++i) freqTicks.push_back (fLo + span * (double) i / 5.0);
+        }
+        else
+        {
+            auto collect = [&](const int* digs, int n)
+            {
+                std::vector<double> t;
+                for (double p = std::ceil (std::log10 (fLo)) - 1.0;
+                     p <= std::floor (std::log10 (fHi)); ++p)
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const double f = (double) digs[i] * std::pow (10.0, p);
+                        if (f >= fLo - 1e-6 && f <= fHi + 1e-6) t.push_back (f);
+                    }
+                return t;
+            };
+            static const int allD[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+            static const int fewD[] = { 1, 2, 5 };
+            auto ticks = collect (allD, 9);
+            if ((int) ticks.size() > 14) ticks = collect (fewD, 3);
+            freqTicks.insert (freqTicks.end(), ticks.begin(), ticks.end());
+        }
     }
     else
     {
@@ -1105,6 +1140,15 @@ void FFTAnalysisView::paint (juce::Graphics& g)
             g.setColour (juce::Colours::white);
             g.fillEllipse (snapDotX - 3.5f, snapDotY - 3.5f, 7.0f, 7.0f);
         }
+    }
+
+    // Rubber band for a right-drag box zoom (drawn last so nothing covers it).
+    if (dragMode == DragMode::ZoomDrag && haveZoomRect)
+    {
+        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 48));
+        g.fillRoundedRectangle (zoomRect.toFloat(), 3.0f);
+        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 160));
+        g.drawRoundedRectangle (zoomRect.toFloat(), 3.0f, 1.0f);
     }
 }
 
@@ -1354,21 +1398,23 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis)
     m.addSeparator();
     m.addItem (100, "Copy Spectrum to Clipboard");
 
-    auto onAction = [this, onLevelAxis, onFreqAxis] (int id)
+    const int sel = m.showMenu (juce::PopupMenu::Options ().withMousePosition());
+    switch (sel)
     {
-        switch (id)
-        {
-            case CtxZoomOutFull:
-                if (onLevelAxis || onFreqAxis) { dbTop_ = 0.0; dbBottom_ = -80.0; repaint(); }
-                else resetDisplayRanges();
-                break;
-            case 100:
-                copySpectrumToClipboard();
-                break;
-        }
-    };
-
-    const int r = m.showMenu (juce::PopupMenu::Options ().withMousePosition());
+        case CtxZoomOutFull:
+            if (onLevelAxis && !onFreqAxis) { dbTop_ = 0.0; dbBottom_ = -80.0; repaint(); }
+            else if (onFreqAxis && !onLevelAxis)
+            {
+                const double rate = app.audioEngine().sampleRate();
+                fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+                repaint();
+            }
+            else resetDisplayRanges();   // plot or corner: reset both windows
+            break;
+        case 100:
+            copySpectrumToClipboard();
+            break;
+    }
 }
 
 void FFTAnalysisView::mouseDown (const juce::MouseEvent& e)
@@ -1442,11 +1488,15 @@ void FFTAnalysisView::mouseDrag (const juce::MouseEvent& e)
         {
             const int x1 = std::clamp (e.x, 0, getWidth());
             const int y1 = std::clamp (e.y, 0, getHeight());
-            zoomRect = juce::Rectangle<int> (std::min (dragStartX, x1), std::min (dragStartY, y1),
-                                             std::abs (x1 - dragStartX) + 1,
-                                             std::abs (y1 - dragStartY) + 1);
-            haveZoomRect = true;
-            repaint();
+            if (!haveZoomRect && (std::abs (x1 - dragStartX) >= 4 || std::abs (y1 - dragStartY) >= 4))
+                haveZoomRect = true;
+            if (haveZoomRect)
+            {
+                zoomRect = juce::Rectangle<int> (std::min (dragStartX, x1), std::min (dragStartY, y1),
+                                                 std::abs (x1 - dragStartX) + 1,
+                                                 std::abs (y1 - dragStartY) + 1);
+                repaint();
+            }
             break;
         }
         default:
