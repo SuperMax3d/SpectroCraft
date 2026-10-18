@@ -46,6 +46,8 @@ public:
     void setupViews();
     void activateDocUI();   // reset both views + sync panels after a doc switch
     juce::String statusBarFileName() const;   // name currently shown in the footer
+    bool waveformVisible() const { return showWaveformView; }      // View menu state
+    bool spectrogramVisible() const { return showSpectralView; }
     void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
     void refreshAfterEdit();   // clamp ranges, repaint waveform, re-render spectral image
     void refreshPanels();
@@ -56,6 +58,7 @@ public:
     void zoomToFit();
     void zoomToSelection();   // fit the current selection in both views
     void zoomOutFull();       // show the whole file in both views
+    void cycleViewVisibility (bool forward);  // F9: both -> waveform -> spectrogram
     void handleContextMenuAction (int id);  // right-click menu actions from either view
     void showChangeGainDialog();
     /** Builds (but does not run modally) the Change Gain dialog. The caller

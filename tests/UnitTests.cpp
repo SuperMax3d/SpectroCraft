@@ -2352,6 +2352,60 @@ static void testCtrlNumberChannelToggle()
     wav.deleteFile();
 }
 
+// ------------------------------------------------- F9 view-layout cycle
+// F9 cycles both -> waveform only -> spectrogram only -> both; Shift+F9 runs
+// the same cycle backwards. At least one view is always visible.
+static void testF9ViewCycle()
+{
+    const juce::File wav = makeTempFile ("f9_cycle.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for F9 cycle test");
+
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "F9 cycle test"));
+
+    auto pressF9 = [&] (juce::ModifierKeys mods)
+    { return win->keyPressed (juce::KeyPress (juce::KeyPress::F9Key, mods, 0), nullptr); };
+
+    // Starts with both views visible.
+    CHECK (win->waveformVisible() && win->spectrogramVisible(), "starts with both views");
+
+    // F9: both -> waveform only.
+    CHECK (pressF9 (juce::ModifierKeys::noModifiers), "F9 handled");
+    CHECK (win->waveformVisible() && !win->spectrogramVisible(), "first F9 -> waveform only");
+
+    // Second F9: waveform only -> spectrogram only.
+    CHECK (pressF9 (juce::ModifierKeys::noModifiers), "second F9 handled");
+    CHECK (!win->waveformVisible() && win->spectrogramVisible(), "second F9 -> spectrogram only");
+
+    // Third F9 wraps back to both.
+    CHECK (pressF9 (juce::ModifierKeys::noModifiers), "third F9 handled");
+    CHECK (win->waveformVisible() && win->spectrogramVisible(), "third F9 wraps to both");
+
+    // Shift+F9 from both goes backwards: -> spectrogram only.
+    CHECK (pressF9 (juce::ModifierKeys::shiftModifier), "Shift+F9 handled");
+    CHECK (!win->waveformVisible() && win->spectrogramVisible(), "Shift+F9 -> spectrogram only");
+
+    // Shift+F9 again: -> waveform only; once more wraps back to both.
+    CHECK (pressF9 (juce::ModifierKeys::shiftModifier), "second Shift+F9 handled");
+    CHECK (win->waveformVisible() && !win->spectrogramVisible(), "second Shift+F9 -> waveform only");
+    CHECK (pressF9 (juce::ModifierKeys::shiftModifier), "third Shift+F9 handled");
+    CHECK (win->waveformVisible() && win->spectrogramVisible(), "Shift+F9 wraps to both");
+
+    // F9 with other modifiers is ignored.
+    CHECK (!pressF9 (juce::ModifierKeys::commandModifier), "Ctrl+F9 not handled");
+    CHECK (win->waveformVisible() && win->spectrogramVisible(), "state unchanged by Ctrl+F9");
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile();
+}
+
 // ------------------------------------------------- File > Open Recent
 // The File menu keeps up to 10 recently opened files, most recent first.
 // The list is persisted across sessions in a PropertiesFile; stale entries
@@ -3067,6 +3121,7 @@ static int scRunUnitTestsImpl()
     progress ("spectral probe");      testSpectralProbe();
     progress ("arrow key selection"); testArrowKeySelection();
     progress ("ctrl+number channels"); testCtrlNumberChannelToggle();
+    progress ("F9 view cycle");       testF9ViewCycle();
     progress ("open recent files");   testOpenRecentFiles();
     progress ("change gain dialog");  testChangeGainDialog();
     progress ("scale calibration");   testScaleCalibration();

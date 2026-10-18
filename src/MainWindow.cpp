@@ -884,6 +884,24 @@ void MainWindow::zoomOutFull()
     applyTimeWindow (0.0, app.audioEngine().duration());
 }
 
+// F9 cycles the view layout: both -> waveform only -> spectrogram only -> both.
+// Shift+F9 runs the same cycle backwards. At least one view is always shown,
+// so no extra guarding is needed here.
+void MainWindow::cycleViewVisibility (bool forward)
+{
+    // 0 = both, 1 = waveform only, 2 = spectrogram only.
+    int state;
+    if      (showWaveformView && showSpectralView) state = 0;
+    else if (showWaveformView)                    state = 1;
+    else                                          state = 2;
+
+    state = (state + (forward ? 1 : -1) + 3) % 3;
+
+    showWaveformView = (state != 2);
+    showSpectralView = (state != 1);
+    resized();
+}
+
 // Actions from the right-click context menu shown by either view.
 void MainWindow::handleContextMenuAction (int id)
 {
@@ -1197,6 +1215,14 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         app.markers().saveSidecar (app.audioEngine().getFile());
         if (markersPanel) markersPanel->refresh();
         syncSharedState();
+        return true;
+    }
+
+    // F9 cycles the view layout (both -> waveform only -> spectrogram only);
+    // Shift+F9 goes the other way around.
+    if (keyCode == juce::KeyPress::F9Key && !mods.isAltDown() && !mods.isCommandDown())
+    {
+        cycleViewVisibility (!mods.isShiftDown());
         return true;
     }
 
