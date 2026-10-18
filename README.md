@@ -119,10 +119,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
     range, Log/Linear toggle, Reset Freq, FFT size). Above the colour-map
     gradient the panel shows the absolute level of each end of the scale in
-    the active file's unit — plain `dB` when uncalibrated, or `dB-SPL` / `dBV`
-    / `dB-g` after **Set Scale** (e.g. `-80.0 dB … 0.0 dB`, or
-    `14.0 dB-SPL … 94.0 dB-SPL` for a 1 Pa full scale). The labels follow both
-    the dB-range slider and calibration changes.
+    the active file's unit — plain `dB` when uncalibrated, or calibrated values
+    after **Set Scale**: `14.0 dB-SPL … 94.0 dB-SPL` for a 1 Pa full scale,
+    while Volts/g files show plain linear values (`0.0001 V … 1 V` for a 1 V
+    full scale). The labels follow both the dB-range slider and calibration
+    changes.
     **Markers** (table with
     a Comment column; select a row to edit its Title, multi-line Comments,
     Begin, End and Length in the detail editors below the table — the comments
@@ -142,9 +143,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - Bottom status bar: left side shows the **name of the file currently in
     the views** (updated on open, when switching between loaded files and
     after closing; empty while no file is loaded) followed by a live cursor
-    probe (time + amplitude, in the file's physical unit when a scale
-    calibration is set — dB-SPL for Pascal files) while hovering over either
-    view; right side
+    probe (time + amplitude on the waveform, time + frequency + level on the
+    spectrogram; in the file's physical unit when a scale calibration is set —
+    linear Pa/V/g on the waveform, dB-SPL for Pascal files and plain V/g values
+    for Volts/g files) while hovering over either view; right side
     shows the **selection start, stop and length** (`Sel: t0 - t1 s (len s)`) whenever a
     selection exists — updated continuously while dragging it in either view —
     plus the current **playhead position** (`Pos: t s`), which tracks playback
@@ -179,10 +181,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   (for the session) and displayed under the corresponding entry in the Files
   list. When set, readouts are converted from relative dB into absolute levels:
   the waveform's amplitude axis shows physical values in that unit (Pa/V/g),
-  the spectrogram hover probe in the footer shows **dB-SPL** for Pascal files
-  (**dBV** for Volts, **dB/g** for g), and the frequency analysis view — FFT
-  curves as well as 1/3-octave bands, including its cursor readout and clipboard
-  export — reports dB-SPL/dBV/dB-g values. "None" restores plain relative dB.
+  and the frequency/spectral readouts — the spectrogram hover probe, the
+  Spectral Controls level-scale labels, and the frequency analysis view (FFT
+  curves as well as 1/3-octave bands, including its axis labels, cursor readout
+  and clipboard export) — show **dB-SPL** for Pascal files but plain linear
+  values in **V** or **g** for Volts/g files. "None" restores plain relative dB.
 - **Open Recent**: File → Open Recent lists up to the ten most recently opened
   files (most recent first) and re-opens them with one click. The list is
   persisted in a `PropertiesFile` (`SpectroCraft.recent` under the user's

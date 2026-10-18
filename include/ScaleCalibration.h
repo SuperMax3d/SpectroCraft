@@ -108,13 +108,6 @@ struct ScaleCalibration
         return juce::String (v, 1) + " " + sc.levelUnitLabel();
     }
 
-    /** FFT-view axis label for a grid line `gridDb` dB below full scale. */
-    static juce::String formatAxisDbLabel (int gridDb, const ScaleCalibration& sc)
-    {
-        if (!sc.isCalibrated()) return juce::String (gridDb);
-        return juce::String ((int) std::lround ((double) gridDb + sc.levelOffsetDb()));
-    }
-
     /** Waveform axis label for a grid line `gridDb` dB below full scale. */
     static juce::String formatWaveformAxisValue (double gridDb, const ScaleCalibration& sc)
     {
@@ -127,5 +120,71 @@ struct ScaleCalibration
     {
         if (!sc.isCalibrated()) return juce::String (normalized, 2);
         return formatPhysicalValue (normalized * sc.fullScaleValue) + sc.unitSuffix();
+    }
+
+    /** True when frequency/spectral level readouts should be plain physical values
+        ("V" / "g") instead of dB: volts and grams are linear units. */
+    bool usesLinearLevels() const { return unit == Unit::Volts || unit == Unit::Grams; }
+
+    /** Unit label for spectral readouts/exports: "V"/"g" when linear, else the dB label. */
+    juce::String spectralUnitLabel() const
+    {
+        return usesLinearLevels() ? unitTitle() : levelUnitLabel();
+    }
+
+    /** Linear level value with ~`sig` significant digits: "1", "0.251", "3.16e-5". */
+    static juce::String formatLevelValue (double v, int sig = 3)
+    {
+        if (!std::isfinite (v) || v == 0.0) return "0";
+        const double a = std::abs (v);
+        const int e = (int) std::floor (std::log10 (a));
+        if (e >= sig - 1 && e < 9)
+        {
+            // Round to the appropriate power of ten, no decimals.
+            const double p = std::pow (10.0, e - (sig - 1));
+            return juce::String ((int) std::lround (v / p) * (int) p);
+        }
+        if (e >= -(sig + 2))
+        {
+            const int dp = juce::jmax (0, sig - 1 - e);
+            if (dp == 0) return juce::String ((int64_t) std::llround (v));
+            juce::String s (v, dp);
+            while (s.endsWith ("0") && s.contains ("."))
+                s = s.substring (0, s.length() - 1);
+            if (s.endsWith ("."))
+                s = s.substring (0, s.length() - 1);
+            return s;
+        }
+        // Scientific notation for very small values: "3.16e-5".
+        const double m = v / std::pow (10.0, e);
+        juce::String s (m, sig - 1);
+        while (s.endsWith ("0") && s.contains ("."))
+            s = s.substring (0, s.length() - 1);
+        if (s.endsWith ("."))
+            s = s.substring (0, s.length() - 1);
+        return s + "e" + juce::String (e);
+    }
+
+    /** Level readout for frequency/spectral displays. Volts/Grams show the linear
+        physical value ("0.42 V"); Pascal shows dB-SPL; uncalibrated shows plain dB. */
+    static juce::String formatSpectralLevel (double relativeDb, const ScaleCalibration& sc)
+    {
+        if (!sc.isCalibrated()) return juce::String (relativeDb, 1) + " dB";
+        if (sc.usesLinearLevels())
+            return formatLevelValue (sc.fullScaleValue * std::pow (10.0, relativeDb / 20.0))
+                   + sc.unitSuffix();
+        return formatLevelDb (relativeDb, sc);
+    }
+
+    /** FFT-view axis label for a grid line `gridDb` dB below full scale.
+        Volts/Grams show the linear value with unit ("0.251 V"); Pascal shows the
+        absolute level; uncalibrated keeps plain relative dB. */
+    static juce::String formatAxisLabel (int gridDb, const ScaleCalibration& sc)
+    {
+        if (!sc.isCalibrated()) return juce::String (gridDb);
+        if (sc.usesLinearLevels())
+            return formatLevelValue (sc.fullScaleValue * std::pow (10.0, gridDb / 20.0))
+                   + sc.unitSuffix();
+        return juce::String ((int) std::lround ((double) gridDb + sc.levelOffsetDb()));
     }
 };

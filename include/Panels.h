@@ -257,6 +257,7 @@ private:
 
     float xToFreq (int x) const;
     double freqToX (double f) const;
+    int axisWidth() const;   // right level-axis width (wider for linear V/g labels)
     juce::Rectangle<int> plotBounds() const;
     void copySpectrumToClipboard();
 
@@ -298,15 +299,16 @@ public:
 
     /** The three level labels drawn above the colour-map gradient:
         left = bottom of the dB range, centre = middle, right = full scale.
-        Values are absolute levels in the calibration's unit. */
+        Values are absolute levels in the calibration's unit (linear V/g for
+        volts/grams files). */
     static std::array<juce::String, 3> levelScaleLabels (float dBRange,
                                                          const ScaleCalibration& sc)
     {
-        // formatLevelDb() takes a RELATIVE level (dB below full scale) and adds
-        // the calibration offset itself.
-        return { ScaleCalibration::formatLevelDb (- (double) dBRange, sc),
-                 ScaleCalibration::formatLevelDb (- 0.5 * (double) dBRange, sc),
-                 ScaleCalibration::formatLevelDb (0.0, sc) };
+        // formatSpectralLevel() takes a RELATIVE level (dB below full scale) and
+        // applies the calibration itself.
+        return { ScaleCalibration::formatSpectralLevel (- (double) dBRange, sc),
+                 ScaleCalibration::formatSpectralLevel (- 0.5 * (double) dBRange, sc),
+                 ScaleCalibration::formatSpectralLevel (0.0, sc) };
     }
 
     // Set by MainWindow: resets the spectral view's frequency axis.

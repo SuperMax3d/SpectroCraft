@@ -302,12 +302,13 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
     const float dB = spectral.probeMagnitude (app.audioEngine(), ch, t, freq, settings_, level);
 
     // With a scale calibration the probe shows absolute levels
-    // (e.g. dB-SPL for Pascal files) instead of relative dB.
+    // (dB-SPL for Pascal files; linear V/g values for volts/grams files)
+    // instead of relative dB.
     onCursorInfo ("t=" + juce::String (t, 3) + " s   f="
                   + ((freq >= 1000.0)
                         ? juce::String (freq / 1000.0, 2) + " kHz"
                         : juce::String ((int) std::lround (freq)) + " Hz")
-                  + "   " + ScaleCalibration::formatLevelDb (dB, app.scale()));
+                  + "   " + ScaleCalibration::formatSpectralLevel (dB, app.scale()));
 }
 
 void SpectralView::mouseExit (const juce::MouseEvent&)

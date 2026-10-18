@@ -18,6 +18,7 @@
 #include "ScrollBars.h"
 #include "MainWindow.h"
 #include "FFTHelpers.h"
+#include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -2406,6 +2407,31 @@ static void testF9ViewCycle()
     wav.deleteFile();
 }
 
+// ------------------------------------------------- no help tooltips over the views
+// The waveform and spectrogram used to carry long mouse-help tooltips;
+// they were removed so hovering only shows the status-bar probe.
+static void testNoViewTooltips()
+{
+    const juce::File wav = makeTempFile ("no_tooltip.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for tooltip test");
+
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "tooltip test"));
+
+    CHECK (win->waveformTooltip().isEmpty(), "no help tooltip over the waveform view");
+    CHECK (win->spectralTooltip().isEmpty(), "no help tooltip over the spectrogram view");
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------- File > Open Recent
 // The File menu keeps up to 10 recently opened files, most recent first.
 // The list is persisted across sessions in a PropertiesFile; stale entries
@@ -2624,9 +2650,45 @@ static void testScaleCalibration()
            "uncalibrated probe stays normalized");
 
     // FFT axis labels: grid line at -12 dB with the pascal offset -> 88.
-    CHECK (ScaleCalibration::formatAxisDbLabel (-12, pa) == "88", "FFT axis shows absolute level");
-    CHECK (ScaleCalibration::formatAxisDbLabel (-12, none) == "-12",
+    CHECK (ScaleCalibration::formatAxisLabel (-12, pa) == "88", "FFT axis shows absolute level");
+    CHECK (ScaleCalibration::formatAxisLabel (-12, none) == "-12",
            "uncalibrated FFT axis unchanged");
+
+    // Volts/grams are linear units: spectral readouts show plain V/g values.
+    CHECK (v.usesLinearLevels (), "volts use linear level readouts");
+    CHECK (g.usesLinearLevels (), "grams use linear level readouts");
+    CHECK (!pa.usesLinearLevels (), "pascal keeps dB-SPL readouts");
+    CHECK (!none.usesLinearLevels (), "uncalibrated keeps plain dB");
+
+    CHECK (v.spectralUnitLabel () == "V", "volts spectral unit label is V");
+    CHECK (g.spectralUnitLabel () == "g", "grams spectral unit label is g");
+    CHECK (pa.spectralUnitLabel () == "dB-SPL", "pascal spectral unit label unchanged");
+    CHECK (none.spectralUnitLabel () == "dB", "uncalibrated spectral unit label unchanged");
+
+    // Linear level values: ~3 significant digits, trimmed.
+    CHECK (ScaleCalibration::formatLevelValue (1.0) == "1", "full scale formats as 1");
+    CHECK (ScaleCalibration::formatLevelValue (0.251) == "0.251", "mid value keeps 3 digits");
+    CHECK (ScaleCalibration::formatLevelValue (9.76e-4) == "0.000976", "small value fixed notation");
+    CHECK (ScaleCalibration::formatLevelValue (3.16e-5) == "0.0000316", "tiny value keeps 3 digits");
+    CHECK (ScaleCalibration::formatLevelValue (12345.0) == "12300", "large value rounded to sig figs");
+    CHECK (ScaleCalibration::formatLevelValue (0.0) == "0", "zero formats as 0");
+
+    // Spectral level readouts: volts/grams -> linear, pascal -> dB-SPL.
+    CHECK (ScaleCalibration::formatSpectralLevel (-20.0, v) == "0.1 V",
+           "-20 dB relative reads as 0.1 V for a 1 V scale");
+    CHECK (ScaleCalibration::formatSpectralLevel (-80.0, v) == "0.0001 V",
+           "-80 dB relative reads as 0.0001 V for a 1 V scale");
+    CHECK (ScaleCalibration::formatSpectralLevel (0.0, g) == "0.1 g",
+           "full scale reads as the gram value");
+    CHECK (ScaleCalibration::formatSpectralLevel (-20.0, pa) == "80.0 dB-SPL",
+           "pascal spectral readout stays in dB-SPL");
+    CHECK (ScaleCalibration::formatSpectralLevel (-43.5, none) == "-43.5 dB",
+           "uncalibrated spectral readout stays plain dB");
+
+    // FFT axis labels for linear units carry the unit suffix.
+    CHECK (ScaleCalibration::formatAxisLabel (0, v) == "1 V", "volts full-scale grid label");
+    CHECK (ScaleCalibration::formatAxisLabel (-24, v) == "0.0631 V",
+           "-24 dB grid line shows the linear value with unit");
 
     // Value formatting trims trailing zeros.
     CHECK (ScaleCalibration::formatPhysicalValue (2.0) == "2", "trailing zeros trimmed (2)");
@@ -2801,6 +2863,27 @@ static void testSpectralScaleLabels()
         CHECK (l[0] == "14.0 dB-SPL",  "1 Pa bottom label");
         CHECK (l[1] == "54.0 dB-SPL",  "1 Pa middle label");
         CHECK (l[2] == "94.0 dB-SPL",  "1 Pa full-scale label");
+    }
+
+    // Volts/grams are linear units: labels show plain V/g values, not dB.
+    {
+        ScaleCalibration sc;
+        sc.unit = ScaleCalibration::Unit::Volts;
+        sc.fullScaleValue = 1.0;
+        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, sc);
+        CHECK (l[0] == "0.0001 V", "volts bottom label is linear");
+        CHECK (l[1] == "0.01 V",   "volts middle label is linear");
+        CHECK (l[2] == "1 V",      "volts full-scale label is the scale value");
+    }
+
+    {
+        ScaleCalibration sc;
+        sc.unit = ScaleCalibration::Unit::Grams;
+        sc.fullScaleValue = 2.0;
+        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, sc);
+        CHECK (l[0] == "0.0002 g", "grams bottom label is linear");
+        CHECK (l[1] == "0.02 g",   "grams middle label is linear");
+        CHECK (l[2] == "2 g",      "grams full-scale label is the scale value");
     }
 
     // The labels must follow the dB-range slider.
@@ -3083,6 +3166,34 @@ static void testMultiFileSupport()
     wavB.deleteFile();
 }
 
+// ------------------------------------------------- Version auto-increment
+// Every build bumps VERSION.txt and regenerates generated/Version.h (About box)
+// plus sc_version.rc (exe file properties). This pins down that the baked-in
+// version string has a valid x.y.z form.
+static bool isXyzVersion (const char* s)
+{
+    int dots = 0, digits = 0;
+    for (const char* p = s; *p != '\0'; ++p)
+    {
+        if (*p == '.')
+        {
+            if (++dots > 2 || digits == 0) return false;
+            digits = 0;
+        }
+        else if (*p >= '0' && *p <= '9')
+            ++digits;
+        else
+            return false;
+    }
+    return dots == 2 && digits > 0;
+}
+
+static void testVersionString()
+{
+    CHECK (isXyzVersion (SC_VERSION_STRING),
+           "version is x.y.z: " + juce::String (SC_VERSION_STRING));
+}
+
 static int scRunUnitTestsImpl()
 {
     progress ("FFT");            testFFT();
@@ -3122,6 +3233,7 @@ static int scRunUnitTestsImpl()
     progress ("arrow key selection"); testArrowKeySelection();
     progress ("ctrl+number channels"); testCtrlNumberChannelToggle();
     progress ("F9 view cycle");       testF9ViewCycle();
+    progress ("no view tooltips");    testNoViewTooltips();
     progress ("open recent files");   testOpenRecentFiles();
     progress ("change gain dialog");  testChangeGainDialog();
     progress ("scale calibration");   testScaleCalibration();
@@ -3129,6 +3241,7 @@ static int scRunUnitTestsImpl()
     progress ("spectral scale labels"); testSpectralScaleLabels();
     progress ("right-drag box zoom"); testRightDragZoom();
     progress ("multi-file support");  testMultiFileSupport();
+    progress ("version string");      testVersionString();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
     return failures == 0 ? 0 : 1;

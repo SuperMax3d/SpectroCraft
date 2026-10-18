@@ -12,6 +12,7 @@
 #include "Panels.h"
 #include "MarkerManager.h"
 #include "IconData.h"
+#include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include <algorithm>
 
 // Dark tab background matching the panel backgrounds (Panels.cpp).
@@ -234,15 +235,6 @@ void MainWindow::setupViews()
 #endif
     waveformView = std::make_unique<WaveformView> (app);
     spectralView = std::make_unique<SpectralView> (app);
-
-    waveformView->setTooltip ("Click: move playhead | Drag: select a region (plain click clears it) "
-                              "| Middle-drag: pan | Right-drag: box zoom (horizontal = time, vertical = amplitude) "
-                              "| Wheel: zoom time (Shift+Wheel or wheel over the dB axis: zoom amplitude) "
-                              "| Double-click: select whole file (on a marker: select its range) | Right-click: context menu.");
-    spectralView->setTooltip ("Click: move playhead | Drag: select a region | Middle-drag: pan "
-                              "| Right-drag: box zoom (horizontal = time, vertical = frequency) "
-                              "| Wheel: zoom time (Shift+Wheel or wheel over the frequency axis: zoom frequency) "
-                              "| Double-click: select whole file (on a marker: select its range) | Right-click: context menu.");
 
     juce::Component::addAndMakeVisible (waveformView.get());
     juce::Component::addAndMakeVisible (spectralView.get());
@@ -832,7 +824,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case HelpAbout:
             juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
                 "About SpectroCraft",
-                "SpectroCraft v1.0.0\nHigh-performance waveform + spectral editor\n"
+                "SpectroCraft v" SC_VERSION_STRING "\nHigh-performance waveform + spectral editor\n"
                 "\nThis software is licensed under the GNU Affero General Public License v3.0.\n"
                 "\nSource code is available at:\nhttps://github.com/SuperMax3d/SpectroCraft\n"
                 "\nThis software uses the JUCE framework (https://juce.com), dual-licensed under "

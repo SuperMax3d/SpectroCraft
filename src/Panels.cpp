@@ -628,11 +628,17 @@ void FFTAnalysisView::refreshSnapshotBands()
     }
 }
 
+int FFTAnalysisView::axisWidth() const
+{
+    // Linear V/g labels are wider than plain dB numbers.
+    return app.scale().usesLinearLevels() ? 50 : 34;
+}
+
 juce::Rectangle<int> FFTAnalysisView::plotBounds() const
 {
     const auto b = getLocalBounds();
     const int topH = 52;      // two control rows
-    const int axisR = 34, axisB = 18, readoutH = 16;
+    const int axisR = axisWidth(), axisB = 18, readoutH = 16;
     return { 2, topH + 2,
              std::max (1, b.getWidth() - axisR - 4),
              std::max (1, b.getHeight() - topH - axisB - readoutH - 4) };
@@ -695,7 +701,7 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     g.drawText ("FFT", 6, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
     g.drawText ("Win", 124, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
 
-    const int axisR = 34;   // right dB axis width
+    const int axisR = axisWidth();   // right level-axis width
     const int axisB = 18;   // bottom Hz axis height
     const int readoutH = 16; // cursor info strip at the very bottom
     const auto plot = plotBounds();
@@ -843,12 +849,13 @@ void FFTAnalysisView::paint (juce::Graphics& g)
         g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
     }
     // With a scale calibration the grid lines show absolute levels
-    // (e.g. dB-SPL for Pascal files) instead of relative dB.
+    // (dB-SPL for Pascal files; linear V/g values for volts/grams files)
+    // instead of relative dB.
     const ScaleCalibration& sc = app.scale();
     for (int db = 0; db >= -(int) app.settings.dBRange; db -= 12)
     {
         const float y = plot.getY() + (float) ((double) -db / (double) app.settings.dBRange) * plot.getHeight();
-        g.drawText (ScaleCalibration::formatAxisDbLabel (db, sc), plot.getRight() + 4, (int) y - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
+        g.drawText (ScaleCalibration::formatAxisLabel (db, sc), plot.getRight() + 4, (int) y - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
     }
 
     // Cursor readout
@@ -877,7 +884,7 @@ void FFTAnalysisView::paint (juce::Graphics& g)
                 for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                     if (b < (int) thirdOctMags[c].size())
                         info += ",  Ch" + juce::String ((int) c + 1) + "="
-                              + ScaleCalibration::formatLevelDb (-app.settings.dBRange + thirdOctMags[c][(size_t) b] * app.settings.dBRange, sc);
+                              + ScaleCalibration::formatSpectralLevel (-app.settings.dBRange + thirdOctMags[c][(size_t) b] * app.settings.dBRange, sc);
             }
         }
         else
@@ -890,7 +897,7 @@ void FFTAnalysisView::paint (juce::Graphics& g)
                 const int bin = (int) std::clamp ((double) (int) std::lround (f * rate / n),
                                                   0.0, (double) maxBin);
                 info += ",  Ch" + juce::String ((int) c + 1) + "="
-                      + ScaleCalibration::formatLevelDb (-app.settings.dBRange + mags[c][bin] * app.settings.dBRange, sc);
+                      + ScaleCalibration::formatSpectralLevel (-app.settings.dBRange + mags[c][bin] * app.settings.dBRange, sc);
             }
         }
         g.setColour (juce::Colours::white);
@@ -1055,14 +1062,21 @@ void FFTAnalysisView::copySpectrumToClipboard()
     const double rate = app.audioEngine().sampleRate();
     double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
 
-    // With a scale calibration the exported values are absolute levels.
+    // With a scale calibration the exported values are absolute levels;
+    // volts/grams files export linear physical values instead (unit in header).
     const ScaleCalibration& sc = app.scale();
     const double off = sc.levelOffsetDb();
+    auto fmtLevel = [&] (double relDb) -> juce::String
+    {
+        if (sc.usesLinearLevels())
+            return ScaleCalibration::formatLevelValue (sc.fullScaleValue * std::pow (10.0, relDb / 20.0), 6);
+        return juce::String (relDb + off, 2);
+    };
 
     juce::StringArray lines;
     juce::String header = "freq_Hz";
     for (size_t c = 0; c < mags.size() && c < 4; ++c)
-        header += ",ch" + juce::String ((int) c + 1) + "_" + sc.levelUnitLabel();
+        header += ",ch" + juce::String ((int) c + 1) + "_" + sc.spectralUnitLabel();
     lines.add (header);
 
     if (axisMode_ == 2 && !thirdOctMags.empty())
@@ -1073,7 +1087,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
             juce::String line = juce::String (kThirdOctCenters[b], 1);
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < thirdOctMags[c].size())
-                    line += "," + juce::String (-app.settings.dBRange + thirdOctMags[c][b] * app.settings.dBRange + off, 2);
+                    line += "," + fmtLevel (-app.settings.dBRange + thirdOctMags[c][b] * app.settings.dBRange);
             lines.add (line);
         }
         juce::SystemClipboard::copyTextToClipboard (lines.joinIntoString ("\n"));
@@ -1088,7 +1102,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
         for (size_t c = 0; c < mags.size() && c < 4; ++c)
         {
             const int bin = std::min (k, (int) mags[c].size() - 1);
-            line += "," + juce::String (-app.settings.dBRange + mags[c][(size_t) bin] * app.settings.dBRange + off, 2);
+            line += "," + fmtLevel (-app.settings.dBRange + mags[c][(size_t) bin] * app.settings.dBRange);
         }
         lines.add (line);
     }

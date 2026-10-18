@@ -48,6 +48,8 @@ public:
     juce::String statusBarFileName() const;   // name currently shown in the footer
     bool waveformVisible() const { return showWaveformView; }      // View menu state
     bool spectrogramVisible() const { return showSpectralView; }
+    juce::String waveformTooltip() const { return waveformView->getTooltip(); }
+    juce::String spectralTooltip() const { return spectralView->getTooltip(); }
     void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
     void refreshAfterEdit();   // clamp ranges, repaint waveform, re-render spectral image
     void refreshPanels();
