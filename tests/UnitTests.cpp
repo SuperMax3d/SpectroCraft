@@ -30,6 +30,7 @@
 #include <cmath>
 #include <vector>
 #include <sstream>
+#include <mutex>
 
 static int failures = 0;
 static int total = 0;
@@ -1738,7 +1739,9 @@ static void testFFTClickAndAverage()
         const int bin880 = (int) std::lround (880.0 * 1024 / 8000.0);
         CHECK (spec[0][(size_t) bin440] > 0.3, "averaged selection keeps the 440 Hz tone");
         CHECK (spec[0][(size_t) bin880] > 0.3, "averaged selection keeps the 880 Hz tone");
-        CHECK (spec[0][25] < 0.1, "far bin stays quiet in the averaged spectrum");
+        // Magnitudes are mapped against a fixed -160 dB floor: 0.3 ~= -112 dB,
+        // which is still far below the ~-40 dB tone peaks.
+        CHECK (spec[0][25] < 0.3, "far bin stays quiet in the averaged spectrum");
     }
 }
 
@@ -3025,6 +3028,369 @@ static void testRightDragZoom()
     wav.deleteFile();
 }
 
+// ---------------- Axis drag pan + log minor ticks ----------------
+// Left-dragging the left axis of either view pans its vertical range
+// (amplitude for the waveform, frequency for the spectrogram) without moving
+// the playhead. In log mode the spectral ruler also draws intermediate 2x/5x
+// decade ticks in a darker colour than the major decade lines.
+
+static void testAxisPanAndLogTicks()
+{
+    const juce::File wav = makeTempFile ("axis_pan.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load wav for axis pan test");
+
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+
+    // --- Waveform: left-drag on the amplitude axis pans vertically ---
+    {
+        WaveformView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        const double ampPx = view.rowAmpPx();
+        CHECK (ampPx > 1.0, "row amplitude scale is positive");
+
+        // x < kLeftAxisWidth selects the vertical-pan drag mode.
+        view.mouseDown (mkMouse (view, 20, 50, lmb));
+        view.mouseDrag (mkMouse (view, 20, 90, lmb));
+
+        CHECK (std::abs (view.getVerticalOffset() - (-40.0 / ampPx)) < 1e-9,
+               "axis drag shifts the vertical offset by the dragged distance");
+        CHECK (app.playhead == 0.0, "waveform axis drag does not move the playhead");
+
+        // Dragging back restores the centre.
+        view.mouseDown (mkMouse (view, 20, 90, lmb));
+        view.mouseDrag (mkMouse (view, 20, 50, lmb));
+        CHECK (std::abs (view.getVerticalOffset()) < 1e-9,
+               "dragging back restores the vertical offset");
+    }
+
+    // --- Spectral: left-drag on the frequency axis pans in log space ---
+    {
+        SpectralView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        // Zoom to a sub-range first so the pan cannot hit the Nyquist clamp.
+        view.setFrequencyRange (100.0, 2000.0);
+        const double fmin = view.getFreqMin(), fmax = view.getFreqMax();
+
+        // One visible channel: the row spans the full height.
+        const int H = 200;
+        const double f0 = view.yToFreq (60.0f, H);   // freq under cursor at drag start
+        const double f1 = view.yToFreq (80.0f, H);
+
+        view.mouseDown (mkMouse (view, 20, 60, lmb));
+        view.mouseDrag (mkMouse (view, 20, 80, lmb));
+
+        CHECK (std::abs (view.getFreqMin() - fmin * (f0 / f1)) / fmin < 1e-9
+              && std::abs (view.getFreqMax() - fmax * (f0 / f1)) / fmax < 1e-9,
+               "log axis drag multiplies the range by the cursor frequency ratio");
+        CHECK (app.playhead == 0.0, "spectral axis drag does not move the playhead");
+    }
+
+    // --- Spectral: linear mode pans by a fixed Hz delta ---
+    {
+        SpectralView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        Settings s = app.settings;
+        s.logFrequency = false;
+        view.setSettings (s);
+        view.setFrequencyRange (500.0, 3000.0);
+
+        const double fmin = view.getFreqMin(), fmax = view.getFreqMax();
+        const int H = 200;
+        const double d = view.yToFreq (80.0f, H) - view.yToFreq (100.0f, H);
+
+        view.mouseDown (mkMouse (view, 20, 80, lmb));
+        view.mouseDrag (mkMouse (view, 20, 100, lmb));
+
+        CHECK (std::abs (view.getFreqMin() - (fmin + d)) < 1e-6
+              && std::abs (view.getFreqMax() - (fmax + d)) < 1e-6,
+               "linear axis drag shifts the range by the cursor frequency delta");
+    }
+
+    // --- Log ruler: intermediate 2x/5x ticks are drawn darker than decades ---
+    // A silent file keeps the background exactly black, so the anti-aliased
+    // tick lines can be measured without spectral content interfering.
+    {
+        const juce::File sil = makeTempFile ("axis_ticks_silence.wav");
+        writeWav (sil, 1, 8000.0, 32000, [] (int, int64_t, double) { return 0.0f; });
+
+        Application app2;
+        CHECK (app2.openFile (sil), "open silence for tick test");
+
+        SpectralView view (app2);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        // Range [80, 900] Hz: one decade tick at 100 Hz plus minor ticks at
+        // 200 and 500 Hz.
+        view.setFrequencyRange (80.0, 900.0);
+        juce::Image img (juce::Image::ARGB, 400, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+
+        // GDI rasterises a 1 px line at fractional y onto the row below it.
+        auto yOf = [&] (double f) -> int
+        { return (int) std::floor ((float) view.freqToY (f, 200)); };
+
+        auto brightness = [&] (int yy) -> int
+        { const auto c = img.getPixelAt (100, yy); return (c.getRed() + c.getGreen() + c.getBlue()) / 3; };
+
+        // All three tick rows must be visible grey lines on the black ground.
+        CHECK (brightness (yOf (100.0)) > 25,
+               "decade tick line is drawn");
+        CHECK (brightness (yOf (200.0)) > 20,
+               "2x intermediate tick is drawn");
+        CHECK (brightness (yOf (500.0)) > 20,
+               "5x intermediate tick is drawn");
+
+        // The major decade line uses a brighter colour than the minor ones.
+        CHECK (brightness (yOf (100.0)) > brightness (yOf (200.0)) + 8
+              && brightness (yOf (100.0)) > brightness (yOf (500.0)) + 8,
+               "decade tick is brighter than the intermediate ticks");
+
+        // A position without a tick stays dark.
+        CHECK (brightness (yOf (300.0)) < 12, "no tick line where none is expected");
+
+        sil.deleteFile();
+    }
+
+    wav.deleteFile();
+}
+
+// ---------------- FFT analysis view: decoupled zoom/pan/wheel + cursor snap ----------------
+// The Frequency Analysis tab keeps its own frequency and level windows:
+// wheel zooms around the cursor, right-drag box-zooms both axes, left-drag on
+// an axis pans it. The cursor readout snaps to the nearest curve within a few
+// pixels and reports that channel's exact bin value.
+static void testFFTViewInteractions()
+{
+    const juce::File wav = makeTempFile ("fft_interact.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for FFT interaction test");   // openFile sets visible channels
+    app.settings.fftSize = 1024;   // bin width 7.8125 Hz -> bins around 440 Hz
+
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    const juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
+
+    // --- Wheel zoom: factor = pow(1.25, -deltaY) around the cursor frequency ---
+    {
+        FFTAnalysisView view (app);
+        view.setSize (300, 200);
+        const auto plot = view.plotBounds();
+        CHECK (plot.getWidth() > 50 && plot.getHeight() > 50, "FFT plot area is sane");
+
+        // Default log axis for an 8 kHz file: [20, Nyquist].
+        const double fLo0 = view.getFreqLo(), fHi0 = view.getFreqHi();
+        CHECK (std::abs (fLo0 - 20.0) < 1e-9 && std::abs (fHi0 - 4000.0) < 1e-9,
+               "default log axis is [20, Nyquist]");
+
+        const int cx = plot.getX() + plot.getWidth() / 2;
+        const double fC = view.xToFreq (cx);
+
+        auto wheel = [&] (int x, int y, float dy)
+        {
+            juce::MouseWheelDetails wd; wd.deltaY = dy;
+            view.mouseWheelMove (mkMouse (view, x, y, {}), wd);
+        };
+
+        // Wheel down (deltaY=-1) zooms in by 1.25x around the cursor.
+        wheel (cx, plot.getY() + plot.getHeight() / 2, -1.0f);
+        const double expLo = std::exp (std::log (fC) + (std::log (fLo0) - std::log (fC)) / 1.25);
+        const double expHi = std::exp (std::log (fC) + (std::log (fHi0) - std::log (fC)) / 1.25);
+        CHECK (std::abs (view.getFreqLo() - expLo) / expLo < 1e-6
+              && std::abs (view.getFreqHi() - expHi) / expHi < 1e-6,
+               "wheel down zooms the frequency window in around the cursor");
+
+        // Wheel up again restores the original range.
+        wheel (cx, plot.getY() + plot.getHeight() / 2, +1.0f);
+        CHECK (std::abs (view.getFreqLo() - fLo0) / fLo0 < 1e-6
+              && std::abs (view.getFreqHi() - fHi0) / fHi0 < 1e-6,
+               "wheel up restores the original frequency window");
+    }
+
+    // --- Right-drag box zoom: horizontal = frequency, vertical = level ---
+    {
+        FFTAnalysisView view (app);
+        view.setSize (300, 200);
+        const auto plot = view.plotBounds();
+
+        const int x1 = plot.getX() + 20, y1 = plot.getY() + 16;
+        const int x2 = plot.getX() + plot.getWidth() - 40, y2 = plot.getY() + plot.getHeight() - 30;
+
+        // Expected values must be computed BEFORE the drag changes the ranges.
+        // The zoom rect is inclusive of both endpoints.
+        const double fA = view.xToFreq (x1), fB = view.xToFreq (x2);
+        const double dbA = view.yToLevel ((float) y1), dbB = view.yToLevel ((float) y2);
+
+        view.mouseDown (mkMouse (view, x1, y1, rmb));
+        view.mouseDrag (mkMouse (view, x2, y2, rmb));
+        view.mouseUp   (mkMouse (view, x2, y2, rmb));
+
+        std::fprintf (stderr, "  boxzoom: rect coords x1=%d x2=%d y1=%d y2=%d\n", x1, x2, y1, y2);
+        std::fprintf (stderr, "  boxzoom: got f [%.3f, %.3f] want [%.3f, %.3f]\n",
+                      view.getFreqLo(), view.getFreqHi(), fA, fB);
+        std::fprintf (stderr, "  boxzoom: got db [%.3f, %.3f] want [%.3f, %.3f]\n",
+                      view.getDbTop(), view.getDbBottom(), dbA, dbB);
+
+        CHECK (std::abs (view.getFreqLo() - fA) / fA < 1e-6
+              && std::abs (view.getFreqHi() - fB) / fB < 1e-6,
+               "box zoom sets the frequency window to the dragged x span");
+        CHECK (std::abs (view.getDbTop() - dbA) < 1e-6
+              && std::abs (view.getDbBottom() - dbB) < 1e-6,
+               "box zoom sets the level window to the dragged y span");
+    }
+
+    // --- Left-drag on the bottom axis pans frequency; right axis pans level ---
+    {
+        FFTAnalysisView view (app);
+        view.setSize (300, 200);
+        const auto plot = view.plotBounds();
+
+        const double fLo0 = view.getFreqLo(), fHi0 = view.getFreqHi();
+        const int ax1 = plot.getX() + 40, ax2 = plot.getX() + 90;
+        const double f0 = view.xToFreq (ax1), f1 = view.xToFreq (ax2);
+
+        // Bottom strip: y below the plot.
+        const int ay = plot.getBottom() + 8;
+        CHECK (ay < view.getHeight(), "bottom axis strip is inside the component");
+        view.mouseDown (mkMouse (view, ax1, ay, lmb));
+        view.mouseDrag (mkMouse (view, ax2, ay, lmb));
+
+        const double r = f0 / f1;   // log mode: multiply by the ratio
+        CHECK (std::abs (view.getFreqLo() - fLo0 * r) / fLo0 < 1e-6
+              && std::abs (view.getFreqHi() - fHi0 * r) / fHi0 < 1e-6,
+               "bottom-axis drag pans the frequency window");
+
+        // Right strip: x beyond the plot.
+        const double dbTop0 = view.getDbTop(), dbBot0 = view.getDbBottom();
+        const int lx = plot.getRight() + 8;
+        CHECK (lx < view.getWidth(), "level axis strip is inside the component");
+        const int ly1 = plot.getY() + 26, ly2 = plot.getY() + 66;
+        const double db0 = view.yToLevel ((float) ly1), db1 = view.yToLevel ((float) ly2);
+
+        view.mouseDown (mkMouse (view, lx, ly1, lmb));
+        view.mouseDrag (mkMouse (view, lx, ly2, lmb));
+
+        CHECK (std::abs (view.getDbTop() - (dbTop0 + (db0 - db1))) < 1e-6
+              && std::abs (view.getDbBottom() - (dbBot0 + (db0 - db1))) < 1e-6,
+               "level-axis drag pans the level window");
+    }
+
+    // --- Cursor readout: snaps to the curve within a few pixels ---
+    {
+        FFTAnalysisView view (app);
+        view.setSize (300, 200);
+        const auto plot = view.plotBounds();
+
+        app.setPlayhead (1.0);   // mid-file, well inside the tone
+        { juce::Image img (juce::Image::ARGB, 300, 200, true);
+          juce::Graphics g (img); view.paint (g); }
+
+        const auto& mags = view.getSpectrum();
+        CHECK (!mags.empty() && !mags[0].empty(), "spectrum was computed on paint");
+
+        if (!mags.empty())
+        {
+            const int n = view.getCachedN();
+            const double rate = app.audioEngine().sampleRate();
+            const int bin440 = (int) std::lround (440.0 * n / rate);
+            CHECK (bin440 > 0 && bin440 < n / 2, "tone bin is inside the spectrum");
+
+            // Find the actual peak bin around the expected one.
+            int pb = 0;
+            for (int b = std::max (1, bin440 - 3); b <= std::min (n / 2 - 1, bin440 + 3); ++b)
+                if (mags[0][(size_t) b] > mags[0][(size_t) pb]) pb = b;
+
+            const double fPeak = (double) pb * rate / n;
+            const int xAtPeak = (int) std::lround ((float) view.freqToX (fPeak));
+            const float yAtPeak = view.levelToY (-160.0 * (1.0 - (double) mags[0][(size_t) pb]));
+
+            bool snapped = false;
+            float dotX = 0, dotY = 0;
+            const juce::String info = view.buildCursorInfo (xAtPeak, (int) std::lround ((float) yAtPeak),
+                                                           snapped, dotX, dotY);
+            CHECK (snapped, "cursor on the curve snaps to it");
+            CHECK (info.contains ("[snap Ch1]"), "readout names the snapped channel");
+            CHECK (info.contains (juce::String (fPeak >= 1000.0 ? fPeak / 1000.0 : fPeak, 2)),
+                   "readout shows the exact bin centre frequency");
+
+            // Far from any curve: no snap, plain per-channel readout.
+            const int xQuiet = (int) std::lround ((float) view.freqToX (50.0));
+            bool snapped2 = true;
+            const juce::String info2 = view.buildCursorInfo (xQuiet, plot.getY() + 3,
+                                                            snapped2, dotX, dotY);
+            CHECK (!snapped2, "cursor away from the curves does not snap");
+            CHECK (info2.startsWith ("Cursor:") && info2.contains ("Ch1="),
+                   "quiet readout still lists the channel value");
+        }
+    }
+
+    wav.deleteFile();
+}
+
+// ---------------- Spectral controls: 512 FFT size option + async load progress ----------------
+static void testSpectralControlsAndAsyncLoad()
+{
+    // The spectrogram's FFT-size combo offers 512 as the finest resolution.
+    {
+        Application app;
+        SpectralControlsPanel panel (app);
+        CHECK (panel.hasFftSizeOption ("512"), "FFT size combo offers a 512 option");
+        CHECK (panel.hasFftSizeOption ("4096"), "FFT size combo still offers the usual sizes");
+    }
+
+    // Large-file loading reports progress and activates the document on the
+    // message thread.
+    {
+        const juce::File wav = makeTempFile ("async_load.wav");
+        writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                          * 440.0 * (double) f / rate); });
+
+        Application app;
+        std::mutex mtx;
+        int progressCount = 0, lastProgressX100 = -1;
+        bool done = false;
+
+        app.loadFileAsync (wav,
+            [&] (float p)
+            {
+                std::lock_guard<std::mutex> l (mtx);
+                ++progressCount;
+                lastProgressX100 = (int) std::lround ((double) p * 100.0);
+            },
+            [&] (bool ok) { done = ok; });
+
+        for (int i = 0; i < 500 && !done; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+
+        CHECK (done, "async load completed successfully");
+        { std::lock_guard<std::mutex> l (mtx);
+          CHECK (progressCount > 0, "loading reported progress");
+          CHECK (lastProgressX100 >= 95, "progress reached the end of the file"); }
+        CHECK (app.audioEngine().isFileLoaded(), "document is active after async load");
+
+        wav.deleteFile();
+    }
+}
+
 static void testMultiFileSupport()
 {
     // Two clearly distinct files: A = 8 kHz mono 2 s (440 Hz),
@@ -3196,6 +3562,8 @@ static void testVersionString()
 
 static int scRunUnitTestsImpl()
 {
+    std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
+    std::setvbuf (stdout, nullptr, _IONBF, 0);
     progress ("FFT");            testFFT();
     progress ("scfft vs juce");  testScFftVsJuce();
     progress ("markers");        testMarkers();
@@ -3240,6 +3608,9 @@ static int scRunUnitTestsImpl()
     progress ("set scale dialog");    testSetScaleDialog();
     progress ("spectral scale labels"); testSpectralScaleLabels();
     progress ("right-drag box zoom"); testRightDragZoom();
+    progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
+    progress ("FFT view interactions"); testFFTViewInteractions();
+    progress ("spectral controls + async load"); testSpectralControlsAndAsyncLoad();
     progress ("multi-file support");  testMultiFileSupport();
     progress ("version string");      testVersionString();
 

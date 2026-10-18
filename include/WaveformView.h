@@ -38,6 +38,30 @@ public:
     {
         if (z != vZoom) { vZoom = z; dirty = true; repaint(); }
     }
+
+    // Set the visible amplitude window directly: [lo, hi] in amplitude units
+    // (the vertical scrollbar drives this). The centre becomes the offset and
+    // the span sets the zoom.
+    void setVerticalRange (double lo, double hi)
+    {
+        vOffset = std::clamp ((lo + hi) * 0.5, -2.0, 2.0);
+        const double span = std::max (1e-6, hi - lo);
+        setVerticalZoom (std::clamp (2.0 / (0.9 * span), 0.05, 64.0));
+    }
+
+    // Reset the vertical axis to full scale centred on zero.
+    void resetVerticalZoom();
+
+    // Pixels per unit amplitude for one row at the current zoom (tests).
+    double rowAmpPx() const
+    {
+        const auto pr = plotRect();
+        int visCount = 0;
+        for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
+            if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
+        return std::max (1e-6, (double) pr.getHeight() / std::max (1, visCount) * 0.45
+                         * (double) vZoom);
+    }
     void setSelection (juce::Range<double> s)
     {
         if (s != selection) { selection = s; dirty = true; repaint(); }
@@ -61,6 +85,8 @@ public:
     // Visible half-amplitude at a row edge (for the vertical scrollbar):
     // 1.0 means full scale fits exactly in the row height.
     double getVisibleAmpHalf() const { return 1.0 / (0.9 * vZoom); }
+    // Current vertical offset: the amplitude value sitting at each row's centre.
+    double getVerticalOffset() const { return vOffset; }
 
     // Notify MainWindow that the time window changed: (newStart, newEnd).
     // MainWindow applies it to BOTH views so they always show the same range.
@@ -82,6 +108,7 @@ public:
 private:
     Application& app;   // audio data read live via app.audioEngine() (active doc)
     double viewStart = 0, viewEnd = 10, vZoom = 1;
+    double vOffset = 0;   // amplitude value at each row's centre (vertical pan)
     juce::Range<double> selection{ 0, 0 };
     double playhead = 0;
     const std::vector<Marker>* markerList = nullptr;   // same overlay as the spectral view
@@ -89,7 +116,7 @@ private:
     bool dirty = true;
 
     // Interaction state
-    enum class DragMode { None, Select, Pan, ZoomDrag };
+    enum class DragMode { None, Select, Pan, VPan, ZoomDrag };
     DragMode dragMode = DragMode::None;
     int dragStartX = 0;
     int dragStartY = 0;

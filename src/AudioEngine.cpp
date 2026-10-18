@@ -19,7 +19,7 @@ AudioEngine::~AudioEngine()
     closeFile();
 }
 
-bool AudioEngine::loadFile (const juce::File& file)
+bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> onProgress)
 {
     closeFile();
     auto* rawReader = fm->createReaderFor (file);
@@ -38,15 +38,32 @@ bool AudioEngine::loadFile (const juce::File& file)
     if ((int64_t) nchans * totalSamples <= maxInMemory)
     {
         buffer = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) totalSamples);
-        rawReader->read (buffer.get(), 0, (int) totalSamples, 0, true, true);
+        // Read in chunks so a progress callback can report real I/O progress
+        // on large files.
+        const int64_t chunk = 1ll << 20;
+        for (int64_t off = 0; off < totalSamples; off += chunk)
+        {
+            const int cnt = (int) std::min<int64_t> (chunk, totalSamples - off);
+            rawReader->read (buffer.get(), 0, cnt, (int) off, true, true);
+            if (onProgress)
+                onProgress ((float) ((double) (off + cnt) / (double) totalSamples));
+        }
         delete rawReader;
     }
     else
     {
         reader.reset (rawReader); // keep streaming
+        if (onProgress) onProgress (0.5f);
     }
 
-    rebuildMipmaps();
+    // Mipmap construction is the second half of the load for streamed files.
+    if (onProgress)
+    {
+        auto p = std::move (onProgress);
+        rebuildMipmaps ([p] (float f) { p (0.5f + 0.5f * f); });
+    }
+    else
+        rebuildMipmaps();
     return true;
 }
 
@@ -211,7 +228,7 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     playheadFrac = newPos;
 }
 
-void AudioEngine::rebuildMipmaps()
+void AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress)
 {
     clearMipmaps();
     if (!hasFile || totalSamples == 0)
@@ -223,6 +240,13 @@ void AudioEngine::rebuildMipmaps()
         baseFactor *= 2;
 
     int64_t factor = baseFactor;
+    // Count levels first so progress can be reported as a fraction.
+    int totalMipLevels = 0;
+    {
+        int64_t f2 = baseFactor;
+        while (f2 <= 16384ll * baseFactor && totalSamples / f2 > 100)
+        { ++totalMipLevels; f2 *= 2; }
+    }
     while (factor <= 16384ll * baseFactor && totalSamples / factor > 100)
     {
         MipLevel lv;
@@ -262,6 +286,8 @@ void AudioEngine::rebuildMipmaps()
         }
 
         mips.push_back (std::move (lv));
+        if (onProgress)
+            onProgress ((float) mips.size() / (float) std::max (1, totalMipLevels));
         factor *= 2;
     }
 }

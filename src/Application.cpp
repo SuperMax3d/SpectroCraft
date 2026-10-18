@@ -4,6 +4,7 @@
 
 #include "Application.h"
 #include <algorithm>
+#include <thread>
 
 Application::Application (const juce::File& recentStorePath)
 {
@@ -77,6 +78,31 @@ bool Application::openFile (const juce::File& file)
     activate ((int) docs.size() - 1);
     addRecentFile (file);
     return true;
+}
+
+void Application::loadFileAsync (const juce::File& file,
+                                 std::function<void(float)> onProgress,
+                                 std::function<void(bool)> onDone)
+{
+    // The document is built entirely on the worker thread (pure I/O + DSP);
+    // it only crosses to the message thread once fully loaded.
+    auto* doc = new FileDoc();
+    std::thread ([doc, file, onProgress, onDone, this] {
+        const bool ok = doc->load (file, onProgress);
+
+        juce::MessageManager::callAsync ([this, doc, file, ok, onDone] {
+            if (ok)
+            {
+                docs.push_back (std::unique_ptr<FileDoc> (doc));
+                activate ((int) docs.size() - 1);
+                addRecentFile (file);
+            }
+            else
+                delete doc;
+
+            if (onDone) onDone (ok);
+        });
+    }).detach();
 }
 
 // Write the current list to the store: one property per slot, clearing any

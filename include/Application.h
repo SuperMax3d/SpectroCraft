@@ -64,6 +64,13 @@ public:
 
     bool openFile (const juce::File& file);
 
+    /** Loads a file on a background thread (for large files). onProgress is
+        called from the worker thread with 0..1; onDone runs on the message
+        thread once the load finished (ok = success, doc activated). */
+    void loadFileAsync (const juce::File& file,
+                        std::function<void(float)> onProgress,
+                        std::function<void(bool)> onDone);
+
     // Recently opened files, most recent first. Updated on every successful
     // openFile() and persisted across sessions in a PropertiesFile.
     static constexpr int kMaxRecentFiles = 10;

@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <cmath>
 
+// Forward declaration (defined further down, used by the constructor).
+static void fftAxisLimits (int mode, double rate, double& fLo, double& fHi);
+
 juce::String formatTimeCode (double secs)
 {
     if (secs < 0) secs = 0;
@@ -296,10 +299,11 @@ static bool isThirdOctLabelFreq (double f)
 static constexpr int64_t kMaxAvgWindows = 2048;
 
 static std::vector<float> toThirdOctBands (const std::vector<float>& mag, int n,
-                                           double rate, float dBRange)
+                                           double rate)
 {
     const double nyq = rate * 0.5;
-    const double dBMin = -(double) dBRange;
+    // Same fixed normalization floor as the live curve (see kNormFloorDb).
+    const double dBMin = -160.0;
     std::vector<float> out;
     for (int b = 0; b < kNumThirdOctBands && kThirdOctCenters[b] <= nyq; ++b)
     {
@@ -417,7 +421,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         axisMode_ = axisCombo.getSelectedId() - 1;
         thirdOctMags.clear();   // band cache is only valid for mode 2
         refreshSnapshotBands(); // re-derive stored snapshots' bands for the new mode
-        repaint();
+        resetDisplayRanges();   // each mode has its own default frequency window
     };
 
     for (int i = 0; i < 10; ++i)
@@ -443,6 +447,87 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
     addAndMakeVisible (&windowCombo);
     addAndMakeVisible (&axisCombo);
     for (auto& b : snapBtns) addAndMakeVisible (&b);
+
+    resetDisplayRanges();   // start at the mode defaults for the current file
+}
+
+// Reset the local display ranges: frequency window to the axis-mode default,
+// level window to 0 .. -80 dB.
+void FFTAnalysisView::resetDisplayRanges()
+{
+    const double rate = app.audioEngine().sampleRate();
+    fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+    dbTop_ = 0.0;
+    dbBottom_ = -80.0;
+    repaint();
+}
+
+// Level-window mapping: dB value -> pixel y inside the plot area.
+float FFTAnalysisView::levelToY (double db) const
+{
+    const auto plot = plotBounds();
+    const double span = std::max (1e-9, dbTop_ - dbBottom_);
+    return (float) (plot.getY() + (dbTop_ - db) / span * plot.getHeight());
+}
+
+double FFTAnalysisView::yToLevel (float y) const
+{
+    const auto plot = plotBounds();
+    const double t = std::clamp ((double) (y - plot.getY()) / std::max (1, plot.getHeight()), 0.0, 1.0);
+    return dbTop_ + t * (dbBottom_ - dbTop_);
+}
+
+// Zoom the frequency window around the cursor x position.
+void FFTAnalysisView::zoomFreqAtX (int x, double factor)
+{
+    const auto plot = plotBounds();
+    if (plot.getWidth() <= 0 || fHi_ <= fLo_) return;
+
+    const double rate = app.audioEngine().sampleRate();
+    const double nyq = rate * 0.5;
+    const double fCursor = std::clamp ((double) xToFreq (x), 1e-9, nyq);
+
+    if (axisMode_ == 1)
+    {
+        // Log axis: zoom in log space.
+        const double llo = std::log (fLo_), lhi = std::log (fHi_), lf = std::log (fCursor);
+        fLo_ = std::exp (std::clamp (lf + (llo - lf) / factor, 0.0, std::log (nyq)));
+        fHi_ = std::exp (std::clamp (lf + (lhi - lf) / factor, 0.0, std::log (nyq)));
+    }
+    else
+    {
+        // Linear axis (and 1/3-octave): zoom in linear Hz.
+        fLo_ = std::clamp (fCursor + (fLo_ - fCursor) / factor, 0.0, nyq);
+        fHi_ = std::clamp (fCursor + (fHi_ - fCursor) / factor, 0.0, nyq);
+    }
+
+    if (fHi_ <= fLo_ * 1.0001)
+    {
+        // Degenerate: fall back to the mode defaults.
+        fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+    }
+    repaint();
+}
+
+// Zoom the level window around the cursor y position.
+void FFTAnalysisView::zoomLevelAtY (float y, double factor)
+{
+    const auto plot = plotBounds();
+    if (plot.getHeight() <= 0) return;
+
+    const double dbCursor = std::clamp ((double) yToLevel (y), -240.0, 40.0);
+    double top = dbTop_ + (dbTop_ - dbCursor) / factor;
+    double bot = dbBottom_ + (dbBottom_ - dbCursor) / factor;
+
+    // Keep the window span in a sane range and stay inside absolute limits.
+    const double span = std::clamp (top - bot, 10.0, 320.0);
+    top = std::clamp (top, -240.0 + span * 0.5, 40.0);
+    bot = top - span;
+    if (bot < -240.0) { bot = -240.0; top = bot + span; }
+
+    dbTop_ = top;
+    dbBottom_ = bot;
+    repaint();
 }
 
 // Frequency-axis limits for the current mode.
@@ -505,7 +590,9 @@ void FFTAnalysisView::computeRegionFrom (AudioEngine& eng, const std::vector<int
                 : 0.54f - 0.46f * std::cos (2.0 * juce::MathConstants<double>::pi * i / (n - 1));
     }
 
-    const double dBMin = -(double) app.settings.dBRange;
+    // Fixed normalization floor: the stored magnitudes do not depend on the
+    // visible level window, so zooming out never changes the curve data.
+    const double dBMin = -FFTAnalysisView::kNormFloorDb;
     for (int ch : chans)
     {
         if (ch < 0 || ch >= eng.numChannels()) continue;
@@ -558,7 +645,6 @@ void FFTAnalysisView::recomputeIfNeeded()
 
     if (mags.size() == app.visibleChannels.size() && cachedN == n && cachedT0 == t0
         && cachedT1 == t1 && cachedFile == file
-        && std::abs (cachedDB - (float) app.settings.dBRange) < 0.5f
         && (axisMode_ != 2 || thirdOctMags.size() == mags.size()))
         return;
 
@@ -580,11 +666,9 @@ void FFTAnalysisView::recomputeIfNeeded()
     thirdOctMags.clear();
     if (axisMode_ == 2)
         for (auto& m : mags)
-            thirdOctMags.push_back (toThirdOctBands (m, n, app.audioEngine().sampleRate(),
-                                                     app.settings.dBRange));
+            thirdOctMags.push_back (toThirdOctBands (m, n, app.audioEngine().sampleRate()));
 
     cachedN = n; cachedT0 = t0; cachedT1 = t1;
-    cachedDB = (float) app.settings.dBRange;
     cachedFile = file;
     lastComputeMs = now;
     lastComputeWasExpensive = (regionLenS > (double) n);
@@ -624,7 +708,7 @@ void FFTAnalysisView::refreshSnapshotBands()
             ? s.source->engine.sampleRate() : app.audioEngine().sampleRate();
         s.bands.clear();
         for (auto& m : s.mags)
-            s.bands.push_back (toThirdOctBands (m, s.n, rate, app.settings.dBRange));
+            s.bands.push_back (toThirdOctBands (m, s.n, rate));
     }
 }
 
@@ -647,26 +731,26 @@ juce::Rectangle<int> FFTAnalysisView::plotBounds() const
 float FFTAnalysisView::xToFreq (int x) const
 {
     const auto plot = plotBounds();
-    if (plot.getWidth() <= 0) return 0.0f;
-    const double rate = app.audioEngine().sampleRate();
-    double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
+    if (plot.getWidth() <= 0 || fHi_ <= fLo_) return (float) fLo_;
     const double t = std::clamp ((double) (x - plot.getX()) / (double) plot.getWidth(), 0.0, 1.0);
     if (axisMode_ == 0)
-        return (float) (fLo + t * (fHi - fLo));
-    return (float) std::exp (std::log (fLo) + t * (std::log (fHi) - std::log (fLo)));
+        return (float) (fLo_ + t * (fHi_ - fLo_));
+    const double llo = std::log (std::max (1e-9, fLo_)), lhi = std::log (fHi_);
+    return (float) std::exp (llo + t * (lhi - llo));
 }
 
 double FFTAnalysisView::freqToX (double f) const
 {
     const auto plot = plotBounds();
-    if (plot.getWidth() <= 0) return (float) plot.getX();
-    const double rate = app.audioEngine().sampleRate();
-    double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
+    if (plot.getWidth() <= 0 || fHi_ <= fLo_) return (float) plot.getX();
     double t;
     if (axisMode_ == 0)
-        t = (f - fLo) / std::max (1e-9, fHi - fLo);
+        t = (f - fLo_) / std::max (1e-9, fHi_ - fLo_);
     else
-        t = (std::log (std::max (1.0, f)) - std::log (fLo)) / (std::log (fHi) - std::log (fLo));
+    {
+        const double llo = std::log (std::max (1e-9, fLo_)), lhi = std::log (fHi_);
+        t = (std::log (std::max (1.0, f)) - llo) / (lhi - llo);
+    }
     return plot.getX() + t * plot.getWidth();
 }
 
@@ -688,6 +772,15 @@ void FFTAnalysisView::resized()
 
 void FFTAnalysisView::paint (juce::Graphics& g)
 {
+    // Rubber band for a right-drag box zoom.
+    if (dragMode == DragMode::ZoomDrag && haveZoomRect)
+    {
+        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 48));
+        g.fillRoundedRectangle (zoomRect.toFloat(), 3.0f);
+        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 160));
+        g.drawRoundedRectangle (zoomRect.toFloat(), 3.0f, 1.0f);
+    }
+
     const auto fullBounds = getLocalBounds();
     g.fillAll (juce::Colours::black);
 
@@ -717,7 +810,8 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     recomputeIfNeeded();
 
     const double rate = app.audioEngine().sampleRate();
-    double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
+    // Local display ranges (independent of the spectrogram's settings).
+    const double fLo = fLo_, fHi = fHi_;
     const int n = cachedN;
     const bool haveSpectrum = (n > 1) && !mags.empty()
                               && (axisMode_ != 2 || !thirdOctMags.empty());
@@ -745,15 +839,18 @@ void FFTAnalysisView::paint (juce::Graphics& g)
             for (int i = 1; i <= 4; ++i) freqTicks.push_back (span * (double) i / 5.0);
     }
 
-    // Grid: frequency ticks + dB lines
+    // Grid: frequency ticks + level lines. The level grid step adapts to the
+    // visible window so zooming in/out always shows a few readable lines.
+    const double dbSpan = std::max (1e-9, dbTop_ - dbBottom_);
+    int dbStep = 12;
+    for (int cand : { 2, 4, 6, 10, 12, 20, 30 })
+        if (dbSpan / cand >= 3.0 && dbSpan / cand <= 9.0) { dbStep = cand; break; }
+
     g.setColour (juce::Colour::fromRGB (40, 40, 46));
     for (double f : freqTicks)
         g.drawVerticalLine ((float) freqToX (f), plot.getY(), plot.getBottom());
-    for (int db = 0; db >= -(int) app.settings.dBRange; db -= 12)
-    {
-        const float y = plot.getY() + (float) ((double) -db / (double) app.settings.dBRange) * plot.getHeight();
-        g.drawHorizontalLine ((int) y, plot.getX(), plot.getRight());
-    }
+    for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
+        g.drawHorizontalLine ((int) levelToY (L), plot.getX(), plot.getRight());
 
     // Curves
     if (!haveSpectrum)
@@ -764,6 +861,12 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     }
     else
     {
+        // Clip the curves to the plot area: with a zoomed level window parts of
+        // the curve can sit above/below the visible range. (This JUCE build has
+        // no add/removeClipRegion, so save/restore the state around it.)
+        g.saveState();
+        g.reduceClipRegion (plot);
+
         // Draw in frequency space: bin k corresponds to f = k * rate / n.
         // (The magnitude vector only has n/2+1 entries — never index it by x!)
         // Each curve is mapped with the FFT size it was computed at, so stored
@@ -778,7 +881,9 @@ void FFTAnalysisView::paint (juce::Graphics& g)
                 const double f = (double) k * rate / (double) curveN;
                 if (f < fLo || f > fHi) continue;
                 const float x = (float) freqToX (f);
-                const float y = plot.getY() + (float) ((1.0f - mag[k]) * plot.getHeight());
+                // Stored magnitudes are normalized against the fixed floor.
+                const double dB = -kNormFloorDb * (1.0 - (double) mag[k]);
+                const float y = levelToY (dB);
                 if (!started) { path.startNewSubPath (x, y); started = true; }
                 else          path.lineTo (x, y);
             }
@@ -803,7 +908,8 @@ void FFTAnalysisView::paint (juce::Graphics& g)
                 if (hi <= lo) continue;
                 const float xLo = (float) freqToX (lo);
                 const float xHi = (float) freqToX (hi);
-                const float y   = plot.getY() + (float) ((1.0f - bands[(size_t) b]) * plot.getHeight());
+                const double dBb = -kNormFloorDb * (1.0 - (double) bands[(size_t) b]);
+                const float y   = levelToY (dBb);
                 if (!started) { path.startNewSubPath (xLo, y); started = true; }
                 else          path.lineTo (xLo, y);    // vertical connector at the shared boundary
                 path.lineTo (xHi, y);                  // flat top of this band
@@ -832,6 +938,8 @@ void FFTAnalysisView::paint (juce::Graphics& g)
         else
             for (size_t c = 0; c < mags.size() && c < 4; ++c)
                 drawCurve (mags[c], n, fftColours[c]);
+
+        g.restoreState();
     }
 
     // Axis labels
@@ -852,40 +960,120 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     // (dB-SPL for Pascal files; linear V/g values for volts/grams files)
     // instead of relative dB.
     const ScaleCalibration& sc = app.scale();
-    for (int db = 0; db >= -(int) app.settings.dBRange; db -= 12)
-    {
-        const float y = plot.getY() + (float) ((double) -db / (double) app.settings.dBRange) * plot.getHeight();
-        g.drawText (ScaleCalibration::formatAxisLabel (db, sc), plot.getRight() + 4, (int) y - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
-    }
+    for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
+        g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
+                    (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
 
-    // Cursor readout
-    if (haveSpectrum && cursorX >= plot.getX() && cursorX <= plot.getRight()
-        && cursorY >= plot.getY() && cursorY <= plot.getBottom())
+    // Cursor readout (crosshair + optional snap marker)
+    bool snapped = false;
+    float snapDotX = 0.0f, snapDotY = 0.0f;
+    const juce::String info = buildCursorInfo (cursorX, cursorY, snapped, snapDotX, snapDotY);
+    if (!info.isEmpty())
     {
-        const double f = xToFreq (cursorX);
-        juce::String info;
-        if (axisMode_ == 2 && !thirdOctMags.empty())
+        g.setColour (juce::Colours::white);
+        g.setFont (10.0f);
+        g.drawText (info, juce::Rectangle<int> (4, fullBounds.getHeight() - readoutH,
+                                                fullBounds.getWidth() - 8, readoutH),
+                    juce::Justification::left);
+
+        // Cursor crosshair + snap marker
+        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 90));
+        g.drawVerticalLine ((float) cursorX, plot.getY(), plot.getBottom());
+        if (snapped)
         {
-            // Report the band containing the cursor frequency (or nearest centre).
-            int b = -1;
-            double bestD = 1e30;
-            for (int i = 0; i < kNumThirdOctBands && i < (int) thirdOctMags[0].size(); ++i)
+            g.setColour (juce::Colours::white);
+            g.fillEllipse (snapDotX - 3.5f, snapDotY - 3.5f, 7.0f, 7.0f);
+        }
+    }
+}
+
+// Build the cursor readout text for position (x, y). When one of the curves
+// passes within a few pixels of the cursor, snapped is set and snapDotX/Y
+// hold that point so paint() can draw the marker. Returns an empty string
+// when there is nothing to show.
+juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
+                                               float& snapDotX, float& snapDotY) const
+{
+    snapped = false;
+    snapDotX = 0.0f;
+    snapDotY = 0.0f;
+
+    const auto plot = plotBounds();
+    const int n = cachedN;
+    const bool haveSpectrum = (n > 1) && !mags.empty()
+                              && (axisMode_ != 2 || !thirdOctMags.empty());
+    if (!haveSpectrum || x < plot.getX() || x > plot.getRight()
+        || y < plot.getY() || y > plot.getBottom())
+        return {};
+
+    const double rate = app.audioEngine().sampleRate();
+    const ScaleCalibration& sc = app.scale();
+    const double f = xToFreq (x);
+    juce::String info;
+    int snapCh = -1;          // channel index of a snapped curve (-1 = none)
+
+    if (axisMode_ == 2 && !thirdOctMags.empty())
+    {
+        // Report the band containing the cursor frequency (or nearest centre).
+        int b = -1;
+        double bestD = 1e30;
+        for (int i = 0; i < kNumThirdOctBands && i < (int) thirdOctMags[0].size(); ++i)
+        {
+            const double fc = kThirdOctCenters[i];
+            const double lo = fc * std::pow (2.0, -1.0 / 6.0);
+            const double hi = fc * std::pow (2.0,  1.0 / 6.0);
+            if (f >= lo && f <= hi) { b = i; break; }
+            const double d = std::abs (f - fc);
+            if (d < bestD) { bestD = d; b = i; }
+        }
+        if (b >= 0)
+        {
+            info = "Cursor:  ~" + juce::String ((int) std::lround (kThirdOctCenters[b])) + " Hz band";
+            for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
+                if (b < (int) thirdOctMags[c].size())
+                    info += ",  Ch" + juce::String ((int) c + 1) + "="
+                          + ScaleCalibration::formatSpectralLevel (-kNormFloorDb + thirdOctMags[c][(size_t) b] * kNormFloorDb, sc);
+        }
+    }
+    else
+    {
+        // Bin index for a frequency: bin = f * n / rate (bin 0 is DC).
+        auto binAt = [&](double freq) -> int
+        {
+            const int maxBin = std::min ((int) (n / 2), (int) mags[0].size() - 1);
+            return (int) std::clamp ((double) std::lround (freq * n / rate),
+                                     0.0, (double) maxBin);
+        };
+
+        // Snap: if one of the curves passes within a few pixels of the
+        // cursor, report that channel's exact bin value first.
+        double bestDy = 8.0;
+        for (size_t c = 0; c < mags.size() && c < 4; ++c)
+        {
+            if (mags[c].empty()) continue;
+            const int maxBin = std::min ((int) (n / 2), (int) mags[c].size() - 1);
+            const int bin = (int) std::clamp ((double) std::lround (f * n / rate),
+                                             0.0, (double) maxBin);
+            const double dBc = -kNormFloorDb * (1.0 - (double) mags[c][bin]);
+            const float yc = levelToY (dBc);
+            if (std::abs ((double) yc - y) < bestDy)
             {
-                const double fc = kThirdOctCenters[i];
-                const double lo = fc * std::pow (2.0, -1.0 / 6.0);
-                const double hi = fc * std::pow (2.0,  1.0 / 6.0);
-                if (f >= lo && f <= hi) { b = i; break; }
-                const double d = std::abs (f - fc);
-                if (d < bestD) { bestD = d; b = i; }
+                bestDy = std::abs ((double) yc - y);
+                snapCh = (int) c;
+                snapDotX = (float) freqToX ((double) bin * rate / n);
+                snapDotY = yc;
             }
-            if (b >= 0)
-            {
-                info = "Cursor:  ~" + juce::String ((int) std::lround (kThirdOctCenters[b])) + " Hz band";
-                for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
-                    if (b < (int) thirdOctMags[c].size())
-                        info += ",  Ch" + juce::String ((int) c + 1) + "="
-                              + ScaleCalibration::formatSpectralLevel (-app.settings.dBRange + thirdOctMags[c][(size_t) b] * app.settings.dBRange, sc);
-            }
+        }
+
+        if (snapCh >= 0)
+        {
+            snapped = true;
+            const int bin = binAt (f);
+            const double fExact = (double) bin * rate / n;   // exact bin centre
+            info = "Cursor:  " + juce::String (fExact >= 1000.0 ? fExact / 1000.0 : fExact, 2)
+                 + (fExact >= 1000.0 ? " kHz" : " Hz")
+                 + "   [snap Ch" + juce::String (snapCh + 1) + "]"
+                 + ScaleCalibration::formatSpectralLevel (-kNormFloorDb * (1.0 - (double) mags[snapCh][bin]), sc);
         }
         else
         {
@@ -893,23 +1081,14 @@ void FFTAnalysisView::paint (juce::Graphics& g)
             for (size_t c = 0; c < mags.size() && c < 4; ++c)
             {
                 if (mags[c].empty()) continue;
-                const int maxBin = std::min ((int) (n / 2), (int) mags[c].size() - 1);
-                const int bin = (int) std::clamp ((double) (int) std::lround (f * rate / n),
-                                                  0.0, (double) maxBin);
+                const int bin = binAt (f);
                 info += ",  Ch" + juce::String ((int) c + 1) + "="
-                      + ScaleCalibration::formatSpectralLevel (-app.settings.dBRange + mags[c][bin] * app.settings.dBRange, sc);
+                      + ScaleCalibration::formatSpectralLevel (-kNormFloorDb * (1.0 - (double) mags[c][bin]), sc);
             }
         }
-        g.setColour (juce::Colours::white);
-        g.setFont (10.0f);
-        g.drawText (info, juce::Rectangle<int> (4, fullBounds.getHeight() - readoutH,
-                                                fullBounds.getWidth() - 8, readoutH),
-                    juce::Justification::left);
-
-        // Cursor crosshair
-        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 90));
-        g.drawVerticalLine ((float) cursorX, plot.getY(), plot.getBottom());
     }
+
+    return info;
 }
 
 void FFTAnalysisView::mouseMove (const juce::MouseEvent& e)
@@ -1045,22 +1224,182 @@ void FFTAnalysisView::showSnapshotMenu (int i)
     { clearSnapshotSlot (i); repaint(); }
 }
 
+// Right-click context menu. When the click landed on an axis, "Zoom Out
+// Full" resets only that range instead of both.
+void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis)
+{
+    juce::PopupMenu m;
+    m.addItem (CtxZoomOutFull, "Zoom Out Full");
+    m.addSeparator();
+    m.addItem (100, "Copy Spectrum to Clipboard");
+
+    auto onAction = [this, onLevelAxis, onFreqAxis] (int id)
+    {
+        switch (id)
+        {
+            case CtxZoomOutFull:
+                if (onLevelAxis || onFreqAxis) { dbTop_ = 0.0; dbBottom_ = -80.0; repaint(); }
+                else resetDisplayRanges();
+                break;
+            case 100:
+                copySpectrumToClipboard();
+                break;
+        }
+    };
+
+    const int r = m.showMenu (juce::PopupMenu::Options ().withMousePosition());
+}
+
 void FFTAnalysisView::mouseDown (const juce::MouseEvent& e)
 {
-    if (!e.mods.isRightButtonDown()) return;
-    const bool haveData = cachedN > 1 && !mags.empty();
-    if (!haveData) return;
+    const auto plot = plotBounds();
 
-    juce::PopupMenu m;
-    m.addItem (1, "Copy Spectrum to Clipboard", true, false);
-    if (m.showMenu (juce::PopupMenu::Options().withMousePosition()) == 1)
-        copySpectrumToClipboard();
+    if (e.mods.isRightButtonDown())
+    {
+        dragMode = DragMode::ZoomDrag;
+        haveZoomRect = false;
+        zoomRect = {};
+        dragStartX = e.x;
+        dragStartY = e.y;
+        return;
+    }
+
+    if (!e.mods.isLeftButtonDown() || e.mods.isRightButtonDown()) return;
+
+    // Left-drag on the bottom Hz axis pans the frequency range; left-drag on
+    // the right level axis pans the level window.
+    if (e.y > plot.getBottom() && e.x >= plot.getX() && e.x <= plot.getRight())
+        dragMode = DragMode::PanFreq;
+    else if (e.x > plot.getRight() && e.y >= plot.getY() && e.y <= plot.getBottom())
+        dragMode = DragMode::PanLevel;
+    else
+        return;   // plain clicks in the plot do nothing here
+
+    dragStartX = e.x;
+    dragStartY = e.y;
+}
+
+void FFTAnalysisView::mouseDrag (const juce::MouseEvent& e)
+{
+    switch (dragMode)
+    {
+        case DragMode::PanFreq:
+        {
+            const double f0 = xToFreq (dragStartX);
+            const double f1 = xToFreq (e.x);
+            if (axisMode_ == 1 && f0 > 0.0 && f1 > 0.0)
+            {
+                // Log axis: pan in log space.
+                const double r = f0 / f1;
+                fLo_ *= r; fHi_ *= r;
+            }
+            else
+            {
+                const double d = f0 - f1;
+                fLo_ += d; fHi_ += d;
+            }
+            // Keep the window inside [0, Nyquist].
+            const double nyq = app.audioEngine().sampleRate() * 0.5;
+            if (fLo_ < 0.0) { fHi_ -= fLo_; fLo_ = 0.0; }
+            if (fHi_ > nyq) { fLo_ -= (fHi_ - nyq); fHi_ = nyq; }
+            repaint();
+            break;
+        }
+        case DragMode::PanLevel:
+        {
+            const double db0 = yToLevel ((float) dragStartY);
+            const double db1 = yToLevel ((float) e.y);
+            const double d = db0 - db1;
+            dbTop_ += d; dbBottom_ += d;
+            // Keep the window inside absolute limits.
+            if (dbTop_ > 40.0) { dbBottom_ -= (dbTop_ - 40.0); dbTop_ = 40.0; }
+            if (dbBottom_ < -240.0) { dbTop_ += (-240.0 - dbBottom_); dbBottom_ = -240.0; }
+            repaint();
+            break;
+        }
+        case DragMode::ZoomDrag:
+        {
+            const int x1 = std::clamp (e.x, 0, getWidth());
+            const int y1 = std::clamp (e.y, 0, getHeight());
+            zoomRect = juce::Rectangle<int> (std::min (dragStartX, x1), std::min (dragStartY, y1),
+                                             std::abs (x1 - dragStartX) + 1,
+                                             std::abs (y1 - dragStartY) + 1);
+            haveZoomRect = true;
+            repaint();
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void FFTAnalysisView::mouseUp (const juce::MouseEvent& e)
+{
+    if (dragMode == DragMode::ZoomDrag)
+    {
+        const auto plot = plotBounds();
+        if (!haveZoomRect)
+            showContextMenu (e.x > plot.getRight(), e.y > plot.getBottom());
+        else
+        {
+            // Horizontal part of the box zooms the frequency range...
+            if (zoomRect.getWidth() >= 2 && axisMode_ != 2)
+            {
+                const double fA = xToFreq (std::clamp (zoomRect.getX(), plot.getX(), plot.getRight()));
+                const double fB = xToFreq (std::clamp (zoomRect.getRight() - 1, plot.getX(), plot.getRight()));
+                if (fB > fA * 1.0001)
+                {
+                    const double nyq = app.audioEngine().sampleRate() * 0.5;
+                    if (axisMode_ == 1)
+                    {
+                        fLo_ = std::clamp (std::exp (std::log (fA)), 1e-9, nyq);
+                        fHi_ = std::clamp (std::exp (std::log (fB)), 1e-9, nyq);
+                    }
+                    else
+                    {
+                        fLo_ = std::clamp (fA, 0.0, nyq);
+                        fHi_ = std::clamp (fB, 0.0, nyq);
+                    }
+                }
+            }
+            // ...and the vertical part zooms the level window.
+            if (zoomRect.getHeight() >= 2)
+            {
+                const double dbA = yToLevel ((float) std::clamp (zoomRect.getY(), plot.getY(), plot.getBottom()));
+                const double dbB = yToLevel ((float) std::clamp (zoomRect.getBottom() - 1, plot.getY(), plot.getBottom()));
+                if (dbA > dbB)
+                {
+                    const double span = std::clamp (dbA - dbB, 10.0, 320.0);
+                    dbTop_ = std::clamp (dbA, -240.0 + span * 0.5, 40.0);
+                    dbBottom_ = dbTop_ - span;
+                }
+            }
+        }
+    }
+
+    dragMode = DragMode::None;
+    haveZoomRect = false;
+    zoomRect = {};
+}
+
+void FFTAnalysisView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    const auto plot = plotBounds();
+    if (!plot.contains (e.x, e.y) && e.x <= plot.getRight() && e.y <= plot.getBottom())
+        return;   // ignore the control strip
+
+    const double factor = std::pow (1.25, -wheel.deltaY);
+    if (e.mods.isShiftDown() || e.x > plot.getRight())
+        zoomLevelAtY ((float) e.y, factor);
+    else
+        zoomFreqAtX (e.x, factor);
 }
 
 void FFTAnalysisView::copySpectrumToClipboard()
 {
     const double rate = app.audioEngine().sampleRate();
-    double fLo, fHi; fftAxisLimits (axisMode_, rate, fLo, fHi);
+    // Export the currently visible frequency window.
+    const double fLo = fLo_, fHi = fHi_;
 
     // With a scale calibration the exported values are absolute levels;
     // volts/grams files export linear physical values instead (unit in header).
@@ -1130,6 +1469,9 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         if (app.onStateChange) app.onStateChange();
     };
 
+    // 512 gives the finest frequency resolution; larger sizes give a finer
+    // time resolution of the spectrogram tiles.
+    fftSizeCombo.addItem ("512", 512);
     for (int n = 1024; n <= 65536; n *= 2)
         fftSizeCombo.addItem (juce::String (n), n);
     fftSizeCombo.onChange = [this] {

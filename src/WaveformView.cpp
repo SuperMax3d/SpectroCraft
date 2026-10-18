@@ -54,7 +54,7 @@ void WaveformView::resized() { dirty = true; }
 // Build and show the right-click context menu (zoom + edit actions).
 // Called from a mouse handler, so withMousePosition() lands exactly where clicked.
 static void showViewContextMenu (Application& app,
-                                 std::function<void(int)>& onAction)
+                                 const std::function<void(int)>& onAction)
 {
     if (!onAction) return;
 
@@ -93,19 +93,34 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     }
 
     dragStartX = e.x;
+    dragStartY = e.y;
     dragStartTime = xToTime (e.x);
 
-    // Clicking anywhere in the plot moves the playhead to that position
-    // (clamped; also updates the transport position without starting playback).
-    app.setPlayhead (dragStartTime);
-    setPlayhead (app.playhead);
+    const bool leftOnAxis = e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
+                            && !e.mods.isMiddleButtonDown() && e.x < kLeftAxisWidth;
 
-    if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && !e.mods.isMiddleButtonDown()
-        && e.x >= kLeftAxisWidth)
+    if (!leftOnAxis)
     {
-        dragMode = DragMode::Select;
-        app.setSelection ({ dragStartTime, dragStartTime });
-        selection = app.selection;
+        // Clicking anywhere in the plot moves the playhead to that position
+        // (clamped; also updates the transport position without starting playback).
+        app.setPlayhead (dragStartTime);
+        setPlayhead (app.playhead);
+    }
+
+    if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && !e.mods.isMiddleButtonDown())
+    {
+        if (leftOnAxis)
+        {
+            // Left-drag on the amplitude axis pans the vertical range; it must
+            // not move the playhead.
+            dragMode = DragMode::VPan;
+        }
+        else
+        {
+            dragMode = DragMode::Select;
+            app.setSelection ({ dragStartTime, dragStartTime });
+            selection = app.selection;
+        }
     }
     else if (e.mods.isMiddleButtonDown() || e.mods.isRightButtonDown())
     {
@@ -113,7 +128,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     }
 
     // Push the new playhead/selection to both views.
-    onChange (viewStart, viewEnd);
+    if (onChange) onChange (viewStart, viewEnd);
 }
 
 void WaveformView::mouseDrag (const juce::MouseEvent& e)
@@ -127,7 +142,7 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
             const double t = xToTime (e.x);
             app.setSelection ({ std::min (dragStartTime, t), std::max (dragStartTime, t) });
             selection = app.selection;
-            onChange (viewStart, viewEnd);
+            if (onChange) onChange (viewStart, viewEnd);
             repaint();
             break;
         }
@@ -136,6 +151,18 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
             // setWindow() inside panByTime already notifies MainWindow.
             const double dt = dragStartTime - xToTime (e.x);
             panByTime (dt);
+            break;
+        }
+        case DragMode::VPan:
+        {
+            // Grab-and-drag: the amplitude value under the cursor at drag start
+            // stays under the cursor. All rows share the same height, so one
+            // pixels-per-unit scale applies to the whole view.
+            const double ampPx = rowAmpPx();
+            vOffset = std::clamp (vOffset + (dragStartY - e.y) / ampPx, -2.0, 2.0);
+            dirty = true;
+            if (onVerticalZoomChanged) onVerticalZoomChanged();
+            repaint();
             break;
         }
         case DragMode::ZoomDrag:
@@ -162,7 +189,18 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
     {
         if (!haveZoomRect)
         {
-            showViewContextMenu (app, onContextAction);
+            // Right-clicking the left amplitude axis makes "Zoom Out Full"
+            // reset the vertical range instead of the time window.
+            const bool onAxis = dragStartX < kLeftAxisWidth;
+            // Only show the menu when there is something to do with it: an
+            // external action callback, or a local axis reset. (Headless test
+            // views have neither and must not enter a modal loop.)
+            if (onAxis || onContextAction)
+                showViewContextMenu (app, [this, onAxis] (int id)
+                {
+                    if (id == CtxZoomOutFull && onAxis) { resetVerticalZoom(); return; }
+                    if (onContextAction) onContextAction (id);
+                });
         }
         else if (zoomRect.getWidth() >= zoomRect.getHeight())
         {
@@ -175,13 +213,22 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
         else
         {
             // Vertical drag: scale the amplitude axis so the dragged span
-            // fills the whole plot (the view stays centred on zero).
+            // fills the whole plot, keeping the value under the box centre at
+            // its row's centre line.
             const auto pr = plotRect();
             int visCount = 0;
             for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
                 if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
             if (visCount > 0 && zoomRect.getHeight() >= 2)
             {
+                const double oldAmpPx = rowAmpPx();
+                const int chanH = pr.getHeight() / visCount;
+                const int rowIdx = std::clamp ((zoomRect.getCentreY() - pr.getY()) / chanH,
+                                               0, visCount - 1);
+                const float centerR = (float) (pr.getY() + rowIdx * chanH + chanH * 0.5f);
+
+                vOffset = std::clamp (vOffset + (centerR - zoomRect.getCentreY()) / oldAmpPx,
+                                     -2.0, 2.0);
                 const double nz = std::clamp (vZoom * ((double) pr.getHeight()
                                                       / (double) zoomRect.getHeight()),
                                               0.05, 64.0);
@@ -198,7 +245,7 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
         app.setSelection ({ 0, 0 }); // plain click clears the selection
         selection = app.selection;
         repaint();
-        onChange (viewStart, viewEnd); // push the cleared selection to both views
+        if (onChange) onChange (viewStart, viewEnd); // push the cleared selection to both views
     }
     dragMode = DragMode::None;
 }
@@ -211,7 +258,7 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
     if (e.x < pr.getX() || e.x >= pr.getRight()
         || e.y < pr.getY() || e.y >= pr.getBottom())
     {
-        onCursorInfo ("");
+        if (onCursorInfo) onCursorInfo ("");
         return;
     }
 
@@ -236,12 +283,14 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
     const double t = xToTime ((int) e.x);
     const float center = pr.getY() + row * chanH + chanH * 0.5f;
     const float ampPx = chanH * 0.45f * (float) vZoom;   // pixels per unit amplitude
-    const double value = (ampPx > 1e-6) ? ((double) center - e.y) / ampPx : 0.0;
+    const double value = (ampPx > 1e-6)
+        ? vOffset + ((double) center - e.y) / ampPx : 0.0;
 
     const juce::String lab = (chans == 2) ? (ch == 0 ? "L" : "R")
                                           : juce::String (ch + 1);
-    onCursorInfo ("t=" + juce::String (t, 3) + " s   ch " + lab
-                  + ": " + ScaleCalibration::formatLinearValue (value, app.scale()));
+    if (onCursorInfo)
+        onCursorInfo ("t=" + juce::String (t, 3) + " s   ch " + lab
+                      + ": " + ScaleCalibration::formatLinearValue (value, app.scale()));
 }
 
 void WaveformView::mouseExit (const juce::MouseEvent&)
@@ -284,7 +333,7 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
                 const double end = (m.end > m.start) ? m.end : m.start;
                 app.setSelection ({ m.start, end });
                 setSelection (app.selection); // local copy for immediate repaint
-                onChange (viewStart, viewEnd); // sync both views via MainWindow
+                if (onChange) onChange (viewStart, viewEnd); // sync both views via MainWindow
                 return;
             }
         }
@@ -332,11 +381,17 @@ void WaveformView::zoomVerticalBy (double factor)
 
 void WaveformView::fitAll()
 {
-    const bool zoomChanged = (vZoom != 1.0);
-    vZoom = 1.0;
-    dirty = true;
+    resetVerticalZoom();
     setWindow (0.0, app.audioEngine().duration());
-    if (zoomChanged && onVerticalZoomChanged) onVerticalZoomChanged();
+}
+
+void WaveformView::resetVerticalZoom()
+{
+    const bool changed = (vZoom != 1.0 || vOffset != 0.0);
+    vZoom = 1.0;
+    vOffset = 0.0;
+    dirty = true;
+    if (changed && onVerticalZoomChanged) onVerticalZoomChanged();
 }
 
 void WaveformView::panByTime (double dt)
@@ -529,7 +584,7 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
         for (int64_t i = 0; i < n; ++i)
         {
             const float x = (float) pr.getX() + ((float) (i + 0.5) / (float) n) * (float) w;
-            const float y = std::clamp (center - buf[i] * amp, rowTop, rowBottom);
+            const float y = std::clamp ((float) (center + (vOffset - buf[i]) * amp), rowTop, rowBottom);
             if (!started) { path.startNewSubPath (x, y); started = true; }
             else           path.lineTo (x, y);
         }
@@ -555,8 +610,8 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
             if (mi < 0 || mi >= (int64_t) best->min[ch].size())
                 continue; // stays at centre -> flat line
             const float mn = best->min[ch][mi], mx = best->max[ch][mi];
-            tops[x] = center - mx * amp;
-            bots[x] = center - mn * amp;
+            tops[x] = center + (vOffset - mx) * amp;
+            bots[x] = center + (vOffset - mn) * amp;
         }
     }
     else
@@ -577,8 +632,8 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
                 mn = std::min (mn, buf[i]);
                 mx = std::max (mx, buf[i]);
             }
-            tops[x] = center - mx * amp;
-            bots[x] = center - mn * amp;
+            tops[x] = center + (vOffset - mx) * amp;
+            bots[x] = center + (vOffset - mn) * amp;
         }
     }
 
@@ -611,7 +666,9 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
             const double a = std::pow (10.0, dB / 20.0); // amplitude at this level
             for (int sign : { -1, +1 })
             {
-                const float y = center + sign * (float) (a * ampScale);
+                // Value +a sits above the centre line, value -a below it;
+                // both are shifted by the vertical offset.
+                const float y = center + (float) ((vOffset - sign * a) * ampScale);
                 if (y < pr.getY() || y > pr.getBottom()) continue;
                 g.setColour (juce::Colour::fromRGB (48, 48, 48));
                 g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
@@ -627,8 +684,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
             {
                 const double a = std::pow (10.0, dB / 20.0);
 
-                // Upper side label
-                const float yUp = center - (float) (a * ampScale);
+                // Upper side label (value +a above the centre line)
+                const float yUp = center + (float) ((vOffset - a) * ampScale);
                 if (yUp >= pr.getY() + 8 && yUp <= pr.getBottom()
                     && (!showChanLabels || std::abs (yUp - center) >= 9.0f))
                 {
@@ -637,8 +694,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
                                kLeftAxisWidth - 4, 14, juce::Justification::centredRight, false);
                 }
 
-                // Lower side label (negative dB below the centre line)
-                const float yDown = center + (float) (a * ampScale);
+                // Lower side label (value -a below the centre line)
+                const float yDown = center + (float) ((vOffset + a) * ampScale);
                 if (yDown >= pr.getY() && yDown <= pr.getBottom() - 8
                     && (!showChanLabels || std::abs (yDown - center) >= 9.0f))
                 {

@@ -12,9 +12,9 @@ FileDoc::FileDoc()
     engine.setMarkersForSave (&markers.markers());
 }
 
-bool FileDoc::load (const juce::File& f)
+bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress)
 {
-    if (!engine.loadFile (f))
+    if (!engine.loadFile (f, onProgress))
         return false;
 
     file = f;

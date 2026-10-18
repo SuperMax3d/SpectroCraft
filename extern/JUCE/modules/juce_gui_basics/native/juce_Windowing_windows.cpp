@@ -4151,6 +4151,27 @@ private:
 
                 break;
 
+            // SPECTROCRAFT PATCH: JUCE only sets the OS cursor from mouse-move
+            // events, so after a modal loop (popup menu, dialog) Windows can
+            // keep showing a stale wait/hourglass cursor until the next mouse
+            // move. Answer this query with the component's own cursor so the
+            // correct one is restored as soon as the window re-activates.
+            case WM_SETCURSOR:
+            {
+                const auto mc = getComponent().getMouseCursor();
+                HCURSOR cur = LoadCursor (nullptr, IDC_ARROW);
+                if      (mc == juce::MouseCursor::IBeamCursor)               cur = LoadCursor (nullptr, IDC_IBEAM);
+                else if (mc == juce::MouseCursor::PointingHandCursor)        cur = LoadCursor (nullptr, IDC_HAND);
+                else if (mc == juce::MouseCursor::LeftRightResizeCursor)     cur = LoadCursor (nullptr, IDC_SIZEWE);
+                else if (mc == juce::MouseCursor::UpDownResizeCursor)        cur = LoadCursor (nullptr, IDC_SIZENS);
+                else if (mc == juce::MouseCursor::UpDownLeftRightResizeCursor)
+                                                                     cur = LoadCursor (nullptr, IDC_SIZEALL);
+                else if (mc == juce::MouseCursor::WaitCursor)                cur = LoadCursor (nullptr, IDC_WAIT);
+
+                SetCursor (cur);
+                return 0;
+            }
+
             case WM_NCACTIVATE:
                 // while a temporary window is being shown, prevent Windows from deactivating the
                 // title bars of our main windows.

@@ -119,7 +119,7 @@ private:
     Settings settings_;
 
     // Interaction state
-    enum class DragMode { None, Select, Pan, ZoomDrag };
+    enum class DragMode { None, Select, Pan, VPan, ZoomDrag };
     DragMode dragMode = DragMode::None;
     int dragStartX = 0;
     int dragStartY = 0;

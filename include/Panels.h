@@ -157,7 +157,12 @@ public:
     void resized() override;
     void mouseMove (const juce::MouseEvent& e) override;
     void mouseExit (const juce::MouseEvent&) override;
-    void mouseDown (const juce::MouseEvent& e) override; // right-click = context menu
+    // Right-click = context menu / right-drag box zoom; left-drag on the
+    // bottom Hz axis or right level axis pans that range; wheel zooms.
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseDrag (const juce::MouseEvent& e) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
 
     // Called by MainWindow while playing: forces a recompute on state change
     // (during playback with no selection the panel tracks the cursor).
@@ -204,6 +209,28 @@ public:
     int getAxisMode() const { return axisMode_; }
     const std::vector<std::vector<float>>& getThirdOctMags() const { return thirdOctMags; }
 
+    // Local display ranges (independent of the spectrogram's settings):
+    // frequency window [fLo_, fHi_] and level window [dbBottom_, dbTop_].
+    double getFreqLo() const { return fLo_; }
+    double getFreqHi() const { return fHi_; }
+    double getDbTop() const { return dbTop_; }
+    double getDbBottom() const { return dbBottom_; }
+
+    // Reset both display ranges to their defaults ("Zoom Out Full").
+    void resetDisplayRanges();
+
+    // Cursor readout text for position (x, y). When a curve passes within a
+    // few pixels of the cursor, snapped is set and snapDotX/Y hold that point.
+    juce::String buildCursorInfo (int x, int y, bool& snapped,
+                                  float& snapDotX, float& snapDotY) const;
+
+    // Mapping helpers exposed for unit tests.
+    float xToFreq (int x) const;
+    double freqToX (double f) const;
+    juce::Rectangle<int> plotBounds() const;
+    float levelToY (double db) const;
+    double yToLevel (float y) const;
+
     // Switch frequency-axis mode: 0 = "FFT Linear", 1 = "FFT Log",
     // 2 = "1/3 Octave". sendNotificationSync so the change is applied
     // immediately (JUCE's default notification is async via AsyncUpdater).
@@ -218,11 +245,27 @@ private:
     juce::ComboBox fftSizeCombo, windowCombo, axisCombo;
     SnapshotButton snapBtns[10];
 
+    // Fixed normalization floor for the stored magnitudes: independent of the
+    // visible level window so zooming out never changes the curve data.
+    static constexpr double kNormFloorDb = 160.0;
+
     int localN = 2048;          // independent from the spectrogram's FFT size
     // Frequency-axis mode: 0 = "FFT Linear", 1 = "FFT Log" (default),
     // 2 = "1/3 Octave" (band plot, 50 Hz .. 16 kHz).
     int axisMode_ = 1;
     bool followPlayhead_ = false;
+
+    // Local display ranges: the frequency window and the level window are
+    // independent of app.settings.dBRange and of the spectrogram view.
+    double fLo_ = 20.0, fHi_ = 20000.0;   // visible frequency range (Hz)
+    double dbTop_ = 0.0, dbBottom_ = -80.0; // visible level window (dB rel.)
+
+    // Interaction state for axis panning / box zooming.
+    enum class DragMode { None, PanFreq, PanLevel, ZoomDrag };
+    DragMode dragMode = DragMode::None;
+    int dragStartX = 0, dragStartY = 0;
+    juce::Rectangle<int> zoomRect;
+    bool haveZoomRect = false;
 
     struct Snapshot
     {
@@ -238,13 +281,12 @@ private:
     Snapshot snapshots[10];     // stored curve overlays, shared across all files
 
     // Cached spectrum data
-    std::vector<std::vector<float>> mags;   // per channel, dB-normalized 0..1
-    // Per-channel 1/3-octave band values (dB-normalized 0..1), one entry per
+    std::vector<std::vector<float>> mags;   // per channel, normalized 0..1 vs kNormFloorDb
+    // Per-channel 1/3-octave band values (normalized 0..1), one entry per
     // band with centre <= Nyquist. Only populated when axisMode_ == 2.
     std::vector<std::vector<float>> thirdOctMags;
     int cachedN = 0;
     double cachedT0 = -1, cachedT1 = -1;
-    float cachedDB = -1;         // dB range used for the last computation
     juce::File cachedFile;
     int64_t lastComputeMs = 0;
     bool lastComputeWasExpensive = false;   // multi-window averaging (throttle key)
@@ -255,11 +297,13 @@ private:
     // their own time segment when it no longer matches.
     int settingsGen = 0;
 
-    float xToFreq (int x) const;
-    double freqToX (double f) const;
     int axisWidth() const;   // right level-axis width (wider for linear V/g labels)
-    juce::Rectangle<int> plotBounds() const;
     void copySpectrumToClipboard();
+
+    // Zoom helpers for the local display ranges.
+    void zoomFreqAtX (int x, double factor);
+    void zoomLevelAtY (float y, double factor);
+    void showContextMenu (bool onLevelAxis, bool onFreqAxis);
 
     // Core averaging computation: analyse region [t0, t1] with windows of n
     // samples at the current window type; one magnitude vector per channel in
@@ -313,6 +357,14 @@ public:
 
     // Set by MainWindow: resets the spectral view's frequency axis.
     std::function<void()> onResetFreq;
+
+    // True when the FFT-size combo offers an item with this label (tests).
+    bool hasFftSizeOption (const juce::String& label) const
+    {
+        for (int i = 0; i < fftSizeCombo.getNumItems(); ++i)
+            if (fftSizeCombo.getItemText (i) == label) return true;
+        return false;
+    }
 
 private:
     Application& app;

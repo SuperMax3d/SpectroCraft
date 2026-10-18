@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "UndoPatch.h"
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <vector>
 #include <mutex>
@@ -17,7 +18,10 @@ public:
     ~AudioEngine();
 
     // ---- File loading (metadata always; full buffer only when small enough) ----
-    bool loadFile (const juce::File& file);
+    /** Loads a file. When onProgress is non-null it is called with 0..1 as
+        the load advances (useful for large files loaded off-thread). */
+    bool loadFile (const juce::File& file,
+                   std::function<void(float)> onProgress = nullptr);
     void closeFile();
     bool isFileLoaded() const { return hasFile; }
     bool fullyInMemory() const { return buffer != nullptr; }
@@ -118,7 +122,7 @@ private:
     ::UndoManager* undo = nullptr;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks
 
-    void rebuildMipmaps();
+    void rebuildMipmaps(std::function<void(float)> onProgress = nullptr);
     void clearMipmaps();
     bool saveWavWithMarkers (const juce::File& file) const;
 

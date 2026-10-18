@@ -114,10 +114,33 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     shows the stored time segment plus the source file name. **Right-clicking
     a snapshot button** offers **Convert to marker** (creates a region marker
     spanning the snapshot's time range in its source file) and **Clear**
-    (same as Shift+click). A right-click menu on the plot area copies the
-    spectrum data to the clipboard.
+    (same as Shift+click).
+
+    The analysis view has **display ranges fully decoupled from the FFT
+    settings**: magnitudes are always normalised against a fixed −160 dB
+    floor, while what you *see* is controlled by two independent windows —
+    a frequency window (default 20 Hz–20 kHz in log mode) and a level window
+    (default 0…−80 dB). Interactions:
+
+    - **Mouse wheel** over the plot zooms the frequency window around the
+      cursor; **Shift+wheel** (or wheel over the right level axis) zooms the
+      level window instead.
+    - **Right-drag a box**: horizontal span sets the frequency window,
+      vertical span sets the level window (both at once if you drag in both
+      directions). A plain right-click shows a context menu with **Zoom Out
+      Full** and **Copy Spectrum to Clipboard**; right-clicking the *level*
+      axis resets only the level window, the *frequency* axis only the
+      frequency window.
+    - **Left-drag on the bottom Hz strip** pans the frequency window;
+      **left-drag on the right dB strip** pans the level window (log-aware in
+      log mode).
+    - The cursor readout shows the frequency under the mouse plus each
+      visible channel's level at that bin; when the mouse is within a few
+      pixels of a curve it **snaps to the nearest one**, showing the exact
+      bin-centre frequency and that channel's value with a marker dot.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
-    range, Log/Linear toggle, Reset Freq, FFT size). Above the colour-map
+    range, Log/Linear toggle, Reset Freq, FFT size — from **512**, the finest
+    frequency resolution, up to 65536). Above the colour-map
     gradient the panel shows the absolute level of each end of the scale in
     the active file's unit — plain `dB` when uncalibrated, or calibrated values
     after **Set Scale**: `14.0 dB-SPL … 94.0 dB-SPL` for a 1 Pa full scale,
@@ -154,6 +177,13 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - The File menu offers **Save Spectrogram As...** (Ctrl+Shift+E), which writes
     the current spectrogram content (per-channel rows included, no axes or
     overlays) to a PNG file.
+- **Large-file loading**: files bigger than ~200 MB are opened on a background
+  thread with a modal progress dialog showing an animated bar (read + mipmap
+  rebuild progress); smaller files load synchronously as before. The UI stays
+  responsive throughout, and the dialog closes itself when loading finishes.
+- **Save / Save As / Export Spectral** also run on background threads behind a
+  modal dialog with an indeterminate spinning bar, so multi-second writes never
+  freeze the window (and no stale wait cursor is left behind afterwards).
 - **Application icon**: `icon.ico` (project root) is embedded in
   `include/IconData.h` and applied to the main window at startup via
   `CreateIconFromResourceEx` + `WM_SETICON`, so it appears in the title bar,
@@ -453,9 +483,10 @@ Mouse (waveform *and* spectral views):
 |---|---|
 | Click | Move the playhead to that position in **both** views (selection drags start from it) |
 | Left-drag | Select a time range |
+| Left-drag on the left axis | **Vertical pan**: drag up/down to shift the amplitude window (waveform) or frequency window (spectral, log-aware). Does not move the playhead |
 | Middle-drag | Pan the shared time window (both views stay in sync) |
 | Right-drag a region | **Box zoom**: a mostly-horizontal drag zooms both views to that time range; a mostly-vertical drag scales the amplitude axis (waveform) or frequency axis (spectral) so the dragged span fills the view. A rubber-band rectangle is shown while dragging |
-| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete |
+| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete. On the **left axis**, "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window |
 | Mouse wheel over the plot / time ruler | Horizontal zoom around the cursor (both views) |
 | Mouse wheel over the left axis (or Shift + wheel anywhere) | Vertical amplitude zoom (waveform) / frequency-range zoom around the cursor (spectral) — independent per view |
 | Drag the divider between the views | Resize waveform vs spectral area |

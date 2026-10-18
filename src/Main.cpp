@@ -145,16 +145,16 @@ public:
             }
             else if (args[i].length() > 0 && !args[i].startsWith ("--"))
             {
-                // Open audio file passed on the command line
+                // Open audio file passed on the command line. Routing through
+                // MainWindow::openFile gives large files their async load with
+                // a progress dialog, exactly like File > Open.
                 const juce::File f = resolvePath (args[i]);
                 if (f.existsAsFile())
                 {
                     app = std::make_unique<Application>();
-                    if (app->openFile (f))
-                    {
-                        mainWindow = std::make_unique<MainWindow> (*app, getApplicationName());
-                        return;
-                    }
+                    mainWindow = std::make_unique<MainWindow> (*app, getApplicationName());
+                    mainWindow->openFile (f);
+                    return;
                 }
             }
         }

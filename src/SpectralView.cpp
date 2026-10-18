@@ -120,7 +120,7 @@ void SpectralView::resized() { dirty = true; imageDirty = true; }
 // Build and show the right-click context menu (zoom + edit actions).
 // Called from a mouse handler, so withMousePosition() lands exactly where clicked.
 static void showViewContextMenu (Application& app,
-                                 std::function<void(int)>& onAction)
+                                 const std::function<void(int)>& onAction)
 {
     if (!onAction) return;
 
@@ -158,19 +158,35 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
         return;   // right-button never moves the playhead
     }
 
+    dragStartX = e.x;
+    dragStartY = e.y;
     dragStartTime = xToTime (e.x);
 
-    // Clicking moves the playhead to that position
-    // (clamped; also updates the transport position without starting playback).
-    app.setPlayhead (dragStartTime);
-    setPlayhead (app.playhead);
+    const bool leftOnAxis = e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
+                            && !e.mods.isMiddleButtonDown() && e.x < kLeftAxisWidth;
 
-    if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && !e.mods.isMiddleButtonDown()
-        && e.x >= kLeftAxisWidth)
+    if (!leftOnAxis)
     {
-        dragMode = DragMode::Select;
-        app.setSelection ({ dragStartTime, dragStartTime });
-        selection = app.selection;
+        // Clicking moves the playhead to that position
+        // (clamped; also updates the transport position without starting playback).
+        app.setPlayhead (dragStartTime);
+        setPlayhead (app.playhead);
+    }
+
+    if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && !e.mods.isMiddleButtonDown())
+    {
+        if (leftOnAxis)
+        {
+            // Left-drag on the frequency axis pans the vertical range; it must
+            // not move the playhead.
+            dragMode = DragMode::VPan;
+        }
+        else
+        {
+            dragMode = DragMode::Select;
+            app.setSelection ({ dragStartTime, dragStartTime });
+            selection = app.selection;
+        }
     }
     else if (e.mods.isMiddleButtonDown() || e.mods.isRightButtonDown())
     {
@@ -178,7 +194,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     }
 
     // Push the new playhead/selection to both views.
-    onChange (viewStart, viewEnd);
+    if (onChange) onChange (viewStart, viewEnd);
 }
 
 void SpectralView::mouseDrag (const juce::MouseEvent& e)
@@ -192,7 +208,7 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
             const double t = xToTime (e.x);
             app.setSelection ({ std::min (dragStartTime, t), std::max (dragStartTime, t) });
             selection = app.selection;
-            onChange (viewStart, viewEnd);
+            if (onChange) onChange (viewStart, viewEnd);
             repaint();
             break;
         }
@@ -201,6 +217,34 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
             // setWindow() inside panByTime already notifies MainWindow.
             const double dt = dragStartTime - xToTime (e.x);
             panByTime (dt);
+            break;
+        }
+        case DragMode::VPan:
+        {
+            // Grab-and-drag: the frequency under the cursor at drag start stays
+            // under the cursor. The shift is applied in log space for a log
+            // axis and linearly otherwise.
+            const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+            if (!rows.empty())
+            {
+                juce::Rectangle<int> row = rows.front();
+                for (const auto& rr : rows)
+                    if (rr.contains (dragStartX, dragStartY)) { row = rr; break; }
+
+                const double f0 = yToFreq ((float) (dragStartY - row.getY()), row.getHeight());
+                const double f1 = yToFreq ((float) (e.y - row.getY()), row.getHeight());
+                if (settings_.logFrequency && f0 > 0.0 && f1 > 0.0)
+                    setFrequencyRange (freqMin * (f0 / f1), freqMax * (f0 / f1));
+                else
+                {
+                    const double d = f0 - f1;
+                    double lo2 = freqMin + d, hi2 = freqMax + d;
+                    if (lo2 < 1.0) { const double s = 1.0 - lo2; lo2 += s; hi2 += s; }
+                    const double nyq = app.audioEngine().sampleRate() * 0.5;
+                    if (hi2 > nyq) { const double s = hi2 - nyq; hi2 -= s; lo2 -= s; }
+                    setFrequencyRange (lo2, hi2);
+                }
+            }
             break;
         }
         case DragMode::ZoomDrag:
@@ -227,7 +271,18 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
     {
         if (!haveZoomRect)
         {
-            showViewContextMenu (app, onContextAction);
+            // Right-clicking the left frequency axis makes "Zoom Out Full"
+            // reset the vertical range instead of the time window.
+            const bool onAxis = dragStartX < kLeftAxisWidth;
+            // Only show the menu when there is something to do with it: an
+            // external action callback, or a local axis reset. (Headless test
+            // views have neither and must not enter a modal loop.)
+            if (onAxis || onContextAction)
+                showViewContextMenu (app, [this, onAxis] (int id)
+                {
+                    if (id == CtxZoomOutFull && onAxis) { resetFrequencyRange(); return; }
+                    if (onContextAction) onContextAction (id);
+                });
         }
         else if (zoomRect.getWidth() >= zoomRect.getHeight())
         {
@@ -263,7 +318,7 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
         app.setSelection ({ 0, 0 }); // plain click clears the selection
         selection = app.selection;
         repaint();
-        onChange (viewStart, viewEnd); // push the cleared selection to both views
+        if (onChange) onChange (viewStart, viewEnd); // push the cleared selection to both views
     }
     dragMode = DragMode::None;
 }
@@ -282,7 +337,7 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
         if (rows[i].contains ((int) e.x, (int) e.y)) { rowIdx = (int) i; break; }
     if (rowIdx < 0 || rowIdx >= (int) channels.size())
     {
-        onCursorInfo ("");
+        if (onCursorInfo) onCursorInfo ("");
         return;
     }
 
@@ -304,11 +359,12 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
     // With a scale calibration the probe shows absolute levels
     // (dB-SPL for Pascal files; linear V/g values for volts/grams files)
     // instead of relative dB.
-    onCursorInfo ("t=" + juce::String (t, 3) + " s   f="
-                  + ((freq >= 1000.0)
-                        ? juce::String (freq / 1000.0, 2) + " kHz"
-                        : juce::String ((int) std::lround (freq)) + " Hz")
-                  + "   " + ScaleCalibration::formatSpectralLevel (dB, app.scale()));
+    if (onCursorInfo)
+        onCursorInfo ("t=" + juce::String (t, 3) + " s   f="
+                      + ((freq >= 1000.0)
+                            ? juce::String (freq / 1000.0, 2) + " kHz"
+                            : juce::String ((int) std::lround (freq)) + " Hz")
+                      + "   " + ScaleCalibration::formatSpectralLevel (dB, app.scale()));
 }
 
 void SpectralView::mouseExit (const juce::MouseEvent&)
@@ -351,7 +407,7 @@ void SpectralView::mouseDoubleClick (const juce::MouseEvent& e)
                 const double end = (m.end > m.start) ? m.end : m.start;
                 app.setSelection ({ m.start, end });
                 setSelection (app.selection); // local copy for immediate repaint
-                onChange (viewStart, viewEnd); // sync both views via MainWindow
+                if (onChange) onChange (viewStart, viewEnd); // sync both views via MainWindow
                 return;
             }
         }
@@ -636,23 +692,32 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
         // Labels only when the row is tall enough to hold them.
         const bool showLabels = rr.getHeight() >= 48;
 
-        auto drawTickAndLabel = [&](double f)
+        auto drawTickAndLabel = [&](double f, bool minor = false)
         {
             const float y = (float) rr.getY() + freqToY (f, rr.getHeight());
-            g.setColour (juce::Colour::fromRGB (60, 60, 60));
+            g.setColour (minor ? juce::Colour::fromRGB (48, 48, 52)
+                               : juce::Colour::fromRGB (60, 60, 60));
             g.drawLine ((float) kLeftAxisWidth, y, (float) getWidth(), y, 1.0f);
             if (!showLabels) return;
             if (hasChanLabel && std::abs (y - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
                 return; // room for the channel label
-            g.setColour (juce::Colour::fromRGB (200, 200, 200));
+            g.setColour (minor ? juce::Colour::fromRGB (130, 130, 138)
+                               : juce::Colour::fromRGB (200, 200, 200));
             juce::String label = f >= 1000 ? juce::String (f / 1000.0, 1) + " kHz" : juce::String ((int) f) + " Hz";
             g.drawText (label, 4, (int) y - 12, kLeftAxisWidth - 6, 12, juce::Justification::bottomLeft, false);
         };
 
         if (settings_.logFrequency)
         {
+            // Major ticks at each decade; intermediate 2x/5x ticks are drawn a
+            // bit darker so the log axis stays readable when zoomed in.
             for (double p = std::ceil (std::log10 (fMin)); p <= std::floor (std::log10 (fMax)); ++p)
-                drawTickAndLabel (std::pow (10.0, p));
+            {
+                drawTickAndLabel (std::pow (10.0, p), false);
+                for (double m : { 2.0 * std::pow (10.0, p), 5.0 * std::pow (10.0, p) })
+                    if (m > fMin && m < fMax)
+                        drawTickAndLabel (m, true);
+            }
         }
         else
         {

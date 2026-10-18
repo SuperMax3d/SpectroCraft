@@ -27,7 +27,9 @@ public:
 
     /** Load the file into this document: audio + markers (sidecar JSON first,
         embedded RIFF cue/adtl as fallback for .wav) + initial UI state. */
-    bool load (const juce::File& f);
+    /** Loads audio + markers. onProgress (optional) receives 0..1 as the
+        load advances; safe to call from a background thread. */
+    bool load (const juce::File& f, std::function<void(float)> onProgress = nullptr);
 
 private:
     JUCE_DECLARE_NON_COPYABLE (FileDoc)

@@ -38,7 +38,10 @@ public:
     // KeyListener
     bool keyPressed (const juce::KeyPress& key, juce::Component* originatingComponent) override;
 
-    void openFile (const juce::File& file);
+    void openFile (const juce::File& file);   // routes large files to the async path
+    void openFileWithProgress (const juce::File& file);  // background load + progress dialog
+    void runSaveAsync (const juce::File& file, bool saveAs);      // background save + dialog
+    void exportSpectralAsync (const juce::File& file);            // background PNG render + dialog
     void handleFileOpen();
     void handleFileSave();
     void handleFileSaveAs();

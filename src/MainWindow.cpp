@@ -7,6 +7,7 @@
 
 #include "MainWindow.h"
 #include "Application.h"
+#include <thread>
 #include "WaveformView.h"
 #include "SpectralView.h"
 #include "Panels.h"
@@ -596,12 +597,83 @@ void MainWindow::refreshPanels()
     if (fftPanel)       fftPanel->repaint();
 }
 
+// Files bigger than this are loaded on a background thread with a progress
+// dialog so the UI stays responsive during I/O + mipmap construction.
+static const int64_t kLargeFileBytes = 200ll * 1024 * 1024;
+
 void MainWindow::openFile (const juce::File& file)
 {
+    // Already loaded? Just make it active again (fast, no progress needed).
+    for (int i = 0; i < app.numDocs(); ++i)
+        if (app.docs[(size_t) i]->file == file)
+        { app.activate (i); return; }
+
+    if (file.getSize() > kLargeFileBytes)
+    {
+        openFileWithProgress (file);
+        return;
+    }
+
     // app.openFile() activates the new document and fires onActiveDocChanged,
     // which resets both views to this file and syncs every panel.
     if (!app.openFile (file))
         return;
+}
+
+// Modal progress dialog: a message plus a progress bar below it. Used for
+// long-running background work (loading, saving, exporting) so the UI stays
+// responsive and Windows never shows its own wait cursor over our windows.
+class WorkProgressDialog : public juce::AlertWindow
+{
+public:
+    WorkProgressDialog (const juce::String& title, const juce::String& message)
+        : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon),
+          bar (progressValue)   // JUCE 9: the bar watches this variable
+    {
+        // The default LookAndFeel tables define no ProgressBar colours, which
+        // resolve to transparent - set them explicitly so the bar is visible
+        // on the dark dialog background.
+        bar.setColour (juce::ProgressBar::backgroundColourId, juce::Colour (0xff232327));
+        bar.setColour (juce::ProgressBar::foregroundColourId, juce::Colours::dodgerblue);
+
+        addChildComponent (&bar);
+
+        // The bar's self-polling timer only starts when visibility *changes*;
+        // toggle it once so progress updates are picked up from the start.
+        bar.setVisible (false);
+        bar.setVisible (true);
+
+        // Grow the window so the bar has its own strip below the message.
+        setSize (getWidth(), getHeight() + 34);
+    }
+
+    void setProgress (double v) { progressValue = v; }
+
+    void resized() override
+    {
+        // The bar gets its own strip along the bottom of the window.
+        bar.setBounds (16, getHeight() - 28, getWidth() - 32, 20);
+    }
+
+private:
+    double progressValue = 0.0;   // declared before bar: member init order
+    juce::ProgressBar bar;
+};
+
+void MainWindow::openFileWithProgress (const juce::File& file)
+{
+    auto* dlg = new WorkProgressDialog ("Loading", "Opening " + file.getFileName() + " ...");
+
+    // Modal but without stealing keyboard focus: the dialog just sits there
+    // while the worker thread reports progress.
+    dlg->enterModalState (false);
+
+    app.loadFileAsync (file,
+        [dlg] (float frac) {
+            juce::MessageManager::callAsync ([dlg, frac]
+            { dlg->setProgress ((double) frac); });
+        },
+        [dlg] (bool) { delete dlg; });
 }
 
 void MainWindow::activateDocUI()
@@ -649,10 +721,28 @@ void MainWindow::handleFileOpen()
         openFile (chooser.getResult());
 }
 
+// Save on a background thread with a progress dialog so writing large files
+// never blocks the UI thread.
+void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
+{
+    auto* dlg = new WorkProgressDialog ("Saving", "Saving " + file.getFileName() + " ...");
+    dlg->setProgress (-1.0);   // out of range -> indeterminate spinning bar
+    dlg->enterModalState (false);
+
+    std::thread ([this, file, saveAs, dlg] {
+        const bool ok = saveAs ? app.audioEngine().saveFileAs (file)
+                               : app.audioEngine().saveFile (file);
+        juce::MessageManager::callAsync ([this, dlg, ok] {
+            delete dlg;
+            if (ok) updateTitle();
+        });
+    }).detach();
+}
+
 void MainWindow::handleFileSave()
 {
     if (app.audioEngine().isFileLoaded())
-        app.audioEngine().saveFile (app.audioEngine().getFile());
+        runSaveAsync (app.audioEngine().getFile(), false);
     else
         handleFileSaveAs();
 }
@@ -665,7 +755,21 @@ void MainWindow::handleFileSaveAs()
         kUseNativeFileChooser);
 
     if (chooser.browseForFileToSave (true))
-        app.audioEngine().saveFileAs (chooser.getResult());
+        runSaveAsync (chooser.getResult(), true);
+}
+
+// Render + write the spectrogram PNG on a background thread.
+void MainWindow::exportSpectralAsync (const juce::File& file)
+{
+    auto* dlg = new WorkProgressDialog ("Exporting",
+                                        "Rendering spectrogram to " + file.getFileName() + " ...");
+    dlg->setProgress (-1.0);   // out of range -> indeterminate spinning bar
+    dlg->enterModalState (false);
+
+    std::thread ([this, file, dlg] {
+        const bool ok = spectralView ? spectralView->saveAsPng (file) : false;
+        juce::MessageManager::callAsync ([dlg, ok] { delete dlg; });
+    }).detach();
 }
 
 void MainWindow::updateTitle()
@@ -778,7 +882,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
                     app.audioEngine().getFile().getParentDirectory(), "*.png",
                     kUseNativeFileChooser);
                 if (chooser.browseForFileToSave (true))
-                    spectralView->saveAsPng (chooser.getResult());
+                    exportSpectralAsync (chooser.getResult());
             }
             break;
         case FileQuit: JUCEApplication::getInstance()->systemRequestedQuit(); break;
@@ -944,6 +1048,11 @@ void MainWindow::showChangeGainDialog()
     if (!app.audioEngine().isFileLoaded() || app.selection.isEmpty()) return;
 
     auto* w = createGainDialog();
+
+    // Enter modal state WITHOUT taking keyboard focus: runModalLoop() would
+    // otherwise re-enter the modal state and grab focus for the window itself,
+    // stealing it from the text field that createGainDialog() focused.
+    w->enterModalState (false);
     const int result = w->runModalLoop();
     const juce::String text = w->getTextEditorContents ("gainDb");
     delete w;
