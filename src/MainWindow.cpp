@@ -890,22 +890,46 @@ void MainWindow::handleContextMenuAction (int id)
     }
 }
 
-// Tools > Change Gain... — prompt for a dB value and apply it to the
+// Effects > Change Gain... — prompt for a dB value and apply it to the
 // selection on the visible channels (undoable).
+juce::AlertWindow* MainWindow::createGainDialog()
+{
+    auto* w = new juce::AlertWindow ("Change Gain",
+                                     "Apply gain to the selection (dB):",
+                                     juce::AlertWindow::QuestionIcon);
+    w->addTextEditor ("gainDb", "0.0");
+    if (auto* editor = w->getTextEditor ("gainDb"))
+        // Let Enter/Escape reach the OK/Cancel shortcuts even while the field
+        // has keyboard focus.
+        editor->setEscapeAndReturnKeysConsumed (false);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // Focus the field with its text pre-selected so a new value can be typed
+    // in immediately. AlertWindow disables keyboard focus on its editors, so
+    // re-enable it first or grabKeyboardFocus() would bounce to a button.
+    if (auto* editor = w->getTextEditor ("gainDb"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+        editor->grabKeyboardFocus();
+    }
+
+    return w;
+}
+
 void MainWindow::showChangeGainDialog()
 {
     if (!app.audioEngine().isFileLoaded() || app.selection.isEmpty()) return;
 
-    juce::AlertWindow w ("Change Gain",
-                         "Apply gain to the selection (dB):",
-                         juce::AlertWindow::QuestionIcon);
-    w.addTextEditor ("gainDb", "0.0");
-    w.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    w.addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+    auto* w = createGainDialog();
+    const int result = w->runModalLoop();
+    const juce::String text = w->getTextEditorContents ("gainDb");
+    delete w;
+    if (result != 1) return;
 
-    if (w.runModalLoop() != 1) return;
-
-    const float db = (float) w.getTextEditorContents ("gainDb").trim().getDoubleValue();
+    const float db = (float) text.trim().getDoubleValue();
     app.changeGain (db);
     refreshAfterEdit();
 }
@@ -1031,7 +1055,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSeparator();
         menu.addItem (TransportLoop, "Loop (Selection/All)\tL", true, app.audioEngine().isLooping());
     }
-    else if (menuName == "Tools")
+    else if (menuName == "Effects")
     {
         const bool hasSel = !app.selection.isEmpty();
         menu.addItem (ToolsSilence, "Silence Selection", hasSel, false);
@@ -1051,7 +1075,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
 
 juce::StringArray MainWindow::getMenuBarNames()
 {
-    return { "File", "Edit", "View", "Transport", "Tools", "Help" };
+    return { "File", "Edit", "View", "Transport", "Effects", "Help" };
 }
 
 bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)

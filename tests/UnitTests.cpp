@@ -2437,6 +2437,50 @@ static void testOpenRecentFiles()
     a.deleteFile (); b.deleteFile (); store.deleteFile ();
 }
 
+// ------------------------------------------------- change gain dialog
+// When the Effects > Change Gain... dialog opens, its field must already be
+// focused with "0.0" selected so that a new value can be typed in right away.
+static void testChangeGainDialog()
+{
+    const juce::File wav = makeTempFile ("gain_dialog.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for gain dialog test");
+    app.setSelection ({ 0.1, 0.2 });
+
+    // A MessageManager is required before constructing the top-level window;
+    // it must still be alive when the window is destroyed.
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "gain dialog test"));
+
+    // Build the dialog without running it modally: the field must be
+    // keyboard-focusable with its initial text fully selected. (Actual focus
+    // acquisition needs OS foreground, which a background test process does
+    // not have; that path is verified in the live GUI.)
+    juce::AlertWindow* dlg = win->createGainDialog ();
+    CHECK (dlg != nullptr, "gain dialog created");
+    if (dlg != nullptr)
+    {
+        auto* editor = dlg->getTextEditor ("gainDb");
+        CHECK (editor != nullptr, "gain field exists");
+        if (editor != nullptr)
+        {
+            CHECK (editor->getWantsKeyboardFocus (), "gain field is keyboard-focusable on open");
+            CHECK (editor->getHighlightedRegion () == juce::Range<int> (0, 3),
+                  "initial value is fully pre-selected");
+        }
+        delete dlg;
+    }
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------- multi-file support
 // Multiple files can be open at once. Each file remembers its own playhead,
 // selection, markers and undo history; switching restores them. Snapshots are
@@ -2622,6 +2666,7 @@ static int scRunUnitTestsImpl()
     progress ("arrow key selection"); testArrowKeySelection();
     progress ("ctrl+number channels"); testCtrlNumberChannelToggle();
     progress ("open recent files");   testOpenRecentFiles();
+    progress ("change gain dialog");  testChangeGainDialog();
     progress ("multi-file support");  testMultiFileSupport();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

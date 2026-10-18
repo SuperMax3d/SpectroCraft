@@ -58,6 +58,9 @@ public:
     void zoomOutFull();       // show the whole file in both views
     void handleContextMenuAction (int id);  // right-click menu actions from either view
     void showChangeGainDialog();
+    /** Builds (but does not run modally) the Change Gain dialog. The caller
+        owns and must delete it; used by showChangeGainDialog() and tests. */
+    juce::AlertWindow* createGainDialog();
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
     void handleTopSplitterDrag (const juce::MouseEvent& e);   // top tabs / bottom tabs

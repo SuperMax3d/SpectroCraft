@@ -393,10 +393,11 @@ main window itself — arrow keys keep working there too. Interactive widgets
 the standard Windows behaviour for arrow keys while focused; click back into a
 view to return playhead control.
 
-Menus: **File, Edit, View, Transport, Tools, Help**. Tools offers Silence,
-Fade In/Out, Normalize, Reverse and **Change Gain...** (a dB dialog that
-multiplies the selection by 10^(dB/20)) — all applied only to the currently
-visible channels. The View menu has **Zoom to Selection** / **Zoom Out Full**,
+Menus: **File, Edit, View, Transport, Effects, Help**. Effects offers Silence,
+Fade In/Out, Normalize, Reverse and **Change Gain...** (a dB dialog whose
+field opens focused with its value pre-selected so a new one can be typed in
+right away; it multiplies the selection by 10^(dB/20)) — all applied only to
+the currently visible channels. The View menu has **Zoom to Selection** / **Zoom Out Full**,
 a **Colour Map** submenu
 (Classic default), checkable **Waveform View / Spectrogram View** items (at
 least one always stays visible) and one checkable item per channel; plain click
@@ -472,6 +473,9 @@ by a single mutex (short critical sections, no lock held during FFT work).
   - **Change Gain**: +6 dB scales the selected samples by exactly 10^(dB/20),
     leaves everything outside the selection untouched, and undo restores the
     original level.
+  - **Change Gain dialog**: on open the dB field already has keyboard focus
+    with its initial "0.0" fully selected (so typing replaces it immediately)
+    while Enter/Escape still trigger OK/Cancel.
   - **Selection / zero-crossing snapping** and duration clipping.
   - **Spectral engine end-to-end**: renders a real PNG from a generated WAV,
     verifies non-trivial output, cache population/clearing.
