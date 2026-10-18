@@ -3371,6 +3371,134 @@ static void testFFTViewInteractions()
     wav.deleteFile();
 }
 
+// ---------------- FFT analysis view: deep zoom keeps the axis, rubber band visible ----------------
+// Zooming far into the frequency window must keep producing on-plot divisions:
+// the old code drew decade ticks only in log mode and relative-to-zero ticks
+// in linear mode, so the axis disappeared at certain zooms. A right-drag box
+// zoom must also show its rubber band while the drag is in progress.
+static void testFFTViewExtremeZoom()
+{
+    const juce::File wav = makeTempFile ("fft_extreme_zoom.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 440.0 * (double) f / rate); });
+
+    const juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
+
+    // Counts bright label pixels in the bottom Hz strip of a rendered view.
+    auto axisLabelPixels = [] (const juce::Image& img, int x0, int x1, int y0, int y1)
+    {
+        int n = 0;
+        for (int y = y0; y < y1 && y < img.getHeight(); ++y)
+            for (int x = x0; x < x1 && x < img.getWidth(); ++x)
+                if (img.getPixelAt (x, y).getRed() > 96) ++n;
+        return n;
+    };
+
+    // --- Log mode: deep box zoom into a sub-decade range keeps labels ---
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for extreme zoom test");
+        FFTAnalysisView view (app);
+        view.setSize (300, 200);
+        const auto plot = view.plotBounds();
+
+        // Drag a narrow box whose x span maps to roughly [900 Hz, 2100 Hz].
+        int xa = -1, xb = -1;
+        for (int x = plot.getX() + 4; x < plot.getRight() - 4 && xa < 0; ++x)
+            if (view.xToFreq ((float) x) >= 900.0) xa = x;
+        for (int x = plot.getRight() - 4; x > plot.getX() + 4 && xb < 0; --x)
+            if (view.xToFreq ((float) x) <= 2100.0) xb = x;
+        CHECK (xa >= 0 && xb > xa, "drag endpoints found around [900 Hz, 2100 Hz]");
+
+        view.mouseDown (mkMouse (view, xa, plot.getY() + 30, rmb));
+        view.mouseDrag (mkMouse (view, xb, plot.getY() + 60, rmb));
+
+        // The rubber band must be visible while the drag is in progress:
+        // a translucent yellow fill over the dark background.
+        juce::Image img (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+        int yellow = 0;
+        for (int y = plot.getY() + 40; y < plot.getY() + 50; ++y)
+            for (int x = xa + 8; x < xb - 8; x += 2)
+            {
+                const auto c = img.getPixelAt (x, y);
+                if (c.getRed() > 24 && c.getGreen() > 24 && c.getBlue() < 24) ++yellow;
+            }
+        CHECK (yellow >= 3, "rubber-band box is painted during the right-drag");
+
+        view.mouseUp (mkMouse (view, xb, plot.getY() + 60, rmb));
+        const double fLo = view.getFreqLo(), fHi = view.getFreqHi();
+        CHECK (fLo > 800.0 && fHi < 2400.0 && std::log10 (fHi / fLo) < 0.7,
+               "deep box zoom lands inside a sub-decade range");
+
+        juce::Image img2 (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img2); view.paint (g); }
+        CHECK (axisLabelPixels (img2, plot.getX(), plot.getRight(),
+                                plot.getBottom() + 1, plot.getBottom() + 17) >= 8,
+               "frequency axis keeps labels after a deep log-mode zoom");
+    }
+
+    // --- Linear mode: the old tick code placed every division below fLo ---
+    {
+        Application app2;
+        CHECK (app2.openFile (wav), "open wav for linear extreme zoom test");
+        app2.settings.fftAxisMode = 0;   // FFT Linear
+        FFTAnalysisView view (app2);
+        view.setSize (300, 200);
+        const auto plot = view.plotBounds();
+
+        int xa = -1, xb = -1;
+        for (int x = plot.getX() + 4; x < plot.getRight() - 4 && xa < 0; ++x)
+            if (view.xToFreq ((float) x) >= 640.0) xa = x;
+        for (int x = plot.getRight() - 4; x > plot.getX() + 4 && xb < 0; --x)
+            if (view.xToFreq ((float) x) <= 760.0) xb = x;
+        CHECK (xa >= 0 && xb > xa, "linear drag endpoints found around [640 Hz, 760 Hz]");
+
+        view.mouseDown (mkMouse (view, xa, plot.getY() + 30, rmb));
+        view.mouseDrag (mkMouse (view, xb, plot.getY() + 60, rmb));
+        view.mouseUp   (mkMouse (view, xb, plot.getY() + 60, rmb));
+
+        const double fLo = view.getFreqLo(), fHi = view.getFreqHi();
+        CHECK (fLo > 400.0 && fHi < 1200.0 && fHi - fLo < 300.0,
+               "linear deep zoom lands in a narrow range");
+
+        juce::Image img (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+        CHECK (axisLabelPixels (img, plot.getX(), plot.getRight(),
+                                plot.getBottom() + 1, plot.getBottom() + 17) >= 8,
+               "frequency axis keeps labels after a deep linear-mode zoom");
+    }
+
+    // --- 1/3-octave mode: wheel-zoom deep; band centres or fallback ticks ---
+    {
+        Application app3;
+        CHECK (app3.openFile (wav), "open wav for third-octave extreme zoom test");
+        app3.settings.fftAxisMode = 2;   // 1/3 Octave
+        FFTAnalysisView view (app3);
+        view.setSize (300, 200);
+        const auto plot = view.plotBounds();
+
+        const int cx = plot.getX() + plot.getWidth() / 2;
+        for (int i = 0; i < 40; ++i)
+        {
+            juce::MouseWheelDetails wd; wd.deltaY = -1.0f;
+            view.mouseWheelMove (mkMouse (view, cx, plot.getY() + plot.getHeight() / 2, {}), wd);
+        }
+
+        const double fLo = view.getFreqLo(), fHi = view.getFreqHi();
+        CHECK (fHi - fLo < 50.0, "wheel zoom reaches a very narrow range");
+
+        juce::Image img (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+        CHECK (axisLabelPixels (img, plot.getX(), plot.getRight(),
+                                plot.getBottom() + 1, plot.getBottom() + 17) >= 8,
+               "frequency axis keeps labels after a deep third-octave zoom");
+    }
+
+    wav.deleteFile ();
+}
+
 // ---------------- Spectral controls: 512 FFT size option + async load progress ----------------
 static void testSpectralControlsAndAsyncLoad()
 {
@@ -3908,6 +4036,7 @@ static int scRunUnitTestsImpl()
     progress ("right-drag box zoom"); testRightDragZoom();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("FFT view interactions"); testFFTViewInteractions();
+    progress ("FFT extreme zoom axis + rubber band"); testFFTViewExtremeZoom();
     progress ("spectral controls + async load"); testSpectralControlsAndAsyncLoad();
     progress ("history tab");             testHistoryPanel();
     progress ("settings persistence");    testSettingsPersistence();

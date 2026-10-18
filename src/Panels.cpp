@@ -930,11 +930,20 @@ void FFTAnalysisView::paint (juce::Graphics& g)
 
     // Frequency grid ticks for the current axis mode
     std::vector<double> freqTicks;
+    bool thirdOctFallback = false;   // deep zoom between band centres
     if (axisMode_ == 2)
     {
         // One grid line per 1/3-octave band centre.
         for (int b = 0; b < kNumThirdOctBands && kThirdOctCenters[b] <= fHi + 1e-6; ++b)
-            freqTicks.push_back (kThirdOctCenters[b]);
+            if (kThirdOctCenters[b] >= fLo - 1e-6) freqTicks.push_back (kThirdOctCenters[b]);
+        // Deep zooms can land between band centres: fall back to even
+        // divisions so the axis never disappears.
+        if (freqTicks.empty())
+        {
+            thirdOctFallback = true;
+            for (int i = 1; i <= 4; ++i)
+                freqTicks.push_back (fLo + std::max (1e-9, fHi - fLo) * (double) i / 5.0);
+        }
     }
     else if (axisMode_ == 1)
     {
@@ -987,12 +996,26 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     }
     else
     {
-        const double span = fHi - fLo;
-        for (double step : { 100.0, 250.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0 })
-            if (span / step >= 3.0 && span / step <= 9.0)
-            { for (double f = step; f < fHi - 1e-6; f += step) freqTicks.push_back (f); break; }
-        if (freqTicks.empty())
-            for (int i = 1; i <= 4; ++i) freqTicks.push_back (span * (double) i / 5.0);
+        // Linear mode: a nice step giving 3..9 ticks, starting at the first
+        // grid point at or above fLo so every tick lands inside the plot.
+        const double span = std::max (1e-9, fHi - fLo);
+        bool done = false;
+        for (double e = std::floor (std::log10 (span / 9.0));
+             !done && e <= std::ceil (std::log10 (span / 3.0)) + 1.0; ++e)
+            for (double m : { 1.0, 2.0, 5.0 })
+            {
+                const double step = m * std::pow (10.0, e);
+                if (span / step >= 3.0 && span / step <= 9.0)
+                {
+                    for (double f = std::ceil (fLo / step - 1e-9) * step;
+                         f <= fHi + 1e-6; f += step)
+                        freqTicks.push_back (f);
+                    done = true;
+                    break;
+                }
+            }
+        if (!done)
+            for (int i = 1; i <= 4; ++i) freqTicks.push_back (fLo + span * (double) i / 5.0);
     }
 
     // Grid: frequency ticks + level lines. The level grid step adapts to the
@@ -1103,7 +1126,8 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     g.setFont (9.0f);
     for (double f : freqTicks)
     {
-        if (axisMode_ == 2 && !isThirdOctLabelFreq (f)) continue;   // avoid crowding
+        if (axisMode_ == 2 && !thirdOctFallback && !isThirdOctLabelFreq (f))
+            continue;   // avoid crowding
         const float x = (float) freqToX (f);
         juce::String label;
         if (f >= 1000.0)
