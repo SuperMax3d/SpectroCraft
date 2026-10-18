@@ -163,6 +163,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   was stored from (shown in its tooltip), so curves from different files can be
   compared side by side. Closing a file clears only the snapshots that came
   from it.
+- **Open Recent**: File → Open Recent lists up to the ten most recently opened
+  files (most recent first) and re-opens them with one click. The list is
+  persisted in a `PropertiesFile` (`SpectroCraft.recent` under the user's
+  application-data folder), survives restarts, deduplicates repeated opens,
+  and self-heals: entries whose file was deleted or moved are dropped when
+  clicked. "Clear Recent Files" empties the list.
 - **Drag & drop**: drop one or more WAV/AIFF/FLAC/MP3/Ogg files onto the window;
   every valid dropped file becomes its own document.
 - **Edits** with 50-level undo/redo (patch-based: old/new sample data + length
@@ -442,7 +448,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (303 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (354 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -500,6 +506,10 @@ by a single mutex (short critical sections, no lock held during FFT work).
     duplicating. Shared snapshots: one stored from each file survives switching,
     "Convert to marker" lands in the snapshot's source file (even when another
     file is active), and closing a file clears only that file's snapshots.
+  - **Open Recent**: adding entries deduplicates and keeps most-recent-first,
+    caps at ten, persists across app instances via the `PropertiesFile`, clear
+    empties the list, stale paths are skipped on load, and the menu handler
+    re-opens a live entry while silently dropping a deleted one.
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,

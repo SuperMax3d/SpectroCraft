@@ -14,7 +14,9 @@
 class Application
 {
 public:
-    Application();
+    // recentStorePath: optional override for the persisted recent-files store
+    // (unit tests point it at a temp file; empty = default app-data location).
+    explicit Application (const juce::File& recentStorePath = {});
     ~Application();
 
     // All loaded files. The active document is what the views and panels show.
@@ -59,6 +61,16 @@ public:
     int numDocs() const { return (int) docs.size(); }
 
     bool openFile (const juce::File& file);
+
+    // Recently opened files, most recent first. Updated on every successful
+    // openFile() and persisted across sessions in a PropertiesFile.
+    static constexpr int kMaxRecentFiles = 10;
+    std::vector<juce::File> recentFiles;
+    std::unique_ptr<juce::PropertiesFile> recentStore;   // no default ctor, so heap-held
+    void addRecentFile (const juce::File& file);   // move to front, dedupe, cap at 10
+    void removeRecentFile (const juce::File& file);// drop one entry and persist
+    void clearRecentFiles();                        // empty the list and persist it
+
     void closeFile();                  // closes the ACTIVE document
     void closeDoc (int index);         // closes one specific loaded document
     void activate (int index);         // make a loaded document active

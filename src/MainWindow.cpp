@@ -698,6 +698,29 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 {
     using enum MenuIDs;
 
+    // File > Open Recent items.
+    if (menuItemID >= RecentBase && menuItemID < RecentBase + Application::kMaxRecentFiles)
+    {
+        const int i = menuItemID - RecentBase;
+        if (i < app.recentFiles.size())
+        {
+            const juce::File f = app.recentFiles[(size_t) i];
+            if (f.existsAsFile())
+                openFile (f);
+            else
+                // Stale entry: the file was deleted or moved since it was opened.
+                // Drop it so the menu self-heals on next open.
+                app.removeRecentFile (f);
+        }
+        return;
+    }
+
+    if (menuItemID == ClearRecent)
+    {
+        app.clearRecentFiles();
+        return;
+    }
+
     // Per-channel visibility toggles: ChannelBase + channel index.
     // Ctrl/Shift+click on a channel shows ONLY that channel (solo).
     if (menuItemID >= ChannelBase && menuItemID < ChannelBase + app.audioEngine().numChannels())
@@ -925,6 +948,22 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     if (menuName == "File")
     {
         menu.addItem (FileOpen, "Open...\tCtrl+O", true, false); // always available
+
+        // Open Recent: up to 10 most recently opened files, most recent first.
+        juce::PopupMenu recentMenu;
+        if (app.recentFiles.empty())
+            recentMenu.addItem (RecentBase, "(No recent files)", false, false);
+        else
+        {
+            for (int i = 0; i < (int) app.recentFiles.size(); ++i)
+                recentMenu.addItem (RecentBase + i,
+                                     app.recentFiles[(size_t) i].getFileName(),
+                                     true, false);
+            recentMenu.addSeparator ();
+            recentMenu.addItem (ClearRecent, "Clear Recent Files", true, false);
+        }
+        menu.addSubMenu ("Open Recent", recentMenu);
+
         menu.addItem (FileClose, "Close\tCtrl+W", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         menu.addItem (FileSave, "Save\tCtrl+S", app.audioEngine().isFileLoaded(), false);

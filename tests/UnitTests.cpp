@@ -2323,6 +2323,120 @@ static void testCtrlNumberChannelToggle()
     wav.deleteFile();
 }
 
+// ------------------------------------------------- File > Open Recent
+// The File menu keeps up to 10 recently opened files, most recent first.
+// The list is persisted across sessions in a PropertiesFile; stale entries
+// (file deleted/moved) are skipped on load and dropped when clicked.
+static void testOpenRecentFiles()
+{
+    const juce::File store = makeTempFile ("recent_store.properties");
+    store.deleteFile();   // start clean (leftovers from earlier runs)
+
+    auto makeWav = [] (const juce::String& name, double freq) -> juce::File
+    {
+        const juce::File f = makeTempFile (name);
+        writeWav (f, 1, 8000.0, 2000, [freq] (int, int64_t smp, double rate)
+                  { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                   * freq * (double) smp / rate); });
+        return f;
+    };
+
+    const juce::File a = makeWav ("recent_a.wav", 100.0);
+    const juce::File b = makeWav ("recent_b.wav", 200.0);
+
+    // --- core list behaviour ------------------------------------------------
+    std::vector<juce::File> extra;
+    {
+        Application app (store);
+        CHECK (app.recentFiles.empty(), "fresh store: no recent files");
+
+        CHECK (app.openFile (a), "open A");
+        CHECK ((int) app.recentFiles.size() == 1 && app.recentFiles[0] == a,
+              "A is the only recent file");
+
+        CHECK (app.openFile (b), "open B");
+        CHECK ((int) app.recentFiles.size() == 2 && app.recentFiles[0] == b
+              && app.recentFiles[1] == a, "B is most recent, then A");
+
+        // Re-opening an already-loaded file moves it to the front (no duplicate).
+        CHECK (app.openFile (a), "re-open A (already loaded)");
+        CHECK ((int) app.recentFiles.size() == 2 && app.recentFiles[0] == a
+              && app.recentFiles[1] == b, "re-opening A moves it to the front");
+
+        // Fill past the cap: nine more opens push the oldest entries off.
+        for (int i = 0; i < 9; ++i)
+            extra.push_back (makeWav ("recent_x" + juce::String (i) + ".wav", 300.0 + i * 10));
+        for (auto& f : extra)
+            CHECK (app.openFile (f), "open filler file");
+
+        CHECK ((int) app.recentFiles.size() == Application::kMaxRecentFiles,
+              "recent list is capped at 10 entries");
+        CHECK (app.recentFiles[0] == extra.back(), "most recently opened file is first");
+        bool bGone = true;
+        for (auto& f : app.recentFiles)
+            if (f == b) bGone = false;
+        CHECK (bGone, "oldest entry fell off the list");
+    }
+
+    // --- persistence across instances ----------------------------------------
+    {
+        Application app2 (store);
+        CHECK ((int) app2.recentFiles.size() == Application::kMaxRecentFiles,
+              "recent list survives a restart");
+        // Expected: x8..x0 then a (a was the oldest survivor).
+        bool orderOk = app2.recentFiles.size() == 10 && app2.recentFiles[9] == a;
+        for (size_t i = 0; orderOk && i < extra.size(); ++i)
+            if (!(app2.recentFiles[i] == extra[extra.size() - 1 - i]))
+                orderOk = false;
+        CHECK (orderOk, "persisted list keeps most-recent-first order");
+
+        app2.clearRecentFiles ();
+        CHECK (app2.recentFiles.empty(), "clear empties the list");
+    }
+    {
+        Application app3 (store);
+        CHECK (app3.recentFiles.empty(), "cleared list stays cleared after restart");
+    }
+
+    // --- stale entries are skipped on load ------------------------------------
+    {
+        juce::PropertiesFile pf (store, juce::PropertiesFile::Options());
+        pf.setValue ("recent_1", "/nonexistent/definitely_missing.wav");
+        pf.save ();
+
+        Application app4 (store);
+        CHECK (app4.recentFiles.empty(), "stale recent entries are skipped on load");
+    }
+
+    // --- menu handler: re-open a closed file, drop stale entries --------------
+    {
+        const juce::File c = makeWav ("recent_c.wav", 900.0);
+        Application app5 (store);   // store is empty at this point
+        CHECK (app5.openFile (c), "open C");
+        app5.closeFile ();          // close it again so the menu item re-opens it
+
+        juce::MessageManager* mm = juce::MessageManager::getInstance();
+        std::unique_ptr<MainWindow> win (new MainWindow (app5, "recent files test"));
+
+        win->menuItemSelected (MainWindow::MenuIDs::RecentBase + 0, 0);
+        CHECK (app5.numDocs() == 1 && app5.audioEngine().getFile() == c,
+              "clicking a recent file re-opens it");
+
+        // Stale entry: open D, delete the file from disk, then click its item.
+        const juce::File d = makeWav ("recent_d.wav", 950.0);
+        CHECK (app5.openFile (d), "open D");
+        d.deleteFile ();            // simulate the file being moved or deleted
+        win->menuItemSelected (MainWindow::MenuIDs::RecentBase + 0, 0);   // D is first now
+        CHECK ((int) app5.recentFiles.size() == 1 && app5.recentFiles[0] == c,
+              "stale recent entry is dropped when clicked");
+
+        win.reset();   // destroy the window while its MessageManager is still alive
+        delete mm;
+    }
+
+    a.deleteFile (); b.deleteFile (); store.deleteFile ();
+}
+
 // ------------------------------------------------- multi-file support
 // Multiple files can be open at once. Each file remembers its own playhead,
 // selection, markers and undo history; switching restores them. Snapshots are
@@ -2507,6 +2621,7 @@ static int scRunUnitTestsImpl()
     progress ("spectral probe");      testSpectralProbe();
     progress ("arrow key selection"); testArrowKeySelection();
     progress ("ctrl+number channels"); testCtrlNumberChannelToggle();
+    progress ("open recent files");   testOpenRecentFiles();
     progress ("multi-file support");  testMultiFileSupport();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

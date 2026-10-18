@@ -5,7 +5,7 @@
 #include "Application.h"
 #include <algorithm>
 
-Application::Application()
+Application::Application (const juce::File& recentStorePath)
 {
     emptyEngine.setUndoManager (&emptyUndo);
     emptyEngine.setMarkersForSave (&emptyMarkers.markers()); // embedded as RIFF cue/adtl in WAV saves
@@ -18,6 +18,26 @@ Application::Application()
     audioDevice = std::make_unique<juce::AudioDeviceManager>();
     audioDevice->addAudioCallback (&sourcePlayer);
     audioDevice->initialiseWithDefaultDevices (0, 2); // no input, stereo output
+
+    // Recent-files store: persisted in the user's app-data folder so the File >
+    // Open Recent list survives restarts. Saving is explicit (no auto-save timer)
+    // so every change hits disk deterministically.
+    juce::PropertiesFile::Options opts;
+    opts.applicationName = "SpectroCraft";
+    opts.filenameSuffix = ".recent";
+    opts.millisecondsBeforeSaving = -1;   // only save() writes to disk
+    if (recentStorePath == juce::File())
+        recentStore = std::make_unique<juce::PropertiesFile> (opts.getDefaultFile(), opts);
+    else
+        recentStore = std::make_unique<juce::PropertiesFile> (recentStorePath, opts);
+
+    for (int i = 0; i < kMaxRecentFiles; ++i)
+    {
+        const juce::String p = recentStore->getValue ("recent_" + juce::String (i + 1));
+        if (p.isEmpty()) break;
+        const juce::File f (p);
+        if (f.existsAsFile()) recentFiles.push_back (f);   // skip stale entries
+    }
 }
 
 Application::~Application() {}
@@ -44,7 +64,7 @@ bool Application::openFile (const juce::File& file)
     // Already loaded? Just make it active again.
     for (int i = 0; i < (int) docs.size(); ++i)
         if (docs[(size_t) i]->file == file)
-        { activate (i); return true; }
+        { activate (i); addRecentFile (file); return true; }
 
     auto d = std::make_unique<FileDoc>();
     if (!d->load (file))
@@ -53,7 +73,48 @@ bool Application::openFile (const juce::File& file)
     FileDoc* raw = d.get();
     docs.push_back (std::move (d));
     activate ((int) docs.size() - 1);
+    addRecentFile (file);
     return true;
+}
+
+// Write the current list to the store: one property per slot, clearing any
+// stale tail slots. Called after every mutation.
+static void persistRecentFiles (Application& app)
+{
+    for (size_t i = 0; i < app.recentFiles.size(); ++i)
+        app.recentStore->setValue ("recent_" + juce::String ((int) i + 1),
+                                      app.recentFiles[i].getFullPathName());
+    for (int i = (int) app.recentFiles.size() + 1; i <= Application::kMaxRecentFiles; ++i)
+        app.recentStore->removeValue ("recent_" + juce::String (i));
+    app.recentStore->save ();
+}
+
+void Application::addRecentFile (const juce::File& file)
+{
+    // Move to the front (dedupe by file identity), then cap at kMaxRecentFiles.
+    recentFiles.erase (std::remove_if (recentFiles.begin(), recentFiles.end(),
+                                      [&file] (const juce::File& f) { return f == file; }),
+                       recentFiles.end());
+    recentFiles.insert (recentFiles.begin(), file);
+    while ((int) recentFiles.size() > kMaxRecentFiles)
+        recentFiles.pop_back ();
+
+    persistRecentFiles (*this);
+}
+
+void Application::removeRecentFile (const juce::File& file)
+{
+    auto it = std::find_if (recentFiles.begin(), recentFiles.end(),
+                            [&file] (const juce::File& f) { return f == file; });
+    if (it != recentFiles.end())
+        recentFiles.erase (it);
+    persistRecentFiles (*this);
+}
+
+void Application::clearRecentFiles()
+{
+    recentFiles.clear ();
+    persistRecentFiles (*this);
 }
 
 void Application::activate (int index)

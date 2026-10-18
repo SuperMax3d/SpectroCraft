@@ -76,7 +76,9 @@ public:
         HelpAbout = 6000,
         ColourMapClassic = 7000, ColourMapViridis, ColourMapPlasma, ColourMapInferno,
         ColourMapMagma, ColourMapHot, ColourMapCool, ColourMapGrayscale,
-        ChannelBase = 8000     // per-channel visibility toggles: ChannelBase + index
+        ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
+        RecentBase = 9000,     // File > Open Recent items: RecentBase + index
+        ClearRecent = 9100     // File > Open Recent > Clear Recent Files
     };
 
 private:
