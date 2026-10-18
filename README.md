@@ -426,6 +426,7 @@ Mouse (waveform *and* spectral views):
 | Click | Move the playhead to that position in **both** views (selection drags start from it) |
 | Left-drag | Select a time range |
 | Middle-drag | Pan the shared time window (both views stay in sync) |
+| Right-drag a region | **Box zoom**: a mostly-horizontal drag zooms both views to that time range; a mostly-vertical drag scales the amplitude axis (waveform) or frequency axis (spectral) so the dragged span fills the view. A rubber-band rectangle is shown while dragging |
 | Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete |
 | Mouse wheel over the plot / time ruler | Horizontal zoom around the cursor (both views) |
 | Mouse wheel over the left axis (or Shift + wheel anywhere) | Vertical amplitude zoom (waveform) / frequency-range zoom around the cursor (spectral) — independent per view |

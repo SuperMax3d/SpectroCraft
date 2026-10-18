@@ -147,11 +147,15 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
-    // Right-click shows the context menu; middle-drag still pans.
+    // Right button: box-zoom drag. A plain right-click (no significant
+    // movement) still shows the context menu, deferred to mouseUp.
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
     {
-        showViewContextMenu (app, onContextAction);
-        return;
+        dragMode = DragMode::ZoomDrag;
+        dragStartX = e.x;
+        dragStartY = e.y;
+        haveZoomRect = false;
+        return;   // right-button never moves the playhead
     }
 
     dragStartTime = xToTime (e.x);
@@ -199,13 +203,62 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
             panByTime (dt);
             break;
         }
+        case DragMode::ZoomDrag:
+        {
+            const int x = std::clamp (e.x, 0, getWidth());
+            const int y = std::clamp (e.y, 0, getHeight());
+            if (!haveZoomRect && (std::abs (x - dragStartX) >= 4 || std::abs (y - dragStartY) >= 4))
+                haveZoomRect = true;
+            if (haveZoomRect)
+            {
+                zoomRect = juce::Rectangle<int> (std::min (dragStartX, x), std::min (dragStartY, y),
+                                                 std::abs (x - dragStartX), std::abs (y - dragStartY));
+                repaint();
+            }
+            break;
+        }
         default: break;
     }
 }
 
 void SpectralView::mouseUp (const juce::MouseEvent&)
 {
-    if (dragMode == DragMode::Select && app.selection.getLength() <= 1e-6)
+    if (dragMode == DragMode::ZoomDrag)
+    {
+        if (!haveZoomRect)
+        {
+            showViewContextMenu (app, onContextAction);
+        }
+        else if (zoomRect.getWidth() >= zoomRect.getHeight())
+        {
+            // Horizontal drag: zoom BOTH views to the dragged time range
+            // (setWindow notifies MainWindow via onChange).
+            const double t0 = xToTime (zoomRect.getX());
+            const double t1 = xToTime (zoomRect.getRight());
+            if (t1 - t0 > 1e-9) setWindow (t0, t1);
+        }
+        else
+        {
+            // Vertical drag: set the frequency axis to the dragged span,
+            // mapped through the channel row containing the drag start.
+            const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+            if (!rows.empty() && zoomRect.getHeight() >= 2)
+            {
+                juce::Rectangle<int> row = rows.front();
+                for (const auto& rr : rows)
+                    if (rr.contains (dragStartX, dragStartY)) { row = rr; break; }
+                const double f1 = yToFreq ((float) (std::min (zoomRect.getY(), zoomRect.getBottom()) - row.getY()),
+                                           row.getHeight());
+                const double f2 = yToFreq ((float) (std::max (zoomRect.getY(), zoomRect.getBottom()) - row.getY()),
+                                           row.getHeight());
+                setFrequencyRange (std::min (f1, f2), std::max (f1, f2));
+            }
+        }
+        haveZoomRect = false;
+        zoomRect = {};
+        repaint();
+    }
+    else if (dragMode == DragMode::Select && app.selection.getLength() <= 1e-6)
     {
         app.setSelection ({ 0, 0 }); // plain click clears the selection
         selection = app.selection;
@@ -503,6 +556,15 @@ void SpectralView::paint (juce::Graphics& g)
     }
 
     drawOverlays (g);
+
+    // Right-drag box-zoom rubber band.
+    if (haveZoomRect && dragMode == DragMode::ZoomDrag)
+    {
+        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 36));
+        g.fillRoundedRectangle (zoomRect.toFloat(), 4.0f);
+        g.setColour (juce::Colours::white.withAlpha (0.85f));
+        g.drawRoundedRectangle (zoomRect.toFloat().expanded (-0.5f), 4.0f, 1.0f);
+    }
 }
 
 // Renders the spectral content (one row per visible channel with dark gaps)

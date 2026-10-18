@@ -236,9 +236,11 @@ void MainWindow::setupViews()
     spectralView = std::make_unique<SpectralView> (app);
 
     waveformView->setTooltip ("Click: move playhead | Drag: select a region (plain click clears it) "
-                              "| Middle/right-drag: pan | Wheel: zoom time (Shift+Wheel or wheel over the dB axis: zoom amplitude) "
+                              "| Middle-drag: pan | Right-drag: box zoom (horizontal = time, vertical = amplitude) "
+                              "| Wheel: zoom time (Shift+Wheel or wheel over the dB axis: zoom amplitude) "
                               "| Double-click: select whole file (on a marker: select its range) | Right-click: context menu.");
-    spectralView->setTooltip ("Click: move playhead | Drag: select a region | Middle/right-drag: pan "
+    spectralView->setTooltip ("Click: move playhead | Drag: select a region | Middle-drag: pan "
+                              "| Right-drag: box zoom (horizontal = time, vertical = frequency) "
                               "| Wheel: zoom time (Shift+Wheel or wheel over the frequency axis: zoom frequency) "
                               "| Double-click: select whole file (on a marker: select its range) | Right-click: context menu.");
 
@@ -430,11 +432,12 @@ void MainWindow::resized()
         placeViewWithScrollBar (mainArea, spectralView.get(), specVScroll.get());
     }
 
-    // Same width as the views above: stop where their vertical scrollbars
-    // begin, so the thumb tracks exactly the visible plot area.
+    // Aligned with the views' plot area: starts at the left-axis edge and
+    // stops where their vertical scrollbars begin, so the thumb tracks
+    // exactly the visible data.
     if (haveFile && timeBar)
-        timeBar->setBounds (mainArea.getX(), mainArea.getBottom() + 2,
-                            std::max (0, mainArea.getWidth() - vScrollW), 16);
+        timeBar->setBounds (mainArea.getX() + kLeftAxisWidth, mainArea.getBottom() + 2,
+                            std::max (0, mainArea.getWidth() - vScrollW - kLeftAxisWidth), 16);
 
     // Now that the bars have real sizes, sync their thumbs with the views.
     updateScrollBars();

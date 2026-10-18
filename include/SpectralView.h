@@ -18,7 +18,9 @@ public:
     void paint (juce::Graphics& g) override;
     void resized() override;
 
-    // Mouse interaction: left-drag = select, middle/right-drag = pan,
+    // Mouse interaction: left-drag = select, middle-drag = pan,
+    // right-drag = box-zoom (horizontal drag -> time range of both views;
+    // vertical drag -> frequency range), plain right-click = context menu,
     // wheel over the plot = time zoom at cursor, wheel over the left
     // frequency axis (or Shift+wheel) = frequency-range zoom,
     // double-click = fit whole file. Clicking moves the playhead.
@@ -117,9 +119,13 @@ private:
     Settings settings_;
 
     // Interaction state
-    enum class DragMode { None, Select, Pan };
+    enum class DragMode { None, Select, Pan, ZoomDrag };
     DragMode dragMode = DragMode::None;
+    int dragStartX = 0;
+    int dragStartY = 0;
     double dragStartTime = 0.0;
+    juce::Rectangle<int> zoomRect;   // right-drag box-zoom rubber band
+    bool haveZoomRect = false;
 
     // Cached rendered image
     juce::Image cachedImage;

@@ -81,11 +81,15 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
-    // Right-click shows the context menu; middle-drag still pans.
+    // Right button: box-zoom drag. A plain right-click (no significant
+    // movement) still shows the context menu, deferred to mouseUp.
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
     {
-        showViewContextMenu (app, onContextAction);
-        return;
+        dragMode = DragMode::ZoomDrag;
+        dragStartX = e.x;
+        dragStartY = e.y;
+        haveZoomRect = false;
+        return;   // right-button never moves the playhead
     }
 
     dragStartX = e.x;
@@ -134,13 +138,62 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
             panByTime (dt);
             break;
         }
+        case DragMode::ZoomDrag:
+        {
+            const int x = std::clamp (e.x, 0, getWidth());
+            const int y = std::clamp (e.y, 0, getHeight());
+            if (!haveZoomRect && (std::abs (x - dragStartX) >= 4 || std::abs (y - dragStartY) >= 4))
+                haveZoomRect = true;
+            if (haveZoomRect)
+            {
+                zoomRect = juce::Rectangle<int> (std::min (dragStartX, x), std::min (dragStartY, y),
+                                                 std::abs (x - dragStartX), std::abs (y - dragStartY));
+                repaint();
+            }
+            break;
+        }
         default: break;
     }
 }
 
 void WaveformView::mouseUp (const juce::MouseEvent&)
 {
-    if (dragMode == DragMode::Select && app.selection.getLength() <= 1e-6)
+    if (dragMode == DragMode::ZoomDrag)
+    {
+        if (!haveZoomRect)
+        {
+            showViewContextMenu (app, onContextAction);
+        }
+        else if (zoomRect.getWidth() >= zoomRect.getHeight())
+        {
+            // Horizontal drag: zoom BOTH views to the dragged time range
+            // (setWindow notifies MainWindow via onChange).
+            const double t0 = xToTime (zoomRect.getX());
+            const double t1 = xToTime (zoomRect.getRight());
+            if (t1 - t0 > 1e-9) setWindow (t0, t1);
+        }
+        else
+        {
+            // Vertical drag: scale the amplitude axis so the dragged span
+            // fills the whole plot (the view stays centred on zero).
+            const auto pr = plotRect();
+            int visCount = 0;
+            for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
+                if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
+            if (visCount > 0 && zoomRect.getHeight() >= 2)
+            {
+                const double nz = std::clamp (vZoom * ((double) pr.getHeight()
+                                                      / (double) zoomRect.getHeight()),
+                                              0.05, 64.0);
+                if (nz != vZoom) { vZoom = nz; dirty = true; }
+                if (onVerticalZoomChanged) onVerticalZoomChanged();
+            }
+        }
+        haveZoomRect = false;
+        zoomRect = {};
+        repaint();
+    }
+    else if (dragMode == DragMode::Select && app.selection.getLength() <= 1e-6)
     {
         app.setSelection ({ 0, 0 }); // plain click clears the selection
         selection = app.selection;
@@ -402,6 +455,15 @@ void WaveformView::paint (juce::Graphics& g)
         tri.addTriangle ((float) px - 5, (float) kRulerH, (float) px + 5, (float) kRulerH,
                         (float) px, 0.0f);
         g.fillPath (tri);
+    }
+
+    // Right-drag box-zoom rubber band.
+    if (haveZoomRect && dragMode == DragMode::ZoomDrag)
+    {
+        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 36));
+        g.fillRoundedRectangle (zoomRect.toFloat(), 4.0f);
+        g.setColour (juce::Colours::white.withAlpha (0.85f));
+        g.drawRoundedRectangle (zoomRect.toFloat().expanded (-0.5f), 4.0f, 1.0f);
     }
 }
 

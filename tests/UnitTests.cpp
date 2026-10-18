@@ -2649,6 +2649,129 @@ static void testSetScaleDialog()
 // selection, markers and undo history; switching restores them. Snapshots are
 // shared across all files but each one tracks the document it was stored
 // from; closing a file clears only that file's snapshot entries.
+// ---------------- Right-drag box zoom (waveform + spectral views) ----------------
+// Horizontal right-drag: both views zoom to the dragged time range.
+// Vertical right-drag: waveform amplitude axis / spectral frequency axis is
+// scaled so the dragged span fills the view. Plain right-click = context menu
+// (no state change when no action handler is attached).
+// The view handlers only read e.x/e.y/e.mods; the Desktop's default mouse
+// source is valid headlessly (MouseInputSourceList adds one at construction).
+static juce::MouseEvent mkMouse (juce::Component& c, int x, int y, juce::ModifierKeys mods)
+{
+    return juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(),
+                             { (float) x, (float) y }, mods,
+                             0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                             &c, &c, juce::Time(), { (float) x, (float) y },
+                             juce::Time(), 1, false);
+}
+
+static void testRightDragZoom()
+{
+    const juce::File wav = makeTempFile ("rightdrag_zoom.wav");
+    writeWav (wav, 2, 8000.0, 44100, [] (int ch, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (ch == 0 ? 300.0 : 600.0) * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load wav for right-drag zoom test");
+
+    const juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
+
+    // --- Waveform: horizontal drag -> time window ---
+    {
+        WaveformView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        const double e0 = view.xToTime (100), e1 = view.xToTime (300);
+        CHECK (e1 > e0, "expected time range is non-degenerate");
+
+        view.mouseDown (mkMouse (view, 100, 60, rmb));
+        view.mouseDrag (mkMouse (view, 300, 70, rmb));
+        view.mouseUp   (mkMouse (view, 300, 70, rmb));
+
+        CHECK (std::abs (view.getViewStart() - e0) < 1e-9
+              && std::abs (view.getViewEnd() - e1) < 1e-9,
+              "horizontal right-drag zooms to the dragged time range");
+    }
+
+    // --- Waveform: vertical drag -> amplitude zoom in ---
+    {
+        WaveformView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        const double before = view.getVisibleAmpHalf();
+        // Plot is y=24..199 (height 176); a 44 px span must zoom in by x4.
+        view.mouseDown (mkMouse (view, 200, 50, rmb));
+        view.mouseDrag (mkMouse (view, 203, 94, rmb));   // dx=3 < dy=44 -> vertical
+        view.mouseUp   (mkMouse (view, 203, 94, rmb));
+
+        CHECK (std::abs (view.getVisibleAmpHalf() - before / 4.0) < 1e-9,
+               "vertical right-drag scales the amplitude axis to the dragged span");
+    }
+
+    // --- Spectral: horizontal drag -> time window; vertical drag -> frequency range ---
+    {
+        SpectralView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        const double e0 = view.xToTime (100), e1 = view.xToTime (300);
+        view.mouseDown (mkMouse (view, 100, 60, rmb));
+        view.mouseDrag (mkMouse (view, 300, 70, rmb));
+        view.mouseUp   (mkMouse (view, 300, 70, rmb));
+
+        CHECK (std::abs (view.getViewStart() - e0) < 1e-9
+              && std::abs (view.getViewEnd() - e1) < 1e-9,
+              "spectral horizontal right-drag zooms to the dragged time range");
+    }
+
+    {
+        SpectralView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        // Default axis: [20 Hz .. min(20 kHz, Nyquist=4 kHz)] on a log scale;
+        // one visible channel row spans the full 200 px height.
+        const double fmin = 20.0, fmax = 4000.0;
+        const double lmin = std::log (fmin), lmax = std::log (fmax);
+        auto freqAt = [lmin, lmax] (double y) { return std::exp (lmin + (1.0 - y / 200.0) * (lmax - lmin)); };
+        const double fTop = freqAt (50.0), fBot = freqAt (150.0);
+
+        view.mouseDown (mkMouse (view, 200, 50, rmb));
+        view.mouseDrag (mkMouse (view, 203, 150, rmb));   // dx=3 < dy=100 -> vertical
+        view.mouseUp   (mkMouse (view, 203, 150, rmb));
+
+        CHECK (std::abs (view.getFreqMin() - fBot) / fBot < 1e-9
+              && std::abs (view.getFreqMax() - fTop) / fTop < 1e-9,
+               "spectral vertical right-drag sets the frequency axis to the dragged span");
+    }
+
+    // --- Plain right-click: no state change, no playhead move ---
+    {
+        WaveformView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        view.mouseDown (mkMouse (view, 150, 80, rmb));
+        view.mouseUp   (mkMouse (view, 150, 80, rmb));
+
+        CHECK (view.getViewStart() == 0.0 && view.getViewEnd() == 4.0,
+               "plain right-click leaves the time window unchanged");
+        CHECK (app.playhead == 0.0, "right-button does not move the playhead");
+    }
+
+    wav.deleteFile();
+}
+
 static void testMultiFileSupport()
 {
     // Two clearly distinct files: A = 8 kHz mono 2 s (440 Hz),
@@ -2832,6 +2955,7 @@ static int scRunUnitTestsImpl()
     progress ("change gain dialog");  testChangeGainDialog();
     progress ("scale calibration");   testScaleCalibration();
     progress ("set scale dialog");    testSetScaleDialog();
+    progress ("right-drag box zoom"); testRightDragZoom();
     progress ("multi-file support");  testMultiFileSupport();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
