@@ -435,6 +435,7 @@ void Application::changeGain (float gainDb)
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 bool Application::noiseSuppress (const std::string& modelId, const std::string& device,
+                                 float attenLimDb, bool df3PostFilter,
                                  std::function<bool(float)> onProgress, std::string* errOut)
 {
     auto fail = [&errOut] (const juce::String& msg) -> bool
@@ -461,8 +462,13 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 
     // The pipeline works on this copy; it is only committed on success.
     std::string err;
-    if (!sc::runDenseUnetPipeline (modelId, device, audioEngine().sampleRate (), nch,
-                                   data, onProgress, &err, &visibleChans (*this)))
+    const bool ok = (modelId == "deepfilternet2" || modelId == "deepfilternet3")
+        ? sc::runDeepFilterPipeline (modelId, device, audioEngine().sampleRate (), nch,
+                                     data, attenLimDb, df3PostFilter,
+                                     onProgress, &err, &visibleChans (*this))
+        : sc::runDenseUnetPipeline (modelId, device, audioEngine().sampleRate (), nch,
+                                    data, onProgress, &err, &visibleChans (*this));
+    if (!ok)
         return fail (err);
 
     audioEngine().replaceSamples (samples, data,

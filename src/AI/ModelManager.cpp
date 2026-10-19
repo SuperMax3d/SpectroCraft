@@ -298,72 +298,75 @@ static bool wininetGet(const std::string& url, const juce::File& destPart,
     const int64_t totalBytes = (int64_t) contentLength;
 
     destPart.deleteFile();   // FileOutputStream opens in append mode
-    juce::FileOutputStream out (destPart);
-    if (!out.failedToOpen())
+    Sha256 digest;
+    int64_t got = 0;
+    bool cancelled = false, openFailed = false;
     {
-        Sha256 digest;
-        char buf[1 << 18];
-        int64_t got = 0;
-        bool cancelled = false, readError = false;
-
-        while (!cancelled && !readError)
+        juce::FileOutputStream out (destPart);
+        if (!out.failedToOpen())
         {
-            DWORD nRead = 0;
-            if (!InternetReadFile (hRequest, buf, sizeof (buf), &nRead) || nRead == 0)
+            char buf[1 << 18];
+
+            while (!cancelled)
             {
-                readError = true;
-                break;
+                DWORD nRead = 0;
+                // InternetReadFile returns FALSE with nRead == 0 at the end of
+                // the stream — that is a clean EOF, not an error. A premature
+                // stop (connection reset etc.) also lands here and is caught by
+                // the size / SHA-256 verification below.
+                if (!InternetReadFile (hRequest, buf, sizeof (buf), &nRead) || nRead == 0)
+                    break;
+
+                out.write ((const unsigned char*) buf, nRead);
+                digest.update ((const unsigned char*) buf, nRead);
+                got += (int64_t) nRead;
+
+                if (onProgress && !onProgress (totalBytes > 0 ? (float) got / (float) totalBytes : 1.0f,
+                                               "downloading…"))
+                    cancelled = true;
             }
-            out.write ((const unsigned char*) buf, nRead);
-            digest.update ((const unsigned char*) buf, nRead);
-            got += (int64_t) nRead;
 
-            if (onProgress && !onProgress (totalBytes > 0 ? (float) got / (float) totalBytes : 1.0f,
-                                           "downloading…"))
-                cancelled = true;
+            out.flush ();   // the destructor closes the stream when this block ends
         }
-
-        out.flush ();   // (the destructor closes the stream)
-
-        if (!readError && !cancelled)
+        else
         {
-            const std::string hex = digest.hexDigest ();
-            if (expectedSha256.empty() || hex == expectedSha256)
+            openFailed = true;
+        }
+    }
+
+    if (openFailed)
+    {
+        if (errOut) *errOut = "Could not write to the models folder.";
+    }
+    else if (!cancelled)
+    {
+        // Verification and rename happen only after the file is fully closed:
+        // Windows will not move or delete a file that still has an open handle.
+        const std::string hex = digest.hexDigest ();
+        if (expectedSha256.empty() || hex == expectedSha256)
+        {
+            if (expectedSize > 0 && got != expectedSize)
             {
-                if (expectedSize > 0 && got != expectedSize)
-                {
-                    destPart.deleteFile ();
-                    if (errOut)
-                {
-                    char buf [128];
-                    std::snprintf (buf, sizeof (buf), "Downloaded size mismatch (%lld of %lld bytes).",
-                                   (long long) got, (long long) expectedSize);
-                    *errOut = buf;
-                }
-                }
-                else
-                {
-                    if (finalDest.exists ()) finalDest.deleteFile ();
-                    ok = destPart.moveFileTo (finalDest);
-                }
+                char msg [128];
+                std::snprintf (msg, sizeof (msg), "Downloaded size mismatch (%lld of %lld bytes).",
+                               (long long) got, (long long) expectedSize);
+                if (errOut) *errOut = msg;
             }
             else
             {
-                destPart.deleteFile ();
-                if (errOut) *errOut = "SHA-256 mismatch: the downloaded file does not match the expected checksum.";
+                if (finalDest.exists ()) finalDest.deleteFile ();
+                ok = destPart.moveFileTo (finalDest);
             }
         }
-        else if (!cancelled && errOut)
+        else if (errOut)
         {
-            destPart.deleteFile ();
-            const DWORD e = GetLastError ();
-            *errOut = "Download interrupted (error " + std::to_string ((int) e) + ").";
+            *errOut = "SHA-256 mismatch: the downloaded file does not match the expected checksum.";
         }
     }
-    else if (errOut)
-    {
-        *errOut = "Could not write to the models folder.";
-    }
+
+    // The stream is closed by now, so removing a failed .part cannot hit a
+    // sharing violation.
+    if (!ok) destPart.deleteFile ();
 
     InternetCloseHandle (hRequest);
     InternetCloseHandle (hInternet);

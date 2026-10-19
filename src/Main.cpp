@@ -2,7 +2,8 @@
  * SpectroCraft - Main entry point
  * Supports offline modes:
  *   --test-spectral <in.wav> <out.png> [width height t0 t1]
- *   --test-noise-suppression <in.wav> <out.wav>   (AI builds only)
+ *   --test-noise-suppression <in.wav> <out.wav> [modelId]   (AI builds only)
+ *       modelId: denseunet (default) | deepfilternet2 | deepfilternet3
  *   --generate-test-files [dir]
  *   --run-unit-tests
  */
@@ -181,12 +182,15 @@ public:
             {
                 if (i + 2 >= args.size())
                 {
-                    std::cout << "usage: --test-noise-suppression <in.wav> <out.wav>\n";
+                    std::cout << "usage: --test-noise-suppression <in.wav> <out.wav> [modelId]\n";
                     quit();
                     return;
                 }
                 const juce::File in  = resolvePath (args[++i]);
                 const juce::File out = resolvePath (args[++i]);
+                std::string modelId = "denseunet";
+                if (i + 1 < args.size())
+                    modelId = args[++i].toStdString ();
 
                 AudioEngine engine;
                 if (!engine.loadFile (in))
@@ -213,17 +217,22 @@ public:
 
                 int lastPct = -1;
                 std::string err;
-                const bool ok = sc::runDenseUnetPipeline ("denseunet", "CPU", rate, nch, data,
-                    [&lastPct] (float f) {
-                        const int pct = (int) (f * 100.0);
-                        if (pct >= lastPct + 10 || pct == 100)
-                        {
-                            lastPct = std::max (lastPct, pct);
-                            std::cout << "  " << lastPct << "%\n";
-                            std::flush (std::cout);
-                        }
-                        return true;
-                    }, &err);
+                const bool isDf = modelId == "deepfilternet2" || modelId == "deepfilternet3";
+                const auto progress = [&lastPct] (float f) {
+                    const int pct = (int) (f * 100.0);
+                    if (pct >= lastPct + 10 || pct == 100)
+                    {
+                        lastPct = std::max (lastPct, pct);
+                        std::cout << "  " << lastPct << "%\n";
+                        std::flush (std::cout);
+                    }
+                    return true;
+                };
+                const bool ok = isDf
+                    ? sc::runDeepFilterPipeline (modelId, "CPU", rate, nch, data,
+                                                 0.f, false, progress, &err)
+                    : sc::runDenseUnetPipeline ("denseunet", "CPU", rate, nch, data,
+                                                progress, &err);
 
                 if (!ok)
                 {

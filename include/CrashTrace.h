@@ -23,6 +23,8 @@
 #include <dbghelp.h>
 #undef max
 #undef min
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

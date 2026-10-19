@@ -79,7 +79,8 @@ public:
         owns and must delete it; used by showNoiseSuppressDialog() and tests. */
     juce::AlertWindow* createNoiseSuppressDialog();
     void showNoiseSuppressDialog();
-    void runNoiseSuppressAsync (const std::string& modelId, const std::string& device);
+    void runNoiseSuppressAsync (const std::string& modelId, const std::string& device,
+                                float attenLimDb = 0.f, bool df3PostFilter = false);
 #endif
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area

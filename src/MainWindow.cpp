@@ -1207,20 +1207,24 @@ void MainWindow::runResampleAsync (double newRate)
     }).detach();
 }
 
-// Effects > Noise Suppression... — AI effect using the denseunet model
-// (Phase 1 of the AI plan). First use downloads ~9 MB of weights.
+// Effects > Noise Suppression... — AI effect using the denseunet or
+// DeepFilterNet2/3 models (Phases 1–2 of the AI plan). First use downloads
+// the model weights (~9 MB for DenseUNet, ~15 MB per DeepFilterNet variant).
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
 {
     auto* w = new juce::AlertWindow ("Noise Suppression",
-                                     "Model:\n"
+                                     "The selection will be processed by the chosen AI model.\n"
+                                     "First use downloads the model weights to\n"
+                                     "%APPDATA%/SpectroCraft/models.\n"
                                      "\n"
-                                     "The selection will be processed with the selected model.\n"
-                                     "First use downloads ~9 MB of weights to\n"
-                                     "%APPDATA%/SpectroCraft/models.",
+                                     "Attenuation limit applies to the DeepFilterNet models only.",
                                      juce::AlertWindow::QuestionIcon);
 
-    w->addComboBox ("model", juce::StringArray { "DenseUNet (legacy)" });
+    w->addComboBox ("model",
+                    juce::StringArray { "DenseUNet (legacy)", "DeepFilterNet2", "DeepFilterNet3" },
+                    "Model");
+    w->addTextEditor ("attenLim", "0", "Attenuation limit dB (0 = off)");
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -1232,26 +1236,41 @@ void MainWindow::showNoiseSuppressDialog()
     if (!app.audioEngine().isFileLoaded() || app.selection.isEmpty()) return;
 
     auto* w = createNoiseSuppressDialog();
-    // No text fields: the window may safely hold keyboard focus, so Enter and
-    // Escape reach the button shortcuts.
+
+    // Enter modal state WITHOUT taking keyboard focus: runModalLoop() would
+    // otherwise re-enter the modal state and grab focus for the window itself.
+    w->enterModalState (false);
+
+    // Give the model combo the keyboard focus so arrows/Enter work immediately;
+    // Tab reaches the attenuation field if needed.
+    if (auto* combo = w->getComboBoxComponent ("model"))
+        combo->grabKeyboardFocus();
+
     const int result = w->runModalLoop();
+    const juce::String modelText = w->getComboBoxComponent ("model") != nullptr
+                                       ? w->getComboBoxComponent ("model")->getText() : "";
+    const float attenLimDb = (float) w->getTextEditorContents ("attenLim").trim().getDoubleValue();
     delete w;
     if (result != 1) return;
 
-    // v1: only denseunet is wired into the pipeline (DeepFilterNet is Phase 2).
-    runNoiseSuppressAsync ("denseunet", "CPU");
+    const std::string modelId = modelText == "DeepFilterNet2" ? "deepfilternet2"
+                                 : modelText == "DeepFilterNet3" ? "deepfilternet3"
+                                                                 : "denseunet";
+    // v1: the DF3 post-filter option is not exposed in the dialog yet.
+    runNoiseSuppressAsync (modelId, "CPU", attenLimDb, false);
 }
 
 // Noise suppression on a background thread with a progress dialog. Progress:
 // model download/compile/inference 0..95%, mipmap rebuild 95..100%.
-void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::string& device)
+void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::string& device,
+                                        float attenLimDb, bool df3PostFilter)
 {
     auto* dlg = new WorkProgressDialog ("Noise Suppression",
                                         "Applying " + juce::String (modelId) + " ...");
     dlg->setProgress (0.0);
     dlg->enterModalState (false);
 
-    std::thread ([this, modelId, device, dlg] {
+    std::thread ([this, modelId, device, attenLimDb, df3PostFilter, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
@@ -1260,7 +1279,7 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
         };
 
         std::string err;
-        const bool ok = app.noiseSuppress (modelId, device,
+        const bool ok = app.noiseSuppress (modelId, device, attenLimDb, df3PostFilter,
             [sendProgress] (float f) { sendProgress (0.95 * (double) f); return true; }, &err);
         if (ok)
             app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {

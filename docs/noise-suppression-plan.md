@@ -99,14 +99,20 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 - **WinInet download details:** `InternetReadFile` returning FALSE with nRead=0 is clean EOF (break, not an error); SHA/size verification + rename must happen *after* the stream is closed (Windows won't move a file with an open handle).
 - **Integration tests must use `Application::openFile()`**, not `audioEngine().loadFile()`: the latter bypasses FileDoc creation so `visibleChannels` stays empty and the pipeline silently skips every channel.
 
-### Phase 2 — DeepFilterNet2/3, torch-free (~1–2 weeks)
-- Port the three OpenVINO sub-model runners (`dfnet_model.*`) as-is (they're already pure OpenVINO + tensor shuffling).
-- Rewrite the DSP layer without libtorch:
-  - STFT/ISTFT: reuse project FFT with Hann window, fft 960 / hop 480.
-  - ERB filterbank: precomputed boxcar-average matrix (weights are `1/num` over contiguous bins — no general GEMM needed).
-  - Normalisation states (`_reg_*`), masking, crossfade chunking: plain loops.
-- Validate numerically against Intel's reference behaviour on a fixed test clip (compare per-frame masks / output RMS; small tolerance for float ordering differences).
-- Expose advanced options: attenuation limit (6–100 dB), DF3 post-filter checkbox — same semantics as Audacity dialog.
+### Phase 2 — DeepFilterNet2/3, torch-free — **DONE**
+- Ported the three OpenVINO sub-model runners (`dfnet_model.*`) as-is (pure OpenVINO + tensor shuffling): `DeepFilterNetModel` compiles enc / erb_dec / df_dec and links encoder outputs to decoder inputs via `set_tensor` at load time.
+- Rewrote the DSP layer without libtorch:
+  - STFT/ISTFT: custom streaming `DfStft` (Bluestein FFT for N=960, M=2048; Vorbis window; hop 480). The Bluestein path uses precomputed twiddle tables `_tw[s][j]` for stages s=1..11 — the table needs **kStages+1 rows** (stage index runs 1..kStages inclusive).
+  - ERB filterbank: boxcar band means via `binToBand()`/`bandWidth()` (32 bands, widths summing to 481), dB features + EMA normalisation (alpha 0.99, state init linspace(-60,-90,32)).
+  - Unit features: scale-invariant `X/sqrt(EMA(|X|))` over the first 96 bins (state init linspace(0.001,0.0001,96)).
+  - Masking, attenuation-limit blend (`lerp` by 10^(-|lim|/20)), DF3 post-filter formula, deep-filter FIR + high-band copy: plain loops.
+  - Chunking: (3002-2)×480-sample chunks with 10 s overlap and linear crossfade; STFT + normalisation states reset per chunk. Feature lookahead padding matches Intel's `ConstantPad2d({0,0,-2,2})`.
+- **Streaming OLA latency**: the analysis/synthesis memory scheme emits output delayed by exactly one hop (480 samples) — verified numerically against a Python reference to 1e-13. `forwardChunk` compensates by padding the chunk with fft_size zeros and trimming the first `fft_size - hop` samples of the synthesised stream, exactly like Intel's `forward()`.
+- **Bugs found & fixed during validation** (both masked each other):
+  1. Twiddle table declared `_tw[kStages][kM/2]` but stage 11 needs row index 11 → out-of-bounds access. The original fill loop (`s < kStages`) left stage-11 twiddles uninitialised (garbage → all-NaN spectra, no crash); "fixing" the loop to `s <= kStages` without resizing the array turned it into an OOB write (access violation in the constructor). Correct fix: `_tw[kStages + 1][kM / 2]`.
+  2. Vorbis window formula divided by `fft_size/2` instead of `fft_size`, producing a double-hump window that violates COLA (`w[n]^2 + w[n+480]^2 != 1`) → round-trip gain varied 0..2× across the frame.
+- Validation: unit test `testDfStft()` (round trip vs delayed reference, DC passthrough, reset) passes at ~3e-7 max error; `testDeepFilterPipeline()` runs DeepFilterNet2 end-to-end on synthetic stereo noise and asserts ≥10 dB RMS reduction + silence passthrough + length preservation. CLI: `--test-noise-suppression in.wav out.wav deepfilternet2` works (auto-downloads the three sub-models, ~9 MB).
+- UI: model combo (denseunet / DeepFilterNet2 / DeepFilterNet3) + attenuation-limit field in the existing dialog. The DF3 post-filter option is a pipeline parameter (default off) — not exposed in v1 because this JUCE build has no `juce::CheckBox`.
 
 ### Phase 3 — Whisper transcription
 - Vendor whisper.cpp (MIT) built with its OpenVINO backend.
@@ -153,6 +159,7 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 - [x] `extern/soxr/` vendored SoXR (Audacity's resampler, LGPL-2.1) — done in `5fe19ae`
 - [x] `src/AI/` module (runtime, generic model manager/downloader with auto-download + manual-install fallback) — done in Phase 0
 - [x] Effects → Resample… tool (whole-file, arbitrary rate, warning dialog) — reusable by AI features internally — done in `5fe19ae`
-- [x] Effects → Noise Suppression… denseunet end-to-end: dialog + async progress + undo integration (DFNet2/3 remain for Phase 2)
-- [x] Unit tests (resampler quality, NS pipeline assertions) + CLI flag `--test-noise-suppression in.wav out.wav`
+- [x] Effects → Noise Suppression… denseunet end-to-end: dialog + async progress + undo integration
+- [x] DeepFilterNet2/3 torch-free port (Bluestein STFT, ERB/unit features, chunking) — Phase 2
+- [x] Unit tests (resampler quality, NS pipeline assertions incl. DfStft round trip + DFNet2 ≥10 dB reduction) + CLI flag `--test-noise-suppression in.wav out.wav [modelId]`
 - [ ] `third_party/licenses/` (GPLv3 text for copied code, Apache/MIT/LGPL notices for OpenVINO/models/SoXR), README update

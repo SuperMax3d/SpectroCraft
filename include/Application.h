@@ -101,10 +101,13 @@ public:
     // Multiply the selection by 10^(gainDb/20) on the visible channels.
     void changeGain (float gainDb);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    // BLOCKING — call from a worker thread. Applies denseunet noise suppression
-    // to the current selection on the visible channels. Returns false and fills
-    // errOut on failure/cancellation; nothing is modified in that case.
+    // BLOCKING — call from a worker thread. Applies AI noise suppression
+    // (denseunet or DeepFilterNet2/3, selected by modelId) to the current
+    // selection on the visible channels. attenLimDb / df3PostFilter only apply
+    // to the DeepFilterNet models. Returns false and fills errOut on failure/
+    // cancellation; nothing is modified in that case.
     bool noiseSuppress (const std::string& modelId, const std::string& device,
+                        float attenLimDb = 0.f, bool df3PostFilter = false,
                         std::function<bool(float)> onProgress = nullptr,
                         std::string* errOut = nullptr);
 #endif

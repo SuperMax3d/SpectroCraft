@@ -19,6 +19,7 @@
 #include "MainWindow.h"
 #include "Resampler.h"
 #include "FFTHelpers.h"
+#include "AI/DfStft.h"   // pure DSP, no OpenVINO dependency
 #if defined(SC_ENABLE_AI)
 #include "AI/ModelManager.h"
 #include "AI/OvRuntime.h"
@@ -26,6 +27,7 @@
 #include "NoiseSuppression.h"
 #endif
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
+#include "CrashTrace.h"  // crash stack traces in the test binary
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1396,6 +1398,9 @@ extern int scRunUnitTests();
 #ifdef SC_TESTS_EXE
 int main (int argc, char** argv)
 {
+#ifdef _WIN32
+    scCrash::install();
+#endif
     if (argc > 1 && juce::String (argv[1]) == "--generate-test-files")
     {
         const juce::String dir = argc > 2 ? argv[2] : ".";
@@ -4304,6 +4309,84 @@ static void testResampler()
     }
 }
 
+// Phase 2: streaming STFT/ISTFT used by DeepFilterNet. Pure DSP — exercised in
+// every build (no model weights or OpenVINO required).
+static void testDfStft()
+{
+    using sc::ai::DfStft;
+    constexpr double kPi = 3.14159265358979323846;
+
+    // Deterministic signal: two tones + low-level noise, exactly 34 frames.
+    const int N = 34 * DfStft::kHop;   // 16320 samples
+    std::vector<float> x ((size_t) N);
+    uint32_t s = 987654u;
+    for (int i = 0; i < N; ++i)
+    {
+        s = s * 1664525u + 1013904223u;
+        const double t = (double) i / 8000.0;
+        x[(size_t) i] = (float) (0.4 * std::sin (2.0 * kPi * 37.0 * t)
+                                + 0.25 * std::sin (2.0 * kPi * 191.0 * t + 0.7)
+                                + 0.01 * ((double) (s >> 8) / 16777216.0 - 1.0));
+    }
+
+    DfStft stft;
+    std::vector<float> spec ((size_t) DfStft::kFreqs * 2);
+    std::vector<float> y ((size_t) N, 0.f);
+
+    for (int t = 0; t < N / DfStft::kHop; ++t)
+    {
+        stft.analyze (x.data () + (size_t) t * DfStft::kHop, spec.data ());
+        float frame[DfStft::kHop];
+        stft.synthesize (spec.data (), frame);
+        for (int n = 0; n < DfStft::kHop; ++n)
+            y[(size_t) t * DfStft::kHop + (size_t) n] += frame[n];
+    }
+
+    // The streaming OLA has an inherent one-hop latency: output chunk t
+    // (absolute [t*hop, (t+1)*hop)) carries input samples [(t-1)*hop, t*hop).
+    // DeepFilter::forwardChunk compensates by trimming the first hop of the
+    // synthesised stream. Here we compare against the delayed reference.
+    double maxErr = 0.0;
+    for (int p = DfStft::kFftSize; p < N - DfStft::kFftSize; ++p)
+        maxErr = std::max (maxErr, std::abs ((double) y[(size_t) p] - x[(size_t) (p - DfStft::kHop)]));
+    CHECK (maxErr < 1e-3,
+           "STFT/ISTFT round trip reconstructs the signal in the interior");
+
+    // DC passthrough: a constant must come back at exactly the same level.
+    {
+        DfStft st;
+        std::vector<float> dc ((size_t) N, 0.5f);
+        std::vector<float> y2 ((size_t) N, 0.f);
+        for (int t = 0; t < N / DfStft::kHop; ++t)
+        {
+            st.analyze (dc.data () + (size_t) t * DfStft::kHop, spec.data ());
+            float frame[DfStft::kHop];
+            st.synthesize (spec.data (), frame);
+            for (int n = 0; n < DfStft::kHop; ++n)
+                y2[(size_t) t * DfStft::kHop + (size_t) n] += frame[n];
+        }
+        double dcErr = 0.0;
+        for (int p = DfStft::kFftSize; p < N - DfStft::kFftSize; ++p)
+            dcErr = std::max (dcErr, std::abs ((double) y2[(size_t) p] - 0.5));
+        CHECK (dcErr < 1e-4, "DC level preserved through the round trip");
+    }
+
+    // reset() must clear the streaming state: analysing silence after a loud
+    // frame yields an all-zero spectrum.
+    {
+        DfStft st;
+        std::vector<float> loud ((size_t) DfStft::kHop, 0.9f);
+        std::vector<float> zero ((size_t) DfStft::kHop, 0.f);
+        float spec2[DfStft::kFreqs * 2];
+        st.analyze (loud.data (), spec2);
+        st.reset ();
+        st.analyze (zero.data (), spec2);
+        double m = 0.0;
+        for (float v : spec2) m = std::max (m, std::abs ((double) v));
+        CHECK (m < 1e-6, "reset clears the analysis memory");
+    }
+}
+
 #if defined(SC_ENABLE_AI)
 // Phase 0: OpenVINO runtime smoke test + generic model manager logic.
 // FIPS 180-4 test vectors for our self-contained SHA-256 (this JUCE build has
@@ -4556,7 +4639,148 @@ static void testDenseUnetPipeline()
         CHECK (app.audioEngine().readSamples (0, 0, N, before.data()), "integration: read pre-edit data");
 
         std::string iErr;
-        const bool ok2 = app.noiseSuppress ("denseunet", "CPU", nullptr, &iErr);
+        const bool ok2 = app.noiseSuppress ("denseunet", "CPU", 0.f, false,
+                                             nullptr, &iErr);
+        CHECK (ok2, "integration: noiseSuppress succeeded");
+        if (!ok2)
+        {
+            std::cerr << "  [integration failed: " << iErr << "]\n";
+            return;
+        }
+
+        CHECK (app.audioEngine().readSamples (0, 0, N, suppressed.data()), "integration: read post-edit data");
+
+        bool changed = false;
+        for (int i = 0; i < N && !changed; ++i)
+            if (suppressed[(size_t) i] != before[(size_t) i]) changed = true;
+        CHECK (changed, "effect modified the samples");
+
+        app.undoStep ();
+        std::vector<float> afterUndo ((size_t) N);
+        app.audioEngine().readSamples (0, 0, N, afterUndo.data());
+        bool same = true;
+        for (int i = 0; i < N && same; ++i)
+            if (afterUndo[(size_t) i] != before[(size_t) i]) same = false;
+        CHECK (same, "undo restores the original samples exactly");
+
+        app.redoStep ();
+        std::vector<float> afterRedo ((size_t) N);
+        app.audioEngine().readSamples (0, 0, N, afterRedo.data());
+        bool same2 = true;
+        for (int i = 0; i < N && same2; ++i)
+            if (afterRedo[(size_t) i] != suppressed[(size_t) i]) same2 = false;
+        CHECK (same2, "redo restores the suppressed samples exactly");
+    }
+}
+
+// Phase 2: DeepFilterNet2/3 end-to-end. Same contract as the denseunet test:
+// stationary white noise must be strongly suppressed; silence stays silent;
+// length is preserved; undo/redo work through Application.
+static void testDeepFilterPipeline()
+{
+    auto& mm = sc::ai::ModelManager::instance ();
+
+    const auto* spec2 = mm.find ("deepfilternet2");
+    const auto* spec3 = mm.find ("deepfilternet3");
+    CHECK (spec2 != nullptr, "deepfilternet2 registered in the model registry");
+    CHECK (spec3 != nullptr, "deepfilternet3 registered in the model registry");
+    if (!spec2 || !spec3) return;
+
+#if defined(_DEBUG)
+    // OpenVINO 2024.6 cannot be initialised under the MSVC debug CRT.
+    std::cerr << "  [deepfilter pipeline test skipped: MSVC debug CRT]\n";
+    return;
+#endif
+
+    // Attempt to install the weights (~15 MB download on first run).
+    std::string err;
+    bool cancelled = false;
+    const bool installed = mm.ensureInstalled (*spec2,
+        [&cancelled] (float, const std::string&) { return !cancelled; }, &err);
+    if (!installed)
+    {
+        std::cerr << "  [deepfilter pipeline test skipped: model unavailable (" << err << ")]\n";
+        return;
+    }
+
+    // Synthetic signal: 2 s @ 48 kHz stereo white noise — the in-distribution
+    // target for speech-enhancement models.
+    const int N = 96000;
+    const double rate = 48000.0;
+    std::vector<std::vector<float>> data (2);
+    juce::Random rng (54321);
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        data[ch].resize ((size_t) N);
+        const double noiseScale = 0.05 * (ch == 0 ? 1.0 : 1.3);
+        for (int i = 0; i < N; ++i)
+            data[ch][(size_t) i] = (float) (noiseScale * (rng.nextFloat () * 2.0 - 1.0));
+    }
+
+    const double inRms[2] = { rmsOf (data[0]), rmsOf (data[1]) };
+    CHECK (inRms[0] > 0.02 && inRms[1] > 0.02, "synthetic noise present before processing");
+
+    const bool ok = sc::runDeepFilterPipeline ("deepfilternet2", "CPU", rate, 2, data,
+                                               0.f, false, nullptr, &err);
+    CHECK (ok, "pipeline completed");
+    if (!ok)
+    {
+        std::cerr << "  [pipeline failed: " << err << "]\n";
+        return;
+    }
+
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        CHECK (data[ch].size () == (size_t) N, "length preserved");
+
+        bool finite = true;
+        for (float v : data[ch]) if (!std::isfinite (v)) { finite = false; break; }
+        CHECK (finite, "output is finite");
+
+        const double outRms = rmsOf (data[ch]);
+        const double dbReduction = 20.0 * std::log10 (
+            std::max (outRms, 1e-9) / inRms[ch]);
+        CHECK (dbReduction <= -10.0, "noise reduced by at least 10 dB");
+    }
+
+    // Silence passes through as silence.
+    {
+        std::vector<std::vector<float>> sil (2);
+        for (auto& c : sil) c.assign ((size_t) N, 0.0f);
+        std::string sErr;
+        const bool okS = sc::runDeepFilterPipeline ("deepfilternet2", "CPU", rate, 2, sil,
+                                                    0.f, false, nullptr, &sErr);
+        CHECK (okS, "silence: pipeline completed");
+        if (okS)
+            CHECK (rmsOf (sil[0]) < 1e-4, "silence stays silent");
+    }
+
+    // Integration via Application: selection + undo/redo around the effect.
+    {
+        const juce::File wav = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                   .getChildFile ("SpectroCraftTests-df-integration.wav");
+        writeWav (wav, 2, rate, N,
+                  [] (int ch, int64_t f, double) {
+                      // deterministic per-channel white noise (LCG)
+                      uint32_t s = 54321u + (uint32_t) (ch * 7919u) + (uint32_t) f;
+                      s = s * 1664525u + 1013904223u;
+                      const double scale = 0.05 * (ch == 0 ? 1.0 : 1.3);
+                      return (float) (scale * ((double) (s >> 8) / 16777216.0 - 1.0));
+                  });
+
+        Application app;   // isolated settings store via SC_TESTS_EXE
+        CHECK (app.openFile (wav), "integration: file loaded");
+        if (!app.audioEngine().isFileLoaded()) return;
+
+        const double dur = app.audioEngine().duration ();
+        app.setSelection ({ 0.0, dur });
+
+        std::vector<float> before ((size_t) N), suppressed ((size_t) N);
+        CHECK (app.audioEngine().readSamples (0, 0, N, before.data()), "integration: read pre-edit data");
+
+        std::string iErr;
+        const bool ok2 = app.noiseSuppress ("deepfilternet2", "CPU", 0.f, false,
+                                             nullptr, &iErr);
         CHECK (ok2, "integration: noiseSuppress succeeded");
         if (!ok2)
         {
@@ -4649,10 +4873,12 @@ static int scRunUnitTestsImpl()
     progress ("batched undo/redo");       testBatchedUndoRedo();
     progress ("multi-file support");  testMultiFileSupport();
     progress ("resampler (soxr)");    testResampler();
+    progress ("df stft round-trip");  testDfStft();
 #if defined(SC_ENABLE_AI)
     progress ("sha256 (self-contained)"); testSha256();
     progress ("AI plumbing");         testAIPlumbing();
     progress ("denseunet pipeline");  testDenseUnetPipeline();
+    progress ("deepfilter pipeline"); testDeepFilterPipeline();
 #endif
     progress ("version string");      testVersionString();
 

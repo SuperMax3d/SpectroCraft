@@ -18,6 +18,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/Application.cpp
         ${CMAKE_SOURCE_DIR}/src/Resampler.cpp
         ${CMAKE_SOURCE_DIR}/src/FFTAvx.cpp
+        ${CMAKE_SOURCE_DIR}/src/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
 )
 
 # AI module — same gating as the app target.
@@ -27,6 +28,8 @@ if (TARGET sc_openvino)
         ${CMAKE_SOURCE_DIR}/src/AI/ModelManager.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/Sha256.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/DenseUnetModel.cpp
+        ${CMAKE_SOURCE_DIR}/src/AI/DeepFilterNetModel.cpp
+        ${CMAKE_SOURCE_DIR}/src/AI/DeepFilter.cpp
         ${CMAKE_SOURCE_DIR}/src/NoiseSuppression.cpp)
     sc_enable_ai (SpectroCraftTests)
 endif()

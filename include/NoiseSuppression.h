@@ -32,4 +32,26 @@ bool runDenseUnetPipeline(const std::string& modelId, const std::string& device,
                           std::string* errOut = nullptr,
                           const std::vector<int>* chans = nullptr);
 
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+/** BLOCKING — call from a worker thread. Runs DeepFilterNet2/3 (modelId must be
+    "deepfilternet2" or "deepfilternet3") on planar float32 data, same contract as
+    runDenseUnetPipeline: `data` holds nChans vectors of exactly len samples at
+    `rate`; on success each vector is replaced in place with exactly len
+    noise-suppressed samples.
+
+    attenLimDb limits the attenuation (6..100 dB; 0 = no limit, upstream default).
+    df3PostFilter enables the DF3 spectral post-filter (ignored for DF2).
+
+    Progress phases: download 0.00–0.15, compile ~0.20, per-channel inference
+    0.20–1.00 (resample-up / model / resample-down). */
+bool runDeepFilterPipeline(const std::string& modelId, const std::string& device,
+                           double rate, int nChans,
+                           std::vector<std::vector<float>>& data,
+                           float attenLimDb = 0.f,
+                           bool df3PostFilter = false,
+                           std::function<bool(float)> onProgress = nullptr,
+                           std::string* errOut = nullptr,
+                           const std::vector<int>* chans = nullptr);
+#endif
+
 } // namespace sc
