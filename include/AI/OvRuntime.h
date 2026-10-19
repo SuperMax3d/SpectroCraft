@@ -3,8 +3,9 @@
 // Owns a single ov::Core for the whole process. The OpenVINO DLLs are vendored
 // in extern/OpenVINO and copied next to the executable by CMake; linking is
 // done against the generated import library extern/OpenVINO/lib/openvino.lib,
-// so no explicit LoadLibrary is needed (the standard Windows DLL search order
-// finds openvino.dll in the application directory).
+// but with /DELAYLOAD:openvino.dll so the executable starts even when the
+// runtime DLLs are missing. init() probes openvino.dll via LoadLibrary and
+// reports a clear error in that case — only the AI features degrade.
 //
 // When built with -DSPECTRO_ENABLE_AI=OFF this class degrades to a stub that
 // reports "AI disabled" — the rest of the app keeps working.

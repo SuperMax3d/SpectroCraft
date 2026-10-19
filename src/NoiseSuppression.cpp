@@ -5,6 +5,7 @@
 #include "AI/DenseUnetModel.h"
 #include "AI/DeepFilter.h"
 #include "AI/ModelManager.h"
+#include "AI/OvRuntime.h"
 #include "Resampler.h"
 
 #include <JuceHeader.h>
@@ -89,6 +90,15 @@ bool runDenseUnetPipeline(const std::string& modelId, const std::string& device,
     const ai::ModelSpec* spec = mm.find (modelId);
     if (!spec)
         return fail ("unknown model: " + modelId);
+
+    // Fail fast when the OpenVINO runtime is unavailable (e.g. its DLLs are
+    // not installed) so we do not waste time downloading model weights.
+    {
+        std::string rtErr;
+        auto& rt = ai::OvRuntime::instance ();
+        if (!rt.ready () && !rt.init (&rtErr))
+            return fail ("OpenVINO runtime unavailable: " + rtErr);
+    }
 
     // ---- Phase 1: make sure the weights are installed (progress 0..0.15).
     std::string installErr;
@@ -229,6 +239,15 @@ bool runDeepFilterPipeline(const std::string& modelId, const std::string& device
     const ai::ModelSpec* spec = mm.find (modelId);
     if (!spec)
         return fail ("unknown model: " + modelId);
+
+    // Fail fast when the OpenVINO runtime is unavailable (e.g. its DLLs are
+    // not installed) so we do not waste time downloading model weights.
+    {
+        std::string rtErr;
+        auto& rt = ai::OvRuntime::instance ();
+        if (!rt.ready () && !rt.init (&rtErr))
+            return fail ("OpenVINO runtime unavailable: " + rtErr);
+    }
 
     const bool isDF3 = (modelId == "deepfilternet3");
     const auto sel = isDF3 ? ai::DeepFilterNetModel::Selection::DF3

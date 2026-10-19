@@ -4500,7 +4500,19 @@ static void testAIPlumbing()
     // --- OpenVINO runtime smoke test --------------------------------------
 #if !defined(_DEBUG)
     auto& rt = sc::ai::OvRuntime::instance ();
-    CHECK (rt.init (&err), "OpenVINO runtime initialised");
+    const bool initOk = rt.init (&err);
+    // Graceful skip when the OpenVINO runtime DLLs are not installed (the
+    // executable is delay-loaded and runs fine without them). A genuine
+    // initialisation failure in an environment that does have the DLLs still
+    // fails the check below.
+#if defined(_WIN32)
+    if (!initOk && !LoadLibraryA ("openvino.dll"))
+    {
+        std::cerr << "  [OpenVINO runtime smoke test skipped: openvino.dll not installed]\n";
+        return;
+    }
+#endif
+    CHECK (initOk, "OpenVINO runtime initialised");
     if (rt.ready ())
     {
         const auto devs = rt.devices ();
@@ -4543,6 +4555,16 @@ static void testDenseUnetPipeline()
     // testAIPlumbing); inference is therefore only exercised in Release.
     std::cerr << "  [denseunet pipeline test skipped: MSVC debug CRT]\n";
     return;
+#endif
+
+#if defined(_WIN32)
+    // Graceful skip when the OpenVINO runtime DLLs are not installed (the
+    // executable is delay-loaded and runs fine without them).
+    if (!LoadLibraryA ("openvino.dll"))
+    {
+        std::cerr << "  [denseunet pipeline test skipped: openvino.dll not installed]\n";
+        return;
+    }
 #endif
 
     // Attempt to install the weights (~9 MB download into the isolated temp
@@ -4690,6 +4712,16 @@ static void testDeepFilterPipeline()
     // OpenVINO 2024.6 cannot be initialised under the MSVC debug CRT.
     std::cerr << "  [deepfilter pipeline test skipped: MSVC debug CRT]\n";
     return;
+#endif
+
+#if defined(_WIN32)
+    // Graceful skip when the OpenVINO runtime DLLs are not installed (the
+    // executable is delay-loaded and runs fine without them).
+    if (!LoadLibraryA ("openvino.dll"))
+    {
+        std::cerr << "  [deepfilter pipeline test skipped: openvino.dll not installed]\n";
+        return;
+    }
 #endif
 
     // Attempt to install the weights (~15 MB download on first run).

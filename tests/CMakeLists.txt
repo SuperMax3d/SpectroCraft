@@ -39,6 +39,13 @@ if (MSVC)
         PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 endif()
 
+# /EHa on the OpenVINO wrapper so catch(...) can intercept the delay-load
+# failure SEH code (0xC06D007E) raised when openvino.dll cannot be loaded.
+if (MSVC AND TARGET sc_openvino)
+    set_source_files_properties (${CMAKE_SOURCE_DIR}/src/AI/OvRuntime.cpp
+        PROPERTIES COMPILE_OPTIONS "/EHa")
+endif()
+
 # MainWindow.cpp includes the auto-generated Version.h, so the tests need the
 # same generated directory and must wait for sc_bump_version to run.
 add_dependencies (SpectroCraftTests sc_bump_version)

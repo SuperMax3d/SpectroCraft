@@ -32,6 +32,13 @@ function (sc_enable_ai tgt)
     target_compile_definitions (${tgt} PRIVATE SC_ENABLE_AI=1)
     target_link_libraries (${tgt} PRIVATE sc_openvino)
 
+    # Delay-load openvino.dll so the executable starts even when the OpenVINO
+    # runtime DLLs are not installed next to it. OvRuntime::init() probes the
+    # DLL and reports a clear error; only the AI features degrade.
+    # delayimp.lib provides the delay-load helper symbols.
+    set_property (TARGET ${tgt} APPEND PROPERTY LINK_OPTIONS
+        "/DELAYLOAD:openvino.dll" "delayimp.lib")
+
     add_custom_command (TARGET ${tgt} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/openvino.dll

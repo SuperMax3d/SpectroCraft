@@ -4,6 +4,10 @@
 #include "AI/OvRuntime.h"
 
 #include <juce_core/juce_core.h>
+#include <cstdio>
+#if defined(_WIN32)
+    #include <windows.h>   // LoadLibraryA / GetLastError (JUCE has already configured the Windows headers)
+#endif
 
 namespace sc { namespace ai {
 
@@ -32,6 +36,25 @@ static juce::File cacheDirPath()
 bool OvRuntime::init(std::string* errOut)
 {
     if (_ready) return true;
+
+#if defined(_WIN32)
+    // openvino.dll is delay-loaded (/DELAYLOAD), so the process starts even
+    // when the runtime DLLs are missing. Probe it here for a precise error:
+    // LoadLibrary also resolves openvino.dll's own dependencies (tbb12, IR
+    // frontend, CPU plugin). On success the DLL stays loaded and the delayed
+    // import stubs below find it already present.
+    if (!LoadLibraryA ("openvino.dll"))
+    {
+        char msg [300];
+        std::snprintf (msg, sizeof msg,
+                       "OpenVINO runtime could not be loaded (Windows error %lu).\n"
+                       "The OpenVINO DLLs are missing — install them next to SpectroCraft.exe.",
+                       (unsigned) GetLastError ());
+        if (errOut) *errOut = msg;
+        return false;
+    }
+#endif
+
     try
     {
         _core = std::make_shared<ov::Core> ();
@@ -44,6 +67,16 @@ bool OvRuntime::init(std::string* errOut)
         if (errOut) *errOut = e.what ();
         return false;
     }
+#if defined(_WIN32) && defined(_MSC_VER)
+    // Backstop: this translation unit is compiled with /EHa, so catch(...) also
+    // intercepts the delay-load failure SEH code (0xC06D007E) should it ever
+    // reach here despite the LoadLibrary probe above.
+    catch (...)
+    {
+        if (errOut) *errOut = "OpenVINO runtime failed to initialise.";
+        return false;
+    }
+#endif
 }
 
 std::vector<std::string> OvRuntime::devices() const

@@ -82,6 +82,13 @@ if (MSVC)
         PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 endif()
 
+# /EHa on the OpenVINO wrapper so catch(...) can intercept the delay-load
+# failure SEH code (0xC06D007E) raised when openvino.dll cannot be loaded.
+if (MSVC AND TARGET sc_openvino)
+    set_source_files_properties (${CMAKE_CURRENT_SOURCE_DIR}/AI/OvRuntime.cpp
+        PROPERTIES COMPILE_OPTIONS "/EHa")
+endif()
+
 juce_generate_juce_header (SpectroCraft)
 target_include_directories (SpectroCraft PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
