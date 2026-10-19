@@ -6,10 +6,12 @@
 
 FileDoc::FileDoc()
 {
-    // Wire this document's engine to its own undo history and marker list so
-    // edits are recorded per file and WAV saves embed that file's markers.
+    // Wire this document's engine to its own undo history, marker list and
+    // transcription data so edits are recorded per file and WAV saves embed
+    // that file's markers (cue/adtl) and segments (SCTT chunk).
     engine.setUndoManager (&undo);
     engine.setMarkersForSave (&markers.markers());
+    engine.setScttForSave (&scttJson);
 }
 
 bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress)
@@ -24,6 +26,13 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress)
     // in WAV files (RIFF cue/adtl chunks, classic DAW marker layout).
     if (!markers.loadSidecar (f) && f.getFileExtension().equalsIgnoreCase (".wav"))
         markers.loadFromWavFile (f, engine.sampleRate());
+
+    // Recover transcription segments embedded in WAV files (SCTT chunk);
+    // absent or corrupt chunks are simply ignored.
+    sctt = ScttData {};
+    if (f.getFileExtension().equalsIgnoreCase (".wav"))
+        readScttChunk (f, sctt);
+    refreshScttJson ();
 
     playhead = 0.0;
     selection = { 0, 0 };

@@ -4,6 +4,8 @@
  *   --test-spectral <in.wav> <out.png> [width height t0 t1]
  *   --test-noise-suppression <in.wav> <out.wav> [modelId]   (AI builds only)
  *       modelId: denseunet (default) | deepfilternet2 | deepfilternet3
+ *   --test-transcribe <in.wav> [modelId] [language]         (AI builds only)
+ *       modelId: whisper-base (default) | whisper-small | ... ; language: auto|en|...
  *   --generate-test-files [dir]
  *   --run-unit-tests
  */
@@ -17,6 +19,8 @@
 #include "Settings.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
+    #include "AI/ModelManager.h"
+    #include "AI/WhisperPipeline.h"
 #endif
 #include <vector>
 #include <cmath>
@@ -250,6 +254,84 @@ public:
 
                 const bool wrote = writeFloatWav (out, nch, rate, data);
                 std::cout << (wrote ? "wrote " : "failed to write ") << out.getFullPathName() << "\n";
+                quit();
+                return;
+            }
+            else if (args[i] == "--test-transcribe")
+            {
+                // Transcribes the whole file with Whisper and prints the
+                // segments. Usage: --test-transcribe <in.wav> [modelId] [language]
+                if (i + 1 >= args.size())
+                {
+                    std::cout << "usage: --test-transcribe <in.wav> [modelId] [language]\n";
+                    quit();
+                    return;
+                }
+                const juce::File in = resolvePath (args[++i]);
+                std::string modelId  = "whisper-base";
+                std::string language = "auto";
+                if (i + 1 < args.size()) modelId  = args[++i].toStdString ();
+                if (i + 1 < args.size()) language = args[++i].toStdString ();
+
+                AudioEngine engine;
+                if (!engine.loadFile (in))
+                {
+                    std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    quit();
+                    return;
+                }
+
+                auto& mm = sc::ai::ModelManager::instance ();
+                const sc::ai::ModelSpec* spec = mm.find (modelId);
+                if (spec == nullptr)
+                {
+                    std::cout << "unknown transcription model: " << modelId << "\n";
+                    quit();
+                    return;
+                }
+
+                int lastPct = -1;
+                const auto progress = [&lastPct] (float f) {
+                    const int pct = (int) (f * 100.0);
+                    if (pct >= lastPct + 10 || pct == 100)
+                    {
+                        lastPct = std::max (lastPct, pct);
+                        std::cout << "  " << lastPct << "%\n";
+                        std::flush (std::cout);
+                    }
+                    return true;
+                };
+
+                std::string err;
+                if (!mm.ensureInstalled (*spec,
+                        [&progress] (float f, const std::string&) { return progress (0.15f * f); }, &err))
+                {
+                    std::cout << "model install failed: " << err << "\n";
+                    quit();
+                    return;
+                }
+
+                const juce::File dir = mm.dirFor (modelId);
+                const std::string baseName = modelId.substr (std::string ("whisper-").size ());
+                const juce::File ggmlModel = dir.getChildFile ("ggml-" + baseName + ".bin");
+                const juce::File irXml     = dir.getChildFile ("ggml-" + baseName + "-encoder-openvino.xml");
+
+                sc::ai::WhisperTranscriber::Options opts;
+                opts.language = language;
+
+                std::vector<ScttSegment> segs;
+                const bool ok = sc::ai::runWhisperPipeline (engine, { 0 }, ggmlModel, irXml,
+                                                           opts, segs, progress, &err);
+                if (!ok)
+                {
+                    std::cout << "transcription failed: " << err << "\n";
+                    quit();
+                    return;
+                }
+
+                std::cout << "segments: " << segs.size() << "\n";
+                for (const auto& s : segs)
+                    std::cout << "[" << s.startSec << " - " << s.endSec << "] " << s.text << "\n";
                 quit();
                 return;
             }

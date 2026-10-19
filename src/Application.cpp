@@ -5,6 +5,8 @@
 #include "Application.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
+    #include "AI/ModelManager.h"
+    #include "AI/WhisperPipeline.h"
 #endif
 #include <algorithm>
 #include <thread>
@@ -473,6 +475,55 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 
     audioEngine().replaceSamples (samples, data,
                                   "Noise suppressed (" + juce::String (modelId) + ")");
+    return true;
+}
+
+bool Application::transcribe (const std::string& modelId, const std::string& language,
+                              bool translate,
+                              std::function<bool(float)> onProgress, std::string* errOut)
+{
+    auto fail = [&errOut] (const juce::String& msg) -> bool
+    {
+        if (errOut != nullptr) *errOut = msg.toStdString ();
+        return false;
+    };
+
+    FileDoc* d = doc ();
+    if (d == nullptr || !audioEngine ().isFileLoaded ())
+        return fail ("No file is loaded.");
+
+    auto& mm = sc::ai::ModelManager::instance ();
+    const sc::ai::ModelSpec* spec = mm.find (modelId);
+    if (spec == nullptr)
+        return fail ("Unknown transcription model: " + juce::String (modelId));
+
+    // Download phase → progress [0, 0.15).
+    std::string err;
+    if (!mm.ensureInstalled (*spec,
+            [&onProgress] (float f, const std::string&)
+            { return onProgress == nullptr || onProgress (0.15f * f); }, &err))
+        return fail (err);
+
+    // Model files: ggml-<name>.bin + the OpenVINO encoder IR pair.
+    const juce::File dir = mm.dirFor (modelId);
+    const std::string baseName = modelId.substr (std::string ("whisper-").size ());
+    const juce::File ggmlModel = dir.getChildFile ("ggml-" + baseName + ".bin");
+    const juce::File irXml     = dir.getChildFile ("ggml-" + baseName + "-encoder-openvino.xml");
+
+    sc::ai::WhisperTranscriber::Options opts;
+    opts.language  = language;
+    opts.translate = translate;
+
+    // Pipeline progress [0,1] → overall [0.15, 1].
+    std::vector<ScttSegment> segs;
+    const bool ok = sc::ai::runWhisperPipeline (audioEngine (), visibleChans (*this),
+                                                ggmlModel, irXml, opts, segs,
+            [&onProgress] (float f) { return onProgress == nullptr || onProgress (0.15f + 0.85f * f); },
+            &err);
+    if (!ok)
+        return fail (err);
+
+    d->setTranscription (std::move (segs));
     return true;
 }
 #endif

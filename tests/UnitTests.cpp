@@ -20,8 +20,10 @@
 #include "Resampler.h"
 #include "FFTHelpers.h"
 #include "AI/DfStft.h"   // pure DSP, no OpenVINO dependency
+#include "ScttChunk.h"   // SCTT RIFF chunk + JSON (no AI dependency)
 #if defined(SC_ENABLE_AI)
 #include "AI/ModelManager.h"
+#include "AI/WhisperPipeline.h"
 #include "AI/OvRuntime.h"
 #include "AI/Sha256.h"
 #include "NoiseSuppression.h"
@@ -4482,6 +4484,96 @@ static void testDfStft()
     }
 }
 
+// ---------------------------------------------------------------------------
+// SCTT chunk (Whisper transcription storage): JSON + RIFF I/O
+
+static void testScttJson()
+{
+    ScttData d;
+    d.version = 1;
+    d.segments.push_back ({ 0.5, 2.75, "hello world" });
+    // Latin-1 chars, an emoji (U+1F600) and JSON special characters that
+    // must be escaped on write. Built from code points so the test does not
+    // depend on the source-file encoding.
+    auto pushCp = [] (std::string& s, unsigned cp)
+    {
+        if (cp < 0x80) { s += (char) cp; return; }
+        if (cp < 0x800) { s += (char) (0xC0 | (cp >> 6)); s += (char) (0x80 | (cp & 0x3F)); return; }
+        if (cp < 0x10000) { s += (char) (0xE0 | (cp >> 12)); s += (char) (0x80 | ((cp >> 6) & 0x3F)); s += (char) (0x80 | (cp & 0x3F)); return; }
+        s += (char) (0xF0 | (cp >> 18));
+        s += (char) (0x80 | ((cp >> 12) & 0x3F));
+        s += (char) (0x80 | ((cp >> 6) & 0x3F));
+        s += (char) (0x80 | (cp & 0x3F));
+    };
+    std::string tricky = "\"quoted\" \\ backslash";   // JSON specials first
+    pushCp (tricky, 0xE9);      // é
+    pushCp (tricky, 0xFC);      // ü
+    pushCp (tricky, 0x1F600);   // grinning-face emoji
+    d.segments.push_back ({ 3.0, 4.25, tricky });
+
+    const std::string json = scttToJson (d);
+    ScttData d2;
+    CHECK (parseScttJson (json, d2), "sctt json parses");
+    if (d2.segments.size() == 2)
+    {
+        CHECK (d2.version == 1, "version round-trip");
+        CHECK (std::abs (d2.segments[0].startSec - 0.5) < 1e-9, "t0 round-trip");
+        CHECK (std::abs (d2.segments[0].endSec - 2.75) < 1e-9, "t1 round-trip");
+        CHECK (d2.segments[0].text == "hello world", "plain text round-trip");
+        CHECK (d2.segments[1].text == tricky, "unicode/escape round-trip");
+    }
+
+    ScttData bad;
+    CHECK (!parseScttJson ("not json at all", bad), "garbage rejected");
+    CHECK (!parseScttJson ("", bad), "empty rejected");
+    CHECK (!parseScttJson ("{\"version\":1,\"segments\":[\"oops\"]}", bad), "wrong segment type rejected");
+}
+
+static void testScttChunkWav()
+{
+    const juce::File wav = makeTempFile ("sctt.wav");
+    CHECK (writeWav (wav, 2, 44100.0, 4410 * 2,
+        [] (int, int64_t f, double rate) {
+            return (float) (0.1 * std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (double) f / rate));
+        }), "write test wav");
+
+    // Save with an SCTT chunk through the engine hook.
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "load sctt wav");
+    ScttData want;
+    want.version = 1;
+    want.segments.push_back ({ 0.25, 1.5, "first line" });
+    // "second é" with the é spelled out as UTF-8 bytes (encoding-independent).
+    std::string uniBytes = "second \xC3\xA9";
+    want.segments.push_back ({ 1.75, 3.9, uniBytes });
+    const std::string json = scttToJson (want);
+    eng.setScttForSave (&json);
+
+    const juce::File outWav = makeTempFile ("sctt_out.wav");
+    CHECK (eng.saveFileAs (outWav), "save with sctt chunk");
+
+    // Read it back through the public RIFF reader.
+    ScttData got;
+    CHECK (readScttChunk (outWav, got), "sctt chunk read back");
+    if (got.segments.size() == 2)
+    {
+        CHECK (std::abs (got.segments[0].startSec - 0.25) < 1e-9, "chunk t0");
+        CHECK (std::abs (got.segments[0].endSec - 1.5) < 1e-9, "chunk t1");
+        CHECK (got.segments[1].text == want.segments[1].text, "chunk text unicode");
+    }
+
+    // A plain WAV without the chunk must return false cleanly.
+    ScttData none;
+    CHECK (!readScttChunk (wav, none), "no sctt in plain wav");
+
+    // FileDoc load path: opening through Application picks up the chunk.
+    { Application app;
+      CHECK (app.openFile (outWav), "open sctt wav via app");
+      if (app.doc () != nullptr)
+          CHECK (app.doc ()->sctt.segments.size() == 2, "filedoc picked up sctt");
+    }
+}
+
 #if defined(SC_ENABLE_AI)
 // Phase 0: OpenVINO runtime smoke test + generic model manager logic.
 // FIPS 180-4 test vectors for our self-contained SHA-256 (this JUCE build has
@@ -4517,7 +4609,8 @@ static void testAIPlumbing()
 {
     // --- Model registry sanity -------------------------------------------
     auto& mm = sc::ai::ModelManager::instance ();
-    CHECK (mm.registry().size() == 3, "registry lists 3 models");
+    // 3 noise-suppression models + 7 Whisper transcription models.
+    CHECK (mm.registry().size() == 10, "registry lists 10 models");
 
     const auto* df2 = mm.find ("deepfilternet2");
     CHECK (df2 != nullptr, "find deepfilternet2");
@@ -4966,6 +5059,95 @@ static void testDeepFilterPipeline()
         CHECK (same2, "redo restores the suppressed samples exactly");
     }
 }
+
+// Phase 3: Whisper transcription smoke test. Runs the full pipeline on a short
+// synthetic signal; no assertion on segment content (a pure tone is not
+// speech - whisper may return zero segments or hallucinate), only that the
+// whole chain (download, ggml load, OV encoder init, inference) works.
+static void testWhisperPipeline()
+{
+    auto& mm = sc::ai::ModelManager::instance ();
+
+    // All seven Whisper models must be registered with a complete per-file
+    // spec: one ggml .bin from HuggingFace. The optional OpenVINO encoder pair
+    // is not part of the download (users can add it manually for speed).
+    const char* ids[] = { "whisper-tiny", "whisper-base", "whisper-small",
+                          "whisper-medium", "whisper-large-v1", "whisper-large-v2",
+                          "whisper-large-v3" };
+    for (const char* id : ids)
+    {
+        const auto* spec = mm.find (id);
+        CHECK (spec != nullptr, juce::String (id) + " registered");
+        if (!spec) continue;
+        bool ok = spec->files.size() == 1 && spec->zip.url.empty ()
+                  && !spec->files[0].url.empty ()
+                  && spec->files[0].sha256.size() == 64
+                  && spec->files[0].sizeBytes > 0
+                  && !spec->files[0].name.empty ();
+        CHECK (ok, juce::String (id) + " file spec complete");
+    }
+
+#if defined(_DEBUG)
+    // OpenVINO cannot be initialised under the MSVC debug CRT.
+    std::cerr << "  [whisper pipeline test skipped: MSVC debug CRT]\n";
+    return;
+#endif
+
+#if defined(_WIN32)
+    if (!LoadLibraryA ("openvino.dll"))
+    {
+        std::cerr << "  [whisper pipeline test skipped: openvino.dll not installed]\n";
+        return;
+    }
+#endif
+
+    const auto* spec = mm.find ("whisper-base");
+    if (!spec) return;
+
+    std::string err;
+    bool cancelled = false;
+    const bool installed = mm.ensureInstalled (*spec,
+        [&cancelled] (float, const std::string&) { return !cancelled; }, &err);
+    if (!installed)
+    {
+        // Graceful skip: no network / non-Windows.
+        std::cerr << "  [whisper pipeline test skipped: model unavailable (" << err << ")]\n";
+        return;
+    }
+
+    const juce::File dir = mm.dirFor ("whisper-base");
+    const juce::File ggmlModel = dir.getChildFile ("ggml-base.bin");
+    const juce::File irXml     = dir.getChildFile ("ggml-base-encoder-openvino.xml");
+
+    // 2 s of a 440 Hz tone @ 16 kHz mono.
+    AudioEngine eng;
+    const int64_t frames = 32000;
+    const juce::File wav = makeTempFile ("whisper_smoke.wav");
+    CHECK (writeWav (wav, 1, 16000.0, frames,
+        [] (int, int64_t f, double rate) {
+            return 0.2f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 440.0 * (double) f / rate);
+        }), "write whisper smoke wav");
+    CHECK (eng.loadFile (wav), "load whisper smoke wav");
+
+    sc::ai::WhisperTranscriber::Options opts;
+    opts.language = "en";
+
+    std::vector<ScttSegment> segs;
+    int lastPct = -1;
+    const bool ok = sc::ai::runWhisperPipeline (eng, { 0 }, ggmlModel, irXml, opts, segs,
+        [&lastPct] (float f) {
+            const int pct = (int) (f * 100.0);
+            if (pct >= lastPct + 25 || pct == 100)
+                std::cerr << "    whisper " << std::max (lastPct, pct) << "%\n";
+            lastPct = std::max (lastPct, pct);
+            return true;
+        }, &err);
+
+    CHECK (ok, juce::String ("whisper pipeline ran: ") + err);
+    if (ok)
+        std::cerr << "    whisper segments on tone: " << segs.size() << "\n";
+}
 #endif   // SC_ENABLE_AI
 
 static int scRunUnitTestsImpl()
@@ -5029,6 +5211,8 @@ static int scRunUnitTestsImpl()
     progress ("resampler (soxr)");    testResampler();
     progress ("fft view rate change"); testFFTAnalysisRateChange();
     progress ("status bar sample rate"); testStatusBarSampleRate();
+    progress ("sctt json");             testScttJson();
+    progress ("sctt chunk wav");        testScttChunkWav();
     progress ("df stft round-trip");  testDfStft();
 #if defined(SC_ENABLE_AI)
     progress ("sha256 (self-contained)"); testSha256();
@@ -5036,6 +5220,7 @@ static int scRunUnitTestsImpl()
     progress ("NS failure details");  testNsFailureDetails();
     progress ("denseunet pipeline");  testDenseUnetPipeline();
     progress ("deepfilter pipeline"); testDeepFilterPipeline();
+    progress ("whisper pipeline");    testWhisperPipeline();
 #endif
     progress ("version string");      testVersionString();
 

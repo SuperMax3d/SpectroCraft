@@ -2367,3 +2367,121 @@ void StatusBar::setPlayhead (double t)
     const juce::String s = "Pos: " + juce::String (t, 3) + " s";
     if (s != playPart) { playPart = s; repaint(); }
 }
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+// ------------------------------------------------- Transcription panel
+
+TranscriptionPanel::Model::Model (TranscriptionPanel* ownerIn) : owner (ownerIn) {}
+
+int TranscriptionPanel::Model::getNumRows()
+{
+    auto* d = owner->app.doc ();
+    return d != nullptr ? (int) d->sctt.segments.size () : 0;
+}
+
+void TranscriptionPanel::Model::paintRowBackground (juce::Graphics& g, int, int width, int height,
+                                                    bool selected)
+{
+    if (selected)
+    {
+        g.setColour (juce::Colour::fromRGB (60, 80, 120));
+        g.fillRect (0, 0, width, height);
+    }
+}
+
+void TranscriptionPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int columnId,
+                                           int width, int height, bool)
+{
+    auto* d = owner->app.doc ();
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
+    const ScttSegment& s = d->sctt.segments [(size_t) rowNumber];
+
+    g.setFont (11.0f);
+    if (columnId == 1)   // index
+    {
+        g.setColour (juce::Colours::lightgrey);
+        g.drawText (juce::String (rowNumber + 1), 4, 0, width - 8, height,
+                    juce::Justification::centredLeft, false);
+    }
+    else if (columnId == 2 || columnId == 3)   // start / end
+    {
+        g.setColour (juce::Colours::lightgrey);
+        const double t = (columnId == 2) ? s.startSec : s.endSec;
+        g.drawText (formatTimeCode (t), 4, 0, width - 8, height,
+                    juce::Justification::centredLeft, false);
+    }
+    else   // text (single line, truncated by drawText)
+    {
+        g.setColour (juce::Colours::white);
+        g.drawText (s.text, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
+    }
+}
+
+void TranscriptionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
+{
+    auto* d = owner->app.doc ();
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
+
+    // Jump to the segment and select its range.
+    const ScttSegment& s = d->sctt.segments [(size_t) rowNumber];
+    owner->app.setPlayhead (s.startSec);
+    if (s.endSec > s.startSec)
+        owner->app.setSelection ({ s.startSec, s.endSec });
+    if (owner->app.onStateChange)
+        owner->app.onStateChange ();   // push the new cursor/selection to both views
+}
+
+TranscriptionPanel::TranscriptionPanel (Application& appIn)
+    : app (appIn), runBtn ("Transcribe..."), clearBtn ("Clear")
+{
+    auto& header = table.getHeader();
+    // JUCE TableHeaderComponent column IDs must be non-zero.
+    header.addColumn ("#", 1, 40);
+    header.addColumn ("Start", 2, 85);
+    header.addColumn ("End", 3, 85);
+    header.addColumn ("Text", 4, 160);
+
+    addAndMakeVisible (&table);
+    addAndMakeVisible (&runBtn);
+    addAndMakeVisible (&clearBtn);
+
+    runBtn.onClick = [this] { if (onRunRequested) onRunRequested (); };
+    clearBtn.onClick = [this] {
+        auto* d = app.doc ();
+        if (d != nullptr && !d->sctt.empty ())
+        {
+            d->setTranscription ({});
+            refresh();
+            if (app.onStateChange) app.onStateChange ();
+        }
+    };
+
+    runBtn.setTooltip ("Run Whisper transcription on the whole file. The first use downloads "
+                       "the model weights to %APPDATA%/SpectroCraft/models.");
+    clearBtn.setTooltip ("Remove all transcription segments from this file (the audio is not modified).");
+    table.setTooltip ("Double-click a row to jump to it and select its range.");
+
+    refresh();
+}
+
+void TranscriptionPanel::refresh()
+{
+    table.updateContent ();
+    table.repaint ();
+}
+
+void TranscriptionPanel::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+}
+
+void TranscriptionPanel::resized()
+{
+    auto b = getLocalBounds ().reduced (4, 4);
+    table.setBounds (b.removeFromTop (std::max (120, (int) (b.getHeight () * 0.7))));
+
+    auto btnRow = b.removeFromTop (30);
+    runBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, 130, 26);
+    clearBtn.setBounds (runBtn.getRight () + 8, btnRow.getY () + 2, 90, 26);
+}
+#endif // SC_ENABLE_AI

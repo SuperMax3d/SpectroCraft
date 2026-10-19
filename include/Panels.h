@@ -541,6 +541,53 @@ private:
     JUCE_DECLARE_NON_COPYABLE (MarkerListPanel)
 };
 
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+// ------------------------------------------------- Transcription panel
+
+/** Whisper transcription segments for the active file (Phase 3 of the AI plan).
+    A read-only table of [start, end, text] rows plus a "Transcribe..." button
+    (which opens the model/language dialog via onRunRequested) and a "Clear"
+    button. Double-clicking a row jumps the playhead to its start and selects
+    its range. Segments live in FileDoc::sctt and are saved into WAV files as
+    an SCTT RIFF chunk — they never appear in the Markers panel. */
+class TranscriptionPanel : public juce::Component
+{
+public:
+    explicit TranscriptionPanel (Application& app);
+    void paint (juce::Graphics& g) override;
+    void resized() override;
+    void refresh();   // call after transcription changes / file open/close
+
+    // Set by MainWindow: opens the model/language dialog and starts the run.
+    std::function<void()> onRunRequested;
+
+private:
+    Application& app;
+
+    class Model : public juce::TableListBoxModel
+    {
+    public:
+        explicit Model (TranscriptionPanel* owner);
+        int getNumRows() override;
+        void paintRowBackground (juce::Graphics& g, int rowNumber, int width, int height,
+                                 bool selected) override;
+        void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
+                        bool selected) override;
+        void cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+
+    private:
+        TranscriptionPanel* owner;
+    };
+
+    Model model { this };
+    juce::TableListBox table { "", &model };
+
+    juce::TextButton runBtn, clearBtn;
+
+    JUCE_DECLARE_NON_COPYABLE (TranscriptionPanel)
+};
+#endif // SC_ENABLE_AI
+
 // ---------------------------------------------------------------- Status bar
 
 // Thin strip at the bottom of the window: active file name + mouse probe info

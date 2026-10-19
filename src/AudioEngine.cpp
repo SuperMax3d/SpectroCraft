@@ -773,11 +773,17 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
     const int64_t cueChunk  = numMarkers > 0 ? 8 + 4 + 24LL * numMarkers : 0;
     const int64_t listChunk = numMarkers > 0 ? 8 + (int64_t) listPayload : 0;
 
+    // SCTT chunk: transcription segments as JSON (see include/ScttChunk.h).
+    const std::string* sctt = saveScttJson;
+    const int64_t scttChunk = (sctt != nullptr && !sctt->empty ())
+                              ? 8 + (int64_t) sctt->size () : 0;
+
     const int64_t riffSize = 4            // "WAVE"
                            + 8 + 16       // fmt chunk
                            + 8 + dataSize // data chunk
                            + cueChunk
-                           + listChunk;
+                           + listChunk
+                           + scttChunk;
 
     file.deleteFile(); // FileOutputStream appends to existing files!
     auto out = std::make_unique<juce::FileOutputStream> (file);
@@ -857,6 +863,14 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
         for (const auto& m : *ms)
             if (!m.comment.isEmpty())
                 writeAdtlTextEntry (*out, "note", m.id, m.comment);
+    }
+
+    // SCTT chunk: transcription segments (JSON payload).
+    if (scttChunk > 0 && ok)
+    {
+        putFourCC (*out, "SCTT");
+        putU32 (*out, (uint32_t) (scttChunk - 8));
+        ok = out->write (sctt->data (), (size_t) sctt->size ());
     }
 
     if (ok)

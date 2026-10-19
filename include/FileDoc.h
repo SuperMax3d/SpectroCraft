@@ -4,6 +4,7 @@
 #include "AudioEngine.h"
 #include "MarkerManager.h"
 #include "ScaleCalibration.h"
+#include "ScttChunk.h"
 #include "UndoManager.h"
 
 /** Everything that belongs to one loaded audio file: its audio data, markers,
@@ -25,6 +26,12 @@ public:
     std::vector<int> visibleChannels;  // sorted channel indices to display
     ScaleCalibration scale;            // physical-unit calibration (Set Scale menu)
 
+    // Whisper transcription segments (Phase 3). Stored in the file as a RIFF
+    // "SCTT" chunk for .wav saves; shown in the Transcription panel, never in
+    // the Markers panel.
+    ScttData sctt;
+    void setTranscription (std::vector<ScttSegment> segs) { sctt.segments = std::move (segs); refreshScttJson (); }
+
     /** Load the file into this document: audio + markers (sidecar JSON first,
         embedded RIFF cue/adtl as fallback for .wav) + initial UI state. */
     /** Loads audio + markers. onProgress (optional) receives 0..1 as the
@@ -32,5 +39,8 @@ public:
     bool load (const juce::File& f, std::function<void(float)> onProgress = nullptr);
 
 private:
+    std::string scttJson;              // serialized form for WAV saves (kept in sync)
+    void refreshScttJson () { scttJson = sctt.empty () ? std::string() : scttToJson (sctt); }
+
     JUCE_DECLARE_NON_COPYABLE (FileDoc)
 };

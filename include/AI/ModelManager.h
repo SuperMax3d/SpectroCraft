@@ -19,16 +19,28 @@ namespace juce { class File; }
 namespace sc { namespace ai {
 
 struct ModelFileSpec {
-    std::string url;         // absolute download URL
-    std::string sha256;      // 64 lowercase hex chars, verified after download
+    std::string url;         // absolute download URL ("" when the file comes from a zip)
+    std::string sha256;      // 64 lowercase hex chars, verified after download ("" = skip hash check)
     int64_t sizeBytes = 0;   // expected size in bytes (0 = unknown)
+    std::string name;        // destination filename (derived from the URL basename when empty)
+};
+
+// Optional zip distribution: some models are published as a single .zip that
+// contains several files (e.g. Whisper's ggml + OpenVINO-encoder pairs). When
+// set, ensureInstalled() downloads and verifies this archive first, extracts
+// it into the model folder, then checks the individual files below.
+struct ModelZipSpec {
+    std::string url;         // absolute download URL of the .zip
+    std::string sha256;      // 64 lowercase hex chars of the zip itself
+    int64_t sizeBytes = 0;   // expected zip size in bytes (0 = unknown)
 };
 
 struct ModelSpec {
     std::string id;          // directory name under the models root
     std::string displayName; // user-facing name for dialogs/menus
-    std::vector<ModelFileSpec> files; // destination filename = URL basename
+    std::vector<ModelFileSpec> files;
     int64_t minFreeDiskBytes = 32 * 1024 * 1024;
+    ModelZipSpec zip;        // empty url = no zip (plain per-file download)
 };
 
 class ModelManager {
@@ -65,6 +77,9 @@ private:
     static bool downloadFile(const std::string& url, const juce::File& dest,
                              const std::string& expectedSha256, int64_t expectedSize,
                              ProgressFn onProgress, std::string* errOut);
+    // Download + verify + extract a model zip into `dir`. BLOCKING.
+    static bool installZip(const ModelSpec& spec, const juce::File& dir,
+                           ProgressFn onProgress, std::string* errOut);
     static int64_t freeDiskSpaceBytes(const juce::File& dir);
 
     std::string _rootOverride;

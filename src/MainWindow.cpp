@@ -127,6 +127,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     fftPanel      = std::make_unique<FFTAnalysisView> (app);
     controlsPanel = std::make_unique<SpectralControlsPanel> (app);
     markersPanel  = std::make_unique<MarkerListPanel> (app);
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    transcriptionPanel = std::make_unique<TranscriptionPanel> (app);
+#endif
     historyPanel  = std::make_unique<HistoryPanel> (app);
 
     fileListPanel->onOpenRequested = [this] { handleFileOpen(); };
@@ -149,6 +152,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     topTabs.addTab ("History", kDarkTabBg, historyPanel.get(), false);
     bottomTabs.addTab ("Spectral Controls", kDarkTabBg, controlsPanel.get(), false);
     bottomTabs.addTab ("Markers", kDarkTabBg, markersPanel.get(), false);
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    bottomTabs.addTab ("Transcription", kDarkTabBg, transcriptionPanel.get(), false);
+    if (transcriptionPanel)
+        transcriptionPanel->onRunRequested = [this] { showTranscribeDialog (); };
+#endif
     // Frequency Analysis is the default tab in the top group.
     topTabs.setCurrentTabIndex (1, false);
     bottomTabs.setCurrentTabIndex (0, false);
@@ -627,6 +635,9 @@ void MainWindow::refreshPanels()
     if (fileListPanel)  fileListPanel->refresh();
     if (controlsPanel)  controlsPanel->refresh();
     if (markersPanel)   markersPanel->refresh();
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    if (transcriptionPanel) transcriptionPanel->refresh();
+#endif
     if (historyPanel)   historyPanel->refresh();
     if (fftPanel)       fftPanel->repaint();
 }
@@ -963,6 +974,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsResample: showResampleDialog(); break;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         case ToolsNoiseSuppress: showNoiseSuppressDialog(); break;
+        case ToolsTranscribe: showTranscribeDialog(); break;
 #endif
         case ToolsReverse: app.reverse(); refreshAfterEdit(); break;
 
@@ -1248,11 +1260,43 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
         {
             details += "\n\nManual installation: download these files into:\n"
                        + mm.dirFor (spec->id).getFullPathName () + "\n";
-            for (const auto& f : spec->files)
-                details += "  " + juce::String (f.url) + "\n";
+            if (!spec->zip.url.empty ())
+                // Zip-distributed model (e.g. Whisper): one archive holds all files.
+                details += "  " + juce::String (spec->zip.url) + "\n";
+            else
+                for (const auto& f : spec->files)
+                    details += "  " + juce::String (f.url) + "\n";
         }
     }
     return details.toStdString ();
+}
+
+// Shared failure dialog for the AI features: a copyable read-only text editor
+// with the error details (paths/URLs), built by sc::buildNsFailureDetails().
+static void showAiFailureDialog (const juce::String& feature, const std::string& err,
+                                 const std::string& modelId)
+{
+    const juce::String details = sc::buildNsFailureDetails (err, modelId);
+
+    // Show the details in a read-only text editor: a plain AlertWindow label is
+    // not selectable, and users need to copy paths/URLs out of this box.
+    // Enter/Escape still close the dialog because key events bubble up from the
+    // editor (read-only editors pass them through).
+    auto* w = new juce::AlertWindow (feature + " Failed",
+                                     "The operation could not be completed.\n"
+                                     "Details below - select any text to copy it.",
+                                     juce::AlertWindow::WarningIcon);
+    auto* ed = new juce::TextEditor ();
+    ed->setMultiLine (true);
+    ed->setReadOnly (true);
+    ed->setSize (560, 230);
+    ed->setText (details, false);
+    w->addCustomComponent (ed);
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->enterModalState (false);
+    ed->grabKeyboardFocus();   // Ctrl+A / Ctrl+C work immediately
+    w->runModalLoop ();
+    delete w;
 }
 
 juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
@@ -1342,29 +1386,158 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
                 return;
             }
 
-            const juce::String details = sc::buildNsFailureDetails (err, modelId);
-
-            // Show the details in a read-only text editor: a plain AlertWindow
-            // label is not selectable, and users need to copy paths/URLs out of
-            // this box. Enter/Escape still close the dialog because key events
-            // bubble up from the editor (read-only editors pass them through).
-            auto* w = new juce::AlertWindow ("Noise Suppression Failed",
-                                             "The selection could not be processed.\n"
-                                             "Details below - select any text to copy it.",
-                                             juce::AlertWindow::WarningIcon);
-            auto* ed = new juce::TextEditor ();
-            ed->setMultiLine (true);
-            ed->setReadOnly (true);
-            ed->setSize (560, 230);
-            ed->setText (details, false);
-            w->addCustomComponent (ed);
-            w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
-            w->enterModalState (false);
-            ed->grabKeyboardFocus();   // Ctrl+A / Ctrl+C work immediately
-            w->runModalLoop ();
-            delete w;
+            showAiFailureDialog ("Noise Suppression", err, modelId);
         });
     }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// Effects > Transcribe... — Whisper transcription of the whole file
+// (Phase 3 of the AI plan). First use downloads the model weights.
+
+static juce::StringArray whisperModelIds()
+{
+    juce::StringArray ids;
+    for (const auto& s : sc::ai::ModelManager::instance ().registry ())
+        if (s.id.rfind ("whisper-", 0) == 0)
+            ids.add (juce::String (s.id));
+    return ids;
+}
+
+static juce::StringArray whisperModelNames()
+{
+    juce::StringArray names;
+    for (const auto& s : sc::ai::ModelManager::instance ().registry ())
+        if (s.id.rfind ("whisper-", 0) == 0)
+            names.add (juce::String (s.displayName));
+    return names;
+}
+
+// Display name -> BCP-47 language code ("auto" stays "auto").
+static const juce::StringArray& transcribeLanguageNames()
+{
+    static const juce::StringArray names {
+        "Auto", "English", "German", "French", "Spanish", "Italian",
+        "Portuguese", "Russian", "Chinese", "Japanese", "Korean",
+        "Arabic", "Hindi", "Dutch", "Polish", "Turkish", "Ukrainian",
+        "Vietnamese", "Thai", "Swedish" };
+    return names;
+}
+
+static const juce::StringArray& transcribeLanguageCodes()
+{
+    static const juce::StringArray codes {
+        "auto", "en", "de", "fr", "es", "it",
+        "pt", "ru", "zh", "ja", "ko",
+        "ar", "hi", "nl", "pl", "tr", "uk",
+        "vi", "th", "sv" };
+    return codes;
+}
+
+juce::AlertWindow* MainWindow::createTranscribeDialog()
+{
+    auto* w = new juce::AlertWindow ("Transcription",
+                                     "The WHOLE file will be transcribed by Whisper; the visible "
+                                     "channels are mixed to mono.\n"
+                                     "First use downloads the model weights to\n"
+                                     "%APPDATA%/SpectroCraft/models.\n"
+                                     "Larger models are more accurate but slower (CPU).",
+                                     juce::AlertWindow::QuestionIcon);
+
+    w->addComboBox ("model", whisperModelNames (), "Model");
+    w->addComboBox ("language", transcribeLanguageNames (), "Language");
+    w->addComboBox ("mode",
+                    juce::StringArray { "Transcribe", "Translate to English" },
+                    "Mode");
+
+    // Default: base model, auto language detection, plain transcription.
+    if (auto* c = w->getComboBoxComponent ("model"))   c->setSelectedItemIndex (0);
+    if (auto* c = w->getComboBoxComponent ("language")) c->setSelectedItemIndex (0);
+    if (auto* c = w->getComboBoxComponent ("mode"))     c->setSelectedItemIndex (0);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+    return w;
+}
+
+void MainWindow::showTranscribeDialog()
+{
+    if (!app.audioEngine ().isFileLoaded ()) return;
+
+    auto* w = createTranscribeDialog ();
+
+    // Enter modal state WITHOUT taking keyboard focus (see showNoiseSuppressDialog).
+    w->enterModalState (false);
+    if (auto* combo = w->getComboBoxComponent ("model"))
+        combo->grabKeyboardFocus ();
+
+    const int result = w->runModalLoop ();
+    const juce::String modelText   = w->getComboBoxComponent ("model") != nullptr
+                                        ? w->getComboBoxComponent ("model")->getText () : "";
+    const juce::String langText    = w->getComboBoxComponent ("language") != nullptr
+                                        ? w->getComboBoxComponent ("language")->getText () : "auto";
+    const bool translate           = w->getComboBoxComponent ("mode") != nullptr
+                                        && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
+    delete w;
+    if (result != 1) return;
+
+    // Map the display texts back to registry ids / language codes.
+    const auto names = whisperModelNames ();
+    const int mi = names.indexOf (modelText);
+    if (mi < 0) return;
+    const std::string modelId = whisperModelIds ()[(size_t) mi].toStdString ();
+
+    const auto langNames = transcribeLanguageNames ();
+    const int li = langNames.indexOf (langText);
+    const std::string language = (li >= 0 ? transcribeLanguageCodes ()[(size_t) li] : juce::String ("auto")).toStdString ();
+
+    runTranscriptionAsync (modelId, language, translate);
+}
+
+// Transcription on a background thread with a progress dialog. Progress:
+// download [0, 15%), mix+resample [15, 25%), inference [25, 100%].
+void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::string& language,
+                                        bool translate)
+{
+    auto* dlg = new WorkProgressDialog ("Transcription",
+                                        "Transcribing with " + juce::String (modelId) + " ...\n"
+                                        "(whole file - this can take a while on CPU)");
+    dlg->setProgress (0.0);
+    dlg->enterModalState (false);
+
+    std::thread ([this, modelId, language, translate, dlg] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v) {
+            if (v - lastSent < 0.02 && v != 1.0) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+
+        std::string err;
+        const bool ok = app.transcribe (modelId, language, translate,
+            [sendProgress] (float f) { sendProgress ((double) f); return true; }, &err);
+
+        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId] {
+            delete dlg;
+            if (ok)
+            {
+                // Show the results: refresh the panel and switch to its tab.
+                if (transcriptionPanel)
+                {
+                    transcriptionPanel->refresh ();
+                    for (int i = 0; i < bottomTabs.getNumTabs (); ++i)
+                        if (bottomTabs.getTabContentComponent (i) == transcriptionPanel.get ())
+                        {
+                            bottomTabs.setCurrentTabIndex (i, false);
+                            break;
+                        }
+                }
+                return;
+            }
+
+            showAiFailureDialog ("Transcription", err, modelId);
+        });
+    }).detach ();
 }
 #endif
 
@@ -1499,9 +1672,11 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsChangeGain, "Change Gain...", hasSel, false);
         menu.addItem (ToolsReverse, "Reverse", hasSel, false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        // AI effect: first use downloads ~9 MB of model weights.
+        // AI effects: first use downloads the model weights.
         menu.addSeparator();
         menu.addItem (ToolsNoiseSuppress, "Noise Suppression...", hasSel, false);
+        // Whole-file operation (no selection needed).
+        menu.addItem (ToolsTranscribe, "Transcribe...", app.audioEngine().isFileLoaded(), false);
 #endif
         menu.addSeparator();
         // Whole-file operation: needs the file fully in memory.

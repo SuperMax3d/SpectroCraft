@@ -116,12 +116,17 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 - Validation: unit test `testDfStft()` (round trip vs delayed reference, DC passthrough, reset) passes at ~3e-7 max error; `testDeepFilterPipeline()` runs DeepFilterNet2 end-to-end on synthetic stereo noise and asserts ≥10 dB RMS reduction + silence passthrough + length preservation. CLI: `--test-noise-suppression in.wav out.wav deepfilternet2` works (auto-downloads the three sub-models, ~9 MB).
 - UI: model combo (denseunet / DeepFilterNet2 / DeepFilterNet3) + attenuation-limit field in the existing dialog. The DF3 post-filter option is a pipeline parameter (default off) — not exposed in v1 because this JUCE build has no `juce::CheckBox`.
 
-### Phase 3 — Whisper transcription
-- Vendor whisper.cpp (MIT) built with its OpenVINO backend.
-- Port Intel's `OVWhisperTranscription` logic (GPL-3.0-only, headers preserved): model-size combo, beam search / best-of options, language auto-detect.
-- New **Transcription panel** next to Markers: segment list, double-click → playhead/selection jump, text search, Run button, Clear.
-- `SCTT` custom RIFF chunk storage (JSON segments) — written on save, parsed on load; never appears in the Markers panel.
-- **Batch transcription**: folder + subfolders scan, process each WAV headless (stream read → infer → write/replace SCTT chunk), per-file progress + summary.
+### Phase 3 — Whisper transcription — **DONE**
+- Vendored whisper.cpp v1.6.2 (MIT) at `extern/whisper.cpp` (flat layout, all files byte-identical to the upstream tag). Built with its OpenVINO encoder backend (`openvino/whisper-openvino-encoder.cpp`).
+- **Model distribution**: auto-download only `ggml-<name>.bin` from `ggerganov/whisper.cpp` on HuggingFace (sizes + SHA-256 verified against the HF API; LFS oid == content hash). The OpenVINO encoder IRs (`ggml-<name>-encoder-openvino.{xml,bin}`) are **not published anywhere** — users can optionally generate them with whisper.cpp's `models/convert-whisper-to-openvino.py` and drop both files into the model folder for faster encoding. Without them the pipeline falls back to the pure-ggml encoder (slower, identical results). Models: tiny / base / small / medium / large-v1 / large-v2 / large-v3.
+- **Engine wrapper** (`WhisperTranscriber`): `whisper_init_from_file_with_params(use_gpu=false)`; OpenVINO encoder init only when the IR XML exists *and* a non-loading-safe availability probe passes (delay-load SEH 0xC06D007E would otherwise escape); progress callback bridge clamps v1.6.x's >100% overshoot on short files.
+- **Pipeline** (`runWhisperPipeline`): mix selected channels to mono at native rate in ~30 s blocks → resample each block to 16 kHz (SoXR) → single inference pass. Cached `WhisperTranscriber` instances keyed by model path (mutex-guarded static map).
+- **SCTT chunk**: custom RIFF chunk with UTF-8 JSON `{"version":1,"segments":[{"start","end","text"}]}` — written on save after the LIST(adtl) marker chunk, parsed on load by scanning the RIFF. Plain WAVs without it load fine; never appears in the Markers panel.
+- **UI**: Transcription tab (segment table: # / start / end / text; double-click → playhead + selection jump), Effects → Transcribe… dialog (model combo, 20-language combo incl. auto-detect, transcribe/translate mode), async worker with WorkProgressDialog, failure dialog reuses the copyable-text AI-failure helper.
+- **CLI**: `--test-transcribe <in.wav> [modelId] [language]`.
+- **Tests**: `testScttJson()` (JSON round-trip incl. unicode + surrogate pairs), `testScttChunkWav()` (save/load round-trip through AudioEngine + FileDoc), `testWhisperPipeline()` (real whisper-base download + inference, AI-gated).
+- **Root cause of the Phase 3 crash hunt** (heap corruption 0xC0000374): `whisper_free_params()` does `delete params` — it is only valid for pointers returned by `whisper_full_default_params_by_ref()`. Passing the address of a stack object from `whisper_full_default_params()` (by value) is UB and corrupted the heap deterministically. Fix: never call `whisper_free_params()` on stack params (the struct is POD — nothing to free). The earlier suspicion that loading openvino.dll/TBB conflicted with ggml was a red herring caused by misreading filtered probe output.
+- **Deferred to Phase 4**: batch folder transcription, in-panel text search box.
 
 ### Phase 4 — Polish
 - Settings persistence (last model/device, auto-download toggle) in the existing settings store.
@@ -144,7 +149,7 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 
 **Shared infrastructure built once now (Phase 0) so Whisper is mostly plug-in work later:**
 1. **OpenVINO runtime bundling** — shared directly (Whisper's encoder runs on OpenVINO).
-2. **Generic model manager/downloader** — Whisper models come from `Intel/whisper.cpp-openvino-models` as ggml + OpenVINO-IR pairs: base ≈ 171 MB, small ≈ 610 MB, medium ≈ 2.1 GB, large-v3 ≈ 4.3 GB. The disk-space pre-check, progress, checksum and manual-install popup designed for the ~9 MB noise models become critical at this scale — hence designing it generically now.
+2. **Generic model manager/downloader** — Whisper ggml weights come from `ggerganov/whisper.cpp` on HuggingFace (base ≈ 148 MB, small ≈ 488 MB, medium ≈ 1.5 GB, large-v3 ≈ 3.1 GB); the OpenVINO encoder IRs are not published and must be generated locally if wanted. The disk-space pre-check, progress, checksum and manual-install popup designed for the ~9 MB noise models become critical at this scale — hence designing it generically now.
 3. **Async worker + `WorkProgressDialog` pattern** — both features are long-running, cancellable.
 4. **whisper.cpp itself** (MIT licence, compatible) built once with its OpenVINO backend; Intel's split is clever: encoder as OpenVINO IR for acceleration, decoder stays in whisper.cpp's ggml runtime. Their `OVWhisperTranscription.cpp` (~1,300 lines, GPL-3.0-only) shows the full parameter surface (model size, beam search, best-of, language) to mirror.
 
@@ -164,4 +169,5 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 - [x] Effects → Noise Suppression… denseunet end-to-end: dialog + async progress + undo integration
 - [x] DeepFilterNet2/3 torch-free port (Bluestein STFT, ERB/unit features, chunking) — Phase 2
 - [x] Unit tests (resampler quality, NS pipeline assertions incl. DfStft round trip + DFNet2 ≥10 dB reduction) + CLI flag `--test-noise-suppression in.wav out.wav [modelId]`
+- [x] Whisper transcription: vendored whisper.cpp v1.6.2 + OpenVINO encoder backend, model auto-download (ggml .bin), SCTT RIFF chunk storage, Transcription panel + dialog, CLI flag `--test-transcribe` — Phase 3
 - [ ] `third_party/licenses/` (GPLv3 text for copied code, Apache/MIT/LGPL notices for OpenVINO/models/SoXR), README update

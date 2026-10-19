@@ -93,6 +93,10 @@ public:
     // Markers embedded into WAV files as RIFF "cue" + "LIST"/"adtl" chunks.
     void setMarkersForSave (const std::vector<Marker>* m) { saveMarkers = m; }
 
+    // Transcription segments embedded into WAV files as a RIFF "SCTT" chunk
+    // (JSON, see include/ScttChunk.h). nullptr or empty string = no chunk.
+    void setScttForSave (const std::string* json) { saveScttJson = json; }
+
     // ---- Waveform overview mipmaps (min/max pyramid) ----
     struct MipLevel { int64_t factor; std::vector<std::vector<float>> min, max; };
     const std::vector<MipLevel>& mipmaps() const { return mips; }
@@ -142,6 +146,7 @@ private:
 
     ::UndoManager* undo = nullptr;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks
+    const std::string* saveScttJson = nullptr;          // for the WAV SCTT chunk
 
     void clearMipmaps();
     bool saveWavWithMarkers (const juce::File& file) const;

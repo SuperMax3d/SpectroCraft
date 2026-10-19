@@ -4,7 +4,10 @@
 #include "AI/ModelManager.h"
 #include "AI/Sha256.h"
 
+#include <miniz/miniz.h>
+
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include <juce_core/juce_core.h>
@@ -27,10 +30,32 @@ namespace {
 
 const char* const kHfBase = "https://huggingface.co/Intel/deepfilternet-openvino/resolve/main";
 const char* const kOmzBase = "https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/noise-suppression-denseunet-ll-0001/FP16";
+// Whisper's ggml + OpenVINO encoder pairs are published as per-model zips.
+const char* const kWhisperBase = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
 std::string hfUrl(const std::string& model, const char* file)
 {
     return std::string(kHfBase) + "/" + model + "/" + file;
+}
+
+// Whisper models are published as single ggml .bin files on HuggingFace
+// (ggerganov/whisper.cpp). The optional OpenVINO encoder pair
+// (ggml-<name>-encoder-openvino.{xml,bin}) is not distributed by anyone; users
+// who want the faster OV encode path can generate it with whisper.cpp's
+// models/convert-whisper-to-openvino.py and drop both files into the model
+// folder. Without them, transcription runs on the pure-ggml encoder (slower,
+// identical results).
+ModelSpec whisperModel(const char* name, const char* display,
+                       int64_t binSize, const char* binSha)
+{
+    ModelSpec s;
+    s.id = std::string("whisper-") + name;
+    s.displayName = display;
+    s.files.push_back ({ std::string(kWhisperBase) + "/ggml-" + name + ".bin",
+                         binSha, binSize, std::string ("ggml-") + name + ".bin" });
+    // Headroom in case the user adds an encoder pair later.
+    s.minFreeDiskBytes = 2 * binSize;
+    return s;
 }
 
 const std::vector<ModelSpec>& registryImpl()
@@ -73,6 +98,20 @@ const std::vector<ModelSpec>& registryImpl()
             },
             32 * 1024 * 1024,
         },
+        whisperModel ("tiny",          "Whisper tiny (~78 MB)",
+                      77691713,   "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"),
+        whisperModel ("base",          "Whisper base (~148 MB)",
+                      147951465,  "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"),
+        whisperModel ("small",         "Whisper small (~488 MB)",
+                      487601967,  "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"),
+        whisperModel ("medium",        "Whisper medium (~1.5 GB)",
+                      1533763059, "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208"),
+        whisperModel ("large-v1",      "Whisper large-v1 (~3.1 GB)",
+                      3094623691, "7d99f41a10525d0206bddadd86760181fa920438b6b33237e3118ff6c83bb53d"),
+        whisperModel ("large-v2",      "Whisper large-v2 (~3.1 GB)",
+                      3094623691, "9a423fe4d40c82774b6af34115b8b935f34152246eb19e80e376071d3f999487"),
+        whisperModel ("large-v3",      "Whisper large-v3 (~3.1 GB)",
+                      3095033483, "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2"),
     };
     return models;
 }
@@ -87,6 +126,12 @@ std::string urlBasename(const std::string& url)
     if (q != std::string::npos) end = q;
     const std::string tail = url.substr(slash + 1, end - slash - 1);
     return tail.empty() ? "model.bin" : tail;
+}
+
+std::string fileNameFor(const ModelFileSpec& f)
+{
+    if (!f.name.empty()) return f.name;
+    return urlBasename (f.url);
 }
 
 juce::File defaultModelRoot()
@@ -147,11 +192,11 @@ bool ModelManager::isInstalled(const ModelSpec& spec, std::vector<std::string>* 
     bool allPresent = true;
     for (const auto& f : spec.files)
     {
-        const juce::File p = dir.getChildFile (urlBasename (f.url));
+        const juce::File p = dir.getChildFile (fileNameFor (f));
         if (!p.existsAsFile() || (f.sizeBytes > 0 && p.getSize() != f.sizeBytes))
         {
             allPresent = false;
-            if (missingOut) missingOut->push_back (urlBasename (f.url));
+            if (missingOut) missingOut->push_back (fileNameFor (f));
         }
     }
     return allPresent;
@@ -162,12 +207,16 @@ bool ModelManager::verifyInstalled(const ModelSpec& spec, std::string* badFileOu
     const juce::File dir = dirFor (spec.id);
     for (const auto& f : spec.files)
     {
-        const juce::File p = dir.getChildFile (urlBasename (f.url));
+        const juce::File p = dir.getChildFile (fileNameFor (f));
         if (!p.existsAsFile())
         {
-            if (badFileOut) *badFileOut = urlBasename (f.url);
+            if (badFileOut) *badFileOut = fileNameFor (f);
             return false;
         }
+        // Files without a published hash (zip-distributed models) are
+        // covered by the zip's own checksum, so existence is enough.
+        if (f.sha256.empty())
+            continue;
         juce::FileInputStream in (p);
         Sha256 digest;
         if (!in.failedToOpen ())
@@ -182,13 +231,13 @@ bool ModelManager::verifyInstalled(const ModelSpec& spec, std::string* badFileOu
         }
         else
         {
-            if (badFileOut) *badFileOut = urlBasename (f.url);
+            if (badFileOut) *badFileOut = fileNameFor (f);
             return false;
         }
         const std::string hex = digest.hexDigest ();
         if (hex != f.sha256)
         {
-            if (badFileOut) *badFileOut = urlBasename (f.url);
+            if (badFileOut) *badFileOut = fileNameFor (f);
             return false;
         }
     }
@@ -212,6 +261,13 @@ bool ModelManager::ensureInstalled(const ModelSpec& spec, ProgressFn onProgress,
     juce::File dir = dirFor (spec.id);
     if (!dir.exists()) dir.createDirectory ();
 
+    // Zip-distributed models: download + verify + extract the archive first.
+    if (!spec.zip.url.empty() && !isInstalled (spec))
+    {
+        if (!installZip (spec, dir, onProgress, errOut))
+            return false;
+    }
+
     const int64_t freeBytes = freeDiskSpaceBytes (modelRoot());
     if (freeBytes > 0 && freeBytes < spec.minFreeDiskBytes)
     {
@@ -230,7 +286,9 @@ bool ModelManager::ensureInstalled(const ModelSpec& spec, ProgressFn onProgress,
     for (size_t i = 0; i < nFiles; ++i)
     {
         const ModelFileSpec& f = spec.files[i];
-        const juce::File dest = dir.getChildFile (urlBasename (f.url));
+        // Zip-provided files have no direct URL — they were extracted above.
+        if (f.url.empty()) continue;
+        const juce::File dest = dir.getChildFile (fileNameFor (f));
 
         if (dest.existsAsFile() && (f.sizeBytes <= 0 || dest.getSize() == f.sizeBytes))
             continue;   // already present with the right size
@@ -253,6 +311,98 @@ bool ModelManager::ensureInstalled(const ModelSpec& spec, ProgressFn onProgress,
         return false;
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Zip-distributed models (Whisper): download the archive, verify its SHA-256,
+// extract it into the model folder with miniz, then remove the zip. A
+// previously downloaded + verified zip is reused if still present, so a failed
+// extraction does not force re-downloading multi-GB archives.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string fileSha256(const juce::File& f)
+{
+    juce::FileInputStream in (f);
+    Sha256 digest;
+    if (!in.failedToOpen ()) return "";
+    char buf[1 << 16];
+    while (true)
+    {
+        const int n = in.read (buf, sizeof (buf));
+        if (n <= 0) break;
+        digest.update ((const unsigned char*) buf, (size_t) n);
+    }
+    return digest.hexDigest ();
+}
+
+} // namespace
+
+bool ModelManager::installZip(const ModelSpec& spec, const juce::File& dir,
+                              ProgressFn onProgress, std::string* errOut)
+{
+    const juce::File zip = dir.getChildFile (urlBasename (spec.zip.url));
+
+    // Reuse an existing verified archive when possible.
+    bool haveZip = false;
+    if (zip.existsAsFile() && (spec.zip.sizeBytes <= 0 || zip.getSize() == spec.zip.sizeBytes))
+        haveZip = (fileSha256 (zip) == spec.zip.sha256);
+
+    if (!haveZip)
+    {
+        zip.deleteFile ();   // stale or wrong-size archive: re-download
+        if (!downloadFile (spec.zip.url, zip, spec.zip.sha256, spec.zip.sizeBytes,
+                           onProgress, errOut))
+            return false;
+        haveZip = true;
+    }
+
+    mz_zip_archive za;
+    std::memset (&za, 0, sizeof (za));
+    if (!mz_zip_reader_init_file (&za, zip.getFullPathName ().toRawUTF8 (), 0))
+    {
+        if (errOut) *errOut = "Could not open the downloaded model archive."
+                              " It may be corrupt — it will be re-downloaded next time.";
+        return false;
+    }
+
+    bool ok = true;
+    const mz_uint nFiles = mz_zip_reader_get_num_files (&za);
+    for (mz_uint i = 0; i < nFiles && ok; ++i)
+    {
+        // miniz v1.14 API: the caller supplies the destination buffer.
+        char nameBuf [512];
+        if (mz_zip_reader_get_filename (&za, i, nameBuf, sizeof (nameBuf)) == 0)
+        {
+            ok = false;
+            break;
+        }
+        const std::string name (nameBuf);
+        // Skip directory entries; reject anything that could escape the folder.
+        if (name.empty () || name.back () == '/') continue;
+        if (name.find ("..") != std::string::npos
+            || name[0] == '/'
+            || (name.size () >= 2 && name[1] == ':'))
+        {
+            ok = false;
+            break;
+        }
+        const juce::File out = dir.getChildFile (name);
+        if (!mz_zip_reader_extract_to_file (&za, i,
+                                            out.getFullPathName ().toRawUTF8 (), 0))
+            ok = false;
+    }
+    mz_zip_reader_end (&za);
+
+    if (ok)
+        zip.deleteFile ();   // extracted contents are what we keep; on failure the
+                            // verified archive is retained so a retry skips the
+                            // (possibly multi-GB) re-download.
+    else if (errOut)
+        *errOut = "Failed to extract the model archive. The downloaded copy was kept,"
+                  " so the next attempt will not re-download it.";
+    return ok;
 }
 
 // ---------------------------------------------------------------------------

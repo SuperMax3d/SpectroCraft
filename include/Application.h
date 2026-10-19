@@ -110,6 +110,15 @@ public:
                         float attenLimDb = 0.f, bool df3PostFilter = false,
                         std::function<bool(float)> onProgress = nullptr,
                         std::string* errOut = nullptr);
+
+    // BLOCKING — call from a worker thread. Transcribes the WHOLE file with
+    // Whisper (modelId selects the model; language "auto" or a BCP-47 code;
+    // translate = true converts to English). Segments are stored in the active
+    // document's SCTT data. Returns false and fills errOut on failure.
+    bool transcribe (const std::string& modelId, const std::string& language,
+                     bool translate,
+                     std::function<bool(float)> onProgress = nullptr,
+                     std::string* errOut = nullptr);
 #endif
     void undoStep(); void redoStep();
     // Batched variants used by the History tab: apply up to n patches in one

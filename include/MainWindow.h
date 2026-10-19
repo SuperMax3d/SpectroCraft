@@ -81,6 +81,13 @@ public:
     void showNoiseSuppressDialog();
     void runNoiseSuppressAsync (const std::string& modelId, const std::string& device,
                                 float attenLimDb = 0.f, bool df3PostFilter = false);
+
+    /** Builds (but does not run modally) the Transcription dialog. The caller
+        owns and must delete it; used by showTranscribeDialog() and tests. */
+    juce::AlertWindow* createTranscribeDialog();
+    void showTranscribeDialog();
+    void runTranscriptionAsync (const std::string& modelId, const std::string& language,
+                                bool translate);
 #endif
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
@@ -100,6 +107,7 @@ public:
         ToolsResample,
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         ToolsNoiseSuppress,   // AI noise suppression (built with -DSPECTRO_ENABLE_AI=ON)
+        ToolsTranscribe,      // AI Whisper transcription (whole file)
 #endif
         HelpAbout = 6000,
         ColourMapClassic = 7000, ColourMapViridis, ColourMapPlasma, ColourMapInferno,
@@ -132,6 +140,9 @@ private:
     std::unique_ptr<FFTAnalysisView> fftPanel;
     std::unique_ptr<SpectralControlsPanel> controlsPanel;
     std::unique_ptr<MarkerListPanel> markersPanel;
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    std::unique_ptr<TranscriptionPanel> transcriptionPanel;   // Whisper segments (Phase 3)
+#endif
     std::unique_ptr<HistoryPanel> historyPanel;
 
     // Zoom/pan scrollbars: time bar at the bottom, one vertical
