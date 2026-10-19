@@ -16,6 +16,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/MainWindow.cpp
         ${CMAKE_SOURCE_DIR}/src/FileDoc.cpp
         ${CMAKE_SOURCE_DIR}/src/Application.cpp
+        ${CMAKE_SOURCE_DIR}/src/Resampler.cpp
         ${CMAKE_SOURCE_DIR}/src/FFTAvx.cpp
 )
 
@@ -31,6 +32,7 @@ target_include_directories (SpectroCraftTests PRIVATE ${CMAKE_SOURCE_DIR}/includ
 
 target_link_libraries (SpectroCraftTests
     PRIVATE
+        soxr   # SoXR resampler (LGPL-2.1), same engine Audacity uses
         juce::juce_audio_basics
         juce::juce_audio_devices
         juce::juce_audio_formats

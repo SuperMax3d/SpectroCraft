@@ -3,6 +3,7 @@
  */
 
 #include "AudioEngine.h"
+#include "Resampler.h"
 #include "UndoManager.h"
 #include "MarkerManager.h"
 #include <algorithm>
@@ -161,6 +162,15 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         bufferToFill.clearActiveBufferRegion();
         return;
     }
+
+    // Track that we are inside a section reading `buffer`: resampleTo() waits
+    // for this to drain before swapping the buffer pointer.
+    struct BufferSectionGuard
+    {
+        std::atomic<int>& counter;
+        explicit BufferSectionGuard (std::atomic<int>& c) : counter (c) { ++counter; }
+        ~BufferSectionGuard() { --counter; }
+    } bufferSectionGuard (audioInBufferSection);
 
     // Advance the fractional playhead by (deviceRate / fileRate) per output
     // sample; step == 1.0 when the rates match.
@@ -537,6 +547,53 @@ void AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vecto
                        buffer->getWritePointer (ch, (int) samples.getStart()));
     unsaved = true;
     rebuildMipmaps();
+}
+
+bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgress)
+{
+    if (!hasFile || !buffer)
+        return false;
+    if (!std::isfinite (newRate) || newRate <= 0.0)
+        return false;
+    if (std::abs (newRate - rate) < 1e-9 * std::max (rate, newRate))
+        return true; // already at that rate
+
+    // Stop playback and wait for any in-flight audio block to finish reading
+    // the buffer before we swap the pointer out from under it.
+    playing.store (false);
+    paused.store (false);
+    const int64_t deadline = juce::Time::getMillisecondCounter() + 100;
+    while (audioInBufferSection.load (std::memory_order_acquire) > 0
+           && juce::Time::getMillisecondCounter() < deadline)
+        std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+    const double posSecs = position();
+
+    juce::AudioBuffer<float> out;
+    if (!sc::Resampler::resample (*buffer, rate, newRate, out, onProgress))
+        return false;
+
+    // Swap in the resampled buffer. The audio thread is idle (playing==false
+    // and no block in flight), so this cannot race with playback reads.
+    auto oldBuffer = std::move (buffer);
+    buffer = std::make_unique<juce::AudioBuffer<float>> (std::move (out));
+
+    rate = newRate;
+    // Engine convention: totalSamples is frames PER CHANNEL (matches
+    // juce::AudioFormatReader::lengthInSamples used in loadFile()).
+    totalSamples = buffer->getNumSamples();
+    durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+
+    // Clipboard samples belong to the old rate: invalid for pasting now.
+    clipboard.reset();
+
+    // Resampling preserves real-time duration, so seconds-based state
+    // (playhead, selection, loop range, markers) stays valid as-is.
+    playheadFrac.store ((double) (std::min (posSecs, durationSecs) * rate));
+
+    clearMipmaps();   // caller rebuilds on its worker thread
+    return true;
 }
 
 bool AudioEngine::applyPatch (const Patch& p, bool forward, bool rebuild)

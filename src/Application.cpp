@@ -27,10 +27,29 @@ Application::Application (const juce::File& recentStorePath)
     opts.applicationName = "SpectroCraft";
     opts.filenameSuffix = ".recent";
     opts.millisecondsBeforeSaving = -1;   // only save() writes to disk
-    if (recentStorePath == juce::File())
-        recentStore = std::make_unique<juce::PropertiesFile> (opts.getDefaultFile(), opts);
+    juce::File storePath;
+    if (recentStorePath != juce::File())
+        storePath = recentStorePath;
+#if SC_TESTS_EXE
     else
-        recentStore = std::make_unique<juce::PropertiesFile> (recentStorePath, opts);
+    {
+        // Tests must never read or write the user's real settings file: a GUI
+        // session that left non-default values behind would otherwise change
+        // test outcomes. Use a fresh per-run temp store instead.
+        static juce::File isolatedStore = [] ()
+        {
+            auto f = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                        .getChildFile ("SpectroCraftTests.recent");
+            if (f.existsAsFile()) f.deleteFile();
+            return f;
+        } ();
+        storePath = isolatedStore;
+    }
+#else
+    else
+        storePath = opts.getDefaultFile();
+#endif
+    recentStore = std::make_unique<juce::PropertiesFile> (storePath, opts);
 
     for (int i = 0; i < kMaxRecentFiles; ++i)
     {

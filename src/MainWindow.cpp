@@ -952,6 +952,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsFadeOut: app.fadeOut(); refreshAfterEdit(); break;
         case ToolsNormalize: app.normalize(); refreshAfterEdit(); break;
         case ToolsChangeGain: showChangeGainDialog(); break;
+        case ToolsResample: showResampleDialog(); break;
         case ToolsReverse: app.reverse(); refreshAfterEdit(); break;
 
         case HelpAbout:
@@ -1098,6 +1099,108 @@ void MainWindow::showChangeGainDialog()
     refreshAfterEdit();
 }
 
+// Effects > Resample... — prompt for a new sample rate and resample the whole
+// file (SoXR, same engine as Audacity). Not undoable: the dialog warns about it.
+juce::AlertWindow* MainWindow::createResampleDialog()
+{
+    const double cur = app.audioEngine().sampleRate();
+    auto* w = new juce::AlertWindow ("Resample",
+                                     "Current rate: " + juce::String (cur, 3) + " Hz\n"
+                                     "New sample rate (Hz):\n"
+                                     "(whole file; cannot be undone)",
+                                     juce::AlertWindow::QuestionIcon);
+    w->addTextEditor ("newRate", juce::String (cur, 3));
+    if (auto* editor = w->getTextEditor ("newRate"))
+        // Let Enter/Escape reach the OK/Cancel shortcuts even while the field
+        // has keyboard focus.
+        editor->setEscapeAndReturnKeysConsumed (false);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // AlertWindow disables keyboard focus on its editors, so re-enable it and
+    // pre-select the text. The actual grabKeyboardFocus() happens in
+    // showResampleDialog() once the window is showing.
+    if (auto* editor = w->getTextEditor ("newRate"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+    }
+
+    return w;
+}
+
+void MainWindow::showResampleDialog()
+{
+    auto& eng = app.audioEngine();
+    if (!eng.isFileLoaded() || !eng.fullyInMemory()) return;
+
+    auto* w = createResampleDialog();
+
+    // Enter modal state WITHOUT taking keyboard focus (see showChangeGainDialog).
+    w->enterModalState (false);
+
+    if (auto* editor = w->getTextEditor ("newRate"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    const juce::String text = w->getTextEditorContents ("newRate");
+    delete w;
+    if (result != 1) return;
+
+    const double newRate = text.trim().getDoubleValue();
+    if (!std::isfinite (newRate) || newRate <= 0.0)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Invalid rate",
+                                            "Please enter a positive sample rate in Hz.");
+        return;
+    }
+
+    runResampleAsync (newRate);
+}
+
+// Resample on a background thread with a progress dialog so multi-GB files
+// never block the UI. Progress: resampling 0..85%, mipmap rebuild 85..100%.
+void MainWindow::runResampleAsync (double newRate)
+{
+    auto* dlg = new WorkProgressDialog ("Resampling",
+                                        "Resampling to " + juce::String (newRate, 3) + " Hz ...");
+    dlg->setProgress (0.0);
+    dlg->enterModalState (false);
+
+    std::thread ([this, newRate, dlg] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v) {
+            if (v - lastSent < 0.02 && v != 1.0) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+
+        const bool ok = app.audioEngine().resampleTo (
+            newRate, [sendProgress] (float f) { sendProgress (0.85 * (double) f); });
+        if (ok)
+            app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
+                sendProgress (0.85 + 0.15 * (double) f);
+            });
+
+        juce::MessageManager::callAsync ([this, dlg, ok] {
+            delete dlg;
+            if (ok)
+            {
+                syncSharedState();
+                updateTitle();
+            }
+            else
+            {
+                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                                    "Resample failed",
+                                                    "The file could not be resampled.");
+            }
+        });
+    }).detach();
+}
+
 // Keep the custom scrollbars in sync with the current view state. The
 // setWindow() calls are no-ops when nothing changed, so this is safe to call
 // from any of the feedback paths.
@@ -1228,6 +1331,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsNormalize, "Normalize", hasSel, false);
         menu.addItem (ToolsChangeGain, "Change Gain...", hasSel, false);
         menu.addItem (ToolsReverse, "Reverse", hasSel, false);
+        menu.addSeparator();
+        // Whole-file operation: needs the file fully in memory.
+        menu.addItem (ToolsResample, "Resample...",
+                      app.audioEngine().isFileLoaded() && app.audioEngine().fullyInMemory(), false);
     }
     else if (menuName == "Help")
     {

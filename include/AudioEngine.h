@@ -75,6 +75,12 @@ public:
                       const std::vector<int>* channels = nullptr);
     void reverseSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr);
 
+    // Resample the whole file to a new sample rate using SoXR (the same
+    // engine Audacity uses). Requires the file to be fully in memory.
+    // NOT undoable; clears the clipboard and mipmap pyramid (the caller is
+    // expected to rebuild mipmaps on its worker thread afterwards).
+    bool resampleTo (double newRate, std::function<void(float)> onProgress = nullptr);
+
     // Apply an undo/redo patch to the in-memory buffer
     // rebuild = false is used by batched undo/redo jumps so the mipmap
     // pyramid is rebuilt only once for the whole run of patches.
@@ -122,6 +128,7 @@ private:
     std::atomic<bool> paused{ false };
     std::atomic<bool> looping{ false };
     std::atomic<double> playheadFrac{ 0 }; // fractional position in file samples
+    std::atomic<int> audioInBufferSection{ 0 }; // >0 while the audio thread is reading `buffer`
     double playbackRate = 0.0;             // device rate set by prepareToPlay()
     std::atomic<float> gain_{ 1.0f };
     juce::Range<double> loopRange_{ 0, 0 };

@@ -8,6 +8,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Vendored copy of the JUCE framework (official repo, master branch)
 add_subdirectory(extern/JUCE)
 
+# SoXR resampler library (LGPL-2.1) — same engine Audacity uses for resampling.
+add_subdirectory(extern/soxr)
+
 # Auto-incremented version: this target runs on EVERY build and bumps the
 # patch number in VERSION.txt (1.0.0 -> 1.0.1 -> ...), then regenerates
 # generated/Version.h (About box) + SC_VERSION.txt. The sc_patch_generated

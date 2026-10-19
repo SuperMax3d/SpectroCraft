@@ -17,6 +17,7 @@
 #include "Panels.h"
 #include "ScrollBars.h"
 #include "MainWindow.h"
+#include "Resampler.h"
 #include "FFTHelpers.h"
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #if JUCE_WINDOWS
@@ -4134,6 +4135,169 @@ static void testVersionString()
            "version is x.y.z: " + juce::String (SC_VERSION_STRING));
 }
 
+// ------------------------------------------------------------------ resampling
+// SoXR is the same engine Audacity uses. Verify length accuracy, tone
+// preservation, anti-aliasing on downsample and extreme ratios.
+static double goertzelAmp (const float* data, int n, double freqHz, double rate)
+{
+    const double w = 2.0 * juce::MathConstants<double>::pi * freqHz / rate;
+    const double c = 2.0 * std::cos (w);
+    double s1 = 0.0, s2 = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        const double s0 = data[i] + c * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    // |DFT(w)| / N * 2 == sine amplitude for an exact-bin full-window tone.
+    return std::sqrt (s1 * s1 + s2 * s2 - c * s1 * s2) / n * 2.0;
+}
+
+static void testResampler()
+{
+    // 1. Upsample stereo 48 kHz -> 96 kHz: length + tone preservation.
+    {
+        const int N = 48000;   // 1 s @ 48 kHz, 1 kHz sine at 0.8 amplitude
+        juce::AudioBuffer<float> in (2, N);
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < N; ++i)
+                in.setSample (c, i,
+                             (float) (0.8 * std::sin (2.0 * juce::MathConstants<double>::pi
+                                                      * 1000.0 * i / 48000.0)));
+        juce::AudioBuffer<float> out;
+        float lastProgress = -1.0f;
+        CHECK (sc::Resampler::resample (in, 48000.0, 96000.0, out,
+                                        [&] (float f) { lastProgress = f; }),
+               "soxr upsampling succeeds");
+        const int len = out.getNumSamples();
+        CHECK (std::abs ((double) len - 96000.0) <= 8.0,
+               "upsampled length is ~2x the input (96000 +/- 8)");
+        const double a0 = goertzelAmp (out.getReadPointer (0), len, 1000.0, 96000.0);
+        const double a1 = goertzelAmp (out.getReadPointer (1), len, 1000.0, 96000.0);
+        CHECK (std::abs (a0 - 0.8) < 0.02 && std::abs (a1 - 0.8) < 0.02,
+               "1 kHz tone amplitude preserved on both channels after upsampling");
+        CHECK (lastProgress >= 0.99f, "progress callback reaches ~1.0");
+    }
+
+    // 2. Downsample 48 kHz -> 22.05 kHz: the out-of-band 20 kHz tone must be
+    //    attenuated by > 60 dB (anti-aliasing); in-band tones survive.
+    {
+        const int N = 48000;
+        auto makeIn = [] (bool withHigh) { return [withHigh] (int, int64_t f, double rate)
+            {
+                float v = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                  * 1000.0 * (double) f / rate);
+                if (withHigh)
+                    v += 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                 * 20000.0 * (double) f / rate);
+                return v;
+            };
+        };
+        juce::AudioBuffer<float> inRef (1, N), inMix (1, N);
+        for (int i = 0; i < N; ++i)
+        {
+            inRef.setSample (0, i, makeIn (false) (0, i, 48000.0));
+            inMix.setSample (0, i, makeIn (true) (0, i, 48000.0));
+        }
+        juce::AudioBuffer<float> outRef, outMix;
+        CHECK (sc::Resampler::resample (inRef, 48000.0, 22050.0, outRef),
+               "soxr downsampling (reference) succeeds");
+        CHECK (sc::Resampler::resample (inMix, 48000.0, 22050.0, outMix),
+               "soxr downsampling (mixed) succeeds");
+        const int len = outRef.getNumSamples();
+        CHECK (std::abs ((double) len - 22050.0) <= 8.0, "downsampled length ~ 22050");
+        const double a1k = goertzelAmp (outMix.getReadPointer (0), len, 1000.0, 22050.0);
+        CHECK (std::abs (a1k - 0.5) < 0.03, "in-band 1 kHz tone survives downsampling");
+        // The difference between the two outputs is exactly the aliased residue
+        // of the 20 kHz component: it must be > 60 dB below its original level.
+        double sumSq = 0.0;
+        for (int i = 0; i < len && i < outMix.getNumSamples(); ++i)
+        {
+            const double d = (double) outMix.getSample (0, i) - (double) outRef.getSample (0, i);
+            sumSq += d * d;
+        }
+        const double rmsResidue = std::sqrt (sumSq / len);
+        CHECK (rmsResidue < 0.5 * std::pow (10.0, -60.0 / 20.0),
+               "out-of-band 20 kHz component attenuated > 60 dB by downsampling");
+    }
+
+    // 3. Round trip 44.1 kHz -> 48 kHz -> 44.1 kHz.
+    {
+        const int N = 44100;
+        juce::AudioBuffer<float> in (1, N);
+        for (int i = 0; i < N; ++i)
+            in.setSample (0, i,
+                         (float) (0.7 * std::sin (2.0 * juce::MathConstants<double>::pi
+                                                  * 440.0 * i / 44100.0)));
+        juce::AudioBuffer<float> mid, back;
+        CHECK (sc::Resampler::resample (in, 44100.0, 48000.0, mid), "round trip stage 1");
+        CHECK (sc::Resampler::resample (mid, 48000.0, 44100.0, back), "round trip stage 2");
+        const int len = back.getNumSamples();
+        CHECK (std::abs ((double) len - 44100.0) <= 16.0, "round-trip length ~ original");
+        const double a = goertzelAmp (back.getReadPointer (0), len, 440.0, 44100.0);
+        CHECK (std::abs (a - 0.7) < 0.02, "tone amplitude preserved through round trip");
+    }
+
+    // 4. Extreme ratio: 8 kHz -> 352.8 kHz (x44.1).
+    {
+        const int N = 8000;
+        juce::AudioBuffer<float> in (1, N);
+        for (int i = 0; i < N; ++i)
+            in.setSample (0, i,
+                         (float) (0.6 * std::sin (2.0 * juce::MathConstants<double>::pi
+                                                  * 1000.0 * i / 8000.0)));
+        juce::AudioBuffer<float> out;
+        CHECK (sc::Resampler::resample (in, 8000.0, 352800.0, out),
+               "extreme x44.1 upsampling succeeds");
+        const int len = out.getNumSamples();
+        CHECK (std::abs ((double) len - 352800.0) <= 64.0,
+               "extreme-ratio output length ~ 352800");
+        const double a = goertzelAmp (out.getReadPointer (0), len, 1000.0, 352800.0);
+        CHECK (std::abs (a - 0.6) < 0.03, "tone preserved at extreme ratio");
+    }
+
+    // 5. Same-rate resample is an exact copy.
+    {
+        const int N = 1234;
+        juce::AudioBuffer<float> in (2, N);
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < N; ++i)
+                in.setSample (c, i, (float) std::sin (i * 1.7 + c));
+        juce::AudioBuffer<float> out;
+        CHECK (sc::Resampler::resample (in, 48000.0, 48000.0, out), "same-rate resample succeeds");
+        bool identical = (out.getNumSamples() == N);
+        for (int c = 0; c < 2 && identical; ++c)
+            for (int i = 0; i < N; ++i)
+                if (out.getSample (c, i) != in.getSample (c, i)) { identical = false; break; }
+        CHECK (identical, "same-rate resample returns an exact copy");
+    }
+
+    // 6. AudioEngine::resampleTo integration: rate/length/duration/playhead.
+    {
+        const juce::File wav = makeTempFile ("resample_engine.wav");
+        writeWav (wav, 2, 44100.0, 44100,
+                 [] (int ch, int64_t f, double rate)
+                 { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                  * (ch == 0 ? 300.0 : 900.0) * (double) f / rate); });
+        Application app;
+        CHECK (app.openFile (wav), "open wav for engine resample test");
+        CHECK (app.audioEngine().fullyInMemory(), "small file is fully in memory");
+
+        const double durBefore = app.audioEngine().duration();
+        app.audioEngine().setPosition (1.0);
+        CHECK (app.audioEngine().resampleTo (48000.0), "engine resample to 48 kHz succeeds");
+        CHECK (std::abs (app.audioEngine().sampleRate() - 48000.0) < 1e-6, "rate updated");
+        const int64_t n = app.audioEngine().numSamples();
+        CHECK (std::abs ((double) n / 48000.0 - durBefore) < 0.01,
+               "duration preserved after resample");
+        CHECK (app.audioEngine().mipmaps().empty(), "mipmaps cleared after resample");
+        app.audioEngine().rebuildMipmaps();
+        CHECK (!app.audioEngine().mipmaps().empty(), "mipmaps rebuilt for the new rate");
+        CHECK (std::abs (app.audioEngine().position() - 1.0) < 0.01,
+               "playhead position preserved in seconds after resample");
+    }
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -4192,6 +4356,7 @@ static int scRunUnitTestsImpl()
     progress ("fft view persistence");    testFFTViewPersistence();
     progress ("batched undo/redo");       testBatchedUndoRedo();
     progress ("multi-file support");  testMultiFileSupport();
+    progress ("resampler (soxr)");    testResampler();
     progress ("version string");      testVersionString();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

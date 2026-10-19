@@ -69,6 +69,11 @@ public:
     /** Builds (but does not run modally) the Change Gain dialog. The caller
         owns and must delete it; used by showChangeGainDialog() and tests. */
     juce::AlertWindow* createGainDialog();
+    void showResampleDialog();
+    /** Builds (but does not run modally) the Resample dialog. The caller owns
+        and must delete it; used by showResampleDialog() and tests. */
+    juce::AlertWindow* createResampleDialog();
+    void runResampleAsync (double newRate);   // background resample + progress dialog
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
     void handleTopSplitterDrag (const juce::MouseEvent& e);   // top tabs / bottom tabs
@@ -84,6 +89,7 @@ public:
         ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels, ViewColourMap,
         TransportPlay = 4000, TransportStop, TransportPause, TransportLoop,
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
+        ToolsResample,
         HelpAbout = 6000,
         ColourMapClassic = 7000, ColourMapViridis, ColourMapPlasma, ColourMapInferno,
         ColourMapMagma, ColourMapHot, ColourMapCool, ColourMapGrayscale,
