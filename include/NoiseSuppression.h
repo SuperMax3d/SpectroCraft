@@ -55,6 +55,19 @@ bool runDeepFilterPipeline(const std::string& modelId, const std::string& device
                            std::function<bool(float)> onProgress = nullptr,
                            std::string* errOut = nullptr,
                            const std::vector<int>* chans = nullptr);
+
+/** Builds the full text shown in the "Noise Suppression Failed" dialog.
+    The raw error is always included; then, depending on what went wrong:
+      - if the OpenVINO runtime itself failed to load (err starts with
+        "OpenVINO runtime unavailable"), the user gets a list of the four
+        required DLLs and where to get them — pointing them at model
+        downloads would be a trap since the weights are useless until the
+        runtime loads;
+      - otherwise, if the model is known, they get the manual-install folder
+        plus one download URL per file.
+    Used by the GUI failure dialog, the --test-ns-failure-alert CLI hook and
+    unit tests. */
+std::string buildNsFailureDetails(const std::string& err, const std::string& modelId);
 #endif
 
 } // namespace sc

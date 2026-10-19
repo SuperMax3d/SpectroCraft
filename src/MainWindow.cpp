@@ -14,6 +14,7 @@
 #include "MarkerManager.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "AI/ModelManager.h"
+    #include "NoiseSuppression.h"
 #endif
 #include "IconData.h"
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
@@ -1221,6 +1222,39 @@ void MainWindow::runResampleAsync (double newRate)
 // DeepFilterNet2/3 models (Phases 1–2 of the AI plan). First use downloads
 // the model weights (~9 MB for DenseUNet, ~15 MB per DeepFilterNet variant).
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+std::string sc::buildNsFailureDetails (const std::string& err, const std::string& modelId)
+{
+    juce::String details = err.empty () ? "The selection could not be processed." : err;
+    auto& mm = sc::ai::ModelManager::instance ();
+    // When the OpenVINO runtime itself is missing, pointing the user at model
+    // downloads would be a trap (the weights are irrelevant until the DLLs
+    // load), so that case gets its own instructions instead.
+    const bool runtimeMissing = details.startsWith ("OpenVINO runtime unavailable");
+    if (const auto* spec = mm.find (modelId))
+    {
+        if (runtimeMissing)
+        {
+            details += "\n\nThe OpenVINO runtime DLLs must sit in the same folder as SpectroCraft.exe:\n"
+                       "  openvino.dll\n"
+                       "  openvino_intel_cpu_plugin.dll\n"
+                       "  openvino_ir_frontend.dll\n"
+                       "  tbb12.dll\n"
+                       "\nWhere to get them:\n"
+                       "- If you built SpectroCraft from source: extern/OpenVINO/bin/ in the repository.\n"
+                       "- Otherwise download OpenVINO 2024.6 from https://github.com/openvinotoolkit/openvino/releases\n"
+                       "  and take the DLLs from its runtime\\Windows\\bin folder.";
+        }
+        else
+        {
+            details += "\n\nManual installation: download these files into:\n"
+                       + mm.dirFor (spec->id).getFullPathName () + "\n";
+            for (const auto& f : spec->files)
+                details += "  " + juce::String (f.url) + "\n";
+        }
+    }
+    return details.toStdString ();
+}
+
 juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
 {
     auto* w = new juce::AlertWindow ("Noise Suppression",
@@ -1308,21 +1342,27 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
                 return;
             }
 
-            // When the model is unavailable, append manual-install instructions.
-            // The destination path sits on its own line so it can be selected
-            // and copied straight out of the message box.
-            juce::String msg = err.empty () ? "The selection could not be processed." : err;
-            auto& mm = sc::ai::ModelManager::instance ();
-            if (const auto* spec = mm.find (modelId))
-            {
-                msg += "\n\nManual installation: download these files into:\n"
-                       + mm.dirFor (spec->id).getFullPathName () + "\n";
-                for (const auto& f : spec->files)
-                    msg += "  " + juce::String (f.url) + "\n";
-            }
+            const juce::String details = sc::buildNsFailureDetails (err, modelId);
 
-            juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
-                                                "Noise Suppression Failed", msg);
+            // Show the details in a read-only text editor: a plain AlertWindow
+            // label is not selectable, and users need to copy paths/URLs out of
+            // this box. Enter/Escape still close the dialog because key events
+            // bubble up from the editor (read-only editors pass them through).
+            auto* w = new juce::AlertWindow ("Noise Suppression Failed",
+                                             "The selection could not be processed.\n"
+                                             "Details below - select any text to copy it.",
+                                             juce::AlertWindow::WarningIcon);
+            auto* ed = new juce::TextEditor ();
+            ed->setMultiLine (true);
+            ed->setReadOnly (true);
+            ed->setSize (560, 230);
+            ed->setText (details, false);
+            w->addCustomComponent (ed);
+            w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+            w->enterModalState (false);
+            ed->grabKeyboardFocus();   // Ctrl+A / Ctrl+C work immediately
+            w->runModalLoop ();
+            delete w;
         });
     }).detach();
 }

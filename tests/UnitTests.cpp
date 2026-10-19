@@ -4629,6 +4629,33 @@ static void testAIPlumbing()
 #endif
 }
 
+// The failure-dialog text builder must point users at the right fix:
+// missing OpenVINO DLLs -> DLL instructions (NOT model downloads);
+// model problems -> manual-install folder + per-file URLs.
+static void testNsFailureDetails()
+{
+    const std::string rtErr = "OpenVINO runtime unavailable: OpenVINO runtime could not be loaded (Windows error 126). The OpenVINO DLLs are missing - install them next to SpectroCraft.exe.";
+
+    const std::string d1 = sc::buildNsFailureDetails (rtErr, "deepfilternet2");
+    CHECK (d1.find ("openvino.dll") != std::string::npos, "runtime-missing: lists openvino.dll");
+    CHECK (d1.find ("tbb12.dll") != std::string::npos, "runtime-missing: lists tbb12.dll");
+    CHECK (d1.find ("extern/OpenVINO/bin/") != std::string::npos, "runtime-missing: points at repo DLL folder");
+    CHECK (d1.find ("openvinotoolkit/openvino/releases") != std::string::npos, "runtime-missing: gives download source");
+    CHECK (d1.find ("huggingface.co/Intel") == std::string::npos, "runtime-missing: no model URLs");
+
+    const std::string d2 = sc::buildNsFailureDetails ("download failed: HTTP 404", "deepfilternet2");
+    CHECK (d2.find ("Manual installation") != std::string::npos, "model error: has manual-install section");
+    CHECK (d2.find ("huggingface.co/Intel/deepfilternet-openvino") != std::string::npos, "model error: lists model URLs");
+    CHECK (d2.find ("OpenVINO runtime DLLs must sit") == std::string::npos, "model error: no DLL list");
+
+    const std::string d3 = sc::buildNsFailureDetails ("boom", "no-such-model");
+    CHECK (d3.find ("Manual installation") == std::string::npos, "unknown model: no extra section");
+    CHECK (d3.find ("boom") != std::string::npos, "unknown model: raw error preserved");
+
+    const std::string d4 = sc::buildNsFailureDetails ("", "denseunet");
+    CHECK (d4.find ("could not be processed") != std::string::npos, "empty error: generic message");
+}
+
 static double rmsOf (const std::vector<float>& v)
 {
     if (v.empty()) return 0.0;
@@ -5006,6 +5033,7 @@ static int scRunUnitTestsImpl()
 #if defined(SC_ENABLE_AI)
     progress ("sha256 (self-contained)"); testSha256();
     progress ("AI plumbing");         testAIPlumbing();
+    progress ("NS failure details");  testNsFailureDetails();
     progress ("denseunet pipeline");  testDenseUnetPipeline();
     progress ("deepfilter pipeline"); testDeepFilterPipeline();
 #endif

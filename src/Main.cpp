@@ -109,14 +109,21 @@ public:
 
     void initialiseInternal (const juce::String& commandLine)
     {
-        // Simple whitespace tokenisation of the command line
+        // Whitespace tokenisation of the command line, with double-quote
+        // support so arguments containing spaces can be passed as one token.
         juce::StringArray args;
         {
             juce::String cur;
+            bool inQuotes = false;
             for (int i = 0; i < commandLine.length(); ++i)
             {
                 const char32_t c = commandLine[(size_t) i];
-                if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+                if (c == '"')
+                {
+                    inQuotes = !inQuotes;
+                    continue;   // drop the quote character itself
+                }
+                if (!inQuotes && (c == ' ' || c == '\t' || c == '\n' || c == '\r'))
                 {
                     if (!cur.isEmpty()) { args.add (cur); cur.clear(); }
                 }
@@ -243,6 +250,118 @@ public:
 
                 const bool wrote = writeFloatWav (out, nch, rate, data);
                 std::cout << (wrote ? "wrote " : "failed to write ") << out.getFullPathName() << "\n";
+                quit();
+                return;
+            }
+            else if (args[i] == "--test-ns-failure-alert")
+            {
+                // Shows the exact failure dialog used by the GUI and verifies
+                // that its text can be selected + copied (the old message box
+                // had no selectable text). Usage:
+                //   --test-ns-failure-alert <in.wav> [modelId] ["fake error"]
+                // With a third argument the pipeline is skipped and that
+                // string is used as the error, so both branches (missing
+                // runtime vs. model problem) can be tested deterministically.
+                if (i + 1 >= args.size())
+                {
+                    std::cout << "usage: --test-ns-failure-alert <in.wav> [modelId] [\"fake error\"]\n";
+                    quit();
+                    return;
+                }
+                const juce::File in = resolvePath (args[++i]);
+                std::string modelId = "deepfilternet2";
+                if (i + 1 < args.size())
+                    modelId = args[++i].toStdString ();
+
+                std::string err;
+                bool haveErr = false;
+                if (i + 1 < args.size())
+                {
+                    err = args[++i].toStdString ();
+                    haveErr = true;
+                }
+                else
+                {
+                    AudioEngine engine;
+                    if (!engine.loadFile (in))
+                    {
+                        std::cout << "failed to open " << in.getFullPathName() << "\n";
+                        quit();
+                        return;
+                    }
+                    const int nch = engine.numChannels ();
+                    const double rate = engine.sampleRate ();
+                    const int64_t frames = engine.numSamples ();
+                    std::vector<std::vector<float>> data (nch);
+                    for (int c = 0; c < nch; ++c)
+                    {
+                        data[c].resize ((size_t) frames);
+                        if (!engine.readSamples (c, 0, frames, data[c].data()))
+                        {
+                            std::cout << "failed to read audio\n";
+                            quit();
+                            return;
+                        }
+                    }
+                    const bool isDf = modelId == "deepfilternet2" || modelId == "deepfilternet3";
+                    const auto progress = [] (float) { return true; };
+                    const bool ok = isDf
+                        ? sc::runDeepFilterPipeline (modelId, "CPU", rate, nch, data,
+                                                     0.f, false, progress, &err)
+                        : sc::runDenseUnetPipeline ("denseunet", "CPU", rate, nch, data,
+                                                    progress, &err);
+                    if (ok)
+                    {
+                        std::cout << "pipeline succeeded - no failure to show.\n"
+                                  << "Pass a third argument to simulate an error instead.\n";
+                        quit();
+                        return;
+                    }
+                    haveErr = true;
+                }
+
+                const juce::String details = sc::buildNsFailureDetails (err, modelId);
+                std::cout << "--- alert details ---\n" << details.toRawUTF8 ()
+                          << "\n---------------------\n";
+
+                // The same dialog the GUI shows.
+                auto* w = new juce::AlertWindow ("Noise Suppression Failed",
+                                                 "The selection could not be processed.\n"
+                                                 "Details below - select any text to copy it.",
+                                                 juce::AlertWindow::WarningIcon);
+                auto* ed = new juce::TextEditor ();
+                ed->setMultiLine (true);
+                ed->setReadOnly (true);
+                ed->setSize (560, 230);
+                ed->setText (details, false);
+                w->addCustomComponent (ed);
+                w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+
+                // Programmatic copy test: select all + copy, then read the
+                // system clipboard back and compare.
+                ed->selectAll ();
+                ed->copyToClipboard ();
+                // (This JUCE build exposes the clipboard as static
+                //  SystemClipboard methods, not a Clipboard singleton.)
+                const juce::String clip = juce::SystemClipboard::getTextFromClipboard ();
+                std::cout << (clip == details ? "clipboard round-trip: OK\n"
+                                              : "clipboard round-trip: MISMATCH\n");
+
+                // Keep the dialog open briefly (so it can be screenshotted),
+                // then close itself.
+                struct AutoCloser : juce::Timer {
+                    juce::AlertWindow* w;
+                    explicit AutoCloser (juce::AlertWindow* a) : w (a) {}
+                    void timerCallback() override { if (w != nullptr) w->exitModalState (1); }
+                };
+                w->enterModalState (false);
+                ed->grabKeyboardFocus();
+                AutoCloser closer (w);
+                closer.startTimer (3000);
+                w->runModalLoop ();
+                delete w;
+
+                std::cout << "alert dialog closed\n";
                 quit();
                 return;
             }
