@@ -11,6 +11,14 @@ add_subdirectory(extern/JUCE)
 # SoXR resampler library (LGPL-2.1) — same engine Audacity uses for resampling.
 add_subdirectory(extern/soxr)
 
+# AI features (OpenVINO noise suppression, later Whisper). The OpenVINO runtime
+# is vendored in extern/OpenVINO; model weights are downloaded on first use and
+# never committed. Disable with -DSPECTRO_ENABLE_AI=OFF for a lean build.
+option(SPECTRO_ENABLE_AI "Build AI features (OpenVINO noise suppression)" ON)
+if (SPECTRO_ENABLE_AI AND WIN32)
+    add_subdirectory(extern/OpenVINO)
+endif()
+
 # Auto-incremented version: this target runs on EVERY build and bumps the
 # patch number in VERSION.txt (1.0.0 -> 1.0.1 -> ...), then regenerates
 # generated/Version.h (About box) + SC_VERSION.txt. The sc_patch_generated

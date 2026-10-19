@@ -1,6 +1,6 @@
 # Noise Suppression via OpenVINO — Integration Plan
 
-Status: Phase 0.5 (Resample tool) **implemented and shipped** (`5fe19ae`). Phases 0/1/2/3 pending approval to start.
+Status: Phase 0 (AI plumbing) and Phase 0.5 (Resample tool) **implemented and shipped**. Phases 1/2/3 pending approval to start.
 
 Source: https://github.com/intel/openvino-plugins-ai-audacity (cloned to `C:/Temp/openvino-plugins-ai-audacity`)
 
@@ -46,7 +46,7 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 
 ## 3. Integration plan for SpectroCraft
 
-### Phase 0 — Shared AI plumbing (foundation, ~1–2 days)
+### Phase 0 — Shared AI plumbing (foundation) — **DONE**
 - Vendor OpenVINO C++ headers + DLLs under `extern/OpenVINO/` (Apache-2.0, licence text in `third_party/licenses/`). Pin a release (2024.6 per Intel's build docs; verify latest 2025.x works). **CPU-only in v1** (per your decision); device enumeration still lists what's present for the future.
 - CMake: optional target flag `-DSPECTRO_ENABLE_AI=ON`; when OFF the app builds with zero new deps (keeps CI green without OpenVINO installed).
 - New module `src/AI/` (deliberately *not* named after one feature — see Whisper section):
@@ -58,6 +58,14 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
     - Disk-space pre-check before downloading (matters a lot once Whisper's multi-GB models arrive).
     - No model binaries ever enter the git repo.
   - Initial registry entries: DF2/DF3 files from `https://huggingface.co/Intel/deepfilternet-openvino/resolve/main/<path>`; denseunet FP16 from OpenVINO storage (checksums published in OMZ `model.yml`).
+
+**Implementation findings (baked into the code, relevant to Phase 1+):**
+- **Linking:** C++ API (`ov::Core`) against a pre-generated import library `extern/OpenVINO/lib/openvino.lib` (built once from `dumpbin /exports` → `.def` → `lib /def:`). Version pinned to 2024.6, so mangling stability is guaranteed; matches Intel's ported source exactly.
+- **Minimal DLL set:** only `openvino.dll`, `openvino_intel_cpu_plugin.dll`, `openvino_ir_frontend.dll` (required to read .xml/.bin), and self-contained `tbb12.dll`. CMake copies them next to both exes via a POST_BUILD rule using `${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/...` — note that `CMAKE_CURRENT_SOURCE_DIR` inside a CMake function resolves to the *caller's* directory, which silently broke the first version of this copy.
+- **OpenVINO 2024.6 API specifics:** split header layout (`openvino/core/` + `openvino/runtime/`, umbrella `<openvino/openvino.hpp>`); `Core::get_available_devices()` (not `available_devices`); `compile_model(...)` returns a default-constructible **value** `CompiledModel` (not a shared_ptr).
+- **SHA-256:** the vendored JUCE has no cryptography module, so `src/AI/Sha256.cpp` is a self-contained FIPS 180-4 implementation. Two subtle bugs found and fixed during verification: `_state[8]` must be initialised from the H₀ constants in the constructor (uninitialised state corrupts every digest), and the padded bit-length field must be written **big-endian** (little-endian only passes for empty input). All FIPS test vectors pass, including streaming == one-shot.
+- **ModelManager::isInstalled()** clears `missingOut` before filling it — otherwise repeated calls accumulate entries.
+- **Known limitation: MSVC debug CRT.** The OpenVINO 2024.6 binaries fail to initialise under `/MDd`: `ov::Core()` throws `std::bad_alloc` (default stack) or a garbled "Error loading XML file" exception (32 MB stack); the same code works perfectly under `/MD`. Verified with standalone repros — it is an OpenVINO/TBB-internal issue, not ours. Consequence: AI features require a **Release** build on Windows; Debug builds report "AI unavailable" through the normal error path, and the unit-test ov::Core smoke check is Release-only (`#if !defined(_DEBUG)`). All other AI plumbing tests (SHA-256 vectors, ModelManager install/verify/corruption logic) run in both configurations.
 
 ### Phase 0.5 — Resample tool (Effects → Resample…) — **DONE** (commit `5fe19ae`)
 - **Vendor SoXR** (`extern/soxr`, LGPL-2.1) — this is *exactly* Audacity's resampler: their `Resample` class wraps libsoxr, vendored in-tree at `lib-src/libsoxr` (v0.1.3). We take the same source tree and drive it with the same "Best" quality recipe (`SOXR_VHQ`, 28-bit precision) Audacity uses for its Best method.
@@ -133,9 +141,9 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 6. **Resample undo** (open design point): v1 = non-undoable + confirm dialog; flag for revisit.
 
 ## 6. Deliverables checklist (when approved)
-- [ ] `extern/OpenVINO/` vendored runtime + CMake option (`SPECTRO_ENABLE_AI`)
+- [x] `extern/OpenVINO/` vendored runtime + CMake option (`SPECTRO_ENABLE_AI`) — done in Phase 0
 - [x] `extern/soxr/` vendored SoXR (Audacity's resampler, LGPL-2.1) — done in `5fe19ae`
-- [ ] `src/AI/` module (runtime, generic model manager/downloader with auto-download + manual-install fallback)
+- [x] `src/AI/` module (runtime, generic model manager/downloader with auto-download + manual-install fallback) — done in Phase 0
 - [x] Effects → Resample… tool (whole-file, arbitrary rate, warning dialog) — reusable by AI features internally — done in `5fe19ae`
 - [ ] Effects → Noise Suppression… (denseunet first, then DFNet2/3 torch-free port): dialog + async progress + undo integration
 - [ ] Unit tests (resampler quality, NS pipeline assertions) + CLI flag `--test-noise-suppression in.wav out.wav`

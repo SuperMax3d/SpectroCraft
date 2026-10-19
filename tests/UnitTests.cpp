@@ -19,6 +19,11 @@
 #include "MainWindow.h"
 #include "Resampler.h"
 #include "FFTHelpers.h"
+#if defined(SC_ENABLE_AI)
+#include "AI/ModelManager.h"
+#include "AI/OvRuntime.h"
+#include "AI/Sha256.h"
+#endif
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
@@ -4298,6 +4303,142 @@ static void testResampler()
     }
 }
 
+#if defined(SC_ENABLE_AI)
+// Phase 0: OpenVINO runtime smoke test + generic model manager logic.
+// FIPS 180-4 test vectors for our self-contained SHA-256 (this JUCE build has
+// no juce::MessageDigest). Digests verified against Python's hashlib.
+static void testSha256()
+{
+    CHECK (sc::ai::sha256Hex ("", 0) ==
+           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "sha256 of empty string");
+    CHECK (sc::ai::sha256Hex ("abc", 3) ==
+           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "sha256 of 'abc'");
+
+    std::string a64 (64, 'a');   // exact block boundary: padding needs a 2nd block
+    CHECK (sc::ai::sha256Hex (a64.data (), a64.size ()) ==
+           "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+          "sha256 of 64 x 'a' (block boundary)");
+
+    std::string a1000 (1000, 'a');   // multi-block
+    CHECK (sc::ai::sha256Hex (a1000.data (), a1000.size ()) ==
+           "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3",
+          "sha256 of 1000 x 'a' (multi-block)");
+
+    // Streaming API must match one-shot.
+    sc::ai::Sha256 h;
+    h.update ((const uint8*) a1000.data (), 37);
+    h.update ((const uint8*) a1000.data () + 37, a1000.size () - 37);
+    CHECK (h.hexDigest () == sc::ai::sha256Hex (a1000.data (), a1000.size ()),
+          "streaming sha256 matches one-shot");
+}
+
+static void testAIPlumbing()
+{
+    // --- Model registry sanity -------------------------------------------
+    auto& mm = sc::ai::ModelManager::instance ();
+    CHECK (mm.registry().size() == 3, "registry lists 3 models");
+
+    const auto* df2 = mm.find ("deepfilternet2");
+    CHECK (df2 != nullptr, "find deepfilternet2");
+    if (df2)
+    {
+        CHECK (df2->files.size() == 6, "df2 has 6 files");
+        bool ok = true;
+        for (const auto& f : df2->files)
+            if (f.sha256.size() != 64 || f.sizeBytes <= 0 || f.url.empty()) ok = false;
+        CHECK (ok, "df2 file specs complete");
+    }
+
+    // --- Install state + checksum logic on a synthetic model -------------
+    juce::File root = mm.modelRoot ();
+    if (!root.exists ()) root.createDirectory ();
+    const juce::File dir = root.getChildFile ("synthetic-test-model");
+    dir.deleteRecursively ();
+    dir.createDirectory ();
+
+    auto shaOf = [] (const juce::String& s) {
+        const std::string utf8 = s.toStdString ();
+        return sc::ai::sha256Hex (utf8.data (), utf8.size ());
+    };
+
+    sc::ai::ModelSpec spec;
+    spec.id = "synthetic-test-model";
+    spec.displayName = "Synthetic";
+    const juce::String contentA = "SpectroCraft synthetic model file A\n";
+    const juce::String contentB = "SpectroCraft synthetic model file B\n";
+    spec.files.push_back ({ "https://example.invalid/a.bin", shaOf (contentA),
+                            (int64_t) contentA.toStdString ().size () });
+    spec.files.push_back ({ "https://example.invalid/b.bin", shaOf (contentB),
+                            (int64_t) contentB.toStdString ().size () });
+
+    std::vector<std::string> missing;
+    CHECK (!mm.isInstalled (spec, &missing), "synthetic model not installed before files exist");
+    CHECK (missing.size() == 2, "both files reported missing");
+
+    auto writeFile = [] (const juce::File& p, const juce::String& s) {
+        p.deleteFile ();   // FileOutputStream opens in append mode
+        juce::FileOutputStream o (p);
+        const std::string utf8 = s.toStdString ();
+        o.write ((const uint8*) utf8.data (), utf8.size ());
+    };
+
+    writeFile (dir.getChildFile ("a.bin"), contentA);
+    CHECK (!mm.isInstalled (spec, &missing), "still not installed with one file missing");
+    CHECK (missing.size() == 1 && missing[0] == "b.bin", "only b.bin reported missing");
+
+    writeFile (dir.getChildFile ("b.bin"), contentB);
+    CHECK (mm.isInstalled (spec, &missing), "installed once all files present with right sizes");
+
+    std::string bad;
+    CHECK (mm.verifyInstalled (spec, &bad), "checksums verify for intact synthetic model");
+
+    // Corrupt b.bin: size changes -> isInstalled false; sha also fails.
+    {
+        juce::FileOutputStream o (dir.getChildFile ("b.bin"));
+        const char extra = 'x';
+        o.setPosition ((int64_t) contentB.toStdString ().size ());
+        o.write (&extra, 1);
+    }
+    CHECK (!mm.isInstalled (spec, nullptr), "corrupted file detected by size check");
+    CHECK (!mm.verifyInstalled (spec, &bad), "checksum mismatch detected");
+    CHECK (bad == "b.bin", "mismatching file identified");
+
+    // Restore and exercise the ensureInstalled fast path: everything present,
+    // so no download is attempted even though the URLs are fake.
+    writeFile (dir.getChildFile ("b.bin"), contentB);
+    std::string err;
+    bool cancelled = false;
+    CHECK (mm.ensureInstalled (spec, [&cancelled] (float, const std::string&) { return !cancelled; }, &err),
+          "ensureInstalled fast path when already installed");
+
+    // --- OpenVINO runtime smoke test --------------------------------------
+#if !defined(_DEBUG)
+    auto& rt = sc::ai::OvRuntime::instance ();
+    CHECK (rt.init (&err), "OpenVINO runtime initialised");
+    if (rt.ready ())
+    {
+        const auto devs = rt.devices ();
+        bool hasCpu = false;
+        for (const auto& d : devs) if (d == "CPU") hasCpu = true;
+        CHECK (hasCpu, "CPU device available");
+    }
+    else
+    {
+        std::cerr << "  [ov init failed: " << err << "]\n";
+        CHECK (false, "OpenVINO runtime initialised (see message)");
+    }
+#else
+    // OpenVINO 2024.6 binaries fail to initialise under the MSVC debug CRT
+    // (std::bad_alloc inside plugin discovery; verified with a standalone
+    // repro). The AI plumbing is therefore smoke-tested in Release builds;
+    // Debug builds exercise everything up to this point.
+    std::cerr << "  [OpenVINO runtime smoke test skipped: MSVC debug CRT]\n";
+#endif
+}
+#endif   // SC_ENABLE_AI
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -4357,6 +4498,10 @@ static int scRunUnitTestsImpl()
     progress ("batched undo/redo");       testBatchedUndoRedo();
     progress ("multi-file support");  testMultiFileSupport();
     progress ("resampler (soxr)");    testResampler();
+#if defined(SC_ENABLE_AI)
+    progress ("sha256 (self-contained)"); testSha256();
+    progress ("AI plumbing");         testAIPlumbing();
+#endif
     progress ("version string");      testVersionString();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

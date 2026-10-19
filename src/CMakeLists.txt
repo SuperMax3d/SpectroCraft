@@ -24,6 +24,16 @@ target_sources (SpectroCraft
         ${CMAKE_SOURCE_DIR}/tests/UnitTests.cpp
 )
 
+# AI module (OpenVINO plumbing + model manager). Only compiled when the
+# OpenVINO runtime target exists (SPECTRO_ENABLE_AI=ON on Windows).
+if (TARGET sc_openvino)
+    target_sources (SpectroCraft PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/OvRuntime.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/ModelManager.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp)
+    sc_enable_ai (SpectroCraft)
+endif()
+
 # Application icon (icon.ico) is embedded at runtime: include/IconData.h holds
 # the raw ICO bytes and MainWindow applies them via CreateIconFromResourceEx +
 # WM_SETICON. A .rc resource file with ICON statements is not used because this

@@ -14,6 +14,8 @@ cmake-build-*/
 *.idb
 *.exp
 *.lib
+# ...except the vendored OpenVINO import library (required for linking)
+!extern/OpenVINO/lib/openvino.lib
 
 # OS junk
 Thumbs.db
