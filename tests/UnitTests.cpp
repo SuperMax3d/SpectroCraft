@@ -4309,6 +4309,101 @@ static void testResampler()
     }
 }
 
+// Regression: after a resample the Frequency Analysis panel's cached spectrum
+// must be invalidated by the sample-rate change alone — same file pointer and
+// same time region, so without the rate key recomputeIfNeeded() would keep
+// drawing stale curves until some other setting happened to change.
+static void testFFTAnalysisRateChange()
+{
+    const juce::File wav = makeTempFile ("fft_rate.wav");
+    writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    // openFile (not loadFile): it creates the FileDoc and populates
+    // visibleChannels, which the analysis view iterates over.
+    CHECK (app.openFile (wav), "open wav for fft rate-change test");
+    app.setSelection ({ 0.0, 1.0 });   // the whole second of audio
+
+    // Pin the FFT size so the expected peak bins are deterministic regardless
+    // of whatever a persisted settings file may hold.
+    app.settings.fftLocalN = 2048;
+
+    FFTAnalysisView view (app);
+    view.setSize (320, 300);
+    view.recomputeIfNeeded();
+
+    auto peakBin = [] (const std::vector<std::vector<float>>& m) -> int
+    {
+        if (m.empty() || m[0].empty()) return -1;
+        size_t p = 0;
+        for (size_t i = 1; i < m[0].size(); ++i)
+            if (m[0][i] > m[0][p]) p = i;
+        return (int) p;
+    };
+
+    // Copy by value: getSpectrum() returns a reference to the internal cache,
+    // which is replaced on every recompute.
+    auto before = view.getSpectrum();
+    CHECK (!before.empty() && !before[0].empty(), "spectrum computed at original rate");
+    const int peakBefore = peakBin (before);
+    // 400 Hz @ 8 kHz with N=2048 -> bin ~102.
+    CHECK (std::abs (peakBefore - 102) <= 1, "pre-resample spectrum peaks at the tone's bin");
+
+    // Resample to a different rate: the analysed time region and file pointer
+    // are unchanged, so only the sample-rate cache key can invalidate.
+    CHECK (app.audioEngine().resampleTo (16000.0), "resample 8 kHz -> 16 kHz");
+    // The multi-window averaging path is throttled to one expensive compute
+    // per 60 ms; wait it out so this recompute actually runs.
+    std::this_thread::sleep_for (std::chrono::milliseconds (100));
+    view.recomputeIfNeeded();
+
+    auto after = view.getSpectrum();
+    const int peakAfter = peakBin (after);
+    // 400 Hz @ 16 kHz with N=2048 -> bin ~51: the curve must have moved.
+    CHECK (std::abs (peakAfter - 51) <= 1, "post-resample spectrum peaks at the new rate's bin");
+    CHECK (peakBefore != peakAfter, "spectrum recomputed after rate change (cache invalidated)");
+
+    // With nothing changed the cache must be stable again.
+    view.recomputeIfNeeded();
+    auto again = view.getSpectrum();
+    bool same = (again.size() == after.size()) && (!after.empty() || again.empty());
+    if (same && !after.empty())
+        for (size_t i = 0; i < after[0].size () && same; ++i)
+            if (again[0][i] != after[0][i]) same = false;
+    CHECK (same, "cache stable when nothing changed");
+}
+
+// The footer bar shows the active file's actual sample rate next to its name.
+static void testStatusBarSampleRate()
+{
+    StatusBar bar;
+    bar.setSize (600, 24);
+    bar.setFileName ("tone.wav");
+    CHECK (bar.getSampleRateText().isEmpty(), "no rate text before setSampleRate");
+
+    bar.setSampleRate (48000.0);
+    CHECK (bar.getSampleRateText() == "48000 Hz", "integer rate formatted as '48000 Hz'");
+
+    bar.setSampleRate (47952.123);
+    CHECK (bar.getSampleRateText() == "47952.123 Hz", "fractional rate keeps 3 decimals");
+
+    bar.setSampleRate (0.0);
+    CHECK (bar.getSampleRateText().isEmpty(), "zero rate clears the text");
+
+    // Painting with every part set must not crash.
+    bar.setSampleRate (44100.0);
+    bar.setSelection (0.5, 1.25);
+    bar.setPlayhead (0.75);
+    juce::Image img (juce::Image::ARGB, 600, 24, true);
+    juce::Graphics g (img);
+    bar.paint (g);
+    CHECK (true, "status bar paints with sample rate");
+}
+
 // Phase 2: streaming STFT/ISTFT used by DeepFilterNet. Pure DSP — exercised in
 // every build (no model weights or OpenVINO required).
 static void testDfStft()
@@ -4905,6 +5000,8 @@ static int scRunUnitTestsImpl()
     progress ("batched undo/redo");       testBatchedUndoRedo();
     progress ("multi-file support");  testMultiFileSupport();
     progress ("resampler (soxr)");    testResampler();
+    progress ("fft view rate change"); testFFTAnalysisRateChange();
+    progress ("status bar sample rate"); testStatusBarSampleRate();
     progress ("df stft round-trip");  testDfStft();
 #if defined(SC_ENABLE_AI)
     progress ("sha256 (self-contained)"); testSha256();

@@ -3,6 +3,8 @@
 #include <JuceHeader.h>
 #include "Application.h"
 
+#include <cmath>
+
 /** Formats seconds as M:SS.mmm (e.g. 0:04.536) */
 juce::String formatTimeCode (double secs);
 
@@ -337,6 +339,10 @@ private:
     std::vector<std::vector<float>> thirdOctMags;
     int cachedN = 0;
     double cachedT0 = -1, cachedT1 = -1;
+    // The sample rate must match too: after a resample the same time region
+    // maps to different samples (and the frequency axis moves), so a cache
+    // hit on t0/t1 alone would draw stale curves.
+    double cachedRate = -1.0;
     juce::File cachedFile;
     int64_t lastComputeMs = 0;
     bool lastComputeWasExpensive = false;   // multi-window averaging (throttle key)
@@ -564,8 +570,21 @@ public:
     }
     juce::String getFileName() const { return fileName; }
 
+    // Left side: the active file's actual sample rate, shown right after the
+    // file name (empty when no file is loaded or the rate is unknown).
+    void setSampleRate (double rate)
+    {
+        juce::String s;
+        if (rate > 0.0 && std::isfinite (rate))
+            s = (std::abs (rate - std::round (rate)) < 1e-9
+                    ? juce::String ((int64_t) std::llround (rate))
+                    : juce::String (rate, 3)) + " Hz";
+        if (s != ratePart) { ratePart = s; repaint(); }
+    }
+    juce::String getSampleRateText() const { return ratePart; }
+
 private:
-    juce::String mouseText, selPart, playPart, fileName;
+    juce::String mouseText, selPart, playPart, fileName, ratePart;
 
     JUCE_DECLARE_NON_COPYABLE (StatusBar)
 };

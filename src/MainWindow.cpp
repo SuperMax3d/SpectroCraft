@@ -610,6 +610,10 @@ void MainWindow::syncSharedState()
 
     if (statusBar)
     {
+        // The file name is set at the open/activate/close transitions; the
+        // sample rate can also change in place (resample), so refresh it here.
+        statusBar->setSampleRate (app.audioEngine().isFileLoaded()
+                                      ? app.audioEngine().sampleRate() : 0.0);
         statusBar->setSelection (app.selection.getStart(), app.selection.getEnd());
         statusBar->setPlayhead (app.playhead);
     }
@@ -1194,7 +1198,13 @@ void MainWindow::runResampleAsync (double newRate)
             delete dlg;
             if (ok)
             {
-                syncSharedState();
+                // refreshAfterEdit() clears the spectral tile cache and forces
+                // a full re-render: after a rate change the old tiles are stale
+                // (same sample positions now hold different content, and the
+                // frequency axis moved), which otherwise shows as a shifted /
+                // garbage spectrogram until some setting change happens to
+                // invalidate it. It also clamps the time window + selection.
+                refreshAfterEdit();
                 updateTitle();
             }
             else
@@ -1218,13 +1228,17 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
                                      "First use downloads the model weights to\n"
                                      "%APPDATA%/SpectroCraft/models.\n"
                                      "\n"
-                                     "Attenuation limit applies to the DeepFilterNet models only.",
+                                     "Attenuation limit (dB) applies to the DeepFilterNet models only:\n"
+                                     "100 means no attenuation limit (full noise suppression).\n"
+                                     "For little noise reduction, set to 6 - 12. For medium, 18 - 24.",
                                      juce::AlertWindow::QuestionIcon);
 
     w->addComboBox ("model",
                     juce::StringArray { "DenseUNet (legacy)", "DeepFilterNet2", "DeepFilterNet3" },
                     "Model");
-    w->addTextEditor ("attenLim", "0", "Attenuation limit dB (0 = off)");
+    // Default 100 = no attenuation limit (full noise suppression), matching
+    // Audacity's default for this parameter.
+    w->addTextEditor ("attenLim", "100", "Attenuation limit dB (100 = no limit)");
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -1295,14 +1309,16 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
             }
 
             // When the model is unavailable, append manual-install instructions.
+            // The destination path sits on its own line so it can be selected
+            // and copied straight out of the message box.
             juce::String msg = err.empty () ? "The selection could not be processed." : err;
             auto& mm = sc::ai::ModelManager::instance ();
             if (const auto* spec = mm.find (modelId))
             {
-                msg += "\n\nManual install: download these files into "
-                       + mm.dirFor (spec->id).getFullPathName () + ":";
+                msg += "\n\nManual installation: download these files into:\n"
+                       + mm.dirFor (spec->id).getFullPathName () + "\n";
                 for (const auto& f : spec->files)
-                    msg += "\n  " + juce::String (f.url);
+                    msg += "  " + juce::String (f.url) + "\n";
             }
 
             juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,

@@ -39,8 +39,11 @@ bool runDenseUnetPipeline(const std::string& modelId, const std::string& device,
     `rate`; on success each vector is replaced in place with exactly len
     noise-suppressed samples.
 
-    attenLimDb limits the attenuation (6..100 dB; 0 = no limit, upstream default).
-    df3PostFilter enables the DF3 spectral post-filter (ignored for DF2).
+    attenLimDb is Audacity's "Attenuation Limit (dB)": 100 = no limit / full
+    noise suppression (upstream default); smaller values blend the enhanced
+    spectrum back toward the original by 10^(-|lim|/20) (6-12 = light,
+    18-24 = medium). df3PostFilter enables the DF3 spectral post-filter
+    (ignored for DF2).
 
     Progress phases: download 0.00–0.15, compile ~0.20, per-channel inference
     0.20–1.00 (resample-up / model / resample-down). */

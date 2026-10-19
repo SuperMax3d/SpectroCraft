@@ -765,7 +765,8 @@ void FFTAnalysisView::recomputeIfNeeded()
     // across all open files and each one remembers its own source document.
 
     if (mags.size() == app.visibleChannels.size() && cachedN == n && cachedT0 == t0
-        && cachedT1 == t1 && cachedFile == file
+        && cachedT1 == t1 && cachedRate == app.audioEngine().sampleRate()
+        && cachedFile == file
         && (axisMode_ != 2 || thirdOctMags.size() == mags.size()))
         return;
 
@@ -790,6 +791,7 @@ void FFTAnalysisView::recomputeIfNeeded()
             thirdOctMags.push_back (toThirdOctBands (m, n, app.audioEngine().sampleRate()));
 
     cachedN = n; cachedT0 = t0; cachedT1 = t1;
+    cachedRate = app.audioEngine().sampleRate();
     cachedFile = file;
     lastComputeMs = now;
     lastComputeWasExpensive = (regionLenS > (double) n);
@@ -2304,8 +2306,8 @@ void StatusBar::paint (juce::Graphics& g)
     int leftX = 6;
     if (!fileName.isEmpty())
     {
-        // The active file's name sits at the far left; the mouse probe text
-        // starts to its right when both are present.
+        // The active file's name sits at the far left; its sample rate follows
+        // it, and the mouse probe text starts to their right when present.
         g.setColour (juce::Colour::fromRGB (235, 235, 240));
         const juce::Font f (12.0f);
         const int w = std::min (b.getWidth() / 2 - leftX,
@@ -2313,6 +2315,19 @@ void StatusBar::paint (juce::Graphics& g)
         if (w > 10)
         {
             g.drawText (fileName, leftX, 0, w, b.getHeight(),
+                        juce::Justification::left, false);
+            leftX += w + 12;
+        }
+    }
+    if (!ratePart.isEmpty() && leftX < b.getWidth() - 8)
+    {
+        g.setColour (juce::Colour::fromRGB (205, 205, 215));
+        const juce::Font f (12.0f);
+        const int w = std::min (b.getWidth() / 2 + 60 - leftX,
+                                (int) juce::GlyphArrangement::getStringWidth (f, ratePart) + 8);
+        if (w > 10)
+        {
+            g.drawText (ratePart, leftX, 0, w, b.getHeight(),
                         juce::Justification::left, false);
             leftX += w + 12;
         }
