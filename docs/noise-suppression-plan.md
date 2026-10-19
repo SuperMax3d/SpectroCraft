@@ -1,4 +1,6 @@
-# Noise Suppression via OpenVINO — Integration Plan (DRAFT, for review)
+# Noise Suppression via OpenVINO — Integration Plan
+
+Status: Phase 0.5 (Resample tool) **implemented and shipped** (`5fe19ae`). Phases 0/1/2/3 pending approval to start.
 
 Source: https://github.com/intel/openvino-plugins-ai-audacity (cloned to `C:/Temp/openvino-plugins-ai-audacity`)
 
@@ -57,19 +59,25 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
     - No model binaries ever enter the git repo.
   - Initial registry entries: DF2/DF3 files from `https://huggingface.co/Intel/deepfilternet-openvino/resolve/main/<path>`; denseunet FP16 from OpenVINO storage (checksums published in OMZ `model.yml`).
 
-### Phase 0.5 — Resample tool (Effects → Resample…)
+### Phase 0.5 — Resample tool (Effects → Resample…) — **DONE** (commit `5fe19ae`)
 - **Vendor SoXR** (`extern/soxr`, LGPL-2.1) — this is *exactly* Audacity's resampler: their `Resample` class wraps libsoxr, vendored in-tree at `lib-src/libsoxr` (v0.1.3). We take the same source tree and drive it with the same "Best" quality recipe (`SOXR_VHQ`, 28-bit precision) Audacity uses for its Best method.
 - LGPL-2.1 + AGPL-3.0 = compatible; combined app stays AGPL-3.0 (ship SoXR source + licence text).
-- Use `soxr_create(oldRate, newRate, nch)` with **planar float32 I/O** (`SOXR_FLOAT32_S`) — maps directly onto JUCE's planar `AudioBuffer`, zero copies; OpenMP enabled for multi-core speed.
+- Use `soxr_create(oldRate, newRate, nch)` with **planar float32 I/O** (`SOXR_FLOAT32_S`) — maps directly onto JUCE's planar `AudioBuffer`, zero copies.
 - (Rubber Band considered first: it's GPL-2-or-later and would also work, but modern Audacity no longer uses it — SoXR is the current Audacity method per your request.)
 - Dialog: shows current rate, target-rate field (any positive float), notes it applies to the **whole file**.
-- After resample: update engine `sampleRate`/`totalSamples`, rebuild mipmaps, scale selection + playhead by the rate ratio to preserve context. Markers are time-based so they survive automatically (verify storage units during implementation).
-- **Undo semantics (design decision needed):** a whole-file resample is a full-buffer snapshot — one such entry per undo level would cost 1× file RAM each, which is too much at 50 levels for multi-GB files. v1 recommendation: **non-undoable with a confirm dialog** ("Resampling changes the entire file and cannot be undone; consider saving first"). Revisit later if a snapshot-eviction scheme proves acceptable.
-- Unit tests: round-trip rate accuracy, passband ripple / stopband attenuation vs a reference tone + noise bed, extreme ratios (8 kHz → 352.8 kHz).
+- After resample: update engine `sampleRate`/`totalSamples`, rebuild mipmaps; playhead/selection/markers are time-based so they survive automatically.
+- **Undo semantics:** v1 = **non-undoable with a warning in the dialog** ("whole file; cannot be undone"). Revisit later if a snapshot-eviction scheme proves acceptable.
+
+**Implementation findings (baked into the code, relevant to Phase 1+):**
+- SoXR expresses *all* lengths as samples **per channel** — never total-across-channels. A first version that used `nch × frames` produced wrong output lengths and heap over-reads (segfault in tests).
+- Engine convention: `AudioEngine::totalSamples` is **frames per channel** (matches JUCE's `lengthInSamples`). `resampleTo()` must keep this or duration/playhead math silently doubles for multichannel files.
+- SoXR must be compiled as **C** (its internal `void*` casts break in C++), with Audacity's exact 14-file source list (`pffft.c`, `cr-core.c`, `util-simd.c` are include-only and must not be separate TUs). Defines: `_USE_MATH_DEFINES`, `_CRT_SECURE_NO_WARNINGS`, `SOXR_LIB`; `/arch:SSE2`. **No /openmp** (matches Audacity; the OpenMP path is guarded by `_OPENMP`).
+- Flush semantics: a final call with negative input length (`~ilen`) processes the remainder *and* flushes in one call — this is what `soxr_oneshot` does internally and avoids the NULL-input code path entirely.
+- **Test isolation fix (important for all future phases):** unit tests construct `Application app;`, which loads `%APPDATA%/SpectroCraft/SpectroCraft.recent`. A GUI session that left non-default settings behind (e.g. linear frequency axis) silently broke 12 log-axis view tests — they looked like rendering regressions but were settings pollution. Test builds (`SC_TESTS_EXE=1`) now use a fresh per-run temp store, so GUI sessions can never change test outcomes again.
 
 ### Phase 1 — denseunet end-to-end (~2–3 days)
 - Port `noise_suppression_omz_model.*` → `DenseUnetModel` operating on `std::vector<float>` in/out (no Audacity types).
-- Resampling reuses the Phase 0.5 libsamplerate wrapper: file rate → 16 kHz → back.
+- Resampling reuses the Phase 0.5 SoXR wrapper (`sc::Resampler`): file rate → 16 kHz → back.
 - `Application::noiseSuppress(modelId, device, options)` mirroring `changeGain`: requires non-empty selection; runs async on a worker thread with the existing `WorkProgressDialog` (indeterminate while compiling — first run 10–30 s per Intel's docs — then determinate per channel); cancellable.
 - Undo: capture pre-edit samples via the existing patch mechanism, action name e.g. `"Noise suppressed (denseunet)"`.
 - UI: **Effects → Noise Suppression…** dialog (same pattern as Change Gain): model combo (only models present/downloaded), device combo, Apply/Cancel; focus-grab + Enter-submit behaviour per the gain-dialog fix.
@@ -126,9 +134,9 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 
 ## 6. Deliverables checklist (when approved)
 - [ ] `extern/OpenVINO/` vendored runtime + CMake option (`SPECTRO_ENABLE_AI`)
-- [ ] `extern/soxr/` vendored SoXR (Audacity's resampler, LGPL-2.1)
+- [x] `extern/soxr/` vendored SoXR (Audacity's resampler, LGPL-2.1) — done in `5fe19ae`
 - [ ] `src/AI/` module (runtime, generic model manager/downloader with auto-download + manual-install fallback)
-- [ ] Effects → Resample… tool (whole-file, arbitrary rate, confirm dialog) — reusable by AI features internally
+- [x] Effects → Resample… tool (whole-file, arbitrary rate, warning dialog) — reusable by AI features internally — done in `5fe19ae`
 - [ ] Effects → Noise Suppression… (denseunet first, then DFNet2/3 torch-free port): dialog + async progress + undo integration
 - [ ] Unit tests (resampler quality, NS pipeline assertions) + CLI flag `--test-noise-suppression in.wav out.wav`
 - [ ] `third_party/licenses/` (GPLv3 text for copied code, Apache/MIT/LGPL notices for OpenVINO/models/SoXR), README update
