@@ -3,6 +3,9 @@
  */
 
 #include "Application.h"
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    #include "NoiseSuppression.h"
+#endif
 #include <algorithm>
 #include <thread>
 
@@ -429,6 +432,44 @@ void Application::changeGain (float gainDb)
     if (selection.getLength() <= 0 || gainDb == 0.0f) return;
     audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this));
 }
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+bool Application::noiseSuppress (const std::string& modelId, const std::string& device,
+                                 std::function<bool(float)> onProgress, std::string* errOut)
+{
+    auto fail = [&errOut] (const juce::String& msg) -> bool
+    {
+        if (errOut) *errOut = msg.toStdString ();
+        return false;
+    };
+
+    if (!audioEngine().isFileLoaded () || selection.getLength() <= 0)
+        return fail ("No audio selection.");
+
+    auto samples = selectionSamples (*this).getIntersectionWith ({ 0, audioEngine().numSamples () });
+    if (samples.getLength () <= 0)
+        return fail ("No audio selection.");
+
+    const int nch = audioEngine().numChannels ();
+    std::vector<std::vector<float>> data (nch);
+    for (int ch = 0; ch < nch; ++ch)
+    {
+        data[ch].resize ((size_t) samples.getLength());
+        if (!audioEngine().readSamples (ch, samples.getStart (), samples.getLength (), data[ch].data()))
+            return fail ("Failed to read the selection.");
+    }
+
+    // The pipeline works on this copy; it is only committed on success.
+    std::string err;
+    if (!sc::runDenseUnetPipeline (modelId, device, audioEngine().sampleRate (), nch,
+                                   data, onProgress, &err, &visibleChans (*this)))
+        return fail (err);
+
+    audioEngine().replaceSamples (samples, data,
+                                  "Noise suppressed (" + juce::String (modelId) + ")");
+    return true;
+}
+#endif
 
 void Application::undoSteps (int n)
 {

@@ -100,6 +100,13 @@ public:
     // Public so batched undo/redo jumps can rebuild once for a whole run.
     void rebuildMipmaps(std::function<void(float)> onProgress = nullptr);
 
+    /** Replace `samples` with newData (same length, one vector per channel)
+        and record an undoable patch. The caller is responsible for rebuilding
+        the mipmaps afterwards (see replaceSamples in AudioEngine.cpp). */
+    void replaceSamples(const juce::Range<int64_t>& samples,
+                        const std::vector<std::vector<float>>& newData,
+                        const juce::String& description);
+
     // ---- Zero-crossing snapping (nearest sign change of `channel` within
     //      +/- windowSecs around timeSecs; returns the crossing in seconds,
     //      quantised to a sample boundary). Falls back to timeSecs when no

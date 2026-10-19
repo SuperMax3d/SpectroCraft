@@ -12,6 +12,9 @@
 #include "SpectralView.h"
 #include "Panels.h"
 #include "MarkerManager.h"
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    #include "AI/ModelManager.h"
+#endif
 #include "IconData.h"
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include <algorithm>
@@ -953,6 +956,9 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsNormalize: app.normalize(); refreshAfterEdit(); break;
         case ToolsChangeGain: showChangeGainDialog(); break;
         case ToolsResample: showResampleDialog(); break;
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+        case ToolsNoiseSuppress: showNoiseSuppressDialog(); break;
+#endif
         case ToolsReverse: app.reverse(); refreshAfterEdit(); break;
 
         case HelpAbout:
@@ -1201,6 +1207,92 @@ void MainWindow::runResampleAsync (double newRate)
     }).detach();
 }
 
+// Effects > Noise Suppression... — AI effect using the denseunet model
+// (Phase 1 of the AI plan). First use downloads ~9 MB of weights.
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
+{
+    auto* w = new juce::AlertWindow ("Noise Suppression",
+                                     "Model:\n"
+                                     "\n"
+                                     "The selection will be processed with the selected model.\n"
+                                     "First use downloads ~9 MB of weights to\n"
+                                     "%APPDATA%/SpectroCraft/models.",
+                                     juce::AlertWindow::QuestionIcon);
+
+    w->addComboBox ("model", juce::StringArray { "DenseUNet (legacy)" });
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+    return w;
+}
+
+void MainWindow::showNoiseSuppressDialog()
+{
+    if (!app.audioEngine().isFileLoaded() || app.selection.isEmpty()) return;
+
+    auto* w = createNoiseSuppressDialog();
+    // No text fields: the window may safely hold keyboard focus, so Enter and
+    // Escape reach the button shortcuts.
+    const int result = w->runModalLoop();
+    delete w;
+    if (result != 1) return;
+
+    // v1: only denseunet is wired into the pipeline (DeepFilterNet is Phase 2).
+    runNoiseSuppressAsync ("denseunet", "CPU");
+}
+
+// Noise suppression on a background thread with a progress dialog. Progress:
+// model download/compile/inference 0..95%, mipmap rebuild 95..100%.
+void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::string& device)
+{
+    auto* dlg = new WorkProgressDialog ("Noise Suppression",
+                                        "Applying " + juce::String (modelId) + " ...");
+    dlg->setProgress (0.0);
+    dlg->enterModalState (false);
+
+    std::thread ([this, modelId, device, dlg] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v) {
+            if (v - lastSent < 0.02 && v != 1.0) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+
+        std::string err;
+        const bool ok = app.noiseSuppress (modelId, device,
+            [sendProgress] (float f) { sendProgress (0.95 * (double) f); return true; }, &err);
+        if (ok)
+            app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
+                sendProgress (0.95 + 0.05 * (double) f);
+            });
+
+        juce::MessageManager::callAsync ([this, modelId, dlg, ok, err] {
+            delete dlg;
+            if (ok)
+            {
+                refreshAfterEdit();
+                return;
+            }
+
+            // When the model is unavailable, append manual-install instructions.
+            juce::String msg = err.empty () ? "The selection could not be processed." : err;
+            auto& mm = sc::ai::ModelManager::instance ();
+            if (const auto* spec = mm.find (modelId))
+            {
+                msg += "\n\nManual install: download these files into "
+                       + mm.dirFor (spec->id).getFullPathName () + ":";
+                for (const auto& f : spec->files)
+                    msg += "\n  " + juce::String (f.url);
+            }
+
+            juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                                "Noise Suppression Failed", msg);
+        });
+    }).detach();
+}
+#endif
+
 // Keep the custom scrollbars in sync with the current view state. The
 // setWindow() calls are no-ops when nothing changed, so this is safe to call
 // from any of the feedback paths.
@@ -1331,6 +1423,11 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsNormalize, "Normalize", hasSel, false);
         menu.addItem (ToolsChangeGain, "Change Gain...", hasSel, false);
         menu.addItem (ToolsReverse, "Reverse", hasSel, false);
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+        // AI effect: first use downloads ~9 MB of model weights.
+        menu.addSeparator();
+        menu.addItem (ToolsNoiseSuppress, "Noise Suppression...", hasSel, false);
+#endif
         menu.addSeparator();
         // Whole-file operation: needs the file fully in memory.
         menu.addItem (ToolsResample, "Resample...",

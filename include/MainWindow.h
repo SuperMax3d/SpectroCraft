@@ -74,6 +74,13 @@ public:
         and must delete it; used by showResampleDialog() and tests. */
     juce::AlertWindow* createResampleDialog();
     void runResampleAsync (double newRate);   // background resample + progress dialog
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    /** Builds (but does not run modally) the Noise Suppression dialog. The caller
+        owns and must delete it; used by showNoiseSuppressDialog() and tests. */
+    juce::AlertWindow* createNoiseSuppressDialog();
+    void showNoiseSuppressDialog();
+    void runNoiseSuppressAsync (const std::string& modelId, const std::string& device);
+#endif
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
     void handleTopSplitterDrag (const juce::MouseEvent& e);   // top tabs / bottom tabs
@@ -90,6 +97,9 @@ public:
         TransportPlay = 4000, TransportStop, TransportPause, TransportLoop,
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsResample,
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+        ToolsNoiseSuppress,   // AI noise suppression (built with -DSPECTRO_ENABLE_AI=ON)
+#endif
         HelpAbout = 6000,
         ColourMapClassic = 7000, ColourMapViridis, ColourMapPlasma, ColourMapInferno,
         ColourMapMagma, ColourMapHot, ColourMapCool, ColourMapGrayscale,

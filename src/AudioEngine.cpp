@@ -465,6 +465,26 @@ void applyPerSample (AudioEngine& eng, juce::Range<int64_t> samples,
     eng.rebuildMipmaps();
 }
 
+void AudioEngine::replaceSamples (const juce::Range<int64_t>& samplesIn,
+                                  const std::vector<std::vector<float>>& newData,
+                                  const juce::String& description)
+{
+    if (!buffer || samplesIn.getLength() <= 0) return;
+    auto samples = samplesIn.getIntersectionWith ({ 0, totalSamples });
+    if (samples.getLength() <= 0) return;
+
+    // Record the patch BEFORE touching the buffer so oldData is pristine.
+    recordReplace (*this, samples, newData, description);
+
+    const int64_t len = samples.getLength();
+    for (int ch = 0; ch < nchans && ch < (int) newData.size (); ++ch)
+        if (newData[ch].size () == (size_t) len)
+            std::copy (newData[ch].begin (), newData[ch].end (),
+                       buffer->getWritePointer (ch, (int) samples.getStart ()));
+
+    unsaved = true;
+}
+
 void AudioEngine::fadeInSamples (juce::Range<int64_t> samples, const std::vector<int>* chans)
 {
     applyPerSample (*this, samples, [] (float v, int i, int len)

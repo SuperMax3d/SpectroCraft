@@ -30,7 +30,9 @@ if (TARGET sc_openvino)
     target_sources (SpectroCraft PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/OvRuntime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/ModelManager.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/DenseUnetModel.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/NoiseSuppression.cpp)
     sc_enable_ai (SpectroCraft)
 endif()
 

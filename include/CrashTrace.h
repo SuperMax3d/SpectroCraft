@@ -250,6 +250,15 @@ namespace scCrash
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
+        // MSVC C++ exceptions (0xE06D7363 = 'msc' marker): these are raised for
+        // EVERY throw, including ones that will be caught by a try/catch on the
+        // stack. A VEH runs before SEH landing pads, so we MUST pass them
+        // through or catchable exceptions become hard crashes (this bit us with
+        // OpenVINO: compile_model throws a legitimate error our code catches,
+        // but this handler used to TerminateProcess first).
+        if (code == 0xE06D7363)
+            return EXCEPTION_CONTINUE_SEARCH;
+
         // Any other exception: a real crash. Trace it and terminate.
         if (InterlockedCompareExchange (&s_handled, 1, 0) == 0)
         {
@@ -293,12 +302,29 @@ namespace scCrash
         return EXCEPTION_EXECUTE_HANDLER;
     }
 
+    static LONG WINAPI filterHandler (EXCEPTION_POINTERS* info)
+    {
+        // Runs after SEH dispatch found no handler for the exception - i.e.
+        // truly unhandled crashes, including C++ exceptions that escaped all
+        // try/catch blocks. Trace and terminate.
+        if (InterlockedCompareExchange (&s_handled, 1, 0) == 0)
+        {
+            std::fprintf (stderr, "[crash] UNHANDLED exception code 0x%lX on thread %lu\n",
+                          info->ExceptionRecord->ExceptionCode, GetCurrentThreadId());
+            dumpOtherThreads();
+            printStack (info->ContextRecord);
+        }
+        TerminateProcess (GetCurrentProcess(), 3);
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
     inline void install()
     {
         // Windows CRT block-buffers stderr when redirected to a file;
         // force unbuffered so diagnostic ordering is chronological.
         std::setvbuf (stderr, nullptr, _IONBF, 0);
         AddVectoredExceptionHandler (1, seHandler);
+        SetUnhandledExceptionFilter (filterHandler);
     }
 }
 

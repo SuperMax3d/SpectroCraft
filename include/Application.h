@@ -100,6 +100,14 @@ public:
     void silence(); void fadeIn(); void fadeOut(); void normalize(); void reverse();
     // Multiply the selection by 10^(gainDb/20) on the visible channels.
     void changeGain (float gainDb);
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    // BLOCKING — call from a worker thread. Applies denseunet noise suppression
+    // to the current selection on the visible channels. Returns false and fills
+    // errOut on failure/cancellation; nothing is modified in that case.
+    bool noiseSuppress (const std::string& modelId, const std::string& device,
+                        std::function<bool(float)> onProgress = nullptr,
+                        std::string* errOut = nullptr);
+#endif
     void undoStep(); void redoStep();
     // Batched variants used by the History tab: apply up to n patches in one
     // go with a single mipmap rebuild at the end (fast for long jumps).

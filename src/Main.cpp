@@ -2,6 +2,7 @@
  * SpectroCraft - Main entry point
  * Supports offline modes:
  *   --test-spectral <in.wav> <out.png> [width height t0 t1]
+ *   --test-noise-suppression <in.wav> <out.wav>   (AI builds only)
  *   --generate-test-files [dir]
  *   --run-unit-tests
  */
@@ -13,6 +14,9 @@
 #include "SpectralEngine.h"
 #include "PngWriter.h"
 #include "Settings.h"
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    #include "NoiseSuppression.h"
+#endif
 #include <vector>
 #include <cmath>
 #include <exception>
@@ -29,6 +33,51 @@ static juce::File resolvePath (const juce::String& p)
         return juce::File (p);
     return juce::File::getCurrentWorkingDirectory().getChildFile (p);
 }
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+// Minimal 32-bit float RIFF writer for the --test-noise-suppression hook.
+static bool writeFloatWav(const juce::File& file, int nchans, double rate,
+                          const std::vector<std::vector<float>>& data)
+{
+    if (nchans <= 0 || data.empty() || data[0].empty()) return false;
+
+    const uint32_t frames = (uint32_t) data[0].size();
+    const uint32_t blockAlign = (uint32_t) nchans * 4u;
+    const uint32_t dataSize = frames * blockAlign;
+
+    file.deleteFile();   // FileOutputStream opens in append mode
+    juce::FileOutputStream out (file);
+    if (out.failedToOpen()) return false;
+
+    // This build is Windows-only (little-endian), so the native-order writers
+    // are already little-endian.
+    auto w16 = [&out] (uint16_t v) { out.writeShort ((short) v); };
+    auto w32 = [&out] (uint32_t v) { out.writeInt ((int) v); };
+
+    out.write ("RIFF", 4);
+    w32 (36 + dataSize);
+    out.write ("WAVE", 4);
+    out.write ("fmt ", 4);
+    w32 (16);                    // fmt chunk size
+    w16 (1);                     // PCM format tag
+    w16 ((uint16_t) nchans);
+    w32 ((uint32_t) rate);
+    w32 ((uint32_t) (rate * blockAlign));   // byte rate
+    w16 ((uint16_t) blockAlign);
+    w16 (32);                    // bits per sample
+    out.write ("data", 4);
+    w32 (dataSize);
+
+    for (uint32_t f = 0; f < frames; ++f)
+        for (int c = 0; c < nchans; ++c)
+        {
+            int32_t bits;
+            std::memcpy (&bits, &data[c][(size_t) f], sizeof (bits));
+            out.writeInt ((int) bits);
+        }
+    return true;
+}
+#endif
 
 class SpectroCraftApplication : public juce::JUCEApplication
 {
@@ -127,6 +176,68 @@ public:
                 quit();
                 return;
             }
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+            else if (args[i] == "--test-noise-suppression")
+            {
+                if (i + 2 >= args.size())
+                {
+                    std::cout << "usage: --test-noise-suppression <in.wav> <out.wav>\n";
+                    quit();
+                    return;
+                }
+                const juce::File in  = resolvePath (args[++i]);
+                const juce::File out = resolvePath (args[++i]);
+
+                AudioEngine engine;
+                if (!engine.loadFile (in))
+                {
+                    std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    quit();
+                    return;
+                }
+
+                const int nch = engine.numChannels ();
+                const double rate = engine.sampleRate ();
+                const int64_t frames = engine.numSamples ();
+                std::vector<std::vector<float>> data (nch);
+                for (int c = 0; c < nch; ++c)
+                {
+                    data[c].resize ((size_t) frames);
+                    if (!engine.readSamples (c, 0, frames, data[c].data()))
+                    {
+                        std::cout << "failed to read audio\n";
+                        quit();
+                        return;
+                    }
+                }
+
+                int lastPct = -1;
+                std::string err;
+                const bool ok = sc::runDenseUnetPipeline ("denseunet", "CPU", rate, nch, data,
+                    [&lastPct] (float f) {
+                        const int pct = (int) (f * 100.0);
+                        if (pct >= lastPct + 10 || pct == 100)
+                        {
+                            lastPct = std::max (lastPct, pct);
+                            std::cout << "  " << lastPct << "%\n";
+                            std::flush (std::cout);
+                        }
+                        return true;
+                    }, &err);
+
+                if (!ok)
+                {
+                    std::cout << "noise suppression failed: " << err << "\n";
+                    quit();
+                    return;
+                }
+
+                const bool wrote = writeFloatWav (out, nch, rate, data);
+                std::cout << (wrote ? "wrote " : "failed to write ") << out.getFullPathName() << "\n";
+                quit();
+                return;
+            }
+#endif
             else if (args[i] == "--run-unit-tests")
             {
                 const int rc = scRunUnitTests();

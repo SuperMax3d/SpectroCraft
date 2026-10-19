@@ -83,13 +83,21 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 - Flush semantics: a final call with negative input length (`~ilen`) processes the remainder *and* flushes in one call — this is what `soxr_oneshot` does internally and avoids the NULL-input code path entirely.
 - **Test isolation fix (important for all future phases):** unit tests construct `Application app;`, which loads `%APPDATA%/SpectroCraft/SpectroCraft.recent`. A GUI session that left non-default settings behind (e.g. linear frequency axis) silently broke 12 log-axis view tests — they looked like rendering regressions but were settings pollution. Test builds (`SC_TESTS_EXE=1`) now use a fresh per-run temp store, so GUI sessions can never change test outcomes again.
 
-### Phase 1 — denseunet end-to-end (~2–3 days)
-- Port `noise_suppression_omz_model.*` → `DenseUnetModel` operating on `std::vector<float>` in/out (no Audacity types).
+### Phase 1 — denseunet end-to-end — **DONE**
+- Ported `noise_suppression_omz_model.*` → `DenseUnetModel` operating on plain float buffers at the model rate (no Audacity types).
 - Resampling reuses the Phase 0.5 SoXR wrapper (`sc::Resampler`): file rate → 16 kHz → back.
-- `Application::noiseSuppress(modelId, device, options)` mirroring `changeGain`: requires non-empty selection; runs async on a worker thread with the existing `WorkProgressDialog` (indeterminate while compiling — first run 10–30 s per Intel's docs — then determinate per channel); cancellable.
-- Undo: capture pre-edit samples via the existing patch mechanism, action name e.g. `"Noise suppressed (denseunet)"`.
-- UI: **Effects → Noise Suppression…** dialog (same pattern as Change Gain): model combo (only models present/downloaded), device combo, Apply/Cancel; focus-grab + Enter-submit behaviour per the gain-dialog fix.
-- Tests: resampler unit tests; pipeline test on synthetic WAV (white noise + 400 Hz tone → assert noise-floor RMS drops ≥ N dB and tone amplitude within tolerance); offline CLI flag `--test-noise-suppression in.wav out.wav` for headless verification (skipped gracefully when models absent).
+- `Application::noiseSuppress(modelId, device, options)` mirroring `changeGain`: requires non-empty selection; runs async on a worker thread with the existing `WorkProgressDialog`; cancellable. Compiles via the shared model cache (first run 10–30 s, instant afterwards).
+- Undo: pre-edit samples captured via `AudioEngine::replaceSamples()` (records an undo patch before writing), action name `"Noise suppressed (denseunet)"`.
+- UI: **Effects → Noise Suppression…** dialog (same pattern as Change Gain): model combo + device combo, no text fields so Enter/Escape reach the button shortcuts directly; failure popup lists exact manual-install URLs.
+- CLI flag `--test-noise-suppression in.wav out.wav` for headless verification (writes 32-bit float WAV).
+
+**Implementation findings (baked into the code, relevant to Phase 2+):**
+- **The model is a speech-enhancement network.** Pure tones are *out-of-distribution* and get suppressed along with noise (verified: 400 Hz tone at amp 0.3 → output ≈ 7e-5). Real speech passes through almost untouched (SAPI TTS clip: correlation 0.99, ~0 dB loss); stationary white noise is cut by >21 dB. Consequence for tests: assert **noise suppression** (≥10 dB on synthetic white noise) and silence passthrough — not tone preservation.
+- **Delay compensation.** The streaming interface has an internal latency of `delay` samples (384 @ 16 kHz): raw output sample i corresponds to input sample i+delay. We shift the result back so it stays time-aligned with the input (the OMZ demo does this; Intel's Audacity plugin does *not*, which shifts their processed audio by ~24 ms). `outputLengthFor()` therefore returns exactly nSamples.
+- **State buffers must be sized before wrapping in `ov::Tensor`.** An empty `std::vector`'s `data()` points at MSVC STL's inline 1-element buffer; OpenVINO then reads out-of-bounds garbage and inference degenerates into a ~50 s pathological hang. Always `assign(shapeSize, 0)` first.
+- **CrashTrace VEH bug (fixed in `include/CrashTrace.h`).** `AddVectoredExceptionHandler` runs *before* C++ landing pads for every throw — the old handler terminated the process on any catchable exception (bit us with an OpenVINO compile error). It now passes code 0xE06D7363 through and a new `SetUnhandledExceptionFilter` traces genuinely unhandled exceptions.
+- **WinInet download details:** `InternetReadFile` returning FALSE with nRead=0 is clean EOF (break, not an error); SHA/size verification + rename must happen *after* the stream is closed (Windows won't move a file with an open handle).
+- **Integration tests must use `Application::openFile()`**, not `audioEngine().loadFile()`: the latter bypasses FileDoc creation so `visibleChannels` stays empty and the pipeline silently skips every channel.
 
 ### Phase 2 — DeepFilterNet2/3, torch-free (~1–2 weeks)
 - Port the three OpenVINO sub-model runners (`dfnet_model.*`) as-is (they're already pure OpenVINO + tensor shuffling).
@@ -145,6 +153,6 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 - [x] `extern/soxr/` vendored SoXR (Audacity's resampler, LGPL-2.1) — done in `5fe19ae`
 - [x] `src/AI/` module (runtime, generic model manager/downloader with auto-download + manual-install fallback) — done in Phase 0
 - [x] Effects → Resample… tool (whole-file, arbitrary rate, warning dialog) — reusable by AI features internally — done in `5fe19ae`
-- [ ] Effects → Noise Suppression… (denseunet first, then DFNet2/3 torch-free port): dialog + async progress + undo integration
-- [ ] Unit tests (resampler quality, NS pipeline assertions) + CLI flag `--test-noise-suppression in.wav out.wav`
+- [x] Effects → Noise Suppression… denseunet end-to-end: dialog + async progress + undo integration (DFNet2/3 remain for Phase 2)
+- [x] Unit tests (resampler quality, NS pipeline assertions) + CLI flag `--test-noise-suppression in.wav out.wav`
 - [ ] `third_party/licenses/` (GPLv3 text for copied code, Apache/MIT/LGPL notices for OpenVINO/models/SoXR), README update

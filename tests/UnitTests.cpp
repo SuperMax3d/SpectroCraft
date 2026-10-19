@@ -23,6 +23,7 @@
 #include "AI/ModelManager.h"
 #include "AI/OvRuntime.h"
 #include "AI/Sha256.h"
+#include "NoiseSuppression.h"
 #endif
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #if JUCE_WINDOWS
@@ -4437,6 +4438,156 @@ static void testAIPlumbing()
     std::cerr << "  [OpenVINO runtime smoke test skipped: MSVC debug CRT]\n";
 #endif
 }
+
+static double rmsOf (const std::vector<float>& v)
+{
+    if (v.empty()) return 0.0;
+    double s = 0.0;
+    for (float x : v) s += (double) x * x;
+    return std::sqrt (s / (double) v.size());
+}
+
+static void testDenseUnetPipeline()
+{
+    auto& mm = sc::ai::ModelManager::instance ();
+
+    const auto* spec = mm.find ("denseunet");
+    CHECK (spec != nullptr, "denseunet registered in the model registry");
+    if (!spec) return;
+
+#if defined(_DEBUG)
+    // OpenVINO 2024.6 cannot be initialised under the MSVC debug CRT (see
+    // testAIPlumbing); inference is therefore only exercised in Release.
+    std::cerr << "  [denseunet pipeline test skipped: MSVC debug CRT]\n";
+    return;
+#endif
+
+    // Attempt to install the weights (~9 MB download into the isolated temp
+    // model root on first run).
+    std::string err;
+    bool cancelled = false;
+    const bool installed = mm.ensureInstalled (*spec,
+        [&cancelled] (float, const std::string&) { return !cancelled; }, &err);
+    if (!installed)
+    {
+        // Graceful skip: no network / non-Windows. The pipeline is still
+        // compiled and linked; only the model weights are missing.
+        std::cerr << "  [denseunet pipeline test skipped: model unavailable (" << err << ")]\n";
+        return;
+    }
+
+    // Synthetic signal: 2 s @ 48 kHz stereo white noise. The denseunet model
+    // is a speech-enhancement network trained on speech+noise; stationary
+    // noise is its in-distribution target, so we assert strong suppression.
+    // (Pure tones are out-of-distribution and get suppressed as well — the
+    // same behaviour Intel's Audacity plugin exhibits.)
+    const int N = 96000;
+    const double rate = 48000.0;
+    std::vector<std::vector<float>> data (2);
+    juce::Random rng (12345);
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        data[ch].resize ((size_t) N);
+        const double noiseScale = 0.05 * (ch == 0 ? 1.0 : 1.3);   // differs per channel
+        for (int i = 0; i < N; ++i)
+            data[ch][(size_t) i] = (float) (noiseScale * (rng.nextFloat () * 2.0 - 1.0));
+    }
+
+    const double inRms[2] = { rmsOf (data[0]), rmsOf (data[1]) };
+    // uniform [-1,1] noise has RMS = scale / sqrt(3) ~ 0.029 / 0.038 here
+    CHECK (inRms[0] > 0.02 && inRms[1] > 0.02, "synthetic noise present before processing");
+
+    const bool ok = sc::runDenseUnetPipeline ("denseunet", "CPU", rate, 2, data,
+                                              nullptr, &err);
+    CHECK (ok, "pipeline completed");
+    if (!ok)
+    {
+        std::cerr << "  [pipeline failed: " << err << "]\n";
+        return;
+    }
+
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        CHECK (data[ch].size () == (size_t) N, "length preserved");
+
+        bool finite = true;
+        for (float v : data[ch]) if (!std::isfinite (v)) { finite = false; break; }
+        CHECK (finite, "output is finite");
+
+        const double outRms = rmsOf (data[ch]);
+        const double dbReduction = 20.0 * std::log10 (
+            std::max (outRms, 1e-9) / inRms[ch]);
+        CHECK (dbReduction <= -10.0, "noise reduced by at least 10 dB");
+    }
+
+    // Silence passes through as silence.
+    {
+        std::vector<std::vector<float>> sil (2);
+        for (auto& c : sil) c.assign ((size_t) N, 0.0f);
+        std::string sErr;
+        const bool okS = sc::runDenseUnetPipeline ("denseunet", "CPU", rate, 2, sil,
+                                                   nullptr, &sErr);
+        CHECK (okS, "silence: pipeline completed");
+        if (okS)
+            CHECK (rmsOf (sil[0]) < 1e-4, "silence stays silent");
+    }
+
+    // Integration via Application: selection + undo/redo around the effect.
+    {
+        const juce::File wav = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                   .getChildFile ("SpectroCraftTests-ns-integration.wav");
+        writeWav (wav, 2, rate, N,
+                  [] (int ch, int64_t f, double) {
+                      // deterministic per-channel white noise (LCG)
+                      uint32_t s = 12345u + (uint32_t) (ch * 7919u) + (uint32_t) f;
+                      s = s * 1664525u + 1013904223u;
+                      const double scale = 0.05 * (ch == 0 ? 1.0 : 1.3);
+                      return (float) (scale * ((double) (s >> 8) / 16777216.0 - 1.0));
+                  });
+
+        Application app;   // isolated settings store via SC_TESTS_EXE
+        CHECK (app.openFile (wav), "integration: file loaded");
+        if (!app.audioEngine().isFileLoaded()) return;
+
+        const double dur = app.audioEngine().duration ();
+        app.setSelection ({ 0.0, dur });
+
+        std::vector<float> before ((size_t) N), suppressed ((size_t) N);
+        CHECK (app.audioEngine().readSamples (0, 0, N, before.data()), "integration: read pre-edit data");
+
+        std::string iErr;
+        const bool ok2 = app.noiseSuppress ("denseunet", "CPU", nullptr, &iErr);
+        CHECK (ok2, "integration: noiseSuppress succeeded");
+        if (!ok2)
+        {
+            std::cerr << "  [integration failed: " << iErr << "]\n";
+            return;
+        }
+
+        CHECK (app.audioEngine().readSamples (0, 0, N, suppressed.data()), "integration: read post-edit data");
+
+        bool changed = false;
+        for (int i = 0; i < N && !changed; ++i)
+            if (suppressed[(size_t) i] != before[(size_t) i]) changed = true;
+        CHECK (changed, "effect modified the samples");
+
+        app.undoStep ();
+        std::vector<float> afterUndo ((size_t) N);
+        app.audioEngine().readSamples (0, 0, N, afterUndo.data());
+        bool same = true;
+        for (int i = 0; i < N && same; ++i)
+            if (afterUndo[(size_t) i] != before[(size_t) i]) same = false;
+        CHECK (same, "undo restores the original samples exactly");
+
+        app.redoStep ();
+        std::vector<float> afterRedo ((size_t) N);
+        app.audioEngine().readSamples (0, 0, N, afterRedo.data());
+        bool same2 = true;
+        for (int i = 0; i < N && same2; ++i)
+            if (afterRedo[(size_t) i] != suppressed[(size_t) i]) same2 = false;
+        CHECK (same2, "redo restores the suppressed samples exactly");
+    }
+}
 #endif   // SC_ENABLE_AI
 
 static int scRunUnitTestsImpl()
@@ -4501,6 +4652,7 @@ static int scRunUnitTestsImpl()
 #if defined(SC_ENABLE_AI)
     progress ("sha256 (self-contained)"); testSha256();
     progress ("AI plumbing");         testAIPlumbing();
+    progress ("denseunet pipeline");  testDenseUnetPipeline();
 #endif
     progress ("version string");      testVersionString();
 
