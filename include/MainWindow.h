@@ -19,6 +19,11 @@ public:
     MainWindow (Application& app, const juce::String& name);
     ~MainWindow();
 
+    // Text shown by Help > About SpectroCraft: version, project licence and the
+    // licences of all third-party components (JUCE, SoXR, OpenVINO runtime,
+    // Intel's Audacity-plugin DSP port, whisper.cpp, model weights).
+    static juce::String buildAboutText();
+
     void resized() override;
     void closeButtonPressed() override;
     void timerCallback() override; // animates the playhead while playing

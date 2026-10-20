@@ -1070,6 +1070,64 @@ void MainWindow::applyColourMap (ColourMap m)
     syncSharedState();
 }
 
+juce::String MainWindow::buildAboutText()
+{
+    juce::String about =
+        "SpectroCraft v" SC_VERSION_STRING "\n"
+        "High-performance waveform + spectral editor\n"
+        "\n"
+        "This software is licensed under the GNU Affero General Public License v3.0.\n"
+        "Source code: https://github.com/SuperMax3d/SpectroCraft\n"
+        "\n"
+        "Third-party components (full details in third_party/licenses/NOTICE.md):\n"
+        "\n"
+        "JUCE 9.0.4 - dual-licensed AGPL-3.0/commercial; this project uses the AGPLv3 option.\n"
+        "SoXR resampler - LGPL-2.1, Steve Harris (the same engine Audacity uses).\n";
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    about +=
+        "\n"
+        "OpenVINO runtime 2024.6 - Apache-2.0, Intel Corporation (noise suppression only;\n"
+        "loaded at runtime, the app works without it).\n"
+        "\nNoise suppression:\n"
+        "- DeepFilterNet DSP code ported from Intel's OpenVINO plugin for Audacity\n"
+        "  (openvino-plugins-ai-audacity) - GPL-3.0-only,\n"
+        "  Copyright (C) 2024 Intel Corporation.\n"
+        "- DenseUNet model weights - Apache-2.0, Intel Open Source Model Zoo.\n"
+        "- DeepFilterNet 2/3 model weights - see the intel/deepfilternet-openvino\n"
+        "  repository on Hugging Face for its licence terms.\n"
+        "\nTranscription:\n"
+        "- whisper.cpp v1.6.2 (+ ggml) - MIT, ggerganov\n"
+        "  (https://github.com/ggml-org/whisper.cpp).\n"
+        "- miniz zip reader - public domain / MIT-style.\n"
+        "- Whisper model weights (ggml-*.bin) are OpenAI's Whisper checkpoints; check the\n"        "  upstream terms before commercial use.\n"
+        "\nModel weights are downloaded on demand to %APPDATA%/SpectroCraft/models and are\n"
+        "never distributed with this source.";
+#endif
+
+    return about;
+}
+
+// The About text is too long for a plain AlertWindow message: this JUCE build's
+// AlertTextComp clamps its height to jmin(width, textHeight), which silently
+// truncates the last lines. Show it in a read-only multi-line editor instead -
+// scrollable and selectable (same pattern as showAiFailureDialog).
+static void showAboutDialog (Component* parent)
+{
+    auto* w = new juce::AlertWindow ("About SpectroCraft", "",
+                                     juce::AlertWindow::NoIcon, parent);
+    auto* ed = new juce::TextEditor ();
+    ed->setMultiLine (true);
+    ed->setReadOnly (true);
+    ed->setSize (640, 520);
+    ed->setText (MainWindow::buildAboutText(), false);
+    w->addCustomComponent (ed);
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->enterModalState (false);
+    ed->grabKeyboardFocus();
+    w->runModalLoop ();
+    delete w;
+}
 
 // ------------------------------------------------------------------- menus
 
@@ -1218,14 +1276,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsReverse: app.reverse(); refreshAfterEdit(); break;
 
         case HelpAbout:
-            juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::InfoIcon,
-                "About SpectroCraft",
-                "SpectroCraft v" SC_VERSION_STRING "\nHigh-performance waveform + spectral editor\n"
-                "\nThis software is licensed under the GNU Affero General Public License v3.0.\n"
-                "\nSource code is available at:\nhttps://github.com/SuperMax3d/SpectroCraft\n"
-                "\nThis software uses the JUCE framework (https://juce.com), dual-licensed under "
-                "AGPLv3 and a commercial licence. This project uses the AGPLv3 option.",
-                "OK", this);
+            showAboutDialog (this);
             break;
     }
 }

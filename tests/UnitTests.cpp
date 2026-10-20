@@ -2245,6 +2245,37 @@ static void testStatusBarFileName()
     wavB.deleteFile();
 }
 
+// ---------------- About dialog licence credits ----------------
+// Help > About must credit the project licence plus every third-party
+// component: JUCE, SoXR (the engine Audacity uses), and - in AI builds - the
+// OpenVINO runtime, Intel's Audacity-plugin DSP port (GPL-3.0) with its model
+// weights, whisper.cpp (MIT) and the Whisper checkpoints.
+static void testAboutText()
+{
+    const juce::String about = MainWindow::buildAboutText();
+    CHECK (about.contains ("SpectroCraft v"), "version line present");
+    CHECK (about.contains ("GNU Affero General Public License v3.0"), "project AGPL licence stated");
+    CHECK (about.contains ("JUCE 9.0.4") && about.contains ("AGPL-3.0"), "JUCE licence credited");
+    CHECK (about.contains ("SoXR resampler - LGPL-2.1"), "SoXR licence credited");
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    CHECK (about.contains ("OpenVINO runtime 2024.6") && about.contains ("Apache-2.0, Intel Corporation"),
+           "OpenVINO runtime licence credited");
+    CHECK (about.contains ("Intel's OpenVINO plugin for Audacity"),
+           "noise-suppression code source: Intel's Audacity plugin");
+    CHECK (about.contains ("GPL-3.0-only") && about.contains ("Copyright (C) 2024 Intel Corporation"),
+           "DeepFilterNet port GPL licence credited");
+    CHECK (about.contains ("DenseUNet model weights - Apache-2.0, Intel Open Source Model Zoo"),
+           "DenseUNet model licence credited");
+    CHECK (about.contains ("intel/deepfilternet-openvino"), "DeepFilterNet 2/3 model source cited");
+    CHECK (about.contains ("whisper.cpp v1.6.2") && about.contains ("MIT, ggerganov"),
+           "whisper.cpp MIT licence credited");
+    CHECK (about.contains ("OpenAI's Whisper checkpoints"), "Whisper weights attributed to OpenAI");
+#else
+    CHECK (!about.contains ("Noise suppression:"), "non-AI build: no AI section in about text");
+#endif
+}
+
 // ------------------------------------------------------- time scrollbar on load
 // The horizontal time scrollbar must appear as soon as a file is loaded.
 // Previously its visibility/bounds were only set in resized(), and loading a
@@ -5904,6 +5935,7 @@ static int scRunUnitTestsImpl()
     progress ("snapshot overlay paint");  testSnapshotOverlayPaint();
     progress ("status bar");          testStatusBar();
     progress ("footer file name");    testStatusBarFileName();
+    progress ("about text licences"); testAboutText();
     progress ("time scrollbar on load"); testTimeScrollBarOnLoad();
     progress ("left panel layout"); testLeftPanelLayout();
     progress ("home/end panning"); testHomeEndPans();
