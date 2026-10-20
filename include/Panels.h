@@ -387,6 +387,25 @@ private:
     JUCE_DECLARE_NON_COPYABLE (FFTAnalysisView)
 };
 
+// TextEditor that commits its content when Return is pressed (this JUCE build
+// has no onReturnPressed member). Also used for focus-lost commits via the
+// onFocusLost callback wired by the owner.
+class LevelEdit : public juce::TextEditor
+{
+public:
+    std::function<void()> onEnter;
+
+    bool keyPressed (const juce::KeyPress& k) override
+    {
+        if (k == juce::KeyPress (juce::KeyPress::returnKey))
+        {
+            if (onEnter != nullptr) onEnter ();
+            return true;
+        }
+        return TextEditor::keyPressed (k);
+    }
+};
+
 // ---------------------------------------------------- Spectral Controls panel
 
 class SpectralControlsPanel : public juce::Component
@@ -398,21 +417,41 @@ public:
     void refresh(); // call after file open/close or settings change
 
     /** The three level labels drawn above the colour-map gradient:
-        left = bottom of the dB range, centre = middle, right = full scale.
+        left = bottom of the level window, centre = middle, right = top.
         Values are absolute levels in the calibration's unit (linear V/g for
         volts/grams files). */
-    static std::array<juce::String, 3> levelScaleLabels (float dBRange,
+    static std::array<juce::String, 3> levelScaleLabels (double minDb, double maxDb,
                                                          const ScaleCalibration& sc)
     {
         // formatSpectralLevel() takes a RELATIVE level (dB below full scale) and
         // applies the calibration itself.
-        return { ScaleCalibration::formatSpectralLevel (- (double) dBRange, sc),
-                 ScaleCalibration::formatSpectralLevel (- 0.5 * (double) dBRange, sc),
-                 ScaleCalibration::formatSpectralLevel (0.0, sc) };
+        return { ScaleCalibration::formatSpectralLevel (minDb, sc),
+                 ScaleCalibration::formatSpectralLevel ((minDb + maxDb) * 0.5, sc),
+                 ScaleCalibration::formatSpectralLevel (maxDb, sc) };
     }
+
+    /** Inverse of formatSpectralLevel(): parses a level typed in the file's
+        display unit ("-80 dB", "0.01 V", "94 dB-SPL") into relative dB below
+        full scale. Returns false when the text is not a valid level. */
+    static bool parseSpectralLevel (const juce::String& text, const ScaleCalibration& sc,
+                                    double& outRelativeDb);
+
+    // Commit helpers: apply a user-entered value to the settings and refresh
+    // the controls. Return false when the value is rejected; the editors are
+    // reverted to their canonical text in that case.
+    bool applyDbRangeValue (double rangeDb);   // keeps the top edge fixed
+    bool applyDbRangeText (const juce::String& text);
+    bool applyDbMinText (const juce::String& text);
+    bool applyDbMaxText (const juce::String& text);
+    void syncLevelControls();                  // slider + editors + preview from settings
 
     // Set by MainWindow: resets the spectral view's frequency axis.
     std::function<void()> onResetFreq;
+
+    // Current dB-range slider position (tests).
+    double getDbRangeSliderValue() const { return dBRangeSlider.getValue(); }
+    juce::String getDbMinText() const { return dbMinEdit.getText(); }
+    juce::String getDbMaxText() const { return dbMaxEdit.getText(); }
 
     // True when the FFT-size combo offers an item with this label (tests).
     bool hasFftSizeOption (const juce::String& label) const
@@ -426,6 +465,7 @@ private:
     Application& app;
     juce::ComboBox colourMapCombo, fftSizeCombo;
     juce::Slider dBRangeSlider;
+    LevelEdit dbRangeEdit, dbMinEdit, dbMaxEdit;
     juce::TextButton logToggle;
     juce::Label colourMapLab, dbRangeLab;
     juce::TextButton resetFreqBtn;
@@ -453,25 +493,21 @@ private:
             }
 
             // Level scale above the gradient: absolute values in the active file's
-            // unit (dB / dB-SPL / dBV / dB-g). refresh() repaints this component,
-            // so the labels follow both the dB-range slider and Set Scale changes.
-            const auto labs = levelScaleLabels (app.settings.dBRange, app.scale());
+            // unit (dB / dB-SPL / dBV / dB-g). The left and right ends are editable
+            // LevelEdit fields laid out by SpectralControlsPanel::resized(); only
+            // the centre label is drawn here. refresh() repaints this component,
+            // so the labels follow both the level controls and Set Scale changes.
+            const auto labs = levelScaleLabels ((double) app.settings.dbMinDb,
+                                                (double) app.settings.dbMaxDb, app.scale());
 
             g.setFont (11.0f);
             g.setColour (juce::Colours::lightgrey);
-            auto drawTick = [&] (const juce::String& lab, int x, juce::Justification j)
             {
                 const int tw = std::max (1, juce::GlyphArrangement::getStringWidthInt
-                                                (g.getCurrentFont(), lab));
-                const int tx = (j == juce::Justification::left)  ? x
-                               : (j == juce::Justification::right) ? x - tw
-                                                                   : x - tw / 2;
-                g.drawText (lab, std::max (0, tx), b.getY(), tw, labelH,
+                                                (g.getCurrentFont(), labs[1]));
+                g.drawText (labs[1], b.getCentreX() - tw / 2, b.getY(), tw, labelH,
                            juce::Justification::centredLeft);
-            };
-            drawTick (labs[0], grad.getX() + 1, juce::Justification::left);
-            drawTick (labs[1], b.getCentreX(), juce::Justification::centred);
-            drawTick (labs[2], b.getRight() - 1, juce::Justification::right);
+            }
         }
     private:
         Application& app;

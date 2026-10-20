@@ -1677,7 +1677,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
             juce::String line = juce::String (kThirdOctCenters[b], 1);
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < thirdOctMags[c].size())
-                    line += "," + fmtLevel (-app.settings.dBRange + thirdOctMags[c][b] * app.settings.dBRange);
+                    line += "," + fmtLevel ((double) app.settings.dbMinDb + thirdOctMags[c][b] * (double) app.settings.dbRange());
             lines.add (line);
         }
         juce::SystemClipboard::copyTextToClipboard (lines.joinIntoString ("\n"));
@@ -1692,7 +1692,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
         for (size_t c = 0; c < mags.size() && c < 4; ++c)
         {
             const int bin = std::min (k, (int) mags[c].size() - 1);
-            line += "," + fmtLevel (-app.settings.dBRange + mags[c][(size_t) bin] * app.settings.dBRange);
+            line += "," + fmtLevel ((double) app.settings.dbMinDb + mags[c][(size_t) bin] * (double) app.settings.dbRange());
         }
         lines.add (line);
     }
@@ -1730,14 +1730,38 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         if (app.onStateChange) app.onStateChange();
     };
 
+    // The slider covers 1..160 dB; the text field next to it accepts any range
+    // greater than 1 dB (values above 160 apply beyond the slider's reach).
     dBRangeSlider.setSliderStyle (juce::Slider::LinearHorizontal);
-    dBRangeSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 40, 20);
-    dBRangeSlider.setRange (20.0, 120.0, 1.0);
-    dBRangeSlider.setValue (app.settings.dBRange, juce::dontSendNotification);
+    dBRangeSlider.setRange (1.0, 160.0, 1.0);
+    dBRangeSlider.setValue ((double) app.settings.dbRange(), juce::dontSendNotification);
     dBRangeSlider.onValueChange = [this] {
-        app.settings.dBRange = (float) dBRangeSlider.getValue();
-        if (app.onStateChange) app.onStateChange();
+        if (!applyDbRangeValue (dBRangeSlider.getValue()))
+            syncLevelControls();   // e.g. the slider's 1 dB end: revert to current range
     };
+
+    auto styleLevelEdit = [] (LevelEdit& e)
+    {
+        e.setFont (11.0f);
+        e.setColour (juce::TextEditor::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
+        e.setColour (juce::TextEditor::textColourId, juce::Colours::lightgrey);
+        e.setColour (juce::TextEditor::outlineColourId, juce::Colour::fromRGB (72, 72, 78));
+    };
+
+    styleLevelEdit (dbRangeEdit);
+    dbRangeEdit.onEnter     = [this] { applyDbRangeText (dbRangeEdit.getText()); };
+    dbRangeEdit.onFocusLost = [this] { applyDbRangeText (dbRangeEdit.getText()); };
+
+    styleLevelEdit (dbMinEdit);
+    dbMinEdit.onEnter       = [this] { applyDbMinText (dbMinEdit.getText()); };
+    dbMinEdit.onFocusLost   = [this] { applyDbMinText (dbMinEdit.getText()); };
+
+    styleLevelEdit (dbMaxEdit);
+    dbMaxEdit.setJustification (juce::Justification::centredRight);
+    dbMaxEdit.onEnter       = [this] { applyDbMaxText (dbMaxEdit.getText()); };
+    dbMaxEdit.onFocusLost   = [this] { applyDbMaxText (dbMaxEdit.getText()); };
+
+    syncLevelControls();
 
     logToggle.setClickingTogglesState (true);
     logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
@@ -1759,8 +1783,13 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
 
     colourMapCombo.setTooltip ("Colour map used by the spectrogram. 'Classic (Default)' is the "
                                 "traditional DAW spectral palette.");
-    dBRangeSlider.setTooltip ("Spectral dynamic range in dB: how far below full scale the "
-                               "spectrogram displays. Higher values reveal quieter detail.");
+    dBRangeSlider.setTooltip ("Spectral dynamic range in dB (1-160): how far below the top of "
+                               "the palette the spectrogram displays. Higher values reveal quieter detail.");
+    dbRangeEdit.setTooltip ("Type any dB range greater than 1. Values above 160 apply beyond the slider's reach.");
+    dbMinEdit.setTooltip ("Bottom level of the colour window: type a value in the file's unit "
+                          "(dB, V or g) to change it; the dB range follows.");
+    dbMaxEdit.setTooltip ("Top level of the colour window: type a value in the file's unit "
+                          "(dB, V or g) to change it; the dB range follows.");
     logToggle.setTooltip ("Toggle the spectrogram's frequency axis between logarithmic and linear scaling.");
     resetFreqBtn.setTooltip ("Reset the spectrogram's vertical (frequency) zoom to its default range.");
     fftSizeCombo.setTooltip ("FFT size used by the spectrogram tiles. Larger values give finer "
@@ -1774,8 +1803,11 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     addAndMakeVisible (&colourMapLab);
     addAndMakeVisible (&colourMapCombo);
     addAndMakeVisible (&preview);
+    addAndMakeVisible (&dbMinEdit);
+    addAndMakeVisible (&dbMaxEdit);
     addAndMakeVisible (&dbRangeLab);
     addAndMakeVisible (&dBRangeSlider);
+    addAndMakeVisible (&dbRangeEdit);
     addAndMakeVisible (&logToggle);
     addAndMakeVisible (&resetFreqBtn);
     addAndMakeVisible (&fftSizeCombo);
@@ -1785,11 +1817,9 @@ void SpectralControlsPanel::refresh()
 {
     colourMapCombo.setSelectedId ((int) app.colourMap + 1, juce::dontSendNotification);
     fftSizeCombo.setSelectedId (app.settings.fftSize, juce::dontSendNotification);
-    dBRangeSlider.setValue (app.settings.dBRange, juce::dontSendNotification);
+    syncLevelControls();
     logToggle.setToggleState (app.settings.logFrequency, juce::dontSendNotification);
     logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
-
-    preview.repaint();
 }
 
 void SpectralControlsPanel::resized()
@@ -1803,12 +1833,17 @@ void SpectralControlsPanel::resized()
     }
 
     preview.setBounds (b.removeFromTop (56));
+    {   // editable level labels over the gradient's left/right ends
+        dbMinEdit.setBounds (preview.getX() + 1, preview.getY(), 72, 18);
+        dbMaxEdit.setBounds (preview.getRight() - 73, preview.getY(), 72, 18);
+    }
     b.reduce (0, 4);
 
-    {   // dB range row
+    {   // dB range row: slider (1-160) + free-text field for any value > 1
         auto row = b.removeFromTop (28);
         dbRangeLab.setBounds (row.removeFromLeft (76));
-        dBRangeSlider.setBounds (row.reduced (0, 0));
+        dbRangeEdit.setBounds (row.removeFromRight (56));
+        dBRangeSlider.setBounds (row);
     }
 
     {   // Log + Reset Freq + FFT size row
@@ -1822,6 +1857,112 @@ void SpectralControlsPanel::resized()
 void SpectralControlsPanel::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+}
+
+// ------------------------------------------------- spectral level window helpers
+
+static bool parseDbNumber (const juce::String& text, double& out)
+{
+    const auto t = text.trim();
+    if (t.isEmpty()) return false;
+    bool hasDigit = false;
+    for (char16_t c : t)
+    {
+        if (c >= '0' && c <= '9')      { hasDigit = true; continue; }
+        if (c == '.' || c == '+' || c == '-' || c == 'e' || c == 'E' || c == ' ') continue;
+        return false;
+    }
+    if (!hasDigit) return false;
+    out = t.getDoubleValue();
+    return std::isfinite (out);
+}
+
+static juce::String formatDbValue (double v)
+{
+    juce::String s (v, 2);
+    while (s.endsWith ("0") && s.contains ("."))
+        s = s.substring (0, s.length() - 1);
+    if (s.endsWith ("."))
+        s = s.substring (0, s.length() - 1);
+    return s;
+}
+
+bool SpectralControlsPanel::parseSpectralLevel (const juce::String& text, const ScaleCalibration& sc,
+                                                double& outRelativeDb)
+{
+    auto t = text.trim();
+    if (t.isEmpty()) return false;
+
+    // Strip a trailing unit token if the user kept it ("dB", "dB-SPL", " V", " g").
+    for (const juce::String& u : { sc.unitSuffix(), sc.levelUnitLabel() })
+        if (u.isNotEmpty() && t.endsWith (u))
+            t = t.substring (0, t.length() - u.length()).trim();
+
+    double v;
+    if (!parseDbNumber (t, v)) return false;
+
+    if (!sc.isCalibrated())
+        outRelativeDb = v;                       // plain relative dB
+    else if (sc.usesLinearLevels())
+    {
+        if (v <= 0.0) return false;              // linear levels must be positive
+        outRelativeDb = 20.0 * std::log10 (v / sc.fullScaleValue);
+    }
+    else
+        outRelativeDb = v - sc.levelOffsetDb();  // absolute dB readout -> relative
+
+    return true;
+}
+
+bool SpectralControlsPanel::applyDbRangeValue (double rangeDb)
+{
+    if (!std::isfinite (rangeDb) || rangeDb <= 1.0) return false;
+    app.settings.dbMinDb = (float) ((double) app.settings.dbMaxDb - rangeDb);
+    syncLevelControls();
+    if (app.onStateChange) app.onStateChange();
+    return true;
+}
+
+bool SpectralControlsPanel::applyDbRangeText (const juce::String& text)
+{
+    double v;
+    if (!parseDbNumber (text, v)) { syncLevelControls(); return false; }
+    return applyDbRangeValue (v);
+}
+
+bool SpectralControlsPanel::applyDbMinText (const juce::String& text)
+{
+    double rel;
+    if (!parseSpectralLevel (text, app.scale(), rel)) { syncLevelControls(); return false; }
+    const double maxDb = (double) app.settings.dbMaxDb;
+    if (!(maxDb - rel > 1.0)) { syncLevelControls(); return false; }   // window must stay > 1 dB
+    app.settings.dbMinDb = (float) rel;
+    syncLevelControls();
+    if (app.onStateChange) app.onStateChange();
+    return true;
+}
+
+bool SpectralControlsPanel::applyDbMaxText (const juce::String& text)
+{
+    double rel;
+    if (!parseSpectralLevel (text, app.scale(), rel)) { syncLevelControls(); return false; }
+    const double minDb = (double) app.settings.dbMinDb;
+    if (!(rel - minDb > 1.0)) { syncLevelControls(); return false; }   // window must stay > 1 dB
+    app.settings.dbMaxDb = (float) rel;
+    syncLevelControls();
+    if (app.onStateChange) app.onStateChange();
+    return true;
+}
+
+void SpectralControlsPanel::syncLevelControls()
+{
+    const double range = (double) app.settings.dbRange();
+    dBRangeSlider.setValue (juce::jmax (1.0, juce::jmin (160.0, range)), juce::dontSendNotification);
+    dbRangeEdit.setText (formatDbValue (range));
+    const auto& sc = app.scale();
+    dbMinEdit.setText (ScaleCalibration::formatSpectralLevel ((double) app.settings.dbMinDb, sc));
+    dbMaxEdit.setText (ScaleCalibration::formatSpectralLevel ((double) app.settings.dbMaxDb, sc));
+    preview.repaint();
 }
 
 // ================================================================= MarkerListPanel

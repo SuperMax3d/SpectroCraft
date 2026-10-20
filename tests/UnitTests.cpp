@@ -2963,8 +2963,9 @@ static void testSpectralScaleLabels()
     const auto base = snapshotLabels();
     CHECK (countTextPixels (base) > 20, "level labels drawn above the gradient");
 
-    // Changing the dB range must change the label values.
-    app.settings.dBRange = 100.0f;
+    // Changing the level window must change the label values.
+    app.settings.dbMinDb = -100.0f;
+    app.settings.dbMaxDb = 0.0f;
     panel.refresh();
     const auto afterRange = snapshotLabels();
     CHECK (countTextPixels (afterRange) > 20, "labels still drawn after dB range change");
@@ -2984,7 +2985,7 @@ static void testSpectralScaleLabels()
     // Exact label values: uncalibrated files show plain relative dB.
     {
         ScaleCalibration none;
-        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, none);
+        const auto l = SpectralControlsPanel::levelScaleLabels (-80.0, 0.0, none);
         CHECK (l[0] == "-80.0 dB", "uncalibrated bottom label");
         CHECK (l[1] == "-40.0 dB", "uncalibrated middle label");
         CHECK (l[2] == "0.0 dB",   "uncalibrated full-scale label");
@@ -2995,7 +2996,7 @@ static void testSpectralScaleLabels()
         ScaleCalibration sc;
         sc.unit = ScaleCalibration::Unit::Pascal;
         sc.fullScaleValue = 2.0;
-        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, sc);
+        const auto l = SpectralControlsPanel::levelScaleLabels (-80.0, 0.0, sc);
         CHECK (l[0] == "20.0 dB-SPL",  "calibrated bottom label");
         CHECK (l[1] == "60.0 dB-SPL",  "calibrated middle label");
         CHECK (l[2] == "100.0 dB-SPL", "calibrated full-scale label");
@@ -3006,7 +3007,7 @@ static void testSpectralScaleLabels()
         ScaleCalibration sc;
         sc.unit = ScaleCalibration::Unit::Pascal;
         sc.fullScaleValue = 1.0;
-        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, sc);
+        const auto l = SpectralControlsPanel::levelScaleLabels (-80.0, 0.0, sc);
         CHECK (l[0] == "14.0 dB-SPL",  "1 Pa bottom label");
         CHECK (l[1] == "54.0 dB-SPL",  "1 Pa middle label");
         CHECK (l[2] == "94.0 dB-SPL",  "1 Pa full-scale label");
@@ -3017,7 +3018,7 @@ static void testSpectralScaleLabels()
         ScaleCalibration sc;
         sc.unit = ScaleCalibration::Unit::Volts;
         sc.fullScaleValue = 1.0;
-        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, sc);
+        const auto l = SpectralControlsPanel::levelScaleLabels (-80.0, 0.0, sc);
         CHECK (l[0] == "0.0001 V", "volts bottom label is linear");
         CHECK (l[1] == "0.01 V",   "volts middle label is linear");
         CHECK (l[2] == "1 V",      "volts full-scale label is the scale value");
@@ -3027,19 +3028,109 @@ static void testSpectralScaleLabels()
         ScaleCalibration sc;
         sc.unit = ScaleCalibration::Unit::Grams;
         sc.fullScaleValue = 2.0;
-        const auto l = SpectralControlsPanel::levelScaleLabels (80.0f, sc);
+        const auto l = SpectralControlsPanel::levelScaleLabels (-80.0, 0.0, sc);
         CHECK (l[0] == "0.0002 g", "grams bottom label is linear");
         CHECK (l[1] == "0.02 g",   "grams middle label is linear");
         CHECK (l[2] == "2 g",      "grams full-scale label is the scale value");
     }
 
-    // The labels must follow the dB-range slider.
+    // The labels must follow the level window edges.
     {
         ScaleCalibration none;
-        const auto l = SpectralControlsPanel::levelScaleLabels (120.0f, none);
+        const auto l = SpectralControlsPanel::levelScaleLabels (-120.0, 0.0, none);
         CHECK (l[0] == "-120.0 dB", "wider range bottom label");
         CHECK (l[2] == "0.0 dB",    "full-scale label independent of range");
     }
+
+    wav.deleteFile ();
+}
+
+// ------------------------------------- spectral dB window controls
+// The Spectral Controls tab exposes the colour-window edges directly: the
+// slider/text field set the range (top edge fixed, slider reaches 160 dB,
+// text accepts any value > 1), and the two labels over the gradient preview
+// are editable min/max levels in the file's unit.
+static void testSpectralDbWindow()
+{
+    const juce::File wav = makeTempFile ("db_window.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for dB window test");
+
+    SpectralControlsPanel panel (app);
+    panel.setSize (260, 170);
+
+    // Defaults: window [-80, 0], range 80.
+    CHECK (app.settings.dbMinDb == -80.0f && app.settings.dbMaxDb == 0.0f, "default window");
+    CHECK (panel.getDbRangeSliderValue() == 80.0, "slider shows default range");
+    CHECK (panel.getDbMinText() == "-80.0 dB", "default min label");
+    CHECK (panel.getDbMaxText() == "0.0 dB",   "default max label");
+
+    // The slider reaches 160 dB: the top edge stays fixed, the bottom moves down.
+    CHECK (panel.applyDbRangeValue (160.0), "range 160 accepted");
+    CHECK (app.settings.dbMinDb == -160.0f && app.settings.dbMaxDb == 0.0f, "range 160 window");
+    CHECK (panel.getDbRangeSliderValue() == 160.0, "slider at its maximum");
+    CHECK (panel.getDbMinText() == "-160.0 dB", "min label follows the slider");
+
+    // Typed range: any value greater than 1 dB is accepted...
+    CHECK (panel.applyDbRangeText ("5"), "small typed range accepted");
+    CHECK (app.settings.dbMinDb == -5.0f && app.settings.dbMaxDb == 0.0f, "range 5 window");
+
+    // ...but values <= 1 are rejected and the settings stay untouched.
+    const float minBefore = app.settings.dbMinDb;
+    CHECK (!panel.applyDbRangeText ("1"),   "range of exactly 1 dB rejected");
+    CHECK (!panel.applyDbRangeText ("0.5"), "sub-1 dB range rejected");
+    CHECK (!panel.applyDbRangeText ("abc"), "non-numeric range rejected");
+    CHECK (app.settings.dbMinDb == minBefore, "rejected ranges leave settings untouched");
+
+    // Ranges beyond the slider's reach still apply to the settings.
+    CHECK (panel.applyDbRangeText ("300"), "range above 160 accepted via text");
+    CHECK (app.settings.dbMinDb == -300.0f && app.settings.dbMaxDb == 0.0f, "range 300 window");
+    CHECK (panel.getDbRangeSliderValue() == 160.0, "slider clamps at its maximum");
+
+    // Editable bottom level: uncalibrated files take plain relative dB.
+    CHECK (panel.applyDbMinText ("-90"), "min text accepted");
+    CHECK (app.settings.dbMinDb == -90.0f && app.settings.dbMaxDb == 0.0f, "min edit window");
+
+    // Editable top level: may sit above full scale for headroom.
+    CHECK (panel.applyDbMaxText ("6"), "max text accepted");
+    CHECK (app.settings.dbMinDb == -90.0f && app.settings.dbMaxDb == 6.0f, "max edit window");
+
+    // The range follows the edges: 96 dB here.
+    CHECK (std::abs ((double) app.settings.dbRange() - 96.0) < 1e-3, "range derived from edges");
+
+    // Edits that would collapse the window to <= 1 dB are rejected.
+    CHECK (!panel.applyDbMinText ("5"),    "min leaving only a 1 dB window rejected");
+    CHECK (!panel.applyDbMaxText ("-89"),  "max leaving only a 1 dB window rejected");
+    CHECK (app.settings.dbMinDb == -90.0f && app.settings.dbMaxDb == 6.0f,
+          "rejected edge edits leave settings untouched");
+
+    // Calibrated volts file: the editors speak in linear V values.
+    FileDoc& d = *app.docs[0];
+    d.scale.unit = ScaleCalibration::Unit::Volts;
+    d.scale.fullScaleValue = 1.0;
+    panel.refresh();
+
+    CHECK (panel.applyDbMinText ("0.01"), "volts min accepted");
+    CHECK (std::abs ((double) app.settings.dbMinDb + 40.0) < 1e-3, "min converted to -40 dB");
+    CHECK (panel.getDbMinText() == "0.01 V", "min label reformatted in volts");
+
+    // Zero/negative linear values are not valid levels.
+    CHECK (!panel.applyDbMinText ("0"),  "zero volts rejected");
+    CHECK (!panel.applyDbMinText ("-2"), "negative volts rejected");
+    CHECK (std::abs ((double) app.settings.dbMinDb + 40.0) < 1e-3, "rejected volts edits ignored");
+
+    // Pascal calibration: editors take absolute dB-SPL (+100 dB offset for 2 Pa).
+    d.scale.unit = ScaleCalibration::Unit::Pascal;
+    d.scale.fullScaleValue = 2.0;
+    panel.refresh();
+    CHECK (panel.applyDbMaxText ("106 dB-SPL"), "dB-SPL max accepted");
+    CHECK (std::abs ((double) app.settings.dbMaxDb - 6.0) < 1e-3, "max converted to relative dB");
 
     wav.deleteFile ();
 }
@@ -5479,6 +5570,7 @@ static int scRunUnitTestsImpl()
     progress ("scale calibration");   testScaleCalibration();
     progress ("set scale dialog");    testSetScaleDialog();
     progress ("spectral scale labels"); testSpectralScaleLabels();
+    progress ("spectral dB window"); testSpectralDbWindow();
     progress ("right-drag box zoom"); testRightDragZoom();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("FFT view interactions"); testFFTViewInteractions();

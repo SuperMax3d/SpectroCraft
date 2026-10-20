@@ -28,7 +28,13 @@ struct Settings
     bool logFrequency = true;
     float minFrequency = 20.0f;
     float maxFrequency = 20000.0f;
-    float dBRange = 80.0f;      // magnitudes below -dBRange clamp to 0
+    // Spectrogram level window in dB relative to full scale (0 = FS): the
+    // colour map spans [dbMinDb, dbMaxDb] and magnitudes outside it clamp.
+    float dbMinDb = -80.0f;     // bottom of the window (left end of the palette)
+    float dbMaxDb = 0.0f;       // top of the window (right end; 0 = full scale)
+
+    /** Window width in dB (the "dB range"). */
+    float dbRange() const { return dbMaxDb - dbMinDb; }
     float gain = 1.0f;
     float bias = 0.0f;
     int smoothing = 1;          // 0=off, 1=light box blur on magnitudes
@@ -43,7 +49,8 @@ struct Settings
     {
         return fftSize == o.fftSize && hopSize == o.hopSize && windowType == o.windowType
             && logFrequency == o.logFrequency && minFrequency == o.minFrequency
-            && maxFrequency == o.maxFrequency && dBRange == o.dBRange
+            && maxFrequency == o.maxFrequency
+            && dbMinDb == o.dbMinDb && dbMaxDb == o.dbMaxDb
             && gain == o.gain && bias == o.bias && smoothing == o.smoothing;
     }
 

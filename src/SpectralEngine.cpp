@@ -440,8 +440,9 @@ void SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
         const double binF = (freq / rate) * 2.0 * (numBins - 1);
         const double bin = std::clamp (binF, -0.5, (double) numBins - 0.5);
 
-        // dB -> display value with the current gain/bias/dB-range settings
-        const double invRange = 1.0 / std::max (1e-6, (double) s.dBRange);
+        // dB -> display value: normalise into the [dbMinDb, dbMaxDb] window,
+        // then apply gain/bias.
+        const double range = std::max (1e-6, (double) s.dbMaxDb - (double) s.dbMinDb);
 
         for (int x = 0; x < width; ++x)
         {
@@ -452,7 +453,7 @@ void SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
             for (auto& tiles : perCh)
                 v = std::max (v, sampleMag (tiles, frame, bin));
 
-            const double norm = ((v + (double) s.dBRange) * invRange) * (double) s.gain + (double) s.bias;
+            const double norm = ((v - (double) s.dbMinDb) / range) * (double) s.gain + (double) s.bias;
             const int idx = (int) std::clamp (norm * 255.0, 0.0, 255.0);
             const size_t o = ((size_t) y * width + x) * 4;
             rgba[o + 0] = lut_[idx * 4 + 0];
