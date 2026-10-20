@@ -1479,10 +1479,22 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
 {
     juce::String details = err.empty () ? "The selection could not be processed." : err;
     auto& mm = sc::ai::ModelManager::instance ();
-    // When the OpenVINO runtime itself is missing, pointing the user at model
-    // downloads would be a trap (the weights are irrelevant until the DLLs
-    // load), so that case gets its own instructions instead.
-    const bool runtimeMissing = details.startsWith ("OpenVINO runtime unavailable");
+    // When any of the OpenVINO DLLs is missing, pointing the user at model
+    // downloads would be a trap (the weights are irrelevant until the runtime
+    // loads), so every such case gets the DLL instructions instead.
+    //
+    // "OpenVINO runtime unavailable" is our own prefix for a failed LoadLibrary
+    // probe: openvino.dll itself missing, or its static import tbb12.dll. Two
+    // more companion DLLs load *dynamically* later and surface as OpenVINO
+    // exceptions at model-read / compile time instead:
+    //  - openvino_ir_frontend.dll absent -> "Unable to read the model ..."
+    //    with an EMPTY "Available frontends:" list;
+    //  - openvino_intel_cpu_plugin.dll absent -> 'Device with "CPU" name is
+    //    not registered in the OpenVINO Runtime'.
+    const bool runtimeMissing = details.startsWith ("OpenVINO runtime unavailable")
+        || details.contains ("is not registered in the OpenVINO Runtime")
+        || (details.contains ("Unable to read the model")
+            && juce::String (details).trim ().endsWith ("Available frontends:"));
     // Only point at model downloads when the error plausibly involves the
     // model itself; "No WAV files found in ..." does not.
     const bool looksModelRelated = details.isEmpty ()
@@ -1493,7 +1505,11 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
     {
         if (runtimeMissing)
         {
-            details += "\n\nThe OpenVINO runtime DLLs must sit in the same folder as SpectroCraft.exe:\n"
+            const juce::String prefix = details.startsWith ("OpenVINO runtime unavailable")
+                ? "The OpenVINO runtime could not be loaded - its DLLs are missing."
+                : "openvino.dll loaded, but one of its companion DLLs is missing.";
+            details += "\n\n" + prefix
+                       + " All four must sit in the same folder as SpectroCraft.exe:\n"
                        "  openvino.dll\n"
                        "  openvino_intel_cpu_plugin.dll\n"
                        "  openvino_ir_frontend.dll\n"

@@ -40,9 +40,12 @@ bool OvRuntime::init(std::string* errOut)
 #if defined(_WIN32)
     // openvino.dll is delay-loaded (/DELAYLOAD), so the process starts even
     // when the runtime DLLs are missing. Probe it here for a precise error:
-    // LoadLibrary also resolves openvino.dll's own dependencies (tbb12, IR
-    // frontend, CPU plugin). On success the DLL stays loaded and the delayed
-    // import stubs below find it already present.
+    // LoadLibrary resolves openvino.dll's static import (tbb12.dll) as well,
+    // but the IR frontend and CPU plugin DLLs load dynamically later - their
+    // absence surfaces at read_model/compile time instead (sc::buildNsFailureDetails
+    // classifies those errors so users still get the four-DLL instructions).
+    // On success the DLL stays loaded and the delayed import stubs find it
+    // already present.
     if (!LoadLibraryA ("openvino.dll"))
     {
         char msg [300];

@@ -5269,6 +5269,29 @@ static void testNsFailureDetails()
 
     const std::string d4 = sc::buildNsFailureDetails ("", "denseunet");
     CHECK (d4.find ("could not be processed") != std::string::npos, "empty error: generic message");
+
+    // Missing companion DLLs surface as OpenVINO exceptions at model-read /
+    // compile time (openvino.dll itself loads fine) - they must also get the
+    // four-DLL instructions, not model-download guidance.
+    const std::string feErr = "failed to load model: Exception from src\\inference\\src\\model_reader.cpp:160:\n"
+        "Unable to read the model: C:\\x\\enc.xml Please check that model format: xml is supported and the model is correct. Available frontends: \n";
+    const std::string d5 = sc::buildNsFailureDetails (feErr, "deepfilternet2");
+    CHECK (d5.find ("openvino_ir_frontend.dll") != std::string::npos, "missing frontend DLL: lists the four DLLs");
+    CHECK (d5.find ("tbb12.dll") != std::string::npos, "missing frontend DLL: lists tbb12.dll");
+    CHECK (d5.find ("Manual installation") == std::string::npos, "missing frontend DLL: no model-install section");
+
+    const std::string cpuErr = "failed to load model: Exception from src\\inference\\src\\dev\\core_impl.cpp:567:\n"
+        "Device with \"CPU\" name is not registered in the OpenVINO Runtime\n";
+    const std::string d6 = sc::buildNsFailureDetails (cpuErr, "deepfilternet2");
+    CHECK (d6.find ("openvino_intel_cpu_plugin.dll") != std::string::npos, "missing CPU plugin DLL: lists the four DLLs");
+    CHECK (d6.find ("Manual installation") == std::string::npos, "missing CPU plugin DLL: no model-install section");
+
+    // A genuinely broken model file (frontends present -> non-empty list) must
+    // NOT be treated as a missing-DLL case.
+    const std::string badModelErr = "failed to load model: Unable to read the model: C:\\x\\enc.xml Please check that model format: xml is supported and the model is correct. Available frontends: xml, onnx";
+    const std::string d7 = sc::buildNsFailureDetails (badModelErr, "deepfilternet2");
+    CHECK (d7.find ("Manual installation") != std::string::npos, "corrupt model with frontends present: model-install section");
+    CHECK (d7.find ("All four must sit in the same folder") == std::string::npos, "corrupt model with frontends present: no DLL list");
 }
 
 static double rmsOf (const std::vector<float>& v)

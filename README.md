@@ -522,8 +522,9 @@ The failure dialog always shows the exact destination folder and the download
 URLs in a copyable text box. The **OpenVINO runtime DLLs** (`openvino.dll`,
 `openvino_intel_cpu_plugin.dll`, `openvino_ir_frontend.dll`, `tbb12.dll`) must sit
 next to `SpectroCraft.exe` for noise suppression — they are copied there by the
-CMake build (from `extern/OpenVINO/bin/`); a prebuilt exe without them fails
-gracefully with instructions. Transcription does **not** need the OpenVINO DLLs:
+CMake build (from `extern/OpenVINO/bin/`). A prebuilt exe without them fails
+gracefully; even a *partial* set (e.g. only `openvino.dll`) is detected and the
+dialog lists all four required files plus where to get them. Transcription does **not** need the OpenVINO DLLs:
 without them it falls back to the pure-ggml encoder automatically.
 
 ### Performance notes (CPU)

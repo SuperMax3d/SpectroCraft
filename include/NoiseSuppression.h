@@ -58,11 +58,15 @@ bool runDeepFilterPipeline(const std::string& modelId, const std::string& device
 
 /** Builds the full text shown in the "Noise Suppression Failed" dialog.
     The raw error is always included; then, depending on what went wrong:
-      - if the OpenVINO runtime itself failed to load (err starts with
-        "OpenVINO runtime unavailable"), the user gets a list of the four
-        required DLLs and where to get them — pointing them at model
-        downloads would be a trap since the weights are useless until the
-        runtime loads;
+      - if any of the four OpenVINO DLLs is missing, the user gets a list of
+        them and where to get them — pointing them at model downloads would
+        be a trap since the weights are useless until the runtime loads.
+        This covers both the LoadLibrary failure (err starts with "OpenVINO
+        runtime unavailable": openvino.dll or its static import tbb12.dll
+        absent) and the two dynamically-loaded companions, whose absence
+        surfaces later as OpenVINO exceptions: an empty "Available frontends:"
+        list (openvino_ir_frontend.dll) or 'Device with "CPU" name is not
+        registered' (openvino_intel_cpu_plugin.dll);
       - otherwise, if the model is known, they get the manual-install folder
         plus one download URL per file.
     Used by the GUI failure dialog, the --test-ns-failure-alert CLI hook and
