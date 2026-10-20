@@ -486,9 +486,14 @@ void HistoryPanel::paint (juce::Graphics& g)
         auto r = rowRect (i).getIntersection (list);
         if (r.isEmpty()) continue;
 
+        // Highlight only this row's band — fillAll() would paint the whole
+        // clip region and hide every row drawn before it.
         const bool current = (i == currentState_);
         if (current)
-            g.fillAll (juce::Colour::fromRGB (58, 64, 80));
+        {
+            g.setColour (juce::Colour::fromRGB (58, 64, 80));
+            g.fillRect (r);
+        }
 
         // Past rows are bright, future (redoable) ones dimmed.
         g.setColour (rows_[(size_t) i].future ? juce::Colour::fromRGB (120, 120, 128)

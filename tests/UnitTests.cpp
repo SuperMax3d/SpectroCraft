@@ -786,6 +786,60 @@ static void testMarkerPanelLayout()
     juce::File (wav.getFullPathName() + ".markers.json").deleteFile();
 }
 
+// ---------------- History panel: highlight only covers the current row ----------------
+static void testHistoryPanelPaint()
+{
+    const juce::File wav = makeTempFile ("histpaint.wav");
+    wav.deleteFile();
+    writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t f, double rate) // 5s mono
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for history paint test");
+
+    // Two recorded actions -> rows: 0 = Loaded, 1 = gain #1, 2 = gain #2 (current).
+    app.setSelection ({ 0.5, 4.5 });
+    app.changeGain (3.0f);
+    app.changeGain (-1.0f);
+    CHECK (app.undo().undoSize() == 2, "two actions recorded");
+
+    HistoryPanel panel (app);
+    panel.setSize (300, 200);
+    panel.refresh();
+    CHECK (panel.numRows() == 3, "three history rows");
+    CHECK (panel.currentState() == 2, "current state is the last row");
+
+    const juce::Image img = panel.createComponentSnapshot (panel.getLocalBounds());
+
+    // Row geometry: header 24 px, then 20 px rows. Current row band = y 64..84.
+    // NB: not named 'near' — windows.h defines it as an empty macro.
+    auto colNear = [&] (int x, int y, int r, int g2, int b)
+    {
+        const juce::Colour c = img.getPixelAt (x, y);
+        return std::abs ((int) c.getRed() - r) <= 16
+            && std::abs ((int) c.getGreen() - g2) <= 16
+            && std::abs ((int) c.getBlue() - b) <= 16;
+    };
+
+    // Regression: the current row's highlight used to be drawn with fillAll(),
+    // which painted over the whole panel and hid every earlier row + the header.
+    CHECK (colNear (290, 34, 45, 45, 48), "rows above the current one keep the plain background");
+    CHECK (colNear (150, 12, 45, 45, 48), "header area is not covered by the highlight");
+    CHECK (colNear (290, 74, 58, 64, 80), "current row band carries the dark grey-blue highlight");
+
+    // Past rows must still show bright text.
+    int bright = 0;
+    for (int y = 25; y < 43; ++y)
+        for (int x = 8; x < 292; ++x)
+            if (img.getPixelAt (x, y).getBrightness () > 0.6f) ++bright;
+    CHECK (bright > 100, "past row text is visible");
+
+    wav.deleteFile();
+}
+
 // ---------------- Independent view windows / zoom levels ----------------
 static void testIndependentViews()
 {
@@ -5393,6 +5447,7 @@ static int scRunUnitTestsImpl()
     progress ("FFT panel paint");testFFTAnalysisViewPaint();
     progress ("markers+channels");testMarkersAndChannels();
     progress ("marker panel details"); testMarkerPanelDetails();
+    progress ("history panel paint");  testHistoryPanelPaint();
     progress ("marker panel layout");  testMarkerPanelLayout();
     progress ("independent views");testIndependentViews();
     progress ("scroll bars");     testScrollBars();
