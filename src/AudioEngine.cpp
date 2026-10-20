@@ -34,9 +34,9 @@ bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> o
     durationSecs = (double) totalSamples / rate;
     hasFile = true;
 
-    // Materialize the whole file only when it comfortably fits in memory (~256 MB of samples)
-    const int64_t maxInMemory = 64ll * 1024 * 1024; // samples per channel
-    if ((int64_t) nchans * totalSamples <= maxInMemory)
+    // Materialize the whole file only when it comfortably fits in memory
+    // (~256 MB of float data by default); larger files are streamed.
+    if (inMemoryLimit > 0 && (int64_t) nchans * totalSamples <= inMemoryLimit)
     {
         buffer = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) totalSamples);
         // Read in chunks so a progress callback can report real I/O progress
@@ -238,13 +238,175 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     playheadFrac = newPos;
 }
 
+// Builds the finest mipmap level in ONE sequential pass over the file.
+// Source priority:
+//   1. Memory-mapped reader (WAV/AIFF): readMaxLevels() scans mapped pages
+//      directly - no user-buffer copy, one call per output block.
+//   2. In-memory buffer: direct pointer scan (no copies).
+//   3. Streaming reader: large sequential chunks with ALL channels at once.
+//
+// The legacy code re-read the whole file once PER LEVEL and PER CHANNEL, with
+// a seek + fresh heap allocation per 64k-sample block - that was the load-time
+// bottleneck for multi-GB files (a 4 GB stereo WAV cost ~20 full passes over
+// the disk plus hundreds of thousands of seeks).
+//
+// Values are bit-identical to the legacy per-level re-scan: each block's min/
+// max is clamped against zero exactly as before, and coarser levels (built by
+// pairwise reduction in rebuildMipmaps) equal a direct re-scan because min/max
+// decimation composes: the min over a union of blocks is the min of the block
+// mins.
+bool AudioEngine::buildFinestLevel (AudioEngine& eng, int64_t factor,
+                                    MipLevel& lv,
+                                    std::function<void(float)> onProgress)
+{
+    const int nchans = eng.numChannels();
+    const int64_t N  = eng.numSamples();
+    const int64_t n  = N / factor + 1;
+
+    lv.factor = factor;
+    lv.min.resize (nchans);
+    lv.max.resize (nchans);
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        lv.min[ch].resize ((size_t) n);
+        lv.max[ch].resize ((size_t) n);
+    }
+
+    // ---- Source 1: memory-mapped reader (WAV/AIFF only) ------------------
+    {
+        std::unique_ptr<juce::MemoryMappedAudioFormatReader> mmr;
+        for (int i = 0; i < eng.fm->getNumKnownFormats(); ++i)
+        {
+            auto* fmt = eng.fm->getKnownFormat (i);
+            if (fmt != nullptr && fmt->canHandleFile (eng.currentFile))
+            {
+                mmr.reset (fmt->createMemoryMappedReader (eng.currentFile));
+                if (mmr != nullptr && mmr->mapEntireFile())
+                    break;
+                mmr.reset();
+            }
+        }
+
+        if (mmr != nullptr)
+        {
+            std::vector<juce::Range<float>> res ((size_t) nchans);
+            const int64_t reportEvery = std::max<int64_t> (1, n / 64);
+            for (int64_t i = 0; i < n; ++i)
+            {
+                const int64_t s   = i * factor;
+                const int64_t cnt = std::min<int64_t> (factor, N - s);
+                mmr->readMaxLevels (s, cnt, res.data(), nchans);
+                for (int ch = 0; ch < nchans; ++ch)
+                {
+                    float mn = res[ch].getStart();
+                    float mx = res[ch].getEnd();
+                    if (mn > 0.0f) mn = 0.0f;
+                    if (mx < 0.0f) mx = 0.0f;
+                    lv.min[ch][(size_t) i] = mn;
+                    lv.max[ch][(size_t) i] = mx;
+                }
+                if (onProgress && (i % reportEvery == 0 || i + 1 == n))
+                    onProgress ((float) (i + 1) / (float) n);
+            }
+            return true;
+        }
+    }
+
+    // ---- Source 2: in-memory buffer --------------------------------------
+    if (eng.buffer != nullptr)
+    {
+        const int64_t reportEvery = std::max<int64_t> (1, n / 64);
+        for (int ch = 0; ch < nchans; ++ch)
+        {
+            const float* base = eng.buffer->getReadPointer (ch, 0);
+            for (int64_t i = 0; i < n; ++i)
+            {
+                const int64_t s   = i * factor;
+                const int64_t cnt = std::min<int64_t> (factor, N - s);
+                float mn = 0.0f, mx = 0.0f;
+                if (cnt > 0)
+                {
+                    auto r = juce::FloatVectorOperations::findMinAndMax (base + s, (int) cnt);
+                    mn = r.getStart();
+                    mx = r.getEnd();
+                }
+                if (mn > 0.0f) mn = 0.0f;
+                if (mx < 0.0f) mx = 0.0f;
+                lv.min[ch][(size_t) i] = mn;
+                lv.max[ch][(size_t) i] = mx;
+            }
+            if (onProgress && ch + 1 == nchans)
+                onProgress (1.0f);
+        }
+        return true;
+    }
+
+    // ---- Source 3: streaming reader, one sequential pass ------------------
+    if (eng.reader != nullptr)
+    {
+        const int64_t chunk = std::min<int64_t> (1ll << 20, N); // frames per read
+        juce::AudioBuffer<float> buf (nchans, (int) chunk);
+        std::vector<float> mn ((size_t) nchans, 0.0f), mx ((size_t) nchans, 0.0f);
+        int64_t bi = 0;                 // current finest block index
+        int64_t nextBoundary = factor;  // sample index ending the current block
+
+        auto flushBlock = [&] {
+            for (int ch = 0; ch < nchans; ++ch)
+            {
+                float a = mn[ch], b = mx[ch];
+                if (a > 0.0f) a = 0.0f;
+                if (b < 0.0f) b = 0.0f;
+                lv.min[ch][(size_t) bi] = a;
+                lv.max[ch][(size_t) bi] = b;
+            }
+            std::fill (mn.begin(), mn.end(), 0.0f);
+            std::fill (mx.begin(), mx.end(), 0.0f);
+            ++bi;
+        };
+
+        for (int64_t off = 0; off < N; off += chunk)
+        {
+            const int cnt = (int) std::min<int64_t> (chunk, N - off);
+            bool ok = false;
+            {
+                const std::lock_guard<std::mutex> lock (eng.readerMutex);
+                ok = eng.reader->read (buf.getArrayOfWritePointers(), nchans,
+                                       off, cnt);
+            }
+            if (!ok)
+                break;
+
+            for (int q = 0; q < cnt; ++q)
+            {
+                if ((int64_t) (off + q) >= nextBoundary)
+                {
+                    flushBlock();
+                    nextBoundary += factor;
+                }
+                for (int ch = 0; ch < nchans; ++ch)
+                {
+                    const float v = *buf.getReadPointer (ch, q);
+                    if (v < mn[ch]) mn[ch] = v;
+                    if (v > mx[ch]) mx[ch] = v;
+                }
+            }
+            if (onProgress)
+                onProgress ((float) std::min<int64_t> (off + cnt, N) / (float) N);
+        }
+        flushBlock(); // last partial block
+        return true;
+    }
+
+    return false;
+}
+
 void AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress)
 {
     clearMipmaps();
     if (!hasFile || totalSamples == 0)
         return;
 
-    // Base factor chosen so the coarsest level has ~100k samples per channel
+    // Base factor chosen so the finest level has ~100k blocks per channel.
     baseFactor = 1;
     while (totalSamples / baseFactor > 100000)
         baseFactor *= 2;
@@ -257,47 +419,73 @@ void AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress)
         while (f2 <= 16384ll * baseFactor && totalSamples / f2 > 100)
         { ++totalMipLevels; f2 *= 2; }
     }
+
+    // Phase 1: finest level in a single pass over the file.
+    MipLevel lv;
+    auto p1 = [onProgress] (float f) { if (onProgress) onProgress (0.9f * f); };
+    if (!buildFinestLevel (*this, baseFactor, lv, p1))
+        return;
+    mips.push_back (std::move (lv));
+
+    // Phase 2: coarser levels by pairwise reduction of the level below.
+    // Level F=2P entry i covers samples [i*2P, (i+1)*2P) = union of P-level
+    // entries 2i and 2i+1, so min/max compose exactly (bit-identical to a
+    // direct re-scan). This replaces ~9 full extra passes over the file with
+    // pure in-memory work.
+    factor = baseFactor * 2;
+    int coarseDone = 0;
+    const int totalCoarse = std::max (1, totalMipLevels - 1);
     while (factor <= 16384ll * baseFactor && totalSamples / factor > 100)
     {
-        MipLevel lv;
-        lv.factor = factor;
-        const int64_t n = totalSamples / factor + 1;
-        lv.min.resize (nchans);
-        lv.max.resize (nchans);
+        MipLevel up;
+        up.factor = factor;
+        const int64_t n2 = totalSamples / factor + 1;
+        up.min.resize (nchans);
+        up.max.resize (nchans);
+
+        const auto& prevMin = mips.back().min;
+        const auto& prevMax = mips.back().max;
+        const int64_t prevN = totalSamples / mips.back().factor + 1;
 
         for (int ch = 0; ch < nchans; ++ch)
         {
-            lv.min[ch].resize ((size_t) n);
-            lv.max[ch].resize ((size_t) n);
+            up.min[ch].resize ((size_t) n2);
+            up.max[ch].resize ((size_t) n2);
+        }
 
-            // Read in blocks to stay memory-bounded even for streaming files
-            const int64_t block = 65536;
-            std::vector<float> tmp ((size_t) block);
-            for (int64_t i = 0; i < n; ++i)
+        for (int64_t i = 0; i < n2; ++i)
+        {
+            const int64_t j0 = 2 * i;
+            if (j0 >= prevN)
             {
-                float mn = 0.0f, mx = 0.0f;
-                const int64_t s = i * factor;
-                const int64_t e = std::min (s + factor, totalSamples);
-                for (int64_t p = s; p < e; p += block)
+                // Empty tail block: legacy behaviour is exactly 0/0.
+                for (int ch = 0; ch < nchans; ++ch)
                 {
-                    const int64_t cnt = std::min (block, e - p);
-                    if (!readSamples (ch, p, cnt, tmp.data()))
-                        continue;
-                    for (int64_t q = 0; q < cnt; ++q)
-                    {
-                        const float v = tmp[q];
-                        mn = std::min (mn, v);
-                        mx = std::max (mx, v);
-                    }
+                    up.min[ch][(size_t) i] = 0.0f;
+                    up.max[ch][(size_t) i] = 0.0f;
                 }
-                lv.min[ch][i] = mn;
-                lv.max[ch][i] = mx;
+            }
+            else
+            {
+                const int64_t j1 = std::min<int64_t> (j0 + 2, prevN);
+                for (int ch = 0; ch < nchans; ++ch)
+                {
+                    float a = prevMin[ch][(size_t) j0];
+                    float b = prevMax[ch][(size_t) j0];
+                    if (j1 > j0 + 1)
+                    {
+                        a = std::min (a, prevMin[ch][(size_t) (j0 + 1)]);
+                        b = std::max (b, prevMax[ch][(size_t) (j0 + 1)]);
+                    }
+                    up.min[ch][(size_t) i] = a;
+                    up.max[ch][(size_t) i] = b;
+                }
             }
         }
 
-        mips.push_back (std::move (lv));
+        mips.push_back (std::move (up));
         if (onProgress)
-            onProgress ((float) mips.size() / (float) std::max (1, totalMipLevels));
+            onProgress (0.9f + 0.1f * (++coarseDone / (float) totalCoarse));
         factor *= 2;
     }
 }

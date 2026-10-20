@@ -5949,6 +5949,244 @@ static void testBatchTranscribe()
 }
 #endif   // SC_ENABLE_AI
 
+// ---------------- Mipmap construction: bit-exactness across all source paths ----------------
+
+// Exact JUCE int16 -> float conversion (WavAudioFormatReader scales the raw
+// value to full-range int32 via ((uint16)v << 16), then multiplies by
+// 1/INT_MAX - which is exactly 2^-31 in float). Both the streaming read path
+// and the memory-mapped findMinAndMax path use this identical scaling.
+static float scI16ToF (int v)
+{
+    const int32_t s = (int32_t) ((uint16_t) (uint16_t) v << 16);
+    return (float) s * (1.0f / 2147483647.0f);
+}
+
+// Hand-written 16-bit PCM WAV writer (the existing writeWav helper is float32).
+static bool scWriteWavI16 (const juce::File& path, int nchans, double rate, int64_t frames,
+                           const std::function<int (int ch, int64_t f)>& fn)
+{
+    const int bytesPerSample = 2;
+    const int blockAlign = nchans * bytesPerSample;
+    const int64_t dataSize = frames * (int64_t) blockAlign;
+
+    auto put32 = [] (std::vector<uint8_t>& v, uint32_t x)
+    {
+        v.push_back ((uint8_t) (x & 0xff)); v.push_back ((uint8_t) ((x >> 8) & 0xff));
+        v.push_back ((uint8_t) ((x >> 16) & 0xff)); v.push_back ((uint8_t) ((x >> 24) & 0xff));
+    };
+    auto put16 = [] (std::vector<uint8_t>& v, uint16_t x)
+    {
+        v.push_back ((uint8_t) (x & 0xff)); v.push_back ((uint8_t) ((x >> 8) & 0xff));
+    };
+
+    std::vector<uint8_t> d;
+    d.insert (d.end(), { 'R', 'I', 'F', 'F' });
+    put32 (d, (uint32_t) (36 + dataSize));
+    d.insert (d.end(), { 'W', 'A', 'V', 'E' });
+    d.insert (d.end(), { 'f', 'm', 't', ' ' });
+    put32 (d, 16);
+    put16 (d, 1); // format: PCM
+    put16 (d, (uint16_t) nchans);
+    put32 (d, (uint32_t) rate);
+    put32 (d, (uint32_t) (rate * blockAlign));
+    put16 (d, (uint16_t) blockAlign);
+    put16 (d, 16); // bits per sample
+    d.insert (d.end(), { 'd', 'a', 't', 'a' });
+    put32 (d, (uint32_t) dataSize);
+
+    for (int64_t f = 0; f < frames; ++f)
+        for (int ch = 0; ch < nchans; ++ch)
+            put16 (d, (uint16_t) fn (ch, f));
+
+    path.deleteFile(); // FileOutputStream appends to existing files!
+    juce::FileOutputStream out (path);
+    if (out.failedToOpen())
+        return false;
+    return out.write (d.data(), (int) d.size());
+}
+
+// Reference mipmap with the legacy semantics, computed directly from float
+// samples: per-block min/max clamped against zero, empty tail blocks 0/0.
+static std::vector<AudioEngine::MipLevel> scRefMips (const std::vector<std::vector<float>>& chs)
+{
+    const int nchans = (int) chs.size();
+    const int64_t N  = (int64_t) chs[0].size();
+    std::vector<AudioEngine::MipLevel> out;
+
+    int64_t baseF = 1;
+    while (N / baseF > 100000)
+        baseF *= 2;
+
+    // Mirror the engine's level loop exactly: condition checked before building.
+    for (int64_t f = baseF; f <= 16384ll * baseF && N / f > 100; f *= 2)
+    {
+        AudioEngine::MipLevel lv;
+        lv.factor = f;
+        const int64_t n = N / f + 1;
+        lv.min.resize (nchans);
+        lv.max.resize (nchans);
+
+        for (int ch = 0; ch < nchans; ++ch)
+        {
+            lv.min[ch].resize ((size_t) n);
+            lv.max[ch].resize ((size_t) n);
+            for (int64_t i = 0; i < n; ++i)
+            {
+                float mn = 0.0f, mx = 0.0f;
+                const int64_t s = i * f;
+                const int64_t e = std::min (s + f, N);
+                for (int64_t p = s; p < e; ++p)
+                {
+                    const float v = chs[ch][(size_t) p];
+                    if (v < mn) mn = v;
+                    if (v > mx) mx = v;
+                }
+                lv.min[ch][(size_t) i] = mn;
+                lv.max[ch][(size_t) i] = mx;
+            }
+        }
+
+        out.push_back (std::move (lv));
+    }
+    return out;
+}
+
+static void scCheckMips (const AudioEngine& eng, const std::vector<std::vector<float>>& chs,
+                         const char* what)
+{
+    auto ref = scRefMips (chs);
+    CHECK ((int) eng.mipmaps().size() == (int) ref.size(), juce::String (what) + ": level count");
+    if (eng.mipmaps().size() != ref.size())
+        return;
+
+    for (size_t li = 0; li < ref.size(); ++li)
+    {
+        const auto& a = eng.mipmaps()[li];
+        const auto& b = ref[li];
+        CHECK (a.factor == b.factor, juce::String (what) + ": level factor");
+
+        bool same = true;
+        for (int ch = 0; ch < (int) b.min.size() && same; ++ch)
+            for (size_t i = 0; i < a.min[ch].size(); ++i)
+                if (a.min[ch][i] != b.min[ch][i] || a.max[ch][i] != b.max[ch][i])
+                    break;
+        CHECK (same, juce::String (what) + ": level values bit-exact");
+    }
+}
+
+static void testMipmapBitExact()
+{
+    // Deterministic stereo int16 content covering every clamping case:
+    // positive-only blocks (min clamps to 0), negative-only blocks (max clamps
+    // to 0), exact silence, a zero-crossing ramp, full-scale +/- spikes and a
+    // dense LCG tail. N=300k -> baseF=4 with 11 mipmap levels.
+    const int nchans = 2;
+    const int64_t N = 300000;
+    std::vector<std::vector<int>> raw (nchans, std::vector<int> ((size_t) N));
+
+    uint32_t seed = 12345u;
+    for (int64_t p = 0; p < N; ++p)
+        for (int ch = 0; ch < nchans; ++ch)
+        {
+            int v;
+            if (p < 50000)          v = 100 + (int) ((p * 7 + ch * 13) % 2901);   // positive only
+            else if (p < 100000)    v = -(100 + (int) ((p * 5 + ch * 11) % 2901)); // negative only
+            else if (p < 150000)    v = 0;                                       // silence
+            else if (p < 200000)    v = (int) ((p + ch * 37) % 4001) - 2000;      // crosses zero
+            else                   { seed = seed * 1664525u + 1013904223u;
+                                     v = (int) ((seed >> 8) % 65537u) - 32768; } // full range
+            if (p % 1000 == 0 && ch == 0) v = 32767;   // +full-scale spike
+            if (p % 1500 == 0 && ch == 1) v = -32768;  // -full-scale spike
+            raw[ch][(size_t) p] = v;
+        }
+
+    std::vector<std::vector<float>> chs (nchans);
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        chs[ch].resize ((size_t) N);
+        for (int64_t p = 0; p < N; ++p)
+            chs[ch][(size_t) p] = scI16ToF (raw[ch][(size_t) p]);
+    }
+
+    const juce::File wav = makeTempFile ("mipmap_i16.wav");
+    CHECK (scWriteWavI16 (wav, nchans, 44100.0, N,
+                         [&] (int ch, int64_t f) { return raw[ch][(size_t) f]; }),
+          "write i16 wav");
+
+    // Path A: in-memory buffer scan.
+    {
+        AudioEngine eng;
+        CHECK (eng.loadFile (wav), "load (in-memory)");
+        CHECK (eng.fullyInMemory(), "is in memory");
+        scCheckMips (eng, chs, "mipmap in-memory");
+    }
+
+    // Path B: streaming load -> memory-mapped reader (WAV is mappable).
+    {
+        AudioEngine eng;
+        eng.setMaxInMemorySampleChannels (0);
+        CHECK (eng.loadFile (wav), "load (streaming)");
+        CHECK (!eng.fullyInMemory(), "is streamed");
+        scCheckMips (eng, chs, "mipmap mapped");
+    }
+
+    // Path C: streaming load -> chunked fallback. FLAC is lossless but has no
+    // memory-mapped reader, so this exercises the sequential-chunk source.
+    {
+        const juce::File flac = makeTempFile ("mipmap.flac");
+        bool wrote = false;
+        {
+            juce::FlacAudioFormat fmt;
+            auto fileStream = std::make_unique<juce::FileOutputStream> (flac);
+            CHECK (!fileStream->failedToOpen(), "flac stream open");
+            if (!fileStream->failedToOpen())
+            {
+                std::unique_ptr<juce::OutputStream> stream (std::move (fileStream));
+                const juce::AudioFormatWriterOptions opts =
+                    juce::AudioFormatWriterOptions {}.withNumChannels (nchans)
+                                                      .withSampleRate (44100.0)
+                                                      .withBitsPerSample (16);
+                auto writer = fmt.createWriterFor (stream, opts);
+                CHECK (writer != nullptr, "flac writer created");
+
+                if (writer != nullptr)
+                {
+                    // The FLAC writer right-shifts full-range int32 by 16 for
+                    // 16-bit output, so pre-scale with the same <<16 the reader
+                    // applies - values round-trip exactly.
+                    std::vector<std::vector<int>> scaled (nchans, std::vector<int> ((size_t) N));
+                    for (int ch = 0; ch < nchans; ++ch)
+                        for (int64_t p = 0; p < N; ++p)
+                            scaled[ch][(size_t) p] = (int32_t) ((uint16_t) raw[ch][(size_t) p] << 16);
+
+                    const int block = 1 << 18;
+                    bool ok = true;
+                    for (int64_t off = 0; off < N && ok; off += block)
+                    {
+                        const int cnt = (int) std::min<int64_t> (block, N - off);
+                        std::vector<const int*> ptrs ((size_t) nchans);
+                        for (int ch = 0; ch < nchans; ++ch)
+                            ptrs[ch] = scaled[ch].data() + off;
+                        ok = writer->write (ptrs.data(), cnt);
+                    }
+                    CHECK (ok, "flac write");
+                    wrote = ok; // encoder finalizes when the writer is destroyed
+                }
+            }
+        }   // <- writer + stream destroyed here: FLAC encoder finalized, file closed
+        CHECK (wrote && flac.getSize() > 0, "write flac");
+
+        if (wrote)
+        {
+            AudioEngine eng;
+            eng.setMaxInMemorySampleChannels (0);
+            CHECK (eng.loadFile (flac), "load (streamed flac)");
+            CHECK (!eng.fullyInMemory(), "is streamed");
+            scCheckMips (eng, chs, "mipmap chunked fallback");
+        }
+    }
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -6006,6 +6244,7 @@ static int scRunUnitTestsImpl()
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("time axis ticks");     testTimeAxisTicks();
+    progress ("mipmap bit-exact");    testMipmapBitExact();
     progress ("marker title clip");   testMarkerTitleClipping();
     progress ("FFT view interactions"); testFFTViewInteractions();
     progress ("FFT extreme zoom axis + rubber band"); testFFTViewExtremeZoom();

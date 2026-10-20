@@ -2,6 +2,7 @@
  * SpectroCraft - Main entry point
  * Supports offline modes:
  *   --test-spectral <in.wav> <out.png> [width height t0 t1]
+ *   --test-load <in.wav>                       (load timing + mipmap stats)
  *   --test-noise-suppression <in.wav> <out.wav> [modelId]   (AI builds only)
  *       modelId: denseunet (default) | deepfilternet2 | deepfilternet3
  *   --test-transcribe <in.wav> [modelId] [language]         (AI builds only)
@@ -189,6 +190,37 @@ public:
                 spectral.renderToPixels (engine, s, w, h, tt0, tt1, allChans, rgba);
                 const bool ok = PngWriter::writePng (out, w, h, rgba);
                 std::cout << (ok ? "wrote " : "failed to write ") << out.getFullPathName() << "\n";
+                quit();
+                return;
+            }
+
+            else if (args[i] == "--test-load")
+            {
+                if (i + 1 >= args.size())
+                {
+                    std::cout << "usage: --test-load <in.wav>\n";
+                    quit();
+                    return;
+                }
+                const juce::File in = resolvePath (args[++i]);
+
+                AudioEngine engine;
+                int64_t progressCalls = 0;
+                const auto t0 = juce::Time::getMillisecondCounter();
+                if (!engine.loadFile (in, [&progressCalls] (float) { ++progressCalls; }))
+                {
+                    std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    quit();
+                    return;
+                }
+                const int64_t ms = juce::Time::getMillisecondCounter() - t0;
+
+                std::cout << "loaded " << (int) engine.duration() << " s, "
+                          << engine.numChannels() << " ch @ " << (int) engine.sampleRate()
+                          << " Hz in " << ms << " ms\n";
+                std::cout << "mipmaps: " << engine.mipmaps().size() << " levels, base factor "
+                          << engine.mipmapBaseFactor() << ", progress callbacks: "
+                          << progressCalls << "\n";
                 quit();
                 return;
             }

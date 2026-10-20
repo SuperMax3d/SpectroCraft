@@ -271,8 +271,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     `.wav` in a folder tree headlessly (files never open in the editor) and
     writes each file's `SCTT` chunk back in place; optional skip-existing mode.
 - **Offline tools**: `--test-spectral` renders a spectrogram PNG headlessly;
-  `--generate-test-files` creates the test WAVs; `--run-unit-tests` runs the
-  unit suite from either executable.
+  `--test-load` times a headless load and prints mipmap stats (useful for
+  multi-hour files); `--generate-test-files` creates the test WAVs;
+  `--run-unit-tests` runs the unit suite from either executable.
 
 ---
 
@@ -554,6 +555,9 @@ SpectroCraft.exe --generate-test-files [dir]   :: write tests/data/*.wav (defaul
 SpectroCraft.exe --test-spectral <in.wav> <out.png> [width height t0 t1]
                                            :: offline spectrogram render, e.g.
 SpectroCraft.exe --test-spectral tests/data/tone_10s_stereo.wav out.png 512 256 0.0 10.0
+SpectroCraft.exe --test-load <in.wav>
+                                           :: headless load timing + mipmap stats,
+                                              e.g. for multi-hour files
 ```
 
 AI builds additionally accept (see [AI features](#ai-features)):

@@ -101,8 +101,22 @@ public:
     struct MipLevel { int64_t factor; std::vector<std::vector<float>> min, max; };
     const std::vector<MipLevel>& mipmaps() const { return mips; }
     int64_t mipmapBaseFactor() const { return baseFactor; }
+
+    /** Upper bound (in total sample-channels) for materialising a file into
+        RAM. Files above this are streamed from disk. 0 = always stream.
+        Default: 64 M sample-channels (~256 MB of float data). */
+    void setMaxInMemorySampleChannels (int64_t v) { inMemoryLimit = v; }
+    int64_t maxInMemorySampleChannels() const { return inMemoryLimit; }
     // Public so batched undo/redo jumps can rebuild once for a whole run.
     void rebuildMipmaps(std::function<void(float)> onProgress = nullptr);
+
+private:
+    // One sequential pass over the file to build the finest mipmap level
+    // (memory-mapped reader > in-memory buffer > chunked streaming reads).
+    static bool buildFinestLevel (AudioEngine& eng, int64_t factor,
+                                  MipLevel& lv,
+                                  std::function<void(float)> onProgress);
+public:
 
     /** Replace `samples` with newData (same length, one vector per channel)
         and record an undoable patch. The caller is responsible for rebuilding
@@ -127,6 +141,7 @@ private:
     std::unique_ptr<juce::AudioBuffer<float>> clipboard;
     std::vector<MipLevel> mips;
     int64_t baseFactor = 1;
+    int64_t inMemoryLimit = 64ll * 1024 * 1024; // sample-channels
 
     int nchans = 0;
     int64_t totalSamples = 0;
