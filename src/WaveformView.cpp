@@ -740,6 +740,79 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
     g.drawText (sc.unitTitle(), 2, pr.getY() + 2, kLeftAxisWidth - 4, 12, juce::Justification::centredLeft, false);
 }
 
+// ---------------------------------------------------------------- time axis
+
+double niceTimeStep (double pxPerSec)
+{
+    if (!(pxPerSec > 0.0)) return 1.0;
+    const double target = 80.0 / pxPerSec;   // seconds per ~80 px of ruler
+
+    // Below one minute: classic 1-2-5 metric steps in seconds, from whole
+    // seconds down to microseconds at deep zooms.
+    if (target < 60.0)
+    {
+        double p = std::pow (10.0, std::floor (std::log10 (target)));
+        for (int d = 0; d < 3 && p < 60.0; ++d)
+        {
+            for (double m : { 1.0, 2.0, 5.0 })
+                if (m * p >= target - 1e-12) return m * p;
+            p *= 10.0;
+        }
+    }
+
+    // One minute and above: time-unit steps that always yield clean labels
+    // ("1m", "2m", "5m", "10m", "15m", "30m", "1h", ...).
+    static const double timeSteps [] = { 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0,
+                                         3600.0, 7200.0, 18000.0, 36000.0, 54000.0,
+                                         108000.0, 216000.0, 432000.0, 864000.0 };
+    for (double s : timeSteps)
+        if (s >= target - 1e-9) return s;
+
+    // Multi-day files: fall back to metric hours/days.
+    double p = std::pow (10.0, std::floor (std::log10 (target)));
+    for (int d = 0; d < 4; ++d)
+    {
+        for (double m : { 1.0, 2.0, 5.0 })
+            if (m * p >= target - 1e-9) return m * p;
+        p *= 10.0;
+    }
+
+    return 864000.0;   // unreachable for sane inputs
+}
+
+juce::String formatTimeTickLabel (double t, double step)
+{
+    if (t == 0.0) return "0";
+    if (step >= 60.0)
+    {
+        const int s = (int) std::llround (t);
+        if (s % 3600 == 0) return juce::String (s / 3600) + "h";
+        if (s % 60 == 0)   return juce::String (s / 60) + "m";
+        // Odd values (defensive; the step sequence never produces them):
+        // h:mm:ss or m:ss.
+        const int h = s / 3600, m = (s % 3600) / 60, sec = s % 60;
+        if (h > 0)
+            return juce::String (h) + ":" + juce::String (m).paddedLeft ('0', 2)
+                   + ":" + juce::String (sec).paddedLeft ('0', 2);
+        return juce::String (m) + ":" + juce::String (sec).paddedLeft ('0', 2);
+    }
+    if (step >= 1.0)   return juce::String ((int) std::llround (t));
+    if (step >= 0.01)  return juce::String (t, step >= 0.1 ? 1 : 2);
+
+    // Sub-10 ms steps: compact ms/us suffixes while still inside the first
+    // second of the file...
+    if (t < 1.0)
+    {
+        if (step >= 0.001) return juce::String ((int) std::llround (t * 1000.0)) + "ms";
+        return juce::String ((int) std::llround (t * 1e6)) + "\u00b5s";   // µs
+    }
+
+    // ...otherwise decimal seconds with as many digits as the step needs.
+    int digits = (int) std::ceil (-std::log10 (step) - 1e-9);
+    if (digits < 3) digits = 3;
+    return juce::String (t, digits);
+}
+
 void WaveformView::drawRuler (juce::Graphics& g)
 {
     const auto pr = plotRect();
@@ -747,31 +820,39 @@ void WaveformView::drawRuler (juce::Graphics& g)
     if (w <= 0 || pr.getWidth() <= 0)
         return;
 
-    double major = 1.0;
     const double pxPerSec = pr.getWidth() / w;
-    if (pxPerSec < 20) major = 60;
-    else if (pxPerSec < 50) major = 10;
-    else if (pxPerSec < 100) major = 5;
-    else if (pxPerSec < 500) major = 1;
-    else if (pxPerSec < 2000) major = 0.1;
-    else major = 0.01;
+    const double major = niceTimeStep (pxPerSec);
+    // Subdivide each major interval into five when there is room for it.
+    const bool showMinors = major * pxPerSec >= 40.0;
 
     g.setColour (juce::Colour::fromRGB (60, 60, 60));
     g.drawLine ((float) pr.getX(), kRulerH - 1, (float) pr.getRight(), kRulerH - 1, 1.0f);
 
+    const double first = std::ceil (viewStart / major) * major;
+    if (first > viewEnd + 1e-9)
+        return;   // the visible span is shorter than one tick step
+
     g.setFont (10.0f);
-    const double start = std::ceil (viewStart / major) * major;
-    for (double t = start; t <= viewEnd; t += major)
+    const int nTicks = (int) std::floor ((viewEnd - first) / major + 1e-9) + 1;
+    for (int i = 0; i < nTicks; ++i)
     {
+        const double t = first + (double) i * major;
+        if (t > viewEnd + 1e-9) break;
         const float x = timeToX (t);
-        if (x < pr.getX() || x > pr.getRight())
-            continue;
+
         g.setColour (juce::Colour::fromRGB (60, 60, 60));
         g.drawLine (x, kRulerH - 8, x, kRulerH - 1, 1.0f);
+
+        if (showMinors)
+            for (int j = 1; j < 5; ++j)
+            {
+                const double tm = t + (double) j * major / 5.0;
+                if (tm > viewEnd + 1e-9) break;
+                g.drawLine (timeToX (tm), kRulerH - 4, timeToX (tm), kRulerH - 1, 1.0f);
+            }
+
         g.setColour (juce::Colour::fromRGB (200, 200, 200));
-        juce::String label = major >= 1
-            ? juce::String ((int) t)
-            : juce::String (t, 3);
-        g.drawText (label, (int) x + 3, 2, 90, kRulerH - 4, juce::Justification::centredLeft, false);
+        g.drawText (formatTimeTickLabel (t, major), (int) x + 3, 2, 90, kRulerH - 4,
+                    juce::Justification::centredLeft, false);
     }
 }

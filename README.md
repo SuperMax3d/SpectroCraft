@@ -24,7 +24,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   view switches from min/max envelope columns to a **per-sample polyline** —
   every individual sample is drawn as a connected line, so at high zoom you see
   the actual sample values (flat tops and vertical jumps on square waves,
-  fine detail on anything else) instead of blocky columns.
+  fine detail on anything else) instead of blocky columns. The time ruler adapts
+  to every zoom level: classic 1-2-5 second steps below one minute (down to µs
+  at deep zoom), then clean time-unit steps with compact labels (`30m`, `1h`)
+  for long files; each major tick is subdivided into five unlabeled minor ticks.
 - **Synchronized horizontal view**: zooming or panning in either view moves the
   shared time range of *both* views (they always show exactly the same slice of
   the file), while each keeps its own vertical axis/zoom — waveform amplitude

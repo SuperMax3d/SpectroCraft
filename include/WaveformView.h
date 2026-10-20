@@ -154,3 +154,17 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaveformView)
 };
+
+// ---------------------------------------------------------------- time axis
+
+/** Chooses a "nice" major tick step (seconds) for a time ruler drawn at
+    `pxPerSec` pixels per second, so labels land roughly every 80 px:
+    classic 1-2-5 metric steps below one minute (down to microseconds at deep
+    zooms), then clean time-unit steps above it (1m/2m/5m/10m/15m/30m,
+    1h/2h/5h/...). */
+double niceTimeStep (double pxPerSec);
+
+/** Formats a ruler tick value for the chosen step: whole seconds when coarse
+    ("45"), compact minutes/hours once the step reaches one minute ("5m",
+    "1h"), and ms/us at deep zooms ("2ms", "500us"). */
+juce::String formatTimeTickLabel (double t, double step);

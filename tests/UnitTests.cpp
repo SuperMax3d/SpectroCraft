@@ -3487,6 +3487,95 @@ static void testTimePanSpeedAndReversal()
     wav.deleteFile();
 }
 
+// ---------------- Time axis adaptive ticks ----------------
+// The time ruler picks a "nice" step at every zoom level: sub-second / ms /
+// us values when zoomed in, and compact minute/hour labels when zoomed out on
+// long files. Major ticks are subdivided into five unlabeled minor ticks.
+
+static void testTimeAxisTicks()
+{
+    auto approx = [] (double a, double b) { return std::abs (a - b) <= b * 1e-9; };
+
+    // --- Step selection at representative zoom levels ---
+    CHECK (approx (niceTimeStep (45.0), 2.0), "20 s span @900 px: 2 s steps");
+    CHECK (approx (niceTimeStep (900.0 / 10800.0), 1800.0), "3 h file @900 px: 30 m steps");
+    CHECK (approx (niceTimeStep (4500.0), 0.02), "0.2 s span: 20 ms steps");
+    CHECK (approx (niceTimeStep (45000.0), 0.002), "20 ms span: 2 ms steps");
+    CHECK (approx (niceTimeStep (1e6), 1e-4), "~1 ms span: 100 us steps");
+
+    // --- Label formatting ---
+    CHECK (formatTimeTickLabel (45.0, 1.0) == "45", "whole seconds label");
+    CHECK (formatTimeTickLabel (300.0, 60.0) == "5m", "minutes compact label");
+    CHECK (formatTimeTickLabel (900.0, 900.0) == "15m", "odd minutes compact label");
+    CHECK (formatTimeTickLabel (3600.0, 3600.0) == "1h", "hours compact label");
+    CHECK (formatTimeTickLabel (7200.0, 1800.0) == "2h", "multiple hours label");
+    CHECK (formatTimeTickLabel (0.2, 0.2) == "0.2", "tenths of a second label");
+    CHECK (formatTimeTickLabel (0.05, 0.05) == "0.05", "hundredths of a second label");
+    CHECK (formatTimeTickLabel (0.002, 0.002) == "2ms", "millisecond label");
+    CHECK (formatTimeTickLabel (0.0005, 0.0005) == "500\u00b5s", "microsecond label");
+    CHECK (formatTimeTickLabel (9.242, 0.002) == "9.242", "ms step away from start: decimal seconds");
+    CHECK (formatTimeTickLabel (12.5, 0.0005) == "12.5000", "sub-ms step away from start: 4 digits");
+    CHECK (formatTimeTickLabel (0.0, 1.0) == "0", "origin label is plain 0");
+
+    // --- Rendered ruler: majors + minors at coarse and fine zooms ---
+    {
+        const juce::File sil = makeTempFile ("time_axis_silence.wav");
+        writeWav (sil, 1, 100.0, 10800 * 100, [] (int, int64_t, double) { return 0.0f; });
+
+        Application app2;
+        CHECK (app2.openFile (sil), "open long silence for time-axis test");
+
+        WaveformView view (app2);
+        view.setSize (960, 300);   // plot width = 960 - kLeftAxisWidth(60) = 900 px
+        view.setVisibleChannels ({ 0 });
+        view.setViewRange (0.0, 10800.0);   // full 3 h file
+
+        juce::Image img (juce::Image::ARGB, 960, 300, true);
+        { juce::Graphics g (img); view.paint (g); }
+
+        auto xOf = [&] (double t) -> int { return (int) std::floor ((float) view.timeToX (t)); };
+        // Max brightness in a small window around the expected tick column.
+        auto brightAt = [&] (const juce::Image& im, double t, int y0, int y1) -> int
+        {
+            int best = 0;
+            for (int dx = -2; dx <= 2; ++dx)
+                for (int y = y0; y <= y1; ++y)
+                {
+                    const auto c = im.getPixelAt (xOf (t) + dx, y);
+                    best = std::max (best, (c.getRed() + c.getGreen() + c.getBlue()) / 3);
+                }
+            return best;
+        };
+
+        // Step is 1800 s: major ticks at 0, 1800 ("30m"), 3600 ("1h"), ...
+        CHECK (brightAt (img, 1800.0, 16, 23) > 45, "major tick drawn at 30 m");
+        CHECK (brightAt (img, 3600.0, 16, 23) > 45, "major tick drawn at 1 h");
+        // Rows y=16..19 are above the minor-tick band (y>=20): no major mid-interval.
+        CHECK (brightAt (img, 2700.0, 16, 19) < 45, "no major tick mid-interval");
+        // Minors subdivide each interval into five: first minor at 1800+360=2160.
+        CHECK (brightAt (img, 2160.0, 20, 23) > 45, "intermediate tick between majors");
+
+        // The "1h" label text sits just right of its tick: bright pixels in rows 4..18.
+        int labelBright = 0;
+        for (int dx = 3; dx < 60; ++dx)
+            for (int y = 4; y <= 18; ++y)
+            {
+                const auto c = img.getPixelAt (xOf (3600.0) + dx, y);
+                labelBright = std::max (labelBright, (c.getRed() + c.getGreen() + c.getBlue()) / 3);
+            }
+        CHECK (labelBright > 120, "hour label text is drawn");
+
+        // Deep zoom: the same ruler must produce ms-scale divisions.
+        view.setViewRange (0.0, 0.02);   // 20 ms span -> 2 ms steps
+        juce::Image img2 (juce::Image::ARGB, 960, 300, true);
+        { juce::Graphics g (img2); view.paint (g); }
+        CHECK (brightAt (img2, 0.004, 16, 23) > 45, "deep zoom: major tick at 4 ms");
+        CHECK (brightAt (img2, 0.008, 16, 23) > 45, "deep zoom: major tick at 8 ms");
+
+        sil.deleteFile();
+    }
+}
+
 // ---------------- Axis drag pan + log minor ticks ----------------
 // Left-dragging the left axis of either view pans its vertical range
 // (amplitude for the waveform, frequency for the spectrogram) without moving
@@ -5832,6 +5921,7 @@ static int scRunUnitTestsImpl()
     progress ("right-drag box zoom"); testRightDragZoom();
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
+    progress ("time axis ticks");     testTimeAxisTicks();
     progress ("FFT view interactions"); testFFTViewInteractions();
     progress ("FFT extreme zoom axis + rubber band"); testFFTViewExtremeZoom();
     progress ("spectral controls + async load"); testSpectralControlsAndAsyncLoad();
