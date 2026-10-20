@@ -1847,7 +1847,7 @@ void MarkerListPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int co
     const auto& m = owner->app.markers().markers()[(size_t) rowNumber];
 
     g.setFont (11.0f);
-    if (columnId == 1)   // Label
+    if (columnId == 1)   // Title
     {
         g.setColour (juce::Colours::white);
         g.drawText (m.name, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
@@ -1904,7 +1904,7 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
 {
     auto& header = table.getHeader();
     // JUCE TableHeaderComponent column IDs must be non-zero.
-    header.addColumn ("Label", 1, 120);
+    header.addColumn ("Title", 1, 120);
     header.addColumn ("Begin", 2, 75);
     header.addColumn ("End", 3, 75);
     header.addColumn ("Comment", 4, 120);
@@ -1976,7 +1976,7 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
     endEdit.setTooltip ("End time of the selected marker, in seconds (leave empty for a point marker).");
     lengthEdit.setTooltip ("Length of the selected region marker. Editing it adjusts the End time "
                            "(and vice versa); leave empty to make it a point marker.");
-    titleEdit.setTooltip ("Title shown on the marker line and in the Label column.");
+    titleEdit.setTooltip ("Title shown on the marker line and in the Title column.");
     commentEdit.setTooltip ("Free-text comment stored with the marker (saved into WAV cue chunks).");;
 
     refresh();
@@ -2155,7 +2155,7 @@ void MarkerListPanel::showMarkerContextMenu()
 }
 
 // Copies every marker as tab-separated lines (one per line, CRLF between rows):
-//   Label <tab> Begin <tab> End <tab> Comment
+//   Title <tab> Begin <tab> End <tab> Comment
 // so the text can be pasted straight into a spreadsheet. Tabs/newlines inside
 // fields are flattened to spaces to keep each marker on one row.
 void MarkerListPanel::copyAllMarkers()
@@ -2181,7 +2181,7 @@ void MarkerListPanel::copyAllMarkers()
 }
 
 // Pastes tab-separated marker lines from the clipboard. Each line is
-//   Label <tab> Begin <tab> End <tab> Comment
+//   Title <tab> Begin <tab> End <tab> Comment
 // with an empty or "-" End creating a point marker.
 int MarkerListPanel::pasteMarkersFromClipboard()
 {
@@ -2205,7 +2205,7 @@ int MarkerListPanel::pasteMarkersFromClipboard()
 
         juce::StringArray f;
         f.addTokens (line, "\t", "");
-        if (f.size() < 2) // need at least Label + Begin
+        if (f.size() < 2) // need at least Title + Begin
             continue;
 
         const juce::String name = f[0].trim();
