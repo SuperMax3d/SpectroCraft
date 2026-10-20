@@ -49,6 +49,7 @@ public:
     void setupViews();
     void activateDocUI();   // reset both views + sync panels after a doc switch
     juce::String statusBarFileName() const;   // name currently shown in the footer
+    bool timeScrollBarVisible() const { return timeBar != nullptr && timeBar->isVisible(); }
     bool waveformVisible() const { return showWaveformView; }      // View menu state
     bool spectrogramVisible() const { return showSpectralView; }
     juce::String waveformTooltip() const { return waveformView->getTooltip(); }

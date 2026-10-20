@@ -2245,6 +2245,36 @@ static void testStatusBarFileName()
     wavB.deleteFile();
 }
 
+// ------------------------------------------------------- time scrollbar on load
+// The horizontal time scrollbar must appear as soon as a file is loaded.
+// Previously its visibility/bounds were only set in resized(), and loading a
+// file never resizes the window - so the bar stayed hidden until the user
+// maximised/restored (any resize) happened to re-run the layout.
+static void testTimeScrollBarOnLoad()
+{
+    const juce::File wav = makeTempFile ("timebar_load.wav");
+    writeWav (wav, 1, 8000.0, 2000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); });
+
+    Application app;
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "time bar test"));
+
+    CHECK (!win->timeScrollBarVisible(), "no file: time scrollbar hidden");
+
+    win->openFile (wav);
+    CHECK (win->timeScrollBarVisible(),
+           "loading a file shows the time scrollbar without any window resize");
+
+    app.closeFile();   // no documents left
+    CHECK (!win->timeScrollBarVisible(), "closing every file hides the time scrollbar again");
+
+    win.reset();
+    delete mm;
+    wav.deleteFile();
+}
+
 // ------------------------------------------------------- spectral point probe
 // SpectralView's cursor readout probes the tile cache for the dB level at an
 // exact time/frequency; a steady tone must give a strong peak on its own
@@ -5654,6 +5684,7 @@ static int scRunUnitTestsImpl()
     progress ("snapshot overlay paint");  testSnapshotOverlayPaint();
     progress ("status bar");          testStatusBar();
     progress ("footer file name");    testStatusBarFileName();
+    progress ("time scrollbar on load"); testTimeScrollBarOnLoad();
     progress ("spectral probe");      testSpectralProbe();
     progress ("arrow key selection"); testArrowKeySelection();
     progress ("ctrl+number channels"); testCtrlNumberChannelToggle();

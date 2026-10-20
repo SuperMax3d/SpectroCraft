@@ -253,6 +253,38 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 
     startTimerHz (30); // playhead animation
     centreWithSize (1400, 900);
+
+    // Keep the whole window inside a display's user area so the title bar is
+    // always reachable: centring a 1400x900 window on a small screen can put
+    // its top edge off-screen.
+    {
+        const auto& ds = juce::Desktop::getInstance().getDisplays();
+        const juce::Displays::Display* mainD = nullptr;
+        for (const auto& d : ds.displays)
+            if (d.isMain) { mainD = &d; break; }
+        if (mainD == nullptr && !ds.displays.isEmpty())
+            mainD = &ds.displays.getReference (0);
+
+        if (mainD != nullptr && !mainD->userBounds.isEmpty())
+        {
+            const juce::Rectangle<int> safe ((int) std::lround (mainD->userBounds.getX()),
+                                             (int) std::lround (mainD->userBounds.getY()),
+                                             (int) std::lround (mainD->userBounds.getWidth()),
+                                             (int) std::lround (mainD->userBounds.getHeight()));
+            auto r = getBounds();
+            if (r.getWidth() > safe.getWidth())
+                r.setWidth (std::max (400, safe.getWidth()));
+            if (r.getHeight() > safe.getHeight())
+                r.setHeight (std::max (300, safe.getHeight()));
+            r = r.withCentre (safe.getCentre());
+            // If it still overflows (tiny screen), pin the top-left so the
+            // title bar stays visible and resizable.
+            if (r.getX() < safe.getX()) r.setX (safe.getX());
+            if (r.getY() < safe.getY()) r.setY (safe.getY());
+            setBounds (r);
+        }
+    }
+
     setVisible (true);
 }
 
@@ -675,8 +707,8 @@ public:
     // modal loop. The worker thread must keep owning the dialog's lifetime:
     // it checks `cancelled` between units of work and deletes the dialog.
     WorkProgressDialog (const juce::String& title, const juce::String& message,
-                        bool withCancel = false)
-        : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon),
+                        bool withCancel = false, Component* centreAround = nullptr)
+        : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon, centreAround),
           bar (progressValue)   // JUCE 9: the bar watches this variable
     {
         // The default LookAndFeel tables define no ProgressBar colours, which
@@ -728,7 +760,8 @@ private:
 
 void MainWindow::openFileWithProgress (const juce::File& file)
 {
-    auto* dlg = new WorkProgressDialog ("Loading", "Opening " + file.getFileName() + " ...");
+    auto* dlg = new WorkProgressDialog ("Loading", "Opening " + file.getFileName() + " ...",
+                                        false, this);
 
     // Modal but without stealing keyboard focus: the dialog just sits there
     // while the worker thread reports progress.
@@ -763,6 +796,12 @@ void MainWindow::activateDocUI()
         statusBar->setFileName (app.audioEngine().isFileLoaded()
                                 ? app.audioEngine().getFile().getFileName()
                                 : juce::String());
+
+    // Re-layout so the time scrollbar's visibility/bounds follow the new file
+    // state: resized() is the only place they are set, and loading a file does
+    // not otherwise resize the window (which left the bar hidden until the
+    // user maximised/restored).
+    resized();
 }
 
 juce::String MainWindow::statusBarFileName() const
@@ -791,7 +830,8 @@ void MainWindow::handleFileOpen()
 // never blocks the UI thread.
 void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
 {
-    auto* dlg = new WorkProgressDialog ("Saving", "Saving " + file.getFileName() + " ...");
+    auto* dlg = new WorkProgressDialog ("Saving", "Saving " + file.getFileName() + " ...",
+                                        false, this);
     dlg->setProgress (-1.0);   // out of range -> indeterminate spinning bar
     dlg->enterModalState (false);
 
@@ -828,7 +868,8 @@ void MainWindow::handleFileSaveAs()
 void MainWindow::exportSpectralAsync (const juce::File& file)
 {
     auto* dlg = new WorkProgressDialog ("Exporting",
-                                        "Rendering spectrogram to " + file.getFileName() + " ...");
+                                        "Rendering spectrogram to " + file.getFileName() + " ...",
+                                        false, this);
     dlg->setProgress (-1.0);   // out of range -> indeterminate spinning bar
     dlg->enterModalState (false);
 
@@ -1008,7 +1049,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
                 "\nSource code is available at:\nhttps://github.com/SuperMax3d/SpectroCraft\n"
                 "\nThis software uses the JUCE framework (https://juce.com), dual-licensed under "
                 "AGPLv3 and a commercial licence. This project uses the AGPLv3 option.",
-                "OK");
+                "OK", this);
             break;
     }
 }
@@ -1095,7 +1136,7 @@ juce::AlertWindow* MainWindow::createGainDialog()
 {
     auto* w = new juce::AlertWindow ("Change Gain",
                                      "Apply gain to the selection (dB):",
-                                     juce::AlertWindow::QuestionIcon);
+                                     juce::AlertWindow::QuestionIcon, this);
     w->addTextEditor ("gainDb", "0.0");
     if (auto* editor = w->getTextEditor ("gainDb"))
         // Let Enter/Escape reach the OK/Cancel shortcuts even while the field
@@ -1153,7 +1194,7 @@ juce::AlertWindow* MainWindow::createResampleDialog()
                                      "Current rate: " + juce::String (cur, 3) + " Hz\n"
                                      "New sample rate (Hz):\n"
                                      "(whole file; cannot be undone)",
-                                     juce::AlertWindow::QuestionIcon);
+                                     juce::AlertWindow::QuestionIcon, this);
     w->addTextEditor ("newRate", juce::String (cur, 3));
     if (auto* editor = w->getTextEditor ("newRate"))
         // Let Enter/Escape reach the OK/Cancel shortcuts even while the field
@@ -1198,7 +1239,7 @@ void MainWindow::showResampleDialog()
     {
         juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid rate",
-                                            "Please enter a positive sample rate in Hz.");
+                                            "Please enter a positive sample rate in Hz.", "", this);
         return;
     }
 
@@ -1210,7 +1251,8 @@ void MainWindow::showResampleDialog()
 void MainWindow::runResampleAsync (double newRate)
 {
     auto* dlg = new WorkProgressDialog ("Resampling",
-                                        "Resampling to " + juce::String (newRate, 3) + " Hz ...");
+                                        "Resampling to " + juce::String (newRate, 3) + " Hz ...",
+                                        false, this);
     dlg->setProgress (0.0);
     dlg->enterModalState (false);
 
@@ -1247,7 +1289,7 @@ void MainWindow::runResampleAsync (double newRate)
             {
                 juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
                                                     "Resample failed",
-                                                    "The file could not be resampled.");
+                                                    "The file could not be resampled.", "", this);
             }
         });
     }).detach();
@@ -1303,7 +1345,7 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
 // Shared failure dialog for the AI features: a copyable read-only text editor
 // with the error details (paths/URLs), built by sc::buildNsFailureDetails().
 static void showAiFailureDialog (const juce::String& feature, const std::string& err,
-                                 const std::string& modelId)
+                                 const std::string& modelId, Component* parent)
 {
     const juce::String details = sc::buildNsFailureDetails (err, modelId);
 
@@ -1314,7 +1356,7 @@ static void showAiFailureDialog (const juce::String& feature, const std::string&
     auto* w = new juce::AlertWindow (feature + " Failed",
                                      "The operation could not be completed.\n"
                                      "Details below - select any text to copy it.",
-                                     juce::AlertWindow::WarningIcon);
+                                     juce::AlertWindow::WarningIcon, parent);
     auto* ed = new juce::TextEditor ();
     ed->setMultiLine (true);
     ed->setReadOnly (true);
@@ -1338,7 +1380,7 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
                                      "Attenuation limit (dB) applies to the DeepFilterNet models only:\n"
                                      "100 means no attenuation limit (full noise suppression).\n"
                                      "For little noise reduction, set to 6 - 12. For medium, 18 - 24.",
-                                     juce::AlertWindow::QuestionIcon);
+                                     juce::AlertWindow::QuestionIcon, this);
 
     const juce::StringArray modelNames { "DenseUNet (legacy)", "DeepFilterNet2", "DeepFilterNet3" };
     w->addComboBox ("model", modelNames, "Model");
@@ -1408,7 +1450,8 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
                                         float attenLimDb, bool df3PostFilter, bool autoDownload)
 {
     auto* dlg = new WorkProgressDialog ("Noise Suppression",
-                                        "Applying " + juce::String (modelId) + " ...");
+                                        "Applying " + juce::String (modelId) + " ...",
+                                        false, this);
     dlg->setProgress (0.0);
     dlg->enterModalState (false);
 
@@ -1437,7 +1480,7 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
                 return;
             }
 
-            showAiFailureDialog ("Noise Suppression", err, modelId);
+            showAiFailureDialog ("Noise Suppression", err, modelId, this);
         });
     }).detach();
 }
@@ -1493,7 +1536,7 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
                                      "First use downloads the model weights to\n"
                                      "%APPDATA%/SpectroCraft/models.\n"
                                      "Larger models are more accurate but slower (CPU).",
-                                     juce::AlertWindow::QuestionIcon);
+                                     juce::AlertWindow::QuestionIcon, this);
 
     w->addComboBox ("model", whisperModelNames (), "Model");
     w->addComboBox ("language", transcribeLanguageNames (), "Language");
@@ -1575,7 +1618,8 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Transcribing with " + juce::String (modelId) + " ...\n"
-                                        "(whole file - this can take a while on CPU)");
+                                        "(whole file - this can take a while on CPU)",
+                                        false, this);
     dlg->setProgress (0.0);
     dlg->enterModalState (false);
 
@@ -1610,7 +1654,7 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
                 return;
             }
 
-            showAiFailureDialog ("Transcription", err, modelId);
+            showAiFailureDialog ("Transcription", err, modelId, this);
         });
     }).detach ();
 }
@@ -1626,7 +1670,7 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
                                      "will be transcribed by Whisper and its SCTT chunk\n"
                                      "updated in place. The files are NOT opened in the editor.\n\n"
                                      + folder.getFullPathName (),
-                                     juce::AlertWindow::QuestionIcon);
+                                     juce::AlertWindow::QuestionIcon, this);
 
     w->addComboBox ("model", whisperModelNames (), "Model");
     w->addComboBox ("language", transcribeLanguageNames (), "Language");
@@ -1720,7 +1764,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Scanning " + folder.getFileName ()
-                                        + " for WAV files ...", true);
+                                        + " for WAV files ...", true, this);
     dlg->setProgress (0.0);
     dlg->enterModalState (false);
 
@@ -1755,7 +1799,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
             delete dlg;
             if (!ok)
             {
-                showAiFailureDialog ("Transcription", err, modelId);
+                showAiFailureDialog ("Transcription", err, modelId, this);
                 return;
             }
 
