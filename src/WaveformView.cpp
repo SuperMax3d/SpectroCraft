@@ -503,8 +503,10 @@ void WaveformView::paint (juce::Graphics& g)
     // Markers (same rendering as the spectral view)
     if (markerList)
     {
-        for (const auto& m : *markerList)
+        const auto& ms = *markerList;   // kept sorted by start time
+        for (size_t i = 0; i < ms.size(); ++i)
         {
+            const Marker& m = ms[i];
             const double x = timeToX (m.start);
             if (x < -50 || x > getWidth() + 50)
                 continue;
@@ -520,9 +522,18 @@ void WaveformView::paint (juce::Graphics& g)
                 g.drawLine ((float) x, (float) kRulerH + 6, (float) x, getHeight(), 1.0f);
                 g.drawLine ((float) x2, (float) kRulerH + 6, (float) x2, getHeight(), 1.0f);
             }
+            // Title: may run past this marker's own range, but must stop
+            // before the next marker starts so that marker's title has room.
             g.setFont (10.0f);
             g.setColour (m.colour);
-            g.drawText (m.name, (int) x + 4, kRulerH + 8, 120, 14, juce::Justification::topLeft, false);
+            const double textX = x + 4;
+            const double rightEdge = (i + 1 < ms.size())
+                ? timeToX (ms[i + 1].start) - 2.0
+                : (double) getWidth() + 50.0;
+            const double w = std::max (0.0, rightEdge - textX);
+            if (w > 0.0)
+                g.drawText (m.name, (int) textX, kRulerH + 8, (int) w, 14,
+                            juce::Justification::topLeft, true);
         }
     }
 

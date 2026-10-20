@@ -3607,6 +3607,58 @@ static void testTimeAxisTicks()
     }
 }
 
+// ---------------- Marker title clipping ----------------
+// A marker's yellow title may run past its own range, but it must stop
+// before the next marker starts so that marker's title has room.
+static void testMarkerTitleClipping()
+{
+    const juce::File wav = makeTempFile ("marker_title_clip.wav");
+    writeWav (wav, 1, 48000.0, 4 * 48000, [] (int, int64_t, double) { return 0.0f; });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for marker title clip test");
+
+    MarkerManager mm;
+    // Long name: ~132 px wide at font size 10, wider than the gap to B.
+    mm.addPointMarker (1.0, juce::String ("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+    mm.addPointMarker (1.5, juce::String ("BBBB"));
+
+    WaveformView view (app);
+    view.setSize (960, 300);   // plot width = 900 px -> 225 px/s
+    view.setVisibleChannels ({ 0 });
+    view.setViewRange (0.0, 4.0);
+    view.setMarkers (&mm.markers());
+
+    juce::Image img (juce::Image::ARGB, 960, 300, true);
+    { juce::Graphics g (img); view.paint (g); }
+
+    const int xA = (int) std::floor ((float) view.timeToX (1.0));   // 285
+    const int xB = (int) std::floor ((float) view.timeToX (1.5));   // 397
+    CHECK (xB - xA > 60, "markers are close enough to overlap at this zoom");
+
+    // Title row: y = kRulerH+8 .. +21.
+    auto brightAt = [&] (int cx, int halfW) -> int
+    {
+        int best = 0;
+        for (int dx = -halfW; dx <= halfW; ++dx)
+            for (int y = WaveformView::kRulerH + 8; y <= WaveformView::kRulerH + 21; ++y)
+            {
+                const auto c = img.getPixelAt (cx + dx, y);
+                best = std::max (best, (c.getRed() + c.getGreen() + c.getBlue()) / 3);
+            }
+        return best;
+    };
+
+    CHECK (brightAt (xA + 8, 4) > 60, "marker A title is drawn");
+    // The gap between B's line and the start of B's title must be free of
+    // A's text: with the old unclipped 120 px box it overflowed into here.
+    // (Threshold above the ~48 plot background, below glyph pixels >= 71.)
+    CHECK (brightAt (xB + 2, 1) < 60, "A's title stops before marker B starts");
+    CHECK (brightAt (xB + 8, 3) > 60, "marker B title is drawn in full");
+
+    wav.deleteFile();
+}
+
 // ---------------- Axis drag pan + log minor ticks ----------------
 // Left-dragging the left axis of either view pans its vertical range
 // (amplitude for the waveform, frequency for the spectrogram) without moving
@@ -5954,6 +6006,7 @@ static int scRunUnitTestsImpl()
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("time axis ticks");     testTimeAxisTicks();
+    progress ("marker title clip");   testMarkerTitleClipping();
     progress ("FFT view interactions"); testFFTViewInteractions();
     progress ("FFT extreme zoom axis + rubber band"); testFFTViewExtremeZoom();
     progress ("spectral controls + async load"); testSpectralControlsAndAsyncLoad();
