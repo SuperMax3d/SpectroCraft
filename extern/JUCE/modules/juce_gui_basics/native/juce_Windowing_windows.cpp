@@ -4377,21 +4377,13 @@ private:
 
             case WM_GETOBJECT:
             {
-                if (static_cast<long> (lParam) == WindowsAccessibility::getUiaRootObjectId())
-                {
-                    if (auto* handler = component.getAccessibilityHandler())
-                    {
-                        LRESULT res = 0;
-
-                        if (WindowsAccessibility::handleWmGetObject (handler, wParam, lParam, &res))
-                        {
-                            isAccessibilityActive = true;
-                            return res;
-                        }
-                    }
-                }
-
-                break;
+                // SpectroCraft patch: do NOT expose a Windows UIA accessibility provider.
+                // External UIA clients (screen readers, automation tools) trigger COM
+                // callbacks into JUCE's UIA provider that can raise E_UNEXPECTED
+                // (0x8001010D), which is uncatchable from here and hard-crashes the
+                // process. Accessibility support is not required for v1; returning no
+                // provider makes such queries harmless.
+                return 0;
             }
             default:
                 break;

@@ -372,3 +372,120 @@ bool readScttChunk(const juce::File& wavFile, ScttData& out, std::string* errOut
 
     return false;   // no SCTT chunk present
 }
+
+bool replaceScttChunkInWav(const juce::File& wavFile, const std::string& json,
+                           std::string* errOut)
+{
+    auto fail = [&] (const char* msg) -> bool
+    {
+        if (errOut != nullptr) *errOut = msg;
+        return false;
+    };
+
+    juce::FileInputStream in (wavFile);
+    if (!wavFile.existsAsFile () || in.failedToOpen ())
+        return fail ("cannot open file for reading");
+
+    char hdr [12];
+    if (in.read (hdr, 12) != 12
+        || std::memcmp (hdr, "RIFF", 4) != 0
+        || std::memcmp (hdr + 8, "WAVE", 4) != 0)
+        return fail ("not a RIFF/WAVE file");
+
+    const int64_t total = in.getTotalLength ();
+
+    // Temp sibling file: same folder so the final replace is atomic.
+    const juce::File tmp = wavFile.getSiblingFile (wavFile.getFileName() + ".sctt-tmp");
+    if (tmp.existsAsFile()) tmp.deleteFile();
+
+    bool ok = true;
+    {
+    // Direct ctor: opens in append mode; the tmp file was deleted above, so
+    // we start at offset 0. The stream is scoped so its handle closes BEFORE
+    // the replace below — Windows refuses to move/replace a file that still
+    // has an open handle without FILE_SHARE_DELETE (and JUCE's output handles
+    // only allow sharing for read).
+    juce::FileOutputStream out (tmp);
+    if (!out.openedOk ())
+        return fail ("cannot create temp file");
+
+    // RIFF header with a placeholder size, fixed up at the end.
+    out.write ("RIFF", 4);
+    out.writeInt (0);
+    out.write ("WAVE", 4);
+
+    std::vector<uint8_t> buf;
+    while (ok && in.getPosition () + 8 <= total)
+    {
+        char fourcc [4];
+        uint32_t size = 0;
+        if (!in.read (fourcc, 4) || !readU32le (in, &size)) { ok = false; break; }
+
+        // Payload plus its word-alignment pad byte.
+        const int64_t padded = (int64_t) size + ((size & 1) ? 1 : 0);
+        if (std::memcmp (fourcc, "SCTT", 4) == 0)
+        {
+            // Drop the old SCTT chunk entirely; a fresh one is appended below.
+            if (!in.setPosition (in.getPosition () + padded)) ok = false;
+            continue;
+        }
+
+        out.write (fourcc, 4);
+        out.writeInt ((int) size);
+        if (padded > 0)
+        {
+            buf.resize ((size_t) padded);
+            int64_t done = 0;
+            while (done < padded && ok)
+            {
+                // Copy in 1 MiB slices so the buffer stays small even for huge chunks.
+                int64_t n = padded - done;
+                if (n > (int64_t) (1 << 20)) n = (int64_t) (1 << 20);
+                const int got = in.read (buf.data() + (size_t) done, (int) n);
+                if (got <= 0) { ok = false; break; }
+                out.write (buf.data() + (size_t) done, (size_t) got);
+                done += got;
+            }
+        }
+    }
+
+    // Append the new SCTT chunk (payload word-aligned with a zero pad byte).
+    if (ok)
+    {
+        out.write ("SCTT", 4);
+        out.writeInt ((int) json.size());
+        // This JUCE build's OutputStream::write returns bool, not a byte count.
+        if (!json.empty())
+            ok = out.write (json.data(), json.size());
+        if (ok && (json.size() & 1))
+            ok = out.writeByte (0);
+    }
+
+    // Fix up the RIFF size field: total file length minus the 8-byte header.
+    if (ok)
+    {
+        const int64_t fileSize = out.getPosition();
+        ok = out.setPosition (4) && out.writeInt ((int) (fileSize - 8));
+    }
+
+    // Force the buffered data to disk before closing the handle.
+    if (ok) out.flush ();
+    }   // <- stream closed here; tmp is no longer open
+
+    if (!ok)
+    {
+        tmp.deleteFile();
+        return fail ("failed while rewriting the file");
+    }
+
+    // Atomic Win32 ReplaceFile: swaps tmp over wavFile without deleting the
+    // destination first. (moveFileTo deletes it up front, which loses data if
+    // the subsequent move fails — e.g. when the original is still open.)
+    if (!tmp.replaceFileIn (wavFile))
+    {
+        tmp.deleteFile();
+        return fail ("could not replace the original file");
+    }
+
+    return true;
+}

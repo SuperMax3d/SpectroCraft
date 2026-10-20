@@ -9,6 +9,7 @@
     #include "AI/WhisperPipeline.h"
 #endif
 #include <algorithm>
+#include <cstdio>
 #include <thread>
 
 Application::Application (const juce::File& recentStorePath)
@@ -66,6 +67,13 @@ Application::Application (const juce::File& recentStorePath)
 
     // Session settings: restore the persisted values (defaults when absent).
     loadSettings ();
+
+    // AI feature preferences (last model/language, auto-download toggle).
+    aiAutoDownload        = recentStore->getIntValue ("ai_auto_download", 1) != 0;
+    lastNsModelId         = recentStore->getValue ("ai_ns_model", lastNsModelId).toStdString ();
+    lastTranscribeModelId = recentStore->getValue ("ai_transcribe_model", lastTranscribeModelId).toStdString ();
+    lastTranscribeLanguage= recentStore->getValue ("ai_transcribe_lang", lastTranscribeLanguage).toStdString ();
+    lastTranscribeTranslate = recentStore->getIntValue ("ai_transcribe_translate", 0) != 0;
 }
 
 // Round v up to the next power of two, then clamp into [lo, hi].
@@ -93,6 +101,16 @@ void Application::saveSettings ()
     recentStore->setValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0);
     recentStore->setValue ("fft_axis_mode", settings.fftAxisMode);
     recentStore->setValue ("fft_local_n", settings.fftLocalN);
+    recentStore->save ();
+}
+
+void Application::saveAiSettings ()
+{
+    recentStore->setValue ("ai_auto_download", aiAutoDownload ? 1 : 0);
+    recentStore->setValue ("ai_ns_model", juce::String (lastNsModelId));
+    recentStore->setValue ("ai_transcribe_model", juce::String (lastTranscribeModelId));
+    recentStore->setValue ("ai_transcribe_lang", juce::String (lastTranscribeLanguage));
+    recentStore->setValue ("ai_transcribe_translate", lastTranscribeTranslate ? 1 : 0);
     recentStore->save ();
 }
 
@@ -438,7 +456,8 @@ void Application::changeGain (float gainDb)
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 bool Application::noiseSuppress (const std::string& modelId, const std::string& device,
                                  float attenLimDb, bool df3PostFilter,
-                                 std::function<bool(float)> onProgress, std::string* errOut)
+                                 std::function<bool(float)> onProgress, std::string* errOut,
+                                 bool autoDownload)
 {
     auto fail = [&errOut] (const juce::String& msg) -> bool
     {
@@ -448,6 +467,17 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 
     if (!audioEngine().isFileLoaded () || selection.getLength() <= 0)
         return fail ("No audio selection.");
+
+    // Auto-download disabled: never touch the network; require the model to be
+    // present already. The failure dialog appends the manual-install URLs.
+    if (!autoDownload)
+    {
+        auto& mm = sc::ai::ModelManager::instance ();
+        const auto* spec = mm.find (modelId);
+        if (spec == nullptr || !mm.isInstalled (*spec))
+            return fail ("Model " + juce::String (modelId) +
+                         " is not installed and auto-download is disabled.");
+    }
 
     auto samples = selectionSamples (*this).getIntersectionWith ({ 0, audioEngine().numSamples () });
     if (samples.getLength () <= 0)
@@ -480,7 +510,8 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 
 bool Application::transcribe (const std::string& modelId, const std::string& language,
                               bool translate,
-                              std::function<bool(float)> onProgress, std::string* errOut)
+                              std::function<bool(float)> onProgress, std::string* errOut,
+                              bool autoDownload)
 {
     auto fail = [&errOut] (const juce::String& msg) -> bool
     {
@@ -497,9 +528,13 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
     if (spec == nullptr)
         return fail ("Unknown transcription model: " + juce::String (modelId));
 
-    // Download phase → progress [0, 0.15).
+    // Install phase → progress [0, 0.15) (skipped when auto-download is off
+    // and the model is already present).
     std::string err;
-    if (!mm.ensureInstalled (*spec,
+    if (!autoDownload && !mm.isInstalled (*spec))
+        return fail ("Model " + juce::String (modelId) +
+                     " is not installed and auto-download is disabled.");
+    if (autoDownload && !mm.ensureInstalled (*spec,
             [&onProgress] (float f, const std::string&)
             { return onProgress == nullptr || onProgress (0.15f * f); }, &err))
         return fail (err);
@@ -524,6 +559,140 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
         return fail (err);
 
     d->setTranscription (std::move (segs));
+    return true;
+}
+
+bool Application::batchTranscribeFolder (const juce::File& folder,
+                                         const std::string& modelId,
+                                         const std::string& language, bool translate,
+                                         bool skipExisting,
+                                         std::function<bool(float)> onProgress,
+                                         std::function<void(const juce::String&)> onStatus,
+                                         std::atomic<bool>* cancelOut,
+                                         BatchTranscribeSummary* summaryOut,
+                                         std::string* errOut,
+                                         bool autoDownload)
+{
+    auto fail = [&errOut] (const juce::String& msg) -> bool
+    {
+        if (errOut != nullptr) *errOut = msg.toStdString ();
+        return false;
+    };
+
+    BatchTranscribeSummary summary;
+
+    if (!folder.isDirectory ())
+        return fail ("Not a folder.");
+
+    // Enumerate WAV files recursively (the pattern match is case-insensitive
+    // on Windows). Sorted for a deterministic run order.
+    juce::Array<juce::File> wavs;
+    for (const auto& f : folder.findChildFiles (juce::File::findFiles, true, "*.wav"))
+        if (f.existsAsFile ()) wavs.add (f);
+    std::sort (wavs.begin (), wavs.end (),
+               [] (const juce::File& a, const juce::File& b) { return a.getFullPathName () < b.getFullPathName (); });
+    summary.total = (int) wavs.size ();
+    if (summary.total == 0)
+        return fail ("No WAV files found in " + folder.getFullPathName ());
+
+    auto& mm = sc::ai::ModelManager::instance ();
+    const sc::ai::ModelSpec* spec = mm.find (modelId);
+    if (spec == nullptr)
+        return fail ("Unknown transcription model: " + juce::String (modelId));
+
+    // Install the model once, up front (progress [0, 0.05]).
+    std::string err;
+    if (!autoDownload && !mm.isInstalled (*spec))
+        return fail ("Model " + juce::String (modelId) +
+                     " is not installed and auto-download is disabled.");
+    if (autoDownload && !mm.ensureInstalled (*spec,
+            [&onProgress] (float f, const std::string&)
+            { return onProgress == nullptr || onProgress (0.05f * f); }, &err))
+        return fail (err);
+
+    // Model files: ggml-<name>.bin + the optional OpenVINO encoder IR pair.
+    const juce::File dir = mm.dirFor (modelId);
+    const std::string baseName = modelId.substr (std::string ("whisper-").size ());
+    const juce::File ggmlModel = dir.getChildFile ("ggml-" + baseName + ".bin");
+    const juce::File irXml     = dir.getChildFile ("ggml-" + baseName + "-encoder-openvino.xml");
+
+    sc::ai::WhisperTranscriber::Options opts;
+    opts.language  = language;
+    opts.translate = translate;
+
+    const int total = summary.total;
+    for (int i = 0; i < total; ++i)
+    {
+        // Cancellation is checked between files: the current file always
+        // finishes before the run stops.
+        if (cancelOut != nullptr && cancelOut->load ())
+            break;
+
+        const juce::File& f = wavs[(size_t) i];
+        if (onStatus != nullptr) onStatus (f.getFileName ());
+        if (onProgress != nullptr)
+            onProgress ((float) (0.05 + 0.95 * ((double) i / total)));
+
+        // Skip files that already carry an SCTT chunk, when asked to.
+        if (skipExisting)
+        {
+            ScttData existing;
+            std::string rerr;
+            if (readScttChunk (f, existing, &rerr))
+            {
+                summary.skipped++;
+                continue;
+            }
+        }
+
+        // Headless load: the file never opens in the editor. The engine is
+        // scoped so its read handle closes BEFORE we rewrite the file —
+        // Windows won't let us replace a file that's still open elsewhere.
+        ScttData data;
+        {
+            AudioEngine eng;
+            if (!eng.loadFile (f))
+            {
+                summary.failed++;
+                summary.failures.push_back (f.getFileName ().toStdString () + ": could not load file");
+                continue;
+            }
+
+            // Mix ALL channels to mono for the transcription.
+            std::vector<int> chans ((size_t) eng.numChannels());
+            for (int c = 0; c < eng.numChannels (); ++c)
+                chans[(size_t) c] = c;
+
+            const bool ok = sc::ai::runWhisperPipeline (eng, chans, ggmlModel, irXml, opts,
+                                                        data.segments,
+                [&onProgress, i, total] (float f) {
+                    return onProgress == nullptr ||
+                           onProgress ((float) (0.05 + 0.95 * ((double) i / total)
+                                             + 0.95 * (double) f / total));
+                }, &err);
+            if (!ok)
+            {
+                summary.failed++;
+                summary.failures.push_back (f.getFileName ().toStdString () + ": " + err);
+                continue;
+            }
+        }   // <- eng destroyed here: the file handle is released
+
+        // Write the SCTT chunk back into the file on disk, preserving every
+        // other RIFF chunk.
+        std::string werr;
+        if (!replaceScttChunkInWav (f, scttToJson (data), &werr))
+        {
+            summary.failed++;
+            summary.failures.push_back (f.getFileName ().toStdString () + ": " + werr);
+            continue;
+        }
+
+        summary.done++;
+    }
+
+    if (onProgress != nullptr) onProgress (1.0f);
+    if (summaryOut != nullptr) *summaryOut = summary;
     return true;
 }
 #endif

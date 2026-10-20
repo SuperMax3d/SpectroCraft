@@ -128,10 +128,24 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
 - **Root cause of the Phase 3 crash hunt** (heap corruption 0xC0000374): `whisper_free_params()` does `delete params` — it is only valid for pointers returned by `whisper_full_default_params_by_ref()`. Passing the address of a stack object from `whisper_full_default_params()` (by value) is UB and corrupted the heap deterministically. Fix: never call `whisper_free_params()` on stack params (the struct is POD — nothing to free). The earlier suspicion that loading openvino.dll/TBB conflicted with ggml was a red herring caused by misreading filtered probe output.
 - **Deferred to Phase 4**: batch folder transcription, in-panel text search box.
 
-### Phase 4 — Polish
+### Phase 4 — Polish — **DONE**
 - Settings persistence (last model/device, auto-download toggle) in the existing settings store.
 - README section: feature description, model sources + licences, manual install instructions, performance notes (CPU vs GPU).
 - Optional: "noise profile" convenience (record N ms of noise → but that's a *different* algorithm — out of scope; these models are speech-enhancement oriented and work best on voice content).
+
+**Implementation notes:**
+- **Batch folder transcription**: Effects → Transcribe Folder… (GUI) + `--test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]` (CLI). Recursively finds WAVs, streams each through the Whisper pipeline without opening it in the editor, then surgically rewrites only the RIFF header + appends/replaces the `SCTT` chunk on disk. Cancellable mid-run; per-file status; summary dialog (total/done/skipped/failed) with failure list.
+- **In-panel text search**: case-insensitive substring search in the Transcription panel; Enter jumps to next match (wraps); double-click still selects the segment range. Implemented via a small `SearchEditor` subclass of `juce::TextEditor` because this JUCE build has no `onReturnPressed`/`setPlaceholder` hooks.
+- **Settings persistence**: NS model + attenuation, transcription model/language/mode, and auto-download toggle all persist in the existing settings store (`testAiSettingsPersistence`).
+- **Data-loss bug found & fixed**: `juce::File::moveFileTo` on Windows deletes the destination *first*, then calls plain `MoveFile`; with the temp file still open by a `FileOutputStream` (no FILE_SHARE_DELETE) the move fails *after* the original was deleted → orphaned temp + lost original. Fixed by scoping all handles closed before replacing and using `replaceFileIn()` (atomic Win32 `ReplaceFile`). Regression test: `testScttChunkReplace`.
+- **README**: new top-level "AI features" section — how NS/transcription/batch work, model sources & licences table, exact manual-install file lists per model, performance notes; all four AI CLI flags documented.
+- **UIA crash investigation (E_UNEXPECTED 0x8001010D)**: in earlier sessions the app died when `System.Windows.Automation` FindAll was run against it (and once ~1–3 min after synthetic menu clicks). Deep dive findings:
+  - The Debug PDB is corrupted (zero GUID) → symbol resolution done by relinking existing .obj files with `/MAP` and parsing the MAP file.
+  - Raw RSP stack scans from the crash handler are unreliable (stale frames); the "UIAutomationCore/combase" frames turned out to be residue — the innermost real frames were `Application::batchTranscribeFolder` + JUCE text rendering, which made no sense for an idle app → confirmed stale-frame theory.
+  - Two defensive JUCE patches applied and kept: `WM_GETOBJECT` now returns 0 (no UIA provider ever exposed) and `WindowsAccessibility::areAnyAccessibilityClientsActive()` always returns false (no UIA events raised). This makes the app fully UIA-inert, which is a reasonable v1 posture.
+  - CrashTrace improved: x64 StackWalk64 seed fix (Rbp must not be used as frame pointer on x64) + self-contained `.pdata`-based fallback walker (`manualWalk`) so future crashes produce clean stacks without dbghelp.
+  - **Final status: no longer reproducible.** After the ghost window of a previously crashed instance disappeared, the current build survived 6 UIA FindAll queries, 15 synthetic menu open/close cycles and >7 min idle with zero exceptions in stderr. Most likely cause was interaction with that zombie/ghost state (or a timing race its presence widened). Documented as resolved; the accessibility patches remain as defense-in-depth.
+- **Tests**: Release 772/772, Debug 726/726 checks passing; spectral CLI md5 unchanged (`e4a31004bcb637e1430d289da645bdb0`); NS + transcription + batch CLI end-to-end verified.
 
 ## 4. Whisper transcription (Phase 3) — design per your spec
 **UI: new "Transcription" panel next to the Markers panel** (not an Effects filter):

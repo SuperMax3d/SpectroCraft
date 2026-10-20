@@ -97,23 +97,15 @@ struct WindowsAccessibility
 
     static bool areAnyAccessibilityClientsActive()
     {
-        const auto areClientsListening = []
-        {
-            if (auto* uiaWrapper = WindowsUIAWrapper::getInstanceWithoutCreating())
-                return uiaWrapper->clientsAreListening() != 0;
-
-            return false;
-        };
-
-        const auto isScreenReaderRunning = []
-        {
-            BOOL isRunning = FALSE;
-            SystemParametersInfo (SPI_GETSCREENREADER, 0, (PVOID) &isRunning, 0);
-
-            return isRunning != 0;
-        };
-
-        return areClientsListening() || isScreenReaderRunning();
+        // SpectroCraft patch: always report "no accessibility clients".
+        // When a UIA client is connected (screen reader, automation tooling),
+        // JUCE raises UIA events via UiaRaiseAutomationEvent(); in this
+        // environment that COM/RPC dispatch can raise E_UNEXPECTED
+        // (0x8001010D) which is uncatchable from here and hard-crashes the
+        // process. Accessibility support is not required for v1, so we never
+        // talk to UIA at all (see also the WM_GETOBJECT patch in
+        // juce_Windowing_windows.cpp).
+        return false;
     }
 };
 

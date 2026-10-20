@@ -5,6 +5,8 @@
  */
 
 #include <JuceHeader.h>
+#include <cstring>
+#include <ctime>
 #include "Application.h"
 #include "AudioEngine.h"
 #include "SpectralEngine.h"
@@ -4574,6 +4576,149 @@ static void testScttChunkWav()
     }
 }
 
+// RIFF scan helpers for the surgical chunk-replace test.
+static int countRiffChunks (const juce::File& f, const char* fourcc)
+{
+    juce::FileInputStream in (f);
+    if (in.failedToOpen ()) return -1;
+    char hdr [12];
+    if (in.read (hdr, 12) != 12 || std::memcmp (hdr, "RIFF", 4) != 0)
+        return -1;
+    const int64_t total = in.getTotalLength ();
+    int count = 0;
+    while (in.getPosition () + 8 <= total)
+    {
+        char id [4];
+        unsigned char b [4];
+        if (!in.read (id, 4) || in.read (b, 4) != 4) break;
+        const uint32_t sz = (uint32_t) b[0] | ((uint32_t) b[1] << 8)
+                          | ((uint32_t) b[2] << 16) | ((uint32_t) b[3] << 24);
+        if (std::memcmp (id, fourcc, 4) == 0) count++;
+        const int64_t skip = (int64_t) sz + ((sz & 1) ? 1 : 0);
+        if (!in.setPosition (in.getPosition () + skip)) break;
+    }
+    return count;
+}
+
+static std::vector<uint8_t> riffChunkPayload (const juce::File& f, const char* fourcc)
+{
+    std::vector<uint8_t> out;
+    juce::FileInputStream in (f);
+    if (in.failedToOpen ()) return out;
+    char hdr [12];
+    if (in.read (hdr, 12) != 12 || std::memcmp (hdr, "RIFF", 4) != 0)
+        return out;
+    const int64_t total = in.getTotalLength ();
+    while (in.getPosition () + 8 <= total)
+    {
+        char id [4];
+        unsigned char b [4];
+        if (!in.read (id, 4) || in.read (b, 4) != 4) break;
+        const uint32_t sz = (uint32_t) b[0] | ((uint32_t) b[1] << 8)
+                          | ((uint32_t) b[2] << 16) | ((uint32_t) b[3] << 24);
+        if (std::memcmp (id, fourcc, 4) == 0 && sz > 0)
+        {
+            out.resize (sz);
+            if (in.read (out.data (), (int) sz) != (int) sz) { out.clear (); break; }
+            break;
+        }
+        const int64_t skip = (int64_t) sz + ((sz & 1) ? 1 : 0);
+        if (!in.setPosition (in.getPosition () + skip)) break;
+    }
+    return out;
+}
+
+static void testScttChunkReplace()
+{
+    const juce::File wav = makeTempFile ("sctt_replace.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 4000,
+        [] (int, int64_t f, double rate) {
+            return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                     * 440.0 * (double) f / rate);
+        }), "write base wav");
+
+    // Append a custom chunk that must survive the surgical rewrite.
+    {
+        const char* payload = "extra-chunk-payload";
+        juce::FileOutputStream out (wav);   // default ctor opens in append mode
+        CHECK (!out.failedToOpen (), "open wav for append");
+        out.write ("TEST", 4);
+        out.writeInt ((int) std::strlen (payload));
+        out.write (payload, std::strlen (payload));
+        out.writeByte (0);   // RIFF chunks are word-aligned: pad odd payloads
+    }
+
+    const std::vector<uint8_t> dataBefore = riffChunkPayload (wav, "data");
+    CHECK (!dataBefore.empty (), "base wav has a data chunk");
+
+    // 1. Append an SCTT to a file that has none.
+    ScttData d1;
+    d1.segments.push_back ({ 0.5, 2.0, "hello world" });
+    std::string err;
+    CHECK (replaceScttChunkInWav (wav, scttToJson (d1), &err),
+          juce::String ("append sctt: ") + err);
+
+    ScttData got;
+    CHECK (readScttChunk (wav, got), "sctt read back after append");
+    if (!got.empty ())
+        CHECK (got.segments.size() == 1 && got.segments[0].text == "hello world",
+              "appended sctt content");
+
+    // The audio data must be byte-identical and the custom chunk preserved.
+    CHECK (riffChunkPayload (wav, "data") == dataBefore, "audio bytes unchanged");
+    const std::vector<uint8_t> extra = riffChunkPayload (wav, "TEST");
+    CHECK (extra.size() == 19 && std::memcmp (extra.data(), "extra-chunk-payload", 19) == 0,
+          "custom chunk preserved");
+
+    // 2. Replace the existing SCTT: content updates, no duplicate chunks.
+    ScttData d2;
+    d2.segments.push_back ({ 1.0, 3.0, "second line" });
+    CHECK (replaceScttChunkInWav (wav, scttToJson (d2), &err),
+          juce::String ("replace sctt: ") + err);
+
+    got = ScttData ();
+    CHECK (readScttChunk (wav, got), "sctt read back after replace");
+    if (!got.empty ())
+        CHECK (got.segments.size() == 1 && got.segments[0].text == "second line",
+              "replaced sctt content");
+    CHECK (countRiffChunks (wav, "SCTT") == 1, "exactly one sctt chunk after replace");
+    CHECK (riffChunkPayload (wav, "data") == dataBefore, "audio bytes unchanged after replace");
+
+    // 3. Error cases: non-WAVE content and a missing file.
+    const juce::File notWav = makeTempFile ("notwave.bin");
+    {
+        juce::FileOutputStream out (notWav);
+        out.write ("GARBAGE", 7);
+    }
+    CHECK (!replaceScttChunkInWav (notWav, "{}", &err), "rejects non-wave file");
+    CHECK (!replaceScttChunkInWav (makeTempFile ("missing_xyz.wav"), "{}", &err),
+          "rejects missing file");
+}
+
+static void testAiSettingsPersistence()
+{
+    const juce::File store = makeTempFile ("ai_settings.recent");
+    store.deleteFile ();   // names are deterministic per run position: never trust leftovers
+    {
+        Application app (store);
+        CHECK (app.aiAutoDownload, "default auto-download is on");
+        app.aiAutoDownload        = false;
+        app.lastNsModelId         = "deepfilternet2";
+        app.lastTranscribeModelId = "whisper-small";
+        app.lastTranscribeLanguage= "de";
+        app.lastTranscribeTranslate = true;
+        app.saveAiSettings ();
+    }
+    {
+        Application app (store);
+        CHECK (!app.aiAutoDownload, "auto-download persisted");
+        CHECK (app.lastNsModelId == "deepfilternet2", "ns model persisted");
+        CHECK (app.lastTranscribeModelId == "whisper-small", "transcribe model persisted");
+        CHECK (app.lastTranscribeLanguage == "de", "language persisted");
+        CHECK (app.lastTranscribeTranslate, "translate flag persisted");
+    }
+}
+
 #if defined(SC_ENABLE_AI)
 // Phase 0: OpenVINO runtime smoke test + generic model manager logic.
 // FIPS 180-4 test vectors for our self-contained SHA-256 (this JUCE build has
@@ -5148,6 +5293,88 @@ static void testWhisperPipeline()
     if (ok)
         std::cerr << "    whisper segments on tone: " << segs.size() << "\n";
 }
+
+// Phase 4: batch folder transcription — headless WAV scan, SCTT written back
+// in place, skip-existing mode. Real inference with the cached whisper-base.
+static void testBatchTranscribe()
+{
+    auto& mm = sc::ai::ModelManager::instance ();
+
+#if defined(_DEBUG)
+    // OpenVINO cannot be initialised under the MSVC debug CRT.
+    std::cerr << "  [batch transcribe skipped: MSVC debug CRT]\n";
+    return;
+#endif
+
+#if defined(_WIN32)
+    if (!LoadLibraryA ("openvino.dll"))
+    {
+        std::cerr << "  [batch transcribe skipped: openvino.dll not installed]\n";
+        return;
+    }
+#endif
+
+    const auto* spec = mm.find ("whisper-base");
+    if (!spec) return;
+
+    std::string err;
+    bool cancelled = false;
+    const bool installed = mm.ensureInstalled (*spec,
+        [&cancelled] (float, const std::string&) { return !cancelled; }, &err);
+    if (!installed)
+    {
+        std::cerr << "  [batch transcribe skipped: model unavailable (" << err << ")]\n";
+        return;
+    }
+
+    // Two short WAVs in a temp folder tree, one nested in a subfolder.
+    const juce::File folder = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getChildFile ("sc_test_batch_" + juce::String ((int) std::time (nullptr)));
+    folder.createDirectory ();
+    const juce::File sub = folder.getChildFile ("sub");
+    sub.createDirectory ();
+
+    auto writeTone = [] (const juce::File& f, double hz) {
+        return writeWav (f, 1, 16000.0, 24000,
+            [hz] (int, int64_t i, double rate) {
+                return 0.2f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                * hz * (double) i / rate);
+            });
+    };
+    const juce::File wavA = folder.getChildFile ("tone_a.wav");
+    const juce::File wavB = sub.getChildFile ("tone_b.wav");
+    if (!writeTone (wavA, 440.0) || !writeTone (wavB, 880.0)) return;
+
+    Application app;   // isolated store under SC_TESTS_EXE
+    BatchTranscribeSummary sum;
+    const bool ok = app.batchTranscribeFolder (folder, "whisper-base", "en", false,
+                                               /*skipExisting=*/false,
+                                               nullptr, nullptr, nullptr, &sum, &err);
+    CHECK (ok, juce::String ("batch transcribe ran: ") + err);
+    if (ok)
+    {
+        CHECK (sum.total == 2, "found both wavs (recursive scan)");
+        CHECK (sum.done == 2 && sum.failed == 0,
+              juce::String ("both files transcribed (") + juce::String (sum.failed) + " failed)");
+
+        ScttData a, b;
+        CHECK (readScttChunk (wavA, a), "sctt chunk written to file A");
+        CHECK (readScttChunk (wavB, b), "sctt chunk written to file B");
+
+        // Second run with skip-existing: nothing new is transcribed.
+        BatchTranscribeSummary sum2;
+        const bool ok2 = app.batchTranscribeFolder (folder, "whisper-base", "en", false,
+                                                    /*skipExisting=*/true,
+                                                    nullptr, nullptr, nullptr, &sum2, &err);
+        CHECK (ok2, juce::String ("batch skip run: ") + err);
+        if (ok2)
+            CHECK (sum2.skipped == 2 && sum2.done == 0 && sum2.failed == 0,
+                  "skip-existing honoured");
+    }
+
+    // Clean up the temp tree.
+    folder.deleteRecursively ();
+}
 #endif   // SC_ENABLE_AI
 
 static int scRunUnitTestsImpl()
@@ -5213,6 +5440,8 @@ static int scRunUnitTestsImpl()
     progress ("status bar sample rate"); testStatusBarSampleRate();
     progress ("sctt json");             testScttJson();
     progress ("sctt chunk wav");        testScttChunkWav();
+    progress ("sctt chunk replace");    testScttChunkReplace();
+    progress ("ai settings persist");   testAiSettingsPersistence();
     progress ("df stft round-trip");  testDfStft();
 #if defined(SC_ENABLE_AI)
     progress ("sha256 (self-contained)"); testSha256();
@@ -5221,6 +5450,7 @@ static int scRunUnitTestsImpl()
     progress ("denseunet pipeline");  testDenseUnetPipeline();
     progress ("deepfilter pipeline"); testDeepFilterPipeline();
     progress ("whisper pipeline");    testWhisperPipeline();
+    progress ("batch transcribe");    testBatchTranscribe();
 #endif
     progress ("version string");      testVersionString();
 

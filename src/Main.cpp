@@ -6,6 +6,10 @@
  *       modelId: denseunet (default) | deepfilternet2 | deepfilternet3
  *   --test-transcribe <in.wav> [modelId] [language]         (AI builds only)
  *       modelId: whisper-base (default) | whisper-small | ... ; language: auto|en|...
+ *   --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]
+ *       (AI builds only)
+ *       Transcribes every .wav in the folder tree headlessly and writes each
+ *       file's SCTT chunk back in place.
  *   --generate-test-files [dir]
  *   --run-unit-tests
  */
@@ -332,6 +336,63 @@ public:
                 std::cout << "segments: " << segs.size() << "\n";
                 for (const auto& s : segs)
                     std::cout << "[" << s.startSec << " - " << s.endSec << "] " << s.text << "\n";
+                quit();
+                return;
+            }
+            else if (args[i] == "--test-batch-transcribe")
+            {
+                // Batch-transcribes every .wav in a folder tree headlessly and
+                // writes the SCTT chunk back into each file. Usage:
+                //   --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]
+                if (i + 1 >= args.size())
+                {
+                    std::cout << "usage: --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]\n";
+                    quit();
+                    return;
+                }
+                const juce::File folder = resolvePath (args[++i]);
+                std::string modelId  = "whisper-base";
+                std::string language = "auto";
+                bool skipExisting = false;
+                if (i + 1 < args.size()) modelId  = args[++i].toStdString ();
+                if (i + 1 < args.size()) language = args[++i].toStdString ();
+                if (i + 1 < args.size()) skipExisting = args[++i] == "1";
+
+                Application app;   // no GUI needed for the batch run
+                BatchTranscribeSummary sum;
+                std::string err;
+                const bool ok = app.batchTranscribeFolder (
+                    folder, modelId, language, /*translate=*/false,
+                    skipExisting,
+                    [] (float f) {
+                        static int lastPct = -1;
+                        const int pct = (int) (f * 100.0);
+                        if (pct >= lastPct + 10 || pct == 100)
+                        {
+                            lastPct = std::max (lastPct, pct);
+                            std::cout << "  " << lastPct << "%\n";
+                            std::flush (std::cout);
+                        }
+                        return true;
+                    },
+                    [] (const juce::String& name) {
+                        std::cout << "  transcribing " << name.toStdString () << "\n";
+                        std::flush (std::cout);
+                    },
+                    nullptr, &sum, &err);
+                if (!ok)
+                {
+                    std::cout << "batch transcription failed: " << err << "\n";
+                    quit();
+                    return;
+                }
+
+                std::cout << "total: "   << sum.total   << "\n"
+                          << "done: "    << sum.done    << "\n"
+                          << "skipped: " << sum.skipped << "\n"
+                          << "failed: "  << sum.failed  << "\n";
+                for (const auto& f : sum.failures)
+                    std::cout << "  - " << f << "\n";
                 quit();
                 return;
             }

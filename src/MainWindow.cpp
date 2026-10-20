@@ -671,7 +671,11 @@ void MainWindow::openFile (const juce::File& file)
 class WorkProgressDialog : public juce::AlertWindow
 {
 public:
-    WorkProgressDialog (const juce::String& title, const juce::String& message)
+    // withCancel adds a Cancel button that sets `cancelled` and exits the
+    // modal loop. The worker thread must keep owning the dialog's lifetime:
+    // it checks `cancelled` between units of work and deletes the dialog.
+    WorkProgressDialog (const juce::String& title, const juce::String& message,
+                        bool withCancel = false)
         : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon),
           bar (progressValue)   // JUCE 9: the bar watches this variable
     {
@@ -688,11 +692,28 @@ public:
         bar.setVisible (false);
         bar.setVisible (true);
 
+        if (withCancel)
+        {
+            addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+            // The AlertWindow's own click listener exits the modal state when
+            // the button is pressed; this flag tells the worker thread to stop.
+            for (auto* c : getChildren())
+                if (auto* b = dynamic_cast<juce::TextButton*> (c))
+                    if (b->getButtonText () == "Cancel")
+                        b->onClick = [this] { cancelled.store (true); };
+        }
+
         // Grow the window so the bar has its own strip below the message.
         setSize (getWidth(), getHeight() + 34);
     }
 
+    // Set by the Cancel button; the worker thread checks it between files.
+    std::atomic<bool> cancelled { false };
+
     void setProgress (double v) { progressValue = v; }
+
+    // Update the message text (call on the message thread).
+    void setStatusText (const juce::String& s) { setMessage (s); }
 
     void resized() override
     {
@@ -975,6 +996,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         case ToolsNoiseSuppress: showNoiseSuppressDialog(); break;
         case ToolsTranscribe: showTranscribeDialog(); break;
+        case ToolsTranscribeFolder: showTranscribeFolderDialog(); break;
 #endif
         case ToolsReverse: app.reverse(); refreshAfterEdit(); break;
 
@@ -1242,6 +1264,12 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
     // downloads would be a trap (the weights are irrelevant until the DLLs
     // load), so that case gets its own instructions instead.
     const bool runtimeMissing = details.startsWith ("OpenVINO runtime unavailable");
+    // Only point at model downloads when the error plausibly involves the
+    // model itself; "No WAV files found in ..." does not.
+    const bool looksModelRelated = details.isEmpty ()
+        || details.contains ("model")
+        || details.contains ("install")
+        || details.contains ("download");
     if (const auto* spec = mm.find (modelId))
     {
         if (runtimeMissing)
@@ -1256,7 +1284,7 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
                        "- Otherwise download OpenVINO 2024.6 from https://github.com/openvinotoolkit/openvino/releases\n"
                        "  and take the DLLs from its runtime\\Windows\\bin folder.";
         }
-        else
+        else if (looksModelRelated)
         {
             details += "\n\nManual installation: download these files into:\n"
                        + mm.dirFor (spec->id).getFullPathName () + "\n";
@@ -1311,12 +1339,26 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
                                      "For little noise reduction, set to 6 - 12. For medium, 18 - 24.",
                                      juce::AlertWindow::QuestionIcon);
 
-    w->addComboBox ("model",
-                    juce::StringArray { "DenseUNet (legacy)", "DeepFilterNet2", "DeepFilterNet3" },
-                    "Model");
+    const juce::StringArray modelNames { "DenseUNet (legacy)", "DeepFilterNet2", "DeepFilterNet3" };
+    w->addComboBox ("model", modelNames, "Model");
+
+    // Remember the last choice between sessions.
+    if (auto* c = w->getComboBoxComponent ("model"))
+    {
+        const int idx = app.lastNsModelId == "deepfilternet2" ? 1
+                        : app.lastNsModelId == "deepfilternet3" ? 2 : 0;
+        c->setSelectedItemIndex (idx);
+    }
+
     // Default 100 = no attenuation limit (full noise suppression), matching
     // Audacity's default for this parameter.
     w->addTextEditor ("attenLim", "100", "Attenuation limit dB (100 = no limit)");
+
+    w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
+                    "Auto-download model if missing");
+    // The persisted choice is preselected.
+    if (auto* c = w->getComboBoxComponent ("autoDl"))
+        c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -1342,27 +1384,34 @@ void MainWindow::showNoiseSuppressDialog()
     const juce::String modelText = w->getComboBoxComponent ("model") != nullptr
                                        ? w->getComboBoxComponent ("model")->getText() : "";
     const float attenLimDb = (float) w->getTextEditorContents ("attenLim").trim().getDoubleValue();
+    const bool autoDownload = w->getComboBoxComponent ("autoDl") == nullptr
+                               || w->getComboBoxComponent ("autoDl")->getText() == "Yes";
     delete w;
     if (result != 1) return;
 
     const std::string modelId = modelText == "DeepFilterNet2" ? "deepfilternet2"
                                  : modelText == "DeepFilterNet3" ? "deepfilternet3"
                                                                  : "denseunet";
+    // Remember the choices for next time.
+    app.lastNsModelId  = modelId;
+    app.aiAutoDownload = autoDownload;
+    app.saveAiSettings();
+
     // v1: the DF3 post-filter option is not exposed in the dialog yet.
-    runNoiseSuppressAsync (modelId, "CPU", attenLimDb, false);
+    runNoiseSuppressAsync (modelId, "CPU", attenLimDb, false, autoDownload);
 }
 
 // Noise suppression on a background thread with a progress dialog. Progress:
 // model download/compile/inference 0..95%, mipmap rebuild 95..100%.
 void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::string& device,
-                                        float attenLimDb, bool df3PostFilter)
+                                        float attenLimDb, bool df3PostFilter, bool autoDownload)
 {
     auto* dlg = new WorkProgressDialog ("Noise Suppression",
                                         "Applying " + juce::String (modelId) + " ...");
     dlg->setProgress (0.0);
     dlg->enterModalState (false);
 
-    std::thread ([this, modelId, device, attenLimDb, df3PostFilter, dlg] {
+    std::thread ([this, modelId, device, attenLimDb, df3PostFilter, autoDownload, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
@@ -1372,7 +1421,8 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
 
         std::string err;
         const bool ok = app.noiseSuppress (modelId, device, attenLimDb, df3PostFilter,
-            [sendProgress] (float f) { sendProgress (0.95 * (double) f); return true; }, &err);
+            [sendProgress] (float f) { sendProgress (0.95 * (double) f); return true; }, &err,
+            autoDownload);
         if (ok)
             app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
                 sendProgress (0.95 + 0.05 * (double) f);
@@ -1450,10 +1500,24 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
                     juce::StringArray { "Transcribe", "Translate to English" },
                     "Mode");
 
-    // Default: base model, auto language detection, plain transcription.
-    if (auto* c = w->getComboBoxComponent ("model"))   c->setSelectedItemIndex (0);
-    if (auto* c = w->getComboBoxComponent ("language")) c->setSelectedItemIndex (0);
-    if (auto* c = w->getComboBoxComponent ("mode"))     c->setSelectedItemIndex (0);
+    // Preselect the persisted choices (defaults when never set).
+    if (auto* c = w->getComboBoxComponent ("model"))
+    {
+        const int mi = whisperModelIds ().indexOf (juce::String (app.lastTranscribeModelId));
+        c->setSelectedItemIndex (mi >= 0 ? mi : 0);
+    }
+    if (auto* c = w->getComboBoxComponent ("language"))
+    {
+        const int li = transcribeLanguageCodes ().indexOf (juce::String (app.lastTranscribeLanguage));
+        c->setSelectedItemIndex (li >= 0 ? li : 0);
+    }
+    if (auto* c = w->getComboBoxComponent ("mode"))
+        c->setSelectedItemIndex (app.lastTranscribeTranslate ? 1 : 0);
+
+    w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
+                    "Auto-download model if missing");
+    if (auto* c = w->getComboBoxComponent ("autoDl"))
+        c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -1478,6 +1542,8 @@ void MainWindow::showTranscribeDialog()
                                         ? w->getComboBoxComponent ("language")->getText () : "auto";
     const bool translate           = w->getComboBoxComponent ("mode") != nullptr
                                         && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
+    const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
+                                       || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
     delete w;
     if (result != 1) return;
 
@@ -1491,13 +1557,20 @@ void MainWindow::showTranscribeDialog()
     const int li = langNames.indexOf (langText);
     const std::string language = (li >= 0 ? transcribeLanguageCodes ()[(size_t) li] : juce::String ("auto")).toStdString ();
 
-    runTranscriptionAsync (modelId, language, translate);
+    // Remember the choices for next time.
+    app.lastTranscribeModelId   = modelId;
+    app.lastTranscribeLanguage  = language;
+    app.lastTranscribeTranslate = translate;
+    app.aiAutoDownload          = autoDownload;
+    app.saveAiSettings ();
+
+    runTranscriptionAsync (modelId, language, translate, autoDownload);
 }
 
 // Transcription on a background thread with a progress dialog. Progress:
 // download [0, 15%), mix+resample [15, 25%), inference [25, 100%].
 void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::string& language,
-                                        bool translate)
+                                        bool translate, bool autoDownload)
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Transcribing with " + juce::String (modelId) + " ...\n"
@@ -1505,7 +1578,7 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
     dlg->setProgress (0.0);
     dlg->enterModalState (false);
 
-    std::thread ([this, modelId, language, translate, dlg] {
+    std::thread ([this, modelId, language, translate, autoDownload, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
@@ -1515,7 +1588,8 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
 
         std::string err;
         const bool ok = app.transcribe (modelId, language, translate,
-            [sendProgress] (float f) { sendProgress ((double) f); return true; }, &err);
+            [sendProgress] (float f) { sendProgress ((double) f); return true; }, &err,
+            autoDownload);
 
         juce::MessageManager::callAsync ([this, dlg, ok, err, modelId] {
             delete dlg;
@@ -1536,6 +1610,168 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
             }
 
             showAiFailureDialog ("Transcription", err, modelId);
+        });
+    }).detach ();
+}
+
+// ---------------------------------------------------------------------------
+// Effects > Transcribe Folder... — batch Whisper transcription of every WAV
+// in a folder tree. Files are processed headlessly and their SCTT chunk is
+// written back in place; nothing opens in the editor.
+juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& folder)
+{
+    auto* w = new juce::AlertWindow ("Transcribe Folder",
+                                     "Every .wav file in this folder (including subfolders)\n"
+                                     "will be transcribed by Whisper and its SCTT chunk\n"
+                                     "updated in place. The files are NOT opened in the editor.\n\n"
+                                     + folder.getFullPathName (),
+                                     juce::AlertWindow::QuestionIcon);
+
+    w->addComboBox ("model", whisperModelNames (), "Model");
+    w->addComboBox ("language", transcribeLanguageNames (), "Language");
+    w->addComboBox ("mode",
+                    juce::StringArray { "Transcribe", "Translate to English" },
+                    "Mode");
+    w->addComboBox ("existing",
+                    juce::StringArray { "Overwrite existing SCTT", "Skip files with SCTT" },
+                    "Existing transcriptions");
+
+    // Preselect the persisted choices (defaults when never set).
+    if (auto* c = w->getComboBoxComponent ("model"))
+    {
+        const int mi = whisperModelIds ().indexOf (juce::String (app.lastTranscribeModelId));
+        c->setSelectedItemIndex (mi >= 0 ? mi : 0);
+    }
+    if (auto* c = w->getComboBoxComponent ("language"))
+    {
+        const int li = transcribeLanguageCodes ().indexOf (juce::String (app.lastTranscribeLanguage));
+        c->setSelectedItemIndex (li >= 0 ? li : 0);
+    }
+    if (auto* c = w->getComboBoxComponent ("mode"))
+        c->setSelectedItemIndex (app.lastTranscribeTranslate ? 1 : 0);
+
+    w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
+                    "Auto-download model if missing");
+    if (auto* c = w->getComboBoxComponent ("autoDl"))
+        c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+    return w;
+}
+
+void MainWindow::showTranscribeFolderDialog()
+{
+    // Step 1: pick the folder.
+    juce::FileChooser chooser ("Transcribe Folder",
+                               juce::File::getSpecialLocation (juce::File::userHomeDirectory),
+                               "", false);
+    if (!chooser.browseForDirectory ())
+        return;
+    const juce::File folder = chooser.getResult ();
+
+    // Step 2: options dialog.
+    auto* w = createTranscribeFolderDialog (folder);
+    w->enterModalState (false);
+    if (auto* combo = w->getComboBoxComponent ("model"))
+        combo->grabKeyboardFocus ();
+
+    const int result = w->runModalLoop ();
+    const juce::String modelText   = w->getComboBoxComponent ("model") != nullptr
+                                        ? w->getComboBoxComponent ("model")->getText () : "";
+    const juce::String langText    = w->getComboBoxComponent ("language") != nullptr
+                                        ? w->getComboBoxComponent ("language")->getText () : "auto";
+    const bool translate           = w->getComboBoxComponent ("mode") != nullptr
+                                        && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
+    const bool skipExisting        = w->getComboBoxComponent ("existing") != nullptr
+                                        && w->getComboBoxComponent ("existing")->getText ().startsWith ("Skip");
+    const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
+                                       || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
+    delete w;
+    if (result != 1) return;
+
+    // Map the display texts back to registry ids / language codes.
+    const auto names = whisperModelNames ();
+    const int mi = names.indexOf (modelText);
+    if (mi < 0) return;
+    const std::string modelId = whisperModelIds ()[(size_t) mi].toStdString ();
+
+    const auto langNames = transcribeLanguageNames ();
+    const int li = langNames.indexOf (langText);
+    const std::string language = (li >= 0 ? transcribeLanguageCodes ()[(size_t) li] : juce::String ("auto")).toStdString ();
+
+    // Remember the choices for next time.
+    app.lastTranscribeModelId   = modelId;
+    app.lastTranscribeLanguage  = language;
+    app.lastTranscribeTranslate = translate;
+    app.aiAutoDownload          = autoDownload;
+    app.saveAiSettings ();
+
+    runBatchTranscribeAsync (folder, modelId, language, translate, skipExisting, autoDownload);
+}
+
+// Batch transcription on a background thread with a cancellable progress
+// dialog. Progress: model install [0, 5%), then each file gets its own slice.
+void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
+                                          const std::string& modelId,
+                                          const std::string& language, bool translate,
+                                          bool skipExisting, bool autoDownload)
+{
+    auto* dlg = new WorkProgressDialog ("Transcription",
+                                        "Scanning " + folder.getFileName ()
+                                        + " for WAV files ...", true);
+    dlg->setProgress (0.0);
+    dlg->enterModalState (false);
+
+    std::thread ([this, folder, modelId, language, translate, skipExisting,
+                  autoDownload, dlg] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v) {
+            if (v < 0.0) v = 0.0;
+            if (v > 1.0) v = 1.0;
+            if (v - lastSent < 0.02 && v != 1.0) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+
+        BatchTranscribeSummary summary;
+        std::string err;
+        const bool ok = app.batchTranscribeFolder (
+            folder, modelId, language, translate, skipExisting,
+            [&sendProgress] (float f) { sendProgress ((double) f); return true; },
+            [dlg] (const juce::String& name) {
+                juce::MessageManager::callAsync ([dlg, name] {
+                    dlg->setStatusText ("Transcribing " + name
+                                        + " ...\n(Cancel stops after the current file)");
+                });
+            },
+            &dlg->cancelled,
+            &summary,
+            &err,
+            autoDownload);
+
+        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId, summary] {
+            delete dlg;
+            if (!ok)
+            {
+                showAiFailureDialog ("Transcription", err, modelId);
+                return;
+            }
+
+            // Summary: what happened to each file.
+            juce::String msg = juce::String (summary.total) + " WAV file(s):\n"
+                               + juce::String (summary.done)    + " transcribed\n"
+                               + juce::String (summary.skipped) + " skipped (already had SCTT)\n"
+                               + juce::String (summary.failed)  + " failed";
+            for (const auto& f : summary.failures)
+                msg += "\n  - " + juce::String (f);
+
+            auto* w = new juce::AlertWindow ("Transcription Finished",
+                                             msg, juce::AlertWindow::InfoIcon);
+            w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+            w->enterModalState (false);
+            w->runModalLoop ();
+            delete w;
         });
     }).detach ();
 }
@@ -1677,6 +1913,8 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsNoiseSuppress, "Noise Suppression...", hasSel, false);
         // Whole-file operation (no selection needed).
         menu.addItem (ToolsTranscribe, "Transcribe...", app.audioEngine().isFileLoaded(), false);
+        // Folder batch: no file needs to be open at all.
+        menu.addItem (ToolsTranscribeFolder, "Transcribe Folder...", true, false);
 #endif
         menu.addSeparator();
         // Whole-file operation: needs the file fully in memory.

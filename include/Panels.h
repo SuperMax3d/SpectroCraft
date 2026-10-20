@@ -550,6 +550,24 @@ private:
     button. Double-clicking a row jumps the playhead to its start and selects
     its range. Segments live in FileDoc::sctt and are saved into WAV files as
     an SCTT RIFF chunk — they never appear in the Markers panel. */
+// TextEditor with an Enter callback: this JUCE build's TextEditor has no
+// onReturnPressed / placeholder members, so the panel hooks key presses here.
+class SearchEditor : public juce::TextEditor
+{
+public:
+    std::function<void()> onEnter;
+
+    bool keyPressed (const juce::KeyPress& k) override
+    {
+        if (k == juce::KeyPress (juce::KeyPress::returnKey))
+        {
+            if (onEnter != nullptr) onEnter ();
+            return true;
+        }
+        return TextEditor::keyPressed (k);
+    }
+};
+
 class TranscriptionPanel : public juce::Component
 {
 public:
@@ -557,6 +575,12 @@ public:
     void paint (juce::Graphics& g) override;
     void resized() override;
     void refresh();   // call after transcription changes / file open/close
+
+    // Case-insensitive substring search over the segment texts. Selects and
+    // scrolls to the next match after the current one (wrapping around),
+    // jumps the playhead there like a double-click, and returns false when no
+    // segment matches at all.
+    bool findNext();
 
     // Set by MainWindow: opens the model/language dialog and starts the run.
     std::function<void()> onRunRequested;
@@ -583,6 +607,9 @@ private:
     juce::TableListBox table { "", &model };
 
     juce::TextButton runBtn, clearBtn;
+    SearchEditor searchBox;       // Enter jumps to the next match
+    int searchAnchorRow = -1;     // row of the last found match (-1 = none)
+    juce::String lastSearchNeedle;// resets the anchor when the query changes
 
     JUCE_DECLARE_NON_COPYABLE (TranscriptionPanel)
 };

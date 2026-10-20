@@ -160,6 +160,161 @@ namespace scCrash
             std::fprintf (stderr, "[no other threads found]\n");
     }
 
+    //==========================================================================
+    // Self-contained x64 stack unwinder using the PE exception directory
+    // (.pdata / RUNTIME_FUNCTION + UNWIND_INFO). dbghelp's StackWalk64 is
+    // unreliable from inside a vectored exception handler in this environment,
+    // and raw RSP scans pick up stale frames, so we walk unwind tables by hand.
+    //==========================================================================
+    // The Windows SDK headers in this toolchain do not define UNWIND_INFO /
+    // UNWIND_CODE (only UNWIND_HISTORY_TABLE), so declare them locally.
+    struct SC_UNWIND_CODE
+    {
+        BYTE UnwindCode;
+        BYTE Offset;
+    };
+
+    struct SC_UNWIND_INFO
+    {
+        BYTE Version;            // always 1
+        BYTE SizeOfCode;         // size of this header (bytes before the codes)
+        WORD Flags;              // bit0 EHANDLER, bit2 NORETURN
+        BYTE Count;              // number of UNWIND_CODE entries that follow
+        WORD OffsetFromHandler;
+        WORD OffsetFromParent;
+    };
+
+    struct PdataModule
+    {
+        DWORD64 base = 0;
+        const RUNTIME_FUNCTION* funcs = nullptr;
+        int count = 0;
+    };
+
+    static PdataModule g_pdata[128];
+    static int g_pdataCount = 0;
+
+    static void loadPdata()
+    {
+        if (g_pdataCount > 0)
+            return;
+        collectModules();
+        for (int i = 0; i < 128 && g_modules[i] != nullptr; ++i)
+        {
+            const uint8_t* img = reinterpret_cast<const uint8_t*> (g_modules[i]);
+            const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*> (img);
+            if (dos->e_magic != 0x5A4D)
+                continue;
+            const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*> (img + dos->e_lfanew);
+            if (nt->Signature != 0x00004550 || nt->FileHeader.Machine != 0x8664)
+                continue;
+            const IMAGE_DATA_DIRECTORY& dd =
+                nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+            if (dd.VirtualAddress == 0 || dd.Size == 0)
+                continue;
+            PdataModule p {};
+            p.base = g_mods[i].base;
+            p.funcs = reinterpret_cast<const RUNTIME_FUNCTION*> (img + dd.VirtualAddress);
+            p.count = (int) (dd.Size / sizeof (RUNTIME_FUNCTION));
+            if (g_pdataCount < 128)
+                g_pdata[g_pdataCount++] = p;
+        }
+    }
+
+    static const SC_UNWIND_INFO* unwindInfoFor (DWORD64 rip)
+    {
+        for (int i = 0; i < g_pdataCount; ++i)
+        {
+            if (rip < g_pdata[i].base || rip >= g_pdata[i].base + g_mods[i].size)
+                continue;
+            const DWORD64 off = rip - g_pdata[i].base;
+            int lo = 0, hi = g_pdata[i].count - 1;
+            while (lo <= hi)
+            {
+                const int mid = (lo + hi) / 2;
+                const RUNTIME_FUNCTION& rf = g_pdata[i].funcs[mid];
+                if (off < rf.BeginAddress)
+                    hi = mid - 1;
+                else if (off >= rf.EndAddress)
+                    lo = mid + 1;
+                else
+                {
+                    return reinterpret_cast<const SC_UNWIND_INFO*> (
+                        g_pdata[i].base + rf.UnwindInfoAddress);
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // One unwind step: given RIP inside a function and the current RSP, find
+    // the caller's (RIP, RSP). Handles the common case where RSP is stable
+    // between prologue completion and epilogue start. Returns false when the
+    // chain cannot be continued (opaque frame, no-return leaf, unknown code).
+    static bool stepFrame (DWORD64& rip, DWORD64& rsp)
+    {
+        const SC_UNWIND_INFO* ui = unwindInfoFor (rip);
+        if (ui == nullptr)
+            return false;
+
+        // NORETURN leaf: there is no caller frame.
+        if ((ui->Flags & 0x4) != 0)
+            return false;
+
+        // The code entries follow the fixed 12-byte header (verified against
+        // real .pdata blocks: the next UNWIND_INFO starts at offset +12).
+        const SC_UNWIND_CODE* codes =
+            reinterpret_cast<const SC_UNWIND_CODE*> (
+                reinterpret_cast<const uint8_t*> (ui) + 12);
+        // Cap the count defensively: a real prologue never needs more than a
+        // handful of codes, and this keeps us inside the mapped image even if
+        // the header was misparsed.
+        int nCodes = ui->Count;
+        if (nCodes > 64) nCodes = 64;
+        for (int i = 0; i < nCodes; ++i)
+        {
+            if (codes[i].UnwindCode == 0 /* UW_OPAQUE */)
+                return false;
+        }
+
+        // The return address sits at [entryRsp], but the prologue may have
+        // moved RSP down by N bytes. Scan upward from the current RSP for the
+        // first slot whose value lands inside a known function range — that is
+        // the caller's return address.
+        uint8_t buf [512];
+        SIZE_T got = 0;
+        if (!ReadProcessMemory (GetCurrentProcess(), (LPCVOID) rsp, buf,
+                                sizeof (buf), &got))
+            return false;
+
+        for (SIZE_T off = 0; off + 8 <= got; off += 8)
+        {
+            DWORD64 v = 0;
+            std::memcpy (&v, buf + off, 8);
+            if (unwindInfoFor (v) != nullptr)
+            {
+                rip = v;
+                rsp += off + 8;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static void manualWalk (CONTEXT* ctx)
+    {
+        loadPdata();
+        DWORD64 rip = ctx->Rip, rsp = ctx->Rsp;
+        std::fprintf (stderr, "---- crash stack (manual .pdata walk) ----\n");
+        int depth = 0;
+        for (; depth < 64; ++depth)
+        {
+            printAddr ("#", rip);
+            if (!stepFrame (rip, rsp))
+                break;
+        }
+    }
+
     static void printStack (CONTEXT* ctx)
     {
         collectModules();
@@ -169,9 +324,11 @@ namespace scCrash
             std::fprintf (stderr, "[crash] SymInitialize failed: %lu\n", GetLastError());
         SymSetOptions (SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
 
+        // x64 does not use RBP as a frame pointer; StackWalk64 must start from
+        // the PC only and follow unwind tables (.pdata). Seeding AddrFrame with
+        // Rbp (an x86 idiom) makes the walk fail immediately.
         STACKFRAME64 frame {};
         frame.AddrPC.Offset      = ctx->Rip;
-        frame.AddrFrame.Offset   = ctx->Rbp;
 
         std::fprintf (stderr, "---- crash stack ----\n");
         int walked = 0;
@@ -207,13 +364,10 @@ namespace scCrash
 
         if (walked == 0)
         {
-            // Fallback: dbghelp's own capture (works without unwind tables).
-            void* addrs[48] = { 0 };
-            const int n = CaptureStackBackTrace (0, 48, addrs, nullptr);
+            // Fallback: hand-rolled .pdata walk (no dbghelp, no stale frames).
             std::fprintf (stderr, "[crash] StackWalk64 failed; raw Rip=0x%llX Rsp=0x%llX\n",
                           (unsigned long long) ctx->Rip, (unsigned long long) ctx->Rsp);
-            for (int i = 0; i < n; ++i)
-                printAddr ("#d", (DWORD64) addrs[i]);
+            manualWalk (ctx);
         }
 
         std::fflush (stderr);

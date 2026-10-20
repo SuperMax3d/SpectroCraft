@@ -2444,6 +2444,9 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
     addAndMakeVisible (&table);
     addAndMakeVisible (&runBtn);
     addAndMakeVisible (&clearBtn);
+    addAndMakeVisible (&searchBox);
+
+    searchBox.onEnter = [this] { findNext (); };
 
     runBtn.onClick = [this] { if (onRunRequested) onRunRequested (); };
     clearBtn.onClick = [this] {
@@ -2459,6 +2462,7 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
     runBtn.setTooltip ("Run Whisper transcription on the whole file. The first use downloads "
                        "the model weights to %APPDATA%/SpectroCraft/models.");
     clearBtn.setTooltip ("Remove all transcription segments from this file (the audio is not modified).");
+    searchBox.setTooltip ("Type text and press Enter to jump to the next matching segment.");
     table.setTooltip ("Double-click a row to jump to it and select its range.");
 
     refresh();
@@ -2483,5 +2487,51 @@ void TranscriptionPanel::resized()
     auto btnRow = b.removeFromTop (30);
     runBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, 130, 26);
     clearBtn.setBounds (runBtn.getRight () + 8, btnRow.getY () + 2, 90, 26);
+    const int sx = clearBtn.getRight () + 8;
+    searchBox.setBounds (sx, btnRow.getY () + 2,
+                        std::max (60, b.getWidth () - (sx - b.getX ())), 26);
+}
+
+bool TranscriptionPanel::findNext()
+{
+    auto* d = app.doc ();
+    if (d == nullptr || d->sctt.segments.empty ()) return false;
+
+    const juce::String needle = searchBox.getText ().trim ();
+    if (needle.isEmpty ()) return false;
+
+    // A changed query restarts the search from the top.
+    if (needle != lastSearchNeedle)
+    {
+        searchAnchorRow = -1;
+        lastSearchNeedle = needle;
+    }
+
+    const int n = (int) d->sctt.segments.size ();
+    // Start just after the last match, wrapping around to the top.
+    int start = searchAnchorRow + 1;
+    if (start >= n) start = 0;
+
+    for (int i = 0; i < n; ++i)
+    {
+        const int row = (start + i) % n;
+        if (juce::String (d->sctt.segments [(size_t) row].text).containsIgnoreCase (needle))
+        {
+            searchAnchorRow = row;
+            table.selectRow (row);
+            table.scrollToEnsureRowIsOnscreen (row);
+
+            // Jump to the segment like a double-click.
+            const ScttSegment& s = d->sctt.segments [(size_t) row];
+            app.setPlayhead (s.startSec);
+            if (s.endSec > s.startSec)
+                app.setSelection ({ s.startSec, s.endSec });
+            if (app.onStateChange) app.onStateChange ();
+            return true;
+        }
+    }
+
+    searchAnchorRow = -1;   // no match: the next Enter restarts from row 0
+    return false;
 }
 #endif // SC_ENABLE_AI

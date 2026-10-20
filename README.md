@@ -246,6 +246,21 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   channels** — e.g. with only Channel 2 visible, a fade never touches the
   other tracks; undo restores every channel exactly (patches capture the old
   data *before* the in-place modification).
+- **Resample**: Effects → Resample… converts the whole file to any sample rate
+  using SoXR's very-high-quality (`SOXR_VHQ`) resampler. Whole-file operation,
+  requires the file fully in memory, not undoable (the old data is discarded);
+  the footer shows the current sample rate.
+- **AI features** (built by default; see [AI features](#ai-features) below):
+  - *Noise Suppression* — Effects → Noise Suppression… applies a neural
+    speech-enhancement model (DeepFilterNet 2/3 or DenseUNet) to the current
+    selection via OpenVINO.
+  - *Transcription* — Effects → Transcribe… runs Whisper over the whole file;
+    segments appear in the **Transcription** tab (double-click a row to jump,
+    search box with Enter-to-next-match). Results are stored inside the WAV as
+    a custom `SCTT` RIFF chunk, so they travel with the file.
+  - *Batch transcription* — Effects → Transcribe Folder… transcribes every
+    `.wav` in a folder tree headlessly (files never open in the editor) and
+    writes each file's `SCTT` chunk back in place; optional skip-existing mode.
 - **Offline tools**: `--test-spectral` renders a spectrogram PNG headlessly;
   `--generate-test-files` creates the test WAVs; `--run-unit-tests` runs the
   unit suite from either executable.
@@ -434,6 +449,92 @@ linear and log modes.
 
 ---
 
+## AI features
+
+The AI module is built by default (`-DSPECTRO_ENABLE_AI=ON`; disable with
+`-DSPECTRO_ENABLE_AI=OFF` for a lean build). It provides neural **noise
+suppression** (OpenVINO) and Whisper **transcription** (whisper.cpp, with an
+optional OpenVINO encoder acceleration). v1 is **CPU-only**; GPU device
+selection will follow if the plugins expose it.
+
+### How it works
+
+- **Noise Suppression** (`Effects → Noise Suppression…`) processes the current
+  selection on the visible channels. Models: **DeepFilterNet 2** (recommended),
+  **DeepFilterNet 3** (experimental) and **DenseUNet** (legacy). The
+  *attenuation limit* slider (dB, default 100 = no limit) controls how hard
+  the DeepFilterNet models suppress noise: 6–12 for light reduction,
+  18–24 for medium. The result is committed as an undoable edit.
+- **Transcription** (`Effects → Transcribe…`) runs Whisper over the whole file
+  (visible channels mixed to mono, resampled to 16 kHz with SoXR). Segments are
+  shown in the **Transcription** tab: double-click a row to jump + select its
+  range; type in the search box and press Enter to cycle through matches.
+  Results are embedded in the WAV as a custom top-level `SCTT` RIFF chunk
+  (UTF-8 JSON, times in seconds) — written on save, parsed on load, never shown
+  in the Markers panel. *Clear* removes them from the document without touching
+  the audio.
+- **Transcribe Folder…** (`Effects → Transcribe Folder…`) scans a folder tree
+  for `.wav` files and transcribes each one headlessly — nothing opens in the
+  editor. Each file's `SCTT` chunk is replaced surgically (all other RIFF chunks
+  are preserved byte-for-byte). The progress dialog has a Cancel button that
+  stops after the current file; a summary lists done/skipped/failed per run.
+  *Skip files with SCTT* re-runs only transcribe files without an existing
+  transcription.
+- **Model preferences persist** between sessions (last model, language, mode,
+  and the auto-download toggle) in the same `SpectroCraft.recent` store as the
+  recent-files list. With *auto-download off*, missing models are never fetched;
+  the failure dialog then shows exactly where to put them manually.
+
+### Model sources & licenses
+
+| Feature | Model(s) | Source | Size |
+|---|---|---|---|
+| Noise suppression | DeepFilterNet 2 (recommended) | [Intel/deepfilternet-openvino](https://huggingface.co/Intel/deepfilternet-openvino) (`deepfilternet2/{enc,erb_dec,df_dec}.{xml,bin}`) | ~9 MB |
+| Noise suppression | DeepFilterNet 3 (experimental) | same repo, `deepfilternet3/…` | ~10 MB |
+| Noise suppression | DenseUNet (legacy) | [Intel Open Model Zoo 2023.0](https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/noise-suppression-denseunet-ll-0001/FP16) FP16 | ~9 MB |
+| Transcription | Whisper tiny / base / small / medium / large-v1 / v2 / v3 | [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) (`ggml-<name>.bin`) | 78 MB – 3.1 GB |
+
+Weights are **never committed to this repository** — they are downloaded on
+first use (SHA-256 verified against the registry in `src/AI/ModelManager.cpp`)
+or installed manually, and cached under `%APPDATA%/SpectroCraft/models/<id>/`.
+The model weights remain under their upstream licenses (Intel's repositories /
+OpenAI MIT for Whisper); SpectroCraft itself is AGPL-3.0, which is compatible
+with the GPL-licensed DeepFilterNet code this port derives from.
+
+### Manual installation (no auto-download)
+
+If a download fails — or you turn *auto-download* off in the dialog — put the
+files yourself into `%APPDATA%/SpectroCraft/models/<model-id>/`:
+
+```
+deepfilternet2:\  enc.xml, enc.bin, erb_dec.xml, erb_dec.bin, df_dec.xml, df_dec.bin
+denseunet:    \  noise-suppression-denseunet-ll-0001.xml, …-0001.bin
+whisper-base: \  ggml-base.bin        (ggml-tiny / small / medium / large-vN)
+```
+
+The failure dialog always shows the exact destination folder and the download
+URLs in a copyable text box. The **OpenVINO runtime DLLs** (`openvino.dll`,
+`openvino_intel_cpu_plugin.dll`, `openvino_ir_frontend.dll`, `tbb12.dll`) must sit
+next to `SpectroCraft.exe` for noise suppression — they are copied there by the
+CMake build (from `extern/OpenVINO/bin/`); a prebuilt exe without them fails
+gracefully with instructions. Transcription does **not** need the OpenVINO DLLs:
+without them it falls back to the pure-ggml encoder automatically.
+
+### Performance notes (CPU)
+
+- Noise suppression runs in near-real-time on modern CPUs for typical selection
+  lengths; DeepFilterNet models are ~9–10 MB and fast, DenseUNet is heavier.
+- Whisper speed scales with model size: `tiny`/`base` transcribe a minute of
+  audio in seconds on CPU; `medium`/`large-v3` take minutes. Use the smallest
+  model that meets your accuracy needs for batch runs.
+- Optional speed-up: whisper.cpp's `models/convert-whisper-to-openvino.py`
+  produces an OpenVINO encoder pair (`ggml-<name>-encoder-openvino.{xml,bin}`)
+  that is not published by anyone; drop both files into the model folder and
+  transcription automatically uses the faster OV encode path (identical
+  results).
+
+---
+
 ## Running & CLI flags
 
 ```
@@ -443,6 +544,23 @@ SpectroCraft.exe --generate-test-files [dir]   :: write tests/data/*.wav (defaul
 SpectroCraft.exe --test-spectral <in.wav> <out.png> [width height t0 t1]
                                            :: offline spectrogram render, e.g.
 SpectroCraft.exe --test-spectral tests/data/tone_10s_stereo.wav out.png 512 256 0.0 10.0
+```
+
+AI builds additionally accept (see [AI features](#ai-features)):
+
+```
+SpectroCraft.exe --test-noise-suppression <in.wav> <out.wav> [modelId]
+                                           :: headless noise suppression, e.g.
+SpectroCraft.exe --test-noise-suppression speech.wav out.wav deepfilternet2
+SpectroCraft.exe --test-transcribe <in.wav> [modelId] [language]
+                                           :: headless Whisper transcription,
+                                              prints the segments
+SpectroCraft.exe --test-batch-transcribe <folder> [modelId] [language]
+                                           :: transcribes every .wav in a folder
+                                              tree and writes each SCTT chunk
+SpectroCraft.exe --test-ns-failure-alert <in.wav> [modelId] ["fake error"]
+                                           :: shows the AI failure dialog (with a
+                                              copyable details box)
 ```
 
 The test executable accepts the same flags (useful for CI without a display).

@@ -10,6 +10,17 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <atomic>
+
+// Result of a batch folder transcription run (see Application::batchTranscribeFolder).
+struct BatchTranscribeSummary
+{
+    int total = 0;      // WAV files found in the folder tree
+    int done = 0;       // transcribed + SCTT chunk written
+    int skipped = 0;    // already had an SCTT chunk (skipExisting mode)
+    int failed = 0;     // load/inference/write problems
+    std::vector<std::string> failures;   // "<file name>: <error>", in run order
+};
 
 class Application
 {
@@ -81,6 +92,14 @@ public:
     // frequency-analysis axis mode + FFT size, zero-crossing snap) into the
     // same PropertiesFile as the recent-files list.
     void saveSettings();
+
+    // AI feature preferences, persisted in the same store (keys ai_*).
+    bool aiAutoDownload = true;          // download missing models on first use
+    std::string lastNsModelId = "denseunet";
+    std::string lastTranscribeModelId = "whisper-base";
+    std::string lastTranscribeLanguage = "auto";
+    bool lastTranscribeTranslate = false;
+    void saveAiSettings();
     void removeRecentFile (const juce::File& file);// drop one entry and persist
     void clearRecentFiles();                        // empty the list and persist it
 
@@ -106,10 +125,13 @@ public:
     // selection on the visible channels. attenLimDb / df3PostFilter only apply
     // to the DeepFilterNet models. Returns false and fills errOut on failure/
     // cancellation; nothing is modified in that case.
+    // autoDownload = false: never download; fail with a manual-install hint
+    // when the model is not already present.
     bool noiseSuppress (const std::string& modelId, const std::string& device,
                         float attenLimDb = 0.f, bool df3PostFilter = false,
                         std::function<bool(float)> onProgress = nullptr,
-                        std::string* errOut = nullptr);
+                        std::string* errOut = nullptr,
+                        bool autoDownload = true);
 
     // BLOCKING — call from a worker thread. Transcribes the WHOLE file with
     // Whisper (modelId selects the model; language "auto" or a BCP-47 code;
@@ -118,7 +140,28 @@ public:
     bool transcribe (const std::string& modelId, const std::string& language,
                      bool translate,
                      std::function<bool(float)> onProgress = nullptr,
-                     std::string* errOut = nullptr);
+                     std::string* errOut = nullptr,
+                     bool autoDownload = true);
+
+    // BLOCKING — call from a worker thread. Transcribes every .wav file in
+    // `folder` (recursively) WITHOUT opening it in the editor: each file is
+    // loaded headlessly, mixed to mono, transcribed with Whisper, and its SCTT
+    // chunk replaced in place on disk (all other RIFF chunks preserved).
+    // skipExisting = true leaves files that already carry an SCTT chunk alone.
+    // onProgress reports overall 0..1; onStatus is called before each file;
+    // cancelOut, when set, stops the run after the current file. Returns false
+    // (and fills errOut) only for setup failures such as "no WAV files found";
+    // per-file problems are tallied in summaryOut instead.
+    bool batchTranscribeFolder (const juce::File& folder,
+                                const std::string& modelId,
+                                const std::string& language, bool translate,
+                                bool skipExisting,
+                                std::function<bool(float)> onProgress = nullptr,
+                                std::function<void(const juce::String&)> onStatus = nullptr,
+                                std::atomic<bool>* cancelOut = nullptr,
+                                BatchTranscribeSummary* summaryOut = nullptr,
+                                std::string* errOut = nullptr,
+                                bool autoDownload = true);
 #endif
     void undoStep(); void redoStep();
     // Batched variants used by the History tab: apply up to n patches in one

@@ -38,4 +38,12 @@ bool parseScttJson(const std::string& json, ScttData& out, std::string* errOut =
 // Read the "SCTT" chunk from a WAV file. Returns false when absent or unreadable.
 bool readScttChunk(const juce::File& wavFile, ScttData& out, std::string* errOut = nullptr);
 
+// Replace (or append) the "SCTT" chunk of an existing WAV file with `json`.
+// Surgical RIFF rewrite: every other chunk is stream-copied byte-for-byte to a
+// temp file (constant memory), the old SCTT chunk is dropped, and the new one
+// is appended at the end. The original file is replaced atomically via rename.
+// Returns false on I/O errors or when the file is not RIFF/WAVE.
+bool replaceScttChunkInWav(const juce::File& wavFile, const std::string& json,
+                           std::string* errOut = nullptr);
+
 

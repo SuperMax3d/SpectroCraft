@@ -80,14 +80,23 @@ public:
     juce::AlertWindow* createNoiseSuppressDialog();
     void showNoiseSuppressDialog();
     void runNoiseSuppressAsync (const std::string& modelId, const std::string& device,
-                                float attenLimDb = 0.f, bool df3PostFilter = false);
+                                float attenLimDb = 0.f, bool df3PostFilter = false,
+                                bool autoDownload = true);
 
     /** Builds (but does not run modally) the Transcription dialog. The caller
         owns and must delete it; used by showTranscribeDialog() and tests. */
     juce::AlertWindow* createTranscribeDialog();
     void showTranscribeDialog();
     void runTranscriptionAsync (const std::string& modelId, const std::string& language,
-                                bool translate);
+                                bool translate, bool autoDownload = true);
+
+    /** Builds (but does not run modally) the Transcribe Folder options dialog.
+        The caller owns and must delete it; used by showTranscribeFolderDialog(). */
+    juce::AlertWindow* createTranscribeFolderDialog (const juce::File& folder);
+    void showTranscribeFolderDialog();   // FileChooser -> options dialog -> async run
+    void runBatchTranscribeAsync (const juce::File& folder, const std::string& modelId,
+                                  const std::string& language, bool translate,
+                                  bool skipExisting, bool autoDownload);
 #endif
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
@@ -108,6 +117,7 @@ public:
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         ToolsNoiseSuppress,   // AI noise suppression (built with -DSPECTRO_ENABLE_AI=ON)
         ToolsTranscribe,      // AI Whisper transcription (whole file)
+        ToolsTranscribeFolder,// AI batch transcription of a folder of WAV files
 #endif
         HelpAbout = 6000,
         ColourMapClassic = 7000, ColourMapViridis, ColourMapPlasma, ColourMapInferno,
