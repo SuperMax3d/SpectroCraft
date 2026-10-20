@@ -3263,6 +3263,92 @@ static void testRightDragZoom()
     wav.deleteFile();
 }
 
+// ---------------- Time-pan speed + reversal responsiveness ----------------
+// Middle-drag (and left-drag on the time ruler) pans the shared time window
+// at half cursor speed, incrementally: deltas absorbed by an edge clamp do
+// not accumulate, so reversing direction responds immediately instead of
+// first unwinding a dead zone.
+static void testTimePanSpeedAndReversal()
+{
+    const juce::File wav = makeTempFile ("time_pan.wav");
+    writeWav (wav, 1, 8000.0, 44100, [] (int, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load wav for time-pan test");
+
+    const juce::ModifierKeys mmb (juce::ModifierKeys::middleButtonModifier);
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+
+    // Plot: x in [60, 400) -> width 340 px. Window [2, 6] s (w = 4 s).
+
+    // --- Waveform middle-drag: half speed, edge pin, immediate reversal ---
+    {
+        WaveformView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (2.0, 6.0);
+        view.setVisibleChannels ({ 0 });
+
+        // Cursor starts at the plot centre: x = 230 -> t = 4 s.
+        view.mouseDown (mkMouse (view, 230, 100, mmb));
+
+        // Drag right to the plot edge (x = 400): dx = +170 px. At half speed
+        // the content moves 85 px = 1.0 s -> window [1, 5]. (At 1:1 it would
+        // already be pinned at [0, 4].)
+        view.mouseDrag (mkMouse (view, 400, 100, mmb));
+        CHECK (std::abs (view.getViewStart() - 1.0) < 1e-9,
+               "middle-drag pans at half cursor speed");
+
+        // Keep dragging right past the view edge: another dx = +170 px ->
+        // another 1.0 s -> pinned at [0, 4].
+        view.mouseDrag (mkMouse (view, 570, 100, mmb));
+        CHECK (std::abs (view.getViewStart() - 0.0) < 1e-9,
+               "panning past the edge pins at file start");
+
+        // Reverse direction: a small left drag must move the window back
+        // immediately (no dead-zone unwinding). dx = -20 px -> +20*0.5*4/340 s.
+        view.mouseDrag (mkMouse (view, 550, 100, mmb));
+        CHECK (std::abs (view.getViewStart() - 20.0 * 0.5 * 4.0 / 340.0) < 1e-9,
+               "reversing direction responds immediately after edge pin");
+
+        view.mouseUp (mkMouse (view, 550, 100, mmb));
+    }
+
+    // --- Waveform ruler drag: same half speed ---
+    {
+        WaveformView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (2.0, 6.0);
+        view.setVisibleChannels ({ 0 });
+
+        // Left-drag on the time ruler (y < 24) pans at half speed too.
+        view.mouseDown (mkMouse (view, 230, 5, lmb));
+        view.mouseDrag (mkMouse (view, 315, 5, lmb));   // dx = +85 px -> -0.5 s
+        CHECK (std::abs (view.getViewStart() - 1.5) < 1e-9,
+               "ruler drag pans at half cursor speed");
+
+        view.mouseUp (mkMouse (view, 315, 5, lmb));
+    }
+
+    // --- Spectral middle-drag: same half speed ---
+    {
+        SpectralView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (2.0, 6.0);
+        view.setVisibleChannels ({ 0 });
+
+        view.mouseDown (mkMouse (view, 230, 100, mmb));
+        view.mouseDrag (mkMouse (view, 400, 100, mmb));   // dx = +170 px -> -1.0 s
+        CHECK (std::abs (view.getViewStart() - 1.0) < 1e-9,
+               "spectral middle-drag pans at half cursor speed");
+
+        view.mouseUp (mkMouse (view, 400, 100, mmb));
+    }
+
+    wav.deleteFile();
+}
+
 // ---------------- Axis drag pan + log minor ticks ----------------
 // Left-dragging the left axis of either view pans its vertical range
 // (amplitude for the waveform, frequency for the spectrogram) without moving
@@ -5572,6 +5658,7 @@ static int scRunUnitTestsImpl()
     progress ("spectral scale labels"); testSpectralScaleLabels();
     progress ("spectral dB window"); testSpectralDbWindow();
     progress ("right-drag box zoom"); testRightDragZoom();
+    progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("FFT view interactions"); testFFTViewInteractions();
     progress ("FFT extreme zoom axis + rubber band"); testFFTViewExtremeZoom();

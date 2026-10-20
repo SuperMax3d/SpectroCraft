@@ -13,6 +13,10 @@
 #include <algorithm>
 #include <cmath>
 
+// Time-pan speed: content moves this many px per cursor pixel (0.5 = half
+// speed, matching the waveform view's grab pan).
+static constexpr double kPanSpeedFactor = 0.5;
+
 juce::Rectangle<int> SpectralView::plotRect() const
 {
     return { kLeftAxisWidth, 0,
@@ -191,6 +195,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     else if (e.mods.isMiddleButtonDown() || e.mods.isRightButtonDown())
     {
         dragMode = DragMode::Pan;
+        panLastX = e.x;
     }
 
     // Push the new playhead/selection to both views.
@@ -216,9 +221,19 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
         }
         case DragMode::Pan:
         {
-            // setWindow() inside panByTime already notifies MainWindow.
-            const double dt = dragStartTime - xToTime (e.x);
-            panByTime (dt);
+            // Grab-and-drag at half speed (like the waveform view): content
+            // follows the cursor but moves 0.5 px per cursor pixel, so panning
+            // stays gentle even on wide windows. The delta is measured from
+            // the last delivered position and that anchor always advances to
+            // the cursor — deltas eaten by an edge clamp do not accumulate,
+            // so reversing direction responds immediately instead of first
+            // unwinding a dead zone (and dragging past the view's edge keeps
+            // panning smoothly). setWindow() inside panByTime notifies MainWindow.
+            const auto pr = plotRect();
+            if (pr.getWidth() > 0)
+                panByTime (-(e.x - panLastX) * kPanSpeedFactor
+                           * (viewEnd - viewStart) / (double) pr.getWidth());
+            panLastX = e.x;
             break;
         }
         case DragMode::VPan:
