@@ -1240,6 +1240,7 @@ void MainWindow::runResampleAsync (double newRate)
                 // garbage spectrogram until some setting change happens to
                 // invalidate it. It also clamps the time window + selection.
                 refreshAfterEdit();
+                if (fftPanel) fftPanel->onSampleRateChanged();
                 updateTitle();
             }
             else

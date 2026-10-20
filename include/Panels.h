@@ -270,6 +270,9 @@ public:
 
     // Reset both display ranges to their defaults ("Zoom Out Full").
     void resetDisplayRanges();
+    // Called after a resample: re-clamp the frequency window to the new
+    // Nyquist and force stored snapshots to be recomputed at the new rate.
+    void onSampleRateChanged();
 
     // Cursor readout text for position (x, y). When a curve passes within a
     // few pixels of the cursor, snapped is set and snapDotX/Y hold that point.

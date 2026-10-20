@@ -4602,6 +4602,14 @@ static void testFFTAnalysisRateChange()
     CHECK (std::abs (peakAfter - 51) <= 1, "post-resample spectrum peaks at the new rate's bin");
     CHECK (peakBefore != peakAfter, "spectrum recomputed after rate change (cache invalidated)");
 
+    // The display window must follow the new Nyquist: otherwise the curve is
+    // squashed into part of the plot (the "shifted analysis" bug).
+    view.onSampleRateChanged();
+    CHECK (view.getFreqHi() <= 16000.0 * 0.5 + 1e-6,
+           "post-resample freq window clamped to new Nyquist");
+    CHECK (view.getFreqHi() >= 2000.0, "post-resample freq window not degenerate");
+    CHECK (view.getFreqLo() >= 0.0, "freq window lower bound sane");
+
     // With nothing changed the cache must be stable again.
     view.recomputeIfNeeded();
     auto again = view.getSpectrum();

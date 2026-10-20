@@ -588,6 +588,21 @@ void FFTAnalysisView::resetDisplayRanges()
     repaint();
 }
 
+void FFTAnalysisView::onSampleRateChanged()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+    // After a resample the old frequency window may extend beyond the new
+    // Nyquist (the curve would be squashed into part of the plot), and any
+    // stored snapshots were computed at the old rate. Reset to this mode's
+    // defaults for the current rate and force every snapshot to recompute
+    // from its source engine.
+    const double rate = app.audioEngine().sampleRate();
+    fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+    settingsGen++;
+    recomputeSnapshots();
+    repaint();
+}
+
 // Level-window mapping: dB value -> pixel y inside the plot area.
 float FFTAnalysisView::levelToY (double db) const
 {

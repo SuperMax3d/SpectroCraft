@@ -729,6 +729,11 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
             if (!showLabels || !withLabel) return;
             if (hasChanLabel && std::abs (y - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
                 return; // room for the channel label
+            // Drop labels that would collide with the neighbouring row's edge
+            // label at a shared boundary (or be clipped at the component
+            // edge); keep the tick line itself.
+            if ((float) y < rr.getY() + 13.0f || (float) y > rr.getBottom() - 1.0f)
+                return;
             g.setColour (minor ? juce::Colour::fromRGB (130, 130, 138)
                                : juce::Colour::fromRGB (200, 200, 200));
             juce::String label = f >= 1000 ? juce::String (f / 1000.0, 1) + " kHz" : juce::String ((int) f) + " Hz";

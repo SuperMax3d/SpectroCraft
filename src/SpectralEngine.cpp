@@ -371,7 +371,8 @@ void SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
     std::vector<std::vector<std::shared_ptr<SpectralTile>>> perCh;
     for (int ch : channels)
     {
-        perCh.push_back (getTiles (engine, ch, s0, s1, level, s));
+        auto ts = getTiles (engine, ch, s0, s1, level, s);
+        perCh.push_back (std::move (ts));
     }
 
 
@@ -422,7 +423,7 @@ void SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
             }
             acc += t->numFrames;
         }
-        return 0.0; // beyond the data: renders as silence (dark)
+        return -300.0; // beyond the data: render as silence (dark), never a bright block
     };
 
     const int64_t firstTileStart = (s0 / ((int64_t) kFramesPerTile * hop)) * ((int64_t) kFramesPerTile * hop);
