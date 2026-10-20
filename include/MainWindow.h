@@ -66,6 +66,19 @@ public:
     void zoomOutFull();       // show the whole file in both views
     void cycleViewVisibility (bool forward);  // F9: both -> waveform -> spectrogram
     void handleContextMenuAction (int id);  // right-click menu actions from either view
+    /** Moves a left-panel tab from (from, fromIndex) to position insertIndex in
+        `to` - within the same bar or across bars. Persists the new layout.
+    */
+    void moveLeftPanelTab (juce::TabbedComponent* from, int fromIndex,
+                           juce::TabbedComponent* to, int insertIndex);
+    void saveLeftLayout();                    // persist tab order + column geometry
+    void applySavedLeftLayout();              // restore a persisted arrangement at startup
+    void setLeftPanelsVisible (bool visible); // View > Left Panels toggle
+    juce::StringArray topPanelTabNames() const { return topTabs.getTabNames (); }
+    juce::StringArray bottomPanelTabNames() const { return bottomTabs.getTabNames (); }
+    juce::TabbedComponent* topPanelTabs() { return &topTabs; }
+    juce::TabbedComponent* bottomPanelTabs() { return &bottomTabs; }
+
     void showChangeGainDialog();
     /** Builds (but does not run modally) the Change Gain dialog. The caller
         owns and must delete it; used by showChangeGainDialog() and tests. */
@@ -102,6 +115,7 @@ public:
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
     void handleTopSplitterDrag (const juce::MouseEvent& e);   // top tabs / bottom tabs
+    const char* panelIdFor (juce::Component*) const;          // stable id for a panel component
     void syncSharedState();   // push app state into views + panels
 
     enum MenuIDs
@@ -111,7 +125,9 @@ public:
         EditSelectAll, EditSnapToZeroCrossings,
         ViewZoomIn = 3000, ViewZoomOut, ViewZoomFit, ViewZoomToSelection, ViewZoomOutFull,
         ViewVerticalZoomIn,
-        ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels, ViewColourMap,
+        ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels,
+        ViewShowLeftPanels,   // hide/show the whole left panel column
+        ViewColourMap,
         TransportPlay = 4000, TransportStop, TransportPause, TransportLoop,
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsResample,
@@ -168,8 +184,9 @@ private:
     // implementing juce::TooltipClient once this exists).
     std::unique_ptr<juce::TooltipWindow> tooltipWindow;
 
-    juce::TabbedComponent topTabs { juce::TabbedButtonBar::TabsAtTop },
-                            bottomTabs { juce::TabbedButtonBar::TabsAtTop };
+    TabDragContext tabDragCtx;                 // shared state for dragging panel tabs
+    DragTabBar topTabs, bottomTabs;           // left-column tab groups (draggable tabs)
+    bool leftPanelsVisible = true;            // View > Left Panels toggle
 
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)

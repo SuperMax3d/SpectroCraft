@@ -98,7 +98,10 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
                       juce::Desktop::getInstance().getDefaultLookAndFeel()
                           .findColour (juce::ResizableWindow::backgroundColourId),
                       DocumentWindow::allButtons),
-      app (appIn)
+      app (appIn),
+      tabDragCtx (),
+      topTabs (juce::TabbedButtonBar::TabsAtTop, &tabDragCtx),
+      bottomTabs (juce::TabbedButtonBar::TabsAtTop, &tabDragCtx)
 {
     setUsingNativeTitleBar (true);
     setResizable (true, true);
@@ -161,6 +164,21 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     topTabs.setCurrentTabIndex (1, false);
     bottomTabs.setCurrentTabIndex (0, false);
 
+    // Drag-and-drop reordering of the panel tabs: within a group or across
+    // groups. The arrangement is persisted by saveLeftLayout().
+    tabDragCtx.bars = { &topTabs, &bottomTabs };
+    tabDragCtx.onMove = [this] (juce::TabbedComponent* from, int fi,
+                                juce::TabbedComponent* to, int ii)
+                        { moveLeftPanelTab (from, fi, to, ii); };
+
+    // Restore the user's saved arrangement + column geometry.
+    applySavedLeftLayout();
+    leftPanelW = std::clamp ((int) app.recentStore->getIntValue ("left_panel_w", leftPanelW), 220, 4000);
+    topRatio   = std::clamp (app.recentStore->getIntValue ("top_ratio_mil",
+                                                          (int) std::lround (topRatio * 1000.0)) / 1000.0,
+                             0.15, 0.85);
+    leftPanelsVisible = app.recentStore->getIntValue ("left_panels_visible", 1) != 0;
+
     juce::Component::addAndMakeVisible (&topTabs);
     juce::Component::addAndMakeVisible (&bottomTabs);
 
@@ -174,9 +192,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     leftSplitter = std::make_unique<ViewSplitter>();
     leftSplitter->vertical = true;
     leftSplitter->onDrag = [this] (const juce::MouseEvent& e) { handleLeftSplitterDrag (e); };
+    leftSplitter->onRelease = [this] () { saveLeftLayout (); };
     leftSplitter->setTooltip ("Drag to adjust the width of the left panel column.");
     topSplitter = std::make_unique<ViewSplitter>();
     topSplitter->onDrag = [this] (const juce::MouseEvent& e) { handleTopSplitterDrag (e); };
+    topSplitter->onRelease = [this] () { saveLeftLayout (); };
     topSplitter->setTooltip ("Drag to adjust the height of the top tab group.");
     juce::Component::addAndMakeVisible (leftSplitter.get());
     juce::Component::addAndMakeVisible (topSplitter.get());
@@ -409,24 +429,33 @@ void MainWindow::resized()
 
     // Left panel column with the two tab groups and draggable dividers:
     // a vertical one between the column and the main area, a horizontal one
-    // between the top and bottom tab groups.
-    auto rest = bounds;
-    const int splitW = 6;
-    const int leftW = std::clamp (leftPanelW, 220,
-                                  std::max (221, (int) (rest.getWidth() * 0.6)));
-    auto leftArea = rest.removeFromLeft (leftW + splitW);
-    if (leftSplitter)
-        leftSplitter->setBounds (leftArea.getRight() - splitW, leftArea.getY(),
-                                 splitW, leftArea.getHeight());
+    // between the top and bottom tab groups. The whole column can be hidden
+    // from View > Left Panels to focus on the tracks.
+    const bool showLeft = leftPanelsVisible;
+    topTabs.setVisible (showLeft);
+    bottomTabs.setVisible (showLeft);
+    if (leftSplitter) leftSplitter->setVisible (showLeft);
 
-    auto col = juce::Rectangle<int> (leftArea.getX(), leftArea.getY(),
-                                     leftW, leftArea.getHeight());
-    const int topH = (int) std::lround (col.getHeight() * topRatio);
-    topTabs.setBounds (col.removeFromTop (topH));
-    col.removeFromTop (splitW);   // strip for the horizontal divider
-    bottomTabs.setBounds (col);
-    if (topSplitter)
-        topSplitter->setBounds (leftArea.getX(), leftArea.getY() + topH, leftW, splitW);
+    auto rest = bounds;
+    if (showLeft)
+    {
+        const int splitW = 6;
+        const int leftW = std::clamp (leftPanelW, 220,
+                                      std::max (221, (int) (rest.getWidth() * 0.6)));
+        auto leftArea = rest.removeFromLeft (leftW + splitW);
+        if (leftSplitter)
+            leftSplitter->setBounds (leftArea.getRight() - splitW, leftArea.getY(),
+                                     splitW, leftArea.getHeight());
+
+        auto col = juce::Rectangle<int> (leftArea.getX(), leftArea.getY(),
+                                         leftW, leftArea.getHeight());
+        const int topH = (int) std::lround (col.getHeight() * topRatio);
+        topTabs.setBounds (col.removeFromTop (topH));
+        col.removeFromTop (splitW);   // strip for the horizontal divider
+        bottomTabs.setBounds (col);
+        if (topSplitter)
+            topSplitter->setBounds (leftArea.getX(), leftArea.getY() + topH, leftW, splitW);
+    }
 
     // Main area: waveform on top, draggable splitter, spectral below; a time
     // scrollbar along the bottom and one vertical scrollbar per view on its
@@ -519,6 +548,147 @@ void MainWindow::handleTopSplitterDrag (const juce::MouseEvent& e)
     const double colH = std::max (10.0, (double) getHeight() - 24.0 - 20.0);
     topRatio = std::clamp ((yInWindow - 24.0) / colH, 0.15, 0.85);
     resized();
+}
+
+// ------------------------------------------------- Left panel layout
+
+const char* MainWindow::panelIdFor (juce::Component* c) const
+{
+    if (c == fileListPanel.get())       return "files";
+    if (c == fftPanel.get())            return "fft";
+    if (c == historyPanel.get())        return "history";
+    if (c == controlsPanel.get())       return "controls";
+    if (c == markersPanel.get())        return "markers";
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    if (c == transcriptionPanel.get())  return "transcription";
+#endif
+    return nullptr;
+}
+
+void MainWindow::moveLeftPanelTab (juce::TabbedComponent* from, int fromIndex,
+                                   juce::TabbedComponent* to, int insertIndex)
+{
+    if (!from || !to) return;
+    const int nFrom = from->getNumTabs ();
+    if (fromIndex < 0 || fromIndex >= nFrom) return;
+
+    if (from == to)
+    {
+        // moveTab() indexes the list AFTER removal: dropping one slot to the
+        // right therefore lands at insertIndex - 1.
+        int target = (insertIndex > fromIndex) ? insertIndex - 1 : insertIndex;
+        target = std::clamp (target, 0, nFrom - 1);
+        if (target == fromIndex) return;
+        from->moveTab (fromIndex, target);
+    }
+    else
+    {
+        const juce::String name   = from->getTabNames().getReference (fromIndex);
+        const juce::Colour colour = from->getTabBackgroundColour (fromIndex);
+        juce::Component* content  = from->getTabContentComponent (fromIndex);
+        if (!content) return;
+
+        insertIndex = std::clamp (insertIndex, 0, to->getNumTabs ());
+        from->removeTab (fromIndex);
+        to->addTab (name, colour, content, false, insertIndex);
+    }
+
+    saveLeftLayout ();
+}
+
+void MainWindow::saveLeftLayout()
+{
+    auto idsFor = [this] (juce::TabbedComponent& bar) -> juce::String
+    {
+        juce::String s;
+        for (int i = 0; i < bar.getNumTabs (); ++i)
+        {
+            const char* id = panelIdFor (bar.getTabContentComponent (i));
+            if (!id) continue;
+            if (s.isNotEmpty()) s << ";";
+            s << id;
+        }
+        return s;
+    };
+
+    app.recentStore->setValue ("left_tab_layout", idsFor (topTabs) + "|" + idsFor (bottomTabs));
+    app.recentStore->setValue ("left_panel_w", leftPanelW);
+    app.recentStore->setValue ("top_ratio_mil", (int) std::lround (topRatio * 1000.0));
+    app.recentStore->setValue ("left_panels_visible", leftPanelsVisible ? 1 : 0);
+    app.recentStore->save ();
+}
+
+void MainWindow::applySavedLeftLayout()
+{
+    struct Entry { const char* id; juce::String name; juce::Component* comp; bool defaultTop; };
+    std::vector<Entry> entries = {
+        { "files",       "Files",              fileListPanel.get(),  true  },
+        { "fft",         "Frequency Analysis", fftPanel.get(),       true  },
+        { "history",     "History",            historyPanel.get(),   true  },
+        { "controls",    "Spectral Controls",  controlsPanel.get(),  false },
+        { "markers",     "Markers",            markersPanel.get(),   false },
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+        { "transcription","Transcription",     transcriptionPanel.get(), false },
+#endif
+    };
+
+    const juce::String saved = app.recentStore->getValue ("left_tab_layout");
+    if (saved.isEmpty()) return;   // first run: keep the default order
+
+    std::vector<std::string> wanted[2];
+    auto addGroup = [&wanted] (const juce::String& s, int which)
+    {
+        int start = 0;
+        while (start <= s.length ())
+        {
+            const int semi = s.indexOfChar (start, ';');
+            const juce::String tok = (semi < 0 ? s.substring (start) : s.substring (start, semi)).trim ();
+            if (!tok.isEmpty()) wanted[which].push_back (tok.toStdString());
+            if (semi < 0) break;
+            start = semi + 1;
+        }
+    };
+    const int sep = saved.indexOfChar ('|');
+    addGroup (sep < 0 ? saved : saved.substring (0, sep), 0);
+    if (sep >= 0) addGroup (saved.substring (sep + 1), 1);
+
+    topTabs.clearTabs ();
+    bottomTabs.clearTabs ();
+
+    std::vector<bool> used (entries.size (), false);
+    auto addEntry = [&](juce::TabbedComponent& bar, const Entry& e)
+    {
+        bar.addTab (e.name, kDarkTabBg, e.comp, false);
+    };
+
+    for (int g = 0; g < 2; ++g)
+        for (const auto& id : wanted[g])
+            for (size_t e = 0; e < entries.size (); ++e)
+                if (!used[e] && std::string (entries[e].id) == id)
+                {
+                    used[e] = true;
+                    addEntry (g == 0 ? topTabs : bottomTabs, entries[e]);
+                }
+
+    // Panels missing from the saved list (e.g. added by a newer version) go to
+    // their default group.
+    for (size_t e = 0; e < entries.size (); ++e)
+        if (!used[e]) addEntry (entries[e].defaultTop ? topTabs : bottomTabs, entries[e]);
+
+    // Frequency Analysis is the default tab in the top group when present.
+    int fftIdx = -1;
+    for (int i = 0; i < topTabs.getNumTabs (); ++i)
+        if (topTabs.getTabContentComponent (i) == fftPanel.get()) { fftIdx = i; break; }
+    topTabs.setCurrentTabIndex (fftIdx >= 0 ? fftIdx : 0, false);
+    bottomTabs.setCurrentTabIndex (0, false);
+}
+
+void MainWindow::setLeftPanelsVisible (bool visible)
+{
+    if (leftPanelsVisible == visible) return;
+    leftPanelsVisible = visible;
+    resized();
+    saveLeftLayout ();
 }
 
 void MainWindow::handleSplitterDrag (const juce::MouseEvent& e)
@@ -969,6 +1139,12 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         if (!showWaveformView) return; // hiding both is not allowed
         showSpectralView = !showSpectralView;
         resized();
+        return;
+    }
+
+    if (menuItemID == ViewShowLeftPanels)
+    {
+        setLeftPanelsVisible (!leftPanelsVisible);
         return;
     }
 
@@ -1912,6 +2088,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ViewShowWaveform, "Waveform View", true, showWaveformView);
         menu.addItem (ViewShowSpectral, "Spectrogram View", true, showSpectralView);
         menu.addItem (ViewShowAllChannels, "Show All Channels", app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ViewShowLeftPanels, "Left Panels", true, leftPanelsVisible);
         menu.addSeparator();
         juce::PopupMenu colourMapMenu;
         colourMapMenu.addItem (ColourMapClassic, "Classic (Default)", true, app.colourMap == ColourMap::Classic);
@@ -2055,15 +2232,18 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         }
         return true;
     }
-    if (key == juce::KeyPress::homeKey)
+    if (key == juce::KeyPress::homeKey || key == juce::KeyPress::endKey)
     {
-        app.setPlayhead (0.0);
-        syncSharedState();
-        return true;
-    }
-    if (key == juce::KeyPress::endKey)
-    {
-        app.setPlayhead (app.audioEngine().duration());
+        // Move the playhead AND pan both views to the very start/end of the
+        // file, keeping the current zoom span.
+        const bool home = (key == juce::KeyPress::homeKey);
+        const double dur  = app.audioEngine().duration();
+        const double span = std::max (1e-6, app.viewEnd - app.viewStart);
+
+        if (dur > 0.0)
+            applyTimeWindow (home ? 0.0 : std::max (0.0, dur - span),
+                             home ? std::min (span, dur) : dur);
+        app.setPlayhead (home ? 0.0 : dur);
         syncSharedState();
         return true;
     }

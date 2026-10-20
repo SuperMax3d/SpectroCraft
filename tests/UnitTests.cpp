@@ -2275,6 +2275,114 @@ static void testTimeScrollBarOnLoad()
     wav.deleteFile();
 }
 
+// ------------------------------------------------------- left panel layout
+// Panel tabs can be reordered within a group or moved between the two groups;
+// the arrangement must survive an app restart. Also covers View > Left Panels.
+static void testLeftPanelLayout()
+{
+    const juce::File store = makeTempFile ("left_layout.recent");
+    store.deleteFile ();   // deterministic per-run name: never trust leftovers
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    const juce::StringArray defaultBottom { "Spectral Controls", "Markers", "Transcription" };
+#else
+    const juce::StringArray defaultBottom { "Spectral Controls", "Markers" };
+#endif
+    const juce::StringArray defaultTop { "Files", "Frequency Analysis", "History" };
+    juce::StringArray expectBottom = defaultBottom;
+    for (int i = 0; i < expectBottom.size (); ++i)
+        if (expectBottom[i] == "Markers") { expectBottom.remove (i); break; }
+
+    // 1) Fresh store: the default arrangement.
+    {
+        Application app (store);
+        juce::MessageManager* mm = juce::MessageManager::getInstance();
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "left layout test"));
+
+        CHECK (win->topPanelTabNames () == defaultTop, "default top group order");
+        CHECK (win->bottomPanelTabNames () == defaultBottom, "default bottom group order");
+
+        // 2) Move Markers from the bottom group to position 1 in the top group.
+        win->moveLeftPanelTab (win->bottomPanelTabs (), 1, win->topPanelTabs (), 1);
+        const juce::StringArray expectTopAfterMove { "Files", "Markers",
+                                                     "Frequency Analysis", "History" };
+        CHECK (win->topPanelTabNames () == expectTopAfterMove, "tab moved across groups");
+        CHECK (win->bottomPanelTabNames () == expectBottom, "source group lost the tab");
+
+        // 3) Same-bar move: Files to just before Frequency Analysis.
+        win->moveLeftPanelTab (win->topPanelTabs (), 0, win->topPanelTabs (), 2);
+        const juce::StringArray expectTopFinal { "Markers", "Files",
+                                                 "Frequency Analysis", "History" };
+        CHECK (win->topPanelTabNames () == expectTopFinal, "same-bar move");
+
+        // 4) View > Left Panels toggle hides/shows the whole column.
+        win->setLeftPanelsVisible (false);
+        CHECK (!win->topPanelTabs ()->isVisible () && !win->bottomPanelTabs ()->isVisible (),
+               "left panels hidden by the menu toggle");
+        win->setLeftPanelsVisible (true);
+        CHECK (win->topPanelTabs ()->isVisible (), "left panels shown again");
+
+        win.reset();
+        delete mm;
+    }
+
+    // 5) A fresh app instance must restore the saved arrangement.
+    {
+        const juce::StringArray expectTopFinal { "Markers", "Files",
+                                                 "Frequency Analysis", "History" };
+        Application app (store);
+        juce::MessageManager* mm = juce::MessageManager::getInstance();
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "left layout test 2"));
+
+        CHECK (win->topPanelTabNames () == expectTopFinal,
+              "tab order persisted across restarts");
+        CHECK (win->bottomPanelTabNames () == expectBottom, "group membership persisted");
+
+        win.reset();
+        delete mm;
+    }
+
+    store.deleteFile ();
+}
+
+// ------------------------------------------------------- Home / End panning
+// Home and End must move the playhead AND pan both views to the start/end of
+// the file while keeping the current zoom span.
+static void testHomeEndPans()
+{
+    const juce::File wav = makeTempFile ("homeend_pan.wav");
+    writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); });
+
+    Application app;
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "home/end pan test"));
+    win->openFile (wav);
+    CHECK (app.audioEngine ().isFileLoaded (), "file loaded");
+
+    const double dur = app.audioEngine ().duration ();   // 5 s
+    CHECK (dur > 4.9 && dur < 5.1, "expected a ~5 s file");
+
+    win->applyTimeWindow (2.0, 4.0);
+    CHECK (std::abs (app.viewStart - 2.0) < 1e-6 && std::abs (app.viewEnd - 4.0) < 1e-6,
+           "zoomed to [2,4] first");
+
+    win->keyPressed (juce::KeyPress (juce::KeyPress::homeKey), nullptr);
+    CHECK (std::abs (app.viewStart) < 1e-6 && std::abs (app.viewEnd - 2.0) < 1e-6,
+           "Home pans the view to the start");
+    CHECK (std::abs (app.playhead) < 1e-9, "Home moves the playhead to zero");
+
+    win->keyPressed (juce::KeyPress (juce::KeyPress::endKey), nullptr);
+    CHECK (std::abs (app.viewEnd - dur) < 1e-6 && std::abs (app.viewStart - (dur - 2.0)) < 1e-6,
+           "End pans the view to the end");
+    CHECK (std::abs (app.playhead - dur) < 1e-9, "End moves the playhead to the end");
+
+    win.reset();
+    delete mm;
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------------- spectral point probe
 // SpectralView's cursor readout probes the tile cache for the dB level at an
 // exact time/frequency; a steady tone must give a strong peak on its own
@@ -5685,6 +5793,8 @@ static int scRunUnitTestsImpl()
     progress ("status bar");          testStatusBar();
     progress ("footer file name");    testStatusBarFileName();
     progress ("time scrollbar on load"); testTimeScrollBarOnLoad();
+    progress ("left panel layout"); testLeftPanelLayout();
+    progress ("home/end panning"); testHomeEndPans();
     progress ("spectral probe");      testSpectralProbe();
     progress ("arrow key selection"); testArrowKeySelection();
     progress ("ctrl+number channels"); testCtrlNumberChannelToggle();

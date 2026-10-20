@@ -18,6 +18,173 @@ juce::String formatTimeCode (double secs)
     return juce::String (m) + ":" + juce::String (s, 3).paddedLeft ('0', 6);
 }
 
+// ------------------------------------------------- Draggable left-panel tabs
+
+namespace {
+
+/** Small floating label that follows the cursor while a tab is dragged.
+*/
+class TabDragGhost : public juce::Component
+{
+public:
+    explicit TabDragGhost (const juce::String& text)
+        : label (text)
+    {
+        setInterceptsMouseClicks (false, false);   // purely visual
+        const int w = std::max (60, 24 + (int) text.length () * 7);
+        setSize (w, 26);
+    }
+
+    void setHighlighted (bool h)
+    {
+        if (highlighted != h) { highlighted = h; repaint(); }
+    }
+
+private:
+    bool highlighted = false;
+    juce::String label;
+
+    void paint (juce::Graphics& g) override
+    {
+        const juce::Rectangle<int> r = getLocalBounds ().reduced (1);
+        g.setColour (juce::Colour::fromRGB (58, 58, 66).withAlpha (0.94f));
+        g.fillRect (r);
+        g.setColour (highlighted ? juce::Colour::fromRGB (120, 170, 255)
+                                 : juce::Colour::fromRGB (160, 160, 170));
+        g.drawRect (r);
+        g.setColour (juce::Colour (255, 255, 255));
+        g.drawText (label, getLocalBounds ().reduced (8, 2), juce::Justification::centred);
+    }
+
+    JUCE_DECLARE_NON_COPYABLE (TabDragGhost)
+};
+
+} // namespace
+
+DragTabButton::DragTabButton (const juce::String& name, juce::TabbedButtonBar& ownerBar,
+                              juce::TabbedComponent* ownerTabbed, TabDragContext* ctx)
+    : TabBarButton (name, ownerBar), context (ctx), ownerTabbed_ (ownerTabbed) {}
+
+DragTabButton::~DragTabButton()
+{
+    delete ghost;
+}
+
+void DragTabButton::mouseDown (const juce::MouseEvent& e)
+{
+    dragArmed = true;
+    dragging  = false;
+    startLocalPos = juce::Point<float> ((float) e.position.x, (float) e.position.y);
+    Button::mouseDown (e);
+}
+
+void DragTabButton::mouseDrag (const juce::MouseEvent& e)
+{
+    if (!dragging && dragArmed)
+    {
+        const float dx = (float) e.position.x - startLocalPos.x;
+        const float dy = (float) e.position.y - startLocalPos.y;
+        if (dx * dx + dy * dy > 36.0f)   // ~6 px movement threshold
+            beginDrag ();
+    }
+
+    if (dragging)
+    {
+        // Keep the ghost under the cursor and highlight a valid drop target.
+        const auto global = localPointToGlobal (
+            juce::Point<int> ((int) e.position.x, (int) e.position.y));
+        if (auto* parent = ghost != nullptr ? ghost->getParentComponent () : nullptr)
+        {
+            const auto topTL = parent->localPointToGlobal (juce::Point<int> (0, 0));
+            ghost->setBounds ((int) global.x - topTL.x + 14,
+                             (int) global.y - topTL.y + 16,
+                             ghost->getWidth(), ghost->getHeight());
+        }
+        DragTabButton* target = findHovered (context, global);
+        if (ghost)
+            static_cast<TabDragGhost*> (ghost)->setHighlighted (target != nullptr && target != this);
+    }
+    else
+    {
+        Button::mouseDrag (e);   // plain hover: keep the default pressed look
+    }
+}
+
+void DragTabButton::mouseUp (const juce::MouseEvent& e)
+{
+    if (dragging)
+    {
+        endDrag (e);            // drop handled ourselves; no tab click fires
+        return;
+    }
+    dragArmed = false;
+    Button::mouseUp (e);        // normal click -> selects the tab as usual
+}
+
+void DragTabButton::beginDrag()
+{
+    dragging = true;
+    auto* top = getTopLevelComponent();
+    if (!top) return;
+    ghost = new TabDragGhost (getButtonText());
+    top->addChildComponent (ghost);   // added last -> painted above the other children
+}
+
+void DragTabButton::endDrag (const juce::MouseEvent& e)
+{
+    dragging  = false;
+    dragArmed = false;
+
+    const auto global = localPointToGlobal (
+        juce::Point<int> ((int) e.position.x, (int) e.position.y));
+
+    if (context && context->onMove && ownerTabbed_)
+    {
+        DragTabButton* target = findHovered (context, global);
+        if (target != nullptr && target != this)
+        {
+            auto& toBar = target->getTabbedButtonBar();
+            const auto tl = target->localPointToGlobal (juce::Point<int> (0, 0));
+            int insertIdx = toBar.indexOfTabButton (target);
+            if (global.x > tl.x + target->getWidth() / 2) ++insertIdx;   // drop on the right half
+
+            context->onMove (ownerTabbed_, getTabbedButtonBar().indexOfTabButton (this),
+                             static_cast<DragTabButton*> (target)->ownerTabbed_, insertIdx);
+        }
+    }
+
+    delete ghost;
+    ghost = nullptr;
+}
+
+DragTabButton* DragTabButton::findHovered (TabDragContext* ctx, const juce::Point<int>& globalPos)
+{
+    if (!ctx) return nullptr;
+    for (auto* bar : ctx->bars)
+    {
+        if (!bar) continue;
+        auto& bb = bar->getTabbedButtonBar();
+        for (int i = 0; i < bb.getNumTabs (); ++i)
+        {
+            auto* btn = bb.getTabButton (i);
+            if (!btn) continue;
+            const auto tl = btn->localPointToGlobal (juce::Point<int> (0, 0));
+            juce::Rectangle<int> r (tl.x, tl.y, btn->getWidth(), btn->getHeight());
+            if (r.contains (globalPos))
+                return static_cast<DragTabButton*> (btn);
+        }
+    }
+    return nullptr;
+}
+
+DragTabBar::DragTabBar (juce::TabbedButtonBar::Orientation orientation, TabDragContext* ctx)
+    : juce::TabbedComponent (orientation), context (ctx) {}
+
+juce::TabBarButton* DragTabBar::createTabButton (const juce::String& tabName, int tabIndex)
+{
+    return new DragTabButton (tabName, getTabbedButtonBar(), this, context);
+}
+
 static double parseTimeCode (const juce::String& text)
 {
     // Accepts "12", "12.5", "0:04.536", "1:02"

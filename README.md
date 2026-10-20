@@ -168,6 +168,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     box starts beside its label and extends to the bottom of the panel;
     Add Marker, delete; right-click a row for Copy All Markers / Paste Markers
     from Clipboard).
+  - **Draggable panel tabs**: drag any tab to reorder the panels within its
+    group, or drop it onto a tab of the other group to move it across — e.g.
+    put Markers next to Frequency Analysis. The arrangement (plus the column
+    width and the top/bottom split) is remembered between sessions.
+  - **View > Left Panels** hides all left panels at once so you can focus on
+    the tracks; toggle it again to bring them back.
   - Per-channel display selection lives in the **View menu**: one checkable item
     per channel ("Channel 1", "Channel 2", …) that toggles each channel
     independently for any number of channels and applies to both views.
@@ -583,7 +589,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Move playhead one sample left / right | Ctrl+← / Ctrl+→ |
 | Select while moving the playhead (anchor = position at first Shift press; released when Shift is let go) | Shift+← / Shift+→ |
 | Fine selection, one sample per step | Ctrl+Shift+← / Ctrl+Shift+→ |
-| Jump to start / end of file | Home / End |
+| Move playhead and pan both views to the start / end (keeps the current zoom span) | Home / End |
 | Loop (selection, or whole file if nothing selected) on/off | L |
 | Add marker (region if selected, else point at cursor) | M or F8 |
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
