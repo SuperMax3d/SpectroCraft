@@ -21,9 +21,12 @@ namespace sc { namespace ai {
 
 // ggmlModel: path to ggml-<name>.bin (full model)
 // irXml:     path to ggml-<name>-encoder-openvino.xml ("") for pure ggml
+// device:    OpenVINO encoder device ("CPU", "GPU" or "NPU") - resolved by the
+//             caller from the user's preference via sc::resolveAiDevice.
 bool runWhisperPipeline(AudioEngine& eng, const std::vector<int>& chans,
                         const juce::File& ggmlModel, const juce::File& irXml,
                         const WhisperTranscriber::Options& opts,
+                        const std::string& device,
                         std::vector<ScttSegment>& outSegments,
                         std::function<bool(float)> onProgress = nullptr,
                         std::string* errOut = nullptr);

@@ -4,12 +4,47 @@
 #include "AI/OvRuntime.h"
 
 #include <juce_core/juce_core.h>
+#include <cctype>
 #include <cstdio>
 #if defined(_WIN32)
     #include <windows.h>   // LoadLibraryA / GetLastError (JUCE has already configured the Windows headers)
 #endif
 
-namespace sc { namespace ai {
+namespace sc {
+
+namespace {
+bool hasDevice(const std::vector<std::string>& v, const char* name)
+{
+    for (const auto& d : v) if (d == name) return true;
+    return false;
+}
+} // namespace
+
+std::string resolveAiDevice(const std::string& prefIn,
+                            const std::vector<std::string>& available,
+                            std::string* noteOut)
+{
+    if (noteOut != nullptr) noteOut->clear ();
+
+    std::string pref = prefIn;
+    for (auto& c : pref) c = (char) std::toupper ((unsigned char) c);
+
+    // "auto" (or empty/unknown): prefer GPU over NPU over CPU. The runtime
+    // always lists "CPU" when it initialised; an empty list means init failed,
+    // in which case the pipelines produce their usual clear errors.
+    if (pref.empty () || pref == "AUTO")
+        return hasDevice (available, "GPU") ? "GPU"
+               : hasDevice (available, "NPU") ? "NPU" : "CPU";
+
+    // A specific device: use it when the runtime exposes it, else fall back to CPU.
+    if (hasDevice (available, pref.c_str ())) return pref;
+
+    if (noteOut != nullptr)
+        *noteOut = pref + " is not available - using CPU instead.";
+    return "CPU";
+}
+
+namespace ai {
 
 OvRuntime& OvRuntime::instance()
 {

@@ -469,9 +469,10 @@ linear and log modes.
 The AI module is built by default (`-DSPECTRO_ENABLE_AI=ON`; disable with
 `-DSPECTRO_ENABLE_AI=OFF` for a lean build). It provides neural **noise
 suppression** (OpenVINO) and Whisper **transcription** (whisper.cpp, with an
-OpenVINO encoder acceleration for most models). Transcription runs on CPU by
-default; when the OpenVINO runtime exposes a GPU or NPU device, the encoder
-is automatically moved there.
+OpenVINO encoder acceleration for most models). Both features run on CPU by
+default; when the OpenVINO runtime exposes a GPU or NPU device it is used
+automatically (*Auto*), and either can be overridden per-run in the dialog's
+*Device* dropdown.
 
 ### How it works
 
@@ -500,10 +501,17 @@ is automatically moved there.
   stops after the current file; a summary lists done/skipped/failed per run.
   *Skip files with SCTT* re-runs only transcribe files without an existing
   transcription.
+- **Device selection** — both dialogs offer a *Device* dropdown: *Auto*
+  (default) picks GPU over NPU over CPU when the OpenVINO runtime exposes it,
+  otherwise CPU; picking *CPU*, *GPU* or *NPU* explicitly overrides that. A
+  device that is not available falls back to CPU and the progress dialog says
+  so. The choice persists between sessions (shared by both features). For
+  transcription only the OpenVINO *encoder* moves to the selected device —
+  whisper.cpp's decoder always runs on CPU.
 - **Model preferences persist** between sessions (last model, language, mode,
-  and the auto-download toggle) in the same `SpectroCraft.recent` store as the
-  recent-files list. With *auto-download off*, missing models are never fetched;
-  the failure dialog then shows exactly where to put them manually.
+  device and the auto-download toggle) in the same `SpectroCraft.recent` store
+  as the recent-files list. With *auto-download off*, missing models are never
+  fetched; the failure dialog then shows exactly where to put them manually.
 
 ### Model sources & licenses
 
@@ -547,6 +555,12 @@ gracefully; even a *partial* set (e.g. only `openvino.dll`) is detected and the
 dialog lists all four required files plus where to get them. Transcription does **not** need the OpenVINO DLLs:
 without them it falls back to the pure-ggml encoder automatically.
 
+To use a **GPU or NPU**, install its plugin DLL from the same OpenVINO release
+(`runtime\Windows\bin`): `openvino_intel_gpu_plugin.dll` for GPU,
+`openvino_npu_plugin.dll` for NPU — next to `SpectroCraft.exe`. Until then the
+runtime simply doesn't list that device, *Auto* stays on CPU, and selecting it
+explicitly falls back to CPU with a note in the progress dialog.
+
 ### Performance notes (CPU)
 
 - Noise suppression runs in near-real-time on modern CPUs for typical selection
@@ -556,7 +570,8 @@ without them it falls back to the pure-ggml encoder automatically.
   model that meets your accuracy needs for batch runs.
 - The OpenVINO encoder (included with base/small/medium/large-v1/v2/v3) is
   faster than the pure-ggml encode and runs on GPU/NPU when available —
-  device selection is automatic, CPU fallback included. `large-v3-turbo` is a
+  device selection is automatic (*Auto*: GPU > NPU > CPU), overwritable in the
+  dialog, CPU fallback included. `large-v3-turbo` is a
   good accuracy/speed compromise for longer files; the q5_1/q8_0 quantized
   variants cut memory use with minimal quality loss.
 - VAD silence skipping + *Fast* (greedy) mode stack: on a 60 s file with two

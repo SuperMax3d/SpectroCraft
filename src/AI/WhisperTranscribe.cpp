@@ -52,7 +52,8 @@ void WhisperTranscriber::unload()
 }
 
 bool WhisperTranscriber::load(const juce::File& ggmlModel, const juce::File& irXml,
-                              const juce::File& cacheDir, std::string* errOut)
+                              const juce::File& cacheDir, const std::string& deviceIn,
+                              std::string* errOut)
 {
     unload();
 
@@ -88,13 +89,9 @@ bool WhisperTranscriber::load(const juce::File& ggmlModel, const juce::File& irX
 #endif
     if (irXml.existsAsFile () && ovAvailable)
     {
-        // Prefer GPU/NPU when the runtime exposes them — the encoder is the
-        // dominant cost of transcription and both beat CPU on supported hardware.
-        std::string device = "CPU";
-        const auto devs = OvRuntime::instance ().devices ();
-        for (const auto& d : devs) if (d == "GPU") { device = d; break; }
-        if (device == "CPU")
-            for (const auto& d : devs) if (d == "NPU") { device = d; break; }
+        // The device was resolved by the caller from the user's preference
+        // (sc::resolveAiDevice); "auto" already means GPU > NPU > CPU.
+        const std::string device = deviceIn.empty () ? "CPU" : deviceIn;
 
         const char* cache = cacheDir.exists () ? cacheDir.getFullPathName ().toRawUTF8 () : nullptr;
         int r = whisper_ctx_init_openvino_encoder (_ctx, irXml.getFullPathName ().toRawUTF8 (),

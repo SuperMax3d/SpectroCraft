@@ -111,7 +111,9 @@ public:
         owns and must delete it; used by showNoiseSuppressDialog() and tests. */
     juce::AlertWindow* createNoiseSuppressDialog();
     void showNoiseSuppressDialog();
-    void runNoiseSuppressAsync (const std::string& modelId, const std::string& device,
+    // devicePref: "auto" | "CPU" | "GPU" | "NPU" - resolved against the
+    // available OpenVINO devices on the worker thread before processing.
+    void runNoiseSuppressAsync (const std::string& modelId, const std::string& devicePref,
                                 float attenLimDb = 0.f, bool df3PostFilter = false,
                                 bool autoDownload = true);
 
@@ -120,7 +122,8 @@ public:
     juce::AlertWindow* createTranscribeDialog();
     void showTranscribeDialog();
     void runTranscriptionAsync (const std::string& modelId, const std::string& language,
-                                bool translate, bool fast, bool autoDownload = true);
+                                bool translate, bool fast, bool autoDownload = true,
+                                const std::string& devicePref = "auto");
 
     /** Builds (but does not run modally) the Transcribe Folder options dialog.
         The caller owns and must delete it; used by showTranscribeFolderDialog(). */
@@ -128,7 +131,8 @@ public:
     void showTranscribeFolderDialog();   // FileChooser -> options dialog -> async run
     void runBatchTranscribeAsync (const juce::File& folder, const std::string& modelId,
                                   const std::string& language, bool translate,
-                                  bool fast, bool skipExisting, bool autoDownload);
+                                  bool fast, bool skipExisting, bool autoDownload,
+                                  const std::string& devicePref = "auto");
 #endif
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area

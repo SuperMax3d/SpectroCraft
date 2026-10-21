@@ -72,9 +72,11 @@ std::vector<VadRegion> detectSpeechRegions(const float* p, int n)
     return out;
 }
 
-// Loaded whisper contexts are cached per model file: loading the ggml weights
-// and compiling the OpenVINO encoder takes seconds to a minute, and users may
-// re-run transcription (different language/mode) without reloading.
+// Loaded whisper contexts are cached per (model file, device): loading the
+// ggml weights and compiling the OpenVINO encoder takes seconds to a minute,
+// and users may re-run transcription (different language/mode) without
+// reloading. The device is part of the key so switching CPU/GPU/NPU between
+// runs recompiles for the new device instead of reusing an old context.
 std::map<std::string, std::unique_ptr<WhisperTranscriber>>& whisperCache()
 {
     static std::map<std::string, std::unique_ptr<WhisperTranscriber>> cache;
@@ -88,9 +90,9 @@ std::mutex& whisperCacheMutex()
 }
 
 WhisperTranscriber* getCachedWhisper(const juce::File& ggmlModel, const juce::File& irXml,
-                                     std::string* errOut)
+                                     const std::string& device, std::string* errOut)
 {
-    const std::string key = ggmlModel.getFullPathName ().toStdString ();
+    const std::string key = ggmlModel.getFullPathName ().toStdString () + "|" + device;
     {
         std::lock_guard<std::mutex> lock (whisperCacheMutex ());
         auto it = whisperCache ().find (key);
@@ -105,7 +107,7 @@ WhisperTranscriber* getCachedWhisper(const juce::File& ggmlModel, const juce::Fi
 
     auto* raw = new WhisperTranscriber ();
     std::string err;
-    if (!raw->load (ggmlModel, irXml, cacheDir, &err))
+    if (!raw->load (ggmlModel, irXml, cacheDir, device, &err))
     {
         delete raw;
         if (errOut != nullptr) *errOut = err;
@@ -125,6 +127,7 @@ WhisperTranscriber* getCachedWhisper(const juce::File& ggmlModel, const juce::Fi
 bool runWhisperPipeline(AudioEngine& eng, const std::vector<int>& chans,
                         const juce::File& ggmlModel, const juce::File& irXml,
                         const WhisperTranscriber::Options& opts,
+                        const std::string& device,
                         std::vector<ScttSegment>& outSegments,
                         std::function<bool(float)> onProgress, std::string* errOut)
 {
@@ -195,7 +198,7 @@ bool runWhisperPipeline(AudioEngine& eng, const std::vector<int>& chans,
     // ------------------------------------------------------------------
     // Phase B: load the model and run inference.
     // ------------------------------------------------------------------
-    WhisperTranscriber* wt = getCachedWhisper (ggmlModel, irXml, errOut);
+    WhisperTranscriber* wt = getCachedWhisper (ggmlModel, irXml, device, errOut);
     if (wt == nullptr)
         return false;
 

@@ -360,7 +360,7 @@ public:
 
                 std::vector<ScttSegment> segs;
                 const bool ok = sc::ai::runWhisperPipeline (engine, { 0 }, ggmlModel, irXml,
-                                                           opts, segs, progress, &err);
+                                                           opts, "auto", segs, progress, &err);
                 if (!ok)
                 {
                     std::cout << "transcription failed: " << err << "\n";

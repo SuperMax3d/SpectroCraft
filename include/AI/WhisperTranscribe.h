@@ -47,8 +47,12 @@ public:
     // ggmlModel:  path to ggml-<name>.bin (full model)
     // irXml:      path to ggml-<name>-encoder-openvino.xml ("") for pure ggml
     // cacheDir:   OpenVINO compiled-model cache directory (speeds up re-init)
+    // device:     OpenVINO encoder device ("CPU", "GPU" or "NPU"); the caller
+    //             resolves the user's preference via sc::resolveAiDevice.
+    //             If initialising on a non-CPU device fails, CPU is retried.
     bool load (const juce::File& ggmlModel, const juce::File& irXml,
-               const juce::File& cacheDir, std::string* errOut);
+               const juce::File& cacheDir, const std::string& device,
+               std::string* errOut);
 
     // samples must be mono float32 @ 16 kHz. Returns false on failure.
     bool transcribe (const float* samples, int nSamples, const Options& opts,

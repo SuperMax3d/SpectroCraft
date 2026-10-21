@@ -25,7 +25,25 @@
     #include <openvino/openvino.hpp>
 #endif
 
-namespace sc { namespace ai {
+// Resolve a user device preference against the devices actually available in
+// the OpenVINO runtime (see OvRuntime::devices()). Used by both noise
+// suppression and Whisper transcription so they share one auto-detect rule:
+//   pref:      "auto" (case-insensitive) or one of "CPU", "GPU", "NPU"
+//              (empty/unknown is treated as "auto").
+//   available: e.g. {"CPU"}, {"CPU","GPU"}, {"CPU","GPU","NPU"} - empty when
+//              the runtime failed to initialise.
+// Returns the device name to compile on. "auto" prefers GPU over NPU over CPU.
+// A specifically requested device that is not available falls back to "CPU",
+// and (when noteOut != nullptr) a short human-readable explanation of the
+// fallback is written there. Pure string logic - no OpenVINO calls, so it can
+// be unit-tested without the runtime DLLs.
+namespace sc {
+
+std::string resolveAiDevice(const std::string& pref,
+                            const std::vector<std::string>& available,
+                            std::string* noteOut = nullptr);
+
+namespace ai {
 
 class OvRuntime {
 public:

@@ -23,10 +23,10 @@
 #include "FFTHelpers.h"
 #include "AI/DfStft.h"   // pure DSP, no OpenVINO dependency
 #include "ScttChunk.h"   // SCTT RIFF chunk + JSON (no AI dependency)
+#include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
 #include "AI/ModelManager.h"
 #include "AI/WhisperPipeline.h"
-#include "AI/OvRuntime.h"
 #include "AI/Sha256.h"
 #include "NoiseSuppression.h"
 #endif
@@ -5924,6 +5924,46 @@ static void testNsFailureDetails()
     const std::string d7 = sc::buildNsFailureDetails (badModelErr, "deepfilternet2");
     CHECK (d7.find ("Manual installation") != std::string::npos, "corrupt model with frontends present: model-install section");
     CHECK (d7.find ("All four must sit in the same folder") == std::string::npos, "corrupt model with frontends present: no DLL list");
+
+    // When GPU/NPU was selected and its plugin is missing, name that DLL too.
+    const std::string d8 = sc::buildNsFailureDetails (cpuErr, "deepfilternet2", "GPU");
+    CHECK (d8.find ("openvino_intel_gpu_plugin.dll") != std::string::npos, "missing GPU plugin: names the GPU DLL");
+    const std::string d9 = sc::buildNsFailureDetails (cpuErr, "deepfilternet2", "NPU");
+    CHECK (d9.find ("openvino_npu_plugin.dll") != std::string::npos, "missing NPU plugin: names the NPU DLL");
+}
+
+// Device preference resolution shared by noise suppression and transcription:
+// "auto" picks GPU over NPU over CPU; an explicit choice that is unavailable
+// falls back to CPU with a human-readable note.
+static void testAiDeviceResolution()
+{
+    const std::vector<std::string> cpuOnly { "CPU" };
+    const std::vector<std::string> all     { "CPU", "GPU", "NPU" };
+
+    CHECK (sc::resolveAiDevice ("auto", cpuOnly) == "CPU",  "auto, only CPU -> CPU");
+    CHECK (sc::resolveAiDevice ("AUTO", all)      == "GPU",  "auto, GPU available -> GPU");
+    CHECK (sc::resolveAiDevice ("auto", { "NPU", "CPU" }) == "NPU", "auto, no GPU but NPU -> NPU");
+    CHECK (sc::resolveAiDevice ("", cpuOnly)     == "CPU",  "empty pref treated as auto");
+
+    std::string note;
+    CHECK (sc::resolveAiDevice ("GPU", all, &note) == "GPU", "explicit GPU available -> GPU");
+    CHECK (note.empty (), "no fallback note when the device is available");
+
+    note.clear ();
+    CHECK (sc::resolveAiDevice ("gpu", { "CPU", "GPU" }, &note) == "GPU",
+          "lowercase pref normalised to GPU");
+
+    note.clear ();
+    CHECK (sc::resolveAiDevice ("NPU", cpuOnly, &note) == "CPU",
+          "explicit NPU unavailable -> CPU fallback");
+    CHECK (!note.empty () && note.find ("NPU") != std::string::npos,
+          "fallback note names the missing device");
+
+    note.clear ();
+    CHECK (sc::resolveAiDevice ("GPU", {}, &note) == "CPU",
+          "runtime not initialised (empty list) -> CPU");
+
+    CHECK (sc::resolveAiDevice ("CPU", cpuOnly) == "CPU", "explicit CPU -> CPU");
 }
 
 static double rmsOf (const std::vector<float>& v)
@@ -6329,7 +6369,7 @@ static void testWhisperPipeline()
 
     std::vector<ScttSegment> segs;
     int lastPct = -1;
-    const bool ok = sc::ai::runWhisperPipeline (eng, { 0 }, ggmlModel, irXml, opts, segs,
+    const bool ok = sc::ai::runWhisperPipeline (eng, { 0 }, ggmlModel, irXml, opts, "auto", segs,
         [&lastPct] (float f) {
             const int pct = (int) (f * 100.0);
             if (pct >= lastPct + 25 || pct == 100)
@@ -6747,6 +6787,7 @@ static int scRunUnitTestsImpl()
     progress ("sctt chunk replace");    testScttChunkReplace();
     progress ("ai settings persist");   testAiSettingsPersistence();
     progress ("df stft round-trip");  testDfStft();
+    progress ("AI device resolution"); testAiDeviceResolution();
 #if defined(SC_ENABLE_AI)
     progress ("sha256 (self-contained)"); testSha256();
     progress ("AI plumbing");         testAIPlumbing();

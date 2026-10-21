@@ -71,7 +71,11 @@ bool runDeepFilterPipeline(const std::string& modelId, const std::string& device
         plus one download URL per file.
     Used by the GUI failure dialog, the --test-ns-failure-alert CLI hook and
     unit tests. */
-std::string buildNsFailureDetails(const std::string& err, const std::string& modelId);
+// device: the OpenVINO device the run was compiled for ("CPU", "GPU" or
+//          "NPU") - used to add a plugin-DLL hint when that device's plugin
+//          is missing.
+std::string buildNsFailureDetails(const std::string& err, const std::string& modelId,
+                                  const std::string& device = "CPU");
 #endif
 
 } // namespace sc

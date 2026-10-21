@@ -103,6 +103,7 @@ public:
     std::string lastTranscribeLanguage = "auto";
     bool lastTranscribeTranslate = false;
     bool lastTranscribeFast = false;   // true = greedy decode (fast), false = beam search
+    std::string aiDevicePref = "auto"; // "auto" | "CPU" | "GPU" | "NPU" - shared by NS + transcription
     void saveAiSettings();
     void removeRecentFile (const juce::File& file);// drop one entry and persist
     void clearRecentFiles();                        // empty the list and persist it
@@ -152,11 +153,14 @@ public:
     // document's SCTT data. Returns false and fills errOut on failure.
     // fast = true uses greedy decoding (~2x faster than beam search, slightly
     // lower accuracy); false keeps the default beam size of 5.
+    // devicePref: "auto" | "CPU" | "GPU" | "NPU" - resolved against the
+    // OpenVINO devices available at run time (sc::resolveAiDevice).
     bool transcribe (const std::string& modelId, const std::string& language,
                      bool translate, bool fast,
                      std::function<bool(float)> onProgress = nullptr,
                      std::string* errOut = nullptr,
-                     bool autoDownload = true);
+                     bool autoDownload = true,
+                     const std::string& devicePref = "auto");
 
     // BLOCKING — call from a worker thread. Transcribes every .wav file in
     // `folder` (recursively) WITHOUT opening it in the editor: each file is
@@ -176,7 +180,8 @@ public:
                                 std::atomic<bool>* cancelOut = nullptr,
                                 BatchTranscribeSummary* summaryOut = nullptr,
                                 std::string* errOut = nullptr,
-                                bool autoDownload = true);
+                                bool autoDownload = true,
+                                const std::string& devicePref = "auto");
 #endif
     void undoStep(); void redoStep();
     // Batched variants used by the History tab: apply up to n patches in one

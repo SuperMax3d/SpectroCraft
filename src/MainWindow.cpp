@@ -14,6 +14,7 @@
 #include "MarkerManager.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "AI/ModelManager.h"
+    #include "AI/OvRuntime.h"
     #include "NoiseSuppression.h"
 #endif
 #include "IconData.h"
@@ -1649,7 +1650,33 @@ void MainWindow::runResampleAsync (double newRate)
 // DeepFilterNet2/3 models (Phases 1–2 of the AI plan). First use downloads
 // the model weights (~9 MB for DenseUNet, ~15 MB per DeepFilterNet variant).
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-std::string sc::buildNsFailureDetails (const std::string& err, const std::string& modelId)
+
+namespace sc {
+
+// Device dropdown shared by the Noise Suppression and Transcription dialogs.
+juce::StringArray aiDeviceNames()
+{
+    return juce::StringArray { "Auto", "CPU", "GPU", "NPU" };
+}
+
+int aiDevicePrefIndex (const std::string& pref)
+{
+    if (pref == "CPU") return 1;
+    if (pref == "GPU") return 2;
+    if (pref == "NPU") return 3;
+    return 0;   // Auto
+}
+
+std::string aiDevicePrefFromText (const juce::String& text)
+{
+    if (text == "CPU" || text == "GPU" || text == "NPU")
+        return text.toStdString ();
+    return "auto";
+}
+
+} // namespace sc
+std::string sc::buildNsFailureDetails (const std::string& err, const std::string& modelId,
+                                       const std::string& device)
 {
     juce::String details = err.empty () ? "The selection could not be processed." : err;
     auto& mm = sc::ai::ModelManager::instance ();
@@ -1687,8 +1714,12 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
                        "  openvino.dll\n"
                        "  openvino_intel_cpu_plugin.dll\n"
                        "  openvino_ir_frontend.dll\n"
-                       "  tbb12.dll\n"
-                       "\nWhere to get them:\n"
+                       "  tbb12.dll\n";
+            if (device == "GPU")
+                details += "  openvino_intel_gpu_plugin.dll   (needed because you selected GPU)\n";
+            else if (device == "NPU")
+                details += "  openvino_npu_plugin.dll         (needed because you selected NPU)\n";
+            details += "\nWhere to get them:\n"
                        "- If you built SpectroCraft from source: extern/OpenVINO/bin/ in the repository.\n"
                        "- Otherwise download OpenVINO 2024.6 from https://github.com/openvinotoolkit/openvino/releases\n"
                        "  and take the DLLs from its runtime\\Windows\\bin folder.";
@@ -1711,9 +1742,10 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
 // Shared failure dialog for the AI features: a copyable read-only text editor
 // with the error details (paths/URLs), built by sc::buildNsFailureDetails().
 static void showAiFailureDialog (const juce::String& feature, const std::string& err,
-                                 const std::string& modelId, Component* parent)
+                                 const std::string& modelId, Component* parent,
+                                 const std::string& device = "CPU")
 {
-    const juce::String details = sc::buildNsFailureDetails (err, modelId);
+    const juce::String details = sc::buildNsFailureDetails (err, modelId, device);
 
     // Show the details in a read-only text editor: a plain AlertWindow label is
     // not selectable, and users need to copy paths/URLs out of this box.
@@ -1743,6 +1775,9 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
                                      "First use downloads the model weights to\n"
                                      "%APPDATA%/SpectroCraft/models.\n"
                                      "\n"
+                                     "Device: Auto picks GPU over NPU over CPU when available;\n"
+                                     "pick one explicitly to override (unavailable devices fall back to CPU).\n"
+                                     "\n"
                                      "Attenuation limit (dB) applies to the DeepFilterNet models only:\n"
                                      "100 means no attenuation limit (full noise suppression).\n"
                                      "For little noise reduction, set to 6 - 12. For medium, 18 - 24.",
@@ -1758,6 +1793,10 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
                         : app.lastNsModelId == "deepfilternet3" ? 2 : 0;
         c->setSelectedItemIndex (idx);
     }
+
+    w->addComboBox ("device", sc::aiDeviceNames (), "Device");
+    if (auto* c = w->getComboBoxComponent ("device"))
+        c->setSelectedItemIndex (sc::aiDevicePrefIndex (app.aiDevicePref));
 
     // Default 100 = no attenuation limit (full noise suppression), matching
     // Audacity's default for this parameter.
@@ -1795,6 +1834,9 @@ void MainWindow::showNoiseSuppressDialog()
     const float attenLimDb = (float) w->getTextEditorContents ("attenLim").trim().getDoubleValue();
     const bool autoDownload = w->getComboBoxComponent ("autoDl") == nullptr
                                || w->getComboBoxComponent ("autoDl")->getText() == "Yes";
+    const std::string devicePref = sc::aiDevicePrefFromText (w->getComboBoxComponent ("device") != nullptr
+                                                               ? w->getComboBoxComponent ("device")->getText ()
+                                                               : juce::String ());
     delete w;
     if (result != 1) return;
 
@@ -1804,15 +1846,16 @@ void MainWindow::showNoiseSuppressDialog()
     // Remember the choices for next time.
     app.lastNsModelId  = modelId;
     app.aiAutoDownload = autoDownload;
+    app.aiDevicePref   = devicePref;
     app.saveAiSettings();
 
     // v1: the DF3 post-filter option is not exposed in the dialog yet.
-    runNoiseSuppressAsync (modelId, "CPU", attenLimDb, false, autoDownload);
+    runNoiseSuppressAsync (modelId, devicePref, attenLimDb, false, autoDownload);
 }
 
 // Noise suppression on a background thread with a progress dialog. Progress:
 // model download/compile/inference 0..95%, mipmap rebuild 95..100%.
-void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::string& device,
+void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::string& devicePref,
                                         float attenLimDb, bool df3PostFilter, bool autoDownload)
 {
     auto* dlg = new WorkProgressDialog ("Noise Suppression",
@@ -1821,13 +1864,24 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
     dlg->setProgress (0.0);
     dlg->beginModal ();
 
-    std::thread ([this, modelId, device, attenLimDb, df3PostFilter, autoDownload, dlg] {
+    std::thread ([this, modelId, devicePref, attenLimDb, df3PostFilter, autoDownload, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
             lastSent = v;
             juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
         };
+
+        // Resolve the device preference against what the runtime offers.
+        sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
+        std::string devNote;
+        const std::string device = sc::resolveAiDevice (devicePref,
+                                                        sc::ai::OvRuntime::instance ().devices (),
+                                                        &devNote);
+        juce::MessageManager::callAsync ([dlg, modelId, device, devNote] {
+            dlg->setStatusText ("Applying " + juce::String (modelId) + " on " + juce::String (device)
+                                + (devNote.empty () ? " ..." : "  (" + juce::String (devNote) + ")"));
+        });
 
         std::string err;
         // A false progress return cancels: the pipeline stops at its next
@@ -1843,7 +1897,7 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
                 sendProgress (0.95 + 0.05 * (double) f);
             });
 
-        juce::MessageManager::callAsync ([this, modelId, dlg, ok, err] {
+        juce::MessageManager::callAsync ([this, modelId, dlg, ok, err, device] {
             const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (ok)
@@ -1854,7 +1908,7 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
 
             // A user cancel is not a failure: just close quietly.
             if (!wasCancelled)
-                showAiFailureDialog ("Noise Suppression", err, modelId, this);
+                showAiFailureDialog ("Noise Suppression", err, modelId, this, device);
         });
     }).detach();
 }
@@ -1909,7 +1963,9 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
                                      "channels are mixed to mono.\n"
                                      "First use downloads the model weights to\n"
                                      "%APPDATA%/SpectroCraft/models.\n"
-                                     "Larger models are more accurate but slower (CPU).",
+                                     "Larger models are more accurate but slower.\n"
+                                     "Device: Auto picks GPU over NPU over CPU when available;\n"
+                                     "pick one explicitly to override (unavailable devices fall back to CPU).",
                                      juce::AlertWindow::QuestionIcon, this);
 
     w->addComboBox ("model", whisperModelNames (), "Model");
@@ -1920,6 +1976,7 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
     w->addComboBox ("speed",
                     juce::StringArray { "Balanced (beam search)", "Fast (greedy)" },
                     "Speed / accuracy");
+    w->addComboBox ("device", sc::aiDeviceNames (), "Device");
 
     // Preselect the persisted choices (defaults when never set).
     if (auto* c = w->getComboBoxComponent ("model"))
@@ -1936,6 +1993,8 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
         c->setSelectedItemIndex (app.lastTranscribeTranslate ? 1 : 0);
     if (auto* c = w->getComboBoxComponent ("speed"))
         c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
+    if (auto* c = w->getComboBoxComponent ("device"))
+        c->setSelectedItemIndex (sc::aiDevicePrefIndex (app.aiDevicePref));
 
     w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
                     "Auto-download model if missing");
@@ -1967,6 +2026,9 @@ void MainWindow::showTranscribeDialog()
                                         && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
     const bool fast                = w->getComboBoxComponent ("speed") != nullptr
                                         && w->getComboBoxComponent ("speed")->getText ().startsWith ("Fast");
+    const std::string devicePref   = sc::aiDevicePrefFromText (w->getComboBoxComponent ("device") != nullptr
+                                                               ? w->getComboBoxComponent ("device")->getText ()
+                                                               : juce::String ());
     const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
                                        || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
     delete w;
@@ -1988,31 +2050,46 @@ void MainWindow::showTranscribeDialog()
     app.lastTranscribeTranslate = translate;
     app.lastTranscribeFast      = fast;
     app.aiAutoDownload          = autoDownload;
+    app.aiDevicePref            = devicePref;
     app.saveAiSettings ();
 
-    runTranscriptionAsync (modelId, language, translate, fast, autoDownload);
+    runTranscriptionAsync (modelId, language, translate, fast, autoDownload, devicePref);
 }
 
 // Transcription on a background thread with a progress dialog. Progress:
 // download [0, 15%), mix+resample [15, 25%), inference [25, 100%].
 void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::string& language,
-                                        bool translate, bool fast, bool autoDownload)
+                                        bool translate, bool fast, bool autoDownload,
+                                        const std::string& devicePref)
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Transcribing with " + juce::String (modelId) + " ...\n"
-                                        "(whole file - this can take a while on CPU)\n"
+                                        "(whole file - this can take a while)\n"
                                         "(Cancel stops after the current phase)",
                                         true, this);
     dlg->setProgress (0.0);
     dlg->beginModal ();
 
-    std::thread ([this, modelId, language, translate, fast, autoDownload, dlg] {
+    std::thread ([this, modelId, language, translate, fast, autoDownload, devicePref, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
             lastSent = v;
             juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
         };
+
+        // Resolve the device preference against what the runtime offers.
+        sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
+        std::string devNote;
+        const std::string device = sc::resolveAiDevice (devicePref,
+                                                        sc::ai::OvRuntime::instance ().devices (),
+                                                        &devNote);
+        juce::MessageManager::callAsync ([dlg, modelId, device, devNote] {
+            dlg->setStatusText ("Transcribing with " + juce::String (modelId) + " on " + juce::String (device)
+                                + (devNote.empty () ? " ..." : "  (" + juce::String (devNote) + ")")
+                                + "\n(whole file - this can take a while)"
+                                  "\n(Cancel stops after the current phase)");
+        });
 
         std::string err;
         // A false progress return cancels: download and mix/resample stop at
@@ -2023,9 +2100,9 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
                 sendProgress ((double) f);
                 return !dlg->cancelled.load ();
             }, &err,
-            autoDownload);
+            autoDownload, devicePref);
 
-        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId] {
+        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId, device] {
             const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (ok)
@@ -2046,7 +2123,7 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
 
             // A user cancel is not a failure: just close quietly.
             if (!wasCancelled)
-                showAiFailureDialog ("Transcription", err, modelId, this);
+                showAiFailureDialog ("Transcription", err, modelId, this, device);
         });
     }).detach ();
 }
@@ -2072,6 +2149,7 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
     w->addComboBox ("speed",
                     juce::StringArray { "Balanced (beam search)", "Fast (greedy)" },
                     "Speed / accuracy");
+    w->addComboBox ("device", sc::aiDeviceNames (), "Device");
     w->addComboBox ("existing",
                     juce::StringArray { "Overwrite existing SCTT", "Skip files with SCTT" },
                     "Existing transcriptions");
@@ -2091,6 +2169,8 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
         c->setSelectedItemIndex (app.lastTranscribeTranslate ? 1 : 0);
     if (auto* c = w->getComboBoxComponent ("speed"))
         c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
+    if (auto* c = w->getComboBoxComponent ("device"))
+        c->setSelectedItemIndex (sc::aiDevicePrefIndex (app.aiDevicePref));
 
     w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
                     "Auto-download model if missing");
@@ -2127,6 +2207,9 @@ void MainWindow::showTranscribeFolderDialog()
                                         && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
     const bool fast                = w->getComboBoxComponent ("speed") != nullptr
                                         && w->getComboBoxComponent ("speed")->getText ().startsWith ("Fast");
+    const std::string devicePref   = sc::aiDevicePrefFromText (w->getComboBoxComponent ("device") != nullptr
+                                                               ? w->getComboBoxComponent ("device")->getText ()
+                                                               : juce::String ());
     const bool skipExisting        = w->getComboBoxComponent ("existing") != nullptr
                                         && w->getComboBoxComponent ("existing")->getText ().startsWith ("Skip");
     const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
@@ -2150,9 +2233,11 @@ void MainWindow::showTranscribeFolderDialog()
     app.lastTranscribeTranslate = translate;
     app.lastTranscribeFast      = fast;
     app.aiAutoDownload          = autoDownload;
+    app.aiDevicePref            = devicePref;
     app.saveAiSettings ();
 
-    runBatchTranscribeAsync (folder, modelId, language, translate, fast, skipExisting, autoDownload);
+    runBatchTranscribeAsync (folder, modelId, language, translate, fast, skipExisting,
+                             autoDownload, devicePref);
 }
 
 // Batch transcription on a background thread with a cancellable progress
@@ -2160,7 +2245,8 @@ void MainWindow::showTranscribeFolderDialog()
 void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
                                           const std::string& modelId,
                                           const std::string& language, bool translate,
-                                          bool fast, bool skipExisting, bool autoDownload)
+                                          bool fast, bool skipExisting, bool autoDownload,
+                                          const std::string& devicePref)
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Scanning " + folder.getFileName ()
@@ -2169,7 +2255,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
     dlg->beginModal ();
 
     std::thread ([this, folder, modelId, language, translate, fast, skipExisting,
-                  autoDownload, dlg] {
+                  autoDownload, devicePref, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v < 0.0) v = 0.0;
@@ -2179,27 +2265,42 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
             juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
         };
 
+        // Resolve the device preference once for the whole batch.
+        sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
+        std::string devNote;
+        const std::string device = sc::resolveAiDevice (devicePref,
+                                                        sc::ai::OvRuntime::instance ().devices (),
+                                                        &devNote);
+        juce::MessageManager::callAsync ([dlg, folder, device, devNote] {
+            dlg->setStatusText ("Scanning " + folder.getFileName () + " for WAV files ...\n"
+                                + "(device: " + juce::String (device)
+                                + (devNote.empty () ? ")" : " - " + juce::String (devNote) + ")")
+                                + "\n(Cancel stops after the current file)");
+        });
+
         BatchTranscribeSummary summary;
         std::string err;
         const bool ok = app.batchTranscribeFolder (
             folder, modelId, language, translate, fast, skipExisting,
             [&sendProgress] (float f) { sendProgress ((double) f); return true; },
-            [dlg] (const juce::String& name) {
-                juce::MessageManager::callAsync ([dlg, name] {
+            [dlg, device] (const juce::String& name) {
+                juce::MessageManager::callAsync ([dlg, name, device] {
                     dlg->setStatusText ("Transcribing " + name
-                                        + " ...\n(Cancel stops after the current file)");
+                                        + " ...\n(device: " + juce::String (device)
+                                        + ")\n(Cancel stops after the current file)");
                 });
             },
             &dlg->cancelled,
             &summary,
             &err,
-            autoDownload);
+            autoDownload,
+            devicePref);
 
-        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId, summary] {
+        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId, summary, device] {
             delete dlg;
             if (!ok)
             {
-                showAiFailureDialog ("Transcription", err, modelId, this);
+                showAiFailureDialog ("Transcription", err, modelId, this, device);
                 return;
             }
 

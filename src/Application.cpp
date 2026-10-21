@@ -6,6 +6,7 @@
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
+    #include "AI/OvRuntime.h"
     #include "AI/WhisperPipeline.h"
 #endif
 #include <algorithm>
@@ -75,6 +76,7 @@ Application::Application (const juce::File& recentStorePath)
     lastTranscribeLanguage= recentStore->getValue ("ai_transcribe_lang", lastTranscribeLanguage).toStdString ();
     lastTranscribeTranslate = recentStore->getIntValue ("ai_transcribe_translate", 0) != 0;
     lastTranscribeFast      = recentStore->getIntValue ("ai_transcribe_fast", 0) != 0;
+    aiDevicePref            = recentStore->getValue ("ai_device", aiDevicePref).toStdString ();
 }
 
 // Round v up to the next power of two, then clamp into [lo, hi].
@@ -113,6 +115,7 @@ void Application::saveAiSettings ()
     recentStore->setValue ("ai_transcribe_lang", juce::String (lastTranscribeLanguage));
     recentStore->setValue ("ai_transcribe_translate", lastTranscribeTranslate ? 1 : 0);
     recentStore->setValue ("ai_transcribe_fast", lastTranscribeFast ? 1 : 0);
+    recentStore->setValue ("ai_device", juce::String (aiDevicePref));
     recentStore->save ();
 }
 
@@ -526,7 +529,7 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 bool Application::transcribe (const std::string& modelId, const std::string& language,
                               bool translate, bool fast,
                               std::function<bool(float)> onProgress, std::string* errOut,
-                              bool autoDownload)
+                              bool autoDownload, const std::string& devicePref)
 {
     auto fail = [&errOut] (const juce::String& msg) -> bool
     {
@@ -565,10 +568,15 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
     opts.translate = translate;
     opts.beamSize  = fast ? 1 : 5;   // greedy vs beam search
 
+    // Resolve the device preference against what the runtime actually offers.
+    sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
+    const std::string device = sc::resolveAiDevice (devicePref,
+                                                    sc::ai::OvRuntime::instance ().devices ());
+
     // Pipeline progress [0,1] → overall [0.15, 1].
     std::vector<ScttSegment> segs;
     const bool ok = sc::ai::runWhisperPipeline (audioEngine (), visibleChans (*this),
-                                                ggmlModel, irXml, opts, segs,
+                                                ggmlModel, irXml, opts, device, segs,
             [&onProgress] (float f) { return onProgress == nullptr || onProgress (0.15f + 0.85f * f); },
             &err);
     if (!ok)
@@ -587,7 +595,8 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
                                          std::atomic<bool>* cancelOut,
                                          BatchTranscribeSummary* summaryOut,
                                          std::string* errOut,
-                                         bool autoDownload)
+                                         bool autoDownload,
+                                         const std::string& devicePref)
 {
     auto fail = [&errOut] (const juce::String& msg) -> bool
     {
@@ -637,6 +646,11 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
     opts.translate = translate;
     opts.beamSize  = fast ? 1 : 5;   // greedy vs beam search
 
+    // Resolve the device preference once for the whole batch.
+    sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
+    const std::string device = sc::resolveAiDevice (devicePref,
+                                                    sc::ai::OvRuntime::instance ().devices ());
+
     const int total = summary.total;
     for (int i = 0; i < total; ++i)
     {
@@ -681,7 +695,7 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
                 chans[(size_t) c] = c;
 
             const bool ok = sc::ai::runWhisperPipeline (eng, chans, ggmlModel, irXml, opts,
-                                                        data.segments,
+                                                        device, data.segments,
                 [&onProgress, i, total] (float f) {
                     return onProgress == nullptr ||
                            onProgress ((float) (0.05 + 0.95 * ((double) i / total)
