@@ -107,7 +107,7 @@ public:
     juce::AlertWindow* createTranscribeDialog();
     void showTranscribeDialog();
     void runTranscriptionAsync (const std::string& modelId, const std::string& language,
-                                bool translate, bool autoDownload = true);
+                                bool translate, bool fast, bool autoDownload = true);
 
     /** Builds (but does not run modally) the Transcribe Folder options dialog.
         The caller owns and must delete it; used by showTranscribeFolderDialog(). */
@@ -115,7 +115,7 @@ public:
     void showTranscribeFolderDialog();   // FileChooser -> options dialog -> async run
     void runBatchTranscribeAsync (const juce::File& folder, const std::string& modelId,
                                   const std::string& language, bool translate,
-                                  bool skipExisting, bool autoDownload);
+                                  bool fast, bool skipExisting, bool autoDownload);
 #endif
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area

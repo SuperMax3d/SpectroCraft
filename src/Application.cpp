@@ -74,6 +74,7 @@ Application::Application (const juce::File& recentStorePath)
     lastTranscribeModelId = recentStore->getValue ("ai_transcribe_model", lastTranscribeModelId).toStdString ();
     lastTranscribeLanguage= recentStore->getValue ("ai_transcribe_lang", lastTranscribeLanguage).toStdString ();
     lastTranscribeTranslate = recentStore->getIntValue ("ai_transcribe_translate", 0) != 0;
+    lastTranscribeFast      = recentStore->getIntValue ("ai_transcribe_fast", 0) != 0;
 }
 
 // Round v up to the next power of two, then clamp into [lo, hi].
@@ -111,6 +112,7 @@ void Application::saveAiSettings ()
     recentStore->setValue ("ai_transcribe_model", juce::String (lastTranscribeModelId));
     recentStore->setValue ("ai_transcribe_lang", juce::String (lastTranscribeLanguage));
     recentStore->setValue ("ai_transcribe_translate", lastTranscribeTranslate ? 1 : 0);
+    recentStore->setValue ("ai_transcribe_fast", lastTranscribeFast ? 1 : 0);
     recentStore->save ();
 }
 
@@ -510,7 +512,7 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 }
 
 bool Application::transcribe (const std::string& modelId, const std::string& language,
-                              bool translate,
+                              bool translate, bool fast,
                               std::function<bool(float)> onProgress, std::string* errOut,
                               bool autoDownload)
 {
@@ -549,6 +551,7 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
     sc::ai::WhisperTranscriber::Options opts;
     opts.language  = language;
     opts.translate = translate;
+    opts.beamSize  = fast ? 1 : 5;   // greedy vs beam search
 
     // Pipeline progress [0,1] → overall [0.15, 1].
     std::vector<ScttSegment> segs;
@@ -566,7 +569,7 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
 bool Application::batchTranscribeFolder (const juce::File& folder,
                                          const std::string& modelId,
                                          const std::string& language, bool translate,
-                                         bool skipExisting,
+                                         bool fast, bool skipExisting,
                                          std::function<bool(float)> onProgress,
                                          std::function<void(const juce::String&)> onStatus,
                                          std::atomic<bool>* cancelOut,
@@ -620,6 +623,7 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
     sc::ai::WhisperTranscriber::Options opts;
     opts.language  = language;
     opts.translate = translate;
+    opts.beamSize  = fast ? 1 : 5;   // greedy vs beam search
 
     const int total = summary.total;
     for (int i = 0; i < total; ++i)

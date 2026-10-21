@@ -30,30 +30,55 @@ namespace {
 
 const char* const kHfBase = "https://huggingface.co/Intel/deepfilternet-openvino/resolve/main";
 const char* const kOmzBase = "https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/noise-suppression-denseunet-ll-0001/FP16";
-// Whisper's ggml + OpenVINO encoder pairs are published as per-model zips.
+// Whisper's ggml .bin files come from ggerganov/whisper.cpp; Intel publishes
+// per-model zips that bundle the same ggml .bin with an OpenVINO encoder IR
+// (ggml-<name>-encoder-openvino.{xml,bin}) for the faster OV encode path.
 const char* const kWhisperBase = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+const char* const kWhisperIntelBase = "https://huggingface.co/Intel/whisper.cpp-openvino-models/resolve/main";
 
 std::string hfUrl(const std::string& model, const char* file)
 {
     return std::string(kHfBase) + "/" + model + "/" + file;
 }
 
-// Whisper models are published as single ggml .bin files on HuggingFace
-// (ggerganov/whisper.cpp). The optional OpenVINO encoder pair
-// (ggml-<name>-encoder-openvino.{xml,bin}) is not distributed by anyone; users
-// who want the faster OV encode path can generate it with whisper.cpp's
-// models/convert-whisper-to-openvino.py and drop both files into the model
-// folder. Without them, transcription runs on the pure-ggml encoder (slower,
-// identical results).
+// Whisper models: base/small/medium/large-v1/v2/v3 are downloaded as Intel's
+// per-model zips (ggml .bin + OpenVINO encoder IR); tiny has no published zip
+// and falls back to the plain ggml download. The ggml .bin inside Intel's zips
+// is byte-identical to ggerganov's, so its published SHA-256 still applies.
 ModelSpec whisperModel(const char* name, const char* display,
-                       int64_t binSize, const char* binSha)
+                       int64_t binSize, const char* binSha,
+                       const char* zipName = nullptr,
+                       const char* zipSha = nullptr,
+                       int64_t zipSize = 0)
 {
     ModelSpec s;
     s.id = std::string("whisper-") + name;
     s.displayName = display;
-    s.files.push_back ({ std::string(kWhisperBase) + "/ggml-" + name + ".bin",
-                         binSha, binSize, std::string ("ggml-") + name + ".bin" });
-    // Headroom in case the user adds an encoder pair later.
+
+    ModelFileSpec bin;
+    if (zipName == nullptr)
+        bin.url = std::string(kWhisperBase) + "/ggml-" + name + ".bin";
+    bin.sha256 = binSha;
+    bin.sizeBytes = binSize;
+    bin.name = std::string ("ggml-") + name + ".bin";
+    s.files.push_back (std::move (bin));
+
+    if (zipName != nullptr)
+    {
+        s.zip.url = std::string(kWhisperIntelBase) + "/" + zipName;
+        s.zip.sha256 = zipSha;
+        s.zip.sizeBytes = zipSize;
+        // Encoder IR pair: no published per-file hashes — the zip's own
+        // checksum covers them, so existence is enough for verification.
+        ModelFileSpec xml;
+        xml.name = std::string ("ggml-") + name + "-encoder-openvino.xml";
+        s.files.push_back (std::move (xml));
+        ModelFileSpec irBin;
+        irBin.name = std::string ("ggml-") + name + "-encoder-openvino.bin";
+        s.files.push_back (std::move (irBin));
+    }
+
+    // Headroom for the encoder IR pair plus a re-download.
     s.minFreeDiskBytes = 2 * binSize;
     return s;
 }
@@ -100,18 +125,34 @@ const std::vector<ModelSpec>& registryImpl()
         },
         whisperModel ("tiny",          "Whisper tiny (~78 MB)",
                       77691713,   "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"),
+        whisperModel ("tiny-q5_1",     "Whisper tiny q5_1, quantized (~32 MB)",
+                      32152673,   "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7"),
         whisperModel ("base",          "Whisper base (~148 MB)",
-                      147951465,  "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"),
+                      147951465,  "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+                      "ggml-base-models.zip",   "18f6e87146bfe9986fa764657cca26695bcb7fa3ba5d77d6d6af1d38de720e4c", 171306938),
+        whisperModel ("base-q5_1",     "Whisper base q5_1, quantized (~60 MB)",
+                      59707625,   "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898"),
         whisperModel ("small",         "Whisper small (~488 MB)",
-                      487601967,  "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"),
+                      487601967,  "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+                      "ggml-small-models.zip",  "7efabdcb08ec09ee24b615db9fe86425114a46d87a25d1e3d14ecd7195dd4e9f", 610456149),
+        whisperModel ("small-q5_1",    "Whisper small q5_1, quantized (~190 MB)",
+                      190085487,  "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"),
         whisperModel ("medium",        "Whisper medium (~1.5 GB)",
-                      1533763059, "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208"),
+                      1533763059, "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
+                      "ggml-medium-models.zip", "afd961c0bac5830dbcbd15826f49553a5d5fb8a09c7a24eb634304fa068fe59f", 2110515739),
         whisperModel ("large-v1",      "Whisper large-v1 (~3.1 GB)",
-                      3094623691, "7d99f41a10525d0206bddadd86760181fa920438b6b33237e3118ff6c83bb53d"),
+                      3094623691, "7d99f41a10525d0206bddadd86760181fa920438b6b33237e3118ff6c83bb53d",
+                      "ggml-large-v1-models.zip", "fa187861eb46b701f242d63fc0067878de6345a71714d926c4b0eecf1ec0fffa", 4301056953),
         whisperModel ("large-v2",      "Whisper large-v2 (~3.1 GB)",
-                      3094623691, "9a423fe4d40c82774b6af34115b8b935f34152246eb19e80e376071d3f999487"),
+                      3094623691, "9a423fe4d40c82774b6af34115b8b935f34152246eb19e80e376071d3f999487",
+                      "ggml-large-v2-models.zip", "ab306b0a0a93a731e56efbfa4e80448206bd9b5b863d5a99e40a3532d64ec754", 4285702502),
         whisperModel ("large-v3",      "Whisper large-v3 (~3.1 GB)",
-                      3095033483, "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2"),
+                      3095033483, "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+                      "ggml-large-v3-models.zip", "d61160dc5b1c1abc1dbdd6ae571fe4da87079fa3170156408f8775b493c15cdd", 4277163902),
+        whisperModel ("large-v3-turbo", "Whisper large-v3-turbo (~1.6 GB)",
+                      1624555275, "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69"),
+        whisperModel ("large-v3-turbo-q8_0", "Whisper large-v3-turbo q8_0, quantized (~874 MB)",
+                      874188075,  "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1"),
     };
     return models;
 }

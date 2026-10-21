@@ -7,6 +7,8 @@
 
 #include <whisper.cpp/whisper.h>
 
+#include "AI/OvRuntime.h"
+
 #include <thread>
 
 #ifdef _WIN32
@@ -46,6 +48,7 @@ void WhisperTranscriber::unload()
         whisper_free (_ctx);
         _ctx = nullptr;
     }
+    _lastLang.clear ();
 }
 
 bool WhisperTranscriber::load(const juce::File& ggmlModel, const juce::File& irXml,
@@ -62,6 +65,7 @@ bool WhisperTranscriber::load(const juce::File& ggmlModel, const juce::File& irX
 
     whisper_context_params cparams = {};
     cparams.use_gpu = false;   // CPU-only in v1 (OpenVINO encoder covers the heavy part)
+    cparams.flash_attn = false; // measured ~1.7x SLOWER on CPU (whisper.cpp flash-attn kernels favour GPU); keep off
 
     _ctx = whisper_init_from_file_with_params (ggmlModel.getFullPathName ().toRawUTF8 (), cparams);
     if (_ctx == nullptr)
@@ -84,11 +88,20 @@ bool WhisperTranscriber::load(const juce::File& ggmlModel, const juce::File& irX
 #endif
     if (irXml.existsAsFile () && ovAvailable)
     {
-        const int r = whisper_ctx_init_openvino_encoder (
-            _ctx,
-            irXml.getFullPathName ().toRawUTF8 (),
-            "CPU",
-            cacheDir.exists () ? cacheDir.getFullPathName ().toRawUTF8 () : nullptr);
+        // Prefer GPU/NPU when the runtime exposes them — the encoder is the
+        // dominant cost of transcription and both beat CPU on supported hardware.
+        std::string device = "CPU";
+        const auto devs = OvRuntime::instance ().devices ();
+        for (const auto& d : devs) if (d == "GPU") { device = d; break; }
+        if (device == "CPU")
+            for (const auto& d : devs) if (d == "NPU") { device = d; break; }
+
+        const char* cache = cacheDir.exists () ? cacheDir.getFullPathName ().toRawUTF8 () : nullptr;
+        int r = whisper_ctx_init_openvino_encoder (_ctx, irXml.getFullPathName ().toRawUTF8 (),
+                                                   device.c_str (), cache);
+        if (r != 0 && device != "CPU")
+            r = whisper_ctx_init_openvino_encoder (_ctx, irXml.getFullPathName ().toRawUTF8 (),
+                                                   "CPU", cache);   // retry on CPU
         if (r != 0 && errOut)
             *errOut = "OpenVINO encoder failed to initialise; using the slower pure-ggml encode.";
     }
@@ -99,6 +112,22 @@ bool WhisperTranscriber::load(const juce::File& ggmlModel, const juce::File& irX
 bool WhisperTranscriber::transcribe(const float* samples, int nSamples, const Options& opts,
                                     std::vector<WhisperSegment>& outSegments,
                                     ProgressFn onProgress, std::string* errOut)
+{
+    // Whole-buffer convenience wrapper around transcribeRegion().
+    std::vector<WhisperSegment> tmp;
+    if (!transcribeRegion (samples, nSamples, opts, opts.language, 0.0,
+                           tmp, onProgress, errOut))
+        return false;
+    outSegments = std::move (tmp);
+    return true;
+}
+
+bool WhisperTranscriber::transcribeRegion(const float* samples, int nSamples,
+                                          const Options& opts,
+                                          const std::string& languageIn,
+                                          double offsetSec,
+                                          std::vector<WhisperSegment>& outSegments,
+                                          ProgressFn onProgress, std::string* errOut)
 {
     if (_ctx == nullptr)
     {
@@ -118,8 +147,8 @@ bool WhisperTranscriber::transcribe(const float* samples, int nSamples, const Op
     if (useBeam)
         params.beam_search.beam_size = opts.beamSize;
 
-    const std::string lang = opts.language.empty () || opts.language == "auto"
-                              ? std::string ("") : opts.language;
+    const std::string lang = languageIn.empty () || languageIn == "auto"
+                              ? std::string ("") : languageIn;
     params.language = lang.empty () ? nullptr : lang.c_str ();
     params.detect_language = lang.empty ();
     params.translate = opts.translate;
@@ -143,14 +172,22 @@ bool WhisperTranscriber::transcribe(const float* samples, int nSamples, const Op
         return false;
     }
 
-    outSegments.clear ();
+    // Remember the auto-detected language for the caller (English is id 0).
+    _lastLang.clear ();
+    if (lang.empty ())
+    {
+        const int lid = whisper_full_lang_id (_ctx);
+        if (lid >= 0 && lid < whisper_lang_max_id ())
+            if (const char* s = whisper_lang_str (lid)) _lastLang = s;
+    }
+
     const int nSegs = whisper_full_n_segments (_ctx);
     for (int i = 0; i < nSegs; ++i)
     {
         WhisperSegment seg;
-        // Segment times are in units of 10 ms.
-        seg.startSec = whisper_full_get_segment_t0 (_ctx, i) / 100.0;
-        seg.endSec   = whisper_full_get_segment_t1 (_ctx, i) / 100.0;
+        // Segment times are in units of 10 ms, offset into the full stream.
+        seg.startSec = whisper_full_get_segment_t0 (_ctx, i) / 100.0 + offsetSec;
+        seg.endSec   = whisper_full_get_segment_t1 (_ctx, i) / 100.0 + offsetSec;
         const char* text = whisper_full_get_segment_text (_ctx, i);
         if (text != nullptr) seg.text = text;
         outSegments.push_back (std::move (seg));

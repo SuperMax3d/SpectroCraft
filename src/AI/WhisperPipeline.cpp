@@ -6,6 +6,8 @@
 #include <AudioEngine.h>
 #include <Resampler.h>
 
+#include <algorithm>
+#include <cmath>
 #include <map>
 #include <mutex>
 
@@ -14,6 +16,61 @@ namespace sc { namespace ai {
 static constexpr double kTargetRate = 16000.0;   // WHISPER_SAMPLE_RATE
 
 namespace {
+
+struct VadRegion { int start = 0, end = 0; };   // sample range [start, end) in the 16 kHz mono stream
+
+// Simple RMS voice-activity detector: 30 ms windows at 16 kHz. A window is
+// "speech" when its RMS is within 45 dB of the loudest window (and above an
+// absolute floor so pure digital silence / very quiet hiss never counts).
+// Speech runs separated by less than ~1 s are merged, and regions shorter
+// than 0.3 s are dropped. Returns {} for fully silent input.
+std::vector<VadRegion> detectSpeechRegions(const float* p, int n)
+{
+    const int kWin = 480;                 // 30 ms at 16 kHz
+    if (n <= 0) return {};
+    if (n < kWin * 2) return { { 0, n } };   // too short to bother with
+
+    const int nWin = n / kWin;
+    std::vector<float> rms ((size_t) nWin);
+    float peak = 0.f;
+    for (int w = 0; w < nWin; ++w)
+    {
+        double acc = 0.0;
+        const int s = w * kWin, e = std::min (s + kWin, n);
+        for (int i = s; i < e; ++i) acc += (double) p[i] * p[i];
+        rms[(size_t) w] = sqrtf ((float) (acc / (e - s)));
+        if (rms[(size_t) w] > peak) peak = rms[(size_t) w];
+    }
+
+    const float thr = std::max (peak * 3.1623e-2f,   // 45 dB below the loudest window
+                                2.0e-4f);           // absolute floor (~ -74 dBFS)
+
+    // Morphological closing: mark every window within ~0.5 s of a speech
+    // window as active, so pauses shorter than ~1 s do not fragment an
+    // utterance.
+    const int kMerge = 15;   // 15 windows x 30 ms = 0.45 s on each side
+    std::vector<char> closed ((size_t) nWin, 0);
+    for (int w = 0; w < nWin; ++w)
+        if (rms[(size_t) w] >= thr)
+            for (int g = std::max (0, w - kMerge); g <= std::min (nWin - 1, w + kMerge); ++g)
+                closed[(size_t) g] = 1;
+
+    std::vector<VadRegion> out;
+    int rs = -1;
+    for (int w = 0; w <= nWin; ++w)
+    {
+        const bool active = w < nWin && closed[(size_t) w];
+        if (active && rs < 0) rs = w * kWin;
+        if (!active && rs >= 0)
+        {
+            const int re = std::min (w * kWin, n);
+            if (re - rs >= 4800)   // keep regions of at least 0.3 s
+                out.push_back ({ rs, re });
+            rs = -1;
+        }
+    }
+    return out;
+}
 
 // Loaded whisper contexts are cached per model file: loading the ggml weights
 // and compiling the OpenVINO encoder takes seconds to a minute, and users may
@@ -142,18 +199,52 @@ bool runWhisperPipeline(AudioEngine& eng, const std::vector<int>& chans,
     if (wt == nullptr)
         return false;
 
-    std::vector<WhisperSegment> segs;
-    WhisperTranscriber::ProgressFn prog;
-    if (onProgress)
-        prog = [op = onProgress] (float p, const std::string&)
-               { return op (0.1f + 0.9f * p); };
-    const bool ok = wt->transcribe (pcm16k.data (), (int) pcm16k.size (), opts, segs,
-                                    prog, errOut);
-    if (!ok)
-        return false;
+    // Silence skipping: transcribe only the speech regions found by the VAD.
+    // Files with long pauses skip most of the encoder/decoder work; a fully
+    // active file yields one region covering everything and behaves exactly
+    // like before. Cancellation is checked between regions (whisper_full
+    // itself cannot be interrupted mid-inference).
+    const auto regions = detectSpeechRegions (pcm16k.data (), (int) pcm16k.size ());
+    if (regions.empty ())
+        return true;   // nothing to transcribe — no segments, not an error
+
+    double totalSpeech = 0.0;
+    for (const auto& r : regions) totalSpeech += (double) (r.end - r.start);
+
+    const bool userLang = !opts.language.empty () && opts.language != "auto";
+    std::string pinnedLang;   // detected on the first region, then reused
+    double doneSpeech = 0.0;
+    std::vector<WhisperSegment> segsAccum;
+
+    for (const auto& region : regions)
+    {
+        // Map this region's internal progress onto its slice of the overall
+        // inference range [0.1, 1] so the bar never moves backwards.
+        const double base = doneSpeech / totalSpeech;
+        const double frac = (double) (region.end - region.start) / totalSpeech;
+        WhisperTranscriber::ProgressFn regionProg;
+        if (onProgress)
+            regionProg = [op = onProgress, base, frac] (float p, const std::string&)
+                         { return op (0.1f + 0.9f * (float) (base + frac * p)); };
+
+        const bool ok = wt->transcribeRegion (
+            pcm16k.data () + region.start, region.end - region.start,
+            opts, userLang ? opts.language : pinnedLang,
+            region.start / 16000.0, segsAccum, regionProg, errOut);
+        if (!ok)
+            return false;
+
+        // Pin the auto-detected language for the remaining regions.
+        if (!userLang && pinnedLang.empty ())
+            pinnedLang = wt->lastDetectedLanguage ();
+
+        doneSpeech += (double) (region.end - region.start);
+        if (onProgress && !onProgress ((float) (doneSpeech / totalSpeech)))
+            return false;   // cancelled between regions
+    }
 
     outSegments.clear ();
-    for (auto& s : segs)
+    for (auto& s : segsAccum)
         outSegments.push_back ({ s.startSec, s.endSec, std::move (s.text) });
 
     return true;

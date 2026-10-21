@@ -5005,6 +5005,73 @@ static void testLoadCancel()
     }
 }
 
+// ------------------------------------------------------------------ large in-memory load
+// Regression for a chunked-load bug: AudioEngine::loadFile reads files that
+// fit in memory in 1<<20 sample-channel chunks but wrote every chunk to
+// destination position 0 instead of its offset, so only fragments of the last
+// two chunks survived at the buffer's head and the rest stayed zero. Any
+// in-memory file longer than one chunk (~21.8 s mono / ~10.9 s stereo @48k)
+// was silently corrupted — waveform display, spectral analysis and every
+// processing path read wrong data.
+static void testLargeInMemoryLoad()
+{
+    // Mono: 1.5M frames @ 48k = 31.25M sample-channels -> two chunks, in-memory.
+    {
+        const int64_t frames = 1500000;
+        const juce::File wav = makeTempFile ("large_mem_mono.wav");
+        CHECK (writeWav (wav, 1, 48000.0, frames,
+            [frames] (int, int64_t f, double) { return f < frames / 2 ? 0.5f : -0.5f; }),
+              "write large mono wav");
+
+        AudioEngine eng;
+        CHECK (eng.loadFile (wav), "load large mono file");
+        CHECK (eng.numSamples () == frames, "full length reported");
+
+        std::vector<float> d (100);
+        CHECK (eng.readSamples (0, 0, 100, d.data ()), "read head ok");
+        bool headOk = true;
+        for (float v : d) if (std::abs (v - 0.5f) > 1e-6f) headOk = false;
+        CHECK (headOk, "head chunk intact (+0.5)");
+
+        // Straddle the halfway boundary: both values must be present in order.
+        CHECK (eng.readSamples (0, frames / 2 - 50, 100, d.data ()), "read boundary ok");
+        bool bndOk = true;
+        for (int i = 0; i < 100; ++i)
+            if (std::abs (d[i] - ((frames / 2 - 50 + i) < frames / 2 ? 0.5f : -0.5f)) > 1e-6f)
+                bndOk = false;
+        CHECK (bndOk, "half boundary exact");
+
+        // Tail: must hold the last chunk's data (-0.5), not zeros or head data.
+        CHECK (eng.readSamples (0, frames - 100, 100, d.data ()), "read tail ok");
+        bool tailOk = true;
+        for (float v : d) if (std::abs (v + 0.5f) > 1e-6f) tailOk = false;
+        CHECK (tailOk, "tail chunk intact (-0.5)");
+    }
+
+    // Stereo: 3M frames @ 48k = 6M sample-channels -> three chunks, in-memory.
+    {
+        const int64_t frames = 3000000;
+        const juce::File wav = makeTempFile ("large_mem_stereo.wav");
+        CHECK (writeWav (wav, 2, 48000.0, frames,
+            [] (int c, int64_t, double) { return c == 0 ? 0.25f : -0.75f; }),
+              "write large stereo wav");
+
+        AudioEngine eng;
+        CHECK (eng.loadFile (wav), "load large stereo file");
+
+        std::vector<float> d (100);
+        CHECK (eng.readSamples (0, frames / 2, 100, d.data ()), "read ch0 mid ok");
+        bool c0 = true;
+        for (float v : d) if (std::abs (v - 0.25f) > 1e-6f) c0 = false;
+        CHECK (c0, "ch0 mid intact (+0.25)");
+
+        CHECK (eng.readSamples (1, frames - 100, 100, d.data ()), "read ch1 tail ok");
+        bool c1 = true;
+        for (float v : d) if (std::abs (v + 0.75f) > 1e-6f) c1 = false;
+        CHECK (c1, "ch1 tail intact (-0.75)");
+    }
+}
+
 static void testResampleCancel()
 {
     const juce::File wav = makeTempFile ("resample_cancel.wav");
@@ -5516,8 +5583,8 @@ static void testAIPlumbing()
 {
     // --- Model registry sanity -------------------------------------------
     auto& mm = sc::ai::ModelManager::instance ();
-    // 3 noise-suppression models + 7 Whisper transcription models.
-    CHECK (mm.registry().size() == 10, "registry lists 10 models");
+    // 3 noise-suppression models + 12 Whisper transcription models.
+    CHECK (mm.registry().size() == 15, "registry lists 15 models");
 
     const auto* df2 = mm.find ("deepfilternet2");
     CHECK (df2 != nullptr, "find deepfilternet2");
@@ -5998,13 +6065,30 @@ static void testWhisperPipeline()
 {
     auto& mm = sc::ai::ModelManager::instance ();
 
-    // All seven Whisper models must be registered with a complete per-file
-    // spec: one ggml .bin from HuggingFace. The optional OpenVINO encoder pair
-    // is not part of the download (users can add it manually for speed).
-    const char* ids[] = { "whisper-tiny", "whisper-base", "whisper-small",
-                          "whisper-medium", "whisper-large-v1", "whisper-large-v2",
-                          "whisper-large-v3" };
-    for (const char* id : ids)
+    // The fp16 base/small/medium/large-v* models are distributed as Intel's
+    // per-model zips: ggml .bin (hash-verified against ggerganov's published
+    // value) plus the OpenVINO encoder IR pair. Everything else is a plain
+    // single-file ggml download from ggerganov/whisper.cpp.
+    const char* zipIds[] = { "whisper-base", "whisper-small", "whisper-medium",
+                             "whisper-large-v1", "whisper-large-v2", "whisper-large-v3" };
+    for (const char* id : zipIds)
+    {
+        const auto* spec = mm.find (id);
+        CHECK (spec != nullptr, juce::String (id) + " registered");
+        if (!spec) continue;
+        bool ok = !spec->zip.url.empty () && spec->zip.sha256.size() == 64
+                  && spec->files.size() == 3
+                  && spec->files[0].url.empty ()            // ggml .bin from the zip
+                  && spec->files[0].sha256.size() == 64     // ggerganov's published hash
+                  && spec->files[1].name.find ("-encoder-openvino.xml") != std::string::npos
+                  && spec->files[2].name.find ("-encoder-openvino.bin") != std::string::npos;
+        CHECK (ok, juce::String (id) + " zip spec complete");
+    }
+
+    const char* plainIds[] = { "whisper-tiny", "whisper-tiny-q5_1", "whisper-base-q5_1",
+                               "whisper-small-q5_1", "whisper-large-v3-turbo",
+                               "whisper-large-v3-turbo-q8_0" };
+    for (const char* id : plainIds)
     {
         const auto* spec = mm.find (id);
         CHECK (spec != nullptr, juce::String (id) + " registered");
@@ -6133,7 +6217,7 @@ static void testBatchTranscribe()
     Application app;   // isolated store under SC_TESTS_EXE
     BatchTranscribeSummary sum;
     const bool ok = app.batchTranscribeFolder (folder, "whisper-base", "en", false,
-                                               /*skipExisting=*/false,
+                                               /*fast=*/false, /*skipExisting=*/false,
                                                nullptr, nullptr, nullptr, &sum, &err);
     CHECK (ok, juce::String ("batch transcribe ran: ") + err);
     if (ok)
@@ -6149,7 +6233,7 @@ static void testBatchTranscribe()
         // Second run with skip-existing: nothing new is transcribed.
         BatchTranscribeSummary sum2;
         const bool ok2 = app.batchTranscribeFolder (folder, "whisper-base", "en", false,
-                                                    /*skipExisting=*/true,
+                                                    /*fast=*/false, /*skipExisting=*/true,
                                                     nullptr, nullptr, nullptr, &sum2, &err);
         CHECK (ok2, juce::String ("batch skip run: ") + err);
         if (ok2)
@@ -6470,6 +6554,7 @@ static int scRunUnitTestsImpl()
     progress ("multi-file support");  testMultiFileSupport();
     progress ("resampler (soxr)");    testResampler();
     progress ("load cancel");         testLoadCancel();
+    progress ("large in-memory load"); testLargeInMemoryLoad();
     progress ("resample cancel");     testResampleCancel();
     progress ("render cancel");       testRenderToPixelsCancel();
     progress ("fft view rate change"); testFFTAnalysisRateChange();

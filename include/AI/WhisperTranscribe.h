@@ -55,11 +55,25 @@ public:
                      std::vector<WhisperSegment>& outSegments,
                      ProgressFn onProgress, std::string* errOut);
 
+    // Transcribes one contiguous region of 16 kHz mono audio (e.g. a speech
+    // segment found by the pipeline's VAD). Segments are APPENDED to
+    // outSegments with their times offset by offsetSec seconds.
+    // language: "" or "auto" = auto-detect, otherwise a BCP-47 code.
+    bool transcribeRegion (const float* samples, int nSamples, const Options& opts,
+                           const std::string& language, double offsetSec,
+                           std::vector<WhisperSegment>& outSegments,
+                           ProgressFn onProgress, std::string* errOut);
+
+    // BCP-47 code auto-detected by the most recent transcribeRegion() call
+    // ("" when detection was not requested or failed).
+    const std::string& lastDetectedLanguage () const { return _lastLang; }
+
     void unload();
     bool isLoaded() const { return _ctx != nullptr; }
 
 private:
     struct whisper_context* _ctx = nullptr;
+    std::string _lastLang;
 };
 
 }} // namespace sc::ai

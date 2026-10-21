@@ -52,7 +52,9 @@ bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> o
                 return false;
             }
             const int cnt = (int) std::min<int64_t> (chunk, totalSamples - off);
-            rawReader->read (buffer.get(), 0, cnt, (int) off, true, true);
+            // startSampleInDest MUST be `off` — writing every chunk to
+            // position 0 would overwrite the buffer's beginning each pass.
+            rawReader->read (buffer.get(), (int) off, cnt, (int) off, true, true);
             if (onProgress)
                 onProgress ((float) ((double) (off + cnt) / (double) totalSamples));
         }

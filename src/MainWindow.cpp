@@ -1854,6 +1854,9 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
     w->addComboBox ("mode",
                     juce::StringArray { "Transcribe", "Translate to English" },
                     "Mode");
+    w->addComboBox ("speed",
+                    juce::StringArray { "Balanced (beam search)", "Fast (greedy)" },
+                    "Speed / accuracy");
 
     // Preselect the persisted choices (defaults when never set).
     if (auto* c = w->getComboBoxComponent ("model"))
@@ -1868,6 +1871,8 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
     }
     if (auto* c = w->getComboBoxComponent ("mode"))
         c->setSelectedItemIndex (app.lastTranscribeTranslate ? 1 : 0);
+    if (auto* c = w->getComboBoxComponent ("speed"))
+        c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
 
     w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
                     "Auto-download model if missing");
@@ -1897,6 +1902,8 @@ void MainWindow::showTranscribeDialog()
                                         ? w->getComboBoxComponent ("language")->getText () : "auto";
     const bool translate           = w->getComboBoxComponent ("mode") != nullptr
                                         && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
+    const bool fast                = w->getComboBoxComponent ("speed") != nullptr
+                                        && w->getComboBoxComponent ("speed")->getText ().startsWith ("Fast");
     const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
                                        || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
     delete w;
@@ -1916,16 +1923,17 @@ void MainWindow::showTranscribeDialog()
     app.lastTranscribeModelId   = modelId;
     app.lastTranscribeLanguage  = language;
     app.lastTranscribeTranslate = translate;
+    app.lastTranscribeFast      = fast;
     app.aiAutoDownload          = autoDownload;
     app.saveAiSettings ();
 
-    runTranscriptionAsync (modelId, language, translate, autoDownload);
+    runTranscriptionAsync (modelId, language, translate, fast, autoDownload);
 }
 
 // Transcription on a background thread with a progress dialog. Progress:
 // download [0, 15%), mix+resample [15, 25%), inference [25, 100%].
 void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::string& language,
-                                        bool translate, bool autoDownload)
+                                        bool translate, bool fast, bool autoDownload)
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Transcribing with " + juce::String (modelId) + " ...\n"
@@ -1935,7 +1943,7 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
     dlg->setProgress (0.0);
     dlg->beginModal ();
 
-    std::thread ([this, modelId, language, translate, autoDownload, dlg] {
+    std::thread ([this, modelId, language, translate, fast, autoDownload, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
@@ -1947,7 +1955,7 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
         // A false progress return cancels: download and mix/resample stop at
         // their next checkpoint; inference itself cannot be interrupted
         // mid-whisper_full, so a cancel during it finishes that phase first.
-        const bool ok = app.transcribe (modelId, language, translate,
+        const bool ok = app.transcribe (modelId, language, translate, fast,
             [sendProgress, dlg] (float f) {
                 sendProgress ((double) f);
                 return !dlg->cancelled.load ();
@@ -1998,6 +2006,9 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
     w->addComboBox ("mode",
                     juce::StringArray { "Transcribe", "Translate to English" },
                     "Mode");
+    w->addComboBox ("speed",
+                    juce::StringArray { "Balanced (beam search)", "Fast (greedy)" },
+                    "Speed / accuracy");
     w->addComboBox ("existing",
                     juce::StringArray { "Overwrite existing SCTT", "Skip files with SCTT" },
                     "Existing transcriptions");
@@ -2015,6 +2026,8 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
     }
     if (auto* c = w->getComboBoxComponent ("mode"))
         c->setSelectedItemIndex (app.lastTranscribeTranslate ? 1 : 0);
+    if (auto* c = w->getComboBoxComponent ("speed"))
+        c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
 
     w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
                     "Auto-download model if missing");
@@ -2049,6 +2062,8 @@ void MainWindow::showTranscribeFolderDialog()
                                         ? w->getComboBoxComponent ("language")->getText () : "auto";
     const bool translate           = w->getComboBoxComponent ("mode") != nullptr
                                         && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
+    const bool fast                = w->getComboBoxComponent ("speed") != nullptr
+                                        && w->getComboBoxComponent ("speed")->getText ().startsWith ("Fast");
     const bool skipExisting        = w->getComboBoxComponent ("existing") != nullptr
                                         && w->getComboBoxComponent ("existing")->getText ().startsWith ("Skip");
     const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
@@ -2070,10 +2085,11 @@ void MainWindow::showTranscribeFolderDialog()
     app.lastTranscribeModelId   = modelId;
     app.lastTranscribeLanguage  = language;
     app.lastTranscribeTranslate = translate;
+    app.lastTranscribeFast      = fast;
     app.aiAutoDownload          = autoDownload;
     app.saveAiSettings ();
 
-    runBatchTranscribeAsync (folder, modelId, language, translate, skipExisting, autoDownload);
+    runBatchTranscribeAsync (folder, modelId, language, translate, fast, skipExisting, autoDownload);
 }
 
 // Batch transcription on a background thread with a cancellable progress
@@ -2081,7 +2097,7 @@ void MainWindow::showTranscribeFolderDialog()
 void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
                                           const std::string& modelId,
                                           const std::string& language, bool translate,
-                                          bool skipExisting, bool autoDownload)
+                                          bool fast, bool skipExisting, bool autoDownload)
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Scanning " + folder.getFileName ()
@@ -2089,7 +2105,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
     dlg->setProgress (0.0);
     dlg->beginModal ();
 
-    std::thread ([this, folder, modelId, language, translate, skipExisting,
+    std::thread ([this, folder, modelId, language, translate, fast, skipExisting,
                   autoDownload, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
@@ -2103,7 +2119,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
         BatchTranscribeSummary summary;
         std::string err;
         const bool ok = app.batchTranscribeFolder (
-            folder, modelId, language, translate, skipExisting,
+            folder, modelId, language, translate, fast, skipExisting,
             [&sendProgress] (float f) { sendProgress ((double) f); return true; },
             [dlg] (const juce::String& name) {
                 juce::MessageManager::callAsync ([dlg, name] {

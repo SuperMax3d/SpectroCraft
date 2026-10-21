@@ -5,7 +5,7 @@
  *   --test-load <in.wav>                       (load timing + mipmap stats)
  *   --test-noise-suppression <in.wav> <out.wav> [modelId]   (AI builds only)
  *       modelId: denseunet (default) | deepfilternet2 | deepfilternet3
- *   --test-transcribe <in.wav> [modelId] [language]         (AI builds only)
+ *   --test-transcribe <in.wav> [modelId] [language] [fast 0|1]   (AI builds only)
  *       modelId: whisper-base (default) | whisper-small | ... ; language: auto|en|...
  *   --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]
  *       (AI builds only)
@@ -296,18 +296,20 @@ public:
             else if (args[i] == "--test-transcribe")
             {
                 // Transcribes the whole file with Whisper and prints the
-                // segments. Usage: --test-transcribe <in.wav> [modelId] [language]
+                // segments. Usage: --test-transcribe <in.wav> [modelId] [language] [fast 0|1]
                 if (i + 1 >= args.size())
                 {
-                    std::cout << "usage: --test-transcribe <in.wav> [modelId] [language]\n";
+                    std::cout << "usage: --test-transcribe <in.wav> [modelId] [language] [fast 0|1]\n";
                     quit();
                     return;
                 }
                 const juce::File in = resolvePath (args[++i]);
                 std::string modelId  = "whisper-base";
                 std::string language = "auto";
+                bool fast = false;
                 if (i + 1 < args.size()) modelId  = args[++i].toStdString ();
                 if (i + 1 < args.size()) language = args[++i].toStdString ();
+                if (i + 1 < args.size() && args[i + 1] == "1") { fast = true; ++i; }
 
                 AudioEngine engine;
                 if (!engine.loadFile (in))
@@ -354,6 +356,7 @@ public:
 
                 sc::ai::WhisperTranscriber::Options opts;
                 opts.language = language;
+                opts.beamSize = fast ? 1 : 5;   // greedy vs beam search
 
                 std::vector<ScttSegment> segs;
                 const bool ok = sc::ai::runWhisperPipeline (engine, { 0 }, ggmlModel, irXml,
@@ -375,27 +378,28 @@ public:
             {
                 // Batch-transcribes every .wav in a folder tree headlessly and
                 // writes the SCTT chunk back into each file. Usage:
-                //   --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]
+                //   --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1] [fast 0|1]
                 if (i + 1 >= args.size())
                 {
-                    std::cout << "usage: --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]\n";
+                    std::cout << "usage: --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1] [fast 0|1]\n";
                     quit();
                     return;
                 }
                 const juce::File folder = resolvePath (args[++i]);
                 std::string modelId  = "whisper-base";
                 std::string language = "auto";
-                bool skipExisting = false;
-                if (i + 1 < args.size()) modelId  = args[++i].toStdString ();
-                if (i + 1 < args.size()) language = args[++i].toStdString ();
-                if (i + 1 < args.size()) skipExisting = args[++i] == "1";
+                bool skipExisting = false, fast = false;
+                if (i + 1 < args.size()) modelId      = args[++i].toStdString ();
+                if (i + 1 < args.size()) language     = args[++i].toStdString ();
+                if (i + 1 < args.size() && args[i + 1] == "1") { skipExisting = true; ++i; }
+                if (i + 1 < args.size() && args[i + 1] == "1") { fast = true; ++i; }
 
                 Application app;   // no GUI needed for the batch run
                 BatchTranscribeSummary sum;
                 std::string err;
                 const bool ok = app.batchTranscribeFolder (
                     folder, modelId, language, /*translate=*/false,
-                    skipExisting,
+                    fast, skipExisting,
                     [] (float f) {
                         static int lastPct = -1;
                         const int pct = (int) (f * 100.0);

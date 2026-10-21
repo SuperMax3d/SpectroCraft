@@ -469,8 +469,9 @@ linear and log modes.
 The AI module is built by default (`-DSPECTRO_ENABLE_AI=ON`; disable with
 `-DSPECTRO_ENABLE_AI=OFF` for a lean build). It provides neural **noise
 suppression** (OpenVINO) and Whisper **transcription** (whisper.cpp, with an
-optional OpenVINO encoder acceleration). v1 is **CPU-only**; GPU device
-selection will follow if the plugins expose it.
+OpenVINO encoder acceleration for most models). Transcription runs on CPU by
+default; when the OpenVINO runtime exposes a GPU or NPU device, the encoder
+is automatically moved there.
 
 ### How it works
 
@@ -481,7 +482,11 @@ selection will follow if the plugins expose it.
   the DeepFilterNet models suppress noise: 6–12 for light reduction,
   18–24 for medium. The result is committed as an undoable edit.
 - **Transcription** (`Effects → Transcribe…`) runs Whisper over the whole file
-  (visible channels mixed to mono, resampled to 16 kHz with SoXR). Segments are
+  (visible channels mixed to mono, resampled to 16 kHz with SoXR). A VAD pass
+  first detects speech regions and skips long silences entirely — files with
+  pauses transcribe several times faster than their length would suggest.
+  *Balanced* uses beam search; *Fast* uses greedy decoding (~1.4× quicker,
+  slightly lower accuracy on difficult audio). Segments are
   shown in the **Transcription** tab: double-click a row to jump + select its
   range; type in the search box and press Enter to cycle through matches.
   Results are embedded in the WAV as a custom top-level `SCTT` RIFF chunk
@@ -507,7 +512,7 @@ selection will follow if the plugins expose it.
 | Noise suppression | DeepFilterNet 2 (recommended) | [Intel/deepfilternet-openvino](https://huggingface.co/Intel/deepfilternet-openvino) (`deepfilternet2/{enc,erb_dec,df_dec}.{xml,bin}`) | ~9 MB |
 | Noise suppression | DeepFilterNet 3 (experimental) | same repo, `deepfilternet3/…` | ~10 MB |
 | Noise suppression | DenseUNet (legacy) | [Intel Open Model Zoo 2023.0](https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/noise-suppression-denseunet-ll-0001/FP16) FP16 | ~9 MB |
-| Transcription | Whisper tiny / base / small / medium / large-v1 / v2 / v3 | [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) (`ggml-<name>.bin`) | 78 MB – 3.1 GB |
+| Transcription | Whisper tiny / base / small / medium / large-v1 / v2 / v3 (+ q5_1 quantized variants, large-v3-turbo + q8_0) | [Intel/whisper.cpp-openvino-models](https://huggingface.co/Intel/whisper.cpp-openvino-models) zips (ggml .bin + OpenVINO encoder IR); plain ggml from [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) for the rest | 32 MB – 4.3 GB |
 
 Weights are **never committed to this repository** — they are downloaded on
 first use (SHA-256 verified against the registry in `src/AI/ModelManager.cpp`)
@@ -524,8 +529,14 @@ files yourself into `%APPDATA%/SpectroCraft/models/<model-id>/`:
 ```
 deepfilternet2:\  enc.xml, enc.bin, erb_dec.xml, erb_dec.bin, df_dec.xml, df_dec.bin
 denseunet:    \  noise-suppression-denseunet-ll-0001.xml, …-0001.bin
-whisper-base: \  ggml-base.bin        (ggml-tiny / small / medium / large-vN)
+whisper-base: \  ggml-base.bin, ggml-base-encoder-openvino.xml, ggml-base-encoder-openvino.bin
+               \  (or just ggml-<name>.bin for tiny / quantized / turbo models)
 ```
+
+The encoder IR pair is optional — without it transcription falls back to the
+slower pure-ggml encode with identical results. The standard fp16 models ship
+with it in Intel's zips; the quantized and turbo variants don't have published
+IRs, so they always use the ggml path.
 
 The failure dialog always shows the exact destination folder and the download
 URLs in a copyable text box. The **OpenVINO runtime DLLs** (`openvino.dll`,
@@ -543,11 +554,14 @@ without them it falls back to the pure-ggml encoder automatically.
 - Whisper speed scales with model size: `tiny`/`base` transcribe a minute of
   audio in seconds on CPU; `medium`/`large-v3` take minutes. Use the smallest
   model that meets your accuracy needs for batch runs.
-- Optional speed-up: whisper.cpp's `models/convert-whisper-to-openvino.py`
-  produces an OpenVINO encoder pair (`ggml-<name>-encoder-openvino.{xml,bin}`)
-  that is not published by anyone; drop both files into the model folder and
-  transcription automatically uses the faster OV encode path (identical
-  results).
+- The OpenVINO encoder (included with base/small/medium/large-v1/v2/v3) is
+  faster than the pure-ggml encode and runs on GPU/NPU when available —
+  device selection is automatic, CPU fallback included. `large-v3-turbo` is a
+  good accuracy/speed compromise for longer files; the q5_1/q8_0 quantized
+  variants cut memory use with minimal quality loss.
+- VAD silence skipping + *Fast* (greedy) mode stack: on a 60 s file with two
+  20 s speech regions, `whisper-base` drops from ~53 s to ~19 s (beam) or
+  ~15 s (fast) on a modern desktop CPU.
 
 ---
 

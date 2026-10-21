@@ -102,6 +102,7 @@ public:
     std::string lastTranscribeModelId = "whisper-base";
     std::string lastTranscribeLanguage = "auto";
     bool lastTranscribeTranslate = false;
+    bool lastTranscribeFast = false;   // true = greedy decode (fast), false = beam search
     void saveAiSettings();
     void removeRecentFile (const juce::File& file);// drop one entry and persist
     void clearRecentFiles();                        // empty the list and persist it
@@ -140,8 +141,10 @@ public:
     // Whisper (modelId selects the model; language "auto" or a BCP-47 code;
     // translate = true converts to English). Segments are stored in the active
     // document's SCTT data. Returns false and fills errOut on failure.
+    // fast = true uses greedy decoding (~2x faster than beam search, slightly
+    // lower accuracy); false keeps the default beam size of 5.
     bool transcribe (const std::string& modelId, const std::string& language,
-                     bool translate,
+                     bool translate, bool fast,
                      std::function<bool(float)> onProgress = nullptr,
                      std::string* errOut = nullptr,
                      bool autoDownload = true);
@@ -158,7 +161,7 @@ public:
     bool batchTranscribeFolder (const juce::File& folder,
                                 const std::string& modelId,
                                 const std::string& language, bool translate,
-                                bool skipExisting,
+                                bool fast, bool skipExisting,
                                 std::function<bool(float)> onProgress = nullptr,
                                 std::function<void(const juce::String&)> onStatus = nullptr,
                                 std::atomic<bool>* cancelOut = nullptr,
