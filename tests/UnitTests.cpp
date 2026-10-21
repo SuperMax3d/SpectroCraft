@@ -4854,6 +4854,127 @@ static void testResampler()
     }
 }
 
+// ---------------- Cancellation of long-running operations (ESC / Cancel) ----
+static void testLoadCancel()
+{
+    // In-memory path: a file spanning several 1M-sample I/O chunks.
+    {
+        const juce::File wav = makeTempFile ("load_cancel_mem.wav");
+        CHECK (writeWav (wav, 2, 48000.0, 3000000,
+            [] (int c, int64_t f, double rate) {
+                return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                         * (100.0 + 50.0 * c) * (double) f / rate);
+            }), "write large wav");
+
+        AudioEngine eng;
+        std::atomic<bool> cancel { false };
+        const bool ok = eng.loadFile (wav,
+            [&cancel] (float frac) { if (frac > 0.5f) cancel.store (true); },
+            &cancel);
+        CHECK (!ok, "cancelled load returns false");
+        CHECK (!eng.isFileLoaded (), "engine back to pre-load state after cancel");
+        CHECK (eng.mipmaps().empty (), "no partial mipmap pyramid after cancelled load");
+    }
+
+    // Streaming path: force streaming and cancel during mipmap construction.
+    {
+        const juce::File wav = makeTempFile ("load_cancel_stream.wav");
+        CHECK (writeWav (wav, 2, 48000.0, 3000000,
+            [] (int c, int64_t f, double rate) {
+                return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                         * (100.0 + 50.0 * c) * (double) f / rate);
+            }), "write large wav (streaming)");
+
+        AudioEngine eng;
+        eng.setMaxInMemorySampleChannels (0);   // force the streaming path
+        std::atomic<bool> cancel { false };
+        const bool ok = eng.loadFile (wav,
+            [&cancel] (float frac) {
+                if (frac > 0.6f) cancel.store (true);   // mipmap phase is [0.5, 1]
+            },
+            &cancel);
+        CHECK (!ok, "cancelled streaming load returns false");
+        CHECK (!eng.isFileLoaded (), "streaming engine clean after cancel");
+        CHECK (eng.mipmaps().empty (), "no partial pyramid after cancelled streaming load");
+    }
+
+    // Pre-set flag: aborts before any work.
+    {
+        const juce::File wav = makeTempFile ("load_cancel_preset.wav");
+        writeWav (wav, 1, 8000.0, 8000,
+            [] (int, int64_t f, double rate) {
+                return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                         * 440.0 * (double) f / rate);
+            });
+        AudioEngine eng;
+        std::atomic<bool> cancel { true };
+        CHECK (!eng.loadFile (wav, nullptr, &cancel), "pre-set cancel aborts immediately");
+        CHECK (!eng.isFileLoaded (), "engine clean after pre-set cancel");
+    }
+}
+
+static void testResampleCancel()
+{
+    const juce::File wav = makeTempFile ("resample_cancel.wav");
+    CHECK (writeWav (wav, 1, 48000.0, 3000000,
+        [] (int, int64_t f, double rate) {
+            return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                     * 440.0 * (double) f / rate);
+        }), "write wav for resample cancel");
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "load ok");
+    const double oldRate = eng.sampleRate();
+    const int64_t oldLen = eng.numSamples();
+
+    // Pre-set flag: cancels at the first chunk boundary.
+    std::atomic<bool> cancel { true };
+    CHECK (!eng.resampleTo (96000.0, nullptr, &cancel), "pre-set cancel aborts resample");
+    CHECK (std::abs (eng.sampleRate() - oldRate) < 1e-9,
+          "rate unchanged after cancelled resample");
+    CHECK (eng.numSamples() == oldLen, "length unchanged after cancelled resample");
+
+    // Mid-resample cancel via the progress callback.
+    std::atomic<bool> cancel2 { false };
+    const bool ok = eng.resampleTo (96000.0,
+        [&cancel2] (float f) { if (f > 0.5f) cancel2.store (true); },
+        &cancel2);
+    CHECK (!ok, "mid-resample cancel returns false");
+    CHECK (std::abs (eng.sampleRate() - oldRate) < 1e-9,
+          "rate unchanged after mid-resample cancel");
+    CHECK (eng.numSamples() == oldLen, "length unchanged after mid-resample cancel");
+}
+
+static void testRenderToPixelsCancel()
+{
+    const juce::File wav = makeTempFile ("render_cancel.wav");
+    CHECK (writeWav (wav, 1, 48000.0, 240000,
+        [] (int, int64_t f, double rate) {
+            return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                     * 440.0 * (double) f / rate);
+        }), "write wav for render cancel");
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "load ok");
+
+    SpectralEngine sp;
+    Settings s;
+    sp.setColourMap (ColourMap::Classic);
+
+    // Pre-set flag: stops before sampling; no partial tiles may be cached.
+    std::atomic<bool> cancel { true };
+    std::vector<uint8_t> rgba;
+    CHECK (!sp.renderToPixels (eng, s, 256, 128, 0.0, 5.0, { 0 }, rgba, &cancel),
+          "pre-set cancel aborts renderToPixels");
+    CHECK (sp.cacheSize() == 0, "no partial tiles cached after cancelled render");
+
+    // A normal (uncancelled) render still works afterwards.
+    std::vector<uint8_t> rgba2;
+    CHECK (sp.renderToPixels (eng, s, 256, 128, 0.0, 5.0, { 0 }, rgba2),
+          "uncancelled render succeeds after a cancelled one");
+    CHECK (rgba2.size() == (size_t) 256 * 128 * 4, "render output size correct");
+}
+
 // Regression: after a resample the Frequency Analysis panel's cached spectrum
 // must be invalidated by the sample-rate change alone — same file pointer and
 // same time region, so without the rate key recomputeIfNeeded() would keep
@@ -6256,6 +6377,9 @@ static int scRunUnitTestsImpl()
     progress ("batched undo/redo");       testBatchedUndoRedo();
     progress ("multi-file support");  testMultiFileSupport();
     progress ("resampler (soxr)");    testResampler();
+    progress ("load cancel");         testLoadCancel();
+    progress ("resample cancel");     testResampleCancel();
+    progress ("render cancel");       testRenderToPixelsCancel();
     progress ("fft view rate change"); testFFTAnalysisRateChange();
     progress ("status bar sample rate"); testStatusBarSampleRate();
     progress ("sctt json");             testScttJson();

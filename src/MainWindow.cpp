@@ -287,10 +287,41 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 
         if (mainD != nullptr && !mainD->userBounds.isEmpty())
         {
-            const juce::Rectangle<int> safe ((int) std::lround (mainD->userBounds.getX()),
-                                             (int) std::lround (mainD->userBounds.getY()),
-                                             (int) std::lround (mainD->userBounds.getWidth()),
-                                             (int) std::lround (mainD->userBounds.getHeight()));
+            juce::Rectangle<int> safe ((int) std::lround (mainD->userBounds.getX()),
+                                      (int) std::lround (mainD->userBounds.getY()),
+                                      (int) std::lround (mainD->userBounds.getWidth()),
+                                      (int) std::lround (mainD->userBounds.getHeight()));
+
+            // JUCE window bounds are the CLIENT area: setBoundsPhysical() adds
+            // the native frame (title bar + resize borders) around them. If we
+            // only fit the client into userBounds, the title bar ends up above
+            // y=0 and is unreachable. Inset by the frame size so the whole
+            // window - decorations included - stays inside the display.
+#if defined (_WIN32)
+            {
+                RECT cr { 0, 0, 1, 1 };
+                const DWORD style = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
+                                    | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+                if (AdjustWindowRectExForDpi (&cr, style, FALSE, 0,
+                                              (UINT) std::lround (mainD->dpi)))
+                {
+                    const double sc = mainD->scale > 0.0 ? mainD->scale : 1.0;
+                    // Frame insets in logical pixels (asymmetric: the title
+                    // bar makes the top inset much larger than the others).
+                    const int il = (int) std::ceil (-cr.left / sc);
+                    const int it = (int) std::ceil (-cr.top / sc);
+                    const int ir = (int) std::ceil (cr.right / sc);
+                    const int ib = (int) std::ceil (cr.bottom / sc);
+                    safe.setX (safe.getX() + il);
+                    safe.setY (safe.getY() + it);
+                    safe.setWidth (std::max (0, safe.getWidth() - il - ir));
+                    safe.setHeight (std::max (0, safe.getHeight() - it - ib));
+                }
+            }
+#endif
+
+            if (!safe.isEmpty())
+            {
             auto r = getBounds();
             if (r.getWidth() > safe.getWidth())
                 r.setWidth (std::max (400, safe.getWidth()));
@@ -302,6 +333,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
             if (r.getX() < safe.getX()) r.setX (safe.getX());
             if (r.getY() < safe.getY()) r.setY (safe.getY());
             setBounds (r);
+            }
         }
     }
 
@@ -909,13 +941,27 @@ public:
         setSize (getWidth(), getHeight() + 34);
     }
 
-    // Set by the Cancel button; the worker thread checks it between files.
+    // Set by the Cancel button / ESC; the worker thread checks it between
+    // units of work and then deletes this dialog.
     std::atomic<bool> cancelled { false };
 
     void setProgress (double v) { progressValue = v; }
 
     // Update the message text (call on the message thread).
     void setStatusText (const juce::String& s) { setMessage (s); }
+
+    /** Enters modal state and grabs keyboard focus so that ESC reaches the
+        Cancel button's shortcut (AlertWindow::keyPressed checks its buttons'
+        registered shortcuts). Progress dialogs contain no text fields, so
+        taking focus is safe. The worker thread still owns this dialog's
+        lifetime: after a cancel it finishes the current unit of work and
+        deletes the dialog. */
+    void beginModal()
+    {
+        enterModalState (false);
+        setWantsKeyboardFocus (true);   // AlertWindow disables this when it has children
+        grabKeyboardFocus ();
+    }
 
     void resized() override
     {
@@ -931,18 +977,20 @@ private:
 void MainWindow::openFileWithProgress (const juce::File& file)
 {
     auto* dlg = new WorkProgressDialog ("Loading", "Opening " + file.getFileName() + " ...",
-                                        false, this);
+                                        true, this);
 
-    // Modal but without stealing keyboard focus: the dialog just sits there
-    // while the worker thread reports progress.
-    dlg->enterModalState (false);
+    // Modal with keyboard focus so ESC hits the Cancel button. The worker
+    // thread checks `cancelled` between I/O chunks and mipmap blocks; a
+    // cancelled load discards the half-built document (nothing is opened).
+    dlg->beginModal ();
 
     app.loadFileAsync (file,
         [dlg] (float frac) {
             juce::MessageManager::callAsync ([dlg, frac]
             { dlg->setProgress ((double) frac); });
         },
-        [dlg] (bool) { delete dlg; });
+        [dlg] (bool) { delete dlg; },
+        &dlg->cancelled);
 }
 
 void MainWindow::activateDocUI()
@@ -1039,13 +1087,20 @@ void MainWindow::exportSpectralAsync (const juce::File& file)
 {
     auto* dlg = new WorkProgressDialog ("Exporting",
                                         "Rendering spectrogram to " + file.getFileName() + " ...",
-                                        false, this);
+                                        true, this);
     dlg->setProgress (-1.0);   // out of range -> indeterminate spinning bar
-    dlg->enterModalState (false);
+    dlg->beginModal ();
 
     std::thread ([this, file, dlg] {
-        const bool ok = spectralView ? spectralView->saveAsPng (file) : false;
-        juce::MessageManager::callAsync ([dlg, ok] { delete dlg; });
+        const bool ok = spectralView ? spectralView->saveAsPng (file, &dlg->cancelled) : false;
+        juce::MessageManager::callAsync ([this, file, dlg, ok] {
+            const bool wasCancelled = dlg->cancelled.load ();
+            delete dlg;
+            if (!ok && !wasCancelled)
+                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                                    "Export failed",
+                                                    "Could not write the PNG file.", "", this);
+        });
     }).detach();
 }
 
@@ -1479,9 +1534,9 @@ void MainWindow::runResampleAsync (double newRate)
 {
     auto* dlg = new WorkProgressDialog ("Resampling",
                                         "Resampling to " + juce::String (newRate, 3) + " Hz ...",
-                                        false, this);
+                                        true, this);
     dlg->setProgress (0.0);
-    dlg->enterModalState (false);
+    dlg->beginModal ();
 
     std::thread ([this, newRate, dlg] {
         double lastSent = -1.0;
@@ -1491,14 +1546,19 @@ void MainWindow::runResampleAsync (double newRate)
             juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
         };
 
+        // Cancellation stops at a SoXR chunk boundary; the buffer swap only
+        // happens on success, so a cancelled resample changes nothing.
         const bool ok = app.audioEngine().resampleTo (
-            newRate, [sendProgress] (float f) { sendProgress (0.85 * (double) f); });
+            newRate,
+            [sendProgress] (float f) { sendProgress (0.85 * (double) f); },
+            &dlg->cancelled);
         if (ok)
             app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
                 sendProgress (0.85 + 0.15 * (double) f);
             });
 
         juce::MessageManager::callAsync ([this, dlg, ok] {
+            const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (ok)
             {
@@ -1512,7 +1572,7 @@ void MainWindow::runResampleAsync (double newRate)
                 if (fftPanel) fftPanel->onSampleRateChanged();
                 updateTitle();
             }
-            else
+            else if (!wasCancelled)
             {
                 juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
                                                     "Resample failed",
@@ -1694,9 +1754,9 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
 {
     auto* dlg = new WorkProgressDialog ("Noise Suppression",
                                         "Applying " + juce::String (modelId) + " ...",
-                                        false, this);
+                                        true, this);
     dlg->setProgress (0.0);
-    dlg->enterModalState (false);
+    dlg->beginModal ();
 
     std::thread ([this, modelId, device, attenLimDb, df3PostFilter, autoDownload, dlg] {
         double lastSent = -1.0;
@@ -1707,8 +1767,13 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
         };
 
         std::string err;
+        // A false progress return cancels: the pipeline stops at its next
+        // stage boundary and no audio is committed.
         const bool ok = app.noiseSuppress (modelId, device, attenLimDb, df3PostFilter,
-            [sendProgress] (float f) { sendProgress (0.95 * (double) f); return true; }, &err,
+            [sendProgress, dlg] (float f) {
+                sendProgress (0.95 * (double) f);
+                return !dlg->cancelled.load ();
+            }, &err,
             autoDownload);
         if (ok)
             app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
@@ -1716,6 +1781,7 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
             });
 
         juce::MessageManager::callAsync ([this, modelId, dlg, ok, err] {
+            const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (ok)
             {
@@ -1723,7 +1789,9 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
                 return;
             }
 
-            showAiFailureDialog ("Noise Suppression", err, modelId, this);
+            // A user cancel is not a failure: just close quietly.
+            if (!wasCancelled)
+                showAiFailureDialog ("Noise Suppression", err, modelId, this);
         });
     }).detach();
 }
@@ -1861,10 +1929,11 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Transcribing with " + juce::String (modelId) + " ...\n"
-                                        "(whole file - this can take a while on CPU)",
-                                        false, this);
+                                        "(whole file - this can take a while on CPU)\n"
+                                        "(Cancel stops after the current phase)",
+                                        true, this);
     dlg->setProgress (0.0);
-    dlg->enterModalState (false);
+    dlg->beginModal ();
 
     std::thread ([this, modelId, language, translate, autoDownload, dlg] {
         double lastSent = -1.0;
@@ -1875,11 +1944,18 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
         };
 
         std::string err;
+        // A false progress return cancels: download and mix/resample stop at
+        // their next checkpoint; inference itself cannot be interrupted
+        // mid-whisper_full, so a cancel during it finishes that phase first.
         const bool ok = app.transcribe (modelId, language, translate,
-            [sendProgress] (float f) { sendProgress ((double) f); return true; }, &err,
+            [sendProgress, dlg] (float f) {
+                sendProgress ((double) f);
+                return !dlg->cancelled.load ();
+            }, &err,
             autoDownload);
 
         juce::MessageManager::callAsync ([this, dlg, ok, err, modelId] {
+            const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (ok)
             {
@@ -1897,7 +1973,9 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
                 return;
             }
 
-            showAiFailureDialog ("Transcription", err, modelId, this);
+            // A user cancel is not a failure: just close quietly.
+            if (!wasCancelled)
+                showAiFailureDialog ("Transcription", err, modelId, this);
         });
     }).detach ();
 }
@@ -2009,7 +2087,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
                                         "Scanning " + folder.getFileName ()
                                         + " for WAV files ...", true, this);
     dlg->setProgress (0.0);
-    dlg->enterModalState (false);
+    dlg->beginModal ();
 
     std::thread ([this, folder, modelId, language, translate, skipExisting,
                   autoDownload, dlg] {

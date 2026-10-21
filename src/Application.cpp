@@ -155,13 +155,14 @@ bool Application::openFile (const juce::File& file)
 
 void Application::loadFileAsync (const juce::File& file,
                                  std::function<void(float)> onProgress,
-                                 std::function<void(bool)> onDone)
+                                 std::function<void(bool)> onDone,
+                                 const std::atomic<bool>* cancel)
 {
     // The document is built entirely on the worker thread (pure I/O + DSP);
     // it only crosses to the message thread once fully loaded.
     auto* doc = new FileDoc();
-    std::thread ([doc, file, onProgress, onDone, this] {
-        const bool ok = doc->load (file, onProgress);
+    std::thread ([doc, file, onProgress, onDone, cancel, this] {
+        const bool ok = doc->load (file, onProgress, cancel);
 
         juce::MessageManager::callAsync ([this, doc, file, ok, onDone] {
             if (ok)

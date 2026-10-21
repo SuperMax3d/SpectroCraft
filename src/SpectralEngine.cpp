@@ -182,9 +182,13 @@ std::shared_ptr<SpectralTile> SpectralEngine::computeTile (
 std::vector<std::shared_ptr<SpectralTile>>
 SpectralEngine::getTiles (const AudioEngine& engine, int channel,
                           int64_t startSample, int64_t endSample, int level,
-                          const Settings& s)
+                          const Settings& s,
+                          const std::atomic<bool>* cancel)
 {
     std::vector<std::shared_ptr<SpectralTile>> out;
+
+    if (cancel != nullptr && cancel->load())
+        return out;   // cancelled before any work: nothing to cache
 
     const int hop = s.hopSize << level;
     const int64_t tileSamples = (int64_t) kFramesPerTile * hop;
@@ -292,6 +296,10 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
         }
 
         // Publish completed tiles into the cache and link them to their jobs.
+        // If cancelled while computing, do NOT publish: the tiles may be
+        // partially filled (-300 dB sentinels) and would poison the cache.
+        if (cancel != nullptr && cancel->load())
+            return out;
         const std::lock_guard<std::mutex> lock (cacheMutex_);
         for (size_t mi = 0; mi < missTiles.size(); ++mi)
         {
@@ -346,21 +354,24 @@ float SpectralEngine::probeMagnitude (const AudioEngine& engine, int channel,
     return best;
 }
 
-void SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& s,
+bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& s,
                                      int width, int height,
                                      double t0, double t1,
                                      const std::vector<int>& channels,
-                                     std::vector<uint8_t>& rgba)
+                                     std::vector<uint8_t>& rgba,
+                                     const std::atomic<bool>* cancel)
 {
+    auto cancelled = [cancel] { return cancel != nullptr && cancel->load(); };
+
     rgba.assign ((size_t) width * height * 4, 0);
     if (!engine.isFileLoaded() || width <= 0 || height <= 0 || channels.empty())
-        return;
+        return true;
 
     const double rate = engine.sampleRate();
     const int64_t s0 = std::max ((int64_t) 0, (int64_t) (t0 * rate));
     const int64_t s1 = std::min (engine.numSamples(), (int64_t) (t1 * rate));
     if (s1 <= s0)
-        return;
+        return true;
 
     // Choose level so one frame ~ one pixel column
     const double samplesPerPixel = (double) (s1 - s0) / width;
@@ -371,7 +382,9 @@ void SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
     std::vector<std::vector<std::shared_ptr<SpectralTile>>> perCh;
     for (int ch : channels)
     {
-        auto ts = getTiles (engine, ch, s0, s1, level, s);
+        auto ts = getTiles (engine, ch, s0, s1, level, s, cancel);
+        if (cancelled())
+            return false;   // stop before sampling; no partial tiles were cached
         perCh.push_back (std::move (ts));
     }
 
@@ -430,6 +443,9 @@ void SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
 
     for (int y = 0; y < height; ++y)
     {
+        if (cancelled())
+            return false;
+
         // Frequency for this row (row 0 = top = max frequency)
         const double rowT = 1.0 - ((double) y + 0.5) / height;
         double freq;
@@ -463,11 +479,13 @@ void SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
             rgba[o + 3] = 255;
         }
     }
+    return true;
 }
 
 bool SpectralEngine::renderToPng (const AudioEngine& engine, const Settings& s,
                                   const juce::File& audioFile, const juce::File& pngFile,
-                                  int width, int height, double t0, double t1)
+                                  int width, int height, double t0, double t1,
+                                  const std::atomic<bool>* cancel)
 {
     if (!engine.isFileLoaded())
         return false;
@@ -480,7 +498,8 @@ bool SpectralEngine::renderToPng (const AudioEngine& engine, const Settings& s,
     for (int c = 0; c < engine.numChannels(); ++c)
         chans.push_back (c);
 
-    renderToPixels (engine, s, width, height, t0, t1, chans, rgba);
+    if (!renderToPixels (engine, s, width, height, t0, t1, chans, rgba, cancel))
+        return false;   // cancelled: no PNG is written
     return PngWriter::writePng (pngFile, width, height, rgba);
 }
 

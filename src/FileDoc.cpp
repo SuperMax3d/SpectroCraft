@@ -14,9 +14,10 @@ FileDoc::FileDoc()
     engine.setScttForSave (&scttJson);
 }
 
-bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress)
+bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
+                    const std::atomic<bool>* cancel)
 {
-    if (!engine.loadFile (f, onProgress))
+    if (!engine.loadFile (f, onProgress, cancel))
         return false;
 
     file = f;

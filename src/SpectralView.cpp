@@ -508,7 +508,7 @@ void SpectralView::setFrequencyRange (double lo, double hi)
     if (onFrequencyRangeChanged) onFrequencyRangeChanged (freqMin, freqMax);
 }
 
-bool SpectralView::saveAsPng (const juce::File& file)
+bool SpectralView::saveAsPng (const juce::File& file, const std::atomic<bool>* cancel)
 {
     if (!app.audioEngine().isFileLoaded() || channels.empty()) return false;
     const auto pr = plotRect();
@@ -517,7 +517,8 @@ bool SpectralView::saveAsPng (const juce::File& file)
     rs.maxFrequency = (float) std::min (app.audioEngine().sampleRate() * 0.5, freqMax);
 
     juce::Image img (juce::Image::ARGB, pr.getWidth(), pr.getHeight(), true);
-    renderSpectralContent (img, rs);
+    if (!renderSpectralContent (img, rs, cancel))
+        return false;   // cancelled: no PNG is written
 
     // Extract raw pixels and write a PNG with our own writer.
     std::vector<uint8_t> rgba ((size_t) pr.getWidth() * pr.getHeight() * 4);
@@ -654,10 +655,13 @@ void SpectralView::paint (juce::Graphics& g)
 
 // Renders the spectral content (one row per visible channel with dark gaps)
 // into an ARGB image of size w×h. Used by paint() and saveAsPng().
-void SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs)
+bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
+                                          const std::atomic<bool>* cancel)
 {
+    auto cancelled = [cancel] { return cancel != nullptr && cancel->load(); };
+
     const int w = img.getWidth(), h = img.getHeight();
-    if (w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0) return true;
 
     const juce::Image::BitmapData bd (img, 0, 0, w, h, juce::Image::BitmapData::writeOnly);
 
@@ -666,12 +670,15 @@ void SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs)
     const auto rows = spectralRowRects (w, h, (int) channels.size());
     for (size_t r = 0; r < rows.size(); ++r)
     {
+        if (cancelled()) return false;
+
         const int ch = channels[r];
         const auto rr = rows[r];
         if (rr.getHeight() <= 0) continue;
 
         std::vector<uint8_t> pixels;
-        spectral.renderToPixels (app.audioEngine(), rs, w, rr.getHeight(), viewStart, viewEnd, { ch }, pixels);
+        spectral.renderToPixels (app.audioEngine(), rs, w, rr.getHeight(), viewStart, viewEnd, { ch }, pixels, cancel);
+        if (cancelled()) return false;
 
         for (int y = 0; y < rr.getHeight(); ++y)
         {
@@ -697,6 +704,7 @@ void SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs)
             }
         }
     }
+    return true;
 }
 
 // One frequency axis per visible channel row: tick lines across the plot and

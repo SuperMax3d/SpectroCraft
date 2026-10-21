@@ -16,7 +16,8 @@ int64_t Resampler::estimateOutputFrames (int64_t inFrames, double oldRate, doubl
 bool Resampler::resample (const juce::AudioBuffer<float>& in,
                           double oldRate, double newRate,
                           juce::AudioBuffer<float>& out,
-                          std::function<void(float)> onProgress)
+                          std::function<void(float)> onProgress,
+                          const std::atomic<bool>* cancel)
 {
     // SoXR expresses all lengths as samples PER CHANNEL.
     const int nch = in.getNumChannels();
@@ -63,6 +64,13 @@ bool Resampler::resample (const juce::AudioBuffer<float>& in,
 
     while (!done)
     {
+        if (cancel != nullptr && cancel->load())
+        {   // Stop at a chunk boundary: no partial output is left behind.
+            soxr_delete (x);
+            out.clear();
+            return false;
+        }
+
         // Grow the output buffer if our estimate was too small.
         size_t cap = (size_t) out.getNumSamples();   // frames per channel
         if (outPos >= cap)

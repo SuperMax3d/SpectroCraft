@@ -129,7 +129,10 @@ bool runWhisperPipeline(AudioEngine& eng, const std::vector<int>& chans,
                        outBlock.getReadPointer (0) + outBlock.getNumSamples ());
 
         pos += n;
-        if (onProgress) onProgress ((float) ((pos / (double) nFrames) * 0.1));
+        // A false return cancels the whole transcription before inference
+        // starts; whisper_full itself cannot be interrupted mid-inference.
+        if (onProgress && !onProgress ((float) ((pos / (double) nFrames) * 0.1)))
+            return false;
     }
 
     // ------------------------------------------------------------------

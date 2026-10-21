@@ -36,7 +36,11 @@ public:
         embedded RIFF cue/adtl as fallback for .wav) + initial UI state. */
     /** Loads audio + markers. onProgress (optional) receives 0..1 as the
         load advances; safe to call from a background thread. */
-    bool load (const juce::File& f, std::function<void(float)> onProgress = nullptr);
+    // Loads the file into this document. If cancel points at an atomic set to
+    // true, loading stops at a checkpoint and false is returned with no state
+    // committed to this doc.
+    bool load (const juce::File& f, std::function<void(float)> onProgress = nullptr,
+               const std::atomic<bool>* cancel = nullptr);
 
 private:
     std::string scttJson;              // serialized form for WAV saves (kept in sync)

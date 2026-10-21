@@ -4,6 +4,7 @@
 // same "Best" quality recipe (SOXR_VHQ, 28-bit precision) and planar
 // float32 I/O so JUCE AudioBuffers can be used directly.
 #include <JuceHeader.h>
+#include <atomic>
 
 namespace sc {
 
@@ -13,11 +14,15 @@ public:
     /** Resamples `in` from oldRate to newRate into `out` (which is resized).
         Supports any positive input/output rates, including extreme ratios.
         onProgress (if non-null) receives 0..1 as the input is consumed; it
-        may be called from a worker thread. Returns false on failure. */
+        may be called from a worker thread. If cancel points at an atomic that
+        has been set to true, resampling stops at the next chunk boundary and
+        false is returned with `out` cleared (no partial output). Returns
+        false on failure or cancellation. */
     static bool resample (const juce::AudioBuffer<float>& in,
                           double oldRate, double newRate,
                           juce::AudioBuffer<float>& out,
-                          std::function<void(float)> onProgress = nullptr);
+                          std::function<void(float)> onProgress = nullptr,
+                          const std::atomic<bool>* cancel = nullptr);
 
     /** Estimated output frame count for a given input length and rates. */
     static int64_t estimateOutputFrames (int64_t inFrames, double oldRate, double newRate);

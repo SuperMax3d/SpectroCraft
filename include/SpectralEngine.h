@@ -71,10 +71,12 @@ public:
     static constexpr int kFramesPerTile = 256;
 
     // Get tiles covering [startSample, endSample) at a level (0 = base hop).
-    // Missing tiles are computed in parallel via the thread pool.
+    // Missing tiles are computed in parallel via the thread pool. If cancel
+    // points at an atomic set to true, returns empty without caching partials.
     std::vector<std::shared_ptr<SpectralTile>>
         getTiles (const AudioEngine& engine, int channel, int64_t startSample, int64_t endSample,
-                  int level, const Settings& s);
+                  int level, const Settings& s,
+                  const std::atomic<bool>* cancel = nullptr);
 
     // Pick the mipmap level so one FFT frame ~ one pixel column.
     static int pickMipLevel (double samplesPerPixel, int baseHop)
@@ -92,17 +94,20 @@ public:
                           double freqHz, const Settings& s, int level);
 
     // Render a region to RGBA pixels (bilinear sampling, colour LUT, optional smoothing).
-    // Returns width*height*4 bytes.
-    void renderToPixels (const AudioEngine& engine, const Settings& s,
+    // Fills rgba with width*height*4 bytes. Returns false if cancel points at an
+    // atomic set to true (rendering stops early; no partial tiles are cached).
+    bool renderToPixels (const AudioEngine& engine, const Settings& s,
                          int width, int height,
                          double t0, double t1,
                          const std::vector<int>& channels,
-                         std::vector<uint8_t>& rgba);
+                         std::vector<uint8_t>& rgba,
+                         const std::atomic<bool>* cancel = nullptr);
 
     // Offline: render whole-file spectrogram to a PNG.
     bool renderToPng (const AudioEngine& engine, const Settings& s,
                       const juce::File& audioFile, const juce::File& pngFile,
-                      int width, int height, double t0, double t1);
+                      int width, int height, double t0, double t1,
+                      const std::atomic<bool>* cancel = nullptr);
 
     void clearCache();
     size_t cacheSize() const;

@@ -77,10 +77,13 @@ public:
 
     /** Loads a file on a background thread (for large files). onProgress is
         called from the worker thread with 0..1; onDone runs on the message
-        thread once the load finished (ok = success, doc activated). */
+        thread once the load finished (ok = success, doc activated).
+        If cancel points at an atomic set to true, loading stops at a
+        checkpoint and onDone(false) fires. */
     void loadFileAsync (const juce::File& file,
                         std::function<void(float)> onProgress,
-                        std::function<void(bool)> onDone);
+                        std::function<void(bool)> onDone,
+                        const std::atomic<bool>* cancel = nullptr);
 
     // Recently opened files, most recent first. Updated on every successful
     // openFile() and persisted across sessions in a PropertiesFile.

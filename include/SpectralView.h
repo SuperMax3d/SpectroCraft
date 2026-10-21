@@ -79,7 +79,9 @@ public:
     void setFrequencyRange (double lo, double hi);
 
     // Render the current spectral content (no axes/overlays) to a PNG file.
-    bool saveAsPng (const juce::File& file);
+    // If cancel points at an atomic set to true, rendering stops early and
+    // false is returned without writing any file.
+    bool saveAsPng (const juce::File& file, const std::atomic<bool>* cancel = nullptr);
 
     // Notify MainWindow that the time window changed: (newStart, newEnd).
     // MainWindow applies it to BOTH views so they always show the same range.
@@ -140,7 +142,9 @@ private:
 
     // Renders the spectral content (one row per visible channel with dark
     // gaps) into an ARGB image of size w×h. Used by paint() and saveAsPng().
-    void renderSpectralContent (juce::Image& img, const Settings& rs);
+    // Returns false if cancelled mid-render.
+    bool renderSpectralContent (juce::Image& img, const Settings& rs,
+                                const std::atomic<bool>* cancel = nullptr);
 
     void drawFrequencyRuler (juce::Graphics& g);
     void drawOverlays (juce::Graphics& g);

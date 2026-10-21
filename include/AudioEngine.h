@@ -19,9 +19,12 @@ public:
 
     // ---- File loading (metadata always; full buffer only when small enough) ----
     /** Loads a file. When onProgress is non-null it is called with 0..1 as
-        the load advances (useful for large files loaded off-thread). */
+        the load advances (useful for large files loaded off-thread). If cancel
+        points at an atomic set to true, loading stops at the next checkpoint,
+        the engine is left in its pre-load state and false is returned. */
     bool loadFile (const juce::File& file,
-                   std::function<void(float)> onProgress = nullptr);
+                   std::function<void(float)> onProgress = nullptr,
+                   const std::atomic<bool>* cancel = nullptr);
     void closeFile();
     bool isFileLoaded() const { return hasFile; }
     bool fullyInMemory() const { return buffer != nullptr; }
@@ -79,7 +82,10 @@ public:
     // engine Audacity uses). Requires the file to be fully in memory.
     // NOT undoable; clears the clipboard and mipmap pyramid (the caller is
     // expected to rebuild mipmaps on its worker thread afterwards).
-    bool resampleTo (double newRate, std::function<void(float)> onProgress = nullptr);
+    // If cancel points at an atomic set to true, resampling stops at a chunk
+    // boundary and false is returned with the engine state unchanged.
+    bool resampleTo (double newRate, std::function<void(float)> onProgress = nullptr,
+                     const std::atomic<bool>* cancel = nullptr);
 
     // Apply an undo/redo patch to the in-memory buffer
     // rebuild = false is used by batched undo/redo jumps so the mipmap
@@ -108,14 +114,18 @@ public:
     void setMaxInMemorySampleChannels (int64_t v) { inMemoryLimit = v; }
     int64_t maxInMemorySampleChannels() const { return inMemoryLimit; }
     // Public so batched undo/redo jumps can rebuild once for a whole run.
-    void rebuildMipmaps(std::function<void(float)> onProgress = nullptr);
+    // Rebuilds the mipmap pyramid. Returns false (with the pyramid left empty)
+    // if cancel points at an atomic set to true.
+    bool rebuildMipmaps(std::function<void(float)> onProgress = nullptr,
+                        const std::atomic<bool>* cancel = nullptr);
 
 private:
     // One sequential pass over the file to build the finest mipmap level
     // (memory-mapped reader > in-memory buffer > chunked streaming reads).
     static bool buildFinestLevel (AudioEngine& eng, int64_t factor,
                                   MipLevel& lv,
-                                  std::function<void(float)> onProgress);
+                                  std::function<void(float)> onProgress,
+                                  const std::atomic<bool>* cancel = nullptr);
 public:
 
     /** Replace `samples` with newData (same length, one vector per channel)

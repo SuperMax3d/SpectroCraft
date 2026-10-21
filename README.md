@@ -270,6 +270,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - *Batch transcription* — Effects → Transcribe Folder… transcribes every
     `.wav` in a folder tree headlessly (files never open in the editor) and
     writes each file's `SCTT` chunk back in place; optional skip-existing mode.
+- **Cancelling long operations**: every progress dialog — loading large files,
+  resampling, noise suppression, transcription (single and batch), spectrogram
+  export — has a Cancel button, and ESC works as well. The operation stops at
+  the next safe checkpoint and nothing is committed on cancel; for Whisper
+  inference a cancel takes effect after the current phase finishes.
 - **Offline tools**: `--test-spectral` renders a spectrogram PNG headlessly;
   `--test-load` times a headless load and prints mipmap stats (useful for
   multi-hour files); `--generate-test-files` creates the test WAVs;

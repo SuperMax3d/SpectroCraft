@@ -20,7 +20,8 @@ AudioEngine::~AudioEngine()
     closeFile();
 }
 
-bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> onProgress)
+bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> onProgress,
+                            const std::atomic<bool>* cancel)
 {
     closeFile();
     auto* rawReader = fm->createReaderFor (file);
@@ -44,6 +45,12 @@ bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> o
         const int64_t chunk = 1ll << 20;
         for (int64_t off = 0; off < totalSamples; off += chunk)
         {
+            if (cancel != nullptr && cancel->load())
+            {   // Leave the engine exactly as it was before loadFile().
+                delete rawReader;
+                closeFile();
+                return false;
+            }
             const int cnt = (int) std::min<int64_t> (chunk, totalSamples - off);
             rawReader->read (buffer.get(), 0, cnt, (int) off, true, true);
             if (onProgress)
@@ -58,13 +65,21 @@ bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> o
     }
 
     // Mipmap construction is the second half of the load for streamed files.
+    bool mipsOk = true;
     if (onProgress)
     {
         auto p = std::move (onProgress);
-        rebuildMipmaps ([p] (float f) { p (0.5f + 0.5f * f); });
+        mipsOk = rebuildMipmaps ([p] (float f) { p (0.5f + 0.5f * f); }, cancel);
     }
     else
-        rebuildMipmaps();
+        mipsOk = rebuildMipmaps (nullptr, cancel);
+
+    if (!mipsOk)
+    {   // Cancelled mid-mipmap: discard the half-built document state.
+        reader.reset (nullptr);
+        closeFile();
+        return false;
+    }
     return true;
 }
 
@@ -257,7 +272,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
 // mins.
 bool AudioEngine::buildFinestLevel (AudioEngine& eng, int64_t factor,
                                     MipLevel& lv,
-                                    std::function<void(float)> onProgress)
+                                    std::function<void(float)> onProgress,
+                                    const std::atomic<bool>* cancel)
 {
     const int nchans = eng.numChannels();
     const int64_t N  = eng.numSamples();
@@ -293,6 +309,8 @@ bool AudioEngine::buildFinestLevel (AudioEngine& eng, int64_t factor,
             const int64_t reportEvery = std::max<int64_t> (1, n / 64);
             for (int64_t i = 0; i < n; ++i)
             {
+                if (cancel != nullptr && cancel->load() && i % reportEvery == 0)
+                    return false;
                 const int64_t s   = i * factor;
                 const int64_t cnt = std::min<int64_t> (factor, N - s);
                 mmr->readMaxLevels (s, cnt, res.data(), nchans);
@@ -321,6 +339,8 @@ bool AudioEngine::buildFinestLevel (AudioEngine& eng, int64_t factor,
             const float* base = eng.buffer->getReadPointer (ch, 0);
             for (int64_t i = 0; i < n; ++i)
             {
+                if (cancel != nullptr && cancel->load() && i % reportEvery == 0)
+                    return false;
                 const int64_t s   = i * factor;
                 const int64_t cnt = std::min<int64_t> (factor, N - s);
                 float mn = 0.0f, mx = 0.0f;
@@ -366,6 +386,8 @@ bool AudioEngine::buildFinestLevel (AudioEngine& eng, int64_t factor,
 
         for (int64_t off = 0; off < N; off += chunk)
         {
+            if (cancel != nullptr && cancel->load())
+                return false;
             const int cnt = (int) std::min<int64_t> (chunk, N - off);
             bool ok = false;
             {
@@ -400,11 +422,15 @@ bool AudioEngine::buildFinestLevel (AudioEngine& eng, int64_t factor,
     return false;
 }
 
-void AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress)
+bool AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress,
+                                const std::atomic<bool>* cancel)
 {
     clearMipmaps();
     if (!hasFile || totalSamples == 0)
-        return;
+        return true;
+
+    // A cancelled rebuild leaves the pyramid empty (clearMipmaps() above).
+    auto cancelled = [cancel] { return cancel != nullptr && cancel->load(); };
 
     // Base factor chosen so the finest level has ~100k blocks per channel.
     baseFactor = 1;
@@ -423,8 +449,8 @@ void AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress)
     // Phase 1: finest level in a single pass over the file.
     MipLevel lv;
     auto p1 = [onProgress] (float f) { if (onProgress) onProgress (0.9f * f); };
-    if (!buildFinestLevel (*this, baseFactor, lv, p1))
-        return;
+    if (!buildFinestLevel (*this, baseFactor, lv, p1, cancel))
+        return false;
     mips.push_back (std::move (lv));
 
     // Phase 2: coarser levels by pairwise reduction of the level below.
@@ -437,6 +463,8 @@ void AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress)
     const int totalCoarse = std::max (1, totalMipLevels - 1);
     while (factor <= 16384ll * baseFactor && totalSamples / factor > 100)
     {
+        if (cancelled())
+            break;
         MipLevel up;
         up.factor = factor;
         const int64_t n2 = totalSamples / factor + 1;
@@ -488,6 +516,13 @@ void AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress)
             onProgress (0.9f + 0.1f * (++coarseDone / (float) totalCoarse));
         factor *= 2;
     }
+
+    if (cancelled())
+    {   // Leave the pyramid empty, as documented.
+        clearMipmaps();
+        return false;
+    }
+    return true;
 }
 
 void AudioEngine::clearMipmaps() { mips.clear(); baseFactor = 1; }
@@ -757,7 +792,8 @@ void AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vecto
     rebuildMipmaps();
 }
 
-bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgress)
+bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgress,
+                              const std::atomic<bool>* cancel)
 {
     if (!hasFile || !buffer)
         return false;
@@ -778,7 +814,9 @@ bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgr
     const double posSecs = position();
 
     juce::AudioBuffer<float> out;
-    if (!sc::Resampler::resample (*buffer, rate, newRate, out, onProgress))
+    // On cancellation the resampler returns false before any buffer swap,
+    // so the engine state is left exactly as it was.
+    if (!sc::Resampler::resample (*buffer, rate, newRate, out, onProgress, cancel))
         return false;
 
     // Swap in the resampled buffer. The audio thread is idle (playing==false
