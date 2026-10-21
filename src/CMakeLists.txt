@@ -13,6 +13,8 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/FileDoc.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioEngine.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SpectralEngine.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/SpectralSelection.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/SpectralMaskProcessor.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SpectralView.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/WaveformView.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/MarkerManager.cpp

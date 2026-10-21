@@ -782,8 +782,15 @@ public:
     }
     juce::String getSampleRateText() const { return ratePart; }
 
+    // Left side: the active selection tool name (e.g. "Marquee", "Paintbrush
+    // 200 Hz"); empty in Time Range mode.
+    void setModeText (const juce::String& s)
+    {
+        if (s != modeText) { modeText = s; repaint(); }
+    }
+
 private:
-    juce::String mouseText, selPart, playPart, fileName, ratePart;
+    juce::String mouseText, selPart, playPart, fileName, ratePart, modeText;
 
     JUCE_DECLARE_NON_COPYABLE (StatusBar)
 };

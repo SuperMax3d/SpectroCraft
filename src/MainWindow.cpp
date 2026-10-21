@@ -865,6 +865,24 @@ void MainWindow::syncSharedState()
                                       ? app.audioEngine().sampleRate() : 0.0);
         statusBar->setSelection (app.selection.getStart(), app.selection.getEnd());
         statusBar->setPlayhead (app.playhead);
+
+        // Active spectral tool indicator (empty in Time Range mode).
+        juce::String mode;
+        switch (app.selMode)
+        {
+            case SpectralSelMode::Marquee:
+                mode = "Marquee";
+                break;
+            case SpectralSelMode::Lasso:
+                mode = "Lasso";
+                break;
+            case SpectralSelMode::Paintbrush:
+                mode = juce::String ("Paintbrush ") +
+                       juce::String ((int) std::lround (app.brushRadiusHz)) + " Hz";
+                break;
+            default: break;
+        }
+        statusBar->setModeText (mode);
     }
 
     updateScrollBars();
@@ -1065,6 +1083,10 @@ void MainWindow::activateDocUI()
         spectralView->fitAll();
         spectralView->resetFrequencyRange();
     }
+
+    // Re-install the playback mask for this doc's spectral selection (or clear
+    // it when the new doc has none / Play Spectral Selection is off).
+    app.pushSpectralMaskToEngine ();
 
     syncSharedState();
     updateTitle();
@@ -1299,6 +1321,38 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         return;
     }
 
+    // Selection tools + brush size + clear.
+    switch (menuItemID)
+    {
+        case SelectionToolTimeRange:
+            app.setSelectionTool (SpectralSelMode::TimeRange);
+            break;
+        case SelectionToolMarquee:
+            app.setSelectionTool (SpectralSelMode::Marquee);
+            break;
+        case SelectionToolLasso:
+            app.setSelectionTool (SpectralSelMode::Lasso);
+            break;
+        case SelectionToolPaintbrush:
+            app.setSelectionTool (SpectralSelMode::Paintbrush);
+            break;
+        case SelectionClear:
+            app.clearSpectralSelection ();
+            break;
+        case SelectionBrushSmaller:
+            app.brushRadiusHz = std::max (20.0, app.brushRadiusHz / 1.5);
+            break;
+        case SelectionBrushLarger:
+            app.brushRadiusHz = std::min (5000.0, app.brushRadiusHz * 1.5);
+            break;
+        default: break;
+    }
+    if (menuItemID >= SelectionToolTimeRange && menuItemID <= SelectionBrushLarger)
+    {
+        syncSharedState ();
+        return;
+    }
+
     // View visibility: at least one of the two views must always stay visible.
     if (menuItemID == ViewShowWaveform)
     {
@@ -1376,6 +1430,15 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case TransportStop: app.stop(); break;
         case TransportPause: app.pause(); break;
         case TransportLoop: app.toggleLoop(); break;
+        case TransportPlaySpectralSel:
+            // Toggle real-time spectral masking during playback. The flag is
+            // auto-cleared if the selection disappears (see Application).
+            app.playSpectralSel = !app.playSpectralSel;
+            if (!app.hasSpectralSelection ())
+                app.playSpectralSel = false;
+            app.pushSpectralMaskToEngine ();
+            syncSharedState ();
+            break;
 
         case ToolsSilence:   runDestructiveEdit ([&] (std::string* e) { return app.silence (e); }); break;
         case ToolsFadeIn:    runDestructiveEdit ([&] (std::string* e) { return app.fadeIn (e); }); break;
@@ -2405,10 +2468,37 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (EditCut, "Cut\tCtrl+X", !app.selection.isEmpty(), false);
         menu.addItem (EditCopy, "Copy\tCtrl+C", !app.selection.isEmpty(), false);
         menu.addItem (EditPaste, "Paste\tCtrl+V", app.audioEngine().canPaste(), false);
-        menu.addItem (EditDelete, "Delete\tDel", !app.selection.isEmpty(), false);
+        // With a spectral selection active, DEL zeros the selected (t,f)
+        // content instead of trimming samples.
+        const bool hasSpectralSel = app.hasSpectralSelection ();
+        menu.addItem (EditDelete,
+                      hasSpectralSel ? "Zero Spectral Selection\tDel" : "Delete\tDel",
+                      !app.selection.isEmpty() || hasSpectralSel, false);
         menu.addItem (EditSelectAll, "Select All\tCtrl+A", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         menu.addItem (EditSnapToZeroCrossings, "Snap to Zero Crossings", true, app.settings.snapToZeroCrossings);
+    }
+    else if (menuName == "Selection")
+    {
+        const bool hasFile = app.audioEngine().isFileLoaded();
+
+        menu.addItem (SelectionToolTimeRange, "Time Range\tS", true,
+                      app.selMode == SpectralSelMode::TimeRange);
+        menu.addItem (SelectionToolMarquee, "Marquee\tM", hasFile,
+                      app.selMode == SpectralSelMode::Marquee);
+        menu.addItem (SelectionToolLasso, "Lasso\tL", hasFile,
+                      app.selMode == SpectralSelMode::Lasso);
+        menu.addItem (SelectionToolPaintbrush,
+                      juce::String ("Paintbrush (") +
+                          juce::String ((int) std::lround (app.brushRadiusHz)) +
+                          " Hz)\tP",
+                      hasFile, app.selMode == SpectralSelMode::Paintbrush);
+        menu.addSeparator ();
+        menu.addItem (SelectionBrushSmaller, "Brush Smaller\t[", hasFile, false);
+        menu.addItem (SelectionBrushLarger, "Brush Larger\t]", hasFile, false);
+        menu.addSeparator ();
+        menu.addItem (SelectionClear, "Clear Spectral Selection\tEsc",
+                      app.hasSpectralSelection (), false);
     }
     else if (menuName == "View")
     {
@@ -2454,7 +2544,11 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (TransportStop, "Stop\tCtrl+.", app.audioEngine().isPlaying(), false);
         menu.addItem (TransportPause, "Pause\tSpace", app.audioEngine().isPlaying(), false);
         menu.addSeparator();
-        menu.addItem (TransportLoop, "Loop (Selection/All)\tL", true, app.audioEngine().isLooping());
+        menu.addItem (TransportLoop, "Loop (Selection/All)\tF3", true, app.audioEngine().isLooping());
+        // Play only the selected spectral content (mask applied in real time).
+        menu.addItem (TransportPlaySpectralSel, "Play Spectral Selection",
+                      app.hasSpectralSelection (),
+                      app.playSpectralSel && app.hasSpectralSelection ());
     }
     else if (menuName == "Effects")
     {
@@ -2490,7 +2584,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
 
 juce::StringArray MainWindow::getMenuBarNames()
 {
-    return { "File", "Edit", "View", "Transport", "Effects", "Help" };
+    return { "File", "Edit", "Selection", "View", "Transport", "Effects", "Help" };
 }
 
 bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
@@ -2591,12 +2685,41 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('>', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { zoomVerticalBoth (1.5); return true; }
     if (key == juce::KeyPress ('-', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { zoomVerticalBoth (1.0 / 1.5); return true; }
     if (key == juce::KeyPress ('0', juce::ModifierKeys::commandModifier, 0)) { zoomToFit(); return true; }
-    if (key == juce::KeyPress ('l', juce::ModifierKeys::noModifiers, 0))
+    // Selection tools: S = Time Range, M = Marquee, L = Lasso, P = Paintbrush.
+    // (M and L were reassigned from "add marker" / "loop", which moved to
+    // F2/F8 and F3 respectively.)
+    if (!mods.isCommandDown() && !mods.isAltDown())
+    {
+        // Windows reports letter key codes in uppercase; normalise for the
+        // switch below (KeyPress::operator== does this, raw getKeyCode() does not).
+        const int kc = (keyCode >= 'A' && keyCode <= 'Z') ? keyCode + 32 : keyCode;
+        switch (kc)
+        {
+            case 's': app.setSelectionTool (SpectralSelMode::TimeRange); syncSharedState(); return true;
+            case 'm': app.setSelectionTool (SpectralSelMode::Marquee);   syncSharedState(); return true;
+            case 'l': app.setSelectionTool (SpectralSelMode::Lasso);     syncSharedState(); return true;
+            case 'p': app.setSelectionTool (SpectralSelMode::Paintbrush);syncSharedState(); return true;
+            case '[': app.brushRadiusHz = std::max (20.0, app.brushRadiusHz / 1.5);
+                     syncSharedState(); return true;
+            case ']': app.brushRadiusHz = std::min (5000.0, app.brushRadiusHz * 1.5);
+                     syncSharedState(); return true;
+            default: break;
+        }
+    }
+
+    // ESC clears the active spectral selection (time selection is untouched).
+    if (keyCode == juce::KeyPress::escapeKey && app.hasSpectralSelection ())
+    {
+        app.clearSpectralSelection ();
+        return true;
+    }
+
+    if (key == juce::KeyPress (juce::KeyPress::F3Key, juce::ModifierKeys::noModifiers, 0))
     {
         app.toggleLoop();
         return true;
     }
-    if (key == juce::KeyPress ('m', juce::ModifierKeys::noModifiers, 0)
+    if (key == juce::KeyPress (juce::KeyPress::F2Key, juce::ModifierKeys::noModifiers, 0)
         || key == juce::KeyPress (juce::KeyPress::F8Key, juce::ModifierKeys::noModifiers, 0))
     {
         // Region marker spanning the selection if there is one,

@@ -3,6 +3,7 @@
  */
 
 #include "Application.h"
+#include "SpectralMaskProcessor.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -352,6 +353,131 @@ void Application::setSelection (juce::Range<double> s, bool snapEdges)
         onStateChange ();
 }
 
+// ------------------------------------------------- spectral selection tools
+
+void Application::setSelectionTool (SpectralSelMode m)
+{
+    selMode = m;
+    // Leaving the spectral tools drops any active spectral selection: the time
+    // range is what Time Range mode operates on, and keeping stale shapes
+    // around would surprise the next effect.
+    if (m == SpectralSelMode::TimeRange && doc() && !doc()->spectralSel.empty ())
+        clearSpectralSelection ();
+}
+
+void Application::clearSpectralSelection ()
+{
+    bool changed = false;
+    auto* d = doc();
+    if (d && !d->spectralSel.empty ())
+    {
+        d->spectralSel.clear ();
+        selection = { 0, 0 };   // the mirrored time range goes with it
+        changed = true;
+    }
+    if (playSpectralSel)
+    {
+        playSpectralSel = false;
+        changed = true;
+    }
+    pushSpectralMaskToEngine ();
+    if (changed && onStateChange)
+        onStateChange ();
+}
+
+void Application::pushSpectralMaskToEngine ()
+{
+    auto* d = doc();
+    const bool active = playSpectralSel && d && !d->spectralSel.empty ();
+    audioEngine ().setSpectralPlaybackMask (
+        active ? std::make_shared<SpectralSelection> (d->spectralSel) : nullptr);
+}
+
+bool Application::hasSpectralSelection () const
+{
+    auto* d = doc();
+    return d && !d->spectralSel.empty ();
+}
+
+// Sample range covered by the active spectral selection (its time extent).
+static juce::Range<int64_t> spectralSelSamples (Application& app)
+{
+    AudioEngine& eng = app.audioEngine();
+    auto ext = app.doc()->spectralSel.timeExtent ().getIntersectionWith ({ 0, eng.duration () });
+    return { (int64_t) (ext.getStart () * eng.sampleRate ()),
+             (int64_t) (ext.getEnd () * eng.sampleRate ()) };
+}
+
+// Gain applied only to the selected spectral content; everything else passes
+// through bit-exact. linearGain == 1.0f is a guaranteed no-op.
+static bool maskedGainEdit (Application& app, const juce::String& desc,
+                            float linearGain, std::string* errOut)
+{
+    auto* d = app.doc();
+    if (!d || d->spectralSel.empty ()) return false;
+    // applyMaskedGain goes through replaceSamples, which does NOT rebuild the
+    // waveform mipmaps (unlike deleteSamples/silenceSamples/applyPerSample).
+    // Rebuild here so the waveform view shows the edit immediately.
+    if (!SpectralMask::applyMaskedGain (app.audioEngine (), spectralSelSamples (app),
+                                        d->spectralSel, linearGain, desc,
+                                        &app.visibleChannels, errOut))
+        return false;
+    app.audioEngine ().rebuildMipmaps ();
+    return true;
+}
+
+// Apply fn (in-place on one channel's masked part) to the selected spectral
+// content only: A = masked signal, B = original - A, write back fn(A) + B.
+static bool applyMaskedEffect (Application& app, const juce::String& desc,
+                               std::function<void (float*, int)> fn,
+                               std::string* errOut)
+{
+    auto* d = app.doc();
+    if (!d || d->spectralSel.empty ()) return false;
+    AudioEngine& eng = app.audioEngine ();
+    const juce::Range<int64_t> range = spectralSelSamples (app);
+    if (range.getLength () <= 0) return true;   // nothing to do
+
+    const int len = (int) range.getLength ();
+    std::vector<std::vector<float>> A;
+    if (!SpectralMask::extractMasked (eng, range, d->spectralSel, A))
+    {
+        if (errOut) *errOut = "Spectral masking failed";
+        return false;
+    }
+
+    const int nch = eng.numChannels ();
+    std::vector<std::vector<float>> orig ((size_t) nch);
+    for (int ch = 0; ch < nch; ++ch)
+    {
+        orig[(size_t) ch].assign ((size_t) len, 0.0f);
+        if (!eng.readSamples (ch, range.getStart (), len, orig[(size_t) ch].data ()))
+        {
+            if (errOut) *errOut = "Failed to read audio";
+            return false;
+        }
+    }
+
+    // B = original - A on the affected channels; then out = B + fn(A).
+    std::vector<std::vector<float>> out (orig);
+    for (int ch : app.visibleChannels)
+    {
+        if (ch < 0 || ch >= nch) continue;
+        for (int i = 0; i < len; ++i)
+            out[(size_t) ch][(size_t) i] -= A[(size_t) ch][(size_t) i];
+        fn (A[(size_t) ch].data (), len);
+        for (int i = 0; i < len; ++i)
+            out[(size_t) ch][(size_t) i] += A[(size_t) ch][(size_t) i];
+    }
+
+    // replaceSamples does not rebuild the waveform mipmaps (see maskedGainEdit);
+    // do it here so the views update immediately after the edit.
+    if (!eng.replaceSamples (range, out, desc, errOut))
+        return false;
+    eng.rebuildMipmaps ();
+    return true;
+}
+
 bool Application::isChannelVisible (int ch) const
 {
     return std::find (visibleChannels.begin(), visibleChannels.end(), ch) != visibleChannels.end();
@@ -414,6 +540,11 @@ bool Application::paste(std::string* errOut)
 
 bool Application::del(std::string* errOut)
 {
+    // With a spectral selection active, DEL zeros the selected (t,f) content
+    // instead of trimming samples: the file length is unchanged.
+    if (hasSpectralSelection ())
+        return maskedGainEdit (*this, "Zeroed spectral selection", 0.0f, errOut);
+
     if (selection.getLength() <= 0) return true;   // nothing to delete - not an error
     if (!audioEngine().deleteSamples (selectionSamples (*this), errOut))
         return false;
@@ -430,37 +561,85 @@ static const std::vector<int>& visibleChans (Application& app)
 
 bool Application::silence(std::string* errOut)
 {
+    if (hasSpectralSelection ())
+        return maskedGainEdit (*this, "Silenced spectral selection", 0.0f, errOut);
+
     if (selection.getLength() <= 0) return true;   // nothing to silence - not an error
     return audioEngine().silenceSamples (selectionSamples (*this), &visibleChans (*this), errOut);
 }
 
 bool Application::fadeIn(std::string* errOut)
 {
+    if (hasSpectralSelection ())
+        return applyMaskedEffect (*this, "Faded in spectral selection",
+                                  [] (float* d, int len) {
+                                      const float div = (float) std::max (1, len - 1);
+                                      for (int i = 0; i < len; ++i)
+                                          d[i] *= (float) i / (float) div;
+                                  }, errOut);
+
     if (selection.getLength() <= 0) return true;
     return audioEngine().fadeInSamples (selectionSamples (*this), &visibleChans (*this), errOut);
 }
 
 bool Application::fadeOut(std::string* errOut)
 {
+    if (hasSpectralSelection ())
+        return applyMaskedEffect (*this, "Faded out spectral selection",
+                                  [] (float* d, int len) {
+                                      const float div = (float) std::max (1, len - 1);
+                                      for (int i = 0; i < len; ++i)
+                                          d[i] *= 1.0f - (float) i / (float) div;
+                                  }, errOut);
+
     if (selection.getLength() <= 0) return true;
     return audioEngine().fadeOutSamples (selectionSamples (*this), &visibleChans (*this), errOut);
 }
 
 bool Application::normalize(std::string* errOut)
 {
+    if (hasSpectralSelection ())
+        return applyMaskedEffect (*this, "Normalized spectral selection",
+                                  [] (float* d, int len) {
+                                      float peak = 0.0f;
+                                      for (int i = 0; i < len; ++i)
+                                          peak = std::max (peak, std::abs (d[i]));
+                                      if (peak > 1e-9f)
+                                      {
+                                          const float s = 1.0f / peak;
+                                          for (int i = 0; i < len; ++i) d[i] *= s;
+                                      }
+                                  }, errOut);
+
     if (selection.getLength() <= 0) return true;
     return audioEngine().normalizeSamples (selectionSamples (*this), 1.0f, &visibleChans (*this), errOut);
 }
 
 bool Application::reverse(std::string* errOut)
 {
+    if (hasSpectralSelection ())
+        return applyMaskedEffect (*this, "Reversed spectral selection",
+                                  [] (float* d, int len) {
+                                      std::vector<float> tmp (d, d + len);
+                                      for (int i = 0; i < len; ++i)
+                                          d[i] = tmp[(size_t) (len - 1 - i)];
+                                  }, errOut);
+
     if (selection.getLength() <= 0) return true;
     return audioEngine().reverseSamples (selectionSamples (*this), &visibleChans (*this), errOut);
 }
 
 bool Application::changeGain (float gainDb, std::string* errOut)
 {
-    if (selection.getLength() <= 0 || gainDb == 0.0f) return true;
+    // No-op gains must leave the file bit-exact: no STFT round-trip, no undo
+    // entry, no "unsaved" flag.
+    if (gainDb == 0.0f) return true;
+
+    if (hasSpectralSelection ())
+        return maskedGainEdit (*this, "Gained spectral selection",
+                               (float) std::pow (10.0, gainDb / 20.0), errOut);
+
+    if (selection.getLength() <= 0) return true;
     return audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this), errOut);
 }
 

@@ -53,6 +53,14 @@ public:
     Settings settings;
     ColourMap colourMap = ColourMap::Classic;
 
+    // Spectral selection tools (Selection menu). The tool + brush size are app-
+    // level (persist across document switches); the shapes themselves live in
+    // FileDoc::spectralSel. playSpectralSel is auto-cleared when the active
+    // spectral selection disappears.
+    SpectralSelMode selMode = SpectralSelMode::TimeRange;
+    double brushRadiusHz = 200.0;   // paintbrush half-width in Hz
+    bool playSpectralSel = false;
+
     // Current UI state - mirrors the active document (kept in sync on switch
     // and through setSelection()/setPlayhead()/toggleChannelVisible()).
     juce::Range<double> selection{ 0, 0 };
@@ -116,6 +124,19 @@ public:
     void syncActiveDoc();
 
     void selectAll();
+
+    // ---- Spectral selection tools (Selection menu) ----
+    /** Switch the active tool. Returning to Time Range clears any spectral
+        selection on the active document. */
+    void setSelectionTool (SpectralSelMode m);
+    // Clear the active doc's spectral selection (+ play flag, engine mask).
+    void clearSpectralSelection();
+    // (Re)install the current playback mask on the active engine: a clone of
+    // the doc's selection when Play Spectral Selection is on and non-empty.
+    void pushSpectralMaskToEngine();
+    // True when the active document has a spectral selection.
+    bool hasSpectralSelection() const;
+
     // snapEdges = true snaps both selection edges to the nearest zero crossing
     // of the first visible channel when settings.snapToZeroCrossings is ON.
     // Used by the views' drag-to-select so cuts land on silent points.

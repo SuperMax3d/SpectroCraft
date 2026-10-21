@@ -43,10 +43,9 @@ public:
     {
         if (s != selection) { selection = s; repaint(); }
     }
-    void setSpectralSelection (juce::Rectangle<float> r)
-    {
-        if (r != spectralSel) { spectralSel = r; repaint(); }
-    }
+    // The spectral selection lives in the active doc (app.doc()->spectralSel);
+    // call this after committing/clearing shapes so overlays refresh.
+    void setSpectralSelectionChanged() { repaint(); }
     void setPlayhead (double t)
     {
         if (t != playhead) { playhead = t; repaint(); }
@@ -113,7 +112,6 @@ private:
     double freqMin = 20.0, freqMax = 20000.0;   // local frequency axis limits
     std::vector<int> channels;
     juce::Range<double> selection{ 0, 0 };
-    juce::Rectangle<float> spectralSel;
     double playhead = 0;
     const std::vector<Marker>* markerList = nullptr;
     bool dirty = true;
@@ -122,7 +120,8 @@ private:
     Settings settings_;
 
     // Interaction state
-    enum class DragMode { None, Select, Pan, VPan, ZoomDrag };
+    enum class DragMode { None, Select, Pan, VPan, ZoomDrag,
+                          Marquee, Lasso, Paint };
     DragMode dragMode = DragMode::None;
     int dragStartX = 0;
     int dragStartY = 0;
@@ -130,6 +129,15 @@ private:
     int panLastX = 0;   // last delivered cursor x during time panning
     juce::Rectangle<int> zoomRect;   // right-drag box-zoom rubber band
     bool haveZoomRect = false;
+
+    // Spectral-tool drag state (committed to app.doc()->spectralSel on mouseUp).
+    // Plain drag replaces the selection, SHIFT adds, CTRL subtracts.
+    bool toolSubtract = false;
+    bool toolReplace = true;
+    double liveT0 = 0, liveT1 = 0, liveF0 = 0, liveF1 = 0;   // marquee (t,f) space
+    std::vector<std::pair<double, double>> lassoPts;        // (tSecs, fHz)
+    std::vector<std::pair<double, double>> strokePts;       // paintbrush path
+    int probeX = -1, probeY = -1;   // last cursor position (status-bar probe / brush)
 
     // Cached rendered image
     juce::Image cachedImage;
@@ -149,6 +157,16 @@ private:
 
     void drawFrequencyRuler (juce::Graphics& g);
     void drawOverlays (juce::Graphics& g);
+
+    // Absolute frequency at a screen y position (mapped through the channel row
+    // containing it; nearest row when between rows).
+    double freqAtY (int y) const;
+    // Mirror a live tool shape's time extent into the shared time selection.
+    void syncToolTimeExtent (juce::Range<double> ext);
+    // Draws committed or live spectral shapes in every channel row.
+    void drawSpectralShapes (juce::Graphics& g,
+                             const std::vector<SpectralShape>& shapesIn,
+                             bool preview);
     void zoomAtX (int x, double factor);
     void panByTime (double dt);
     void zoomFreqAtY (float y, double factor);

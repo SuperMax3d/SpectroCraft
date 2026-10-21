@@ -3,6 +3,7 @@
  */
 
 #include "AudioEngine.h"
+#include "SpectralMaskProcessor.h"
 #include "Resampler.h"
 #include "UndoManager.h"
 #include "MarkerManager.h"
@@ -206,18 +207,65 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
     }
 
     // File-sample range needed for this block.
-    const int64_t readStart = std::max<int64_t> (0, (int64_t) std::floor (pos));
-    const int64_t readEnd   = std::min (totalSamples,
-                                       (int64_t) std::ceil (pos + n * step) + 1);
-    const int64_t count     = std::max<int64_t> (0, readEnd - readStart);
+    const int64_t baseReadStart = std::max<int64_t> (0, (int64_t) std::floor (pos));
+    const int64_t baseReadEnd = std::min (totalSamples,
+                                          (int64_t) std::ceil (pos + n * step) + 1);
+    const int64_t count       = std::max<int64_t> (0, baseReadEnd - baseReadStart);
+
+    // "Play Spectral Selection": the STFT mask needs extra context samples so
+    // its last analysis window is complete; read them alongside this block.
+    std::shared_ptr<const SpectralSelection> selLocal;
+    {
+        std::lock_guard<std::mutex> lk (maskMutex);
+        selLocal = playSel;
+    }
+    const bool masking = (bool) selLocal && count > 0;
+
+    // When the mask will re-prime for this block (seek, loop wrap, toggle,
+    // first block), also read fftSize()-1 samples before baseReadStart so
+    // every analysis window is complete and the fast-forward is exact.
+    int64_t ctxBefore = 0;
+    if (masking)
+    {
+        std::lock_guard<std::mutex> lk (maskMutex);
+        if (!playMask || playMask->willReprimeAt (baseReadStart))
+            ctxBefore = SpectralMask::fftSize() - 1;
+    }
+    const int64_t readStart = std::max<int64_t> (0, baseReadStart - ctxBefore);
+
+    const int64_t readEnd = std::min (totalSamples, baseReadEnd
+                                      + (masking ? SpectralMask::contextSamples() : 0));
+    const int64_t extCount = std::max<int64_t> (0, readEnd - readStart);
 
     const int chans = std::min (dst->getNumChannels(), nchans);
     std::vector<std::vector<float>> tmp ((size_t) chans);
     for (int ch = 0; ch < chans; ++ch)
     {
-        tmp[(size_t) ch].resize ((size_t) count);
-        if (!readSamples (ch, readStart, count, tmp[(size_t) ch].data()))
-            tmp[(size_t) ch].assign ((size_t) count, 0.0f);
+        tmp[(size_t) ch].resize ((size_t) extCount);
+        if (!readSamples (ch, readStart, extCount, tmp[(size_t) ch].data()))
+            tmp[(size_t) ch].assign ((size_t) extCount, 0.0f);
+        // Zero anything beyond the file end: reused vectors may hold stale
+        // data in the mask's context region (and readSamples only fills what
+        // is actually available).
+        const int64_t avail = std::max<int64_t> (0, totalSamples - readStart);
+        if ((int64_t) tmp[(size_t) ch].size() > avail)
+            std::fill (tmp[(size_t) ch].begin() + (size_t) avail,
+                       tmp[(size_t) ch].end(), 0.0f);
+    }
+
+    if (masking)
+    {
+        std::lock_guard<std::mutex> lk (maskMutex);
+        if (!playMask || !playMask->matches (rate, nchans))
+        {
+            if (!playMask)
+                playMask = std::make_shared<SpectralMask::PlaybackMask>();
+            playMask->prepare (rate, nchans);
+        }
+        // Masks tmp[ch][ctxBefore .. ctxBefore+count) in place; the extra
+        // context samples around it are only used by the mask's analysis
+        // windows.
+        playMask->process (tmp, readStart, baseReadStart, (int) count, *selLocal);
     }
 
     const float g = gain_.load();
@@ -227,9 +275,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         for (int ch = 0; ch < chans; ++ch)
         {
             float* d = dst->getWritePointer (ch, bufferToFill.startSample);
-            if (p >= 0.0 && p < (double) count - 1.0)
+            if (p >= 0.0 && p < (double) ctxBefore + count - 1.0)
             {
                 // Linear interpolation between the two surrounding file samples.
+                // (p is relative to readStart, which includes the mask's
+                // pre-context; tmp indices are absolute within that buffer.)
                 const int64_t a = (int64_t) std::floor (p);
                 const float fr = (float) (p - (double) a);
                 d[i] = (tmp[(size_t) ch][(size_t) a] * (1.0f - fr)
@@ -790,6 +840,15 @@ bool AudioEngine::replaceSamples (const juce::Range<int64_t>& samplesIn,
                        buffer->getWritePointer (ch, (int) samples.getStart ()));
 
     unsaved = true;
+    return true;
+}
+
+void AudioEngine::setSpectralPlaybackMask (std::shared_ptr<const SpectralSelection> selIn)
+{
+    std::lock_guard<std::mutex> lk (maskMutex);
+    playSel = std::move (selIn);
+    if (!playSel)
+        playMask.reset();   // free the state machine when masking is off
 }
 
 bool AudioEngine::fadeInSamples (juce::Range<int64_t> samples, const std::vector<int>* chans,

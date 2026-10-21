@@ -169,6 +169,36 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     const bool leftOnAxis = e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
                             && !e.mods.isMiddleButtonDown() && e.x < kLeftAxisWidth;
 
+    // Spectral selection tools (Selection menu): a left-drag on the plot draws
+    // a shape in time-frequency space. Plain = replace, SHIFT = add,
+    // CTRL = subtract. Tool drags never move the playhead.
+    if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
+        && !e.mods.isMiddleButtonDown() && e.x >= kLeftAxisWidth
+        && app.selMode != SpectralSelMode::TimeRange)
+    {
+        toolSubtract = e.mods.isCtrlDown();
+        toolReplace = !e.mods.isShiftDown() && !toolSubtract;
+        lassoPts.clear ();
+        strokePts.clear ();
+        liveT0 = liveT1 = liveF0 = liveF1 = 0.0;
+
+        switch (app.selMode)
+        {
+            case SpectralSelMode::Marquee:
+                dragMode = DragMode::Marquee;
+                break;
+            case SpectralSelMode::Lasso:
+                dragMode = DragMode::Lasso;
+                lassoPts.emplace_back (dragStartTime, freqAtY (e.y));
+                break;
+            default:   // Paintbrush
+                dragMode = DragMode::Paint;
+                strokePts.emplace_back (dragStartTime, freqAtY (e.y));
+                break;
+        }
+        return;
+    }
+
     if (!leftOnAxis)
     {
         // Clicking moves the playhead to that position
@@ -206,8 +236,57 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
+    // Keep the status-bar probe / brush cursor position current.
+    probeX = e.x;
+    probeY = e.y;
+
     switch (dragMode)
     {
+        case DragMode::Marquee:
+        {
+            const double tA = xToTime (std::min (dragStartX, e.x));
+            const double tB = xToTime (std::max (dragStartX, e.x));
+            const double fA = freqAtY (std::min (dragStartY, e.y));
+            const double fB = freqAtY (std::max (dragStartY, e.y));
+            liveT0 = tA;
+            liveT1 = tB;
+            liveF0 = std::min (fA, fB);
+            liveF1 = std::max (fA, fB);
+            syncToolTimeExtent ({ liveT0, liveT1 });
+            repaint();
+            break;
+        }
+        case DragMode::Lasso:
+        {
+            const double t = xToTime (e.x);
+            const double f = freqAtY (e.y);
+            const auto last = lassoPts.empty() ? std::pair<double, double> (-1e30, -1e30)
+                                               : lassoPts.back();
+            if (std::abs (t - last.first) >= 1e-3 || std::abs (f - last.second) >= 8.0)
+                lassoPts.emplace_back (t, f);
+
+            // Live time extent: union of the path's bounds with any kept shapes.
+            double tMin = 1e30, tMax = -1e30;
+            for (auto& p : lassoPts) { tMin = std::min (tMin, p.first); tMax = std::max (tMax, p.first); }
+            syncToolTimeExtent ({ tMin, tMax });
+            repaint();
+            break;
+        }
+        case DragMode::Paint:
+        {
+            const double t = xToTime (e.x);
+            const double f = freqAtY (e.y);
+            const auto last = strokePts.empty() ? std::pair<double, double> (-1e30, -1e30)
+                                                : strokePts.back();
+            if (std::abs (t - last.first) >= 1e-3 || std::abs (f - last.second) >= 8.0)
+                strokePts.emplace_back (t, f);
+
+            double tMin = 1e30, tMax = -1e30;
+            for (auto& p : strokePts) { tMin = std::min (tMin, p.first); tMax = std::max (tMax, p.first); }
+            syncToolTimeExtent ({ tMin, tMax });
+            repaint();
+            break;
+        }
         case DragMode::Select:
         {
             const double t = xToTime (e.x);
@@ -358,6 +437,61 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
         haveZoomRect = false;
         zoomRect = {};
         repaint();
+    }
+    else if (dragMode == DragMode::Marquee || dragMode == DragMode::Lasso
+             || dragMode == DragMode::Paint)
+    {
+        auto* d = app.doc();
+        bool changed = false;
+
+        if (d)
+        {
+            switch (dragMode)
+            {
+                case DragMode::Marquee:
+                    // A degenerate marquee (no real span) clears on a plain drag.
+                    if (liveT1 - liveT0 > 1e-6 && liveF1 - liveF0 > 1.0)
+                        d->spectralSel.addRect (liveT0, liveT1, liveF0, liveF1,
+                                                toolSubtract, toolReplace);
+                    else if (toolReplace && !toolSubtract)
+                        d->spectralSel.clear ();
+                    changed = true;
+                    break;
+                case DragMode::Lasso:
+                    if (lassoPts.size() >= 3)
+                        d->spectralSel.addPolygon (lassoPts, toolSubtract, toolReplace);
+                    else if (toolReplace && !toolSubtract)
+                        d->spectralSel.clear ();   // tiny lasso = clear
+                    changed = true;
+                    break;
+                default:   // Paint
+                    if (!strokePts.empty())
+                        d->spectralSel.addStroke (strokePts, app.brushRadiusHz,
+                                                  toolSubtract, toolReplace);
+                    changed = true;
+                    break;
+            }
+        }
+
+        lassoPts.clear ();
+        strokePts.clear ();
+
+        if (changed)
+        {
+            // Mirror the committed selection's time extent into the shared time
+            // selection and refresh both views + panels.
+            auto ext = d ? d->spectralSel.timeExtent () : juce::Range<double> { 0, 0 };
+            const double dur = app.audioEngine().duration ();
+            ext = ext.getIntersectionWith ({ 0, std::max (1e-9, dur) });
+            if (ext.getLength() <= 1e-9)
+                app.setSelection ({ 0, 0 });
+            else
+                app.setSelection (ext);
+            selection = app.selection;
+            setSpectralSelectionChanged ();
+            // Re-install the playback mask in case Play Spectral Selection is on.
+            app.pushSpectralMaskToEngine ();
+        }
     }
     else if (dragMode == DragMode::Select && app.selection.getLength() <= 1e-6)
     {
@@ -885,13 +1019,30 @@ void SpectralView::drawOverlays (juce::Graphics& g)
         g.drawVerticalLine ((float) x2, 0.0f, (float) getHeight());
     }
 
-    // Spectral-domain selection rectangle
-    if (spectralSel.getWidth() > 0 && spectralSel.getHeight() > 0)
+    // Spectral selection: committed shapes from the active doc, plus the live
+    // preview while a tool drag is in progress.
     {
-        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 60));
-        g.fillRect (spectralSel);
-        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 180));
-        g.drawRect (spectralSel.toFloat(), 1.0f);
+        static const std::vector<SpectralShape> emptyShapes;
+        auto* d = app.doc();
+        drawSpectralShapes (g, d ? d->spectralSel.shapes() : emptyShapes, false);
+
+        if (dragMode == DragMode::Marquee)
+        {
+            SpectralShape s;
+            s.kind = SpectralShape::Kind::Rect;
+            s.t0 = liveT0;  s.t1 = liveT1;
+            s.f0 = liveF0;  s.f1 = liveF1;
+            drawSpectralShapes (g, { s }, true);
+        }
+        else if ((dragMode == DragMode::Lasso && !lassoPts.empty ())
+                 || (dragMode == DragMode::Paint && !strokePts.empty ()))
+        {
+            SpectralShape s;
+            s.kind = dragMode == DragMode::Lasso ? SpectralShape::Kind::Polygon
+                                                 : SpectralShape::Kind::Stroke;
+            s.pts = (dragMode == DragMode::Lasso) ? lassoPts : strokePts;
+            drawSpectralShapes (g, { s }, true);
+        }
     }
 
     // Markers
@@ -931,11 +1082,152 @@ void SpectralView::drawOverlays (juce::Graphics& g)
         }
     }
 
+    // Paintbrush cursor: a translucent band showing the brush's frequency
+    // width at the current cursor position.
+    if (app.selMode == SpectralSelMode::Paintbrush && dragMode == DragMode::None
+        && probeX >= kLeftAxisWidth && probeX <= getWidth()
+        && probeY >= 0 && probeY <= getHeight())
+    {
+        const double f = freqAtY (probeY);
+        g.setColour (juce::Colour::fromRGBA (96, 150, 255, 140));
+        for (const auto& row : spectralRowRects (getWidth(), getHeight(), (int) channels.size()))
+        {
+            const double yTop = row.getY() + freqToY (f + app.brushRadiusHz, row.getHeight());
+            const double yBot = row.getY() + freqToY (std::max (0.0, f - app.brushRadiusHz), row.getHeight());
+            g.fillRect ((float) probeX - 1.0f, (float) std::min (yTop, yBot), 2.0f,
+                        (float) std::max (0.0, std::abs (yBot - yTop)));
+        }
+    }
+
     // Playhead
     const double px = timeToX (playhead);
     if (px >= kLeftAxisWidth && px <= getWidth())
     {
         g.setColour (juce::Colour::fromRGB (255, 60, 60));
         g.drawVerticalLine ((int) px, 0.0f, (float) getHeight());
+    }
+}
+
+// ------------------------------------------------- spectral selection tools
+
+double SpectralView::freqAtY (int y) const
+{
+    const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+    if (rows.empty()) return 0.0;
+
+    size_t best = 0;
+    double bestDist = 1e30;
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        const int dy = y < rows[i].getY() ? rows[i].getY() - y
+                        : y > rows[i].getBottom() ? y - rows[i].getBottom() : 0;
+        if (dy < bestDist) { bestDist = dy; best = i; }
+    }
+    const auto& r = rows[best];
+    return yToFreq ((float) (y - r.getY()), r.getHeight());
+}
+
+void SpectralView::syncToolTimeExtent (juce::Range<double> ext)
+{
+    // When adding to an existing selection, keep the union of extents so both
+    // views track everything that will be affected.
+    auto* d = app.doc();
+    if (!toolReplace && d && !d->spectralSel.empty ())
+        ext = ext.getUnionWith (d->spectralSel.timeExtent ());
+
+    const double dur = std::max (1e-9, app.audioEngine().duration ());
+    ext = ext.getIntersectionWith ({ 0, dur });
+    if (ext.getLength() <= 1e-9)
+        app.setSelection ({ 0, 0 });
+    else
+        app.setSelection (ext);
+    selection = app.selection;
+}
+
+void SpectralView::drawSpectralShapes (juce::Graphics& g,
+                                      const std::vector<SpectralShape>& shapesIn,
+                                      bool preview)
+{
+    if (shapesIn.empty()) return;
+    const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+    if (rows.empty()) return;
+
+    // Same blue family as the time selection; previews are brighter and dashed.
+    const juce::Colour fillCol  = preview ? juce::Colour::fromRGBA (70, 130, 255, 96)
+                                          : juce::Colour::fromRGBA (70, 130, 255, 80);
+    const juce::Colour edgeCol  = preview ? juce::Colour::fromRGB (140, 180, 255)
+                                          : juce::Colour::fromRGB (96, 150, 255);
+
+    for (const auto& row : rows)
+    {
+        // This JUCE build has no save/restoreGraphicsContext: use the RAII
+        // ScopedSaveState + reduceClipRegion instead.
+        const juce::Graphics::ScopedSaveState save (g);
+        if (!g.reduceClipRegion (row)) continue;   // row outside the repaint clip
+
+        const double pxPerHz = (freqMax - freqMin) > 1e-9
+            ? (double) row.getHeight() / (freqMax - freqMin) : 0.0;
+
+        for (const auto& s : shapesIn)
+        {
+            if (s.kind == SpectralShape::Kind::Rect)
+            {
+                const double x0 = timeToX (std::min (s.t0, s.t1));
+                const double x1 = timeToX (std::max (s.t0, s.t1));
+                const double yTop = row.getY() + freqToY (std::max (s.f0, s.f1), row.getHeight());
+                const double yBot = row.getY() + freqToY (std::min (s.f0, s.f1), row.getHeight());
+                g.setColour (fillCol);
+                g.fillRect ((float) x0, (float) std::min (yTop, yBot),
+                            (float) std::max (0.0, x1 - x0),
+                            (float) std::max (0.0, std::abs (yBot - yTop)));
+                g.setColour (edgeCol);
+                const float rx = (float) x0;
+                const float ry = (float) std::min (yTop, yBot);
+                const float rw = (float) std::max (1.0, x1 - x0);
+                const float rh = (float) std::max (1.0, std::abs (yBot - yTop));
+                if (preview || s.subtract)
+                {
+                    static const float dash[] = { 4.0f, 3.0f };
+                    g.drawDashedLine (juce::Line<float> (rx, ry, rx + rw, ry), dash, 2, 1.0f);
+                    g.drawDashedLine (juce::Line<float> (rx + rw, ry, rx + rw, ry + rh), dash, 2, 1.0f);
+                    g.drawDashedLine (juce::Line<float> (rx + rw, ry + rh, rx, ry + rh), dash, 2, 1.0f);
+                    g.drawDashedLine (juce::Line<float> (rx, ry + rh, rx, ry), dash, 2, 1.0f);
+                }
+                else
+                    g.drawRect (rx, ry, rw, rh, 1.0f);
+            }
+            else if (s.kind == SpectralShape::Kind::Polygon && s.pts.size() >= 3)
+            {
+                juce::Path p;
+                for (size_t i = 0; i < s.pts.size(); ++i)
+                {
+                    const double x = timeToX (s.pts[i].first);
+                    const double y = row.getY() + freqToY (s.pts[i].second, row.getHeight());
+                    if (i == 0) p.startNewSubPath ((float) x, (float) y);
+                    else        p.lineTo ((float) x, (float) y);
+                }
+                p.closeSubPath ();
+                g.setColour (fillCol);
+                g.fillPath (p);
+                g.setColour (edgeCol);
+                g.strokePath (p, juce::PathStrokeType (1.0f));
+            }
+            else if (s.kind == SpectralShape::Kind::Stroke && s.pts.size() >= 2)
+            {
+                // Brush width in pixels for this row.
+                const float w = (float) std::max (1.5, 2.0 * app.brushRadiusHz * pxPerHz);
+                juce::Path p;
+                for (size_t i = 0; i < s.pts.size(); ++i)
+                {
+                    const double x = timeToX (s.pts[i].first);
+                    const double y = row.getY() + freqToY (s.pts[i].second, row.getHeight());
+                    if (i == 0) p.startNewSubPath ((float) x, (float) y);
+                    else        p.lineTo ((float) x, (float) y);
+                }
+                g.setColour (fillCol);
+                g.strokePath (p, juce::PathStrokeType (w));
+            }
+        }
+        // ScopedSaveState restores the clip on scope exit.
     }
 }

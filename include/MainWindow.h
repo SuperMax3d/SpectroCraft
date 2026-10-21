@@ -150,7 +150,11 @@ public:
         ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels,
         ViewShowLeftPanels,   // hide/show the whole left panel column
         ViewColourMap,
+        SelectionToolTimeRange = 3500, SelectionToolMarquee, SelectionToolLasso,
+        SelectionToolPaintbrush, SelectionClear, SelectionBrushSmaller,
+        SelectionBrushLarger,
         TransportPlay = 4000, TransportStop, TransportPause, TransportLoop,
+        TransportPlaySpectralSel,
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsResample,
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI

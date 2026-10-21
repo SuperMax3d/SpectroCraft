@@ -2685,6 +2685,21 @@ void StatusBar::paint (juce::Graphics& g)
             leftX += w + 12;
         }
     }
+    if (!modeText.isEmpty() && leftX < b.getWidth() - 8)
+    {
+        // The active spectral tool name, in a distinct colour so it reads as
+        // a mode indicator rather than probe data.
+        g.setColour (juce::Colour::fromRGB (120, 170, 255));
+        const juce::Font f (12.0f);
+        const int w = std::min (b.getWidth() - leftX - 8,
+                                (int) juce::GlyphArrangement::getStringWidth (f, modeText) + 8);
+        if (w > 10)
+        {
+            g.drawText (modeText, leftX, 0, w, b.getHeight(),
+                        juce::Justification::left, false);
+            leftX += w + 12;
+        }
+    }
     if (!mouseText.isEmpty() && leftX < b.getWidth() - 8)
     {
         g.setColour (juce::Colour::fromRGB (205, 205, 215));

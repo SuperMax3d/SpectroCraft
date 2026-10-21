@@ -22,7 +22,8 @@ public:
     ::UndoManager undo;                // per-file edit history
 
     double playhead = 0.0;             // UI cursor position (seconds)
-    juce::Range<double> selection { 0, 0 };
+    juce::Range<double> selection { 0, 0 };   // time-range selection (mirrors the spectral one's extent)
+    SpectralSelection spectralSel;     // per-file spectral (time x frequency) selection
     std::vector<int> visibleChannels;  // sorted channel indices to display
     ScaleCalibration scale;            // physical-unit calibration (Set Unit and Scale menu)
 

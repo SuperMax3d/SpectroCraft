@@ -21,6 +21,8 @@
 #include "MainWindow.h"
 #include "Resampler.h"
 #include "FFTHelpers.h"
+#include "SpectralSelection.h"
+#include "SpectralMaskProcessor.h"
 #include "AI/DfStft.h"   // pure DSP, no OpenVINO dependency
 #include "ScttChunk.h"   // SCTT RIFF chunk + JSON (no AI dependency)
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
@@ -5966,6 +5968,343 @@ static void testAiDeviceResolution()
     CHECK (sc::resolveAiDevice ("CPU", cpuOnly) == "CPU", "explicit CPU -> CPU");
 }
 
+// ------------------------------------------------- spectral selection model
+
+static void testSpectralSelectionModel()
+{
+    // Rect: contains + inverted-edge normalisation.
+    SpectralSelection sel;
+    sel.addRect (1.0, 2.0, 300.0, 700.0, false);
+    CHECK (sel.contains (1.5, 500.0), "rect contains interior point");
+    CHECK (!sel.contains (0.5, 500.0), "rejects point left of rect");
+    CHECK (!sel.contains (1.5, 900.0), "rejects point above rect");
+    CHECK (!sel.contains (2.5, 500.0), "rejects point right of rect");
+
+    // Inverted edges are normalised.
+    SpectralSelection inv;
+    inv.addRect (2.0, 1.0, 700.0, 300.0, false);
+    CHECK (inv.contains (1.5, 500.0), "inverted rect edges normalised");
+
+    // Polygon: even-odd rule.
+    SpectralSelection poly;
+    poly.addPolygon ({ { 0.0, 0.0 }, { 2.0, 0.0 }, { 1.0, 1000.0 } }, false);
+    CHECK (poly.contains (1.0, 300.0), "polygon contains centroid");
+    CHECK (!poly.contains (0.1, 900.0), "polygon rejects outside point");
+
+    // Degenerate polygons are dropped.
+    SpectralSelection tiny;
+    tiny.addPolygon ({ { 0.0, 0.0 }, { 0.0, 0.0 }, { 0.1, 0.0 } }, false);
+    CHECK (tiny.empty (), "<3 distinct points -> no shape");
+
+    // Stroke: rasterised brush band.
+    SpectralSelection stroke;
+    std::vector<std::pair<double, double>> path;
+    for (int i = 0; i <= 100; ++i)
+        path.emplace_back ((double) i / 100.0 * 2.0, 500.0);   // t: 0..2 s at 500 Hz
+    stroke.addStroke (path, 200.0, false);
+    CHECK (!stroke.empty (), "stroke committed");
+    CHECK (stroke.contains (1.0, 500.0), "stroke contains its centre line");
+    CHECK (stroke.contains (1.0, 650.0), "stroke covers within brush radius");
+    CHECK (!stroke.contains (1.0, 900.0), "stroke rejects beyond brush radius");
+    CHECK (!stroke.contains (3.0, 500.0), "stroke rejects outside its time span");
+
+    // Boolean order: add A, subtract B inside A.
+    SpectralSelection boolSel;
+    boolSel.addRect (0.0, 2.0, 0.0, 1000.0, false);          // A: everything
+    boolSel.addRect (0.5, 1.5, 400.0, 600.0, true);          // B: hole in the middle
+    CHECK (!boolSel.contains (1.0, 500.0), "subtractive rect carves a hole");
+    CHECK (boolSel.contains (0.2, 500.0), "area outside the hole stays selected");
+
+    // timeExtent is the union over ALL shapes (including subtractive ones).
+    const auto ext = boolSel.timeExtent();
+    CHECK (std::abs (ext.getStart() - 0.0) < 1e-9 && std::abs (ext.getEnd() - 2.0) < 1e-9,
+          "timeExtent spans the additive shape");
+
+    // replace semantics: a new plain rect clears previous shapes.
+    SpectralSelection rep;
+    rep.addRect (0.0, 1.0, 0.0, 100.0, false);
+    rep.addRect (5.0, 6.0, 0.0, 100.0, false);   // replace=true by default
+    CHECK (rep.count() == 1, "plain add replaces previous shapes");
+    CHECK (!rep.contains (0.5, 50.0), "old shape gone after replace");
+    CHECK (rep.contains (5.5, 50.0), "new shape present");
+
+    // Shift-add keeps both.
+    SpectralSelection add2;
+    add2.addRect (0.0, 1.0, 0.0, 100.0, false);
+    add2.addRect (5.0, 6.0, 0.0, 100.0, false, /*replace=*/false);
+    CHECK (add2.count() == 2, "shift-add keeps previous shapes");
+}
+
+// DFT amplitude of a pure tone in a buffer (leakage-tolerant).
+static float toneAmp (const std::vector<float>& x, size_t from, size_t to,
+                      double freqHz, double rate)
+{
+    double sr = 0.0, si = 0.0;
+    for (size_t i = from; i < to && i < x.size(); ++i)
+    {
+        const double ph = 2.0 * juce::MathConstants<double>::pi * freqHz * (double) i / rate;
+        sr += (double) x[i] * std::cos (ph);
+        si -= (double) x[i] * std::sin (ph);
+    }
+    const double n = (double) std::max<size_t> (1, to - from);
+    return (float) (std::sqrt (sr * sr + si * si) / n * 2.0);
+}
+
+// Two-tone test file: 500 Hz + 3500 Hz sines, mono 8 kHz.
+static const double kToneRate = 8000.0;
+static const int64_t kToneFrames = 16384;   // 2 seconds
+
+static bool writeTwoToneWav (const juce::File& path)
+{
+    return writeWav (path, 1, kToneRate, kToneFrames,
+        [] (int, int64_t f, double rate) {
+            const double t = (double) f / rate;
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 500.0 * t)
+                 + 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 3500.0 * t);
+        });
+}
+
+// Marquee covering only the 500 Hz tone.
+static SpectralSelection lowBandSel()
+{
+    SpectralSelection s;
+    s.addRect (0.0, kToneFrames / kToneRate, 300.0, 700.0, false);
+    return s;
+}
+
+// ------------------------------------------------- masked gain + zero-out
+
+static void testMaskedGainAndZero()
+{
+    const juce::File wav = makeTempFile ("masked_gain.wav");
+    CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "loaded two-tone wav");
+
+    // Baseline amplitudes.
+    std::vector<float> orig ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, orig.data()), "read baseline");
+    const float a500 = toneAmp (orig, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float a3500 = toneAmp (orig, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (std::abs (a500 - 0.5f) < 0.01f, "baseline 500 Hz amplitude");
+    CHECK (std::abs (a3500 - 0.5f) < 0.01f, "baseline 3500 Hz amplitude");
+
+    // -6 dB gain on the low band only.
+    const float g = (float) std::pow (10.0, -6.0 / 20.0);
+    SpectralSelection sel = lowBandSel();
+    CHECK (SpectralMask::applyMaskedGain (eng,
+            { 0, kToneFrames }, sel, g, "test gain"), "masked gain applied");
+
+    std::vector<float> after ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, after.data()), "read after gain");
+    const float b500 = toneAmp (after, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float b3500 = toneAmp (after, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (std::abs (b500 - a500 * g) < 0.01f, "masked tone attenuated by the gain");
+    CHECK (std::abs (b3500 - a3500) < 0.005f, "unmasked tone untouched");
+
+    // Zero-out: the low band disappears entirely.
+    SpectralSelection sel2 = lowBandSel();
+    CHECK (SpectralMask::applyMaskedGain (eng,
+            { 0, kToneFrames }, sel2, 0.0f, "test zero"), "masked zero applied");
+
+    std::vector<float> zeroed ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, zeroed.data()), "read after zero");
+    const float z500 = toneAmp (zeroed, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float z3500 = toneAmp (zeroed, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (z500 < 0.01f, "masked tone zeroed");
+    CHECK (std::abs (z3500 - a3500) < 0.005f, "unmasked tone still intact after zero-out");
+
+    // Identity gain is a guaranteed no-op: bit-exact, no undo entry.
+    ::UndoManager um;   // global scope: JUCE also has juce::UndoManager
+    eng.setUndoManager (&um);
+    const size_t undoBefore = um.undoSize();
+    SpectralSelection sel3 = lowBandSel();
+    CHECK (SpectralMask::applyMaskedGain (eng,
+            { 0, kToneFrames }, sel3, 1.0f, "no-op gain"), "identity gain returns true");
+    std::vector<float> identity ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, identity.data()), "read after no-op");
+    bool bitExact = identity.size() == zeroed.size();
+    for (size_t i = 0; bitExact && i < identity.size(); ++i)
+        bitExact = identity[i] == zeroed[i];
+    CHECK (bitExact, "identity gain leaves samples bit-exact");
+    CHECK (um.undoSize() == undoBefore, "identity gain records no undo entry");
+}
+
+// ------------------------------------- masked edits refresh the waveform mips
+// Regression: spectral-mask edits commit through replaceSamples(), which does
+// NOT rebuild the waveform mipmaps. The Application-level helpers must do it,
+// otherwise the waveform view keeps showing pre-edit content after DEL /
+// silence / gain / fade / normalize / reverse on a spectral selection (the
+// spectral view updates because refreshAfterEdit clears its tile cache).
+static void testMaskedEditRebuildsMipmaps()
+{
+    const juce::File wav = makeTempFile ("masked_mips.wav");
+    CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened two-tone wav");
+    FileDoc* d = app.doc();
+    if (!d) return;
+    AudioEngine& eng = app.audioEngine ();
+
+    // Peak of the finest mipmap level over a sample range.
+    auto mipPeak = [&] (int ch, int64_t s0, int64_t s1) -> float
+    {
+        const auto& mips = eng.mipmaps ();
+        if (mips.empty ()) return -1.0f;
+        const auto& mx = mips.front ().max[(size_t) ch];
+        float m = 0.0f;
+        for (int64_t i = s0; i < s1 && i < (int64_t) mx.size (); ++i)
+            if (mx[(size_t) i] > m) m = mx[(size_t) i];
+        return m;
+    };
+
+    // Ground truth: highest POSITIVE sample in the engine buffer. The finest
+    // mipmap level stores per-sample max clamped at zero, so it matches this.
+    auto bufPosPeak = [&] () -> float
+    {
+        std::vector<float> x ((size_t) kToneFrames);
+        if (!eng.readSamples (0, 0, (int) kToneFrames, x.data ())) return -1.0f;
+        float m = 0.0f;
+        for (float v : x)
+            if (v > m) m = v;
+        return m;
+    };
+
+    CHECK (mipPeak (0, 0, kToneFrames) > 0.4f, "baseline tone visible in mipmap");
+
+    // DEL with an active spectral selection: zeros the low band through
+    // maskedGainEdit -> applyMaskedGain + rebuildMipmaps.
+    d->spectralSel = lowBandSel ();
+    std::string err;
+    CHECK (app.del (&err), "del zeroed the spectral selection");
+
+    // The 500 Hz tone is gone from the buffer; the unmasked 3500 Hz one remains.
+    std::vector<float> after ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, after.data ()), "read after del");
+    const float a500 = toneAmp (after, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float a3500 = toneAmp (after, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (a500 < 0.01f, "masked 500 Hz tone zeroed");
+    CHECK (std::abs (a3500 - 0.5f) < 0.01f, "unmasked 3500 Hz tone intact");
+
+    // The mipmap must now match the edited buffer (finest level is per-sample).
+    CHECK (std::abs (mipPeak (0, 0, kToneFrames) - bufPosPeak ()) < 1e-3f,
+           "mipmap matches the edited buffer");
+
+    // Undo restores the tone AND refreshes the mipmap again.
+    ::UndoManager& um = app.undo ();
+    CHECK (um.canUndo (), "undo available after masked del");
+    app.undoStep ();
+    std::vector<float> undone ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, undone.data ()), "read after undo");
+    const float u500 = toneAmp (undone, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    CHECK (u500 > 0.4f, "undo restored the masked tone");
+    CHECK (std::abs (mipPeak (0, 0, kToneFrames) - bufPosPeak ()) < 1e-3f,
+           "mipmap matches the buffer after undo");
+}
+
+// ------------------------------------------------- extract masked (A + B = orig)
+
+static void testExtractMasked()
+{
+    const juce::File wav = makeTempFile ("extract_masked.wav");
+    CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "loaded two-tone wav");
+
+    const juce::Range<int64_t> range { 0, kToneFrames };
+    SpectralSelection sel = lowBandSel();
+
+    std::vector<std::vector<float>> A;
+    CHECK (SpectralMask::extractMasked (eng, range, sel, A), "extract masked part A");
+    CHECK (A.size() == 1 && A[0].size() == (size_t) kToneFrames, "A has one channel of full length");
+
+    // A must contain ~all of the 500 Hz tone and ~none of the 3500 Hz tone.
+    const float a500 = toneAmp (A[0], 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float a3500 = toneAmp (A[0], 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (std::abs (a500 - 0.5f) < 0.01f, "A contains the masked tone");
+    CHECK (a3500 < 0.01f, "A excludes the unmasked tone");
+
+    // B = original - A; A + B must reconstruct the original to within a
+    // couple of ULPs (floating-point round-trip, not bit-exact).
+    std::vector<float> orig ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, orig.data()), "read original");
+    double maxErr = 0.0;
+    for (size_t i = 0; i < orig.size(); ++i)
+        maxErr = std::max (maxErr, (double) std::abs (A[0][i] + (orig[i] - A[0][i]) - orig[i]));
+    CHECK (maxErr < 1e-6, "A + B reconstructs the original");
+}
+
+// ------------------------------------------------- playback mask (streaming OLA)
+
+static void testPlaybackMaskStreaming()
+{
+    const juce::File wav = makeTempFile ("playback_mask.wav");
+    CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "loaded two-tone wav");
+
+    // Offline reference: the masked signal over the whole file.
+    SpectralSelection sel = lowBandSel();
+    std::vector<std::vector<float>> ref;
+    CHECK (SpectralMask::extractMasked (eng, { 0, kToneFrames }, sel, ref), "offline reference");
+
+    // Streaming: feed the mask processor in consecutive blocks and compare.
+    // Each block carries trailing context so its last analysis windows are
+    // complete (exactly what AudioEngine::getNextAudioBlock does).
+    SpectralMask::PlaybackMask pm;
+    pm.prepare (kToneRate, 1);
+
+    const int block = 4097;   // deliberately NOT a multiple of the hop (512)
+    double maxErrConsec = 0.0;
+    for (int64_t start = 0; start < kToneFrames; start += block)
+    {
+        const int n = (int) std::min ((int64_t) block, kToneFrames - start);
+        const int64_t needEnd = std::min ((int64_t) kToneFrames,
+                                          start + (int64_t) n
+                                              + SpectralMask::contextSamples());
+        const int extN = (int) (needEnd - start);
+        std::vector<std::vector<float>> datas (1, std::vector<float> ((size_t) extN));
+        CHECK (eng.readSamples (0, start, extN, datas[0].data()), "read block");
+        pm.process (datas, start, start, n, sel);
+        for (int i = 0; i < n; ++i)
+            maxErrConsec = std::max (maxErrConsec,
+                (double) std::abs (datas[0][(size_t) i] - ref[0][(size_t) start + (size_t) i]));
+    }
+    CHECK (maxErrConsec < 1e-4, "consecutive blocks match the offline reference");
+
+    // Seek: a non-consecutive start must re-prime and still match.  The block
+    // carries fftSize()-1 samples of pre-context so the fast-forward is exact.
+    pm.prepare (kToneRate, 1);
+    const int64_t seekTo = 8192 + 37;   // deliberately not on a frame boundary
+    {
+        const int n = 4096;
+        const int64_t dataStart = std::max<int64_t> (0, seekTo - (SpectralMask::fftSize() - 1));
+        const int64_t needEnd = std::min ((int64_t) kToneFrames,
+                                          seekTo + (int64_t) n
+                                              + SpectralMask::contextSamples());
+        const int extN = (int) (needEnd - dataStart);
+        std::vector<std::vector<float>> datas (1, std::vector<float> ((size_t) extN));
+        CHECK (eng.readSamples (0, dataStart, extN, datas[0].data()), "read seek block");
+        pm.process (datas, dataStart, seekTo, n, sel);
+        const size_t preOff = (size_t) (seekTo - dataStart);
+        double maxErrSeek = 0.0;
+        for (int i = 0; i < n; ++i)
+            maxErrSeek = std::max (maxErrSeek,
+                (double) std::abs (datas[0][preOff + (size_t) i]
+                                   - ref[0][(size_t) seekTo + (size_t) i]));
+        CHECK (maxErrSeek < 1e-4, "seek re-prime matches the offline reference");
+    }
+
+    // matches() guards: wrong rate/channels must force a re-prepare.
+    CHECK (pm.matches (kToneRate, 1), "matches after prepare");
+    CHECK (!pm.matches (44100.0, 1), "mismatched rate detected");
+    CHECK (!pm.matches (kToneRate, 2), "mismatched channel count detected");
+}
+
 static double rmsOf (const std::vector<float>& v)
 {
     if (v.empty()) return 0.0;
@@ -6884,6 +7223,11 @@ static int scRunUnitTestsImpl()
     progress ("batch transcribe");    testBatchTranscribe();
     progress ("transcription panel layout"); testTranscriptionPanelLayout();
 #endif
+    progress ("spectral selection model");  testSpectralSelectionModel();
+    progress ("masked gain + zero-out");    testMaskedGainAndZero();
+    progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
+    progress ("extract masked A+B=orig");   testExtractMasked();
+    progress ("playback mask streaming");   testPlaybackMaskStreaming();
     progress ("version string");      testVersionString();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

@@ -625,15 +625,18 @@ The test executable accepts the same flags (useful for CI without a display).
 | Undo / Redo | Ctrl+Z / Ctrl+Y |
 | Cut / Copy / Paste | Ctrl+X / Ctrl+C / Ctrl+V |
 | Select all | Ctrl+A |
-| Delete selection | Del / Backspace |
+| Delete time selection (or **zero the spectral selection** when one is active) | Del / Backspace |
 | Play / Pause toggle | Space |
 | Move playhead in 10 ms steps left / right | ← / → |
 | Move playhead one sample left / right | Ctrl+← / Ctrl+→ |
 | Select while moving the playhead (anchor = position at first Shift press; released when Shift is let go) | Shift+← / Shift+→ |
 | Fine selection, one sample per step | Ctrl+Shift+← / Ctrl+Shift+→ |
 | Move playhead and pan both views to the start / end (keeps the current zoom span) | Home / End |
-| Loop (selection, or whole file if nothing selected) on/off | L |
-| Add marker (region if selected, else point at cursor) | M or F8 |
+| Loop (selection, or whole file if nothing selected) on/off | F3 |
+| Add marker (region if selected, else point at cursor) | F2 / F8 |
+| Selection tool: Time Range / Marquee / Lasso / Paintbrush | S / M / L / P |
+| Brush radius smaller / larger (Paintbrush only) | [ / ] |
+| Clear the active spectral selection (time selection untouched) | Esc |
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
 | Zoom to fit (both views) | Ctrl+0 |
 | Vertical zoom in / out (waveform amplitude + spectral frequency) | Ctrl+Shift+= / Ctrl+Shift+- |
@@ -648,12 +651,15 @@ main window itself — arrow keys keep working there too. Interactive widgets
 the standard Windows behaviour for arrow keys while focused; click back into a
 view to return playhead control.
 
-Menus: **File, Edit, View, Transport, Effects, Help**. The Edit menu has a
+Menus: **File, Edit, Selection, View, Transport, Effects, Help**. The Edit menu has a
 checkable **Snap to Zero Crossings** toggle (**off by default**): when on,
 dragging out a new time selection snaps both edges to the nearest zero
 crossing of the first visible channel (within ±50 ms), so cuts and effects
 start/end where the waveform crosses zero instead of clipping mid-cycle.
-Programmatic selections (markers, keyboard steps) are never snapped. Effects offers Silence,
+Programmatic selections (markers, keyboard steps) are never snapped. The Edit menu's
+Delete item is labelled **Zero Spectral Selection** while a spectral selection is
+active (it then zeros the selected time/frequency content in place instead of
+cutting samples). Effects offers Silence,
 Fade In/Out, Normalize, Reverse and **Change Gain...** (a dB dialog whose
 field opens focused with its value pre-selected so a new one can be typed in
 right away; it multiplies the selection by 10^(dB/20)) — all applied only to
@@ -687,6 +693,35 @@ Mouse (waveform *and* spectral views):
 
 Selecting a time range in *either* view applies the selection to **both**
 views at once.
+
+### Spectral selections (Selection menu)
+
+Besides plain time ranges, you can select arbitrary regions of the
+time/frequency plane and apply edits to exactly that content. The
+**Selection** menu switches the drawing tool:
+
+| Tool | Key | How to draw |
+|---|---|---|
+| Time Range (default) | S | Left-drag a time range, as before |
+| Marquee | M | Left-drag a rectangle in either view's plot area |
+| Lasso | L | Hold and drag through the vertices of the region; releasing closes the polygon (≥3 points) |
+| Paintbrush | P | Drag a freehand stroke; its width is the brush radius (Hz) |
+
+Modifier keys while dragging: **plain = replace** the current selection,
+**Shift = add** to it, **Ctrl = subtract** from it (subtractive shapes are
+drawn with dashed edges). The active tool and brush radius are shown in the
+status bar; `[` / `]` change the brush radius (20–5000 Hz), and **Esc**
+clears the spectral selection without touching the time selection.
+
+With a spectral selection active, destructive edits operate on its content
+over its own time extent instead of the time selection: **Del/Backspace**
+zeros it, Silence / Fade In / Fade Out / Normalize / Reverse / Change Gain
+apply to the selected (time, frequency) region only — e.g. you can remove a
+hum or a tone from one channel's band while leaving everything else
+bit-exact. The waveform and spectral views both refresh immediately after
+the edit, and undo/redo works as usual. **Play Spectral Selection**
+(Transport menu) plays back with the selection masked out in real time,
+without modifying the file.
 
 ---
 

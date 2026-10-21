@@ -2,6 +2,8 @@
 // SpectroCraft - Audio Engine: streaming file access, playback, waveform mipmaps, edits
 #include <JuceHeader.h>
 #include "UndoPatch.h"
+#include "SpectralSelection.h"
+#include "SpectralMaskProcessor.h"
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -51,6 +53,13 @@ public:
     void setLooping (bool); bool isLooping() const { return looping.load(); }
     void setLoopRange (juce::Range<double>); juce::Range<double> loopRange() const { return loopRange_; }
     void setGain (float); float gain() const { return gain_.load(); }
+
+    /** "Play Spectral Selection": when a non-null selection is installed,
+        playback passes through an STFT mask that zeros every (t,f) bin outside
+        it. nullptr restores normal playback. Thread-safe: the audio thread
+        snapshots the shared pointer per block, and selection changes take
+        effect from the next block without restarting transport. */
+    void setSpectralPlaybackMask(std::shared_ptr<const SpectralSelection> sel);
 
     // ---- AudioSource interface (audio thread) ----
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
@@ -194,6 +203,14 @@ private:
     double playbackRate = 0.0;             // device rate set by prepareToPlay()
     std::atomic<float> gain_{ 1.0f };
     juce::Range<double> loopRange_{ 0, 0 };
+
+    // Spectral playback mask (see setSpectralPlaybackMask). playSel is swapped
+    // under maskMutex; the audio thread snapshots it per block and runs the
+    // PlaybackMask state machine under the same lock so prepare/reset never
+    // races an in-flight process().
+    std::mutex maskMutex;
+    std::shared_ptr<const SpectralSelection> playSel;
+    std::shared_ptr<SpectralMask::PlaybackMask> playMask;
 
     ::UndoManager* undo = nullptr;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks

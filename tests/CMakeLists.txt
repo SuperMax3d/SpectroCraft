@@ -8,6 +8,8 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/tests/UnitTests.cpp
         ${CMAKE_SOURCE_DIR}/src/AudioEngine.cpp
         ${CMAKE_SOURCE_DIR}/src/SpectralEngine.cpp
+        ${CMAKE_SOURCE_DIR}/src/SpectralSelection.cpp
+        ${CMAKE_SOURCE_DIR}/src/SpectralMaskProcessor.cpp
         ${CMAKE_SOURCE_DIR}/src/MarkerManager.cpp
         ${CMAKE_SOURCE_DIR}/src/WaveformView.cpp
         ${CMAKE_SOURCE_DIR}/src/SpectralView.cpp
