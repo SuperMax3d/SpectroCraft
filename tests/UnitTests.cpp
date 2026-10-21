@@ -3310,10 +3310,13 @@ static void testSpectralDbWindow()
 // shared across all files but each one tracks the document it was stored
 // from; closing a file clears only that file's snapshot entries.
 // ---------------- Right-drag box zoom (waveform + spectral views) ----------------
-// Horizontal right-drag: both views zoom to the dragged time range.
-// Vertical right-drag: waveform amplitude axis / spectral frequency axis is
-// scaled so the dragged span fills the view. Plain right-click = context menu
-// (no state change when no action handler is attached).
+// The drag START position selects the zoomed axes:
+//  - drag on the track (plot area): BOTH axes — time from the box's x span,
+//    amplitude/frequency from its y span;
+//  - drag starting on the left axis: vertical only;
+//  - drag starting on the top time ruler (waveform): horizontal only.
+// Plain right-click = context menu (no state change when no action handler
+// is attached).
 // The view handlers only read e.x/e.y/e.mods; the Desktop's default mouse
 // source is valid headlessly (MouseInputSourceList adds one at construction).
 static juce::MouseEvent mkMouse (juce::Component& c, int x, int y, juce::ModifierKeys mods)
@@ -3339,7 +3342,7 @@ static void testRightDragZoom()
 
     const juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
 
-    // --- Waveform: horizontal drag -> time window ---
+    // --- Waveform: drag on the track -> BOTH axes (time + amplitude) ---
     {
         WaveformView view (app);
         view.setSize (400, 200);
@@ -3348,50 +3351,85 @@ static void testRightDragZoom()
 
         const double e0 = view.xToTime (100), e1 = view.xToTime (300);
         CHECK (e1 > e0, "expected time range is non-degenerate");
+        const double ampBefore = view.getVisibleAmpHalf();
 
+        // Box x span [100,300], y span 60..70 (10 px of the 176 px plot).
         view.mouseDown (mkMouse (view, 100, 60, rmb));
         view.mouseDrag (mkMouse (view, 300, 70, rmb));
         view.mouseUp   (mkMouse (view, 300, 70, rmb));
 
         CHECK (std::abs (view.getViewStart() - e0) < 1e-9
               && std::abs (view.getViewEnd() - e1) < 1e-9,
-              "horizontal right-drag zooms to the dragged time range");
+              "track right-drag zooms to the dragged time range");
+        CHECK (std::abs (view.getVisibleAmpHalf() - ampBefore * 10.0 / 176.0) < 1e-9,
+               "track right-drag also scales the amplitude axis to the y span");
     }
 
-    // --- Waveform: vertical drag -> amplitude zoom in ---
+    // --- Waveform: narrow track drag still zooms BOTH axes ---
     {
         WaveformView view (app);
         view.setSize (400, 200);
         view.setViewRange (0.0, 4.0);
         view.setVisibleChannels ({ 0 });
 
-        const double before = view.getVisibleAmpHalf();
-        // Plot is y=24..199 (height 176); a 44 px span must zoom in by x4.
+        const double e0 = view.xToTime (200), e1 = view.xToTime (203);
+        const double ampBefore = view.getVisibleAmpHalf();
+
+        // dx=3, dy=44: the time window shrinks to the 3 px x span as well.
         view.mouseDown (mkMouse (view, 200, 50, rmb));
-        view.mouseDrag (mkMouse (view, 203, 94, rmb));   // dx=3 < dy=44 -> vertical
+        view.mouseDrag (mkMouse (view, 203, 94, rmb));
         view.mouseUp   (mkMouse (view, 203, 94, rmb));
 
-        CHECK (std::abs (view.getVisibleAmpHalf() - before / 4.0) < 1e-9,
-               "vertical right-drag scales the amplitude axis to the dragged span");
+        CHECK (std::abs (view.getViewStart() - e0) < 1e-9
+              && std::abs (view.getViewEnd() - e1) < 1e-9,
+               "narrow track right-drag zooms the time axis to the x span");
+        CHECK (std::abs (view.getVisibleAmpHalf() - ampBefore / 4.0) < 1e-9,
+               "narrow track right-drag scales the amplitude axis to the y span");
     }
 
-    // --- Spectral: horizontal drag -> time window; vertical drag -> frequency range ---
+    // --- Waveform: drag starting on the left amplitude axis -> vertical only ---
     {
-        SpectralView view (app);
+        WaveformView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        const double ampBefore = view.getVisibleAmpHalf();
+
+        // Box x span [30,40] lies on the axis; y span 50..120 (70 px).
+        view.mouseDown (mkMouse (view, 30, 50, rmb));
+        view.mouseDrag (mkMouse (view, 40, 120, rmb));
+        view.mouseUp   (mkMouse (view, 40, 120, rmb));
+
+        CHECK (std::abs (view.getVisibleAmpHalf() - ampBefore * 70.0 / 176.0) < 1e-9,
+               "axis right-drag scales the amplitude axis to the y span");
+        CHECK (view.getViewStart() == 0.0 && view.getViewEnd() == 4.0,
+               "axis right-drag leaves the time window unchanged");
+    }
+
+    // --- Waveform: drag starting on the top time ruler -> horizontal only ---
+    {
+        WaveformView view (app);
         view.setSize (400, 200);
         view.setViewRange (0.0, 4.0);
         view.setVisibleChannels ({ 0 });
 
         const double e0 = view.xToTime (100), e1 = view.xToTime (300);
-        view.mouseDown (mkMouse (view, 100, 60, rmb));
-        view.mouseDrag (mkMouse (view, 300, 70, rmb));
-        view.mouseUp   (mkMouse (view, 300, 70, rmb));
+        const double ampBefore = view.getVisibleAmpHalf();
+
+        // Box y span [8,18] lies on the ruler; x span 100..300.
+        view.mouseDown (mkMouse (view, 100, 8, rmb));
+        view.mouseDrag (mkMouse (view, 300, 18, rmb));
+        view.mouseUp   (mkMouse (view, 300, 18, rmb));
 
         CHECK (std::abs (view.getViewStart() - e0) < 1e-9
               && std::abs (view.getViewEnd() - e1) < 1e-9,
-              "spectral horizontal right-drag zooms to the dragged time range");
+               "ruler right-drag zooms to the dragged time range");
+        CHECK (std::abs (view.getVisibleAmpHalf() - ampBefore) < 1e-9,
+               "ruler right-drag leaves the amplitude axis unchanged");
     }
 
+    // --- Spectral: drag on the track -> BOTH axes (time + frequency) ---
     {
         SpectralView view (app);
         view.setSize (400, 200);
@@ -3403,15 +3441,69 @@ static void testRightDragZoom()
         const double fmin = 20.0, fmax = 4000.0;
         const double lmin = std::log (fmin), lmax = std::log (fmax);
         auto freqAt = [lmin, lmax] (double y) { return std::exp (lmin + (1.0 - y / 200.0) * (lmax - lmin)); };
-        const double fTop = freqAt (50.0), fBot = freqAt (150.0);
 
+        const double e0 = view.xToTime (100), e1 = view.xToTime (300);
+
+        // Box x span [100,300], y span 60..70.
+        view.mouseDown (mkMouse (view, 100, 60, rmb));
+        view.mouseDrag (mkMouse (view, 300, 70, rmb));
+        view.mouseUp   (mkMouse (view, 300, 70, rmb));
+
+        CHECK (std::abs (view.getViewStart() - e0) < 1e-9
+              && std::abs (view.getViewEnd() - e1) < 1e-9,
+               "spectral track right-drag zooms to the dragged time range");
+        CHECK (std::abs (view.getFreqMin() - freqAt (70.0)) / freqAt (70.0) < 1e-9
+              && std::abs (view.getFreqMax() - freqAt (60.0)) / freqAt (60.0) < 1e-9,
+               "spectral track right-drag also sets the frequency axis to the y span");
+    }
+
+    // --- Spectral: narrow track drag still zooms BOTH axes ---
+    {
+        SpectralView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        const double fmin = 20.0, fmax = 4000.0;
+        const double lmin = std::log (fmin), lmax = std::log (fmax);
+        auto freqAt = [lmin, lmax] (double y) { return std::exp (lmin + (1.0 - y / 200.0) * (lmax - lmin)); };
+
+        const double e0 = view.xToTime (200), e1 = view.xToTime (203);
+
+        // dx=3, dy=100: the time window shrinks to the 3 px x span as well.
         view.mouseDown (mkMouse (view, 200, 50, rmb));
-        view.mouseDrag (mkMouse (view, 203, 150, rmb));   // dx=3 < dy=100 -> vertical
+        view.mouseDrag (mkMouse (view, 203, 150, rmb));
         view.mouseUp   (mkMouse (view, 203, 150, rmb));
 
-        CHECK (std::abs (view.getFreqMin() - fBot) / fBot < 1e-9
-              && std::abs (view.getFreqMax() - fTop) / fTop < 1e-9,
-               "spectral vertical right-drag sets the frequency axis to the dragged span");
+        CHECK (std::abs (view.getViewStart() - e0) < 1e-9
+              && std::abs (view.getViewEnd() - e1) < 1e-9,
+               "spectral narrow track right-drag zooms the time axis to the x span");
+        CHECK (std::abs (view.getFreqMin() - freqAt (150.0)) / freqAt (150.0) < 1e-9
+              && std::abs (view.getFreqMax() - freqAt (50.0)) / freqAt (50.0) < 1e-9,
+               "spectral narrow track right-drag sets the frequency axis to the y span");
+    }
+
+    // --- Spectral: drag starting on the left frequency axis -> vertical only ---
+    {
+        SpectralView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 4.0);
+        view.setVisibleChannels ({ 0 });
+
+        const double fmin = 20.0, fmax = 4000.0;
+        const double lmin = std::log (fmin), lmax = std::log (fmax);
+        auto freqAt = [lmin, lmax] (double y) { return std::exp (lmin + (1.0 - y / 200.0) * (lmax - lmin)); };
+
+        // Box x span [30,40] lies on the axis; y span 50..150.
+        view.mouseDown (mkMouse (view, 30, 50, rmb));
+        view.mouseDrag (mkMouse (view, 40, 150, rmb));
+        view.mouseUp   (mkMouse (view, 40, 150, rmb));
+
+        CHECK (std::abs (view.getFreqMin() - freqAt (150.0)) / freqAt (150.0) < 1e-9
+              && std::abs (view.getFreqMax() - freqAt (50.0)) / freqAt (50.0) < 1e-9,
+               "spectral axis right-drag sets the frequency axis to the y span");
+        CHECK (view.getViewStart() == 0.0 && view.getViewEnd() == 4.0,
+               "spectral axis right-drag leaves the time window unchanged");
     }
 
     // --- Plain right-click: no state change, no playhead move ---

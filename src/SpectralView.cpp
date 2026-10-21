@@ -312,29 +312,47 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
                     if (onContextAction) onContextAction (id);
                 });
         }
-        else if (zoomRect.getWidth() >= zoomRect.getHeight())
-        {
-            // Horizontal drag: zoom BOTH views to the dragged time range
-            // (setWindow notifies MainWindow via onChange).
-            const double t0 = xToTime (zoomRect.getX());
-            const double t1 = xToTime (zoomRect.getRight());
-            if (t1 - t0 > 1e-9) setWindow (t0, t1);
-        }
         else
         {
-            // Vertical drag: set the frequency axis to the dragged span,
-            // mapped through the channel row containing the drag start.
-            const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
-            if (!rows.empty() && zoomRect.getHeight() >= 2)
+            // The drag START position selects which axes get zoomed:
+            //  - inside the plot ("the track"): BOTH axes — time from the box's
+            //    x span, frequency from its y span;
+            //  - on the left frequency axis: vertical only.
+            const bool startOnAxis = dragStartX < kLeftAxisWidth;
+
+            auto zoomTime = [this] ()
             {
-                juce::Rectangle<int> row = rows.front();
-                for (const auto& rr : rows)
-                    if (rr.contains (dragStartX, dragStartY)) { row = rr; break; }
-                const double f1 = yToFreq ((float) (std::min (zoomRect.getY(), zoomRect.getBottom()) - row.getY()),
-                                           row.getHeight());
-                const double f2 = yToFreq ((float) (std::max (zoomRect.getY(), zoomRect.getBottom()) - row.getY()),
-                                           row.getHeight());
-                setFrequencyRange (std::min (f1, f2), std::max (f1, f2));
+                // Zoom BOTH views to the dragged time range (setWindow notifies
+                // MainWindow via onChange).
+                const double t0 = xToTime (zoomRect.getX());
+                const double t1 = xToTime (zoomRect.getRight());
+                if (t1 - t0 > 1e-9) setWindow (t0, t1);
+            };
+
+            auto zoomFreq = [this] ()
+            {
+                // Set the frequency axis to the dragged span, mapped through
+                // the channel row containing the drag start.
+                const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+                if (!rows.empty() && zoomRect.getHeight() >= 2)
+                {
+                    juce::Rectangle<int> row = rows.front();
+                    for (const auto& rr : rows)
+                        if (rr.contains (dragStartX, dragStartY)) { row = rr; break; }
+                    const double f1 = yToFreq ((float) (std::min (zoomRect.getY(), zoomRect.getBottom()) - row.getY()),
+                                               row.getHeight());
+                    const double f2 = yToFreq ((float) (std::max (zoomRect.getY(), zoomRect.getBottom()) - row.getY()),
+                                               row.getHeight());
+                    setFrequencyRange (std::min (f1, f2), std::max (f1, f2));
+                }
+            };
+
+            if (startOnAxis)
+                zoomFreq ();
+            else
+            {
+                zoomTime ();
+                zoomFreq ();
             }
         }
         haveZoomRect = false;

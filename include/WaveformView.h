@@ -19,8 +19,10 @@ public:
     void resized() override;
 
     // Mouse interaction: left-drag = select, middle-drag = pan,
-    // right-drag = box-zoom (horizontal drag -> time range of both views;
-    // vertical drag -> amplitude range), plain right-click = context menu,
+    // right-drag = box-zoom (drag on the track -> BOTH axes: time from the
+    // box's x span + amplitude from its y span; drag starting on the left
+    // amplitude axis -> vertical only; drag starting on the top time ruler
+    // -> horizontal only), plain right-click = context menu,
     // wheel over the plot or time ruler = horizontal zoom at cursor,
     // wheel over the left amplitude axis (or Shift+wheel) = vertical zoom,
     // double-click = fit whole file. Clicking moves the playhead.

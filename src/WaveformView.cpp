@@ -228,38 +228,60 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
                     if (onContextAction) onContextAction (id);
                 });
         }
-        else if (zoomRect.getWidth() >= zoomRect.getHeight())
-        {
-            // Horizontal drag: zoom BOTH views to the dragged time range
-            // (setWindow notifies MainWindow via onChange).
-            const double t0 = xToTime (zoomRect.getX());
-            const double t1 = xToTime (zoomRect.getRight());
-            if (t1 - t0 > 1e-9) setWindow (t0, t1);
-        }
         else
         {
-            // Vertical drag: scale the amplitude axis so the dragged span
-            // fills the whole plot, keeping the value under the box centre at
-            // its row's centre line.
-            const auto pr = plotRect();
-            int visCount = 0;
-            for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
-                if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
-            if (visCount > 0 && zoomRect.getHeight() >= 2)
-            {
-                const double oldAmpPx = rowAmpPx();
-                const int chanH = pr.getHeight() / visCount;
-                const int rowIdx = std::clamp ((zoomRect.getCentreY() - pr.getY()) / chanH,
-                                               0, visCount - 1);
-                const float centerR = (float) (pr.getY() + rowIdx * chanH + chanH * 0.5f);
+            // The drag START position selects which axes get zoomed:
+            //  - inside the plot ("the track"): BOTH axes — time from the box's
+            //    x span, amplitude from its y span;
+            //  - on the left amplitude axis: vertical only;
+            //  - on the top time ruler: horizontal only.
+            const bool startOnAxis  = dragStartX < kLeftAxisWidth;
+            const bool startOnRuler = !startOnAxis && dragStartY < kRulerH;
 
-                vOffset = std::clamp (vOffset + (centerR - zoomRect.getCentreY()) / oldAmpPx,
-                                     -2.0, 2.0);
-                const double nz = std::clamp (vZoom * ((double) pr.getHeight()
-                                                      / (double) zoomRect.getHeight()),
-                                              0.05, 64.0);
-                if (nz != vZoom) { vZoom = nz; dirty = true; }
-                if (onVerticalZoomChanged) onVerticalZoomChanged();
+            auto zoomTime = [this] ()
+            {
+                // Zoom BOTH views to the dragged time range (setWindow notifies
+                // MainWindow via onChange).
+                const double t0 = xToTime (zoomRect.getX());
+                const double t1 = xToTime (zoomRect.getRight());
+                if (t1 - t0 > 1e-9) setWindow (t0, t1);
+            };
+
+            auto zoomAmp = [this] ()
+            {
+                // Scale the amplitude axis so the dragged span fills the whole
+                // plot, keeping the value under the box centre at its row's
+                // centre line.
+                const auto pr = plotRect();
+                int visCount = 0;
+                for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
+                    if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
+                if (visCount > 0 && zoomRect.getHeight() >= 2)
+                {
+                    const double oldAmpPx = rowAmpPx();
+                    const int chanH = pr.getHeight() / visCount;
+                    const int rowIdx = std::clamp ((zoomRect.getCentreY() - pr.getY()) / chanH,
+                                                   0, visCount - 1);
+                    const float centerR = (float) (pr.getY() + rowIdx * chanH + chanH * 0.5f);
+
+                    vOffset = std::clamp (vOffset + (centerR - zoomRect.getCentreY()) / oldAmpPx,
+                                         -2.0, 2.0);
+                    const double nz = std::clamp (vZoom * ((double) pr.getHeight()
+                                                          / (double) zoomRect.getHeight()),
+                                                  0.05, 64.0);
+                    if (nz != vZoom) { vZoom = nz; dirty = true; }
+                    if (onVerticalZoomChanged) onVerticalZoomChanged();
+                }
+            };
+
+            if (startOnAxis)
+                zoomAmp ();
+            else if (startOnRuler)
+                zoomTime ();
+            else
+            {
+                zoomTime ();
+                zoomAmp ();
             }
         }
         haveZoomRect = false;

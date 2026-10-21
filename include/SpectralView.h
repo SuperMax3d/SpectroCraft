@@ -19,8 +19,9 @@ public:
     void resized() override;
 
     // Mouse interaction: left-drag = select, middle-drag = pan,
-    // right-drag = box-zoom (horizontal drag -> time range of both views;
-    // vertical drag -> frequency range), plain right-click = context menu,
+    // right-drag = box-zoom (drag on the track -> BOTH axes: time from the
+    // box's x span + frequency from its y span; drag starting on the left
+    // frequency axis -> vertical only), plain right-click = context menu,
     // wheel over the plot = time zoom at cursor, wheel over the left
     // frequency axis (or Shift+wheel) = frequency-range zoom,
     // double-click = fit whole file. Clicking moves the playhead.
