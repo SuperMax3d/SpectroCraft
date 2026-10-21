@@ -666,6 +666,25 @@ public:
         }
         return TextEditor::keyPressed (k);
     }
+
+protected:
+    // Paints a dim italic "Search" placeholder while the box is empty and
+    // unfocused; it disappears as soon as the user clicks into the box.
+    void paint (juce::Graphics& g) override
+    {
+        TextEditor::paint (g);
+        if (getText ().isEmpty () && !hasKeyboardFocus (false))
+        {
+            juce::Font f (12.0f, juce::Font::italic);
+            g.setFont (f);
+            g.setColour (juce::Colour::fromRGB (135, 140, 152));
+            g.drawText ("Search", getLocalBounds ().reduced (8, 3),
+                        juce::Justification::centredLeft, false);
+        }
+    }
+
+    void focusGained (juce::Component::FocusChangeType) override { repaint (); }
+    void focusLost (juce::Component::FocusChangeType) override { repaint (); }
 };
 
 class TranscriptionPanel : public juce::Component

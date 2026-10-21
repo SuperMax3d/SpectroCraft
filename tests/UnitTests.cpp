@@ -6464,6 +6464,92 @@ static void testBatchTranscribe()
     // Clean up the temp tree.
     folder.deleteRecursively ();
 }
+
+// ---------------- Transcription panel: buttons pinned to bottom, "Search" placeholder ----------------
+static void testTranscriptionPanelLayout()
+{
+    const juce::File wav = makeTempFile ("trplayout.wav");
+    wav.deleteFile();
+    writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for transcription layout test");
+
+    TranscriptionPanel panel (app);
+    panel.setSize (300, 420);
+
+    juce::TextButton* runBtn = nullptr;
+    juce::TextButton* clearBtn = nullptr;
+    SearchEditor* searchBox = nullptr;
+    juce::TableListBox* table = nullptr;
+    for (int i = 0; i < panel.getNumChildComponents (); ++i)
+    {
+        auto* c = panel.getChildComponent (i);
+        if (auto* tb = dynamic_cast<juce::TextButton*> (c))
+        {
+            if (tb->getButtonText () == "Transcribe...") runBtn = tb;
+            else if (tb->getButtonText () == "Clear") clearBtn = tb;
+        }
+        else if (auto* se = dynamic_cast<SearchEditor*> (c)) searchBox = se;
+        else if (auto* tl = dynamic_cast<juce::TableListBox*> (c)) table = tl;
+    }
+
+    CHECK (runBtn != nullptr && clearBtn != nullptr && searchBox != nullptr && table != nullptr,
+           "transcription panel children found");
+    if (! runBtn || ! clearBtn || ! searchBox || ! table)
+    {
+        wav.deleteFile ();
+        return;
+    }
+
+    // The button strip and the search box are pinned to the bottom of the
+    // panel (4px margin + 2px offset inside a 30px row).
+    const int expectedBottom = panel.getHeight () - 6;
+    CHECK (runBtn->getBottom () == expectedBottom, "Transcribe button at panel bottom");
+    CHECK (clearBtn->getBottom () == expectedBottom, "Clear button at panel bottom");
+    CHECK (searchBox->getBottom () == expectedBottom, "search box at panel bottom");
+
+    // The segment list takes all the space above the buttons.
+    CHECK (table->getBottom () < runBtn->getY (), "list ends above the button row");
+    CHECK (runBtn->getY () - table->getBottom () <= 10, "only a small gap between list and buttons");
+    CHECK (table->getHeight () > panel.getHeight () * 3 / 4,
+          "segment list takes most of the panel height");
+
+    // Count dim bluish-grey pixels inside the search box, away from its
+    // outline. The placeholder colour (135,140,152) is distinctly bluer than
+    // the neutral text/outline colours, so this isolates it.
+    auto placeholderPixelCount = [] (juce::Component& c)
+    {
+        const juce::Image img = c.createComponentSnapshot (c.getLocalBounds ());
+        int n = 0;
+        for (int y = 4; y < img.getHeight () - 4; ++y)
+            for (int x = 6; x < img.getWidth () - 2; ++x)
+            {
+                const juce::Colour p = img.getPixelAt (x, y);
+                if (p.getBrightness () > 0.3f && p.getBrightness () < 0.8f
+                    && (int) p.getBlue () - (int) p.getRed () > 8)
+                    ++n;
+            }
+        return n;
+    };
+
+    CHECK (placeholderPixelCount (*searchBox) > 40,
+          "placeholder 'Search' is painted while empty and unfocused");
+
+    // Typing into the box hides the placeholder; clearing it brings it back.
+    searchBox->setText ("x", juce::dontSendNotification);
+    CHECK (placeholderPixelCount (*searchBox) < 25,
+          "placeholder hidden once text is present");
+    searchBox->setText ("", juce::dontSendNotification);
+    CHECK (placeholderPixelCount (*searchBox) > 40,
+          "placeholder returns when the box is empty again");
+
+    wav.deleteFile ();
+}
 #endif   // SC_ENABLE_AI
 
 // ---------------- Mipmap construction: bit-exactness across all source paths ----------------
@@ -6796,6 +6882,7 @@ static int scRunUnitTestsImpl()
     progress ("deepfilter pipeline"); testDeepFilterPipeline();
     progress ("whisper pipeline");    testWhisperPipeline();
     progress ("batch transcribe");    testBatchTranscribe();
+    progress ("transcription panel layout"); testTranscriptionPanelLayout();
 #endif
     progress ("version string");      testVersionString();
 

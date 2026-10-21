@@ -2878,14 +2878,17 @@ void TranscriptionPanel::paint (juce::Graphics& g)
 void TranscriptionPanel::resized()
 {
     auto b = getLocalBounds ().reduced (4, 4);
-    table.setBounds (b.removeFromTop (std::max (120, (int) (b.getHeight () * 0.7))));
 
-    auto btnRow = b.removeFromTop (30);
+    // The button strip is pinned to the bottom of the panel; the segment
+    // list takes all of the space above it.
+    auto btnRow = b.removeFromBottom (30);
     runBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, 130, 26);
     clearBtn.setBounds (runBtn.getRight () + 8, btnRow.getY () + 2, 90, 26);
     const int sx = clearBtn.getRight () + 8;
     searchBox.setBounds (sx, btnRow.getY () + 2,
                         std::max (60, b.getWidth () - (sx - b.getX ())), 26);
+
+    table.setBounds (b.reduced (0, 4));   // small gap between list and buttons
 }
 
 bool TranscriptionPanel::findNext()
