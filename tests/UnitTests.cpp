@@ -3524,6 +3524,64 @@ static void testRightDragZoom()
     wav.deleteFile();
 }
 
+// ------------------------------------------------------- context menu zoom-out-full
+// Right-clicking the track data and choosing "Zoom Out Full" must reset BOTH
+// axes: the shared time window plus each view's vertical zoom (waveform
+// amplitude + spectral frequency). Only right-clicks that start on an axis
+// keep the local axis-only behaviour.
+static void testCtxZoomOutFull()
+{
+    const juce::File wav = makeTempFile ("ctx_zoomout.wav");
+    // 5 s stereo @ 8 kHz -> Nyquist 4 kHz, so the default spectral range is
+    // [20 Hz .. min(4 kHz, 20 kHz)] = [20 .. 4000].
+    writeWav (wav, 2, 8000.0, 40000, [] (int ch, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (ch == 0 ? 300.0 : 600.0) * (double) f / rate);
+    });
+
+    Application app;
+    // A MessageManager is required before constructing the top-level window.
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "ctx zoom out test"));
+    win->openFile (wav);
+    CHECK (app.audioEngine().isFileLoaded(), "load wav for ctx zoom-out test");
+    const double dur = app.audioEngine().duration();
+
+    const double ampDefault = 1.0 / 0.9;   // getVisibleAmpHalf() at vZoom == 1
+    CHECK (std::abs (win->waveformAmpHalf() - ampDefault) < 1e-9,
+           "setup: default amplitude zoom");
+
+    // Zoom in on both axes of both views.
+    win->applyTimeWindow (1.0, 3.0);
+    win->zoomVerticalBoth (4.0);
+    CHECK (std::abs (app.viewStart - 1.0) < 1e-9 && std::abs (app.viewEnd - 3.0) < 1e-9,
+           "setup: time window zoomed in");
+    CHECK (std::abs (win->waveformAmpHalf() - ampDefault / 4.0) < 1e-9,
+           "setup: amplitude zoomed in");
+    CHECK (win->spectralFreqMin() > 20.0, "setup: frequency range narrowed");
+
+    // Track right-click -> context menu -> Zoom Out Full. The views only
+    // intercept CtxZoomOutFull for axis clicks; track clicks route through
+    // MainWindow::handleContextMenuAction -> zoomOutFull().
+    win->handleContextMenuAction (CtxZoomOutFull);
+
+    CHECK (std::abs (app.viewStart) < 1e-9 && std::abs (app.viewEnd - dur) < 1e-9,
+           "track zoom-out-full resets the shared time window");
+    CHECK (std::abs (win->waveformTimeStart()) < 1e-9
+          && std::abs (win->waveformTimeEnd() - dur) < 1e-9,
+           "track zoom-out-full resets the waveform view's time window");
+    CHECK (std::abs (win->waveformAmpHalf() - ampDefault) < 1e-9,
+           "track zoom-out-full resets the amplitude zoom");
+    CHECK (std::abs (win->spectralFreqMin() - 20.0) < 1e-9
+          && std::abs (win->spectralFreqMax() - 4000.0) < 1e-9,
+           "track zoom-out-full resets the frequency range");
+
+    win.reset();
+    delete mm;
+    wav.deleteFile();
+}
+
 // ---------------- Time-pan speed + reversal responsiveness ----------------
 // Middle-drag (and left-drag on the time ruler) pans the shared time window
 // at half cursor speed, incrementally: deltas absorbed by an edge clamp do
@@ -6538,6 +6596,7 @@ static int scRunUnitTestsImpl()
     progress ("spectral scale labels"); testSpectralScaleLabels();
     progress ("spectral dB window"); testSpectralDbWindow();
     progress ("right-drag box zoom"); testRightDragZoom();
+    progress ("ctx menu zoom-out-full"); testCtxZoomOutFull();
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("time axis ticks");     testTimeAxisTicks();

@@ -59,6 +59,11 @@ public:
     bool spectrogramVisible() const { return showSpectralView; }
     juce::String waveformTooltip() const { return waveformView->getTooltip(); }
     juce::String spectralTooltip() const { return spectralView->getTooltip(); }
+    double waveformTimeStart() const { return waveformView->getViewStart(); }
+    double waveformTimeEnd()   const { return waveformView->getViewEnd(); }
+    double waveformAmpHalf()   const { return waveformView->getVisibleAmpHalf(); }
+    double spectralFreqMin()   const { return spectralView->getFreqMin(); }
+    double spectralFreqMax()   const { return spectralView->getFreqMax(); }
     void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
     void refreshAfterEdit();   // clamp ranges, repaint waveform, re-render spectral image
     void refreshPanels();
@@ -68,7 +73,7 @@ public:
     void zoomVerticalBoth (double factor); // waveform amplitude + spectral frequency
     void zoomToFit();
     void zoomToSelection();   // fit the current selection in both views
-    void zoomOutFull();       // show the whole file in both views
+    void zoomOutFull();       // whole file + default vertical zooms in both views
     void cycleViewVisibility (bool forward);  // F9: both -> waveform -> spectrogram
     void handleContextMenuAction (int id);  // right-click menu actions from either view
     /** Moves a left-panel tab from (from, fromIndex) to position insertIndex in

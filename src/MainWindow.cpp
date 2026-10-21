@@ -1380,7 +1380,12 @@ void MainWindow::zoomToSelection()
 void MainWindow::zoomOutFull()
 {
     if (!app.audioEngine().isFileLoaded()) return;
+    // "Zoom Out Full" from the track data resets BOTH axes: the shared time
+    // window plus each view's vertical zoom. (Right-clicking an axis handles
+    // CtxZoomOutFull locally in that view and only resets its own axis.)
     applyTimeWindow (0.0, app.audioEngine().duration());
+    if (waveformView) waveformView->resetVerticalZoom();
+    if (spectralView) spectralView->resetFrequencyRange();
 }
 
 // F9 cycles the view layout: both -> waveform only -> spectrogram only -> both.
