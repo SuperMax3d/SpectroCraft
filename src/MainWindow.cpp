@@ -1155,8 +1155,11 @@ void MainWindow::handleFileSave()
 
 void MainWindow::handleFileSaveAs()
 {
+    // Start in the current file's folder when one is loaded, so saving a
+    // copy / exporting to another format begins where the user expects.
     juce::FileChooser chooser ("Save Audio File As",
-        juce::File::getSpecialLocation (juce::File::userHomeDirectory),
+        app.audioEngine().isFileLoaded() ? app.audioEngine().getFile().getParentDirectory()
+                                         : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
         "*.wav;*.aiff;*.aif;*.flac;*.ogg",
         kUseNativeFileChooser);
 
