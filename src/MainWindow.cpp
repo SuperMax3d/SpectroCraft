@@ -916,35 +916,47 @@ public:
     // it checks `cancelled` between units of work and deletes the dialog.
     WorkProgressDialog (const juce::String& title, const juce::String& message,
                         bool withCancel = false, Component* centreAround = nullptr)
-        : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon, centreAround),
-          bar (progressValue)   // JUCE 9: the bar watches this variable
+        : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon, centreAround)
     {
-        // The default LookAndFeel tables define no ProgressBar colours, which
-        // resolve to transparent - set them explicitly so the bar is visible
-        // on the dark dialog background.
-        bar.setColour (juce::ProgressBar::backgroundColourId, juce::Colour (0xff232327));
-        bar.setColour (juce::ProgressBar::foregroundColourId, juce::Colours::dodgerblue);
+        // Use the AlertWindow's own progress bar so its layout code accounts
+        // for it: when setStatusText() changes the message, updateLayout()
+        // repositions text, bar and buttons together. A manually added child
+        // bar plus a setSize() hack breaks that invariant - on the first
+        // status change the Cancel button drops down onto the bar strip.
+        addProgressBarComponent (progressValue);
 
-        addChildComponent (&bar);
+        if (withCancel)
+            addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
-        // The bar's self-polling timer only starts when visibility *changes*;
-        // toggle it once so progress updates are picked up from the start.
-        bar.setVisible (false);
-        bar.setVisible (true);
+        for (auto* c : getChildren())
+        {
+            if (auto* pb = dynamic_cast<juce::ProgressBar*> (c))
+            {
+                // The default LookAndFeel tables define no ProgressBar colours,
+                // which resolve to transparent - set them explicitly so the bar
+                // is visible on the dark dialog background.
+                pb->setColour (juce::ProgressBar::backgroundColourId, juce::Colour (0xff232327));
+                pb->setColour (juce::ProgressBar::foregroundColourId, juce::Colours::dodgerblue);
+
+                // The bar's self-polling timer only starts when visibility
+                // *changes*; toggle it once so updates are picked up from the start.
+                pb->setVisible (false);
+                pb->setVisible (true);
+            }
+        }
 
         if (withCancel)
         {
-            addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
-            // The AlertWindow's own click listener exits the modal state when
-            // the button is pressed; this flag tells the worker thread to stop.
             for (auto* c : getChildren())
                 if (auto* b = dynamic_cast<juce::TextButton*> (c))
+                {
+                    // The AlertWindow's own click listener exits the modal state
+                    // when the button is pressed; this flag tells the worker
+                    // thread to stop.
                     if (b->getButtonText () == "Cancel")
                         b->onClick = [this] { cancelled.store (true); };
+                }
         }
-
-        // Grow the window so the bar has its own strip below the message.
-        setSize (getWidth(), getHeight() + 34);
     }
 
     // Set by the Cancel button / ESC; the worker thread checks it between
@@ -969,15 +981,8 @@ public:
         grabKeyboardFocus ();
     }
 
-    void resized() override
-    {
-        // The bar gets its own strip along the bottom of the window.
-        bar.setBounds (16, getHeight() - 28, getWidth() - 32, 20);
-    }
-
 private:
-    double progressValue = 0.0;   // declared before bar: member init order
-    juce::ProgressBar bar;
+    double progressValue = 0.0;
 };
 
 void MainWindow::showEditError (const std::string& err)
@@ -1777,6 +1782,8 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
                                      "\n"
                                      "Device: Auto picks GPU over NPU over CPU when available;\n"
                                      "pick one explicitly to override (unavailable devices fall back to CPU).\n"
+                                     "OpenVINO only uses Intel CPU/GPU/NPU hardware - NVIDIA GPUs are not\n"
+                                     "supported by the runtime and will never be listed.\n"
                                      "\n"
                                      "Attenuation limit (dB) applies to the DeepFilterNet models only:\n"
                                      "100 means no attenuation limit (full noise suppression).\n"
@@ -1965,7 +1972,9 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
                                      "%APPDATA%/SpectroCraft/models.\n"
                                      "Larger models are more accurate but slower.\n"
                                      "Device: Auto picks GPU over NPU over CPU when available;\n"
-                                     "pick one explicitly to override (unavailable devices fall back to CPU).",
+                                     "pick one explicitly to override (unavailable devices fall back to CPU).\n"
+                                     "OpenVINO only uses Intel CPU/GPU/NPU hardware - NVIDIA GPUs are not\n"
+                                     "supported by the runtime and will never be listed.",
                                      juce::AlertWindow::QuestionIcon, this);
 
     w->addComboBox ("model", whisperModelNames (), "Model");
@@ -2137,7 +2146,9 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
     auto* w = new juce::AlertWindow ("Transcribe Folder",
                                      "Every .wav file in this folder (including subfolders)\n"
                                      "will be transcribed by Whisper and its SCTT chunk\n"
-                                     "updated in place. The files are NOT opened in the editor.\n\n"
+                                     "updated in place. The files are NOT opened in the editor.\n"
+                                     "OpenVINO only uses Intel CPU/GPU/NPU hardware - NVIDIA GPUs are not\n"
+                                     "supported by the runtime and will never be listed.\n\n"
                                      + folder.getFullPathName (),
                                      juce::AlertWindow::QuestionIcon, this);
 

@@ -11,6 +11,8 @@
  *       (AI builds only)
  *       Transcribes every .wav in the folder tree headlessly and writes each
  *       file's SCTT chunk back in place.
+ *   --list-ai-devices                        (AI builds only)
+ *       Prints the OpenVINO devices available on this machine.
  *   --generate-test-files [dir]
  *   --run-unit-tests
  */
@@ -25,6 +27,7 @@
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
+    #include "AI/OvRuntime.h"
     #include "AI/WhisperPipeline.h"
 #endif
 #include <vector>
@@ -545,6 +548,30 @@ public:
                 return;
             }
 #endif
+            else if (args[i] == "--list-ai-devices")
+            {
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+                std::string err;
+                const bool ok = sc::ai::OvRuntime::instance ().init (&err);
+                if (!ok)
+                    std::cout << "OpenVINO runtime not available: " << err << "\n";
+                else
+                {
+                    const auto devs = sc::ai::OvRuntime::instance ().devices ();
+                    std::cout << "OpenVINO devices:";
+                    if (devs.empty ())
+                        std::cout << " (none)";
+                    for (size_t j = 0; j < devs.size (); ++j)
+                        std::cout << (j == 0 ? " " : ", ") << devs[j];
+                    std::cout << "\n"
+                              << "(OpenVINO only uses Intel CPU/GPU/NPU hardware - NVIDIA GPUs are not supported.)\n";
+                }
+#else
+                std::cout << "AI features are disabled in this build.\n";
+#endif
+                quit();
+                return;
+            }
             else if (args[i] == "--run-unit-tests")
             {
                 const int rc = scRunUnitTests();

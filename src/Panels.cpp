@@ -2745,6 +2745,23 @@ void TranscriptionPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int
     }
 }
 
+void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::MouseEvent& e)
+{
+    // Left clicks only change the selection; a right click shows a small
+    // context menu for the segment under the cursor.
+    if (!e.mods.isRightButtonDown ()) return;
+
+    auto* d = owner->app.doc ();
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
+
+    juce::PopupMenu menu;
+    menu.addItem (1, "Add as marker");
+    // Options() targets the current mouse position - exactly where the user
+    // right-clicked.
+    if (menu.showMenu (juce::PopupMenu::Options ()) == 1)
+        owner->addMarkerForRow (rowNumber);
+}
+
 void TranscriptionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
 {
     auto* d = owner->app.doc ();
@@ -2757,6 +2774,31 @@ void TranscriptionPanel::Model::cellDoubleClicked (int rowNumber, int, const juc
         owner->app.setSelection ({ s.startSec, s.endSec });
     if (owner->app.onStateChange)
         owner->app.onStateChange ();   // push the new cursor/selection to both views
+}
+
+void TranscriptionPanel::addMarkerForRow (int rowNumber)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
+
+    const ScttSegment& s = d->sctt.segments [(size_t) rowNumber];
+
+    juce::String full = juce::String (s.text).trim ();
+    juce::String title = full;
+    if (title.length () > 80)
+        title = title.substring (0, 79) + "...";
+    if (title.isEmpty ())
+        title = "Marker";
+
+    const int id = (s.endSec > s.startSec)
+        ? app.markers ().addRegionMarker (s.startSec, s.endSec, title)
+        : app.markers ().addPointMarker (s.startSec, title);
+    if (!full.isEmpty ())
+        app.markers ().setComment (id, full);   // keep the full text
+
+    app.markers ().saveSidecar (app.audioEngine ().getFile ());
+    refresh ();
+    if (app.onStateChange) app.onStateChange ();   // views + markers panel
 }
 
 TranscriptionPanel::TranscriptionPanel (Application& appIn)
@@ -2791,7 +2833,8 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
                        "the model weights to %APPDATA%/SpectroCraft/models.");
     clearBtn.setTooltip ("Remove all transcription segments from this file (the audio is not modified).");
     searchBox.setTooltip ("Type text and press Enter to jump to the next matching segment.");
-    table.setTooltip ("Double-click a row to jump to it and select its range.");
+    table.setTooltip ("Double-click a row to jump to it and select its range.\n"
+                      "Right-click a row to add it as a marker.");
 
     refresh();
 }

@@ -681,6 +681,11 @@ public:
     // segment matches at all.
     bool findNext();
 
+    // Creates a marker spanning the segment's time range (point marker when
+    // it has no length), titled with its text; the full text goes into the
+    // marker comment. Persists the sidecar and refreshes all panels/views.
+    void addMarkerForRow (int rowNumber);
+
     // Set by MainWindow: opens the model/language dialog and starts the run.
     std::function<void()> onRunRequested;
 
@@ -696,6 +701,7 @@ private:
                                  bool selected) override;
         void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
                         bool selected) override;
+        void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
         void cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
 
     private:
