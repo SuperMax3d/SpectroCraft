@@ -93,10 +93,15 @@ static void applyWindowIcon (void* hwndPtr)
 #endif
 }
 
+// The window background shows through in the small gaps around the time
+// scrollbar (left of it, right of it, and the 2 px strip above it). Use the
+// same neutral dark grey as the views' axis backgrounds instead of JUCE's
+// default bluish scheme colour so those areas blend with the tracks.
+static juce::Colour mainWindowBackground () { return juce::Colour::fromRGB (32, 32, 36); }
+
 MainWindow::MainWindow (Application& appIn, const juce::String& name)
     : DocumentWindow (name,
-                      juce::Desktop::getInstance().getDefaultLookAndFeel()
-                          .findColour (juce::ResizableWindow::backgroundColourId),
+                      mainWindowBackground (),
                       DocumentWindow::allButtons),
       app (appIn),
       tabDragCtx (),

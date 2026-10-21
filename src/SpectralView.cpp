@@ -661,13 +661,21 @@ void SpectralView::paint (juce::Graphics& g)
 
     drawOverlays (g);
 
-    // Right-drag box-zoom rubber band.
+    // Right-drag box-zoom rubber band: the same translucent blue as the
+    // time selection in the tracks, so it reads as "this region" rather
+    // than a generic white marquee. When the drag starts on the frequency
+    // axis the band stretches across its full width (matching what mouseUp
+    // will actually zoom).
     if (haveZoomRect && dragMode == DragMode::ZoomDrag)
     {
-        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 36));
-        g.fillRoundedRectangle (zoomRect.toFloat(), 4.0f);
-        g.setColour (juce::Colours::white.withAlpha (0.85f));
-        g.drawRoundedRectangle (zoomRect.toFloat().expanded (-0.5f), 4.0f, 1.0f);
+        auto zr = zoomRect;
+        if (dragStartX < kLeftAxisWidth)
+            zr = juce::Rectangle<int> (0, zr.getY(), kLeftAxisWidth, zr.getHeight());
+
+        g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
+        g.fillRect (zr);
+        g.setColour (juce::Colour::fromRGB (96, 150, 255).withAlpha (0.9f));
+        g.drawRect (zr, 1);
     }
 }
 

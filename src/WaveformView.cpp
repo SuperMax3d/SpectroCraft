@@ -571,13 +571,25 @@ void WaveformView::paint (juce::Graphics& g)
         g.fillPath (tri);
     }
 
-    // Right-drag box-zoom rubber band.
+    // Right-drag box-zoom rubber band: the same translucent blue as the
+    // time selection in the tracks, so it reads as "this region" rather
+    // than a generic white marquee. When the drag starts on an axis the
+    // band stretches across that axis' full width/height (matching which
+    // axes mouseUp will actually zoom).
     if (haveZoomRect && dragMode == DragMode::ZoomDrag)
     {
-        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 36));
-        g.fillRoundedRectangle (zoomRect.toFloat(), 4.0f);
-        g.setColour (juce::Colours::white.withAlpha (0.85f));
-        g.drawRoundedRectangle (zoomRect.toFloat().expanded (-0.5f), 4.0f, 1.0f);
+        auto zr = zoomRect;
+        const bool startOnAxis  = dragStartX < kLeftAxisWidth;
+        const bool startOnRuler = !startOnAxis && dragStartY < kRulerH;
+        if (startOnAxis)
+            zr = juce::Rectangle<int> (0, zr.getY(), kLeftAxisWidth, zr.getHeight());
+        else if (startOnRuler)
+            zr = juce::Rectangle<int> (zr.getX(), 0, zr.getWidth(), kRulerH);
+
+        g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
+        g.fillRect (zr);
+        g.setColour (juce::Colour::fromRGB (96, 150, 255).withAlpha (0.9f));
+        g.drawRect (zr, 1);
     }
 }
 
