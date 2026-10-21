@@ -142,7 +142,7 @@ public:
     // Set by MainWindow to trigger the Open dialog
     std::function<void()> onOpenRequested;
 
-    /** Builds the "Set Scale" calibration dialog for one document.
+    /** Builds the "Set Unit and Scale" calibration dialog for one document.
         The caller owns and deletes the returned window (unit tests inspect it
         without running the modal loop). */
     juce::AlertWindow* createScaleDialog (FileDoc& d);
@@ -165,6 +165,7 @@ private:
     void closeDoc (int i);
     void showFileMenu (int row);
     void showScaleDialog (int row);
+    void openContainingFolder (int row);
 
     JUCE_DECLARE_NON_COPYABLE (FileListPanel)
 };

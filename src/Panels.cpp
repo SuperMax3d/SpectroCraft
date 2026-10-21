@@ -7,6 +7,14 @@
 #include <algorithm>
 #include <cmath>
 
+#if JUCE_WINDOWS
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>   // ShellExecuteW (Open Containing Folder)
+#endif
+
 // Forward declaration (defined further down, used by the constructor).
 static void fftAxisLimits (int mode, double rate, double& fLo, double& fHi);
 
@@ -257,22 +265,39 @@ void FileListPanel::closeDoc (int i)
         app.closeDoc (i);
 }
 
+void FileListPanel::openContainingFolder (int row)
+{
+    if (row < 0 || row >= app.numDocs()) return;
+    const juce::File folder = app.docs[(size_t) row]->file.getParentDirectory();
+#if JUCE_WINDOWS
+    // Opens Windows Explorer at the folder.
+    ShellExecuteW (nullptr, L"open", folder.getFullPathName().toWideCharPointer(),
+                   nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    const juce::String cmd = (JUCE_MACOS ? "open " : "xdg-open ") + "\""
+                            + folder.getFullPathName() + "\"";
+    std::system (cmd.toRawUTF8());
+#endif
+}
+
 void FileListPanel::showFileMenu (int row)
 {
     juce::PopupMenu m;
     m.addItem (1, "Activate", true, false);
     m.addItem (2, "Close", true, false);
-    m.addItem (3, "Set Scale...", true, false);
+    m.addItem (3, "Set Unit and Scale...", true, false);
+    m.addItem (4, "Open Containing Folder", true, false);
     const int r = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (r == 1) activateDoc (row);
     else if (r == 2) closeDoc (row);
     else if (r == 3) showScaleDialog (row);
+    else if (r == 4) openContainingFolder (row);
 }
 
 juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
 {
     auto* dlg = new juce::AlertWindow (
-        "Set Scale",
+        "Set Unit and Scale",
         "Calibrate the physical units of this file.\n"
         "Full scale (|1.0|) equals the value you enter below.",
         juce::AlertWindow::NoIcon);
@@ -341,7 +366,7 @@ void FileListPanel::showScaleDialog (int row)
         }
         else
         {
-            juce::AlertWindow err ("Set Scale",
+            juce::AlertWindow err ("Set Unit and Scale",
                                    "Please enter a positive value for the full-scale level.",
                                    juce::AlertWindow::NoIcon);
             err.setColour (juce::AlertWindow::backgroundColourId,

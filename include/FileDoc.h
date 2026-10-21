@@ -24,7 +24,7 @@ public:
     double playhead = 0.0;             // UI cursor position (seconds)
     juce::Range<double> selection { 0, 0 };
     std::vector<int> visibleChannels;  // sorted channel indices to display
-    ScaleCalibration scale;            // physical-unit calibration (Set Scale menu)
+    ScaleCalibration scale;            // physical-unit calibration (Set Unit and Scale menu)
 
     // Whisper transcription segments (Phase 3). Stored in the file as a RIFF
     // "SCTT" chunk for .wav saves; shown in the Transcription panel, never in
