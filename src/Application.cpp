@@ -384,11 +384,11 @@ static juce::Range<int64_t> selectionSamples (Application& app)
              (int64_t) (app.selection.getEnd() * rate) };
 }
 
-void Application::cut()
+bool Application::cut(std::string* errOut)
 {
-    if (selection.getLength() <= 0) return;
+    if (selection.getLength() <= 0) return true;   // nothing to cut - not an error
     copy();
-    del();
+    return del (errOut);
 }
 
 void Application::copy()
@@ -397,21 +397,26 @@ void Application::copy()
     audioEngine().copySelection (selectionSamples (*this));
 }
 
-void Application::paste()
+bool Application::paste(std::string* errOut)
 {
-    if (!audioEngine().canPaste()) return;
+    if (!audioEngine().canPaste()) return true;   // nothing to paste - not an error
     // Paste at the start of the selection, or at the cursor when nothing is
     // selected.
     const double t = !selection.isEmpty() ? selection.getStart() : playhead;
-    audioEngine().pasteAt ((int64_t) (t * audioEngine().sampleRate()));
+    if (!audioEngine().pasteAt ((int64_t) (t * audioEngine().sampleRate()), errOut))
+        return false;
+    syncActiveDoc ();
+    return true;
 }
 
-void Application::del()
+bool Application::del(std::string* errOut)
 {
-    if (selection.getLength() <= 0) return;
-    audioEngine().deleteSamples (selectionSamples (*this));
+    if (selection.getLength() <= 0) return true;   // nothing to delete - not an error
+    if (!audioEngine().deleteSamples (selectionSamples (*this), errOut))
+        return false;
     selection = { 0, 0 };
     syncActiveDoc ();
+    return true;
 }
 
 // Effects apply only to the currently selected (visible) channels.
@@ -420,40 +425,40 @@ static const std::vector<int>& visibleChans (Application& app)
     return app.visibleChannels;
 }
 
-void Application::silence()
+bool Application::silence(std::string* errOut)
 {
-    if (selection.getLength() <= 0) return;
-    audioEngine().silenceSamples (selectionSamples (*this), &visibleChans (*this));
+    if (selection.getLength() <= 0) return true;   // nothing to silence - not an error
+    return audioEngine().silenceSamples (selectionSamples (*this), &visibleChans (*this), errOut);
 }
 
-void Application::fadeIn()
+bool Application::fadeIn(std::string* errOut)
 {
-    if (selection.getLength() <= 0) return;
-    audioEngine().fadeInSamples (selectionSamples (*this), &visibleChans (*this));
+    if (selection.getLength() <= 0) return true;
+    return audioEngine().fadeInSamples (selectionSamples (*this), &visibleChans (*this), errOut);
 }
 
-void Application::fadeOut()
+bool Application::fadeOut(std::string* errOut)
 {
-    if (selection.getLength() <= 0) return;
-    audioEngine().fadeOutSamples (selectionSamples (*this), &visibleChans (*this));
+    if (selection.getLength() <= 0) return true;
+    return audioEngine().fadeOutSamples (selectionSamples (*this), &visibleChans (*this), errOut);
 }
 
-void Application::normalize()
+bool Application::normalize(std::string* errOut)
 {
-    if (selection.getLength() <= 0) return;
-    audioEngine().normalizeSamples (selectionSamples (*this), 1.0f, &visibleChans (*this));
+    if (selection.getLength() <= 0) return true;
+    return audioEngine().normalizeSamples (selectionSamples (*this), 1.0f, &visibleChans (*this), errOut);
 }
 
-void Application::reverse()
+bool Application::reverse(std::string* errOut)
 {
-    if (selection.getLength() <= 0) return;
-    audioEngine().reverseSamples (selectionSamples (*this), &visibleChans (*this));
+    if (selection.getLength() <= 0) return true;
+    return audioEngine().reverseSamples (selectionSamples (*this), &visibleChans (*this), errOut);
 }
 
-void Application::changeGain (float gainDb)
+bool Application::changeGain (float gainDb, std::string* errOut)
 {
-    if (selection.getLength() <= 0 || gainDb == 0.0f) return;
-    audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this));
+    if (selection.getLength() <= 0 || gainDb == 0.0f) return true;
+    return audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this), errOut);
 }
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -486,6 +491,13 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
     if (samples.getLength () <= 0)
         return fail ("No audio selection.");
 
+    // Streamed files must be materialised before the result can be committed;
+    // do it now so an out-of-memory failure is reported up front instead of
+    // after minutes of processing whose output would be silently dropped.
+    std::string err;
+    if (!audioEngine().ensureEditable (&err))
+        return fail (err);
+
     const int nch = audioEngine().numChannels ();
     std::vector<std::vector<float>> data (nch);
     for (int ch = 0; ch < nch; ++ch)
@@ -496,7 +508,6 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
     }
 
     // The pipeline works on this copy; it is only committed on success.
-    std::string err;
     const bool ok = (modelId == "deepfilternet2" || modelId == "deepfilternet3")
         ? sc::runDeepFilterPipeline (modelId, device, audioEngine().sampleRate (), nch,
                                      data, attenLimDb, df3PostFilter,
@@ -506,8 +517,9 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
     if (!ok)
         return fail (err);
 
-    audioEngine().replaceSamples (samples, data,
-                                  "Noise suppressed (" + juce::String (modelId) + ")");
+    if (!audioEngine().replaceSamples (samples, data,
+                                       "Noise suppressed (" + juce::String (modelId) + ")", &err))
+        return fail (err);
     return true;
 }
 

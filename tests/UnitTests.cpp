@@ -5130,6 +5130,128 @@ static void testLargeInMemoryLoad()
     }
 }
 
+// Regression: after an edit the mipmap pyramid must be built from the
+// in-memory buffer, not from a memory-mapped read of the file on disk.
+// Before the fix, WAV/AIFF files were always mapped from disk for the finest
+// level, so the waveform showed pre-edit content while the spectral view
+// (which reads the buffer) showed the edit.
+static void testMipmapReflectsEdits()
+{
+    const juce::File wav = makeTempFile ("mip_edit.wav");
+    CHECK (writeWav (wav, 2, 1000.0, 4000,
+        [] (int ch, int64_t, double) { return ch == 0 ? 0.5f : -0.25f; }),
+          "write wav for mipmap edit test");
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "load ok");
+    CHECK (eng.fullyInMemory (), "in memory");
+
+    std::vector<int> onlyCh0 = { 0 };
+    CHECK (eng.silenceSamples ({ 1000, 2000 }, &onlyCh0), "silence ok");
+
+    const auto& mips = eng.mipmaps ();
+    CHECK (mips.size () > 0, "mipmap pyramid built");
+    if (mips.empty ()) return;
+    const auto& lv = mips.front ();   // finest level; factor 1 for this size
+    CHECK (lv.factor == 1, "finest level is per-sample");
+
+    // Blocks fully inside the silenced range: ch0 flat zero, ch1 untouched.
+    float worstCh0 = 0.0f, worstCh1Min = 0.0f, worstCh1Max = 0.0f;
+    for (int64_t i = 1000; i < 2000; ++i)
+    {
+        worstCh0     = std::max (worstCh0, std::abs (lv.min[0][(size_t) i])
+                                       + std::abs (lv.max[0][(size_t) i]));
+        worstCh1Min  = std::max (worstCh1Min, std::abs (lv.min[1][(size_t) i] - (-0.25f)));
+        worstCh1Max  = std::max (worstCh1Max, std::abs (lv.max[1][(size_t) i]));
+    }
+    CHECK (worstCh0 == 0.0f, "ch0 mipmap flat in silenced range");
+    CHECK (worstCh1Min < 1e-6 && worstCh1Max < 1e-6,
+           "ch1 mipmap unchanged in silenced range");
+    // Just outside the range: ch0 still at its original level.
+    CHECK (lv.max[0][999] == 0.5f, "ch0 mipmap intact just before the range");
+
+    // A gain applied afterwards must also be visible in the mipmaps.
+    CHECK (eng.gainSamples ({ 0, 4000 }, +6.0206f, &onlyCh0), "gain ok");
+    const auto& lv2 = eng.mipmaps ().front ();
+    CHECK (std::abs (lv2.max[0][999] - 1.0f) < 1e-3,
+           "ch0 mipmap reflects the +6 dB gain outside the silenced range");
+    CHECK (lv2.min[0][1500] == 0.0f && lv2.max[0][1500] == 0.0f,
+           "silenced region stays flat after the gain");
+}
+
+// Regression: destructive edits on streamed files must materialise the file
+// into memory and actually apply, instead of silently no-op'ing (and errors
+// such as out-of-memory must be reported through errOut).
+static void testEditStreamingFile()
+{
+    const juce::File wav = makeTempFile ("stream_edit.wav");
+    CHECK (writeWav (wav, 2, 8000.0, 4000,
+        [] (int ch, int64_t, double) { return ch == 0 ? 0.5f : -0.25f; }),
+          "write wav for streaming edit test");
+
+    // Silence on a streamed file: materialises + applies.
+    {
+        AudioEngine eng;
+        eng.setMaxInMemorySampleChannels (100);   // force streaming mode
+        CHECK (eng.loadFile (wav), "load ok");
+        CHECK (!eng.fullyInMemory (), "streamed");
+
+        std::vector<int> onlyCh0 = { 0 };
+        std::string err;
+        CHECK (eng.silenceSamples ({ 1000, 2000 }, &onlyCh0, &err),
+              juce::String ("silence ok: ") + err);
+        CHECK (eng.fullyInMemory (), "materialised after the edit");
+
+        std::vector<float> d (500);
+        CHECK (eng.readSamples (0, 1200, 500, d.data ()), "read silenced range");
+        bool allZero = true;
+        for (float v : d) if (v != 0.0f) { allZero = false; break; }
+        CHECK (allZero, "silenced region is actually zero in the buffer");
+
+        std::vector<float> d2 (1);
+        CHECK (eng.readSamples (0, 500, 1, d2.data ()), "read outside range");
+        CHECK (std::abs (d2[0] - 0.5f) < 1e-6, "outside the range is unchanged");
+        CHECK (eng.readSamples (1, 1200, 1, d2.data ()), "read other channel");
+        CHECK (std::abs (d2[0] - (-0.25f)) < 1e-6, "unaffected channel unchanged");
+
+        // Gain works on the now-in-memory file too.
+        CHECK (eng.gainSamples ({ 0, 4000 }, +6.0206f, &onlyCh0), "gain ok");
+        CHECK (eng.readSamples (0, 500, 1, d2.data ()), "read after gain");
+        CHECK (std::abs (d2[0] - 1.0f) < 1e-3, "+6 dB doubled the amplitude");
+    }
+
+    // Structural edit on a streamed file: delete.
+    {
+        AudioEngine eng;
+        eng.setMaxInMemorySampleChannels (100);
+        CHECK (eng.loadFile (wav), "load ok");
+        std::string err;
+        CHECK (eng.deleteSamples ({ 1000, 2000 }, &err),
+              juce::String ("delete ok: ") + err);
+        CHECK (eng.numSamples () == 3000, "length reduced by the deletion");
+    }
+
+    // Resample on a streamed file: materialises first, then resamples.
+    {
+        AudioEngine eng;
+        eng.setMaxInMemorySampleChannels (100);
+        CHECK (eng.loadFile (wav), "load ok");
+        std::string err;
+        CHECK (eng.resampleTo (16000.0, nullptr, nullptr, &err),
+              juce::String ("resample ok: ") + err);
+        CHECK (std::abs (eng.sampleRate () - 16000.0) < 1e-9, "rate changed");
+        CHECK (eng.fullyInMemory (), "materialised by the resample");
+    }
+
+    // Error path: no file loaded -> false with a clear message.
+    {
+        AudioEngine eng;
+        std::string err;
+        CHECK (!eng.silenceSamples ({ 0, 10 }, nullptr, &err), "no file -> false");
+        CHECK (!err.empty (), "error message was set");
+    }
+}
+
 static void testResampleCancel()
 {
     const juce::File wav = makeTempFile ("resample_cancel.wav");
@@ -6614,6 +6736,8 @@ static int scRunUnitTestsImpl()
     progress ("resampler (soxr)");    testResampler();
     progress ("load cancel");         testLoadCancel();
     progress ("large in-memory load"); testLargeInMemoryLoad();
+    progress ("mipmap reflects edits");  testMipmapReflectsEdits();
+    progress ("edit streamed file");     testEditStreamingFile();
     progress ("resample cancel");     testResampleCancel();
     progress ("render cancel");       testRenderToPixelsCancel();
     progress ("fft view rate change"); testFFTAnalysisRateChange();

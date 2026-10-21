@@ -119,10 +119,19 @@ public:
     // of the first visible channel when settings.snapToZeroCrossings is ON.
     // Used by the views' drag-to-select so cuts land on silent points.
     void setSelection (juce::Range<double> s, bool snapEdges = false);
-    void cut(); void copy(); void paste(); void del();
-    void silence(); void fadeIn(); void fadeOut(); void normalize(); void reverse();
+    // Destructive operations return false and fill errOut when they cannot be
+    // performed (e.g. a streamed file could not be loaded into memory).
+    bool cut(std::string* errOut = nullptr);
+    void copy();   // read-only; works on streamed files too
+    bool paste(std::string* errOut = nullptr);
+    bool del(std::string* errOut = nullptr);
+    bool silence(std::string* errOut = nullptr);
+    bool fadeIn(std::string* errOut = nullptr);
+    bool fadeOut(std::string* errOut = nullptr);
+    bool normalize(std::string* errOut = nullptr);
+    bool reverse(std::string* errOut = nullptr);
     // Multiply the selection by 10^(gainDb/20) on the visible channels.
-    void changeGain (float gainDb);
+    bool changeGain (float gainDb, std::string* errOut = nullptr);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     // BLOCKING — call from a worker thread. Applies AI noise suppression
     // (denseunet or DeepFilterNet2/3, selected by modelId) to the current

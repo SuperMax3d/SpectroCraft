@@ -8,6 +8,7 @@
 #include "MarkerManager.h"
 #include <algorithm>
 #include <cmath>
+#include <new>
 
 AudioEngine::AudioEngine()
 {
@@ -291,6 +292,12 @@ bool AudioEngine::buildFinestLevel (AudioEngine& eng, int64_t factor,
     }
 
     // ---- Source 1: memory-mapped reader (WAV/AIFF only) ------------------
+    // Only used when there is no in-memory buffer. When a buffer exists it is
+    // the authoritative source of truth - after an edit it holds unsaved data
+    // that differs from what is still on disk, so mapping the file would
+    // build stale mipmaps (the waveform would show pre-edit content while the
+    // spectral view, which reads the buffer, shows the edit).
+    if (eng.buffer == nullptr)
     {
         std::unique_ptr<juce::MemoryMappedAudioFormatReader> mmr;
         for (int i = 0; i < eng.fm->getNumKnownFormats(); ++i)
@@ -565,10 +572,18 @@ void AudioEngine::copySelection (juce::Range<int64_t> samples)
                      clipboard->getWritePointer (ch));
 }
 
-void AudioEngine::pasteAt (int64_t samplePos)
+static bool failErr (std::string* errOut, const juce::String& msg)
 {
-    if (!clipboard || !buffer)
-        return;
+    if (errOut != nullptr) *errOut = msg.toStdString ();
+    return false;
+}
+
+bool AudioEngine::pasteAt (int64_t samplePos, std::string* errOut)
+{
+    if (!ensureEditable (errOut))
+        return false;
+    if (!clipboard)
+        return failErr (errOut, "Nothing in the clipboard to paste.");
     samplePos = std::clamp<int64_t> (samplePos, (int64_t) 0, totalSamples);
     const int64_t pasteLen = clipboard->getNumSamples();
 
@@ -598,13 +613,14 @@ void AudioEngine::pasteAt (int64_t samplePos)
     durationSecs = (double) totalSamples / rate;
     unsaved = true;
     rebuildMipmaps();
+    return true;
 }
 
-void AudioEngine::deleteSamples (juce::Range<int64_t> samples)
+bool AudioEngine::deleteSamples (juce::Range<int64_t> samples, std::string* errOut)
 {
-    if (!buffer) return;
+    if (!ensureEditable (errOut)) return false;
     samples = samples.getIntersectionWith ({ 0, totalSamples });
-    if (samples.getLength() <= 0) return;
+    if (samples.getLength() <= 0) return true;   // nothing to delete
     recordReplace (*this, samples, {}, "Deleted samples");
 
     const int64_t delLen = samples.getLength();
@@ -621,6 +637,7 @@ void AudioEngine::deleteSamples (juce::Range<int64_t> samples)
     durationSecs = (double) totalSamples / rate;
     unsaved = true;
     rebuildMipmaps();
+    return true;
 }
 
 // Returns true if the channel is affected by `chans` (nullptr => all).
@@ -629,11 +646,12 @@ static bool channelAffected (const std::vector<int>* chans, int ch)
     return !chans || std::find (chans->begin(), chans->end(), ch) != chans->end();
 }
 
-void AudioEngine::silenceSamples (juce::Range<int64_t> samples, const std::vector<int>* chans)
+bool AudioEngine::silenceSamples (juce::Range<int64_t> samples, const std::vector<int>* chans,
+                                  std::string* errOut)
 {
-    if (!buffer) return;
+    if (!ensureEditable (errOut)) return false;
     samples = samples.getIntersectionWith ({ 0, totalSamples });
-    if (samples.getLength() <= 0) return;
+    if (samples.getLength() <= 0) return true;   // nothing to silence
 
     // Record the replacement data explicitly — an empty newData vector would
     // mean "delete" and undo would remove the samples instead of restoring them.
@@ -653,6 +671,7 @@ void AudioEngine::silenceSamples (juce::Range<int64_t> samples, const std::vecto
             buffer->clear (ch, (int) samples.getStart(), (int) len);
     unsaved = true;
     rebuildMipmaps();
+    return true;
 }
 
 // Applies fn to the selected channels only; other channels are copied
@@ -690,13 +709,76 @@ void applyPerSample (AudioEngine& eng, juce::Range<int64_t> samples,
     eng.rebuildMipmaps();
 }
 
-void AudioEngine::replaceSamples (const juce::Range<int64_t>& samplesIn,
-                                  const std::vector<std::vector<float>>& newData,
-                                  const juce::String& description)
+bool AudioEngine::ensureEditable (std::string* errOut,
+                                  std::function<void(float)> onProgress,
+                                  const std::atomic<bool>* cancel)
 {
-    if (!buffer || samplesIn.getLength() <= 0) return;
+    auto fail = [errOut] (const juce::String& m) -> bool
+    {
+        if (errOut != nullptr) *errOut = m.toStdString ();
+        return false;
+    };
+
+    if (!hasFile)
+        return fail ("No audio loaded.");
+    if (buffer != nullptr)
+        return true;   // already editable in place
+    if (reader == nullptr)
+        return fail ("This file cannot be edited in place.");
+
+    // Stop playback and wait for any in-flight audio block to finish reading
+    // before we swap the source out from under it (same pattern as resampleTo).
+    playing.store (false);
+    paused.store (false);
+    const int64_t deadline = juce::Time::getMillisecondCounter() + 100;
+    while (audioInBufferSection.load (std::memory_order_acquire) > 0
+           && juce::Time::getMillisecondCounter() < deadline)
+        std::this_thread::sleep_for (std::chrono::milliseconds (1));
+
+    const int64_t needBytes = (int64_t) nchans * totalSamples * sizeof (float);
+    std::unique_ptr<juce::AudioBuffer<float>> nb;
+    try
+    {
+        nb = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) totalSamples);
+    }
+    catch (const std::bad_alloc&)
+    {
+        return fail ("Not enough memory to edit this file (~"
+                     + juce::String ((double) needBytes / 1073741824.0, 1) + " GB needed).");
+    }
+
+    // Read the whole file from the streaming reader in chunks.
+    const int64_t chunk = 1ll << 20;
+    for (int64_t off = 0; off < totalSamples; off += chunk)
+    {
+        if (cancel != nullptr && cancel->load())
+            return fail ("Cancelled");
+        const int cnt = (int) std::min<int64_t> (chunk, totalSamples - off);
+        // startSampleInDest MUST be `off` (see loadFile for the same reason).
+        const bool ok = [&] { 
+            const std::lock_guard<std::mutex> lock (readerMutex);
+            return reader->read (nb.get(), (int) off, cnt, (int) off, true, true); 
+        } ();
+        if (!ok)
+            return fail ("Failed to read the file for editing.");
+        if (onProgress != nullptr)
+            onProgress ((float) ((double) (off + cnt) / (double) totalSamples));
+    }
+
+    // The buffer is now the authoritative source of truth; drop the reader.
+    buffer = std::move (nb);
+    reader.reset ();
+    return true;
+}
+
+bool AudioEngine::replaceSamples (const juce::Range<int64_t>& samplesIn,
+                                  const std::vector<std::vector<float>>& newData,
+                                  const juce::String& description,
+                                  std::string* errOut)
+{
+    if (!ensureEditable (errOut)) return false;
     auto samples = samplesIn.getIntersectionWith ({ 0, totalSamples });
-    if (samples.getLength() <= 0) return;
+    if (samples.getLength() <= 0) return true;   // nothing to replace
 
     // Record the patch BEFORE touching the buffer so oldData is pristine.
     recordReplace (*this, samples, newData, description);
@@ -710,28 +792,34 @@ void AudioEngine::replaceSamples (const juce::Range<int64_t>& samplesIn,
     unsaved = true;
 }
 
-void AudioEngine::fadeInSamples (juce::Range<int64_t> samples, const std::vector<int>* chans)
+bool AudioEngine::fadeInSamples (juce::Range<int64_t> samples, const std::vector<int>* chans,
+                                 std::string* errOut)
 {
+    if (!ensureEditable (errOut)) return false;
     applyPerSample (*this, samples, [] (float v, int i, int len)
     {
         return v * (float) i / (float) std::max (1, len - 1);
     }, chans, "Faded in");
+    return true;
 }
 
-void AudioEngine::fadeOutSamples (juce::Range<int64_t> samples, const std::vector<int>* chans)
+bool AudioEngine::fadeOutSamples (juce::Range<int64_t> samples, const std::vector<int>* chans,
+                                  std::string* errOut)
 {
+    if (!ensureEditable (errOut)) return false;
     applyPerSample (*this, samples, [] (float v, int i, int len)
     {
         return v * (1.0f - (float) i / (float) std::max (1, len - 1));
     }, chans, "Faded out");
+    return true;
 }
 
-void AudioEngine::normalizeSamples (juce::Range<int64_t> samples, float target,
-                                    const std::vector<int>* chans)
+bool AudioEngine::normalizeSamples (juce::Range<int64_t> samples, float target,
+                                    const std::vector<int>* chans, std::string* errOut)
 {
-    if (!buffer) return;
+    if (!ensureEditable (errOut)) return false;
     samples = samples.getIntersectionWith ({ 0, totalSamples });
-    if (samples.getLength() <= 0) return;
+    if (samples.getLength() <= 0) return true;   // nothing to normalize
 
     // Peak is measured over the selected channels only.
     float peak = 0.0f;
@@ -743,32 +831,36 @@ void AudioEngine::normalizeSamples (juce::Range<int64_t> samples, float target,
             peak = std::max (peak, std::abs (d[i]));
     }
     if (peak <= 0.0f)
-        return;
+        return true;   // already at target - not an error
 
     const float g = target / peak;
     applyPerSample (*this, samples, [g] (float v, int, int) { return v * g; }, chans,
                    "Normalized");
+    return true;
 }
 
-void AudioEngine::gainSamples (juce::Range<int64_t> samples, float gainDb,
-                               const std::vector<int>* chans)
+bool AudioEngine::gainSamples (juce::Range<int64_t> samples, float gainDb,
+                               const std::vector<int>* chans, std::string* errOut)
 {
-    if (!buffer || gainDb == 0.0f) return;
+    if (!ensureEditable (errOut)) return false;
+    if (gainDb == 0.0f) return true;   // nothing to do - not an error
     samples = samples.getIntersectionWith ({ 0, totalSamples });
-    if (samples.getLength() <= 0) return;
+    if (samples.getLength() <= 0) return true;
 
     const float g = std::pow (10.0f, gainDb / 20.0f);
     applyPerSample (*this, samples, [g] (float v, int, int) { return v * g; }, chans,
                    juce::String ("Changed gain by ")
                        + juce::String (gainDb >= 0.0f ? "+" : "")
                        + juce::String (gainDb, 2) + " dB");
+    return true;
 }
 
-void AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vector<int>* chans)
+bool AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vector<int>* chans,
+                                  std::string* errOut)
 {
-    if (!buffer) return;
+    if (!ensureEditable (errOut)) return false;
     samples = samples.getIntersectionWith ({ 0, totalSamples });
-    if (samples.getLength() <= 0) return;
+    if (samples.getLength() <= 0) return true;
 
     // Only the selected channels are reversed; others keep their data.
     std::vector<std::vector<float>> newData (nchans);
@@ -792,12 +884,18 @@ void AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vecto
                        buffer->getWritePointer (ch, (int) samples.getStart()));
     unsaved = true;
     rebuildMipmaps();
+    return true;
 }
 
 bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgress,
-                              const std::atomic<bool>* cancel)
+                              const std::atomic<bool>* cancel, std::string* errOut)
 {
-    if (!hasFile || !buffer)
+    if (!hasFile)
+        return failErr (errOut, "No audio loaded.");
+    // Streaming files are materialised first so the resampler can work on a
+    // contiguous buffer; this also reports out-of-memory clearly instead of
+    // failing with no explanation.
+    if (!ensureEditable (errOut, nullptr, cancel))
         return false;
     if (!std::isfinite (newRate) || newRate <= 0.0)
         return false;

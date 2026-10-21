@@ -979,6 +979,55 @@ private:
     juce::ProgressBar bar;
 };
 
+void MainWindow::showEditError (const std::string& err)
+{
+    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                       "Effect failed",
+                                       err.empty () ? "The effect could not be applied."
+                                                     : juce::String (err),
+                                       "", this);
+}
+
+void MainWindow::runDestructiveEdit(std::function<bool(std::string*)> edit)
+{
+    auto& eng = app.audioEngine();
+    if (!eng.isFileLoaded () || eng.fullyInMemory ())
+    {   // Fast path: already in memory (or nothing loaded - the edit is a no-op).
+        std::string err;
+        const bool ok = edit (&err);
+        if (ok) refreshAfterEdit();
+        else showEditError (err);
+        return;
+    }
+
+    // Streamed file: materialise it into memory first. Reading multi-GB files
+    // can take seconds, so run that on a worker thread behind a progress
+    // dialog instead of freezing the UI.
+    auto* dlg = new WorkProgressDialog ("Preparing file for editing",
+                                        "Loading the file into memory ...", true, this);
+    dlg->setProgress (0.0);
+    dlg->beginModal ();
+
+    std::thread ([this, edit, dlg] {
+        std::string err;
+        bool ok = app.audioEngine().ensureEditable (&err,
+                                                    [dlg] (float f) {
+                                                        juce::MessageManager::callAsync (
+                                                            [dlg, f] { dlg->setProgress (0.9f * f); });
+                                                    },
+                                                    &dlg->cancelled);
+        if (ok)
+            ok = edit (&err);   // now in memory; only an OOM inside the edit can fail
+
+        juce::MessageManager::callAsync ([this, dlg, ok, err] {
+            const bool wasCancelled = dlg->cancelled.load ();
+            delete dlg;
+            if (ok) refreshAfterEdit();
+            else if (!wasCancelled) showEditError (err);
+        });
+    }).detach();
+}
+
 void MainWindow::openFileWithProgress (const juce::File& file)
 {
     auto* dlg = new WorkProgressDialog ("Loading", "Opening " + file.getFileName() + " ...",
@@ -1290,10 +1339,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 
         case EditUndo: app.undoStep(); refreshAfterEdit(); break;
         case EditRedo: app.redoStep(); refreshAfterEdit(); break;
-        case EditCut: app.cut(); refreshAfterEdit(); break;
-        case EditCopy: app.copy(); break;
-        case EditPaste: app.paste(); refreshAfterEdit(); break;
-        case EditDelete: app.del(); refreshAfterEdit(); break;
+        case EditCut:    runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); break;
+        case EditCopy:   app.copy(); break;   // read-only; works on streamed files too
+        case EditPaste:  runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); break;
+        case EditDelete: runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); break;
         case EditSelectAll: app.selectAll(); syncSharedState(); break;
         case EditSnapToZeroCrossings:
             app.settings.snapToZeroCrossings = !app.settings.snapToZeroCrossings;
@@ -1322,10 +1371,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case TransportPause: app.pause(); break;
         case TransportLoop: app.toggleLoop(); break;
 
-        case ToolsSilence: app.silence(); refreshAfterEdit(); break;
-        case ToolsFadeIn: app.fadeIn(); refreshAfterEdit(); break;
-        case ToolsFadeOut: app.fadeOut(); refreshAfterEdit(); break;
-        case ToolsNormalize: app.normalize(); refreshAfterEdit(); break;
+        case ToolsSilence:   runDestructiveEdit ([&] (std::string* e) { return app.silence (e); }); break;
+        case ToolsFadeIn:    runDestructiveEdit ([&] (std::string* e) { return app.fadeIn (e); }); break;
+        case ToolsFadeOut:   runDestructiveEdit ([&] (std::string* e) { return app.fadeOut (e); }); break;
+        case ToolsNormalize: runDestructiveEdit ([&] (std::string* e) { return app.normalize (e); }); break;
         case ToolsChangeGain: showChangeGainDialog(); break;
         case ToolsResample: showResampleDialog(); break;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -1333,7 +1382,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsTranscribe: showTranscribeDialog(); break;
         case ToolsTranscribeFolder: showTranscribeFolderDialog(); break;
 #endif
-        case ToolsReverse: app.reverse(); refreshAfterEdit(); break;
+        case ToolsReverse: runDestructiveEdit ([&] (std::string* e) { return app.reverse (e); }); break;
 
         case HelpAbout:
             showAboutDialog (this);
@@ -1415,10 +1464,10 @@ void MainWindow::handleContextMenuAction (int id)
         case CtxZoomToSelection: zoomToSelection(); break;
         case CtxZoomOutFull:     zoomOutFull(); break;
         case CtxSelectAll:       app.selectAll(); break; // notifies via setSelection()
-        case CtxCut:             app.cut();   refreshAfterEdit(); break;
-        case CtxCopy:            app.copy();  break;
-        case CtxPaste:           app.paste(); refreshAfterEdit(); break;
-        case CtxDelete:          app.del();   refreshAfterEdit(); break;
+        case CtxCut:             runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); break;
+        case CtxCopy:            app.copy();  break;   // read-only
+        case CtxPaste:           runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); break;
+        case CtxDelete:          runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); break;
     }
 }
 
@@ -1473,8 +1522,7 @@ void MainWindow::showChangeGainDialog()
     if (result != 1) return;
 
     const float db = (float) text.trim().getDoubleValue();
-    app.changeGain (db);
-    refreshAfterEdit();
+    runDestructiveEdit ([&] (std::string* e) { return app.changeGain (db, e); });
 }
 
 // Effects > Resample... — prompt for a new sample rate and resample the whole
@@ -1510,8 +1558,10 @@ juce::AlertWindow* MainWindow::createResampleDialog()
 
 void MainWindow::showResampleDialog()
 {
+    // Streamed files are fine: resampleTo materialises them into memory first
+    // (with a clear error if that is impossible).
     auto& eng = app.audioEngine();
-    if (!eng.isFileLoaded() || !eng.fullyInMemory()) return;
+    if (!eng.isFileLoaded()) return;
 
     auto* w = createResampleDialog();
 
@@ -1558,16 +1608,17 @@ void MainWindow::runResampleAsync (double newRate)
 
         // Cancellation stops at a SoXR chunk boundary; the buffer swap only
         // happens on success, so a cancelled resample changes nothing.
+        std::string err;
         const bool ok = app.audioEngine().resampleTo (
             newRate,
             [sendProgress] (float f) { sendProgress (0.85 * (double) f); },
-            &dlg->cancelled);
+            &dlg->cancelled, &err);
         if (ok)
             app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
                 sendProgress (0.85 + 0.15 * (double) f);
             });
 
-        juce::MessageManager::callAsync ([this, dlg, ok] {
+        juce::MessageManager::callAsync ([this, dlg, ok, err] {
             const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (ok)
@@ -1584,9 +1635,11 @@ void MainWindow::runResampleAsync (double newRate)
             }
             else if (!wasCancelled)
             {
+                const juce::String detail = err.empty () ? juce::String ("")
+                                                         : juce::String ("\n") + juce::String (err);
                 juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
                                                     "Resample failed",
-                                                    "The file could not be resampled.", "", this);
+                                                    "The file could not be resampled." + detail, "", this);
             }
         });
     }).detach();
@@ -2310,9 +2363,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsTranscribeFolder, "Transcribe Folder...", true, false);
 #endif
         menu.addSeparator();
-        // Whole-file operation: needs the file fully in memory.
+        // Whole-file operation. Streamed files are materialised into memory
+        // first when the resample actually runs.
         menu.addItem (ToolsResample, "Resample...",
-                      app.audioEngine().isFileLoaded() && app.audioEngine().fullyInMemory(), false);
+                      app.audioEngine().isFileLoaded(), false);
     }
     else if (menuName == "Help")
     {
@@ -2341,11 +2395,11 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }
     if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) { app.undoStep(); refreshAfterEdit(); return true; }
     if (key == juce::KeyPress ('y', juce::ModifierKeys::commandModifier, 0)) { app.redoStep(); refreshAfterEdit(); return true; }
-    if (key == juce::KeyPress ('x', juce::ModifierKeys::commandModifier, 0)) { app.cut(); refreshAfterEdit(); return true; }
-    if (key == juce::KeyPress ('c', juce::ModifierKeys::commandModifier, 0)) { app.copy(); return true; }
-    if (key == juce::KeyPress ('v', juce::ModifierKeys::commandModifier, 0)) { app.paste(); refreshAfterEdit(); return true; }
+    if (key == juce::KeyPress ('x', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); return true; }
+    if (key == juce::KeyPress ('c', juce::ModifierKeys::commandModifier, 0)) { app.copy(); return true; }   // read-only
+    if (key == juce::KeyPress ('v', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); return true; }
     if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier, 0)) { app.selectAll(); syncSharedState(); return true; }
-    if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey) { app.del(); refreshAfterEdit(); return true; }
+    if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey) { runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); return true; }
     if (key == juce::KeyPress::spaceKey)
     {
         // Space toggles play/pause (not stop).

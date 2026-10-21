@@ -66,6 +66,14 @@ public:
     double spectralFreqMax()   const { return spectralView->getFreqMax(); }
     void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
     void refreshAfterEdit();   // clamp ranges, repaint waveform, re-render spectral image
+    /** Applies a destructive edit (`edit` returns false and fills errOut on
+        failure). If the active file is still being streamed from disk it must
+        first be loaded into memory; that can take seconds for multi-GB files,
+        so in that case the whole thing runs on a worker thread behind a
+        progress dialog. On success refreshAfterEdit() is called; on failure an
+        error message box is shown (unless the user cancelled). */
+    void runDestructiveEdit(std::function<bool(std::string*)> edit);
+    void showEditError (const std::string& err);
     void refreshPanels();
     void applyColourMap (ColourMap m);
     void zoomHorizontal (double factor);   // both views

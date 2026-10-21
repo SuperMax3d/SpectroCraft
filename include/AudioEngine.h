@@ -59,33 +59,56 @@ public:
 
     // ---- Editing (destructive, recorded as undo patches) ----
     void setUndoManager (::UndoManager* um) { undo = um; }
-    bool canEdit() const { return buffer != nullptr; }
+    bool canEdit() const { return hasFile; }
     bool canPaste() const { return clipboard != nullptr; }
+
+    /** If the file is still being streamed from disk, materialise it into an
+        in-memory buffer so destructive edits can be applied. Returns false
+        (and sets *errOut when non-null) if that is impossible - e.g. out of
+        memory. Safe to call while playback is running: playback is stopped
+        and any in-flight audio block is waited for before the source is
+        swapped. If cancel points at an atomic set to true, loading stops at
+        the next chunk boundary, the engine state is unchanged and false is
+        returned with *errOut = "Cancelled". */
+    bool ensureEditable (std::string* errOut = nullptr,
+                         std::function<void(float)> onProgress = nullptr,
+                         const std::atomic<bool>* cancel = nullptr);
+
     // Destructive edits. `channels` optionally restricts the effect to a
     // subset of channels (the currently visible/selected ones); nullptr or an
     // empty list means "all channels" for structural ops, and "no-op" is NOT
     // implied - pass nullptr to affect everything.
+    // All return false (and set *errOut when non-null) if the edit cannot be
+    // performed - e.g. the file could not be loaded into memory.
     void copySelection (juce::Range<int64_t> samples);
-    void pasteAt (int64_t samplePos);
-    void deleteSamples (juce::Range<int64_t> samples);
-    void silenceSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr);
-    void fadeInSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr);
-    void fadeOutSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr);
-    void normalizeSamples (juce::Range<int64_t> samples, float target = 1.0f,
-                           const std::vector<int>* channels = nullptr);
+    bool pasteAt (int64_t samplePos, std::string* errOut = nullptr);
+    bool deleteSamples (juce::Range<int64_t> samples, std::string* errOut = nullptr);
+    bool silenceSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr,
+                         std::string* errOut = nullptr);
+    bool fadeInSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr,
+                        std::string* errOut = nullptr);
+    bool fadeOutSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr,
+                         std::string* errOut = nullptr);
+    bool normalizeSamples (juce::Range<int64_t> samples, float target = 1.0f,
+                           const std::vector<int>* channels = nullptr,
+                           std::string* errOut = nullptr);
     // Multiply the selection by 10^(gainDb/20) on the given channels.
-    void gainSamples (juce::Range<int64_t> samples, float gainDb,
-                      const std::vector<int>* channels = nullptr);
-    void reverseSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr);
+    bool gainSamples (juce::Range<int64_t> samples, float gainDb,
+                      const std::vector<int>* channels = nullptr,
+                      std::string* errOut = nullptr);
+    bool reverseSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr,
+                         std::string* errOut = nullptr);
 
     // Resample the whole file to a new sample rate using SoXR (the same
-    // engine Audacity uses). Requires the file to be fully in memory.
+    // engine Audacity uses). Streaming files are materialised into memory
+    // first (see ensureEditable).
     // NOT undoable; clears the clipboard and mipmap pyramid (the caller is
     // expected to rebuild mipmaps on its worker thread afterwards).
     // If cancel points at an atomic set to true, resampling stops at a chunk
     // boundary and false is returned with the engine state unchanged.
     bool resampleTo (double newRate, std::function<void(float)> onProgress = nullptr,
-                     const std::atomic<bool>* cancel = nullptr);
+                     const std::atomic<bool>* cancel = nullptr,
+                     std::string* errOut = nullptr);
 
     // Apply an undo/redo patch to the in-memory buffer
     // rebuild = false is used by batched undo/redo jumps so the mipmap
@@ -130,10 +153,13 @@ public:
 
     /** Replace `samples` with newData (same length, one vector per channel)
         and record an undoable patch. The caller is responsible for rebuilding
-        the mipmaps afterwards (see replaceSamples in AudioEngine.cpp). */
-    void replaceSamples(const juce::Range<int64_t>& samples,
+        the mipmaps afterwards (see replaceSamples in AudioEngine.cpp).
+        Returns false (and sets *errOut when non-null) if the file could not
+        be made editable first. */
+    bool replaceSamples(const juce::Range<int64_t>& samples,
                         const std::vector<std::vector<float>>& newData,
-                        const juce::String& description);
+                        const juce::String& description,
+                        std::string* errOut = nullptr);
 
     // ---- Zero-crossing snapping (nearest sign change of `channel` within
     //      +/- windowSecs around timeSecs; returns the crossing in seconds,
