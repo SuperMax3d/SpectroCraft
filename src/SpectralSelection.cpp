@@ -190,17 +190,35 @@ void SpectralShape::rasteriseStroke (double radiusHz)
         grid[bit >> 3] |= (uint8_t) (1u << (bit & 7));
     };
 
-    for (auto& p : pts)
-    {
-        const int c = (int) std::floor ((p.first - t0) / colSpan);
-        // Rows whose centre lies within the brush radius of the point's freq.
-        double rLo = (p.second - radiusHz - 0.5 * rowHz - f0) / rowHz;
-        double rHi = (p.second + radiusHz - 0.5 * rowHz - f0) / rowHz;
+    // Stamp one brush disc centred on (t, f): the column containing t plus
+    // every row whose centre lies within radiusHz of f.
+    auto stamp = [&] (double t, double f) {
+        const int c = (int) std::floor ((t - t0) / colSpan);
+        double rLo = (f - radiusHz - 0.5 * rowHz - f0) / rowHz;
+        double rHi = (f + radiusHz - 0.5 * rowHz - f0) / rowHz;
         int r0 = (int) std::floor (rLo);
         int r1 = (int) std::ceil (rHi) - 1;
-        if (r1 < r0) { r0 = r1 = (int) std::lround ((p.second - f0) / rowHz); }
+        if (r1 < r0) { r0 = r1 = (int) std::lround ((f - f0) / rowHz); }
         for (int r = r0; r <= r1; ++r)
             setBit (c, r);
+    };
+
+    // Walk each segment between consecutive points so fast drags leave no
+    // gaps: mouse events can jump several ms/Hz apart, and stamping only the
+    // sampled points would leave empty cells in between. Step finely enough
+    // that adjacent stamps are at most half a cell apart in time AND freq.
+    for (size_t i = 0; i < pts.size (); ++i)
+    {
+        stamp (pts[i].first, pts[i].second);
+        if (i + 1 >= pts.size ()) break;
+
+        const double dt = pts[i + 1].first - pts[i].first;
+        const double df = pts[i + 1].second - pts[i].second;
+        const int steps = std::max ((int) std::ceil (std::abs (dt) / (colSpan * 0.5)),
+                                   (int) std::ceil (std::abs (df) / (rowHz * 0.5)));
+        for (int s = 1; s <= steps; ++s)
+            stamp (pts[i].first + dt * ((double) s / (double) steps),
+                   pts[i].second + df * ((double) s / (double) steps));
     }
 }
 

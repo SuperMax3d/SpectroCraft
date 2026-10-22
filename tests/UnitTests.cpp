@@ -6010,6 +6010,25 @@ static void testSpectralSelectionModel()
     CHECK (!stroke.contains (1.0, 900.0), "stroke rejects beyond brush radius");
     CHECK (!stroke.contains (3.0, 500.0), "stroke rejects outside its time span");
 
+    // Fast-drag strokes: sparse sample points must not leave gaps between
+    // them - the rasteriser interpolates along each segment.
+    SpectralSelection sparse;
+    sparse.addStroke ({ { 0.0, 500.0 }, { 2.0, 500.0 } }, 20.0, false);
+    bool noGapH = true;
+    for (int i = 1; i < 200; ++i)
+        if (!sparse.contains ((double) i / 100.0, 500.0)) { noGapH = false; break; }
+    CHECK (noGapH, "horizontal stroke has no gaps between sparse samples");
+
+    SpectralSelection diag;
+    diag.addStroke ({ { 0.0, 100.0 }, { 2.0, 900.0 } }, 20.0, false);
+    bool noGapD = true;
+    for (int i = 1; i < 200; ++i)
+    {
+        const double u = (double) i / 200.0;   // 0..1 along the segment
+        if (!diag.contains (u * 2.0, 100.0 + u * 800.0)) { noGapD = false; break; }
+    }
+    CHECK (noGapD, "diagonal stroke has no gaps between sparse samples");
+
     // Boolean order: add A, subtract B inside A.
     SpectralSelection boolSel;
     boolSel.addRect (0.0, 2.0, 0.0, 1000.0, false);          // A: everything
