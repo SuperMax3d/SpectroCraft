@@ -673,9 +673,37 @@ bool Application::del(std::string* errOut)
         return maskedGainEdit (*this, "Zeroed spectral selection", 0.0f, errOut);
 
     if (selection.getLength() <= 0) return true;   // nothing to delete - not an error
+    FileDoc* d = doc();
+    const double a = selection.getStart(), b = selection.getEnd();
+    const size_t depthBefore = d->undo.depth();
+
+    // Non-audio state that this deletion will shift / trim / drop. Captured
+    // before the edit so undo/redo can restore it (Patch::hasSideState).
+    std::vector<Marker> oldMarkers = d->markers.markers();
+    auto oldSavedSel = d->savedSelections;
+
     if (!audioEngine().deleteSamples (selectionSamples (*this), errOut))
         return false;
     selection = { 0, 0 };
+
+    if (d->undo.depth() > depthBefore)   // a patch was actually recorded
+    {
+        d->markers.adjustForDeletion (a, b);
+        for (auto& ss : d->savedSelections)
+            ss.data.adjustForDeletion (a, b);
+        if (d->selectionsOnDisk)
+            d->saveSelectionsToDisk ();
+
+        Patch& p = d->undo.lastRecorded ();
+        p.hasSideState = true;
+        p.oldMarkers = std::move (oldMarkers);
+        p.newMarkers = d->markers.markers();
+        p.oldSavedSel = std::move (oldSavedSel);
+        p.newSavedSel = d->savedSelections;
+        if (onTimeRangeDeleted)
+            onTimeRangeDeleted (d, a, b, p);   // records + adjusts FFT snapshots
+    }
+
     syncActiveDoc ();
     return true;
 }
@@ -1045,6 +1073,7 @@ void Application::undoSteps (int n)
         Patch p;
         if (!d->undo.popUndo (p)) break;
         d->engine.applyPatch (p, false, /*rebuild=*/false);
+        if (p.hasSideState) restorePatchSideState (d, p, false);
         ++done;
     }
     if (done > 0)
@@ -1062,10 +1091,24 @@ void Application::redoSteps (int n)
         Patch p;
         if (!d->undo.popRedo (p)) break;
         d->engine.applyPatch (p, true, /*rebuild=*/false);
+        if (p.hasSideState) restorePatchSideState (d, p, true);
         ++done;
     }
     if (done > 0)
         d->engine.rebuildMipmaps();
+}
+
+// Restores the non-audio state recorded in a patch: markers and named saved
+// selections are restored directly; shared UI state (FFT snapshot slots) goes
+// through onPatchSideStateRestored because it is owned by MainWindow.
+void Application::restorePatchSideState (FileDoc* d, const Patch& p, bool isRedo)
+{
+    d->markers.restore (isRedo ? p.newMarkers : p.oldMarkers);
+    d->savedSelections = isRedo ? p.newSavedSel : p.oldSavedSel;
+    if (d->selectionsOnDisk)
+        d->saveSelectionsToDisk ();
+    if (onPatchSideStateRestored)
+        onPatchSideStateRestored (d, p, isRedo);
 }
 
 void Application::undoStep() { undoSteps (1); }

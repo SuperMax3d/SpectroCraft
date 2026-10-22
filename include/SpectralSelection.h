@@ -130,6 +130,13 @@ public:
     // shapes). Empty when the selection is empty.
     juce::Range<double> timeExtent() const;
 
+    // Adjust this selection after [a, b] seconds have been removed from the
+    // file: shapes entirely before are unchanged; those entirely after shift
+    // left by the deleted length; shapes straddling an edge of the deletion
+    // are trimmed (rects) or split into up to two pieces (polygons/strokes);
+    // fully contained shapes are dropped. Returns true when anything changed.
+    bool adjustForDeletion (double a, double b);
+
     // True if the point (tSecs, fHz) lies inside the final boolean result.
     bool contains (double tSecs, double fHz) const;
 

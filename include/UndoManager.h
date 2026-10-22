@@ -19,6 +19,10 @@ public:
 
     bool canUndo() const { return !undoStack.empty(); }
     bool canRedo() const { return !redoStack.empty(); }
+
+    // The most recently recorded patch (valid when canUndo()). Lets the caller
+    // attach non-audio side state to an edit right after it was recorded.
+    Patch& lastRecorded() { return undoStack.back(); }
     size_t depth() const { return undoStack.size(); }
 
     // Read-only enumeration for the History tab. Index 0 is always the

@@ -107,6 +107,58 @@ bool MarkerManager::setPoint (int id)
     return false;
 }
 
+bool MarkerManager::adjustForDeletion (double a, double b)
+{
+    if (!(b > a))
+        return false;
+    const double len = b - a;
+    bool changed = false;
+
+    for (size_t i = 0; i < list.size();)
+    {
+        Marker& m = list[i];
+        if (m.end < 0.0)   // point marker at time m.start
+        {
+            const double t = m.start;
+            if (t >= b)
+            { m.start = t - len; changed = true; ++i; }
+            else if (t >= a)
+            { list.erase (list.begin() + (long long) i); changed = true; }   // inside [a, b): dropped
+            else
+                ++i;                                                          // before the deletion: unchanged
+        }
+        else                // region marker [m.start, m.end]
+        {
+            const double s = m.start, e = m.end;
+            if (e <= a)
+                ++i;                                                           // entirely before
+            else if (s >= b)
+            { m.start = s - len; m.end = e - len; changed = true; ++i; }       // entirely after: shift
+            else if (s < a && e > b)
+            { m.end = e - len; changed = true; ++i; }                          // straddles the whole deletion:
+                                                                               // both halves stay contiguous -> [s, e-len]
+            else if (s < a)
+            { m.end = a; changed = true; ++i; }                                // right part deleted -> [s, a]
+            else if (e <= b)
+            { list.erase (list.begin() + (long long) i); changed = true; }     // fully contained: dropped
+            else
+            { m.start = a; m.end = e - len; changed = true; ++i; }             // left part deleted:
+                                                                               // old [b, e] -> new [a, e-len]
+        }
+    }
+    return changed;
+}
+
+void MarkerManager::restore (const std::vector<Marker>& m)
+{
+    list = m;
+    sort();
+    nextId = 1;
+    for (const auto& mk : list)
+        if (mk.id >= nextId)
+            nextId = mk.id + 1;
+}
+
 const Marker* MarkerManager::findNear (double time, double tolSecs) const
 {
     const Marker* best = nullptr;

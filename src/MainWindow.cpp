@@ -279,6 +279,19 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (fftPanel) fftPanel->clearSnapshotsFor (&d);
     };
 
+    // Deleting a time range also shifts / trims / drops the FFT snapshot slots
+    // stored from that file; record their before/after state into the patch.
+    app.onTimeRangeDeleted = [this] (FileDoc* d, double a, double b, Patch& p)
+    {
+        if (fftPanel) fftPanel->recordAndAdjustSnapshotsForDeletion (d, a, b, p);
+    };
+
+    // Undo/redo of such a patch restores the snapshot slots too.
+    app.onPatchSideStateRestored = [this] (FileDoc* d, const Patch& p, bool isRedo)
+    {
+        if (fftPanel) fftPanel->restoreSnapshotSlots (d, p, isRedo);
+    };
+
     startTimerHz (30); // playhead animation
     centreWithSize (1400, 900);
 

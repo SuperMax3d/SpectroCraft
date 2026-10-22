@@ -31,6 +31,17 @@ public:
 
     const std::vector<Marker>& markers() const { return list; }
     const Marker* findNear (double time, double tolSecs) const;
+
+    // Adjust the markers after [a, b] seconds have been removed from the file:
+    // point markers inside the deleted range are dropped; region markers that
+    // straddle an edge of it are trimmed to that edge; fully contained regions
+    // are dropped; everything at/after b shifts left by the deleted length.
+    // Returns true when any marker changed.
+    bool adjustForDeletion (double a, double b);
+
+    // Replace the whole list with `m` (undo/redo restoration of side state).
+    void restore (const std::vector<Marker>& m);
+
     void clear() { list.clear(); nextId = 1; }
     size_t count() const { return list.size(); }
 

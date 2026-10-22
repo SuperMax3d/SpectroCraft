@@ -312,6 +312,15 @@ public:
     // Create a region marker in the snapshot's source file spanning [t0, t1].
     bool convertSnapshotToMarker (int i);
 
+    // Called after [a, b] seconds were removed from file d: shifts / trims /
+    // clears every stored snapshot whose source is d and records the before/
+    // after state of each touched slot into p.snapshotSlots for undo/redo.
+    void recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a, double b, Patch& p);
+
+    // Restores the snapshot slots recorded in patch p after an undo (!isRedo)
+    // or redo (isRedo). Curves are recomputed from each slot's source file.
+    void restoreSnapshotSlots (FileDoc* d, const Patch& p, bool isRedo);
+
     // Programmatic setting changes (same code path as the UI combos).
     void setFftSize (int n) { fftSizeCombo.setSelectedId (n, juce::sendNotificationSync); }
     void setWindowType (int t) { windowCombo.setSelectedId (t + 1, juce::sendNotificationSync); }
@@ -441,6 +450,8 @@ private:
     // Recompute all valid snapshots from their stored time segments using the
     // current FFT size / window type, then refresh their 1/3-octave bands.
     void recomputeSnapshots();
+    // Rebuild one slot's curve from its source file at the current FFT size.
+    void recomputeSnapshotSlot (int i);
     // Right-click context menu on snapshot button i (Convert to marker / Clear).
     void showSnapshotMenu (int i);
     // Re-derive the 1/3-octave band values of every snapshot (cheap: no FFT).

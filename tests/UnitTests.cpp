@@ -6250,6 +6250,263 @@ static SpectralSelection lowBandSel()
 
 // ------------------------------------------------- masked gain + zero-out
 
+// ------------------------------------------------------- deletion side state
+// Deleting a time range must also adjust the non-audio state of that file:
+// markers shift / trim / drop, named saved spectral selections follow the
+// same rules, and stored FFT snapshots do too. Everything is undoable along
+// with the audio patch.
+static void testMarkerAdjustForDeletion()
+{
+    MarkerManager mm;
+    const int pBefore = mm.addPointMarker (1.0, "before");
+    const int pAtA    = mm.addPointMarker (4.0, "at-a");
+    const int pIn     = mm.addPointMarker (5.0, "inside");
+    const int pAtB    = mm.addPointMarker (6.0, "at-b");
+    const int pAfter  = mm.addPointMarker (8.0, "after");
+    const int rBefore   = mm.addRegionMarker (0.5, 2.0, "r-before");
+    const int rAfter    = mm.addRegionMarker (7.0, 9.0, "r-after");
+    const int rStraddle = mm.addRegionMarker (3.0, 8.0, "r-straddle");
+    const int rRightTrim= mm.addRegionMarker (2.0, 5.0, "r-right-trim");
+    const int rLeftTrim = mm.addRegionMarker (5.0, 8.0, "r-left-trim");
+    const int rContained= mm.addRegionMarker (4.5, 5.5, "r-contained");
+
+    CHECK (mm.adjustForDeletion (4.0, 6.0), "deletion adjusts markers");
+
+    auto find = [&] (int id) -> const Marker*
+    { for (const auto& m : mm.markers()) if (m.id == id) return &m; return nullptr; };
+
+    const Marker* mb = find (pBefore);
+    CHECK (mb && std::abs (mb->start - 1.0) < 1e-9, "point before deletion unchanged");
+    CHECK (!find (pAtA), "point at the deletion start is dropped");
+    CHECK (!find (pIn), "point inside the deleted range is dropped");
+    mb = find (pAtB);
+    CHECK (mb && std::abs (mb->start - 4.0) < 1e-9, "point at b shifts to a");
+    mb = find (pAfter);
+    CHECK (mb && std::abs (mb->start - 6.0) < 1e-9, "point after the range shifts by its length");
+
+    const Marker* rb = find (rBefore);
+    CHECK (rb && std::abs (rb->end - 2.0) < 1e-9, "region before deletion unchanged");
+    const Marker* ra = find (rAfter);
+    CHECK (ra && std::abs (ra->start - 5.0) < 1e-9 && std::abs (ra->end - 7.0) < 1e-9,
+          "region after the range shifts left");
+    const Marker* rs = find (rStraddle);
+    CHECK (rs && std::abs (rs->start - 3.0) < 1e-9 && std::abs (rs->end - 6.0) < 1e-9,
+          "region spanning the whole deletion trims to [3,6]");
+    const Marker* rr = find (rRightTrim);
+    CHECK (rr && std::abs (rr->start - 2.0) < 1e-9 && std::abs (rr->end - 4.0) < 1e-9,
+          "region with its right part deleted trims to [2,4]");
+    const Marker* rl = find (rLeftTrim);
+    CHECK (rl && std::abs (rl->start - 4.0) < 1e-9 && std::abs (rl->end - 6.0) < 1e-9,
+          "region with its left part deleted becomes [4,6]");
+    CHECK (!find (rContained), "fully contained region is dropped");
+
+    // restore() replaces the list and keeps id allocation sane.
+    const std::vector<Marker> saved = mm.markers();
+    MarkerManager mm2;
+    mm2.addPointMarker (0.1, "x");
+    mm2.restore (saved);
+    CHECK ((int) mm2.markers().size() == (int) saved.size(), "restore replaces the list");
+    bool same = true;
+    for (size_t i = 0; i < saved.size(); ++i)
+        if (!(mm2.markers()[i].id == saved[i].id
+              && std::abs (mm2.markers()[i].start - saved[i].start) < 1e-9))
+            same = false;
+    CHECK (same, "restored markers match the original list");
+}
+
+static void testSpectralSelectionAdjustForDeletion()
+{
+    // Rectangles against deletion [4,6].
+    SpectralSelection sel;
+    sel.addRect (0.5, 1.5, 100, 200, false);            // before: unchanged
+    sel.addRect (7.0, 8.0, 100, 200, false, false);     // after: shift -> [5,7]
+    sel.addRect (3.0, 9.0, 100, 200, false, false);     // straddles whole deletion -> [3,7]
+    sel.addRect (2.0, 5.0, 100, 200, false, false);     // right part deleted -> [2,4]
+    sel.addRect (5.0, 8.0, 100, 200, false, false);     // left part deleted -> [4,6]
+    sel.addRect (4.5, 5.5, 100, 200, false, false);     // contained: dropped
+
+    CHECK (sel.adjustForDeletion (4.0, 6.0), "rects adjusted for deletion");
+    auto rectAt = [&] (double t) -> const SpectralShape*
+    { for (const auto& s : sel.shapes()) if (s.kind == SpectralShape::Kind::Rect && std::abs (s.t0 - t) < 1e-9) return &s; return nullptr; };
+
+    const SpectralShape* r = rectAt (0.5);
+    CHECK (r && std::abs (r->t1 - 1.5) < 1e-9, "rect before deletion unchanged");
+    r = rectAt (5.0);
+    CHECK (r && std::abs (r->t1 - 6.0) < 1e-9, "rect after the range shifted to [5,6]");
+    r = rectAt (3.0);
+    CHECK (r && std::abs (r->t1 - 7.0) < 1e-9, "straddling rect trims to [3,7]");
+    r = rectAt (2.0);
+    CHECK (r && std::abs (r->t1 - 4.0) < 1e-9, "right-trimmed rect becomes [2,4]");
+    r = rectAt (4.0);
+    CHECK (r && std::abs (r->t1 - 6.0) < 1e-9, "left-trimmed rect becomes [4,6]");
+    int rects = 0;
+    for (const auto& s : sel.shapes()) if (s.kind == SpectralShape::Kind::Rect) ++rects;
+    CHECK (rects == 5, "contained rect dropped");
+
+    // Polygon entirely after the range: shifted.
+    SpectralSelection poly1;
+    poly1.addPolygon ({ {7.0, 100}, {9.0, 100}, {8.0, 300} }, false);
+    CHECK (poly1.adjustForDeletion (4.0, 6.0), "polygon shifted");
+    CHECK (poly1.shapes().size() == 1 && poly1.shapes()[0].kind == SpectralShape::Kind::Polygon,
+          "single polygon kept");
+    const auto& pp = poly1.shapes()[0].pts;
+    CHECK (std::abs (pp[0].first - 5.0) < 1e-9 && std::abs (pp[1].first - 7.0) < 1e-9
+           && std::abs (pp[2].first - 6.0) < 1e-9,
+          "polygon vertices shifted by the deleted length");
+
+    // Polygon straddling the deletion: split into two pieces.
+    SpectralSelection poly2;
+    poly2.addPolygon ({ {3.0, 100}, {8.0, 100}, {5.5, 400} }, false);
+    CHECK (poly2.adjustForDeletion (4.0, 6.0), "polygon split");
+    int polys = 0;
+    for (const auto& s : poly2.shapes()) if (s.kind == SpectralShape::Kind::Polygon) ++polys;
+    CHECK (polys == 2, "two polygon pieces after the split");
+    CHECK (poly2.contains (3.5, 150), "left piece keeps its content");
+    CHECK (poly2.contains (5.0, 150), "right piece shifted into place");
+    CHECK (!poly2.contains (4.5, 300), "deleted middle is gone");
+
+    // Stroke entirely after the range: shifted with grid intact.
+    SpectralSelection st1;
+    st1.addStroke (straightLinePoints (7.0, 150, 9.0, 250), 50.0, false);
+    CHECK (st1.adjustForDeletion (4.0, 6.0), "stroke shifted");
+    const auto& s1 = st1.shapes()[0];
+    // Stroke grids carry a half-cell margin around the path, so allow slack.
+    CHECK (std::abs (s1.t0 - 5.0) < 0.01 && std::abs (s1.t1 - 7.0) < 0.01,
+          "stroke time range shifted");
+    CHECK (st1.contains (6.0, 200), "shifted stroke still covers its line");
+
+    // Stroke straddling both edges: split into two contiguous pieces.
+    SpectralSelection st2;
+    st2.addStroke (straightLinePoints (3.0, 150, 9.0, 250), 50.0, false);
+    CHECK (st2.adjustForDeletion (4.0, 6.0), "stroke split");
+    int strokes = 0;
+    for (const auto& s : st2.shapes()) if (s.kind == SpectralShape::Kind::Stroke) ++strokes;
+    CHECK (strokes == 2, "two stroke pieces after the split");
+    CHECK (st2.contains (3.5, 160), "left piece keeps its line");
+    CHECK (st2.contains (5.5, 225), "right piece shifted into place");
+    CHECK (!st2.contains (7.5, 280), "nothing beyond the new end");
+
+    // Stroke fully contained: dropped.
+    SpectralSelection st3;
+    st3.addStroke (straightLinePoints (4.5, 150, 5.5, 250), 50.0, false);
+    CHECK (st3.adjustForDeletion (4.0, 6.0), "contained stroke dropped");
+    CHECK (st3.empty(), "selection empty after dropping the only shape");
+
+    // No-op: everything before the deletion range.
+    SpectralSelection st4;
+    st4.addRect (0.5, 1.5, 100, 200, false);
+    CHECK (!st4.adjustForDeletion (4.0, 6.0), "no change when nothing overlaps");
+}
+
+static void testDeleteShiftsMarkersAndSavedSelections()
+{
+    const juce::File wav = makeTempFile ("del_side.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 64000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); }),
+          "wrote test wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for deletion side-state test");
+    FileDoc* d = app.doc();
+    CHECK (d != nullptr, "active doc exists");
+
+    const int m1 = app.markers().addPointMarker (8.0, "after-marker");
+    SavedSpectralSelection ss;
+    ss.name = "saved";
+    ss.data.addRect (7.0, 9.0, 100, 500, false);
+    d->savedSelections.push_back (std::move (ss));
+
+    app.setSelection ({ 4.0, 6.0 });
+    CHECK (app.del (), "delete succeeds");
+
+    auto findMarker = [&] (int id) -> const Marker*
+    { for (const auto& m : app.markers().markers()) if (m.id == id) return &m; return nullptr; };
+
+    const Marker* mk = findMarker (m1);
+    CHECK (mk && std::abs (mk->start - 6.0) < 1e-9, "marker after the deleted range shifted left");
+
+    CHECK (d->savedSelections.size() == 1, "named saved selection kept");
+    const auto& sr = d->savedSelections[0].data.shapes().front();
+    CHECK (std::abs (sr.t0 - 5.0) < 1e-9 && std::abs (sr.t1 - 7.0) < 1e-9,
+          "saved spectral rect shifted with the audio");
+
+    const Patch& p = app.undo().undoAt (app.undo().undoSize() - 1);
+    CHECK (p.hasSideState, "patch carries non-audio side state");
+
+    // Undo restores markers and saved selections together with the audio.
+    app.undoStep ();
+    mk = findMarker (m1);
+    CHECK (mk && std::abs (mk->start - 8.0) < 1e-9, "undo restores the marker position");
+    CHECK (d->savedSelections.size() == 1, "undo keeps the saved selection");
+    const auto& sr2 = d->savedSelections[0].data.shapes().front();
+    CHECK (std::abs (sr2.t0 - 7.0) < 1e-9 && std::abs (sr2.t1 - 9.0) < 1e-9,
+          "undo restores the saved spectral rect");
+
+    // Redo re-applies the adjustment.
+    app.redoStep ();
+    mk = findMarker (m1);
+    CHECK (mk && std::abs (mk->start - 6.0) < 1e-9, "redo shifts the marker again");
+    const auto& sr3 = d->savedSelections[0].data.shapes().front();
+    CHECK (std::abs (sr3.t0 - 5.0) < 1e-9 && std::abs (sr3.t1 - 7.0) < 1e-9,
+          "redo shifts the saved spectral rect again");
+}
+
+static void testDeleteAdjustsSnapshots()
+{
+    const juce::File wav = makeTempFile ("snap_del.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 64000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); }),
+          "wrote test wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for snapshot deletion test");
+    app.settings.fftSize = 1024;
+    app.settings.fftLocalN = 1024;
+
+    FFTAnalysisView view (app);
+    view.setSize (300, 200);
+
+    // Three snapshots: before / straddling the right edge / contained in [4,6].
+    app.setSelection ({ 1.0, 2.0 });
+    view.recomputeIfNeeded();
+    view.handleSnapshotClick (0);
+    CHECK (view.snapshotN (0) > 0, "snapshot 0 stored");
+
+    std::this_thread::sleep_for (std::chrono::milliseconds (80));
+    app.setSelection ({ 5.0, 7.0 });
+    view.recomputeIfNeeded();
+    view.handleSnapshotClick (1);
+    CHECK (view.snapshotN (1) > 0, "snapshot 1 stored");
+
+    std::this_thread::sleep_for (std::chrono::milliseconds (80));
+    app.setSelection ({ 4.2, 5.8 });
+    view.recomputeIfNeeded();
+    view.handleSnapshotClick (2);
+    CHECK (view.snapshotN (2) > 0, "snapshot 2 stored");
+
+    FileDoc* d = app.doc();
+    Patch p;
+    view.recordAndAdjustSnapshotsForDeletion (d, 4.0, 6.0, p);
+
+    CHECK (std::abs (view.snapshotT0 (0) - 1.0) < 1e-9 && std::abs (view.snapshotT1 (0) - 2.0) < 1e-9
+          && view.snapshotN (0) > 0, "snapshot before the range untouched");
+    CHECK (std::abs (view.snapshotT0 (1) - 4.0) < 1e-9 && std::abs (view.snapshotT1 (1) - 5.0) < 1e-9,
+          "straddling snapshot trimmed to [4,5]");
+    CHECK (view.snapshotN (2) == 0, "contained snapshot cleared");
+
+    // Undo-style restore: slot 2 comes back and its curve is recomputed.
+    view.restoreSnapshotSlots (d, p, false);
+    CHECK (std::abs (view.snapshotT0 (2) - 4.2) < 1e-9 && std::abs (view.snapshotT1 (2) - 5.8) < 1e-9,
+          "undo restores the cleared snapshot's segment");
+    CHECK (!view.snapshotMags (2).empty(), "restored curve recomputed from audio");
+
+    // Redo-style: it is cleared again.
+    view.restoreSnapshotSlots (d, p, true);
+    CHECK (view.snapshotN (2) == 0, "redo clears the slot again");
+}
+
 static void testMaskedGainAndZero()
 {
     const juce::File wav = makeTempFile ("masked_gain.wav");
@@ -7608,6 +7865,10 @@ static int scRunUnitTestsImpl()
     progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
     progress ("extract masked A+B=orig");   testExtractMasked();
     progress ("playback mask streaming");   testPlaybackMaskStreaming();
+    progress ("marker deletion adjust");  testMarkerAdjustForDeletion();
+    progress ("spectral sel deletion adjust"); testSpectralSelectionAdjustForDeletion();
+    progress ("delete shifts markers/saved sel"); testDeleteShiftsMarkersAndSavedSelections();
+    progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("version string");      testVersionString();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

@@ -310,3 +310,256 @@ bool SpectralSelection::contains (double tSecs, double fHz) const
     }
     return sel;
 }
+
+// ---------------------------------------------------------------------------
+// Time-range deletion adjustment (markers/snapshots are handled elsewhere;
+// this keeps spectral selections consistent when samples are cut out).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Sutherland-Hodgman clip of a polygon against the half-plane t <= c.
+std::vector<std::pair<double, double>> clipPolyToTimeAtMost (const std::vector<std::pair<double, double>>& poly, double c)
+{
+    std::vector<std::pair<double, double>> out;
+    const size_t n = poly.size();
+    if (n < 3) return out;
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const auto& S = poly[i];
+        const auto& E = poly[(i + 1) % n];
+        const bool sIn = S.first <= c, eIn = E.first <= c;
+        if (sIn && eIn)
+            out.push_back (E);
+        else if (sIn != eIn)
+        {
+            double f;
+            if (std::abs (E.first - S.first) < 1e-12)
+                f = 0.5 * (S.second + E.second);
+            else
+                f = S.second + (E.second - S.second) * (c - S.first) / (E.first - S.first);
+            out.emplace_back (c, f);
+            if (!sIn && eIn)
+                out.push_back (E);
+        }
+    }
+    return out;
+}
+
+// Mirror of the above: keep t >= c.
+std::vector<std::pair<double, double>> clipPolyToTimeAtLeast (const std::vector<std::pair<double, double>>& poly, double c)
+{
+    std::vector<std::pair<double, double>> out;
+    const size_t n = poly.size();
+    if (n < 3) return out;
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const auto& S = poly[i];
+        const auto& E = poly[(i + 1) % n];
+        const bool sIn = S.first >= c, eIn = E.first >= c;
+        if (sIn && eIn)
+            out.push_back (E);
+        else if (sIn != eIn)
+        {
+            double f;
+            if (std::abs (E.first - S.first) < 1e-12)
+                f = 0.5 * (S.second + E.second);
+            else
+                f = S.second + (E.second - S.second) * (c - S.first) / (E.first - S.first);
+            out.emplace_back (c, f);
+            if (!sIn && eIn)
+                out.push_back (E);
+        }
+    }
+    return out;
+}
+
+// Extract columns [c0, c1) of a stroke grid (column-major bit layout:
+// bit index = col * rows + row).
+std::vector<uint8_t> cropStrokeColumns (const SpectralShape& s, int c0, int c1)
+{
+    const int colsNew = c1 - c0;
+    std::vector<uint8_t> g ((size_t) (colsNew * s.rows + 7) / 8, 0);
+    for (int c = c0; c < c1; ++c)
+        for (int r = 0; r < s.rows; ++r)
+        {
+            const size_t srcBit = (size_t) c * s.rows + (size_t) r;
+            if ((s.grid[srcBit >> 3] & (1u << (srcBit & 7))) != 0)
+            {
+                const size_t dstBit = (size_t) (c - c0) * s.rows + (size_t) r;
+                g[dstBit >> 3] |= (uint8_t) (1u << (dstBit & 7));
+            }
+        }
+    return g;
+}
+
+// Apply the deletion of [a, b] seconds to one shape. Returns replacement
+// shapes: one for unchanged/shifted/trimmed shapes, up to two pieces when a
+// polygon or stroke straddles the deleted range, empty when dropped.
+std::vector<SpectralShape> adjustShapeForDeletion (const SpectralShape& sIn, double a, double b)
+{
+    const double len = b - a;
+    std::vector<SpectralShape> out;
+
+    switch (sIn.kind)
+    {
+        case SpectralShape::Kind::Rect:
+        {
+            SpectralShape r = sIn;
+            if (r.t1 <= a)
+                ;                                   // entirely before: unchanged
+            else if (r.t0 >= b)
+            { r.t0 -= len; r.t1 -= len; }          // entirely after: shift left
+            else if (r.t0 < a && r.t1 > b)
+                r.t1 -= len;                       // straddles the whole deletion:
+                                                   // both halves stay contiguous -> [t0, t1-len]
+            else if (r.t0 < a)
+                r.t1 = a;                          // right part deleted -> [t0, a]
+            else if (r.t1 <= b)
+                return out;                        // fully contained: dropped
+            else
+            { r.t0 = a; r.t1 -= len; }             // left part deleted: old [b,t1] -> new [a, t1-len]
+
+            if (r.t1 - r.t0 > 1e-9)
+                out.push_back (std::move (r));
+            break;
+        }
+
+        case SpectralShape::Kind::Polygon:
+        {
+            double minT = 1e300, maxT = -1e300;
+            for (const auto& p : sIn.pts)
+            {
+                if (p.first < minT) minT = p.first;
+                if (p.first > maxT) maxT = p.first;
+            }
+
+            if (sIn.pts.size() < 3 || maxT <= a)   // degenerate or entirely before: unchanged
+            { out.push_back (sIn); break; }
+
+            if (minT >= b)                         // entirely after: shift left
+            {
+                SpectralShape r = sIn;
+                for (auto& p : r.pts) p.first -= len;
+                out.push_back (std::move (r));
+                break;
+            }
+
+            // Straddles the deleted range: keep the part before a and the part
+            // after b (shifted left by len); each piece keeps the subtract flag.
+            const auto left = clipPolyToTimeAtMost (sIn.pts, a);
+            if (left.size() >= 3)
+            {
+                SpectralShape r = sIn;
+                r.pts = std::move (left);
+                out.push_back (std::move (r));
+            }
+
+            const auto right = clipPolyToTimeAtLeast (sIn.pts, b);
+            if (right.size() >= 3)
+            {
+                SpectralShape r = sIn;
+                r.pts = std::move (right);
+                for (auto& p : r.pts) p.first -= len;
+                out.push_back (std::move (r));
+            }
+            break;
+        }
+
+        case SpectralShape::Kind::Stroke:
+        {
+            if (sIn.cols <= 0 || sIn.rows <= 0)    // degenerate grid: unchanged
+            { out.push_back (sIn); break; }
+
+            const double dt = std::max (1e-9, (sIn.t1 - sIn.t0) / (double) sIn.cols);
+
+            if (sIn.t1 <= a)                       // entirely before: unchanged
+            { out.push_back (sIn); break; }
+
+            if (sIn.t0 >= b)                       // entirely after: shift left
+            {
+                SpectralShape r = sIn;
+                r.t0 -= len; r.t1 -= len;
+                out.push_back (std::move (r));
+                break;
+            }
+
+            if (sIn.t0 >= a && sIn.t1 <= b)        // fully contained: dropped
+                return out;
+
+            // Left piece [t0, a] when the stroke starts before the deletion.
+            if (sIn.t0 < a)
+            {
+                int cA = (int) std::lround ((a - sIn.t0) / dt);
+                cA = std::clamp (cA, 1, sIn.cols);
+                SpectralShape r = sIn;
+                r.grid = cropStrokeColumns (sIn, 0, cA);
+                r.cols = cA;
+                r.t1 = a;
+                out.push_back (std::move (r));
+            }
+
+            // Right piece: old [b, t1] -> new [a, t1 - len].
+            if (sIn.t1 > b)
+            {
+                int cB = (int) std::lround ((b - sIn.t0) / dt);
+                cB = std::clamp (cB, 0, sIn.cols - 1);
+                SpectralShape r = sIn;
+                r.grid = cropStrokeColumns (sIn, cB, sIn.cols);
+                r.cols = sIn.cols - cB;
+                r.t0 = a;
+                r.t1 -= len;
+                if (r.t1 - r.t0 > 1e-9)
+                    out.push_back (std::move (r));
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+bool shapesEqualForDeletionCheck (const SpectralShape& s, const SpectralShape& r)
+{
+    switch (s.kind)
+    {
+        case SpectralShape::Kind::Rect:
+            return r.t0 == s.t0 && r.t1 == s.t1;
+        case SpectralShape::Kind::Polygon:
+            return r.pts == s.pts;
+        default:
+            return r.t0 == s.t0 && r.t1 == s.t1 && r.cols == s.cols && r.grid == s.grid;
+    }
+}
+
+} // anonymous namespace
+
+bool SpectralSelection::adjustForDeletion (double a, double b)
+{
+    if (!(b > a))
+        return false;
+
+    std::vector<SpectralShape> newList;
+    bool changed = false;
+
+    for (const auto& s : shapeList)
+    {
+        const std::vector<SpectralShape> repl = adjustShapeForDeletion (s, a, b);
+        if (repl.empty())
+        { changed = true; continue; }             // dropped entirely
+
+        bool same = false;
+        if (repl.size() == 1)
+            same = shapesEqualForDeletionCheck (s, repl[0]);
+        if (!same)
+            changed = true;
+
+        for (auto& r : repl)
+            newList.push_back (std::move (r));
+    }
+
+    if (changed)
+        shapeList = std::move (newList);
+    return changed;
+}

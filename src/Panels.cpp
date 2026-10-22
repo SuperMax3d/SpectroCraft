@@ -1635,6 +1635,93 @@ void FFTAnalysisView::clearSnapshotSlot (int i)
     updateSnapshotTooltip (i);
 }
 
+void FFTAnalysisView::recomputeSnapshotSlot (int i)
+{
+    auto& s = snapshots[i];
+    if (!(s.n > 0 && s.source != nullptr && app.isDocLoaded (s.source)))
+    { clearSnapshotSlot (i); return; }
+
+    computeRegionFrom (s.source->engine, s.chans, s.t0, s.t1, localN, s.mags);
+    s.n = localN;
+    s.gen = settingsGen;
+    refreshSnapshotBands();
+    snapBtns[i].setToggleState (s.shown, juce::dontSendNotification);
+    snapBtns[i].setStored (true);
+    updateSnapshotTooltip (i);
+}
+
+void FFTAnalysisView::recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a, double b, Patch& p)
+{
+    if (d == nullptr || !(b > a))
+        return;
+    const double len = b - a;
+
+    for (int i = 0; i < 10; ++i)
+    {
+        auto& s = snapshots[i];
+        if (s.source != d)   // slots are shared across files: only adjust this one's
+            continue;
+
+        SnapshotSlotChange ch;
+        ch.before.t0 = s.t0;  ch.before.t1 = s.t1;
+        ch.before.n = s.n;    ch.before.shown = s.shown;
+        ch.before.chans = s.chans;
+
+        bool touched = false;
+        if (s.t1 <= a)
+            ;                                   // entirely before: unchanged
+        else if (s.t0 >= b)
+        { s.t0 -= len; s.t1 -= len; touched = true; }   // entirely after: shift left
+        else if (s.t0 < a && s.t1 > b)
+        { s.t1 -= len; touched = true; }       // straddles the whole deletion:
+                                                // both halves stay contiguous -> [t0, t1-len]
+        else if (s.t0 < a)
+        { s.t1 = a; touched = true; }          // right part deleted -> [t0, a]
+        else if (s.t1 <= b)
+        { clearSnapshotSlot (i); touched = true; }   // fully contained: cleared
+        else
+        { s.t0 = a; s.t1 -= len; touched = true; }   // left part deleted:
+                                                // old [b, t1] -> new [a, t1-len]
+
+        if (!touched)
+            continue;
+
+        auto& s2 = snapshots[i];               // may have been reset by clearSnapshotSlot
+        ch.changed = true;
+        ch.after.n = s2.n;  ch.after.t0 = s2.t0;  ch.after.t1 = s2.t1;
+        ch.after.shown = s2.shown;  ch.after.chans = s2.chans;
+        p.snapshotSlots[(size_t) i] = ch;
+    }
+}
+
+void FFTAnalysisView::restoreSnapshotSlots (FileDoc* d, const Patch& p, bool isRedo)
+{
+    if (d == nullptr)
+        return;
+
+    for (int i = 0; i < 10; ++i)
+    {
+        const auto& ch = p.snapshotSlots[(size_t) i];
+        if (!ch.changed)
+            continue;
+        const SnapshotMeta& m = isRedo ? ch.after : ch.before;
+
+        // Never clobber a slot that now holds another file's snapshot.
+        auto& s = snapshots[i];
+        if (s.source != nullptr && s.source != d)
+            continue;
+
+        if (m.n <= 0 || !app.isDocLoaded (d))
+        { clearSnapshotSlot (i); continue; }
+
+        s.t0 = m.t0;  s.t1 = m.t1;
+        s.chans = m.chans;  s.shown = m.shown;
+        s.source = d;
+        s.n = m.n;   // mark valid so recomputeSnapshotSlot rebuilds the curve
+        recomputeSnapshotSlot (i);
+    }
+}
+
 void FFTAnalysisView::clearSnapshotsFor (const FileDoc* d)
 {
     for (int i = 0; i < 10; ++i)

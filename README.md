@@ -255,6 +255,16 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   channels** — e.g. with only Channel 2 visible, a fade never touches the
   other tracks; undo restores every channel exactly (patches capture the old
   data *before* the in-place modification).
+- **Deleting a time range adjusts related state**: everything that references
+  file time follows the cut inside the same undo step. Markers shift left,
+  trim, or drop depending on where they sit relative to the deleted range;
+  named saved spectral selections (Selection panel) follow the same rules —
+  rectangles trim/shift/drop, while polygons and strokes that straddle the
+  cut are split into two contiguous pieces; stored FFT snapshots of that file
+  shift/trim/clear accordingly. Undo and redo restore all of it together with
+  the audio patch (snapshot curves are recomputed from the restored audio), so
+  a single Ctrl+Z brings back both the samples and every marker, selection and
+  snapshot exactly as before.
 - **Resample**: Effects → Resample… converts the whole file to any sample rate
   using SoXR's very-high-quality (`SOXR_VHQ`) resampler. Whole-file operation,
   requires the file fully in memory, not undoable (the old data is discarded);
@@ -781,7 +791,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (354 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~1300 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -853,6 +863,11 @@ by a single mutex (short critical sections, no lock held during FFT work).
   - **Batched undo/redo**: `undoSteps`/`redoSteps` move several patches in one
     call (single mipmap rebuild), clamp when more steps are requested than
     available, and restore/re-apply the exact sample data.
+  - **Deletion side-state**: deleting a time range shifts/trims/drops markers,
+    adjusts named saved spectral selections (rectangles trim/shift/drop;
+    polygons and strokes straddling the cut split into two contiguous pieces),
+    and shifts/trims/clears stored FFT snapshots of that file — all verified
+    end-to-end through `del()` with undo and redo restoring every piece.
   - **Settings persistence**: spectrogram log/linear + FFT size, frequency-
     analysis axis mode + its independent FFT size, and the zero-crossing snap
     toggle all survive an app restart via the properties file; stored

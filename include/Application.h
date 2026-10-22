@@ -275,12 +275,24 @@ public:
     // drop state that belongs to it (e.g. snapshots stored from that file).
     std::function<void(const FileDoc&)> onFileClosed;
 
+    // Set by MainWindow: called right after [a, b] seconds were deleted from d
+    // (the audio patch is already recorded). Lets shared UI state - the FFT
+    // snapshot slots - record its before/after into the patch and adjust.
+    std::function<void(FileDoc*, double, double, Patch&)> onTimeRangeDeleted;
+
+    // Set by MainWindow: called after an undo (!isRedo) or redo (isRedo)
+    // applied a patch with side state to d, so shared UI state is restored too.
+    std::function<void(FileDoc*, const Patch&, bool)> onPatchSideStateRestored;
+
     // Set by MainWindow: fired after open/switch/close so the UI can adapt
     // (reset views to the new file, push its state into every panel).
     std::function<void()> onActiveDocChanged;
 
 private:
     void loadSettings();   // restore persisted session settings from recentStore
+
+    // Restores the non-audio state recorded in a patch (see Patch::hasSideState).
+    void restorePatchSideState (FileDoc* d, const Patch& p, bool isRedo);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Application)
 };
