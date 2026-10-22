@@ -139,6 +139,10 @@ private:
     std::vector<std::pair<double, double>> strokePts;       // paintbrush path
     int probeX = -1, probeY = -1;   // last cursor position (status-bar probe / brush)
 
+    // Per-pixel boolean raster of the spectral selection (1 byte per view
+    // pixel), rebuilt on every paint so subtractive shapes render as holes.
+    std::vector<uint8_t> selMask;
+
     // Cached rendered image
     juce::Image cachedImage;
     bool haveImage = false;
@@ -163,10 +167,11 @@ private:
     double freqAtY (int y) const;
     // Mirror a live tool shape's time extent into the shared time selection.
     void syncToolTimeExtent (juce::Range<double> ext);
-    // Draws committed or live spectral shapes in every channel row.
+    // Draws the committed spectral selection plus an optional live preview
+    // shape, evaluated together as one ordered boolean list in every channel row.
     void drawSpectralShapes (juce::Graphics& g,
-                             const std::vector<SpectralShape>& shapesIn,
-                             bool preview);
+                             const std::vector<SpectralShape>& committedIn,
+                             const SpectralShape* live);
     void zoomAtX (int x, double factor);
     void panByTime (double dt);
     void zoomFreqAtY (float y, double factor);

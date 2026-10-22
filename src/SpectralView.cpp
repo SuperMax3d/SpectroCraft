@@ -1019,30 +1019,38 @@ void SpectralView::drawOverlays (juce::Graphics& g)
         g.drawVerticalLine ((float) x2, 0.0f, (float) getHeight());
     }
 
-    // Spectral selection: committed shapes from the active doc, plus the live
-    // preview while a tool drag is in progress.
+    // Spectral selection: committed shapes from the active doc plus the live
+    // preview while a tool drag is in progress. They are evaluated TOGETHER so
+    // a Ctrl-drag shows its hole in the existing selection immediately.
     {
         static const std::vector<SpectralShape> emptyShapes;
         auto* d = app.doc();
-        drawSpectralShapes (g, d ? d->spectralSel.shapes() : emptyShapes, false);
+        const std::vector<SpectralShape>& committed =
+            (d && !d->spectralSel.empty ()) ? d->spectralSel.shapes () : emptyShapes;
 
+        SpectralShape live;
+        bool haveLive = false;
         if (dragMode == DragMode::Marquee)
         {
-            SpectralShape s;
-            s.kind = SpectralShape::Kind::Rect;
-            s.t0 = liveT0;  s.t1 = liveT1;
-            s.f0 = liveF0;  s.f1 = liveF1;
-            drawSpectralShapes (g, { s }, true);
+            live.kind = SpectralShape::Kind::Rect;
+            live.subtract = toolSubtract;
+            live.t0 = liveT0;  live.t1 = liveT1;
+            live.f0 = liveF0;  live.f1 = liveF1;
+            haveLive = true;
         }
         else if ((dragMode == DragMode::Lasso && !lassoPts.empty ())
                  || (dragMode == DragMode::Paint && !strokePts.empty ()))
         {
-            SpectralShape s;
-            s.kind = dragMode == DragMode::Lasso ? SpectralShape::Kind::Polygon
-                                                 : SpectralShape::Kind::Stroke;
-            s.pts = (dragMode == DragMode::Lasso) ? lassoPts : strokePts;
-            drawSpectralShapes (g, { s }, true);
+            live.kind = dragMode == DragMode::Lasso ? SpectralShape::Kind::Polygon
+                                                   : SpectralShape::Kind::Stroke;
+            live.subtract = toolSubtract;
+            live.pts = (dragMode == DragMode::Lasso) ? lassoPts : strokePts;
+            if (live.kind == SpectralShape::Kind::Stroke)
+                live.rasteriseStroke (app.brushRadiusHz);   // grid needed for contains()
+            haveLive = true;
         }
+
+        drawSpectralShapes (g, committed, haveLive ? &live : nullptr);
     }
 
     // Markers
@@ -1145,18 +1153,39 @@ void SpectralView::syncToolTimeExtent (juce::Range<double> ext)
 }
 
 void SpectralView::drawSpectralShapes (juce::Graphics& g,
-                                      const std::vector<SpectralShape>& shapesIn,
-                                      bool preview)
+                                      const std::vector<SpectralShape>& committedIn,
+                                      const SpectralShape* live)
 {
-    if (shapesIn.empty()) return;
+    const bool preview = (live != nullptr);
+    if (committedIn.empty() && !preview) return;
     const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
     if (rows.empty()) return;
+
+    // Ordered iteration over committed shapes followed by the live preview.
+    const int nShapes = (int) committedIn.size() + (preview ? 1 : 0);
+    auto shapeAt = [&] (int i) -> const SpectralShape&
+    {
+        return i < (int) committedIn.size() ? committedIn[(size_t) i] : *live;
+    };
 
     // Same blue family as the time selection; previews are brighter and dashed.
     const juce::Colour fillCol  = preview ? juce::Colour::fromRGBA (70, 130, 255, 96)
                                           : juce::Colour::fromRGBA (70, 130, 255, 80);
     const juce::Colour edgeCol  = preview ? juce::Colour::fromRGB (140, 180, 255)
                                           : juce::Colour::fromRGB (96, 150, 255);
+
+    // Rasterise the ordered shape list into a per-pixel boolean mask: additive
+    // shapes set bits, subtractive ones clear them. This is exactly what
+    // SpectralSelection::contains() computes, so the overlay shows real holes
+    // where Ctrl-dragged regions were cut out instead of painting more blue on
+    // top - what you see is precisely what gets edited / played back.
+    const int W = getWidth();
+    const size_t totalPx = (size_t) W * (size_t) std::max (1, getHeight());
+    if (selMask.size() < totalPx) selMask.assign (totalPx, 0);
+    std::fill (selMask.begin(), selMask.begin() + totalPx, 0);
+
+    const int plotX = kLeftAxisWidth;
+    const int plotRight = W - 1;
 
     for (const auto& row : rows)
     {
@@ -1165,36 +1194,130 @@ void SpectralView::drawSpectralShapes (juce::Graphics& g,
         const juce::Graphics::ScopedSaveState save (g);
         if (!g.reduceClipRegion (row)) continue;   // row outside the repaint clip
 
-        const double pxPerHz = (freqMax - freqMin) > 1e-9
-            ? (double) row.getHeight() / (freqMax - freqMin) : 0.0;
+        const int rh = std::max (1, row.getHeight());
 
-        for (const auto& s : shapesIn)
+        // Per-row frequency lookup so per-pixel tests stay cheap.
+        std::vector<double> freqAtY ((size_t) rh);
+        for (int y = 0; y < rh; ++y)
+            freqAtY[(size_t) y] = yToFreq ((float) y, rh);
+
+        // Apply every shape in order to this row's pixels.
+        for (int si = 0; si < nShapes; ++si)
         {
+            const SpectralShape& s = shapeAt (si);
+            const juce::Rectangle<double> bb = s.boundingBox();
+            if (bb.getWidth() <= 0 || bb.getHeight() <= 0) continue;
+            // timeToX clamps to the plot, so reject off-screen shapes explicitly.
+            if (bb.getRight() <= viewStart || bb.getX() >= viewEnd) continue;
+
+            int x0 = std::max (plotX, (int) std::floor (timeToX (bb.getX())));
+            int x1 = std::min (plotRight, (int) std::ceil (timeToX (bb.getRight())));
+            if (x1 < x0) continue;
+
+            // Frequency span -> row-local y range (high frequency at the top).
+            const double fLo = bb.getY(), fHi = bb.getY() + bb.getHeight();
+            int yTop = std::max (0, (int) std::floor ((double) freqToY (fHi, rh)));
+            int yBot  = std::min (rh - 1, (int) std::ceil ((double) freqToY (fLo, rh)));
+            if (yBot < yTop) continue;
+
+            uint8_t* const maskBase = selMask.data() + (size_t) row.getY() * W;
+
+            if (s.kind == SpectralShape::Kind::Rect)
+            {
+                // Whole-pixel fill/clear - no per-pixel tests needed.
+                for (int y = yTop; y <= yBot; ++y)
+                    std::fill_n (maskBase + (size_t) y * W + x0, x1 - x0 + 1,
+                                 s.subtract ? uint8_t (0) : uint8_t (1));
+            }
+            else if (s.kind == SpectralShape::Kind::Polygon && s.pts.size() >= 3)
+            {
+                const double tAtX0 = xToTime (x0);
+                const double dtPx  = xToTime (x0 + 1) - tAtX0;
+                for (int y = yTop; y <= yBot; ++y)
+                {
+                    const double f = freqAtY[(size_t) y];
+                    uint8_t* line = maskBase + (size_t) y * W;
+                    // Even-odd ray casting against the polygon edges.
+                    for (int x = x0; x <= x1; ++x)
+                    {
+                        const double t = tAtX0 + dtPx * (double) (x - x0);
+                        bool inside = false;
+                        const auto& pts = s.pts;
+                        for (size_t i = 0, j = pts.size() - 1; i < pts.size(); j = i++)
+                        {
+                            if ((pts[i].second > f) != (pts[j].second > f))
+                            {
+                                const double xCross = pts[i].first
+                                    + (f - pts[i].second)
+                                      * (pts[j].first - pts[i].first)
+                                      / (pts[j].second - pts[i].second);
+                                if (t < xCross) inside = !inside;
+                            }
+                        }
+                        if (inside)
+                            line[x] = s.subtract ? uint8_t (0) : uint8_t (1);
+                    }
+                }
+            }
+            else // Stroke: the committed grid answers contains() in O(1).
+            {
+                const double tAtX0 = xToTime (x0);
+                const double dtPx  = xToTime (x0 + 1) - tAtX0;
+                for (int y = yTop; y <= yBot; ++y)
+                {
+                    const double f = freqAtY[(size_t) y];
+                    uint8_t* line = maskBase + (size_t) y * W;
+                    for (int x = x0; x <= x1; ++x)
+                        if (s.contains (tAtX0 + dtPx * (double) (x - x0), f))
+                            line[x] = s.subtract ? uint8_t (0) : uint8_t (1);
+                }
+            }
+        }
+
+        // Paint the boolean result as horizontal blue runs.
+        g.setColour (fillCol);
+        for (int y = 0; y < rh; ++y)
+        {
+            const uint8_t* line = selMask.data() + ((size_t) row.getY() + (size_t) y) * W;
+            int x = plotX;
+            while (x <= plotRight)
+            {
+                if (!line[x]) { ++x; continue; }
+                const int xs = x;
+                while (x <= plotRight && line[x]) ++x;
+                g.fillRect ((float) xs, (float) (row.getY() + y),
+                            (float) (x - xs), 1.0f);
+            }
+        }
+
+        // Borders: solid for committed additive shapes, dashed for subtractive
+        // ones and live previews (same convention as before).
+        g.setColour (edgeCol);
+        static const float dash[] = { 4.0f, 3.0f };
+        for (int si = 0; si < nShapes; ++si)
+        {
+            const SpectralShape& s = shapeAt (si);
             if (s.kind == SpectralShape::Kind::Rect)
             {
                 const double x0 = timeToX (std::min (s.t0, s.t1));
                 const double x1 = timeToX (std::max (s.t0, s.t1));
-                const double yTop = row.getY() + freqToY (std::max (s.f0, s.f1), row.getHeight());
-                const double yBot = row.getY() + freqToY (std::min (s.f0, s.f1), row.getHeight());
-                g.setColour (fillCol);
-                g.fillRect ((float) x0, (float) std::min (yTop, yBot),
-                            (float) std::max (0.0, x1 - x0),
-                            (float) std::max (0.0, std::abs (yBot - yTop)));
-                g.setColour (edgeCol);
-                const float rx = (float) x0;
-                const float ry = (float) std::min (yTop, yBot);
-                const float rw = (float) std::max (1.0, x1 - x0);
-                const float rh = (float) std::max (1.0, std::abs (yBot - yTop));
+                if (x1 <= plotX || x0 >= plotRight) continue;
+                const float rx = (float) std::max ((double) plotX, x0);
+                const float rw = (float) std::max (1.0, std::min ((double) plotRight, x1) - rx);
+                if (rw <= 0) continue;
+                const double yTop = freqToY (std::max (s.f0, s.f1), rh);
+                const double yBot = freqToY (std::min (s.f0, s.f1), rh);
+                const float ry = (float) std::clamp ((double) std::min (yTop, yBot), 0.0, (double) (rh - 1));
+                const float rb = (float) std::clamp ((double) std::max (yTop, yBot), 0.0, (double) (rh - 1));
                 if (preview || s.subtract)
                 {
-                    static const float dash[] = { 4.0f, 3.0f };
-                    g.drawDashedLine (juce::Line<float> (rx, ry, rx + rw, ry), dash, 2, 1.0f);
-                    g.drawDashedLine (juce::Line<float> (rx + rw, ry, rx + rw, ry + rh), dash, 2, 1.0f);
-                    g.drawDashedLine (juce::Line<float> (rx + rw, ry + rh, rx, ry + rh), dash, 2, 1.0f);
-                    g.drawDashedLine (juce::Line<float> (rx, ry + rh, rx, ry), dash, 2, 1.0f);
+                    g.drawDashedLine (juce::Line<float> (rx, ry + row.getY(), rx + rw, ry + row.getY()), dash, 2, 1.0f);
+                    g.drawDashedLine (juce::Line<float> (rx + rw, ry + row.getY(), rx + rw, rb + row.getY()), dash, 2, 1.0f);
+                    g.drawDashedLine (juce::Line<float> (rx + rw, rb + row.getY(), rx, rb + row.getY()), dash, 2, 1.0f);
+                    g.drawDashedLine (juce::Line<float> (rx, rb + row.getY(), rx, ry + row.getY()), dash, 2, 1.0f);
                 }
                 else
-                    g.drawRect (rx, ry, rw, rh, 1.0f);
+                    g.drawRect (rx, ry + row.getY(), rw, std::max (1.0f, rb - ry), 1.0f);
             }
             else if (s.kind == SpectralShape::Kind::Polygon && s.pts.size() >= 3)
             {
@@ -1202,32 +1325,16 @@ void SpectralView::drawSpectralShapes (juce::Graphics& g,
                 for (size_t i = 0; i < s.pts.size(); ++i)
                 {
                     const double x = timeToX (s.pts[i].first);
-                    const double y = row.getY() + freqToY (s.pts[i].second, row.getHeight());
+                    const double y = row.getY() + freqToY (s.pts[i].second, rh);
                     if (i == 0) p.startNewSubPath ((float) x, (float) y);
                     else        p.lineTo ((float) x, (float) y);
                 }
                 p.closeSubPath ();
-                g.setColour (fillCol);
-                g.fillPath (p);
-                g.setColour (edgeCol);
                 g.strokePath (p, juce::PathStrokeType (1.0f));
             }
-            else if (s.kind == SpectralShape::Kind::Stroke && s.pts.size() >= 2)
-            {
-                // Brush width in pixels for this row.
-                const float w = (float) std::max (1.5, 2.0 * app.brushRadiusHz * pxPerHz);
-                juce::Path p;
-                for (size_t i = 0; i < s.pts.size(); ++i)
-                {
-                    const double x = timeToX (s.pts[i].first);
-                    const double y = row.getY() + freqToY (s.pts[i].second, row.getHeight());
-                    if (i == 0) p.startNewSubPath ((float) x, (float) y);
-                    else        p.lineTo ((float) x, (float) y);
-                }
-                g.setColour (fillCol);
-                g.strokePath (p, juce::PathStrokeType (w));
-            }
+            // Strokes need no extra border: the mask already paints their band.
         }
+
         // ScopedSaveState restores the clip on scope exit.
     }
 }

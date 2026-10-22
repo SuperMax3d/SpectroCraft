@@ -47,6 +47,13 @@ struct SpectralShape
     std::vector<uint8_t> grid;
 
     bool contains (double tSecs, double fHz) const;
+    // Tight bounding box in (timeSecs, freqHz) space: x/y = lower corner,
+    // width/height = spans. Empty for degenerate shapes.
+    juce::Rectangle<double> boundingBox() const;
+
+    // Stroke only: rasterises the stored pts into cols/rows/grid at the given
+    // brush radius (Hz). Needed before contains() can answer for a stroke.
+    void rasteriseStroke (double radiusHz);
 };
 
 class SpectralSelection

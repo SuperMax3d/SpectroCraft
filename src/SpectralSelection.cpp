@@ -44,10 +44,33 @@ bool SpectralShape::contains (double tSecs, double fHz) const
     return false;
 }
 
-// Rasterises a paint path into the shape's grid (defined below).
-static void rasteriseStrokeFromPoints (SpectralShape& out,
-                                       const std::vector<std::pair<double, double>>& pts,
-                                       double radiusHz);
+juce::Rectangle<double> SpectralShape::boundingBox() const
+{
+    switch (kind)
+    {
+        case Kind::Rect:
+            return { std::min (t0, t1), std::min (f0, f1),
+                     std::max (t0, t1) - std::min (t0, t1),
+                     std::max (f0, f1) - std::min (f0, f1) };
+
+        case Kind::Polygon:
+        {
+            if (pts.size() < 3) return {};
+            double loT = 1e30, hiT = -1e30, loF = 1e30, hiF = -1e30;
+            for (const auto& p : pts)
+            {
+                loT = std::min (loT, p.first);  hiT = std::max (hiT, p.first);
+                loF = std::min (loF, p.second); hiF = std::max (hiF, p.second);
+            }
+            return { loT, loF, hiT - loT, hiF - loF };
+        }
+
+        case Kind::Stroke:
+            if (cols <= 0 || rows <= 0) return {};
+            return { t0, f0, t1 - t0, f1 - f0 };
+    }
+    return {};
+}
 
 void SpectralSelection::clear()
 {
@@ -115,17 +138,17 @@ void SpectralSelection::addStroke (std::vector<std::pair<double, double>> ptsIn,
     s.kind = SpectralShape::Kind::Stroke;
     s.subtract = subtract;
     s.pts = pts;   // kept for rendering (the grid is only used by contains())
-    rasteriseStrokeFromPoints (s, pts, std::max (1.0, radiusHz));
+    s.rasteriseStroke (std::max (1.0, radiusHz));
     shapeList.push_back (std::move (s));
 }
 
-// Rasterises a paint path into the shape's grid. Resolution is fixed in
+// Rasterises the stored pts into cols/rows/grid. Resolution is fixed in
 // absolute units (~512 columns/second, ~32 Hz/row) and capped at 4096x4096
 // cells so even hour-long strokes stay small (<= 2 MB).
-static void rasteriseStrokeFromPoints (SpectralShape& out,
-                                       const std::vector<std::pair<double, double>>& pts,
-                                       double radiusHz)
+void SpectralShape::rasteriseStroke (double radiusHz)
 {
+    if (kind != Kind::Stroke || pts.empty()) return;
+
     double tMin = 1e30, tMax = -1e30, fMin = 1e30, fMax = -1e30;
     for (auto& p : pts)
     {
@@ -137,34 +160,34 @@ static void rasteriseStrokeFromPoints (SpectralShape& out,
 
     const double colSpan = std::max (1.0 / 512.0, tSpan / 4096.0);
     const double rowHz   = std::max (32.0, fSpan / 4096.0);
-    out.cols = (int) std::min <double> (4096.0, std::ceil (tSpan / colSpan));
-    out.rows = (int) std::min <double> (4096.0, std::ceil (fSpan / rowHz));
-    if (out.cols <= 0 || out.rows <= 0) return;
+    cols = (int) std::min <double> (4096.0, std::ceil (tSpan / colSpan));
+    rows = (int) std::min <double> (4096.0, std::ceil (fSpan / rowHz));
+    if (cols <= 0 || rows <= 0) return;
 
     // The grid covers the path plus one brush radius of margin on every side.
-    out.t0 = tMin - colSpan * 0.5;
-    out.t1 = out.t0 + out.cols * colSpan;
-    out.f0 = fMin - radiusHz - rowHz * 0.5;
-    out.f1 = out.f0 + out.rows * rowHz;
+    t0 = tMin - colSpan * 0.5;
+    t1 = t0 + cols * colSpan;
+    f0 = fMin - radiusHz - rowHz * 0.5;
+    f1 = f0 + rows * rowHz;
 
-    const size_t nBits = (size_t) out.cols * (size_t) out.rows;
-    out.grid.assign ((nBits + 7) >> 3, 0);
+    const size_t nBits = (size_t) cols * (size_t) rows;
+    grid.assign ((nBits + 7) >> 3, 0);
 
     auto setBit = [&] (int c, int r) {
-        if (c < 0 || c >= out.cols || r < 0 || r >= out.rows) return;
-        const size_t bit = (size_t) c * (size_t) out.rows + (size_t) r;
-        out.grid[bit >> 3] |= (uint8_t) (1u << (bit & 7));
+        if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+        const size_t bit = (size_t) c * (size_t) rows + (size_t) r;
+        grid[bit >> 3] |= (uint8_t) (1u << (bit & 7));
     };
 
     for (auto& p : pts)
     {
-        const int c = (int) std::floor ((p.first - out.t0) / colSpan);
+        const int c = (int) std::floor ((p.first - t0) / colSpan);
         // Rows whose centre lies within the brush radius of the point's freq.
-        double rLo = (p.second - radiusHz - 0.5 * rowHz - out.f0) / rowHz;
-        double rHi = (p.second + radiusHz - 0.5 * rowHz - out.f0) / rowHz;
+        double rLo = (p.second - radiusHz - 0.5 * rowHz - f0) / rowHz;
+        double rHi = (p.second + radiusHz - 0.5 * rowHz - f0) / rowHz;
         int r0 = (int) std::floor (rLo);
         int r1 = (int) std::ceil (rHi) - 1;
-        if (r1 < r0) { r0 = r1 = (int) std::lround ((p.second - out.f0) / rowHz); }
+        if (r1 < r0) { r0 = r1 = (int) std::lround ((p.second - f0) / rowHz); }
         for (int r = r0; r <= r1; ++r)
             setBit (c, r);
     }

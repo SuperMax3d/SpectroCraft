@@ -6035,6 +6035,60 @@ static void testSpectralSelectionModel()
     CHECK (add2.count() == 2, "shift-add keeps previous shapes");
 }
 
+// ---------------- Spectral selection rendering: subtractive shapes render as holes ----------------
+static void testSpectralSelectionRenderHole()
+{
+    const juce::File wav = makeTempFile ("sel_hole.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for selection render test");
+
+    SpectralView view (app);
+    view.setSize (256, 128);
+    // Exactly the file length: the engine maps pixels onto the data range, so a
+    // wider view would stretch the content and smear colours across the plot.
+    view.setViewRange (0.0, 0.5);
+    view.setVisibleChannels ({ 0 });
+    view.setSettings (app.settings);
+
+    // A: additive rect; B: subtractive rect fully inside A -> final selection is A minus B.
+    auto& sel = app.doc()->spectralSel;
+    sel.addRect (0.1, 0.4, 100.0, 700.0, false);                    // A
+    sel.addRect (0.2, 0.3, 200.0, 600.0, true, /*replace=*/false);  // B: hole in the middle
+
+    juce::Image img (juce::Image::ARGB, 256, 128, true);
+    { juce::Graphics g (img); view.paint (g); }
+
+    // Baseline render with no selection at all. The overlay must be the ONLY
+    // difference between the two images — comparing against it is immune to
+    // whatever spectral content (tone lines, sidelobe halos) sits underneath.
+    sel.clear ();
+    juce::Image base (juce::Image::ARGB, 256, 128, true);
+    { juce::Graphics g0 (base); view.paint (g0); }
+
+    auto sameAsBase = [&] (int x, int y) { return img.getPixelAt (x, y) == base.getPixelAt (x, y); };
+    // The selection fill is RGBA(70,130,255,~80): over any dark background it
+    // lands around (44,60,105) — clearly blue-dominant.
+    auto blueTint = [] (const juce::Colour& p) { return p.getBlue() - p.getRed() > 40; };
+
+    const int yLow   = (int) view.freqToY (250.0, 128);  // inside both rects' freq span
+    const int xAonly = (int) view.timeToX (0.15);        // inside A only -> blue fill
+    CHECK (!sameAsBase (xAonly, yLow), "additive area differs from the no-selection baseline");
+    CHECK (blueTint (img.getPixelAt (xAonly, yLow)), "additive area renders blue");
+
+    const int xHole = (int) view.timeToX (0.25);         // inside A and B -> hole, no fill
+    CHECK (sameAsBase (xHole, yLow), "subtractive overlap renders as a hole");
+
+    const int xOut  = (int) view.timeToX (0.45);         // outside both shapes -> no fill
+    CHECK (sameAsBase (xOut, yLow), "area outside the selection is untouched");
+
+    wav.deleteFile();
+}
+
 // DFT amplitude of a pure tone in a buffer (leakage-tolerant).
 static float toneAmp (const std::vector<float>& x, size_t from, size_t to,
                       double freqHz, double rate)
@@ -7224,6 +7278,7 @@ static int scRunUnitTestsImpl()
     progress ("transcription panel layout"); testTranscriptionPanelLayout();
 #endif
     progress ("spectral selection model");  testSpectralSelectionModel();
+    progress ("selection render hole");     testSpectralSelectionRenderHole();
     progress ("masked gain + zero-out");    testMaskedGainAndZero();
     progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
     progress ("extract masked A+B=orig");   testExtractMasked();
