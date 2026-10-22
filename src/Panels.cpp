@@ -2949,3 +2949,287 @@ bool TranscriptionPanel::findNext()
     return false;
 }
 #endif // SC_ENABLE_AI
+
+// ------------------------------------------------- Selection panel
+
+static void showSelectionMessage (const juce::String& title, const juce::String& msg)
+{
+    juce::AlertWindow dlg (title, msg, juce::AlertWindow::WarningIcon);
+    dlg.setColour (juce::AlertWindow::backgroundColourId,
+                   juce::Colour::fromRGB (45, 45, 48));
+    dlg.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.runModalLoop ();
+}
+
+SelectionPanel::Model::Model (SelectionPanel* ownerIn) : owner (ownerIn) {}
+
+int SelectionPanel::Model::getNumRows()
+{
+    auto* d = owner->app.doc ();
+    return d != nullptr ? (int) d->savedSelections.size () : 0;
+}
+
+void SelectionPanel::Model::paintRowBackground (juce::Graphics& g, int, int width, int height,
+                                                bool selected)
+{
+    if (selected)
+    {
+        g.setColour (juce::Colour::fromRGB (60, 80, 120));
+        g.fillRect (0, 0, width, height);
+    }
+}
+
+void SelectionPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int columnId,
+                                       int width, int height, bool)
+{
+    auto* d = owner->app.doc ();
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->savedSelections.size ()) return;
+    const SavedSpectralSelection& s = d->savedSelections [(size_t) rowNumber];
+
+    g.setFont (11.0f);
+    if (columnId == 1)   // name
+    {
+        g.setColour (juce::Colours::white);
+        g.drawText (s.name, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
+    }
+    else   // shape count
+    {
+        g.setColour (juce::Colours::lightgrey);
+        g.drawText (juce::String (s.data.count ()), 4, 0, width - 8, height,
+                    juce::Justification::centredRight, false);
+    }
+}
+
+void SelectionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
+{
+    owner->doRecall (rowNumber);
+}
+
+SelectionPanel::SelectionPanel (Application& appIn)
+    : app (appIn),
+      saveBtn ("Save"), recallBtn ("Recall"), deleteBtn ("Delete"),
+      diskToggle ("Save to disk"), applyMultBtn ("Apply"), pickBtn ("Pick points...")
+{
+    auto& header = table.getHeader();
+    // JUCE TableHeaderComponent column IDs must be non-zero.
+    header.addColumn ("Name", 1, 160);
+    header.addColumn ("Shapes", 2, 70);
+
+    savedLab.setText ("Saved selections", juce::dontSendNotification);
+    cloneLab.setText ("Clone & Multiply", juce::dontSendNotification);
+    multHintLab.setText ("Multipliers of the current selection, e.g. 0.5, 2, 5",
+                        juce::dontSendNotification);
+
+    addAndMakeVisible (&savedLab);
+    addAndMakeVisible (&table);
+    addAndMakeVisible (&saveBtn);
+    addAndMakeVisible (&recallBtn);
+    addAndMakeVisible (&deleteBtn);
+    addAndMakeVisible (&diskToggle);
+    addAndMakeVisible (&cloneLab);
+    addAndMakeVisible (&multHintLab);
+    addAndMakeVisible (&multEdit);
+    addAndMakeVisible (&applyMultBtn);
+    addAndMakeVisible (&pickBtn);
+
+    saveBtn.onClick = [this] { doSave (); };
+    recallBtn.onClick = [this] { doRecall (table.getSelectedRow ()); };
+    deleteBtn.onClick = [this] { doDelete (); };
+    diskToggle.setClickingTogglesState (true);
+    diskToggle.onClick = [this] { toggleDisk (); };
+    applyMultBtn.onClick = [this] { doApplyMultipliers (); };
+    pickBtn.onClick = [this] { togglePick (); };   // plain button; label driven by refresh()
+
+    saveBtn.setTooltip ("Store the current spectral selection under a name. Saving again with "
+                        "the same name updates that entry.");
+    recallBtn.setTooltip ("Replace the current spectral selection with the selected saved one "
+                         "(double-clicking a row does the same).");
+    deleteBtn.setTooltip ("Remove the selected saved selection from this file's list.");
+    diskToggle.setTooltip ("Keep the list in sync with \"<file>.selections.json\" next to the audio "
+                          "file so it survives restarts. Off = in-memory only for this session.");
+    multHintLab.setTooltip ("Each number becomes a clone of the current selection whose frequencies "
+                           "(and thickness) are multiplied by that factor - e.g. 2 and 5 select the "
+                           "2nd and 5th harmonics of a fundamental band.");
+    applyMultBtn.setTooltip ("Append clones of the current selection at the given frequency multipliers.");
+    pickBtn.setTooltip ("Interactive mode: click a reference point in the spectrogram, then click "
+                       "each target frequency. Each click adds clones scaled by (clicked / reference). "
+                       "Esc or this button ends the session.");
+
+    refresh();
+}
+
+void SelectionPanel::refresh()
+{
+    table.updateContent ();
+    table.repaint ();
+
+    auto* d = app.doc ();
+    const bool hasSel = app.hasSpectralSelection ();
+    saveBtn.setEnabled (hasSel);
+    applyMultBtn.setEnabled (hasSel);
+    pickBtn.setEnabled (d != nullptr && hasSel && !app.isClonePicking ());
+
+    const int selRow = table.getSelectedRow ();
+    const bool haveRow = d != nullptr && selRow >= 0 && selRow < (int) d->savedSelections.size ();
+    recallBtn.setEnabled (haveRow);
+    deleteBtn.setEnabled (haveRow);
+
+    // Keep the toggle/button states in step with the app without firing clicks.
+    diskToggle.setToggleState (d != nullptr && d->selectionsOnDisk,
+                               juce::dontSendNotification);
+    pickBtn.setButtonText (app.isClonePicking () ? "Stop picking" : "Pick points...");
+}
+
+void SelectionPanel::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+
+    // Separator between the saved-selections and clone & multiply sections.
+    const int y = multHintLab.getY () - 6;
+    if (y > table.getBottom ())
+    {
+        g.setColour (juce::Colour::fromRGB (70, 70, 76));
+        g.drawLine (4, y, getWidth () - 4, y);
+    }
+}
+
+void SelectionPanel::resized()
+{
+    auto b = getLocalBounds ().reduced (4, 4);
+
+    // Fixed-height rows from the bottom up; the table takes what is left.
+    const int rowH = 28;
+    auto pickRow   = b.removeFromBottom (rowH + 6);
+    auto applyRow  = b.removeFromBottom (rowH + 6);
+    auto hintRow   = b.removeFromBottom (18);
+    auto cloneRow  = b.removeFromBottom (20);
+    auto btnRow    = b.removeFromBottom (rowH + 8);
+
+    savedLab.setBounds (b.getX (), b.getY () + 2, b.getWidth (), 16);
+    table.setBounds (b.getX (), savedLab.getBottom () + 4,
+                    b.getWidth (), std::max (60, btnRow.getY () - savedLab.getBottom () - 8));
+
+    const int gap = 8;
+    const int bw = std::max (52, (btnRow.getWidth () - gap * 3) / 4);
+    saveBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, bw, rowH);
+    recallBtn.setBounds (saveBtn.getRight () + gap, btnRow.getY () + 2, bw, rowH);
+    deleteBtn.setBounds (recallBtn.getRight () + gap, btnRow.getY () + 2, bw, rowH);
+    diskToggle.setBounds (deleteBtn.getRight () + gap, btnRow.getY () + 2,
+                         std::max (70, btnRow.getWidth () - (deleteBtn.getRight () - btnRow.getX ()) - gap),
+                         rowH);
+
+    cloneLab.setBounds (cloneRow.getX (), cloneRow.getY () + 1, cloneRow.getWidth (), 16);
+    multHintLab.setBounds (hintRow.getX (), hintRow.getY (), hintRow.getWidth (), 14);
+
+    const int applyW = 70;
+    multEdit.setBounds (applyRow.getX (), applyRow.getY () + 2,
+                       std::max (80, applyRow.getWidth () - applyW - gap), rowH);
+    applyMultBtn.setBounds (multEdit.getRight () + gap, applyRow.getY () + 2, applyW, rowH);
+
+    pickBtn.setBounds (pickRow.getX (), pickRow.getY () + 2, pickRow.getWidth (), rowH);
+}
+
+void SelectionPanel::doSave()
+{
+    auto* d = app.doc ();
+    if (d == nullptr || d->spectralSel.empty ()) return;
+
+    juce::AlertWindow dlg ("Save Selection",
+                          "Name for this spectral selection:",
+                          juce::AlertWindow::NoIcon);
+    dlg.setColour (juce::AlertWindow::backgroundColourId,
+                   juce::Colour::fromRGB (45, 45, 48));
+
+    // This JUCE build's addTextEditor returns void; fetch the editor by name.
+    dlg.addTextEditor ("name", "", "Name:");
+    auto* ed = dlg.getTextEditor ("name");
+    dlg.addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (ed != nullptr)
+    {
+        ed->setWantsKeyboardFocus (true);
+        ed->selectAll();
+        ed->grabKeyboardFocus();
+    }
+
+    if (dlg.runModalLoop () != 1 || ed == nullptr) return;
+    const juce::String name = ed->getText ().trim ();
+    if (name.isEmpty ())
+    {
+        showSelectionMessage ("Save Selection", "Please enter a name.");
+        return;
+    }
+
+    SavedSpectralSelection s;
+    s.name = name;
+    s.data = d->spectralSel;   // deep copy of the current shapes
+
+    bool replaced = false;
+    for (auto& e : d->savedSelections)
+        if (e.name == name) { e = std::move (s); replaced = true; break; }
+    if (!replaced)
+        d->savedSelections.push_back (std::move (s));
+
+    if (d->selectionsOnDisk)
+        d->saveSelectionsToDisk ();
+    refresh();
+}
+
+void SelectionPanel::doRecall (int row)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
+    app.setSpectralSelectionFrom (d->savedSelections [(size_t) row].data);
+    refresh();
+}
+
+void SelectionPanel::doDelete()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+    const int row = table.getSelectedRow ();
+    if (row < 0 || row >= (int) d->savedSelections.size ()) return;
+
+    d->savedSelections.erase (d->savedSelections.begin () + row);
+    if (d->selectionsOnDisk)
+        d->saveSelectionsToDisk ();
+    refresh();
+}
+
+void SelectionPanel::doApplyMultipliers()
+{
+    std::string err;
+    const auto mults = Application::parseMultiplierList (multEdit.getText (), &err);
+    if (mults.empty ())
+    {
+        showSelectionMessage ("Clone & Multiply", juce::String (err));
+        return;
+    }
+    if (!app.cloneAndMultiplySelection (mults, &err))
+    {
+        showSelectionMessage ("Clone & Multiply", juce::String (err));
+        return;
+    }
+    refresh();
+}
+
+void SelectionPanel::toggleDisk()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+    const bool on = diskToggle.getToggleState ();
+    if (on)
+        d->saveSelectionsToDisk ();   // sets selectionsOnDisk=true when it succeeds
+    else
+        d->selectionsOnDisk = false;  // stop syncing; the sidecar file stays as-is
+    refresh();
+}
+
+void SelectionPanel::togglePick()
+{
+    if (app.isClonePicking ())
+        app.endClonePick ();
+    else
+        app.startClonePick ();   // fires onStateChange -> syncSharedState -> refresh()
+}

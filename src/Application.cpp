@@ -228,6 +228,7 @@ void Application::clearRecentFiles()
 void Application::activate (int index)
 {
     if (index < 0 || index >= (int) docs.size()) return;
+    endClonePick ();   // a picking session belongs to the doc being left
     FileDoc* d = docs[(size_t) index].get();
 
     // Save the current UI state back into the doc being left and stop its
@@ -283,6 +284,7 @@ void Application::closeFile()
 void Application::closeDoc (int index)
 {
     if (index < 0 || index >= (int) docs.size()) return;
+    endClonePick ();   // a picking session belongs to the doc being closed
     FileDoc& d = *docs[(size_t) index];
 
     const bool wasActive = (index == activeDocIndex);
@@ -397,6 +399,131 @@ bool Application::hasSpectralSelection () const
 {
     auto* d = doc();
     return d && !d->spectralSel.empty ();
+}
+
+void Application::refreshSpectralSelectionUI ()
+{
+    auto* d = doc ();
+    if (!d) return;
+    // Mirror the selection's time extent into the shared time selection (the
+    // same way the spectral tools' commit path does), re-install the playback
+    // mask and let the UI refresh.
+    const double dur = audioEngine ().duration ();
+    auto ext = d->spectralSel.timeExtent ().getIntersectionWith ({ 0, std::max (1e-9, dur) });
+    setSelection (ext.getLength () > 1e-9 ? ext : juce::Range<double> { 0, 0 });
+    pushSpectralMaskToEngine ();
+    if (onStateChange)
+        onStateChange ();
+}
+
+std::vector<double> Application::parseMultiplierList (const juce::String& text,
+                                                      std::string* errOut)
+{
+    auto fail = [&] (const juce::String& msg) { if (errOut) *errOut = msg.toStdString (); return std::vector<double> {}; };
+
+    // This JUCE build's fromTokens takes (string, breakChars, quoteChars).
+    const auto tokens = juce::StringArray::fromTokens (text.trim (),
+                                                       juce::String (" \t\r\n,;"),
+                                                       juce::String());
+    if (tokens.isEmpty ())
+        return fail ("Enter at least one multiplier, e.g. 0.5, 2, 5.");
+
+    std::vector<double> out;
+    // No range-for: this JUCE build's StringArray has no begin()/end().
+    for (int i = 0; i < tokens.size(); ++i)
+    {
+        const juce::String t = tokens[i].trim ();
+        if (t.isEmpty ()) continue;
+        // Strict digit check: getDoubleValue() would silently accept "2x".
+        bool okNum = !t.isEmpty ();
+        for (int i = 0; i < t.length(); ++i)
+        {
+            const char16_t c = t[i];
+            if (!((c >= '0' && c <= '9') || c == '.' || c == '+' || c == '-'
+                  || c == 'e' || c == 'E')) { okNum = false; break; }
+        }
+        const double v = t.getDoubleValue ();
+        if (!okNum || !std::isfinite (v) || !(v > 0.0))
+            return fail ("Each multiplier must be a positive number: \"" + t + "\".");
+        out.push_back (v);
+    }
+    if (out.empty ())
+        return fail ("Enter at least one multiplier, e.g. 0.5, 2, 5.");
+    return out;
+}
+
+bool Application::cloneAndMultiplySelection (const std::vector<double>& multipliers,
+                                             std::string* errOut)
+{
+    auto fail = [&] (const juce::String& msg) { if (errOut) *errOut = msg.toStdString (); return false; };
+
+    auto* d = doc ();
+    if (!d || d->spectralSel.empty ())
+        return fail ("No spectral selection to clone.");
+    if (multipliers.empty ())
+        return fail ("Enter at least one multiplier, e.g. 0.5, 2, 5.");
+    for (double m : multipliers)
+        if (!(m > 0.0) || !std::isfinite (m))
+            return fail ("Multipliers must be positive numbers.");
+
+    d->spectralSel.addScaledClones (multipliers);
+    refreshSpectralSelectionUI ();
+    return true;
+}
+
+void Application::setSpectralSelectionFrom (const SpectralSelection& sel)
+{
+    auto* d = doc ();
+    if (!d) return;
+    d->spectralSel = sel;   // deep copy of the stored shapes
+    refreshSpectralSelectionUI ();
+}
+
+void Application::startClonePick ()
+{
+    auto* d = doc ();
+    if (!d || d->spectralSel.empty ()) return;
+    clonePicking = true;
+    haveClonePickRef = false;
+    clonePickPts.clear ();
+    // Every click clones this snapshot - never the clones added by earlier
+    // clicks in the same session (see SpectralSelection::appendScaledShapesFrom).
+    clonePickBase = d->spectralSel;
+    if (onStateChange)
+        onStateChange ();   // status bar hint + panel button state
+}
+
+void Application::endClonePick ()
+{
+    if (!clonePicking) return;
+    clonePicking = false;
+    haveClonePickRef = false;
+    clonePickPts.clear ();
+    clonePickBase.clear ();
+    if (onStateChange)
+        onStateChange ();
+}
+
+bool Application::clonePickClick (double tSecs, double fHz)
+{
+    auto* d = doc ();
+    if (!d || d->spectralSel.empty () || !(fHz > 0.0))
+        return false;
+
+    clonePickPts.emplace_back (tSecs, fHz);
+    if (!haveClonePickRef)
+    {
+        haveClonePickRef = true;
+        clonePickRefF = fHz;
+        if (onStateChange) onStateChange ();   // status bar shows the reference
+    }
+    else
+    {
+        // Clone the session-start snapshot, not the growing selection.
+        d->spectralSel.appendScaledShapesFrom (clonePickBase, fHz / clonePickRefF);
+        refreshSpectralSelectionUI ();
+    }
+    return true;
 }
 
 // Sample range covered by the active spectral selection (its time extent).

@@ -139,6 +139,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     transcriptionPanel = std::make_unique<TranscriptionPanel> (app);
 #endif
+    selectionPanel = std::make_unique<SelectionPanel> (app);
     historyPanel  = std::make_unique<HistoryPanel> (app);
 
     fileListPanel->onOpenRequested = [this] { handleFileOpen(); };
@@ -166,6 +167,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     if (transcriptionPanel)
         transcriptionPanel->onRunRequested = [this] { showTranscribeDialog (); };
 #endif
+    bottomTabs.addTab ("Selection", kDarkTabBg, selectionPanel.get(), false);
     // Frequency Analysis is the default tab in the top group.
     topTabs.setCurrentTabIndex (1, false);
     bottomTabs.setCurrentTabIndex (0, false);
@@ -600,6 +602,7 @@ const char* MainWindow::panelIdFor (juce::Component* c) const
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     if (c == transcriptionPanel.get())  return "transcription";
 #endif
+    if (c == selectionPanel.get())      return "selection";
     return nullptr;
 }
 
@@ -668,6 +671,7 @@ void MainWindow::applySavedLeftLayout()
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         { "transcription","Transcription",     transcriptionPanel.get(), false },
 #endif
+        { "selection",   "Selection",           selectionPanel.get(),  false },
     };
 
     const juce::String saved = app.recentStore->getValue ("left_tab_layout");
@@ -882,6 +886,13 @@ void MainWindow::syncSharedState()
                 break;
             default: break;
         }
+
+        // Clone & Multiply picking overrides the tool indicator with a hint.
+        if (app.isClonePicking ())
+            mode = app.hasClonePickRef ()
+                       ? juce::String ("Clone pick  ref ") +
+                         juce::String ((int) std::lround (app.clonePickRefFreq())) + " Hz"
+                       : "Clone pick: click the reference frequency";
         statusBar->setModeText (mode);
     }
 
@@ -896,6 +907,7 @@ void MainWindow::refreshPanels()
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     if (transcriptionPanel) transcriptionPanel->refresh();
 #endif
+    if (selectionPanel)   selectionPanel->refresh();
     if (historyPanel)   historyPanel->refresh();
     if (fftPanel)       fftPanel->repaint();
 }
@@ -2710,11 +2722,20 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         }
     }
 
-    // ESC clears the active spectral selection (time selection is untouched).
-    if (keyCode == juce::KeyPress::escapeKey && app.hasSpectralSelection ())
+    // ESC ends an active clone-picking session first; otherwise it clears
+    // the active spectral selection (time selection is untouched).
+    if (keyCode == juce::KeyPress::escapeKey)
     {
-        app.clearSpectralSelection ();
-        return true;
+        if (app.isClonePicking ())
+        {
+            app.endClonePick ();
+            return true;
+        }
+        if (app.hasSpectralSelection ())
+        {
+            app.clearSpectralSelection ();
+            return true;
+        }
     }
 
     if (key == juce::KeyPress (juce::KeyPress::F3Key, juce::ModifierKeys::noModifiers, 0))

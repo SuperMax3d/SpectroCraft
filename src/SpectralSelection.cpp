@@ -145,7 +145,8 @@ void SpectralSelection::addStroke (std::vector<std::pair<double, double>> ptsIn,
     s.kind = SpectralShape::Kind::Stroke;
     s.subtract = subtract;
     s.pts = pts;   // kept for rendering (the grid is only used by contains())
-    s.rasteriseStroke (std::max (1.0, radiusHz));
+    s.strokeRadiusHz = std::max (1.0, radiusHz);
+    s.rasteriseStroke (s.strokeRadiusHz);
     shapeList.push_back (std::move (s));
 }
 
@@ -201,6 +202,54 @@ void SpectralShape::rasteriseStroke (double radiusHz)
         for (int r = r0; r <= r1; ++r)
             setBit (c, r);
     }
+}
+
+// Appends a copy of one shape with all frequencies multiplied by m. Time
+// coordinates are untouched; stroke radii scale too so the clone's thickness
+// is stretched, not just shifted.
+void SpectralSelection::appendScaledShape (const SpectralShape& sIn, double m)
+{
+    if (!(m > 0.0) || !std::isfinite (m)) return;
+    SpectralShape c = sIn;   // deep copy
+    switch (c.kind)
+    {
+        case SpectralShape::Kind::Rect:
+            c.f0 *= m;
+            c.f1 *= m;
+            break;
+        case SpectralShape::Kind::Polygon:
+            for (auto& p : c.pts) p.second *= m;
+            break;
+        default:   // Stroke: re-stamp the scaled path at the scaled radius.
+            for (auto& p : c.pts) p.second *= m;
+            c.strokeRadiusHz = std::max (1.0, c.strokeRadiusHz * m);
+            c.cols = 0; c.rows = 0; c.grid.clear ();
+            c.rasteriseStroke (c.strokeRadiusHz);
+            break;
+    }
+    shapeList.push_back (std::move (c));
+}
+
+SpectralSelection SpectralSelection::scaledCopy (double m) const
+{
+    SpectralSelection out;
+    for (const auto& s : shapeList)
+        out.appendScaledShape (s, m);
+    return out;
+}
+
+void SpectralSelection::appendScaledShapesFrom (const SpectralSelection& src, double m)
+{
+    for (const auto& s : src.shapeList)
+        appendScaledShape (s, m);
+}
+
+void SpectralSelection::addScaledClones (const std::vector<double>& multipliers)
+{
+    if (shapeList.empty () || multipliers.empty ()) return;
+    const SpectralSelection snapshot = *this;   // clones must not clone themselves
+    for (double m : multipliers)
+        appendScaledShapesFrom (snapshot, m);
 }
 
 juce::Range<double> SpectralSelection::timeExtent() const

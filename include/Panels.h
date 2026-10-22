@@ -740,6 +740,64 @@ private:
 };
 #endif // SC_ENABLE_AI
 
+// ------------------------------------------------- Selection panel
+
+/** Named spectral selections (store / recall) + "Clone & Multiply" for
+    picking out harmonics of the current selection.
+
+    - The table lists this file's saved selections; double-click recalls one
+      (it replaces the current spectral selection). Save stores the CURRENT
+      selection under a name (same name = update), Delete removes an entry.
+    - "Save to disk" keeps the list in sync with "<file>.selections.json"
+      next to the audio file, so it survives restarts.
+    - Clone & Multiply appends additive clones of the current selection at
+      user-given frequency multipliers (e.g. 0.5, 2, 5); clone thickness is
+      stretched by the same factor. The interactive "Pick points..." mode
+      does the same with clicks: first click = reference frequency, each
+      following click adds clones at (clicked freq / ref freq). */
+class SelectionPanel : public juce::Component
+{
+public:
+    explicit SelectionPanel (Application& app);
+    void paint (juce::Graphics& g) override;
+    void resized() override;
+    void refresh();   // call after doc changes / selection or list changes
+
+private:
+    Application& app;
+
+    class Model : public juce::TableListBoxModel
+    {
+    public:
+        explicit Model (SelectionPanel* owner);
+        int getNumRows() override;
+        void paintRowBackground (juce::Graphics& g, int rowNumber, int width, int height,
+                                 bool selected) override;
+        void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
+                        bool selected) override;
+        void cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+
+    private:
+        SelectionPanel* owner;
+    };
+
+    Model model { this };
+    juce::TableListBox table { "", &model };
+
+    juce::TextButton saveBtn, recallBtn, deleteBtn, diskToggle, applyMultBtn, pickBtn;
+    juce::Label savedLab, cloneLab, multHintLab;
+    juce::TextEditor multEdit;
+
+    void doSave();
+    void doRecall (int row);
+    void doDelete();
+    void doApplyMultipliers();
+    void toggleDisk();
+    void togglePick();
+
+    JUCE_DECLARE_NON_COPYABLE (SelectionPanel)
+};
+
 // ---------------------------------------------------------------- Status bar
 
 // Thin strip at the bottom of the window: active file name + mouse probe info

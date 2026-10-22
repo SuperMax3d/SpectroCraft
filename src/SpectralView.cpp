@@ -151,6 +151,15 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
+    // Clone & Multiply picking (Selection panel): left clicks inside the plot
+    // pick a reference frequency first, then target frequencies afterwards.
+    if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
+        && e.x >= kLeftAxisWidth && app.isClonePicking ())
+    {
+        app.clonePickClick (xToTime ((double) e.x), freqAtY (e.y));
+        return;
+    }
+
     // Right button: box-zoom drag. A plain right-click (no significant
     // movement) still shows the context menu, deferred to mouseUp.
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
@@ -1159,6 +1168,27 @@ void SpectralView::drawOverlays (juce::Graphics& g)
             const double yBot = row.getY() + freqToY (std::max (0.0, f - app.brushRadiusHz), row.getHeight());
             g.fillRect ((float) probeX - 1.0f, (float) std::min (yTop, yBot), 2.0f,
                         (float) std::max (0.0, std::abs (yBot - yTop)));
+        }
+    }
+
+    // Clone & Multiply picking markers: the reference point (orange) and each
+    // clicked target (cyan), drawn on every channel row.
+    if (app.isClonePicking ())
+    {
+        const auto& pts = app.clonePickPoints ();
+        for (size_t i = 0; i < pts.size(); ++i)
+        {
+            const double t = pts[i].first, f = pts[i].second;
+            if (t < viewStart || t > viewEnd) continue;
+            const int x = timeToX (t);
+            g.setColour (i == 0 ? juce::Colours::orange : juce::Colours::cyan);
+            for (const auto& row : spectralRowRects (getWidth(), getHeight (), (int) channels.size()))
+            {
+                const int y = freqToY (f, row.getHeight());
+                if (y < 0 || y >= row.getHeight()) continue;
+                g.drawEllipse ((float) x - 5.0f, (float) row.getY() + y - 5.0f,
+                              10.0f, 10.0f, 1.5f);
+            }
         }
     }
 

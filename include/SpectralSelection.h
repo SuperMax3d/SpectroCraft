@@ -45,6 +45,7 @@ struct SpectralShape
     // cols x rows cells; a set bit means the brush painted that cell.
     int cols = 0, rows = 0;
     std::vector<uint8_t> grid;
+    double strokeRadiusHz = 0.0;   // Stroke only: brush half-width used at stamp time
 
     bool contains (double tSecs, double fHz) const;
     // Tight bounding box in (timeSecs, freqHz) space: x/y = lower corner,
@@ -108,6 +109,23 @@ public:
     void addStroke (std::vector<std::pair<double, double>> pts,
                     double radiusHz, bool subtract, bool replace = true);
 
+    /** Returns a copy of this selection with every frequency multiplied by m
+        (time coordinates unchanged). Stroke brush radii are scaled too, so a
+        clone's thickness is stretched proportionally - not just offset.
+        Each shape keeps its additive/subtractive flag. */
+    SpectralSelection scaledCopy (double m) const;
+
+    /** Appends clones of every CURRENT shape at each given frequency
+        multiplier (the original shapes stay in place, so the result contains
+        the original pattern plus one scaled copy per multiplier). Clones are
+        built from a snapshot, so they never clone themselves. */
+    void addScaledClones (const std::vector<double>& multipliers);
+
+    /** Appends frequency-scaled copies of every shape in `src` at multiplier m.
+        Used by the interactive pick mode, which always clones the selection
+        as it was when picking started - never its own previous clones. */
+    void appendScaledShapesFrom (const SpectralSelection& src, double m);
+
     // Bounding time range of all shapes (a safe superset for subtractive
     // shapes). Empty when the selection is empty.
     juce::Range<double> timeExtent() const;
@@ -116,5 +134,8 @@ public:
     bool contains (double tSecs, double fHz) const;
 
 private:
+    // Appends a frequency-scaled copy of one shape to this selection.
+    void appendScaledShape (const SpectralShape& sIn, double m);
+
     std::vector<SpectralShape> shapeList;
 };

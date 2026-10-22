@@ -196,6 +196,7 @@ private:
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     std::unique_ptr<TranscriptionPanel> transcriptionPanel;   // Whisper segments (Phase 3)
 #endif
+    std::unique_ptr<SelectionPanel> selectionPanel;           // named selections + clone & multiply
     std::unique_ptr<HistoryPanel> historyPanel;
 
     // Zoom/pan scrollbars: time bar at the bottom, one vertical

@@ -61,6 +61,15 @@ public:
     double brushRadiusHz = 200.0;   // paintbrush half-width in Hz
     bool playSpectralSel = false;
 
+    // Clone & Multiply interactive picking (Selection panel): the first click
+    // sets the reference frequency, every following click adds clones at
+    // (clicked freq / ref freq). App-level like selMode.
+    bool clonePicking = false;
+    bool haveClonePickRef = false;
+    double clonePickRefF = 0.0;
+    std::vector<std::pair<double, double>> clonePickPts;   // all picked points incl. the reference
+    SpectralSelection clonePickBase;   // snapshot of the selection when picking started
+
     // Current UI state - mirrors the active document (kept in sync on switch
     // and through setSelection()/setPlayhead()/toggleChannelVisible()).
     juce::Range<double> selection{ 0, 0 };
@@ -136,6 +145,38 @@ public:
     void pushSpectralMaskToEngine();
     // True when the active document has a spectral selection.
     bool hasSpectralSelection() const;
+
+    /** Appends additive clones of the active spectral selection at each given
+        frequency multiplier (the original stays in place; clone thickness is
+        stretched by the same factor). Returns false and fills errOut when
+        there is no selection or a multiplier is invalid. */
+    bool cloneAndMultiplySelection (const std::vector<double>& multipliers,
+                                    std::string* errOut = nullptr);
+
+    // Parses "0.5, 2, 5" into positive multipliers; fills errOut on bad input.
+    static std::vector<double> parseMultiplierList (const juce::String& text,
+                                                    std::string* errOut);
+
+    /** Replaces the active doc's spectral selection with a copy of `sel`
+        (Selection panel "Recall"). */
+    void setSpectralSelectionFrom (const SpectralSelection& sel);
+
+    // Interactive clone picking: first click = reference frequency, each later
+    // click adds clones at (clicked freq / ref freq). Esc or the panel button
+    // ends the session; switching/closing documents does too.
+    void startClonePick();
+    void endClonePick();
+    bool isClonePicking() const { return clonePicking; }
+    double clonePickRefFreq() const { return clonePickRefF; }
+    bool hasClonePickRef() const { return haveClonePickRef; }
+    const std::vector<std::pair<double, double>>& clonePickPoints() const { return clonePickPts; }
+    // Called by the spectral view on a left click while picking. Returns false
+    // when nothing happened (no selection / bad frequency).
+    bool clonePickClick (double tSecs, double fHz);
+
+    // Mirrors the active doc's spectral selection time extent into the shared
+    // time selection, re-installs the playback mask and notifies the UI.
+    void refreshSpectralSelectionUI();
 
     // snapEdges = true snaps both selection edges to the nearest zero crossing
     // of the first visible channel when settings.snapToZeroCrossings is ON.

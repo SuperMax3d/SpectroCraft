@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "AudioEngine.h"
 #include "MarkerManager.h"
+#include "SavedSelections.h"
 #include "ScaleCalibration.h"
 #include "ScttChunk.h"
 #include "UndoManager.h"
@@ -27,11 +28,22 @@ public:
     std::vector<int> visibleChannels;  // sorted channel indices to display
     ScaleCalibration scale;            // physical-unit calibration (Set Unit and Scale menu)
 
+    // Named spectral selections (Selection panel). When selectionsOnDisk is
+    // true the list is kept in sync with "<file>.selections.json".
+    std::vector<SavedSpectralSelection> savedSelections;
+    bool selectionsOnDisk = false;
+
     // Whisper transcription segments (Phase 3). Stored in the file as a RIFF
     // "SCTT" chunk for .wav saves; shown in the Transcription panel, never in
     // the Markers panel.
     ScttData sctt;
     void setTranscription (std::vector<ScttSegment> segs) { sctt.segments = std::move (segs); refreshScttJson (); }
+
+    // Selection sidecar persistence. loadSelectionsFromDisk() is called during
+    // load(); saveSelectionsToDisk() writes the current list and returns false
+    // when the file cannot be written.
+    void loadSelectionsFromDisk();
+    bool saveSelectionsToDisk();
 
     /** Load the file into this document: audio + markers (sidecar JSON first,
         embedded RIFF cue/adtl as fallback for .wav) + initial UI state. */

@@ -2317,9 +2317,11 @@ static void testLeftPanelLayout()
     store.deleteFile ();   // deterministic per-run name: never trust leftovers
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    const juce::StringArray defaultBottom { "Spectral Controls", "Markers", "Transcription" };
+    const juce::StringArray defaultBottom { "Spectral Controls", "Markers",
+                                            "Transcription", "Selection" };
 #else
-    const juce::StringArray defaultBottom { "Spectral Controls", "Markers" };
+    const juce::StringArray defaultBottom { "Spectral Controls", "Markers",
+                                            "Selection" };
 #endif
     const juce::StringArray defaultTop { "Files", "Frequency Analysis", "History" };
     juce::StringArray expectBottom = defaultBottom;
@@ -7284,6 +7286,202 @@ static void testMipmapBitExact()
     }
 }
 
+// ------------------------------------------------- Selection panel / clone & multiply
+
+/** scaledCopy multiplies frequencies (and stroke radii) by m, time unchanged. */
+static void testScaledCopy()
+{
+    SpectralSelection sel;
+    // replace=false on every call so the shapes stack instead of replacing.
+    sel.addRect (0.1, 0.5, 200.0, 400.0, false, false);   // additive rect
+    std::vector<std::pair<double,double>> poly = { {0.2, 300}, {0.6, 300}, {0.4, 900} };
+    sel.addPolygon (poly, true, false);                  // subtractive triangle
+    // Dense path: strokes stamp per point, so the midpoint needs a point.
+    std::vector<std::pair<double,double>> stroke = { {0.1, 500}, {0.2, 750},
+                                                     {0.3, 1000}, {0.4, 1250},
+                                                     {0.5, 1500} };
+    sel.addStroke (stroke, 250.0, false, false);         // additive stroke
+
+    const SpectralSelection scaled = sel.scaledCopy (2.0);
+    CHECK (scaled.count () == 3, "scaled copy keeps shape count");
+    CHECK (sel.count () == 3, "original untouched by scaledCopy");
+
+    // Rect: doubled frequency band [400,800]; probe below the triangle edge.
+    CHECK (scaled.contains (0.3, 590.0), "scaled rect at doubled frequency");
+    CHECK (!sel.contains (0.3, 590.0), "original has nothing at that point");
+
+    // Subtractive hole moves from f in (300,600) to f in (600,1200).
+    CHECK (!scaled.contains (0.3, 900.0), "scaled subtractive hole moved up");
+    CHECK (!sel.contains (0.3, 450.0), "original subtractive hole in place");
+
+    // Stroke: midpoint doubles from f=1000 to f=2000 and the radius doubles too.
+    CHECK (scaled.contains (0.3, 2000.0), "scaled stroke midpoint at doubled frequency");
+    CHECK (sel.contains (0.3, 1000.0), "original stroke midpoint in place");
+    CHECK (!sel.contains (0.3, 2000.0), "original has no energy where the clone is");
+    CHECK (scaled.contains (0.3, 2490.0), "clone thickness stretched by the multiplier");
+
+    const auto te = sel.timeExtent ();
+    CHECK (std::abs (scaled.timeExtent ().getStart () - te.getStart ()) < 1e-9
+          && std::abs (scaled.timeExtent ().getEnd () - te.getEnd ()) < 1e-9,
+          "time extent unchanged by scaling");
+}
+
+/** addScaledClones appends one clone per multiplier, built from a snapshot. */
+static void testAddScaledClones()
+{
+    SpectralSelection sel;
+    sel.addRect (0.1, 0.5, 200.0, 400.0, false);
+    const int before = sel.count ();
+
+    sel.addScaledClones ({ 0.5, 2.0 });
+    CHECK (sel.count () == before + 2, "one clone per multiplier");
+    CHECK (sel.contains (0.3, 300.0), "original rect kept");
+    CHECK (sel.contains (0.3, 150.0), "x0.5 clone present");
+    CHECK (sel.contains (0.3, 600.0), "x2 clone present");
+
+    // Snapshot semantics: the next call clones every CURRENT shape exactly once.
+    sel.addScaledClones ({ 4.0 });
+    CHECK (sel.count () == before + 5, "second call adds one clone per current shape");
+
+    // Non-positive / non-finite multipliers are ignored silently.
+    sel.addScaledClones ({ -1.0, 0.0 });
+    CHECK (sel.count () == before + 5, "bad multipliers add nothing");
+}
+
+/** parseMultiplierList accepts positive numbers only and reports bad input. */
+static void testParseMultiplierList()
+{
+    std::string err;
+
+    auto v = Application::parseMultiplierList ("0.5, 2, 5", &err);
+    CHECK (v.size () == 3 && v[0] == 0.5 && v[1] == 2.0 && v[2] == 5.0,
+          "parses comma list");
+
+    auto v2 = Application::parseMultiplierList (" 2 ; 4 ", &err);
+    CHECK (v2.size () == 2 && v2[0] == 2.0 && v2[1] == 4.0, "semicolon + spaces ok");
+
+    auto v3 = Application::parseMultiplierList ("", &err);
+    CHECK (v3.empty() && !err.empty(), "empty input rejected with message");
+
+    auto v4 = Application::parseMultiplierList ("abc", &err);
+    CHECK (v4.empty() && !err.empty(), "non-numeric token rejected");
+
+    auto v5 = Application::parseMultiplierList ("2x", &err);
+    CHECK (v5.empty() && !err.empty(), "trailing junk rejected");
+
+    auto v6 = Application::parseMultiplierList ("-1, 0, 3", &err);
+    CHECK (v6.empty() && !err.empty(), "non-positive values rejected");
+}
+
+/** Saved selections survive a JSON serialise/deserialise round trip. */
+static void testSavedSelectionsRoundTrip()
+{
+    std::vector<SavedSpectralSelection> list;
+
+    SavedSpectralSelection a;
+    a.name = "Harmonics \"quoted\"";
+    // replace=false so all three shapes are kept.
+    a.data.addRect (0.1, 0.5, 200.0, 400.0, false, false);
+    std::vector<std::pair<double,double>> poly = { {0.2, 300}, {0.6, 300}, {0.4, 900} };
+    a.data.addPolygon (poly, true, false);
+    std::vector<std::pair<double,double>> stroke = { {0.1, 500}, {0.2, 750},
+                                                     {0.3, 1000}, {0.4, 1250},
+                                                     {0.5, 1500} };
+    a.data.addStroke (stroke, 250.0, false, false);
+    list.push_back (std::move (a));
+
+    SavedSpectralSelection b;
+    b.name = "Second";
+    b.data.addRect (1.0, 2.0, 1000.0, 2000.0, true);   // subtractive rect
+    list.push_back (std::move (b));
+
+    const juce::String json = serialiseSavedSelections (list);
+    std::vector<SavedSpectralSelection> out;
+    CHECK (deserialiseSavedSelections (json, out), "round-trip parse ok");
+    CHECK (out.size () == 2, "two entries restored");
+    if (out.size() != 2) return;
+
+    CHECK (out[0].name == "Harmonics \"quoted\"", "name with quotes survives");
+    CHECK (out[1].name == "Second", "second name ok");
+    CHECK (out[0].data.count () == 3, "all three shapes restored");
+    CHECK (out[1].data.count () == 1, "subtractive rect restored");
+
+    // Behavioural equivalence at probe points.
+    SpectralSelection orig;
+    orig.addRect (0.1, 0.5, 200.0, 400.0, false, false);
+    orig.addPolygon (poly, true, false);
+    orig.addStroke (stroke, 250.0, false, false);
+    bool same = true;
+    for (double t : { 0.15, 0.3, 0.45 })
+        for (double f : { 150.0, 300.0, 450.0, 900.0, 1000.0, 2000.0 })
+            if (orig.contains (t, f) != out[0].data.contains (t, f)) same = false;
+    CHECK (same, "restored selection matches original at probe points");
+
+    // Subtractive rect: the hole is preserved.
+    CHECK (!out[1].data.contains (1.5, 1500.0), "subtractive rect hole preserved");
+
+    // Empty list round-trips to empty; garbage is rejected without crashing.
+    std::vector<SavedSpectralSelection> none;
+    CHECK (deserialiseSavedSelections (serialiseSavedSelections (none), none) && none.empty(),
+          "empty list round-trip");
+
+    std::vector<SavedSpectralSelection> bad;
+    CHECK (!deserialiseSavedSelections ("{ not json", bad), "garbage rejected");
+}
+
+/** Interactive clone picking: reference click, then target clicks. */
+static void testClonePickFlow()
+{
+    const juce::File wav = makeTempFile ("clonepick.wav");
+    writeWav (wav, 1, 8000.0, 16384, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for clone-pick test");
+    auto* d = app.doc ();
+    if (!d) return;
+
+    d->spectralSel.addRect (0.1, 0.5, 200.0, 400.0, false);
+
+    CHECK (!app.isClonePicking (), "not picking initially");
+    app.startClonePick ();
+    CHECK (app.isClonePicking () && !app.hasClonePickRef (), "pick session started clean");
+
+    // First click sets the reference frequency; no clone yet.
+    const int before = d->spectralSel.count ();
+    CHECK (app.clonePickClick (0.3, 100.0), "reference click accepted");
+    CHECK (app.hasClonePickRef () && std::abs (app.clonePickRefFreq () - 100.0) < 1e-9,
+          "reference frequency stored");
+    CHECK (d->spectralSel.count () == before, "no clone from the reference click");
+
+    // Second click at 500 Hz -> multiplier 5: rect clone at [1000,2000].
+    CHECK (app.clonePickClick (0.4, 500.0), "target click accepted");
+    CHECK (d->spectralSel.count () == before + 1, "one clone added per target click");
+    CHECK (d->spectralSel.contains (0.3, 1500.0), "clone at x5 frequency present");
+    CHECK (d->spectralSel.contains (0.3, 300.0), "original still in place");
+
+    // Third click at 200 Hz -> multiplier 2.
+    app.clonePickClick (0.45, 200.0);
+    CHECK (d->spectralSel.count () == before + 2, "second clone added");
+    CHECK (d->spectralSel.contains (0.3, 600.0), "clone at x2 frequency present");
+    // No cascade: the x5 clone must NOT itself be cloned at x2 (x10 band).
+    CHECK (!d->spectralSel.contains (0.3, 3000.0), "no cascaded x10 clone");
+
+    // Ending the session keeps the selection and resets the pick state.
+    app.endClonePick ();
+    CHECK (!app.isClonePicking () && !app.hasClonePickRef (), "pick session ended");
+    CHECK (d->spectralSel.count () == before + 2, "selection kept after ending pick");
+
+    // Clicks without a selection are ignored.
+    d->spectralSel.clear ();
+    app.startClonePick ();
+    CHECK (!app.clonePickClick (0.3, 100.0), "click rejected with no selection");
+    app.endClonePick ();
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -7382,6 +7580,11 @@ static int scRunUnitTestsImpl()
     progress ("selection render hole");     testSpectralSelectionRenderHole();
     progress ("straight line points");      testStraightLinePoints();
     progress ("alt-click straight line");   testAltClickStraightLine();
+    progress ("scaled copy");               testScaledCopy();
+    progress ("add scaled clones");         testAddScaledClones();
+    progress ("parse multiplier list");     testParseMultiplierList();
+    progress ("saved selections round-trip"); testSavedSelectionsRoundTrip();
+    progress ("clone pick flow");           testClonePickFlow();
     progress ("masked gain + zero-out");    testMaskedGainAndZero();
     progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
     progress ("extract masked A+B=orig");   testExtractMasked();
