@@ -147,6 +147,15 @@ Two model families behind one abstract interface (`NoiseSuppressionModel::run(ch
   - **Final status: no longer reproducible.** After the ghost window of a previously crashed instance disappeared, the current build survived 6 UIA FindAll queries, 15 synthetic menu open/close cycles and >7 min idle with zero exceptions in stderr. Most likely cause was interaction with that zombie/ghost state (or a timing race its presence widened). Documented as resolved; the accessibility patches remain as defense-in-depth.
 - **Tests**: Release 772/772, Debug 726/726 checks passing; spectral CLI md5 unchanged (`e4a31004bcb637e1430d289da645bdb0`); NS + transcription + batch CLI end-to-end verified.
 
+### Phase 5 — whisper.cpp b5454 prebuilt binaries — **DONE**
+- User report: the official `whisper-bin-x64.zip` from release `b5454` is much faster on CPU-only than our compiled-in v1.6.2 + OpenVINO encoder approach. Adopted wholesale for transcription (OpenVINO remains only for noise suppression).
+- **Runtime**: 13 prebuilt DLLs vendored under `extern/whisper-b5454/bin/` (`whisper.dll`, `ggml.dll`, `ggml-base.dll`, `llama.dll` + nine per-microarchitecture `ggml-cpu-*.dll`). Loaded at runtime via `LoadLibraryA("whisper.dll")` (with fallback to an explicit path beside the exe); every C API entry point resolved with `GetProcAddress` — fail-fast on any missing symbol. CMake copies the DLLs next to the exe post-build.
+- **Backend registration**: b5454's whisper.dll does NOT load CPU backends itself — the host application must call `ggml_backend_load_all()` (exported by ggml.dll), which scans the executable's directory for `ggml-cpu-*.dll` and registers the best-scoring one. Called once from `WhisperRuntime::load()`; idempotent thanks to ggml's duplicate-registration guard.
+- **Headers**: b5454's `whisper.h` + self-contained `ggml.h` vendored verbatim under `extern/whisper-b5454/include/`; empty `ggml-cpu.h` shim (whisper.h includes it but uses nothing from it).
+- **Removed**: the vendored whisper.cpp v1.6.2 source tree; its OpenVINO encoder path (`whisper_ctx_init_openvino_encoder` is a stub in b5454 — calling it would only produce misleading warnings); the device-selection combo from both transcription dialogs (transcription is CPU-only now, NS keeps its own device choice); and the zip-based model install mechanism + vendored miniz (every Whisper model is now a plain single-file ggml `.bin` download from ggerganov's HF).
+- **ABI notes**: b5454's `whisper_full_params.language` is a `const char*`; segment getters take non-const contexts; `whisper_init_from_file_with_params` replaces the deprecated init. The C API is POD-only, so it works fine from debug-CRT test processes against release DLLs (the `_DEBUG` skip in whisper tests is gone).
+- **Tests**: Release 1295/1295, Debug 1259/1259; spectral CLI md5 unchanged (`e4a31004bcb637e1430d289da645bdb0`); `--test-transcribe` end-to-end verified with the prebuilt runtime.
+
 ## 4. Whisper transcription (Phase 3) — design per your spec
 **UI: new "Transcription" panel next to the Markers panel** (not an Effects filter):
 - List of segments: `[start – end] text`.

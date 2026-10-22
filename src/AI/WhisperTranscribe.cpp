@@ -1,20 +1,13 @@
 // SpectroCraft — Whisper transcription engine (Phase 3 of the AI plan).
-// See include/AI/WhisperTranscribe.h for the design notes.
+// Runs on the prebuilt whisper.cpp b5454 binaries via sc::ai::WhisperRuntime.
 
 #include "AI/WhisperTranscribe.h"
+#include "AI/WhisperRuntime.h"
 
 #include <juce_core/juce_core.h>
 
-#include <whisper.cpp/whisper.h>
-
-#include "AI/OvRuntime.h"
-
+#include <cctype>
 #include <thread>
-
-#ifdef _WIN32
-// windows.h must come after the JUCE headers (JUCE configures WINVER first).
-#include <windows.h>
-#endif
 
 namespace sc { namespace ai {
 
@@ -24,17 +17,32 @@ struct ProgressBridge {
     WhisperTranscriber::ProgressFn fn;
 };
 
+// b5454 progress callback signature (identical to v1.6.x).
 void whisperProgressCb(struct whisper_context*, struct whisper_state*, int progress, void* user)
 {
     auto* b = static_cast<ProgressBridge*>(user);
     if (b != nullptr && b->fn)
     {
-        // v1.6.x can report > 100% on short files (timestamp-token seek overshoot); clamp.
+        // whisper can report > 100% on short files (timestamp-token seek
+        // overshoot); clamp.
         float p = (float) progress / 100.0f;
         if (p < 0.0f) p = 0.0f;
         if (p > 1.0f) p = 1.0f;
         b->fn (p, "transcribing…");
     }
+}
+
+void reportError(std::string* errOut, const juce::String& msg)
+{
+    if (errOut != nullptr) *errOut = msg.toStdString ();
+}
+
+std::string trimWhitespace(const char* text)
+{
+    std::string t (text);
+    while (!t.empty () && std::isspace ((unsigned char) t.front ()) != 0) t.erase (t.begin ());
+    while (!t.empty () && std::isspace ((unsigned char) t.back ())  != 0) t.pop_back ();
+    return t;
 }
 
 } // namespace
@@ -45,110 +53,61 @@ void WhisperTranscriber::unload()
 {
     if (_ctx != nullptr)
     {
-        whisper_free (_ctx);
+        WhisperRuntime::instance ().freeContext (_ctx);
         _ctx = nullptr;
     }
     _lastLang.clear ();
 }
 
-bool WhisperTranscriber::load(const juce::File& ggmlModel, const juce::File& irXml,
-                              const juce::File& cacheDir, const std::string& deviceIn,
-                              std::string* errOut)
+bool WhisperTranscriber::load(const juce::File& ggmlModel, std::string* errOut)
 {
     unload();
 
-    if (!ggmlModel.existsAsFile())
+    auto& rt = WhisperRuntime::instance ();
+    if (!rt.load (errOut))
+        return false;   // missing/incompatible whisper.dll — message already set
+
+    if (!ggmlModel.existsAsFile ())
     {
-        if (errOut) *errOut = std::string ("Whisper model file not found: ")
-                                 + ggmlModel.getFullPathName ().toStdString ();
+        reportError (errOut, "Whisper model file not found: " + ggmlModel.getFullPathName ());
         return false;
     }
 
+    // b5454 context params: CPU-only. flash_attn stays off — measured ~1.7x
+    // SLOWER on CPU (the kernels favour GPU). The DTW fields are unused.
     whisper_context_params cparams = {};
-    cparams.use_gpu = false;   // CPU-only in v1 (OpenVINO encoder covers the heavy part)
-    cparams.flash_attn = false; // measured ~1.7x SLOWER on CPU (whisper.cpp flash-attn kernels favour GPU); keep off
+    cparams.use_gpu     = false;
+    cparams.flash_attn  = false;
+    cparams.gpu_device  = 0;
 
-    _ctx = whisper_init_from_file_with_params (ggmlModel.getFullPathName ().toRawUTF8 (), cparams);
+    _ctx = rt.initFromFilePath (ggmlModel.getFullPathName ().toRawUTF8 (), cparams);
     if (_ctx == nullptr)
-    {
-        if (errOut) *errOut = std::string ("Could not load the Whisper model: ")
-                                 + ggmlModel.getFileName ().toStdString ();
-        return false;
-    }
-
-    // Enable the OpenVINO encoder when an IR model is available. On failure we
-    // keep going — whisper.cpp falls back to its pure-ggml encode path.
-    //
-    // The probe below matters: openvino.dll is delay-loaded, so calling into
-    // it without the DLL present raises SEH 0xC06D007E (a hard crash in a
-    // module not compiled with /EHa). LoadLibraryA fails cleanly instead.
-#ifdef _WIN32
-    const bool ovAvailable = ::LoadLibraryA ("openvino.dll") != nullptr;
-#else
-    const bool ovAvailable = true;
-#endif
-    if (irXml.existsAsFile () && ovAvailable)
-    {
-        // The device was resolved by the caller from the user's preference
-        // (sc::resolveAiDevice); "auto" already means GPU > NPU > CPU.
-        const std::string device = deviceIn.empty () ? "CPU" : deviceIn;
-
-        const char* cache = cacheDir.exists () ? cacheDir.getFullPathName ().toRawUTF8 () : nullptr;
-        int r = whisper_ctx_init_openvino_encoder (_ctx, irXml.getFullPathName ().toRawUTF8 (),
-                                                   device.c_str (), cache);
-        if (r != 0 && device != "CPU")
-            r = whisper_ctx_init_openvino_encoder (_ctx, irXml.getFullPathName ().toRawUTF8 (),
-                                                   "CPU", cache);   // retry on CPU
-        if (r != 0 && errOut)
-            *errOut = "OpenVINO encoder failed to initialise; using the slower pure-ggml encode.";
-    }
-
-    return true;
+        reportError (errOut, "Failed to load the Whisper model: " + ggmlModel.getFileName ());
+    return _ctx != nullptr;
 }
 
 bool WhisperTranscriber::transcribe(const float* samples, int nSamples, const Options& opts,
                                     std::vector<WhisperSegment>& outSegments,
                                     ProgressFn onProgress, std::string* errOut)
 {
-    // Whole-buffer convenience wrapper around transcribeRegion().
-    std::vector<WhisperSegment> tmp;
-    if (!transcribeRegion (samples, nSamples, opts, opts.language, 0.0,
-                           tmp, onProgress, errOut))
-        return false;
-    outSegments = std::move (tmp);
-    return true;
-}
-
-bool WhisperTranscriber::transcribeRegion(const float* samples, int nSamples,
-                                          const Options& opts,
-                                          const std::string& languageIn,
-                                          double offsetSec,
-                                          std::vector<WhisperSegment>& outSegments,
-                                          ProgressFn onProgress, std::string* errOut)
-{
-    if (_ctx == nullptr)
+    if (_ctx == nullptr || samples == nullptr || nSamples <= 0)
     {
-        if (errOut) *errOut = "Whisper model is not loaded.";
-        return false;
-    }
-    if (samples == nullptr || nSamples <= 0)
-    {
-        if (errOut) *errOut = "No audio to transcribe.";
+        reportError (errOut, "Transcriber is not loaded.");
         return false;
     }
 
+    auto& rt = WhisperRuntime::instance ();
     const bool useBeam = opts.beamSize > 1;
-    whisper_full_params params = whisper_full_default_params (
-        useBeam ? WHISPER_SAMPLING_BEAM_SEARCH : WHISPER_SAMPLING_GREEDY);
-
+    whisper_full_params params = rt.fullDefaultParams (useBeam ? WHISPER_SAMPLING_BEAM_SEARCH
+                                                               : WHISPER_SAMPLING_GREEDY);
     if (useBeam)
         params.beam_search.beam_size = opts.beamSize;
 
-    const std::string lang = languageIn.empty () || languageIn == "auto"
-                              ? std::string ("") : languageIn;
-    params.language = lang.empty () ? nullptr : lang.c_str ();
-    params.detect_language = lang.empty ();
-    params.translate = opts.translate;
+    const std::string lang = opts.language.empty () || opts.language == "auto"
+                              ? std::string ("") : opts.language;
+    params.language       = lang.empty () ? nullptr : lang.c_str ();
+    params.detect_language= lang.empty ();
+    params.translate      = opts.translate;
 
     params.n_threads = opts.threads > 0 ? opts.threads
                                         : (int) std::thread::hardware_concurrency ();
@@ -156,41 +115,96 @@ bool WhisperTranscriber::transcribeRegion(const float* samples, int nSamples,
 
     params.print_progress = false;   // we report progress ourselves
     ProgressBridge bridge { onProgress };
-    params.progress_callback = whisperProgressCb;
+    params.progress_callback         = whisperProgressCb;
     params.progress_callback_user_data = &bridge;
 
-    const int r = whisper_full (_ctx, params, samples, nSamples);
-    // NOTE: `params` is a stack object from whisper_full_default_params() (by value).
-    // Do NOT call whisper_free_params() on it — that function does `delete params`
-    // and is only for pointers returned by whisper_full_default_params_by_ref().
-    if (r != 0)
+    if (rt.full (_ctx, params, samples, nSamples) != 0)
     {
-        if (errOut) *errOut = "Whisper transcription failed (code " + std::to_string (r) + ").";
+        reportError (errOut, "Whisper inference failed.");
         return false;
     }
 
-    // Remember the auto-detected language for the caller (English is id 0).
+    outSegments.clear ();
+    const int n = rt.nSegments (_ctx);
+    for (int i = 0; i < n; ++i)
+    {
+        WhisperSegment seg;
+        seg.startSec = (double) rt.segmentT0 (_ctx, i) / 1000.0;
+        seg.endSec   = (double) rt.segmentT1 (_ctx, i) / 1000.0;
+        const char* text = rt.segmentText (_ctx, i);
+        if (text != nullptr)
+            seg.text = trimWhitespace (text);
+        if (!seg.text.empty ())
+            outSegments.push_back (std::move (seg));
+    }
+
+    return true;
+}
+
+bool WhisperTranscriber::transcribeRegion(const float* samples, int nSamples, const Options& opts,
+                                          const std::string& languageIn, double offsetSec,
+                                          std::vector<WhisperSegment>& outSegments,
+                                          ProgressFn onProgress, std::string* errOut)
+{
+    if (_ctx == nullptr || samples == nullptr || nSamples <= 0)
+    {
+        reportError (errOut, "Transcriber is not loaded.");
+        return false;
+    }
+
+    auto& rt = WhisperRuntime::instance ();
+    const bool useBeam = opts.beamSize > 1;
+    whisper_full_params params = rt.fullDefaultParams (useBeam ? WHISPER_SAMPLING_BEAM_SEARCH
+                                                               : WHISPER_SAMPLING_GREEDY);
+    if (useBeam)
+        params.beam_search.beam_size = opts.beamSize;
+
+    const std::string lang = languageIn.empty () || languageIn == "auto"
+                              ? std::string ("") : languageIn;
+    params.language       = lang.empty () ? nullptr : lang.c_str ();
+    params.detect_language= lang.empty ();
+    params.translate      = opts.translate;
+
+    params.n_threads = opts.threads > 0 ? opts.threads
+                                        : (int) std::thread::hardware_concurrency ();
+    if (params.n_threads < 1) params.n_threads = 1;
+
+    params.print_progress = false;   // we report progress ourselves
+    ProgressBridge bridge { onProgress };
+    params.progress_callback         = whisperProgressCb;
+    params.progress_callback_user_data = &bridge;
+
+    if (rt.full (_ctx, params, samples, nSamples) != 0)
+    {
+        reportError (errOut, "Whisper inference failed.");
+        return false;
+    }
+
+    // Remember the auto-detected language for the pipeline's pinning logic.
     _lastLang.clear ();
     if (lang.empty ())
     {
-        const int lid = whisper_full_lang_id (_ctx);
-        if (lid >= 0 && lid < whisper_lang_max_id ())
-            if (const char* s = whisper_lang_str (lid)) _lastLang = s;
+        const int id = rt.langId (_ctx);
+        if (id > 0 && id < rt.langMaxId ())
+        {
+            const char* s = rt.langStr (id);
+            if (s != nullptr) _lastLang = s;
+        }
     }
 
-    const int nSegs = whisper_full_n_segments (_ctx);
-    for (int i = 0; i < nSegs; ++i)
+    const int n = rt.nSegments (_ctx);
+    for (int i = 0; i < n; ++i)
     {
         WhisperSegment seg;
-        // Segment times are in units of 10 ms, offset into the full stream.
-        seg.startSec = whisper_full_get_segment_t0 (_ctx, i) / 100.0 + offsetSec;
-        seg.endSec   = whisper_full_get_segment_t1 (_ctx, i) / 100.0 + offsetSec;
-        const char* text = whisper_full_get_segment_text (_ctx, i);
-        if (text != nullptr) seg.text = text;
-        outSegments.push_back (std::move (seg));
+        seg.startSec = offsetSec + (double) rt.segmentT0 (_ctx, i) / 1000.0;
+        seg.endSec   = offsetSec + (double) rt.segmentT1 (_ctx, i) / 1000.0;
+        const char* text = rt.segmentText (_ctx, i);
+        if (text != nullptr)
+            seg.text = trimWhitespace (text);
+        if (!seg.text.empty ())
+            outSegments.push_back (std::move (seg));
     }
 
-    // No free needed: stack-allocated params, no heap members.
     return true;
 }
 

@@ -478,11 +478,12 @@ linear and log modes.
 
 The AI module is built by default (`-DSPECTRO_ENABLE_AI=ON`; disable with
 `-DSPECTRO_ENABLE_AI=OFF` for a lean build). It provides neural **noise
-suppression** (OpenVINO) and Whisper **transcription** (whisper.cpp, with an
-OpenVINO encoder acceleration for most models). Both features run on CPU by
-default; when the OpenVINO runtime exposes a GPU or NPU device it is used
-automatically (*Auto*), and either can be overridden per-run in the dialog's
-*Device* dropdown.
+suppression** (OpenVINO) and Whisper **transcription** (whisper.cpp b5454
+prebuilt binaries, CPU-only). Noise suppression runs on CPU by default; when
+the OpenVINO runtime exposes a GPU or NPU device it is used automatically
+(*Auto*), and can be overridden per-run in the dialog's *Device* dropdown.
+Transcription always runs on CPU — ggml auto-selects an AVX2/AVX-512 backend
+for your microarchitecture at load time.
 
 ### How it works
 
@@ -511,16 +512,15 @@ automatically (*Auto*), and either can be overridden per-run in the dialog's
   stops after the current file; a summary lists done/skipped/failed per run.
   *Skip files with SCTT* re-runs only transcribe files without an existing
   transcription.
-- **Device selection** — both dialogs offer a *Device* dropdown: *Auto*
-  (default) picks GPU over NPU over CPU when the OpenVINO runtime exposes it,
-  otherwise CPU; picking *CPU*, *GPU* or *NPU* explicitly overrides that. A
-  device that is not available falls back to CPU and the progress dialog says
-  so. The choice persists between sessions (shared by both features). For
-  transcription only the OpenVINO *encoder* moves to the selected device —
-  whisper.cpp's decoder always runs on CPU.
-- **Model preferences persist** between sessions (last model, language, mode,
-  device and the auto-download toggle) in the same `SpectroCraft.recent` store
-  as the recent-files list. With *auto-download off*, missing models are never
+- **Device selection** — the noise-suppression dialog offers a *Device*
+  dropdown: *Auto* (default) picks GPU over NPU over CPU when the OpenVINO
+  runtime exposes it, otherwise CPU; picking *CPU*, *GPU* or *NPU* explicitly
+  overrides that. A device that is not available falls back to CPU and the
+  progress dialog says so. The choice persists between sessions. Transcription
+  has no device option: whisper.cpp's prebuilt runtime is CPU-only.
+- **Model preferences persist** between sessions (last model, language, mode
+  and the auto-download toggle) in the same `SpectroCraft.recent` store as the
+  recent-files list. With *auto-download off*, missing models are never
   fetched; the failure dialog then shows exactly where to put them manually.
 
 ### Model sources & licenses
@@ -530,7 +530,7 @@ automatically (*Auto*), and either can be overridden per-run in the dialog's
 | Noise suppression | DeepFilterNet 2 (recommended) | [Intel/deepfilternet-openvino](https://huggingface.co/Intel/deepfilternet-openvino) (`deepfilternet2/{enc,erb_dec,df_dec}.{xml,bin}`) | ~9 MB |
 | Noise suppression | DeepFilterNet 3 (experimental) | same repo, `deepfilternet3/…` | ~10 MB |
 | Noise suppression | DenseUNet (legacy) | [Intel Open Model Zoo 2023.0](https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/noise-suppression-denseunet-ll-0001/FP16) FP16 | ~9 MB |
-| Transcription | Whisper tiny / base / small / medium / large-v1 / v2 / v3 (+ q5_1 quantized variants, large-v3-turbo + q8_0) | [Intel/whisper.cpp-openvino-models](https://huggingface.co/Intel/whisper.cpp-openvino-models) zips (ggml .bin + OpenVINO encoder IR); plain ggml from [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) for the rest | 32 MB – 4.3 GB |
+| Transcription | Whisper tiny / base / small / medium / large-v1 / v2 / v3 (+ q5_1 quantized variants, large-v3-turbo + q8_0) | plain ggml `.bin` from [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) | 32 MB – 3.1 GB |
 
 Weights are **never committed to this repository** — they are downloaded on
 first use (SHA-256 verified against the registry in `src/AI/ModelManager.cpp`)
@@ -547,14 +547,8 @@ files yourself into `%APPDATA%/SpectroCraft/models/<model-id>/`:
 ```
 deepfilternet2:\  enc.xml, enc.bin, erb_dec.xml, erb_dec.bin, df_dec.xml, df_dec.bin
 denseunet:    \  noise-suppression-denseunet-ll-0001.xml, …-0001.bin
-whisper-base: \  ggml-base.bin, ggml-base-encoder-openvino.xml, ggml-base-encoder-openvino.bin
-               \  (or just ggml-<name>.bin for tiny / quantized / turbo models)
+whisper-base: \  ggml-base.bin   (i.e. a single ggml-<name>.bin for every model)
 ```
-
-The encoder IR pair is optional — without it transcription falls back to the
-slower pure-ggml encode with identical results. The standard fp16 models ship
-with it in Intel's zips; the quantized and turbo variants don't have published
-IRs, so they always use the ggml path.
 
 The failure dialog always shows the exact destination folder and the download
 URLs in a copyable text box. The **OpenVINO runtime DLLs** (`openvino.dll`,
@@ -562,8 +556,10 @@ URLs in a copyable text box. The **OpenVINO runtime DLLs** (`openvino.dll`,
 next to `SpectroCraft.exe` for noise suppression — they are copied there by the
 CMake build (from `extern/OpenVINO/bin/`). A prebuilt exe without them fails
 gracefully; even a *partial* set (e.g. only `openvino.dll`) is detected and the
-dialog lists all four required files plus where to get them. Transcription does **not** need the OpenVINO DLLs:
-without them it falls back to the pure-ggml encoder automatically.
+dialog lists all four required files plus where to get them. Transcription needs
+the **whisper runtime DLLs** (`whisper.dll` plus 12 ggml/llama DLLs — see
+`extern/whisper-b5454/bin/`) next to `SpectroCraft.exe`; the CMake build copies
+them there too, and a missing or incompatible set is reported with a clear error.
 
 To use a **GPU or NPU**, install its plugin DLL from the same OpenVINO release
 (`runtime\Windows\bin`): `openvino_intel_gpu_plugin.dll` for GPU,
@@ -578,12 +574,10 @@ explicitly falls back to CPU with a note in the progress dialog.
 - Whisper speed scales with model size: `tiny`/`base` transcribe a minute of
   audio in seconds on CPU; `medium`/`large-v3` take minutes. Use the smallest
   model that meets your accuracy needs for batch runs.
-- The OpenVINO encoder (included with base/small/medium/large-v1/v2/v3) is
-  faster than the pure-ggml encode and runs on GPU/NPU when available —
-  device selection is automatic (*Auto*: GPU > NPU > CPU), overwritable in the
-  dialog, CPU fallback included. `large-v3-turbo` is a
-  good accuracy/speed compromise for longer files; the q5_1/q8_0 quantized
-  variants cut memory use with minimal quality loss.
+- Transcription runs on CPU via ggml's per-microarchitecture SIMD backends
+  (AVX2/AVX-512 auto-selected at load time). `large-v3-turbo` is a good
+  accuracy/speed compromise for longer files; the q5_1/q8_0 quantized variants
+  cut memory use with minimal quality loss.
 - VAD silence skipping + *Fast* (greedy) mode stack: on a 60 s file with two
   20 s speech regions, `whisper-base` drops from ~53 s to ~19 s (beam) or
   ~15 s (fast) on a modern desktop CPU.

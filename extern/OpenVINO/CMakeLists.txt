@@ -47,4 +47,13 @@ function (sc_enable_ai tgt)
             ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/tbb12.dll
             $<TARGET_FILE_DIR:${tgt}>
         COMMENT "Copying OpenVINO runtime DLLs next to ${tgt}")
+
+    # whisper.cpp b5454 prebuilt binaries (transcription, CPU-only): the C API
+    # library plus ggml's per-microarchitecture backends. See
+    # extern/whisper-b5454/README.md for the full set and provenance.
+    file (GLOB SC_WHISPER_DLLS ${CMAKE_SOURCE_DIR}/extern/whisper-b5454/bin/*.dll)
+    add_custom_command (TARGET ${tgt} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SC_WHISPER_DLLS}
+            $<TARGET_FILE_DIR:${tgt}>
+        COMMENT "Copying whisper.cpp b5454 runtime DLLs next to ${tgt}")
 endfunction ()

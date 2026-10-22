@@ -863,7 +863,7 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 bool Application::transcribe (const std::string& modelId, const std::string& language,
                               bool translate, bool fast,
                               std::function<bool(float)> onProgress, std::string* errOut,
-                              bool autoDownload, const std::string& devicePref)
+                              bool autoDownload)
 {
     auto fail = [&errOut] (const juce::String& msg) -> bool
     {
@@ -891,26 +891,20 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
             { return onProgress == nullptr || onProgress (0.15f * f); }, &err))
         return fail (err);
 
-    // Model files: ggml-<name>.bin + the OpenVINO encoder IR pair.
+    // Model file: ggml-<name>.bin.
     const juce::File dir = mm.dirFor (modelId);
     const std::string baseName = modelId.substr (std::string ("whisper-").size ());
     const juce::File ggmlModel = dir.getChildFile ("ggml-" + baseName + ".bin");
-    const juce::File irXml     = dir.getChildFile ("ggml-" + baseName + "-encoder-openvino.xml");
 
     sc::ai::WhisperTranscriber::Options opts;
     opts.language  = language;
     opts.translate = translate;
     opts.beamSize  = fast ? 1 : 5;   // greedy vs beam search
 
-    // Resolve the device preference against what the runtime actually offers.
-    sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
-    const std::string device = sc::resolveAiDevice (devicePref,
-                                                    sc::ai::OvRuntime::instance ().devices ());
-
     // Pipeline progress [0,1] → overall [0.15, 1].
     std::vector<ScttSegment> segs;
     const bool ok = sc::ai::runWhisperPipeline (audioEngine (), visibleChans (*this),
-                                                ggmlModel, irXml, opts, device, segs,
+                                                ggmlModel, opts, segs,
             [&onProgress] (float f) { return onProgress == nullptr || onProgress (0.15f + 0.85f * f); },
             &err);
     if (!ok)
@@ -929,8 +923,7 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
                                          std::atomic<bool>* cancelOut,
                                          BatchTranscribeSummary* summaryOut,
                                          std::string* errOut,
-                                         bool autoDownload,
-                                         const std::string& devicePref)
+                                         bool autoDownload)
 {
     auto fail = [&errOut] (const juce::String& msg) -> bool
     {
@@ -969,21 +962,15 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
             { return onProgress == nullptr || onProgress (0.05f * f); }, &err))
         return fail (err);
 
-    // Model files: ggml-<name>.bin + the optional OpenVINO encoder IR pair.
+    // Model file: ggml-<name>.bin.
     const juce::File dir = mm.dirFor (modelId);
     const std::string baseName = modelId.substr (std::string ("whisper-").size ());
     const juce::File ggmlModel = dir.getChildFile ("ggml-" + baseName + ".bin");
-    const juce::File irXml     = dir.getChildFile ("ggml-" + baseName + "-encoder-openvino.xml");
 
     sc::ai::WhisperTranscriber::Options opts;
     opts.language  = language;
     opts.translate = translate;
     opts.beamSize  = fast ? 1 : 5;   // greedy vs beam search
-
-    // Resolve the device preference once for the whole batch.
-    sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
-    const std::string device = sc::resolveAiDevice (devicePref,
-                                                    sc::ai::OvRuntime::instance ().devices ());
 
     const int total = summary.total;
     for (int i = 0; i < total; ++i)
@@ -1028,8 +1015,8 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
             for (int c = 0; c < eng.numChannels (); ++c)
                 chans[(size_t) c] = c;
 
-            const bool ok = sc::ai::runWhisperPipeline (eng, chans, ggmlModel, irXml, opts,
-                                                        device, data.segments,
+            const bool ok = sc::ai::runWhisperPipeline (eng, chans, ggmlModel, opts,
+                                                        data.segments,
                 [&onProgress, i, total] (float f) {
                     return onProgress == nullptr ||
                            onProgress ((float) (0.05 + 0.95 * ((double) i / total)

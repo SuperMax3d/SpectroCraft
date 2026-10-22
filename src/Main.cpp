@@ -355,15 +355,14 @@ public:
                 const juce::File dir = mm.dirFor (modelId);
                 const std::string baseName = modelId.substr (std::string ("whisper-").size ());
                 const juce::File ggmlModel = dir.getChildFile ("ggml-" + baseName + ".bin");
-                const juce::File irXml     = dir.getChildFile ("ggml-" + baseName + "-encoder-openvino.xml");
 
                 sc::ai::WhisperTranscriber::Options opts;
                 opts.language = language;
                 opts.beamSize = fast ? 1 : 5;   // greedy vs beam search
 
                 std::vector<ScttSegment> segs;
-                const bool ok = sc::ai::runWhisperPipeline (engine, { 0 }, ggmlModel, irXml,
-                                                           opts, "auto", segs, progress, &err);
+                const bool ok = sc::ai::runWhisperPipeline (engine, { 0 }, ggmlModel,
+                                                           opts, segs, progress, &err);
                 if (!ok)
                 {
                     std::cout << "transcription failed: " << err << "\n";

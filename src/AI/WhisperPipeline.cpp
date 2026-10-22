@@ -72,11 +72,9 @@ std::vector<VadRegion> detectSpeechRegions(const float* p, int n)
     return out;
 }
 
-// Loaded whisper contexts are cached per (model file, device): loading the
-// ggml weights and compiling the OpenVINO encoder takes seconds to a minute,
-// and users may re-run transcription (different language/mode) without
-// reloading. The device is part of the key so switching CPU/GPU/NPU between
-// runs recompiles for the new device instead of reusing an old context.
+// Loaded whisper contexts are cached per model file: loading the ggml
+// weights takes seconds, and users may re-run transcription (different
+// language/mode) without reloading.
 std::map<std::string, std::unique_ptr<WhisperTranscriber>>& whisperCache()
 {
     static std::map<std::string, std::unique_ptr<WhisperTranscriber>> cache;
@@ -89,25 +87,18 @@ std::mutex& whisperCacheMutex()
     return m;
 }
 
-WhisperTranscriber* getCachedWhisper(const juce::File& ggmlModel, const juce::File& irXml,
-                                     const std::string& device, std::string* errOut)
+WhisperTranscriber* getCachedWhisper(const juce::File& ggmlModel, std::string* errOut)
 {
-    const std::string key = ggmlModel.getFullPathName ().toStdString () + "|" + device;
+    const std::string key = ggmlModel.getFullPathName ().toStdString ();
     {
         std::lock_guard<std::mutex> lock (whisperCacheMutex ());
         auto it = whisperCache ().find (key);
         if (it != whisperCache ().end ()) return it->second.get ();
     }
 
-    const juce::File cacheDir = irXml.existsAsFile ()
-                                ? irXml.getParentDirectory ().getChildFile ("ov-cache")
-                                : juce::File ();
-    if (cacheDir != juce::File ())
-        cacheDir.createDirectory ();
-
     auto* raw = new WhisperTranscriber ();
     std::string err;
-    if (!raw->load (ggmlModel, irXml, cacheDir, device, &err))
+    if (!raw->load (ggmlModel, &err))
     {
         delete raw;
         if (errOut != nullptr) *errOut = err;
@@ -125,9 +116,8 @@ WhisperTranscriber* getCachedWhisper(const juce::File& ggmlModel, const juce::Fi
 } // namespace
 
 bool runWhisperPipeline(AudioEngine& eng, const std::vector<int>& chans,
-                        const juce::File& ggmlModel, const juce::File& irXml,
+                        const juce::File& ggmlModel,
                         const WhisperTranscriber::Options& opts,
-                        const std::string& device,
                         std::vector<ScttSegment>& outSegments,
                         std::function<bool(float)> onProgress, std::string* errOut)
 {
@@ -198,7 +188,7 @@ bool runWhisperPipeline(AudioEngine& eng, const std::vector<int>& chans,
     // ------------------------------------------------------------------
     // Phase B: load the model and run inference.
     // ------------------------------------------------------------------
-    WhisperTranscriber* wt = getCachedWhisper (ggmlModel, irXml, device, errOut);
+    WhisperTranscriber* wt = getCachedWhisper (ggmlModel, errOut);
     if (wt == nullptr)
         return false;
 

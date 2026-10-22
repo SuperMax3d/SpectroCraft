@@ -1262,9 +1262,8 @@ juce::String MainWindow::buildAboutText()
         "- DeepFilterNet 2/3 model weights - see the intel/deepfilternet-openvino\n"
         "  repository on Hugging Face for its licence terms.\n"
         "\nTranscription:\n"
-        "- whisper.cpp v1.6.2 (+ ggml) - MIT, ggerganov\n"
-        "  (https://github.com/ggml-org/whisper.cpp).\n"
-        "- miniz zip reader - public domain / MIT-style.\n"
+        "- whisper.cpp b5454 prebuilt binaries (+ ggml, llama.cpp) - MIT, ggerganov\n"
+        "  (https://github.com/ggml-org/whisper.cpp); loaded at runtime.\n"
         "- Whisper model weights (ggml-*.bin) are OpenAI's Whisper checkpoints; check the\n"        "  upstream terms before commercial use.\n"
         "\nModel weights are downloaded on demand to %APPDATA%/SpectroCraft/models and are\n"
         "never distributed with this source.";
@@ -1824,12 +1823,8 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
         {
             details += "\n\nManual installation: download these files into:\n"
                        + mm.dirFor (spec->id).getFullPathName () + "\n";
-            if (!spec->zip.url.empty ())
-                // Zip-distributed model (e.g. Whisper): one archive holds all files.
-                details += "  " + juce::String (spec->zip.url) + "\n";
-            else
-                for (const auto& f : spec->files)
-                    details += "  " + juce::String (f.url) + "\n";
+            for (const auto& f : spec->files)
+                details += "  " + juce::String (f.url) + "\n";
         }
     }
     return details.toStdString ();
@@ -2062,10 +2057,7 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
                                      "First use downloads the model weights to\n"
                                      "%APPDATA%/SpectroCraft/models.\n"
                                      "Larger models are more accurate but slower.\n"
-                                     "Device: Auto picks GPU over NPU over CPU when available;\n"
-                                     "pick one explicitly to override (unavailable devices fall back to CPU).\n"
-                                     "OpenVINO only uses Intel CPU/GPU/NPU hardware - NVIDIA GPUs are not\n"
-                                     "supported by the runtime and will never be listed.",
+                                     "Transcription runs on CPU (whisper.cpp b5454 prebuilt runtime).",
                                      juce::AlertWindow::QuestionIcon, this);
 
     w->addComboBox ("model", whisperModelNames (), "Model");
@@ -2076,7 +2068,6 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
     w->addComboBox ("speed",
                     juce::StringArray { "Balanced (beam search)", "Fast (greedy)" },
                     "Speed / accuracy");
-    w->addComboBox ("device", sc::aiDeviceNames (), "Device");
 
     // Preselect the persisted choices (defaults when never set).
     if (auto* c = w->getComboBoxComponent ("model"))
@@ -2093,8 +2084,6 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
         c->setSelectedItemIndex (app.lastTranscribeTranslate ? 1 : 0);
     if (auto* c = w->getComboBoxComponent ("speed"))
         c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
-    if (auto* c = w->getComboBoxComponent ("device"))
-        c->setSelectedItemIndex (sc::aiDevicePrefIndex (app.aiDevicePref));
 
     w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
                     "Auto-download model if missing");
@@ -2126,9 +2115,6 @@ void MainWindow::showTranscribeDialog()
                                         && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
     const bool fast                = w->getComboBoxComponent ("speed") != nullptr
                                         && w->getComboBoxComponent ("speed")->getText ().startsWith ("Fast");
-    const std::string devicePref   = sc::aiDevicePrefFromText (w->getComboBoxComponent ("device") != nullptr
-                                                               ? w->getComboBoxComponent ("device")->getText ()
-                                                               : juce::String ());
     const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
                                        || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
     delete w;
@@ -2150,17 +2136,15 @@ void MainWindow::showTranscribeDialog()
     app.lastTranscribeTranslate = translate;
     app.lastTranscribeFast      = fast;
     app.aiAutoDownload          = autoDownload;
-    app.aiDevicePref            = devicePref;
     app.saveAiSettings ();
 
-    runTranscriptionAsync (modelId, language, translate, fast, autoDownload, devicePref);
+    runTranscriptionAsync (modelId, language, translate, fast, autoDownload);
 }
 
 // Transcription on a background thread with a progress dialog. Progress:
 // download [0, 15%), mix+resample [15, 25%), inference [25, 100%].
 void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::string& language,
-                                        bool translate, bool fast, bool autoDownload,
-                                        const std::string& devicePref)
+                                        bool translate, bool fast, bool autoDownload)
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Transcribing with " + juce::String (modelId) + " ...\n"
@@ -2170,7 +2154,7 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
     dlg->setProgress (0.0);
     dlg->beginModal ();
 
-    std::thread ([this, modelId, language, translate, fast, autoDownload, devicePref, dlg] {
+    std::thread ([this, modelId, language, translate, fast, autoDownload, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
@@ -2178,15 +2162,8 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
             juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
         };
 
-        // Resolve the device preference against what the runtime offers.
-        sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
-        std::string devNote;
-        const std::string device = sc::resolveAiDevice (devicePref,
-                                                        sc::ai::OvRuntime::instance ().devices (),
-                                                        &devNote);
-        juce::MessageManager::callAsync ([dlg, modelId, device, devNote] {
-            dlg->setStatusText ("Transcribing with " + juce::String (modelId) + " on " + juce::String (device)
-                                + (devNote.empty () ? " ..." : "  (" + juce::String (devNote) + ")")
+        juce::MessageManager::callAsync ([dlg, modelId] {
+            dlg->setStatusText ("Transcribing with " + juce::String (modelId) + " on CPU ..."
                                 + "\n(whole file - this can take a while)"
                                   "\n(Cancel stops after the current phase)");
         });
@@ -2200,9 +2177,9 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
                 sendProgress ((double) f);
                 return !dlg->cancelled.load ();
             }, &err,
-            autoDownload, devicePref);
+            autoDownload);
 
-        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId, device] {
+        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId] {
             const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (ok)
@@ -2223,7 +2200,7 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
 
             // A user cancel is not a failure: just close quietly.
             if (!wasCancelled)
-                showAiFailureDialog ("Transcription", err, modelId, this, device);
+                showAiFailureDialog ("Transcription", err, modelId, this, "CPU");
         });
     }).detach ();
 }
@@ -2238,8 +2215,7 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
                                      "Every .wav file in this folder (including subfolders)\n"
                                      "will be transcribed by Whisper and its SCTT chunk\n"
                                      "updated in place. The files are NOT opened in the editor.\n"
-                                     "OpenVINO only uses Intel CPU/GPU/NPU hardware - NVIDIA GPUs are not\n"
-                                     "supported by the runtime and will never be listed.\n\n"
+                                     "Transcription runs on CPU (whisper.cpp b5454 prebuilt runtime).\n\n"
                                      + folder.getFullPathName (),
                                      juce::AlertWindow::QuestionIcon, this);
 
@@ -2251,7 +2227,6 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
     w->addComboBox ("speed",
                     juce::StringArray { "Balanced (beam search)", "Fast (greedy)" },
                     "Speed / accuracy");
-    w->addComboBox ("device", sc::aiDeviceNames (), "Device");
     w->addComboBox ("existing",
                     juce::StringArray { "Overwrite existing SCTT", "Skip files with SCTT" },
                     "Existing transcriptions");
@@ -2271,8 +2246,6 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
         c->setSelectedItemIndex (app.lastTranscribeTranslate ? 1 : 0);
     if (auto* c = w->getComboBoxComponent ("speed"))
         c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
-    if (auto* c = w->getComboBoxComponent ("device"))
-        c->setSelectedItemIndex (sc::aiDevicePrefIndex (app.aiDevicePref));
 
     w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
                     "Auto-download model if missing");
@@ -2309,9 +2282,6 @@ void MainWindow::showTranscribeFolderDialog()
                                         && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
     const bool fast                = w->getComboBoxComponent ("speed") != nullptr
                                         && w->getComboBoxComponent ("speed")->getText ().startsWith ("Fast");
-    const std::string devicePref   = sc::aiDevicePrefFromText (w->getComboBoxComponent ("device") != nullptr
-                                                               ? w->getComboBoxComponent ("device")->getText ()
-                                                               : juce::String ());
     const bool skipExisting        = w->getComboBoxComponent ("existing") != nullptr
                                         && w->getComboBoxComponent ("existing")->getText ().startsWith ("Skip");
     const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
@@ -2335,11 +2305,10 @@ void MainWindow::showTranscribeFolderDialog()
     app.lastTranscribeTranslate = translate;
     app.lastTranscribeFast      = fast;
     app.aiAutoDownload          = autoDownload;
-    app.aiDevicePref            = devicePref;
     app.saveAiSettings ();
 
     runBatchTranscribeAsync (folder, modelId, language, translate, fast, skipExisting,
-                             autoDownload, devicePref);
+                             autoDownload);
 }
 
 // Batch transcription on a background thread with a cancellable progress
@@ -2347,8 +2316,7 @@ void MainWindow::showTranscribeFolderDialog()
 void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
                                           const std::string& modelId,
                                           const std::string& language, bool translate,
-                                          bool fast, bool skipExisting, bool autoDownload,
-                                          const std::string& devicePref)
+                                          bool fast, bool skipExisting, bool autoDownload)
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Scanning " + folder.getFileName ()
@@ -2357,7 +2325,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
     dlg->beginModal ();
 
     std::thread ([this, folder, modelId, language, translate, fast, skipExisting,
-                  autoDownload, devicePref, dlg] {
+                  autoDownload, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v < 0.0) v = 0.0;
@@ -2367,17 +2335,9 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
             juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
         };
 
-        // Resolve the device preference once for the whole batch.
-        sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
-        std::string devNote;
-        const std::string device = sc::resolveAiDevice (devicePref,
-                                                        sc::ai::OvRuntime::instance ().devices (),
-                                                        &devNote);
-        juce::MessageManager::callAsync ([dlg, folder, device, devNote] {
+        juce::MessageManager::callAsync ([dlg, folder] {
             dlg->setStatusText ("Scanning " + folder.getFileName () + " for WAV files ...\n"
-                                + "(device: " + juce::String (device)
-                                + (devNote.empty () ? ")" : " - " + juce::String (devNote) + ")")
-                                + "\n(Cancel stops after the current file)");
+                                + "(CPU)\n(Cancel stops after the current file)");
         });
 
         BatchTranscribeSummary summary;
@@ -2385,24 +2345,22 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
         const bool ok = app.batchTranscribeFolder (
             folder, modelId, language, translate, fast, skipExisting,
             [&sendProgress] (float f) { sendProgress ((double) f); return true; },
-            [dlg, device] (const juce::String& name) {
-                juce::MessageManager::callAsync ([dlg, name, device] {
+            [dlg] (const juce::String& name) {
+                juce::MessageManager::callAsync ([dlg, name] {
                     dlg->setStatusText ("Transcribing " + name
-                                        + " ...\n(device: " + juce::String (device)
-                                        + ")\n(Cancel stops after the current file)");
+                                        + " ...\n(CPU)\n(Cancel stops after the current file)");
                 });
             },
             &dlg->cancelled,
             &summary,
             &err,
-            autoDownload,
-            devicePref);
+            autoDownload);
 
-        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId, summary, device] {
+        juce::MessageManager::callAsync ([this, dlg, ok, err, modelId, summary] {
             delete dlg;
             if (!ok)
             {
-                showAiFailureDialog ("Transcription", err, modelId, this, device);
+                showAiFailureDialog ("Transcription", err, modelId, this, "CPU");
                 return;
             }
 

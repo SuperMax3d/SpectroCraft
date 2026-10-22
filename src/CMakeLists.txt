@@ -41,20 +41,11 @@ if (TARGET sc_openvino)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DeepFilter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperTranscribe.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperPipeline.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/NoiseSuppression.cpp
-        # whisper.cpp v1.6.2 (MIT) — CPU ggml runtime + OpenVINO encoder backend.
-        ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/whisper.cpp
-        ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/ggml.c
-        ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/ggml-quants.c
-        ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/ggml-alloc.c
-        ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/ggml-backend.c
-        ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/openvino/whisper-openvino-encoder.cpp
-        # miniz v1.14 (public domain) — zip extraction for model archives.
-        ${CMAKE_SOURCE_DIR}/extern/miniz/miniz.c)
-    # extern/whisper.cpp itself: whisper.cpp includes "openvino/..." relative to
-    # its own root, and the ggml C files include their headers by bare name.
-    target_include_directories (SpectroCraft PRIVATE ${CMAKE_SOURCE_DIR}/extern
-                                                   ${CMAKE_SOURCE_DIR}/extern/whisper.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperRuntime.cpp   # dynamic loader for the prebuilt b5454 DLLs
+        ${CMAKE_CURRENT_SOURCE_DIR}/NoiseSuppression.cpp)
+    # Vendored whisper.cpp b5454 C API header (the binaries themselves are
+    # loaded at runtime — see extern/whisper-b5454/README.md).
+    target_include_directories (SpectroCraft PRIVATE ${CMAKE_SOURCE_DIR}/extern/whisper-b5454/include)
     sc_enable_ai (SpectroCraft)
 endif()
 
@@ -106,21 +97,6 @@ endif()
 if (MSVC AND TARGET sc_openvino)
     set_source_files_properties (${CMAKE_CURRENT_SOURCE_DIR}/AI/OvRuntime.cpp
         PROPERTIES COMPILE_OPTIONS "/EHa")
-endif()
-
-# whisper.cpp: the OpenVINO encoder path is compiled in via WHISPER_USE_OPENVINO,
-# and ggml's SIMD kernels need /arch:AVX2 on MSVC (upstream does the same).
-if (TARGET sc_openvino)
-    set_source_files_properties (
-        ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/whisper.cpp
-        ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/openvino/whisper-openvino-encoder.cpp
-        PROPERTIES COMPILE_DEFINITIONS "WHISPER_USE_OPENVINO")
-    if (MSVC)
-        set_source_files_properties (
-            ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/whisper.cpp
-            ${CMAKE_SOURCE_DIR}/extern/whisper.cpp/ggml.c
-            PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
-    endif()
 endif()
 
 juce_generate_juce_header (SpectroCraft)

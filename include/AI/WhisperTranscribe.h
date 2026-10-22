@@ -1,10 +1,9 @@
 // SpectroCraft — Whisper transcription engine (Phase 3 of the AI plan).
 //
-// Thin wrapper around whisper.cpp v1.6.2 (MIT) with its OpenVINO encoder
-// backend: the encoder runs on the bundled OpenVINO runtime, the decoder
-// stays in whisper.cpp's ggml CPU runtime — Intel's split for their Audacity
-// plugin. If the OpenVINO encoder fails to initialise, whisper.cpp silently
-// falls back to a pure-ggml encode (slower, same results).
+// Thin wrapper around the prebuilt whisper.cpp b5454 binaries (MIT), loaded
+// at runtime by sc::ai::WhisperRuntime and run on CPU via ggml's per-
+// microarchitecture SIMD backends. No OpenVINO is involved in transcription;
+// the bundled OpenVINO runtime serves noise suppression only.
 //
 // All methods are BLOCKING — call them from a worker thread. The input must
 // be mono float32 at 16 kHz (WHISPER_SAMPLE_RATE); callers resample first
@@ -18,7 +17,7 @@
 
 namespace juce { class File; }
 
-struct whisper_context;   // forward decl from whisper.h (kept out of this header)
+struct whisper_context;   // opaque type from the vendored b5454 whisper.h
 
 namespace sc { namespace ai {
 
@@ -44,15 +43,9 @@ public:
     WhisperTranscriber (const WhisperTranscriber&) = delete;
     WhisperTranscriber& operator= (const WhisperTranscriber&) = delete;
 
-    // ggmlModel:  path to ggml-<name>.bin (full model)
-    // irXml:      path to ggml-<name>-encoder-openvino.xml ("") for pure ggml
-    // cacheDir:   OpenVINO compiled-model cache directory (speeds up re-init)
-    // device:     OpenVINO encoder device ("CPU", "GPU" or "NPU"); the caller
-    //             resolves the user's preference via sc::resolveAiDevice.
-    //             If initialising on a non-CPU device fails, CPU is retried.
-    bool load (const juce::File& ggmlModel, const juce::File& irXml,
-               const juce::File& cacheDir, const std::string& device,
-               std::string* errOut);
+    // ggmlModel: path to ggml-<name>.bin. Also loads whisper.dll on first use
+    // (see sc::ai::WhisperRuntime); a missing runtime is reported in *errOut.
+    bool load (const juce::File& ggmlModel, std::string* errOut);
 
     // samples must be mono float32 @ 16 kHz. Returns false on failure.
     bool transcribe (const float* samples, int nSamples, const Options& opts,

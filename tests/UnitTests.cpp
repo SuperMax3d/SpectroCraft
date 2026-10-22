@@ -2270,7 +2270,7 @@ static void testAboutText()
     CHECK (about.contains ("DenseUNet model weights - Apache-2.0, Intel Open Source Model Zoo"),
            "DenseUNet model licence credited");
     CHECK (about.contains ("intel/deepfilternet-openvino"), "DeepFilterNet 2/3 model source cited");
-    CHECK (about.contains ("whisper.cpp v1.6.2") && about.contains ("MIT, ggerganov"),
+    CHECK (about.contains ("whisper.cpp b5454") && about.contains ("MIT, ggerganov"),
            "whisper.cpp MIT licence credited");
     CHECK (about.contains ("OpenAI's Whisper checkpoints"), "Whisper weights attributed to OpenAI");
 #else
@@ -7057,35 +7057,19 @@ static void testWhisperPipeline()
 {
     auto& mm = sc::ai::ModelManager::instance ();
 
-    // The fp16 base/small/medium/large-v* models are distributed as Intel's
-    // per-model zips: ggml .bin (hash-verified against ggerganov's published
-    // value) plus the OpenVINO encoder IR pair. Everything else is a plain
-    // single-file ggml download from ggerganov/whisper.cpp.
-    const char* zipIds[] = { "whisper-base", "whisper-small", "whisper-medium",
-                             "whisper-large-v1", "whisper-large-v2", "whisper-large-v3" };
-    for (const char* id : zipIds)
+    // Every Whisper model is a plain single-file ggml .bin download from
+    // ggerganov/whisper.cpp, hash-verified against the published value.
+    const char* ids[] = { "whisper-tiny", "whisper-tiny-q5_1", "whisper-base",
+                          "whisper-base-q5_1", "whisper-small", "whisper-small-q5_1",
+                          "whisper-medium", "whisper-large-v1", "whisper-large-v2",
+                          "whisper-large-v3", "whisper-large-v3-turbo",
+                          "whisper-large-v3-turbo-q8_0" };
+    for (const char* id : ids)
     {
         const auto* spec = mm.find (id);
         CHECK (spec != nullptr, juce::String (id) + " registered");
         if (!spec) continue;
-        bool ok = !spec->zip.url.empty () && spec->zip.sha256.size() == 64
-                  && spec->files.size() == 3
-                  && spec->files[0].url.empty ()            // ggml .bin from the zip
-                  && spec->files[0].sha256.size() == 64     // ggerganov's published hash
-                  && spec->files[1].name.find ("-encoder-openvino.xml") != std::string::npos
-                  && spec->files[2].name.find ("-encoder-openvino.bin") != std::string::npos;
-        CHECK (ok, juce::String (id) + " zip spec complete");
-    }
-
-    const char* plainIds[] = { "whisper-tiny", "whisper-tiny-q5_1", "whisper-base-q5_1",
-                               "whisper-small-q5_1", "whisper-large-v3-turbo",
-                               "whisper-large-v3-turbo-q8_0" };
-    for (const char* id : plainIds)
-    {
-        const auto* spec = mm.find (id);
-        CHECK (spec != nullptr, juce::String (id) + " registered");
-        if (!spec) continue;
-        bool ok = spec->files.size() == 1 && spec->zip.url.empty ()
+        bool ok = spec->files.size() == 1
                   && !spec->files[0].url.empty ()
                   && spec->files[0].sha256.size() == 64
                   && spec->files[0].sizeBytes > 0
@@ -7093,16 +7077,10 @@ static void testWhisperPipeline()
         CHECK (ok, juce::String (id) + " file spec complete");
     }
 
-#if defined(_DEBUG)
-    // OpenVINO cannot be initialised under the MSVC debug CRT.
-    std::cerr << "  [whisper pipeline test skipped: MSVC debug CRT]\n";
-    return;
-#endif
-
 #if defined(_WIN32)
-    if (!LoadLibraryA ("openvino.dll"))
+    if (!LoadLibraryA ("whisper.dll"))
     {
-        std::cerr << "  [whisper pipeline test skipped: openvino.dll not installed]\n";
+        std::cerr << "  [whisper pipeline test skipped: whisper.dll not installed]\n";
         return;
     }
 #endif
@@ -7123,7 +7101,6 @@ static void testWhisperPipeline()
 
     const juce::File dir = mm.dirFor ("whisper-base");
     const juce::File ggmlModel = dir.getChildFile ("ggml-base.bin");
-    const juce::File irXml     = dir.getChildFile ("ggml-base-encoder-openvino.xml");
 
     // 2 s of a 440 Hz tone @ 16 kHz mono.
     AudioEngine eng;
@@ -7141,7 +7118,7 @@ static void testWhisperPipeline()
 
     std::vector<ScttSegment> segs;
     int lastPct = -1;
-    const bool ok = sc::ai::runWhisperPipeline (eng, { 0 }, ggmlModel, irXml, opts, "auto", segs,
+    const bool ok = sc::ai::runWhisperPipeline (eng, { 0 }, ggmlModel, opts, segs,
         [&lastPct] (float f) {
             const int pct = (int) (f * 100.0);
             if (pct >= lastPct + 25 || pct == 100)
@@ -7161,16 +7138,10 @@ static void testBatchTranscribe()
 {
     auto& mm = sc::ai::ModelManager::instance ();
 
-#if defined(_DEBUG)
-    // OpenVINO cannot be initialised under the MSVC debug CRT.
-    std::cerr << "  [batch transcribe skipped: MSVC debug CRT]\n";
-    return;
-#endif
-
 #if defined(_WIN32)
-    if (!LoadLibraryA ("openvino.dll"))
+    if (!LoadLibraryA ("whisper.dll"))
     {
-        std::cerr << "  [batch transcribe skipped: openvino.dll not installed]\n";
+        std::cerr << "  [batch transcribe skipped: whisper.dll not installed]\n";
         return;
     }
 #endif
