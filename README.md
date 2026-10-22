@@ -734,8 +734,8 @@ The **Selection** tab in the left panel manages *named* spectral selections
 for the active file and provides **Clone & Multiply**, a tool for picking out
 harmonics of whatever is currently selected.
 
-- **Save / Recall / Delete**: Save stores the current spectral selection under
-  a name (saving again with the same name updates that entry); Recall replaces
+- **Store / Recall / Delete**: Store saves the current spectral selection under
+  a name (storing again with the same name updates that entry); Recall replaces
   the current selection with a saved one (double-clicking a row does the same).
   The list belongs to each file, and when **Save to disk** is on it is kept in
   sync with `<file>.selections.json` next to the audio file so it survives

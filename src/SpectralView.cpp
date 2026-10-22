@@ -538,18 +538,15 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
         if (changed)
         {
             // Mirror the committed selection's time extent into the shared time
-            // selection and refresh both views + panels.
-            auto ext = d ? d->spectralSel.timeExtent () : juce::Range<double> { 0, 0 };
-            const double dur = app.audioEngine().duration ();
-            ext = ext.getIntersectionWith ({ 0, std::max (1e-9, dur) });
-            if (ext.getLength() <= 1e-9)
-                app.setSelection ({ 0, 0 });
-            else
-                app.setSelection (ext);
+            // selection, re-install the playback mask and refresh both views +
+            // panels. This must go through refreshSpectralSelectionUI() rather
+            // than a plain setSelection(): the live drag already synced the same
+            // extent via syncToolTimeExtent(), so a bare setSelection would be a
+            // no-op, fire no notification and leave the Selection panel with
+            // stale button states (e.g. Save disabled after a plain replace-drag).
+            app.refreshSpectralSelectionUI ();
             selection = app.selection;
             setSpectralSelectionChanged ();
-            // Re-install the playback mask in case Play Spectral Selection is on.
-            app.pushSpectralMaskToEngine ();
         }
     }
     else if (dragMode == DragMode::Select && app.selection.getLength() <= 1e-6)

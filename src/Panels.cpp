@@ -3007,7 +3007,7 @@ void SelectionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::M
 
 SelectionPanel::SelectionPanel (Application& appIn)
     : app (appIn),
-      saveBtn ("Save"), recallBtn ("Recall"), deleteBtn ("Delete"),
+      saveBtn ("Store"), recallBtn ("Recall"), deleteBtn ("Delete"),
       diskToggle ("Save to disk"), applyMultBtn ("Apply"), pickBtn ("Pick points...")
 {
     auto& header = table.getHeader();
@@ -3067,7 +3067,9 @@ void SelectionPanel::refresh()
     const bool hasSel = app.hasSpectralSelection ();
     saveBtn.setEnabled (hasSel);
     applyMultBtn.setEnabled (hasSel);
-    pickBtn.setEnabled (d != nullptr && hasSel && !app.isClonePicking ());
+    // The button must stay enabled while a picking session is active so the
+    // user can click "Stop picking" to end it (Esc works too).
+    pickBtn.setEnabled (d != nullptr && hasSel);
 
     const int selRow = table.getSelectedRow ();
     const bool haveRow = d != nullptr && selRow >= 0 && selRow < (int) d->savedSelections.size ();
