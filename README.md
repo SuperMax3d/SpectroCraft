@@ -636,6 +636,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Add marker (region if selected, else point at cursor) | F2 / F8 |
 | Selection tool: Time Range / Marquee / Lasso / Paintbrush | S / M / L / P |
 | Brush radius smaller / larger (Paintbrush only) | [ / ] |
+| Paintbrush: straight line from the last stroke's end point to the click position (straight in linear-frequency space) | Alt+click |
 | Clear the active spectral selection (time selection untouched) | Esc |
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
 | Zoom to fit (both views) | Ctrl+0 |
@@ -709,7 +710,11 @@ time/frequency plane and apply edits to exactly that content. The
 
 Modifier keys while dragging: **plain = replace** the current selection,
 **Shift = add** to it, **Ctrl = subtract** from it (subtractive shapes are
-drawn with dashed edges). The active tool and brush radius are shown in the
+drawn with dashed edges). With the paintbrush, **Alt+click** draws a straight
+line from the last stroke's end point to the click position; the line is
+straight in *linear-frequency* space, so on a logarithmic frequency axis it
+appears slightly curved (switching the view to a linear scale shows it as a
+perfectly straight line). Shift/Ctrl combine with Alt for add/subtract lines. The active tool and brush radius are shown in the
 status bar; `[` / `]` change the brush radius (20–5000 Hz), and **Esc**
 clears the spectral selection without touching the time selection.
 

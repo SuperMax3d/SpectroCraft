@@ -100,6 +100,9 @@ public:
     double timeToX (double t) const;
     float freqToY (double freq, int height) const;
     double yToFreq (float y, int height) const;
+    // Absolute frequency at a screen y position (mapped through the channel row
+    // containing it; nearest row when between rows).
+    double freqAtY (int y) const;
 
 public:
     // Plot area (starts at kLeftAxisWidth so it aligns with the waveform view).
@@ -121,7 +124,7 @@ private:
 
     // Interaction state
     enum class DragMode { None, Select, Pan, VPan, ZoomDrag,
-                          Marquee, Lasso, Paint };
+                          Marquee, Lasso, Paint, LineDrag };
     DragMode dragMode = DragMode::None;
     int dragStartX = 0;
     int dragStartY = 0;
@@ -137,6 +140,13 @@ private:
     double liveT0 = 0, liveT1 = 0, liveF0 = 0, liveF1 = 0;   // marquee (t,f) space
     std::vector<std::pair<double, double>> lassoPts;        // (tSecs, fHz)
     std::vector<std::pair<double, double>> strokePts;       // paintbrush path
+
+    // Paintbrush straight-line mode (ALT+click): a line from the last stroke's
+    // end point (the anchor) to the current cursor position. The anchor is set
+    // by every paint mouse-up (freehand drag or ALT+click line).
+    bool haveLineAnchor = false;
+    double lineAnchorT = 0.0, lineAnchorF = 0.0;
+    double lineEndT = 0.0, lineEndF = 0.0;   // live end point while LineDrag
     int probeX = -1, probeY = -1;   // last cursor position (status-bar probe / brush)
 
     // Per-pixel boolean raster of the spectral selection (1 byte per view
@@ -162,9 +172,6 @@ private:
     void drawFrequencyRuler (juce::Graphics& g);
     void drawOverlays (juce::Graphics& g);
 
-    // Absolute frequency at a screen y position (mapped through the channel row
-    // containing it; nearest row when between rows).
-    double freqAtY (int y) const;
     // Mirror a live tool shape's time extent into the shared time selection.
     void syncToolTimeExtent (juce::Range<double> ext);
     // Draws the committed spectral selection plus an optional live preview

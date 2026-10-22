@@ -6089,6 +6089,107 @@ static void testSpectralSelectionRenderHole()
     wav.deleteFile();
 }
 
+// Straight-line sampling must be linear in BOTH time and frequency: the
+// midpoint is exactly the average of the endpoints and every sample lies on
+// f = f0 + (f1-f0)*(t-t0)/(t1-t0).
+static void testStraightLinePoints()
+{
+    auto pts = straightLinePoints (0.0, 100.0, 1.0, 300.0);
+    CHECK (!pts.empty (), "line has points");
+    if (pts.size () >= 2)
+    {
+        CHECK (pts.front ().first == 0.0 && pts.front ().second == 100.0,
+              "starts at P0");
+        CHECK (pts.back ().first == 1.0 && pts.back ().second == 300.0,
+              "ends at P1");
+
+        const auto mid = pts[pts.size () / 2];
+        CHECK (std::abs (mid.first - 0.5) < 1e-9 && std::abs (mid.second - 200.0) < 1e-6,
+              "midpoint is the exact average");
+
+        bool onLine = true;
+        for (auto& p : pts)
+            if (std::abs (p.second - (100.0 + 200.0 * p.first)) > 1e-6) { onLine = false; break; }
+        CHECK (onLine, "all samples collinear in linear-f space");
+    }
+
+    // A vertical line keeps constant time.
+    auto vpts = straightLinePoints (0.5, 200.0, 0.5, 800.0);
+    bool vertOk = !vpts.empty ();
+    for (auto& p : vpts) if (p.first != 0.5) { vertOk = false; break; }
+    CHECK (vertOk, "vertical line keeps constant time");
+
+    // A degenerate zero-length line still returns points (a dot stamp).
+    auto dpts = straightLinePoints (1.0, 500.0, 1.0, 500.0);
+    CHECK (!dpts.empty (), "zero-length line has points");
+}
+
+// ALT+click in paintbrush mode draws a straight line from the last stroke's
+// end point to the click position. The line is interpolated linearly in
+// (time, frequency) space - i.e. it stays straight on a LINEAR frequency
+// scale and only appears slightly curved on screen when the view uses a log
+// axis (which is correct).
+static void testAltClickStraightLine()
+{
+    const juce::File wav = makeTempFile ("alt_line.wav");
+    writeWav (wav, 1, 8000.0, 16384, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for alt-click line test");
+
+    SpectralView view (app);
+    view.setSize (512, 256);
+    view.setViewRange (0.0, 2.0);
+    view.setVisibleChannels ({ 0 });
+    // Keep the default LOG frequency axis: a screen-straight drag would be an
+    // exponential curve in f; the committed line must still be linear in f.
+    view.setSettings (app.settings);
+
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    const juce::ModifierKeys altLmb (juce::ModifierKeys::leftButtonModifier
+                                     | juce::ModifierKeys::altModifier);
+    app.selMode = SpectralSelMode::Paintbrush;
+
+    // Op 1: plain freehand paint drag from A to B. Its mouse-up point B
+    // becomes the anchor for the next ALT+click.
+    const int xA = (int) view.timeToX (0.2), yA = (int) view.freqToY (500.0, 256);
+    const int xB = (int) view.timeToX (0.4), yB = (int) view.freqToY (200.0, 256);
+    view.mouseDown (mkMouse (view, xA, yA, lmb));
+    view.mouseDrag (mkMouse (view, xB, yB, lmb));
+    view.mouseUp   (mkMouse (view, xB, yB, lmb));
+
+    // Op 2: ALT+click at C. Commits a straight line B -> C and replaces the
+    // selection (plain modifier = replace).
+    const int xC = (int) view.timeToX (0.8), yC = (int) view.freqToY (3500.0, 256);
+    view.mouseDown (mkMouse (view, xC, yC, altLmb));
+    view.mouseUp   (mkMouse (view, xC, yC, altLmb));
+
+    auto& sel = app.doc()->spectralSel;
+    CHECK (sel.count () == 1, "ALT+click replaces the selection with one line stroke");
+    if (sel.count () != 1) { wav.deleteFile (); return; }
+    const SpectralShape& s = sel.shapes ().front ();
+    CHECK (s.kind == SpectralShape::Kind::Stroke, "committed shape is a stroke");
+
+    // The anchor B was at f=200 Hz and the click C at f=3500 Hz. At the time
+    // midpoint t=0.6 s a LINEAR-f line passes through (200+3500)/2 = 1850 Hz;
+    // a screen-straight (log-interpolated) line would pass through
+    // sqrt(200*3500) ~ 837 Hz instead - far outside the 200 Hz brush radius.
+    CHECK (sel.contains (0.6, 1850.0), "line is straight in linear-f space");
+    CHECK (!sel.contains (0.6, 837.0), "log-curved position is NOT on the line");
+
+    // Both endpoints are covered by their brush radius.
+    const double tB = view.xToTime (xB), fB = view.freqAtY (yB);
+    const double tC = view.xToTime (xC), fC = view.freqAtY (yC);
+    CHECK (sel.contains (tB, fB), "anchor end covered");
+    CHECK (sel.contains (tC, fC), "click end covered");
+
+    wav.deleteFile ();
+}
+
 // DFT amplitude of a pure tone in a buffer (leakage-tolerant).
 static float toneAmp (const std::vector<float>& x, size_t from, size_t to,
                       double freqHz, double rate)
@@ -7279,6 +7380,8 @@ static int scRunUnitTestsImpl()
 #endif
     progress ("spectral selection model");  testSpectralSelectionModel();
     progress ("selection render hole");     testSpectralSelectionRenderHole();
+    progress ("straight line points");      testStraightLinePoints();
+    progress ("alt-click straight line");   testAltClickStraightLine();
     progress ("masked gain + zero-out");    testMaskedGainAndZero();
     progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
     progress ("extract masked A+B=orig");   testExtractMasked();

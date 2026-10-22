@@ -192,8 +192,33 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
                 lassoPts.emplace_back (dragStartTime, freqAtY (e.y));
                 break;
             default:   // Paintbrush
-                dragMode = DragMode::Paint;
-                strokePts.emplace_back (dragStartTime, freqAtY (e.y));
+                if (e.mods.isAltDown ())
+                {
+                    const double t = dragStartTime;
+                    const double f = freqAtY (e.y);
+                    if (haveLineAnchor)
+                    {
+                        // Straight line from the last stroke's end point to here.
+                        dragMode = DragMode::LineDrag;
+                        lineEndT = t;
+                        lineEndF = f;
+                        syncToolTimeExtent ({ std::min (lineAnchorT, t),
+                                              std::max (lineAnchorT, t) });
+                    }
+                    else
+                    {
+                        // No previous stroke yet: just remember this point as
+                        // the anchor for the next ALT+click.
+                        haveLineAnchor = true;
+                        lineAnchorT = t;
+                        lineAnchorF = f;
+                    }
+                }
+                else
+                {
+                    dragMode = DragMode::Paint;
+                    strokePts.emplace_back (dragStartTime, freqAtY (e.y));
+                }
                 break;
         }
         return;
@@ -284,6 +309,15 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
             double tMin = 1e30, tMax = -1e30;
             for (auto& p : strokePts) { tMin = std::min (tMin, p.first); tMax = std::max (tMax, p.first); }
             syncToolTimeExtent ({ tMin, tMax });
+            repaint();
+            break;
+        }
+        case DragMode::LineDrag:
+        {
+            lineEndT = xToTime (e.x);
+            lineEndF = freqAtY (e.y);
+            syncToolTimeExtent ({ std::min (lineAnchorT, lineEndT),
+                                  std::max (lineAnchorT, lineEndT) });
             repaint();
             break;
         }
@@ -439,7 +473,7 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
         repaint();
     }
     else if (dragMode == DragMode::Marquee || dragMode == DragMode::Lasso
-             || dragMode == DragMode::Paint)
+             || dragMode == DragMode::Paint || dragMode == DragMode::LineDrag)
     {
         auto* d = app.doc();
         bool changed = false;
@@ -464,10 +498,26 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
                         d->spectralSel.clear ();   // tiny lasso = clear
                     changed = true;
                     break;
+                case DragMode::LineDrag:
+                    // Straight line in LINEAR-frequency space from the anchor
+                    // to the release point (see straightLinePoints()).
+                    d->spectralSel.addStroke (straightLinePoints (lineAnchorT, lineAnchorF,
+                                                                 lineEndT, lineEndF),
+                                              app.brushRadiusHz, toolSubtract, toolReplace);
+                    haveLineAnchor = true;
+                    lineAnchorT = lineEndT;
+                    lineAnchorF = lineEndF;
+                    changed = true;
+                    break;
                 default:   // Paint
                     if (!strokePts.empty())
+                    {
                         d->spectralSel.addStroke (strokePts, app.brushRadiusHz,
                                                   toolSubtract, toolReplace);
+                        haveLineAnchor = true;
+                        lineAnchorT = strokePts.back().first;
+                        lineAnchorF = strokePts.back().second;
+                    }
                     changed = true;
                     break;
             }
@@ -1039,12 +1089,17 @@ void SpectralView::drawOverlays (juce::Graphics& g)
             haveLive = true;
         }
         else if ((dragMode == DragMode::Lasso && !lassoPts.empty ())
-                 || (dragMode == DragMode::Paint && !strokePts.empty ()))
+                 || (dragMode == DragMode::Paint && !strokePts.empty ())
+                 || dragMode == DragMode::LineDrag)
         {
             live.kind = dragMode == DragMode::Lasso ? SpectralShape::Kind::Polygon
                                                    : SpectralShape::Kind::Stroke;
             live.subtract = toolSubtract;
-            live.pts = (dragMode == DragMode::Lasso) ? lassoPts : strokePts;
+            if (dragMode == DragMode::LineDrag)
+                live.pts = straightLinePoints (lineAnchorT, lineAnchorF,
+                                               lineEndT, lineEndF);
+            else
+                live.pts = (dragMode == DragMode::Lasso) ? lassoPts : strokePts;
             if (live.kind == SpectralShape::Kind::Stroke)
                 live.rasteriseStroke (app.brushRadiusHz);   // grid needed for contains()
             haveLive = true;

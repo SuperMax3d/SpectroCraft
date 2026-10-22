@@ -56,6 +56,35 @@ struct SpectralShape
     void rasteriseStroke (double radiusHz);
 };
 
+// Sample points along a straight line between two (timeSecs, freqHz) positions.
+// Both time and frequency are interpolated LINEARLY, so the result is a true
+// straight line in linear-frequency space. On screen it may therefore appear
+// slightly curved when the view uses a logarithmic frequency axis - that
+// curvature is correct: the stroke stays perfectly straight if the view is
+// switched to a linear frequency scale.
+inline std::vector<std::pair<double, double>> straightLinePoints (double t0, double f0,
+                                                                 double t1, double f1)
+{
+    // Stroke rasterisation uses ~512 cols/sec and 32 Hz/row; sample at least
+    // twice as fine so the stamped brush disks merge into a solid line.
+    double need = 8.0;
+    const double dtSpan = std::abs (t1 - t0) * 1024.0;
+    if (dtSpan > need) need = dtSpan;
+    const double dfSpan = std::abs (f1 - f0) / 8.0;
+    if (dfSpan > need) need = dfSpan;
+    int n = (int) std::ceil (need);
+    if (n > 8192) n = 8192;
+
+    std::vector<std::pair<double, double>> pts;
+    pts.reserve ((size_t) n + 1);
+    for (int i = 0; i <= n; ++i)
+    {
+        const double u = (double) i / (double) n;
+        pts.emplace_back (t0 + (t1 - t0) * u, f0 + (f1 - f0) * u);
+    }
+    return pts;
+}
+
 class SpectralSelection
 {
 public:

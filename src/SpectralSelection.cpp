@@ -123,12 +123,19 @@ void SpectralSelection::addStroke (std::vector<std::pair<double, double>> ptsIn,
                                    double radiusHz, bool subtract, bool replace)
 {
     // Thin the path: keep a point only when it moved at least ~1 ms or 8 Hz.
+    // The first and last points are ALWAYS kept - they mark where the stroke
+    // really starts and ends (a densely sampled straight line would otherwise
+    // lose its exact endpoint if it falls within the threshold of the
+    // previous kept point).
     std::vector<std::pair<double, double>> pts;
-    for (auto& p : ptsIn)
-        if (pts.empty()
+    for (size_t i = 0; i < ptsIn.size (); ++i)
+    {
+        const auto& p = ptsIn[i];
+        if (pts.empty () || i == ptsIn.size () - 1
             || std::abs (p.first - pts.back().first) >= 1e-3
             || std::abs (p.second - pts.back().second) >= 8.0)
             pts.push_back (p);
+    }
     if (pts.empty()) return;
 
     if (replace && !subtract)
@@ -160,8 +167,11 @@ void SpectralShape::rasteriseStroke (double radiusHz)
 
     const double colSpan = std::max (1.0 / 512.0, tSpan / 4096.0);
     const double rowHz   = std::max (32.0, fSpan / 4096.0);
-    cols = (int) std::min <double> (4096.0, std::ceil (tSpan / colSpan));
-    rows = (int) std::min <double> (4096.0, std::ceil (fSpan / rowHz));
+    // The grid must cover [min - margin, max + margin] with a FULL cell of
+    // margin on every side: an endpoint exactly at tMax/fMax would otherwise
+    // map to index == cols/rows and be silently dropped by setBit/contains().
+    cols = (int) std::min <double> (4096.0, std::ceil ((tSpan + colSpan) / colSpan));
+    rows = (int) std::min <double> (4096.0, std::ceil ((fSpan + rowHz) / rowHz));
     if (cols <= 0 || rows <= 0) return;
 
     // The grid covers the path plus one brush radius of margin on every side.
