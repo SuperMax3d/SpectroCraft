@@ -747,7 +747,10 @@ shared across all open files — you can copy from one file and paste into
 another. **Copy to New File** and **Paste Mix** are described above. Effects offers Silence,
 Fade In/Out, Normalize, Reverse and **Change Gain...** (a dB dialog whose
 field opens focused with its value pre-selected so a new one can be typed in
-right away; it multiplies the selection by 10^(dB/20)) — all applied only to
+right away; it also has a -60..+24 dB slider kept two-way synced with the box —
+dragging rewrites the field, typing moves the slider clamped to its range,
+and OK applies whatever is in the field; it multiplies the selection by
+10^(dB/20)) — all applied only to
 the currently visible channels. The View menu has **Zoom to Selection** / **Zoom Out Full**,
 a **Colour Map** submenu
 (Classic default), checkable **Waveform View / Spectrogram View** items (at
@@ -912,7 +915,10 @@ by a single mutex (short critical sections, no lock held during FFT work).
     original level.
   - **Change Gain dialog**: on open the dB field already has keyboard focus
     with its initial "0.0" fully selected (so typing replaces it immediately)
-    while Enter/Escape still trigger OK/Cancel.
+    while Enter/Escape still trigger OK/Cancel; the slider below the box is
+    verified two-way synced — dragging rewrites the field without a feedback
+    loop, typing moves the slider clamped to -60..+24 dB, and half-typed text
+    like "-" leaves it alone.
   - **Selection / zero-crossing snapping** and duration clipping.
   - **Spectral engine end-to-end**: renders a real PNG from a generated WAV,
     verifies non-trivial output, cache population/clearing.

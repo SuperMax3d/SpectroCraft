@@ -1822,6 +1822,31 @@ void MainWindow::handleContextMenuAction (int id)
     }
 }
 
+// Parses a dB value typed into the Change Gain dialog. Returns false for
+// anything that isn't a plain number (optional leading sign, digits, at most
+// one dot) so half-typed text like "-" doesn't yank the slider around.
+static bool parseGainDbText (const juce::String& s, double& out)
+{
+    const auto t = s.trim();
+    if (t.isEmpty()) return false;
+
+    int i = 0;
+    if (t[i] == '+' || t[i] == '-') ++i;
+
+    bool digitSeen = false, dotSeen = false;
+    for (; i < t.length(); ++i)
+    {
+        const char c = t[i];
+        if (c >= '0' && c <= '9')  { digitSeen = true; continue; }
+        if (c == '.' && !dotSeen)  { dotSeen = true;   continue; }
+        return false;
+    }
+
+    if (!digitSeen) return false;
+    out = t.getDoubleValue();
+    return true;
+}
+
 // Effects > Change Gain... — prompt for a dB value and apply it to the
 // selection on the visible channels (undoable).
 juce::AlertWindow* MainWindow::createGainDialog()
@@ -1830,10 +1855,39 @@ juce::AlertWindow* MainWindow::createGainDialog()
                                      "Apply gain to the selection (dB):",
                                      juce::AlertWindow::QuestionIcon, this);
     w->addTextEditor ("gainDb", "0.0");
+
+    // Slider below the text box: -60..+24 dB in 0.1 steps. The text box stays
+    // authoritative — OK applies whatever is typed; the slider simply clamps
+    // to its range when a larger value is entered.
+    auto* slider = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::NoTextBox);
+    slider->setName ("Gain (dB)");
+    slider->setRange (-60.0, 24.0, 0.1);
+    slider->setValue (0.0, juce::dontSendNotification);
+    slider->setSize (280, 30);
+
     if (auto* editor = w->getTextEditor ("gainDb"))
+    {
         // Let Enter/Escape reach the OK/Cancel shortcuts even while the field
         // has keyboard focus.
         editor->setEscapeAndReturnKeysConsumed (false);
+
+        // Two-way sync between box and slider. Programmatic updates use
+        // dontSendNotification, so only genuine user input propagates and no
+        // feedback loop can start.
+        slider->onValueChange = [editor, slider]
+        {
+            editor->setText (juce::String (slider->getValue(), 1));
+        };
+
+        editor->onTextChange = [slider, editor]
+        {
+            double v;
+            if (!parseGainDbText (editor->getText(), v)) return;   // mid-typing: leave the slider alone
+            slider->setValue (jlimit (-60.0, 24.0, v), juce::dontSendNotification);
+        };
+    }
+
+    w->addCustomComponent (slider);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));

@@ -3362,6 +3362,56 @@ static void testChangeGainDialog()
         delete dlg;
     }
 
+    // Slider below the text box: two-way sync with clamping to its range.
+    {
+        juce::AlertWindow* w = win->createGainDialog ();
+        CHECK (w != nullptr, "gain dialog created for slider test");
+        if (w != nullptr)
+        {
+            auto* ed = w->getTextEditor ("gainDb");
+            auto* sl = dynamic_cast<juce::Slider*> (w->getCustomComponent (0));
+            CHECK (sl != nullptr, "slider is the dialog's custom component");
+
+            if (ed != nullptr && sl != nullptr)
+            {
+                // TextEditor posts its change message asynchronously; pump so
+                // onTextChange runs in this headless test.
+                auto setAndPump = [ed] (const juce::String& t)
+                {
+                    ed->setText (t, true);
+                    for (int i = 0; i < 8; ++i)
+                        juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+                };
+
+                const juce::Range<double> expectRange (-60.0, 24.0);
+                CHECK (sl->getRange() == expectRange, "slider spans -60..+24 dB");
+                CHECK (std::abs (sl->getValue()) < 1e-9, "slider starts at 0 dB");
+
+                // Dragging the slider rewrites the text box...
+                sl->setValue (6.5, juce::sendNotificationSync);
+                CHECK (ed->getText().trim() == "6.5", "slider drag updates the text box");
+                setAndPump ("6.5");   // flush the async echo; value must not move
+                CHECK (std::abs (sl->getValue() - 6.5) < 1e-9,
+                      "...without a feedback loop moving it back");
+
+                // ...and typing moves the slider...
+                setAndPump ("12");
+                CHECK (std::abs (sl->getValue() - 12.0) < 1e-9, "typing moves the slider");
+
+                // ...clamped to its range when a larger value is typed; the text
+                // box stays authoritative for what OK will apply.
+                setAndPump ("50");
+                CHECK (std::abs (sl->getValue() - 24.0) < 1e-9, "out-of-range typing clamps the slider");
+                CHECK (ed->getText().trim() == "50", "...but keeps the typed value in the box");
+
+                // Half-typed text must not yank the slider around.
+                setAndPump ("-");
+                CHECK (std::abs (sl->getValue() - 24.0) < 1e-9, "half-typed text leaves the slider alone");
+            }
+        }
+        delete w;
+    }
+
     // Full user flow: open the dialog, type "6", press Enter -> OK. A helper
     // thread injects the keystrokes into the modal loop exactly like a user:
     // '6' must replace the pre-selected "0.0" and Return must trigger OK.
