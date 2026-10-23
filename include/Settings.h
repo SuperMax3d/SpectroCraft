@@ -24,8 +24,23 @@ enum ContextMenuIDs : int
     CtxPasteMix        = 11,
     CtxSetHarmonicRefs = 12,   // Frequency Analysis only
     CtxCopyHarmonics   = 13,   // Frequency Analysis only
-    CtxResetHarmonic   = 14    // Frequency Analysis only
+    CtxResetHarmonic   = 14,   // Frequency Analysis only
+    // Scale menu (right-click on either view): time axis + vertical axis.
+    CtxScaleTimeTime      = 15,
+    CtxScaleTimeOffset    = 16,   // prompts for the time at the playhead
+    CtxScaleTimeSample    = 17,
+    CtxScaleWaveWavUnits  = 18,   // waveform vertical axis only
+    CtxScaleWaveDb        = 19,
+    CtxScaleWaveNorm      = 20,
+    CtxScaleSpecHz        = 21,   // spectrogram frequency axis only
+    CtxScaleSpecCustom    = 22,   // arms the reference-click flow
+    // Alternative Scale menu (spectrogram right-click only): checkable.
+    CtxAltScaleTime       = 23,
+    CtxAltScaleFreq       = 24
 };
+
+// Time-axis scale for the shared time window (both views, footer, markers).
+enum class TimeAxisMode : int { Time = 0, TimeOffset = 1, Sample = 2 };
 
 struct Settings
 {

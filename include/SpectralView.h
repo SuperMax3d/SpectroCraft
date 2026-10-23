@@ -94,6 +94,15 @@ public:
     // Status-bar probe: cursor time + frequency + level under the mouse
     // (empty string clears it).
     std::function<void(const juce::String&)> onCursorInfo;
+    // Armed scale calibration (Scale / Alternative Scale menu): fires when the
+    // user places the reference point in the plot.
+    std::function<void(double, double)> onRefClickPlaced;
+
+    /** When both views are stacked the spectrogram hides its own time ruler
+        (the waveform's top ruler covers it). */
+    void setShowOwnTimeRuler (bool show);
+    bool showsOwnTimeRuler() const { return showOwnTimeRuler; }
+    int rulerH() const { return showOwnTimeRuler ? kRulerH : 0; }
 
     double getViewStart() const { return viewStart; }
     double getViewEnd() const { return viewEnd; }
@@ -108,12 +117,17 @@ public:
 public:
     static constexpr int kRulerH = 24;   // top time ruler height
 
+    /** Frequency-axis label for a real frequency: plain Hz/kHz when `factor`
+        is 1, otherwise the scaled value (custom units are unitless). */
+    static juce::String formatFreqAxisLabel (double fHz, double factor);
+
     // Plot area (below the top time ruler, starting at kLeftAxisWidth so it
     // aligns with the waveform view).
     juce::Rectangle<int> plotRect() const;
 
 private:
     Application& app;   // audio data read live via app.audioEngine() (active doc)
+    bool showOwnTimeRuler = true;
     SpectralEngine& spectral;
     double viewStart = 0, viewEnd = 10;
     double freqMin = 20.0, freqMax = 20000.0;   // local frequency axis limits

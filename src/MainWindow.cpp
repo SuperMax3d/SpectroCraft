@@ -418,6 +418,13 @@ void MainWindow::setupViews()
     waveformView->onContextAction = [this] (int id) { handleContextMenuAction (id); };
     spectralView->onContextAction = [this] (int id) { handleContextMenuAction (id); };
 
+    // Armed scale calibration: once the reference point is placed in the
+    // spectrogram, prompt for its value and apply the resulting scale.
+    spectralView->onRefClickPlaced = [this] (double t, double f)
+    {
+        handleRefClickPlaced (t, f);
+    };
+
     // Cursor probes feed the status bar: time + amplitude over the waveform,
     // time + frequency + level over the spectrogram.
     auto onCursorInfo = [this] (const juce::String& s)
@@ -563,7 +570,13 @@ void MainWindow::resized()
     const bool showWave = showWaveformView && (waveformView != nullptr);
     const bool showSpec = showSpectralView && (spectralView != nullptr);
     if (waveformView) waveformView->setVisible (showWave);
-    if (spectralView) spectralView->setVisible (showSpec);
+    if (spectralView)
+    {
+        spectralView->setVisible (showSpec);
+        // In the stacked dual view the spectrogram drops its own time ruler -
+        // the waveform's top ruler covers it. Alone, it draws one again.
+        spectralView->setShowOwnTimeRuler (!showWave);
+    }
 
     // Time scrollbar at the bottom of the main area.
     if (timeBar) timeBar->setVisible (haveFile);
@@ -1126,6 +1139,9 @@ void MainWindow::syncSharedState()
         // sample rate can also change in place (resample), so refresh it here.
         statusBar->setSampleRate (app.audioEngine().isFileLoaded()
                                       ? app.audioEngine().sampleRate() : 0.0);
+        // Footer fields + playhead readout follow the active time-axis scale.
+        statusBar->setTimeContext (app.timeAxisMode, app.timeOffsetSecs,
+                                   app.audioEngine().sampleRate());
         statusBar->setSelection (app.selection.getStart(), app.selection.getEnd());
         statusBar->setPlayhead (app.playhead);
 
@@ -1817,6 +1833,13 @@ void MainWindow::cycleViewVisibility (bool forward)
     resized();
 }
 
+// Prompts for a plain numeric value with OK/Cancel (defined below).
+static bool promptNumberValue (juce::Component* parent, const juce::String& title,
+                               const juce::String& message, const juce::String& initial,
+                               double& out);
+// Strict plain-number parser (defined below).
+static bool parseGainDbText (const juce::String& s, double& out);
+
 // Actions from the right-click context menu shown by either view.
 void MainWindow::handleContextMenuAction (int id)
 {
@@ -1838,7 +1861,171 @@ void MainWindow::handleContextMenuAction (int id)
             break;
         }
         case CtxPasteMix:        runDestructiveEdit ([&] (std::string* e) { return app.pasteMix (e); }); break;
+
+        // ---- Scale menu: time axis + vertical axis (independent) ----
+        case CtxScaleTimeTime:
+            app.timeAxisMode = TimeAxisMode::Time;
+            app.timeOffsetSecs = 0.0;
+            break;
+        case CtxScaleTimeOffset:
+        {
+            // Ask for the time that should be shown at the playhead position.
+            double v = 0.0;
+            if (promptNumberValue (this, "Time Offset",
+                                   "Current time at the playhead (hh:mm:ss.xxxx):",
+                                   formatOffsetTime (app.playhead), v))
+            {
+                app.timeAxisMode = TimeAxisMode::TimeOffset;
+                app.timeOffsetSecs = v - app.playhead;
+            }
+            break;
+        }
+        case CtxScaleTimeSample:
+            app.timeAxisMode = TimeAxisMode::Sample;
+            break;
+        case CtxScaleWaveWavUnits: app.waveVScaleMode = 0; break;
+        case CtxScaleWaveDb:       app.waveVScaleMode = 1; break;
+        case CtxScaleWaveNorm:     app.waveVScaleMode = 2; break;
+        case CtxScaleSpecHz:
+            app.specFreqScaleMode = 0;
+            app.specFreqFactor = 1.0;
+            break;
+        case CtxScaleSpecCustom:
+            armRefClick (Application::RefClickTarget::SpecFreqCustom);
+            break;
+
+        // ---- Alternative Scale menu (spectrogram only, checkable) ----
+        case CtxAltScaleTime:
+            if (app.altTimeOn)
+                app.altTimeOn = false;   // disable the overlay scale
+            else
+                armRefClick (Application::RefClickTarget::AltTime);
+            break;
+        case CtxAltScaleFreq:
+            if (app.altFreqOn)
+                app.altFreqOn = false;
+            else
+                armRefClick (Application::RefClickTarget::AltFreq);
+            break;
     }
+
+    // Scale changes affect both views' rulers, the footer and the markers.
+    syncSharedState();
+}
+
+// Prompts for a plain numeric value with OK/Cancel. Returns false when
+// cancelled or the text is not a strict number (parseGainDbText rules).
+static bool promptNumberValue (juce::Component* parent, const juce::String& title,
+                               const juce::String& message, const juce::String& initial,
+                               double& out)
+{
+    auto* w = new juce::AlertWindow (title, message, juce::AlertWindow::QuestionIcon, parent);
+    w->addTextEditor ("value", initial);
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // AlertWindow disables keyboard focus on its editors; re-enable it and
+    // pre-select the text so a new value can be typed immediately.
+    if (auto* editor = w->getTextEditor ("value"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+    }
+
+    // Enter modal state WITHOUT taking keyboard focus, then grab it for the
+    // field once the window is showing.
+    w->enterModalState (false);
+    if (auto* editor = w->getTextEditor ("value"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    const juce::String text = w->getTextEditorContents ("value");
+    delete w;
+    if (result != 1) return false;
+    double v = 0.0;
+    if (!parseGainDbText (text, v)) return false;
+    out = v;
+    return true;
+}
+
+void MainWindow::armRefClick (Application::RefClickTarget target)
+{
+    app.refClickTarget = target;
+    app.haveRefClickPt = false;
+    if (statusBar) statusBar->setModeText ("Place the reference point in the spectrogram...");
+}
+
+void MainWindow::handleRefClickPlaced (double tSecs, double fHz)
+{
+    const auto target = app.refClickTarget;
+
+    juce::String title, message, initial;
+    switch (target)
+    {
+        case Application::RefClickTarget::SpecFreqCustom:
+            title   = "Custom Frequency Scale";
+            message = "Value at this frequency:";
+            initial = juce::String (fHz, 1);
+            break;
+        case Application::RefClickTarget::AltTime:
+            title   = "Alternative Time Scale";
+            message = "Value at this time (seconds):";
+            initial = juce::String (tSecs, 3);
+            break;
+        case Application::RefClickTarget::AltFreq:
+            title   = "Alternative Frequency Scale";
+            message = "Value at this frequency:";
+            initial = juce::String (fHz, 1);
+            break;
+        default:
+            app.refClickTarget = Application::RefClickTarget::None;
+            app.haveRefClickPt = false;
+            if (spectralView) spectralView->repaint();
+            return;
+    }
+
+    double v = 0.0;
+    const bool ok = promptNumberValue (this, title, message, initial, v);
+
+    // Clear the armed state + reference circle in every outcome.
+    app.refClickTarget = Application::RefClickTarget::None;
+    app.haveRefClickPt = false;
+    if (statusBar) statusBar->setModeText (currentModeText());
+    if (!ok)
+    {
+        if (spectralView) spectralView->repaint();
+        return;
+    }
+
+    switch (target)
+    {
+        case Application::RefClickTarget::SpecFreqCustom:
+            if (fHz > 1e-9 && v != 0.0)
+            {
+                app.specFreqScaleMode = 1;
+                app.specFreqFactor = v / fHz;   // displayed(f) = f * factor
+            }
+            break;
+        case Application::RefClickTarget::AltTime:
+            if (std::abs (tSecs) > 1e-9 && v != 0.0)
+            {
+                app.altTimeOn = true;
+                app.altTimeRefSecs = tSecs;     // alt(t) = t * value / ref
+                app.altTimeValue = v;
+            }
+            break;
+        case Application::RefClickTarget::AltFreq:
+            if (fHz > 1e-9 && v != 0.0)
+            {
+                app.altFreqOn = true;
+                app.altFreqRefHz = fHz;         // alt(f) = f * value / ref
+                app.altFreqValue = v;
+            }
+            break;
+        default: break;
+    }
+
+    syncSharedState();   // refreshes the status bar + spectral axis labels
 }
 
 // Parses a dB value typed into the Change Gain dialog. Returns false for

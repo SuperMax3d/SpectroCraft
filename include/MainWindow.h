@@ -95,6 +95,12 @@ public:
     void handleFind (bool openDialog);     // Ctrl+F / F3 in the active list panel
     void handleFindPrevious ();            // Ctrl+F3 in the active list panel
     void handleContextMenuAction (int id);  // right-click menu actions from either view
+    /** Arms the spectrogram's reference-click flow for a scale calibration
+        (Scale > Custom / Alternative Scale menu items). */
+    void armRefClick (Application::RefClickTarget target);
+    /** The armed flow received its reference point: prompts for the value
+        and applies the resulting scale. */
+    void handleRefClickPlaced (double tSecs, double fHz);
     /** Moves a left-panel tab from (from, fromIndex) to position insertIndex in
         `to` - within the same bar or across bars. Persists the new layout.
     */

@@ -81,6 +81,28 @@ static void showViewContextMenu (Application& app,
     m.addItem (CtxPasteMix, "Paste Mix\tCtrl+Shift+V", app.canPaste(), false);
     m.addItem (CtxDelete,"Delete\tDel",   hasSel, false);
 
+    // Scale menu: independent time-axis and vertical-axis scales.
+    juce::PopupMenu scaleMenu;
+    {
+        juce::PopupMenu timeAxis;
+        timeAxis.addItem (CtxScaleTimeTime,     "Time",           true,
+                          app.timeAxisMode == TimeAxisMode::Time);
+        timeAxis.addItem (CtxScaleTimeOffset,   "Time Offset...", true,
+                          app.timeAxisMode == TimeAxisMode::TimeOffset);
+        timeAxis.addItem (CtxScaleTimeSample,   "Sample",         true,
+                          app.timeAxisMode == TimeAxisMode::Sample);
+
+        juce::PopupMenu vAxis;
+        vAxis.addItem (CtxScaleWaveWavUnits, "Wav Units",  true, app.waveVScaleMode == 0);
+        vAxis.addItem (CtxScaleWaveDb,       "dB",         true, app.waveVScaleMode == 1);
+        vAxis.addItem (CtxScaleWaveNorm,     "Normalized", true, app.waveVScaleMode == 2);
+
+        scaleMenu.addSubMenu ("Time Axis", timeAxis);
+        scaleMenu.addSubMenu ("Vertical Axis", vAxis);
+    }
+    m.addSeparator();
+    m.addSubMenu ("Scale", scaleMenu);
+
     if (const int sel = m.showMenu (juce::PopupMenu::Options().withMousePosition());
         sel != 0)
         onAction (sel);
@@ -341,9 +363,41 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
 
     const juce::String lab = (chans == 2) ? (ch == 0 ? "L" : "R")
                                           : juce::String (ch + 1);
+
+    // Time part follows the active time-axis scale mode.
+    juce::String tText;
+    switch (app.timeAxisMode)
+    {
+        case TimeAxisMode::Sample:     tText = "t=" + formatDisplayedTime (t, app.timeAxisMode,
+                                                                           app.timeOffsetSecs,
+                                                                           app.audioEngine().sampleRate())
+                                             + " smp"; break;
+        case TimeAxisMode::TimeOffset:
+            tText = "t=" + formatDisplayedTime (t, app.timeAxisMode,
+                                                 app.timeOffsetSecs,
+                                                 app.audioEngine().sampleRate()); break;
+        default:                       tText = "t=" + juce::String (t, 3) + " s"; break;
+    }
+
+    // Amplitude part follows the active waveform vertical scale mode.
+    juce::String vText;
+    switch (app.waveVScaleMode)
+    {
+        case 1:
+            vText = (std::abs (value) > 1e-9)
+                    ? juce::String (20.0 * std::log10 (std::abs (value)), 1) + " dB"
+                    : "-inf dB";
+            break;
+        case 2:
+            vText = juce::String (value, 3);
+            break;
+        default:
+            vText = ScaleCalibration::formatLinearValue (value, app.scale());
+            break;
+    }
+
     if (onCursorInfo)
-        onCursorInfo ("t=" + juce::String (t, 3) + " s   ch " + lab
-                      + ": " + ScaleCalibration::formatLinearValue (value, app.scale()));
+        onCursorInfo (tText + "   ch " + lab + ": " + vText);
 }
 
 void WaveformView::mouseExit (const juce::MouseEvent&)
@@ -780,7 +834,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
                     && (!showChanLabels || std::abs (yUp - center) >= 9.0f))
                 {
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
-                    g.drawText (ScaleCalibration::formatWaveformAxisValue (dB, sc), 2, (int) yUp - 7,
+                    g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, true),
+                               2, (int) yUp - 7,
                                kLeftAxisWidth - 4, 14, juce::Justification::centredRight, false);
                 }
 
@@ -790,7 +845,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
                     && (!showChanLabels || std::abs (yDown - center) >= 9.0f))
                 {
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
-                    g.drawText (ScaleCalibration::formatWaveformAxisValue (dB, sc), 2, (int) yDown - 7,
+                    g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, false),
+                               2, (int) yDown - 7,
                                kLeftAxisWidth - 4, 14, juce::Justification::centredRight, false);
                 }
             }
@@ -801,7 +857,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
     // Axis title
     g.setFont (9.0f);
     g.setColour (juce::Colour::fromRGB (150, 150, 150));
-    g.drawText (sc.unitTitle(), 2, pr.getY() + 2, kLeftAxisWidth - 4, 12, juce::Justification::centredLeft, false);
+    g.drawText (waveVScaleTitle (app.waveVScaleMode, sc), 2, pr.getY() + 2,
+               kLeftAxisWidth - 4, 12, juce::Justification::centredLeft, false);
 }
 
 // ---------------------------------------------------------------- time axis
@@ -932,6 +989,163 @@ bool parseTimeText (const juce::String& sIn, double& out)
     return true;
 }
 
+juce::String formatOffsetTime (double t)
+{
+    // Always "hh:mm:ss.xxxx" with exactly four fractional digits: the Time
+    // Offset prompt and its readouts use this fixed shape.
+    if (!std::isfinite (t)) t = 0.0;
+    const bool neg = t < 0.0;
+    t = std::abs (t);
+    const int64_t whole = (int64_t) std::llround (std::floor (t));
+    const double frac = t - std::floor (t);
+    const int h = (int) (whole / 3600), m = (int) ((whole % 3600) / 60), s = (int) (whole % 60);
+    juce::String fs = juce::String (frac, 4).substring (2);   // "1270"
+    while (fs.length() < 4) fs = "0" + fs;
+    juce::String out;
+    if (neg) out << "-";
+    if (h > 0)
+        out << h << ":" << juce::String (m).paddedLeft ('0', 2) << ":"
+            << juce::String (s).paddedLeft ('0', 2);
+    else
+        out << m << ":" << juce::String (s).paddedLeft ('0', 2);
+    return out << "." << fs;
+}
+
+bool parseSignedClock (const juce::String& sIn, double& outSecs)
+{
+    auto s = sIn.trim();
+    bool neg = false;
+    if (!s.isEmpty() && (s[0] == L'-' || s[0] == L'+'))
+    {
+        neg = (s[0] == L'-');
+        s = s.substring (1);
+    }
+    double v = 0.0;
+    if (!parseTimeText (s, v)) return false;
+    outSecs = neg ? -v : v;
+    return true;
+}
+
+double timeToDisplayValue (double tSecs, TimeAxisMode m, double offsetSecs, double rate)
+{
+    switch (m)
+    {
+        case TimeAxisMode::TimeOffset: return tSecs + offsetSecs;
+        case TimeAxisMode::Sample:
+            return tSecs * std::max (1.0, rate);
+        default:                       return tSecs;
+    }
+}
+
+juce::String formatDisplayedTime (double tSecs, TimeAxisMode m, double offsetSecs, double rate)
+{
+    switch (m)
+    {
+        case TimeAxisMode::TimeOffset:
+            return formatOffsetTime (tSecs + offsetSecs);
+        case TimeAxisMode::Sample:
+            return juce::String ((int64_t) std::llround (timeToDisplayValue (tSecs, m, offsetSecs, rate)));
+        default:
+            return formatFooterTime (tSecs);
+    }
+}
+
+bool parseDisplayedTime (const juce::String& s, TimeAxisMode m, double offsetSecs,
+                         double rate, double& outSecs)
+{
+    switch (m)
+    {
+        case TimeAxisMode::Sample:
+        {
+            // Integer or decimal sample count (sign allowed).
+            auto t = s.trim();
+            if (t.isEmpty()) { outSecs = 0.0; return false; }
+            bool neg = false;
+            if (t[0] == L'-' || t[0] == L'+')
+            {
+                neg = (t[0] == L'-');
+                t = t.substring (1);
+            }
+            int dots = 0, digits = 0;
+            for (int i = 0; i < t.length(); ++i)
+            {
+                const juce_wchar c = t[i];
+                if (c == L'.') { if (++dots > 1) { outSecs = 0.0; return false; } }
+                else if (c < L'0' || c > L'9') { outSecs = 0.0; return false; }
+                else ++digits;
+            }
+            if (dots == 0 && digits == 0) { outSecs = 0.0; return false; }
+            double v = t.getDoubleValue();
+            if (!std::isfinite (v)) { outSecs = 0.0; return false; }
+            const double r = std::max (1.0, rate);
+            outSecs = (neg ? -v : v) / r;
+            return true;
+        }
+        case TimeAxisMode::TimeOffset:
+        {
+            double v = 0.0;
+            if (!parseSignedClock (s, v)) { outSecs = 0.0; return false; }
+            outSecs = v - offsetSecs;
+            return true;
+        }
+        default:
+        {
+            double v = 0.0;
+            if (!parseSignedClock (s, v)) { outSecs = 0.0; return false; }
+            outSecs = v;
+            return true;
+        }
+    }
+}
+
+double niceSampleStep (double samplesPerPixel)
+{
+    // Same 1-2-5 metric idea as niceTimeStep(), but in the sample domain and
+    // never below one sample.
+    const double target = std::max (1e-9, samplesPerPixel * 80.0);
+    const int e = (int) std::floor (std::log10 (target));
+    for (int k = -2; k < 5; ++k)
+        for (double m : { 1.0, 2.0, 5.0 })
+        {
+            const double step = m * std::pow (10.0, e + k);
+            if (step >= target) return std::max (1.0, step);
+        }
+    return std::max (1.0, std::pow (10.0, e + 5));
+}
+
+juce::String formatWaveVScaleLabel (double gridDb, int mode, const ScaleCalibration& sc,
+                                    bool positiveSide)
+{
+    switch (mode)
+    {
+        case 1:   // dB: plain relative level.
+            return juce::String ((int) std::lround (gridDb));
+        case 2:
+        {
+            // Normalized: signed linear amplitude at this grid line
+            // (+a above the centre line, -a below it).
+            const double a = std::pow (10.0, gridDb / 20.0);
+            juce::String s = juce::String (std::abs (a), 3);
+            while (s.length() > 2 && s.endsWith ("0")) s = s.dropLastCharacters (1);
+            if (s.endsWith (".")) s = s.dropLastCharacters (1);
+            return (positiveSide ? "+" : "-") + s;
+        }
+        default:
+            // Wav Units: physical value when calibrated, relative dB otherwise.
+            return ScaleCalibration::formatWaveformAxisValue (gridDb, sc);
+    }
+}
+
+juce::String waveVScaleTitle (int mode, const ScaleCalibration& sc)
+{
+    switch (mode)
+    {
+        case 1: return "dB";
+        case 2: return "norm";
+        default: return sc.unitTitle();
+    }
+}
+
 juce::String formatTimeTickLabel (double t, double step, double span)
 {
     // Zoomed-out rulers use clock-style labels based on the visible range:
@@ -971,24 +1185,46 @@ void WaveformView::drawRuler (juce::Graphics& g)
     if (w <= 0 || pr.getWidth() <= 0)
         return;
 
+    // Ticks are placed at nice values of the DISPLAYED axis: seconds for
+    // Time/TimeOffset, sample counts for Sample. Each displayed value maps
+    // back to a real time for positioning.
     const double pxPerSec = pr.getWidth() / w;
-    const double major = niceTimeStep (pxPerSec);
+    const TimeAxisMode mode = app.timeAxisMode;
+    const double off = app.timeOffsetSecs;
+    const double rate = std::max (1.0, app.audioEngine().sampleRate());
+
+    auto dispToTime = [mode, off, rate] (double d) -> double
+    {
+        switch (mode)
+        {
+            case TimeAxisMode::Sample:     return d / rate;
+            case TimeAxisMode::TimeOffset: return d - off;
+            default:                       return d;
+        }
+    };
+
+    const double dispStart = timeToDisplayValue (viewStart, mode, off, rate);
+    const double dispEnd   = timeToDisplayValue (viewEnd,   mode, off, rate);
+    const double major = (mode == TimeAxisMode::Sample)
+                         ? niceSampleStep (pxPerSec * rate) : niceTimeStep (pxPerSec);
     // Subdivide each major interval into five when there is room for it.
     const bool showMinors = major * pxPerSec >= 40.0;
 
     g.setColour (juce::Colour::fromRGB (60, 60, 60));
     g.drawLine ((float) pr.getX(), kRulerH - 1, (float) pr.getRight(), kRulerH - 1, 1.0f);
 
-    const double first = std::ceil (viewStart / major) * major;
-    if (first > viewEnd + 1e-9)
+    const double first = std::ceil (dispStart / major) * major;
+    if (first > dispEnd + 1e-9)
         return;   // the visible span is shorter than one tick step
 
     g.setFont (10.0f);
-    const int nTicks = (int) std::floor ((viewEnd - first) / major + 1e-9) + 1;
+    const int nTicks = (int) std::floor ((dispEnd - first) / major + 1e-9) + 1;
     for (int i = 0; i < nTicks; ++i)
     {
-        const double t = first + (double) i * major;
-        if (t > viewEnd + 1e-9) break;
+        const double d = first + (double) i * major;
+        if (d > dispEnd + 1e-9) break;
+        const double t = dispToTime (d);
+        if (t < viewStart - 1e-9 || t > viewEnd + 1e-9) continue;
         const float x = timeToX (t);
 
         g.setColour (juce::Colour::fromRGB (60, 60, 60));
@@ -997,13 +1233,22 @@ void WaveformView::drawRuler (juce::Graphics& g)
         if (showMinors)
             for (int j = 1; j < 5; ++j)
             {
-                const double tm = t + (double) j * major / 5.0;
-                if (tm > viewEnd + 1e-9) break;
+                const double dm = d + (double) j * major / 5.0;
+                const double tm = dispToTime (dm);
+                if (tm > viewEnd + 1e-9 || tm < viewStart - 1e-9) break;
                 g.drawLine (timeToX (tm), kRulerH - 4, timeToX (tm), kRulerH - 1, 1.0f);
             }
 
+        juce::String label;
+        switch (mode)
+        {
+            case TimeAxisMode::Sample:     label = juce::String ((int64_t) std::llround (d)); break;
+            case TimeAxisMode::TimeOffset: label = formatClockTime (d, 4); break;
+            default:                       label = formatTimeTickLabel (d, major, w); break;
+        }
+
         g.setColour (juce::Colour::fromRGB (200, 200, 200));
-        g.drawText (formatTimeTickLabel (t, major, w), (int) x + 3, 2, 90, kRulerH - 4,
+        g.drawText (label, (int) x + 3, 2, 90, kRulerH - 4,
                     juce::Justification::centredLeft, false);
     }
 }

@@ -5932,6 +5932,292 @@ static bool isXyzVersion (const char* s)
     return dots == 2 && digits > 0;
 }
 
+// ------------------------------------------------------------------ axis scale modes
+// Right-click "Scale" menu: time axis (Time / Time Offset... / Sample), the
+// waveform vertical axis (Wav Units / dB / Normalized), the spectrogram
+// frequency axis (Hz / Custom...) and the checkable Alternative Scale overlay.
+static void testAxisScaleModes()
+{
+    auto approx = [] (double a, double b) { return std::abs (a - b) <= 1e-9; };
+    auto pump = [] ()
+    {
+        for (int i = 0; i < 8; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+    };
+    auto diffCount = [] (const juce::Image& a, const juce::Image& b)
+    {
+        int n = 0;
+        for (int y = 0; y < a.getHeight(); ++y)
+            for (int x = 0; x < a.getWidth(); ++x)
+                if (a.getPixelAt (x, y) != b.getPixelAt (x, y)) ++n;
+        return n;
+    };
+
+    // --- Pure conversion helpers -------------------------------------
+    {
+        const juce::File store = makeTempFile ("scale_modes.recent");
+        store.deleteFile();
+        Application app (store);   // no file loaded: default rate 44100 Hz
+
+        CHECK (approx (app.timeToDisplay (2.5), 2.5), "Time mode is identity");
+        app.timeAxisMode = TimeAxisMode::Sample;
+        CHECK (approx (app.timeToDisplay (2.5), 110250.0), "Sample mode multiplies by rate");
+        CHECK (approx (app.displayToTime (110250.0), 2.5), "displayToTime inverts Sample mode");
+
+        app.timeAxisMode = TimeAxisMode::TimeOffset;
+        app.timeOffsetSecs = 3723.5;
+        CHECK (approx (app.timeToDisplay (10.0), 3733.5), "offset adds to the time");
+        CHECK (approx (app.displayToTime (3733.5), 10.0), "displayToTime inverts offset");
+
+        // format/parse round trips per mode.
+        app.timeAxisMode = TimeAxisMode::Sample;
+        {
+            const juce::String s = formatDisplayedTime (0.2, app.timeAxisMode, 0.0, 48000.0);
+            CHECK (s == "9600", "sample display is an integer count: " + s);
+            double v = -1;
+            CHECK (parseDisplayedTime ("9600", TimeAxisMode::Sample, 0.0, 48000.0, v)
+                      && approx (v, 0.2), "sample parse inverts the display");
+        }
+        app.timeAxisMode = TimeAxisMode::TimeOffset;
+        {
+            // Use a whole-hour offset so the clock round trip is exact.
+            const juce::String s = formatDisplayedTime (10.0, app.timeAxisMode, 3600.0, 48000.0);
+            CHECK (s == "1:00:10.0000", "offset display is hh:mm:ss.xxxx: " + s);
+            double v = -1;
+            CHECK (parseDisplayedTime ("1:00:10", TimeAxisMode::TimeOffset, 3600.0, 48000.0, v)
+                      && approx (v, 10.0), "clock text parses back through the offset");
+        }
+        app.timeAxisMode = TimeAxisMode::Time;
+        CHECK (formatDisplayedTime (90.0, app.timeAxisMode, 0.0, 48000.0) == "1:30",
+               "plain time keeps the m:ss footer format");
+
+        // Nice sample steps land on 1-2-5 x 10^k at ~80 px spacing.
+        CHECK (niceSampleStep (40.0) == 5000.0, "step for 40 samples/px");
+        CHECK (niceSampleStep (800.0) == 100000.0, "step for 800 samples/px");
+        CHECK (niceSampleStep (0.02) == 2.0, "deep zoom gets tiny steps");
+
+        // Offset clock formatting shape.
+        CHECK (formatOffsetTime (3723.5) == "1:02:03.5000", "offset time format: " + formatOffsetTime (3723.5));
+        store.deleteFile();
+    }
+
+    // --- Waveform view: rulers, axis labels and probe text --------------
+    {
+        const juce::File store = makeTempFile ("scale_wave.recent");
+        const juce::File wav = makeTempFile ("scale_wave.wav");
+        writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 440.0 * (double) f / rate);
+        });
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "scale wave test"));
+
+        WaveformView* wv = nullptr;
+        for (auto* c : win->getChildren ())
+            if ((wv = dynamic_cast<WaveformView*> (c)) != nullptr) break;
+        CHECK (wv != nullptr && app.openFile (wav), "waveform view + file ready");
+        if (!wv)
+        {
+            wav.deleteFile (); store.deleteFile ();
+            return;   // abort the remaining scale tests
+        }
+
+        auto capture = [wv] ()
+        {
+            juce::Image img (juce::Image::ARGB, std::max (1, wv->getWidth()),
+                             std::max (1, wv->getHeight()), true);
+            { juce::Graphics g (img); wv->paint (g); }
+            return img;
+        };
+
+        // Time-axis mode changes the ruler labels.
+        const auto imgTime = capture();
+        app.timeAxisMode = TimeAxisMode::Sample;
+        CHECK (diffCount (imgTime, capture()) > 50,
+               "sample-mode ruler shows sample counts");
+        app.timeAxisMode = TimeAxisMode::TimeOffset;
+        app.timeOffsetSecs = 120.0;
+        CHECK (diffCount (capture(), imgTime) > 50,
+               "time-offset mode shows clock labels");
+
+        // Waveform vertical scale modes change the left axis labels. Calibrate
+        // first: an uncalibrated file shows relative dB in BOTH wav-units and
+        // dB mode, so only a calibration makes the two visibly distinct.
+        app.doc()->scale.unit = ScaleCalibration::Unit::Pascal;
+        app.doc()->scale.fullScaleValue = 1.0;
+        app.waveVScaleMode = 0;   const auto aWav = capture();
+        app.waveVScaleMode = 1;
+        CHECK (diffCount (aWav, capture()) > 5, "dB axis labels differ from wav units");
+        app.waveVScaleMode = 2;
+        CHECK (diffCount (capture(), aWav) > 5, "normalized axis labels differ");
+
+        // Probe text follows the active time mode.
+        juce::String probe;
+        wv->onCursorInfo = [&probe] (const juce::String& s) { probe = s; };
+        const int xMid = (int) std::lround (wv->timeToX (1.0));
+
+        app.timeAxisMode = TimeAxisMode::Sample;
+        wv->mouseMove (mkMouse (*wv, xMid, wv->getHeight() / 2, {}));
+        const long long expectSmp = (long long) std::llround (wv->xToTime (xMid) * 8000.0);
+        CHECK (probe.startsWith ("t=" + juce::String (expectSmp) + " smp"),
+               "sample-mode probe shows a sample count: " + probe);
+
+        app.timeAxisMode = TimeAxisMode::TimeOffset;
+        app.timeOffsetSecs = 120.0;
+        wv->mouseMove (mkMouse (*wv, xMid, wv->getHeight() / 2, {}));
+        CHECK (probe.startsWith ("t=" + formatClockTime (wv->xToTime (xMid) + 120.0, 4)),
+               "offset-mode probe shows clock time: " + probe);
+
+        app.timeAxisMode = TimeAxisMode::Time;
+        wav.deleteFile (); store.deleteFile ();
+    }
+
+    // --- Spectral view: frequency scale factor, alt scales, ruler flag --
+    {
+        const juce::File store = makeTempFile ("scale_spec.recent");
+        const juce::File wav = makeTempFile ("scale_spec.wav");
+        writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 1000.0 * (double) f / rate);
+        });
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "scale spec test"));
+
+        SpectralView* sv = nullptr;
+        for (auto* c : win->getChildren ())
+            if ((sv = dynamic_cast<SpectralView*> (c)) != nullptr) break;
+        CHECK (sv != nullptr && app.openFile (wav), "spectral view + file ready");
+        if (!sv)
+        {
+            wav.deleteFile (); store.deleteFile ();
+            return;
+        }
+
+        auto capture = [sv] ()
+        {
+            juce::Image img (juce::Image::ARGB, std::max (1, sv->getWidth()),
+                             std::max (1, sv->getHeight()), true);
+            { juce::Graphics g (img); sv->paint (g); }
+            return img;
+        };
+
+        // Custom frequency scale relabels the right axis.
+        app.specFreqScaleMode = 0;   app.specFreqFactor = 1.0;
+        const auto sHz = capture();
+        app.specFreqScaleMode = 1;   app.specFreqFactor = 2.0;
+        CHECK (diffCount (sHz, capture()) > 30,
+               "custom frequency scale relabels the axis");
+
+        // Alternative scales append to the probe text.
+        juce::String probe;
+        sv->onCursorInfo = [&probe] (const juce::String& s) { probe = s; };
+        const int px = 2 + sv->getWidth() / 3, py = 60 + sv->getHeight() / 3;
+
+        app.altTimeOn = true;   app.altTimeRefSecs = 1.0;  app.altTimeValue = 2.0;
+        app.altFreqOn = true;   app.altFreqRefHz = 1000.0; app.altFreqValue = 500.0;
+        sv->mouseMove (mkMouse (*sv, px, py, {}));
+        CHECK (probe.contains ("| alt t=") && probe.contains ("| alt f="),
+               "alternative scales appear in the probe: " + probe);
+
+        app.altTimeOn = false;  app.altFreqOn = false;
+        sv->mouseMove (mkMouse (*sv, px, py, {}));
+        CHECK (!probe.contains ("| alt t=") && !probe.contains ("| alt f="),
+               "disabling removes the alternative scales: " + probe);
+
+        // With both views visible MainWindow hides the spectral view's own
+        // time ruler; it can be re-enabled and hidden again.
+        CHECK (!sv->showsOwnTimeRuler() && sv->rulerH() == 0,
+               "own ruler hidden while the waveform is shown");
+        sv->setShowOwnTimeRuler (true);
+        CHECK (sv->showsOwnTimeRuler() && sv->rulerH() == 24, "own ruler can be re-enabled");
+        sv->setShowOwnTimeRuler (false);
+
+        wav.deleteFile (); store.deleteFile ();
+    }
+
+    // --- Status bar: footer fields + playhead follow the scale mode -----
+    {
+        const juce::File store = makeTempFile ("scale_sb.recent");
+        const juce::File wav = makeTempFile ("scale_sb.wav");
+        writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 440.0 * (double) f / rate);
+        });
+        Application app (store);
+        CHECK (app.openFile (wav), "open file for the status bar test");
+
+        StatusBar bar;
+        bar.setSize (900, 20);
+        double gotA = -1.0, gotB = -1.0;
+        bar.onSelectionEdited = [&] (double a, double b)
+        { gotA = a; gotB = b; bar.setSelection (a, b); };
+
+        // Sample mode: fields show sample counts at the file's 8 kHz rate.
+        bar.setTimeContext (TimeAxisMode::Sample, 0.0, app.audioEngine().sampleRate());
+        bar.setSelection (1.5, 3.5);
+        CHECK (bar.getSelStartText() == "12000", "start in samples: " + bar.getSelStartText());
+        CHECK (bar.getSelStopText() == "28000", "stop in samples: " + bar.getSelStopText());
+        bar.setPlayhead (2.0);
+        CHECK (bar.getPlayheadText() == "Pos: 16000", "playhead in samples: " + bar.getPlayheadText());
+
+        // Typing a sample count applies it as seconds/rate.
+        bar.selStartField().setText ("9600", true);
+        pump();
+        CHECK (approx (gotA, 1.2) && approx (gotB, 3.5), "typed samples apply");
+
+        // Time offset: fields show clock text; typing clock text removes the offset.
+        bar.setTimeContext (TimeAxisMode::TimeOffset, 120.0, app.audioEngine().sampleRate());
+        CHECK (bar.getSelStartText() == "2:01.2000", "offset start as clock: " + bar.getSelStartText());
+        bar.selStopField().setText ("3:00", true);
+        pump();
+        CHECK (approx (gotA, 1.2) && approx (gotB, 60.0), "typed clock applies with offset removed");
+
+        // The length field is a duration: sample counts, never offset-shifted.
+        bar.setTimeContext (TimeAxisMode::Sample, 0.0, app.audioEngine().sampleRate());
+        CHECK (bar.getSelLenText() == "470400", "length in samples: " + bar.getSelLenText());
+
+        wav.deleteFile (); store.deleteFile ();
+    }
+
+    // --- Marker panel: time cells + detail editors follow the scale mode -
+    {
+        const juce::File store = makeTempFile ("scale_mk.recent");
+        const juce::File wav = makeTempFile ("scale_mk.wav");
+        writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 440.0 * (double) f / rate);
+        });
+        Application app (store);
+        CHECK (app.openFile (wav), "open file for the marker scale test");
+        app.markers().addPointMarker (1.5, "scale test");
+
+        MarkerListPanel mp (app);
+        mp.setSize (400, 200);
+        CHECK (mp.markerTimeText (1.5, false) == "0:01.500", "default mode keeps m:ss.ddd: "
+                + mp.markerTimeText (1.5, false));
+
+        app.timeAxisMode = TimeAxisMode::Sample;
+        CHECK (mp.markerTimeText (1.5, false) == "12000", "sample-mode marker time: "
+                + mp.markerTimeText (1.5, false));
+        CHECK (approx (mp.parseMarkerTime ("9600", false), 1.2), "sample text parses back");
+
+        app.timeAxisMode = TimeAxisMode::TimeOffset;
+        app.timeOffsetSecs = 120.0;
+        CHECK (mp.markerTimeText (1.5, false) == "2:01.5000", "offset-mode marker time: "
+                + mp.markerTimeText (1.5, false));
+        CHECK (approx (mp.parseMarkerTime ("3:00", false), 60.0), "clock text parses back");
+
+        // Durations never carry the offset (plain m:ss.ddd like Time mode).
+        CHECK (mp.markerTimeText (2.5, true) == "0:02.500", "duration ignores the offset");
+
+        wav.deleteFile (); store.deleteFile ();
+    }
+}
+
 static void testVersionString()
 {
     CHECK (isXyzVersion (SC_VERSION_STRING),
@@ -10196,6 +10482,7 @@ static int scRunUnitTestsImpl()
     progress ("delete shifts markers/saved sel"); testDeleteShiftsMarkersAndSavedSelections();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
+    progress ("axis scale modes");        testAxisScaleModes();
     progress ("version string");      testVersionString();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

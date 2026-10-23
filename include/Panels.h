@@ -821,6 +821,13 @@ public:
     // Programmatic row selection (normally done via the table UI).
     void selectRow (int row);
 
+    // Time text under the active time-axis scale mode. Durations never carry
+    // the Time Offset; Sample mode shows sample counts.
+    juce::String markerTimeText (double t, bool duration) const;
+    /** Parses a begin/end/length field: displayed value -> real seconds.
+        Empty/invalid text yields 0 in displayed units (parseTimeCode parity). */
+    double parseMarkerTime (const juce::String& s, bool duration) const;
+
     // Double-click a row: sets the time selection to the marker's range and
     // makes sure both views' time window includes it. Also used by unit tests.
     void activateRow (int row);
@@ -1082,6 +1089,18 @@ public:
     void setSelection (double t0, double t1);
     void setPlayhead (double t);
 
+    /** Time-axis scale context for the footer fields + playhead readout:
+        values are displayed/parsed in the active mode's units. */
+    void setTimeContext (TimeAxisMode mode, double offsetSecs, double rate)
+    {
+        timeCtxMode = mode;
+        timeCtxOffset = offsetSecs;
+        timeCtxRate = std::max (1.0, rate);
+        reformatField (startEdit);
+        reformatField (stopEdit);
+        reformatField (lenEdit);
+    }
+
     // Current field texts (unit tests).
     juce::String getSelStartText() const { return startEdit.getText(); }
     juce::String getSelStopText()  const { return stopEdit.getText(); }
@@ -1129,6 +1148,11 @@ private:
     void reformatField (juce::TextEditor& ed);
     double fieldTime (const juce::TextEditor& ed) const;
 
+    // Field text under the active time-axis scale. Durations (the length
+    // field) never carry the Time Offset; Sample mode scales them linearly.
+    juce::String formatFieldTime (double v, bool duration) const;
+    bool parseFieldText (const juce::String& s, double& outSecs, bool duration) const;
+
     // Right-side layout: [Sel:] [start] [-] [stop] [(] [len] [)]  gap  [Pos: t]
     struct RightLayout { int selLabelX, startX, dashX, stopX, openX, lenX,
                           closeX, posX; };
@@ -1137,6 +1161,10 @@ private:
     juce::String mouseText, playPart, fileName, ratePart, modeText;
     bool selVisible_ = false, rightFits_ = true;
     double curStart = 0.0, curStop = 0.0;
+
+    // Time-axis scale context (set by MainWindow via setTimeContext).
+    TimeAxisMode timeCtxMode = TimeAxisMode::Time;
+    double timeCtxOffset = 0.0, timeCtxRate = 48000.0;
 
     juce::TextEditor startEdit, stopEdit, lenEdit;
 

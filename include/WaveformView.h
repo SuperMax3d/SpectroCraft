@@ -188,3 +188,37 @@ juce::String formatFooterTime (double t);
     ("2:35", "02:35.5", "1:02:35"). Returns false for anything else; `out`
     receives the value in seconds on success. */
 bool parseTimeText (const juce::String& s, double& out);
+
+// ---- Time-axis scale helpers (shared by rulers, footer and marker panel) ----
+
+/** Clock text with a fixed 4-digit fraction: "hh:mm:ss.xxxx" (hours only
+    when non-zero). Used for the Time Offset prompt and its display. */
+juce::String formatOffsetTime (double t);
+
+/** Like parseTimeText but also accepts a leading +/- sign. */
+bool parseSignedClock (const juce::String& s, double& outSecs);
+
+/** Displayed value for the active time-axis mode:
+    Time -> seconds, TimeOffset -> seconds + offset, Sample -> sample count. */
+double timeToDisplayValue (double tSecs, TimeAxisMode m, double offsetSecs, double rate);
+
+/** Footer/marker text for a real time under the active axis mode. */
+juce::String formatDisplayedTime (double tSecs, TimeAxisMode m, double offsetSecs, double rate);
+
+/** Parse footer/marker text back to real seconds under the active axis mode.
+    Sample mode accepts integer/decimal sample counts; the time modes accept
+    signed plain-seconds or clock text. */
+bool parseDisplayedTime (const juce::String& s, TimeAxisMode m, double offsetSecs,
+                         double rate, double& outSecs);
+
+/** Nice 1-2-5 tick step in SAMPLES for a ruler showing `samplesPerPixel`. */
+double niceSampleStep (double samplesPerPixel);
+
+// ---- Waveform vertical-axis scale labels ----
+// mode: 0=Wav Units (file calibration), 1=dB, 2=Normalized.
+/** Label text for the grid line `gridDb` dB below full scale.
+    `positiveSide` selects the +a / -a sign in Normalized mode. */
+juce::String formatWaveVScaleLabel (double gridDb, int mode, const ScaleCalibration& sc,
+                                    bool positiveSide);
+/** Axis title for the waveform's left axis under the active vertical scale. */
+juce::String waveVScaleTitle (int mode, const ScaleCalibration& sc);

@@ -20,9 +20,18 @@ static constexpr double kPanSpeedFactor = 0.5;
 
 juce::Rectangle<int> SpectralView::plotRect() const
 {
-    return { kLeftAxisWidth, kRulerH,
+    return { kLeftAxisWidth, rulerH(),
              std::max (1, getWidth() - kLeftAxisWidth),
-             std::max (1, getHeight() - kRulerH) };
+             std::max (1, getHeight() - rulerH()) };
+}
+
+void SpectralView::setShowOwnTimeRuler (bool show)
+{
+    if (show == showOwnTimeRuler) return;
+    showOwnTimeRuler = show;
+    dirty = true;      // plot area moved: the cached image no longer fits
+    imageDirty = true;
+    repaint();
 }
 
 // One row per visible channel with a thin dark gap between the rows.
@@ -172,6 +181,36 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
     m.addItem (CtxPasteMix, "Paste Mix\tCtrl+Shift+V", app.canPaste(), false);
     m.addItem (CtxDelete,"Delete\tDel",   hasSel, false);
 
+    // Scale menu: independent time-axis and frequency-axis scales.
+    juce::PopupMenu scaleMenu;
+    {
+        juce::PopupMenu timeAxis;
+        timeAxis.addItem (CtxScaleTimeTime,     "Time",           true,
+                          app.timeAxisMode == TimeAxisMode::Time);
+        timeAxis.addItem (CtxScaleTimeOffset,   "Time Offset...", true,
+                          app.timeAxisMode == TimeAxisMode::TimeOffset);
+        timeAxis.addItem (CtxScaleTimeSample,   "Sample",         true,
+                          app.timeAxisMode == TimeAxisMode::Sample);
+
+        juce::PopupMenu vAxis;
+        vAxis.addItem (CtxScaleSpecHz,     "Hz",      true, app.specFreqScaleMode == 0);
+        vAxis.addItem (CtxScaleSpecCustom, "Custom...", true, app.specFreqScaleMode == 1);
+
+        scaleMenu.addSubMenu ("Time Axis", timeAxis);
+        scaleMenu.addSubMenu ("Vertical Axis", vAxis);
+    }
+    m.addSeparator();
+    m.addSubMenu ("Scale", scaleMenu);
+
+    // Alternative Scale: checkable overlay scales shown in the status bar.
+    {
+        juce::PopupMenu alt;
+        alt.addItem (CtxAltScaleTime, "Time", true, app.altTimeOn);
+        alt.addItem (CtxAltScaleFreq, "Frequency", true, app.altFreqOn);
+        m.addSeparator();
+        m.addSubMenu ("Alternative Scale", alt);
+    }
+
     if (const int sel = m.showMenu (juce::PopupMenu::Options().withMousePosition());
         sel != 0)
         onAction (sel);
@@ -181,10 +220,33 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
+    // Armed scale calibration (Scale / Alternative Scale menu): a left click
+    // inside the plot places the reference point - a circle is drawn and
+    // MainWindow prompts for its value. Any other click cancels the flow.
+    if (app.refClickTarget != Application::RefClickTarget::None)
+    {
+        const auto pr = plotRect();
+        const bool inPlot = e.x >= pr.getX() && e.x < pr.getRight()
+                            && e.y >= pr.getY() && e.y < pr.getBottom();
+        if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && inPlot)
+        {
+            app.refClickT = xToTime ((double) e.x);
+            app.refClickF = freqAtY (e.y);
+            app.haveRefClickPt = true;
+            repaint();
+            if (onRefClickPlaced) onRefClickPlaced (app.refClickT, app.refClickF);
+            return;
+        }
+        app.refClickTarget = Application::RefClickTarget::None;
+        app.haveRefClickPt = false;
+        repaint();
+        // Fall through: a right-click still shows the context menu.
+    }
+
     // Move/Scale selection gesture: left clicks inside the plot set the
     // reference point first, then apply the change on the second click.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
-        && e.x >= kLeftAxisWidth && e.y >= kRulerH && app.isSelGesturing ())
+        && e.x >= kLeftAxisWidth && e.y >= rulerH() && app.isSelGesturing ())
     {
         selGestLastClickMs = juce::Time::getMillisecondCounter();
         app.selGestureClick (xToTime ((double) e.x), freqAtY (e.y),
@@ -195,7 +257,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     // Clone & Multiply picking (Selection panel): left clicks inside the plot
     // pick a reference frequency first, then target frequencies afterwards.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
-        && e.x >= kLeftAxisWidth && e.y >= kRulerH && app.isClonePicking ())
+        && e.x >= kLeftAxisWidth && e.y >= rulerH() && app.isClonePicking ())
     {
         // ~8 px hit radius in data units: clicking on a picked point removes it.
         const double dtTol = std::abs (xToTime (e.x + 4) - xToTime (e.x - 4));
@@ -228,7 +290,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     // CTRL = subtract. Tool drags never move the playhead.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
         && !e.mods.isMiddleButtonDown() && e.x >= kLeftAxisWidth
-        && e.y >= kRulerH
+        && e.y >= rulerH()
         && app.selMode != SpectralSelMode::TimeRange)
     {
         toolSubtract = e.mods.isCtrlDown();
@@ -289,7 +351,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && !e.mods.isMiddleButtonDown())
     {
-        const bool onTimeRuler = e.y < kRulerH;
+        const bool onTimeRuler = e.y < rulerH();
         if (onTimeRuler)
         {
             // Left-drag on the top time ruler pans horizontally at half speed
@@ -523,7 +585,7 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
             //  - on the left frequency axis: vertical only;
             //  - on the top time ruler: horizontal only.
             const bool startOnAxis  = dragStartX < kLeftAxisWidth;
-            const bool startOnRuler = !startOnAxis && dragStartY < kRulerH;
+            const bool startOnRuler = !startOnAxis && dragStartY < rulerH();
 
             auto zoomTime = [this] ()
             {
@@ -686,12 +748,30 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
     // With a scale calibration the probe shows absolute levels
     // (dB-SPL for Pascal files; linear V/g values for volts/grams files)
     // instead of relative dB.
+
+    // Time part follows the active time-axis scale mode.
+    juce::String tText;
+    switch (app.timeAxisMode)
+    {
+        case TimeAxisMode::Sample:     tText = "t=" + formatDisplayedTime (t, app.timeAxisMode,
+                                                                           app.timeOffsetSecs, rate) + " smp"; break;
+        case TimeAxisMode::TimeOffset:
+            tText = "t=" + formatDisplayedTime (t, app.timeAxisMode, app.timeOffsetSecs, rate); break;
+        default:                       tText = "t=" + juce::String (t, 3) + " s"; break;
+    }
+
+    const double factor = (app.specFreqScaleMode == 1) ? app.specFreqFactor : 1.0;
+    juce::String info = tText + "   f=" + formatFreqAxisLabel (freq, factor)
+                        + "   " + ScaleCalibration::formatSpectralLevel (dB, app.scale());
+
+    // Alternative scale overlay: the rescaled coordinates alongside the normal ones.
+    if (app.altTimeOn && std::abs (app.altTimeRefSecs) > 1e-9)
+        info += "   | alt t=" + juce::String (t * app.altTimeValue / app.altTimeRefSecs, 3);
+    if (app.altFreqOn && std::abs (app.altFreqRefHz) > 1e-9)
+        info += "   | alt f=" + juce::String (freq * app.altFreqValue / app.altFreqRefHz, 3);
+
     if (onCursorInfo)
-        onCursorInfo ("t=" + juce::String (t, 3) + " s   f="
-                      + ((freq >= 1000.0)
-                            ? juce::String (freq / 1000.0, 2) + " kHz"
-                            : juce::String ((int) std::lround (freq)) + " Hz")
-                      + "   " + ScaleCalibration::formatSpectralLevel (dB, app.scale()));
+        onCursorInfo (info);
 }
 
 void SpectralView::mouseExit (const juce::MouseEvent&)
@@ -964,11 +1044,11 @@ void SpectralView::paint (juce::Graphics& g)
     {
         auto zr = zoomRect;
         const bool startOnAxis  = dragStartX < kLeftAxisWidth;
-        const bool startOnRuler = !startOnAxis && dragStartY < kRulerH;
+        const bool startOnRuler = !startOnAxis && dragStartY < rulerH();
         if (startOnAxis)
             zr = juce::Rectangle<int> (0, zr.getY(), kLeftAxisWidth, zr.getHeight());
         else if (startOnRuler)
-            zr = juce::Rectangle<int> (zr.getX(), 0, zr.getWidth(), kRulerH);
+            zr = juce::Rectangle<int> (zr.getX(), 0, zr.getWidth(), rulerH());
 
         g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
         g.fillRect (zr);
@@ -1038,52 +1118,97 @@ void SpectralView::drawTimeRuler (juce::Graphics& g)
 {
     const auto pr = plotRect();
     const double w = viewEnd - viewStart;
-    if (w <= 0 || pr.getWidth() <= 0)
+    if (w <= 0 || pr.getWidth() <= 0 || rulerH() <= 0)
         return;
 
     // Opaque background so the labels stay readable over the spectrum.
     g.setColour (juce::Colour::fromRGB (32, 32, 36));
-    g.fillRect (pr.getX(), 0, pr.getWidth(), kRulerH);
+    g.fillRect (pr.getX(), 0, pr.getWidth(), rulerH());
 
+    // Ticks are placed at nice values of the DISPLAYED axis: seconds for
+    // Time/TimeOffset, sample counts for Sample.
     const double pxPerSec = pr.getWidth() / w;
-    const double major = niceTimeStep (pxPerSec);
+    const TimeAxisMode mode = app.timeAxisMode;
+    const double off = app.timeOffsetSecs;
+    const double rate = std::max (1.0, app.audioEngine().sampleRate());
+
+    auto dispToTime = [mode, off, rate] (double d) -> double
+    {
+        switch (mode)
+        {
+            case TimeAxisMode::Sample:     return d / rate;
+            case TimeAxisMode::TimeOffset: return d - off;
+            default:                       return d;
+        }
+    };
+
+    const double dispStart = timeToDisplayValue (viewStart, mode, off, rate);
+    const double dispEnd   = timeToDisplayValue (viewEnd,   mode, off, rate);
+    const double major = (mode == TimeAxisMode::Sample)
+                         ? niceSampleStep (pxPerSec * rate) : niceTimeStep (pxPerSec);
     // Subdivide each major interval into five when there is room for it.
     const bool showMinors = major * pxPerSec >= 40.0;
 
     g.setColour (juce::Colour::fromRGB (60, 60, 60));
-    g.drawLine ((float) pr.getX(), kRulerH - 1, (float) pr.getRight(), kRulerH - 1, 1.0f);
+    g.drawLine ((float) pr.getX(), rulerH() - 1, (float) pr.getRight(), rulerH() - 1, 1.0f);
 
-    const double first = std::ceil (viewStart / major) * major;
-    if (first > viewEnd + 1e-9)
+    const double first = std::ceil (dispStart / major) * major;
+    if (first > dispEnd + 1e-9)
         return;   // the visible span is shorter than one tick step
 
     g.setFont (10.0f);
-    const int nTicks = (int) std::floor ((viewEnd - first) / major + 1e-9) + 1;
+    const int nTicks = (int) std::floor ((dispEnd - first) / major + 1e-9) + 1;
     for (int i = 0; i < nTicks; ++i)
     {
-        const double t = first + (double) i * major;
-        if (t > viewEnd + 1e-9) break;
+        const double d = first + (double) i * major;
+        if (d > dispEnd + 1e-9) break;
+        const double t = dispToTime (d);
+        if (t < viewStart - 1e-9 || t > viewEnd + 1e-9) continue;
         const float x = timeToX (t);
 
         g.setColour (juce::Colour::fromRGB (60, 60, 60));
-        g.drawLine (x, kRulerH - 8, x, kRulerH - 1, 1.0f);
+        g.drawLine (x, rulerH() - 8, x, rulerH() - 1, 1.0f);
 
         if (showMinors)
             for (int j = 1; j < 5; ++j)
             {
-                const double tm = t + (double) j * major / 5.0;
-                if (tm > viewEnd + 1e-9) break;
-                g.drawLine (timeToX (tm), kRulerH - 4, timeToX (tm), kRulerH - 1, 1.0f);
+                const double tm = dispToTime (d + (double) j * major / 5.0);
+                if (tm > viewEnd + 1e-9 || tm < viewStart - 1e-9) break;
+                g.drawLine (timeToX (tm), rulerH() - 4, timeToX (tm), rulerH() - 1, 1.0f);
             }
 
+        juce::String label;
+        switch (mode)
+        {
+            case TimeAxisMode::Sample:     label = juce::String ((int64_t) std::llround (d)); break;
+            case TimeAxisMode::TimeOffset: label = formatClockTime (d, 4); break;
+            default:                       label = formatTimeTickLabel (d, major, w); break;
+        }
+
         g.setColour (juce::Colour::fromRGB (200, 200, 200));
-        g.drawText (formatTimeTickLabel (t, major, w), (int) x + 3, 2, 90, kRulerH - 4,
+        g.drawText (label, (int) x + 3, 2, 90, rulerH() - 4,
                     juce::Justification::centredLeft, false);
     }
 }
 
 // One frequency axis per visible channel row: tick lines across the plot and
 // labels in the left ruler area for each row.
+juce::String SpectralView::formatFreqAxisLabel (double fHz, double factor)
+{
+    if (std::abs (factor - 1.0) < 1e-12)
+        return fHz >= 1000 ? juce::String (fHz / 1000.0, 1) + " kHz"
+                           : juce::String ((int) std::lround (fHz)) + " Hz";
+
+    // Custom units: the scaled value as a plain number (no unit suffix).
+    const double d = fHz * factor;
+    if (std::abs (d) >= 100.0)
+        return juce::String ((int) std::lround (d));
+    juce::String s = juce::String (d, 2);
+    while (s.endsWith ("0")) s = s.dropLastCharacters (1);
+    if (s.endsWith (".")) s = s.dropLastCharacters (1);
+    return s;
+}
+
 void SpectralView::drawFrequencyRuler (juce::Graphics& g)
 {
     const double rate = app.audioEngine().sampleRate();
@@ -1119,8 +1244,9 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
                 return;
             g.setColour (minor ? juce::Colour::fromRGB (130, 130, 138)
                                : juce::Colour::fromRGB (200, 200, 200));
-            juce::String label = f >= 1000 ? juce::String (f / 1000.0, 1) + " kHz" : juce::String ((int) f) + " Hz";
-            g.drawText (label, 4, (int) y - 12, kLeftAxisWidth - 6, 12, juce::Justification::bottomLeft, false);
+            const double factor = (app.specFreqScaleMode == 1) ? app.specFreqFactor : 1.0;
+            g.drawText (formatFreqAxisLabel (f, factor), 4, (int) y - 12,
+                        kLeftAxisWidth - 6, 12, juce::Justification::bottomLeft, false);
         };
 
         if (settings_.logFrequency)
@@ -1346,6 +1472,26 @@ void SpectralView::drawOverlays (juce::Graphics& g)
             if (t < viewStart || t > viewEnd) continue;
             const int x = timeToX (t);
             g.setColour (i == 0 ? juce::Colours::orange : juce::Colours::cyan);
+            for (const auto& row : rowRects ())
+            {
+                const int y = freqToY (f, row.getHeight());
+                if (y < 0 || y >= row.getHeight()) continue;
+                g.drawEllipse ((float) x - 5.0f, (float) row.getY() + y - 5.0f,
+                              10.0f, 10.0f, 1.5f);
+            }
+        }
+    }
+
+    // Armed scale calibration: the placed reference point, drawn with the
+    // same round orange indicator as Clone & Multiply picking. It stays on
+    // screen while MainWindow prompts for its value and is cleared after.
+    if (app.haveRefClickPt)
+    {
+        const double t = app.refClickT, f = app.refClickF;
+        if (t >= viewStart && t <= viewEnd)
+        {
+            const int x = timeToX (t);
+            g.setColour (juce::Colours::orange);
             for (const auto& row : rowRects ())
             {
                 const int y = freqToY (f, row.getHeight());

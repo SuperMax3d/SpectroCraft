@@ -29,7 +29,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   at deep zoom). Once the visible range exceeds a minute, labels switch to
   clock style (`m:ss`), and once it exceeds an hour they gain the hours field
   (`h:mm:ss`, e.g. `30:00` next to `1:00:00`); each major tick is subdivided
-  into five unlabeled minor ticks.
+  into five unlabeled minor ticks. The right-click **Scale** menu (see below)
+  can switch the time axis between seconds, an offset clock and sample counts,
+  and relabel each view's vertical axis.
 - **Synchronized horizontal view**: zooming or panning in either view moves the
   shared time range of *both* views (they always show exactly the same slice of
   the file), while each keeps its own vertical axis/zoom — waveform amplitude
@@ -799,7 +801,7 @@ Mouse (waveform *and* spectral views):
 | Left-drag on the top time ruler | Pan the shared time window at half cursor speed (same as middle-drag); does not create a selection |
 | Middle-drag | Pan the shared time window (both views stay in sync). The content follows the cursor at half speed; panning against a file edge pins that edge, and reversing direction responds immediately (no dead zone) |
 | Right-drag a region | **Box zoom**: dragging on the track zooms **both** axes at once — time from the box's horizontal span, amplitude (waveform) or frequency (spectral) from its vertical span. Dragging that starts on an axis zooms only that axis: left axis → vertical range, top time ruler (waveform) → time range. A rubber-band rectangle is shown while dragging |
-| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete. On the **left axis**, "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
+| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete, plus a **Scale** submenu (time axis Time/Time Offset.../Sample; vertical axis Wav Units/dB/Normalized in the waveform, Hz/Custom... in the spectrogram; checkable Alternative Scale time/frequency overlays there). On the **left axis**, "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
 | Mouse wheel over the plot / time ruler | Horizontal zoom around the cursor (both views) |
 | Mouse wheel over the left axis (or Shift + wheel anywhere) | Vertical amplitude zoom (waveform) / frequency-range zoom around the cursor (spectral) — independent per view |
 | Drag the divider between the views | Resize waveform vs spectral area |
@@ -808,6 +810,41 @@ Mouse (waveform *and* spectral views):
 
 Selecting a time range in *either* view applies the selection to **both**
 views at once.
+
+### Axis scales (right-click → Scale)
+
+Both views share a right-click **Scale** menu that changes how axis values are
+*displayed*. The underlying data, zoom windows and selections never change;
+the settings apply session-wide (rulers, footer fields, playhead readout,
+cursor probes and the marker panel) until changed again and are not persisted
+across restarts.
+
+- **Time Axis** (both views):
+  - **Time** (default): seconds, with clock-style labels past a minute.
+  - **Time Offset...**: a dialog asks for the time that should appear at the
+    playhead position (`hh:mm:ss.xxxx`); from then on every time readout shows
+    *time + offset*, and typing a clock value in any footer/marker field applies
+    it with the offset removed. Ruler ticks land on round clock values.
+  - **Sample**: times are shown as sample counts at the active file's rate;
+    ruler ticks land on nice 1-2-5×10^k sample steps, and footer/marker fields
+    accept integer or decimal sample counts (the length field is a duration in
+    samples).
+- **Vertical Axis** (waveform): how the left amplitude axis is labelled —
+  **Wav Units** (physical value when calibrated, relative dB otherwise),
+  **dB** (plain 0/−6/−12…) or **Normalized** (signed linear amplitude: +a above
+  and −a below the centre line). Grid-line positions are unchanged.
+- The spectrogram's Scale menu instead offers a **Vertical Axis** for its
+  frequency axis: **Hz** (default) or **Custom...**. Custom arms a reference
+  click — click any point in the plot, then enter the value that should appear
+  at its frequency; the whole axis is relabelled by the resulting factor while
+  tick positions stay put.
+- **Alternative Scale** (spectrogram only, checkable): a second linear scale
+  anchored at zero, shown alongside the normal readout in the status-bar probe
+  as `| alt t=…` / `| alt f=…`. Enabling one arms the same reference-click flow:
+  click a point and enter its value; the overlay rescales time or frequency by
+  *value/ref*. Disabling just hides the overlay.
+- While both views are visible, the spectrogram hides its own (identical) time
+  ruler to save plot space; it reappears when only the spectrogram is shown.
 
 ### Spectral selections (Selection menu)
 
@@ -916,7 +953,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~1300 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~1800 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1002,6 +1039,13 @@ by a single mutex (short critical sections, no lock held during FFT work).
     curve-mode options (Ref Time / Smooth / Track), and the zero-crossing snap
     toggle all survive an app restart via the properties file; stored
     non-power-of-two sizes round up to the next power of two on load.
+  - **Axis scale modes** (right-click Scale menu): time-axis Time / Time
+    Offset... / Sample and vertical-axis Wav Units / dB / Normalized (waveform)
+    or Hz / Custom... (spectrogram), plus checkable Alternative-Scale overlays —
+    verified headlessly through the pure conversion helpers, per-mode ruler
+    rendering diffs, probe text in Sample/TimeOffset modes, frequency-factor
+    relabelling, StatusBar field/playhead round-trips with typed input, and the
+    marker panel's time cells + detail editors.
   - **Zero-crossing snap selection**: with the toggle off (the default) drag
     edges are untouched; with it on both edges land on tone zero crossings;
     zero-length and programmatic selections are never snapped. The analysis

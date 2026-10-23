@@ -3753,8 +3753,8 @@ void MarkerListPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int co
     else
     {
         g.setColour (juce::Colours::lightgrey);
-        const juce::String text = (columnId == 2) ? formatTimeCode (m.start)
-                                                  : (columnId == 3 ? (m.end < 0 ? "-" : formatTimeCode (m.end))
+        const juce::String text = (columnId == 2) ? owner->markerTimeText (m.start, false)
+                                                  : (columnId == 3 ? (m.end < 0 ? "-" : owner->markerTimeText (m.end, false))
                                                                    : m.comment);
         g.drawText (text, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
     }
@@ -3912,8 +3912,8 @@ void MarkerListPanel::onBeginEndChanged (bool isBegin)
 {
     if (editing || selectedRow < 0 || selectedRow >= (int) app.markers().count()) return;
     const auto& m = app.markers().markers()[(size_t) selectedRow];
-    double begin = parseTimeCode (beginEdit.getText());
-    double end = parseTimeCode (endEdit.getText());
+    double begin = parseMarkerTime (beginEdit.getText(), false);
+    double end = parseMarkerTime (endEdit.getText(), false);
 
     const double dur = app.audioEngine().duration();
 
@@ -3945,7 +3945,7 @@ void MarkerListPanel::onLengthChanged()
     if (editing || selectedRow < 0 || selectedRow >= (int) app.markers().count()) return;
     const auto& m = app.markers().markers()[(size_t) selectedRow];
 
-    double len = parseTimeCode (lengthEdit.getText()); // empty text parses to 0.0
+    double len = parseMarkerTime (lengthEdit.getText(), true);   // empty -> 0.0
     if (!(len > 0.0))
     {
         if (m.end >= 0)
@@ -3970,6 +3970,31 @@ void MarkerListPanel::onLengthChanged()
     if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
 
+juce::String MarkerListPanel::markerTimeText (double t, bool duration) const
+{
+    const double r = std::max (1.0, app.audioEngine().sampleRate());
+    if (!duration && app.timeAxisMode == TimeAxisMode::TimeOffset)
+        return formatDisplayedTime (t, app.timeAxisMode, app.timeOffsetSecs, r);
+    if (app.timeAxisMode == TimeAxisMode::Sample)
+        return juce::String ((int64_t) std::llround (t * r));
+    return formatTimeCode (t);   // classic m:ss.ddd in the default Time mode
+}
+
+double MarkerListPanel::parseMarkerTime (const juce::String& s, bool duration) const
+{
+    // Displayed value; empty/invalid text becomes 0 (same as parseTimeCode).
+    double v = 0.0;
+    if (!s.trim().isEmpty() && !parseSignedClock (s, v))
+        v = 0.0;
+
+    const double r = std::max (1.0, app.audioEngine().sampleRate());
+    if (!duration && app.timeAxisMode == TimeAxisMode::TimeOffset)
+        return v - app.timeOffsetSecs;
+    if (app.timeAxisMode == TimeAxisMode::Sample)
+        return v / r;
+    return v;
+}
+
 void MarkerListPanel::updateDetails()
 {
     if (selectedRow < 0 || selectedRow >= (int) app.markers().count())
@@ -3984,9 +4009,9 @@ void MarkerListPanel::updateDetails()
 
     const auto& m = app.markers().markers()[(size_t) selectedRow];
     editing = true;
-    beginEdit.setText (formatTimeCode (m.start), juce::dontSendNotification);
-    endEdit.setText (m.end < 0 ? "" : formatTimeCode (m.end), juce::dontSendNotification);
-    lengthEdit.setText (m.end < 0 ? "" : formatTimeCode (m.end - m.start),
+    beginEdit.setText (markerTimeText (m.start, false), juce::dontSendNotification);
+    endEdit.setText (m.end < 0 ? "" : markerTimeText (m.end, false), juce::dontSendNotification);
+    lengthEdit.setText (m.end < 0 ? "" : markerTimeText (m.end - m.start, true),
                         juce::dontSendNotification);
     titleEdit.setText (m.name, juce::dontSendNotification);
     commentEdit.setText (m.comment, juce::dontSendNotification);
@@ -4432,7 +4457,7 @@ double StatusBar::fieldTime (const juce::TextEditor& ed) const
 void StatusBar::commitField (juce::TextEditor& ed)
 {
     double v;
-    if (!parseTimeText (ed.getText(), v))
+    if (!parseFieldText (ed.getText(), v, &ed == &lenEdit))
         return;   // mid-typing text: leave the selection alone for now
 
     double a = curStart, b = curStop;
@@ -4448,7 +4473,29 @@ void StatusBar::reformatField (juce::TextEditor& ed)
 {
     // Canonical display of the current selection edge; also reverts garbage
     // that was typed before focus was lost.
-    ed.setText (formatFooterTime (fieldTime (ed)), false);
+    ed.setText (formatFieldTime (fieldTime (ed), &ed == &lenEdit), false);
+}
+
+juce::String StatusBar::formatFieldTime (double v, bool duration) const
+{
+    if (!duration && timeCtxMode == TimeAxisMode::TimeOffset)
+        return formatDisplayedTime (v, timeCtxMode, timeCtxOffset, timeCtxRate);
+    // Durations never carry the offset; Sample mode scales them linearly.
+    if (timeCtxMode == TimeAxisMode::Sample)
+        return juce::String ((int64_t) std::llround (v * timeCtxRate));
+    return formatFooterTime (v);
+}
+
+bool StatusBar::parseFieldText (const juce::String& s, double& outSecs, bool duration) const
+{
+    if (!duration && timeCtxMode == TimeAxisMode::TimeOffset)
+        return parseDisplayedTime (s, timeCtxMode, timeCtxOffset, timeCtxRate, outSecs);
+    if (timeCtxMode == TimeAxisMode::Sample)
+        return parseDisplayedTime (s, TimeAxisMode::Sample, 0.0, timeCtxRate, outSecs);
+    double v = 0.0;
+    if (!parseSignedClock (s, v)) { outSecs = 0.0; return false; }
+    outSecs = v;
+    return true;
 }
 
 void StatusBar::textEditorFocusLost (juce::TextEditor& ed)
@@ -4559,20 +4606,22 @@ void StatusBar::setSelection (double t0, double t1)
     applyFieldVisibility();
     if (!has) return;
 
-    auto sync = [this] (juce::TextEditor& e, double v)
+    auto sync = [this] (juce::TextEditor& e, double v, bool duration)
     {
         // Never clobber a field the user is currently editing.
         if (!e.hasKeyboardFocus (false))
-            e.setText (formatFooterTime (v), false);
+            e.setText (formatFieldTime (v, duration), false);
     };
-    sync (startEdit, curStart);
-    sync (stopEdit, curStop);
-    sync (lenEdit, curStop - curStart);
+    sync (startEdit, curStart, false);
+    sync (stopEdit, curStop, false);
+    sync (lenEdit, curStop - curStart, true);
 }
 
 void StatusBar::setPlayhead (double t)
 {
-    const juce::String s = "Pos: " + formatFooterTime (t);
+    // The playhead readout follows the active time-axis scale mode.
+    const juce::String s = "Pos: " + formatDisplayedTime (t, timeCtxMode,
+                                                          timeCtxOffset, timeCtxRate);
     if (s != playPart) { playPart = s; repaint(); }
 }
 

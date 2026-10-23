@@ -101,6 +101,52 @@ public:
     // clicked it; tracks playback while playing).
     double playhead = 0.0;
 
+    // ---- Axis scale modes (right-click "Scale" menu; session-only) ----
+    TimeAxisMode timeAxisMode = TimeAxisMode::Time;
+    double timeOffsetSecs = 0.0;   // displayed(t) = t + offset (TimeOffset mode)
+    int waveVScaleMode = 0;        // waveform vertical axis: 0=Wav Units, 1=dB, 2=Normalized
+    int specFreqScaleMode = 0;     // spectrogram frequency axis: 0=Hz, 1=Custom
+    double specFreqFactor = 1.0;   // displayed(f) = f * factor (Custom mode)
+
+    // Alternative scale overlay (spectrogram right-click "Alternative Scale").
+    // Each is a linear rescale anchored at zero: the reference point defines
+    // the unit, so alt value at x = x * (value / ref).
+    bool altTimeOn = false;
+    double altTimeRefSecs = 0.0, altTimeValue = 0.0;
+    bool altFreqOn = false;
+    double altFreqRefHz = 0.0, altFreqValue = 0.0;
+
+    // Armed reference-click flow: which calibration is waiting for a plot
+    // click (the spectral view draws the circle once the point is placed).
+    enum class RefClickTarget : int { None = 0, SpecFreqCustom, AltTime, AltFreq };
+    RefClickTarget refClickTarget = RefClickTarget::None;
+    bool haveRefClickPt = false;
+    double refClickT = 0.0, refClickF = 0.0;
+
+    /** Displayed time value for the active time-axis mode:
+        Time -> seconds, TimeOffset -> seconds + offset, Sample -> sample count. */
+    double timeToDisplay (double t)
+    {
+        switch (timeAxisMode)
+        {
+            case TimeAxisMode::TimeOffset: return t + timeOffsetSecs;
+            case TimeAxisMode::Sample:
+                return t * std::max (1.0, audioEngine().sampleRate());
+            default:                       return t;
+        }
+    }
+    /** Inverse of timeToDisplay(): displayed value -> real seconds. */
+    double displayToTime (double v)
+    {
+        switch (timeAxisMode)
+        {
+            case TimeAxisMode::TimeOffset: return v - timeOffsetSecs;
+            case TimeAxisMode::Sample:
+                return v / std::max (1.0, audioEngine().sampleRate());
+            default:                       return v;
+        }
+    }
+
     std::vector<int> visibleChannels;   // sorted list of visible channel indices (any subset)
 
     FileDoc* doc() const;               // active document, or nullptr
