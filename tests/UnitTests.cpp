@@ -230,6 +230,27 @@ static void testMarkers()
     mm2.loadSidecar (f);
     CHECK (mm2.count() == 1 && mm2.markers()[0].id == b, "sidecar round-trip");
     f.deleteFile();
+
+    // Hand-written sidecars use plain unsigned ARGB; the app itself writes
+    // signed ints. Both forms must load to the same colour.
+    const juce::File fu = makeTempFile ("markers_unsigned.wav");
+    juce::File (fu.getFullPathName() + ".markers.json").replaceWithText (juce::String (
+        "{ \"markers\": ["
+        " { \"id\": 1, \"name\": \"U\", \"comment\": \"\", \"start\": 0.5, \"end\": -1.0, \"colour\": 4294967040 },"
+        " { \"id\": 2, \"name\": \"S\", \"comment\": \"\", \"start\": 1.5, \"end\": -1.0, \"colour\": -256 }"
+        "] }") + "\n");
+    MarkerManager mm3;
+    CHECK (mm3.loadSidecar (fu), "unsigned sidecar loads");
+    CHECK (mm3.count() == 2, "unsigned sidecar marker count");
+    if (mm3.count() == 2)
+    {
+        CHECK (mm3.markers()[0].colour == juce::Colours::yellow,
+              "unsigned ARGB loads as yellow");
+        CHECK (mm3.markers()[1].colour == juce::Colours::yellow,
+              "signed ARGB loads as yellow");
+    }
+    juce::File (fu.getFullPathName() + ".markers.json").deleteFile();
+    fu.deleteFile();
 }
 
 // ---------------- Undo/redo ----------------
@@ -365,14 +386,15 @@ static void testSpectralViewPaint()
 
     // The 400 Hz tone should produce a bright row at its log-scale position.
     // Note: the engine clamps fMax to Nyquist (rate/2), so for this 8 kHz file
-    // the axis is 20 Hz .. 4000 Hz:
+    // the axis is 20 Hz .. 4000 Hz. The plot starts below the top time ruler:
+    const auto prTone = view.plotRect();
     const double rate = app.audioEngine().sampleRate();
     const double fMin = 20.0, fMax = std::min (rate * 0.5, 20000.0);
-    const int expectedRow = (int) std::lround (128.0 * (1.0 - std::log (400.0 / fMin)
-                                                        / std::log (fMax / fMin)));
+    const int expectedRow = prTone.getY() + (int) std::lround (prTone.getHeight()
+        * (1.0 - std::log (400.0 / fMin) / std::log (fMax / fMin)));
 
     int brightestRow = -1, bestVal = 0;
-    for (int y = 0; y < 128; ++y)
+    for (int y = prTone.getY(); y < 128; ++y)   // below the time ruler (its labels are brighter than the tone)
         for (int x = 70; x < 256; ++x) // skip the frequency-ruler text area
         {
             const auto c = img.getPixelAt (x, y);
@@ -483,6 +505,139 @@ static void testWaveformPerSampleZoom()
         for (int x = 60; x <= 67; ++x)
             if (isWave (img.getPixelAt (x, y))) { foundPeak = true; break; }
     CHECK (foundPeak, "per-sample curve passes through the expected sample point");
+
+    wav.deleteFile();
+}
+
+// ---------------- Marker axis clipping (regression) ----------------
+// A marker whose time maps into the left amplitude-axis strip must not paint
+// its line or title over that strip: both views clip markers to the plot rect.
+static void testMarkerAxisClipping()
+{
+    const juce::File wav = makeTempFile ("marker_clip.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load wav for marker clip test");
+
+    MarkerManager mm;
+    const int id = mm.addPointMarker (0.0, "M-zero");   // yellow by default
+    CHECK (id == 1, "marker added");
+
+    auto countYellow = [] (const juce::Image& img)
+    {
+        int n = 0;
+        for (int y = 0; y < img.getHeight(); ++y)
+            for (int x = 0; x < img.getWidth(); ++x)
+            {
+                const auto c = img.getPixelAt (x, y);
+                if (c.getRed() > 150 && c.getGreen() > 150 && c.getBlue() < 120) ++n;
+            }
+        return n;
+    };
+
+    // Control: window [0,2] puts the t=0 marker exactly on plotLeft (x=64),
+    // so it must be drawn.
+    {
+        WaveformView view (app);
+        view.setSize (256, 128);
+        view.setViewRange (0.0, 2.0);
+        view.setVisibleChannels ({ 0 });
+        view.setMarkers (&mm.markers());
+        juce::Image img (juce::Image::ARGB, 256, 128, true);
+        { juce::Graphics g (img); view.paint (g); }
+        CHECK (countYellow (img) > 0, "waveform marker visible when on plot edge");
+
+        SpectralView sv (app);
+        sv.setSize (256, 128);
+        sv.setViewRange (0.0, 2.0);
+        sv.setVisibleChannels ({ 0 });
+        sv.setSettings (app.settings);
+        sv.setMarkers (&mm.markers());
+        juce::Image img2 (juce::Image::ARGB, 256, 128, true);
+        { juce::Graphics g (img2); sv.paint (g); }
+        CHECK (countYellow (img2) > 0, "spectral marker visible when on plot edge");
+    }
+
+    // Window [0.5,2]: the t=0 marker maps to x = 64 - 0.5*128 = 0, deep inside
+    // the axis strip. Neither its line nor its title may paint there.
+    {
+        WaveformView view (app);
+        view.setSize (256, 128);
+        view.setViewRange (0.5, 2.0);
+        view.setVisibleChannels ({ 0 });
+        view.setMarkers (&mm.markers());
+        juce::Image img (juce::Image::ARGB, 256, 128, true);
+        { juce::Graphics g (img); view.paint (g); }
+        CHECK (countYellow (img) == 0, "waveform marker clipped out of axis strip");
+
+        SpectralView sv (app);
+        sv.setSize (256, 128);
+        sv.setViewRange (0.5, 2.0);
+        sv.setVisibleChannels ({ 0 });
+        sv.setSettings (app.settings);
+        sv.setMarkers (&mm.markers());
+        juce::Image img2 (juce::Image::ARGB, 256, 128, true);
+        { juce::Graphics g (img2); sv.paint (g); }
+        CHECK (countYellow (img2) == 0, "spectral marker clipped out of axis strip");
+    }
+
+    wav.deleteFile();
+}
+
+// ---------------- Spectral view top time ruler ----------------
+// The spectral view carries its own top time ruler so the time axis stays
+// visible in spectrogram-only (F9) mode.
+static void testSpectralTimeRuler()
+{
+    const juce::File wav = makeTempFile ("spec_ruler.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load wav for spectral ruler test");
+
+    SpectralView view (app);
+    view.setSize (256, 128);
+    view.setViewRange (0.0, 2.0);
+    view.setVisibleChannels ({ 0 });
+    view.setSettings (app.settings);
+
+    juce::Image img (juce::Image::ARGB, 256, 128, true);
+    { juce::Graphics g (img); view.paint (g); }
+
+    // Opaque dark background across the ruler strip (right of the frequency axis).
+    bool bgOk = true;
+    for (int x : { 100, 150, 200 })
+        for (int y = 0; y < SpectralView::kRulerH; ++y)
+        {
+            const auto c = img.getPixelAt (x, y);
+            if (c.getRed() > 60 || c.getGreen() > 60 || c.getBlue() > 70) bgOk = false;
+        }
+    CHECK (bgOk, "ruler strip has opaque dark background");
+
+    // Tick marks: brighter pixels in the bottom rows of the ruler.
+    int tickPx = 0;
+    for (int y = SpectralView::kRulerH - 8; y < SpectralView::kRulerH; ++y)
+        for (int x = kLeftAxisWidth + 1; x < 256; ++x)
+            if ((img.getPixelAt (x, y).getRed() + img.getPixelAt (x, y).getGreen()
+                 + img.getPixelAt (x, y).getBlue()) / 3 > 40)
+                ++tickPx;
+    CHECK (tickPx >= 8, "ruler has tick marks");
+
+    // Time labels: bright text pixels inside the ruler strip.
+    int labelPx = 0;
+    for (int y = 2; y < SpectralView::kRulerH - 4; ++y)
+        for (int x = kLeftAxisWidth + 1; x < 256; ++x)
+            if ((img.getPixelAt (x, y).getRed() + img.getPixelAt (x, y).getGreen()
+                 + img.getPixelAt (x, y).getBlue()) / 3 > 100)
+                ++labelPx;
+    CHECK (labelPx >= 8, "ruler has time labels");
 
     wav.deleteFile();
 }
@@ -3441,10 +3596,12 @@ static void testRightDragZoom()
         view.setVisibleChannels ({ 0 });
 
         // Default axis: [20 Hz .. min(20 kHz, Nyquist=4 kHz)] on a log scale;
-        // one visible channel row spans the full 200 px height.
+        // one visible channel row spans the plot area below the time ruler.
         const double fmin = 20.0, fmax = 4000.0;
         const double lmin = std::log (fmin), lmax = std::log (fmax);
-        auto freqAt = [lmin, lmax] (double y) { return std::exp (lmin + (1.0 - y / 200.0) * (lmax - lmin)); };
+        const int ry = SpectralView::kRulerH, rh = 200 - SpectralView::kRulerH;
+        auto freqAt = [lmin, lmax, ry, rh] (double y)
+            { return std::exp (lmin + (1.0 - (y - ry) / rh) * (lmax - lmin)); };
 
         const double e0 = view.xToTime (100), e1 = view.xToTime (300);
 
@@ -3470,7 +3627,9 @@ static void testRightDragZoom()
 
         const double fmin = 20.0, fmax = 4000.0;
         const double lmin = std::log (fmin), lmax = std::log (fmax);
-        auto freqAt = [lmin, lmax] (double y) { return std::exp (lmin + (1.0 - y / 200.0) * (lmax - lmin)); };
+        const int ry = SpectralView::kRulerH, rh = 200 - SpectralView::kRulerH;
+        auto freqAt = [lmin, lmax, ry, rh] (double y)
+            { return std::exp (lmin + (1.0 - (y - ry) / rh) * (lmax - lmin)); };
 
         const double e0 = view.xToTime (200), e1 = view.xToTime (203);
 
@@ -3496,7 +3655,9 @@ static void testRightDragZoom()
 
         const double fmin = 20.0, fmax = 4000.0;
         const double lmin = std::log (fmin), lmax = std::log (fmax);
-        auto freqAt = [lmin, lmax] (double y) { return std::exp (lmin + (1.0 - y / 200.0) * (lmax - lmin)); };
+        const int ry = SpectralView::kRulerH, rh = 200 - SpectralView::kRulerH;
+        auto freqAt = [lmin, lmax, ry, rh] (double y)
+            { return std::exp (lmin + (1.0 - (y - ry) / rh) * (lmax - lmin)); };
 
         // Box x span [30,40] lies on the axis; y span 50..150.
         view.mouseDown (mkMouse (view, 30, 50, rmb));
@@ -3869,10 +4030,10 @@ static void testAxisPanAndLogTicks()
         view.setFrequencyRange (100.0, 2000.0);
         const double fmin = view.getFreqMin(), fmax = view.getFreqMax();
 
-        // One visible channel: the row spans the full height.
-        const int H = 200;
-        const double f0 = view.yToFreq (60.0f, H);   // freq under cursor at drag start
-        const double f1 = view.yToFreq (80.0f, H);
+        // One visible channel: the row is the plot area below the time ruler.
+        const auto prLog = view.plotRect();
+        const double f0 = view.yToFreq (60.0f - prLog.getY(), prLog.getHeight());   // freq under cursor at drag start
+        const double f1 = view.yToFreq (80.0f - prLog.getY(), prLog.getHeight());
 
         view.mouseDown (mkMouse (view, 20, 60, lmb));
         view.mouseDrag (mkMouse (view, 20, 80, lmb));
@@ -3896,8 +4057,9 @@ static void testAxisPanAndLogTicks()
         view.setFrequencyRange (500.0, 3000.0);
 
         const double fmin = view.getFreqMin(), fmax = view.getFreqMax();
-        const int H = 200;
-        const double d = view.yToFreq (80.0f, H) - view.yToFreq (100.0f, H);
+        const auto prLin = view.plotRect();
+        const double d = view.yToFreq (80.0f - prLin.getY(), prLin.getHeight())
+                       - view.yToFreq (100.0f - prLin.getY(), prLin.getHeight());
 
         view.mouseDown (mkMouse (view, 20, 80, lmb));
         view.mouseDrag (mkMouse (view, 20, 100, lmb));
@@ -3929,11 +4091,23 @@ static void testAxisPanAndLogTicks()
         { juce::Graphics g (img); view.paint (g); }
 
         // GDI rasterises a 1 px line at fractional y onto the row below it.
+        const auto prTicks = view.plotRect();
         auto yOf = [&] (double f) -> int
-        { return (int) std::floor ((float) view.freqToY (f, 200)); };
+        { return prTicks.getY() + (int) std::floor ((float) view.freqToY (f, prTicks.getHeight())); };
 
         auto brightness = [&] (int yy) -> int
         { const auto c = img.getPixelAt (100, yy); return (c.getRed() + c.getGreen() + c.getBlue()) / 3; };
+
+        // GDI anti-aliases a fractional-y line across two rows, so the total
+        // energy of a tick is measured over its nominal row plus neighbours.
+        auto tickEnergy = [&] (int yy) -> int
+        {
+            int e = 0;
+            for (int dy = -1; dy <= 1; ++dy)
+                if (yy + dy >= 0 && yy + dy < img.getHeight())
+                    e += brightness (yy + dy);
+            return e;
+        };
 
         // All three tick rows must be visible grey lines on the black ground.
         CHECK (brightness (yOf (100.0)) > 25,
@@ -3943,9 +4117,10 @@ static void testAxisPanAndLogTicks()
         CHECK (brightness (yOf (500.0)) > 20,
                "5x intermediate tick is drawn");
 
-        // The major decade line uses a brighter colour than the minor ones.
-        CHECK (brightness (yOf (100.0)) > brightness (yOf (200.0)) + 8
-              && brightness (yOf (100.0)) > brightness (yOf (500.0)) + 8,
+        // The major decade line uses a brighter colour than the minor ones
+        // (compared by total energy so the AA row split cannot hide it).
+        CHECK (tickEnergy (yOf (100.0)) > tickEnergy (yOf (200.0)) + 4
+              && tickEnergy (yOf (100.0)) > tickEnergy (yOf (500.0)) + 4,
                "decade tick is brighter than the intermediate ticks");
 
         // A position without a tick stays dark.
@@ -3957,7 +4132,7 @@ static void testAxisPanAndLogTicks()
         juce::Image img2 (juce::Image::ARGB, 400, 200, true);
         { juce::Graphics g (img2); view.paint (g); }
         auto yOf2 = [&] (double f) -> int
-        { return (int) std::floor ((float) view.freqToY (f, 200)); };
+        { return prTicks.getY() + (int) std::floor ((float) view.freqToY (f, prTicks.getHeight())); };
         auto brightness2 = [&] (int yy) -> int
         { const auto c = img2.getPixelAt (100, yy); return (c.getRed() + c.getGreen() + c.getBlue()) / 3; };
         CHECK (brightness2 (yOf2 (1400.0)) > 25,
@@ -4258,8 +4433,9 @@ static void testFFTViewExtremeZoom()
         juce::Image img (juce::Image::ARGB, 400, 200, true);
         { juce::Graphics g (img); view.paint (g); }
 
+        const auto prGap = view.plotRect();
         auto yOf = [&] (double f) -> int
-        { return (int) std::floor ((float) view.freqToY (f, 200)); };
+        { return prGap.getY() + (int) std::floor ((float) view.freqToY (f, prGap.getHeight())); };
         auto brightness = [&] (int yy) -> int
         { const auto c = img.getPixelAt (100, yy); return (c.getRed() + c.getGreen() + c.getBlue()) / 3; };
 
@@ -6096,7 +6272,8 @@ static void testSpectralSelectionRenderHole()
     // lands around (44,60,105) — clearly blue-dominant.
     auto blueTint = [] (const juce::Colour& p) { return p.getBlue() - p.getRed() > 40; };
 
-    const int yLow   = (int) view.freqToY (250.0, 128);  // inside both rects' freq span
+    const auto prSel = view.plotRect();
+    const int yLow   = prSel.getY() + (int) view.freqToY (250.0, prSel.getHeight());  // inside both rects' freq span
     const int xAonly = (int) view.timeToX (0.15);        // inside A only -> blue fill
     CHECK (!sameAsBase (xAonly, yLow), "additive area differs from the no-selection baseline");
     CHECK (blueTint (img.getPixelAt (xAonly, yLow)), "additive area renders blue");
@@ -6177,15 +6354,16 @@ static void testAltClickStraightLine()
 
     // Op 1: plain freehand paint drag from A to B. Its mouse-up point B
     // becomes the anchor for the next ALT+click.
-    const int xA = (int) view.timeToX (0.2), yA = (int) view.freqToY (500.0, 256);
-    const int xB = (int) view.timeToX (0.4), yB = (int) view.freqToY (200.0, 256);
+    const auto prLine = view.plotRect();
+    const int xA = (int) view.timeToX (0.2), yA = prLine.getY() + (int) view.freqToY (500.0, prLine.getHeight());
+    const int xB = (int) view.timeToX (0.4), yB = prLine.getY() + (int) view.freqToY (200.0, prLine.getHeight());
     view.mouseDown (mkMouse (view, xA, yA, lmb));
     view.mouseDrag (mkMouse (view, xB, yB, lmb));
     view.mouseUp   (mkMouse (view, xB, yB, lmb));
 
     // Op 2: ALT+click at C. Commits a straight line B -> C and replaces the
     // selection (plain modifier = replace).
-    const int xC = (int) view.timeToX (0.8), yC = (int) view.freqToY (3500.0, 256);
+    const int xC = (int) view.timeToX (0.8), yC = prLine.getY() + (int) view.freqToY (3500.0, prLine.getHeight());
     view.mouseDown (mkMouse (view, xC, yC, altLmb));
     view.mouseUp   (mkMouse (view, xC, yC, altLmb));
 
@@ -7740,6 +7918,8 @@ static int scRunUnitTestsImpl()
     progress ("zero-crossing");  testZeroCrossing();
     progress ("spectral engine");testSpectral();
     progress ("spectral view paint"); testSpectralViewPaint();
+    progress ("marker axis clipping"); testMarkerAxisClipping();
+    progress ("spectral time ruler");  testSpectralTimeRuler();
     progress ("waveform view paint"); testWaveformViewPaint();
     progress ("per-sample zoom");     testWaveformPerSampleZoom();
     progress ("FFT panel paint");testFFTAnalysisViewPaint();

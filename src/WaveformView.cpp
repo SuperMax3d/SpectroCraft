@@ -509,11 +509,14 @@ void WaveformView::paint (juce::Graphics& g)
     // (identical behaviour to the spectral view).
 
     // Time selection highlight — blue fill with solid edge lines so it stays
-    // clearly visible even over the teal waveform.
+    // clearly visible even over the teal waveform. Clipped to the plot so an
+    // edge before the visible window never paints over the amplitude axis.
     if (!selection.isEmpty())
     {
         const double x1 = timeToX (selection.getStart());
         const double x2 = timeToX (selection.getEnd());
+        const juce::Graphics::ScopedSaveState save (g);
+        g.reduceClipRegion (pr);
         g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
         g.fillRect ((float) x1, (float) pr.getY(),
                    (float) std::max (0.0, x2 - x1), (float) waveH);
@@ -522,9 +525,13 @@ void WaveformView::paint (juce::Graphics& g)
         g.drawVerticalLine ((float) x2, (float) pr.getY(), (float) pr.getBottom());
     }
 
-    // Markers (same rendering as the spectral view)
+    // Markers (same rendering as the spectral view). Clipped to the plot so
+    // lines and titles never paint over the left amplitude axis when a marker
+    // starts before the visible window.
     if (markerList)
     {
+        const juce::Graphics::ScopedSaveState save (g);
+        g.reduceClipRegion (pr);
         const auto& ms = *markerList;   // kept sorted by start time
         for (size_t i = 0; i < ms.size(); ++i)
         {

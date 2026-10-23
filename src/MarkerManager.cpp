@@ -279,7 +279,15 @@ bool MarkerManager::loadSidecar (const juce::File& audioFile)
         {
             double cv = 0;
             if (findKeyNum ("\"colour\"", objStart, objEnd, cv))
+            {
+                // Accept both the signed form this app writes (-2147483648 ..
+                // 2147483647) and plain unsigned ARGB (0 .. 4294967295). The
+                // normalisation keeps the value inside int range so the cast
+                // below is exact instead of saturating on x86-64.
+                if (cv >= 2147483648.0)
+                    cv -= 4294967296.0;
                 m.colour = juce::Colour ((uint32) (int) cv);
+            }
         }
 
         const auto comAt = s.indexOf ((int) objStart, "\"comment\"");

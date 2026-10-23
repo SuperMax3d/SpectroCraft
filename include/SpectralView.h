@@ -21,7 +21,8 @@ public:
     // Mouse interaction: left-drag = select, middle-drag = pan,
     // right-drag = box-zoom (drag on the track -> BOTH axes: time from the
     // box's x span + frequency from its y span; drag starting on the left
-    // frequency axis -> vertical only), plain right-click = context menu,
+    // frequency axis -> vertical only; drag starting on the top time ruler
+    // -> horizontal only), plain right-click = context menu,
     // wheel over the plot = time zoom at cursor, wheel over the left
     // frequency axis (or Shift+wheel) = frequency-range zoom,
     // double-click = fit whole file. Clicking moves the playhead.
@@ -105,7 +106,10 @@ public:
     double freqAtY (int y) const;
 
 public:
-    // Plot area (starts at kLeftAxisWidth so it aligns with the waveform view).
+    static constexpr int kRulerH = 24;   // top time ruler height
+
+    // Plot area (below the top time ruler, starting at kLeftAxisWidth so it
+    // aligns with the waveform view).
     juce::Rectangle<int> plotRect() const;
 
 private:
@@ -123,7 +127,7 @@ private:
     Settings settings_;
 
     // Interaction state
-    enum class DragMode { None, Select, Pan, VPan, ZoomDrag,
+    enum class DragMode { None, Select, Pan, TimePan, VPan, ZoomDrag,
                           Marquee, Lasso, Paint, LineDrag };
     DragMode dragMode = DragMode::None;
     int dragStartX = 0;
@@ -169,6 +173,11 @@ private:
     bool renderSpectralContent (juce::Image& img, const Settings& rs,
                                 const std::atomic<bool>* cancel = nullptr);
 
+    // Channel rows in absolute view coordinates: full component width (so
+    // axis drags can hit-test them too), positioned inside the plot area.
+    std::vector<juce::Rectangle<int>> rowRects() const;
+
+    void drawTimeRuler (juce::Graphics& g);
     void drawFrequencyRuler (juce::Graphics& g);
     void drawOverlays (juce::Graphics& g);
 

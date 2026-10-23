@@ -7,6 +7,7 @@
  */
 
 #include "SpectralView.h"
+#include "WaveformView.h"   // niceTimeStep / formatTimeTickLabel (shared ruler style)
 #include "AudioEngine.h"
 #include "MarkerManager.h"
 #include "PngWriter.h"
@@ -19,9 +20,9 @@ static constexpr double kPanSpeedFactor = 0.5;
 
 juce::Rectangle<int> SpectralView::plotRect() const
 {
-    return { kLeftAxisWidth, 0,
+    return { kLeftAxisWidth, kRulerH,
              std::max (1, getWidth() - kLeftAxisWidth),
-             std::max (1, getHeight()) };
+             std::max (1, getHeight() - kRulerH) };
 }
 
 // One row per visible channel with a thin dark gap between the rows.
@@ -41,6 +42,18 @@ static std::vector<juce::Rectangle<int>> spectralRowRects (int w, int h, int nRo
         rects.push_back ({ 0, y0, w, std::min (baseRowH, h - y0) }); // last row takes the remainder
     }
     return rects;
+}
+
+std::vector<juce::Rectangle<int>> SpectralView::rowRects() const
+{
+    // Channel rows in absolute view coordinates: full component width (so
+    // axis drags can hit-test them too), positioned inside the plot area
+    // below the top time ruler.
+    const auto pr = plotRect();
+    auto rows = spectralRowRects (getWidth(), pr.getHeight(), (int) channels.size());
+    for (auto& r : rows)
+        r.setY (r.getY() + pr.getY());
+    return rows;
 }
 
 SpectralView::SpectralView (Application& appIn)
@@ -154,7 +167,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     // Clone & Multiply picking (Selection panel): left clicks inside the plot
     // pick a reference frequency first, then target frequencies afterwards.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
-        && e.x >= kLeftAxisWidth && app.isClonePicking ())
+        && e.x >= kLeftAxisWidth && e.y >= kRulerH && app.isClonePicking ())
     {
         app.clonePickClick (xToTime ((double) e.x), freqAtY (e.y));
         return;
@@ -183,6 +196,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     // CTRL = subtract. Tool drags never move the playhead.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
         && !e.mods.isMiddleButtonDown() && e.x >= kLeftAxisWidth
+        && e.y >= kRulerH
         && app.selMode != SpectralSelMode::TimeRange)
     {
         toolSubtract = e.mods.isCtrlDown();
@@ -243,7 +257,15 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && !e.mods.isMiddleButtonDown())
     {
-        if (leftOnAxis)
+        const bool onTimeRuler = e.y < kRulerH;
+        if (onTimeRuler)
+        {
+            // Left-drag on the top time ruler pans horizontally at half speed
+            // (same as the waveform view's ruler).
+            dragMode = DragMode::TimePan;
+            panLastX = e.x;
+        }
+        else if (leftOnAxis)
         {
             // Left-drag on the frequency axis pans the vertical range; it must
             // not move the playhead.
@@ -358,12 +380,23 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
             panLastX = e.x;
             break;
         }
+        case DragMode::TimePan:
+        {
+            // Ruler drag: horizontal pan at half cursor speed, like the
+            // waveform view's ruler and the middle-button grab pan.
+            const auto pr = plotRect();
+            if (pr.getWidth() > 0)
+                panByTime (-(e.x - panLastX) * kPanSpeedFactor
+                           * (viewEnd - viewStart) / (double) pr.getWidth());
+            panLastX = e.x;
+            break;
+        }
         case DragMode::VPan:
         {
             // Grab-and-drag: the frequency under the cursor at drag start stays
             // under the cursor. The shift is applied in log space for a log
             // axis and linearly otherwise.
-            const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+            const auto rows = rowRects ();
             if (!rows.empty())
             {
                 juce::Rectangle<int> row = rows.front();
@@ -439,8 +472,10 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
             // The drag START position selects which axes get zoomed:
             //  - inside the plot ("the track"): BOTH axes — time from the box's
             //    x span, frequency from its y span;
-            //  - on the left frequency axis: vertical only.
-            const bool startOnAxis = dragStartX < kLeftAxisWidth;
+            //  - on the left frequency axis: vertical only;
+            //  - on the top time ruler: horizontal only.
+            const bool startOnAxis  = dragStartX < kLeftAxisWidth;
+            const bool startOnRuler = !startOnAxis && dragStartY < kRulerH;
 
             auto zoomTime = [this] ()
             {
@@ -455,7 +490,7 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
             {
                 // Set the frequency axis to the dragged span, mapped through
                 // the channel row containing the drag start.
-                const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+                const auto rows = rowRects ();
                 if (!rows.empty() && zoomRect.getHeight() >= 2)
                 {
                     juce::Rectangle<int> row = rows.front();
@@ -471,6 +506,8 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
 
             if (startOnAxis)
                 zoomFreq ();
+            else if (startOnRuler)
+                zoomTime ();
             else
             {
                 zoomTime ();
@@ -564,10 +601,11 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
 {
     if (!onCursorInfo) return;
     const auto pr = plotRect();
-    if (e.x < pr.getX() || e.x >= pr.getRight()) { onCursorInfo (""); return; }
+    if (e.x < pr.getX() || e.x >= pr.getRight()
+        || e.y < pr.getY() || e.y >= pr.getBottom()) { onCursorInfo (""); return; }
 
     // Which channel row is the cursor in?
-    const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+    const auto rows = rowRects ();
     int rowIdx = -1;
     for (size_t i = 0; i < rows.size(); ++i)
         if (rows[i].contains ((int) e.x, (int) e.y)) { rowIdx = (int) i; break; }
@@ -747,7 +785,8 @@ void SpectralView::zoomFrequencyBy (double factor)
 {
     // Keyboard vertical zoom: zoom the frequency range around its centre.
     if (!app.audioEngine().isFileLoaded()) return;
-    zoomFreqAtY ((float) getHeight() * 0.5f, factor);
+    const auto pr = plotRect();
+    zoomFreqAtY ((float) (pr.getY() + pr.getHeight() * 0.5), factor);
 }
 
 void SpectralView::panByTime (double dt)
@@ -760,8 +799,12 @@ void SpectralView::panByTime (double dt)
 
 void SpectralView::zoomFreqAtY (float y, double factor)
 {
+    // Map the absolute screen position into the plot area first.
+    const auto pr = plotRect();
+    const float yc = std::clamp (y, (float) pr.getY(), (float) pr.getBottom());
+
     const double rate = app.audioEngine().sampleRate();
-    const double fCursor = std::clamp (yToFreq (y, getHeight()), 1.0, rate * 0.5);
+    const double fCursor = std::clamp (yToFreq (yc - (float) pr.getY(), pr.getHeight()), 1.0, rate * 0.5);
     double lo = std::max (1.0, freqMin);
     double hi = std::min (rate * 0.5, freqMax);
 
@@ -823,7 +866,8 @@ void SpectralView::paint (juce::Graphics& g)
     if (haveImage)
     {
         g.drawImage (cachedImage,
-                     juce::Rectangle<float> ((float) pr.getX(), 0.0f, (float) w, (float) h),
+                     juce::Rectangle<float> ((float) pr.getX(), (float) pr.getY(),
+                                             (float) w, (float) h),
                      juce::RectanglePlacement::fillDestination);
     }
 
@@ -831,12 +875,13 @@ void SpectralView::paint (juce::Graphics& g)
     g.setColour (juce::Colour::fromRGB (32, 32, 36));
     g.fillRect (0, 0, kLeftAxisWidth, getHeight());
     drawFrequencyRuler (g);
+    drawTimeRuler (g);
 
     // Channel labels on the left of each track: "L"/"R" for stereo files,
     // channel numbers when several tracks are shown at once.
     if (channels.size() > 1 || app.audioEngine().numChannels() == 2)
     {
-        const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+        const auto rows = rowRects ();
         g.setFont (10.0f);
         for (size_t r = 0; r < rows.size(); ++r)
         {
@@ -859,8 +904,12 @@ void SpectralView::paint (juce::Graphics& g)
     if (haveZoomRect && dragMode == DragMode::ZoomDrag)
     {
         auto zr = zoomRect;
-        if (dragStartX < kLeftAxisWidth)
+        const bool startOnAxis  = dragStartX < kLeftAxisWidth;
+        const bool startOnRuler = !startOnAxis && dragStartY < kRulerH;
+        if (startOnAxis)
             zr = juce::Rectangle<int> (0, zr.getY(), kLeftAxisWidth, zr.getHeight());
+        else if (startOnRuler)
+            zr = juce::Rectangle<int> (zr.getX(), 0, zr.getWidth(), kRulerH);
 
         g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
         g.fillRect (zr);
@@ -923,6 +972,57 @@ bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
     return true;
 }
 
+// Top time ruler: same tick scheme and style as the waveform view's, so the
+// spectrogram keeps a visible time axis even when it is shown on its own
+// (F9 "spectrogram only" mode).
+void SpectralView::drawTimeRuler (juce::Graphics& g)
+{
+    const auto pr = plotRect();
+    const double w = viewEnd - viewStart;
+    if (w <= 0 || pr.getWidth() <= 0)
+        return;
+
+    // Opaque background so the labels stay readable over the spectrum.
+    g.setColour (juce::Colour::fromRGB (32, 32, 36));
+    g.fillRect (pr.getX(), 0, pr.getWidth(), kRulerH);
+
+    const double pxPerSec = pr.getWidth() / w;
+    const double major = niceTimeStep (pxPerSec);
+    // Subdivide each major interval into five when there is room for it.
+    const bool showMinors = major * pxPerSec >= 40.0;
+
+    g.setColour (juce::Colour::fromRGB (60, 60, 60));
+    g.drawLine ((float) pr.getX(), kRulerH - 1, (float) pr.getRight(), kRulerH - 1, 1.0f);
+
+    const double first = std::ceil (viewStart / major) * major;
+    if (first > viewEnd + 1e-9)
+        return;   // the visible span is shorter than one tick step
+
+    g.setFont (10.0f);
+    const int nTicks = (int) std::floor ((viewEnd - first) / major + 1e-9) + 1;
+    for (int i = 0; i < nTicks; ++i)
+    {
+        const double t = first + (double) i * major;
+        if (t > viewEnd + 1e-9) break;
+        const float x = timeToX (t);
+
+        g.setColour (juce::Colour::fromRGB (60, 60, 60));
+        g.drawLine (x, kRulerH - 8, x, kRulerH - 1, 1.0f);
+
+        if (showMinors)
+            for (int j = 1; j < 5; ++j)
+            {
+                const double tm = t + (double) j * major / 5.0;
+                if (tm > viewEnd + 1e-9) break;
+                g.drawLine (timeToX (tm), kRulerH - 4, timeToX (tm), kRulerH - 1, 1.0f);
+            }
+
+        g.setColour (juce::Colour::fromRGB (200, 200, 200));
+        g.drawText (formatTimeTickLabel (t, major), (int) x + 3, 2, 90, kRulerH - 4,
+                    juce::Justification::centredLeft, false);
+    }
+}
+
 // One frequency axis per visible channel row: tick lines across the plot and
 // labels in the left ruler area for each row.
 void SpectralView::drawFrequencyRuler (juce::Graphics& g)
@@ -935,7 +1035,7 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
     // labels out of that zone.
     const bool hasChanLabel = (channels.size() > 1 || app.audioEngine().numChannels() == 2);
 
-    const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+    const auto rows = rowRects ();
     g.setFont (10.0f);
 
     for (const auto& rr : rows)
@@ -1062,17 +1162,22 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
 
 void SpectralView::drawOverlays (juce::Graphics& g)
 {
+    const auto pr = plotRect();
+
     // Time selection — blue fill with solid edge lines so it stays clearly
-    // visible over the spectrogram image.
+    // visible over the spectrogram image. Clipped to the plot so an edge that
+    // lies before the visible window never paints over the frequency axis.
     if (!selection.isEmpty())
     {
         const double x1 = timeToX (selection.getStart());
         const double x2 = timeToX (selection.getEnd());
+        const juce::Graphics::ScopedSaveState save (g);
+        g.reduceClipRegion (pr);
         g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
-        g.fillRect ((float) x1, 0.0f, (float) std::max (0.0, x2 - x1), (float) getHeight());
+        g.fillRect ((float) x1, (float) pr.getY(), (float) std::max (0.0, x2 - x1), (float) pr.getHeight());
         g.setColour (juce::Colour::fromRGB (96, 150, 255));
-        g.drawVerticalLine ((float) x1, 0.0f, (float) getHeight());
-        g.drawVerticalLine ((float) x2, 0.0f, (float) getHeight());
+        g.drawVerticalLine ((float) x1, (float) pr.getY(), (float) pr.getBottom());
+        g.drawVerticalLine ((float) x2, (float) pr.getY(), (float) pr.getBottom());
     }
 
     // Spectral selection: committed shapes from the active doc plus the live
@@ -1114,9 +1219,12 @@ void SpectralView::drawOverlays (juce::Graphics& g)
         drawSpectralShapes (g, committed, haveLive ? &live : nullptr);
     }
 
-    // Markers
+    // Markers — clipped to the plot so lines and titles never paint over the
+    // left frequency axis when a marker starts before the visible window.
     if (markerList)
     {
+        const juce::Graphics::ScopedSaveState save (g);
+        g.reduceClipRegion (pr);
         const auto& ms = *markerList;   // kept sorted by start time
         for (size_t i = 0; i < ms.size(); ++i)
         {
@@ -1127,14 +1235,14 @@ void SpectralView::drawOverlays (juce::Graphics& g)
             g.setColour (m.colour.withAlpha (0.8f));
             if (m.end < 0)
             {
-                g.drawVerticalLine ((int) x, 0.0f, (float) getHeight());
+                g.drawVerticalLine ((int) x, (float) pr.getY(), (float) pr.getBottom());
             }
             else
             {
                 const double x2 = timeToX (m.end);
-                g.drawLine ((float) x, 6, (float) x2, 6, 2.0f);
-                g.drawLine ((float) x, 6, (float) x, getHeight(), 1.0f);
-                g.drawLine ((float) x2, 6, (float) x2, getHeight(), 1.0f);
+                g.drawLine ((float) x, (float) pr.getY() + 6, (float) x2, (float) pr.getY() + 6, 2.0f);
+                g.drawLine ((float) x, (float) pr.getY() + 6, (float) x, pr.getBottom(), 1.0f);
+                g.drawLine ((float) x2, (float) pr.getY() + 6, (float) x2, pr.getBottom(), 1.0f);
             }
             // Title: may run past this marker's own range, but must stop
             // before the next marker starts so that marker's title has room.
@@ -1146,7 +1254,7 @@ void SpectralView::drawOverlays (juce::Graphics& g)
                 : (double) getWidth() + 50.0;
             const double w = std::max (0.0, rightEdge - textX);
             if (w > 0.0)
-                g.drawText (m.name, (int) textX, 8, (int) w, 14,
+                g.drawText (m.name, (int) textX, pr.getY() + 8, (int) w, 14,
                             juce::Justification::topLeft, true);
         }
     }
@@ -1154,12 +1262,12 @@ void SpectralView::drawOverlays (juce::Graphics& g)
     // Paintbrush cursor: a translucent band showing the brush's frequency
     // width at the current cursor position.
     if (app.selMode == SpectralSelMode::Paintbrush && dragMode == DragMode::None
-        && probeX >= kLeftAxisWidth && probeX <= getWidth()
-        && probeY >= 0 && probeY <= getHeight())
+        && probeX >= pr.getX() && probeX <= pr.getRight()
+        && probeY >= pr.getY() && probeY <= pr.getBottom())
     {
         const double f = freqAtY (probeY);
         g.setColour (juce::Colour::fromRGBA (96, 150, 255, 140));
-        for (const auto& row : spectralRowRects (getWidth(), getHeight(), (int) channels.size()))
+        for (const auto& row : rowRects ())
         {
             const double yTop = row.getY() + freqToY (f + app.brushRadiusHz, row.getHeight());
             const double yBot = row.getY() + freqToY (std::max (0.0, f - app.brushRadiusHz), row.getHeight());
@@ -1179,7 +1287,7 @@ void SpectralView::drawOverlays (juce::Graphics& g)
             if (t < viewStart || t > viewEnd) continue;
             const int x = timeToX (t);
             g.setColour (i == 0 ? juce::Colours::orange : juce::Colours::cyan);
-            for (const auto& row : spectralRowRects (getWidth(), getHeight (), (int) channels.size()))
+            for (const auto& row : rowRects ())
             {
                 const int y = freqToY (f, row.getHeight());
                 if (y < 0 || y >= row.getHeight()) continue;
@@ -1191,10 +1299,10 @@ void SpectralView::drawOverlays (juce::Graphics& g)
 
     // Playhead
     const double px = timeToX (playhead);
-    if (px >= kLeftAxisWidth && px <= getWidth())
+    if (px >= pr.getX() && px <= pr.getRight())
     {
         g.setColour (juce::Colour::fromRGB (255, 60, 60));
-        g.drawVerticalLine ((int) px, 0.0f, (float) getHeight());
+        g.drawVerticalLine ((int) px, (float) pr.getY(), (float) pr.getBottom());
     }
 }
 
@@ -1202,7 +1310,7 @@ void SpectralView::drawOverlays (juce::Graphics& g)
 
 double SpectralView::freqAtY (int y) const
 {
-    const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+    const auto rows = rowRects ();
     if (rows.empty()) return 0.0;
 
     size_t best = 0;
@@ -1240,7 +1348,7 @@ void SpectralView::drawSpectralShapes (juce::Graphics& g,
 {
     const bool preview = (live != nullptr);
     if (committedIn.empty() && !preview) return;
-    const auto rows = spectralRowRects (getWidth(), getHeight(), (int) channels.size());
+    const auto rows = rowRects ();
     if (rows.empty()) return;
 
     // Ordered iteration over committed shapes followed by the live preview.
