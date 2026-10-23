@@ -2504,10 +2504,13 @@ static void testSnapshotOverlayPaint()
 // ------------------------------------------------------------------ status bar
 // The bottom status bar shows the mouse probe on the left and the selection +
 // playhead times on the right.
+// The footer's right side is a fixed-width group of editable selection
+// fields plus the playhead readout (~468 px), so these tests use a 900 px
+// bar to keep the left and right halves clearly separated.
 static void testStatusBar()
 {
     StatusBar bar;
-    bar.setSize (600, 20);
+    bar.setSize (900, 20);
     bar.setSelection (1.0, 2.5);
     bar.setPlayhead (0.75);
     bar.setMouseInfo ("t=1.234 s   ch L: +0.72");
@@ -2520,41 +2523,126 @@ static void testStatusBar()
         return false;
     };
 
-    juce::Image img (juce::Image::ARGB, 600, 20, true);
+    juce::Image img (juce::Image::ARGB, 900, 20, true);
     { juce::Graphics g (img); bar.paint (g); }
     CHECK (brightIn (img, 6, 300), "status bar shows the mouse probe on the left");
-    CHECK (brightIn (img, 300, 594), "status bar shows selection/playhead on the right");
+    CHECK (brightIn (img, 450, 894), "status bar shows selection/playhead on the right");
 
     // Clearing the mouse info leaves only the right side.
     bar.setMouseInfo ("");
-    juce::Image img2 (juce::Image::ARGB, 600, 20, true);
+    juce::Image img2 (juce::Image::ARGB, 900, 20, true);
     { juce::Graphics g (img2); bar.paint (g); }
     CHECK (!brightIn (img2, 6, 300), "cleared mouse info leaves the left side empty");
-    CHECK (brightIn (img2, 300, 594), "right side still shows selection/playhead");
+    CHECK (brightIn (img2, 450, 894), "right side still shows selection/playhead");
 
     // The active file name sits at the far left of the footer.
     bar.setFileName ("tone.wav");
-    juce::Image img3 (juce::Image::ARGB, 600, 20, true);
+    juce::Image img3 (juce::Image::ARGB, 900, 20, true);
     { juce::Graphics g (img3); bar.paint (g); }
     CHECK (brightIn (img3, 6, 300), "file name is shown on the left");
 
     // With both file name and mouse probe present, the probe starts to the
     // right of the name instead of overlapping it.
     const juce::Font f (12.0f);
-    const int nameW = std::min (600 / 2 - 6,
+    const int nameW = std::min (900 / 2 - 6,
                                 (int) juce::GlyphArrangement::getStringWidth (f, "tone.wav") + 8);
     const int probeX = 6 + nameW + 12;
     bar.setMouseInfo ("t=1.234 s   ch L: +0.72");
-    juce::Image img4 (juce::Image::ARGB, 600, 20, true);
+    juce::Image img4 (juce::Image::ARGB, 900, 20, true);
     { juce::Graphics g (img4); bar.paint (g); }
     CHECK (brightIn (img4, 6, probeX), "file name still at the far left");
     CHECK (brightIn (img4, probeX + 2, 300), "mouse probe starts after the file name");
 
     // Clearing the name sends the mouse probe back to its original spot.
     bar.setFileName ("");
-    juce::Image img5 (juce::Image::ARGB, 600, 20, true);
+    juce::Image img5 (juce::Image::ARGB, 900, 20, true);
     { juce::Graphics g (img5); bar.paint (g); }
     CHECK (brightIn (img5, 6, probeX), "mouse probe returns to the far left");
+}
+
+// ------------------------------------------------- footer selection editing
+// The status bar's start/stop/length fields are live-editable: parseable
+// changes apply straight away (so pasted values work without Enter),
+// unparseable partial text is ignored, and programmatic updates never echo
+// back into the edit callback.
+static void testStatusBarEditing()
+{
+    auto approx = [] (double a, double b) { return std::abs (a - b) <= 1e-9; };
+
+    StatusBar bar;
+    bar.setSize (900, 20);
+
+    // No selection: the fields are hidden and empty.
+    CHECK (!bar.selFieldsVisible(), "no selection: footer fields hidden");
+
+    bar.setSelection (12.0, 18.5);
+    CHECK (bar.selFieldsVisible(), "a selection shows the footer fields");
+    CHECK (bar.getSelStartText() == "12.000", "start field shows the start time");
+    CHECK (bar.getSelStopText() == "18.500", "stop field shows the stop time");
+    CHECK (bar.getSelLenText() == "6.500", "length field shows the duration");
+
+    // Long times use clock style in all three fields.
+    bar.setSelection (3725.25, 7400.0);
+    CHECK (bar.getSelStartText() == "1:02:05.25", "start past an hour uses h:mm:ss");
+    CHECK (bar.getSelStopText() == "2:03:20", "stop past two hours uses h:mm:ss");
+    CHECK (bar.getSelLenText() == "1:01:14.75", "length past an hour uses h:mm:ss");
+
+    bar.setSelection (0.0, 0.0);
+    CHECK (!bar.selFieldsVisible(), "clearing the selection hides the fields");
+
+    // Editing pushes new start/stop values through the callback; mirror the
+    // real wiring by feeding them back into the bar as well.
+    double gotA = -1.0, gotB = -1.0;
+    bar.onSelectionEdited = [&] (double a, double b)
+    { gotA = a; gotB = b; bar.setSelection (a, b); };
+
+    auto pump = [] ()
+    {
+        for (int i = 0; i < 8; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+    };
+
+    bar.setSelection (10.0, 20.0);
+    pump();   // flush any pending messages from the setup above
+
+    // Typing a new start applies it live...
+    bar.selStartField().setText ("15", true);
+    pump();
+    CHECK (approx (gotA, 15.0) && approx (gotB, 20.0), "typing a start applies it");
+
+    // ...pasting clock-style text works too...
+    bar.selStopField().setText ("1:30", true);
+    pump();
+    CHECK (approx (gotA, 15.0) && approx (gotB, 90.0), "pasted m:ss applies to the stop");
+
+    // ...and the length field moves the stop edge from a fixed start.
+    bar.selLenField().setText ("30", true);
+    pump();
+    CHECK (approx (gotA, 15.0) && approx (gotB, 45.0), "length sets stop = start + len");
+
+    // Unparseable partial text leaves the selection alone...
+    bar.selStartField().setText ("-", true);
+    pump();
+    CHECK (approx (gotA, 15.0) && approx (gotB, 45.0), "unparseable text is ignored");
+
+    // ...and a start beyond the stop clamps to the stop.
+    bar.selStartField().setText ("99", true);
+    pump();
+    CHECK (approx (gotA, 45.0) && approx (gotB, 45.0), "start past stop clamps to stop");
+
+    // Programmatic selection changes update the fields without echoing into
+    // the callback (setText with no notification).
+    gotA = gotB = -1.0;
+    bar.setSelection (30.0, 40.0);
+    pump();
+    CHECK (gotA < 0.0, "programmatic change does not echo into the callback");
+    CHECK (bar.getSelStartText() == "30.000", "...but still refreshes the fields");
+
+    // The playhead readout switches to clock style past a minute.
+    bar.setPlayhead (75.0);
+    CHECK (bar.getPlayheadText() == "Pos: 1:15", "playhead readout uses m:ss past a minute");
+    bar.setPlayhead (3661.25);
+    CHECK (bar.getPlayheadText() == "Pos: 1:01:01.25", "playhead readout uses h:mm:ss past an hour");
 }
 
 // ------------------------------------------------- footer file name wiring
@@ -4350,6 +4438,60 @@ static void testTimePanSpeedAndReversal()
 // us values when zoomed in, and compact minute/hour labels when zoomed out on
 // long files. Major ticks are subdivided into five unlabeled minor ticks.
 
+// ------------------------------------------------- time text formatting
+// Clock-style (m:ss / h:mm:ss) and footer formatting, plus the parser that
+// backs the editable footer fields.
+static void testTimeFormatting()
+{
+    auto approx = [] (double a, double b) { return std::abs (a - b) <= 1e-9; };
+
+    // --- Clock style ---
+    CHECK (formatClockTime (0.0) == "0:00", "zero as m:ss");
+    CHECK (formatClockTime (45.0) == "0:45", "sub-minute clock value keeps m:ss");
+    CHECK (formatClockTime (155.0) == "2:35", "minutes and seconds");
+    CHECK (formatClockTime (155.5) == "2:35.5", "fractional seconds trimmed");
+    CHECK (formatClockTime (155.127) == "2:35.127", "three fractional digits");
+    CHECK (formatClockTime (155.99996, 4) == "2:36", "fractional carry bumps the second");
+    CHECK (formatClockTime (155.6, 0) == "2:36", "no fraction requested rounds to nearest second");
+    CHECK (formatClockTime (3600.0) == "1:00:00", "hour boundary gains the hour field");
+    CHECK (formatClockTime (3755.25) == "1:02:35.25", "hours with trimmed fraction");
+    CHECK (formatClockTime (7200.0) == "2:00:00", "multiple hours");
+
+    // --- Footer style (magnitude-based) ---
+    CHECK (formatFooterTime (0.0) == "0.000", "footer zero stays decimal seconds");
+    CHECK (formatFooterTime (12.5) == "12.500", "sub-minute footer value: 3 decimals");
+    CHECK (formatFooterTime (59.999) == "59.999", "just under a minute stays decimal");
+    CHECK (formatFooterTime (60.0) == "1:00", "one minute switches to m:ss");
+    CHECK (formatFooterTime (3599.0) == "59:59", "last second before an hour");
+    CHECK (formatFooterTime (3600.0) == "1:00:00", "one hour switches to h:mm:ss");
+    CHECK (formatFooterTime (7200.5) == "2:00:00.5", "hours with trimmed fraction");
+
+    // --- Parsing ---
+    double v = -1.0;
+    CHECK (parseTimeText ("12.5", v) && approx (v, 12.5), "plain seconds parse");
+    CHECK (parseTimeText ("60", v) && approx (v, 60.0), "whole seconds parse");
+    CHECK (parseTimeText ("2:35", v) && approx (v, 155.0), "m:ss parses");
+    CHECK (parseTimeText ("02:35.5", v) && approx (v, 155.5), "padded m:ss with fraction parses");
+    CHECK (parseTimeText ("1:02:35", v) && approx (v, 3755.0), "h:mm:ss parses");
+    CHECK (parseTimeText ("1:02:35.127", v) && approx (v, 3755.127), "h:mm:ss with fraction parses");
+    CHECK (!parseTimeText ("-", v), "lone minus rejected");
+    CHECK (!parseTimeText ("abc", v), "letters rejected");
+    CHECK (!parseTimeText ("2:", v), "trailing colon rejected");
+    CHECK (!parseTimeText (":30", v), "leading colon rejected");
+    CHECK (!parseTimeText ("1:2:3:4", v), "three colons rejected");
+    CHECK (!parseTimeText ("", v), "empty text rejected");
+    CHECK (!parseTimeText ("  ", v), "blank text rejected");
+
+    // Round-trip: what the footer displays must parse back to itself.
+    const double roundTrip [] = { 0.0, 12.5, 59.999, 60.0, 155.127, 3599.0, 3600.0, 7200.5 };
+    for (double t : roundTrip)
+    {
+        const juce::String s = formatFooterTime (t);
+        double back = -1.0;
+        CHECK (parseTimeText (s, back) && approx (back, t), "round-trip: " + s);
+    }
+}
+
 static void testTimeAxisTicks()
 {
     auto approx = [] (double a, double b) { return std::abs (a - b) <= b * 1e-9; };
@@ -4361,19 +4503,25 @@ static void testTimeAxisTicks()
     CHECK (approx (niceTimeStep (45000.0), 0.002), "20 ms span: 2 ms steps");
     CHECK (approx (niceTimeStep (1e6), 1e-4), "~1 ms span: 100 us steps");
 
-    // --- Label formatting ---
-    CHECK (formatTimeTickLabel (45.0, 1.0) == "45", "whole seconds label");
-    CHECK (formatTimeTickLabel (300.0, 60.0) == "5m", "minutes compact label");
-    CHECK (formatTimeTickLabel (900.0, 900.0) == "15m", "odd minutes compact label");
-    CHECK (formatTimeTickLabel (3600.0, 3600.0) == "1h", "hours compact label");
-    CHECK (formatTimeTickLabel (7200.0, 1800.0) == "2h", "multiple hours label");
-    CHECK (formatTimeTickLabel (0.2, 0.2) == "0.2", "tenths of a second label");
-    CHECK (formatTimeTickLabel (0.05, 0.05) == "0.05", "hundredths of a second label");
-    CHECK (formatTimeTickLabel (0.002, 0.002) == "2ms", "millisecond label");
-    CHECK (formatTimeTickLabel (0.0005, 0.0005) == "500\u00b5s", "microsecond label");
-    CHECK (formatTimeTickLabel (9.242, 0.002) == "9.242", "ms step away from start: decimal seconds");
-    CHECK (formatTimeTickLabel (12.5, 0.0005) == "12.5000", "sub-ms step away from start: 4 digits");
-    CHECK (formatTimeTickLabel (0.0, 1.0) == "0", "origin label is plain 0");
+    // --- Label formatting (zoomed in: span <= one minute keeps decimal seconds)
+    CHECK (formatTimeTickLabel (45.0, 1.0, 45.0) == "45", "whole seconds label");
+    CHECK (formatTimeTickLabel (0.2, 0.2, 1.0) == "0.2", "tenths of a second label");
+    CHECK (formatTimeTickLabel (0.05, 0.05, 1.0) == "0.05", "hundredths of a second label");
+    CHECK (formatTimeTickLabel (0.002, 0.002, 1.0) == "2ms", "millisecond label");
+    CHECK (formatTimeTickLabel (0.0005, 0.0005, 1.0) == "500\u00b5s", "microsecond label");
+    CHECK (formatTimeTickLabel (9.242, 0.002, 20.0) == "9.242", "ms step away from start: decimal seconds");
+    CHECK (formatTimeTickLabel (12.5, 0.0005, 20.0) == "12.5000", "sub-ms step away from start: 4 digits");
+    CHECK (formatTimeTickLabel (0.0, 1.0, 30.0) == "0", "origin label is plain 0 when zoomed in");
+
+    // --- Label formatting (zoomed out: span > one minute switches to clock style)
+    CHECK (formatTimeTickLabel (45.0, 15.0, 90.0) == "0:45", "sub-minute tick in a long view: m:ss");
+    CHECK (formatTimeTickLabel (300.0, 60.0, 300.0) == "5:00", "minutes as m:ss");
+    CHECK (formatTimeTickLabel (900.0, 900.0, 900.0) == "15:00", "odd minutes as m:ss");
+    CHECK (formatTimeTickLabel (3600.0, 600.0, 7200.0) == "1:00:00", "hour boundary as h:mm:ss");
+    CHECK (formatTimeTickLabel (5400.0, 900.0, 7200.0) == "1:30:00", "mid-hour tick in a long view");
+    CHECK (formatTimeTickLabel (7200.0, 1800.0, 7200.0) == "2:00:00", "multiple hours as h:mm:ss");
+    CHECK (formatTimeTickLabel (62.5, 0.5, 90.0) == "1:02.5",
+          "sub-second step in a long view keeps fractional seconds");
 
     // --- Rendered ruler: majors + minors at coarse and fine zooms ---
     {
@@ -4405,7 +4553,7 @@ static void testTimeAxisTicks()
             return best;
         };
 
-        // Step is 1800 s: major ticks at 0, 1800 ("30m"), 3600 ("1h"), ...
+        // Step is 1800 s: major ticks at 0, 1800 ("30:00"), 3600 ("1:00:00"), ...
         CHECK (brightAt (img, 1800.0, 16, 23) > 45, "major tick drawn at 30 m");
         CHECK (brightAt (img, 3600.0, 16, 23) > 45, "major tick drawn at 1 h");
         // Rows y=16..19 are above the minor-tick band (y>=20): no major mid-interval.
@@ -4413,7 +4561,7 @@ static void testTimeAxisTicks()
         // Minors subdivide each interval into five: first minor at 1800+360=2160.
         CHECK (brightAt (img, 2160.0, 20, 23) > 45, "intermediate tick between majors");
 
-        // The "1h" label text sits just right of its tick: bright pixels in rows 4..18.
+        // The "1:00:00" label text sits just right of its tick: bright pixels in rows 4..18.
         int labelBright = 0;
         for (int dx = 3; dx < 60; ++dx)
             for (int y = 4; y <= 18; ++y)
@@ -9508,6 +9656,7 @@ static int scRunUnitTestsImpl()
     progress ("snapshot store/recompute"); testSnapshotStoreAndRecompute();
     progress ("snapshot overlay paint");  testSnapshotOverlayPaint();
     progress ("status bar");          testStatusBar();
+    progress ("footer selection editing"); testStatusBarEditing();
     progress ("footer file name");    testStatusBarFileName();
     progress ("about text licences"); testAboutText();
     progress ("time scrollbar on load"); testTimeScrollBarOnLoad();
@@ -9530,6 +9679,7 @@ static int scRunUnitTestsImpl()
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("time axis ticks");     testTimeAxisTicks();
+    progress ("time text formatting"); testTimeFormatting();
     progress ("mipmap bit-exact");    testMipmapBitExact();
     progress ("marker title clip");   testMarkerTitleClipping();
     progress ("FFT view interactions"); testFFTViewInteractions();

@@ -844,22 +844,109 @@ double niceTimeStep (double pxPerSec)
     return 864000.0;   // unreachable for sane inputs
 }
 
-juce::String formatTimeTickLabel (double t, double step)
+juce::String formatClockTime (double t, int maxDecimals)
 {
-    if (t == 0.0) return "0";
-    if (step >= 60.0)
+    if (!std::isfinite (t) || t < 0.0) t = 0.0;
+
+    // Round the fractional part to `maxDecimals` digits first so a carry can
+    // bump the whole-second count (e.g. 155.99996 @4dp -> 2:36). With no
+    // fraction requested, round the whole value instead.
+    double wholeD = (maxDecimals > 0) ? std::floor (t) : std::llround (t);
+    double frac = t - wholeD;
+    if (maxDecimals > 0 && frac > 0.0)
     {
-        const int s = (int) std::llround (t);
-        if (s % 3600 == 0) return juce::String (s / 3600) + "h";
-        if (s % 60 == 0)   return juce::String (s / 60) + "m";
-        // Odd values (defensive; the step sequence never produces them):
-        // h:mm:ss or m:ss.
-        const int h = s / 3600, m = (s % 3600) / 60, sec = s % 60;
-        if (h > 0)
-            return juce::String (h) + ":" + juce::String (m).paddedLeft ('0', 2)
-                   + ":" + juce::String (sec).paddedLeft ('0', 2);
-        return juce::String (m) + ":" + juce::String (sec).paddedLeft ('0', 2);
+        const double scale = std::pow (10.0, maxDecimals);
+        frac = std::round (frac * scale) / scale;
+        if (frac >= 1.0 - 1e-12) { wholeD += 1.0; frac = 0.0; }
     }
+
+    const int64_t whole = (int64_t) std::llround (wholeD);
+    const int h = (int) (whole / 3600), m = (int) ((whole % 3600) / 60), sec = (int) (whole % 60);
+
+    // Hours appear only once the value reaches one hour, so a 30-minute tick
+    // in a two-hour ruler reads "30:00" next to "1:00:00".
+    juce::String s;
+    if (h > 0)
+        s << h << ":" << juce::String (m).paddedLeft ('0', 2) << ":"
+          << juce::String (sec).paddedLeft ('0', 2);
+    else
+        s << m << ":" << juce::String (sec).paddedLeft ('0', 2);
+
+    if (maxDecimals > 0 && frac > 0.0)
+    {
+        // "0.1270" -> "1270" -> trim trailing zeros -> "127"
+        juce::String fs = juce::String (frac, maxDecimals).substring (2);
+        while (fs.endsWith ("0")) fs = fs.dropLastCharacters (1);
+        if (!fs.isEmpty()) s << "." << fs;
+    }
+    return s;
+}
+
+juce::String formatFooterTime (double t)
+{
+    if (!std::isfinite (t) || t < 0.0) t = 0.0;
+    if (t >= 60.0) return formatClockTime (t, 4);
+    return juce::String (t, 3);
+}
+
+bool parseTimeText (const juce::String& sIn, double& out)
+{
+    const auto s = sIn.trim();
+    if (s.isEmpty()) { out = 0.0; return false; }
+
+    // Split on ':' - at most two separators are allowed.
+    juce::StringArray parts;
+    int start = 0;
+    for (int i = 0; ; ++i)
+    {
+        const bool end = (i >= s.length());
+        if (!end && s[i] != ':') continue;
+
+        // Note: this build's substring takes (startIndex, endIndex).
+        const auto part = s.substring (start, i);
+        if (part.isEmpty()) { out = 0.0; return false; }
+        // Digits with at most one decimal point.
+        int dots = 0;
+        for (int j = 0; j < part.length(); ++j)
+        {
+            const juce_wchar c = part[j];
+            if (c == L'.') { if (++dots > 1) { out = 0.0; return false; } }
+            else if (c < L'0' || c > L'9') { out = 0.0; return false; }
+        }
+        parts.add (part);
+        if (end) break;
+        start = i + 1;
+    }
+    if (parts.size() > 3) { out = 0.0; return false; }
+
+    double v = 0.0;
+    try
+    {
+        for (const auto& p : parts)
+            v = v * 60.0 + std::stod (p.toRawUTF8());
+    }
+    catch (...) { out = 0.0; return false; }
+
+    if (!std::isfinite (v) || v < 0.0) { out = 0.0; return false; }
+    out = v;
+    return true;
+}
+
+juce::String formatTimeTickLabel (double t, double step, double span)
+{
+    // Zoomed-out rulers use clock-style labels based on the visible range:
+    // m:ss above one minute, h:mm:ss above an hour. Fractional seconds only
+    // appear when the step is sub-second (defensive; the nice-step sequence
+    // keeps steps >= 1 s at these zooms for any realistic plot width).
+    if (span > 60.0)
+    {
+        int maxDec = 0;
+        if (step < 1.0)
+            maxDec = std::min (4, (int) std::ceil (-std::log10 (step) - 1e-9));
+        return formatClockTime (t, maxDec);
+    }
+
+    if (t == 0.0) return "0";
     if (step >= 1.0)   return juce::String ((int) std::llround (t));
     if (step >= 0.01)  return juce::String (t, step >= 0.1 ? 1 : 2);
 
@@ -916,7 +1003,7 @@ void WaveformView::drawRuler (juce::Graphics& g)
             }
 
         g.setColour (juce::Colour::fromRGB (200, 200, 200));
-        g.drawText (formatTimeTickLabel (t, major), (int) x + 3, 2, 90, kRulerH - 4,
+        g.drawText (formatTimeTickLabel (t, major, w), (int) x + 3, 2, 90, kRulerH - 4,
                     juce::Justification::centredLeft, false);
     }
 }

@@ -907,14 +907,16 @@ private:
 
 // Thin strip at the bottom of the window: active file name + mouse probe info
 // on the left, playhead and selection times on the right.
-class StatusBar : public juce::Component
+class StatusBar : public juce::Component,
+                  public juce::TextEditor::Listener
 {
 public:
     // MSVC 2019 does not generate an implicit default constructor when a
     // deleted copy constructor is declared, so declare it explicitly.
-    StatusBar() = default;
+    StatusBar();
 
     void paint (juce::Graphics& g) override;
+    void resized() override;
 
     // Left side: free-form probe text from whichever view the cursor is over
     // (empty string clears it).
@@ -922,9 +924,26 @@ public:
     {
         if (s != mouseText) { mouseText = s; repaint(); }
     }
-    // Right side: selection range and playhead position.
+    /** Called when the user edits one of the selection fields below. The
+        callback receives the new start/stop in seconds; MainWindow wires it
+        to Application::setSelection. */
+    std::function<void (double, double)> onSelectionEdited;
+
+    // Right side: editable selection range and playhead position.
     void setSelection (double t0, double t1);
     void setPlayhead (double t);
+
+    // Current field texts (unit tests).
+    juce::String getSelStartText() const { return startEdit.getText(); }
+    juce::String getSelStopText()  const { return stopEdit.getText(); }
+    juce::String getSelLenText()   const { return lenEdit.getText(); }
+    bool selFieldsVisible() const { return startEdit.isVisible(); }
+    juce::String getPlayheadText() const { return playPart; }
+
+    // The editable fields themselves (unit tests).
+    juce::TextEditor& selStartField() { return startEdit; }
+    juce::TextEditor& selStopField()  { return stopEdit; }
+    juce::TextEditor& selLenField()   { return lenEdit; }
     // Left side: name of the currently active file (empty when none is loaded).
     void setFileName (const juce::String& s)
     {
@@ -952,8 +971,25 @@ public:
         if (s != modeText) { modeText = s; repaint(); }
     }
 
+    // TextEditor::Listener: normalise a field when it loses focus.
+    void textEditorFocusLost (juce::TextEditor& ed) override;
+
 private:
-    juce::String mouseText, selPart, playPart, fileName, ratePart, modeText;
+    void applyFieldVisibility();
+    void commitField (juce::TextEditor& ed);
+    void reformatField (juce::TextEditor& ed);
+    double fieldTime (const juce::TextEditor& ed) const;
+
+    // Right-side layout: [Sel:] [start] [-] [stop] [(] [len] [)]  gap  [Pos: t]
+    struct RightLayout { int selLabelX, startX, dashX, stopX, openX, lenX,
+                          closeX, posX; };
+    RightLayout computeRightLayout (int width) const;
+
+    juce::String mouseText, playPart, fileName, ratePart, modeText;
+    bool selVisible_ = false, rightFits_ = true;
+    double curStart = 0.0, curStop = 0.0;
+
+    juce::TextEditor startEdit, stopEdit, lenEdit;
 
     JUCE_DECLARE_NON_COPYABLE (StatusBar)
 };

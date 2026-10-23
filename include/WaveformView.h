@@ -166,7 +166,25 @@ private:
     1h/2h/5h/...). */
 double niceTimeStep (double pxPerSec);
 
-/** Formats a ruler tick value for the chosen step: whole seconds when coarse
-    ("45"), compact minutes/hours once the step reaches one minute ("5m",
-    "1h"), and ms/us at deep zooms ("2ms", "500us"). */
-juce::String formatTimeTickLabel (double t, double step);
+/** Formats a ruler tick value for the chosen step. When the visible range
+    `span` exceeds one minute the labels switch to clock style - m:ss above a
+    minute, h:mm:ss above an hour (fractional seconds only if the step is
+    sub-second). Below that: whole seconds when coarse ("45"), and ms/us at
+    deep zooms ("2ms", "500us"). */
+juce::String formatTimeTickLabel (double t, double step, double span);
+
+/** Clock-style formatting of an absolute time or duration:
+    m:ss[.dddd] below one hour, h:mm:ss[.dddd] above it, with up to
+    `maxDecimals` fractional digits and trailing zeros trimmed ("2:35",
+    "1:02:35.127"). */
+juce::String formatClockTime (double t, int maxDecimals = 4);
+
+/** Footer/readout formatting for an absolute time or duration: decimal
+    seconds below one minute ("12.500"), m:ss above it, h:mm:ss above an hour.
+    Used by the status bar's editable selection fields and playhead readout. */
+juce::String formatFooterTime (double t);
+
+/** Parses user-entered time text: plain seconds ("12.5") or clock style
+    ("2:35", "02:35.5", "1:02:35"). Returns false for anything else; `out`
+    receives the value in seconds on success. */
+bool parseTimeText (const juce::String& s, double& out);

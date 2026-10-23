@@ -274,6 +274,12 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // Panels notify us when they change shared state
     app.onStateChange = [this] { syncSharedState(); };
 
+    // The footer's editable selection fields push new start/stop values back
+    // into the shared selection (Application clamps them to the file).
+    if (statusBar)
+        statusBar->onSelectionEdited = [this] (double a, double b)
+        { app.setSelection (juce::Range<double> (a, b)); };
+
     // Panels can ask for a time range to be shown in both views (e.g.
     // double-clicking a marker or a stored selection).
     app.onSetTimeWindow = [this] (double t0, double t1) { applyTimeWindow (t0, t1); };

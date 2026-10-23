@@ -3,6 +3,7 @@
  */
 
 #include "Panels.h"
+#include "WaveformView.h"   // formatFooterTime / parseTimeText (shared time text)
 #include "FFTHelpers.h"
 #include <algorithm>
 #include <cctype>
@@ -3195,6 +3196,115 @@ void MarkerListPanel::paint (juce::Graphics& g)
 
 // ---------------------------------------------------------------- Status bar
 
+// Right-side field widths: [Sel:] [start] [-] [stop] [(] [len] [)]  gap  [Pos: t]
+static constexpr int kSelEditW = 90;   // start / stop field width
+static constexpr int kLenEditW = 84;   // length field width
+static constexpr int kPosAreaW = 120;  // reserved for the "Pos: ..." readout
+
+StatusBar::RightLayout StatusBar::computeRightLayout (int width) const
+{
+    // selLabelX = -1 marks "does not fit".
+    RightLayout r {-1, 0, 0, 0, 0, 0, 0, 0};
+    constexpr int selLabelW = 34, dashSlot = 10, parenSlot = 8, gap = 16;
+    const int groupW = selLabelW + kSelEditW + dashSlot + kSelEditW
+                     + parenSlot + kLenEditW + parenSlot + gap + kPosAreaW;
+    if (width <= groupW + 8) return r;   // too narrow: fields stay hidden
+    const int x0 = width - 8 - groupW;
+    r.selLabelX = x0;
+    r.startX    = x0 + selLabelW;
+    r.dashX     = r.startX + kSelEditW;
+    r.stopX     = r.dashX + dashSlot;
+    r.openX     = r.stopX + kSelEditW;
+    r.lenX      = r.openX + parenSlot;
+    r.closeX    = r.lenX + kLenEditW;
+    r.posX      = r.closeX + parenSlot + gap;
+    return r;
+}
+
+StatusBar::StatusBar()
+{
+    for (auto* e : { &startEdit, &stopEdit, &lenEdit })
+    {
+        e->setFont (12.0f);
+        e->setMultiLine (false);
+        e->setVisible (false);   // shown once a selection exists and fits
+        e->setColour (juce::TextEditor::backgroundColourId,
+                     juce::Colour::fromRGB (60, 60, 70));
+        e->setColour (juce::TextEditor::textColourId,
+                     juce::Colour::fromRGB (235, 235, 240));
+        e->setColour (juce::TextEditor::highlightedTextColourId,
+                     juce::Colour::fromRGB (255, 255, 255));
+        e->addListener (this);
+    }
+
+    // Live editing: every parseable change is applied straight away, so a
+    // pasted value takes effect without pressing Enter. Unparseable partial
+    // text ("-", "2:") is ignored until focus is lost.
+    startEdit.onTextChange = [this] { commitField (startEdit); };
+    stopEdit.onTextChange  = [this] { commitField (stopEdit); };
+    lenEdit.onTextChange   = [this] { commitField (lenEdit); };
+
+    // Enter normalises the field to the canonical display of its value.
+    startEdit.onReturnKey = [this] { reformatField (startEdit); };
+    stopEdit.onReturnKey  = [this] { reformatField (stopEdit); };
+    lenEdit.onReturnKey   = [this] { reformatField (lenEdit); };
+}
+
+void StatusBar::resized()
+{
+    rightFits_ = computeRightLayout (getWidth()).selLabelX >= 0;
+    applyFieldVisibility();
+    if (!rightFits_) return;
+    const auto L = computeRightLayout (getWidth());
+    const int y = 2, h = std::max (14, getHeight() - 5);
+    startEdit.setBounds (L.startX, y, kSelEditW, h);
+    stopEdit.setBounds (L.stopX, y, kSelEditW, h);
+    lenEdit.setBounds (L.lenX, y, kLenEditW, h);
+}
+
+void StatusBar::applyFieldVisibility()
+{
+    const bool show = rightFits_ && selVisible_;
+    startEdit.setVisible (show);
+    stopEdit.setVisible (show);
+    lenEdit.setVisible (show);
+}
+
+double StatusBar::fieldTime (const juce::TextEditor& ed) const
+{
+    if (&ed == &startEdit) return curStart;
+    if (&ed == &stopEdit)  return curStop;
+    return curStop - curStart;
+}
+
+void StatusBar::commitField (juce::TextEditor& ed)
+{
+    double v;
+    if (!parseTimeText (ed.getText(), v))
+        return;   // mid-typing text: leave the selection alone for now
+
+    double a = curStart, b = curStop;
+    if (&ed == &startEdit)      a = jlimit (0.0, curStop, v);
+    else if (&ed == &stopEdit)  b = std::max (curStart, v);   // app clamps to file end
+    else                        b = curStart + std::max (0.0, v);
+
+    if (onSelectionEdited)
+        onSelectionEdited (a, b);
+}
+
+void StatusBar::reformatField (juce::TextEditor& ed)
+{
+    // Canonical display of the current selection edge; also reverts garbage
+    // that was typed before focus was lost.
+    ed.setText (formatFooterTime (fieldTime (ed)), false);
+}
+
+void StatusBar::textEditorFocusLost (juce::TextEditor& ed)
+{
+    if (&ed == &startEdit || &ed == &stopEdit || &ed == &lenEdit)
+        reformatField (ed);
+}
+
 void StatusBar::paint (juce::Graphics& g)
 {
     const auto b = getLocalBounds();
@@ -3250,36 +3360,67 @@ void StatusBar::paint (juce::Graphics& g)
     if (!mouseText.isEmpty() && leftX < b.getWidth() - 8)
     {
         g.setColour (juce::Colour::fromRGB (205, 205, 215));
-        const int w = std::max (10, b.getWidth() / 2 + 60 - leftX);
-        g.drawText (mouseText, leftX, 0, w, b.getHeight(),
+        int w = std::max (10, b.getWidth() / 2 + 60 - leftX);
+        // Keep the probe text clear of the editable selection fields.
+        if (rightFits_ && selVisible_)
+            w = std::min (w, computeRightLayout (b.getWidth()).selLabelX - leftX - 8);
+        g.drawText (mouseText, leftX, 0, std::max (10, w), b.getHeight(),
                     juce::Justification::left, false);
     }
 
-    const juce::String right = selPart.isEmpty() ? playPart
-                              : (playPart.isEmpty() ? selPart
-                                                   : selPart + "     " + playPart);
-    if (!right.isEmpty())
+    if (rightFits_ && selVisible_)
+    {
+        const auto L = computeRightLayout (b.getWidth());
+        g.setColour (juce::Colour::fromRGB (160, 190, 235));
+        g.setFont (12.0f);
+        g.drawText ("Sel:", L.selLabelX, 0, 34, b.getHeight(), juce::Justification::left, false);
+        g.drawText ("-", L.dashX, 0, 10, b.getHeight(), juce::Justification::centred, false);
+        g.drawText ("(", L.openX, 0, 8, b.getHeight(), juce::Justification::centred, false);
+        g.drawText (")", L.closeX, 0, 8, b.getHeight(), juce::Justification::centred, false);
+    }
+
+    if (!playPart.isEmpty())
     {
         g.setColour (juce::Colour::fromRGB (160, 190, 235));
         juce::Font f (12.0f);
-        const int w = std::min (b.getWidth() - 8,
-                                (int) juce::GlyphArrangement::getStringWidth (f, right) + 16);
-        g.drawText (right, b.getWidth() - w, 0, w, b.getHeight(),
-                    juce::Justification::right, false);
+        if (rightFits_)
+        {
+            const auto L = computeRightLayout (b.getWidth());
+            g.drawText (playPart, L.posX, 0, kPosAreaW, b.getHeight(),
+                        juce::Justification::right, false);
+        }
+        else
+        {
+            const int w = std::min (b.getWidth() - 8,
+                                    (int) juce::GlyphArrangement::getStringWidth (f, playPart) + 16);
+            g.drawText (playPart, b.getWidth() - w, 0, w, b.getHeight(),
+                        juce::Justification::right, false);
+        }
     }
 }
 
 void StatusBar::setSelection (double t0, double t1)
 {
-    const juce::String s = (t1 > t0)
-        ? "Sel: " + juce::String (t0, 3) + " - " + juce::String (t1, 3) + " s (" + juce::String (t1 - t0, 3) + " s)"
-        : juce::String();
-    if (s != selPart) { selPart = s; repaint(); }
+    const bool has = (t1 > t0);
+    if (has) { curStart = t0; curStop = t1; }
+    selVisible_ = has;
+    applyFieldVisibility();
+    if (!has) return;
+
+    auto sync = [this] (juce::TextEditor& e, double v)
+    {
+        // Never clobber a field the user is currently editing.
+        if (!e.hasKeyboardFocus (false))
+            e.setText (formatFooterTime (v), false);
+    };
+    sync (startEdit, curStart);
+    sync (stopEdit, curStop);
+    sync (lenEdit, curStop - curStart);
 }
 
 void StatusBar::setPlayhead (double t)
 {
-    const juce::String s = "Pos: " + juce::String (t, 3) + " s";
+    const juce::String s = "Pos: " + formatFooterTime (t);
     if (s != playPart) { playPart = s; repaint(); }
 }
 

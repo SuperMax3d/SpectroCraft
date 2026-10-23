@@ -26,8 +26,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   the actual sample values (flat tops and vertical jumps on square waves,
   fine detail on anything else) instead of blocky columns. The time ruler adapts
   to every zoom level: classic 1-2-5 second steps below one minute (down to µs
-  at deep zoom), then clean time-unit steps with compact labels (`30m`, `1h`)
-  for long files; each major tick is subdivided into five unlabeled minor ticks.
+  at deep zoom). Once the visible range exceeds a minute, labels switch to
+  clock style (`m:ss`), and once it exceeds an hour they gain the hours field
+  (`h:mm:ss`, e.g. `30:00` next to `1:00:00`); each major tick is subdivided
+  into five unlabeled minor ticks.
 - **Synchronized horizontal view**: zooming or panning in either view moves the
   shared time range of *both* views (they always show exactly the same slice of
   the file), while each keeps its own vertical axis/zoom — waveform amplitude
@@ -248,11 +250,15 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     probe (time + amplitude on the waveform, time + frequency + level on the
     spectrogram; in the file's physical unit when a scale calibration is set —
     linear Pa/V/g on the waveform, dB-SPL for Pascal files and plain V/g values
-    for Volts/g files) while hovering over either view; right side
-    shows the **selection start, stop and length** (`Sel: t0 - t1 s (len s)`) whenever a
-    selection exists — updated continuously while dragging it in either view —
-    plus the current **playhead position** (`Pos: t s`), which tracks playback
-    at 30 Hz.
+    for Volts/g files) while hovering over either view; right side shows the
+    **selection start, stop and length as three editable fields**
+    (`Sel: [start] - [stop] ([len])`) whenever a selection exists — updated
+    continuously while dragging it in either view. Click into any field to type
+    or paste a new value (plain seconds like `12.5` or clock style like
+    `1:02:35.127`); parseable changes apply live, Enter normalises the field,
+    and losing focus reverts invalid text. Times of a minute or more display in
+    clock style (`m:ss`, `h:mm:ss[.dddd]`). The current **playhead position**
+    (`Pos: t`) uses the same formatting and tracks playback at 30 Hz.
   - The File menu offers **Save Spectrogram As...** (Ctrl+Shift+E), which writes
     the current spectrogram content (per-channel rows included, no axes or
     overlays) to a PNG file.
