@@ -143,6 +143,10 @@ public:
         as it was when picking started - never its own previous clones. */
     void appendScaledShapesFrom (const SpectralSelection& src, double m);
 
+    // Remove the shapes [start, start+count) from the list (no-op when out of
+    // range). Used to undo a Clone & Multiply pick point's appended clones.
+    void removeShapesAt (int start, int count);
+
     // Bounding time range of all shapes (a safe superset for subtractive
     // shapes). Empty when the selection is empty.
     juce::Range<double> timeExtent() const;

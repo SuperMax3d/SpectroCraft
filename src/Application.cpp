@@ -518,6 +518,7 @@ void Application::startClonePick ()
     clonePicking = true;
     haveClonePickRef = false;
     clonePickPts.clear ();
+    clonePickShapeStarts.clear ();
     // Every click clones this snapshot - never the clones added by earlier
     // clicks in the same session (see SpectralSelection::appendScaledShapesFrom).
     clonePickBase = d->spectralSel;
@@ -531,18 +532,37 @@ void Application::endClonePick ()
     clonePicking = false;
     haveClonePickRef = false;
     clonePickPts.clear ();
+    clonePickShapeStarts.clear ();
     clonePickBase.clear ();
     if (onStateChange)
         onStateChange ();
 }
 
-bool Application::clonePickClick (double tSecs, double fHz)
+bool Application::clonePickClick (double tSecs, double fHz,
+                                 double dtTolSecs, double dfTolHz)
 {
     auto* d = doc ();
-    if (!d || d->spectralSel.empty () || !(fHz > 0.0))
+    if (!d || !(fHz > 0.0))
+        return false;
+
+    // Clicking near an already-picked point removes it (and the shapes its
+    // pick added), so a stray click can be undone without Esc.
+    if (dtTolSecs > 0.0 && dfTolHz > 0.0)
+    {
+        for (size_t i = 0; i < clonePickPts.size (); ++i)
+            if (std::abs (clonePickPts[i].first - tSecs) <= dtTolSecs
+                && std::abs (clonePickPts[i].second - fHz) <= dfTolHz)
+            {
+                removeClonePickPoint ((int) i);
+                return true;
+            }
+    }
+
+    if (d->spectralSel.empty ())
         return false;
 
     clonePickPts.emplace_back (tSecs, fHz);
+    int shapeStart = -1;   // the reference point adds no shapes of its own
     if (!haveClonePickRef)
     {
         haveClonePickRef = true;
@@ -552,10 +572,46 @@ bool Application::clonePickClick (double tSecs, double fHz)
     else
     {
         // Clone the session-start snapshot, not the growing selection.
+        shapeStart = d->spectralSel.count ();
         d->spectralSel.appendScaledShapesFrom (clonePickBase, fHz / clonePickRefF);
         refreshSpectralSelectionUI ();
     }
+    clonePickShapeStarts.push_back (shapeStart);
     return true;
+}
+
+void Application::removeClonePickPoint (int index)
+{
+    auto* d = doc ();
+    if (!d || index < 0 || index >= (int) clonePickPts.size ())
+        return;
+
+    // Drop the shapes this pick appended, keeping later points' start indices
+    // valid (their blocks sit after this one and shift down by its size).
+    const int start = clonePickShapeStarts[(size_t) index];
+    const int nShapes = clonePickBase.count ();
+    if (start >= 0 && nShapes > 0)
+    {
+        d->spectralSel.removeShapesAt (start, nShapes);
+        for (int& s : clonePickShapeStarts)
+            if (s > start) s -= nShapes;
+    }
+
+    clonePickPts.erase (clonePickPts.begin () + index);
+    clonePickShapeStarts.erase (clonePickShapeStarts.begin () + index);
+
+    // Removing the first point also clears the reference: the next click sets
+    // a new one. The clones already committed to the selection stay put.
+    if (index == 0 && haveClonePickRef)
+        haveClonePickRef = false;
+
+    refreshSpectralSelectionUI ();
+}
+
+void Application::stepBrushRadius (bool larger)
+{
+    brushRadiusHz = larger ? std::min (5000.0, brushRadiusHz * 1.5)
+                           : std::max (5.0, brushRadiusHz / 1.5);
 }
 
 // ---------------------------------------------------------------------------

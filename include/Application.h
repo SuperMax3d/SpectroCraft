@@ -68,6 +68,10 @@ public:
     bool haveClonePickRef = false;
     double clonePickRefF = 0.0;
     std::vector<std::pair<double, double>> clonePickPts;   // all picked points incl. the reference
+    // Parallel to clonePickPts: the index in the doc's spectral selection where
+    // each point's appended clone block starts (-1 when it added no shapes,
+    // i.e. the reference point). Lets a re-click remove a point AND its clones.
+    std::vector<int> clonePickShapeStarts;
     SpectralSelection clonePickBase;   // snapshot of the selection when picking started
 
     // Move/Scale selection gesture (spectral view right-click menu): the first
@@ -230,8 +234,15 @@ public:
     bool hasClonePickRef() const { return haveClonePickRef; }
     const std::vector<std::pair<double, double>>& clonePickPoints() const { return clonePickPts; }
     // Called by the spectral view on a left click while picking. Returns false
-    // when nothing happened (no selection / bad frequency).
-    bool clonePickClick (double tSecs, double fHz);
+    // when nothing happened (no selection / bad frequency). When dtTolSecs /
+    // dfTolHz are positive and the click lands within them of an already-picked
+    // point, that point is REMOVED instead (with the shapes its pick added).
+    bool clonePickClick (double tSecs, double fHz,
+                         double dtTolSecs = 0.0, double dfTolHz = 0.0);
+    void removeClonePickPoint (int index);
+
+    // Paintbrush size step: x1.5 / x(1/1.5), clamped to [5 Hz, 5000 Hz].
+    void stepBrushRadius (bool larger);
 
     // Mirrors the active doc's spectral selection time extent into the shared
     // time selection, re-installs the playback mask and notifies the UI.

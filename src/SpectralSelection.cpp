@@ -262,6 +262,13 @@ void SpectralSelection::appendScaledShapesFrom (const SpectralSelection& src, do
         appendScaledShape (s, m);
 }
 
+void SpectralSelection::removeShapesAt (int start, int count)
+{
+    if (start < 0 || count <= 0 || start >= (int) shapeList.size ()) return;
+    const int end = std::min ((int) shapeList.size (), start + count);
+    shapeList.erase (shapeList.begin () + start, shapeList.begin () + end);
+}
+
 SpectralSelection SpectralSelection::translatedCopy (double dt, double df) const
 {
     if (!std::isfinite (dt) || !std::isfinite (df)) return *this;

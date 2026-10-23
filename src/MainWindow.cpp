@@ -788,6 +788,11 @@ void MainWindow::timerCallback()
     if (shiftAnchorTime >= 0.0 && !juce::ModifierKeys::getCurrentModifiers().isShiftDown())
         shiftAnchorTime = -1.0;
 
+    // Keep the status-bar tool indicator in sync with live SHIFT/CTRL state
+    // (setModeText() is a no-op when nothing changed).
+    if (statusBar)
+        statusBar->setModeText (currentModeText());
+
     // The Frequency Analysis panel follows the playhead while playing.
     if (fftPanel) { fftPanel->setFollowPlayhead (app.audioEngine().isPlaying()); fftPanel->repaint(); }
 
@@ -839,6 +844,74 @@ void MainWindow::filesDropped (const juce::StringArray& files, int, int)
 }
 
 // ------------------------------------------------------------- state sync
+
+// Appends the live SHIFT/CTRL selection-mode suffix to a tool indicator:
+// CTRL -> "Subtract Selection", SHIFT -> "Add Selection" (the same modifiers
+// that change how the next drag edits the spectral selection).
+juce::String MainWindow::applyModifierHint (const juce::String& mode,
+                                             bool shiftDown, bool ctrlDown) const
+{
+    if (ctrlDown)
+        return mode + "  -  Subtract Selection";
+    if (shiftDown)
+        return mode + "  +  Add Selection";
+    return mode;
+}
+
+// The status-bar tool indicator: the active spectral selection tool name,
+// overridden by Clone & Multiply picking and Move/Scale gesture hints. While a
+// shape-drawing tool is active (and keyboard focus is on a view or nowhere),
+// holding SHIFT appends "Add Selection" and CTRL appends "Subtract Selection".
+juce::String MainWindow::currentModeText() const
+{
+    juce::String mode;
+    switch (app.selMode)
+    {
+        case SpectralSelMode::Marquee:
+            mode = "Marquee";
+            break;
+        case SpectralSelMode::Lasso:
+            mode = "Lasso";
+            break;
+        case SpectralSelMode::Paintbrush:
+            mode = juce::String ("Paintbrush ") +
+                   juce::String ((int) std::lround (app.brushRadiusHz)) + " Hz";
+            break;
+        default: break;
+    }
+
+    // Clone & Multiply picking overrides the tool indicator with a hint.
+    if (app.isClonePicking ())
+        mode = app.hasClonePickRef ()
+                   ? juce::String ("Clone pick  ref ") +
+                     juce::String ((int) std::lround (app.clonePickRefFreq())) + " Hz"
+                   : "Clone pick: click the reference frequency";
+
+    // Move/Scale selection gestures override it with their own hint.
+    if (app.isSelGesturing ())
+        mode = app.haveSelGestureRef ()
+                   ? juce::String (app.selGestureIsScale () ? "Scale sel" : "Move sel")
+                     + "  ref " + juce::String (app.selGestureRefT (), 2) + " s, "
+                     + juce::String ((int) std::lround (app.selGestureRefF ())) + " Hz"
+                   : juce::String (app.selGestureIsScale () ? "Scale selection: click the reference point"
+                                                           : "Move selection: click the reference point");
+
+    // Live modifier hint for shape-drawing tools. JUCE has no key-up callback,
+    // so this is polled from the timer as well; setModeText() ignores repeats.
+    if (app.selMode != SpectralSelMode::TimeRange && !app.isClonePicking ()
+        && !app.isSelGesturing ())
+    {
+        juce::Component* fc = juce::Component::getCurrentlyFocusedComponent ();
+        const bool viewsHaveFocus = fc == nullptr || fc == waveformView.get ()
+                                    || fc == spectralView.get ();
+        if (viewsHaveFocus)
+        {
+            const auto mods = juce::ModifierKeys::getCurrentModifiers();
+            return applyModifierHint (mode, mods.isShiftDown (), mods.isCtrlDown ());
+        }
+    }
+    return mode;
+}
 
 // Push shared state (selection, channels, playhead, settings) into the views.
 // Time windows and zoom levels are owned by each view independently.
@@ -893,39 +966,8 @@ void MainWindow::syncSharedState()
         statusBar->setSelection (app.selection.getStart(), app.selection.getEnd());
         statusBar->setPlayhead (app.playhead);
 
-        // Active spectral tool indicator (empty in Time Range mode).
-        juce::String mode;
-        switch (app.selMode)
-        {
-            case SpectralSelMode::Marquee:
-                mode = "Marquee";
-                break;
-            case SpectralSelMode::Lasso:
-                mode = "Lasso";
-                break;
-            case SpectralSelMode::Paintbrush:
-                mode = juce::String ("Paintbrush ") +
-                       juce::String ((int) std::lround (app.brushRadiusHz)) + " Hz";
-                break;
-            default: break;
-        }
-
-        // Clone & Multiply picking overrides the tool indicator with a hint.
-        if (app.isClonePicking ())
-            mode = app.hasClonePickRef ()
-                       ? juce::String ("Clone pick  ref ") +
-                         juce::String ((int) std::lround (app.clonePickRefFreq())) + " Hz"
-                       : "Clone pick: click the reference frequency";
-
-        // Move/Scale selection gestures override it with their own hint.
-        if (app.isSelGesturing ())
-            mode = app.haveSelGestureRef ()
-                       ? juce::String (app.selGestureIsScale () ? "Scale sel" : "Move sel")
-                         + "  ref " + juce::String (app.selGestureRefT (), 2) + " s, "
-                         + juce::String ((int) std::lround (app.selGestureRefF ())) + " Hz"
-                       : juce::String (app.selGestureIsScale () ? "Scale selection: click the reference point"
-                                                               : "Move selection: click the reference point");
-        statusBar->setModeText (mode);
+        // Active spectral tool indicator + live SHIFT/CTRL selection hint.
+        statusBar->setModeText (currentModeText());
     }
 
     updateScrollBars();
@@ -1402,10 +1444,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             app.clearSpectralSelection ();
             break;
         case SelectionBrushSmaller:
-            app.brushRadiusHz = std::max (20.0, app.brushRadiusHz / 1.5);
+            app.stepBrushRadius (false);
             break;
         case SelectionBrushLarger:
-            app.brushRadiusHz = std::min (5000.0, app.brushRadiusHz * 1.5);
+            app.stepBrushRadius (true);
             break;
         default: break;
     }
@@ -2933,9 +2975,9 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
             case 'm': app.setSelectionTool (SpectralSelMode::Marquee);   syncSharedState(); return true;
             case 'l': app.setSelectionTool (SpectralSelMode::Lasso);     syncSharedState(); return true;
             case 'p': app.setSelectionTool (SpectralSelMode::Paintbrush);syncSharedState(); return true;
-            case '[': app.brushRadiusHz = std::max (20.0, app.brushRadiusHz / 1.5);
+            case '[': app.stepBrushRadius (false);
                      syncSharedState(); return true;
-            case ']': app.brushRadiusHz = std::min (5000.0, app.brushRadiusHz * 1.5);
+            case ']': app.stepBrushRadius (true);
                      syncSharedState(); return true;
             default: break;
         }

@@ -197,7 +197,10 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
         && e.x >= kLeftAxisWidth && e.y >= kRulerH && app.isClonePicking ())
     {
-        app.clonePickClick (xToTime ((double) e.x), freqAtY (e.y));
+        // ~8 px hit radius in data units: clicking on a picked point removes it.
+        const double dtTol = std::abs (xToTime (e.x + 4) - xToTime (e.x - 4));
+        const double dfTol = std::abs (freqAtY (e.y + 4) - freqAtY (e.y - 4));
+        app.clonePickClick (xToTime ((double) e.x), freqAtY (e.y), dtTol, dfTol);
         return;
     }
 

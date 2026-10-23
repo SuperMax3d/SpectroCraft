@@ -54,6 +54,14 @@ public:
     void setupViews();
     void activateDocUI();   // reset both views + sync panels after a doc switch
     juce::String statusBarFileName() const;   // name currently shown in the footer
+    // The status-bar tool indicator: active spectral selection tool name,
+    // overridden by Clone & Multiply picking and Move/Scale gesture hints;
+    // while a shape-drawing tool is active, holding SHIFT appends "Add
+    // Selection" and CTRL appends "Subtract Selection" (live modifier state).
+    juce::String currentModeText() const;
+    // Pure part of the above: append the SHIFT/CTRL selection-mode suffix.
+    juce::String applyModifierHint (const juce::String& mode,
+                                    bool shiftDown, bool ctrlDown) const;
     bool timeScrollBarVisible() const { return timeBar != nullptr && timeBar->isVisible(); }
     bool waveformVisible() const { return showWaveformView; }      // View menu state
     bool spectrogramVisible() const { return showSpectralView; }

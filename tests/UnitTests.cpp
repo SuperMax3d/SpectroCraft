@@ -8943,6 +8943,106 @@ static void testClonePickFlow()
     app.startClonePick ();
     CHECK (!app.clonePickClick (0.3, 100.0), "click rejected with no selection");
     app.endClonePick ();
+
+    wav.deleteFile ();
+}
+
+static void testClonePickToggleAndHints()
+{
+    const juce::File wav = makeTempFile ("picktoggle.wav");
+    writeWav (wav, 1, 8000.0, 16384, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for pick-toggle test");
+    auto* d = app.doc ();
+    if (!d) { wav.deleteFile (); return; }
+
+    // One base rect: [1,2] s x [100,300] Hz.
+    d->spectralSel.addRect (1.0, 2.0, 100.0, 300.0, false);
+    const int before = d->spectralSel.count ();   // 1
+
+    app.startClonePick ();
+    CHECK (app.isClonePicking (), "pick session started");
+
+    // Reference click at 200 Hz adds no shapes.
+    CHECK (app.clonePickClick (1.5, 200.0, 0.05, 25.0), "reference click accepted");
+    CHECK (app.hasClonePickRef (), "reference stored");
+    CHECK (d->spectralSel.count () == before, "reference adds no shapes");
+
+    // Target at 400 Hz -> x2 clone: same time range [1,2] s, freq [200,600] Hz.
+    CHECK (app.clonePickClick (1.5, 400.0, 0.05, 25.0), "target click accepted");
+    CHECK (d->spectralSel.count () == before + 1, "x2 clone added");
+    CHECK (d->spectralSel.contains (1.5, 500.0), "x2 clone present");
+
+    // Target at 300 Hz -> x1.5 clone: freq [150,450] Hz.
+    app.clonePickClick (1.6, 300.0, 0.05, 25.0);
+    CHECK (d->spectralSel.count () == before + 2, "x1.5 clone added");
+
+    // Re-clicking the x2 point removes it and its clone only.
+    CHECK (app.clonePickClick (1.53, 405.0, 0.05, 25.0), "re-click near a picked point accepted");
+    CHECK (d->spectralSel.count () == before + 1, "x2 clone removed with its pick point");
+    CHECK (!d->spectralSel.contains (1.5, 500.0), "removed x2 clone is gone");
+    CHECK (d->spectralSel.contains (1.5, 375.0), "x1.5 clone still present");
+
+    // The later point's recorded index survived the earlier removal.
+    CHECK (app.clonePickClick (1.62, 295.0, 0.05, 25.0), "re-click near the other picked point accepted");
+    CHECK (d->spectralSel.count () == before, "x1.5 clone removed too");
+
+    // Re-clicking the reference clears it; committed clones stay put.
+    CHECK (app.clonePickClick (1.48, 195.0, 0.05, 25.0), "re-click near the reference accepted");
+    CHECK (!app.hasClonePickRef (), "reference cleared by its removal");
+    CHECK (d->spectralSel.count () == before, "removing the reference adds nothing");
+
+    // A fresh click starts a new reference.
+    CHECK (app.clonePickClick (1.5, 250.0, 0.05, 25.0), "new reference after removal");
+    CHECK (app.hasClonePickRef () && std::abs (app.clonePickRefFreq () - 250.0) < 1e-9,
+          "new reference frequency stored");
+
+    // Zero tolerances never remove: an exact re-click adds a x1 clone instead.
+    app.clonePickClick (1.5, 250.0);
+    CHECK (app.hasClonePickRef (), "zero-tolerance click does not remove the reference");
+    CHECK (d->spectralSel.count () == before + 1, "exact re-click adds a x1 clone instead");
+
+    app.endClonePick ();
+    CHECK (!app.isClonePicking (), "pick session ended");
+
+    // Paintbrush radius: x1.5 steps clamped to [5 Hz, 5000 Hz].
+    app.brushRadiusHz = 200.0;
+    app.stepBrushRadius (false);
+    CHECK (std::abs (app.brushRadiusHz - 200.0 / 1.5) < 1e-9, "brush step down x(1/1.5)");
+    app.brushRadiusHz = 20.0;
+    for (int i = 0; i < 6; ++i) app.stepBrushRadius (false);
+    CHECK (std::abs (app.brushRadiusHz - 5.0) < 1e-9, "brush radius clamps at 5 Hz");
+    app.stepBrushRadius (true);
+    CHECK (std::abs (app.brushRadiusHz - 7.5) < 1e-9, "step up from the floor");
+    app.brushRadiusHz = 4000.0;
+    app.stepBrushRadius (true);
+    CHECK (std::abs (app.brushRadiusHz - 5000.0) < 1e-9, "brush radius clamps at 5000 Hz");
+
+    // Footer modifier hints: the pure part plus live composition.
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "hint test"));
+    CHECK (win->applyModifierHint ("Marquee", true, false) == "Marquee  +  Add Selection",
+          "SHIFT hint text");
+    CHECK (win->applyModifierHint ("Paintbrush 200 Hz", false, true)
+              == "Paintbrush 200 Hz  -  Subtract Selection",
+          "CTRL hint text");
+    const juce::String both = win->applyModifierHint ("Lasso", true, true);
+    CHECK (both.contains ("Subtract Selection") && !both.contains ("Add Selection"),
+          "CTRL wins over SHIFT");
+    CHECK (win->applyModifierHint ("Marquee", false, false) == "Marquee",
+          "no modifiers -> no hint");
+
+    // Live composition: headless tests hold no keys, so the base text passes through.
+    app.selMode = SpectralSelMode::Marquee;
+    CHECK (win->currentModeText () == "Marquee", "live mode text without modifiers");
+    app.selMode = SpectralSelMode::TimeRange;
+    CHECK (win->currentModeText ().isEmpty (), "no tool indicator in Time Range mode");
+
+    wav.deleteFile ();
 }
 
 static int scRunUnitTestsImpl()
@@ -9056,6 +9156,8 @@ static int scRunUnitTestsImpl()
     progress ("saved selections round-trip"); testSavedSelectionsRoundTrip();
     progress ("selections disk reload + dnd"); testSelectionsDiskReload();
     progress ("clone pick flow");           testClonePickFlow();
+    progress ("pick toggle + brush floor + modifier hints");
+    testClonePickToggleAndHints();
     progress ("move/scale selection gesture"); testSelMoveScaleGesture();
     progress ("new file / clipboard / paste mix"); testNewFileCopyPasteMix();
     progress ("masked gain + zero-out");    testMaskedGainAndZero();

@@ -782,7 +782,7 @@ line from the last stroke's end point to the click position; the line is
 straight in *linear-frequency* space, so on a logarithmic frequency axis it
 appears slightly curved (switching the view to a linear scale shows it as a
 perfectly straight line). Shift/Ctrl combine with Alt for add/subtract lines. The active tool and brush radius are shown in the
-status bar; `[` / `]` change the brush radius (20–5000 Hz), and **Esc**
+status bar; while holding **Shift** or **Ctrl**, it additionally shows "Add Selection" / "Subtract Selection", so you can always see how the next drag will edit the selection. `[` / `]` change the brush radius (5–5000 Hz), and **Esc**
 clears the spectral selection without touching the time selection.
 
 **Moving / scaling an existing selection**: in the spectral view, right-click
@@ -834,8 +834,10 @@ harmonics of whatever is currently selected.
   the spectrogram (shown as an orange circle), then click each target
   frequency — every click appends clones scaled by `clicked / reference` (e.g.
   reference 100 Hz plus clicks at 50/200/500 Hz gives multipliers 0.5, 2 and
-  5). Picked points are drawn as circles on every channel row; **Esc** or the
-  button ends the session without touching the selection.
+  5). Picked points are drawn as circles on every channel row; clicking near
+  an already-picked point removes it (and the clones its pick added), so a
+  stray click can be undone without Esc. **Esc** or the button ends the session
+  without touching the selection.
 
 ---
 
