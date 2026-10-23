@@ -768,7 +768,11 @@ private:
       stretched by the same factor. The interactive "Pick points..." mode
       does the same with clicks: first click = reference frequency, each
       following click adds clones at (clicked freq / ref freq). */
-class SelectionPanel : public juce::Component
+// Derives from FileDragAndDropTarget so .selections.json files can be
+// dropped straight onto the panel (JUCE routes a drop to the nearest
+// ancestor target under the cursor).
+class SelectionPanel : public juce::Component,
+                       public juce::FileDragAndDropTarget
 {
 public:
     explicit SelectionPanel (Application& app);
@@ -780,6 +784,22 @@ public:
     // and makes sure both views' time window includes its time range. Also
     // used by unit tests.
     void doRecall (int row);
+
+    // "Load from disk..." (right-click menu): re-reads the sidecar next to the
+    // audio file, or any .selections.json picked in a chooser when there is
+    // none. Returns false when there is no doc, the chooser was cancelled,
+    // or loading failed. Also used by unit tests.
+    bool loadFromDisk();
+
+    // Loads `f` into the active doc's saved-selection list (replacing it).
+    // Returns false - leaving everything unchanged - when the file is missing,
+    // not .json, or not a valid saved-selections document. Loading the
+    // canonical sidecar next to the audio file also turns on "Save to disk".
+    bool loadSelectionsFromFile (const juce::File& f);
+
+    // Drag & drop of .selections.json files onto the panel (also used by unit tests).
+    bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void filesDropped (const juce::StringArray& files, int x, int y) override;
 
 private:
     Application& app;
@@ -805,6 +825,14 @@ private:
     juce::TextButton saveBtn, recallBtn, deleteBtn, diskToggle, applyMultBtn, pickBtn;
     juce::Label savedLab, cloneLab, multHintLab;
     juce::TextEditor multEdit;
+
+    void mouseDown (const juce::MouseEvent&) override;
+    void showLoadContextMenu();
+
+    // Drag-over highlight feedback.
+    void fileDragEnter (const juce::StringArray&, int, int) override;
+    void fileDragExit (const juce::StringArray&) override;
+    bool dragOver = false;
 
     void doSave();
     void doDelete();

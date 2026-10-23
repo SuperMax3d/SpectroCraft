@@ -3430,6 +3430,13 @@ void SelectionPanel::paint (juce::Graphics& g)
         g.setColour (juce::Colour::fromRGB (70, 70, 76));
         g.drawLine (4, y, getWidth () - 4, y);
     }
+
+    // Highlight while a .selections.json drag hovers over the panel.
+    if (dragOver)
+    {
+        g.setColour (juce::Colour::fromRGB (96, 150, 255).withAlpha (0.9f));
+        g.drawRect (getLocalBounds (), 2);
+    }
 }
 
 void SelectionPanel::resized()
@@ -3529,6 +3536,95 @@ void SelectionPanel::doRecall (int row)
         app.ensureTimeRangeVisible (ext.getStart(), ext.getEnd());
     }
     refresh();
+}
+
+void SelectionPanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (!e.mods.isRightButtonDown() || e.mods.isLeftButtonDown()) return;
+    showLoadContextMenu ();
+}
+
+void SelectionPanel::showLoadContextMenu()
+{
+    juce::PopupMenu m;
+    m.addItem (1, "Load from disk...");
+    if (m.showMenu (juce::PopupMenu::Options().withMousePosition()) == 1)
+        loadFromDisk ();
+}
+
+bool SelectionPanel::loadFromDisk()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return false;
+
+    // Prefer the sidecar next to the audio file; otherwise let the user pick.
+    juce::File source = savedSelectionsSidecarPath (d->file);
+    if (!source.existsAsFile ())
+    {
+        juce::FileChooser chooser ("Load a saved-selections file",
+                                   d->file, "*.json", kUseNativeFileChooser);
+        if (!chooser.browseForFileToOpen ()) return false;
+        source = chooser.getResult ();
+    }
+
+    const bool ok = loadSelectionsFromFile (source);
+    if (!ok)
+        showSelectionMessage ("Load from disk",
+                              "Could not read saved selections from:\n"
+                              + source.getFullPathName());
+    return ok;
+}
+
+bool SelectionPanel::loadSelectionsFromFile (const juce::File& f)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || !f.existsAsFile ()) return false;
+    if (!f.getFileExtension().equalsIgnoreCase (".json")) return false;
+
+    std::vector<SavedSpectralSelection> list;
+    if (!deserialiseSavedSelections (f.loadFileAsString (), list)) return false;
+
+    d->savedSelections = std::move (list);
+    // Loading the canonical sidecar next to the audio file turns on syncing.
+    if (f == savedSelectionsSidecarPath (d->file))
+        d->selectionsOnDisk = true;
+    refresh ();
+    return true;
+}
+
+bool SelectionPanel::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (const auto& f : files)
+        if (juce::File (f).getFileExtension().equalsIgnoreCase (".json"))
+            return true;
+    return false;
+}
+
+void SelectionPanel::filesDropped (const juce::StringArray& files, int, int)
+{
+    dragOver = false;   // fileDragExit may not follow a drop
+    repaint ();
+
+    bool loaded = false;
+    for (const auto& f : files)
+        loaded |= loadSelectionsFromFile (juce::File (f));
+
+    if (!loaded)
+        showSelectionMessage ("Load from disk",
+                              "Could not read saved selections from the dropped file(s).\n"
+                              "Expected a .selections.json document.");
+}
+
+void SelectionPanel::fileDragEnter (const juce::StringArray&, int, int)
+{
+    dragOver = true;
+    repaint ();
+}
+
+void SelectionPanel::fileDragExit (const juce::StringArray&)
+{
+    dragOver = false;
+    repaint ();
 }
 
 void SelectionPanel::doDelete()

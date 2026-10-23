@@ -8365,6 +8365,91 @@ static void testSavedSelectionsRoundTrip()
 }
 
 /** Interactive clone picking: reference click, then target clicks. */
+// ---------------- Saved selections: disk reload + drag & drop --------------
+// A sidecar next to the wav auto-loads on open; "Load from disk..." and
+// dropping a .selections.json onto the panel re-read it into memory.
+static void testSelectionsDiskReload()
+{
+    const juce::File wav = makeTempFile ("sel_disk_reload.wav");
+    writeWav (wav, 1, 8000.0, 80000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    auto makeSel = [] (const juce::String& name, double t0, double t1)
+                   { SpectralSelection s; s.addRect (t0, t1, 50.0, 900.0, false);
+                     return SavedSpectralSelection { name, s }; };
+
+    // Two named selections in the sidecar next to the wav, written BEFORE open.
+    std::vector<SavedSpectralSelection> diskList = { makeSel ("one", 1.0, 2.0),
+                                                     makeSel ("two", 3.0, 4.0) };
+    const juce::File sidecar = savedSelectionsSidecarPath (wav);
+    {
+        juce::FileOutputStream out (sidecar);
+        CHECK (!out.failedToOpen (), "sidecar writable");
+        const juce::String json = serialiseSavedSelections (diskList);
+        out.write (json.getCharPointer (), json.getNumBytesAsUTF8 ());
+    }
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav with sidecar");
+    auto* d = app.doc ();
+    CHECK (d != nullptr, "doc exists");
+    CHECK (d->savedSelections.size () == 2 && d->selectionsOnDisk,
+          "sidecar next to the wav loads automatically on open");
+
+    SelectionPanel sp (app);
+    sp.setSize (300, 240);
+
+    // Manual reload: mutate memory, then load from disk restores it.
+    d->savedSelections.clear ();
+    CHECK (sp.loadFromDisk (), "load from disk succeeds with the canonical sidecar");
+    CHECK (d->savedSelections.size () == 2 && d->selectionsOnDisk,
+          "manual reload restored the sidecar list");
+
+    // Drag & drop of another JSON file replaces the in-memory list.
+    const juce::File other = makeTempFile ("other_selections.json");
+    {
+        std::vector<SavedSpectralSelection> one = { makeSel ("three", 5.0, 6.0) };
+        juce::FileOutputStream out (other);
+        CHECK (!out.failedToOpen (), "other json writable");
+        const juce::String json = serialiseSavedSelections (one);
+        out.write (json.getCharPointer (), json.getNumBytesAsUTF8 ());
+    }
+    {
+        juce::StringArray dropped; dropped.add (other.getFullPathName());
+        CHECK (sp.isInterestedInFileDrag (dropped), "interested in a .json drag");
+        sp.filesDropped (dropped, 10, 10);
+        CHECK (d->savedSelections.size () == 1
+              && d->savedSelections [(size_t) 0].name == "three",
+              "drag & drop loads the dropped file");
+    }
+
+    // Rejections leave the list untouched.
+    const juce::File notJson = makeTempFile ("not_json.txt");
+    {
+        juce::FileOutputStream out (notJson);
+        CHECK (!out.failedToOpen (), "txt writable");
+        out.write ("hello", 5);
+    }
+    {
+        juce::StringArray dropped; dropped.add (notJson.getFullPathName());
+        CHECK (!sp.isInterestedInFileDrag (dropped), "not interested in a .txt drag");
+        CHECK (!sp.loadSelectionsFromFile (notJson), "non-JSON file rejected");
+    }
+
+    const juce::File corrupt = makeTempFile ("corrupt.json");
+    {
+        juce::FileOutputStream out (corrupt);
+        CHECK (!out.failedToOpen (), "corrupt json writable");
+        out.write ("{ not valid json", 16);
+    }
+    CHECK (!sp.loadSelectionsFromFile (corrupt), "corrupt JSON rejected");
+    CHECK (d->savedSelections.size () == 1, "rejections left the list untouched");
+
+    wav.deleteFile (); sidecar.deleteFile (); other.deleteFile ();
+    notJson.deleteFile (); corrupt.deleteFile ();
+}
+
 static void testClonePickFlow()
 {
     const juce::File wav = makeTempFile ("clonepick.wav");
@@ -8526,6 +8611,7 @@ static int scRunUnitTestsImpl()
     progress ("add scaled clones");         testAddScaledClones();
     progress ("parse multiplier list");     testParseMultiplierList();
     progress ("saved selections round-trip"); testSavedSelectionsRoundTrip();
+    progress ("selections disk reload + dnd"); testSelectionsDiskReload();
     progress ("clone pick flow");           testClonePickFlow();
     progress ("masked gain + zero-out");    testMaskedGainAndZero();
     progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
