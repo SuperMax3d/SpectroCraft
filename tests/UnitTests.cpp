@@ -7591,6 +7591,114 @@ static void testTranscriptionPanelLayout()
 }
 #endif   // SC_ENABLE_AI
 
+// ---------------- Double-clicking a marker / stored selection shows it ----
+// ensureTimeRangeVisible() is a no-op when the range is already fully in the
+// window; otherwise it pans with the current span kept, or zooms to the range
+// exactly when that is at least as wide as the view. Marker double-click and
+// stored-selection recall both route through it.
+static void testEnsureTimeRangeVisible()
+{
+    const juce::File wav = makeTempFile ("ensure_visible.wav");
+    writeWav (wav, 1, 8000.0, 80000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for ensure-visible test");   // dur = 10 s
+
+    int calls = 0;
+    double lastT0 = -1, lastT1 = -1;
+    // Mimic MainWindow::applyTimeWindow: record the request and update the
+    // canonical window.
+    app.onSetTimeWindow = [&] (double a, double b)
+    {
+        ++calls; lastT0 = a; lastT1 = b;
+        app.viewStart = a; app.viewEnd = b;
+    };
+
+    // Already fully visible -> no-op.
+    app.viewStart = 2.0; app.viewEnd = 8.0;
+    calls = 0;
+    app.ensureTimeRangeVisible (3.0, 5.0);
+    CHECK (calls == 0, "already-visible range is a no-op");
+
+    // Target left of the view, narrower than the span -> pan keeping span.
+    app.viewStart = 4.0; app.viewEnd = 9.0;   // W=5
+    calls = 0;
+    app.ensureTimeRangeVisible (1.0, 3.0);    // S=2 < 5
+    CHECK (calls == 1 && lastT0 == 1.0 && lastT1 == 6.0,
+           "left target: pan keeping the current span");
+
+    // Target right of the view -> pan keeping span.
+    app.viewStart = 1.0; app.viewEnd = 6.0;   // W=5
+    calls = 0;
+    app.ensureTimeRangeVisible (7.0, 9.0);
+    CHECK (calls == 1 && lastT0 == 4.0 && lastT1 == 9.0,
+           "right target: pan keeping the current span");
+
+    // Target at least as wide as the view -> zoom to it exactly.
+    app.viewStart = 2.0; app.viewEnd = 4.0;   // W=2
+    calls = 0;
+    app.ensureTimeRangeVisible (1.0, 8.0);    // S=7 >= 2
+    CHECK (calls == 1 && lastT0 == 1.0 && lastT1 == 8.0,
+           "wide target: zoom to it exactly");
+
+    // Point outside on the left -> pan so it lands at the left edge.
+    app.viewStart = 3.0; app.viewEnd = 8.0;   // W=5
+    calls = 0;
+    app.ensureTimeRangeVisible (0.5, 0.5);
+    CHECK (calls == 1 && lastT0 == 0.5 && lastT1 == 5.5,
+           "point left of view: pan to the edge");
+
+    // Pan near the end of file: window [7,9], target [9.5,9.9] -> [7.9,9.9].
+    app.viewStart = 7.0; app.viewEnd = 9.0;   // W=2, dur=10
+    calls = 0;
+    app.ensureTimeRangeVisible (9.5, 9.9);
+    CHECK (calls == 1 && lastT0 == 7.9 && lastT1 == 9.9,
+           "pan near the end of file keeps the span");
+
+    // Degenerate window wider than the whole file: result clamps to [0, dur].
+    app.viewStart = 3.0; app.viewEnd = 15.0;  // W=12 > dur=10
+    calls = 0;
+    app.ensureTimeRangeVisible (0.5, 1.0);
+    CHECK (calls == 1 && lastT0 == 0.0 && lastT1 == 10.0,
+           "window wider than the file: clamped to the whole file");
+
+    // --- Marker double-click integration ----------------------------------
+    app.markers().addRegionMarker (8.0, 9.0, "far region");
+    app.viewStart = 0.0; app.viewEnd = 3.0;   // W=3, target S=1 < 3 -> [6,9]
+
+    MarkerListPanel mp (app);
+    mp.setSize (260, 200);
+    calls = 0;
+    mp.activateRow (0);
+    CHECK (calls == 1 && lastT0 == 6.0 && lastT1 == 9.0,
+           "marker double-click pans to include the marker");
+    CHECK (app.selection.getStart() == 8.0 && app.selection.getEnd() == 9.0,
+           "marker double-click sets the time selection");
+
+    calls = 0;
+    mp.activateRow (0);   // window is now [6,9] and contains [8,9]
+    CHECK (calls == 0, "visible marker: no window change");
+
+    // --- Stored-selection recall integration ------------------------------
+    auto* d = app.doc ();
+    SpectralSelection ss;
+    ss.addRect (5.0, 6.5, 100.0, 2000.0, false);
+    d->savedSelections.push_back ({ "sel A", ss });
+
+    SelectionPanel sp (app);
+    sp.setSize (300, 240);
+    app.viewStart = 0.0; app.viewEnd = 3.0;   // W=3, target S=1.5 < 3 -> [3.5,6.5]
+    calls = 0;
+    sp.doRecall (0);
+    CHECK (calls == 1 && lastT0 == 3.5 && lastT1 == 6.5,
+           "recall pans to include the stored selection");
+    CHECK (!d->spectralSel.empty(), "recall restored the spectral selection");
+
+    wav.deleteFile ();
+}
+
 // ---------------- Find in the Markers / Transcription panels ----------------
 // Ctrl+F opens a per-panel find dialog; F3 / Ctrl+F3 jump to the next /
 // previous match. Each panel keeps its own query/anchor state, and both are
@@ -8407,6 +8515,7 @@ static int scRunUnitTestsImpl()
     progress ("batch transcribe");    testBatchTranscribe();
     progress ("transcription panel layout"); testTranscriptionPanelLayout();
 #endif
+    progress ("ensure time range visible"); testEnsureTimeRangeVisible();
     progress ("find in panels");            testFindInPanels();
     progress ("python scripts");            testPythonScripts();
     progress ("spectral selection model");  testSpectralSelectionModel();

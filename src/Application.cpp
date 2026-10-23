@@ -480,6 +480,35 @@ void Application::setSpectralSelectionFrom (const SpectralSelection& sel)
     refreshSpectralSelectionUI ();
 }
 
+void Application::ensureTimeRangeVisible (double t0, double t1)
+{
+    if (!onSetTimeWindow) return;
+    const double dur = audioEngine().duration();
+    if (!(dur > 0.0)) return;
+
+    auto cl = [&] (double v) { return std::clamp (v, 0.0, dur); };
+    t0 = cl (t0); t1 = cl (t1);
+    if (t1 < t0) std::swap (t0, t1);
+
+    const double vs = viewStart, ve = viewEnd;
+    // Already fully inside the current window? Nothing to do.
+    if (t0 >= vs - 1e-9 && t1 <= ve + 1e-9) return;
+
+    const double W = std::max (ve - vs, 1e-9);
+    const double S = t1 - t0;
+    // Target is at least as wide as the view: zoom to it exactly.
+    if (S >= W)
+    {
+        onSetTimeWindow (t0, t1);
+        return;
+    }
+
+    // Otherwise keep the current span and pan just enough to include the range.
+    const double n0 = std::clamp ((t0 < vs) ? t0 : t1 - W,
+                                  0.0, std::max (0.0, dur - W));
+    onSetTimeWindow (n0, std::min (n0 + W, dur));
+}
+
 void Application::startClonePick ()
 {
     auto* d = doc ();

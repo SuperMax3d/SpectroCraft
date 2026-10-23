@@ -624,6 +624,10 @@ public:
     // Programmatic row selection (normally done via the table UI).
     void selectRow (int row);
 
+    // Double-click a row: sets the time selection to the marker's range and
+    // makes sure both views' time window includes it. Also used by unit tests.
+    void activateRow (int row);
+
     // Find (Ctrl+F / F3 / Ctrl+F3): case-insensitive substring search over
     // marker titles and comments. The query/anchor state is independent of
     // the transcription panel's own search.
@@ -772,6 +776,11 @@ public:
     void resized() override;
     void refresh();   // call after doc changes / selection or list changes
 
+    // Recall a stored selection: replaces the live spectral selection with it
+    // and makes sure both views' time window includes its time range. Also
+    // used by unit tests.
+    void doRecall (int row);
+
 private:
     Application& app;
 
@@ -798,7 +807,6 @@ private:
     juce::TextEditor multEdit;
 
     void doSave();
-    void doRecall (int row);
     void doDelete();
     void doApplyMultipliers();
     void toggleDisk();

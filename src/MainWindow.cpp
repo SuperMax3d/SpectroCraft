@@ -259,6 +259,10 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // Panels notify us when they change shared state
     app.onStateChange = [this] { syncSharedState(); };
 
+    // Panels can ask for a time range to be shown in both views (e.g.
+    // double-clicking a marker or a stored selection).
+    app.onSetTimeWindow = [this] (double t0, double t1) { applyTimeWindow (t0, t1); };
+
     // Keep the playhead in both views identical whenever it moves (clicks,
     // Home/End, file load). The 30 Hz timer already pushes playback position to
     // both views directly.

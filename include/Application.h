@@ -161,6 +161,13 @@ public:
         (Selection panel "Recall"). */
     void setSpectralSelectionFrom (const SpectralSelection& sel);
 
+    // Make sure both views' shared time window includes [t0, t1]: no-op when
+    // it is already fully visible; otherwise pans with the current span kept,
+    // or zooms to the range exactly when it is at least as wide as the view.
+    // Routed through onSetTimeWindow so MainWindow can push the result to
+    // both views (and keep app.viewStart/viewEnd in sync).
+    void ensureTimeRangeVisible (double t0, double t1);
+
     // Interactive clone picking: first click = reference frequency, each later
     // click adds clones at (clicked freq / ref freq). Esc or the panel button
     // ends the session; switching/closing documents does too.
@@ -278,6 +285,10 @@ public:
     // Set by MainWindow: called when panels change shared state (settings, markers,
     // channels) so the main views can be re-synced.
     std::function<void()> onStateChange;
+
+    // Set by MainWindow: sets both views' time window to [t0, t1]. Used by
+    // ensureTimeRangeVisible() when a panel asks for something to be shown.
+    std::function<void(double, double)> onSetTimeWindow;
 
     // Set by MainWindow: called whenever setPlayhead() moves the cursor, so both
     // views always show the same playhead position.

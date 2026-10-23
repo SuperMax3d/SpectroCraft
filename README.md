@@ -67,7 +67,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   shows that file's markers, and a sidecar next to a file is re-read when it
   loads (if present) — and **double-clicking a
   marker** — in the Markers tab or on its line/region in either view — sets the
-  time selection to that marker's range.
+  time selection to that marker's range and makes sure both views actually show
+  it: if the marker is not fully inside the current time window, the views pan
+  (keeping their zoom) or zoom out when the marker is wider than the window.
   Right-clicking a row in the marker table shows a context menu with **Copy All
   Markers** (tab-separated `Label\tBegin\tEnd\tComment` lines, CRLF between rows,
   `-` for point-marker ends), **Paste Markers from Clipboard**, which parses that
@@ -781,8 +783,10 @@ harmonics of whatever is currently selected.
 
 - **Store / Recall / Delete**: Store saves the current spectral selection under
   a name (storing again with the same name updates that entry); Recall replaces
-  the current selection with a saved one (double-clicking a row does the same).
-  The list belongs to each file, and when **Save to disk** is on it is kept in
+  the current selection with a saved one (double-clicking a row does the same)
+  and makes sure both views show its time range — panning or zooming out when
+  it is not fully inside the current window. The list belongs to each file, and
+  when **Save to disk** is on it is kept in
   sync with `<file>.selections.json` next to the audio file so it survives
   restarts.
 - **Clone & Multiply**: enter frequency multipliers such as `0.5, 2, 5` and

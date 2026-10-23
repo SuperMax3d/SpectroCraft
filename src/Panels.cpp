@@ -2403,17 +2403,25 @@ void MarkerListPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int co
 void MarkerListPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
 {
     if (rowNumber >= 0 && rowNumber < getNumRows())
-    {
-        owner->selectedRow = rowNumber;
-        owner->updateDetails(); // Title/Comment are edited in the detail editors below
+        owner->activateRow (rowNumber);
+}
 
-        // Double-clicking a marker sets the time selection to its range.
-        const Marker& m = owner->app.markers().markers()[(size_t) rowNumber];
-        const double end = (m.end > m.start) ? m.end : m.start;
-        owner->app.setSelection ({ m.start, end });
-        if (owner->app.onStateChange)
-            owner->app.onStateChange(); // push the new selection to both views
-    }
+void MarkerListPanel::activateRow (int row)
+{
+    if (app.doc () == nullptr || row < 0
+        || row >= (int) app.markers().markers().size ()) return;
+
+    selectedRow = row;
+    updateDetails(); // Title/Comment are edited in the detail editors below
+
+    // Double-clicking a marker sets the time selection to its range and makes
+    // sure both views actually show it.
+    const Marker& m = app.markers().markers()[(size_t) row];
+    const double end = (m.end > m.start) ? m.end : m.start;
+    app.setSelection ({ m.start, end });
+    app.ensureTimeRangeVisible (m.start, end);
+    if (app.onStateChange)
+        app.onStateChange(); // push the new selection to both views
 }
 
 void MarkerListPanel::Model::selectedRowsChanged (int row)
@@ -3511,7 +3519,15 @@ void SelectionPanel::doRecall (int row)
 {
     auto* d = app.doc ();
     if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
-    app.setSpectralSelectionFrom (d->savedSelections [(size_t) row].data);
+    const auto& sel = d->savedSelections [(size_t) row];
+    app.setSpectralSelectionFrom (sel.data);
+
+    // Make sure both views show the recalled selection's time range.
+    if (!sel.data.empty())
+    {
+        const auto ext = sel.data.timeExtent();
+        app.ensureTimeRangeVisible (ext.getStart(), ext.getEnd());
+    }
     refresh();
 }
 
