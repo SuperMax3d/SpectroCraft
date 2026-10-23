@@ -2478,7 +2478,8 @@ static void testLeftPanelLayout()
     const juce::StringArray defaultBottom { "Spectral Controls", "Markers",
                                             "Selection" };
 #endif
-    const juce::StringArray defaultTop { "Files", "Frequency Analysis", "History" };
+    const juce::StringArray defaultTop { "Files", "Frequency Analysis", "History",
+                                          "Python" };
     juce::StringArray expectBottom = defaultBottom;
     for (int i = 0; i < expectBottom.size (); ++i)
         if (expectBottom[i] == "Markers") { expectBottom.remove (i); break; }
@@ -2495,14 +2496,16 @@ static void testLeftPanelLayout()
         // 2) Move Markers from the bottom group to position 1 in the top group.
         win->moveLeftPanelTab (win->bottomPanelTabs (), 1, win->topPanelTabs (), 1);
         const juce::StringArray expectTopAfterMove { "Files", "Markers",
-                                                     "Frequency Analysis", "History" };
+                                                     "Frequency Analysis", "History",
+                                                     "Python" };
         CHECK (win->topPanelTabNames () == expectTopAfterMove, "tab moved across groups");
         CHECK (win->bottomPanelTabNames () == expectBottom, "source group lost the tab");
 
         // 3) Same-bar move: Files to just before Frequency Analysis.
         win->moveLeftPanelTab (win->topPanelTabs (), 0, win->topPanelTabs (), 2);
         const juce::StringArray expectTopFinal { "Markers", "Files",
-                                                 "Frequency Analysis", "History" };
+                                                 "Frequency Analysis", "History",
+                                                 "Python" };
         CHECK (win->topPanelTabNames () == expectTopFinal, "same-bar move");
 
         // 4) View > Left Panels toggle hides/shows the whole column.
@@ -2519,7 +2522,8 @@ static void testLeftPanelLayout()
     // 5) A fresh app instance must restore the saved arrangement.
     {
         const juce::StringArray expectTopFinal { "Markers", "Files",
-                                                 "Frequency Analysis", "History" };
+                                                 "Frequency Analysis", "History",
+                                                 "Python" };
         Application app (store);
         juce::MessageManager* mm = juce::MessageManager::getInstance();
         std::unique_ptr<MainWindow> win (new MainWindow (app, "left layout test 2"));
@@ -7523,6 +7527,208 @@ static void testFindInPanels()
     wav.deleteFile ();
 }
 
+// ------------------------------------------------- Python script panel
+static void testPythonScripts()
+{
+    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getChildFile ("sc_pytest_"
+                       + juce::String ((int64_t) juce::Time::getCurrentTime ().toMilliseconds ()));
+    dir.deleteRecursively ();   // deterministic start
+
+    // 1) Example scripts are created once and never clobbered afterwards.
+    sc::py::ensureExampleScripts (dir);
+    CHECK (dir.getChildFile ("Threshold.py").existsAsFile (), "threshold example created");
+    CHECK (dir.getChildFile ("Dynamic processing.py").existsAsFile (),
+          "dynamic processing example created");
+    CHECK (dir.getChildFile ("Modulation.py").existsAsFile (), "modulation example created");
+
+    const juce::String thrText = dir.getChildFile ("Threshold.py").loadFileAsString ();
+    CHECK (thrText.contains ("THRESHOLD"), "threshold script has a threshold constant");
+
+    {
+        const juce::File t = dir.getChildFile ("Threshold.py");
+        t.replaceWithText (t.loadFileAsString () + "\n# user edit\n");
+    }
+    sc::py::ensureExampleScripts (dir);
+    CHECK (dir.getChildFile ("Threshold.py").loadFileAsString ().contains ("user edit"),
+          "existing scripts are not overwritten");
+
+    // 2) listScripts returns the sorted .py files.
+    const auto scripts = sc::py::listScripts (dir);
+    CHECK (scripts.size () == 3, "three scripts listed");
+    if (scripts.size () == 3)
+        CHECK (scripts[0].getFileName () == "Dynamic processing.py"
+               && scripts[1].getFileName () == "Modulation.py"
+               && scripts[2].getFileName () == "Threshold.py",
+              "scripts sorted by name");
+
+    // 3) Metadata JSON carries rate/channels/selection/markers.
+    {
+        std::vector<Marker> markers;
+        Marker m;
+        m.name = "Intro"; m.comment = "start of intro"; m.start = 1.25; m.end = -1;
+        markers.push_back (m);
+
+        const juce::String json = sc::py::buildMetaJson (44100.0, 2, 19.886,
+                                                         { 0.5, 2.5 }, false, "mix.wav", markers);
+        const juce::var parsed = juce::JSON::parse (json);
+        CHECK (parsed.isObject (), "meta json parses");
+
+        if (parsed.isObject ())
+        {
+            auto* v = parsed.getDynamicObject ();
+            CHECK ((int64) v->getProperty ("sampleRate") == 44100, "sample rate in meta");
+            CHECK ((int) v->getProperty ("numChannels") == 2, "channel count in meta");
+            CHECK (!((bool) v->getProperty ("wholeFile")), "wholeFile flag is false");
+            CHECK (std::abs ((double) v->getProperty ("selectionStartSec") - 0.5) < 1e-9
+                   && std::abs ((double) v->getProperty ("selectionEndSec") - 2.5) < 1e-9,
+                  "selection range in meta");
+            CHECK (v->getProperty ("fileName").toString () == "mix.wav", "file name in meta");
+
+            const juce::var& markersVar = v->getProperty ("markers");
+            CHECK (markersVar.isArray (), "markers is an array");
+            if (markersVar.isArray ())
+            {
+                auto* arr = markersVar.getArray ();
+                CHECK (arr != nullptr && arr->size () == 1, "one marker in meta");
+                if (arr != nullptr && arr->size () == 1)
+                {
+                    auto* m0 = (*arr)[0].getDynamicObject ();
+                    CHECK (m0 != nullptr
+                           && m0->getProperty ("name").toString () == "Intro"
+                           && std::abs ((double) m0->getProperty ("start") - 1.25) < 1e-9,
+                          "marker fields in meta");
+                }
+            }
+        }
+    }
+
+    // 4) Float WAV round-trip is bit-exact.
+    {
+        const juce::File wav = makeTempFile ("py_roundtrip.wav");
+        std::vector<std::vector<float>> data (2, std::vector<float> (100));
+        for (int i = 0; i < 100; ++i)
+        {
+            data[0][(size_t) i] = (float) std::sin ((double) i * 0.1);
+            data[1][(size_t) i] = -data[0][(size_t) i];
+        }
+
+        CHECK (sc::py::writeFloatWav (wav, data, 8000.0), "wrote float wav");
+        double rate = 0.0;
+        int nch = 0;
+        std::vector<std::vector<float>> back;
+        CHECK (sc::py::readFloatWav (wav, &rate, &nch, back), "read float wav");
+        CHECK (std::abs (rate - 8000.0) < 1e-9 && nch == 2, "rate/channels preserved");
+
+        bool exact = back.size () == 2;
+        for (int c = 0; exact && c < 2; ++c)
+            if (back[(size_t) c].size () != 100 || back[(size_t) c] != data[(size_t) c])
+                exact = false;
+        CHECK (exact, "float32 round-trip is bit-exact");
+        wav.deleteFile ();
+    }
+
+    // 5) Interpreter probe + end-to-end threshold run (skipped when no Python).
+    std::string pyCmd;
+    if (sc::py::findPython (&pyCmd))
+    {
+        const juce::File wav = makeTempFile ("py_e2e.wav");
+        writeWav (wav, 2, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+                 {   // ch1: loud tone; ch2: quiet tone below the 0.01 threshold
+                     const double t = (double) f / rate;
+                     return ch == 0 ? 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                       * 440.0 * t)
+                                    : 0.005f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                        * 3000.0 * t);
+                 });
+
+        Application app;
+        CHECK (app.openFile (wav), "opened e2e wav");
+
+        // Snapshot the quiet channel before processing.
+        std::vector<float> ch2Before ((size_t) app.audioEngine ().numSamples ());
+        CHECK (app.audioEngine ().readSamples (1, 0, app.audioEngine ().numSamples (),
+                                               ch2Before.data ()), "read pre-state");
+
+        // Select [0.1, 0.4] so the outside can be verified unchanged.
+        app.setSelection ({ 0.1, 0.4 });
+
+        const juce::File script = dir.getChildFile ("Threshold.py");
+        std::string err;
+        const bool ok = app.runPythonScript (script, script.loadFileAsString (), pyCmd,
+                                             nullptr, &err);
+        CHECK (ok, "threshold script ran" + (ok ? juce::String () : ": " + juce::String (err)));
+
+        if (ok)
+        {
+            const int64_t s0 = 800, s1 = 3200;   // [0.1, 0.4] @ 8 kHz
+
+            std::vector<float> ch2Sel ((size_t) (s1 - s0));
+            app.audioEngine ().readSamples (1, s0, s1 - s0, ch2Sel.data ());
+            bool allZero = true;
+            for (float v : ch2Sel)
+                if (v != 0.0f) { allZero = false; break; }
+            CHECK (allZero, "quiet channel zeroed inside the selection");
+
+            // Outside the selection the audio must be untouched.
+            std::vector<float> ch2After ((size_t) app.audioEngine ().numSamples ());
+            app.audioEngine ().readSamples (1, 0, app.audioEngine ().numSamples (),
+                                            ch2After.data ());
+            bool outsideUnchanged = true;
+            for (int64_t i = 0; i < s0 && outsideUnchanged; ++i)
+                if (ch2After[(size_t) i] != ch2Before[(size_t) i]) outsideUnchanged = false;
+            for (int64_t i = s1; i < (int64_t) ch2After.size () && outsideUnchanged; ++i)
+                if (ch2After[(size_t) i] != ch2Before[(size_t) i]) outsideUnchanged = false;
+            CHECK (outsideUnchanged, "audio outside the selection is unchanged");
+
+            CHECK (app.undo ().undoSize () == 1, "edit recorded in undo history");
+        }
+
+        wav.deleteFile ();
+    }
+    else
+    {
+        // No interpreter here: a missing executable must fail cleanly.
+        int rc = -1;
+        CHECK (!sc::py::runProcess ("definitely_not_a_real_exe_xyz", {},
+                                    [] { return true; }, &rc),
+              "missing executable reported as failure");
+    }
+
+    // 6) Panel UI: combo lists the scripts, selecting one loads its text.
+    {
+        Application app;
+        PythonPanel panel (app, dir);
+        panel.setSize (320, 400);
+
+        juce::ComboBox* box = nullptr;
+        juce::TextEditor* ed = nullptr;
+        int buttons = 0;
+        for (auto* c : panel.getChildren ())
+        {
+            if (box == nullptr && (box = dynamic_cast<juce::ComboBox*> (c)) != nullptr) {}
+            else if (ed == nullptr && (ed = dynamic_cast<juce::TextEditor*> (c)) != nullptr) {}
+            else if (dynamic_cast<juce::TextButton*> (c) != nullptr) ++buttons;
+        }
+
+        CHECK (box != nullptr && ed != nullptr, "panel has combo + editor");
+        CHECK (buttons == 3, "panel has Add/Remove/Run buttons");
+
+        if (box != nullptr)
+        {
+            CHECK (box->getNumItems () == 3, "combo lists the three scripts");
+            // sendNotificationSync: the headless test has no message loop to
+            // process the async update that plain sendNotification would queue.
+            box->setSelectedId (2, juce::sendNotificationSync);   // modulation.py
+            const juce::String expect = dir.getChildFile ("Modulation.py").loadFileAsString ();
+            CHECK (ed != nullptr && ed->getText () == expect,
+                  "selecting a script loads its text into the editor");
+        }
+    }
+
+    dir.deleteRecursively ();
+}
+
 // ---------------- Mipmap construction: bit-exactness across all source paths ----------------
 
 // Exact JUCE int16 -> float conversion (WavAudioFormatReader scales the raw
@@ -8054,6 +8260,7 @@ static int scRunUnitTestsImpl()
     progress ("transcription panel layout"); testTranscriptionPanelLayout();
 #endif
     progress ("find in panels");            testFindInPanels();
+    progress ("python scripts");            testPythonScripts();
     progress ("spectral selection model");  testSpectralSelectionModel();
     progress ("selection render hole");     testSpectralSelectionRenderHole();
     progress ("straight line points");      testStraightLinePoints();

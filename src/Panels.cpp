@@ -5,6 +5,7 @@
 #include "Panels.h"
 #include "FFTHelpers.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 #if JUCE_WINDOWS
@@ -3431,4 +3432,189 @@ void SelectionPanel::togglePick()
         app.endClonePick ();
     else
         app.startClonePick ();   // fires onStateChange -> syncSharedState -> refresh()
+}
+
+// ------------------------------------------------- Python script panel
+
+PythonPanel::PythonPanel (Application& appIn, const juce::File& folder)
+    : app (appIn), scriptDir (folder.getFullPathName ().isEmpty () ? sc::py::scriptFolder() : folder)
+{
+    sc::py::ensureExampleScripts (scriptDir);   // creates the folder + examples
+
+    addAndMakeVisible (&scriptBox);
+    addAndMakeVisible (&addBtn);
+    addAndMakeVisible (&removeBtn);
+    addAndMakeVisible (&runBtn);
+
+    editor.setMultiLine (true);
+    editor.setScrollbarsShown (true);
+    editor.setFont (juce::Font ("Consolas", 13.0f, juce::Font::plain));
+    addAndMakeVisible (&editor);
+
+    scriptBox.onChange = [this] { loadCurrentScript (); };
+    addBtn.onClick     = [this] { showAddDialog (); };
+    removeBtn.onClick  = [this] { confirmRemove (); };
+    runBtn.onClick     = [this] { requestRun (); };
+
+    refreshScripts ();
+}
+
+void PythonPanel::refreshScripts ()
+{
+    const juce::String keepPath = currentIdx >= 0 && currentIdx < (int) scripts.size ()
+                                       ? scripts[(size_t) currentIdx].getFullPathName() : "";
+
+    scripts = sc::py::listScripts (scriptDir);
+    currentIdx = -1;
+    for (int i = 0; i < (int) scripts.size (); ++i)
+        if (scripts[(size_t) i].getFullPathName () == keepPath) { currentIdx = i; break; }
+
+    scriptBox.clear (juce::dontSendNotification);
+    for (int i = 0; i < (int) scripts.size (); ++i)
+        scriptBox.addItem (scripts[(size_t) i].getFileName (), i + 1);
+    if (currentIdx >= 0)   // setSelectedItemIndex takes a 0-based position
+        scriptBox.setSelectedItemIndex (currentIdx, juce::dontSendNotification);
+
+    loadCurrentScript ();
+}
+
+void PythonPanel::loadCurrentScript ()
+{
+    const int idx = scriptBox.getSelectedId () - 1;
+    if (idx < 0 || idx >= (int) scripts.size ())
+    {
+        editor.setText ("", juce::dontSendNotification);
+        return;
+    }
+
+    currentIdx = idx;
+    editor.setText (scripts[(size_t) idx].loadFileAsString (),
+                    juce::dontSendNotification);
+}
+
+void PythonPanel::showAddDialog ()
+{
+    auto* w = new juce::AlertWindow ("New Script", "Script name:",
+                                     juce::AlertWindow::NoIcon, this);
+    w->setColour (juce::AlertWindow::backgroundColourId,
+                 juce::Colour::fromRGB (45, 45, 48));
+    w->addTextEditor ("name", "NewScript");
+    auto* nameEdit = w->getTextEditor ("name");
+    w->addButton ("Create", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (nameEdit != nullptr)
+    {
+        nameEdit->setWantsKeyboardFocus (true);
+        nameEdit->selectAll();
+        nameEdit->grabKeyboardFocus();
+    }
+
+    const int result = w->runModalLoop ();
+    delete w;
+    if (result != 1 || nameEdit == nullptr) return;
+
+    // Sanitise: strip path separators / invalid characters, force a .py suffix.
+    juce::String name = nameEdit->getText ().trim ();
+    for (int i = 0; i < name.length (); ++i)
+    {
+        const juce_wchar c = name[i];
+        if (!(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9')
+            && c != ' ' && c != '_' && c != '-')
+            name.replaceCharacter (c, '_');
+    }
+    name = name.trim ();
+    if (name.isEmpty()) name = "NewScript";
+    if (!name.endsWithIgnoreCase (".py")) name << ".py";
+
+    const juce::File f = scriptDir.getChildFile (name);
+    if (f.existsAsFile ())
+    {
+        auto* err = new juce::AlertWindow ("New Script",
+                                           "'" + name + "' already exists.",
+                                           juce::AlertWindow::WarningIcon, this);
+        err->setColour (juce::AlertWindow::backgroundColourId,
+                        juce::Colour::fromRGB (45, 45, 48));
+        err->addButton ("OK", 1);
+        err->enterModalState ();
+        delete err;
+        return;
+    }
+
+    f.replaceWithText (sc::py::newScriptTemplate ());
+    refreshScripts ();
+
+    for (int i = 0; i < (int) scripts.size (); ++i)
+        if (scripts[(size_t) i].getFullPathName () == f.getFullPathName ())
+        {
+            currentIdx = i;
+            scriptBox.setSelectedItemIndex (i + 1, juce::NotificationType::dontSendNotification);
+            loadCurrentScript ();
+            break;
+        }
+}
+
+void PythonPanel::confirmRemove ()
+{
+    if (currentIdx < 0 || currentIdx >= (int) scripts.size ()) return;
+    const juce::File f = scripts[(size_t) currentIdx];
+
+    auto* w = new juce::AlertWindow ("Delete Script",
+                                     "Delete '" + f.getFileName () + "'?\nThis cannot be undone.",
+                                     juce::AlertWindow::QuestionIcon, this);
+    w->setColour (juce::AlertWindow::backgroundColourId,
+                 juce::Colour::fromRGB (45, 45, 48));
+    w->addButton ("Delete", 1);
+    w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    const int result = w->runModalLoop ();
+    delete w;
+
+    if (result != 1) return;
+    f.deleteFile ();
+    refreshScripts ();
+}
+
+void PythonPanel::requestRun ()
+{
+    if (!app.audioEngine ().isFileLoaded ())
+    {
+        auto* info = new juce::AlertWindow ("Python", "Load an audio file first.",
+                                            juce::AlertWindow::InfoIcon, this);
+        info->setColour (juce::AlertWindow::backgroundColourId,
+                         juce::Colour::fromRGB (45, 45, 48));
+        info->addButton ("OK", 1);
+        info->enterModalState ();
+        delete info;
+        return;
+    }
+
+    if (currentIdx < 0 || currentIdx >= (int) scripts.size ())
+    {
+        auto* info = new juce::AlertWindow ("Python", "Select a script first.",
+                                            juce::AlertWindow::InfoIcon, this);
+        info->setColour (juce::AlertWindow::backgroundColourId,
+                         juce::Colour::fromRGB (45, 45, 48));
+        info->addButton ("OK", 1);
+        info->enterModalState ();
+        delete info;
+        return;
+    }
+
+    if (onRunRequested != nullptr)
+        onRunRequested (scripts[(size_t) currentIdx], editor.getText ());
+}
+
+void PythonPanel::resized ()
+{
+    auto b = getLocalBounds ().reduced (4, 4);
+
+    scriptBox.setBounds (b.removeFromTop (26));
+
+    const int btnY = b.getY ();
+    addBtn.setBounds (b.getX (), btnY + 2, 50, 24);
+    removeBtn.setBounds (addBtn.getRight () + 8, btnY + 2, 70, 24);
+    runBtn.setBounds (removeBtn.getRight () + 8, btnY + 2, 56, 24);
+    b.removeFromTop (30);
+
+    editor.setBounds (b);
 }

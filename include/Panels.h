@@ -2,6 +2,7 @@
 // SpectroCraft - Left-side panels
 #include <JuceHeader.h>
 #include "Application.h"
+#include "PythonScripts.h"
 
 #include <cmath>
 
@@ -854,4 +855,43 @@ private:
     juce::String mouseText, selPart, playPart, fileName, ratePart, modeText;
 
     JUCE_DECLARE_NON_COPYABLE (StatusBar)
+};
+
+// ------------------------------------------------- Python script panel
+
+/** Top-group tab next to History. Lists the user's Python scripts (stored in
+    %APPDATA%/SpectroCraft/python), lets you edit them and run one against the
+    current selection (or the whole file when nothing is selected). The actual
+    execution - temp files, interpreter launch, re-import - is orchestrated by
+    MainWindow through onRunRequested. */
+class PythonPanel : public juce::Component
+{
+public:
+    explicit PythonPanel (Application& appIn,
+                          const juce::File& folder = sc::py::scriptFolder());
+
+    /** Rescans the script folder and reloads the current script's text. */
+    void refreshScripts();
+
+    /** Called by MainWindow to run `script` with exactly this editor text.
+        Signature: (script file, script text). */
+    std::function<void (const juce::File&, const juce::String&)> onRunRequested;
+
+private:
+    void resized() override;
+    void loadCurrentScript();
+    void showAddDialog();
+    void confirmRemove();
+    void requestRun();
+
+    Application& app;
+    juce::File scriptDir;
+    std::vector<juce::File> scripts;
+    int currentIdx = -1;
+
+    juce::ComboBox scriptBox;
+    juce::TextButton addBtn, removeBtn, runBtn;
+    juce::TextEditor editor;
+
+    JUCE_DECLARE_NON_COPYABLE (PythonPanel)
 };

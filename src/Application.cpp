@@ -4,6 +4,7 @@
 
 #include "Application.h"
 #include "SpectralMaskProcessor.h"
+#include "PythonScripts.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -857,6 +858,168 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
     if (!audioEngine().replaceSamples (samples, data,
                                        "Noise suppressed (" + juce::String (modelId) + ")", &err))
         return fail (err);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Python scripts: run a user script against the selection (or whole file).
+// Data exchange happens through temp float32 WAV files plus a metadata JSON;
+// the result replaces that range in place and is undoable.
+
+bool Application::runPythonScript (const juce::File& script, const juce::String& scriptText,
+                                   const std::string& pythonCmd,
+                                   std::function<bool(float)> onProgress, std::string* errOut)
+{
+    auto fail = [&errOut] (const juce::String& msg) -> bool
+    {
+        if (errOut != nullptr) *errOut = msg.toStdString ();
+        return false;
+    };
+
+    // Progress wrapper: reports 0..1 and returns false when cancelled.
+    auto prog = [onProgress] (float f) { return onProgress == nullptr || onProgress (f); };
+
+    if (!audioEngine ().isFileLoaded ())
+        return fail ("No file is loaded.");
+    FileDoc* d = doc ();
+    if (d == nullptr)
+        return fail ("No file is loaded.");
+
+    // Range: the current selection, or the whole file when nothing is selected.
+    juce::Range<double> selSecs = selection;
+    const bool wholeFile = selSecs.getLength () <= 0.0;
+    if (wholeFile)
+        selSecs = { 0.0, audioEngine ().duration () };
+
+    const double rate = audioEngine ().sampleRate ();
+    auto samples = juce::Range<int64_t> ((int64_t) (selSecs.getStart () * rate),
+                                         (int64_t) (selSecs.getEnd () * rate))
+                      .getIntersectionWith ({ 0, audioEngine ().numSamples () });
+    if (samples.getLength () <= 0)
+        return fail ("Nothing to process.");
+
+    // Save the editor's text first so that what runs is exactly what was shown.
+    if (!script.replaceWithText (scriptText))
+        return fail ("Could not save " + script.getFileName ());
+
+    if (!prog (0.0f))
+        return false;   // cancelled before doing anything - silent
+
+    // Streamed files must be materialised before the result can be committed;
+    // do it now so an out-of-memory failure is reported up front instead of
+    // after minutes of processing whose output would be silently dropped.
+    std::string err;
+    if (!audioEngine ().ensureEditable (&err, [prog] (float f) { return prog (0.25f * f); }, nullptr))
+        return fail (err);
+
+    const int nch = audioEngine ().numChannels ();
+    std::vector<std::vector<float>> data (nch);
+    for (int ch = 0; ch < nch; ++ch)
+    {
+        data[(size_t) ch].resize ((size_t) samples.getLength ());
+        if (!audioEngine ().readSamples (ch, samples.getStart (), samples.getLength (),
+                                         data[(size_t) ch].data ()))
+            return fail ("Failed to read the selection.");
+    }
+
+    // Temp files for the exchange with the script.
+    const juce::File tmpDir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                  .getChildFile ("SpectroCraftPython");
+    if (!tmpDir.exists ())
+        tmpDir.createDirectory ();
+    const juce::String stamp = juce::String ((int64_t) juce::Time::getCurrentTime ().toMilliseconds ())
+                              + "_" + juce::String ((size_t) this);
+    const juce::File inWav  = tmpDir.getChildFile ("in_"   + stamp + ".wav");
+    const juce::File outWav = tmpDir.getChildFile ("out_"  + stamp + ".wav");
+    const juce::File metaJ  = tmpDir.getChildFile ("meta_" + stamp + ".json");
+
+    auto cleanup = [&] { inWav.deleteFile (); outWav.deleteFile (); metaJ.deleteFile (); };
+
+    if (!sc::py::writeFloatWav (inWav, data, rate))
+    {
+        cleanup ();
+        return fail ("Could not write the temp input WAV.");
+    }
+    metaJ.replaceWithText (sc::py::buildMetaJson (rate, nch, audioEngine ().duration (),
+                                                  selSecs, wholeFile,
+                                                  audioEngine ().getFile ().getFileName (),
+                                                  d->markers.markers ()));
+
+    if (!prog (0.3f)) { cleanup (); return false; }   // cancelled - silent
+
+    // Run the interpreter: <pythonCmd> <script> <in.wav> <out.wav> <meta.json>
+    const juce::StringArray cmdTokens (juce::String (pythonCmd).trim ());
+    if (cmdTokens.size () == 0)
+    {
+        cleanup ();
+        return fail ("No Python interpreter command was provided.");
+    }
+
+    juce::StringArray scriptArgs;
+    for (int i = 1; i < cmdTokens.size (); ++i)   // extra flags, e.g. "-3"
+        scriptArgs.add (cmdTokens[i]);
+    scriptArgs.add (script.getFullPathName ());
+    scriptArgs.add (inWav.getFullPathName ());
+    scriptArgs.add (outWav.getFullPathName ());
+    scriptArgs.add (metaJ.getFullPathName ());
+
+    bool cancelled = false;
+    int rc = -1;
+    juce::String out, errText;
+    const bool started = sc::py::runProcess (cmdTokens[0].toStdString (), scriptArgs,
+        [&cancelled, prog] { if (!prog (0.5f)) { cancelled = true; return false; } return true; },
+        &rc, &out, &errText);
+
+    if (!started || cancelled)
+    {
+        cleanup ();
+        if (cancelled) return false;   // user cancel is not a failure - silent
+        return fail ("Could not start the Python interpreter.");
+    }
+
+    if (rc != 0 || !outWav.existsAsFile ())
+    {
+        cleanup ();
+        juce::String msg = "Python exited with code " + juce::String (rc);
+        const juce::String tail = errText.trim ().isNotEmpty () ? errText.trim () : out.trim ();
+        if (tail.isNotEmpty ())
+            msg += "\n" + tail.substring (std::max (0, tail.length () - 2000));
+        return fail (msg);
+    }
+
+    // Read the script's output back and validate it.
+    double outRate = 0.0;
+    int outCh = 0;
+    std::vector<std::vector<float>> newData;
+    if (!sc::py::readFloatWav (outWav, &outRate, &outCh, newData))
+    {
+        cleanup ();
+        return fail ("Could not read the script's output WAV.");
+    }
+
+    const int64_t want = samples.getLength ();
+    bool bad = std::abs (outRate - rate) > 1e-9 || outCh != nch;
+    for (int ch = 0; !bad && ch < nch; ++ch)
+        if ((int64_t) newData[(size_t) ch].size () != want) bad = true;
+
+    if (bad)
+    {
+        cleanup ();
+        return fail ("The script's output does not match the input: expected "
+                     + juce::String (nch) + " channel(s), " + juce::String ((int64_t) rate)
+                     + " Hz and " + juce::String (want) + " samples.");
+    }
+
+    if (!prog (0.9f)) { cleanup (); return false; }   // cancelled before commit - silent
+
+    if (!audioEngine ().replaceSamples (samples, newData,
+                                        "Python script '" + script.getFileName () + "'", &err))
+    {
+        cleanup ();
+        return fail (err);
+    }
+
+    cleanup ();
     return true;
 }
 

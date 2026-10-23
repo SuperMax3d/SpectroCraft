@@ -156,6 +156,34 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     **Clicking any row jumps straight to that state**, undoing or redoing as
     many steps as needed in one batched operation (a single mipmap rebuild for
     the whole run instead of one per step). The header shows "N of M applied".
+  - **Python**: a script editor next to History. The dropdown lists every
+    `*.py` file in your personal script folder (`%APPDATA%/SpectroCraft/python`
+    on Windows, created automatically with three examples: *Dynamic
+    processing*, *Threshold* and *Modulation*). **Add** creates a new script
+    from a template, **Remove** deletes the selected one, and **Run** executes
+    it against the current selection — or against the whole file when nothing
+    is selected. The run is undoable (it appears in History as "Python script
+    '<name>'").
+
+    A script is called as `python <script.py> <input.wav> <output.wav>
+    <meta.json>`: `input.wav` is a 32-bit float WAV of the processed range with
+    all channels, and `meta.json` carries `sampleRate`, `numChannels`,
+    `fileDurationSec`, `selectionStartSec`, `selectionEndSec`, `wholeFile`,
+    `fileName` and every marker (`name`, `comment`, `start`, `end`; `-1` means
+    a point marker). The script must write `output.wav` with the **same**
+    sample rate, channel count and length; anything else is rejected. Temp
+    files are cleaned up after each run. Note that Python's stdlib `wave`
+    module only handles PCM — since SpectroCraft exchanges IEEE float32 WAVs,
+    the example scripts (and the Add template) embed a small RIFF/WAVE
+    reader/writer you can reuse in your own scripts.
+
+    Only a minimal CPython installation is needed — the example scripts use
+    nothing but the standard library (no pip packages). If no interpreter is
+    found on the PATH, Run shows installation instructions: download Python 3.x
+    from <https://www.python.org/downloads/>, install with default options
+    (on Windows keep "Add python.exe to PATH" checked), verify with
+    `python --version` in a terminal, then press Run again. Note that pure-Python
+    processing is slow on long selections — select shorter ranges for big jobs.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
     range, Log/Linear toggle, Reset Freq, FFT size — from **512**, the finest
     frequency resolution, up to 65536). Above the colour-map
@@ -773,7 +801,8 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
-| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x) and a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, and named spectral selections with clone & multiply (`SavedSelections` JSON sidecar). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x) and a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with clone & multiply (`SavedSelections` JSON sidecar), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with three example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near, JSON sidecar persistence next to the audio file. |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |

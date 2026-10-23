@@ -141,6 +141,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 #endif
     selectionPanel = std::make_unique<SelectionPanel> (app);
     historyPanel  = std::make_unique<HistoryPanel> (app);
+    pythonPanel   = std::make_unique<PythonPanel> (app);
 
     fileListPanel->onOpenRequested = [this] { handleFileOpen(); };
 
@@ -160,6 +161,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     topTabs.addTab ("Files", kDarkTabBg, fileListPanel.get(), false);
     topTabs.addTab ("Frequency Analysis", kDarkTabBg, fftPanel.get(), false);
     topTabs.addTab ("History", kDarkTabBg, historyPanel.get(), false);
+    topTabs.addTab ("Python", kDarkTabBg, pythonPanel.get(), false);
     bottomTabs.addTab ("Spectral Controls", kDarkTabBg, controlsPanel.get(), false);
     bottomTabs.addTab ("Markers", kDarkTabBg, markersPanel.get(), false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -167,6 +169,8 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     if (transcriptionPanel)
         transcriptionPanel->onRunRequested = [this] { showTranscribeDialog (); };
 #endif
+    pythonPanel->onRunRequested = [this] (const juce::File& f, const juce::String& t)
+                                  { runPythonScriptAsync (f, t); };
     bottomTabs.addTab ("Selection", kDarkTabBg, selectionPanel.get(), false);
     // Frequency Analysis is the default tab in the top group.
     topTabs.setCurrentTabIndex (1, false);
@@ -610,6 +614,7 @@ const char* MainWindow::panelIdFor (juce::Component* c) const
     if (c == fileListPanel.get())       return "files";
     if (c == fftPanel.get())            return "fft";
     if (c == historyPanel.get())        return "history";
+    if (c == pythonPanel.get())         return "python";
     if (c == controlsPanel.get())       return "controls";
     if (c == markersPanel.get())        return "markers";
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -679,6 +684,7 @@ void MainWindow::applySavedLeftLayout()
         { "files",       "Files",              fileListPanel.get(),  true  },
         { "fft",         "Frequency Analysis", fftPanel.get(),       true  },
         { "history",     "History",            historyPanel.get(),   true  },
+        { "python",      "Python",             pythonPanel.get(),    true  },
         { "controls",    "Spectral Controls",  controlsPanel.get(),  false },
         { "markers",     "Markers",            markersPanel.get(),   false },
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -2002,6 +2008,59 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
             // A user cancel is not a failure: just close quietly.
             if (!wasCancelled)
                 showAiFailureDialog ("Noise Suppression", err, modelId, this, device);
+        });
+    }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// Python panel: run a user script against the selection (or whole file).
+// Progress: materialise + extract 0..30%, interpreter run 30..95% (the bar
+// holds steady while pure-Python processing runs), re-import 95..100%.
+
+void MainWindow::runPythonScriptAsync (const juce::File& script, const juce::String& scriptText)
+{
+    std::string pyCmd;
+    if (!sc::py::findPython (&pyCmd))
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::InfoIcon,
+                                           "Python not found",
+                                           sc::py::installHelpText (),
+                                           juce::String(), this);
+        return;
+    }
+
+    auto* dlg = new WorkProgressDialog ("Python",
+                                        "Running " + script.getFileName () + " ...",
+                                        true, this);
+    dlg->setProgress (0.0);
+    dlg->beginModal ();
+
+    std::thread ([this, script, scriptText, pyCmd, dlg] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v) {
+            if (v - lastSent < 0.02 && v != 1.0) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+
+        std::string err;
+        const bool ok = app.runPythonScript (script, scriptText, pyCmd,
+            [sendProgress, dlg] (float f) {
+                sendProgress (0.95 * (double) f);
+                return !dlg->cancelled.load ();
+            }, &err);
+        if (ok)
+            app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
+                sendProgress (0.95 + 0.05 * (double) f);
+            });
+
+        juce::MessageManager::callAsync ([this, dlg, ok, err] {
+            const bool wasCancelled = dlg->cancelled.load ();
+            delete dlg;
+            if (ok)
+                refreshAfterEdit();
+            else if (!wasCancelled)   // a user cancel is not a failure
+                showEditError (err);
         });
     }).detach();
 }

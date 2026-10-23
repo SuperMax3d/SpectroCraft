@@ -19,6 +19,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/SpectralView.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/WaveformView.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/MarkerManager.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/PythonScripts.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Panels.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ScrollBars.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/MainWindow.cpp

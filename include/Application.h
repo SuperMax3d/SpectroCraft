@@ -242,6 +242,21 @@ public:
                                 std::string* errOut = nullptr,
                                 bool autoDownload = true);
 #endif
+
+    // BLOCKING — call from a worker thread. Runs the Python script `script`
+    // (whose on-disk text is first replaced by `scriptText`) against the
+    // current selection, or the whole file when nothing is selected.
+    // pythonCmd is the interpreter command found by sc::py::findPython
+    // (e.g. "python" or "py -3"). The script receives a float32 WAV of the
+    // range plus a metadata JSON and must write back an output WAV with the
+    // same rate/channels/length; the result replaces that range in place and
+    // is undoable. onProgress reports 0..1 (excluding the final mipmap
+    // rebuild) and returning false cancels (killing the child process).
+    bool runPythonScript (const juce::File& script, const juce::String& scriptText,
+                          const std::string& pythonCmd,
+                          std::function<bool(float)> onProgress = nullptr,
+                          std::string* errOut = nullptr);
+
     void undoStep(); void redoStep();
     // Batched variants used by the History tab: apply up to n patches in one
     // go with a single mipmap rebuild at the end (fast for long jumps).

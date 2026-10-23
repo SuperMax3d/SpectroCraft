@@ -135,6 +135,13 @@ public:
                                   const std::string& language, bool translate,
                                   bool fast, bool skipExisting, bool autoDownload);
 #endif
+
+    /** Runs the Python script `script` with exactly this editor text on a
+        background thread with a progress dialog. The selection is processed,
+        or the whole file when nothing is selected; the result replaces that
+        range in place (undoable). */
+    void runPythonScriptAsync (const juce::File& script, const juce::String& scriptText);
+
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
     void handleTopSplitterDrag (const juce::MouseEvent& e);   // top tabs / bottom tabs
@@ -199,6 +206,7 @@ private:
 #endif
     std::unique_ptr<SelectionPanel> selectionPanel;           // named selections + clone & multiply
     std::unique_ptr<HistoryPanel> historyPanel;
+    std::unique_ptr<PythonPanel> pythonPanel;                 // user Python scripts (top group)
 
     // Zoom/pan scrollbars: time bar at the bottom, one vertical
     // scrollbar per view on its right edge.
