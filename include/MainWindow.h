@@ -83,6 +83,9 @@ public:
     void zoomToSelection();   // fit the current selection in both views
     void zoomOutFull();       // whole file + default vertical zooms in both views
     void cycleViewVisibility (bool forward);  // F9: both -> waveform -> spectrogram
+    juce::Component* activeListPanel() const;  // Markers/Transcription tab content, or nullptr
+    void handleFind (bool openDialog);     // Ctrl+F / F3 in the active list panel
+    void handleFindPrevious ();            // Ctrl+F3 in the active list panel
     void handleContextMenuAction (int id);  // right-click menu actions from either view
     /** Moves a left-panel tab from (from, fromIndex) to position insertIndex in
         `to` - within the same bar or across bars. Persists the new layout.

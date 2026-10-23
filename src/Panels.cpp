@@ -2259,6 +2259,66 @@ void SpectralControlsPanel::syncLevelControls()
     preview.repaint();
 }
 
+// ---------------------------------------------------------------- Find dialog
+// Shared by the Markers and Transcription panels (Ctrl+F / F3 / Ctrl+F3).
+bool showFindDialog (juce::Component* parent, const juce::String& title,
+                     const juce::String& lastNeedle, juce::String& needle)
+{
+    auto* w = new juce::AlertWindow ("Find", "Search for text:",
+                                     juce::AlertWindow::QuestionIcon, parent);
+    w->addTextEditor ("findQuery", lastNeedle);
+    if (auto* ed = w->getTextEditor ("findQuery"))
+        // Let Enter/Escape reach the OK/Cancel shortcuts even while the field
+        // has keyboard focus.
+        ed->setEscapeAndReturnKeysConsumed (false);
+
+    w->addButton ("Find Next", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // Enter modal state WITHOUT taking keyboard focus: runModalLoop() would
+    // otherwise re-enter the modal state and grab focus for the window itself,
+    // stealing it from the text field.
+    w->enterModalState (false);
+    if (auto* ed = w->getTextEditor ("findQuery"))
+    {
+        ed->setWantsKeyboardFocus (true);
+        ed->grabKeyboardFocus();
+        ed->selectAll();
+    }
+
+    const int result = w->runModalLoop ();
+    needle = w->getTextEditorContents ("findQuery").trim();
+    delete w;
+    return result == 1 && !needle.isEmpty ();
+}
+
+// Shared find loop for the Markers and Transcription panels. `match` reports
+// whether row r matches; on success, `onFound` selects/scrolls/jumps to it.
+// The first find after a query change starts at the top (forward) or bottom
+// (backward); later finds continue from the last match, wrapping around.
+static bool findRowInDirection (int n, int anchor, int dir,
+                                const std::function<bool (int)>& match,
+                                const std::function<void (int)>& onFound,
+                                int& newAnchor)
+{
+    if (n == 0) return false;
+
+    int idx = (anchor < 0) ? (dir > 0 ? 0 : n - 1) : anchor + dir;
+    for (int i = 0; i < n; ++i, idx += dir)
+    {
+        const int row = ((idx % n) + n) % n;
+        if (match (row))
+        {
+            newAnchor = row;
+            onFound (row);
+            return true;
+        }
+    }
+
+    newAnchor = -1;   // no match: the next find restarts from top/bottom
+    return false;
+}
+
 // ================================================================= MarkerListPanel
 
 MarkerListPanel::Model::Model (MarkerListPanel* ownerIn) : owner (ownerIn) {}
@@ -2581,12 +2641,62 @@ void MarkerListPanel::showMarkerContextMenu()
     m.addItem (1, "Copy All Markers", app.markers().count() > 0);
     m.addItem (2, "Paste Markers from Clipboard",
                !juce::SystemClipboard::getTextFromClipboard().trim().isEmpty());
+    m.addItem (3, "Find...\tCtrl+F");
 
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (id == 1)
         copyAllMarkers();
     else if (id == 2)
         pasteMarkersFromClipboard();
+    else if (id == 3)
+        showFindDialog();
+}
+
+// ---------------------------------------------------------------- Find (Ctrl+F / F3 / Ctrl+F3)
+void MarkerListPanel::setFindQuery (const juce::String& q)
+{
+    const juce::String t = q.trim ();
+    if (t != searchNeedle) { searchNeedle = t; searchAnchorRow = -1; }
+}
+
+bool MarkerListPanel::findNext()     { return findInDirection (+1); }
+bool MarkerListPanel::findPrevious() { return findInDirection (-1); }
+
+void MarkerListPanel::showFindDialog()
+{
+    juce::String needle;
+    // :: prefix: the member of this same name would otherwise hide the free
+    // function during unqualified lookup.
+    if (!::showFindDialog (this, "Find in Markers", searchNeedle, needle))
+        return;
+    setFindQuery (needle);
+    findNext ();
+}
+
+bool MarkerListPanel::findInDirection (int dir)
+{
+    const auto& ms = app.markers().markers();
+    if (searchNeedle.isEmpty ()) return false;
+
+    return findRowInDirection ((int) ms.size(), searchAnchorRow, dir,
+        [this, &ms] (int row) {
+            const Marker& m = ms [(size_t) row];
+            return m.name.containsIgnoreCase (searchNeedle)
+                || m.comment.containsIgnoreCase (searchNeedle);
+        },
+        [this] (int row) {
+            juce::SparseSet<int> sel;
+            sel.addRange ({ row, row + 1 });
+            table.setSelectedRows (sel, juce::sendNotificationSync); // -> selectedRowsChanged
+            table.scrollToEnsureRowIsOnscreen (row);
+
+            const Marker& m = app.markers().markers() [(size_t) row];
+            app.setPlayhead (m.start);
+            if (m.end > m.start)
+                app.setSelection ({ m.start, m.end });
+            if (app.onStateChange) app.onStateChange ();   // push to both views
+        },
+        searchAnchorRow);
 }
 
 // Copies every marker as tab-separated lines (one per line, CRLF between rows):
@@ -2883,10 +2993,14 @@ void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::Mou
 
     juce::PopupMenu menu;
     menu.addItem (1, "Add as marker");
+    menu.addItem (2, "Find...\tCtrl+F");
     // Options() targets the current mouse position - exactly where the user
     // right-clicked.
-    if (menu.showMenu (juce::PopupMenu::Options ()) == 1)
+    const int id = menu.showMenu (juce::PopupMenu::Options ());
+    if (id == 1)
         owner->addMarkerForRow (rowNumber);
+    else if (id == 2)
+        owner->showFindDialog ();
 }
 
 void TranscriptionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
@@ -2941,9 +3055,6 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
     addAndMakeVisible (&table);
     addAndMakeVisible (&runBtn);
     addAndMakeVisible (&clearBtn);
-    addAndMakeVisible (&searchBox);
-
-    searchBox.onEnter = [this] { findNext (); };
 
     runBtn.onClick = [this] { if (onRunRequested) onRunRequested (); };
     clearBtn.onClick = [this] {
@@ -2959,9 +3070,9 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
     runBtn.setTooltip ("Run Whisper transcription on the whole file. The first use downloads "
                        "the model weights to %APPDATA%/SpectroCraft/models.");
     clearBtn.setTooltip ("Remove all transcription segments from this file (the audio is not modified).");
-    searchBox.setTooltip ("Type text and press Enter to jump to the next matching segment.");
     table.setTooltip ("Double-click a row to jump to it and select its range.\n"
-                      "Right-click a row to add it as a marker.");
+                      "Right-click a row to add it as a marker or search (Find).\n"
+                      "Ctrl+F searches, F3 / Ctrl+F3 find next / previous.");
 
     refresh();
 }
@@ -2986,39 +3097,42 @@ void TranscriptionPanel::resized()
     auto btnRow = b.removeFromBottom (30);
     runBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, 130, 26);
     clearBtn.setBounds (runBtn.getRight () + 8, btnRow.getY () + 2, 90, 26);
-    const int sx = clearBtn.getRight () + 8;
-    searchBox.setBounds (sx, btnRow.getY () + 2,
-                        std::max (60, b.getWidth () - (sx - b.getX ())), 26);
 
     table.setBounds (b.reduced (0, 4));   // small gap between list and buttons
 }
 
-bool TranscriptionPanel::findNext()
+// ---------------------------------------------------------------- Find (Ctrl+F / F3 / Ctrl+F3)
+void TranscriptionPanel::setFindQuery (const juce::String& q)
+{
+    const juce::String t = q.trim ();
+    if (t != searchNeedle) { searchNeedle = t; searchAnchorRow = -1; }
+}
+
+bool TranscriptionPanel::findNext()     { return findInDirection (+1); }
+bool TranscriptionPanel::findPrevious() { return findInDirection (-1); }
+
+void TranscriptionPanel::showFindDialog()
+{
+    juce::String needle;
+    // :: prefix: the member of this same name would otherwise hide the free
+    // function during unqualified lookup.
+    if (!::showFindDialog (this, "Find in Transcription", searchNeedle, needle))
+        return;
+    setFindQuery (needle);
+    findNext ();
+}
+
+bool TranscriptionPanel::findInDirection (int dir)
 {
     auto* d = app.doc ();
-    if (d == nullptr || d->sctt.segments.empty ()) return false;
+    if (d == nullptr || searchNeedle.isEmpty ()) return false;
 
-    const juce::String needle = searchBox.getText ().trim ();
-    if (needle.isEmpty ()) return false;
-
-    // A changed query restarts the search from the top.
-    if (needle != lastSearchNeedle)
-    {
-        searchAnchorRow = -1;
-        lastSearchNeedle = needle;
-    }
-
-    const int n = (int) d->sctt.segments.size ();
-    // Start just after the last match, wrapping around to the top.
-    int start = searchAnchorRow + 1;
-    if (start >= n) start = 0;
-
-    for (int i = 0; i < n; ++i)
-    {
-        const int row = (start + i) % n;
-        if (juce::String (d->sctt.segments [(size_t) row].text).containsIgnoreCase (needle))
-        {
-            searchAnchorRow = row;
+    const auto& segs = d->sctt.segments;
+    return findRowInDirection ((int) segs.size (), searchAnchorRow, dir,
+        [this, &segs] (int row) {
+            return juce::String (segs [(size_t) row].text).containsIgnoreCase (searchNeedle);
+        },
+        [this, d] (int row) {
             table.selectRow (row);
             table.scrollToEnsureRowIsOnscreen (row);
 
@@ -3028,12 +3142,8 @@ bool TranscriptionPanel::findNext()
             if (s.endSec > s.startSec)
                 app.setSelection ({ s.startSec, s.endSec });
             if (app.onStateChange) app.onStateChange ();
-            return true;
-        }
-    }
-
-    searchAnchorRow = -1;   // no match: the next Enter restarts from row 0
-    return false;
+        },
+        searchAnchorRow);
 }
 #endif // SC_ENABLE_AI
 

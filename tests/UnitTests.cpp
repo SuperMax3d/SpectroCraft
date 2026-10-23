@@ -7386,7 +7386,7 @@ static void testBatchTranscribe()
     folder.deleteRecursively ();
 }
 
-// ---------------- Transcription panel: buttons pinned to bottom, "Search" placeholder ----------------
+// ---------------- Transcription panel: buttons pinned to bottom ----------------
 static void testTranscriptionPanelLayout()
 {
     const juce::File wav = makeTempFile ("trplayout.wav");
@@ -7405,7 +7405,6 @@ static void testTranscriptionPanelLayout()
 
     juce::TextButton* runBtn = nullptr;
     juce::TextButton* clearBtn = nullptr;
-    SearchEditor* searchBox = nullptr;
     juce::TableListBox* table = nullptr;
     for (int i = 0; i < panel.getNumChildComponents (); ++i)
     {
@@ -7415,24 +7414,22 @@ static void testTranscriptionPanelLayout()
             if (tb->getButtonText () == "Transcribe...") runBtn = tb;
             else if (tb->getButtonText () == "Clear") clearBtn = tb;
         }
-        else if (auto* se = dynamic_cast<SearchEditor*> (c)) searchBox = se;
         else if (auto* tl = dynamic_cast<juce::TableListBox*> (c)) table = tl;
     }
 
-    CHECK (runBtn != nullptr && clearBtn != nullptr && searchBox != nullptr && table != nullptr,
+    CHECK (runBtn != nullptr && clearBtn != nullptr && table != nullptr,
            "transcription panel children found");
-    if (! runBtn || ! clearBtn || ! searchBox || ! table)
+    if (! runBtn || ! clearBtn || ! table)
     {
         wav.deleteFile ();
         return;
     }
 
-    // The button strip and the search box are pinned to the bottom of the
-    // panel (4px margin + 2px offset inside a 30px row).
+    // The button strip is pinned to the bottom of the panel (4px margin + 2px
+    // offset inside a 30px row).
     const int expectedBottom = panel.getHeight () - 6;
     CHECK (runBtn->getBottom () == expectedBottom, "Transcribe button at panel bottom");
     CHECK (clearBtn->getBottom () == expectedBottom, "Clear button at panel bottom");
-    CHECK (searchBox->getBottom () == expectedBottom, "search box at panel bottom");
 
     // The segment list takes all the space above the buttons.
     CHECK (table->getBottom () < runBtn->getY (), "list ends above the button row");
@@ -7440,38 +7437,91 @@ static void testTranscriptionPanelLayout()
     CHECK (table->getHeight () > panel.getHeight () * 3 / 4,
           "segment list takes most of the panel height");
 
-    // Count dim bluish-grey pixels inside the search box, away from its
-    // outline. The placeholder colour (135,140,152) is distinctly bluer than
-    // the neutral text/outline colours, so this isolates it.
-    auto placeholderPixelCount = [] (juce::Component& c)
-    {
-        const juce::Image img = c.createComponentSnapshot (c.getLocalBounds ());
-        int n = 0;
-        for (int y = 4; y < img.getHeight () - 4; ++y)
-            for (int x = 6; x < img.getWidth () - 2; ++x)
-            {
-                const juce::Colour p = img.getPixelAt (x, y);
-                if (p.getBrightness () > 0.3f && p.getBrightness () < 0.8f
-                    && (int) p.getBlue () - (int) p.getRed () > 8)
-                    ++n;
-            }
-        return n;
-    };
-
-    CHECK (placeholderPixelCount (*searchBox) > 40,
-          "placeholder 'Search' is painted while empty and unfocused");
-
-    // Typing into the box hides the placeholder; clearing it brings it back.
-    searchBox->setText ("x", juce::dontSendNotification);
-    CHECK (placeholderPixelCount (*searchBox) < 25,
-          "placeholder hidden once text is present");
-    searchBox->setText ("", juce::dontSendNotification);
-    CHECK (placeholderPixelCount (*searchBox) > 40,
-          "placeholder returns when the box is empty again");
-
     wav.deleteFile ();
 }
 #endif   // SC_ENABLE_AI
+
+// ---------------- Find in the Markers / Transcription panels ----------------
+// Ctrl+F opens a per-panel find dialog; F3 / Ctrl+F3 jump to the next /
+// previous match. Each panel keeps its own query/anchor state, and both are
+// case-insensitive substring searches (markers: title + comment).
+static void testFindInPanels()
+{
+    // 6 s long: the markers/segments below reach t=5, and setPlayhead clamps
+    // to the file duration.
+    const juce::File wav = makeTempFile ("find_panels.wav");
+    writeWav (wav, 1, 8000.0, 48000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for find test");
+
+    // Markers: two matching titles + one non-matching.
+    app.markers().addPointMarker (1.0, "alpha one");
+    app.markers().addPointMarker (3.0, "beta two");
+    app.markers().addPointMarker (5.0, "ALPHA three");   // case-insensitive match
+
+    MarkerListPanel mp (app);
+    mp.setSize (260, 200);
+
+    CHECK (!mp.findNext(), "no query yet: find fails");
+
+    mp.setFindQuery ("alpha");
+    CHECK (mp.getFindQuery () == "alpha", "query stored");
+    CHECK (mp.findNext (), "first match found");
+    CHECK (std::abs (app.playhead - 1.0) < 1e-9, "jumped to first match");
+
+    CHECK (mp.findNext (), "second match found");
+    CHECK (std::abs (app.playhead - 5.0) < 1e-9, "case-insensitive second match");
+
+    CHECK (mp.findNext (), "wraps around to the first match");
+    CHECK (std::abs (app.playhead - 1.0) < 1e-9, "wrapped to first match");
+
+    CHECK (mp.findPrevious (), "previous wraps backwards");
+    CHECK (std::abs (app.playhead - 5.0) < 1e-9, "backwards wrap lands on second match");
+
+    mp.setFindQuery ("zzz-no-match");
+    CHECK (!mp.findNext (), "no match: find fails cleanly");
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    // Transcription search is independent of the marker search.
+    auto* d = app.doc ();
+    CHECK (d != nullptr, "doc exists for transcription find test");
+    if (d != nullptr)
+    {
+        std::vector<ScttSegment> segs;
+        segs.push_back ({ 0.5, 1.0, "hello world" });
+        segs.push_back ({ 2.0, 3.0, "goodbye moon" });
+        segs.push_back ({ 4.0, 5.0, "HELLO again" });
+        d->setTranscription (segs);
+
+        TranscriptionPanel tp (app);
+        tp.setSize (300, 200);
+
+        CHECK (!tp.findNext (), "transcription: no query yet");
+        tp.setFindQuery ("hello");
+        CHECK (mp.getFindQuery () == "zzz-no-match",
+              "marker query untouched by transcription search");
+
+        CHECK (tp.findNext (), "transcription first match");
+        CHECK (std::abs (app.playhead - 0.5) < 1e-9, "jumped to segment start");
+        CHECK (!app.selection.isEmpty ()
+              && std::abs (app.selection.getStart () - 0.5) < 1e-9
+              && std::abs (app.selection.getEnd () - 1.0) < 1e-9,
+              "segment range selected");
+
+        CHECK (tp.findNext (), "transcription second match");
+        CHECK (std::abs (app.playhead - 4.0) < 1e-9, "case-insensitive segment match");
+
+        CHECK (tp.findPrevious (), "transcription previous wraps backwards");
+        CHECK (std::abs (app.playhead - 0.5) < 1e-9,
+              "backwards wrap lands on first segment");
+    }
+#endif
+
+    wav.deleteFile ();
+}
 
 // ---------------- Mipmap construction: bit-exactness across all source paths ----------------
 
@@ -8003,6 +8053,7 @@ static int scRunUnitTestsImpl()
     progress ("batch transcribe");    testBatchTranscribe();
     progress ("transcription panel layout"); testTranscriptionPanelLayout();
 #endif
+    progress ("find in panels");            testFindInPanels();
     progress ("spectral selection model");  testSpectralSelectionModel();
     progress ("selection render hole");     testSpectralSelectionRenderHole();
     progress ("straight line points");      testStraightLinePoints();

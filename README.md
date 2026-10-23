@@ -170,7 +170,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     Begin, End and Length in the detail editors below the table — the comments
     box starts beside its label and extends to the bottom of the panel;
     Add Marker, delete; right-click a row for Copy All Markers / Paste Markers
-    from Clipboard).
+    from Clipboard or Find (Ctrl+F searches titles and comments,
+    F3 / Ctrl+F3 jump to the next / previous match)).
   - **Draggable panel tabs**: drag any tab to reorder the panels within its
     group, or drop it onto a tab of the other group to move it across — e.g.
     put Markers next to Frequency Analysis. The arrangement (plus the column
@@ -275,7 +276,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     selection via OpenVINO.
   - *Transcription* — Effects → Transcribe… runs Whisper over the whole file;
     segments appear in the **Transcription** tab (double-click a row to jump,
-    search box with Enter-to-next-match). Results are stored inside the WAV as
+    Ctrl+F / F3 search for matches). Results are stored inside the WAV as
     a custom `SCTT` RIFF chunk, so they travel with the file.
   - *Batch transcription* — Effects → Transcribe Folder… transcribes every
     `.wav` in a folder tree headlessly (files never open in the editor) and
@@ -500,7 +501,8 @@ for your microarchitecture at load time.
   *Balanced* uses beam search; *Fast* uses greedy decoding (~1.4× quicker,
   slightly lower accuracy on difficult audio). Segments are
   shown in the **Transcription** tab: double-click a row to jump + select its
-  range; type in the search box and press Enter to cycle through matches.
+  range; press Ctrl+F (or right-click > Find) to search, then F3 / Ctrl+F3 to
+  cycle through matches.
   Results are embedded in the WAV as a custom top-level `SCTT` RIFF chunk
   (UTF-8 JSON, times in seconds) — written on save, parsed on load, never shown
   in the Markers panel. *Clear* removes them from the document without touching
@@ -636,7 +638,10 @@ The test executable accepts the same flags (useful for CI without a display).
 | Select while moving the playhead (anchor = position at first Shift press; released when Shift is let go) | Shift+← / Shift+→ |
 | Fine selection, one sample per step | Ctrl+Shift+← / Ctrl+Shift+→ |
 | Move playhead and pan both views to the start / end (keeps the current zoom span) | Home / End |
-| Loop (selection, or whole file if nothing selected) on/off | F3 |
+| Loop (selection, or whole file if nothing selected) on/off | Ctrl+L |
+| Find in the active list panel (Markers / Transcription tab; right-click > Find also works) | Ctrl+F |
+| Find next match (opens the dialog first when no query is set yet) | F3 |
+| Find previous match | Ctrl+F3 |
 | Add marker (region if selected, else point at cursor) | F2 / F8 |
 | Selection tool: Time Range / Marquee / Lasso / Paintbrush | S / M / L / P |
 | Brush radius smaller / larger (Paintbrush only) | [ / ] |

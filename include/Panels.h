@@ -595,6 +595,12 @@ private:
 
 // ---------------------------------------------------------- Markers panel
 
+// Modal "Find" dialog shared by the Markers and Transcription panels. The box
+// is pre-filled with lastNeedle; on OK, needle receives the trimmed query and
+// true is returned (an empty query cancels the search).
+bool showFindDialog (juce::Component* parent, const juce::String& title,
+                     const juce::String& lastNeedle, juce::String& needle);
+
 // Note: juce::Component already inherits from juce::MouseListener in JUCE 9,
 // so overriding mouseDown() below is sufficient (no extra base needed).
 class MarkerListPanel : public juce::Component
@@ -612,9 +618,19 @@ public:
     // Programmatic row selection (normally done via the table UI).
     void selectRow (int row);
 
+    // Find (Ctrl+F / F3 / Ctrl+F3): case-insensitive substring search over
+    // marker titles and comments. The query/anchor state is independent of
+    // the transcription panel's own search.
+    void showFindDialog();
+    bool findNext();
+    bool findPrevious();
+    void setFindQuery (const juce::String& q);
+    const juce::String& getFindQuery() const { return searchNeedle; }
+
 private:
     void mouseDown (const juce::MouseEvent&) override;
     void showMarkerContextMenu();
+    bool findInDirection (int dir);
 
 private:
     Application& app;
@@ -644,6 +660,9 @@ private:
     int selectedRow = -1;
     bool editing = false; // guard against feedback loops in text editors
 
+    juce::String searchNeedle;   // current find query (empty = none)
+    int searchAnchorRow = -1;    // row of the last found match (-1 = none)
+
     void updateDetails();
     void onBeginEndChanged (bool isBegin);
     void onLengthChanged();
@@ -660,44 +679,11 @@ private:
     (which opens the model/language dialog via onRunRequested) and a "Clear"
     button. Double-clicking a row jumps the playhead to its start and selects
     its range. Segments live in FileDoc::sctt and are saved into WAV files as
-    an SCTT RIFF chunk — they never appear in the Markers panel. */
-// TextEditor with an Enter callback: this JUCE build's TextEditor has no
-// onReturnPressed / placeholder members, so the panel hooks key presses here.
-class SearchEditor : public juce::TextEditor
-{
-public:
-    std::function<void()> onEnter;
+    an SCTT RIFF chunk — they never appear in the Markers panel.
 
-    bool keyPressed (const juce::KeyPress& k) override
-    {
-        if (k == juce::KeyPress (juce::KeyPress::returnKey))
-        {
-            if (onEnter != nullptr) onEnter ();
-            return true;
-        }
-        return TextEditor::keyPressed (k);
-    }
-
-protected:
-    // Paints a dim italic "Search" placeholder while the box is empty and
-    // unfocused; it disappears as soon as the user clicks into the box.
-    void paint (juce::Graphics& g) override
-    {
-        TextEditor::paint (g);
-        if (getText ().isEmpty () && !hasKeyboardFocus (false))
-        {
-            juce::Font f (12.0f, juce::Font::italic);
-            g.setFont (f);
-            g.setColour (juce::Colour::fromRGB (135, 140, 152));
-            g.drawText ("Search", getLocalBounds ().reduced (8, 3),
-                        juce::Justification::centredLeft, false);
-        }
-    }
-
-    void focusGained (juce::Component::FocusChangeType) override { repaint (); }
-    void focusLost (juce::Component::FocusChangeType) override { repaint (); }
-};
-
+    Searching is shortcut-driven (Ctrl+F / F3 / Ctrl+F3, or right-click >
+    Find): there is no on-panel search box. The query/anchor state is
+    independent of the markers panel's own search. */
 class TranscriptionPanel : public juce::Component
 {
 public:
@@ -707,10 +693,14 @@ public:
     void refresh();   // call after transcription changes / file open/close
 
     // Case-insensitive substring search over the segment texts. Selects and
-    // scrolls to the next match after the current one (wrapping around),
-    // jumps the playhead there like a double-click, and returns false when no
-    // segment matches at all.
+    // scrolls to the next/previous match (wrapping around), jumps the
+    // playhead there like a double-click, and returns false when no segment
+    // matches at all.
+    void showFindDialog();
     bool findNext();
+    bool findPrevious();
+    void setFindQuery (const juce::String& q);
+    const juce::String& getFindQuery() const { return searchNeedle; }
 
     // Creates a marker spanning the segment's time range (point marker when
     // it has no length), titled with its text; the full text goes into the
@@ -743,9 +733,11 @@ private:
     juce::TableListBox table { "", &model };
 
     juce::TextButton runBtn, clearBtn;
-    SearchEditor searchBox;       // Enter jumps to the next match
-    int searchAnchorRow = -1;     // row of the last found match (-1 = none)
-    juce::String lastSearchNeedle;// resets the anchor when the query changes
+
+    bool findInDirection (int dir);
+
+    juce::String searchNeedle;   // current find query (empty = none)
+    int searchAnchorRow = -1;    // row of the last found match (-1 = none)
 
     JUCE_DECLARE_NON_COPYABLE (TranscriptionPanel)
 };

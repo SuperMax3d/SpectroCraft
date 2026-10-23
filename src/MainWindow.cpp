@@ -2530,7 +2530,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (TransportStop, "Stop\tCtrl+.", app.audioEngine().isPlaying(), false);
         menu.addItem (TransportPause, "Pause\tSpace", app.audioEngine().isPlaying(), false);
         menu.addSeparator();
-        menu.addItem (TransportLoop, "Loop (Selection/All)\tF3", true, app.audioEngine().isLooping());
+        menu.addItem (TransportLoop, "Loop (Selection/All)\tCtrl+L", true, app.audioEngine().isLooping());
         // Play only the selected spectral content (mask applied in real time).
         menu.addItem (TransportPlaySpectralSel, "Play Spectral Selection",
                       app.hasSpectralSelection (),
@@ -2573,6 +2573,65 @@ juce::StringArray MainWindow::getMenuBarNames()
     return { "File", "Edit", "Selection", "View", "Transport", "Effects", "Help" };
 }
 
+// The list panel (Markers or Transcription) currently shown in a left-panel
+// tab, or nullptr when another tab is active. Panels can live in either of
+// the two tab bars (they are draggable between them).
+juce::Component* MainWindow::activeListPanel() const
+{
+    juce::Component* cur = bottomTabs.getCurrentContentComponent ();
+    if (cur == nullptr) cur = topTabs.getCurrentContentComponent ();
+    return cur;
+}
+
+// Ctrl+F / F3: search the active list panel. With no query set yet, open the
+// Find dialog first; otherwise jump to the next match.
+void MainWindow::handleFind (bool openDialog)
+{
+    juce::Component* cur = activeListPanel ();
+
+    if (cur == markersPanel.get ())
+    {
+        if (openDialog || markersPanel->getFindQuery ().isEmpty ())
+            markersPanel->showFindDialog ();
+        else
+            markersPanel->findNext ();
+        return;
+    }
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    if (cur == transcriptionPanel.get ())
+    {
+        if (openDialog || transcriptionPanel->getFindQuery ().isEmpty ())
+            transcriptionPanel->showFindDialog ();
+        else
+            transcriptionPanel->findNext ();
+    }
+#endif
+}
+
+// Ctrl+F3: previous match in the active list panel (dialog first when no query).
+void MainWindow::handleFindPrevious ()
+{
+    juce::Component* cur = activeListPanel ();
+
+    if (cur == markersPanel.get ())
+    {
+        if (markersPanel->getFindQuery ().isEmpty ())
+            markersPanel->showFindDialog ();
+        else
+            markersPanel->findPrevious ();
+        return;
+    }
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    if (cur == transcriptionPanel.get ())
+    {
+        if (transcriptionPanel->getFindQuery ().isEmpty ())
+            transcriptionPanel->showFindDialog ();
+        else
+            transcriptionPanel->findPrevious ();
+    }
+#endif
+}
+
 bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
 {
     // Ctrl+Tab / Ctrl+Shift+Tab cycles through the loaded files.
@@ -2591,6 +2650,8 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('c', juce::ModifierKeys::commandModifier, 0)) { app.copy(); return true; }   // read-only
     if (key == juce::KeyPress ('v', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); return true; }
     if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier, 0)) { app.selectAll(); syncSharedState(); return true; }
+    // Find in the active list panel (Markers / Transcription tab).
+    if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier, 0)) { handleFind (true); return true; }
     if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey) { runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); return true; }
     if (key == juce::KeyPress::spaceKey)
     {
@@ -2673,7 +2734,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('0', juce::ModifierKeys::commandModifier, 0)) { zoomToFit(); return true; }
     // Selection tools: S = Time Range, M = Marquee, L = Lasso, P = Paintbrush.
     // (M and L were reassigned from "add marker" / "loop", which moved to
-    // F2/F8 and F3 respectively.)
+    // F2/F8 and Ctrl+L respectively.)
     if (!mods.isCommandDown() && !mods.isAltDown())
     {
         // Windows reports letter key codes in uppercase; normalise for the
@@ -2709,7 +2770,19 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         }
     }
 
+    // Find next / previous in the active list panel. F3 used to toggle the
+    // loop; that moved to Ctrl+L (below).
     if (key == juce::KeyPress (juce::KeyPress::F3Key, juce::ModifierKeys::noModifiers, 0))
+    {
+        handleFind (false);
+        return true;
+    }
+    if (key == juce::KeyPress (juce::KeyPress::F3Key, juce::ModifierKeys::commandModifier, 0))
+    {
+        handleFindPrevious ();
+        return true;
+    }
+    if (key == juce::KeyPress ('l', juce::ModifierKeys::commandModifier, 0))
     {
         app.toggleLoop();
         return true;
