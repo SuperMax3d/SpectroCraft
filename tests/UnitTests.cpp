@@ -4319,6 +4319,65 @@ static void testFFTViewInteractions()
                "box zoom sets the level window to the dragged y span");
     }
 
+    // --- Right-drag starting on an axis: blue band + only that axis zooms ---
+    {
+        FFTAnalysisView view (app);
+        view.setSize (300, 200);
+        const auto plot = view.plotBounds();
+
+        // Bottom Hz axis: horizontal drag with a slight vertical component.
+        const int ax1 = plot.getX() + 30, ax2 = plot.getRight() - 60;
+        const int ay1 = plot.getBottom() + 4, ay2 = plot.getBottom() + 12;
+        const double fA = view.xToFreq (ax1), fB = view.xToFreq (ax2);
+        const double dbTop0 = view.getDbTop(), dbBot0 = view.getDbBottom();
+
+        view.mouseDown (mkMouse (view, ax1, ay1, rmb));
+        view.mouseDrag (mkMouse (view, ax2, ay2, rmb));
+
+        // The rubber band must stretch across the full height of the bottom
+        // axis strip: a translucent blue fill over the dark background.
+        juce::Image img (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+        int blue = 0;
+        for (int y = plot.getBottom() + 1; y < plot.getBottom() + 17; ++y)
+            for (int x = ax1 + 8; x < ax2 - 8; x += 2)
+                if (img.getPixelAt (x, y).getBlue() > img.getPixelAt (x, y).getRed() + 40) ++blue;
+        CHECK (blue >= 3, "axis drag shows a blue band across the bottom axis");
+
+        view.mouseUp (mkMouse (view, ax2, ay2, rmb));
+        CHECK (std::abs (view.getFreqLo() - fA) / fA < 1e-6
+              && std::abs (view.getFreqHi() - fB) / fB < 1e-6,
+               "bottom-axis drag zooms the frequency window");
+        CHECK (view.getDbTop() == dbTop0 && view.getDbBottom() == dbBot0,
+               "bottom-axis drag leaves the level window alone");
+
+        // Right level axis: vertical drag with a slight horizontal component.
+        const int lx1 = plot.getRight() + 4, lx2 = plot.getRight() + 12;
+        const int ly1 = plot.getY() + 30, ly2 = plot.getY() + 90;
+        const double dbA = view.yToLevel ((float) ly1), dbB = view.yToLevel ((float) ly2);
+        const double fLo0 = view.getFreqLo(), fHi0 = view.getFreqHi();
+
+        view.mouseDown (mkMouse (view, lx1, ly1, rmb));
+        view.mouseDrag (mkMouse (view, lx2, ly2, rmb));
+
+        img = juce::Image (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+        blue = 0;
+        for (int y = ly1 + 8; y < ly2 - 8; ++y)
+            for (int x = plot.getRight() + 1; x < plot.getRight() + 33; ++x)
+                if (img.getPixelAt (x, y).getBlue() > img.getPixelAt (x, y).getRed() + 40) ++blue;
+        CHECK (blue >= 3, "axis drag shows a blue band across the right axis");
+
+        view.mouseUp (mkMouse (view, lx2, ly2, rmb));
+        const double span = std::clamp (dbA - dbB, 10.0, 320.0);
+        const double expTop = std::clamp (dbA, -240.0 + span * 0.5, 40.0);
+        CHECK (std::abs (view.getDbTop() - expTop) < 1e-6
+              && std::abs (view.getDbBottom() - (expTop - span)) < 1e-6,
+               "right-axis drag zooms the level window");
+        CHECK (view.getFreqLo() == fLo0 && view.getFreqHi() == fHi0,
+               "right-axis drag leaves the frequency window alone");
+    }
+
     // --- Left-drag on the bottom axis pans frequency; right axis pans level ---
     {
         FFTAnalysisView view (app);

@@ -1445,12 +1445,34 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     }
 
     // Rubber band for a right-drag box zoom (drawn last so nothing covers it).
+    // A drag that starts on an axis stretches into a full-height/width band
+    // across that axis strip - the same translucent blue as the waveform and
+    // spectrogram views; a drag inside the plot keeps the free yellow box.
     if (dragMode == DragMode::ZoomDrag && haveZoomRect)
     {
-        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 48));
-        g.fillRoundedRectangle (zoomRect.toFloat(), 3.0f);
-        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 160));
-        g.drawRoundedRectangle (zoomRect.toFloat(), 3.0f, 1.0f);
+        auto zr = zoomRect;
+        const bool startOnFreqAxis  = dragStartY >= plot.getBottom();
+        const bool startOnLevelAxis = !startOnFreqAxis && dragStartX > plot.getRight();
+
+        if (startOnFreqAxis || startOnLevelAxis)
+        {
+            if (startOnFreqAxis)
+                zr = juce::Rectangle<int> (zr.getX(), plot.getBottom(), zr.getWidth(), axisB);
+            else
+                zr = juce::Rectangle<int> (plot.getRight(), zr.getY(), axisWidth(), zr.getHeight());
+
+            g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
+            g.fillRect (zr);
+            g.setColour (juce::Colour::fromRGB (96, 150, 255).withAlpha (0.9f));
+            g.drawRect (zr, 1);
+        }
+        else
+        {
+            g.setColour (juce::Colour::fromRGBA (255, 255, 0, 48));
+            g.fillRoundedRectangle (zoomRect.toFloat(), 3.0f);
+            g.setColour (juce::Colour::fromRGBA (255, 255, 0, 160));
+            g.drawRoundedRectangle (zoomRect.toFloat(), 3.0f, 1.0f);
+        }
     }
 }
 
@@ -1902,8 +1924,14 @@ void FFTAnalysisView::mouseUp (const juce::MouseEvent& e)
             showContextMenu (e.x > plot.getRight(), e.y > plot.getBottom());
         else
         {
+            // The drag START position selects which axes get zoomed (same as
+            // the waveform/spectrogram views): inside the plot both, on an
+            // axis only that axis.
+            const bool startOnFreqAxis  = dragStartY >= plot.getBottom();
+            const bool startOnLevelAxis = !startOnFreqAxis && dragStartX > plot.getRight();
+
             // Horizontal part of the box zooms the frequency range...
-            if (zoomRect.getWidth() >= 2 && axisMode_ != 2)
+            if (!startOnLevelAxis && zoomRect.getWidth() >= 2 && axisMode_ != 2)
             {
                 const double fA = xToFreq (std::clamp (zoomRect.getX(), plot.getX(), plot.getRight()));
                 const double fB = xToFreq (std::clamp (zoomRect.getRight() - 1, plot.getX(), plot.getRight()));
@@ -1923,7 +1951,7 @@ void FFTAnalysisView::mouseUp (const juce::MouseEvent& e)
                 }
             }
             // ...and the vertical part zooms the level window.
-            if (zoomRect.getHeight() >= 2)
+            if (!startOnFreqAxis && zoomRect.getHeight() >= 2)
             {
                 const double dbA = yToLevel ((float) std::clamp (zoomRect.getY(), plot.getY(), plot.getBottom()));
                 const double dbB = yToLevel ((float) std::clamp (zoomRect.getBottom() - 1, plot.getY(), plot.getBottom()));
