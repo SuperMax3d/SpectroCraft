@@ -4062,6 +4062,10 @@ PythonPanel::PythonPanel (Application& appIn, const juce::File& folder)
     addAndMakeVisible (&editor);
 
     scriptBox.onChange = [this] { loadCurrentScript (); };
+    addBtn.setButtonText ("Add");
+    removeBtn.setButtonText ("Remove");
+    runBtn.setButtonText ("Run");
+
     addBtn.onClick     = [this] { showAddDialog (); };
     removeBtn.onClick  = [this] { confirmRemove (); };
     runBtn.onClick     = [this] { requestRun (); };

@@ -8537,6 +8537,15 @@ static void testPythonScripts()
         CHECK (box != nullptr && ed != nullptr, "panel has combo + editor");
         CHECK (buttons == 3, "panel has Add/Remove/Run buttons");
 
+        // Regression: the buttons were once created without setButtonText and
+        // rendered as blank rectangles.
+        juce::StringArray labels;
+        for (auto* c : panel.getChildren ())
+            if (auto* tb = dynamic_cast<juce::TextButton*> (c))
+                labels.add (tb->getButtonText());
+        const juce::StringArray expectLabels { "Add", "Remove", "Run" };
+        CHECK (labels == expectLabels, "buttons are labelled Add/Remove/Run");
+
         if (box != nullptr)
         {
             CHECK (box->getNumItems () == 3, "combo lists the three scripts");
