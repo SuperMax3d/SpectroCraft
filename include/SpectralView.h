@@ -183,6 +183,13 @@ private:
 
     // Mirror a live tool shape's time extent into the shared time selection.
     void syncToolTimeExtent (juce::Range<double> ext);
+
+    // Move/Scale selection gesture helpers: SHIFT locks to the axis with the
+    // larger screen-space delta from the reference point; updates push the
+    // transformed session-start snapshot into the active doc live.
+    Application::AxisLock axisLockForEvent (const juce::MouseEvent& e) const;
+    void updateSelGestureFromEvent (const juce::MouseEvent& e);
+    int64_t selGestLastClickMs = 0;   // guards mouseDoubleClick after a gesture click
     // Draws the committed spectral selection plus an optional live preview
     // shape, evaluated together as one ordered boolean list in every channel row.
     void drawSpectralShapes (juce::Graphics& g,

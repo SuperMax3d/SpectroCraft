@@ -916,6 +916,15 @@ void MainWindow::syncSharedState()
                        ? juce::String ("Clone pick  ref ") +
                          juce::String ((int) std::lround (app.clonePickRefFreq())) + " Hz"
                        : "Clone pick: click the reference frequency";
+
+        // Move/Scale selection gestures override it with their own hint.
+        if (app.isSelGesturing ())
+            mode = app.haveSelGestureRef ()
+                       ? juce::String (app.selGestureIsScale () ? "Scale sel" : "Move sel")
+                         + "  ref " + juce::String (app.selGestureRefT (), 2) + " s, "
+                         + juce::String ((int) std::lround (app.selGestureRefF ())) + " Hz"
+                       : juce::String (app.selGestureIsScale () ? "Scale selection: click the reference point"
+                                                               : "Move selection: click the reference point");
         statusBar->setModeText (mode);
     }
 
@@ -2817,10 +2826,13 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         }
     }
 
-    // ESC ends an active clone-picking session first; otherwise it clears
-    // the active spectral selection (time selection is untouched).
+    // ESC ends an active move/scale gesture first, then a clone-picking
+    // session; otherwise it clears the active spectral selection (time
+    // selection is untouched).
     if (keyCode == juce::KeyPress::escapeKey)
     {
+        if (app.cancelSelGesture ())
+            return true;
         if (app.isClonePicking ())
         {
             app.endClonePick ();

@@ -70,6 +70,17 @@ public:
     std::vector<std::pair<double, double>> clonePickPts;   // all picked points incl. the reference
     SpectralSelection clonePickBase;   // snapshot of the selection when picking started
 
+    // Move/Scale selection gesture (spectral view right-click menu): the first
+    // click sets a reference point, mouse movement previews the transform live,
+    // the second click applies it and Esc/right-click cancels.
+    enum class AxisLock { None, X, Y };   // SHIFT locks to one screen axis
+    bool selGesturing = false;
+    bool selGestScale = false;            // true = Scale gesture, false = Move
+    bool haveSelGestRef = false;
+    double selGestRefT = 0.0, selGestRefF = 0.0;
+    SpectralSelection selGestBase;        // snapshot of the selection at start
+    double selGestW = 1e-3, selGestH = 8.0;   // bbox spans (scale normalisation)
+
     // Current UI state - mirrors the active document (kept in sync on switch
     // and through setSelection()/setPlayhead()/toggleChannelVisible()).
     juce::Range<double> selection{ 0, 0 };
@@ -160,6 +171,28 @@ public:
     /** Replaces the active doc's spectral selection with a copy of `sel`
         (Selection panel "Recall"). */
     void setSpectralSelectionFrom (const SpectralSelection& sel);
+
+    // ---- Move/Scale selection gesture (spectral view right-click menu) ----
+    /** Starts a Move or Scale gesture on the active doc's spectral selection.
+        No-op when there is no document or no selection. */
+    void startSelGesture (bool scale);
+    /** First click sets the reference point; a later click applies the
+        preview under the cursor and ends the gesture. Returns false when not
+        gesturing. `lock` is honoured on the applying click only. */
+    bool selGestureClick (double tSecs, double fHz, AxisLock lock);
+    /** Live preview: transforms the session-start snapshot about the reference
+        point and installs it as the current selection (time extent mirrored,
+        playback mask re-installed, UI notified). No-op until the reference is
+        set. */
+    void updateSelGesture (double tSecs, double fHz, AxisLock lock);
+    /** Cancels the gesture, restoring the session-start selection. Returns
+        true when a gesture was active. */
+    bool cancelSelGesture ();
+    bool isSelGesturing () const { return selGesturing; }
+    bool haveSelGestureRef () const { return selGesturing && haveSelGestRef; }
+    bool selGestureIsScale () const { return selGestScale; }
+    double selGestureRefT () const { return selGestRefT; }
+    double selGestureRefF () const { return selGestRefF; }
 
     // Make sure both views' shared time window includes [t0, t1]: no-op when
     // it is already fully visible; otherwise pans with the current span kept,

@@ -734,7 +734,7 @@ Mouse (waveform *and* spectral views):
 | Left-drag on the top time ruler | Pan the shared time window at half cursor speed (same as middle-drag); does not create a selection |
 | Middle-drag | Pan the shared time window (both views stay in sync). The content follows the cursor at half speed; panning against a file edge pins that edge, and reversing direction responds immediately (no dead zone) |
 | Right-drag a region | **Box zoom**: dragging on the track zooms **both** axes at once — time from the box's horizontal span, amplitude (waveform) or frequency (spectral) from its vertical span. Dragging that starts on an axis zooms only that axis: left axis → vertical range, top time ruler (waveform) → time range. A rubber-band rectangle is shown while dragging |
-| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete. On the **left axis**, "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window |
+| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete. On the **left axis**, "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
 | Mouse wheel over the plot / time ruler | Horizontal zoom around the cursor (both views) |
 | Mouse wheel over the left axis (or Shift + wheel anywhere) | Vertical amplitude zoom (waveform) / frequency-range zoom around the cursor (spectral) — independent per view |
 | Drag the divider between the views | Resize waveform vs spectral area |
@@ -766,6 +766,16 @@ appears slightly curved (switching the view to a linear scale shows it as a
 perfectly straight line). Shift/Ctrl combine with Alt for add/subtract lines. The active tool and brush radius are shown in the
 status bar; `[` / `]` change the brush radius (20–5000 Hz), and **Esc**
 clears the spectral selection without touching the time selection.
+
+**Moving / scaling an existing selection**: in the spectral view, right-click
+on the current spectral selection and choose **Move Selection** or **Scale
+Selection**. The first click sets a reference point (shown with the same round
+orange indicator as Pick Points); moving the mouse — button held or not —
+updates the selection live: Move shifts it by the cursor's offset from the
+reference, Scale stretches it about the reference (moving one full span of the
+selection doubles that axis). Holding **Shift** locks to X-only or Y-only based
+on which direction the mouse has moved more. A second click applies the change;
+Esc or a right-click cancels and restores the original selection.
 
 With a spectral selection active, destructive edits operate on its content
 over its own time extent instead of the time selection: **Del/Backspace**

@@ -230,6 +230,7 @@ void Application::activate (int index)
 {
     if (index < 0 || index >= (int) docs.size()) return;
     endClonePick ();   // a picking session belongs to the doc being left
+    cancelSelGesture ();
     FileDoc* d = docs[(size_t) index].get();
 
     // Save the current UI state back into the doc being left and stop its
@@ -286,6 +287,7 @@ void Application::closeDoc (int index)
 {
     if (index < 0 || index >= (int) docs.size()) return;
     endClonePick ();   // a picking session belongs to the doc being closed
+    cancelSelGesture ();
     FileDoc& d = *docs[(size_t) index];
 
     const bool wasActive = (index == activeDocIndex);
@@ -553,6 +555,107 @@ bool Application::clonePickClick (double tSecs, double fHz)
         d->spectralSel.appendScaledShapesFrom (clonePickBase, fHz / clonePickRefF);
         refreshSpectralSelectionUI ();
     }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Move/Scale selection gesture (spectral view right-click menu).
+// The first click sets a reference point; mouse movement previews the
+// transform live (always computed from the session-start snapshot, so moves
+// never compound); the second click applies it. Esc or a right-click cancels.
+// ---------------------------------------------------------------------------
+
+void Application::startSelGesture (bool scale)
+{
+    auto* d = doc ();
+    if (!d || d->spectralSel.empty ()) return;
+
+    cancelSelGesture ();   // restore + clear any previous gesture state
+    selGesturing = true;
+    selGestScale = scale;
+    haveSelGestRef = false;
+    selGestBase = d->spectralSel;
+    const auto bb = d->spectralSel.boundingBox();
+    // Normalisation spans for the Scale gesture: one full span of mouse travel
+    // from the reference doubles that axis. Guards keep degenerate selections
+    // (zero-width/height) from dividing by ~0.
+    selGestW = std::max (1e-3, bb.getWidth());
+    selGestH = std::max (8.0,  bb.getHeight());
+    if (onStateChange)
+        onStateChange ();   // status bar hint + view repaint
+}
+
+bool Application::selGestureClick (double tSecs, double fHz, AxisLock lock)
+{
+    auto* d = doc ();
+    if (!d || !selGesturing) return false;
+
+    if (!haveSelGestRef)
+    {
+        // First click: establish the reference point.
+        haveSelGestRef = true;
+        selGestRefT = tSecs;
+        selGestRefF = fHz;
+        if (onStateChange) onStateChange ();   // draw the round indicator
+    }
+    else
+    {
+        // Second click: apply what is under the cursor and end the gesture.
+        updateSelGesture (tSecs, fHz, lock);
+        selGesturing = false;
+        haveSelGestRef = false;
+        selGestBase.clear ();
+        refreshSpectralSelectionUI ();   // final mask push + UI sync
+    }
+    return true;
+}
+
+void Application::updateSelGesture (double tSecs, double fHz, AxisLock lock)
+{
+    auto* d = doc ();
+    if (!d || !selGesturing || !haveSelGestRef) return;
+
+    SpectralSelection preview;
+    if (selGestScale)
+    {
+        // Factor 1 at the reference point itself; moving one full bbox span
+        // away doubles that axis. Clamped so the gesture can never invert or
+        // explode the selection.
+        double st = 1.0 + (tSecs - selGestRefT) / selGestW;
+        double sf = 1.0 + (fHz   - selGestRefF) / selGestH;
+        if (lock == AxisLock::X)      sf = 1.0;
+        else if (lock == AxisLock::Y) st = 1.0;
+        st = std::clamp (st, 0.02, 50.0);
+        sf = std::clamp (sf, 0.02, 50.0);
+        preview = selGestBase.scaledAboutCopy (selGestRefT, selGestRefF, st, sf);
+    }
+    else
+    {
+        double dt = tSecs - selGestRefT;
+        double df = fHz   - selGestRefF;
+        if (lock == AxisLock::X)      df = 0.0;
+        else if (lock == AxisLock::Y) dt = 0.0;
+        preview = selGestBase.translatedCopy (dt, df);
+    }
+
+    d->spectralSel = std::move (preview);
+    refreshSpectralSelectionUI ();
+}
+
+bool Application::cancelSelGesture ()
+{
+    if (!selGesturing) return false;
+
+    auto* d = doc ();
+    selGesturing = false;
+    haveSelGestRef = false;
+
+    // Restore the session-start selection (the live preview may have moved it).
+    if (d)
+        d->spectralSel = selGestBase;
+    selGestBase.clear ();
+
+    refreshSpectralSelectionUI ();   // re-sync extent/mask/UI even when unchanged
     return true;
 }
 

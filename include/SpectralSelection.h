@@ -115,6 +115,23 @@ public:
         Each shape keeps its additive/subtractive flag. */
     SpectralSelection scaledCopy (double m) const;
 
+    /** Returns a copy translated by dt seconds and df Hz (every shape).
+        Stroke grids are untouched: they are relative to the shape's own
+        t0/f0 origin, which moves with them. Non-finite deltas leave the
+        selection unchanged. */
+    SpectralSelection translatedCopy (double dt, double df) const;
+
+    /** Returns a copy scaled about the anchor point (anchorT, anchorF): time
+        coordinates by st, frequency coordinates by sf. Stroke brush radii
+        scale with sf so thickness stretches proportionally. Non-positive or
+        non-finite factors leave the selection unchanged. */
+    SpectralSelection scaledAboutCopy (double anchorT, double anchorF,
+                                       double st, double sf) const;
+
+    // Bounding box of all shapes in (timeSecs, freqHz) space: x/y = lower
+    // corner, width/height = spans. Empty when the selection is empty.
+    juce::Rectangle<double> boundingBox() const;
+
     /** Appends clones of every CURRENT shape at each given frequency
         multiplier (the original shapes stay in place, so the result contains
         the original pattern plus one scaled copy per multiplier). Clones are

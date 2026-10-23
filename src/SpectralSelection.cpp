@@ -262,6 +262,106 @@ void SpectralSelection::appendScaledShapesFrom (const SpectralSelection& src, do
         appendScaledShape (s, m);
 }
 
+SpectralSelection SpectralSelection::translatedCopy (double dt, double df) const
+{
+    if (!std::isfinite (dt) || !std::isfinite (df)) return *this;
+
+    SpectralSelection out;
+    for (const auto& s : shapeList)
+    {
+        SpectralShape c = s;   // deep copy
+        switch (c.kind)
+        {
+            case SpectralShape::Kind::Rect:
+                c.t0 += dt;  c.t1 += dt;
+                c.f0 += df;  c.f1 += df;
+                break;
+            case SpectralShape::Kind::Polygon:
+                for (auto& p : c.pts) { p.first += dt; p.second += df; }
+                break;
+            default:   // Stroke: the grid is relative to t0/f0, so shifting the
+                      // origin keeps every cell aligned with its content.
+                for (auto& p : c.pts) { p.first += dt; p.second += df; }
+                c.t0 += dt;  c.t1 += dt;
+                c.f0 += df;  c.f1 += df;
+                break;
+        }
+        out.shapeList.push_back (std::move (c));
+    }
+    return out;
+}
+
+SpectralSelection SpectralSelection::scaledAboutCopy (double anchorT, double anchorF,
+                                                     double st, double sf) const
+{
+    if (!(st > 0.0) || !(sf > 0.0) || !std::isfinite (st) || !std::isfinite (sf))
+        return *this;
+
+    SpectralSelection out;
+    for (const auto& s : shapeList)
+    {
+        SpectralShape c = s;   // deep copy
+        switch (c.kind)
+        {
+            case SpectralShape::Kind::Rect:
+                c.t0 = anchorT + (c.t0 - anchorT) * st;
+                c.t1 = anchorT + (c.t1 - anchorT) * st;
+                c.f0 = anchorF + (c.f0 - anchorF) * sf;
+                c.f1 = anchorF + (c.f1 - anchorF) * sf;
+                break;
+            case SpectralShape::Kind::Polygon:
+                for (auto& p : c.pts)
+                {
+                    p.first  = anchorT + (p.first  - anchorT) * st;
+                    p.second = anchorF + (p.second - anchorF) * sf;
+                }
+                break;
+            default:   // Stroke: re-stamp the scaled path at the scaled radius.
+                for (auto& p : c.pts)
+                {
+                    p.first  = anchorT + (p.first  - anchorT) * st;
+                    p.second = anchorF + (p.second - anchorF) * sf;
+                }
+                c.strokeRadiusHz = std::max (1.0, c.strokeRadiusHz * sf);
+                c.cols = 0; c.rows = 0; c.grid.clear ();
+                c.rasteriseStroke (c.strokeRadiusHz);
+                break;
+        }
+        out.shapeList.push_back (std::move (c));
+    }
+    return out;
+}
+
+juce::Rectangle<double> SpectralSelection::boundingBox() const
+{
+    if (shapeList.empty()) return {};
+    double loT = 1e30, hiT = -1e30, loF = 1e30, hiF = -1e30;
+    for (const auto& s : shapeList)
+    {
+        switch (s.kind)
+        {
+            case SpectralShape::Kind::Rect:
+                loT = std::min (loT, std::min (s.t0, s.t1));
+                hiT = std::max (hiT, std::max (s.t0, s.t1));
+                loF = std::min (loF, std::min (s.f0, s.f1));
+                hiF = std::max (hiF, std::max (s.f0, s.f1));
+                break;
+            case SpectralShape::Kind::Polygon:
+                for (const auto& p : s.pts)
+                {
+                    loT = std::min (loT, p.first);  hiT = std::max (hiT, p.first);
+                    loF = std::min (loF, p.second); hiF = std::max (hiF, p.second);
+                }
+                break;
+            case SpectralShape::Kind::Stroke:
+                loT = std::min (loT, s.t0);  hiT = std::max (hiT, s.t1);
+                loF = std::min (loF, s.f0);  hiF = std::max (hiF, s.f1);
+                break;
+        }
+    }
+    return { loT, loF, hiT - loT, hiF - loF };
+}
+
 void SpectralSelection::addScaledClones (const std::vector<double>& multipliers)
 {
     if (shapeList.empty () || multipliers.empty ()) return;

@@ -8365,6 +8365,164 @@ static void testSavedSelectionsRoundTrip()
 }
 
 /** Interactive clone picking: reference click, then target clicks. */
+// ---------------- Move/Scale selection gesture (right-click menu) ----------
+// Transform math + the click-move-click state machine with SHIFT axis lock.
+static void testSelMoveScaleGesture()
+{
+    // ---- Pure transform math -------------------------------------------------
+    {
+        SpectralSelection sel;
+        sel.addRect (1.0, 2.0, 100.0, 300.0, false);
+
+        auto tr = sel.translatedCopy (0.5, -50.0);
+        CHECK (std::abs (tr.boundingBox().getX() - 1.5) < 1e-9
+              && std::abs (tr.boundingBox().getY() - 50.0) < 1e-9,
+              "translated bbox moved");
+        CHECK (tr.contains (2.3, 60.0) && !sel.contains (2.3, 60.0),
+              "translation shifts the region");
+
+        auto bad = sel.translatedCopy (std::nan (""), 0.0);
+        CHECK (bad.boundingBox() == sel.boundingBox(),
+              "NaN delta leaves the selection unchanged");
+
+        // Scale about an interior anchor: x2 in time, x0.5 in frequency.
+        auto sc = sel.scaledAboutCopy (1.5, 200.0, 2.0, 0.5);
+        CHECK (std::abs (sc.boundingBox().getX() - 0.5) < 1e-9
+              && std::abs (sc.boundingBox().getRight() - 2.5) < 1e-9
+              && std::abs (sc.boundingBox().getY() - 150.0) < 1e-9
+              && std::abs (sc.boundingBox().getBottom() - 250.0) < 1e-9,
+              "scale about the anchor stretches both axes");
+        CHECK (sc.contains (1.5, 200.0), "anchor point stays inside");
+
+        auto badSc = sel.scaledAboutCopy (1.5, 200.0, -1.0, 2.0);
+        CHECK (badSc.boundingBox() == sel.boundingBox(),
+              "negative factor leaves the selection unchanged");
+    }
+
+    // Stroke translation keeps the rasterised grid aligned with its path.
+    {
+        SpectralSelection sel;
+        std::vector<std::pair<double, double>> line = { {0.2, 300}, {0.6, 500} };
+        sel.addStroke (line, 40.0, false);
+
+        CHECK (sel.contains (0.4, 400.0), "original stroke covers its midpoint");
+        auto tr = sel.translatedCopy (1.0, -100.0);
+        CHECK (tr.contains (1.4, 300.0), "translated stroke covers the shifted midpoint");
+        CHECK (!tr.contains (0.4, 400.0), "original position no longer covered");
+
+        auto sc = sel.scaledAboutCopy (0.2, 300.0, 2.0, 2.0);   // anchor at line start
+        CHECK (sc.contains (1.0, 700.0), "scaled stroke covers the scaled endpoint");
+        CHECK (sc.contains (0.6, 500.0), "scaled stroke covers the scaled midpoint");
+    }
+
+    // ---- Gesture state machine -------------------------------------------------
+    const juce::File wav = makeTempFile ("selgesture.wav");
+    writeWav (wav, 1, 8000.0, 32768, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for gesture test");
+    auto* d = app.doc ();
+    if (!d) return;
+
+    // No selection -> starting a gesture is a no-op.
+    app.startSelGesture (false);
+    CHECK (!app.isSelGesturing (), "no gesture without a selection");
+
+    d->spectralSel.addRect (1.0, 2.0, 100.0, 300.0, false);
+
+    app.startSelGesture (false);   // Move
+    CHECK (app.isSelGesturing () && !app.selGestureIsScale (), "move gesture started");
+
+    // Before the reference click nothing may change.
+    app.updateSelGesture (1.5, 200.0, Application::AxisLock::None);
+    CHECK (d->spectralSel.boundingBox().getX() == 1.0,
+          "no preview before the reference click");
+
+    // First click sets the reference; still no change.
+    CHECK (app.selGestureClick (1.5, 200.0, Application::AxisLock::None),
+          "reference click accepted");
+    CHECK (app.haveSelGestureRef (), "reference stored");
+    CHECK (d->spectralSel.boundingBox().getX() == 1.0
+          && d->spectralSel.boundingBox().getY() == 100.0,
+          "no preview from the reference click itself");
+
+    // Free move: +0.2 s / +50 Hz from the reference.
+    app.updateSelGesture (1.7, 250.0, Application::AxisLock::None);
+    CHECK (std::abs (d->spectralSel.boundingBox().getX() - 1.2) < 1e-9
+          && std::abs (d->spectralSel.boundingBox().getY() - 150.0) < 1e-9,
+          "free move applied");
+    CHECK (std::abs (app.selection.getStart () - 1.2) < 1e-9
+          && std::abs (app.selection.getEnd () - 2.2) < 1e-9,
+          "time extent mirrored into the shared selection");
+
+    // SHIFT + x-dominant: only time moves.
+    app.updateSelGesture (1.9, 400.0, Application::AxisLock::X);
+    CHECK (std::abs (d->spectralSel.boundingBox().getX() - 1.4) < 1e-9
+          && d->spectralSel.boundingBox().getY() == 100.0,
+          "x-locked move keeps the frequency");
+
+    // SHIFT + y-dominant: only frequency moves.
+    app.updateSelGesture (2.5, 300.0, Application::AxisLock::Y);
+    CHECK (d->spectralSel.boundingBox().getX() == 1.0
+          && std::abs (d->spectralSel.boundingBox().getY() - 200.0) < 1e-9,
+          "y-locked move keeps the time");
+
+    // Second click applies the delta under the cursor and ends the gesture.
+    CHECK (app.selGestureClick (2.0, 300.0, Application::AxisLock::None),
+          "apply click accepted");
+    CHECK (!app.isSelGesturing (), "gesture ended after apply");
+    CHECK (std::abs (d->spectralSel.boundingBox().getX() - 1.5) < 1e-9
+          && std::abs (d->spectralSel.boundingBox().getY() - 200.0) < 1e-9,
+          "applied move committed");
+
+    // ---- Scale gesture ---------------------------------------------------------
+    app.startSelGesture (true);   // bbox is now [1.5,2.5] x [200,400]: W=1 s, H=200 Hz
+    CHECK (app.isSelGesturing () && app.selGestureIsScale (), "scale gesture started");
+
+    CHECK (app.selGestureClick (1.75, 250.0, Application::AxisLock::None),
+          "scale reference click accepted");
+
+    // +0.5 s / +100 Hz from the ref -> x1.5 on both axes about the anchor.
+    app.updateSelGesture (2.25, 350.0, Application::AxisLock::None);
+    {
+        const auto bb = d->spectralSel.boundingBox();
+        CHECK (std::abs (bb.getX() - 1.375) < 1e-9
+              && std::abs (bb.getRight() - 2.875) < 1e-9,
+              "scale stretched time about the anchor");
+        CHECK (std::abs (bb.getY() - 175.0) < 1e-9
+              && std::abs (bb.getBottom() - 475.0) < 1e-9,
+              "scale stretched frequency about the anchor");
+    }
+
+    // X-locked: time x2.5, frequency untouched.
+    app.updateSelGesture (3.25, 100.0, Application::AxisLock::X);
+    {
+        const auto bb = d->spectralSel.boundingBox();
+        CHECK (std::abs (bb.getX() - 1.125) < 1e-9
+              && std::abs (bb.getRight() - 3.625) < 1e-9,
+              "x-locked scale stretched time only");
+        CHECK (std::abs (bb.getY() - 200.0) < 1e-9
+              && std::abs (bb.getBottom() - 400.0) < 1e-9,
+              "x-locked scale kept the frequency");
+    }
+
+    // Cancel restores the session-start selection.
+    CHECK (app.cancelSelGesture (), "cancel returns true while gesturing");
+    CHECK (!app.isSelGesturing (), "gesture ended after cancel");
+    {
+        const auto bb = d->spectralSel.boundingBox();
+        CHECK (std::abs (bb.getX() - 1.5) < 1e-9 && std::abs (bb.getRight() - 2.5) < 1e-9
+              && std::abs (bb.getY() - 200.0) < 1e-9 && std::abs (bb.getBottom() - 400.0) < 1e-9,
+              "cancel restored the session-start selection");
+    }
+
+    CHECK (!app.cancelSelGesture (), "cancel is a no-op when not gesturing");
+
+    wav.deleteFile ();
+}
+
 // ---------------- Saved selections: disk reload + drag & drop --------------
 // A sidecar next to the wav auto-loads on open; "Load from disk..." and
 // dropping a .selections.json onto the panel re-read it into memory.
@@ -8613,6 +8771,7 @@ static int scRunUnitTestsImpl()
     progress ("saved selections round-trip"); testSavedSelectionsRoundTrip();
     progress ("selections disk reload + dnd"); testSelectionsDiskReload();
     progress ("clone pick flow");           testClonePickFlow();
+    progress ("move/scale selection gesture"); testSelMoveScaleGesture();
     progress ("masked gain + zero-out");    testMaskedGainAndZero();
     progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
     progress ("extract masked A+B=orig");   testExtractMasked();

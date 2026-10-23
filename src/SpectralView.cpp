@@ -136,7 +136,7 @@ void SpectralView::resized() { dirty = true; imageDirty = true; }
 
 // Build and show the right-click context menu (zoom + edit actions).
 // Called from a mouse handler, so withMousePosition() lands exactly where clicked.
-static void showViewContextMenu (Application& app,
+static void showViewContextMenu (Application& app, double clickT, double clickF,
                                  const std::function<void(int)>& onAction)
 {
     if (!onAction) return;
@@ -149,6 +149,18 @@ static void showViewContextMenu (Application& app,
                app.audioEngine().isFileLoaded(), false);
     m.addItem (CtxSelectAll,       "Select All\tCtrl+A",
                app.audioEngine().isFileLoaded(), false);
+
+    // Move/Scale the spectral selection: offered only when right-clicking ON it.
+    auto* d = app.doc ();
+    const bool onSpectralSel = d != nullptr && !d->spectralSel.empty ()
+                               && d->spectralSel.contains (clickT, clickF);
+    if (onSpectralSel)
+    {
+        m.addSeparator();
+        m.addItem (CtxMoveSelection,  "Move Selection");
+        m.addItem (CtxScaleSelection, "Scale Selection");
+    }
+
     m.addSeparator();
     m.addItem (CtxCut,   "Cut\tCtrl+X",   hasSel, false);
     m.addItem (CtxCopy,  "Copy\tCtrl+C",  hasSel, false);
@@ -164,6 +176,17 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
+    // Move/Scale selection gesture: left clicks inside the plot set the
+    // reference point first, then apply the change on the second click.
+    if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
+        && e.x >= kLeftAxisWidth && e.y >= kRulerH && app.isSelGesturing ())
+    {
+        selGestLastClickMs = juce::Time::getMillisecondCounter();
+        app.selGestureClick (xToTime ((double) e.x), freqAtY (e.y),
+                             axisLockForEvent (e));
+        return;
+    }
+
     // Clone & Multiply picking (Selection panel): left clicks inside the plot
     // pick a reference frequency first, then target frequencies afterwards.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
@@ -177,6 +200,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     // movement) still shows the context menu, deferred to mouseUp.
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
     {
+        app.cancelSelGesture ();   // a right button always ends the gesture first
         dragMode = DragMode::ZoomDrag;
         dragStartX = e.x;
         dragStartY = e.y;
@@ -295,6 +319,13 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
     // Keep the status-bar probe / brush cursor position current.
     probeX = e.x;
     probeY = e.y;
+
+    // Move/Scale gesture: dragging from the reference click previews live too.
+    if (app.haveSelGestureRef ())
+    {
+        updateSelGestureFromEvent (e);
+        return;
+    }
 
     switch (dragMode)
     {
@@ -461,9 +492,18 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
             // external action callback, or a local axis reset. (Headless test
             // views have neither and must not enter a modal loop.)
             if (onAxis || onContextAction)
-                showViewContextMenu (app, [this, onAxis] (int id)
+                showViewContextMenu (app,
+                                     xToTime ((double) dragStartX), freqAtY (dragStartY),
+                                     [this, onAxis] (int id)
                 {
+                    using enum ContextMenuIDs;
                     if (id == CtxZoomOutFull && onAxis) { resetFrequencyRange(); return; }
+                    // Move/Scale start a local gesture in this view.
+                    if (id == CtxMoveSelection || id == CtxScaleSelection)
+                    {
+                        app.startSelGesture (id == CtxScaleSelection);
+                        return;
+                    }
                     if (onContextAction) onContextAction (id);
                 });
         }
@@ -599,6 +639,11 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
 // Status-bar probe: time + frequency + level of that frequency under the cursor.
 void SpectralView::mouseMove (const juce::MouseEvent& e)
 {
+    // Move/Scale gesture: the live preview follows the cursor even without a
+    // button held (must not depend on onCursorInfo being set).
+    if (app.haveSelGestureRef ())
+        updateSelGestureFromEvent (e);
+
     if (!onCursorInfo) return;
     const auto pr = plotRect();
     if (e.x < pr.getX() || e.x >= pr.getRight()
@@ -665,6 +710,12 @@ void SpectralView::mouseDoubleClick (const juce::MouseEvent& e)
 {
     // Only left-button double-clicks select; middle/right are pan/menu buttons.
     if (!e.mods.isLeftButtonDown() || !app.audioEngine().isFileLoaded())
+        return;
+
+    // A move/scale gesture click must not also trigger "fit whole file": the
+    // applying second click of a quick click-click sequence would otherwise
+    // double-fire.
+    if (juce::Time::getMillisecondCounter () - selGestLastClickMs < 400)
         return;
 
     // Double-clicking a marker sets the selection to its range.
@@ -1297,6 +1348,25 @@ void SpectralView::drawOverlays (juce::Graphics& g)
         }
     }
 
+    // Move/Scale selection gesture: the reference point, drawn with the same
+    // round orange indicator as Clone & Multiply picking.
+    if (app.haveSelGestureRef ())
+    {
+        const double t = app.selGestureRefT(), f = app.selGestureRefF();
+        if (t >= viewStart && t <= viewEnd)
+        {
+            const int x = timeToX (t);
+            g.setColour (juce::Colours::orange);
+            for (const auto& row : rowRects ())
+            {
+                const int y = freqToY (f, row.getHeight());
+                if (y < 0 || y >= row.getHeight()) continue;
+                g.drawEllipse ((float) x - 5.0f, (float) row.getY() + y - 5.0f,
+                              10.0f, 10.0f, 1.5f);
+            }
+        }
+    }
+
     // Playhead
     const double px = timeToX (playhead);
     if (px >= pr.getX() && px <= pr.getRight())
@@ -1340,6 +1410,31 @@ void SpectralView::syncToolTimeExtent (juce::Range<double> ext)
     else
         app.setSelection (ext);
     selection = app.selection;
+}
+
+// SHIFT locks the gesture to the axis with the larger SCREEN-space delta from
+// the reference point ("the main direction of the mouse").
+Application::AxisLock SpectralView::axisLockForEvent (const juce::MouseEvent& e) const
+{
+    if (!e.mods.isShiftDown ()) return Application::AxisLock::None;
+
+    const auto rows = rowRects ();
+    juce::Rectangle<int> row = plotRect();
+    for (const auto& rr : rows)
+        if (rr.contains ((int) e.x, (int) e.y)) { row = rr; break; }
+
+    const int refX = (int) std::lround (timeToX (app.selGestureRefT ()));
+    const int refY = row.getY() + (int) std::lround (freqToY (app.selGestureRefF (),
+                                                             row.getHeight ()));
+    return std::abs (e.x - refX) >= std::abs (e.y - refY)
+               ? Application::AxisLock::X
+               : Application::AxisLock::Y;
+}
+
+void SpectralView::updateSelGestureFromEvent (const juce::MouseEvent& e)
+{
+    app.updateSelGesture (xToTime ((double) e.x), freqAtY (e.y),
+                          axisLockForEvent (e));
 }
 
 void SpectralView::drawSpectralShapes (juce::Graphics& g,
