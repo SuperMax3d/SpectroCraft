@@ -9092,9 +9092,18 @@ static void testPythonScripts()
     CHECK (dir.getChildFile ("Dynamic processing.py").existsAsFile (),
           "dynamic processing example created");
     CHECK (dir.getChildFile ("Modulation.py").existsAsFile (), "modulation example created");
+    CHECK (dir.getChildFile ("Generate White Noise.py").existsAsFile (),
+          "white noise example created");
+    CHECK (dir.getChildFile ("Generate Tones.py").existsAsFile (),
+          "tones example created");
+    CHECK (dir.getChildFile ("Add Echo.py").existsAsFile (), "echo example created");
 
     const juce::String thrText = dir.getChildFile ("Threshold.py").loadFileAsString ();
     CHECK (thrText.contains ("THRESHOLD"), "threshold script has a threshold constant");
+    CHECK (dir.getChildFile ("Generate White Noise.py").loadFileAsString ().contains ("AMPLITUDE")
+           && dir.getChildFile ("Generate Tones.py").loadFileAsString ().contains ("TONES")
+           && dir.getChildFile ("Add Echo.py").loadFileAsString ().contains ("DELAY_MS"),
+          "new examples carry their tuning constants");
 
     {
         const juce::File t = dir.getChildFile ("Threshold.py");
@@ -9106,11 +9115,14 @@ static void testPythonScripts()
 
     // 2) listScripts returns the sorted .py files.
     const auto scripts = sc::py::listScripts (dir);
-    CHECK (scripts.size () == 3, "three scripts listed");
-    if (scripts.size () == 3)
-        CHECK (scripts[0].getFileName () == "Dynamic processing.py"
-               && scripts[1].getFileName () == "Modulation.py"
-               && scripts[2].getFileName () == "Threshold.py",
+    CHECK (scripts.size () == 6, "six scripts listed");
+    if (scripts.size () == 6)
+        CHECK (scripts[0].getFileName () == "Add Echo.py"
+               && scripts[1].getFileName () == "Dynamic processing.py"
+               && scripts[2].getFileName () == "Generate Tones.py"
+               && scripts[3].getFileName () == "Generate White Noise.py"
+               && scripts[4].getFileName () == "Modulation.py"
+               && scripts[5].getFileName () == "Threshold.py",
               "scripts sorted by name");
 
     // 3) Metadata JSON carries rate/channels/selection/markers.
@@ -9236,6 +9248,132 @@ static void testPythonScripts()
         }
 
         wav.deleteFile ();
+
+        // --- Generate Tones: deterministic sine replacement ---
+        {
+            const juce::File wavT = makeTempFile ("py_tones.wav");
+            writeWav (wavT, 1, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+                     { return 0.0f; });   // silence
+
+            Application appT;
+            CHECK (appT.openFile (wavT), "opened tones wav");
+            appT.setSelection ({ 0.1, 0.3 });   // [800, 2400) @ 8 kHz
+
+            const juce::File scriptT = dir.getChildFile ("Generate Tones.py");
+            std::string errT;
+            const bool okT = appT.runPythonScript (scriptT, scriptT.loadFileAsString (), pyCmd,
+                                                   nullptr, &errT);
+            CHECK (okT, "tones script ran"
+                       + (okT ? juce::String () : ": " + juce::String (errT)));
+
+            if (okT)
+            {
+                std::vector<float> sel ((size_t) 1600);
+                appT.audioEngine ().readSamples (0, 800, 1600, sel.data ());
+                bool match = true;
+                for (int i = 0; i < 1600 && match; ++i)
+                {
+                    const double t = 0.1 + (double) i / 8000.0;
+                    const double v = 0.5 * std::sin (2.0 * juce::MathConstants<double>::pi
+                                                    * 440.0 * t)
+                                   + 0.25 * std::sin (2.0 * juce::MathConstants<double>::pi
+                                                     * 880.0 * t);
+                    if (std::abs ((double) sel[(size_t) i] - v) > 1e-4) match = false;
+                }
+                CHECK (match, "generated tones match the expected sines");
+
+                // Outside the selection must remain silence.
+                std::vector<float> tail ((size_t) 1600);
+                appT.audioEngine ().readSamples (0, 2400, 1600, tail.data ());
+                bool silent = true;
+                for (float v : tail)
+                    if (v != 0.0f) { silent = false; break; }
+                CHECK (silent, "audio outside the selection is untouched");
+            }
+
+            wavT.deleteFile ();
+        }
+
+        // --- Add Echo: impulse response check ---
+        {
+            const juce::File wavE = makeTempFile ("py_echo.wav");
+            writeWav (wavE, 1, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+                     { return f == 0 ? 1.0f : 0.0f; });   // single impulse at t=0
+
+            Application appE;
+            CHECK (appE.openFile (wavE), "opened echo wav");
+            appE.setSelection ({ 0.0, 0.5 });   // whole file @ 8 kHz = [0, 4000)
+
+            const juce::File scriptE = dir.getChildFile ("Add Echo.py");
+            std::string errE;
+            const bool okE = appE.runPythonScript (scriptE, scriptE.loadFileAsString (), pyCmd,
+                                                   nullptr, &errE);
+            CHECK (okE, "echo script ran"
+                       + (okE ? juce::String () : ": " + juce::String (errE)));
+
+            if (okE)
+            {
+                std::vector<float> sel ((size_t) 4000);
+                appE.audioEngine ().readSamples (0, 0, 4000, sel.data ());
+                // DELAY_MS=120 @ 8 kHz -> 960 samples; FEEDBACK=0.4, ECHO_GAIN=0.8.
+                auto closeTo = [] (float a, double b) { return std::abs ((double) a - b) < 1e-5; };
+                CHECK (closeTo (sel[0], 1.0), "dry impulse kept");
+                CHECK (closeTo (sel[960], 0.8), "first echo at the delay");
+                CHECK (closeTo (sel[1920], 0.32), "second echo decays by FEEDBACK");
+                CHECK (closeTo (sel[2880], 0.128), "third echo decays again");
+                CHECK (closeTo (sel[3840], 0.0512), "fourth echo decays again");
+
+                bool gapsZero = true;
+                for (int i = 1; i < 960 && gapsZero; ++i)
+                    if (sel[(size_t) i] != 0.0f) { gapsZero = false; break; }
+                CHECK (gapsZero, "no samples between the repeats");
+            }
+
+            wavE.deleteFile ();
+        }
+
+        // --- Generate White Noise: smoke run (content is random by design) ---
+        {
+            const juce::File wavN = makeTempFile ("py_noise.wav");
+            writeWav (wavN, 1, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+                     { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                   * 440.0 * ((double) f / rate)); });
+
+            Application appN;
+            CHECK (appN.openFile (wavN), "opened noise wav");
+            appN.setSelection ({ 0.1, 0.3 });   // [800, 2400) @ 8 kHz
+
+            const juce::File scriptN = dir.getChildFile ("Generate White Noise.py");
+            std::string errN;
+            const bool okN = appN.runPythonScript (scriptN, scriptN.loadFileAsString (), pyCmd,
+                                                   nullptr, &errN);
+            CHECK (okN, "white noise script ran"
+                       + (okN ? juce::String () : ": " + juce::String (errN)));
+
+            if (okN)
+            {
+                std::vector<float> sel ((size_t) 1600);
+                appN.audioEngine ().readSamples (0, 800, 1600, sel.data ());
+
+                bool anyNonZero = false;
+                for (float v : sel)
+                    if (v != 0.0f) { anyNonZero = true; break; }
+                CHECK (anyNonZero, "generated noise is not silent");
+
+                // The tone must be gone: count samples that differ from it.
+                int diffs = 0;
+                for (int i = 0; i < 1600 && diffs <= 100; ++i)
+                {
+                    const double t = 0.1 + (double) i / 8000.0;
+                    const double v = 0.5 * std::sin (2.0 * juce::MathConstants<double>::pi
+                                                    * 440.0 * t);
+                    if (std::abs ((double) sel[(size_t) i] - v) > 1e-6) ++diffs;
+                }
+                CHECK (diffs > 100, "generated noise replaced the tone");
+            }
+
+            wavN.deleteFile ();
+        }
     }
     else
     {
@@ -9276,10 +9414,10 @@ static void testPythonScripts()
 
         if (box != nullptr)
         {
-            CHECK (box->getNumItems () == 3, "combo lists the three scripts");
+            CHECK (box->getNumItems () == 6, "combo lists the six scripts");
             // sendNotificationSync: the headless test has no message loop to
             // process the async update that plain sendNotification would queue.
-            box->setSelectedId (2, juce::sendNotificationSync);   // modulation.py
+            box->setSelectedId (5, juce::sendNotificationSync);   // modulation.py
             const juce::String expect = dir.getChildFile ("Modulation.py").loadFileAsString ();
             CHECK (ed != nullptr && ed->getText () == expect,
                   "selecting a script loads its text into the editor");

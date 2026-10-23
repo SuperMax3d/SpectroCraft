@@ -199,6 +199,144 @@ main()
     return juce::String (s.c_str ());
 }
 
+static juce::String whiteNoiseScript ()
+{
+    const std::string s = std::string (R"PY(
+# SpectroCraft example: generate white noise.
+# Replaces every sample in the processed range with uncorrelated random
+# values of amplitude AMPLITUDE (linear, 0..1). Set SEED to an integer for
+# reproducible output; leave it None for a fresh pattern on every run.
+#
+# Called by SpectroCraft as:
+#   python "Generate White Noise.py" <input.wav> <output.wav> <meta.json>
+
+import sys, random
+
+)PY") + kWavIo + R"PY(
+
+AMPLITUDE = 0.25   # linear amplitude (0..1) of the generated noise
+SEED      = None   # e.g. 42 for reproducible noise
+
+
+def main():
+    in_path, out_path, meta_path = sys.argv[1:4]
+    rate, nch, x = read_wav(in_path)
+
+    if SEED is not None:
+        random.seed(SEED)
+
+    out = array.array("f", [0.0]) * len(x)
+    for i in range(len(out)):
+        # uniform on [-AMPLITUDE, AMPLITUDE]
+        out[i] = (random.random() * 2.0 - 1.0) * AMPLITUDE
+
+    write_wav(out_path, rate, nch, out)
+
+
+main()
+)PY";
+    return juce::String (s.c_str ());
+}
+
+static juce::String tonesScript ()
+{
+    const std::string s = std::string (R"PY(
+# SpectroCraft example: generate tones.
+# Replaces every sample in the processed range with the sum of sine waves
+# listed in TONES as (frequency_hz, amplitude) pairs. Phases are continuous
+# with file time (meta.json's selectionStartSec), so generating over adjacent
+# selections does not click. The same mix is written to every channel.
+#
+# Called by SpectroCraft as:
+#   python "Generate Tones.py" <input.wav> <output.wav> <meta.json>
+
+import sys, math, json
+
+)PY") + kWavIo + R"PY(
+
+TONES = [
+    (440.0, 0.5),   # A4 at half scale
+    (880.0, 0.25),  # A5 at a quarter
+]
+
+
+def main():
+    in_path, out_path, meta_path = sys.argv[1:4]
+    rate, nch, x = read_wav(in_path)
+
+    with open(meta_path) as f:
+        t0 = float(json.load(f).get("selectionStartSec", 0.0))
+
+    n = len(x) // nch
+    out = array.array("f", [0.0]) * (n * nch)
+    for i in range(n):
+        t = t0 + i / rate
+        v = 0.0
+        for freq, amp in TONES:
+            v += amp * math.sin(2.0 * math.pi * freq * t)
+        for ch in range(nch):
+            out[ch + i * nch] = v
+
+    write_wav(out_path, rate, nch, out)
+
+
+main()
+)PY";
+    return juce::String (s.c_str ());
+}
+
+static juce::String echoScript ()
+{
+    const std::string s = std::string (R"PY(
+# SpectroCraft example: add echo.
+# Appends decaying repeats of the input DELAY_MS apart:
+#   y[n] = x[n] + ECHO_GAIN * sum_k FEEDBACK^k * x[n - k*DELAY_SAMPLES]
+# Samples before the start of the processed range are treated as zero, so
+# early echoes are partial. The dry signal is kept at full level.
+#
+# Called by SpectroCraft as:
+#   python "Add Echo.py" <input.wav> <output.wav> <meta.json>
+
+import sys
+
+)PY") + kWavIo + R"PY(
+
+DELAY_MS  = 120.0   # time between repeats (ms)
+FEEDBACK  = 0.4     # each repeat is this fraction of the previous one (0..1)
+ECHO_GAIN = 0.8     # overall level of the echo tail
+
+
+def main():
+    in_path, out_path, meta_path = sys.argv[1:4]
+    rate, nch, x = read_wav(in_path)
+    n = len(x) // nch
+    delay = int(round(DELAY_MS * rate / 1000.0))
+    if delay <= 0:
+        write_wav(out_path, rate, nch, x)   # nothing to echo
+        return
+
+    out = array.array("f", [0.0]) * (n * nch)
+    for ch in range(nch):
+        for i in range(n):
+            v = x[ch + i * nch]
+            g = ECHO_GAIN
+            j = i - delay
+            while j >= 0:
+                v += g * x[ch + j * nch]
+                g *= FEEDBACK
+                if abs(g) < 1e-6:
+                    break
+                j -= delay
+            out[ch + i * nch] = v
+
+    write_wav(out_path, rate, nch, out)
+
+
+main()
+)PY";
+    return juce::String (s.c_str ());
+}
+
 // Template written by the panel's Add button.
 static juce::String newScriptTemplateText ()
 {
@@ -247,9 +385,12 @@ void ensureExampleScripts (const juce::File& dir)
 
     struct Ex { const char* name; juce::String body; };
     const Ex examples[] = {
-        { "Dynamic processing.py", dynamicProcessingScript () },
-        { "Threshold.py",          thresholdScript () },
-        { "Modulation.py",         modulationScript () },
+        { "Dynamic processing.py",  dynamicProcessingScript () },
+        { "Threshold.py",           thresholdScript () },
+        { "Modulation.py",          modulationScript () },
+        { "Generate White Noise.py", whiteNoiseScript () },
+        { "Generate Tones.py",       tonesScript () },
+        { "Add Echo.py",             echoScript () },
     };
 
     for (const auto& e : examples)

@@ -200,8 +200,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     the whole run instead of one per step). The header shows "N of M applied".
   - **Python**: a script editor next to History. The dropdown lists every
     `*.py` file in your personal script folder (`%APPDATA%/SpectroCraft/python`
-    on Windows, created automatically with three examples: *Dynamic
-    processing*, *Threshold* and *Modulation*). **Add** creates a new script
+    on Windows, created automatically with six examples: *Dynamic
+    processing*, *Threshold*, *Modulation*, *Generate White Noise*,
+    *Generate Tones* and *Add Echo*). **Add** creates a new script
     from a template, **Remove** deletes the selected one, and **Run** executes
     it against the current selection — or against the whole file when nothing
     is selected. The run is undoable (it appears in History as "Python script
