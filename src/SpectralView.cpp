@@ -1077,7 +1077,7 @@ void SpectralView::drawTimeRuler (juce::Graphics& g)
             }
 
         g.setColour (juce::Colour::fromRGB (200, 200, 200));
-        g.drawText (formatTimeTickLabel (t, major), (int) x + 3, 2, 90, kRulerH - 4,
+        g.drawText (formatTimeTickLabel (t, major, w), (int) x + 3, 2, 90, kRulerH - 4,
                     juce::Justification::centredLeft, false);
     }
 }

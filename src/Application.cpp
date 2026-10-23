@@ -95,8 +95,14 @@ void Application::loadSettings ()
     settings.fftSize       = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_size", settings.fftSize), 512, 65536);
     settings.logFrequency  = recentStore->getIntValue ("log_freq", settings.logFrequency ? 1 : 0) != 0;
     settings.snapToZeroCrossings = recentStore->getIntValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0) != 0;
-    settings.fftAxisMode   = std::clamp ((int) recentStore->getIntValue ("fft_axis_mode", settings.fftAxisMode), 0, 2);
+    settings.fftAxisMode   = std::clamp ((int) recentStore->getIntValue ("fft_axis_mode", settings.fftAxisMode), 0, 5);
     settings.fftLocalN     = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_local_n", settings.fftLocalN), 1024, 65536);
+    settings.fftRefTime    = std::clamp ((int) recentStore->getIntValue ("fft_ref_time", settings.fftRefTime), 0, 1);
+    {   // smoothing window is one of None / 3 / 5 points
+        const int sm = recentStore->getIntValue ("fft_smooth", settings.fftSmooth);
+        settings.fftSmooth = (sm == 5) ? 5 : ((sm >= 1 && sm <= 4) ? 3 : 0);
+    }
+    settings.fftTrack      = std::clamp ((int) recentStore->getIntValue ("fft_track", settings.fftTrack), 0, 1);
 }
 
 void Application::saveSettings ()
@@ -106,6 +112,9 @@ void Application::saveSettings ()
     recentStore->setValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0);
     recentStore->setValue ("fft_axis_mode", settings.fftAxisMode);
     recentStore->setValue ("fft_local_n", settings.fftLocalN);
+    recentStore->setValue ("fft_ref_time", settings.fftRefTime);
+    recentStore->setValue ("fft_smooth", settings.fftSmooth);
+    recentStore->setValue ("fft_track", settings.fftTrack);
     recentStore->save ();
 }
 

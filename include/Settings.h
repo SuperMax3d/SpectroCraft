@@ -49,8 +49,13 @@ struct Settings
 
     // Frequency Analysis tab state (independent of the spectrogram settings).
     // Persisted between sessions: axis mode and its own FFT size.
-    int fftAxisMode = 1;        // 0=FFT Linear, 1=FFT Log, 2=1/3 Octave
+    int fftAxisMode = 1;        // 0=FFT Linear, 1=FFT Log, 2=1/3 Octave,
+                                // 3=Freq vs Time, 4=Amp vs Time, 5=Amp vs Freq
     int fftLocalN = 2048;       // Frequency Analysis FFT size (power of two)
+    // Curve-mode options (modes 3..5), persisted between sessions:
+    int fftRefTime = 0;         // time-based modes: 0=Relative, 1=Absolute
+    int fftSmooth = 0;          // curve smoothing window: 0=None, 3, or 5 points
+    int fftTrack = 0;           // 0=Max (strongest component), 1=Total
 
     bool operator== (const Settings& o) const
     {
@@ -67,7 +72,9 @@ struct Settings
     {
         return fftSize == o.fftSize && logFrequency == o.logFrequency
             && snapToZeroCrossings == o.snapToZeroCrossings
-            && fftAxisMode == o.fftAxisMode && fftLocalN == o.fftLocalN;
+            && fftAxisMode == o.fftAxisMode && fftLocalN == o.fftLocalN
+            && fftRefTime == o.fftRefTime && fftSmooth == o.fftSmooth
+            && fftTrack == o.fftTrack;
     }
 };
 

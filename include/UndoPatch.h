@@ -26,6 +26,26 @@ struct SnapshotSlotChange
     SnapshotMeta before, after;
 };
 
+// Lightweight copy of a curve-snapshot slot's metadata (no series data):
+// enough to restore a stored Freq/Amp-vs-Time or Amp-vs-Freq curve after
+// undo/redo, where the series is recomputed from the restored audio.
+struct CurveSnapshotMeta
+{
+    double t0 = 0.0, t1 = 0.0;   // analysed time segment of the source file
+    int mode = -1;               // axis mode at store time (3..5); -1 => slot empty
+    int track = 0;               // 0=Max, 1=Total (at store time)
+    int smooth = 0;              // smoothing window in points: 0/3/5 (at store time)
+    bool shown = false;
+    std::vector<int> chans;      // visible channels at store time
+};
+
+// Before/after state of one curve-snapshot slot for a patch.
+struct CurveSlotChange
+{
+    bool changed = false;
+    CurveSnapshotMeta before, after;
+};
+
 struct Patch
 {
     int64_t oldStart = 0;   // region replaced in the old buffer [oldStart, oldEnd)
@@ -47,4 +67,6 @@ struct Patch
     std::vector<SavedSpectralSelection> oldSavedSel, newSavedSel;
     static constexpr int kSnapshotSlots = 8;
     std::array<SnapshotSlotChange, kSnapshotSlots> snapshotSlots {};
+    // Same for the curve snapshots stored in the Freq/Amp analysis modes.
+    std::array<CurveSlotChange, kSnapshotSlots> curveSlots {};
 };

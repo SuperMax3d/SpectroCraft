@@ -7602,6 +7602,250 @@ static void testDeleteAdjustsSnapshots()
     CHECK (view.snapshotN (2) == 0, "redo clears the slot again");
 }
 
+static void testCurveAnalysisModes()
+{
+    // One second mono @ 8 kHz: first half a 400 Hz tone, second half 1600 Hz.
+    const juce::File wav = makeTempFile ("curve_modes.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (f < 4000 ? 400.0 : 1600.0) * (double) f / rate); }),
+          "wrote two-tone wav for curve mode test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for curve mode test");
+    app.settings.fftLocalN = 1024;
+    app.setSelection ({ 0.0, 1.0 });
+
+    // --- Mode items and layout -------------------------------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        CHECK (view.axisComboRef().getNumItems() == 6, "axis combo has six modes");
+        const int classicTop = view.plotBounds().getY();
+        view.setAxisMode (3);
+        CHECK (view.plotBounds().getY() - classicTop == 26,
+              "curve mode adds a third control row to the top area");
+    }
+
+    // --- Mode 3: Freq vs Time tracks each tone ---------------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (3);
+        view.recomputeIfNeeded();
+        const auto& curves = view.getLiveCurves();
+        CHECK (!curves.empty() && !curves[0].x.empty(), "mode 3 produced a live curve");
+
+        int early = -1, late = -1;
+        for (size_t i = 0; i < curves[0].x.size(); ++i)
+        {
+            if (curves[0].x[i] < 0.25 && early < 0) early = (int) i;
+            if (curves[0].x[i] > 0.75) late = (int) i;
+        }
+        CHECK (early >= 0 && late >= 0, "curve spans both halves");
+        CHECK (std::abs ((double) curves[0].freqHz[(size_t) early] - 400.0) < 8.0,
+              "first half tracks the 400 Hz tone");
+        CHECK (std::abs ((double) curves[0].freqHz[(size_t) late] - 1600.0) < 8.0,
+              "second half tracks the 1600 Hz tone");
+        // Normalised like the classic spectrum: a 0.5-amplitude Hann-windowed
+        // tone lands near -12 dB, well above the noise floor.
+        CHECK (curves[0].ampDb[(size_t) early] > -40.0f && curves[0].ampDb[(size_t) late] > -40.0f,
+              "tracked tone levels are audible");
+
+        // Time mapping: the analysed region spans the full plot width.
+        const auto plot = view.plotBounds();
+        CHECK (std::abs ((double) view.timeToX (0.0) - plot.getX()) < 1e-3
+             && std::abs ((double) view.timeToX (1.0) - plot.getRight()) < 1e-3,
+              "time axis maps the region onto the full plot width");
+        CHECK (std::abs (view.xToTime (plot.getX()) - 0.0) < 1e-9
+             && std::abs (view.xToTime (plot.getRight()) - 1.0) < 1e-9,
+              "inverse time mapping is exact");
+
+        // Paint in mode 3 without crashing and with visible content.
+        const auto img = view.createComponentSnapshot (view.getLocalBounds());
+        int rowsWithContent = 0;
+        for (int y = plot.getY() + 4; y < plot.getBottom() - 2 && rowsWithContent < 50; ++y)
+            for (int x = plot.getX() + 4; x < plot.getRight() - 2; ++x)
+                if (img.getPixelAt (x, y).getBrightness () > 0.1f) { rowsWithContent++; break; }
+        CHECK (rowsWithContent >= 5, "mode 3 paints grid/curve content");
+    }
+
+    // --- Mode 4: Amp vs Time ---------------------------------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (4);
+        view.recomputeIfNeeded();
+        const auto& curves = view.getLiveCurves();
+        CHECK (!curves.empty() && !curves[0].x.empty(), "mode 4 produced a live curve");
+
+        int early = -1, late = -1;
+        for (size_t i = 0; i < curves[0].x.size(); ++i)
+        {
+            if (curves[0].x[i] < 0.25 && early < 0) early = (int) i;
+            if (curves[0].x[i] > 0.75) late = (int) i;
+        }
+        CHECK (early >= 0 && late >= 0, "curve spans both halves");
+        CHECK (curves[0].ampDb[(size_t) early] > -40.0f && curves[0].ampDb[(size_t) late] > -40.0f,
+              "tone levels are high in both halves");
+        // Total tracking reports the amplitude-weighted centroid frequency.
+        CHECK (std::abs ((double) curves[0].freqHz[(size_t) early] - 400.0) < 15.0
+             && std::abs ((double) curves[0].freqHz[(size_t) late] - 1600.0) < 15.0,
+              "centroid frequency follows each tone");
+
+        // Level mapping: higher dB -> smaller y (upward).
+        CHECK (view.levelToY (-20.0f) < view.levelToY (-60.0f), "level axis increases upward");
+    }
+
+    // --- Mode 5: Amp vs Freq ---------------------------------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (5);
+        view.recomputeIfNeeded();
+        const auto& curves = view.getLiveCurves();
+        CHECK (!curves.empty() && !curves[0].x.empty(), "mode 5 produced a live curve");
+
+        // x values are bin centres: find the bins nearest 400 Hz and 2600 Hz.
+        size_t i400 = 0, iFar = 0;
+        double d400 = 1e30, dFar = -1.0;
+        for (size_t i = 0; i < curves[0].x.size(); ++i)
+        {
+            const double f = curves[0].x[i];
+            if (std::abs (f - 400.0) < d400) { d400 = std::abs (f - 400.0); i400 = i; }
+            if (std::abs (f - 2600.0) > dFar) { dFar = std::abs (f - 2600.0); iFar = i; }
+        }
+        CHECK (d400 < 5.0, "a bin sits within 5 Hz of the 400 Hz tone");
+        CHECK ((double) curves[0].ampDb[i400] > -30.0f, "tone bin is strong");
+        CHECK ((double) curves[0].ampDb[iFar] < (double) curves[0].ampDb[i400] - 20.0,
+              "a far bin is at least 20 dB below the tone bin");
+    }
+
+    // --- Smoothing --------------------------------------------------------
+    {
+        std::vector<float> v = { 1.0f, 3.0f, 5.0f, 7.0f, 9.0f };
+        FFTAnalysisView::smoothSeries (v, 3);
+        CHECK (std::abs (v[2] - 5.0f) < 1e-6 && std::abs (v[1] - 3.0f) < 1e-6
+             && std::abs (v[4] - 8.0f) < 1e-6,
+              "window-3 smoothing is a centred moving average");
+    }
+
+    // --- Curve snapshots: separate store per mode -------------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (3);
+        view.recomputeIfNeeded();
+        view.handleSnapshotClick (0);   // stores into the curve store
+        CHECK (view.slotHasData (0) && view.curveSnapMode (0) == 3,
+              "mode-3 click stored a mode-3 curve snapshot");
+        CHECK (view.snapshotN (0) == 0, "classic snapshot store untouched");
+
+        // Switching modes: the slot no longer matches and the button state follows.
+        view.setAxisMode (4);
+        CHECK (!view.slotHasData (0), "slot does not match mode 4");
+        view.recomputeIfNeeded();
+        view.handleSnapshotClick (1);   // stores into slot 2 for mode 4
+        CHECK (view.curveSnapMode (1) == 4 && view.slotHasData (1),
+              "mode-4 click stored a mode-4 curve snapshot in its own slot");
+
+        // Shift+click clears the active-mode slot.
+        view.handleSnapshotClick (1, juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
+        CHECK (!view.slotHasData (1) && view.curveSnapMode (1) < 0,
+              "shift+click cleared the curve slot");
+
+        // Classic store still works in classic modes.
+        view.setAxisMode (0);
+        view.recomputeIfNeeded();
+        view.handleSnapshotClick (2);
+        CHECK (view.snapshotN (2) > 0 && !view.slotHasData (3), "classic store independent");
+    }
+
+    // --- Masking: spectral selection restricts the analysis ---------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (5);
+        app.doc()->spectralSel.addRect (0.0, 1.0, 0.0, 800.0, false);   // low band only
+        view.recomputeIfNeeded();
+        const auto& curves = view.getLiveCurves();
+        CHECK (!curves.empty() && !curves[0].x.empty(), "masked mode-5 curve computed");
+
+        size_t iLow = 0, iHigh = 0;
+        double dLow = 1e30, dHigh = 1e30;
+        for (size_t i = 0; i < curves[0].x.size(); ++i)
+        {
+            const double f = curves[0].x[i];
+            if (std::abs (f - 400.0) < dLow) { dLow = std::abs (f - 400.0); iLow = i; }
+            if (std::abs (f - 2600.0) < dHigh) { dHigh = std::abs (f - 2600.0); iHigh = i; }
+        }
+        CHECK ((double) curves[0].ampDb[iLow] > -30.0f, "in-mask tone bin still strong");
+        CHECK (curves[0].ampDb[iHigh] <= -159.0f, "out-of-mask bins fall to the floor");
+        app.doc()->spectralSel.clear();   // reset for later tests
+    }
+
+    // --- Deletion adjusts curve snapshots like classic ones ---------------
+    {
+        const juce::File wav2 = makeTempFile ("curve_snap_del.wav");
+        CHECK (writeWav (wav2, 1, 8000.0, 64000, [] (int, int64_t f, double rate)
+            { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 440.0 * (double) f / rate); }),
+              "wrote wav for curve snapshot deletion test");
+
+        Application app2;
+        CHECK (app2.openFile (wav2), "open wav for curve snapshot deletion test");
+        app2.settings.fftLocalN = 1024;
+
+        FFTAnalysisView view (app2);
+        view.setSize (300, 200);
+        view.setAxisMode (3);
+
+        // Three snapshots: before / straddling the right edge / contained in [4,6].
+        app2.setSelection ({ 1.0, 2.0 });
+        view.recomputeIfNeeded();
+        view.handleSnapshotClick (0);
+        CHECK (view.curveSnapMode (0) == 3 && std::abs (view.curveSnapshotT0 (0) - 1.0) < 1e-9,
+              "curve snapshot stored over [1,2]");
+
+        std::this_thread::sleep_for (std::chrono::milliseconds (80));
+        app2.setSelection ({ 5.0, 7.0 });
+        view.recomputeIfNeeded();
+        view.handleSnapshotClick (1);
+        CHECK (view.curveSnapMode (1) == 3 && std::abs (view.curveSnapshotT0 (1) - 5.0) < 1e-9,
+              "curve snapshot stored over [5,7]");
+
+        std::this_thread::sleep_for (std::chrono::milliseconds (80));
+        app2.setSelection ({ 4.2, 5.8 });
+        view.recomputeIfNeeded();
+        view.handleSnapshotClick (2);
+        CHECK (view.curveSnapMode (2) == 3 && std::abs (view.curveSnapshotT0 (2) - 4.2) < 1e-9,
+              "curve snapshot stored over [4.2,5.8]");
+
+        FileDoc* d = app2.doc();
+        Patch p;
+        view.recordAndAdjustSnapshotsForDeletion (d, 4.0, 6.0, p);
+
+        CHECK (std::abs (view.curveSnapshotT0 (0) - 1.0) < 1e-9
+             && std::abs (view.curveSnapshotT1 (0) - 2.0) < 1e-9,
+              "curve snapshot before the range untouched");
+        CHECK (std::abs (view.curveSnapshotT0 (1) - 4.0) < 1e-9
+             && std::abs (view.curveSnapshotT1 (1) - 5.0) < 1e-9,
+              "straddling curve snapshot trimmed to [4,5]");
+        CHECK (view.curveSnapMode (2) < 0, "contained curve snapshot cleared");
+
+        // Undo-style restore: slot 2 comes back and its series is recomputed.
+        view.restoreSnapshotSlots (d, p, false);
+        CHECK (view.curveSnapMode (2) == 3 && std::abs (view.curveSnapshotT0 (2) - 4.2) < 1e-9
+             && std::abs (view.curveSnapshotT1 (2) - 5.8) < 1e-9,
+              "undo restores the cleared curve snapshot's segment");
+        CHECK (!view.curveSnapData (2).empty(), "restored curve recomputed from audio");
+
+        // Redo-style: it is cleared again.
+        view.restoreSnapshotSlots (d, p, true);
+        CHECK (view.curveSnapMode (2) < 0, "redo clears the curve slot again");
+    }
+}
+
 static void testMaskedGainAndZero()
 {
     const juce::File wav = makeTempFile ("masked_gain.wav");
@@ -9951,6 +10195,7 @@ static int scRunUnitTestsImpl()
     progress ("spectral sel deletion adjust"); testSpectralSelectionAdjustForDeletion();
     progress ("delete shifts markers/saved sel"); testDeleteShiftsMarkersAndSavedSelections();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
+    progress ("curve analysis modes");     testCurveAnalysisModes();
     progress ("version string");      testVersionString();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

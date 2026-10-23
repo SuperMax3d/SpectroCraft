@@ -308,12 +308,35 @@ public:
     void handleSnapshotClick (int i,
                               juce::ModifierKeys mods =
                                   juce::ModifierKeys::getCurrentModifiers());
+    // Curve-mode variant: the same semantics applied to curveSnaps[i] in
+    // axis modes 3..5.
+    void handleCurveSnapshotClick (int i, juce::ModifierKeys mods);
+    // True when slot i holds data for the CURRENT mode (classic store or
+    // matching curve store).
+    bool slotHasData (int i) const;
+    // Update all eight buttons' stored/toggle/tooltip state for the current
+    // mode (called after an axis-mode change).
+    void refreshSnapshotButtonStates();
+    // Recompute every curve slot whose settings generation is stale.
+    void recomputeCurveSlots();
 
     // Local analysis parameters (unit tests + persistence wiring checks).
     int fftSize() const { return localN; }
     int axisMode() const { return axisMode_; }
     juce::ComboBox& fftSizeComboRef() { return fftSizeCombo; }
     juce::ComboBox& axisComboRef() { return axisCombo; }
+
+    // Curve-mode options (axis modes 3..5):
+    //   refTime: 0 = Relative (time axis starts at the selection),
+    //            1 = Absolute (file time scale).
+    //   smoothing window in points: 0 = None, 3 or 5.
+    //   track: 0 = Max (strongest component), 1 = Total (sum / centroid).
+    int refTimeMode() const { return refTime_; }
+    int smoothingWindow() const { return smooth_; }
+    int trackMode() const { return track_; }
+    juce::ComboBox& refTimeComboRef() { return refTimeCombo; }
+    juce::ComboBox& smoothComboRef() { return smoothCombo; }
+    juce::ComboBox& trackComboRef() { return trackCombo; }
 
     // Stored-snapshot state (unit tests).
     double snapshotT0 (int i) const { return snapshots[i].t0; }
@@ -349,6 +372,30 @@ public:
     int getAxisMode() const { return axisMode_; }
     const std::vector<std::vector<float>>& getThirdOctMags() const { return thirdOctMags; }
 
+    // Centred moving-average smoothing of a series (window in points).
+    static void smoothSeries (std::vector<float>& v, int window);
+
+    // Live curve data for the new analysis modes (one entry per visible
+    // channel, same order as app.visibleChannels). x holds seconds in the
+    // time-based modes and Hz in Amp vs Freq mode.
+    struct CurveData
+    {
+        std::vector<double> x;      // time (s) or frequency (Hz), per point
+        std::vector<float> ampDb;   // amplitude, dB rel. full scale (floor -160)
+        std::vector<float> freqHz;  // tracked frequency per point (time modes);
+                                     // equals x in Amp vs Freq mode
+    };
+    const std::vector<CurveData>& getLiveCurves() const { return liveCurves; }
+
+    // Curve snapshots (the 1..8 buttons in the new modes). Each slot stores
+    // BOTH amplitude and frequency series at once, kept separate from the
+    // classic FFT snapshot store.
+    bool curveSnapShown (int i) const { return curveSnaps[i].mode >= 0; }
+    int curveSnapMode (int i) const { return curveSnaps[i].mode; }
+    double curveSnapshotT0 (int i) const { return curveSnaps[i].t0; }
+    double curveSnapshotT1 (int i) const { return curveSnaps[i].t1; }
+    const std::vector<CurveData>& curveSnapData (int i) const { return curveSnaps[i].data; }
+
     // Local display ranges (independent of the spectrogram's settings):
     // frequency window [fLo_, fHi_] and level window [dbBottom_, dbTop_].
     double getFreqLo() const { return fLo_; }
@@ -366,6 +413,9 @@ public:
     // few pixels of the cursor, snapped is set and snapDotX/Y hold that point.
     juce::String buildCursorInfo (int x, int y, bool& snapped,
                                   float& snapDotX, float& snapDotY) const;
+    // Curve-mode variant of the readout (modes 3-5).
+    juce::String buildCurveCursorInfo (int x, int y, bool& snapped,
+                                       float& snapDotX, float& snapDotY) const;
 
     // Mapping helpers exposed for unit tests.
     float xToFreq (int x) const;
@@ -373,6 +423,29 @@ public:
     juce::Rectangle<int> plotBounds() const;
     float levelToY (double db) const;
     double yToLevel (float y) const;
+
+    // Time-axis mapping for the curve modes: absolute seconds <-> pixel x.
+    // Relative mode maps [cachedT0, cachedT1] onto the full plot width with a
+    // zero origin at the selection start; Absolute uses file time directly.
+    float timeToX (double tSecs) const;
+    double xToTime (int x) const;
+    // Vertical frequency mapping used by Freq vs Time mode.
+    float freqToY (double fHz) const;
+    double yToFreq (float y) const;
+
+    // Grid/label helpers shared between the classic and curve modes.
+    void buildFreqAxisTicks (std::vector<double>& freqTicks,
+                             std::vector<std::pair<double, bool>>& subTicks,
+                             bool& thirdOctFallback) const;
+    void drawFreqXLabels (juce::Graphics& g, const juce::Rectangle<int>& plot, int axisB,
+                          const std::vector<double>& freqTicks,
+                          const std::vector<std::pair<double, bool>>& subTicks,
+                          bool thirdOctFallback) const;
+    // Grid + curves + labels for the curve analysis modes (3-5).
+    void paintCurveModes (juce::Graphics& g);
+    // Cursor readout strip and right-drag rubber band (shared by all modes).
+    void paintCursorReadout (juce::Graphics& g, const juce::Rectangle<int>& plot) const;
+    void paintZoomRubberBand (juce::Graphics& g, const juce::Rectangle<int>& plot) const;
 
     // Harmonic reference mode (right-click "Set Harmonic References"): the
     // frequency under the cursor is treated as harmonic #N of a fundamental,
@@ -388,9 +461,14 @@ public:
     juce::String buildHarmonicsTable() const;
 
     // Switch frequency-axis mode: 0 = "FFT Linear", 1 = "FFT Log",
-    // 2 = "1/3 Octave". sendNotificationSync so the change is applied
+    // 2 = "1/3 Octave", 3 = "Freq vs Time", 4 = "Amp vs Time",
+    // 5 = "Amp vs Freq". sendNotificationSync so the change is applied
     // immediately (JUCE's default notification is async via AsyncUpdater).
     void setAxisMode (int m) { axisCombo.setSelectedId (m + 1, juce::sendNotificationSync); }
+
+    // True for the time-based curve modes (Freq vs Time / Amp vs Time), where
+    // the horizontal axis is time instead of frequency.
+    bool isTimeAxisMode() const { return axisMode_ == 3 || axisMode_ == 4; }
 
     // Standard IEC 61260-1 1/3-octave centre frequencies (50 Hz .. 16 kHz).
     static const double* thirdOctCentres() noexcept;
@@ -399,6 +477,8 @@ public:
 private:
     Application& app;
     juce::ComboBox fftSizeCombo, windowCombo, axisCombo;
+    // Curve-mode options (visible only in the new analysis modes):
+    juce::ComboBox refTimeCombo, smoothCombo, trackCombo;
     SnapshotButton snapBtns[8];
 
     // Fixed normalization floor for the stored magnitudes: independent of the
@@ -406,10 +486,16 @@ private:
     static constexpr double kNormFloorDb = 160.0;
 
     int localN = 2048;          // independent from the spectrogram's FFT size
-    // Frequency-axis mode: 0 = "FFT Linear", 1 = "FFT Log" (default),
-    // 2 = "1/3 Octave" (band plot, 50 Hz .. 16 kHz).
+    // Axis mode: 0 = "FFT Linear", 1 = "FFT Log" (default),
+    // 2 = "1/3 Octave" (band plot, 50 Hz .. 16 kHz),
+    // 3 = "Freq vs Time", 4 = "Amp vs Time", 5 = "Amp vs Freq".
     int axisMode_ = 1;
     bool followPlayhead_ = false;
+
+    // Curve-mode options (persisted in app.settings):
+    int refTime_ = 0;           // 0 = Relative, 1 = Absolute (time-based modes)
+    int smooth_ = 0;            // smoothing window in points: 0 / 3 / 5
+    int track_ = 0;             // 0 = Max, 1 = Total
 
     // Local display ranges: the frequency window and the level window are
     // independent of app.settings.dBRange and of the spectrogram view.
@@ -417,7 +503,8 @@ private:
     double dbTop_ = 0.0, dbBottom_ = -80.0; // visible level window (dB rel.)
 
     // Interaction state for axis panning / box zooming.
-    enum class DragMode { None, PanFreq, PanLevel, ZoomDrag };
+    enum class DragMode { None, PanFreq, PanLevel, PanFreqV, ZoomDrag };
+    // PanFreqV: vertical frequency panning in Freq vs Time mode.
     DragMode dragMode = DragMode::None;
     int dragStartX = 0, dragStartY = 0;
     juce::Rectangle<int> zoomRect;
@@ -436,11 +523,35 @@ private:
     };
     Snapshot snapshots[8];      // stored curve overlays, shared across all files
 
+    // Stored curves for the new analysis modes (modes 3..5). Kept in a
+    // separate array from `snapshots`: saving a curve never touches the
+    // classic FFT snapshot slots and vice versa. Each slot stores BOTH the
+    // amplitude series and the frequency series captured at save time.
+    struct CurveSnapshot
+    {
+        int mode = -1;          // axis mode it was stored in (3..5); -1 = empty
+        double t0 = 0, t1 = 0;  // analysed time segment of the source file
+        int gen = -1;           // settings generation at store time
+        int track = 0;          // tracking option at store time (0=Max, 1=Total)
+        int smooth = 0;         // smoothing window at store time (0/3/5)
+        bool shown = false;
+        std::vector<CurveData> data;   // per visible channel (same order)
+        FileDoc* source = nullptr;
+        std::vector<int> chans;
+    };
+    CurveSnapshot curveSnaps[8];
+
     // Cached spectrum data
     std::vector<std::vector<float>> mags;   // per channel, normalized 0..1 vs kNormFloorDb
     // Per-channel 1/3-octave band values (normalized 0..1), one entry per
     // band with centre <= Nyquist. Only populated when axisMode_ == 2.
     std::vector<std::vector<float>> thirdOctMags;
+    // Live curves for the new analysis modes (one per visible channel).
+    std::vector<CurveData> liveCurves;
+    int cachedCurveMode = -1;   // axis mode the live curves were computed in
+    int cachedCurveTrack = 0;   // track option at compute time
+    int cachedCurveSmooth = 0;  // smoothing window at compute time
+
     int cachedN = 0;
     double cachedT0 = -1, cachedT1 = -1;
     // The sample rate must match too: after a resample the same time region
@@ -467,6 +578,7 @@ private:
 
     // Zoom helpers for the local display ranges.
     void zoomFreqAtX (int x, double factor);
+    void zoomFreqAtY (float y, double factor);
     void zoomLevelAtY (float y, double factor);
     void showContextMenu (bool onLevelAxis, bool onFreqAxis, int clickX);
     // Popup asking which harmonic number the clicked frequency is.
@@ -480,6 +592,41 @@ private:
     void computeRegionFrom (AudioEngine& eng, const std::vector<int>& chans,
                             double t0, double t1, int n,
                             std::vector<std::vector<float>>& outMags);
+
+    // Curve computations for the new analysis modes. `mask` is nullptr when
+    // there is no spectral selection (all bins count); otherwise only bins
+    // inside mask.contains(tSecs, fHz) contribute.
+    //
+    // Time-based modes (Freq vs Time / Amp vs Time): one point per FFT frame
+    // under [t0, t1] (fixed 2048-point Hann frames; the hop grows so that at
+    // most kMaxCurveFrames points are produced). Per point: x = frame centre
+    // time, ampDb/freqHz follow `track` (Max: strongest bin's level +
+    // frequency; Total: summed level + amplitude-weighted centroid).
+    void computeTimeCurveFrom (const AudioEngine& eng, const std::vector<int>& chans,
+                               double t0, double t1, int track,
+                               const SpectralSelection* mask,
+                               std::vector<CurveData>& out);
+
+    // Amp vs Freq mode: one point per FFT bin; ampDb is the per-bin Max or
+    // Total (summed linear magnitudes) over all frames under [t0, t1].
+    void computeSpectrumCurveFrom (const AudioEngine& eng, const std::vector<int>& chans,
+                                   double t0, double t1, int n, int windowType,
+                                   int track, const SpectralSelection* mask,
+                                   std::vector<CurveData>& out);
+
+    // Recompute the live curves for the current mode/track/smoothing over
+    // region [t0, t1] (called from recomputeIfNeeded()).
+    void recomputeCurve (double t0, double t1);
+
+    // Top control area height: 52 px for the classic modes, 78 px when the
+    // third option row (Smoothing / Track) is visible.
+    int topHeight() const { return axisMode_ >= 3 ? 78 : 52; }
+
+    // Rebuild curve slot i from its source file using the parameters stored
+    // in the slot itself. Clears the slot when the source is gone.
+    void recomputeCurveSlot (int i);
+    // Clear curve slot i (Shift+click on a curve-mode button).
+    void clearCurveSlot (int i);
     // Live-analysis convenience wrapper: uses the active document.
     void computeRegion (double t0, double t1, int n,
                         std::vector<std::vector<float>>& outMags)

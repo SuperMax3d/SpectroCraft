@@ -749,8 +749,12 @@ void HistoryPanel::paint (juce::Graphics& g)
 FFTAnalysisView::FFTAnalysisView (Application& appIn)
     : app (appIn)
 {
-    // Restore the persisted frequency-analysis state (axis mode + FFT size).
-    axisMode_ = std::clamp (app.settings.fftAxisMode, 0, 2);
+    // Restore the persisted frequency-analysis state (axis mode + FFT size
+    // + curve-mode options).
+    axisMode_ = std::clamp (app.settings.fftAxisMode, 0, 5);
+    refTime_ = std::clamp (app.settings.fftRefTime, 0, 1);
+    smooth_ = app.settings.fftSmooth == 5 ? 5 : (app.settings.fftSmooth >= 1 && app.settings.fftSmooth <= 4 ? 3 : 0);
+    track_ = std::clamp (app.settings.fftTrack, 0, 1);
 
     for (int n = 1024; n <= 65536; n *= 2)
         fftSizeCombo.addItem (juce::String (n), n);
@@ -763,6 +767,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         settingsGen++;               // stored snapshots must be recomputed too
         mags.clear(); cachedN = 0;   // invalidate cached spectrum
         recomputeSnapshots();
+        recomputeCurveSlots();
         if (app.onStateChange) app.onStateChange();   // triggers the settings save
         repaint();
     };
@@ -777,20 +782,69 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         settingsGen++;               // stored snapshots must be recomputed too
         mags.clear(); cachedN = 0;
         recomputeSnapshots();
+        recomputeCurveSlots();
         repaint();
     };
 
     axisCombo.addItem ("FFT Linear", 1);
     axisCombo.addItem ("FFT Log", 2);
     axisCombo.addItem ("1/3 Octave", 3);
+    axisCombo.addItem ("Freq vs Time", 4);
+    axisCombo.addItem ("Amp vs Time", 5);
+    axisCombo.addItem ("Amp vs Freq", 6);
     axisCombo.setSelectedId (axisMode_ + 1, juce::dontSendNotification);
     axisCombo.onChange = [this] {
         axisMode_ = axisCombo.getSelectedId() - 1;
         app.settings.fftAxisMode = axisMode_;   // persisted between sessions
         thirdOctMags.clear();   // band cache is only valid for mode 2
+        liveCurves.clear();     // curve cache belongs to the previous mode
+        cachedCurveMode = -1;
         refreshSnapshotBands(); // re-derive stored snapshots' bands for the new mode
+        refreshSnapshotButtonStates();   // buttons now address the other store
         resetDisplayRanges();   // each mode has its own default frequency window
+        resized();              // row 1/row 3 contents differ per mode
         if (app.onStateChange) app.onStateChange();   // triggers the settings save
+    };
+
+    // Curve-mode options. Ref Time only applies to the time-based modes
+    // (Freq vs Time / Amp vs Time); Smoothing and Track apply to all three.
+    refTimeCombo.addItem ("Relative", 1);
+    refTimeCombo.addItem ("Absolute", 2);
+    refTimeCombo.setSelectedId (refTime_ + 1, juce::dontSendNotification);
+    refTimeCombo.onChange = [this] {
+        refTime_ = refTimeCombo.getSelectedId() - 1;
+        app.settings.fftRefTime = refTime_;   // persisted between sessions
+        if (app.onStateChange) app.onStateChange();
+        repaint();
+    };
+
+    smoothCombo.addItem ("None", 1);
+    smoothCombo.addItem ("3 Frames", 2);
+    smoothCombo.addItem ("5 Frames", 3);
+    smoothCombo.setSelectedId (smooth_ == 0 ? 1 : (smooth_ == 3 ? 2 : 3),
+                               juce::dontSendNotification);
+    smoothCombo.onChange = [this] {
+        const int id = smoothCombo.getSelectedId();
+        smooth_ = (id == 1) ? 0 : ((id == 2) ? 3 : 5);
+        app.settings.fftSmooth = smooth_;   // persisted between sessions
+        cachedCurveSmooth = -1;             // live curve must be re-smoothed
+        settingsGen++;                      // stored curves follow the current options
+        recomputeCurveSlots();
+        if (app.onStateChange) app.onStateChange();
+        repaint();
+    };
+
+    trackCombo.addItem ("Max", 1);
+    trackCombo.addItem ("Total", 2);
+    trackCombo.setSelectedId (track_ + 1, juce::dontSendNotification);
+    trackCombo.onChange = [this] {
+        track_ = trackCombo.getSelectedId() - 1;
+        app.settings.fftTrack = track_;   // persisted between sessions
+        cachedCurveTrack = -1;            // live curve must be re-tracked
+        settingsGen++;                    // stored curves follow the current options
+        recomputeCurveSlots();
+        if (app.onStateChange) app.onStateChange();
+        repaint();
     };
 
     for (int i = 0; i < 8; ++i)
@@ -809,12 +863,22 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
                              "Stored snapshots are recomputed at the new size.");
     windowCombo.setTooltip ("Window function applied to each analysed frame: Rectangular, Hann or Hamming. "
                             "Stored snapshots are recomputed with the new window.");
-    axisCombo.setTooltip ("Frequency axis mode: FFT Linear (linear Hz), FFT Log (logarithmic) or "
-                          "1/3 Octave (IEC 61260-1 band plot from 50 Hz to 16 kHz).");
+    axisCombo.setTooltip ("Frequency axis mode: FFT Linear (linear Hz), FFT Log (logarithmic), "
+                          "1/3 Octave (IEC 61260-1 band plot from 50 Hz to 16 kHz), "
+                          "Freq vs Time / Amp vs Time (curves over the selection, honouring a "
+                          "spectral-selection mask) or Amp vs Freq (per-bin spectrum of the selection).");
+    refTimeCombo.setTooltip ("Time scale for the time-based modes: Relative starts at the selection "
+                             "start; Absolute uses the file's absolute time.");
+    smoothCombo.setTooltip ("Moving-average smoothing applied to the plotted curve: None, 3 or 5 frames.");
+    trackCombo.setTooltip ("Max tracks the strongest component per frame/bin (its level and frequency); "
+                           "Total tracks the summed signal level and the amplitude-weighted centroid frequency.");
 
     addAndMakeVisible (&fftSizeCombo);
     addAndMakeVisible (&windowCombo);
     addAndMakeVisible (&axisCombo);
+    addAndMakeVisible (&refTimeCombo);
+    addAndMakeVisible (&smoothCombo);
+    addAndMakeVisible (&trackCombo);
     for (auto& b : snapBtns) addAndMakeVisible (&b);
 
     resetDisplayRanges();   // start at the mode defaults for the current file
@@ -843,6 +907,7 @@ void FFTAnalysisView::onSampleRateChanged()
     fftAxisLimits (axisMode_, rate, fLo_, fHi_);
     settingsGen++;
     recomputeSnapshots();
+    recomputeCurveSlots();
     repaint();
 }
 
@@ -890,6 +955,25 @@ void FFTAnalysisView::zoomFreqAtX (int x, double factor)
         // Degenerate: fall back to the mode defaults.
         fftAxisLimits (axisMode_, rate, fLo_, fHi_);
     }
+    repaint();
+}
+
+// Zoom the frequency window around the cursor y position: the vertical axis
+// of Freq vs Time mode (frequency increases upward there).
+void FFTAnalysisView::zoomFreqAtY (float y, double factor)
+{
+    const auto plot = plotBounds();
+    if (plot.getHeight() <= 0 || fHi_ <= fLo_) return;
+
+    const double rate = app.audioEngine().sampleRate();
+    const double nyq = rate * 0.5;
+    const double fCursor = std::clamp ((double) yToFreq (y), 1e-9, nyq);
+
+    fLo_ = std::clamp (fCursor + (fLo_ - fCursor) / factor, 0.0, nyq);
+    fHi_ = std::clamp (fCursor + (fHi_ - fCursor) / factor, 0.0, nyq);
+
+    if (fHi_ <= fLo_ * 1.0001)
+        fftAxisLimits (axisMode_, rate, fLo_, fHi_);   // degenerate: mode defaults
     repaint();
 }
 
@@ -1021,6 +1105,14 @@ void FFTAnalysisView::recomputeIfNeeded()
     if (!app.selection.isEmpty()) { t0 = app.selection.getStart(); t1 = app.selection.getEnd(); }
     else                          { t0 = app.playhead;          t1 = app.playhead; }
 
+    // The new analysis modes compute per-frame curves instead of an averaged
+    // spectrum; they have their own cache and never touch `mags`.
+    if (axisMode_ >= 3)
+    {
+        recomputeCurve (t0, t1);
+        return;
+    }
+
     const int n = localN;
     const auto file = app.audioEngine().getFile();
 
@@ -1058,6 +1150,262 @@ void FFTAnalysisView::recomputeIfNeeded()
     cachedFile = file;
     lastComputeMs = now;
     lastComputeWasExpensive = (regionLenS > (double) n);
+}
+
+// ------------------------------------------------- Curve analysis modes
+//
+// The new axis modes (3 = Freq vs Time, 4 = Amp vs Time, 5 = Amp vs Freq)
+// compute per-frame curves over the analysed region instead of an averaged
+// spectrum. A spectral selection acts as a mask: only bins inside it count.
+
+static constexpr int kMaxCurveFrames = 2048;   // max points in one curve
+static constexpr int kTimeModeFFT = 2048;      // fixed FFT size for the time modes
+
+// Frame placement shared by both curve computations: frames of `fftN`
+// samples covering [s0, s1] with a hop that yields at most kMaxCurveFrames
+// points. A region shorter than one window gets a single frame centred on it
+// (clamped inside the file).
+static std::vector<int64_t> curveFrameStarts (double totalSamples,
+                                              int64_t s0, int64_t s1, int fftN)
+{
+    std::vector<int64_t> starts;
+    const int64_t avail = s1 - s0;
+    if (avail <= fftN)
+    {
+        const int64_t mid = (int64_t) ((s0 + s1) * 0.5);
+        starts.push_back (std::clamp<int64_t> (mid - fftN / 2, 0,
+                                                std::max<int64_t> (0, totalSamples - fftN)));
+        return starts;
+    }
+    const int64_t hop = std::max<int64_t> (fftN / 4,
+                                           (avail + kMaxCurveFrames - 1) / kMaxCurveFrames);
+    for (int64_t s = s0; s + fftN <= s1 && (int) starts.size() < kMaxCurveFrames; s += hop)
+        starts.push_back (s);
+    if (starts.empty())
+        starts.push_back (std::clamp<int64_t> (s0, 0,
+                                               std::max<int64_t> (0, totalSamples - fftN)));
+    return starts;
+}
+
+void FFTAnalysisView::recomputeCurve (double t0, double t1)
+{
+    const auto& eng = app.audioEngine();
+    if (!eng.isFileLoaded()) { liveCurves.clear(); cachedCurveMode = -1; return; }
+
+    const double rate = eng.sampleRate();
+    const double durS = eng.duration();
+    t0 = std::clamp (t0, 0.0, durS);
+    t1 = std::clamp (t1, t0, durS);
+
+    const auto file = eng.getFile();
+    if (cachedCurveMode == axisMode_ && cachedCurveTrack == track_
+        && cachedCurveSmooth == smooth_ && cachedT0 == t0 && cachedT1 == t1
+        && cachedRate == rate && cachedFile == file
+        && liveCurves.size() == app.visibleChannels.size())
+        return;
+
+    // Throttle repeated expensive multi-frame computations (same policy as
+    // the classic spectrum path): single-frame updates stay instant.
+    const int64_t now = juce::Time::getMillisecondCounter();
+    const double regionLenS = std::max (0.0, (t1 - t0) * rate);
+    if (!liveCurves.empty() && lastComputeWasExpensive && now - lastComputeMs < 60
+        && regionLenS > (double) kTimeModeFFT)
+        return;
+
+    // A spectral selection masks the analysis: only bins inside it count.
+    const SpectralSelection* mask = nullptr;
+    FileDoc* d = app.doc();
+    if (d != nullptr && !d->spectralSel.empty())
+        mask = &d->spectralSel;
+
+    std::vector<CurveData> out;
+    const auto& chans = app.visibleChannels;
+    if (axisMode_ == 5)
+        computeSpectrumCurveFrom (eng, chans, t0, t1, localN,
+                                  windowCombo.getSelectedId() - 1, track_, mask, out);
+    else
+        computeTimeCurveFrom (eng, chans, t0, t1, track_, mask, out);
+
+    // Moving-average smoothing on the plotted series. In Amp vs Freq mode only
+    // the amplitude is smoothed: the x values are bin centres and must stay
+    // exact.
+    if (smooth_ > 1)
+        for (auto& cd : out)
+        {
+            smoothSeries (cd.ampDb, smooth_);
+            if (axisMode_ != 5) smoothSeries (cd.freqHz, smooth_);
+        }
+
+    liveCurves = std::move (out);
+    cachedCurveMode = axisMode_;
+    cachedCurveTrack = track_;
+    cachedCurveSmooth = smooth_;
+    cachedT0 = t0; cachedT1 = t1;
+    cachedRate = rate;
+    cachedFile = file;
+
+    lastComputeMs = now;
+    lastComputeWasExpensive = regionLenS > (double) kTimeModeFFT * 4;
+}
+
+void FFTAnalysisView::computeTimeCurveFrom (const AudioEngine& eng, const std::vector<int>& chans,
+                                            double t0, double t1, int track,
+                                            const SpectralSelection* mask,
+                                            std::vector<CurveData>& out)
+{
+    const double rate = eng.sampleRate();
+    const double durS = eng.duration();
+    const int64_t totalSamples = (int64_t) (durS * rate);
+    const int64_t s0 = (int64_t) std::clamp (t0 * rate, 0.0, (double) totalSamples);
+    const int64_t s1 = (int64_t) std::clamp (t1 * rate, (double) s0, (double) totalSamples);
+    const int fftN = kTimeModeFFT;
+
+    out.clear();
+    for (int ch : chans)
+    {
+        if (ch < 0 || ch >= eng.numChannels()) continue;
+
+        CurveData cd;
+        std::vector<int64_t> starts = curveFrameStarts (totalSamples, s0, s1, fftN);
+
+        const int order = (int) std::log2 ((double) fftN);
+        // Fixed Hann window for the time-based modes: the Win type combo is
+        // hidden there, and a Hann keeps peak tracking free of leakage.
+        std::vector<float> win ((size_t) fftN);
+        for (int i = 0; i < fftN; ++i)
+            win[(size_t) i] = 0.5f * (1.0f - std::cos (2.0 * juce::MathConstants<double>::pi
+                                                       * (double) i / (double) fftN));
+
+        std::vector<float> samples ((size_t) fftN, 0.0f);   // zero-filled: partial reads at the file end stay silent
+        std::vector<float> buf ((size_t) fftN * 2, 0.0f);
+
+        for (int64_t s : starts)
+        {
+            const double tMid = ((double) s + fftN / 2.0) / rate;   // frame centre time
+            std::fill (samples.begin(), samples.end(), 0.0f);
+            if (!eng.readSamples (ch, s, fftN, samples.data())) continue;
+            for (int i = 0; i < fftN; ++i)
+                buf[i] = samples[i] * win[(size_t) i];
+            scfft::realForward (buf.data(), order);
+
+            double maxMag = 0.0, maxF = 0.0, sumLin = 0.0, wsum = 0.0;
+            for (int k = 1; k <= fftN / 2; ++k)
+            {
+                const float re = buf[k * 2], im = buf[k * 2 + 1];
+                const double m = std::sqrt ((double) re * re + (double) im * im);
+                if (mask != nullptr
+                    && !mask->contains (tMid, (double) k * rate / (double) fftN))
+                    continue;   // outside the spectral selection: this bin does not count
+                const double f = (double) k * rate / (double) fftN;
+                if (m > maxMag) { maxMag = m; maxF = f; }
+                sumLin += m;
+                wsum += m * f;
+            }
+
+            // Max: strongest bin's level + frequency. Total: summed level +
+            // amplitude-weighted centroid frequency.
+            // Normalise by the FFT size exactly like the classic spectrum path,
+            // so a full-scale tone lands near 0 dB (window coherent gain aside).
+            const double lin = (track == 0) ? maxMag / fftN : sumLin / fftN;
+            cd.x.push_back (tMid);
+            cd.ampDb.push_back ((float) std::max (-kNormFloorDb,
+                                                  20.0 * std::log10 (std::max (1e-12, lin))));
+            cd.freqHz.push_back ((float) ((track == 0) ? maxF
+                                                      : (sumLin > 1e-30 ? wsum / sumLin : 0.0)));
+        }
+
+        out.push_back (std::move (cd));
+    }
+}
+
+void FFTAnalysisView::computeSpectrumCurveFrom (const AudioEngine& eng, const std::vector<int>& chans,
+                                                double t0, double t1, int n, int windowType,
+                                                int track, const SpectralSelection* mask,
+                                                std::vector<CurveData>& out)
+{
+    const double rate = eng.sampleRate();
+    const double durS = eng.duration();
+    const int64_t totalSamples = (int64_t) (durS * rate);
+    const int64_t s0 = (int64_t) std::clamp (t0 * rate, 0.0, (double) totalSamples);
+    const int64_t s1 = (int64_t) std::clamp (t1 * rate, (double) s0, (double) totalSamples);
+
+    out.clear();
+    for (int ch : chans)
+    {
+        if (ch < 0 || ch >= eng.numChannels()) continue;
+
+        CurveData cd;
+        const int numBins = n / 2 + 1;
+        std::vector<double> accMax ((size_t) numBins, 0.0);   // per-bin max linear magnitude
+        std::vector<double> accSum ((size_t) numBins, 0.0);   // per-bin summed magnitudes
+
+        const int order = (int) std::log2 ((double) n);
+        std::vector<float> win ((size_t) n, 1.0f);
+        if (windowType == 1 || windowType == 2)
+            for (int i = 0; i < n; ++i)
+                win[(size_t) i] = (windowType == 1)
+                    ? 0.5f * (1.0f - std::cos (2.0 * juce::MathConstants<double>::pi
+                                               * (double) i / (double) n))
+                    : 0.54f - 0.46f * std::cos (2.0 * juce::MathConstants<double>::pi
+                                               * (double) i / ((double) n - 1.0));
+
+        std::vector<float> samples ((size_t) n, 0.0f);
+        std::vector<float> buf ((size_t) n * 2, 0.0f);
+        const std::vector<int64_t> starts = curveFrameStarts (totalSamples, s0, s1, n);
+        for (int64_t s : starts)
+        {
+            const double tMid = ((double) s + n / 2.0) / rate;
+            std::fill (samples.begin(), samples.end(), 0.0f);
+            if (!eng.readSamples (ch, s, n, samples.data())) continue;
+            for (int i = 0; i < n; ++i)
+                buf[i] = samples[i] * win[(size_t) i];
+            scfft::realForward (buf.data(), order);
+            for (int k = 1; k <= n / 2; ++k)
+            {
+                if (mask != nullptr
+                    && !mask->contains (tMid, (double) k * rate / (double) n))
+                    continue;
+                const float re = buf[k * 2], im = buf[k * 2 + 1];
+                const double m = std::sqrt ((double) re * re + (double) im * im);
+                if (m > accMax[(size_t) k]) accMax[(size_t) k] = m;
+                accSum[(size_t) k] += m;
+            }
+        }
+
+        // Same normalisation as the classic spectrum path: divide by the FFT
+        // size (and by the frame count for Total) so levels are comparable to
+        // the averaged spectrum of a single window.
+        const double numFrames = std::max<int64_t> (1, starts.size());
+        for (int k = 1; k <= n / 2; ++k)
+        {
+            const double f = (double) k * rate / (double) n;
+            const double lin = (track == 0) ? accMax[(size_t) k] / n
+                                            : accSum[(size_t) k] / ((double) numFrames * n);
+            cd.x.push_back (f);
+            cd.ampDb.push_back ((float) std::max (-kNormFloorDb,
+                                                  20.0 * std::log10 (std::max (1e-12, lin))));
+            cd.freqHz.push_back ((float) f);   // the "frequency curve" is the axis itself
+        }
+
+        out.push_back (std::move (cd));
+    }
+}
+
+void FFTAnalysisView::smoothSeries (std::vector<float>& v, int window)
+{
+    if (window < 2 || v.size() <= (size_t) window) return;
+    const size_t half = (size_t) (window - 1) / 2;   // windows are odd: 3 or 5
+    std::vector<float> tmp (v);
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+        double acc = 0.0;
+        size_t cnt = 0;
+        const size_t lo = (i > half) ? i - half : 0;
+        const size_t hi = std::min (v.size() - 1, i + half);
+        for (size_t j = lo; j <= hi; ++j)
+        { acc += tmp[j]; ++cnt; }
+        v[i] = (float) (acc / (double) cnt);
+    }
 }
 
 void FFTAnalysisView::recomputeSnapshots()
@@ -1107,7 +1455,7 @@ int FFTAnalysisView::axisWidth() const
 juce::Rectangle<int> FFTAnalysisView::plotBounds() const
 {
     const auto b = getLocalBounds();
-    const int topH = 52;      // two control rows
+    const int topH = topHeight();   // two control rows (three in curve modes)
     const int axisR = axisWidth(), axisB = 18, readoutH = 16;
     return { 2, topH + 2,
              std::max (1, b.getWidth() - axisR - 4),
@@ -1143,15 +1491,46 @@ double FFTAnalysisView::freqToX (double f) const
 void FFTAnalysisView::resized()
 {
     auto b = getLocalBounds();
-    // Row 1: FFT size combo + window combo. Row 2: linear toggle + snapshots.
+    // Row 1: classic modes show the FFT size + window combos; the time-based
+    // curve modes replace them with the Ref Time option. (Smoothing / Track
+    // live on row 3, which only exists in the new analysis modes.)
     auto row1 = b.removeFromTop (26);
-    fftSizeCombo.setBounds (30, row1.getY(), 85, 22);
-    windowCombo.setBounds (148, row1.getY(), 90, 22);
+    if (isTimeAxisMode())
+    {
+        // The time-based modes replace the FFT/Win options with Ref Time.
+        refTimeCombo.setVisible (true);
+        fftSizeCombo.setVisible (false);
+        windowCombo.setVisible (false);
+        refTimeCombo.setBounds (58, row1.getY(), 120, 22);
+    }
+    else
+    {
+        refTimeCombo.setVisible (false);
+        fftSizeCombo.setVisible (true);
+        windowCombo.setVisible (true);
+        fftSizeCombo.setBounds (30, row1.getY(), 85, 22);
+        windowCombo.setBounds (148, row1.getY(), 90, 22);
+    }
 
     auto row2 = b.removeFromTop (26);
     axisCombo.setBounds (4, row2.getY() + 2, 90, 22);
     for (int i = 0; i < 8; ++i)
         snapBtns[i].setBounds (98 + i * 24, row2.getY() + 2, 23, 20);
+
+    // Row 3 (curve modes only): Smoothing + Track.
+    if (axisMode_ >= 3)
+    {
+        auto row3 = b.removeFromTop (26);
+        smoothCombo.setVisible (true);
+        trackCombo.setVisible (true);
+        smoothCombo.setBounds (58, row3.getY(), 95, 22);
+        trackCombo.setBounds (197, row3.getY(), 70, 22);
+    }
+    else
+    {
+        smoothCombo.setVisible (false);
+        trackCombo.setVisible (false);
+    }
 
     repaint();
 }
@@ -1162,18 +1541,28 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     g.fillAll (juce::Colours::black);
 
     // Top control rows background + labels
-    const int topH = 52;
+    const int topH = topHeight();
     const auto topRow = juce::Rectangle<int> (fullBounds).removeFromTop (topH);
     g.setColour (juce::Colour::fromRGB (45, 45, 48));
     g.fillRect (topRow);
     g.setColour (juce::Colours::white);
     g.setFont (11.0f);
-    g.drawText ("FFT", 6, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
-    g.drawText ("Win", 124, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
+    if (isTimeAxisMode())
+        g.drawText ("Ref Time", 6, topRow.getY() + 5, 48, 16, juce::Justification::centredLeft, false);
+    else
+    {
+        g.drawText ("FFT", 6, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
+        g.drawText ("Win", 124, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
+    }
+    if (axisMode_ >= 3)
+    {
+        const int row3Y = 52;   // third control row
+        g.drawText ("Smooth", 6, row3Y + 5, 48, 16, juce::Justification::centredLeft, false);
+        g.drawText ("Track", 175, row3Y + 5, 20, 16, juce::Justification::centredLeft, false);
+    }
 
     const int axisR = axisWidth();   // right level-axis width
     const int axisB = 18;   // bottom Hz axis height
-    const int readoutH = 16; // cursor info strip at the very bottom
     const auto plot = plotBounds();
 
     if (!app.audioEngine().isFileLoaded())
@@ -1186,6 +1575,13 @@ void FFTAnalysisView::paint (juce::Graphics& g)
 
     recomputeIfNeeded();
 
+    // The new analysis modes have their own grid / curve / label pipeline.
+    if (axisMode_ >= 3)
+    {
+        paintCurveModes (g);
+        return;
+    }
+
     const double rate = app.audioEngine().sampleRate();
     // Local display ranges (independent of the spectrogram's settings).
     const double fLo = fLo_, fHi = fHi_;
@@ -1193,11 +1589,532 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     const bool haveSpectrum = (n > 1) && !mags.empty()
                               && (axisMode_ != 2 || !thirdOctMags.empty());
 
-    // Frequency grid ticks for the current axis mode
+    // Frequency grid ticks for the current axis mode.
     std::vector<double> freqTicks;
     // Linear subdivisions inserted into wide log gaps (freq, hasLabel).
     std::vector<std::pair<double, bool>> subTicks;
     bool thirdOctFallback = false;   // deep zoom between band centres
+    buildFreqAxisTicks (freqTicks, subTicks, thirdOctFallback);
+
+    // Grid: frequency ticks + level lines. The level grid step adapts to the
+    // visible window so zooming in/out always shows a few readable lines.
+    const double dbSpan = std::max (1e-9, dbTop_ - dbBottom_);
+    int dbStep = 12;
+    for (int cand : { 2, 4, 6, 10, 12, 20, 30 })
+        if (dbSpan / cand >= 3.0 && dbSpan / cand <= 9.0) { dbStep = cand; break; }
+
+    g.setColour (juce::Colour::fromRGB (40, 40, 46));
+    for (double f : freqTicks)
+        g.drawVerticalLine ((float) freqToX (f), plot.getY(), plot.getBottom());
+    for (const auto& st : subTicks)
+        g.drawVerticalLine ((float) freqToX (st.first), plot.getY(), plot.getBottom());
+    for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
+        g.drawHorizontalLine ((int) levelToY (L), plot.getX(), plot.getRight());
+
+    // Curves
+    if (!haveSpectrum)
+    {
+        g.setColour (juce::Colours::grey);
+        g.setFont (11.0f);
+        g.drawText ("No audio data", plot, juce::Justification::centred);
+    }
+    else
+    {
+        // Clip the curves to the plot area: with a zoomed level window parts of
+        // the curve can sit above/below the visible range. (This JUCE build has
+        // no add/removeClipRegion, so save/restore the state around it.)
+        g.saveState();
+        g.reduceClipRegion (plot);
+
+        // Draw in frequency space: bin k corresponds to f = k * rate / n.
+        // (The magnitude vector only has n/2+1 entries — never index it by x!)
+        // Each curve is mapped with the FFT size it was computed at, so stored
+        // snapshots do not shift when the live analysis uses a different size.
+        auto drawCurve = [&](const std::vector<float>& mag, int curveN, const juce::Colour& col,
+                             float w)
+        {
+            g.setColour (col);
+            juce::Path path;
+            bool started = false;
+            for (int k = 1; k <= curveN / 2 && k < (int) mag.size(); ++k)
+            {
+                const double f = (double) k * rate / (double) curveN;
+                if (f < fLo || f > fHi) continue;
+                const float x = (float) freqToX (f);
+                // Stored magnitudes are normalized against the fixed floor.
+                const double dB = -kNormFloorDb * (1.0 - (double) mag[k]);
+                const float y = levelToY (dB);
+                if (!started) { path.startNewSubPath (x, y); started = true; }
+                else          path.lineTo (x, y);
+            }
+            g.strokePath (path, juce::PathStrokeType (w));
+        };
+
+        // In 1/3-octave mode each band is drawn as a flat step spanning its
+        // frequency edges with vertical connectors at the boundaries — the
+        // classic 1/3-octave band-plot look, not a smooth curve.
+        auto drawBandCurve = [&](const std::vector<float>& bands, const juce::Colour& col,
+                                 float w)
+        {
+            if (bands.empty()) return;
+            g.setColour (col);
+            juce::Path path;
+            bool started = false;
+            for (int b = 0; b < kNumThirdOctBands && b < (int) bands.size(); ++b)
+            {
+                const double fc = kThirdOctCenters[b];
+                if (fc > fHi + 1e-6) break;
+                const double lo = std::max (fLo, fc * std::pow (2.0, -1.0 / 6.0));
+                const double hi = std::min (fHi, fc * std::pow (2.0,  1.0 / 6.0));
+                if (hi <= lo) continue;
+                const float xLo = (float) freqToX (lo);
+                const float xHi = (float) freqToX (hi);
+                const double dBb = -kNormFloorDb * (1.0 - (double) bands[(size_t) b]);
+                const float y   = levelToY (dBb);
+                if (!started) { path.startNewSubPath (xLo, y); started = true; }
+                else          path.lineTo (xLo, y);    // vertical connector at the shared boundary
+                path.lineTo (xHi, y);                  // flat top of this band
+            }
+            g.strokePath (path, juce::PathStrokeType (w));
+        };
+
+        // Stored snapshot overlays first: full slot colour, just a little
+        // thinner than the live curves. Live curves go on top.
+        for (int i = 0; i < 8; ++i)
+            if (snapshots[i].shown && snapshots[i].n > 1 && !snapshots[i].mags.empty())
+                for (size_t c = 0; c < snapshots[i].mags.size() && c < 4; ++c)
+                    if (axisMode_ == 2)
+                    {
+                        // Braces are required here: without them the else below
+                        // would bind to the inner if and snapshot curves would
+                        // never be drawn in linear/log axis modes.
+                        if (!snapshots[i].bands.empty())
+                            drawBandCurve (snapshots[i].bands[c], snapColours[i], 1.0f);
+                    }
+                    else
+                        drawCurve (snapshots[i].mags[c], snapshots[i].n, snapColours[i], 1.0f);
+
+        if (axisMode_ == 2)
+            for (size_t c = 0; c < mags.size() && c < 4; ++c)
+                drawBandCurve (thirdOctMags[c], fftColours[c], 1.2f);
+        else
+            for (size_t c = 0; c < mags.size() && c < 4; ++c)
+                drawCurve (mags[c], n, fftColours[c], 1.2f);
+
+        g.restoreState();
+    }
+
+    // Axis labels
+    drawFreqXLabels (g, plot, axisB, freqTicks, subTicks, thirdOctFallback);
+    // With a scale calibration the grid lines show absolute levels
+    // (dB-SPL for Pascal files; linear V/g values for volts/grams files)
+    // instead of relative dB.
+    const ScaleCalibration& sc = app.scale();
+    for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
+        g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
+                    (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
+
+    // Harmonic reference lines: while active, the frequency under the cursor
+    // is harmonic #N of a fundamental and harmonics 1..N get delicate
+    // vertical markers wherever they are inside the visible window.
+    if (harmonicRefActive_ && haveSpectrum && harmonicAnchorF_ > 0.0)
+    {
+        const double fFund = harmonicAnchorF_ / std::max (1, harmonicN_);
+        for (int k = 1; k <= harmonicN_; ++k)
+        {
+            const double f = (double) k * fFund;
+            if (f < fLo || f > fHi) continue;
+            const float x = (float) freqToX (f);
+            g.setColour (juce::Colour::fromRGBA (140, 230, 255, 160));
+            g.drawVerticalLine (x, plot.getY(), plot.getBottom());
+            g.setFont (9.0f);
+            g.drawText (juce::String (k), x - 8, plot.getY() + 1, 16, 12,
+                        juce::Justification::centred, false);
+        }
+    }
+
+    // Cursor readout + rubber band (shared with the curve modes).
+    paintCursorReadout (g, plot);
+    paintZoomRubberBand (g, plot);
+}
+
+// Bottom-axis labels for a frequency-x axis (classic modes + Amp vs Freq).
+void FFTAnalysisView::drawFreqXLabels (juce::Graphics& g, const juce::Rectangle<int>& plot,
+                                       int axisB, const std::vector<double>& freqTicks,
+                                       const std::vector<std::pair<double, bool>>& subTicks,
+                                       bool thirdOctFallback) const
+{
+    g.setColour (juce::Colours::lightgrey);
+    g.setFont (9.0f);
+    for (double f : freqTicks)
+    {
+        if (axisMode_ == 2 && !thirdOctFallback && !isThirdOctLabelFreq (f))
+            continue;   // avoid crowding
+        const float x = (float) freqToX (f);
+        juce::String label;
+        if (f >= 1000.0)
+            label = juce::String (f / 1000.0, std::abs (f - std::round (f)) < 1e-6 ? 0 : 1) + "k";
+        else
+            label = juce::String ((int) std::lround (f));
+        g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
+    }
+    for (const auto& st : subTicks)
+    {
+        if (!st.second) continue;
+        const float x = (float) freqToX (st.first);
+        juce::String label;
+        if (st.first >= 1000.0)
+            label = juce::String (st.first / 1000.0, std::abs (st.first - std::round (st.first)) < 1e-6 ? 0 : 1) + "k";
+        else
+            label = juce::String ((int) std::lround (st.first));
+        g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
+    }
+}
+
+// Time tick labels: decimal seconds for short spans, m:ss / h:mm:ss beyond.
+static juce::String formatTimeTickLabel (double s)
+{
+    if (!(s >= 0.0)) return "0";
+    if (s < 60.0)
+        return juce::String (s, s < 1.0 ? 3 : (s < 10.0 ? 1 : 0));
+    const int whole = (int) std::lround (s);
+    const int h = whole / 3600;
+    const int m = (whole % 3600) / 60;
+    const int sec = whole % 60;
+    if (h > 0)
+        return juce::String (h) + ":" + juce::String (m).paddedLeft ('0', 2)
+             + ":" + juce::String (sec).paddedLeft ('0', 2);
+    return juce::String (m) + ":" + juce::String (sec).paddedLeft ('0', 2);
+}
+
+// Time <-> x mapping for the time-based curve modes. The analysed region
+// [cachedT0, cachedT1] always spans the full plot width; Relative vs Absolute
+// only changes which values the ticks are labelled with.
+float FFTAnalysisView::timeToX (double tSecs) const
+{
+    const auto plot = plotBounds();
+    if (plot.getWidth() <= 0)
+        return (float) plot.getX();
+    const double span = std::max (1e-9, cachedT1 - cachedT0);
+    const double t = std::clamp ((tSecs - cachedT0) / span, 0.0, 1.0);
+    return (float) (plot.getX() + t * plot.getWidth());
+}
+
+double FFTAnalysisView::xToTime (int x) const
+{
+    const auto plot = plotBounds();
+    if (plot.getWidth() <= 0)
+        return cachedT0;
+    const double span = std::max (1e-9, cachedT1 - cachedT0);
+    const double t = std::clamp ((double) (x - plot.getX()) / plot.getWidth(), 0.0, 1.0);
+    return cachedT0 + t * span;
+}
+
+// Frequency <-> y mapping for Freq vs Time mode (frequency increases upward).
+float FFTAnalysisView::freqToY (double fHz) const
+{
+    const auto plot = plotBounds();
+    if (plot.getHeight() <= 0 || fHi_ <= fLo_)
+        return (float) plot.getBottom();
+    const double t = std::clamp ((fHz - fLo_) / std::max (1e-9, fHi_ - fLo_), 0.0, 1.0);
+    return (float) (plot.getBottom() - t * plot.getHeight());
+}
+
+double FFTAnalysisView::yToFreq (float y) const
+{
+    const auto plot = plotBounds();
+    if (plot.getHeight() <= 0 || fHi_ <= fLo_)
+        return fLo_;
+    const double t = std::clamp ((plot.getBottom() - (double) y) / plot.getHeight(), 0.0, 1.0);
+    return fLo_ + t * (fHi_ - fLo_);
+}
+
+// Grid, curves and labels for the curve analysis modes (3-5).
+void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
+{
+    const int axisR = axisWidth();   // right-axis width
+    const int axisB = 18;            // bottom axis height
+    const auto plot = plotBounds();
+
+    const bool haveLive = !liveCurves.empty() && !liveCurves[0].x.empty();
+    bool haveSnap = false;
+    for (int i = 0; i < 8; ++i)
+        if (curveSnaps[i].shown && curveSnaps[i].mode == axisMode_ && !curveSnaps[i].data.empty())
+            { haveSnap = true; break; }
+
+    const double tLo = cachedT0;
+    const double tHi = std::max (cachedT1, cachedT0 + 1e-9);
+
+    if (!haveLive && !haveSnap)
+    {
+        g.setColour (juce::Colours::grey);
+        g.setFont (11.0f);
+        g.drawText ("No audio data", plot, juce::Justification::centred);
+        paintCursorReadout (g, plot);
+        paintZoomRubberBand (g, plot);
+        return;
+    }
+
+    // ---- Grid + axis labels --------------------------------------------
+    if (isTimeAxisMode())
+    {
+        // Time ticks: Relative mode counts from the selection start (0-based),
+        // Absolute uses nice steps on the file's absolute time.
+        const bool rel = (refTime_ == 0);
+        std::vector<double> tTicks;
+        const double span = std::max (1e-9, tHi - tLo);
+        auto makeTicks = [&] (double lo)
+        {
+            bool done = false;
+            for (double e = std::floor (std::log10 (span / 8.0));
+                 !done && e <= std::ceil (std::log10 (span / 3.0)) + 1.0; ++e)
+                for (double m : { 1.0, 2.0, 5.0 })
+                {
+                    const double step = m * std::pow (10.0, e);
+                    if (span / step >= 3.0 && span / step <= 8.0)
+                    {
+                        for (double t = std::ceil ((lo + 1e-9) / step - 1e-9) * step;
+                             t <= lo + span + 1e-6; t += step)
+                            if (t >= lo - 1e-6)
+                                tTicks.push_back (t);
+                        done = true;
+                        break;
+                    }
+                }
+            if (!done)
+                for (int i = 1; i <= 4; ++i)
+                    tTicks.push_back (lo + span * (double) i / 5.0);
+        };
+        makeTicks (rel ? 0.0 : tLo);
+
+        g.setColour (juce::Colour::fromRGB (40, 40, 46));
+        for (double tv : tTicks)
+            g.drawVerticalLine ((float) timeToX (rel ? tLo + tv : tv), plot.getY(), plot.getBottom());
+
+        // Vertical axis: frequency in Freq vs Time mode, level in Amp vs Time.
+        if (axisMode_ == 3)
+        {
+            std::vector<double> fTicks;
+            const double spanF = std::max (1e-9, fHi_ - fLo_);
+            bool done = false;
+            for (double e = std::floor (std::log10 (spanF / 8.0));
+                 !done && e <= std::ceil (std::log10 (spanF / 3.0)) + 1.0; ++e)
+                for (double m : { 1.0, 2.0, 5.0 })
+                {
+                    const double step = m * std::pow (10.0, e);
+                    if (spanF / step >= 3.0 && spanF / step <= 8.0)
+                    {
+                        for (double f = std::ceil (fLo_ / step - 1e-9) * step;
+                             f <= fHi_ + 1e-6; f += step)
+                            fTicks.push_back (f);
+                        done = true;
+                        break;
+                    }
+                }
+            if (!done)
+                for (int i = 1; i <= 4; ++i)
+                    fTicks.push_back (fLo_ + spanF * (double) i / 5.0);
+
+            g.setColour (juce::Colour::fromRGB (40, 40, 46));
+            for (double f : fTicks)
+                g.drawHorizontalLine ((float) freqToY (f), plot.getX(), plot.getRight());
+
+            g.setColour (juce::Colours::lightgrey);
+            g.setFont (9.0f);
+            for (double f : fTicks)
+            {
+                juce::String label;
+                if (f >= 1000.0)
+                    label = juce::String (f / 1000.0, std::abs (f - std::round (f)) < 1e-6 ? 0 : 1) + "k";
+                else
+                    label = juce::String ((int) std::lround (f));
+                g.drawText (label, plot.getRight() + 4, (float) freqToY (f) - 7, axisR - 6, 14,
+                            juce::Justification::centredLeft, false);
+            }
+        }
+        else   // Amp vs Time: level gridlines + right labels (classic style).
+        {
+            const double dbSpan = std::max (1e-9, dbTop_ - dbBottom_);
+            int dbStep = 12;
+            for (int cand : { 2, 4, 6, 10, 12, 20, 30 })
+                if (dbSpan / cand >= 3.0 && dbSpan / cand <= 9.0) { dbStep = cand; break; }
+
+            g.setColour (juce::Colour::fromRGB (40, 40, 46));
+            for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
+                g.drawHorizontalLine ((int) levelToY (L), plot.getX(), plot.getRight());
+
+            const ScaleCalibration& sc = app.scale();
+            g.setColour (juce::Colours::lightgrey);
+            g.setFont (9.0f);
+            for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
+                g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
+                            (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
+        }
+
+        // Bottom time labels.
+        g.setColour (juce::Colours::lightgrey);
+        g.setFont (9.0f);
+        for (double tv : tTicks)
+            g.drawText (formatTimeTickLabel (tv), (int) timeToX (rel ? tLo + tv : tv) - 14,
+                        plot.getBottom() + 2, 30, axisB - 4, juce::Justification::centred, false);
+    }
+    else   // Amp vs Freq: frequency-x grid exactly like the classic modes.
+    {
+        std::vector<double> freqTicks;
+        std::vector<std::pair<double, bool>> subTicks;
+        bool thirdOctFallback = false;
+        buildFreqAxisTicks (freqTicks, subTicks, thirdOctFallback);
+
+        g.setColour (juce::Colour::fromRGB (40, 40, 46));
+        for (double f : freqTicks)
+            g.drawVerticalLine ((float) freqToX (f), plot.getY(), plot.getBottom());
+        for (const auto& st : subTicks)
+            g.drawVerticalLine ((float) freqToX (st.first), plot.getY(), plot.getBottom());
+
+        const double dbSpan = std::max (1e-9, dbTop_ - dbBottom_);
+        int dbStep = 12;
+        for (int cand : { 2, 4, 6, 10, 12, 20, 30 })
+            if (dbSpan / cand >= 3.0 && dbSpan / cand <= 9.0) { dbStep = cand; break; }
+        for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
+            g.drawHorizontalLine ((int) levelToY (L), plot.getX(), plot.getRight());
+
+        drawFreqXLabels (g, plot, axisB, freqTicks, subTicks, thirdOctFallback);
+
+        const ScaleCalibration& sc = app.scale();
+        g.setColour (juce::Colours::lightgrey);
+        g.setFont (9.0f);
+        for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
+            g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
+                        (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
+    }
+
+    // ---- Curves ----------------------------------------------------------
+    g.saveState();
+    g.reduceClipRegion (plot);
+
+    auto drawCurveSeries = [&](const CurveData& cd, const juce::Colour& col, float w)
+    {
+        if (cd.x.empty()) return;
+        g.setColour (col);
+        auto xy = [&] (size_t i) -> std::pair<float, float>
+        {
+            const float px = isTimeAxisMode() ? timeToX (cd.x[i]) : (float) freqToX (cd.x[i]);
+            // Freq vs Time plots the tracked frequency; the other modes plot level.
+            const float py = (axisMode_ == 3) ? freqToY (cd.freqHz[i]) : levelToY (cd.ampDb[i]);
+            return { px, py };
+        };
+
+        if (cd.x.size() == 1)
+        {
+            const auto p = xy (0);
+            g.fillEllipse (p.first - 2.5f, p.second - 2.5f, 5.0f, 5.0f);
+            return;
+        }
+
+        juce::Path path;
+        bool started = false;
+        for (size_t i = 0; i < cd.x.size(); ++i)
+        {
+            const auto p = xy (i);
+            if (!started) { path.startNewSubPath (p.first, p.second); started = true; }
+            else          path.lineTo (p.first, p.second);
+        }
+        g.strokePath (path, juce::PathStrokeType (w));
+    };
+
+    // Stored curve snapshots first (only those saved in this mode), live on top.
+    for (int i = 0; i < 8; ++i)
+    {
+        const auto& cs = curveSnaps[i];
+        if (!(cs.shown && cs.mode == axisMode_)) continue;
+        for (size_t c = 0; c < cs.data.size() && c < 4; ++c)
+            drawCurveSeries (cs.data[c], snapColours[i], 1.0f);
+    }
+    if (haveLive)
+        for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
+            drawCurveSeries (liveCurves[c], fftColours[c], 1.2f);
+
+    g.restoreState();
+
+    paintCursorReadout (g, plot);
+    paintZoomRubberBand (g, plot);
+}
+
+// Cursor readout strip + crosshair/snap marker (shared by all modes).
+void FFTAnalysisView::paintCursorReadout (juce::Graphics& g, const juce::Rectangle<int>& plot) const
+{
+    static constexpr int readoutH = 16;   // cursor info strip at the very bottom
+    const auto fullBounds = getLocalBounds();
+
+    bool snapped = false;
+    float snapDotX = 0.0f, snapDotY = 0.0f;
+    const juce::String info = buildCursorInfo (cursorX, cursorY, snapped, snapDotX, snapDotY);
+    if (!info.isEmpty())
+    {
+        g.setColour (juce::Colours::white);
+        g.setFont (10.0f);
+        g.drawText (info, juce::Rectangle<int> (4, fullBounds.getHeight() - readoutH,
+                                                fullBounds.getWidth() - 8, readoutH),
+                    juce::Justification::left);
+
+        // Cursor crosshair + snap marker
+        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 90));
+        g.drawVerticalLine ((float) cursorX, plot.getY(), plot.getBottom());
+        if (snapped)
+        {
+            g.setColour (juce::Colours::white);
+            g.fillEllipse (snapDotX - 3.5f, snapDotY - 3.5f, 7.0f, 7.0f);
+        }
+    }
+}
+
+// Rubber band for a right-drag box zoom (drawn last so nothing covers it).
+// A drag that starts on an axis stretches into a full-height/width band
+// across that axis strip - the same translucent blue as the waveform and
+// spectrogram views; a drag inside the plot keeps the free yellow box.
+void FFTAnalysisView::paintZoomRubberBand (juce::Graphics& g, const juce::Rectangle<int>& plot) const
+{
+    static constexpr int axisB = 18;   // bottom axis height
+    if (dragMode != DragMode::ZoomDrag || !haveZoomRect)
+        return;
+
+    auto zr = zoomRect;
+    const bool startOnFreqAxis  = dragStartY >= plot.getBottom();
+    const bool startOnLevelAxis = !startOnFreqAxis && dragStartX > plot.getRight();
+
+    if (startOnFreqAxis || startOnLevelAxis)
+    {
+        if (startOnFreqAxis)
+            zr = juce::Rectangle<int> (zr.getX(), plot.getBottom(), zr.getWidth(), axisB);
+        else
+            zr = juce::Rectangle<int> (plot.getRight(), zr.getY(), axisWidth(), zr.getHeight());
+
+        g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
+        g.fillRect (zr);
+        g.setColour (juce::Colour::fromRGB (96, 150, 255).withAlpha (0.9f));
+        g.drawRect (zr, 1);
+    }
+    else
+    {
+        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 48));
+        g.fillRoundedRectangle (zoomRect.toFloat(), 3.0f);
+        g.setColour (juce::Colour::fromRGBA (255, 255, 0, 160));
+        g.drawRoundedRectangle (zoomRect.toFloat(), 3.0f, 1.0f);
+    }
+}
+
+// Generate the frequency-axis grid ticks for the current axis mode:
+// 1/3-octave band centres, adaptive log ticks with linear gap-fill,
+// or a nice linear step. Shared by the classic modes and Amp vs Freq.
+void FFTAnalysisView::buildFreqAxisTicks (std::vector<double>& freqTicks,
+                                           std::vector<std::pair<double, bool>>& subTicks,
+                                           bool& thirdOctFallback) const
+{
+    freqTicks.clear();
+    subTicks.clear();
+    thirdOctFallback = false;
+    const double fLo = fLo_, fHi = fHi_;   // local display window
+    const auto plot = plotBounds();
     if (axisMode_ == 2)
     {
         // One grid line per 1/3-octave band centre.
@@ -1319,231 +2236,115 @@ void FFTAnalysisView::paint (juce::Graphics& g)
             for (int i = 1; i <= 4; ++i) freqTicks.push_back (fLo + span * (double) i / 5.0);
     }
 
-    // Grid: frequency ticks + level lines. The level grid step adapts to the
-    // visible window so zooming in/out always shows a few readable lines.
-    const double dbSpan = std::max (1e-9, dbTop_ - dbBottom_);
-    int dbStep = 12;
-    for (int cand : { 2, 4, 6, 10, 12, 20, 30 })
-        if (dbSpan / cand >= 3.0 && dbSpan / cand <= 9.0) { dbStep = cand; break; }
-
-    g.setColour (juce::Colour::fromRGB (40, 40, 46));
-    for (double f : freqTicks)
-        g.drawVerticalLine ((float) freqToX (f), plot.getY(), plot.getBottom());
-    for (const auto& st : subTicks)
-        g.drawVerticalLine ((float) freqToX (st.first), plot.getY(), plot.getBottom());
-    for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
-        g.drawHorizontalLine ((int) levelToY (L), plot.getX(), plot.getRight());
-
-    // Curves
-    if (!haveSpectrum)
-    {
-        g.setColour (juce::Colours::grey);
-        g.setFont (11.0f);
-        g.drawText ("No audio data", plot, juce::Justification::centred);
-    }
-    else
-    {
-        // Clip the curves to the plot area: with a zoomed level window parts of
-        // the curve can sit above/below the visible range. (This JUCE build has
-        // no add/removeClipRegion, so save/restore the state around it.)
-        g.saveState();
-        g.reduceClipRegion (plot);
-
-        // Draw in frequency space: bin k corresponds to f = k * rate / n.
-        // (The magnitude vector only has n/2+1 entries — never index it by x!)
-        // Each curve is mapped with the FFT size it was computed at, so stored
-        // snapshots do not shift when the live analysis uses a different size.
-        auto drawCurve = [&](const std::vector<float>& mag, int curveN, const juce::Colour& col,
-                             float w)
-        {
-            g.setColour (col);
-            juce::Path path;
-            bool started = false;
-            for (int k = 1; k <= curveN / 2 && k < (int) mag.size(); ++k)
-            {
-                const double f = (double) k * rate / (double) curveN;
-                if (f < fLo || f > fHi) continue;
-                const float x = (float) freqToX (f);
-                // Stored magnitudes are normalized against the fixed floor.
-                const double dB = -kNormFloorDb * (1.0 - (double) mag[k]);
-                const float y = levelToY (dB);
-                if (!started) { path.startNewSubPath (x, y); started = true; }
-                else          path.lineTo (x, y);
-            }
-            g.strokePath (path, juce::PathStrokeType (w));
-        };
-
-        // In 1/3-octave mode each band is drawn as a flat step spanning its
-        // frequency edges with vertical connectors at the boundaries — the
-        // classic 1/3-octave band-plot look, not a smooth curve.
-        auto drawBandCurve = [&](const std::vector<float>& bands, const juce::Colour& col,
-                                 float w)
-        {
-            if (bands.empty()) return;
-            g.setColour (col);
-            juce::Path path;
-            bool started = false;
-            for (int b = 0; b < kNumThirdOctBands && b < (int) bands.size(); ++b)
-            {
-                const double fc = kThirdOctCenters[b];
-                if (fc > fHi + 1e-6) break;
-                const double lo = std::max (fLo, fc * std::pow (2.0, -1.0 / 6.0));
-                const double hi = std::min (fHi, fc * std::pow (2.0,  1.0 / 6.0));
-                if (hi <= lo) continue;
-                const float xLo = (float) freqToX (lo);
-                const float xHi = (float) freqToX (hi);
-                const double dBb = -kNormFloorDb * (1.0 - (double) bands[(size_t) b]);
-                const float y   = levelToY (dBb);
-                if (!started) { path.startNewSubPath (xLo, y); started = true; }
-                else          path.lineTo (xLo, y);    // vertical connector at the shared boundary
-                path.lineTo (xHi, y);                  // flat top of this band
-            }
-            g.strokePath (path, juce::PathStrokeType (w));
-        };
-
-        // Stored snapshot overlays first: full slot colour, just a little
-        // thinner than the live curves. Live curves go on top.
-        for (int i = 0; i < 8; ++i)
-            if (snapshots[i].shown && snapshots[i].n > 1 && !snapshots[i].mags.empty())
-                for (size_t c = 0; c < snapshots[i].mags.size() && c < 4; ++c)
-                    if (axisMode_ == 2)
-                    {
-                        // Braces are required here: without them the else below
-                        // would bind to the inner if and snapshot curves would
-                        // never be drawn in linear/log axis modes.
-                        if (!snapshots[i].bands.empty())
-                            drawBandCurve (snapshots[i].bands[c], snapColours[i], 1.0f);
-                    }
-                    else
-                        drawCurve (snapshots[i].mags[c], snapshots[i].n, snapColours[i], 1.0f);
-
-        if (axisMode_ == 2)
-            for (size_t c = 0; c < mags.size() && c < 4; ++c)
-                drawBandCurve (thirdOctMags[c], fftColours[c], 1.2f);
-        else
-            for (size_t c = 0; c < mags.size() && c < 4; ++c)
-                drawCurve (mags[c], n, fftColours[c], 1.2f);
-
-        g.restoreState();
-    }
-
-    // Axis labels
-    g.setColour (juce::Colours::lightgrey);
-    g.setFont (9.0f);
-    for (double f : freqTicks)
-    {
-        if (axisMode_ == 2 && !thirdOctFallback && !isThirdOctLabelFreq (f))
-            continue;   // avoid crowding
-        const float x = (float) freqToX (f);
-        juce::String label;
-        if (f >= 1000.0)
-            label = juce::String (f / 1000.0, std::abs (f - std::round (f)) < 1e-6 ? 0 : 1) + "k";
-        else
-            label = juce::String ((int) std::lround (f));
-        g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
-    }
-    for (const auto& st : subTicks)
-    {
-        if (!st.second) continue;
-        const float x = (float) freqToX (st.first);
-        juce::String label;
-        if (st.first >= 1000.0)
-            label = juce::String (st.first / 1000.0, std::abs (st.first - std::round (st.first)) < 1e-6 ? 0 : 1) + "k";
-        else
-            label = juce::String ((int) std::lround (st.first));
-        g.drawText (label, (int) x - 12, plot.getBottom() + 2, 26, axisB - 4, juce::Justification::centred, false);
-    }
-    // With a scale calibration the grid lines show absolute levels
-    // (dB-SPL for Pascal files; linear V/g values for volts/grams files)
-    // instead of relative dB.
-    const ScaleCalibration& sc = app.scale();
-    for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
-        g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
-                    (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
-
-    // Harmonic reference lines: while active, the frequency under the cursor
-    // is harmonic #N of a fundamental and harmonics 1..N get delicate
-    // vertical markers wherever they are inside the visible window.
-    if (harmonicRefActive_ && haveSpectrum && harmonicAnchorF_ > 0.0)
-    {
-        const double fFund = harmonicAnchorF_ / std::max (1, harmonicN_);
-        for (int k = 1; k <= harmonicN_; ++k)
-        {
-            const double f = (double) k * fFund;
-            if (f < fLo || f > fHi) continue;
-            const float x = (float) freqToX (f);
-            g.setColour (juce::Colour::fromRGBA (140, 230, 255, 160));
-            g.drawVerticalLine (x, plot.getY(), plot.getBottom());
-            g.setFont (9.0f);
-            g.drawText (juce::String (k), x - 8, plot.getY() + 1, 16, 12,
-                        juce::Justification::centred, false);
-        }
-    }
-
-    // Cursor readout (crosshair + optional snap marker)
-    bool snapped = false;
-    float snapDotX = 0.0f, snapDotY = 0.0f;
-    const juce::String info = buildCursorInfo (cursorX, cursorY, snapped, snapDotX, snapDotY);
-    if (!info.isEmpty())
-    {
-        g.setColour (juce::Colours::white);
-        g.setFont (10.0f);
-        g.drawText (info, juce::Rectangle<int> (4, fullBounds.getHeight() - readoutH,
-                                                fullBounds.getWidth() - 8, readoutH),
-                    juce::Justification::left);
-
-        // Cursor crosshair + snap marker
-        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 90));
-        g.drawVerticalLine ((float) cursorX, plot.getY(), plot.getBottom());
-        if (snapped)
-        {
-            g.setColour (juce::Colours::white);
-            g.fillEllipse (snapDotX - 3.5f, snapDotY - 3.5f, 7.0f, 7.0f);
-        }
-    }
-
-    // Rubber band for a right-drag box zoom (drawn last so nothing covers it).
-    // A drag that starts on an axis stretches into a full-height/width band
-    // across that axis strip - the same translucent blue as the waveform and
-    // spectrogram views; a drag inside the plot keeps the free yellow box.
-    if (dragMode == DragMode::ZoomDrag && haveZoomRect)
-    {
-        auto zr = zoomRect;
-        const bool startOnFreqAxis  = dragStartY >= plot.getBottom();
-        const bool startOnLevelAxis = !startOnFreqAxis && dragStartX > plot.getRight();
-
-        if (startOnFreqAxis || startOnLevelAxis)
-        {
-            if (startOnFreqAxis)
-                zr = juce::Rectangle<int> (zr.getX(), plot.getBottom(), zr.getWidth(), axisB);
-            else
-                zr = juce::Rectangle<int> (plot.getRight(), zr.getY(), axisWidth(), zr.getHeight());
-
-            g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
-            g.fillRect (zr);
-            g.setColour (juce::Colour::fromRGB (96, 150, 255).withAlpha (0.9f));
-            g.drawRect (zr, 1);
-        }
-        else
-        {
-            g.setColour (juce::Colour::fromRGBA (255, 255, 0, 48));
-            g.fillRoundedRectangle (zoomRect.toFloat(), 3.0f);
-            g.setColour (juce::Colour::fromRGBA (255, 255, 0, 160));
-            g.drawRoundedRectangle (zoomRect.toFloat(), 3.0f, 1.0f);
-        }
-    }
 }
+
 
 // Build the cursor readout text for position (x, y). When one of the curves
 // passes within a few pixels of the cursor, snapped is set and snapDotX/Y
 // hold that point so paint() can draw the marker. Returns an empty string
 // when there is nothing to show.
+// Cursor readout for the curve analysis modes (3-5). Reports the cursor's
+// time/frequency plus each visible channel's value at the nearest data
+// point, and snaps to a curve that passes within a few pixels.
+juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
+                                                    float& snapDotX, float& snapDotY) const
+{
+    const auto plot = plotBounds();
+    if (x < plot.getX() || x > plot.getRight()
+        || y < plot.getY() || y > plot.getBottom())
+        return {};
+
+    const ScaleCalibration& sc = app.scale();
+    juce::String info;
+    int snapCh = -1;          // channel index of a snapped curve (-1 = none)
+    double bestDy = 8.0;
+
+    auto pointXY = [&](const CurveData& cd, size_t i) -> std::pair<float, float>
+    {
+        const float px = isTimeAxisMode() ? timeToX (cd.x[i]) : (float) freqToX (cd.x[i]);
+        // Freq vs Time plots the tracked frequency; the other modes plot level.
+        const float py = (axisMode_ == 3) ? freqToY (cd.freqHz[i]) : levelToY (cd.ampDb[i]);
+        return { px, py };
+    };
+
+    // Nearest data point per channel by horizontal distance...
+    std::vector<size_t> nearest (liveCurves.size(), 0);
+    for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
+    {
+        const auto& cd = liveCurves[c];
+        if (cd.x.empty()) continue;
+        size_t best = 0;
+        double bestDx = 1e30;
+        for (size_t i = 0; i < cd.x.size(); ++i)
+        {
+            const float px = isTimeAxisMode() ? timeToX (cd.x[i]) : (float) freqToX (cd.x[i]);
+            const double d = std::abs ((double) px - x);
+            if (d < bestDx) { bestDx = d; best = i; }
+        }
+        nearest[c] = best;
+    }
+
+    // ...and snap when any curve passes close to the cursor vertically.
+    for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
+    {
+        const auto& cd = liveCurves[c];
+        if (cd.x.empty()) continue;
+        const auto pxy = pointXY (cd, nearest[c]);
+        const double d = std::abs ((double) pxy.second - y);
+        if (d < bestDy) { bestDy = d; snapCh = (int) c; }
+    }
+
+    if (snapCh >= 0 && liveCurves[(size_t) snapCh].x.size() > 1)
+    {
+        snapped = true;
+        const auto pxy = pointXY (liveCurves[(size_t) snapCh], nearest[(size_t) snapCh]);
+        snapDotX = pxy.first;
+        snapDotY = pxy.second;
+    }
+
+    if (isTimeAxisMode())
+    {
+        info = "Cursor:  t=" + formatTimeTickLabel (xToTime ((double) x));
+        for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
+        {
+            const auto& cd = liveCurves[c];
+            if (cd.x.empty()) continue;
+            info += ",  Ch" + juce::String ((int) c + 1) + "=";
+            if (axisMode_ == 3)
+                info += juce::String (cd.freqHz[nearest[c]] >= 1000.0
+                                      ? cd.freqHz[nearest[c]] / 1000.0 : cd.freqHz[nearest[c]], 2)
+                      + (cd.freqHz[nearest[c]] >= 1000.0 ? " kHz" : " Hz")
+                      + ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc);
+            else
+                info += ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc);
+        }
+    }
+    else   // Amp vs Freq: cursor frequency + per-channel level at the nearest bin.
+    {
+        const double f = xToFreq ((float) x);
+        info = "Cursor:  " + juce::String (f >= 1000.0 ? f / 1000.0 : f, 2)
+             + (f >= 1000.0 ? " kHz" : " Hz");
+        for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
+        {
+            const auto& cd = liveCurves[c];
+            if (cd.x.empty()) continue;
+            info += ",  Ch" + juce::String ((int) c + 1) + "="
+                  + ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc);
+        }
+    }
+
+    return info;
+}
+
 juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
                                                float& snapDotX, float& snapDotY) const
 {
     snapped = false;
     snapDotX = 0.0f;
     snapDotY = 0.0f;
+
+    if (axisMode_ >= 3)
+        return buildCurveCursorInfo (x, y, snapped, snapDotX, snapDotY);
 
     const auto plot = plotBounds();
     const int n = cachedN;
@@ -1665,8 +2466,78 @@ void FFTAnalysisView::setFollowPlayhead (bool f)
 
 // Snapshot buttons: click stores the current curve in the slot and toggles its
 // overlay visibility; Ctrl/Shift+click clears the slot entirely.
+// True when slot i holds data for the CURRENT mode: the classic store in
+// modes 0-2, or a curve snapshot saved in exactly this mode in 3-5.
+bool FFTAnalysisView::slotHasData (int i) const
+{
+    if (axisMode_ >= 3)
+        return curveSnaps[i].mode == axisMode_ && !curveSnaps[i].data.empty();
+    return snapshots[i].n > 0;
+}
+
+// Update all eight buttons' stored/toggle/tooltip state for the current mode.
+void FFTAnalysisView::refreshSnapshotButtonStates()
+{
+    for (int i = 0; i < 8; ++i)
+    {
+        const bool stored = slotHasData (i);
+        snapBtns[i].setStored (stored);
+        const bool shown = axisMode_ >= 3 ? curveSnaps[i].shown : snapshots[i].shown;
+        snapBtns[i].setToggleState (stored && shown, juce::dontSendNotification);
+        updateSnapshotTooltip (i);
+    }
+}
+
+void FFTAnalysisView::handleCurveSnapshotClick (int i, juce::ModifierKeys mods)
+{
+    auto& cs = curveSnaps[i];
+    const bool stored = (cs.mode == axisMode_ && !cs.data.empty());
+
+    if (mods.isShiftDown())
+    {
+        clearCurveSlot (i);
+        repaint();
+        return;
+    }
+
+    if (!stored || mods.isCommandDown())
+    {
+        // Empty slot: store the current live curve. Stored slot + Ctrl+click:
+        // re-store it from the region currently being analysed.
+        if (liveCurves.empty() || liveCurves[0].x.empty())
+        {
+            snapBtns[i].setToggleState (false, juce::dontSendNotification); // nothing to store yet
+            return;
+        }
+
+        cs.mode = axisMode_;
+        cs.t0 = cachedT0;
+        cs.t1 = cachedT1;
+        cs.gen = settingsGen;
+        cs.track = track_;      // metadata: what was captured at store time
+        cs.smooth = smooth_;
+        cs.data = liveCurves;   // copy of the current live curves (already tracked/smoothed)
+        cs.source = app.doc();  // remember which file this came from
+        cs.chans = app.visibleChannels;
+        cs.shown = true;        // newly captured data is shown
+    }
+    else
+    {
+        // Plain click on a stored slot: only toggle the overlay, never update.
+        cs.shown = !cs.shown;
+    }
+
+    snapBtns[i].setToggleState (cs.shown, juce::dontSendNotification);
+    snapBtns[i].setStored (true);
+    updateSnapshotTooltip (i);
+    repaint();
+}
+
 void FFTAnalysisView::handleSnapshotClick (int i, juce::ModifierKeys mods)
 {
+    if (axisMode_ >= 3)
+        return handleCurveSnapshotClick (i, mods);
+
     auto& s = snapshots[i];
     const bool stored = (s.n > 0);
 
@@ -1715,8 +2586,25 @@ void FFTAnalysisView::handleSnapshotClick (int i, juce::ModifierKeys mods)
 
 void FFTAnalysisView::updateSnapshotTooltip (int i)
 {
-    auto& s = snapshots[i];
     const juce::String num = juce::String (i + 1);
+
+    if (axisMode_ >= 3)
+    {
+        auto& cs = curveSnaps[i];
+        if (cs.mode == axisMode_ && !cs.data.empty())
+        {
+            const juce::String from = (cs.source != nullptr) ? (" from " + cs.source->name)
+                                                             : juce::String();
+            snapBtns[i].setTooltip ("Snapshot " + num + ": stores " + formatTimeCode (cs.t0)
+                                    + " - " + formatTimeCode (cs.t1) + from
+                                    + ". Click shows/hides the stored curve. Ctrl+Click re-stores it from the current selection/cursor. Shift+Click clears it. Right-click: convert to marker / clear.");
+        }
+        else
+            snapBtns[i].setTooltip ("Snapshot " + num + " is empty in this mode. Click stores the currently analysed curve here and shows it. Snapshots are shared across all open files.");
+        return;
+    }
+
+    auto& s = snapshots[i];
     if (s.n > 0)
     {
         const juce::String from = (s.source != nullptr) ? (" from " + s.source->name)
@@ -1751,6 +2639,62 @@ void FFTAnalysisView::recomputeSnapshotSlot (int i)
     snapBtns[i].setToggleState (s.shown, juce::dontSendNotification);
     snapBtns[i].setStored (true);
     updateSnapshotTooltip (i);
+}
+
+void FFTAnalysisView::clearCurveSlot (int i)
+{
+    auto& cs = curveSnaps[i];
+    cs = CurveSnapshot{};
+    snapBtns[i].setToggleState (false, juce::dontSendNotification);
+    snapBtns[i].setStored (false);
+    updateSnapshotTooltip (i);
+}
+
+// Rebuild curve slot i from its source file over [t0, t1] using the CURRENT
+// track / smoothing options (and FFT size + window type in Amp vs Freq mode),
+// exactly like classic snapshot slots follow the current settings. Clears the
+// slot when the source is gone.
+void FFTAnalysisView::recomputeCurveSlot (int i)
+{
+    auto& cs = curveSnaps[i];
+    if (!(cs.mode >= 3 && cs.source != nullptr && app.isDocLoaded (cs.source)))
+    { clearCurveSlot (i); return; }
+
+    const double durS = cs.source->engine.duration();
+    cs.t0 = std::clamp (cs.t0, 0.0, durS);
+    cs.t1 = std::clamp (cs.t1, cs.t0, durS);
+
+    // A spectral selection of the source file masks the analysis (same as live).
+    const SpectralSelection* mask = nullptr;
+    if (!cs.source->spectralSel.empty())
+        mask = &cs.source->spectralSel;
+
+    std::vector<CurveData> out;
+    if (cs.mode == 5)
+        computeSpectrumCurveFrom (cs.source->engine, cs.chans, cs.t0, cs.t1, localN,
+                                  windowCombo.getSelectedId() - 1, track_, mask, out);
+    else
+        computeTimeCurveFrom (cs.source->engine, cs.chans, cs.t0, cs.t1, track_, mask, out);
+
+    if (smooth_ > 1)
+        for (auto& cd : out)
+        {
+            smoothSeries (cd.ampDb, smooth_);
+            if (cs.mode != 5) smoothSeries (cd.freqHz, smooth_);
+        }
+
+    cs.data = std::move (out);
+    cs.gen = settingsGen;
+    snapBtns[i].setToggleState (cs.shown && !cs.data.empty(), juce::dontSendNotification);
+    snapBtns[i].setStored (!cs.data.empty());
+    updateSnapshotTooltip (i);
+}
+
+void FFTAnalysisView::recomputeCurveSlots()
+{
+    for (int i = 0; i < 8; ++i)
+        if (curveSnaps[i].mode >= 3 && curveSnaps[i].gen != settingsGen)
+            recomputeCurveSlot (i);
 }
 
 void FFTAnalysisView::recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a, double b, Patch& p)
@@ -1795,6 +2739,47 @@ void FFTAnalysisView::recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a,
         ch.after.shown = s2.shown;  ch.after.chans = s2.chans;
         p.snapshotSlots[(size_t) i] = ch;
     }
+
+    // The curve snapshots (modes 3-5) get the same treatment: adjust their time
+    // segment, then rebuild from the post-deletion source data.
+    for (int i = 0; i < 8; ++i)
+    {
+        auto& cs = curveSnaps[i];
+        if (cs.source != d || cs.mode < 3)   // slots are shared across files
+            continue;
+
+        CurveSlotChange ch;
+        ch.before.t0 = cs.t0;  ch.before.t1 = cs.t1;
+        ch.before.mode = cs.mode;  ch.before.track = track_;  ch.before.smooth = smooth_;
+        ch.before.shown = cs.shown;  ch.before.chans = cs.chans;
+
+        bool touched = false;
+        if (cs.t1 <= a)
+            ;                                   // entirely before: unchanged
+        else if (cs.t0 >= b)
+        { cs.t0 -= len; cs.t1 -= len; touched = true; }   // entirely after: shift left
+        else if (cs.t0 < a && cs.t1 > b)
+        { cs.t1 -= len; touched = true; }       // straddles the whole deletion
+        else if (cs.t0 < a)
+        { cs.t1 = a; touched = true; }          // right part deleted -> [t0, a]
+        else if (cs.t1 <= b)
+        { clearCurveSlot (i); touched = true; }   // fully contained: cleared
+        else
+        { cs.t0 = a; cs.t1 -= len; touched = true; }   // left part deleted
+
+        if (!touched)
+            continue;
+
+        auto& cs2 = curveSnaps[i];             // may have been reset by clearCurveSlot
+        ch.changed = true;
+        ch.after.mode = cs2.mode;  ch.after.t0 = cs2.t0;  ch.after.t1 = cs2.t1;
+        ch.after.track = track_;  ch.after.smooth = smooth_;
+        ch.after.shown = cs2.shown;  ch.after.chans = cs2.chans;
+        p.curveSlots[(size_t) i] = ch;
+
+        if (cs2.mode >= 3 && app.isDocLoaded (d))
+            recomputeCurveSlot (i);   // rebuild from the post-deletion source data
+    }
 }
 
 void FFTAnalysisView::restoreSnapshotSlots (FileDoc* d, const Patch& p, bool isRedo)
@@ -1823,17 +2808,59 @@ void FFTAnalysisView::restoreSnapshotSlots (FileDoc* d, const Patch& p, bool isR
         s.n = m.n;   // mark valid so recomputeSnapshotSlot rebuilds the curve
         recomputeSnapshotSlot (i);
     }
+
+    for (int i = 0; i < 8; ++i)
+    {
+        const auto& ch = p.curveSlots[(size_t) i];
+        if (!ch.changed)
+            continue;
+        const CurveSnapshotMeta& m = isRedo ? ch.after : ch.before;
+
+        // Never clobber a slot that now holds another file's snapshot.
+        auto& cs = curveSnaps[i];
+        if (cs.source != nullptr && cs.source != d)
+            continue;
+
+        if (m.mode < 3 || !app.isDocLoaded (d))
+        { clearCurveSlot (i); continue; }
+
+        cs.t0 = m.t0;  cs.t1 = m.t1;
+        cs.mode = m.mode;
+        cs.chans = m.chans;  cs.shown = m.shown;
+        cs.source = d;
+        recomputeCurveSlot (i);
+    }
 }
 
 void FFTAnalysisView::clearSnapshotsFor (const FileDoc* d)
 {
     for (int i = 0; i < 8; ++i)
+    {
         if (snapshots[i].source == d)
             clearSnapshotSlot (i);
+        if (curveSnaps[i].source == d)
+            clearCurveSlot (i);
+    }
 }
 
 bool FFTAnalysisView::convertSnapshotToMarker (int i)
 {
+    if (axisMode_ >= 3)
+    {
+        auto& cs = curveSnaps[i];
+        if (!(cs.mode == axisMode_ && !cs.data.empty()) || cs.source == nullptr) return false;
+
+        const double dur = cs.source->engine.duration();
+        const double t0 = std::clamp (cs.t0, 0.0, dur);
+        const double t1 = std::clamp (cs.t1, t0, dur);
+        if (t1 <= t0) return false;
+
+        cs.source->markers.addRegionMarker (t0, t1, "Snapshot " + juce::String (i + 1));
+        if (app.doc() == cs.source && app.onStateChange)
+            app.onStateChange ();   // refresh the marker list when that file is active
+        return true;
+    }
+
     auto& s = snapshots[i];
     if (!(s.n > 1 && !s.mags.empty()) || s.source == nullptr) return false;
 
@@ -1854,16 +2881,24 @@ bool FFTAnalysisView::convertSnapshotToMarker (int i)
 
 void FFTAnalysisView::showSnapshotMenu (int i)
 {
-    auto& s = snapshots[i];
     juce::PopupMenu m;
-    const bool hasData = (s.n > 1 && !s.mags.empty());
+    const bool hasData = slotHasData (i) && (axisMode_ >= 3
+        ? !curveSnaps[i].data.empty()
+        : snapshots[i].n > 1);
     m.addItem (1, "Convert to marker", hasData, false);
-    m.addItem (2, "Clear", s.n > 0 || s.shown, false);
+    m.addItem (2, "Clear",
+               axisMode_ >= 3 ? curveSnaps[i].mode >= 0
+                              : (snapshots[i].n > 0 || snapshots[i].shown),
+               false);
 
     const int r = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (r == 1) convertSnapshotToMarker (i);
     else if (r == 2)
-    { clearSnapshotSlot (i); repaint(); }
+    {
+        if (axisMode_ >= 3) clearCurveSlot (i);
+        else                clearSnapshotSlot (i);
+        repaint();
+    }
 }
 
 // Right-click context menu. When the click landed on an axis, "Zoom Out
@@ -1877,11 +2912,14 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
     m.addItem (CtxZoomOutFull, "Zoom Out Full");
     m.addSeparator();
     m.addItem (100, "Copy Spectrum to Clipboard");
-    m.addSeparator();
-    m.addItem (CtxSetHarmonicRefs, "Set Harmonic References", haveSpec);
-    m.addItem (CtxCopyHarmonics, "Copy Harmonics",
-               harmonicRefActive_ && haveSpec);
-    m.addItem (CtxResetHarmonic, "Reset Harmonic", harmonicRefActive_);
+    if (axisMode_ < 3)   // harmonic references are a classic-mode feature
+    {
+        m.addSeparator();
+        m.addItem (CtxSetHarmonicRefs, "Set Harmonic References", haveSpec);
+        m.addItem (CtxCopyHarmonics, "Copy Harmonics",
+                   harmonicRefActive_ && haveSpec);
+        m.addItem (CtxResetHarmonic, "Reset Harmonic", harmonicRefActive_);
+    }
     m.addSeparator();
     m.addItem (101, "Close Panel");
 
@@ -1889,7 +2927,20 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
     switch (sel)
     {
         case CtxZoomOutFull:
-            if (onLevelAxis && !onFreqAxis) { dbTop_ = 0.0; dbBottom_ = -80.0; repaint(); }
+            if (isTimeAxisMode())
+            {
+                // The time axis is fixed to the analysed region: reset only
+                // the vertical range (frequency in mode 3, level in mode 4).
+                if (axisMode_ == 3)
+                {
+                    const double rate = app.audioEngine().sampleRate();
+                    fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+                }
+                else
+                { dbTop_ = 0.0; dbBottom_ = -80.0; }
+                repaint();
+            }
+            else if (onLevelAxis && !onFreqAxis) { dbTop_ = 0.0; dbBottom_ = -80.0; repaint(); }
             else if (onFreqAxis && !onLevelAxis)
             {
                 const double rate = app.audioEngine().sampleRate();
@@ -2052,12 +3103,14 @@ void FFTAnalysisView::mouseDown (const juce::MouseEvent& e)
 
     if (!e.mods.isLeftButtonDown() || e.mods.isRightButtonDown()) return;
 
-    // Left-drag on the bottom Hz axis pans the frequency range; left-drag on
-    // the right level axis pans the level window.
+    // Left-drag on the bottom axis pans the horizontal range (frequency in
+    // the classic modes); left-drag on the right axis pans the vertical
+    // range. In the time-based curve modes the bottom axis is time - fixed to
+    // the analysed region - so only the vertical range can be panned.
     if (e.y > plot.getBottom() && e.x >= plot.getX() && e.x <= plot.getRight())
-        dragMode = DragMode::PanFreq;
+        dragMode = isTimeAxisMode() ? DragMode::None : DragMode::PanFreq;
     else if (e.x > plot.getRight() && e.y >= plot.getY() && e.y <= plot.getBottom())
-        dragMode = DragMode::PanLevel;
+        dragMode = (axisMode_ == 3) ? DragMode::PanFreqV : DragMode::PanLevel;
     else
         return;   // plain clicks in the plot do nothing here
 
@@ -2084,6 +3137,20 @@ void FFTAnalysisView::mouseDrag (const juce::MouseEvent& e)
                 const double d = f0 - f1;
                 fLo_ += d; fHi_ += d;
             }
+            // Keep the window inside [0, Nyquist].
+            const double nyq = app.audioEngine().sampleRate() * 0.5;
+            if (fLo_ < 0.0) { fHi_ -= fLo_; fLo_ = 0.0; }
+            if (fHi_ > nyq) { fLo_ -= (fHi_ - nyq); fHi_ = nyq; }
+            repaint();
+            break;
+        }
+        case DragMode::PanFreqV:
+        {
+            // Freq vs Time: the vertical axis is frequency.
+            const double f0 = yToFreq ((float) dragStartY);
+            const double f1 = yToFreq ((float) e.y);
+            const double d = f0 - f1;
+            fLo_ += d; fHi_ += d;
             // Keep the window inside [0, Nyquist].
             const double nyq = app.audioEngine().sampleRate() * 0.5;
             if (fLo_ < 0.0) { fHi_ -= fLo_; fLo_ = 0.0; }
@@ -2134,40 +3201,61 @@ void FFTAnalysisView::mouseUp (const juce::MouseEvent& e)
         {
             // The drag START position selects which axes get zoomed (same as
             // the waveform/spectrogram views): inside the plot both, on an
-            // axis only that axis.
-            const bool startOnFreqAxis  = dragStartY >= plot.getBottom();
-            const bool startOnLevelAxis = !startOnFreqAxis && dragStartX > plot.getRight();
+            // axis only that axis. In the time-based curve modes the bottom
+            // axis is time (fixed to the analysed region), so a box there has
+            // nothing to zoom and only drags from the plot / right axis apply.
+            const bool startOnBottomAxis = dragStartY >= plot.getBottom();
+            const bool startOnRightAxis  = !startOnBottomAxis && dragStartX > plot.getRight();
 
-            // Horizontal part of the box zooms the frequency range...
-            if (!startOnLevelAxis && zoomRect.getWidth() >= 2 && axisMode_ != 2)
+            if (!(isTimeAxisMode() && startOnBottomAxis))
             {
-                const double fA = xToFreq (std::clamp (zoomRect.getX(), plot.getX(), plot.getRight()));
-                const double fB = xToFreq (std::clamp (zoomRect.getRight() - 1, plot.getX(), plot.getRight()));
-                if (fB > fA * 1.0001)
+                // Horizontal part of the box zooms the frequency range (the
+                // classic modes and Amp vs Freq only)...
+                if (!isTimeAxisMode() && !startOnRightAxis && zoomRect.getWidth() >= 2 && axisMode_ != 2)
                 {
-                    const double nyq = app.audioEngine().sampleRate() * 0.5;
-                    if (axisMode_ == 1)
+                    const double fA = xToFreq (std::clamp (zoomRect.getX(), plot.getX(), plot.getRight()));
+                    const double fB = xToFreq (std::clamp (zoomRect.getRight() - 1, plot.getX(), plot.getRight()));
+                    if (fB > fA * 1.0001)
                     {
-                        fLo_ = std::clamp (std::exp (std::log (fA)), 1e-9, nyq);
-                        fHi_ = std::clamp (std::exp (std::log (fB)), 1e-9, nyq);
+                        const double nyq = app.audioEngine().sampleRate() * 0.5;
+                        if (axisMode_ == 1)
+                        {
+                            fLo_ = std::clamp (std::exp (std::log (fA)), 1e-9, nyq);
+                            fHi_ = std::clamp (std::exp (std::log (fB)), 1e-9, nyq);
+                        }
+                        else
+                        {
+                            fLo_ = std::clamp (fA, 0.0, nyq);
+                            fHi_ = std::clamp (fB, 0.0, nyq);
+                        }
+                    }
+                }
+                // ...and the vertical part zooms the frequency window in Freq
+                // vs Time mode and the level window everywhere else.
+                if (!startOnBottomAxis && zoomRect.getHeight() >= 2)
+                {
+                    if (axisMode_ == 3)
+                    {
+                        const double fA = yToFreq ((float) std::clamp (zoomRect.getY(), plot.getY(), plot.getBottom()));
+                        const double fB = yToFreq ((float) std::clamp (zoomRect.getBottom() - 1, plot.getY(), plot.getBottom()));
+                        if (fB > fA * 1.0001)
+                        {
+                            const double nyq = app.audioEngine().sampleRate() * 0.5;
+                            fLo_ = std::clamp (fA, 0.0, nyq);
+                            fHi_ = std::clamp (fB, 0.0, nyq);
+                        }
                     }
                     else
                     {
-                        fLo_ = std::clamp (fA, 0.0, nyq);
-                        fHi_ = std::clamp (fB, 0.0, nyq);
+                        const double dbA = yToLevel ((float) std::clamp (zoomRect.getY(), plot.getY(), plot.getBottom()));
+                        const double dbB = yToLevel ((float) std::clamp (zoomRect.getBottom() - 1, plot.getY(), plot.getBottom()));
+                        if (dbA > dbB)
+                        {
+                            const double span = std::clamp (dbA - dbB, 10.0, 320.0);
+                            dbTop_ = std::clamp (dbA, -240.0 + span * 0.5, 40.0);
+                            dbBottom_ = dbTop_ - span;
+                        }
                     }
-                }
-            }
-            // ...and the vertical part zooms the level window.
-            if (!startOnFreqAxis && zoomRect.getHeight() >= 2)
-            {
-                const double dbA = yToLevel ((float) std::clamp (zoomRect.getY(), plot.getY(), plot.getBottom()));
-                const double dbB = yToLevel ((float) std::clamp (zoomRect.getBottom() - 1, plot.getY(), plot.getBottom()));
-                if (dbA > dbB)
-                {
-                    const double span = std::clamp (dbA - dbB, 10.0, 320.0);
-                    dbTop_ = std::clamp (dbA, -240.0 + span * 0.5, 40.0);
-                    dbBottom_ = dbTop_ - span;
                 }
             }
         }
@@ -2185,7 +3273,16 @@ void FFTAnalysisView::mouseWheelMove (const juce::MouseEvent& e, const juce::Mou
         return;   // ignore the control strip
 
     const double factor = std::pow (1.25, -wheel.deltaY);
-    if (e.mods.isShiftDown() || e.x > plot.getRight())
+    if (isTimeAxisMode())
+    {
+        // Time-based modes: the horizontal axis is fixed to the analysed
+        // region; the wheel always zooms the vertical range at the cursor.
+        if (axisMode_ == 3)
+            zoomFreqAtY ((float) e.y, factor);
+        else
+            zoomLevelAtY ((float) e.y, factor);
+    }
+    else if (e.mods.isShiftDown() || e.x > plot.getRight())
         zoomLevelAtY ((float) e.y, factor);
     else
         zoomFreqAtX (e.x, factor);
@@ -2207,6 +3304,50 @@ void FFTAnalysisView::copySpectrumToClipboard()
             return ScaleCalibration::formatLevelValue (sc.fullScaleValue * std::pow (10.0, relDb / 20.0), 6);
         return juce::String (relDb + off, 2);
     };
+
+    // Curve modes export the live curve series instead of a bin table:
+    // Freq vs Time: time, per channel freq+level; Amp vs Time: time, per
+    // channel level+freq; Amp vs Freq: frequency, per channel level.
+    if (axisMode_ >= 3 && !liveCurves.empty() && !liveCurves[0].x.empty())
+    {
+        juce::StringArray lines;
+        const int nCh = std::min ((int) liveCurves.size(), 4);
+        juce::String header = isTimeAxisMode() ? "time_s" : "freq_Hz";
+        for (int c = 0; c < nCh; ++c)
+        {
+            if (axisMode_ == 3)
+                header += ",ch" + juce::String (c + 1) + "_Hz,ch"
+                        + juce::String (c + 1) + "_" + sc.spectralUnitLabel();
+            else if (axisMode_ == 4)
+                header += ",ch" + juce::String (c + 1) + "_" + sc.spectralUnitLabel()
+                        + ",ch" + juce::String (c + 1) + "_Hz";
+            else
+                header += ",ch" + juce::String (c + 1) + "_" + sc.spectralUnitLabel();
+        }
+        lines.add (header);
+
+        const size_t nPts = liveCurves[0].x.size();
+        for (size_t i = 0; i < nPts; ++i)
+        {
+            juce::String line = isTimeAxisMode() ? juce::String (liveCurves[0].x[i], 6)
+                                                 : juce::String (liveCurves[0].x[i], 3);
+            for (int c = 0; c < nCh; ++c)
+            {
+                const auto& cd = liveCurves[(size_t) c];
+                if (i >= cd.x.size()) continue;   // defensive: channels are equal-sized
+                if (axisMode_ == 3)
+                    line += "," + juce::String (cd.freqHz[i], 2) + "," + fmtLevel (cd.ampDb[i]);
+                else if (axisMode_ == 4)
+                    line += "," + fmtLevel (cd.ampDb[i]) + "," + juce::String (cd.freqHz[i], 2);
+                else
+                    line += "," + fmtLevel (cd.ampDb[i]);
+            }
+            lines.add (line);
+        }
+
+        juce::SystemClipboard::copyTextToClipboard (lines.joinIntoString ("\n"));
+        return;
+    }
 
     juce::StringArray lines;
     juce::String header = "freq_Hz";

@@ -103,13 +103,31 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     several evenly spaced windows are computed and their magnitudes averaged
     (the classic "average over the selection" behaviour). Its FFT size is
     **independent of the spectrogram's**, plus a window-type selector
-    (Rectangular/Hann/Hamming) and a frequency-axis dropdown with three modes:
+    (Rectangular/Hann/Hamming) and a frequency-axis dropdown with six modes:
     **FFT Linear** (linear Hz axis), **FFT Log** (logarithmic axis, the default)
     and **1/3 Octave** (IEC 61260-1 band plot from 50 Hz to 16 kHz — one curve
     per visible channel, each band drawn as a flat-topped step across its
     frequency edges with vertical connectors at the boundaries — the classic
     1/3-octave band-plot look; every click replaces the curve instead of
-    adding another).
+    adding another), plus three curve-analysis modes:
+    **Freq vs Time** (the tracked dominant frequency plotted against time —
+    the cursor readout also shows each channel's level), **Amp vs Time**
+    (level over time) and **Amp vs Freq** (a per-bin spectrum of the analysed
+    region, using the FFT size + window type like the classic modes). The curve modes
+    analyse the selection frame by frame (fixed 2048-point Hann frames in the
+    two time-based modes, capped at 2048 points per curve) and honour a
+    spectral-selection mask — bins outside it do not count. Their extra row of
+    options offers **Ref Time** (Relative = ticks counted from the selection
+    start, Absolute = file time), **Smooth** (None / 3 / 5-frame centred moving
+    average) and **Track** (Max = strongest component per frame/bin with its
+    frequency; Total = summed level with amplitude-weighted centroid
+    frequency). In the time-based modes the bottom axis is fixed to the
+    analysed region: left-drag/wheel/right-drag box zoom only affect the
+    vertical range, and **Zoom Out Full** resets just that range. The 8
+    snapshot buttons keep working in these modes but store a *separate* set of
+    curve snapshots per mode (a slot saved in Freq vs Time is empty when you
+    switch to Amp vs Time); stored curves follow the current Track/Smooth
+    options, exactly like classic snapshots follow the current FFT size.
     8 numbered snapshot buttons, each with its own classic DAW hold-button
     colour: red, orange, yellow, light green, dark green, teal, blue and
     magenta. Each button's background matches the colour of the curve it
@@ -121,7 +139,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     updates from the current selection/cursor position and shows the curve.
     **Shift+click** clears the slot. Stored curves are drawn in their button's
     full colour — just a little thinner than the live curves — beneath them,
-    at their own stored FFT size, in all three axis modes. Snapshots are **shared across
+    at their own stored FFT size, in the classic axis modes (the curve modes
+    keep their separate per-mode snapshot store described above). Snapshots are **shared across
     all open files**: each one stores its source file and channel list, so a
     curve captured from another file keeps working (and is recomputed from
     that file's engine when the FFT size or window type changes). The tooltip
@@ -765,9 +784,10 @@ least one always stays visible) and one checkable item per channel; plain click
 toggles that channel, **Ctrl/Shift+click shows only it**.
 
 **Remembered between sessions**: the spectrogram's Log/Linear state and FFT
-size, the Frequency Analysis axis mode (FFT Linear / FFT Log / 1/3 Octave) and
-its independent FFT size, and the Snap to Zero Crossings toggle are saved to
-the same properties file as the recent-files list and restored on startup.
+size, the Frequency Analysis axis mode (FFT Linear / FFT Log / 1/3 Octave /
+Freq vs Time / Amp vs Time / Amp vs Freq), its independent FFT size, and the
+curve-mode options (Ref Time, Smooth, Track) are saved to the same properties
+file as the recent-files list and restored on startup.
 
 Mouse (waveform *and* spectral views):
 
@@ -878,7 +898,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
-| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with clone & multiply (`SavedSelections` JSON sidecar — auto-loaded on open, re-loadable via right-click "Load from disk..." or by dropping a `.selections.json` onto the panel), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with clone & multiply (`SavedSelections` JSON sidecar — auto-loaded on open, re-loadable via right-click "Load from disk..." or by dropping a `.selections.json` onto the panel), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
 | `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with three example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near, JSON sidecar persistence next to the audio file. |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
@@ -974,10 +994,12 @@ by a single mutex (short critical sections, no lock held during FFT work).
   - **Deletion side-state**: deleting a time range shifts/trims/drops markers,
     adjusts named saved spectral selections (rectangles trim/shift/drop;
     polygons and strokes straddling the cut split into two contiguous pieces),
-    and shifts/trims/clears stored FFT snapshots of that file — all verified
-    end-to-end through `del()` with undo and redo restoring every piece.
+    and shifts/trims/clears stored FFT snapshots *and* curve-mode snapshot
+    slots of that file — all verified end-to-end through `del()` with undo and
+    redo restoring every piece.
   - **Settings persistence**: spectrogram log/linear + FFT size, frequency-
-    analysis axis mode + its independent FFT size, and the zero-crossing snap
+    analysis axis mode (all six modes) + its independent FFT size, the
+    curve-mode options (Ref Time / Smooth / Track), and the zero-crossing snap
     toggle all survive an app restart via the properties file; stored
     non-power-of-two sizes round up to the next power of two on load.
   - **Zero-crossing snap selection**: with the toggle off (the default) drag
