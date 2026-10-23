@@ -226,6 +226,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     width and the top/bottom split) is remembered between sessions.
   - **View > Left Panels** hides all left panels at once so you can focus on
     the tracks; toggle it again to bring them back.
+  - Individual panels can be closed with a right-click **Close Panel** menu
+    item (on any panel, including its list rows where applicable). The
+    **Window** menu lists every left-column panel with a checkmark and opens
+    or closes each one; a group whose last panel is closed gives up its space
+    so the other tab bar fills the whole column. Closed panels stay closed
+    between sessions (reopening inserts them back at their default position).
   - Per-channel display selection lives in the **View menu**: one checkable item
     per channel ("Channel 1", "Channel 2", …) that toggles each channel
     independently for any number of channels and applies to both views.
@@ -726,7 +732,8 @@ main window itself — arrow keys keep working there too. Interactive widgets
 the standard Windows behaviour for arrow keys while focused; click back into a
 view to return playhead control.
 
-Menus: **File, Edit, Selection, View, Transport, Effects, Help**. The Edit menu has a
+Menus: **File, Edit, Selection, View, Transport, Effects, Window, Help** (the
+Window menu opens/closes the individual left-column panels). The Edit menu has a
 checkable **Snap to Zero Crossings** toggle (**off by default**): when on,
 dragging out a new time selection snaps both edges to the nearest zero
 crossing of the first visible channel (within ±50 ms), so cuts and effects

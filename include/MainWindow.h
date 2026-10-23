@@ -108,6 +108,13 @@ public:
     juce::TabbedComponent* topPanelTabs() { return &topTabs; }
     juce::TabbedComponent* bottomPanelTabs() { return &bottomTabs; }
 
+    // Window menu + per-panel "Close Panel" support: open/close state of the
+    // left-column panels. `id` is one of files/fft/history/python/
+    // controls/markers/transcription/selection.
+    bool isPanelOpen (const juce::String& id) const;
+    void setPanelVisible (const juce::String& id, bool visible);
+    juce::Component* panelForId (const juce::String& id) const;   // unit tests
+
     void showChangeGainDialog();
     /** Builds (but does not run modally) the Change Gain dialog. The caller
         owns and must delete it; used by showChangeGainDialog() and tests. */
@@ -157,6 +164,8 @@ public:
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
     void handleTopSplitterDrag (const juce::MouseEvent& e);   // top tabs / bottom tabs
     const char* panelIdFor (juce::Component*) const;          // stable id for a panel component
+    struct LeftPanelEntry { const char* id; juce::String name; bool defaultTop; };
+    std::vector<LeftPanelEntry> leftPanelEntries() const;     // canonical order, AI-conditional
     void syncSharedState();   // push app state into views + panels
 
     enum MenuIDs
@@ -181,6 +190,7 @@ public:
         ToolsTranscribe,      // AI Whisper transcription (whole file)
         ToolsTranscribeFolder,// AI batch transcription of a folder of WAV files
 #endif
+        WindowPanelBase = 6500,   // Window menu: per-panel open/close toggles
         HelpAbout = 6000,
         ColourMapClassic = 7000, ColourMapViridis, ColourMapPlasma, ColourMapInferno,
         ColourMapMagma, ColourMapHot, ColourMapCool, ColourMapGrayscale,

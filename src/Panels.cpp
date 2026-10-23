@@ -293,11 +293,14 @@ void FileListPanel::showFileMenu (int row)
     // Brand-new documents have no folder to open yet.
     m.addItem (4, "Open Containing Folder",
                !d.file.getFullPathName().isEmpty(), false);
+    m.addSeparator();
+    m.addItem (5, "Close Panel");
     const int r = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (r == 1) activateDoc (row);
     else if (r == 2) closeDoc (row);
     else if (r == 3) showScaleDialog (row);
     else if (r == 4) openContainingFolder (row);
+    else if (r == 5 && onCloseRequested) onCloseRequested();
 }
 
 juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
@@ -384,11 +387,25 @@ void FileListPanel::showScaleDialog (int row)
     delete dlg;
 }
 
+// Right-click "Close Panel" menu shared by every left-column panel. Returns
+// true when the user picked the item.
+static bool showClosePanelMenu()
+{
+    juce::PopupMenu m;
+    m.addItem (1, "Close Panel");
+    return m.showMenu (juce::PopupMenu::Options().withMousePosition()) == 1;
+}
+
 void FileListPanel::mouseDown (const juce::MouseEvent& e)
 {
     if (!e.mods.isRightButtonDown()) return;
     const int row = rowAt ((int) e.x, (int) e.y);
-    if (row < 0) return;
+    if (row < 0)
+    {
+        // Empty area below the list: offer to close the panel itself.
+        if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
+        return;
+    }
     showFileMenu (row);
 }
 
@@ -646,6 +663,11 @@ int HistoryPanel::rowAt (int x, int y) const
 
 void HistoryPanel::mouseDown (const juce::MouseEvent& e)
 {
+    if (e.mods.isRightButtonDown())
+    {
+        if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
+        return;
+    }
     const int r = rowAt (e.x, e.y);
     if (r < 0 || !onJumpToState) return;
     onJumpToState (r);   // MainWindow performs the jump and refreshes everything
@@ -1848,6 +1870,8 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
     m.addItem (CtxCopyHarmonics, "Copy Harmonics",
                harmonicRefActive_ && haveSpec);
     m.addItem (CtxResetHarmonic, "Reset Harmonic", harmonicRefActive_);
+    m.addSeparator();
+    m.addItem (101, "Close Panel");
 
     const int sel = m.showMenu (juce::PopupMenu::Options ().withMousePosition());
     switch (sel)
@@ -1873,6 +1897,9 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
             break;
         case CtxResetHarmonic:
             resetHarmonicReference();
+            break;
+        case 101:
+            if (onCloseRequested) onCloseRequested();
             break;
     }
 }
@@ -2362,6 +2389,13 @@ void SpectralControlsPanel::resized()
         resetFreqBtn.setBounds (row.removeFromRight (86));
         fftSizeCombo.setBounds (row.reduced (6, 0));
     }
+}
+
+// Right-click on empty panel area: offer to close the panel.
+void SpectralControlsPanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (!e.mods.isRightButtonDown()) return;
+    if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
 }
 
 void SpectralControlsPanel::paint (juce::Graphics& g)
@@ -2870,6 +2904,8 @@ void MarkerListPanel::showMarkerContextMenu()
     m.addSeparator();
     m.addItem (6, "Remove All Markers", app.markers().count() > 0);
     m.addItem (3, "Find...\tCtrl+F");
+    m.addSeparator();
+    m.addItem (7, "Close Panel");
 
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (id == 1)
@@ -2884,6 +2920,7 @@ void MarkerListPanel::showMarkerContextMenu()
         removeAllMarkers();
     else if (id == 3)
         showFindDialog();
+    else if (id == 7 && onCloseRequested) onCloseRequested();
 }
 
 // useOSNativeDialogBox = false: the native Win32 IFileDialog is unavailable on some
@@ -3390,6 +3427,14 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
     refresh();
 }
 
+// Right-click on empty panel area: offer to close the panel. (Row right-
+// clicks are handled by the table's own context menu in Model::cellClicked.)
+void TranscriptionPanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (!e.mods.isRightButtonDown() || e.mods.isLeftButtonDown()) return;
+    if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
+}
+
 void TranscriptionPanel::refresh()
 {
     table.updateContent ();
@@ -3565,6 +3610,11 @@ SelectionPanel::SelectionPanel (Application& appIn)
                        "each target frequency. Each click adds clones scaled by (clicked / reference). "
                        "Esc or this button ends the session.");
 
+    // Right-clicking a row in the table shows the panel context menu (Load
+    // from disk / Close Panel). Deep registration is required: clicks on rows
+    // are delivered to the row's own component, not to the TableListBox.
+    table.addMouseListener (this, true);
+
     refresh();
 }
 
@@ -3721,8 +3771,11 @@ void SelectionPanel::showLoadContextMenu()
 {
     juce::PopupMenu m;
     m.addItem (1, "Load from disk...");
-    if (m.showMenu (juce::PopupMenu::Options().withMousePosition()) == 1)
-        loadFromDisk ();
+    m.addSeparator();
+    m.addItem (2, "Close Panel");
+    const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
+    if (id == 1) loadFromDisk ();
+    else if (id == 2 && onCloseRequested) onCloseRequested();
 }
 
 bool SelectionPanel::loadFromDisk()
@@ -3873,6 +3926,13 @@ PythonPanel::PythonPanel (Application& appIn, const juce::File& folder)
     runBtn.onClick     = [this] { requestRun (); };
 
     refreshScripts ();
+}
+
+// Right-click on empty panel area: offer to close the panel.
+void PythonPanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (!e.mods.isRightButtonDown()) return;
+    if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
 }
 
 void PythonPanel::refreshScripts ()

@@ -253,6 +253,7 @@ static void testMarkers()
     fu.deleteFile();
 }
 
+
 // ---------------- Marker CSV export/import ----------------
 static void testMarkerCsvRoundTrip()
 {
@@ -2620,6 +2621,169 @@ static void testLeftPanelLayout()
         CHECK (win->bottomPanelTabNames () == expectBottom, "group membership persisted");
 
         win.reset();
+        delete mm;
+    }
+
+    store.deleteFile ();
+}
+
+// ------------------------------------------------- Close Panel + Window menu
+// Every left-column panel offers right-click "Close Panel"; the Window menu
+// lists all panels with checkmarks and toggles them. Closed state persists.
+static void testClosePanelsAndWindowMenu()
+{
+    const juce::File store = makeTempFile ("close_panel.recent");
+    store.deleteFile ();   // deterministic per-run name: never trust leftovers
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    const int kNumPanels = 8;
+#else
+    const int kNumPanels = 7;
+#endif
+
+    auto windowMenuIndex = [] (MainWindow& win) -> int
+    {
+        const juce::StringArray names = win.getMenuBarNames ();
+        for (int i = 0; i < names.size (); ++i)
+            if (names[i] == "Window") return i;
+        return -1;
+    };
+
+    // 1) Fresh store: every panel open, Window menu lists them all.
+    {
+        Application app (store);
+        juce::MessageManager* mm = juce::MessageManager::getInstance();
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "close panel test"));
+
+        const bool allOpen = win->isPanelOpen ("files") && win->isPanelOpen ("fft")
+            && win->isPanelOpen ("history") && win->isPanelOpen ("python")
+            && win->isPanelOpen ("controls") && win->isPanelOpen ("markers")
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+            && win->isPanelOpen ("transcription")
+#endif
+            && win->isPanelOpen ("selection");
+        CHECK (allOpen, "all panels open by default");
+
+        const int wIdx = windowMenuIndex (*win);
+        CHECK (wIdx >= 0, "Window menu exists in the menu bar");
+        juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
+        CHECK (wm.getNumItems () == kNumPanels, "Window menu lists every panel");
+
+        // Each Window menu entry toggles its own panel (dispatch + action).
+        // Toggle back immediately so later steps see the original state.
+        juce::StringArray ids;
+        ids.add ("files");   ids.add ("fft");     ids.add ("history");
+        ids.add ("python");  ids.add ("controls"); ids.add ("markers");
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+        ids.add ("transcription");
+#endif
+        ids.add ("selection");
+        for (int i = 0; i < kNumPanels; ++i)
+        {
+            const bool wasOpen = win->isPanelOpen (ids[i]);
+            win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + i, wIdx);
+            CHECK (win->isPanelOpen (ids[i]) == !wasOpen,
+                  "Window menu toggles panel " + ids[i]);
+            win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + i, wIdx);
+        }
+
+        // 2) Closing a panel through its own right-click wiring.
+        auto* files = dynamic_cast<FileListPanel*> (win->panelForId ("files"));
+        CHECK (files != nullptr, "panelForId resolves Files");
+        if (files)
+        {
+            files->requestClose ();
+            CHECK (!win->isPanelOpen ("files"), "Files closed via its own close action");
+        }
+
+        // 3) Reopening through the Window menu lands back at index 0.
+        win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 0, wIdx);
+        CHECK (win->isPanelOpen ("files"), "Files reopened from the Window menu");
+        CHECK (win->topPanelTabNames ()[0] == "Files",
+              "reopened Files is first in its group again");
+
+        // 4) Canonical order restored after closing and reopening out of order.
+        win->setPanelVisible ("history", false);
+        win->setPanelVisible ("fft", false);
+        {
+            const juce::StringArray expectTop1 { "Files", "Python" };
+            CHECK (win->topPanelTabNames () == expectTop1,
+                  "two panels closed from the top group");
+        }
+        win->setPanelVisible ("history", true);   // before fft canonically
+        {
+            const juce::StringArray expectTop2 { "Files", "History", "Python" };
+            CHECK (win->topPanelTabNames () == expectTop2,
+                  "History reinserted at its canonical position");
+        }
+        win->setPanelVisible ("fft", true);
+        {
+            const juce::StringArray expectTop3 { "Files", "Frequency Analysis",
+                                                 "History", "Python" };
+            CHECK (win->topPanelTabNames () == expectTop3,
+                  "canonical top order fully restored");
+        }
+
+        // 5) A panel dragged to the other bar is closed from there.
+        int markersIdx = -1;
+        const juce::StringArray bot = win->bottomPanelTabNames ();
+        for (int i = 0; i < bot.size (); ++i)
+            if (bot[i] == "Markers") { markersIdx = i; break; }
+        CHECK (markersIdx >= 0, "Markers found in the bottom group");
+        win->moveLeftPanelTab (win->bottomPanelTabs (), markersIdx,
+                               win->topPanelTabs (), 0);
+        CHECK (win->topPanelTabNames ()[0] == "Markers",
+              "Markers moved to the top group");
+        win->setPanelVisible ("markers", false);
+        CHECK (!win->isPanelOpen ("markers"), "Markers closed from the top group");
+        CHECK (win->topPanelTabNames ()[0] == "Files",
+              "top group order after closing Markers");
+
+        // 6) Closing every panel of a group hides that bar; reopening one
+        //    shows it again.
+        win->setPanelVisible ("files", false);
+        win->setPanelVisible ("fft", false);
+        win->setPanelVisible ("history", false);
+        win->setPanelVisible ("python", false);
+        CHECK (!win->topPanelTabs ()->isVisible (), "empty top group is hidden");
+        CHECK (win->bottomPanelTabs ()->isVisible (), "bottom group still visible");
+        win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 1, wIdx);   // fft
+        CHECK (win->topPanelTabs ()->isVisible (), "top group visible again");
+        CHECK (win->isPanelOpen ("fft") && !win->isPanelOpen ("files"),
+              "only Frequency Analysis reopened");
+
+        win.reset ();
+        delete mm;
+    }
+
+    // 7) Closed panels stay closed after a restart; open ones keep their order.
+    {
+        Application app (store);
+        juce::MessageManager* mm = juce::MessageManager::getInstance();
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "close panel test 2"));
+
+        CHECK (!win->isPanelOpen ("files") && !win->isPanelOpen ("history")
+               && !win->isPanelOpen ("markers") && !win->isPanelOpen ("python"),
+              "closed panels stay closed after restart");
+        {
+            const juce::StringArray expectTop { "Frequency Analysis" };
+            CHECK (win->topPanelTabNames () == expectTop, "open top group restored in order");
+        }
+
+        const int wIdx = windowMenuIndex (*win);
+        juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
+        CHECK (wm.getNumItems () == kNumPanels, "Window menu still lists every panel");
+
+        // Reopening a closed panel from the Window menu works after restart too.
+        win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 0, wIdx);   // files
+        CHECK (win->isPanelOpen ("files"), "Files reopened after restart");
+        {
+            const juce::StringArray expectTop { "Files", "Frequency Analysis" };
+            CHECK (win->topPanelTabNames () == expectTop,
+                  "reopened Files first again after restart");
+        }
+
+        win.reset ();
         delete mm;
     }
 
@@ -9191,6 +9355,7 @@ static int scRunUnitTestsImpl()
     progress ("about text licences"); testAboutText();
     progress ("time scrollbar on load"); testTimeScrollBarOnLoad();
     progress ("left panel layout"); testLeftPanelLayout();
+    progress ("close panels + window menu"); testClosePanelsAndWindowMenu();
     progress ("home/end panning"); testHomeEndPans();
     progress ("spectral probe");      testSpectralProbe();
     progress ("arrow key selection"); testArrowKeySelection();

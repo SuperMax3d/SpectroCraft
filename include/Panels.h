@@ -143,6 +143,11 @@ public:
     // Set by MainWindow to trigger the Open dialog
     std::function<void()> onOpenRequested;
 
+    // Right-click "Close Panel": set by MainWindow, invoked from this panel's
+    // context menus. requestClose() is the testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
+
     /** Builds the "Set Unit and Scale" calibration dialog for one document.
         The caller owns and deletes the returned window (unit tests inspect it
         without running the modal loop). */
@@ -188,6 +193,11 @@ public:
     // Set by MainWindow: called with a target STATE index (0 = right after
     // file load, N = end of history). The window undoes/redo-es to it.
     std::function<void(int)> onJumpToState;
+
+    // Right-click "Close Panel": set by MainWindow. requestClose() is the
+    // testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
 
     // Unit-test accessors.
     int numRows() const { return (int) rows_.size(); }
@@ -271,6 +281,11 @@ public:
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+
+    // Right-click "Close Panel": set by MainWindow. requestClose() is the
+    // testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
 
     // Called by MainWindow while playing: forces a recompute on state change
     // (during playback with no selection the panel tracks the cursor).
@@ -545,6 +560,11 @@ public:
     // Set by MainWindow: resets the spectral view's frequency axis.
     std::function<void()> onResetFreq;
 
+    // Right-click "Close Panel": set by MainWindow. requestClose() is the
+    // testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
+
     // Current dB-range slider position (tests).
     double getDbRangeSliderValue() const { return dBRangeSlider.getValue(); }
     juce::String getDbMinText() const { return dbMinEdit.getText(); }
@@ -559,6 +579,8 @@ public:
     }
 
 private:
+    void mouseDown (const juce::MouseEvent&) override;   // right-click = Close Panel
+
     Application& app;
     juce::ComboBox colourMapCombo, fftSizeCombo;
     juce::Slider dBRangeSlider;
@@ -636,6 +658,11 @@ public:
     // Right-click context menu actions (also used by unit tests).
     void copyAllMarkers();
     int pasteMarkersFromClipboard();
+
+    // Right-click "Close Panel": set by MainWindow. requestClose() is the
+    // testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
 
     // CSV export/import via file chooser, and "Remove All" with a confirm box.
     void exportMarkersCsv();
@@ -741,6 +768,11 @@ public:
     // Set by MainWindow: opens the model/language dialog and starts the run.
     std::function<void()> onRunRequested;
 
+    // Right-click "Close Panel": set by MainWindow. requestClose() is the
+    // testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
+
 private:
     Application& app;
 
@@ -759,6 +791,8 @@ private:
     private:
         TranscriptionPanel* owner;
     };
+
+    void mouseDown (const juce::MouseEvent&) override;   // right-click = Close Panel
 
     Model model { this };
     juce::TableListBox table { "", &model };
@@ -821,6 +855,11 @@ public:
     // Drag & drop of .selections.json files onto the panel (also used by unit tests).
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void filesDropped (const juce::StringArray& files, int x, int y) override;
+
+    // Right-click "Close Panel": set by MainWindow. requestClose() is the
+    // testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
 
 private:
     Application& app;
@@ -939,8 +978,14 @@ public:
         Signature: (script file, script text). */
     std::function<void (const juce::File&, const juce::String&)> onRunRequested;
 
+    // Right-click "Close Panel": set by MainWindow. requestClose() is the
+    // testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
+
 private:
     void resized() override;
+    void mouseDown (const juce::MouseEvent&) override;   // right-click = Close Panel
     void loadCurrentScript();
     void showAddDialog();
     void confirmRemove();

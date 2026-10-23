@@ -183,6 +183,21 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
                                 juce::TabbedComponent* to, int ii)
                         { moveLeftPanelTab (from, fi, to, ii); };
 
+    // Right-click "Close Panel" in each left-column panel (the Window menu
+    // offers the same toggles for every panel).
+    fileListPanel->onCloseRequested   = [this] { setPanelVisible ("files", false); };
+    fftPanel->onCloseRequested        = [this] { setPanelVisible ("fft", false); };
+    historyPanel->onCloseRequested    = [this] { setPanelVisible ("history", false); };
+    pythonPanel->onCloseRequested     = [this] { setPanelVisible ("python", false); };
+    controlsPanel->onCloseRequested   = [this] { setPanelVisible ("controls", false); };
+    markersPanel->onCloseRequested    = [this] { setPanelVisible ("markers", false); };
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    if (transcriptionPanel)
+        transcriptionPanel->onCloseRequested =
+            [this] { setPanelVisible ("transcription", false); };
+#endif
+    selectionPanel->onCloseRequested  = [this] { setPanelVisible ("selection", false); };
+
     // Restore the user's saved arrangement + column geometry.
     applySavedLeftLayout();
     leftPanelW = std::clamp ((int) app.recentStore->getIntValue ("left_panel_w", leftPanelW), 220, 4000);
@@ -492,9 +507,13 @@ void MainWindow::resized()
     // a vertical one between the column and the main area, a horizontal one
     // between the top and bottom tab groups. The whole column can be hidden
     // from View > Left Panels to focus on the tracks.
+    // A tab group with no open panels takes no space; the other bar fills
+    // the whole column when one of them is empty.
+    const bool topEmpty = topTabs.getNumTabs () == 0;
+    const bool botEmpty = bottomTabs.getNumTabs () == 0;
     const bool showLeft = leftPanelsVisible;
-    topTabs.setVisible (showLeft);
-    bottomTabs.setVisible (showLeft);
+    topTabs.setVisible (showLeft && !topEmpty);
+    bottomTabs.setVisible (showLeft && !botEmpty);
     if (leftSplitter) leftSplitter->setVisible (showLeft);
 
     auto rest = bounds;
@@ -511,11 +530,24 @@ void MainWindow::resized()
         auto col = juce::Rectangle<int> (leftArea.getX(), leftArea.getY(),
                                          leftW, leftArea.getHeight());
         const int topH = (int) std::lround (col.getHeight() * topRatio);
-        topTabs.setBounds (col.removeFromTop (topH));
-        col.removeFromTop (splitW);   // strip for the horizontal divider
-        bottomTabs.setBounds (col);
-        if (topSplitter)
-            topSplitter->setBounds (leftArea.getX(), leftArea.getY() + topH, leftW, splitW);
+        if (topEmpty || botEmpty)
+        {
+            if (!topEmpty) topTabs.setBounds (col);
+            else           bottomTabs.setBounds (col);
+            if (topSplitter) topSplitter->setVisible (false);
+        }
+        else
+        {
+            topTabs.setBounds (col.removeFromTop (topH));
+            col.removeFromTop (splitW);   // strip for the horizontal divider
+            bottomTabs.setBounds (col);
+            if (topSplitter)
+            {
+                topSplitter->setVisible (true);
+                topSplitter->setBounds (leftArea.getX(), leftArea.getY() + topH,
+                                        leftW, splitW);
+            }
+        }
     }
 
     // Main area: waveform on top, draggable splitter, spectral below; a time
@@ -659,6 +691,93 @@ void MainWindow::moveLeftPanelTab (juce::TabbedComponent* from, int fromIndex,
     saveLeftLayout ();
 }
 
+// Canonical list of the left-column panels: id, tab name and which group it
+// starts in. The Window menu, setPanelVisible() and layout persistence all
+// iterate this list, so a new panel only needs one entry here.
+std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
+{
+    return {
+        { "files",       "Files",              true  },
+        { "fft",         "Frequency Analysis", true  },
+        { "history",     "History",            true  },
+        { "python",      "Python",             true  },
+        { "controls",    "Spectral Controls",  false },
+        { "markers",     "Markers",            false },
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+        { "transcription","Transcription",     false },
+#endif
+        { "selection",   "Selection",          false },
+    };
+}
+
+juce::Component* MainWindow::panelForId (const juce::String& id) const
+{
+    if (id == "files")       return fileListPanel.get ();
+    if (id == "fft")         return fftPanel.get ();
+    if (id == "history")     return historyPanel.get ();
+    if (id == "python")      return pythonPanel.get ();
+    if (id == "controls")    return controlsPanel.get ();
+    if (id == "markers")     return markersPanel.get ();
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    if (id == "transcription") return transcriptionPanel.get ();
+#endif
+    if (id == "selection")   return selectionPanel.get ();
+    return nullptr;
+}
+
+bool MainWindow::isPanelOpen (const juce::String& id) const
+{
+    juce::Component* comp = panelForId (id);
+    if (!comp) return false;
+    for (int i = 0; i < topTabs.getNumTabs (); ++i)
+        if (topTabs.getTabContentComponent (i) == comp) return true;
+    for (int i = 0; i < bottomTabs.getNumTabs (); ++i)
+        if (bottomTabs.getTabContentComponent (i) == comp) return true;
+    return false;
+}
+
+void MainWindow::setPanelVisible (const juce::String& id, bool visible)
+{
+    const auto entries = leftPanelEntries ();
+    int idx = -1;
+    for (size_t i = 0; i < entries.size (); ++i)
+        if (juce::String (entries[i].id) == id) { idx = (int) i; break; }
+    if (idx < 0 || isPanelOpen (id) == visible) return;
+
+    if (!visible)
+    {
+        // Remove the tab from whichever bar currently holds it.
+        for (auto* bar : { &topTabs, &bottomTabs })
+            for (int i = 0; i < bar->getNumTabs (); ++i)
+                if (bar->getTabContentComponent (i) == panelForId (id))
+                {
+                    bar->removeTab (i);
+                    saveLeftLayout ();
+                    resized();   // an emptied group must give up its space now
+                    return;
+                }
+        return;
+    }
+
+    // Reopen: insert at the canonical position among the panels that are
+    // currently open in this panel's default group, so reopening restores a
+    // natural order without fighting user drags.
+    juce::TabbedComponent& bar = entries[(size_t) idx].defaultTop ? topTabs : bottomTabs;
+    int insertAt = 0;
+    for (int i = 0; i < idx; ++i)
+    {
+        juce::Component* c = panelForId (entries[i].id);
+        if (!c) continue;
+        bool inThisBar = false;
+        for (int t = 0; t < bar.getNumTabs (); ++t)
+            if (bar.getTabContentComponent (t) == c) { inThisBar = true; break; }
+        if (inThisBar) ++insertAt;
+    }
+    bar.addTab (entries[(size_t) idx].name, kDarkTabBg, panelForId (id), false, insertAt);
+    saveLeftLayout ();
+    resized();   // a previously empty group must take its space back now
+}
+
 void MainWindow::saveLeftLayout()
 {
     auto idsFor = [this] (juce::TabbedComponent& bar) -> juce::String
@@ -674,7 +793,18 @@ void MainWindow::saveLeftLayout()
         return s;
     };
 
+    // Explicit closed list: panels missing from left_tab_layout could be new
+    // ones added by a newer version, so "closed" must be stored separately.
+    juce::String closed;
+    for (const auto& e : leftPanelEntries ())
+        if (!isPanelOpen (e.id))
+        {
+            if (closed.isNotEmpty()) closed << ";";
+            closed << e.id;
+        }
+
     app.recentStore->setValue ("left_tab_layout", idsFor (topTabs) + "|" + idsFor (bottomTabs));
+    app.recentStore->setValue ("left_panels_closed", closed);
     app.recentStore->setValue ("left_panel_w", leftPanelW);
     app.recentStore->setValue ("top_ratio_mil", (int) std::lround (topRatio * 1000.0));
     app.recentStore->setValue ("left_panels_visible", leftPanelsVisible ? 1 : 0);
@@ -740,12 +870,31 @@ void MainWindow::applySavedLeftLayout()
     for (size_t e = 0; e < entries.size (); ++e)
         if (!used[e]) addEntry (entries[e].defaultTop ? topTabs : bottomTabs, entries[e]);
 
+    // Panels the user explicitly closed stay closed. (Newer-version panels not
+    // in either list default to open.)
+    const juce::StringArray closedIds = juce::StringArray::fromTokens (
+        app.recentStore->getValue ("left_panels_closed"), ";", "");
+    for (const auto& cid : closedIds)
+    {
+        juce::Component* comp = panelForId (cid);
+        if (!comp) continue;
+        for (auto* bar : { &topTabs, &bottomTabs })
+        {
+            int i = 0;
+            while (i < bar->getNumTabs () && bar->getTabContentComponent (i) != comp)
+                ++i;
+            if (i < bar->getNumTabs ()) bar->removeTab (i);
+        }
+    }
+
     // Frequency Analysis is the default tab in the top group when present.
     int fftIdx = -1;
     for (int i = 0; i < topTabs.getNumTabs (); ++i)
         if (topTabs.getTabContentComponent (i) == fftPanel.get()) { fftIdx = i; break; }
-    topTabs.setCurrentTabIndex (fftIdx >= 0 ? fftIdx : 0, false);
-    bottomTabs.setCurrentTabIndex (0, false);
+    if (topTabs.getNumTabs () > 0)
+        topTabs.setCurrentTabIndex (fftIdx >= 0 ? fftIdx : 0, false);
+    if (bottomTabs.getNumTabs () > 0)
+        bottomTabs.setCurrentTabIndex (0, false);
 }
 
 void MainWindow::setLeftPanelsVisible (bool visible)
@@ -1375,6 +1524,16 @@ static void showAboutDialog (Component* parent)
 void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 {
     using enum MenuIDs;
+
+    // Window menu: toggle a left-column panel open/closed.
+    if (menuItemID >= WindowPanelBase && menuItemID < WindowPanelBase + 16)
+    {
+        const auto entries = leftPanelEntries ();
+        const int i = menuItemID - WindowPanelBase;
+        if (i >= 0 && i < (int) entries.size ())
+            setPanelVisible (entries[i].id, !isPanelOpen (entries[i].id));
+        return;
+    }
 
     // File > Open Recent items.
     if (menuItemID >= RecentBase && menuItemID < RecentBase + Application::kMaxRecentFiles)
@@ -2787,6 +2946,15 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsResample, "Resample...",
                       app.audioEngine().isFileLoaded(), false);
     }
+    else if (menuName == "Window")
+    {
+        // One entry per left-column panel, in canonical order; a checkmark
+        // shows which panels are currently open.
+        const auto entries = leftPanelEntries ();
+        for (size_t i = 0; i < entries.size (); ++i)
+            menu.addItem ((int) (WindowPanelBase + i), entries[i].name, true,
+                          isPanelOpen (entries[i].id));
+    }
     else if (menuName == "Help")
     {
         menu.addItem (HelpAbout, "About SpectroCraft", true, false);
@@ -2797,7 +2965,8 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
 
 juce::StringArray MainWindow::getMenuBarNames()
 {
-    return { "File", "Edit", "Selection", "View", "Transport", "Effects", "Help" };
+    return { "File", "Edit", "Selection", "View", "Transport", "Effects",
+             "Window", "Help" };
 }
 
 // The list panel (Markers or Transcription) currently shown in a left-panel
