@@ -649,6 +649,112 @@ static void testMarkerAxisClipping()
     wav.deleteFile();
 }
 
+// ---------------- Playhead arrow symmetry ----------------
+// The playhead is a 1px vertical line plus an upward triangle in the ruler.
+// Both must be centred on the same pixel column: if the triangle's apex sat
+// at a fractional x while the line occupied [floor(px), floor(px)+1), one
+// wing would rasterise visibly heavier than the other (the arrow looked
+// skewed). This test renders the real view headlessly and checks that every
+// ruler row is balanced about the snapped centre, at both 100% and 150%
+// DPI scale.
+static void testPlayheadArrowSymmetry()
+{
+    const juce::File wav = makeTempFile ("ph_sym.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "playhead symmetry: load wav");
+
+    // View [0,2] in a 300px-wide view: plot x = 60..300, timeToX(t) = 60 + 120 t.
+    // pxI = 144 keeps the probe window clear of ruler ticks (x=...132,156...) and labels.
+    for (double px : { 144.3, 144.7 })
+    {
+        const double t = (px - 60.0) / 120.0;
+
+        for (float scale : { 1.0f, 1.5f })
+        {
+            WaveformView view (app);
+            view.setSize (300, 128);
+            view.setViewRange (0.0, 2.0);
+            view.setVisibleChannels ({ 0 });
+            view.setPlayhead (t);
+
+            const int W = (int) std::ceil (300 * scale), H = (int) std::ceil (128 * scale);
+            juce::Image img (juce::Image::ARGB, W, H, true);
+            {
+                juce::Graphics bg (img);
+                bg.fillAll (juce::Colours::black);
+            }
+            juce::Graphics g (img);
+            if (scale != 1.0f)
+                g.addTransform (juce::AffineTransform::scale (scale));
+            view.paint (g);
+
+            const int pxI = (int) std::lround (px);
+            const double centreDev = ((double) pxI + 0.5) * scale;   // snapped line centre
+            const int cxw = (int) std::lround ((double) pxI * scale);
+            const int lastRow = (int) std::lround ((WaveformView::kRulerH - 1) * scale);  // above ruler border
+
+            bool rowsSeen = false, comOk = true, edgeOk = true;
+            int maxSpan = 0;
+            for (int y = 0; y < lastRow && y < H; ++y)
+            {
+                int lo = -1, hi = -1;
+                double sum = 0.0, wsum = 0.0;
+                for (int x = std::max (0, cxw - 8); x < std::min (W, cxw + 9); ++x)
+                {
+                    const int r = (int) img.getPixelAt (x, y).getRed();
+                    if (r > 40)
+                    {
+                        if (lo < 0) lo = x;
+                        hi = x;
+                        sum += (double) r * ((double) x + 0.5);
+                        wsum += (double) r;
+                    }
+                }
+                if (lo < 0)
+                    continue;
+
+                rowsSeen = true;
+                maxSpan = std::max (maxSpan, hi - lo + 1);
+                const double comOffset = sum / wsum - centreDev;
+                if (std::abs (comOffset) > 0.3)
+                {
+                    comOk = false;
+                    std::cerr << "[phsym] px=" << px << " scale=" << scale
+                              << " row " << y << " comOffset=" << comOffset << '\n';
+                }
+                // At 100% scale the two slanted edges must land at mirror-image
+                // sub-pixel phases: equal coverage on both outer pixels.
+                if (scale == 1.0f && hi - lo >= 2)
+                {
+                    const int vL = (int) img.getPixelAt (lo, y).getRed();
+                    const int vR = (int) img.getPixelAt (hi, y).getRed();
+                    if (std::abs (vL - vR) > 8)
+                    {
+                        edgeOk = false;
+                        std::cerr << "[phsym] px=" << px << " row " << y
+                                  << " edges " << vL << "/" << vR << '\n';
+                    }
+                }
+            }
+
+            const juce::String tag = "px=" + juce::String (px) + " scale=" + juce::String (scale);
+            CHECK (rowsSeen, "playhead arrow visible (" + tag + ")");
+            CHECK (maxSpan >= 8 * (int) std::lround (scale) - 2,
+                  "playhead arrow reaches full width (" + tag + "): span=" + juce::String (maxSpan));
+            CHECK (comOk, "playhead arrow centred on its line (" + tag + ")");
+            if (scale == 1.0f)
+                CHECK (edgeOk, "playhead arrow wings equally covered (" + tag + ")");
+        }
+    }
+
+    wav.deleteFile();
+}
+
 // ---------------- Spectral view top time ruler ----------------
 // The spectral view carries its own top time ruler so the time axis stays
 // visible in spectrogram-only (F9) mode.
@@ -9321,6 +9427,7 @@ static int scRunUnitTestsImpl()
     progress ("undo/redo");      testUndo();
     progress ("zero-crossing");  testZeroCrossing();
     progress ("spectral engine");testSpectral();
+    progress ("playhead arrow symmetry"); testPlayheadArrowSymmetry();
     progress ("spectral view paint"); testSpectralViewPaint();
     progress ("marker axis clipping"); testMarkerAxisClipping();
     progress ("spectral time ruler");  testSpectralTimeRuler();

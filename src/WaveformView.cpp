@@ -575,11 +575,18 @@ void WaveformView::paint (juce::Graphics& g)
     const double px = timeToX (playhead);
     if (px >= pr.getX() && px <= pr.getRight())
     {
+        // Snap the line and the arrow to a common pixel centre. The line is a
+        // 1px column [x, x+1); centring the triangle on that same column keeps
+        // both slanted edges at mirror-image sub-pixel phases, so the arrow
+        // rasterises symmetrically (a fractional apex would otherwise make one
+        // wing visibly heavier than the other).
+        const int pxI = (int) std::lround (px);
         g.setColour (juce::Colour::fromRGB (255, 60, 60));
-        g.drawVerticalLine ((int) px, 0.0f, (float) bounds.getHeight());
+        g.drawVerticalLine (pxI, 0.0f, (float) bounds.getHeight());
         juce::Path tri;
-        tri.addTriangle ((float) px - 5, (float) kRulerH, (float) px + 5, (float) kRulerH,
-                        (float) px, 0.0f);
+        tri.addTriangle ((float) pxI - 4.5f, (float) kRulerH,
+                         (float) pxI + 5.5f, (float) kRulerH,
+                         (float) pxI + 0.5f, 0.0f);
         g.fillPath (tri);
     }
 
