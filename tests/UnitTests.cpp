@@ -2821,6 +2821,204 @@ static void testLeftPanelLayout()
     store.deleteFile ();
 }
 
+static juce::MouseEvent mkMouse (juce::Component& c, int x, int y, juce::ModifierKeys mods);   // defined below
+
+// ------------------------------------------- Cross-bar tab move (drag regression)
+// Dragging a panel tab from one row to the other used to crash: removeTab()
+// deletes the DragTabButton that was still executing its own mouseUp, and the
+// old endDrag() then touched freed members. moveLeftPanelTab is the exact code
+// path the drop invokes, so driving it headlessly covers both sides.
+static void testCrossBarTabMove()
+{
+    const juce::File store = makeTempFile ("crossbar_tab.recent");
+    store.deleteFile ();
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    const int kNumPanels = 8;
+#else
+    const int kNumPanels = 7;
+#endif
+
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "cross bar tab test"));
+
+        auto* filesPanel = win->panelForId ("files");
+        CHECK (filesPanel != nullptr, "test setup: probe panel exists");
+
+        // The two bars are direct children of the window. Identify them by
+        // their tab names - a panel's parent is only its bar while that tab
+        // is the current one.
+        juce::TabbedComponent* topBar = nullptr, *bottomBar = nullptr;
+        for (auto* c : win->getChildren ())
+        {
+            auto* tb = dynamic_cast<juce::TabbedComponent*> (c);
+            if (!tb) continue;
+            const juce::StringArray names = tb->getTabNames ();
+            bool hasFiles = false, hasMarkers = false;
+            for (auto& n : names)
+            {
+                if (n == "Files") hasFiles = true;
+                else if (n == "Markers") hasMarkers = true;
+            }
+            if (hasFiles && topBar == nullptr) topBar = tb;
+            else if (hasMarkers && bottomBar == nullptr) bottomBar = tb;
+        }
+        CHECK (topBar != nullptr && bottomBar != nullptr, "test setup: both bars found");
+        if (!filesPanel || !topBar || !bottomBar) return;
+
+        const int topN = topBar->getNumTabs ();
+        const int botN = bottomBar->getNumTabs ();
+        CHECK (topN + botN == kNumPanels, "test setup: all panels present");
+
+        // Move the first tab of the top bar ("Files") to the front of the bottom bar.
+        win->moveLeftPanelTab (topBar, 0, bottomBar, 0);
+
+        CHECK (topBar->getNumTabs () == topN - 1, "source bar lost one tab");
+        CHECK (bottomBar->getNumTabs () == botN + 1, "destination bar gained one tab");
+        CHECK (bottomBar->getTabNames() [0] == "Files", "moved tab is first in the destination bar");
+
+        // The panel component itself must survive the move intact.
+        auto* moved = win->panelForId ("files");
+        CHECK (moved == filesPanel, "panel object survived the cross-bar move");
+        CHECK (dynamic_cast<juce::TabbedComponent*> (moved->getParentComponent()) == bottomBar,
+              "panel now lives in the destination bar");
+
+        // Selection state: the moved tab is active in its new bar, and the
+        // source bar keeps a selection while tabs remain.
+        CHECK (bottomBar->getCurrentTabIndex () == 0, "moved tab selected in destination bar");
+        CHECK (topBar->getNumTabs () > 0 && topBar->getCurrentTabIndex () >= 0,
+              "source bar keeps a selection when tabs remain");
+
+        // Round trip back to the original arrangement.
+        win->moveLeftPanelTab (bottomBar, 0, topBar, 0);
+        CHECK (topBar->getNumTabs () == topN && bottomBar->getNumTabs () == botN,
+              "moving the tab back restores both bars");
+        CHECK (win->isPanelOpen ("files"), "panel still open after round trip");
+
+        // Appending at the end of the other bar also works.
+        win->moveLeftPanelTab (topBar, 0, bottomBar, botN);
+        CHECK (bottomBar->getTabNames() [botN] == "Files", "append-at-end lands last");
+        win->moveLeftPanelTab (bottomBar, botN, topBar, 0);
+    }
+
+    // Simulated real drag: mouseDown on the Files tab button, drag onto a tab
+    // of the other bar, release. This exercises DragTabButton::endDrag() -
+    // before the fix, removeTab() deleted that very button mid-mouseUp and
+    // endDrag then touched freed members (crash).
+    {
+        Application app2 (store);
+        std::unique_ptr<MainWindow> win2 (new MainWindow (app2, "cross bar drag test"));
+
+        juce::TabbedComponent* topBar2 = nullptr, *bottomBar2 = nullptr;
+        for (auto* c : win2->getChildren ())
+        {
+            auto* tb = dynamic_cast<juce::TabbedComponent*> (c);
+            if (!tb) continue;
+            const juce::StringArray names = tb->getTabNames ();
+            bool hasFiles = false, hasMarkers = false;
+            for (auto& n : names)
+            {
+                if (n == "Files") hasFiles = true;
+                else if (n == "Markers") hasMarkers = true;
+            }
+            if (hasFiles && topBar2 == nullptr) topBar2 = tb;
+            else if (hasMarkers && bottomBar2 == nullptr) bottomBar2 = tb;
+        }
+        CHECK (topBar2 != nullptr && bottomBar2 != nullptr, "drag test setup: both bars found");
+
+        auto* filesBtn  = dynamic_cast<DragTabButton*> (topBar2->getTabbedButtonBar().getTabButton (0));
+        auto* targetBtn = bottomBar2->getTabbedButtonBar().getTabButton (0);
+        CHECK (filesBtn != nullptr && targetBtn != nullptr, "drag test setup: tab buttons found");
+
+        if (topBar2 && bottomBar2 && filesBtn && targetBtn)
+        {
+            const auto srcTL = filesBtn->localPointToGlobal  (juce::Point<int> (0, 0));
+            const auto dstTL = targetBtn->localPointToGlobal (juce::Point<int> (0, 0));
+
+            // Down near the source tab's centre...
+            filesBtn->mouseDown (mkMouse (*filesBtn, 12, 6, {}));
+            // ...drag far enough to arm the drag and land on the target tab.
+            const int lx = dstTL.x - srcTL.x + 12;
+            const int ly = dstTL.y - srcTL.y + 6;
+            filesBtn->mouseDrag (mkMouse (*filesBtn, lx, ly, {}));
+            // ...release. (Do not touch filesBtn after this: the drop deletes it.)
+            filesBtn->mouseUp   (mkMouse (*filesBtn, lx, ly, {}));
+
+            CHECK (bottomBar2->getTabNames() [0] == "Files",
+                  "drag moved the Files tab to the other bar");
+            auto* moved = win2->panelForId ("files");
+            CHECK (moved != nullptr && moved->getParentComponent() == bottomBar2,
+                  "panel survived the simulated drag and lives in the destination bar");
+        }
+    }
+
+    store.deleteFile ();
+}
+
+// ------------------------------------- Spectral refresh on equal-length doc switch
+// Ctrl+Tab between two files of identical duration used to leave the previous
+// file's tiles on screen: fitAll() saw no time-window change and never marked
+// the tile image dirty. Switching must force a re-render from the new engine.
+static void testSpectralRefreshOnDocSwitch()
+{
+    const juce::File store = makeTempFile ("spec_switch.recent");
+    store.deleteFile ();
+    const juce::File wavA = makeTempFile ("spec_switch_a.wav");
+    const juce::File wavB = makeTempFile ("spec_switch_b.wav");
+
+    // Same length, different spectral content: 400 Hz vs 3 kHz at an 8 kHz rate.
+    writeWav (wavA, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+    writeWav (wavB, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 3000.0 * (double) f / rate);
+    });
+
+    Application app (store);
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "spec switch test"));
+
+    SpectralView* sv = nullptr;
+    for (auto* c : win->getChildren ())
+        if ((sv = dynamic_cast<SpectralView*> (c)) != nullptr) break;
+    CHECK (sv != nullptr, "found the spectral view in the main window");
+    if (!sv)
+    {
+        wavA.deleteFile ();
+        wavB.deleteFile ();
+        store.deleteFile ();
+        return;
+    }
+
+    // Capture at the view's real layout size (MainWindow::resized() has already
+    // placed it): A's 400 Hz tone renders as a full-width row mid-axis while B's
+    // 3 kHz tone sits near the top of the axis, so a stale image (A's tiles
+    // painted for B) differs by thousands of pixels.
+    CHECK (app.openFile (wavA), "open file A");   // fires activateDocUI()
+    juce::Image imgA (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
+    { juce::Graphics g (imgA); sv->paint (g); }
+
+    CHECK (app.openFile (wavB), "open file B (same duration)");
+    // Regression: without the forced refresh in activateDocUI(), fitAll() sees
+    // no window change and the view keeps painting A's tiles - imgB would be
+    // pixel-identical to imgA.
+    juce::Image imgB (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
+    { juce::Graphics g (imgB); sv->paint (g); }
+
+    int diffs = 0;
+    for (int y = 0; y < imgA.getHeight(); ++y)
+        for (int x = 0; x < imgA.getWidth(); ++x)
+            if (imgA.getPixelAt (x, y) != imgB.getPixelAt (x, y)) ++diffs;
+
+    CHECK (diffs > 50, "spectrogram re-rendered after switching to an equal-length file");
+
+    wavA.deleteFile ();
+    wavB.deleteFile ();
+    store.deleteFile ();
+}
+
 // ------------------------------------------------- Close Panel + Window menu
 // Every left-column panel offers right-click "Close Panel"; the Window menu
 // lists all panels with checkmarks and toggles them. Closed state persists.
@@ -9671,6 +9869,8 @@ static int scRunUnitTestsImpl()
     progress ("time scrollbar on load"); testTimeScrollBarOnLoad();
     progress ("left panel layout"); testLeftPanelLayout();
     progress ("close panels + window menu"); testClosePanelsAndWindowMenu();
+    progress ("cross bar tab move"); testCrossBarTabMove();
+    progress ("spectral refresh on doc switch"); testSpectralRefreshOnDocSwitch();
     progress ("home/end panning"); testHomeEndPans();
     progress ("spectral probe");      testSpectralProbe();
     progress ("arrow key selection"); testArrowKeySelection();

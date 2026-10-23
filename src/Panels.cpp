@@ -148,6 +148,18 @@ void DragTabButton::endDrag (const juce::MouseEvent& e)
     const auto global = localPointToGlobal (
         juce::Point<int> ((int) e.position.x, (int) e.position.y));
 
+    // A cross-bar drop makes MainWindow remove this tab from its bar, and
+    // TabbedButtonBar::removeTab() deletes THIS button while we are still
+    // inside its own mouseUp dispatch. So the onMove call below must be the
+    // very last thing done here - no member of `this` may be touched after it.
+    // (The ghost is ours: drop it first so ~DragTabButton won't double-delete.)
+    if (ghost != nullptr)
+    {
+        auto* g = ghost;
+        ghost = nullptr;
+        delete g;
+    }
+
     if (context && context->onMove && ownerTabbed_)
     {
         DragTabButton* target = findHovered (context, global);
@@ -158,13 +170,12 @@ void DragTabButton::endDrag (const juce::MouseEvent& e)
             int insertIdx = toBar.indexOfTabButton (target);
             if (global.x > tl.x + target->getWidth() / 2) ++insertIdx;   // drop on the right half
 
-            context->onMove (ownerTabbed_, getTabbedButtonBar().indexOfTabButton (this),
-                             static_cast<DragTabButton*> (target)->ownerTabbed_, insertIdx);
+            // Read everything from `this` before onMove runs - it may delete us.
+            juce::TabbedComponent* const fromComp = ownerTabbed_;
+            const int fromIdx = getTabbedButtonBar().indexOfTabButton (this);
+            context->onMove (fromComp, fromIdx, target->ownerTabbed_, insertIdx);
         }
     }
-
-    delete ghost;
-    ghost = nullptr;
 }
 
 DragTabButton* DragTabButton::findHovered (TabDragContext* ctx, const juce::Point<int>& globalPos)

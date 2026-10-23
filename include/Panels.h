@@ -95,10 +95,12 @@ public:
                    juce::TabbedComponent* ownerTabbed, TabDragContext* ctx);
     ~DragTabButton() override;
 
-private:
+    // Public so headless unit tests can drive a full drag sequence.
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp   (const juce::MouseEvent&) override;
+
+private:
 
     TabDragContext* context = nullptr;
     juce::TabbedComponent* ownerTabbed_ = nullptr;

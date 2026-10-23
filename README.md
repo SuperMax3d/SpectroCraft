@@ -295,8 +295,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   remembers its own playhead position, selection range, visible channels,
   markers and undo history; switching files restores all of them.
   **Ctrl+Tab / Ctrl+Shift+Tab** cycles through the loaded files (forward /
-  backwards). Closing a file (right-click → Close, or File → Close for the
-  active one) removes it from the list. The live frequency analysis always
+  backwards). Closing a file (right-click → Close, File → Close, or
+  Ctrl+W / Ctrl+F4 for the active one) removes it from the list. The live frequency analysis always
   follows the playhead of the *active* file, and **the eight stored snapshots
   are shared across all open files** — each snapshot remembers which file it
   was stored from (shown in its tooltip), so curves from different files can be
@@ -700,7 +700,8 @@ The test executable accepts the same flags (useful for CI without a display).
 
 | Action | Shortcut |
 |---|---|
-| Open / Close file | Ctrl+O / Ctrl+W |
+| Open file | Ctrl+O |
+| Close active file | Ctrl+W or Ctrl+F4 |
 | Cycle through loaded files (forward / backwards) | Ctrl+Tab / Ctrl+Shift+Tab |
 | Save / Save As | Ctrl+S / Ctrl+Shift+S |
 | Undo / Redo | Ctrl+Z / Ctrl+Y |

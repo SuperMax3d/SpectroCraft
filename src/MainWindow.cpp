@@ -690,8 +690,16 @@ void MainWindow::moveLeftPanelTab (juce::TabbedComponent* from, int fromIndex,
         if (!content) return;
 
         insertIndex = std::clamp (insertIndex, 0, to->getNumTabs ());
+        const int remaining = nFrom - 1;
         from->removeTab (fromIndex);
         to->addTab (name, colour, content, false, insertIndex);
+
+        // Keep both bars in a sensible selected state: the moved tab becomes
+        // active in its new bar, and if any tabs remain behind, the neighbour
+        // that slid into the vacated slot takes over there.
+        to->setCurrentTabIndex (insertIndex, false);
+        if (remaining > 0)
+            from->setCurrentTabIndex (std::min (fromIndex, remaining - 1), false);
     }
 
     saveLeftLayout ();
@@ -1323,6 +1331,11 @@ void MainWindow::activateDocUI()
     {
         spectralView->fitAll();
         spectralView->resetFrequencyRange();
+        // fitAll() only repaints when the time window actually changed - two
+        // files of identical duration would leave the previous file's tiles on
+        // screen. Application::activate() already cleared the tile cache, so
+        // force a re-render from the newly active engine.
+        spectralView->invalidateImage();
     }
 
     // Re-install the playback mask for this doc's spectral selection (or clear
@@ -3101,6 +3114,8 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0)) { handleFileSave(); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleFileSaveAs(); return true; }
     if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }
+    // Ctrl+F4 also closes the active file (browser-style tab close).
+    if (key == juce::KeyPress (juce::KeyPress::F4Key, juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }
     if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) { app.undoStep(); refreshAfterEdit(); return true; }
     if (key == juce::KeyPress ('y', juce::ModifierKeys::commandModifier, 0)) { app.redoStep(); refreshAfterEdit(); return true; }
     if (key == juce::KeyPress ('x', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); return true; }
