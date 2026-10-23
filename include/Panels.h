@@ -357,6 +357,19 @@ public:
     float levelToY (double db) const;
     double yToLevel (float y) const;
 
+    // Harmonic reference mode (right-click "Set Harmonic References"): the
+    // frequency under the cursor is treated as harmonic #N of a fundamental,
+    // and harmonics 1..N get delicate vertical lines wherever they are inside
+    // the visible frequency window. The anchor follows the mouse X position.
+    bool harmonicRefActive() const { return harmonicRefActive_; }
+    int harmonicN() const { return harmonicN_; }
+    double harmonicAnchorF() const { return harmonicAnchorF_; }
+    void setHarmonicReference (int n, double anchorHz);
+    void resetHarmonicReference();
+    // TSV table of harmonics 1..N (header + one row each), CRLF line endings,
+    // Excel-paste friendly. Empty when the mode is off or no spectrum exists.
+    juce::String buildHarmonicsTable() const;
+
     // Switch frequency-axis mode: 0 = "FFT Linear", 1 = "FFT Log",
     // 2 = "1/3 Octave". sendNotificationSync so the change is applied
     // immediately (JUCE's default notification is async via AsyncUpdater).
@@ -422,6 +435,11 @@ private:
     bool lastComputeWasExpensive = false;   // multi-window averaging (throttle key)
     int cursorX = -1, cursorY = -1;
 
+    // Harmonic reference mode state (see the public accessors above).
+    bool harmonicRefActive_ = false;
+    int harmonicN_ = 1;              // which harmonic number the anchor is
+    double harmonicAnchorF_ = 0.0;   // Hz, follows the mouse while active
+
     // Bumped whenever the FFT size or window type changes: stored snapshots
     // remember the generation they were computed with and are recomputed from
     // their own time segment when it no longer matches.
@@ -433,7 +451,10 @@ private:
     // Zoom helpers for the local display ranges.
     void zoomFreqAtX (int x, double factor);
     void zoomLevelAtY (float y, double factor);
-    void showContextMenu (bool onLevelAxis, bool onFreqAxis);
+    void showContextMenu (bool onLevelAxis, bool onFreqAxis, int clickX);
+    // Popup asking which harmonic number the clicked frequency is.
+    void showSetHarmonicDialog (double clickFreqHz);
+    void copyHarmonicsToClipboard();
 
     // Core averaging computation: analyse region [t0, t1] with windows of n
     // samples at the current window type; one magnitude vector per channel in

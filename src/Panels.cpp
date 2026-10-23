@@ -1427,6 +1427,25 @@ void FFTAnalysisView::paint (juce::Graphics& g)
         g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
                     (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
 
+    // Harmonic reference lines: while active, the frequency under the cursor
+    // is harmonic #N of a fundamental and harmonics 1..N get delicate
+    // vertical markers wherever they are inside the visible window.
+    if (harmonicRefActive_ && haveSpectrum && harmonicAnchorF_ > 0.0)
+    {
+        const double fFund = harmonicAnchorF_ / std::max (1, harmonicN_);
+        for (int k = 1; k <= harmonicN_; ++k)
+        {
+            const double f = (double) k * fFund;
+            if (f < fLo || f > fHi) continue;
+            const float x = (float) freqToX (f);
+            g.setColour (juce::Colour::fromRGBA (140, 230, 255, 160));
+            g.drawVerticalLine (x, plot.getY(), plot.getBottom());
+            g.setFont (9.0f);
+            g.drawText (juce::String (k), x - 8, plot.getY() + 1, 16, 12,
+                        juce::Justification::centred, false);
+        }
+    }
+
     // Cursor readout (crosshair + optional snap marker)
     bool snapped = false;
     float snapDotX = 0.0f, snapDotY = 0.0f;
@@ -1588,6 +1607,14 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
 void FFTAnalysisView::mouseMove (const juce::MouseEvent& e)
 {
     cursorX = e.x; cursorY = e.y;
+    // Harmonic reference lines follow the mouse: re-anchor to the frequency
+    // under the cursor while it is horizontally inside the plot.
+    if (harmonicRefActive_)
+    {
+        const auto plot = plotBounds();
+        if (e.x >= plot.getX() && e.x <= plot.getRight())
+            harmonicAnchorF_ = xToFreq (e.x);
+    }
     repaint();
 }
 
@@ -1807,12 +1834,20 @@ void FFTAnalysisView::showSnapshotMenu (int i)
 
 // Right-click context menu. When the click landed on an axis, "Zoom Out
 // Full" resets only that range instead of both.
-void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis)
+void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int clickX)
 {
+    const bool haveSpec = app.audioEngine().isFileLoaded()
+                          && cachedN > 1 && !mags.empty();
+
     juce::PopupMenu m;
     m.addItem (CtxZoomOutFull, "Zoom Out Full");
     m.addSeparator();
     m.addItem (100, "Copy Spectrum to Clipboard");
+    m.addSeparator();
+    m.addItem (CtxSetHarmonicRefs, "Set Harmonic References", haveSpec);
+    m.addItem (CtxCopyHarmonics, "Copy Harmonics",
+               harmonicRefActive_ && haveSpec);
+    m.addItem (CtxResetHarmonic, "Reset Harmonic", harmonicRefActive_);
 
     const int sel = m.showMenu (juce::PopupMenu::Options ().withMousePosition());
     switch (sel)
@@ -1830,7 +1865,136 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis)
         case 100:
             copySpectrumToClipboard();
             break;
+        case CtxSetHarmonicRefs:
+            showSetHarmonicDialog (xToFreq (clickX));
+            break;
+        case CtxCopyHarmonics:
+            copyHarmonicsToClipboard();
+            break;
+        case CtxResetHarmonic:
+            resetHarmonicReference();
+            break;
     }
+}
+
+void FFTAnalysisView::setHarmonicReference (int n, double anchorHz)
+{
+    if (n < 1 || !(anchorHz > 0.0) || !std::isfinite (anchorHz)) return;
+    harmonicRefActive_ = true;
+    harmonicN_ = n;
+    harmonicAnchorF_ = anchorHz;
+    repaint();
+}
+
+void FFTAnalysisView::resetHarmonicReference()
+{
+    if (!harmonicRefActive_) return;
+    harmonicRefActive_ = false;
+    harmonicN_ = 1;
+    harmonicAnchorF_ = 0.0;
+    repaint();
+}
+
+juce::String FFTAnalysisView::buildHarmonicsTable() const
+{
+    if (!harmonicRefActive_ || harmonicN_ < 1 || cachedN <= 1 || mags.empty())
+        return {};
+
+    const double rate = app.audioEngine().sampleRate();
+    const double fFund = harmonicAnchorF_ / (double) harmonicN_;
+    if (!(fFund > 0.0) || !std::isfinite (fFund))
+        return {};
+
+    // Same level formatting as "Copy Spectrum to Clipboard": absolute linear
+    // values for volts/grams files, otherwise dB relative to full scale.
+    const ScaleCalibration& sc = app.scale();
+    const double off = sc.levelOffsetDb();
+    auto fmtLevel = [&] (double relDb) -> juce::String
+    {
+        if (sc.usesLinearLevels())
+            return ScaleCalibration::formatLevelValue (sc.fullScaleValue * std::pow (10.0, relDb / 20.0), 6);
+        return juce::String (relDb + off, 2);
+    };
+
+    // Amplitude comes from the first visible channel at the nearest FFT bin.
+    const auto& mag = mags.front();
+    const int maxBin = std::min ((int) (cachedN / 2), (int) mag.size() - 1);
+
+    juce::StringArray lines;
+    lines.add ("Harmonic\tFrequency\tAmplitude");
+    for (int k = 1; k <= harmonicN_; ++k)
+    {
+        const double f = (double) k * fFund;
+        juce::String line = juce::String (k) + "\t" + juce::String (f, 3);
+        if (maxBin < 1 || f > rate * 0.5)
+            line += "\t";   // no FFT data above Nyquist: leave the cell empty
+        else
+        {
+            const int bin = (int) std::clamp ((double) std::lround (f * cachedN / rate),
+                                              0.0, (double) maxBin);
+            const double dB = -kNormFloorDb * (1.0 - (double) mag[(size_t) bin]);
+            line += "\t" + fmtLevel (dB);
+        }
+        lines.add (line);
+    }
+    return lines.joinIntoString ("\r\n");
+}
+
+void FFTAnalysisView::copyHarmonicsToClipboard()
+{
+    const juce::String table = buildHarmonicsTable();
+    if (!table.isEmpty())
+        juce::SystemClipboard::copyTextToClipboard (table);
+}
+
+void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
+{
+    auto* w = new juce::AlertWindow ("Set Harmonic References",
+                                     "The frequency under the cursor is\n"
+                                     + juce::String (clickFreqHz, 1) + " Hz.\n\n"
+                                     "Which harmonic number is it? (1 = fundamental)\n"
+                                     "Harmonics 1..N will be marked with vertical lines that\n"
+                                     "follow the mouse while you move it.",
+                                     juce::AlertWindow::QuestionIcon, this);
+    w->addTextEditor ("harmonic", "1");
+    if (auto* editor = w->getTextEditor ("harmonic"))
+        // Let Enter/Escape reach the OK/Cancel shortcuts even while a
+        // field has keyboard focus.
+        editor->setEscapeAndReturnKeysConsumed (false);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // AlertWindow disables keyboard focus on its editors; re-enable it and
+    // pre-select the default so a plain Enter accepts harmonic #1.
+    if (auto* editor = w->getTextEditor ("harmonic"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+    }
+
+    // Enter modal state WITHOUT taking keyboard focus (see showNewFileDialog).
+    w->enterModalState (false);
+    if (auto* editor = w->getTextEditor ("harmonic"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    const juce::String text = w->getTextEditorContents ("harmonic")
+                                 .trim ().removeCharacters ("., ");
+    delete w;
+    if (result != 1) return;
+
+    const int n = text.isEmpty () ? 0 : text.getIntValue ();
+    if (n < 1 || n > 1000)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Set Harmonic References",
+                                            "Please enter an integer between 1 and 1000.",
+                                            "", this);
+        return;
+    }
+
+    setHarmonicReference (n, clickFreqHz);
 }
 
 void FFTAnalysisView::mouseDown (const juce::MouseEvent& e)
@@ -1926,7 +2090,7 @@ void FFTAnalysisView::mouseUp (const juce::MouseEvent& e)
     {
         const auto plot = plotBounds();
         if (!haveZoomRect)
-            showContextMenu (e.x > plot.getRight(), e.y > plot.getBottom());
+            showContextMenu (e.x > plot.getRight(), e.y > plot.getBottom(), e.x);
         else
         {
             // The drag START position selects which axes get zoomed (same as
@@ -2019,7 +2183,9 @@ void FFTAnalysisView::copySpectrumToClipboard()
             juce::String line = juce::String (kThirdOctCenters[b], 1);
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < thirdOctMags[c].size())
-                    line += "," + fmtLevel ((double) app.settings.dbMinDb + thirdOctMags[c][b] * (double) app.settings.dbRange());
+                    // Magnitudes are normalised against the fixed floor, so
+                    // the level is -kNormFloorDb * (1 - mag), exactly as painted.
+                    line += "," + fmtLevel (-kNormFloorDb * (1.0 - (double) thirdOctMags[c][b]));
             lines.add (line);
         }
         juce::SystemClipboard::copyTextToClipboard (lines.joinIntoString ("\n"));
@@ -2034,7 +2200,9 @@ void FFTAnalysisView::copySpectrumToClipboard()
         for (size_t c = 0; c < mags.size() && c < 4; ++c)
         {
             const int bin = std::min (k, (int) mags[c].size() - 1);
-            line += "," + fmtLevel ((double) app.settings.dbMinDb + mags[c][(size_t) bin] * (double) app.settings.dbRange());
+            // Magnitudes are normalised against the fixed floor, so the
+            // level is -kNormFloorDb * (1 - mag), exactly as painted.
+            line += "," + fmtLevel (-kNormFloorDb * (1.0 - (double) mags[c][(size_t) bin]));
         }
         lines.add (line);
     }

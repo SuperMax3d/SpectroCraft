@@ -21,7 +21,10 @@ enum ContextMenuIDs : int
     CtxMoveSelection   = 8,   // spectral view only: interactive move gesture
     CtxScaleSelection  = 9,   // spectral view only: interactive scale gesture
     CtxCopyToNewFile   = 10,
-    CtxPasteMix        = 11
+    CtxPasteMix        = 11,
+    CtxSetHarmonicRefs = 12,   // Frequency Analysis only
+    CtxCopyHarmonics   = 13,   // Frequency Analysis only
+    CtxResetHarmonic   = 14    // Frequency Analysis only
 };
 
 struct Settings

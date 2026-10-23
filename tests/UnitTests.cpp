@@ -3578,6 +3578,107 @@ static juce::MouseEvent mkMouse (juce::Component& c, int x, int y, juce::Modifie
                              juce::Time(), 1, false);
 }
 
+// ---------------- Harmonic reference lines (FFT panel) ----------------
+// Right-click "Set Harmonic References" treats the frequency under the cursor
+// as harmonic #N of a fundamental: delicate vertical lines mark harmonics
+// 1..N wherever they are inside the visible window and follow the mouse.
+// "Copy Harmonics" exports an Excel-friendly TSV table (Harmonic/Frequency/
+// Amplitude, CRLF line endings); "Reset Harmonic" clears everything again.
+static void testFFTHarmonicReferences()
+{
+    const juce::File wav = makeTempFile ("fft_harm.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for harmonic reference test");
+    app.settings.fftLocalN = 1024;   // picked up as the panel's localN at construction
+
+    FFTAnalysisView view (app);
+    view.setSize (300, 200);
+    { juce::Image img (juce::Image::ARGB, 300, 200, true); juce::Graphics g (img); view.paint (g); }
+    CHECK (!view.getSpectrum().empty(), "spectrum computed before enabling");
+
+    // --- Table contents: the clicked frequency is the 3rd harmonic of 440 Hz.
+    view.setHarmonicReference (3, 1320.0);
+    CHECK (view.harmonicRefActive(), "reference active after set");
+    CHECK (view.harmonicN() == 3, "harmonic number stored");
+    CHECK (std::abs (view.harmonicAnchorF() - 1320.0) < 1e-9, "anchor stored");
+
+    const auto lines = juce::StringArray::fromLines (view.buildHarmonicsTable());
+    CHECK (lines.size() == 4, "header + one row per harmonic");
+    if (lines.size() == 4)
+    {
+        CHECK (lines[0] == "Harmonic\tFrequency\tAmplitude", "TSV header row");
+        double amps[3] = { -1e9, -1e9, -1e9 };
+        for (int k = 1; k <= 3; ++k)
+        {
+            const auto fields = juce::StringArray::fromTokens (lines[(size_t) k], "\t");
+            if (fields.size() != 3) continue;
+            CHECK (fields[0] == juce::String (k), "row number is the harmonic index");
+            const double f = fields[1].getDoubleValue();
+            CHECK (std::abs (f - (double) k * 440.0) < 0.5, "harmonic frequency is k*440 Hz");
+            amps[k - 1] = fields[2].getDoubleValue();
+        }
+        CHECK (amps[0] > amps[1], "amplitude at the 440 Hz tone beats the 880 Hz bin");
+    }
+
+    // --- Reset clears state and table.
+    view.resetHarmonicReference();
+    CHECK (!view.harmonicRefActive(), "reset deactivates the reference");
+    CHECK (view.buildHarmonicsTable().isEmpty(), "table empty after reset");
+
+    // --- N=1: single row, anchor is the fundamental itself.
+    view.setHarmonicReference (1, 440.0);
+    {
+        const auto l2 = juce::StringArray::fromLines (view.buildHarmonicsTable());
+        CHECK (l2.size() == 2, "N=1 gives header + one row");
+        if (l2.size() == 2)
+        {
+            const auto fields = juce::StringArray::fromTokens (l2[1], "\t");
+            CHECK (fields.size() == 3 && std::abs (fields[1].getDoubleValue() - 440.0) < 0.5,
+                   "N=1 row is the fundamental itself");
+        }
+    }
+
+    // --- The lines follow the mouse X position while inside the plot.
+    view.setHarmonicReference (2, 880.0);
+    const auto plot = view.plotBounds();
+    const int midX = plot.getX() + plot.getWidth() / 2;
+    view.mouseMove (mkMouse (view, midX, plot.getY() + 10, {}));
+    CHECK (std::abs (view.harmonicAnchorF() - view.xToFreq (midX)) < 1e-3,
+           "anchor follows the mouse");
+
+    const double frozen = view.harmonicAnchorF();
+    view.mouseMove (mkMouse (view, 0, plot.getY() + 10, {}));   // left of the plot
+    CHECK (std::abs (view.harmonicAnchorF() - frozen) < 1e-9,
+           "anchor stays put outside the plot");
+
+    // --- The delicate vertical lines are actually drawn: with anchor 2000 Hz
+    //     and N=2, harmonic #1 sits at 1000 Hz. Scan that column for the
+    //     line's cyan tint (the mono curve is pink, grid lines grey).
+    view.setHarmonicReference (2, 2000.0);
+    const float xLine = (float) view.freqToX (1000.0);
+    {
+        juce::Image img (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+        int cyan = 0;
+        for (int x = (int) xLine - 1; x <= (int) xLine + 1; ++x)
+            for (int y = plot.getY() + 2; y < plot.getBottom() - 2; ++y)
+                if (x >= 0 && x < 300 && y >= 0 && y < 200)
+                {
+                    const auto px = img.getPixelAt (x, y);
+                    if (px.getBlue() > 120 && px.getGreen() > 100 && px.getRed() < 110) ++cyan;
+                }
+        CHECK (cyan >= 40, "harmonic line pixels drawn at the expected column");
+    }
+
+    wav.deleteFile();
+}
+
 static void testRightDragZoom()
 {
     const juce::File wav = makeTempFile ("rightdrag_zoom.wav");
@@ -9126,6 +9227,7 @@ static int scRunUnitTestsImpl()
     progress ("resample cancel");     testResampleCancel();
     progress ("render cancel");       testRenderToPixelsCancel();
     progress ("fft view rate change"); testFFTAnalysisRateChange();
+    progress ("fft harmonic references"); testFFTHarmonicReferences();
     progress ("status bar sample rate"); testStatusBarSampleRate();
     progress ("sctt json");             testScttJson();
     progress ("sctt chunk wav");        testScttChunkWav();

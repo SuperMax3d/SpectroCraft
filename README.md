@@ -140,10 +140,20 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     - **Right-drag a box** (a rubber-band rectangle is shown while dragging):
       horizontal span sets the frequency window, vertical span sets the level
       window (both at once if you drag in both directions). A plain right-click
-      shows a context menu with **Zoom Out
-      Full** and **Copy Spectrum to Clipboard**; right-clicking the *level*
-      axis resets only the level window, the *frequency* axis only the
+      shows a context menu with **Zoom Out Full**, **Copy Spectrum to
+      Clipboard**, and the harmonic-reference tools below; right-clicking the
+      *level* axis resets only the level window, the *frequency* axis only the
       frequency window.
+    - **Set Harmonic References** (right-click): a popup asks which harmonic
+      number the frequency under the cursor is (default 1 = fundamental). The
+      panel then draws delicate vertical lines for harmonics 1..N wherever they
+      are inside the visible frequency window, each labelled with its number.
+      The lines are dynamic — they re-anchor to the frequency under the mouse as
+      you move it. **Copy Harmonics** copies an Excel-friendly table (tab-
+      separated, CRLF line endings) with columns *Harmonic*, *Frequency* and
+      *Amplitude* (sampled from the first visible channel at each harmonic's
+      nearest FFT bin; empty above Nyquist). **Reset Harmonic** removes the
+      reference and its lines.
     - **Left-drag on the bottom Hz strip** pans the frequency window;
       **left-drag on the right dB strip** pans the level window (log-aware in
       log mode).
@@ -851,7 +861,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
-| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x) and a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with clone & multiply (`SavedSelections` JSON sidecar — auto-loaded on open, re-loadable via right-click "Load from disk..." or by dropping a `.selections.json` onto the panel), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with clone & multiply (`SavedSelections` JSON sidecar — auto-loaded on open, re-loadable via right-click "Load from disk..." or by dropping a `.selections.json` onto the panel), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
 | `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with three example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near, JSON sidecar persistence next to the audio file. |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
