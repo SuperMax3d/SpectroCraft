@@ -55,6 +55,15 @@ public:
     // Returns true if at least one marker was recovered.
     bool loadFromWavFile (const juce::File& wavFile, double sampleRate);
 
+    // CSV export/import: "Title,Begin,End,Comment" with a header row; times in
+    // seconds (3 decimals); fields containing commas/quotes are quoted per
+    // RFC 4180. Point markers have End = "-".
+    bool saveCsv (const juce::File& file) const;
+
+    // Appends the parsed markers to the current list, clamping them to
+    // durationSec. Returns how many were added (0 when nothing was readable).
+    int loadCsv (const juce::File& file, double durationSec);
+
 private:
     void sort();
 

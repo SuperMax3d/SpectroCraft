@@ -70,8 +70,13 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   time selection to that marker's range.
   Right-clicking a row in the marker table shows a context menu with **Copy All
   Markers** (tab-separated `Label\tBegin\tEnd\tComment` lines, CRLF between rows,
-  `-` for point-marker ends) and **Paste Markers from Clipboard**, which parses
-  that TSV format back into markers (times clamped to the file duration).
+  `-` for point-marker ends), **Paste Markers from Clipboard**, which parses that
+  TSV format back into markers (times clamped to the file duration),
+  **Export Markers as CSV...** / **Import Markers from CSV...** — a
+  `Title,Begin,End,Comment` table with times in seconds (`-` for point-marker
+  ends; fields containing commas/quotes are quoted per RFC 4180; import appends
+  the parsed markers and clamps them to the file duration) — and **Remove All
+  Markers**, which clears the list after a confirmation.
   Markers are drawn identically in both views (vertical line for points,
   bracket + label for regions) and stay in sync with the playhead, selection
   and zoom.
@@ -200,8 +205,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     Begin, End and Length in the detail editors below the table — the comments
     box starts beside its label and extends to the bottom of the panel;
     Add Marker, delete; right-click a row for Copy All Markers / Paste Markers
-    from Clipboard or Find (Ctrl+F searches titles and comments,
-    F3 / Ctrl+F3 jump to the next / previous match)).
+    from Clipboard, Export/Import CSV, Remove All Markers or Find (Ctrl+F
+    searches titles and comments, F3 / Ctrl+F3 jump to the next / previous
+    match)).
   - **Draggable panel tabs**: drag any tab to reorder the panels within its
     group, or drop it onto a tab of the other group to move it across — e.g.
     put Markers next to Frequency Analysis. The arrangement (plus the column

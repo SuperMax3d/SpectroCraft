@@ -2656,6 +2656,10 @@ void MarkerListPanel::showMarkerContextMenu()
     m.addItem (1, "Copy All Markers", app.markers().count() > 0);
     m.addItem (2, "Paste Markers from Clipboard",
                !juce::SystemClipboard::getTextFromClipboard().trim().isEmpty());
+    m.addItem (4, "Export Markers as CSV...", app.markers().count() > 0);
+    m.addItem (5, "Import Markers from CSV...", app.audioEngine().isFileLoaded());
+    m.addSeparator();
+    m.addItem (6, "Remove All Markers", app.markers().count() > 0);
     m.addItem (3, "Find...\tCtrl+F");
 
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
@@ -2663,8 +2667,93 @@ void MarkerListPanel::showMarkerContextMenu()
         copyAllMarkers();
     else if (id == 2)
         pasteMarkersFromClipboard();
+    else if (id == 4)
+        exportMarkersCsv();
+    else if (id == 5)
+        importMarkersCsv();
+    else if (id == 6)
+        removeAllMarkers();
     else if (id == 3)
         showFindDialog();
+}
+
+// useOSNativeDialogBox = false: the native Win32 IFileDialog is unavailable on some
+// systems; JUCE's built-in browser is pure GDI and works everywhere.
+static constexpr bool kUseNativeFileChooser = false;
+
+void MarkerListPanel::exportMarkersCsv()
+{
+    if (app.markers().count() == 0)
+        return;
+
+    juce::FileChooser chooser ("Export Markers as CSV",
+        app.audioEngine().isFileLoaded() ? app.audioEngine().getFile().getParentDirectory()
+                                         : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
+        "*.csv", kUseNativeFileChooser);
+
+    if (!chooser.browseForFileToSave (true))
+        return;
+
+    auto file = chooser.getResult();
+    if (!file.hasFileExtension (".csv"))
+        file = file.withFileExtension (".csv");
+
+    if (!app.markers().saveCsv (file))
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Export failed",
+                                            "Could not write the CSV file.", "", this);
+}
+
+int MarkerListPanel::importMarkersCsv()
+{
+    if (!app.audioEngine().isFileLoaded())
+        return 0;
+
+    juce::FileChooser chooser ("Import Markers from CSV",
+        app.audioEngine().getFile().getParentDirectory(),
+        "*.csv", kUseNativeFileChooser);
+
+    if (!chooser.browseForFileToOpen())
+        return 0;
+
+    const int added = app.markers().loadCsv (chooser.getResult(),
+                                             app.audioEngine().duration());
+    if (added > 0)
+    {
+        app.markers().saveSidecar (app.audioEngine().getFile());
+        refresh();
+        if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
+    }
+    else
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Import failed",
+                                            "No markers could be read from the CSV file.",
+                                            "", this);
+    }
+
+    return added;
+}
+
+void MarkerListPanel::removeAllMarkers()
+{
+    const int n = (int) app.markers().count();
+    if (n == 0)
+        return;
+
+    juce::AlertWindow w ("Remove all markers?",
+                         "This removes all " + juce::String (n) + " marker(s) from this file.",
+                         juce::AlertWindow::WarningIcon, this);
+    w.addButton ("Remove", 1);
+    w.addButton ("Cancel", 0);
+
+    if (w.runModalLoop() != 1)
+        return;
+
+    app.markers().clear();
+    app.markers().saveSidecar (app.audioEngine().getFile());
+    refresh();
+    if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
 
 // ---------------------------------------------------------------- Find (Ctrl+F / F3 / Ctrl+F3)

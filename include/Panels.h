@@ -616,6 +616,11 @@ public:
     void copyAllMarkers();
     int pasteMarkersFromClipboard();
 
+    // CSV export/import via file chooser, and "Remove All" with a confirm box.
+    void exportMarkersCsv();
+    int importMarkersCsv();   // returns how many markers were added
+    void removeAllMarkers();
+
     // Programmatic row selection (normally done via the table UI).
     void selectRow (int row);
 

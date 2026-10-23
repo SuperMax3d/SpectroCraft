@@ -493,3 +493,137 @@ bool MarkerManager::loadFromWavFile (const juce::File& wavFile, double sampleRat
     sort();
     return true;
 }
+
+// ---------------------------------------------------------------- CSV export/import
+
+namespace {
+
+juce::String csvField (const juce::String& s)
+{
+    // Flatten newlines/tabs so each marker stays on one line, then quote per
+    // RFC 4180 when the field contains a comma or a double quote.
+    const auto flat = s.replace ("\r\n", " ").replace ("\n", " ")
+                       .replace ("\r", " ").replace ("\t", " ");
+    if (flat.containsChar (',') || flat.containsChar ('"'))
+        return '"' + flat.replace ("\"", "\"\"") + '"';
+    return flat;
+}
+
+std::vector<juce::String> csvLineFields (const juce::String& line)
+{
+    std::vector<juce::String> out;
+    juce::String cur;
+    bool inQuotes = false;
+    for (int i = 0; i < line.length(); ++i)
+    {
+        const juce_wchar c = line[i];
+        if (inQuotes)
+        {
+            if (c == '"')
+            {
+                if (i + 1 < line.length() && line[i + 1] == '"') { cur << '"'; ++i; }
+                else inQuotes = false;
+            }
+            else
+                cur << c;
+        }
+        else if (c == '"' && cur.isEmpty())
+        {
+            inQuotes = true;   // quotes only start a field at its beginning
+        }
+        else if (c == ',')
+        {
+            out.push_back (cur);
+            cur.clear();
+        }
+        else
+            cur << c;
+    }
+    out.push_back (cur);
+    return out;
+}
+
+double csvTime (const juce::String& text)
+{
+    // Accepts plain seconds ("12.5") or a time code ("0:04.536", "1:02").
+    const int colon = text.indexOfChar (':');
+    if (colon >= 0)
+        return text.substring (0, colon).getDoubleValue() * 60.0
+             + text.substring (colon + 1).getDoubleValue();
+    return text.getDoubleValue();
+}
+
+} // namespace
+
+bool MarkerManager::saveCsv (const juce::File& file) const
+{
+    juce::String out = "Title,Begin,End,Comment";
+    for (const auto& m : list)
+        out << "\r\n" << csvField (m.name)
+            << ',' << juce::String (m.start, 3)
+            << ',' << (m.end < 0 ? "-" : juce::String (m.end, 3))
+            << ',' << csvField (m.comment);
+
+    return file.replaceWithText (out);
+}
+
+int MarkerManager::loadCsv (const juce::File& file, double durationSec)
+{
+    juce::String text = file.loadFileAsString();
+    if (text.length() > 0 && text[0] == 0xFEFF)   // strip a UTF-8 BOM if present
+        text = text.substring (1);
+
+    juce::StringArray lines;
+    lines.addLines (text);
+
+    int added = 0;
+    for (int li = 0; li < lines.size(); ++li)
+    {
+        const auto line = lines[li].trim();
+        if (line.isEmpty())
+            continue;
+
+        const auto fields = csvLineFields (line);
+        if (fields.size() < 2)   // need at least Title + Begin
+            continue;
+
+        if (li == 0 && fields[0].trim().equalsIgnoreCase ("Title"))
+            continue;            // header row
+
+        juce::String name = fields[0].trim();
+        const juce::String bTok = fields[1].trim();
+        if (bTok.isEmpty())
+            continue;             // no time at all -> malformed line
+        const double beginRaw = csvTime (bTok);
+        if (!(beginRaw >= 0.0))   // NaN or negative -> malformed line
+            continue;
+        const double begin = std::min (beginRaw, durationSec);
+
+        double end = -1.0;
+        if (fields.size() > 2)
+        {
+            const juce::String eTok = fields[2].trim();
+            if (!eTok.isEmpty() && eTok != "-")
+            {
+                const double e = csvTime (eTok);
+                if (e > begin + 1e-9)
+                    end = std::min (e, durationSec);
+            }
+        }
+
+        juce::String comment;
+        if (fields.size() > 3)
+            comment = fields[3].trim();
+
+        const juce::String label = name.isEmpty() ? "Marker" : name;
+        const int id = (end < 0.0) ? addPointMarker (begin, label)
+                                   : addRegionMarker (begin, end, label);
+        if (!comment.isEmpty())
+            setComment (id, comment);
+        ++added;
+    }
+
+    if (added > 0)
+        sort();
+    return added;
+}

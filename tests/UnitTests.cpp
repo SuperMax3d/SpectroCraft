@@ -253,6 +253,66 @@ static void testMarkers()
     fu.deleteFile();
 }
 
+// ---------------- Marker CSV export/import ----------------
+static void testMarkerCsvRoundTrip()
+{
+    MarkerManager mm;
+    const int p = mm.addPointMarker (0.5, "Intro");
+    const int r = mm.addRegionMarker (1.25, 3.75, "Verse One");
+    CHECK (mm.setComment (p, "He said \"hi\", twice"), "comment set");
+
+    const juce::File f = makeTempFile ("markers_export.csv");
+    CHECK (mm.saveCsv (f), "saveCsv ok");
+    const juce::String txt = f.loadFileAsString();
+    CHECK (txt.startsWith ("Title,Begin,End,Comment"), "header row present");
+    CHECK (txt.contains ("\"He said \"\"hi\"\", twice\""),
+          "comment with quotes/commas is CSV-quoted");
+
+    MarkerManager mm2;
+    CHECK (mm2.loadCsv (f, 10.0) == 2, "two markers imported");
+    if (mm2.count() == 2)
+    {
+        const auto& m0 = mm2.markers()[0];   // sorted by start: Intro first
+        CHECK (m0.name == "Intro", "name round-trip");
+        CHECK (std::abs (m0.start - 0.5) < 1e-9, "point start round-trip");
+        CHECK (m0.end < 0.0, "point marker stays a point");
+        CHECK (m0.comment == "He said \"hi\", twice",
+              "comment with quotes/commas round-trips");
+
+        const auto& m1 = mm2.markers()[1];
+        CHECK (m1.name == "Verse One", "region name round-trip");
+        CHECK (std::abs (m1.start - 1.25) < 1e-9 && std::abs (m1.end - 3.75) < 1e-9,
+              "region times round-trip");
+    }
+
+    // Hand-written CSV: header row, time-code begin, "-" end, an empty Begin
+    // field and a region whose end exceeds the duration (clamped).
+    const juce::File f2 = makeTempFile ("markers_import.csv");
+    f2.replaceWithText (juce::String (
+        "Title,Begin,End,Comment\r\n"
+        "First,0:01.5,-,\r\n"
+        "Long,5.0,9.5,tail\r\n"
+        "BadLine,,\r\n"
+        "\r\n"));
+    MarkerManager mm3;
+    CHECK (mm3.loadCsv (f2, 7.0) == 2, "header/malformed lines skipped");
+    if (mm3.count() == 2)
+    {
+        const auto& m0 = mm3.markers()[0];
+        CHECK (m0.name == "First" && std::abs (m0.start - 1.5) < 1e-9,
+              "time-code begin parsed");
+        CHECK (m0.end < 0.0, "\"-\" end becomes a point marker");
+
+        const auto& m1 = mm3.markers()[1];
+        CHECK (std::abs (m1.start - 5.0) < 1e-9 && std::abs (m1.end - 7.0) < 1e-9,
+              "end clamped to duration");
+        CHECK (m1.comment == "tail", "comment imported");
+    }
+
+    f.deleteFile();
+    f2.deleteFile();
+}
+
 // ---------------- Undo/redo ----------------
 static void testUndo()
 {
@@ -8197,6 +8257,7 @@ static int scRunUnitTestsImpl()
     progress ("FFT");            testFFT();
     progress ("scfft vs juce");  testScFftVsJuce();
     progress ("markers");        testMarkers();
+    progress ("marker csv");     testMarkerCsvRoundTrip();
     progress ("undo/redo");      testUndo();
     progress ("zero-crossing");  testZeroCrossing();
     progress ("spectral engine");testSpectral();
