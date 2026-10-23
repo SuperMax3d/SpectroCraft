@@ -86,6 +86,13 @@ public:
     juce::Range<double> selection{ 0, 0 };
     double viewStart = 0, viewEnd = 10;   // canonical time window (follows the waveform view)
 
+    // Audio clipboard: app-level so content copied from one document can be
+    // pasted into another (e.g. a freshly created "New File"). With a spectral
+    // selection active at copy time, only the selected (t,f) content is stored.
+    std::unique_ptr<juce::AudioBuffer<float>> clipboard;
+    bool canPaste() const { return clipboard != nullptr && clipboard->getNumSamples() > 0; }
+    void clearClipboard() { clipboard.reset(); }
+
     // UI cursor position in seconds (independent of transport: stays where you
     // clicked it; tracks playback while playing).
     double playhead = 0.0;
@@ -100,6 +107,18 @@ public:
     bool isDocLoaded (const FileDoc* d) const;
 
     int numDocs() const { return (int) docs.size(); }
+
+    /** Creates a new empty in-memory document (no file path until Save As)
+        with the given channel count and sample rate, and activates it.
+        Returns false for invalid parameters. */
+    bool newFile (int numChans, double sampleRate);
+
+    /** "Copy to New File": copies the current time selection (or the whole
+        file when nothing is selected) into a brand-new document that has
+        exactly as many channels as are currently visible. With a spectral
+        selection active only the selected (t,f) content is copied. The new
+        document becomes active. */
+    bool copyToNewFile (std::string* errOut = nullptr);
 
     bool openFile (const juce::File& file);
 
@@ -227,6 +246,10 @@ public:
     bool cut(std::string* errOut = nullptr);
     void copy();   // read-only; works on streamed files too
     bool paste(std::string* errOut = nullptr);
+    /** Like paste, but adds the clipboard to the existing content at the
+        paste position instead of inserting it (overlap is summed; a
+        clipboard tail past EOF extends the file). */
+    bool pasteMix(std::string* errOut = nullptr);
     bool del(std::string* errOut = nullptr);
     bool silence(std::string* errOut = nullptr);
     bool fadeIn(std::string* errOut = nullptr);

@@ -783,18 +783,153 @@ bool Application::cut(std::string* errOut)
 void Application::copy()
 {
     if (selection.getLength() <= 0) return;
-    audioEngine().copySelection (selectionSamples (*this));
+    auto& eng = audioEngine();
+    const int nch = eng.numChannels();
+    const auto range = selectionSamples (*this)
+                           .getIntersectionWith ({ 0, eng.numSamples() });
+    if (range.getLength() <= 0 || nch <= 0) return;
+
+    std::vector<std::vector<float>> data;
+    if (!eng.readRange (range.getStart(), range.getLength(), data))
+        return;
+
+    // With a spectral selection active, only the selected (t,f) content is
+    // copied - so both plain Paste and Copy-to-New-File receive it.
+    auto* d = doc();
+    if (d && !d->spectralSel.empty ())
+    {
+        std::vector<std::vector<float>> masked;
+        if (SpectralMask::extractMasked (eng, range, d->spectralSel, masked)
+            && masked.size() == (size_t) nch && !masked[0].empty ())
+            data = std::move (masked);
+    }
+
+    clipboard = std::make_unique<juce::AudioBuffer<float>> (nch,
+                                                            (int) range.getLength());
+    for (int ch = 0; ch < nch; ++ch)
+        std::copy (data[(size_t) ch].begin(), data[(size_t) ch].end(),
+                   clipboard->getWritePointer (ch));
 }
 
 bool Application::paste(std::string* errOut)
 {
-    if (!audioEngine().canPaste()) return true;   // nothing to paste - not an error
+    if (!canPaste()) return true;   // nothing to paste - not an error
     // Paste at the start of the selection, or at the cursor when nothing is
     // selected.
     const double t = !selection.isEmpty() ? selection.getStart() : playhead;
-    if (!audioEngine().pasteAt ((int64_t) (t * audioEngine().sampleRate()), errOut))
+    if (!audioEngine().pasteAt ((int64_t) (t * audioEngine().sampleRate()),
+                                *clipboard, errOut))
         return false;
     syncActiveDoc ();
+    return true;
+}
+
+bool Application::pasteMix(std::string* errOut)
+{
+    if (!canPaste()) return true;   // nothing to mix - not an error
+    const double t = !selection.isEmpty() ? selection.getStart() : playhead;
+    if (!audioEngine().pasteMixAt ((int64_t) (t * audioEngine().sampleRate()),
+                                   *clipboard, errOut))
+        return false;
+    syncActiveDoc ();
+    return true;
+}
+
+namespace
+{
+    // Unique display name for a document without a file path:
+    // "Untitled", "Untitled 2", ...
+    juce::String uniqueUntitledName (const std::vector<std::unique_ptr<FileDoc>>& docs)
+    {
+        const juce::String base = "Untitled";
+        int n = 1;
+        for (;; ++n)
+        {
+            const juce::String nm = (n == 1 ? base : base + " " + juce::String (n));
+            bool used = false;
+            for (const auto& o : docs)
+                if (o->name == nm) { used = true; break; }
+            if (!used) return nm;
+        }
+    }
+}
+
+bool Application::newFile (int numChans, double sampleRate)
+{
+    auto d = std::make_unique<FileDoc>();
+    if (!d->engine.initNew (numChans, sampleRate))
+        return false;
+
+    d->name = uniqueUntitledName (docs);
+    d->file = juce::File();   // no path until Save As
+    d->playhead = 0.0;
+    d->selection = { 0, 0 };
+    d->visibleChannels.clear();
+    for (int i = 0; i < numChans; ++i)
+        d->visibleChannels.push_back (i);
+
+    docs.push_back (std::move (d));
+    activate ((int) docs.size() - 1);   // fires onActiveDocChanged -> UI sync
+    return true;
+}
+
+bool Application::copyToNewFile (std::string* errOut)
+{
+    auto fail = [errOut] (const char* msg) { if (errOut != nullptr) *errOut = msg; return false; };
+
+    auto* d = doc();
+    if (!d || !d->engine.isFileLoaded ())
+        return fail ("No file is open.");
+
+    const int64_t total = d->engine.numSamples();
+    juce::Range<int64_t> range = selection.getLength() > 0
+                                      ? selectionSamples (*this)
+                                      : juce::Range<int64_t> { 0, total };
+    range = range.getIntersectionWith ({ 0, total });
+    if (range.getLength() <= 0)
+        return fail ("Nothing to copy.");
+
+    // The new file gets exactly the channels currently shown.
+    std::vector<int> chans = visibleChannels;
+    if (chans.empty())
+        for (int i = 0; i < d->engine.numChannels(); ++i)
+            chans.push_back (i);
+    const int nch = (int) chans.size();
+
+    std::vector<std::vector<float>> data;
+    if (!d->engine.readRange (range.getStart(), range.getLength(), data))
+        return fail ("Could not read the source audio.");
+
+    // With a spectral selection active only the selected (t,f) content is
+    // copied. extractMasked processes every channel.
+    if (!d->spectralSel.empty ())
+    {
+        std::vector<std::vector<float>> masked;
+        if (SpectralMask::extractMasked (d->engine, range, d->spectralSel, masked)
+            && masked.size() == (size_t) d->engine.numChannels())
+            data = std::move (masked);
+    }
+
+    // Keep exactly the visible channels, in display order.
+    std::vector<std::vector<float>> picked;
+    picked.reserve ((size_t) nch);
+    for (int i = 0; i < nch; ++i)
+        picked.push_back (std::move (data[(size_t) chans[(size_t) i]]));
+
+    auto nd = std::make_unique<FileDoc>();
+    if (!nd->engine.initNew (nch, d->engine.sampleRate(), &picked))
+        return fail ("Could not create the new file.");
+
+    nd->name = uniqueUntitledName (docs);
+    nd->file = juce::File();   // no path until Save As
+    nd->playhead = 0.0;
+    nd->selection = { 0, 0 };
+    nd->visibleChannels.clear();
+    for (int i = 0; i < nch; ++i)
+        nd->visibleChannels.push_back (i);
+
+    docs.push_back (std::move (nd));
+    activate ((int) docs.size() - 1);   // fires onActiveDocChanged -> UI sync
     return true;
 }
 

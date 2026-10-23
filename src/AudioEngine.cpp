@@ -90,7 +90,6 @@ bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> o
 void AudioEngine::closeFile()
 {
     buffer.reset();
-    clipboard.reset();
     reader.reset();
     clearMipmaps();
     currentFile = {};
@@ -611,15 +610,58 @@ void recordReplace (AudioEngine& eng, const juce::Range<int64_t>& region,
     if (eng.undo) eng.undo->record (std::move (p));
 }
 
-void AudioEngine::copySelection (juce::Range<int64_t> samples)
+bool AudioEngine::initNew (int numChans, double sampleRate,
+                           const std::vector<std::vector<float>>* data)
 {
-    samples = samples.getIntersectionWith ({ 0, totalSamples });
-    if (samples.getLength() <= 0)
-        return;
-    clipboard = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) samples.getLength());
+    if (numChans <= 0 || !std::isfinite (sampleRate) || sampleRate <= 0.0)
+        return false;
+
+    int64_t len = 0;
+    if (data != nullptr && !data->empty())
+    {
+        len = (int64_t) (*data)[0].size();
+        for (const auto& v : *data)
+            if ((int64_t) v.size() != len)
+                return false;   // inconsistent channel lengths
+    }
+
+    nchans = numChans;
+    rate = sampleRate;
+    totalSamples = len;
+    durationSecs = (double) len / rate;
+    hasFile = true;
+    unsaved = len > 0;   // content that exists nowhere else is "unsaved"
+    currentFile = juce::File();   // no path until Save As
+
+    buffer = std::make_unique<juce::AudioBuffer<float>> (numChans, (int) len);
+    if (data != nullptr && len > 0)
+        for (int ch = 0; ch < numChans; ++ch)
+            std::copy ((*data)[(size_t) ch].begin(), (*data)[(size_t) ch].end(),
+                       buffer->getWritePointer (ch));
+
+    playheadFrac = 0.0;
+    rebuildMipmaps();   // no-op for empty documents
+    return true;
+}
+
+bool AudioEngine::readRange (int64_t start, int64_t count,
+                             std::vector<std::vector<float>>& out) const
+{
+    if (!hasFile || count <= 0)
+        return false;
+    auto r = juce::Range<int64_t> { start, start + count }
+                 .getIntersectionWith ({ 0, totalSamples });
+    if (r.getLength() <= 0)
+        return false;
+
+    out.resize ((size_t) nchans);
     for (int ch = 0; ch < nchans; ++ch)
-        readSamples (ch, samples.getStart(), (int) samples.getLength(),
-                     clipboard->getWritePointer (ch));
+    {
+        out[(size_t) ch].resize ((size_t) r.getLength());
+        if (!readSamples (ch, r.getStart(), r.getLength(), out[(size_t) ch].data()))
+            return false;
+    }
+    return true;
 }
 
 static bool failErr (std::string* errOut, const juce::String& msg)
@@ -628,35 +670,97 @@ static bool failErr (std::string* errOut, const juce::String& msg)
     return false;
 }
 
-bool AudioEngine::pasteAt (int64_t samplePos, std::string* errOut)
+bool AudioEngine::pasteAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
+                           std::string* errOut)
 {
     if (!ensureEditable (errOut))
         return false;
-    if (!clipboard)
+    if (clip.getNumSamples() <= 0)
         return failErr (errOut, "Nothing in the clipboard to paste.");
     samplePos = std::clamp<int64_t> (samplePos, (int64_t) 0, totalSamples);
-    const int64_t pasteLen = clipboard->getNumSamples();
+    const int64_t pasteLen = clip.getNumSamples();
+    const int clipChans = clip.getNumChannels();
 
+    // Target channels beyond the clipboard's own count receive silence.
     std::vector<std::vector<float>> newData (nchans);
     for (int ch = 0; ch < nchans; ++ch)
     {
-        newData[ch].assign (clipboard->getReadPointer (ch),
-                            clipboard->getReadPointer (ch) + pasteLen);
+        newData[ch].resize ((size_t) pasteLen, 0.0f);
+        if (ch < clipChans)
+            std::copy (clip.getReadPointer (ch),
+                       clip.getReadPointer (ch) + pasteLen,
+                       newData[ch].data());
     }
 
     // Insert = replace empty region [pos, pos) with newData
-    recordReplace (*this, { samplePos, samplePos }, std::move (newData), "Pasted samples");
+    recordReplace (*this, { samplePos, samplePos }, newData, "Pasted samples");
 
-    // Apply forward patch
-    Patch p; // re-apply manually since recordReplace only records
+    // Apply forward patch manually (recordReplace only records).
     const int64_t newTotal = totalSamples + pasteLen;
     auto nb = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) newTotal);
     for (int ch = 0; ch < nchans; ++ch)
     {
         nb->copyFrom (ch, 0, *buffer, ch, 0, (int) samplePos);
-        nb->copyFrom (ch, (int) samplePos, *clipboard, ch, 0, (int) pasteLen);
+        nb->copyFrom (ch, (int) samplePos, newData[ch].data(), (int) pasteLen);
         nb->copyFrom (ch, (int) (samplePos + pasteLen), *buffer, ch, (int) samplePos,
                       (int) (totalSamples - samplePos));
+    }
+    buffer = std::move (nb);
+    totalSamples = newTotal;
+    durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+    rebuildMipmaps();
+    return true;
+}
+
+bool AudioEngine::pasteMixAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
+                              std::string* errOut)
+{
+    if (!ensureEditable (errOut))
+        return false;
+    if (clip.getNumSamples() <= 0)
+        return failErr (errOut, "Nothing in the clipboard to mix.");
+    samplePos = std::clamp<int64_t> (samplePos, (int64_t) 0, totalSamples);
+    const int64_t pasteLen = clip.getNumSamples();
+    const int clipChans = clip.getNumChannels();
+
+    // Mix over the overlap [pos, pos+overlap); if the clipboard extends past
+    // EOF the remainder is appended (a plain paste at the end).
+    const int64_t tail = std::max<int64_t> (0, pasteLen - (totalSamples - samplePos));
+
+    std::vector<std::vector<float>> newData (nchans);
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        const int64_t oldLen = totalSamples - samplePos;
+        newData[ch].resize ((size_t) (oldLen + tail), 0.0f);
+        const float* old = buffer->getReadPointer (ch, (int) samplePos);
+        for (int64_t i = 0; i < oldLen; ++i)
+        {
+            float v = old[i];
+            if (ch < clipChans && i < pasteLen)
+                v += clip.getReadPointer (ch)[(size_t) i];
+            newData[ch][(size_t) i] = v;
+        }
+
+        // The part of the clipboard that extends past EOF is appended as-is.
+        for (int64_t i = oldLen; i < oldLen + tail; ++i)
+            newData[ch][(size_t) i] = (ch < clipChans)
+                                         ? clip.getReadPointer (ch)[(size_t) i]
+                                         : 0.0f;
+    }
+
+    // One undoable patch: region [pos, EOF) replaced by mixed + appended data.
+    recordReplace (*this, { samplePos, totalSamples }, newData,
+                  "Mixed in pasted samples");
+
+    // Apply forward patch manually (recordReplace only records).
+    const int64_t newTotal = totalSamples + tail;
+    auto nb = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) newTotal);
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        nb->copyFrom (ch, 0, *buffer, ch, 0, (int) samplePos);
+        nb->copyFrom (ch, (int) samplePos, newData[ch].data(),
+                      (int) (totalSamples - samplePos + tail));
     }
     buffer = std::move (nb);
     totalSamples = newTotal;
@@ -990,8 +1094,8 @@ bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgr
     durationSecs = (double) totalSamples / rate;
     unsaved = true;
 
-    // Clipboard samples belong to the old rate: invalid for pasting now.
-    clipboard.reset();
+    // (The app-level clipboard is cleared by the caller after a successful
+    // resample - its samples belong to the old rate.)
 
     // Resampling preserves real-time duration, so seconds-based state
     // (playhead, selection, loop range, markers) stays valid as-is.

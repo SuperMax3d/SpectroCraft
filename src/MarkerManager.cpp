@@ -192,6 +192,11 @@ static juce::String jsonEscape (const juce::String& s)
 
 bool MarkerManager::saveSidecar (const juce::File& audioFile) const
 {
+    // Brand-new documents have no file path yet: there is nowhere to put a
+    // sidecar, so skip it rather than writing into the working directory.
+    if (audioFile.getFullPathName().isEmpty())
+        return false;
+
     const juce::File sidecar (audioFile.getFullPathName() + ".markers.json");
     juce::String s = "{\n  \"markers\": [\n";
     for (const auto& m : list)

@@ -164,7 +164,12 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
     m.addSeparator();
     m.addItem (CtxCut,   "Cut\tCtrl+X",   hasSel, false);
     m.addItem (CtxCopy,  "Copy\tCtrl+C",  hasSel, false);
-    m.addItem (CtxPaste, "Paste\tCtrl+V", app.audioEngine().canPaste(), false);
+    m.addItem (CtxCopyToNewFile, "Copy to New File",
+               app.audioEngine().isFileLoaded()
+                   && app.audioEngine().numSamples() > 0,
+               false);
+    m.addItem (CtxPaste, "Paste\tCtrl+V", app.canPaste(), false);
+    m.addItem (CtxPasteMix, "Paste Mix\tCtrl+Shift+V", app.canPaste(), false);
     m.addItem (CtxDelete,"Delete\tDel",   hasSel, false);
 
     if (const int sel = m.showMenu (juce::PopupMenu::Options().withMousePosition());

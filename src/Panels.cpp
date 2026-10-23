@@ -269,7 +269,9 @@ void FileListPanel::closeDoc (int i)
 void FileListPanel::openContainingFolder (int row)
 {
     if (row < 0 || row >= app.numDocs()) return;
-    const juce::File folder = app.docs[(size_t) row]->file.getParentDirectory();
+    const juce::File f = app.docs[(size_t) row]->file;
+    if (f.getFullPathName().isEmpty()) return;   // brand-new document: no folder yet
+    const juce::File folder = f.getParentDirectory();
 #if JUCE_WINDOWS
     // Opens Windows Explorer at the folder.
     ShellExecuteW (nullptr, L"open", folder.getFullPathName().toWideCharPointer(),
@@ -283,11 +285,14 @@ void FileListPanel::openContainingFolder (int row)
 
 void FileListPanel::showFileMenu (int row)
 {
+    const FileDoc& d = *app.docs[(size_t) row];
     juce::PopupMenu m;
     m.addItem (1, "Activate", true, false);
     m.addItem (2, "Close", true, false);
     m.addItem (3, "Set Unit and Scale...", true, false);
-    m.addItem (4, "Open Containing Folder", true, false);
+    // Brand-new documents have no folder to open yet.
+    m.addItem (4, "Open Containing Folder",
+               !d.file.getFullPathName().isEmpty(), false);
     const int r = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (r == 1) activateDoc (row);
     else if (r == 2) closeDoc (row);

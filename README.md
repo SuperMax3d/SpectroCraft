@@ -240,6 +240,19 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - The File menu offers **Save Spectrogram As...** (Ctrl+Shift+E), which writes
     the current spectrogram content (per-channel rows included, no axes or
     overlays) to a PNG file.
+- **New files**: File → **New...** (Ctrl+Shift+N) creates an empty document with
+  the chosen channel count and sample rate (defaults: 2 channels / 44100 Hz,
+  or the active file's values). New documents are named *Untitled*,
+  *Untitled 2*, ... in creation order, have no path until you Save As, and can
+  be pasted into immediately — a paste at position 0 grows an empty file to the
+  clipboard length. The Edit menu's **Copy to New File** copies the current
+  selection (or the whole file when nothing is selected) into a fresh document
+  that becomes active; it keeps exactly the *visible* channels, and if a
+  spectral selection is active only its (time, frequency) content is copied.
+  **Paste Mix** (Ctrl+Shift+V) adds the clipboard to the audio at the selection
+  start instead of replacing it — the overlap region is summed in place, and if
+  the clipboard extends past end-of-file the remainder is appended. Both are
+  single undoable edits.
 - **Large-file loading**: files bigger than ~200 MB are opened on a background
   thread with a modal progress dialog showing an animated bar (read + mipmap
   rebuild progress); smaller files load synchronously as before. The UI stays
@@ -669,7 +682,9 @@ The test executable accepts the same flags (useful for CI without a display).
 | Cycle through loaded files (forward / backwards) | Ctrl+Tab / Ctrl+Shift+Tab |
 | Save / Save As | Ctrl+S / Ctrl+Shift+S |
 | Undo / Redo | Ctrl+Z / Ctrl+Y |
+| New file (empty document, choose channels + rate) | Ctrl+Shift+N |
 | Cut / Copy / Paste | Ctrl+X / Ctrl+C / Ctrl+V |
+| Paste Mix (add the clipboard at the selection start instead of replacing; appends past end-of-file if it extends that far) | Ctrl+Shift+V |
 | Select all | Ctrl+A |
 | Delete time selection (or **zero the spectral selection** when one is active) | Del / Backspace |
 | Play / Pause toggle | Space |
@@ -709,7 +724,10 @@ start/end where the waveform crosses zero instead of clipping mid-cycle.
 Programmatic selections (markers, keyboard steps) are never snapped. The Edit menu's
 Delete item is labelled **Zero Spectral Selection** while a spectral selection is
 active (it then zeros the selected time/frequency content in place instead of
-cutting samples). Effects offers Silence,
+cutting samples). Copy/Cut respect an active spectral selection too: only the
+selected (time, frequency) content goes onto the app-level clipboard, which is
+shared across all open files — you can copy from one file and paste into
+another. **Copy to New File** and **Paste Mix** are described above. Effects offers Silence,
 Fade In/Out, Normalize, Reverse and **Change Gain...** (a dB dialog whose
 field opens focused with its value pre-selected so a new one can be typed in
 right away; it multiplies the selection by 10^(dB/20)) — all applied only to
@@ -827,7 +845,7 @@ Clean separation into independent components (see `include/` + `src/`):
 
 | Component | Responsibility |
 |---|---|
-| `AudioEngine` (`juce::AudioSource`) | File I/O via AudioFormatManager, streaming vs in-memory decision, sample access API, mipmap pyramid for the waveform overview, playback transport (play/pause/loop), edit primitives (`applyPatch`, silence/fade/normalize/reverse/cut/copy/paste/delete). All disk reads are mutex-protected; the UI thread never blocks on I/O. |
+| `AudioEngine` (`juce::AudioSource`) | File I/O via AudioFormatManager, streaming vs in-memory decision, sample access API, mipmap pyramid for the waveform overview, playback transport (play/pause/loop), edit primitives (`applyPatch`, silence/fade/normalize/reverse/cut/copy/paste/delete) plus `initNew` (empty or pre-filled documents with no file path yet), `readRange` and `pasteMixAt` (sum-in-place paste that appends past end-of-file). All disk reads are mutex-protected; the UI thread never blocks on I/O. |
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
@@ -836,8 +854,8 @@ Clean separation into independent components (see `include/` + `src/`):
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near, JSON sidecar persistence next to the audio file. |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
-| `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list and scale calibration (`ScaleCalibration`). Created by `Application::openFile`; destroyed on close (the audio player is detached from its engine *before* destruction). |
-| `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. |
+| `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list and scale calibration (`ScaleCalibration`). Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
+| `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked) and `pasteMix`. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop, playhead animation timer and view-range state sync between views/panels. |
 
 Threading model: the UI thread only draws and dispatches; FFT tiles are computed

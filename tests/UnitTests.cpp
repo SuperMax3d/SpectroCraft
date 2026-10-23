@@ -8367,6 +8367,291 @@ static void testSavedSelectionsRoundTrip()
 /** Interactive clone picking: reference click, then target clicks. */
 // ---------------- Move/Scale selection gesture (right-click menu) ----------
 // Transform math + the click-move-click state machine with SHIFT axis lock.
+// ------------------------------------------------- new file / clipboard / paste mix
+
+// Build a document directly (no disk I/O), attach it to app and make it
+// active (mirrors Application::openFile).
+static FileDoc* attachNewDoc (Application& app, int nchans, double rate,
+                              const std::vector<std::vector<float>>* data = nullptr)
+{
+    auto d = std::make_unique<FileDoc>();
+    if (!d->engine.initNew (nchans, rate, data)) return nullptr;
+    for (int i = 0; i < nchans; ++i)
+        d->visibleChannels.push_back (i);
+    FileDoc* raw = d.get();
+    app.docs.push_back (std::move (d));
+    app.activate ((int) app.docs.size () - 1);
+    return raw;
+}
+
+static void testNewFileCopyPasteMix()
+{
+    // --- initNew: empty document -------------------------------------
+    {
+        AudioEngine eng;
+        CHECK (eng.initNew (2, 48000.0), "initNew accepts an empty document");
+        CHECK (eng.isFileLoaded () && !eng.hasUnsavedChanges (),
+              "empty doc is loaded but not unsaved");
+        CHECK (eng.numChannels () == 2 && std::abs (eng.sampleRate () - 48000.0) < 1e-9,
+              "channel count and rate are stored");
+        CHECK (eng.numSamples () == 0 && eng.getFile ().getFullPathName ().isEmpty (),
+              "no samples and no file path yet");
+        AudioEngine bad;
+        CHECK (!bad.initNew (0, 44100.0), "zero channels rejected");
+        CHECK (!bad.initNew (2, -1.0), "negative rate rejected");
+    }
+
+    // --- initNew with data + readRange ---------------------------------
+    {
+        AudioEngine eng;
+        std::vector<std::vector<float>> data (4);
+        for (int ch = 0; ch < 4; ++ch)
+            for (int i = 0; i < 1000; ++i)
+                data[(size_t) ch].push_back ((float) std::sin (i * 0.01 + ch));
+        CHECK (eng.initNew (4, 8000.0, &data), "initNew accepts initial content");
+        CHECK (eng.numSamples () == 1000 && eng.hasUnsavedChanges (),
+              "content stored and marked unsaved");
+
+        std::vector<std::vector<float>> out;
+        CHECK (eng.readRange (100, 50, out), "readRange reads a middle slice");
+        CHECK (out.size () == 4 && out[0].size () == 50, "readRange shape");
+        bool same = true;
+        for (int i = 0; i < 50; ++i)
+            if (out[1][(size_t) i] != data[1][(size_t) (100 + i)]) { same = false; break; }
+        CHECK (same, "readRange content matches the source");
+    }
+
+    // --- Application::newFile: naming, activation, paste into empty ----
+    {
+        Application app;
+        CHECK (app.newFile (2, 44100.0), "newFile creates a document");
+        CHECK (app.numDocs () == 1 && app.activeDocIndex == 0, "one doc, active");
+        FileDoc& d = *app.docs[0];
+        CHECK (d.name == "Untitled", "first new file is named Untitled");
+        CHECK (d.engine.numSamples () == 0, "new file starts empty");
+        CHECK (app.audioEngine ().numChannels () == 2, "active engine is the new doc");
+
+        CHECK (app.newFile (4, 96000.0), "second newFile ok");
+        FileDoc& d2 = *app.docs[1];
+        CHECK (d2.name == "Untitled 2", "unique name for the second file");
+        CHECK (app.activeDocIndex == 1 && app.audioEngine ().numChannels () == 4,
+              "second doc is active with its own rate/channels");
+
+        // Paste into an empty document at position 0.
+        auto c = std::make_unique<juce::AudioBuffer<float>> (2, 800);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 800; ++i)
+                c->getWritePointer (ch)[(size_t) i] = (float) std::sin (i * 0.1 + ch);
+        app.clipboard = std::move (c);
+        CHECK (app.canPaste (), "clipboard set");
+        CHECK (app.paste (nullptr), "paste into empty doc ok");
+        CHECK (app.audioEngine ().numSamples () == 800,
+              "empty doc grew to the clipboard length");
+    }
+
+    // --- Copy + copy-to-new-file with visible channels ------------------
+    {
+        Application app;
+        std::vector<std::vector<float>> src (4);
+        for (int ch = 0; ch < 4; ++ch)
+            for (int i = 0; i < 8000; ++i)
+                src[(size_t) ch].push_back ((float) std::sin (i * 0.01 + ch));
+        FileDoc* sd = attachNewDoc (app, 4, 8000.0, &src);
+        CHECK (sd != nullptr, "source doc attached");
+
+        // Select [0.25s, 0.75s) and copy: the clipboard holds exactly that slice.
+        app.setSelection ({ 0.25, 0.75 });
+        app.copy ();
+        CHECK (app.canPaste (), "copy fills the app-level clipboard");
+        bool same = true;
+        for (int ch = 0; ch < 4 && same; ++ch)
+            for (int i = 0; i < 4000; ++i)
+                if (app.clipboard->getReadPointer (ch)[(size_t) i]
+                    != src[(size_t) ch][(size_t) (2000 + i)])
+                    { same = false; break; }
+        CHECK (same, "clipboard holds the selected slice of every channel");
+
+        // Show only channels 1 and 3 (0-based), then copy to a new file.
+        app.toggleChannelVisible (0);
+        app.toggleChannelVisible (2);
+        std::string err;
+        CHECK (app.copyToNewFile (&err), "copy-to-new-file ok");
+        FileDoc& nd = *app.docs[1];
+        CHECK (nd.engine.numChannels () == 2,
+              "new file has exactly the visible channels");
+        CHECK (std::abs (nd.engine.sampleRate () - 8000.0) < 1e-9, "rate preserved");
+        CHECK (nd.engine.numSamples () == 4000, "new file holds the selected length");
+        std::vector<std::vector<float>> out;
+        CHECK (nd.engine.readRange (0, 4000, out), "read new file content");
+        bool chOk = true;
+        for (int i = 0; i < 4000 && chOk; ++i)
+        {
+            if (out[0][(size_t) i] != src[1][(size_t) (2000 + i)]) chOk = false;
+            if (out[1][(size_t) i] != src[3][(size_t) (2000 + i)]) chOk = false;
+        }
+        CHECK (chOk, "new file channels are the visible source channels");
+        CHECK (app.activeDocIndex == 1, "the new file is active");
+
+        // Nothing selected -> the whole file would be copied. Re-show every
+        // channel first so this copy keeps all four.
+        app.activate (0);
+        app.setSelection ({ 0, 0 });
+        for (int ch = 0; ch < 4; ++ch)
+            if (!app.isChannelVisible (ch)) app.toggleChannelVisible (ch);
+        CHECK (app.copyToNewFile (&err), "copy-to-new-file of the whole file ok");
+        FileDoc& nd2 = *app.docs[2];
+        CHECK (nd2.engine.numSamples () == 8000 && nd2.engine.numChannels () == 4,
+              "whole-file copy keeps length and all channels");
+    }
+
+    // --- Spectral selection: masked copy-to-new-file + masked clipboard --
+    {
+        const juce::File wav = makeTempFile ("spec_copy.wav");
+        CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+        Application app;
+        CHECK (app.openFile (wav), "opened two-tone wav");
+        FileDoc& d = *app.docs[0];
+
+        // Select the whole file and keep only the 300-700 Hz band.
+        app.setSelection ({ 0.0, (double) kToneFrames / kToneRate });
+        d.spectralSel = lowBandSel ();
+
+        std::string err;
+        CHECK (app.copyToNewFile (&err), "masked copy-to-new-file ok");
+        FileDoc& nd = *app.docs[1];
+        std::vector<float> got ((size_t) kToneFrames);
+        CHECK (nd.engine.readSamples (0, 0, (int) kToneFrames, got.data()),
+              "read new file content");
+        const float n500 = toneAmp (got, 2048, (size_t) kToneFrames - 2048,
+                                    500.0, kToneRate);
+        const float n3500 = toneAmp (got, 2048, (size_t) kToneFrames - 2048,
+                                    3500.0, kToneRate);
+        CHECK (std::abs (n500 - 0.5f) < 0.01f, "new file contains the selected tone");
+        CHECK (n3500 < 0.01f, "new file has no unselected content");
+
+        // A plain copy is masked too: the clipboard keeps only the low band.
+        app.activate (0);
+        app.copy ();
+        CHECK (app.canPaste (), "masked copy fills the clipboard");
+        std::vector<float> clipData ((size_t) kToneFrames);
+        std::copy (app.clipboard->getReadPointer (0),
+                   app.clipboard->getReadPointer (0) + kToneFrames, clipData.begin());
+        const float c500 = toneAmp (clipData, 2048,
+                                    (size_t) kToneFrames - 2048, 500.0, kToneRate);
+        const float c3500 = toneAmp (clipData, 2048,
+                                     (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+        CHECK (std::abs (c500 - 0.5f) < 0.01f, "selected band survives the copy");
+        CHECK (c3500 < 0.01f, "unselected band is gone from the clipboard");
+
+        // Pasting that clipboard into a fresh file lands only the low tone;
+        // extra target channels stay silence.
+        CHECK (app.newFile (2, kToneRate), "new target file");
+        app.setSelection ({ 0, 0 });   // paste at position 0
+        CHECK (app.paste (nullptr), "paste masked clipboard into new file");
+        FileDoc& nd2 = *app.docs[2];
+        std::vector<float> got2 ((size_t) kToneFrames);
+        CHECK (nd2.engine.readSamples (0, 0, (int) kToneFrames, got2.data()),
+              "read target ch0");
+        const float t500 = toneAmp (got2, 2048, (size_t) kToneFrames - 2048,
+                                    500.0, kToneRate);
+        const float t3500 = toneAmp (got2, 2048, (size_t) kToneFrames - 2048,
+                                     3500.0, kToneRate);
+        CHECK (std::abs (t500 - 0.5f) < 0.01f, "pasted file contains the selected tone");
+        CHECK (t3500 < 0.01f, "pasted file has no unselected content");
+        std::vector<float> got3 ((size_t) kToneFrames);
+        nd2.engine.readSamples (1, 0, (int) kToneFrames, got3.data());
+        bool silent = true;
+        for (float v : got3) if (v != 0.0f) { silent = false; break; }
+        CHECK (silent, "extra target channel is silence");
+
+        wav.deleteFile ();
+    }
+
+    // --- Paste mix ------------------------------------------------------
+    {
+        Application app;
+        std::vector<std::vector<float>> src (1);
+        for (int i = 0; i < 8000; ++i)
+            src[0].push_back ((float) std::sin (i * 0.02));
+        FileDoc* sd = attachNewDoc (app, 1, 8000.0, &src);
+        CHECK (sd != nullptr, "mix source doc attached");
+
+        // Copy [0.25s, 0.75s) and mix it back at the same position: doubled.
+        app.setSelection ({ 0.25, 0.75 });
+        app.copy ();
+        CHECK (app.pasteMix (nullptr), "paste-mix ok");
+        std::vector<float> got ((size_t) 8000);
+        CHECK (app.audioEngine ().readSamples (0, 0, 8000, got.data()),
+              "read mixed file");
+        bool doubled = true;
+        for (int i = 2000; i < 6000 && doubled; ++i)
+            if (std::abs (got[(size_t) i] - 2.0f * src[0][(size_t) i]) > 1e-5f)
+                doubled = false;
+        CHECK (doubled, "overlap region is the sum of old + clipboard");
+        bool restSame = true;
+        for (int i = 0; i < 8000; ++i)
+            if ((i < 2000 || i >= 6000) && got[(size_t) i] != src[0][(size_t) i])
+                { restSame = false; break; }
+        CHECK (restSame, "regions outside the overlap are untouched");
+        CHECK (app.audioEngine ().numSamples () == 8000,
+              "length unchanged when the clipboard fits");
+
+        // Undo restores exactly.
+        app.undoStep ();
+        std::vector<float> back ((size_t) 8000);
+        app.audioEngine ().readSamples (0, 0, 8000, back.data());
+        bool exact = true;
+        for (int i = 0; i < 8000; ++i)
+            if (back[(size_t) i] != src[0][(size_t) i]) { exact = false; break; }
+        CHECK (exact, "undo restores the pre-mix content exactly");
+
+        // Mix at 0.9s: overlap [7200,8000) is summed, tail appended past EOF.
+        app.setSelection ({ 0.9, 1.0 });   // paste position = selection start
+        CHECK (app.pasteMix (nullptr), "paste-mix with a tail ok");
+        const int64_t newLen = 8000 + 3200;
+        CHECK (app.audioEngine ().numSamples () == newLen,
+              "file grew by the clipboard tail");
+        std::vector<float> got2 ((size_t) newLen);
+        app.audioEngine ().readSamples (0, 0, (int) newLen, got2.data());
+        bool sumOk = true;
+        for (int i = 7200; i < 8000 && sumOk; ++i)
+            if (std::abs (got2[(size_t) i]
+                         - (src[0][(size_t) i] + src[0][(size_t) (2000 + (i - 7200))]))
+                > 1e-5f)
+                sumOk = false;
+        CHECK (sumOk, "overlap at EOF is summed");
+        bool tailOk = true;
+        for (int i = 8000; i < (int) newLen && tailOk; ++i)
+            if (got2[(size_t) i] != src[0][(size_t) (2800 + (i - 8000))])
+                { tailOk = false; break; }
+        CHECK (tailOk, "appended tail matches the clipboard remainder");
+
+        // Undo restores the original length and content exactly.
+        app.undoStep ();
+        CHECK (app.audioEngine ().numSamples () == 8000,
+              "undo shrinks back to the original length");
+        std::vector<float> back2 ((size_t) 8000);
+        app.audioEngine ().readSamples (0, 0, 8000, back2.data());
+        bool exact2 = true;
+        for (int i = 0; i < 8000; ++i)
+            if (back2[(size_t) i] != src[0][(size_t) i]) { exact2 = false; break; }
+        CHECK (exact2, "undo restores the pre-mix content exactly");
+    }
+
+    // --- Empty-document save round-trip ----------------------------------
+    {
+        Application app;
+        CHECK (app.newFile (1, 8000.0), "empty doc for save test");
+        const juce::File out = makeTempFile ("empty_save.wav");
+        CHECK (app.audioEngine ().saveFileAs (out), "saving an empty file works");
+        AudioEngine eng2;
+        CHECK (eng2.loadFile (out), "empty wav reloads");
+        CHECK (eng2.numSamples () == 0 && eng2.numChannels () == 1,
+              "reloaded as empty mono");
+        out.deleteFile ();
+    }
+}
+
 static void testSelMoveScaleGesture()
 {
     // ---- Pure transform math -------------------------------------------------
@@ -8772,6 +9057,7 @@ static int scRunUnitTestsImpl()
     progress ("selections disk reload + dnd"); testSelectionsDiskReload();
     progress ("clone pick flow");           testClonePickFlow();
     progress ("move/scale selection gesture"); testSelMoveScaleGesture();
+    progress ("new file / clipboard / paste mix"); testNewFileCopyPasteMix();
     progress ("masked gain + zero-out");    testMaskedGainAndZero();
     progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
     progress ("extract masked A+B=orig");   testExtractMasked();

@@ -1135,11 +1135,20 @@ void MainWindow::activateDocUI()
     syncSharedState();
     updateTitle();
 
-    // The footer always shows the name of the file currently in the views.
+    // The footer always shows the name of the file currently in the views
+    // (or the display name for a brand-new, not-yet-saved document).
     if (statusBar)
-        statusBar->setFileName (app.audioEngine().isFileLoaded()
-                                ? app.audioEngine().getFile().getFileName()
-                                : juce::String());
+    {
+        juce::String fn;
+        if (app.audioEngine().isFileLoaded())
+        {
+            const juce::File f = app.audioEngine().getFile();
+            fn = f.getFullPathName().isEmpty()
+                     ? (app.doc() != nullptr ? app.doc()->name : juce::String())
+                     : f.getFileName();
+        }
+        statusBar->setFileName (fn);
+    }
 
     // Re-layout so the time scrollbar's visibility/bounds follow the new file
     // state: resized() is the only place they are set, and loading a file does
@@ -1191,8 +1200,10 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
 
 void MainWindow::handleFileSave()
 {
-    if (app.audioEngine().isFileLoaded())
-        runSaveAsync (app.audioEngine().getFile(), false);
+    // A brand-new document has no file path yet: Save behaves as Save As.
+    const juce::File f = app.audioEngine().getFile();
+    if (app.audioEngine().isFileLoaded() && !f.getFullPathName().isEmpty())
+        runSaveAsync (f, false);
     else
         handleFileSaveAs();
 }
@@ -1238,7 +1249,12 @@ void MainWindow::updateTitle()
     juce::String title = "SpectroCraft";
     if (app.audioEngine().isFileLoaded())
     {
-        title = app.audioEngine().getFile().getFileName() + " - " + title;
+        // Brand-new documents have no file path yet: show their display name.
+        const juce::File f = app.audioEngine().getFile();
+        const juce::String name = f.getFullPathName().isEmpty()
+                                      ? (app.doc() != nullptr ? app.doc()->name : juce::String())
+                                      : f.getFileName();
+        title = name + " - " + title;
         if (app.audioEngine().hasUnsavedChanges())
             title = "*" + title;
     }
@@ -1423,6 +1439,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 
     switch (menuItemID)
     {
+        case FileNew:  showNewFileDialog(); break;
         case FileOpen: handleFileOpen(); break;
         case FileClose:
             // closeFile() fires onActiveDocChanged (or resets the empty state),
@@ -1448,6 +1465,16 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case EditCut:    runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); break;
         case EditCopy:   app.copy(); break;   // read-only; works on streamed files too
         case EditPaste:  runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); break;
+        case EditCopyToNewFile:
+        {
+            std::string err;
+            if (!app.copyToNewFile (&err))
+                showEditError (err);
+            // Success: the new document is already active; onActiveDocChanged
+            // has synchronised the UI.
+            break;
+        }
+        case EditPasteMix: runDestructiveEdit ([&] (std::string* e) { return app.pasteMix (e); }); break;
         case EditDelete: runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); break;
         case EditSelectAll: app.selectAll(); syncSharedState(); break;
         case EditSnapToZeroCrossings:
@@ -1583,6 +1610,14 @@ void MainWindow::handleContextMenuAction (int id)
         case CtxCopy:            app.copy();  break;   // read-only
         case CtxPaste:           runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); break;
         case CtxDelete:          runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); break;
+        case CtxCopyToNewFile:
+        {
+            std::string err;
+            if (!app.copyToNewFile (&err))
+                showEditError (err);
+            break;
+        }
+        case CtxPasteMix:        runDestructiveEdit ([&] (std::string* e) { return app.pasteMix (e); }); break;
     }
 }
 
@@ -1703,6 +1738,75 @@ void MainWindow::showResampleDialog()
     runResampleAsync (newRate);
 }
 
+void MainWindow::showNewFileDialog()
+{
+    // Defaults follow the active document when one is open, so "New" makes a
+    // twin of what you are looking at; otherwise 2ch / 44.1 kHz.
+    int defChans = 2;
+    double defRate = 44100.0;
+    if (app.audioEngine().isFileLoaded())
+    {
+        defChans = app.audioEngine().numChannels();
+        defRate = app.audioEngine().sampleRate();
+    }
+
+    auto* w = new juce::AlertWindow ("New File",
+                                     "Create a new empty audio file.\n"
+                                     "Number of channels:\n"
+                                     "Sample rate (Hz):",
+                                     juce::AlertWindow::QuestionIcon, this);
+    w->addTextEditor ("channels", juce::String (defChans));
+    w->addTextEditor ("rate", juce::String (defRate, 3));
+    for (const char* name : { "channels", "rate" })
+        if (auto* editor = w->getTextEditor (name))
+            // Let Enter/Escape reach the OK/Cancel shortcuts even while a
+            // field has keyboard focus.
+            editor->setEscapeAndReturnKeysConsumed (false);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // AlertWindow disables keyboard focus on its editors; re-enable it and
+    // pre-select the first field's text.
+    if (auto* editor = w->getTextEditor ("channels"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+    }
+
+    // Enter modal state WITHOUT taking keyboard focus (see showChangeGainDialog).
+    w->enterModalState (false);
+    if (auto* editor = w->getTextEditor ("channels"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    const juce::String chText = w->getTextEditorContents ("channels");
+    const juce::String rateText = w->getTextEditorContents ("rate");
+    delete w;
+    if (result != 1) return;
+
+    const int chans = chText.trim().getIntValue();
+    const double rate = rateText.trim().getDoubleValue();
+    if (chans < 1 || chans > 512)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Invalid channel count",
+                                            "Please enter a channel count between 1 and 512.",
+                                            "", this);
+        return;
+    }
+    if (!std::isfinite (rate) || rate <= 0.0)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Invalid rate",
+                                            "Please enter a positive sample rate in Hz.",
+                                            "", this);
+        return;
+    }
+
+    app.newFile (chans, rate);
+}
+
 // Resample on a background thread with a progress dialog so multi-GB files
 // never block the UI. Progress: resampling 0..85%, mipmap rebuild 85..100%.
 void MainWindow::runResampleAsync (double newRate)
@@ -1738,6 +1842,9 @@ void MainWindow::runResampleAsync (double newRate)
             delete dlg;
             if (ok)
             {
+                // The clipboard's samples belong to the old sample rate.
+                app.clearClipboard ();
+
                 // refreshAfterEdit() clears the spectral tile cache and forces
                 // a full re-render: after a rate change the old tiles are stale
                 // (same sample positions now hold different content, and the
@@ -2492,6 +2599,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
 
     if (menuName == "File")
     {
+        menu.addItem (FileNew, "New...\tCtrl+Shift+N", true, false);
         menu.addItem (FileOpen, "Open...\tCtrl+O", true, false); // always available
 
         // Open Recent: up to 10 most recently opened files, most recent first.
@@ -2525,7 +2633,12 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSeparator();
         menu.addItem (EditCut, "Cut\tCtrl+X", !app.selection.isEmpty(), false);
         menu.addItem (EditCopy, "Copy\tCtrl+C", !app.selection.isEmpty(), false);
-        menu.addItem (EditPaste, "Paste\tCtrl+V", app.audioEngine().canPaste(), false);
+        menu.addItem (EditCopyToNewFile, "Copy to New File",
+                      app.audioEngine().isFileLoaded()
+                          && app.audioEngine().numSamples() > 0,
+                      false);
+        menu.addItem (EditPaste, "Paste\tCtrl+V", app.canPaste(), false);
+        menu.addItem (EditPasteMix, "Paste Mix\tCtrl+Shift+V", app.canPaste(), false);
         // With a spectral selection active, DEL zeros the selected (t,f)
         // content instead of trimming samples.
         const bool hasSpectralSel = app.hasSpectralSelection ();
@@ -2712,6 +2825,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         app.cycleActiveDoc (!key.getModifiers().isShiftDown());
         return true;
     }
+    if (key == juce::KeyPress ('n', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { showNewFileDialog(); return true; }
     if (key == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { handleFileOpen(); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0)) { handleFileSave(); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleFileSaveAs(); return true; }
@@ -2721,6 +2835,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('x', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); return true; }
     if (key == juce::KeyPress ('c', juce::ModifierKeys::commandModifier, 0)) { app.copy(); return true; }   // read-only
     if (key == juce::KeyPress ('v', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); return true; }
+    if (key == juce::KeyPress ('v', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.pasteMix (e); }); return true; }
     if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier, 0)) { app.selectAll(); syncSharedState(); return true; }
     // Find in the active list panel (Markers / Transcription tab).
     if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier, 0)) { handleFind (true); return true; }

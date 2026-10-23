@@ -20,6 +20,15 @@ public:
     ~AudioEngine();
 
     // ---- File loading (metadata always; full buffer only when small enough) ----
+    /** Creates a brand-new in-memory document with the given channel count
+        and sample rate. With no data it is empty (zero samples) - "New
+        File"; the caller can then fill it via edits/paste. With data (one
+        vector per channel, all the same length) that content becomes the
+        initial buffer ("Copy to New File"). The document has no file path
+        until Save As and is marked unsaved when it carries content. */
+    bool initNew (int numChans, double sampleRate,
+                  const std::vector<std::vector<float>>* data = nullptr);
+
     /** Loads a file. When onProgress is non-null it is called with 0..1 as
         the load advances (useful for large files loaded off-thread). If cancel
         points at an atomic set to true, loading stops at the next checkpoint,
@@ -69,7 +78,6 @@ public:
     // ---- Editing (destructive, recorded as undo patches) ----
     void setUndoManager (::UndoManager* um) { undo = um; }
     bool canEdit() const { return hasFile; }
-    bool canPaste() const { return clipboard != nullptr; }
 
     /** If the file is still being streamed from disk, materialise it into an
         in-memory buffer so destructive edits can be applied. Returns false
@@ -83,14 +91,28 @@ public:
                          std::function<void(float)> onProgress = nullptr,
                          const std::atomic<bool>* cancel = nullptr);
 
+    /** Reads a range of all channels into out (one vector per channel,
+        each of length count). Works on streamed engines too. */
+    bool readRange (int64_t start, int64_t count,
+                    std::vector<std::vector<float>>& out) const;
+
     // Destructive edits. `channels` optionally restricts the effect to a
     // subset of channels (the currently visible/selected ones); nullptr or an
     // empty list means "all channels" for structural ops, and "no-op" is NOT
     // implied - pass nullptr to affect everything.
     // All return false (and set *errOut when non-null) if the edit cannot be
     // performed - e.g. the file could not be loaded into memory.
-    void copySelection (juce::Range<int64_t> samples);
-    bool pasteAt (int64_t samplePos, std::string* errOut = nullptr);
+    /** Inserts clip at samplePos (the clipboard lives in Application, shared
+        across documents). Channels of the target beyond the clipboard's own
+        channel count receive silence. */
+    bool pasteAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
+                  std::string* errOut = nullptr);
+    /** Adds clip to the existing content at samplePos instead of replacing:
+        the overlap [pos, pos+clipLen) is summed sample-wise; if the
+        clipboard extends past the end of file, the remainder is appended.
+        Recorded as one undoable patch. */
+    bool pasteMixAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
+                     std::string* errOut = nullptr);
     bool deleteSamples (juce::Range<int64_t> samples, std::string* errOut = nullptr);
     bool silenceSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr,
                          std::string* errOut = nullptr);
@@ -183,7 +205,6 @@ private:
     mutable std::mutex readerMutex;
 
     std::unique_ptr<juce::AudioBuffer<float>> buffer;
-    std::unique_ptr<juce::AudioBuffer<float>> clipboard;
     std::vector<MipLevel> mips;
     int64_t baseFactor = 1;
     int64_t inMemoryLimit = 64ll * 1024 * 1024; // sample-channels
