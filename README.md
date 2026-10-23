@@ -101,16 +101,18 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     frequency edges with vertical connectors at the boundaries — the classic
     1/3-octave band-plot look; every click replaces the curve instead of
     adding another).
-    10 numbered snapshot buttons. Each button's background matches its curve
-    colour (slot *i* uses `fftColours[i % 4]`); a toggled-on button shows the
-    full colour with a thick white border, an off-but-stored one is dimmed,
-    and an empty slot is a dark tint. **Plain click** on an empty slot stores
-    the current live region (selection or playhead) and shows it; plain click
-    on a stored slot only toggles visibility — it does *not* update the value.
-    **Ctrl+click** re-stores/updates from the current selection/cursor position
-    and shows the curve. **Shift+click** clears the slot. Stored curves are
-    drawn as dim (alpha 90) overlays beneath the live curves, at their own
-    stored FFT size, in all three axis modes. Snapshots are **shared across
+    8 numbered snapshot buttons, each with its own classic DAW hold-button
+    colour: red, orange, yellow, light green, dark green, teal, blue and
+    magenta. Each button's background matches the colour of the curve it
+    reproduces; a toggled-on button shows the full colour with a thick white
+    border, an off-but-stored one is dimmed, and an empty slot is a dark tint.
+    **Plain click** on an empty slot stores the current live region (selection
+    or playhead) and shows it; plain click on a stored slot only toggles
+    visibility — it does *not* update the value. **Ctrl+click** re-stores/
+    updates from the current selection/cursor position and shows the curve.
+    **Shift+click** clears the slot. Stored curves are drawn in their button's
+    full colour — just a little thinner than the live curves — beneath them,
+    at their own stored FFT size, in all three axis modes. Snapshots are **shared across
     all open files**: each one stores its source file and channel list, so a
     curve captured from another file keeps working (and is recomputed from
     that file's engine when the FFT size or window type changes). The tooltip
@@ -252,7 +254,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   **Ctrl+Tab / Ctrl+Shift+Tab** cycles through the loaded files (forward /
   backwards). Closing a file (right-click → Close, or File → Close for the
   active one) removes it from the list. The live frequency analysis always
-  follows the playhead of the *active* file, and **the ten stored snapshots
+  follows the playhead of the *active* file, and **the eight stored snapshots
   are shared across all open files** — each snapshot remembers which file it
   was stored from (shown in its tooltip), so curves from different files can be
   compared side by side. Closing a file clears only the snapshots that came

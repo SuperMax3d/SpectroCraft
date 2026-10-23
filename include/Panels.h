@@ -220,7 +220,7 @@ private:
 // settings: this panel analyses a short region around the selection or the
 // playhead with its own parameters.
 
-/** Snapshot overlay button (1..10).
+/** Snapshot overlay button (1..8).
     Its background always shows the colour of the curve it reproduces:
       - toggled ON  -> full curve colour + thick white border (most obvious),
       - OFF but a value is stored -> dimmed curve colour,
@@ -231,7 +231,7 @@ private:
 class SnapshotButton : public juce::Button
 {
 public:
-    // Needed for the value-initialised snapBtns[10] array. Defined out-of-line
+    // Needed for the value-initialised snapBtns[8] array. Defined out-of-line
     // because juce::Button's constructor takes no default argument.
     SnapshotButton();
 
@@ -369,7 +369,7 @@ public:
 private:
     Application& app;
     juce::ComboBox fftSizeCombo, windowCombo, axisCombo;
-    SnapshotButton snapBtns[10];
+    SnapshotButton snapBtns[8];
 
     // Fixed normalization floor for the stored magnitudes: independent of the
     // visible level window so zooming out never changes the curve data.
@@ -404,7 +404,7 @@ private:
         FileDoc* source = nullptr;              // file this snapshot was stored from
         std::vector<int> chans;                 // visible channels at store time
     };
-    Snapshot snapshots[10];     // stored curve overlays, shared across all files
+    Snapshot snapshots[8];      // stored curve overlays, shared across all files
 
     // Cached spectrum data
     std::vector<std::vector<float>> mags;   // per channel, normalized 0..1 vs kNormFloorDb

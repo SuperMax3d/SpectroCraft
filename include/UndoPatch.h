@@ -45,6 +45,6 @@ struct Patch
     bool hasSideState = false;
     std::vector<Marker> oldMarkers, newMarkers;
     std::vector<SavedSpectralSelection> oldSavedSel, newSavedSel;
-    static constexpr int kSnapshotSlots = 10;
+    static constexpr int kSnapshotSlots = 8;
     std::array<SnapshotSlotChange, kSnapshotSlots> snapshotSlots {};
 };

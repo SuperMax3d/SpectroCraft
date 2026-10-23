@@ -524,14 +524,25 @@ static std::vector<float> toThirdOctBands (const std::vector<float>& mag, int n,
     return out;
 }
 
-// Curve colours for the live spectrum and the snapshot overlays. Button i+1
-// reproduces curve fftColours[(i + 1) % 4] and wears that colour as its
-// background.
+// Curve colours for the live spectrum (one per visible channel).
 static const juce::Colour fftColours[] = {
     juce::Colour::fromRGB (255, 48, 144),   // pink
     juce::Colour::fromRGB (48, 192, 255),   // cyan
     juce::Colour::fromRGB (120, 255, 120),  // green
     juce::Colour::fromRGB (255, 220, 60)    // yellow
+};
+
+// Snapshot slot colours: button i+1 wears snapColours[i] as its background and
+// its stored curve is drawn in the same colour.
+static const juce::Colour snapColours[] = {
+    juce::Colour::fromRGB (255, 0, 0),      // red
+    juce::Colour::fromRGB (255, 127, 0),    // orange
+    juce::Colour::fromRGB (255, 255, 0),    // yellow
+    juce::Colour::fromRGB (109, 242, 0),    // light green
+    juce::Colour::fromRGB (65, 189, 58),    // dark green
+    juce::Colour::fromRGB (2, 238, 255),    // teal
+    juce::Colour::fromRGB (45, 152, 252),   // blue
+    juce::Colour::fromRGB (255, 5, 247)     // magenta
 };
 
 SnapshotButton::SnapshotButton() : juce::Button (juce::String())
@@ -743,11 +754,11 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         if (app.onStateChange) app.onStateChange();   // triggers the settings save
     };
 
-    for (int i = 0; i < 10; ++i)
+    for (int i = 0; i < 8; ++i)
     {
         // The button's background always shows the colour of the curve it
         // reproduces (same mapping as the overlay drawing in paint()).
-        snapBtns[i].setCurveColour (fftColours[(i + 1) % 4]);
+        snapBtns[i].setCurveColour (snapColours[i]);
         snapBtns[i].setButtonText (juce::String (i + 1));
         snapBtns[i].setClickingTogglesState (true);
         snapBtns[i].onClick = [this, i] { handleSnapshotClick (i); };
@@ -1015,7 +1026,7 @@ void FFTAnalysisView::recomputeSnapshots()
     // Snapshots are shared across all open files: each one is recomputed from
     // the engine of the file it was stored from (not necessarily the active
     // one), at its own time segment and the current FFT size / window type.
-    for (int i = 0; i < 10; ++i)
+    for (int i = 0; i < 8; ++i)
     {
         auto& s = snapshots[i];
         if (!(s.n > 0 && s.gen != settingsGen)) continue;
@@ -1034,7 +1045,7 @@ void FFTAnalysisView::recomputeSnapshots()
 
 void FFTAnalysisView::refreshSnapshotBands()
 {
-    for (int i = 0; i < 10; ++i)
+    for (int i = 0; i < 8; ++i)
     {
         auto& s = snapshots[i];
         if (!(s.n > 0 && !s.mags.empty())) continue;
@@ -1100,7 +1111,7 @@ void FFTAnalysisView::resized()
 
     auto row2 = b.removeFromTop (26);
     axisCombo.setBounds (4, row2.getY() + 2, 90, 22);
-    for (int i = 0; i < 10; ++i)
+    for (int i = 0; i < 8; ++i)
         snapBtns[i].setBounds (98 + i * 24, row2.getY() + 2, 23, 20);
 
     repaint();
@@ -1303,7 +1314,8 @@ void FFTAnalysisView::paint (juce::Graphics& g)
         // (The magnitude vector only has n/2+1 entries — never index it by x!)
         // Each curve is mapped with the FFT size it was computed at, so stored
         // snapshots do not shift when the live analysis uses a different size.
-        auto drawCurve = [&](const std::vector<float>& mag, int curveN, const juce::Colour& col)
+        auto drawCurve = [&](const std::vector<float>& mag, int curveN, const juce::Colour& col,
+                             float w)
         {
             g.setColour (col);
             juce::Path path;
@@ -1319,13 +1331,14 @@ void FFTAnalysisView::paint (juce::Graphics& g)
                 if (!started) { path.startNewSubPath (x, y); started = true; }
                 else          path.lineTo (x, y);
             }
-            g.strokePath (path, juce::PathStrokeType (1.2f));
+            g.strokePath (path, juce::PathStrokeType (w));
         };
 
         // In 1/3-octave mode each band is drawn as a flat step spanning its
         // frequency edges with vertical connectors at the boundaries — the
         // classic 1/3-octave band-plot look, not a smooth curve.
-        auto drawBandCurve = [&](const std::vector<float>& bands, const juce::Colour& col)
+        auto drawBandCurve = [&](const std::vector<float>& bands, const juce::Colour& col,
+                                 float w)
         {
             if (bands.empty()) return;
             g.setColour (col);
@@ -1346,11 +1359,12 @@ void FFTAnalysisView::paint (juce::Graphics& g)
                 else          path.lineTo (xLo, y);    // vertical connector at the shared boundary
                 path.lineTo (xHi, y);                  // flat top of this band
             }
-            g.strokePath (path, juce::PathStrokeType (1.2f));
+            g.strokePath (path, juce::PathStrokeType (w));
         };
 
-        // Stored snapshot overlays first (dimmer), live curves on top.
-        for (int i = 0; i < 10; ++i)
+        // Stored snapshot overlays first: full slot colour, just a little
+        // thinner than the live curves. Live curves go on top.
+        for (int i = 0; i < 8; ++i)
             if (snapshots[i].shown && snapshots[i].n > 1 && !snapshots[i].mags.empty())
                 for (size_t c = 0; c < snapshots[i].mags.size() && c < 4; ++c)
                     if (axisMode_ == 2)
@@ -1359,17 +1373,17 @@ void FFTAnalysisView::paint (juce::Graphics& g)
                         // would bind to the inner if and snapshot curves would
                         // never be drawn in linear/log axis modes.
                         if (!snapshots[i].bands.empty())
-                            drawBandCurve (snapshots[i].bands[c], fftColours[(i + 1) % 4].withAlpha (90 / 255.0f));
+                            drawBandCurve (snapshots[i].bands[c], snapColours[i], 1.0f);
                     }
                     else
-                        drawCurve (snapshots[i].mags[c], snapshots[i].n, fftColours[(i + 1) % 4].withAlpha (90 / 255.0f));
+                        drawCurve (snapshots[i].mags[c], snapshots[i].n, snapColours[i], 1.0f);
 
         if (axisMode_ == 2)
             for (size_t c = 0; c < mags.size() && c < 4; ++c)
-                drawBandCurve (thirdOctMags[c], fftColours[c]);
+                drawBandCurve (thirdOctMags[c], fftColours[c], 1.2f);
         else
             for (size_t c = 0; c < mags.size() && c < 4; ++c)
-                drawCurve (mags[c], n, fftColours[c]);
+                drawCurve (mags[c], n, fftColours[c], 1.2f);
 
         g.restoreState();
     }
@@ -1657,7 +1671,7 @@ void FFTAnalysisView::recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a,
         return;
     const double len = b - a;
 
-    for (int i = 0; i < 10; ++i)
+    for (int i = 0; i < 8; ++i)
     {
         auto& s = snapshots[i];
         if (s.source != d)   // slots are shared across files: only adjust this one's
@@ -1700,7 +1714,7 @@ void FFTAnalysisView::restoreSnapshotSlots (FileDoc* d, const Patch& p, bool isR
     if (d == nullptr)
         return;
 
-    for (int i = 0; i < 10; ++i)
+    for (int i = 0; i < 8; ++i)
     {
         const auto& ch = p.snapshotSlots[(size_t) i];
         if (!ch.changed)
@@ -1725,7 +1739,7 @@ void FFTAnalysisView::restoreSnapshotSlots (FileDoc* d, const Patch& p, bool isR
 
 void FFTAnalysisView::clearSnapshotsFor (const FileDoc* d)
 {
-    for (int i = 0; i < 10; ++i)
+    for (int i = 0; i < 8; ++i)
         if (snapshots[i].source == d)
             clearSnapshotSlot (i);
 }

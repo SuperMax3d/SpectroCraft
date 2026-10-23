@@ -1859,6 +1859,33 @@ static void testSnapshotButtonPaint()
           "button prominence increases: empty < stored < ON");
 }
 
+/** The eight snapshot buttons wear the classic hold-button palette in order:
+    red, orange, yellow, light green, dark green, teal, blue, magenta. */
+static void testSnapshotPaletteLayout()
+{
+    Application app;
+    FFTAnalysisView view (app);
+    view.setSize (320, 120);
+
+    const int expected[8][3] = {
+        { 255,   0,   0 }, { 255, 127,   0 }, { 255, 255,   0 }, { 109, 242,   0 },
+        {  65, 189,  58 }, {   2, 238, 255 }, {  45, 152, 252 }, { 255,   5, 247 }
+    };
+
+    const auto img = view.createComponentSnapshot (view.getLocalBounds());
+
+    for (int i = 0; i < 8; ++i)
+    {
+        // Empty-slot fill is the palette colour darkened by 0.72 (factor 1/1.72);
+        // local (4,4) inside each button sits clear of the centred digit.
+        const auto px = img.getPixelAt (98 + i * 24 + 4, 26 + 2 + 4);
+        CHECK (std::abs ((int) px.getRed()   - expected[i][0] / 1.72f) <= 3
+               && std::abs ((int) px.getGreen() - expected[i][1] / 1.72f) <= 3
+               && std::abs ((int) px.getBlue()  - expected[i][2] / 1.72f) <= 3,
+               "button " + juce::String (i + 1) + " wears its palette colour");
+    }
+}
+
 static void testThirdOctaveClickUpdates()
 {
     // First half: 440 Hz tone, second half: 880 Hz tone (mono, 8 kHz).
@@ -2270,18 +2297,18 @@ static void testSnapshotOverlayPaint()
     app.setSelection ({ 2.0, 4.0 });
     view.recomputeIfNeeded();
 
-    auto countDimCyan = [] (const juce::Image& img) -> int
+    auto countRed = [] (const juce::Image& img) -> int
     {
-        // Slot 1's curve colour is cyan (48,192,255); the overlay is drawn with
-        // alpha 90 over the black plot background. Count pixels whose blue
-        // channel clearly dominates red - the live magenta curve and the grey
-        // grid lines never satisfy this.
+        // Slot 1's curve colour is red (255,0,0), drawn at full opacity over
+        // the black plot background. Count pixels whose red channel clearly
+        // dominates while blue stays low - the live pink curve (blue ~144)
+        // and the green grid lines never satisfy this.
         int count = 0;
         for (int y = 54; y < 262; ++y)
             for (int x = 2; x < 282; ++x)
             {
                 const auto px = img.getPixelAt (x, y);
-                if (px.getBlue() > 60 && px.getBlue() > px.getRed() + 25) ++count;
+                if (px.getRed() > 60 && px.getBlue() < 30) ++count;
             }
         return count;
     };
@@ -2292,7 +2319,7 @@ static void testSnapshotOverlayPaint()
         juce::Image img (juce::Image::ARGB, 320, 300, true);
         juce::Graphics g (img);
         view.paint (g);
-        CHECK (countDimCyan (img) > 20,
+        CHECK (countRed (img) > 20,
               "stored snapshot overlay is painted in linear axis mode");
     }
 
@@ -2302,7 +2329,7 @@ static void testSnapshotOverlayPaint()
         juce::Image img (juce::Image::ARGB, 320, 300, true);
         juce::Graphics g (img);
         view.paint (g);
-        CHECK (countDimCyan (img) > 20,
+        CHECK (countRed (img) > 20,
               "stored snapshot overlay is painted in log axis mode");
     }
 }
@@ -8196,6 +8223,7 @@ static int scRunUnitTestsImpl()
     progress ("fft click+average");   testFFTClickAndAverage();
     progress ("1/3 octave step draw"); testThirdOctaveStepDrawing();
     progress ("snapshot button paint"); testSnapshotButtonPaint();
+    progress ("snapshot palette layout"); testSnapshotPaletteLayout();
     progress ("1/3 octave click update"); testThirdOctaveClickUpdates();
     progress ("change gain");         testChangeGain();
     progress ("playback chain");      testPlaybackChain();
