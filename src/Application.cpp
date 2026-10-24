@@ -5,6 +5,7 @@
 #include "Application.h"
 #include "SpectralMaskProcessor.h"
 #include "PythonScripts.h"
+#include "Resampler.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -1119,6 +1120,196 @@ bool Application::pasteToNewChannels(std::string* errOut)
     return true;
 }
 
+// ---- Merging several files into one document (Shift + drag & drop) ----
+
+namespace
+{
+    void mergeBandProgress (std::function<void(float)> onProgress, double lo, double hi, float p)
+    {
+        if (onProgress)
+            onProgress ((float) (lo + (hi - lo) * std::min (1.0f, std::max (0.0f, p))));
+    }
+
+    // Read every file at its native rate (+ markers). Band: [lo, hi).
+    bool readAllMergeSources (const std::vector<juce::File>& files, double lo, double hi,
+                              std::vector<sc::MergeSource>& srcs,
+                              std::function<void(float)> onProgress,
+                              const std::atomic<bool>* cancel)
+    {
+        const int n = (int) files.size ();
+        for (int i = 0; i < n; ++i)
+        {
+            if (cancel != nullptr && cancel->load ()) return false;
+            sc::MergeSource s;
+            const double fLo = lo + (hi - lo) * (double) i / n;
+            const double fHi = lo + (hi - lo) * (double) (i + 1) / n;
+            auto subProgress = [&onProgress, fLo, fHi] (float p)
+                { mergeBandProgress (onProgress, fLo, fHi, p); };
+            if (!sc::readMergeSource (files[i], 0.0, s, subProgress, cancel))
+                return false;   // caller reports the error with the file name
+            srcs.push_back (std::move (s));
+        }
+        return true;
+    }
+
+    bool resampleAllMergeSources (std::vector<sc::MergeSource>& srcs, double targetRate,
+                                  double lo, double hi,
+                                  std::function<void(float)> onProgress,
+                                  const std::atomic<bool>* cancel)
+    {
+        const int n = (int) srcs.size ();
+        for (int i = 0; i < n; ++i)
+        {
+            if (!sc::resampleMergeSource (srcs[i], targetRate, cancel)) return false;
+            mergeBandProgress (onProgress,
+                               lo + (hi - lo) * (double) i / n,
+                               lo + (hi - lo) * (double) (i + 1) / n, 1.0f);
+        }
+        return true;
+    }
+
+    // Stop playback and wait for any in-flight audio block to finish reading
+    // the engine's buffer before a long-running worker touches it.
+    void quiesceEngine (AudioEngine& eng) { eng.quiesceForEdit (); }
+} // namespace
+
+bool Application::mergeFilesIntoActiveDoc (const std::vector<juce::File>& files, sc::MergeMode mode,
+                                           std::function<void(float)> onProgress,
+                                           const std::atomic<bool>* cancel,
+                                           std::string* errOut)
+{
+    auto fail = [errOut] (const juce::String& m) -> bool
+    {
+        if (errOut != nullptr) *errOut = m.toStdString ();
+        return false;
+    };
+
+    FileDoc* d = doc ();
+    if (!d || !d->engine.isFileLoaded ()) return fail ("No file is open.");
+    if (files.empty ()) return fail ("Nothing to merge.");
+
+    auto& eng = d->engine;
+
+    // 1. Read every dropped file at its native rate (+ markers). Band: 0..0.75.
+    std::vector<sc::MergeSource> srcs;
+    if (!readAllMergeSources (files, 0.0, 0.75, srcs, onProgress, cancel))
+        return fail ("Could not read one of the dropped files.");
+
+    // 2. Target rate = highest among the current doc and all sources.
+    double targetRate = eng.sampleRate ();
+    for (const auto& s : srcs) targetRate = std::max (targetRate, s.rate);
+    const bool rateChanges = std::abs (eng.sampleRate () - targetRate)
+                             > 1e-9 * std::max (eng.sampleRate (), targetRate);
+
+    // 3. Resample the sources to the target rate. Band: 0.75..0.95.
+    if (!resampleAllMergeSources (srcs, targetRate, 0.75, 0.95, onProgress, cancel))
+        return fail ("Resampling one of the dropped files failed.");
+
+    // 4. The merge worker may run for a long time - stop playback and wait for
+    //    in-flight blocks before touching the engine's buffer.
+    quiesceEngine (eng);
+    if (!eng.ensureEditable (errOut, nullptr, cancel)) return false;
+
+    const int oldN = eng.numChannels ();
+    const int64_t oldLen = eng.numSamples ();
+
+    // 5. Read the existing content and resample it when needed.
+    std::vector<std::vector<float>> prefixData (oldN);
+    for (int ch = 0; ch < oldN; ++ch)
+    {
+        prefixData[ch].resize ((size_t) oldLen);
+        if (!eng.readSamples (ch, 0, oldLen, prefixData[ch].data ()))
+            return fail ("Could not read the current file's audio.");
+    }
+
+    int64_t prefixLen = oldLen;
+    if (rateChanges)
+    {
+        juce::AudioBuffer<float> in (oldN, (int) oldLen);
+        for (int ch = 0; ch < oldN; ++ch)
+            std::copy (prefixData[ch].begin (), prefixData[ch].end (), in.getWritePointer (ch));
+        juce::AudioBuffer<float> rs;
+        if (!sc::Resampler::resample (in, eng.sampleRate (), targetRate, rs, nullptr, cancel))
+            return fail ("Resampling the current file failed.");
+        prefixData.clear ();
+        for (int ch = 0; ch < rs.getNumChannels (); ++ch)
+            prefixData.push_back (std::vector<float> (rs.getReadPointer (ch),
+                                                      rs.getReadPointer (ch) + std::max<int64_t> (0, rs.getNumSamples ())));
+        prefixLen = rs.getNumSamples ();
+    }
+
+    // 6. Treat the existing content as source 0 and build the merged result.
+    sc::MergeSource existing;
+    existing.name = d->engine.getFile ().getFileName ().isEmpty () ? d->name
+                                                                   : d->engine.getFile ().getFileName ();
+    existing.rate = targetRate;
+    existing.channels = (int) prefixData.size ();
+    existing.lengthSamples = prefixLen;
+    existing.data = std::move (prefixData);
+    existing.markers = d->markers.markers ();
+
+    std::vector<sc::MergeSource> all;
+    all.push_back (std::move (existing));
+    for (auto& s : srcs) all.push_back (std::move (s));
+
+    const sc::MergeLayout lay = sc::computeMergeLayout (mode, all);
+    std::vector<Marker> mergedMarkers =
+        sc::buildMergedMarkers (mode, nullptr, lay, all, /*firstDropped=*/1);
+
+    // 7. Apply the merge.
+    if (mode == sc::MergeMode::Sequence && !rateChanges)
+    {
+        // Undoable: pure append at the old end - existing samples are untouched,
+        // so the patch stores no old data and undo only truncates.
+        juce::AudioBuffer<float> appended (lay.outChannels, (int) (lay.outLengthSamples - prefixLen));
+        appended.clear ();   // setSize does not zero a fresh buffer in this JUCE build
+        for (size_t i = 1; i < all.size (); ++i)
+            for (int ch = 0; ch < all[i].channels && ch < lay.outChannels; ++ch)
+                appended.copyFrom (ch, (int) (lay.segs[i].startSample - prefixLen),
+                                   all[i].data[ch].data (),
+                                   (int) std::min<int64_t> (all[i].lengthSamples,
+                                                            lay.outLengthSamples - prefixLen));
+
+        std::vector<Marker> oldMarkers = d->markers.markers ();
+        auto oldSavedSel = d->savedSelections;
+
+        if (!eng.appendSamples (appended, "Merged " + juce::String (files.size ())
+                                + " file(s) in sequence"))
+            return fail ("Could not append the merged audio.");
+
+        // Side state: markers gained entries; saved selections are unchanged but
+        // must be recorded so restorePatchSideState does not wipe them.
+        d->markers.restore (mergedMarkers);
+        Patch& p = d->undo.lastRecorded ();
+        p.hasSideState = true;
+        p.oldMarkers = std::move (oldMarkers);
+        p.newMarkers = d->markers.markers ();
+        p.oldSavedSel = std::move (oldSavedSel);
+        p.newSavedSel = d->savedSelections;
+    }
+    else
+    {
+        // Whole-file replacement: parallel layout and/or a rate change. NOT
+        // undoable, like Resample.
+        juce::AudioBuffer<float> merged;
+        sc::buildMergedAudio (mode, lay, all, merged);
+        if (!eng.replaceWholeFile (merged, targetRate))
+            return fail ("Could not replace the file's audio.");
+        d->markers.restore (mergedMarkers);
+    }
+
+    // 8. Make every channel visible and sync the session state with the doc.
+    visibleChannels.clear ();
+    for (int ch = 0; ch < eng.numChannels (); ++ch)
+        visibleChannels.push_back (ch);
+    playhead = std::min (playhead, eng.duration ());
+    const double dur = eng.duration ();
+    selection = { std::clamp (selection.getStart (), 0.0, dur),
+                  std::clamp (selection.getEnd (), 0.0, dur) };
+    syncActiveDoc ();
+    return true;
+}
+
 namespace
 {
     // Unique display name for a document without a file path:
@@ -1136,6 +1327,43 @@ namespace
             if (!used) return nm;
         }
     }
+}
+
+// Message-thread only: creates a new document from an already-computed merge
+// result and activates it. The heavy reading/resampling work is done by the
+// caller on a worker thread (sc::mergeFilesToResult).
+bool Application::createDocFromMerged (sc::MergeResult& r, std::string* errOut)
+{
+    if (r.channels <= 0 || !std::isfinite (r.rate) || r.rate <= 0.0
+        || r.data.empty () || r.data.size () != (size_t) r.channels)
+    {
+        if (errOut != nullptr) *errOut = "Invalid merged data.";
+        return false;
+    }
+
+    auto d = std::make_unique<FileDoc>();
+    if (!d->engine.initNew (r.channels, r.rate, &r.data))
+    {
+        if (errOut != nullptr) *errOut = "Could not create the merged document.";
+        return false;
+    }
+
+    d->name = uniqueUntitledName (docs);
+    d->file = juce::File();   // no path until Save As
+    d->playhead = 0.0;
+    d->selection = { 0, 0 };
+    d->visibleChannels.clear ();
+    for (int i = 0; i < r.channels; ++i)
+        d->visibleChannels.push_back (i);
+    d->markers.restore (r.markers);
+
+    // Inherit the current session's display state so activating the new doc
+    // doesn't reset the Frequency Analysis panel / axis calibrations.
+    pushActiveDocMetaTo (*d);
+
+    docs.push_back (std::move (d));
+    activate ((int) docs.size () - 1);   // fires onActiveDocChanged -> UI sync
+    return true;
 }
 
 bool Application::newFile (int numChans, double sampleRate)

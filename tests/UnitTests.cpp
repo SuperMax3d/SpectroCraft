@@ -12067,6 +12067,318 @@ static void testChannelRowGeometry()
     }
 }
 
+// ---------------- Multi-file merge (Shift + drag & drop) ----------------
+
+namespace
+{
+    // Mean of a channel slice - immune to SoXR edge transients at segment ends.
+    double meanSlice (const std::vector<float>& v, int64_t from, int64_t to)
+    {
+        if (to <= from) return 0.0;
+        double sum = 0.0;
+        for (int64_t i = from; i < to; ++i) sum += (double) v[(size_t) i];
+        return sum / (double) (to - from);
+    }
+
+    bool sliceIsSilent (const std::vector<float>& v, int64_t from, int64_t to)
+    {
+        for (int64_t i = from; i < to; ++i)
+            if (std::abs ((double) v[(size_t) i]) > 1e-9) return false;
+        return true;
+    }
+
+    bool sliceIsSilent (const float* v, int64_t from, int64_t to)
+    {
+        for (int64_t i = from; i < to; ++i)
+            if (std::abs ((double) v[(size_t) i]) > 1e-9) return false;
+        return true;
+    }
+
+    // Mean of a channel slice read through an engine sample reader.
+    double meanOf (const std::function<double (int, int64_t)>& rs,
+                   int ch, int64_t from, int64_t to)
+    {
+        if (to <= from) return 0.0;
+        double sum = 0.0;
+        for (int64_t i = from; i < to; ++i) sum += rs (ch, i);
+        return sum / (double) (to - from);
+    }
+
+    bool sliceIsSilentVec (const AudioEngine& eng, int ch, int64_t from, int64_t to)
+    {
+        for (int64_t i = from; i < to; ++i)
+        {
+            float v = 0.0f;
+            eng.readSamples (ch, i, 1, &v);
+            if (std::abs ((double) v) > 1e-9) return false;
+        }
+        return true;
+    }
+} // namespace
+
+static void testMergeFiles()
+{
+    // --- A: pure layout / audio / marker computation ---------------------
+    {
+        sc::MergeSource a, b;
+        a.name = "a"; a.rate = 8000.0; a.channels = 1; a.lengthSamples = 100;
+        a.data.assign (1, std::vector<float> (100, 0.25f));
+        b.name = "b"; b.rate = 8000.0; b.channels = 2; b.lengthSamples = 50;
+        b.data.assign (2, std::vector<float> (50, -0.5f));
+
+        const sc::MergeLayout seq = sc::computeMergeLayout (sc::MergeMode::Sequence,
+                                                            { a, b });
+        CHECK (seq.outChannels == 2 && seq.outLengthSamples == 150,
+               "sequence layout: max channels, summed length");
+        CHECK (seq.segs[0].startSample == 0 && seq.segs[1].startSample == 100
+              && seq.segs[0].channelOffset == 0 && seq.segs[1].channelOffset == 0,
+               "sequence segments placed back to back");
+
+        const sc::MergeLayout par = sc::computeMergeLayout (sc::MergeMode::Parallel,
+                                                            { a, b });
+        CHECK (par.outChannels == 3 && par.outLengthSamples == 100,
+               "parallel layout: summed channels, max length");
+        CHECK (par.segs[0].channelOffset == 0 && par.segs[1].channelOffset == 1
+              && par.segs[0].startSample == 0 && par.segs[1].startSample == 0,
+               "parallel segments stacked on channels at t=0");
+
+        juce::AudioBuffer<float> out;
+        sc::buildMergedAudio (sc::MergeMode::Sequence, seq, { a, b }, out);
+        CHECK (out.getNumChannels () == 2 && out.getNumSamples () == 150,
+               "sequence audio shape");
+        CHECK (std::abs ((double) out.getSample (0, 10) - 0.25) < 1e-9
+              && std::abs ((double) out.getSample (0, 120) + 0.5) < 1e-9,
+               "sequence audio content placed per segment");
+        CHECK (std::abs ((double) out.getSample (1, 120) + 0.5) < 1e-9
+              && sliceIsSilent (out.getReadPointer (1), 0, 100),
+               "shorter source leaves silence on its missing channel");
+
+        Marker m1; m1.name = "orig"; m1.start = 0.0125;   // sample 100 @8k
+        const std::vector<Marker> existing { m1 };
+        auto mk = sc::buildMergedMarkers (sc::MergeMode::Sequence, &existing,
+                                          seq, { a, b }, /*firstDropped=*/1);
+        CHECK (mk.size () == 2, "one original + one region marker for the dropped file");
+        CHECK (mk[0].name == "orig" && std::abs (mk[0].start - 0.0125) < 1e-9,
+               "existing markers kept unshifted (source 0 starts at 0)");
+        CHECK (mk[1].name == "b" && std::abs (mk[1].start - 0.0125) < 1e-9
+              && std::abs (mk[1].end - 0.01875) < 1e-9,
+               "dropped file gets a region marker at its segment");
+        CHECK (mk[0].id == 1 && mk[1].id == 2,
+               "merged markers get fresh sequential ids");
+
+        auto parMk = sc::buildMergedMarkers (sc::MergeMode::Parallel, &existing,
+                                             par, { a, b }, 0);
+        CHECK (parMk.size () == 1 && parMk[0].name == "orig",
+               "parallel mode adds no region markers");
+    }
+
+    // --- B: mergeFilesToResult from real files on disk -------------------
+    const juce::File toneA = makeTempFile ("merge_a.wav");   // mono 8k, DC +0.25
+    const juce::File toneB = makeTempFile ("merge_b.wav");   // stereo 16k, L -0.5 / R +0.75
+    CHECK (writeWav (toneA, 1, 8000.0, 400,
+                     [] (int, int64_t, double) { return 0.25f; }), "wrote tone A");
+    CHECK (writeWav (toneB, 2, 16000.0, 800,
+                     [] (int ch, int64_t, double) { return ch == 0 ? -0.5f : 0.75f; }),
+           "wrote tone B");
+
+    sc::MergeResult seqRes;
+    CHECK (sc::mergeFilesToResult ({ toneA, toneB }, sc::MergeMode::Sequence,
+                                   seqRes), "sequence merge from disk ok");
+    CHECK (std::abs (seqRes.rate - 16000.0) < 1e-9 && seqRes.channels == 2
+          && (int64_t) seqRes.data.size () == 2
+          && (int64_t) seqRes.data[0].size () == 1600,
+           "sequence result: highest rate, max channels, summed length");
+    CHECK (std::abs (meanSlice (seqRes.data[0], 100, 700) - 0.25) < 0.02
+          && std::abs (meanSlice (seqRes.data[0], 900, 1500) + 0.5) < 0.02,
+           "sequence result: A then B on channel 1");
+    CHECK (sliceIsSilent (seqRes.data[1], 100, 700)
+          && std::abs (meanSlice (seqRes.data[1], 900, 1500) - 0.75) < 0.02,
+           "sequence result: A's missing channel is silence");
+    CHECK (seqRes.markers.size () == 2
+          && seqRes.markers[0].name == toneA.getFileName ()
+          && std::abs (seqRes.markers[0].start) < 1e-9
+          && std::abs (seqRes.markers[0].end - 0.05) < 1e-9
+          && seqRes.markers[1].name == toneB.getFileName ()
+          && std::abs (seqRes.markers[1].start - 0.05) < 1e-9,
+           "sequence result: region marker per file at its segment");
+
+    sc::MergeResult parRes;
+    CHECK (sc::mergeFilesToResult ({ toneA, toneB }, sc::MergeMode::Parallel,
+                                   parRes), "parallel merge from disk ok");
+    CHECK (std::abs (parRes.rate - 16000.0) < 1e-9 && parRes.channels == 3
+          && (int64_t) parRes.data[0].size () == 800,
+           "parallel result: summed channels, max length");
+    CHECK (std::abs (meanSlice (parRes.data[0], 100, 700) - 0.25) < 0.02
+          && std::abs (meanSlice (parRes.data[1], 100, 700) + 0.5) < 0.02
+          && std::abs (meanSlice (parRes.data[2], 100, 700) - 0.75) < 0.02,
+           "parallel result: each source on its own channels");
+    CHECK (parRes.markers.empty (), "parallel result has no region markers");
+
+    // --- C: merge into the active doc, same rate -> undoable append ------
+    {
+        Application app;
+        const int N = 400;   // 0.05 s @ 8 kHz
+        std::vector<std::vector<float>> src (1);
+        for (int i = 0; i < N; ++i)
+            src[0].push_back ((float) std::sin (i * 0.1));
+        FileDoc* d = attachNewDoc (app, 1, 8000.0, &src);
+        CHECK (d != nullptr, "current doc attached");
+        d->markers.addPointMarker (0.03, "orig");
+
+        const juce::File dropA = makeTempFile ("merge_drop_a.wav");   // mono 8k DC +0.5
+        CHECK (writeWav (dropA, 1, 8000.0, 200,
+                         [] (int, int64_t, double) { return 0.5f; }), "wrote drop A");
+
+        std::string err;
+        CHECK (app.mergeFilesIntoActiveDoc ({ dropA }, sc::MergeMode::Sequence,
+                                             nullptr, nullptr, &err),
+              "sequence merge into current file ok" + juce::String (err.c_str ()));
+        auto& eng = app.audioEngine ();
+        CHECK ((int) eng.numSamples () == N + 200 && eng.numChannels () == 1,
+               "appended: length grew, channel count unchanged");
+
+        bool samePrefix = true;
+        for (int ch = 0; ch < 1 && samePrefix; ++ch)
+            for (int i = 0; i < N; ++i)
+            {
+                float v = 0.0f;
+                eng.readSamples (ch, i, 1, &v);
+                if (v != src[(size_t) ch][(size_t) i]) { samePrefix = false; break; }
+            }
+        CHECK (samePrefix, "existing content byte-for-byte identical");
+
+        bool tailOk = true;
+        for (int i = N; i < N + 200 && tailOk; ++i)
+        {
+            float v = 0.0f;
+            eng.readSamples (0, i, 1, &v);
+            if (std::abs ((double) v - 0.5) > 1e-6) tailOk = false;
+        }
+        CHECK (tailOk, "appended content is the dropped file");
+
+        const auto mks = d->markers.markers ();
+        bool hasOrig = false, hasRegion = false;
+        for (const auto& m : mks)
+        {
+            if (m.name == "orig" && std::abs (m.start - 0.03) < 1e-9) hasOrig = true;
+            if (m.name == dropA.getFileName ()
+                && std::abs (m.start - 0.05) < 1e-9
+                && std::abs (m.end - 0.075) < 1e-9) hasRegion = true;
+        }
+        CHECK (hasOrig, "existing marker survived the merge");
+        CHECK (hasRegion, "dropped file got a region marker at its segment");
+
+        // Undoable: undo truncates back to the original content.
+        CHECK (app.undo ().canUndo (), "append recorded in undo history");
+        app.undoStep ();
+        CHECK ((int) eng.numSamples () == N && eng.numChannels () == 1,
+               "undo truncates back to the original length");
+        bool sameAfterUndo = true;
+        for (int i = 0; i < N; ++i)
+        {
+            float v = 0.0f;
+            eng.readSamples (0, i, 1, &v);
+            if (v != src[0][(size_t) i]) { sameAfterUndo = false; break; }
+        }
+        CHECK (sameAfterUndo, "undo restores the original content");
+        const auto mksAfterUndo = d->markers.markers ();
+        bool origOnly = mksAfterUndo.size () == 1 && mksAfterUndo[0].name == "orig";
+        CHECK (origOnly, "undo removes the added region marker");
+
+        app.redoStep ();
+        CHECK ((int) eng.numSamples () == N + 200, "redo re-appends");
+    }
+
+    // --- D: sequence with a rate change -> whole-file replacement --------
+    {
+        Application app;
+        const int N = 400;   // mono 8k DC +0.25
+        std::vector<std::vector<float>> src (1, std::vector<float> (N, 0.25f));
+        FileDoc* d = attachNewDoc (app, 1, 8000.0, &src);
+        CHECK (d != nullptr, "current doc attached (rate-change case)");
+
+        std::string err;
+        CHECK (app.mergeFilesIntoActiveDoc ({ toneB }, sc::MergeMode::Sequence,
+                                             nullptr, nullptr, &err),
+              "sequence merge with rate change ok" + juce::String (err.c_str ()));
+        auto& eng = app.audioEngine ();
+        CHECK (std::abs (eng.sampleRate () - 16000.0) < 1e-9
+              && eng.numChannels () == 2 && (int) eng.numSamples () == 1600,
+               "rate change: doc now stereo 16k, length doubled");
+        auto rs = [&eng] (int ch, int64_t pos)
+        {
+            float v = 0.0f;
+            eng.readSamples (ch, pos, 1, &v);
+            return (double) v;
+        };
+        CHECK (std::abs (meanOf (rs, 0, 100, 700) - 0.25) < 0.02
+              && std::abs (meanOf (rs, 0, 900, 1500) + 0.5) < 0.02,
+               "existing content resampled in place, dropped file after it");
+        CHECK (!app.undo ().canUndo (), "rate-change merge is not undoable");
+    }
+
+    // --- E: parallel into the active doc ----------------------------------
+    {
+        Application app;
+        const int N = 400;   // mono 8k DC +0.2
+        std::vector<std::vector<float>> src (1, std::vector<float> (N, 0.2f));
+        FileDoc* d = attachNewDoc (app, 1, 8000.0, &src);
+        CHECK (d != nullptr, "current doc attached (parallel case)");
+
+        const juce::File dropC = makeTempFile ("merge_drop_c.wav");   // stereo 8k
+        CHECK (writeWav (dropC, 2, 8000.0, 300,
+                         [] (int ch, int64_t, double) { return ch == 0 ? 0.1f : -0.1f; }),
+               "wrote drop C");
+
+        std::string err;
+        CHECK (app.mergeFilesIntoActiveDoc ({ dropC }, sc::MergeMode::Parallel,
+                                             nullptr, nullptr, &err),
+              "parallel merge into current file ok" + juce::String (err.c_str ()));
+        auto& eng = app.audioEngine ();
+        CHECK (eng.numChannels () == 3 && (int) eng.numSamples () == N,
+               "parallel: channels stacked, length is the max");
+        auto rs = [&eng] (int ch, int64_t pos)
+        {
+            float v = 0.0f;
+            eng.readSamples (ch, pos, 1, &v);
+            return (double) v;
+        };
+        CHECK (std::abs (meanOf (rs, 0, 50, 350) - 0.2) < 1e-6,
+               "existing channel untouched");
+        CHECK (std::abs (meanOf (rs, 1, 50, 250) - 0.1) < 1e-6
+              && sliceIsSilentVec (eng, 1, 300, N),
+               "dropped L on channel 2, silence after its end");
+        CHECK (std::abs (meanOf (rs, 2, 50, 250) + 0.1) < 1e-6
+              && sliceIsSilentVec (eng, 2, 300, N),
+               "dropped R on channel 3, silence after its end");
+        CHECK (!app.undo ().canUndo (), "parallel merge is not undoable");
+    }
+
+    // --- F: createDocFromMerged activates a fresh document ---------------
+    {
+        Application app;
+        std::string err;
+        CHECK (app.createDocFromMerged (seqRes, &err),
+              "create doc from merge result ok" + juce::String (err.c_str ()));
+        auto& eng = app.audioEngine ();
+        CHECK (eng.numChannels () == 2 && std::abs (eng.sampleRate () - 16000.0) < 1e-9
+              && (int) eng.numSamples () == 1600, "new doc holds the merged audio");
+        const auto mks = app.doc ()->markers.markers ();
+        CHECK (mks.size () == 2 && mks[0].name == toneA.getFileName (),
+               "new doc carries the merged markers");
+    }
+
+    // --- G: merge menu contents ------------------------------------------
+    {
+        const juce::PopupMenu withDoc = MainWindow::buildMergeMenu (true);
+        const juce::PopupMenu withoutDoc = MainWindow::buildMergeMenu (false);
+        // getNumItems() does not count separators in this JUCE build.
+        CHECK (withDoc.getNumItems () == 5, "menu with a doc: open + 4 merge options");
+        CHECK (withoutDoc.getNumItems () == 3,
+               "menu without a doc: open + the two new-file options");
+    }
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -12209,6 +12521,7 @@ static int scRunUnitTestsImpl()
     progress ("resample remix");          testResampleRemix();
     progress ("paste to new channels");   testPasteToNewChannels();
     progress ("channel row geometry");    testChannelRowGeometry();
+    progress ("merge files");           testMergeFiles();
     progress ("version string");      testVersionString();
 
 

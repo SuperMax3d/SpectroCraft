@@ -183,6 +183,18 @@ public:
         dialog. Empty remixWeights keeps the current channels. */
     void runResampleAsync (double newRate,
                            const std::vector<std::vector<double>>& remixWeights);
+
+    /** Shift + drag & drop: popup offering how to merge the dropped files.
+        Item ids: 1 = plain open, 2/3 = sequence into current/new file,
+        4/5 = parallel into current/new file. The "into current file" items
+        only exist when a document is loaded (public static so headless tests
+        can check the menu contents). */
+    static juce::PopupMenu buildMergeMenu (bool haveActiveDoc);
+    void showMergeMenu (const std::vector<juce::File>& files);
+    /** Background merge with a progress dialog. intoCurrent merges into the
+        active document; otherwise a new document is created from the result. */
+    void runMergeFilesAsync (const std::vector<juce::File>& files, sc::MergeMode mode,
+                             bool intoCurrent);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     /** Builds (but does not run modally) the Noise Suppression dialog. The caller
         owns and must delete it; used by showNoiseSuppressDialog() and tests. */

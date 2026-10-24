@@ -1171,6 +1171,92 @@ bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgr
     return true;
 }
 
+void AudioEngine::quiesceForEdit ()
+{
+    playing.store (false);
+    paused.store (false);
+    const int64_t deadline = juce::Time::getMillisecondCounter() + 100;
+    while (audioInBufferSection.load (std::memory_order_acquire) > 0
+           && juce::Time::getMillisecondCounter() < deadline)
+        std::this_thread::sleep_for (std::chrono::milliseconds (1));
+}
+
+bool AudioEngine::replaceWholeFile (const juce::AudioBuffer<float>& data, double newRate,
+                                    std::string* errOut)
+{
+    if (!hasFile || !buffer)
+        return failErr (errOut, "No audio loaded.");
+    if (!std::isfinite (newRate) || newRate <= 0.0
+        || data.getNumChannels () <= 0 || data.getNumSamples () < 0)
+        return failErr (errOut, "Invalid replacement data.");
+
+    // Stop playback and wait for any in-flight audio block to finish reading
+    // the buffer before we swap the pointer out from under it.
+    quiesceForEdit ();
+
+    const double posSecs = position();
+
+    reader.reset();   // streaming is no longer needed - we own the data now
+    auto oldBuffer = std::move (buffer);
+    buffer = std::make_unique<juce::AudioBuffer<float>> (data.getNumChannels (),
+                                                        data.getNumSamples ());
+    for (int ch = 0; ch < data.getNumChannels (); ++ch)
+        buffer->copyFrom (ch, 0, data.getReadPointer (ch), data.getNumSamples ());
+
+    rate = newRate;
+    nchans = buffer->getNumChannels ();
+    totalSamples = buffer->getNumSamples ();   // frames per channel
+    durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+
+    playheadFrac.store ((double) (std::min (posSecs, durationSecs) * rate));
+    clearMipmaps();   // caller rebuilds on its worker thread
+    return true;
+}
+
+bool AudioEngine::appendSamples (const juce::AudioBuffer<float>& append,
+                                 const juce::String& description)
+{
+    if (!ensureEditable ())
+        return false;
+    if (append.getNumSamples () <= 0 || append.getNumChannels () <= 0)
+        return false;
+
+    const int newN = std::max (nchans, append.getNumChannels ());
+    const int64_t pos = totalSamples;
+    const int64_t len = append.getNumSamples ();
+
+    // Target channels beyond the appended data's own count receive silence.
+    std::vector<std::vector<float>> newData (newN);
+    for (int ch = 0; ch < newN; ++ch)
+    {
+        newData[ch].resize ((size_t) len, 0.0f);
+        if (ch < append.getNumChannels ())
+            std::copy (append.getReadPointer (ch), append.getReadPointer (ch) + len,
+                       newData[ch].data ());
+    }
+
+    // Insert = replace the empty region [pos, pos). The existing content is
+    // untouched, so oldData stays empty and undo only truncates.
+    recordReplace (*this, { pos, pos }, newData, description, newN);
+
+    const int64_t newTotal = totalSamples + len;
+    auto nb = std::make_unique<juce::AudioBuffer<float>> (newN, (int) newTotal);
+    for (int ch = 0; ch < newN; ++ch)
+    {
+        if (ch < nchans)
+            nb->copyFrom (ch, 0, *buffer, ch, 0, (int) totalSamples);
+        nb->copyFrom (ch, (int) pos, newData[ch].data (), (int) len);
+    }
+    buffer = std::move (nb);
+    nchans = newN;
+    totalSamples = newTotal;
+    durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+    rebuildMipmaps ();
+    return true;
+}
+
 bool AudioEngine::applyPatch (const Patch& p, bool forward, bool rebuild)
 {
     if (!buffer)

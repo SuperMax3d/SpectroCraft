@@ -154,6 +154,29 @@ public:
                      std::string* errOut = nullptr,
                      const std::vector<std::vector<double>>* remixWeights = nullptr);
 
+    /** Stop playback and wait for any in-flight audio block to finish reading
+        the buffer, so a long-running worker can modify it safely. */
+    void quiesceForEdit ();
+
+    // Replace the entire audio content with `data` (one row per channel, all
+    // the same length) at sample rate `newRate`. Used by whole-file merges
+    // that restructure the file (channel layout or a rate change). NOT
+    // undoable, like resampleTo(): playback is stopped and in-flight blocks
+    // are awaited before the swap; any streaming reader is dropped; the
+    // mipmap pyramid is cleared (the caller rebuilds it) and unsaved is set.
+    bool replaceWholeFile (const juce::AudioBuffer<float>& data, double newRate,
+                           std::string* errOut = nullptr);
+
+    // Append `append` after the current content. Channels beyond the appended
+    // data's own count receive silence; when it has more channels than the
+    // file currently does the channel count grows to match (existing channels
+    // are untouched). Records an undoable insertion patch - because nothing
+    // existing is modified, no old sample data is stored and undo only
+    // truncates. The caller must have stopped playback first if this runs off
+    // the message thread for a long time (see mergeFilesIntoActiveDoc).
+    bool appendSamples (const juce::AudioBuffer<float>& append,
+                        const juce::String& description);
+
     // Apply an undo/redo patch to the in-memory buffer
     // rebuild = false is used by batched undo/redo jumps so the mipmap
     // pyramid is rebuilt only once for the whole run of patches.

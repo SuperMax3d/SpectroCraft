@@ -5,6 +5,7 @@
 #include "AudioEngine.h"
 #include "SpectralEngine.h"
 #include "MarkerManager.h"
+#include "MergeFiles.h"
 #include "UndoManager.h"
 #include "FileDoc.h"
 #include <vector>
@@ -204,6 +205,34 @@ public:
         selection active only the selected (t,f) content is copied. The new
         document becomes active. */
     bool copyToNewFile (std::string* errOut = nullptr);
+
+    /** Merges several files into one document (Shift + drag & drop). Every
+        involved file is resampled to the highest sample rate among them.
+        Both do heavy I/O and CPU work - call from a worker thread with a
+        progress dialog, like loadFileAsync / runResampleAsync. On failure
+        errOut receives the reason (empty when cancelled).
+
+        mergeFilesIntoActiveDoc: merges into the currently active document.
+          Sequence mode appends each file after the existing content; parallel
+          mode adds every file's channels after the existing ones, zero-padded
+          to the longest duration. Markers from all sources are preserved
+          (shifted in sequence mode) and a region marker named after the
+          original file is added around each dropped file in sequence mode.
+          A sequence merge that does not change the sample rate is undoable;
+          parallel merges and any merge that changes the rate replace the whole
+          file and are NOT undoable (like Resample).
+
+        "Open in ... in a new file" merges are done by the caller running
+        sc::mergeFilesToResult() on a worker thread and then calling
+        createDocFromMerged() on the message thread.
+
+        createDocFromMerged: creates a brand-new document from an already-
+        computed merge result (message thread only) and activates it. */
+    bool mergeFilesIntoActiveDoc (const std::vector<juce::File>& files, sc::MergeMode mode,
+                                  std::function<void(float)> onProgress = nullptr,
+                                  const std::atomic<bool>* cancel = nullptr,
+                                  std::string* errOut = nullptr);
+    bool createDocFromMerged (sc::MergeResult& r, std::string* errOut = nullptr);
 
     bool openFile (const juce::File& file);
 

@@ -363,6 +363,24 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   clicked. "Clear Recent Files" empties the list.
 - **Drag & drop**: drop one or more WAV/AIFF/FLAC/MP3/Ogg files onto the
   window; every valid dropped file becomes its own document.
+- **Merge (Shift + drag & drop)**: dropping files while holding Shift shows a
+  menu at the cursor with four merge options (plus plain *Open*):
+  - *Open in sequence in current file / …in a new file*: concatenate the files
+    one after another (the current document first when merging into it). The
+    result uses the highest sample rate involved — every source is resampled
+    to it with SoXR — and the maximum channel count, so shorter/narrower
+    sources are padded with silence. Markers from the dropped files travel
+    along, shifted to their new positions, and each dropped file gains a region
+    marker spanning its segment.
+  - *Open in parallel in current file / …in a new file*: stack the files on top
+    of each other — every source keeps all of its channels as fresh output
+    channels (the current document's channels first), length = the longest
+    input, shorter inputs padded with silence at their end.
+  - Merging into the current file at an unchanged rate in sequence mode is a
+    pure append and **undoable** like any other edit; parallel merges and rate
+    changes replace the whole file and are not undoable (like Resample).
+  - The work runs on a worker thread behind a progress dialog with cancel;
+    multi-GB files stream through in chunks and never load fully into RAM.
 - **Edits** with 50-level undo/redo (patch-based: old/new sample data + length
   delta — memory efficient): silence, fade in/out, normalize, reverse, gain,
   cut/copy/paste, delete, insert. The destructive effects (silence/fade/
@@ -1039,8 +1057,9 @@ Clean separation into independent components (see `include/` + `src/`):
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
 | `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`), saved spectral selections, axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
 | `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). |
-| `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked) and `pasteMix`. |
-| `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop, playhead animation timer and view-range state sync between views/panels. |
+| `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
+| `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix` and the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`). |
+| `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
 
 Threading model: the UI thread only draws and dispatches; FFT tiles are computed
 on a pool sized to hardware threads; file reads happen on the reader under a
@@ -1051,7 +1070,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2100 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2150 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1147,6 +1166,16 @@ by a single mutex (short critical sections, no lock held during FFT work).
     gap between rows, the last row absorbing any rounding remainder so rows plus
     gaps fill the area; the spectral view's row layout matches the waveform
     view's.
+  - **Multi-file merge (Shift + drag & drop)**: pure layout computation for
+    sequence/parallel placement (summed lengths, stacked channels, segment
+    offsets), merged audio content with silence padding on missing channels,
+    marker shifting plus a region marker per dropped file; `mergeFilesToResult`
+    from real WAV files on disk (mixed rates resampled to the highest rate,
+    mixed channel counts padded); merging into an active document — same-rate
+    sequence append is undoable with exact content/length restoration, rate
+    changes and parallel merges replace the whole file and are not undoable;
+    `createDocFromMerged` activates a fresh document holding the merged audio
+    and markers; and the merge menu's item counts with/without an active doc.
   - **Multi-file support**: two files open at once — per-file playhead/
     selection restoration on switch, Ctrl+Tab cycling (with wrap-around),
     independent marker lists and undo histories per file, closing a non-active

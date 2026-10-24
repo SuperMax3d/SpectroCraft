@@ -1016,13 +1016,40 @@ void MainWindow::fileDragExit (const juce::StringArray&) { repaint(); }
 
 void MainWindow::filesDropped (const juce::StringArray& files, int, int)
 {
+    // Collect the valid files first so the merge menu can offer its options.
+    std::vector<juce::File> valid;
     for (const auto& f : files)
+        if (juce::File (f).existsAsFile ())
+            valid.push_back (juce::File (f));
+    if (valid.empty ()) return;
+
+    // Shift + drop: choose how to merge the dropped files. JUCE does not pass
+    // modifier keys to FileDragAndDropTarget, so read them at drop time.
+    if (juce::ModifierKeys::getCurrentModifiersRealtime ().isShiftDown ())
     {
-        const juce::File file (f);
-        if (file.existsAsFile())
-            openFile (file);   // multi-file editor: every valid drop becomes a document
+        showMergeMenu (valid);
+        return;
     }
+
+    for (const auto& f : valid)
+        openFile (f);   // multi-file editor: every valid drop becomes a document
 }
+
+juce::PopupMenu MainWindow::buildMergeMenu (bool haveActiveDoc)
+{
+    juce::PopupMenu m;
+    m.addItem (1, "Open");
+    m.addSeparator ();
+    if (haveActiveDoc)
+        m.addItem (2, "Open in sequence in current file");
+    m.addItem (3, "Open in sequence in a new file");
+    if (haveActiveDoc)
+        m.addItem (4, "Open in parallel in current file");
+    m.addItem (5, "Open in parallel in a new file");
+    return m;
+}
+
+
 
 // ------------------------------------------------------------- state sync
 
@@ -2812,6 +2839,124 @@ void MainWindow::showNewFileDialog()
 // Resample (+ optional channel remix) on a background thread with a progress
 // dialog so multi-GB files never block the UI. Progress: resampling 0..85%,
 // mipmap rebuild 85..100%. Empty remixWeights keeps the current channels.
+
+void MainWindow::runMergeFilesAsync (const std::vector<juce::File>& files, sc::MergeMode mode,
+                                     bool intoCurrent)
+{
+    const juce::String what = juce::String (mode == sc::MergeMode::Sequence
+                                             ? "Merging in sequence"
+                                             : "Merging in parallel")
+                              + juce::String (intoCurrent ? " into current file" : " into a new file");
+
+    auto* dlg = new WorkProgressDialog ("Merging files",
+                                        what + ": reading " + juce::String (files.size ())
+                                            + " file(s) ...", true, this);
+    dlg->setProgress (0.0);
+    dlg->beginModal ();
+
+    std::thread ([this, files, mode, intoCurrent, dlg] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v) {
+            if (v - lastSent < 0.02 && v != 1.0) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+        auto progFn = [sendProgress] (float f) { sendProgress ((double) f); };
+
+        if (intoCurrent)
+        {
+            std::string err;
+            const bool ok = app.mergeFilesIntoActiveDoc (files, mode, progFn,
+                                                         &dlg->cancelled, &err);
+            juce::MessageManager::callAsync ([this, dlg, ok, err] {
+                const bool wasCancelled = dlg->cancelled.load ();
+                delete dlg;
+                if (ok)
+                {
+                    app.clearClipboard ();   // samples may belong to the old rate
+                    refreshAfterEdit();      // clears spectral cache + clamps window/selection
+                    if (fftPanel) fftPanel->onSampleRateChanged ();
+                    updateTitle ();
+                }
+                else if (!wasCancelled)
+                {
+                    const juce::String detail = err.empty () ? juce::String ("")
+                                                             : juce::String ("\n") + juce::String (err);
+                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                                       "Merge failed",
+                                                       "The files could not be merged." + detail,
+                                                       "", this);
+                }
+            });
+        }
+        else
+        {
+            auto* r = new sc::MergeResult();
+            std::string err;
+            const bool got = sc::mergeFilesToResult (files, mode, *r, progFn,
+                                                     &dlg->cancelled, &err);
+            juce::MessageManager::callAsync ([this, dlg, got, err, r] {
+                if (!got)
+                {
+                    delete r;
+                    const bool wasCancelled = dlg->cancelled.load ();
+                    delete dlg;
+                    if (!wasCancelled)
+                    {
+                        const juce::String detail = err.empty () ? juce::String ("")
+                                                                 : juce::String ("\n") + juce::String (err);
+                        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                                           "Merge failed",
+                                                           "The files could not be merged." + detail,
+                                                           "", this);
+                    }
+                    return;
+                }
+
+                // Document creation + activation must happen on the message thread.
+                std::string cerr;
+                const bool ok = app.createDocFromMerged (*r, &cerr);
+                delete r;
+                delete dlg;
+                if (ok)
+                {
+                    app.clearClipboard ();
+                    refreshAfterEdit();
+                    if (fftPanel) fftPanel->onSampleRateChanged ();
+                    updateTitle ();
+                }
+                else
+                {
+                    const juce::String detail = cerr.empty () ? juce::String ("")
+                                                              : juce::String ("\n") + juce::String (cerr);
+                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                                       "Merge failed",
+                                                       "The merged document could not be created." + detail,
+                                                       "", this);
+                }
+            });
+        }
+    }).detach ();
+}
+
+void MainWindow::showMergeMenu (const std::vector<juce::File>& files)
+{
+    const bool haveDoc = app.doc () != nullptr && app.audioEngine ().isFileLoaded ();
+    const int id = buildMergeMenu (haveDoc).showMenu (juce::PopupMenu::Options ().withMousePosition ());
+
+    switch (id)
+    {
+        case 1:   // plain open - same as a drop without Shift
+            for (const auto& f : files)
+                openFile (f);
+            break;
+        case 2: runMergeFilesAsync (files, sc::MergeMode::Sequence, true);  break;
+        case 3: runMergeFilesAsync (files, sc::MergeMode::Sequence, false); break;
+        case 4: runMergeFilesAsync (files, sc::MergeMode::Parallel, true);  break;
+        case 5: runMergeFilesAsync (files, sc::MergeMode::Parallel, false); break;
+        default: break;   // dismissed
+    }
+}
 void MainWindow::runResampleAsync (double newRate,
                                    const std::vector<std::vector<double>>& remixWeights)
 {
