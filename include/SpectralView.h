@@ -125,6 +125,11 @@ public:
     // aligns with the waveform view).
     juce::Rectangle<int> plotRect() const;
 
+    /** Channel rows in absolute view coordinates: full component width (so
+        axis drags can hit-test them too), positioned inside the plot area.
+        Public so headless unit tests can verify the shared row layout. */
+    std::vector<juce::Rectangle<int>> rowRects() const;
+
 private:
     Application& app;   // audio data read live via app.audioEngine() (active doc)
     bool showOwnTimeRuler = true;
@@ -186,10 +191,6 @@ private:
     // Returns false if cancelled mid-render.
     bool renderSpectralContent (juce::Image& img, const Settings& rs,
                                 const std::atomic<bool>* cancel = nullptr);
-
-    // Channel rows in absolute view coordinates: full component width (so
-    // axis drags can hit-test them too), positioned inside the plot area.
-    std::vector<juce::Rectangle<int>> rowRects() const;
 
     void drawTimeRuler (juce::Graphics& g);
     void drawFrequencyRuler (juce::Graphics& g);

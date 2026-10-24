@@ -10489,6 +10489,283 @@ static void testClonePickToggleAndHints()
     wav.deleteFile ();
 }
 
+// ------------------------------------------------- resample remix / paste to new channels
+
+static void testResampleRemix()
+{
+    // --- Same-rate downmix: stereo -> mono average ---------------------
+    {
+        juce::AudioBuffer<float> in (2, 100);
+        for (int i = 0; i < 100; ++i)
+        {
+            in.setSample (0, i, 0.5f);
+            in.setSample (1, i, -0.5f);
+        }
+        juce::AudioBuffer<float> out;
+        const std::vector<std::vector<double>> w = {{ 0.5, 0.5 }};
+        CHECK (sc::Resampler::resampleAndRemix (in, 48000.0, 48000.0, w, out),
+               "same-rate mix accepted");
+        CHECK (out.getNumChannels () == 1 && out.getNumSamples () == 100,
+               "mono output with unchanged length");
+        bool zero = true;
+        for (int i = 0; i < 100; ++i)
+            if (std::abs ((double) out.getSample (0, i)) > 1e-6) { zero = false; break; }
+        CHECK (zero, "equal-and-opposite channels average to silence");
+    }
+
+    // --- Weight rows are normalised by their sum ------------------------
+    {
+        juce::AudioBuffer<float> in (2, 10);
+        for (int i = 0; i < 10; ++i)
+        {
+            in.setSample (0, i, 0.6f);
+            in.setSample (1, i, 0.3f);
+        }
+        juce::AudioBuffer<float> out;
+        const std::vector<std::vector<double>> w = {{ 2.0, 1.0 }};   // -> {2/3, 1/3}
+        CHECK (sc::Resampler::resampleAndRemix (in, 48000.0, 48000.0, w, out),
+               "weighted mix accepted");
+        CHECK (std::abs ((double) out.getSample (0, 0) - 0.5) < 1e-6,
+               "{2,1} means 2/3 L + 1/3 R = 0.5");
+    }
+
+    // --- Zero-sum row -> silence; identity rows pass through ------------
+    {
+        juce::AudioBuffer<float> in (2, 8);
+        for (int i = 0; i < 8; ++i)
+        {
+            in.setSample (0, i, 1.0f);
+            in.setSample (1, i, 0.5f);
+        }
+        juce::AudioBuffer<float> out;
+        const std::vector<std::vector<double>> w = {{ 1.0, -1.0 }, { 1.0, 0.0 },
+                                                     { 0.0, 1.0 }};
+        CHECK (sc::Resampler::resampleAndRemix (in, 48000.0, 48000.0, w, out),
+               "3-output mix accepted");
+        CHECK (out.getNumChannels () == 3 && out.getNumSamples () == 8,
+               "output shape follows the weight matrix");
+        bool ok = true;
+        for (int i = 0; i < 8; ++i)
+        {
+            if (std::abs ((double) out.getSample (0, i)) > 1e-6) ok = false;   // zero-sum row
+            if (std::abs ((double) out.getSample (1, i) - 1.0) > 1e-6) ok = false;
+            if (std::abs ((double) out.getSample (2, i) - 0.5) > 1e-6) ok = false;
+        }
+        CHECK (ok, "zero-sum row is silence; identity rows pass through");
+    }
+
+    // --- Rate change + downmix in one call -------------------------------
+    {
+        constexpr double kPi = 3.14159265358979323846;
+        const int N = 4096;
+        juce::AudioBuffer<float> in (2, N);
+        for (int i = 0; i < N; ++i)
+        {
+            const double t = (double) i / 8000.0;
+            in.setSample (0, i, (float) std::sin (2.0 * kPi * 440.0 * t));
+            in.setSample (1, i, (float) std::sin (2.0 * kPi * 440.0 * t) * 0.5f);
+        }
+        juce::AudioBuffer<float> out;
+        const std::vector<std::vector<double>> w = {{ 1.0, 1.0 }};   // average
+        CHECK (sc::Resampler::resampleAndRemix (in, 8000.0, 16000.0, w, out),
+               "rate change + downmix accepted");
+        CHECK (out.getNumChannels () == 1, "downmixed to mono");
+        CHECK (std::abs ((double) out.getNumSamples() - N * 2) <= 4.0,
+               "length doubles at 8k -> 16k");
+        // Goertzel measurement is immune to the sinc filter's ~9% edge
+        // overshoot at the start/end transients.
+        const double amp = goertzelAmp (out.getReadPointer (0), out.getNumSamples(),
+                                        440.0, 16000.0);
+        CHECK (std::abs (amp - 0.75) < 0.02,
+               "average of amplitudes 1 and 0.5 gives a 0.75 tone");
+    }
+
+    // --- Invalid weight shapes are rejected ------------------------------
+    {
+        juce::AudioBuffer<float> in (2, 8);
+        juce::AudioBuffer<float> out;
+        const std::vector<std::vector<double>> badCols = {{ 1.0 }};   // one column for two inputs
+        CHECK (!sc::Resampler::resampleAndRemix (in, 48000.0, 48000.0, badCols, out),
+               "wrong column count rejected");
+        const std::vector<std::vector<double>> empty = {};
+        CHECK (!sc::Resampler::resampleAndRemix (in, 48000.0, 48000.0, empty, out),
+               "empty weight matrix rejected");
+    }
+}
+
+static void testPasteToNewChannels()
+{
+    // --- Basic paste: stereo file gains two channels ---------------------
+    {
+        Application app;
+        const int N = 8000;   // 1 s @ 8 kHz
+        std::vector<std::vector<float>> src (2);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < N; ++i)
+                src[(size_t) ch].push_back ((float) std::sin (i * 0.01 + ch));
+        FileDoc* d = attachNewDoc (app, 2, 8000.0, &src);
+        CHECK (d != nullptr, "source doc attached");
+
+        auto c = std::make_unique<juce::AudioBuffer<float>> (2, 300);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 300; ++i)
+                c->getWritePointer (ch)[(size_t) i] = (float) std::sin (i * 0.5 + ch);
+        app.clipboard = std::move (c);
+
+        app.setSelection ({ 0.1, 0.2 });   // paste position = selection start = sample 800
+        CHECK (app.pasteToNewChannels (), "paste to new channels ok");
+        auto& eng = app.audioEngine ();
+        CHECK (eng.numChannels () == 4, "file grew from 2 to 4 channels");
+        CHECK ((int) eng.numSamples () == N, "length unchanged");
+
+        auto rs = [&eng] (int ch, int64_t pos)
+        {
+            float v = 0.0f;
+            eng.readSamples (ch, pos, 1, &v);
+            return v;
+        };
+
+        // Existing channels are byte-for-byte identical.
+        bool same = true;
+        for (int ch = 0; ch < 2 && same; ++ch)
+            for (int i = 0; i < N; ++i)
+                if (rs (ch, i) != src[(size_t) ch][(size_t) i]) { same = false; break; }
+        CHECK (same, "existing channels untouched");
+
+        // New channels: silence except the clipboard at [800, 1100).
+        bool ok = true;
+        for (int ch = 2; ch < 4 && ok; ++ch)
+            for (int i = 0; i < N; ++i)
+            {
+                const float expect = (i >= 800 && i < 1100)
+                                      ? std::sin ((i - 800) * 0.5 + (ch - 2)) : 0.0f;
+                if (std::abs (rs (ch, i) - expect) > 1e-6) { ok = false; break; }
+            }
+        CHECK (ok, "new channels hold the clipboard at the selection start");
+
+        // The new channels are made visible.
+        bool vis23 = app.isChannelVisible (2) && app.isChannelVisible (3);
+        CHECK (vis23, "added channels become visible");
+
+        // Undo restores 2 channels with the original content; redo re-applies.
+        CHECK (app.undo ().canUndo (), "edit recorded in undo history");
+        app.undoStep ();
+        CHECK (eng.numChannels () == 2 && (int) eng.numSamples () == N,
+               "undo back to 2 channels, same length");
+        bool sameAfterUndo = true;
+        for (int ch = 0; ch < 2 && sameAfterUndo; ++ch)
+            for (int i = 0; i < N; ++i)
+                if (rs (ch, i) != src[(size_t) ch][(size_t) i]) { sameAfterUndo = false; break; }
+        CHECK (sameAfterUndo, "undo restores the original content");
+        app.redoStep ();
+        CHECK (eng.numChannels () == 4 && (int) eng.numSamples () == N,
+               "redo re-applies the channel growth");
+    }
+
+    // --- Paste near EOF is truncated to the file length -------------------
+    {
+        Application app;
+        const int N = 1000;
+        std::vector<std::vector<float>> src (1);
+        for (int i = 0; i < N; ++i)
+            src[0].push_back ((float) i * 1e-4f);
+        FileDoc* d = attachNewDoc (app, 1, 8000.0, &src);
+        CHECK (d != nullptr, "mono doc attached");
+
+        auto c = std::make_unique<juce::AudioBuffer<float>> (1, 300);
+        for (int i = 0; i < 300; ++i)
+            c->getWritePointer (0)[(size_t) i] = 0.9f;
+        app.clipboard = std::move (c);
+
+        app.setSelection ({ 0, 0 });
+        app.playhead = ((double) (N - 100)) / 8000.0;   // only 100 samples of room left
+        CHECK (app.pasteToNewChannels (), "truncating paste ok");
+        auto& eng = app.audioEngine ();
+        CHECK (eng.numChannels () == 2 && (int) eng.numSamples () == N,
+               "one channel added, length unchanged");
+        bool ok = true;
+        for (int i = 0; i < N; ++i)
+        {
+            const float expect = (i >= N - 100) ? 0.9f : 0.0f;
+            float v = 0.0f;
+            eng.readSamples (1, i, 1, &v);
+            if (std::abs (v - expect) > 1e-6) { ok = false; break; }
+        }
+        CHECK (ok, "paste truncated at the end of the file");
+    }
+
+    // --- No clipboard: no-op, not an error ---------------------------------
+    {
+        Application app;
+        std::vector<std::vector<float>> src (2);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < 400; ++i)
+                src[(size_t) ch].push_back ((float) ch * 0.1f);
+        FileDoc* d = attachNewDoc (app, 2, 8000.0, &src);
+        CHECK (d != nullptr, "doc attached");
+        app.clearClipboard ();
+        CHECK (!app.canPaste (), "clipboard empty");
+        CHECK (app.pasteToNewChannels (), "no-clipboard paste is a no-op");
+        CHECK (app.audioEngine ().numChannels () == 2, "channel count unchanged");
+    }
+}
+
+static void testChannelRowGeometry()
+{
+    // --- Shared row layout: one row per channel with a 5 px gap -----------
+    {
+        auto r1 = WaveformView::channelRowRects (100, 100, 1);
+        CHECK (r1.size () == 1 && r1[0] == juce::Rectangle<int> (0, 0, 100, 100),
+               "single row fills the area");
+
+        auto r2 = WaveformView::channelRowRects (100, 100, 2);
+        CHECK (r2.size () == 2, "two rows");
+        if (r2.size () == 2)
+        {
+            CHECK (r2[0] == juce::Rectangle<int> (0, 0, 100, 47), "row 0: 47 px tall");
+            CHECK (r2[1].getY () == 52, "5 px gap between rows");
+            CHECK (r2[1] == juce::Rectangle<int> (0, 52, 100, 48), "last row takes the remainder");
+        }
+
+        auto r3 = WaveformView::channelRowRects (100, 100, 3);
+        CHECK (r3.size () == 3, "three rows");
+        if (r3.size () == 3)
+        {
+            int covered = 0;
+            for (size_t i = 0; i < r3.size(); ++i)
+                covered += r3[i].getHeight ();
+            CHECK (covered + 2 * WaveformView::kChannelRowGap == 100,
+                   "rows plus gaps fill the area exactly");
+            for (size_t i = 1; i < r3.size(); ++i)
+                if (r3[i].getY () != r3[i - 1].getBottom () + WaveformView::kChannelRowGap)
+                    CHECK (false, "rows are separated by exactly the gap");
+        }
+
+        auto r0 = WaveformView::channelRowRects (100, 100, 0);
+        CHECK (r0.empty (), "zero rows -> empty list");
+    }
+
+    // --- The spectral view uses the identical layout ----------------------
+    {
+        Application app;
+        SpectralView sv (app);
+        sv.setSize (300, 200);
+        sv.setVisibleChannels ({ 0, 1 });
+        const auto pr = sv.plotRect ();
+        const auto rows = sv.rowRects ();
+        CHECK (rows.size () == 2, "spectral view has one row per visible channel");
+        if (rows.size () == 2)
+        {
+            const auto expect = WaveformView::channelRowRects (pr.getWidth(), pr.getHeight(), 2);
+            bool same = rows[0].getY () - pr.getY() == expect[0].getY()
+                        && rows[1].getY () - pr.getY() == expect[1].getY()
+                        && rows[0].getHeight () == expect[0].getHeight()
+                        && rows[1].getHeight () == expect[1].getHeight();
+            CHECK (same, "spectral row layout matches the waveform view's");
+        }
+    }
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -10621,6 +10898,9 @@ static int scRunUnitTestsImpl()
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
     progress ("axis scale modes");        testAxisScaleModes();
+    progress ("resample remix");          testResampleRemix();
+    progress ("paste to new channels");   testPasteToNewChannels();
+    progress ("channel row geometry");    testChannelRowGeometry();
     progress ("version string");      testVersionString();
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

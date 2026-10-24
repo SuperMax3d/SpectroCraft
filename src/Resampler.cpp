@@ -113,4 +113,86 @@ bool Resampler::resample (const juce::AudioBuffer<float>& in,
     return true;
 }
 
+namespace
+{
+// Weighted per-output-channel mix of an in-memory buffer. Each row of
+// `weights` is normalised by its sum before use.
+bool mixChannels (const juce::AudioBuffer<float>& in,
+                  const std::vector<std::vector<double>>& weights,
+                  juce::AudioBuffer<float>& out,
+                  std::function<void(float)> onProgress)
+{
+    const int nch = in.getNumChannels();
+    if (nch <= 0 || weights.empty()) { out.clear(); return false; }
+
+    // Normalise each output channel's weight row by its sum.
+    std::vector<std::vector<double>> norm (weights.size());
+    for (size_t r = 0; r < weights.size(); ++r)
+    {
+        if ((int) weights[r].size() != nch) { out.clear(); return false; }
+        double sum = 0.0;
+        for (double w : weights[r])
+        {
+            if (!std::isfinite (w)) { out.clear(); return false; }
+            sum += w;
+        }
+        const double scale = (sum > 0.0) ? 1.0 / sum : 0.0;
+        norm[r].resize ((size_t) nch);
+        for (int c = 0; c < nch; ++c)
+            norm[r][(size_t) c] = weights[r][(size_t) c] * scale;
+    }
+
+    const size_t N = (size_t) in.getNumSamples();
+    out.clear();
+    out.setSize ((int) weights.size(), (int) N);
+
+    const size_t kChunk = (size_t) (1 << 20);   // ~1M frames per progress step
+    for (size_t pos = 0; pos < N; )
+    {
+        const size_t chunk = std::min (kChunk, N - pos);
+        for (size_t r = 0; r < norm.size(); ++r)
+        {
+            float* dst = out.getWritePointer ((int) r, (int) pos);
+            for (size_t i = 0; i < chunk; ++i)
+            {
+                double v = 0.0;
+                for (int c = 0; c < nch; ++c)
+                    v += norm[r][(size_t) c] * in.getReadPointer (c)[(size_t) (pos + i)];
+                dst[i] = (float) v;
+            }
+        }
+        pos += chunk;
+        if (onProgress && N > 0)
+            onProgress ((float) ((double) pos / (double) N));
+    }
+    if (onProgress && N == 0) onProgress (1.0f);
+    return true;
+}
+} // namespace
+
+bool Resampler::resampleAndRemix (const juce::AudioBuffer<float>& in,
+                                  double oldRate, double newRate,
+                                  const std::vector<std::vector<double>>& weights,
+                                  juce::AudioBuffer<float>& out,
+                                  std::function<void(float)> onProgress,
+                                  const std::atomic<bool>* cancel)
+{
+    if (!std::isfinite (oldRate) || !std::isfinite (newRate) || oldRate <= 0.0
+        || newRate <= 0.0 || in.getNumChannels() <= 0 || weights.empty())
+    {
+        out.clear();
+        return false;
+    }
+
+    // Same rate: mix directly, no SoXR involved.
+    if (std::abs (oldRate - newRate) < 1e-9 * std::max (oldRate, newRate))
+        return mixChannels (in, weights, out, onProgress);
+
+    // Different rates: resample all channels first, then mix the result.
+    juce::AudioBuffer<float> tmp;
+    if (!resample (in, oldRate, newRate, tmp, onProgress, cancel))
+        return false;
+    return mixChannels (tmp, weights, out, nullptr);
+}
+
 } // namespace sc

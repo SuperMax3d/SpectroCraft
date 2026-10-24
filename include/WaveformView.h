@@ -61,8 +61,38 @@ public:
         int visCount = 0;
         for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
             if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
-        return std::max (1e-6, (double) pr.getHeight() / std::max (1, visCount) * 0.45
+        return std::max (1e-6, (double) channelRowHeight (pr.getHeight(), visCount) * 0.45
                          * (double) vZoom);
+    }
+
+    /** Dark separator between channel rows (same colour as the axis).
+        Shared layout rule for paint, hit-testing and the amplitude axis; the
+        spectral view uses an identical scheme. */
+    static constexpr int kChannelRowGap = 5;
+    static int channelRowHeight (int h, int nRows)
+    {
+        if (nRows <= 0 || h <= 0) return 0;
+        const int gap = (nRows > 1) ? kChannelRowGap : 0;
+        return std::max (1, (h - gap * (nRows - 1)) / nRows);
+    }
+    /** One rectangle per visible channel inside a w×h plot area: rows are
+        separated by kChannelRowGap pixels of background colour. */
+    static std::vector<juce::Rectangle<int>> channelRowRects (int w, int h, int nRows)
+    {
+        std::vector<juce::Rectangle<int>> rects;
+        if (nRows <= 0 || h <= 0) return rects;
+        const int gap = (nRows > 1) ? kChannelRowGap : 0;
+        const int baseRowH = channelRowHeight (h, nRows);
+        for (int r = 0; r < nRows; ++r)
+        {
+            const int y0 = r * (baseRowH + gap);
+            // The last row absorbs any rounding remainder so the rows plus
+            // gaps fill the area exactly.
+            const int rh = (r == nRows - 1) ? std::max (baseRowH, h - y0)
+                                            : baseRowH;
+            rects.push_back ({ 0, y0, w, std::min (rh, h - y0) });
+        }
+        return rects;
     }
     void setSelection (juce::Range<double> s)
     {
@@ -150,7 +180,7 @@ private:
 
     void paintChannel (juce::Graphics& g, int ch, int chanY, int chanH, float center, float amp);
     void drawRuler (juce::Graphics& g);
-    void drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH, bool showChanLabels);
+    void drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce::Rectangle<int>>& rows);
     void zoomAtX (int x, double factor);
     void panByTime (double dt);
 

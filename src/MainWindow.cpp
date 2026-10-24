@@ -1711,6 +1711,9 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             break;
         }
         case EditPasteMix: runDestructiveEdit ([&] (std::string* e) { return app.pasteMix (e); }); break;
+        case EditPasteToNewChannels:
+            runDestructiveEdit ([&] (std::string* e) { return app.pasteToNewChannels (e); });
+            break;
         case EditDelete: runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); break;
         case EditSelectAll: app.selectAll(); syncSharedState(); break;
         case EditSnapToZeroCrossings:
@@ -2136,21 +2139,243 @@ void MainWindow::showChangeGainDialog()
     runDestructiveEdit ([&] (std::string* e) { return app.changeGain (db, e); });
 }
 
-// Effects > Resample... — prompt for a new sample rate and resample the whole
-// file (SoXR, same engine as Audacity). Not undoable: the dialog warns about it.
+// Effects > Resample... — prompt for a new sample rate AND channel count and
+// resample/remix the whole file (SoXR, same engine as Audacity). Not undoable:
+// the dialog warns about it.
+namespace
+{
+constexpr int kResampleMaxChans = 512;
+
+/** Strict plain-number parse: optional sign, digits, at most one dot. */
+bool parseWeightText (const juce::String& text, double& valueOut)
+{
+    const int n = text.length();
+    int i = 0;
+    if (i < n && (text[i] == '+' || text[i] == '-')) ++i;
+    int digits = 0, dots = 0;
+    for (; i < n; ++i)
+    {
+        const auto ch = text[i];
+        if (ch >= '0' && ch <= '9') ++digits;
+        else if (ch == '.') { if (++dots > 1) return false; }
+        else return false;
+    }
+    if (digits <= 0) return false;
+    const double v = text.getDoubleValue();
+    valueOut = v;
+    return std::isfinite (v);
+}
+
+juce::String formatWeightText (double v)
+{
+    if (std::abs (v - std::round (v)) < 1e-9 && std::abs (v) < 1e6)
+        return juce::String ((int) std::lround (v));
+    return juce::String (v, 4).trimCharactersAtEnd ("0").trimCharactersAtEnd (".");
+}
+
+/** Default mix matrix: identity when the count is unchanged, otherwise each
+    output channel averages all inputs. */
+std::vector<std::vector<double>> defaultRemixWeights (int outChans, int inChans)
+{
+    std::vector<std::vector<double>> w ((size_t) outChans,
+                                        std::vector<double> ((size_t) inChans, 0.0));
+    for (int r = 0; r < outChans; ++r)
+        for (int c = 0; c < inChans; ++c)
+            w[(size_t) r][(size_t) c] = (outChans == inChans)
+                                           ? (r == c ? 1.0 : 0.0)
+                                           : 1.0 / (double) inChans;
+    return w;
+}
+
+/** Divides every row by its sum (zero rows stay silence). */
+std::vector<std::vector<double>> normaliseRemixWeights (
+    const std::vector<std::vector<double>>& weights)
+{
+    std::vector<std::vector<double>> out = weights;
+    for (auto& row : out)
+    {
+        double sum = 0.0;
+        for (double w : row) sum += w;
+        if (sum > 0.0)
+            for (double& w : row) w /= sum;
+        else
+            std::fill (row.begin(), row.end(), 0.0);
+    }
+    return out;
+}
+
+bool isIdentityRemix (const std::vector<std::vector<double>>& weights, int n)
+{
+    if ((int) weights.size() != n) return false;
+    for (int r = 0; r < n; ++r)
+        for (int c = 0; c < n; ++c)
+            if (std::abs (weights[(size_t) r][(size_t) c] - (r == c ? 1.0 : 0.0)) > 1e-9)
+                return false;
+    return true;
+}
+
+// One row per output channel: an "Out N" label plus one weight field per
+// input channel. Rebuilt whenever the requested output count changes.
+class RemixGrid : public juce::Component
+{
+public:
+    explicit RemixGrid (int inChans) : inChans_ (inChans)
+    {
+        setBounds (0, 0, widthFor (inChans_), kRowH);
+    }
+
+    int numRows() const { return (int) rows_.size(); }
+
+    void rebuild (int outChans, const std::vector<std::vector<double>>& defaults)
+    {
+        removeAllChildren();
+        rows_.clear();
+        for (int r = 0; r < outChans; ++r)
+        {
+            Row row;
+            row.label = new juce::Label ("", "Out " + juce::String (r + 1));
+            addAndMakeVisible (row.label);
+            for (int c = 0; c < inChans_; ++c)
+            {
+                auto* ed = new juce::TextEditor();
+                ed->setMultiLine (false);
+                ed->setText (formatWeightText (defaults[(size_t) r][(size_t) c]));
+                addAndMakeVisible (ed);
+                row.editors.push_back (ed);
+            }
+            rows_.push_back (std::move (row));
+        }
+        setSize (widthFor (inChans_), (int) rows_.size() * kRowH + 8);
+        resized();
+    }
+
+    /** Parsed weights; false if any field is not a plain number. */
+    bool getWeights (std::vector<std::vector<double>>& out) const
+    {
+        out.clear();
+        for (const auto& row : rows_)
+        {
+            std::vector<double> w;
+            for (auto* ed : row.editors)
+            {
+                const juce::String t = ed->getText().trim();
+                if (t.isEmpty()) { w.push_back (0.0); continue; }
+                double v = 0.0;
+                if (!parseWeightText (t, v)) return false;
+                w.push_back (v);
+            }
+            out.push_back (std::move (w));
+        }
+        return true;
+    }
+
+    void resized() override
+    {
+        for (size_t r = 0; r < rows_.size(); ++r)
+        {
+            auto& row = rows_[r];
+            row.label->setBounds (0, (int) r * kRowH + 6, kLabelW, 18);
+            for (size_t c = 0; c < row.editors.size(); ++c)
+                row.editors[c]->setBounds (kLabelW + kGapX
+                                              + (int) c * (kEditorW + kGapX),
+                                           (int) r * kRowH + 4, kEditorW, 22);
+        }
+    }
+
+private:
+    struct Row { juce::Label* label; std::vector<juce::TextEditor*> editors; };
+    int inChans_ = 0;
+    std::vector<Row> rows_;
+
+    static constexpr int kRowH = 26, kLabelW = 48, kGapX = 6, kEditorW = 52;
+    static int widthFor (int inChans)
+    {
+        return kLabelW + kGapX + inChans * (kEditorW + kGapX);
+    }
+};
+
+// Rebuilds the weight grid while the user edits the channel-count field.
+// A (zero-size, invisible) component so the dialog owns it and deletes it
+// automatically; plain addChildComponent keeps AlertWindow's layout code
+// from touching it.
+class NewChansListener : public juce::Component, public juce::TextEditor::Listener
+{
+public:
+    juce::AlertWindow* window = nullptr;
+    RemixGrid* grid = nullptr;
+    int inChans = 0;
+
+    void textEditorTextChanged (juce::TextEditor& ed) override
+    {
+        if (window == nullptr || grid == nullptr) return;
+        double v = 0.0;
+        const juce::String t = ed.getText().trim();
+        int outChans = -1;
+        if (!t.isEmpty() && parseWeightText (t, v)
+            && std::abs (v - std::round (v)) < 1e-9
+            && v >= 1.0 && v <= (double) kResampleMaxChans)
+            outChans = (int) std::lround (v);
+        if (outChans > 0 && grid->numRows() != outChans)
+        {
+            // AlertWindow's layout is private, so re-size the dialog by hand:
+            // rebuild the grid in place, slide everything below it (the
+            // OK/Cancel buttons) and grow/shrink the window to match.
+            const int oldBottom = grid->getBottom();
+            const int oldH = grid->getHeight();
+            grid->rebuild (outChans, defaultRemixWeights (outChans, inChans));
+            const int delta = grid->getHeight() - oldH;
+            if (delta != 0)
+            {
+                for (int i = 0; i < window->getNumChildComponents(); ++i)
+                {
+                    auto* c = window->getChildComponent (i);
+                    if (c != nullptr && c != grid && c->getBounds().getY() >= oldBottom)
+                        c->setBounds (c->getX(), c->getBounds().getY() + delta,
+                                      c->getWidth(), c->getHeight());
+                }
+                window->setSize (window->getWidth(),
+                                std::max (100, window->getHeight() + delta));
+            }
+        }
+    }
+};
+} // namespace
+
 juce::AlertWindow* MainWindow::createResampleDialog()
 {
-    const double cur = app.audioEngine().sampleRate();
+    auto& eng = app.audioEngine();
+    const double cur = eng.sampleRate();
+    const int curChans = eng.numChannels();
+
     auto* w = new juce::AlertWindow ("Resample",
-                                     "Current rate: " + juce::String (cur, 3) + " Hz\n"
+                                     "Current rate: " + juce::String (cur, 3) + " Hz, "
+                                     + juce::String (curChans) + " channel(s)\n"
                                      "New sample rate (Hz):\n"
+                                     "New channel count:\n"
+                                     "Mix weights per output channel (each row is normalised to sum to 1):\n"
                                      "(whole file; cannot be undone)",
                                      juce::AlertWindow::QuestionIcon, this);
     w->addTextEditor ("newRate", juce::String (cur, 3));
-    if (auto* editor = w->getTextEditor ("newRate"))
-        // Let Enter/Escape reach the OK/Cancel shortcuts even while the field
-        // has keyboard focus.
-        editor->setEscapeAndReturnKeysConsumed (false);
+    w->addTextEditor ("newChans", juce::String (curChans));
+
+    auto* grid = new RemixGrid (curChans);
+    grid->rebuild (curChans, defaultRemixWeights (curChans, curChans));
+    w->addCustomComponent (grid);
+
+    for (const char* name : { "newRate", "newChans" })
+        if (auto* editor = w->getTextEditor (name))
+            // Let Enter/Escape reach the OK/Cancel shortcuts even while a
+            // field has keyboard focus.
+            editor->setEscapeAndReturnKeysConsumed (false);
+
+    // Rebuild the weight grid whenever the requested channel count changes.
+    auto* chansListener = new NewChansListener();
+    chansListener->window = w;
+    chansListener->grid = grid;
+    chansListener->inChans = curChans;
+    w->addChildComponent (chansListener);   // owned by the dialog
+    if (auto* editor = w->getTextEditor ("newChans"))
+        editor->addListener (chansListener);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -2158,11 +2383,11 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     // AlertWindow disables keyboard focus on its editors, so re-enable it and
     // pre-select the text. The actual grabKeyboardFocus() happens in
     // showResampleDialog() once the window is showing.
+    for (const char* name : { "newRate", "newChans" })
+        if (auto* editor = w->getTextEditor (name))
+            editor->setWantsKeyboardFocus (true);
     if (auto* editor = w->getTextEditor ("newRate"))
-    {
-        editor->setWantsKeyboardFocus (true);
         editor->selectAll();
-    }
 
     return w;
 }
@@ -2183,11 +2408,17 @@ void MainWindow::showResampleDialog()
         editor->grabKeyboardFocus();
 
     const int result = w->runModalLoop();
-    const juce::String text = w->getTextEditorContents ("newRate");
+    const juce::String rateText = w->getTextEditorContents ("newRate");
+    const juce::String chansText = w->getTextEditorContents ("newChans");
+    std::vector<std::vector<double>> weights;
+    bool weightsOk = false;
+    for (int i = 0; i < w->getNumChildComponents() && !weightsOk; ++i)
+        if (auto* grid = dynamic_cast<RemixGrid*> (w->getChildComponent (i)))
+            weightsOk = grid->getWeights (weights);
     delete w;
     if (result != 1) return;
 
-    const double newRate = text.trim().getDoubleValue();
+    const double newRate = rateText.trim().getDoubleValue();
     if (!std::isfinite (newRate) || newRate <= 0.0)
     {
         juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
@@ -2196,7 +2427,32 @@ void MainWindow::showResampleDialog()
         return;
     }
 
-    runResampleAsync (newRate);
+    const int newChans = chansText.trim().getIntValue();
+    if (newChans < 1 || newChans > kResampleMaxChans)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Invalid channel count",
+                                            "Please enter a channel count between 1 and "
+                                            + juce::String (kResampleMaxChans) + ".", "", this);
+        return;
+    }
+
+    if (!weightsOk || (int) weights.size() != newChans)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Invalid mix weight",
+                                            "Every weight field must be a number "
+                                            "(empty means 0).", "", this);
+        return;
+    }
+
+    weights = normaliseRemixWeights (weights);
+    const bool sameRate = std::abs (newRate - eng.sampleRate())
+                          < 1e-9 * std::max (eng.sampleRate(), newRate);
+    if (sameRate && newChans == eng.numChannels() && isIdentityRemix (weights, newChans))
+        return;   // nothing to do
+
+    runResampleAsync (newRate, weights);
 }
 
 void MainWindow::showNewFileDialog()
@@ -2268,17 +2524,24 @@ void MainWindow::showNewFileDialog()
     app.newFile (chans, rate);
 }
 
-// Resample on a background thread with a progress dialog so multi-GB files
-// never block the UI. Progress: resampling 0..85%, mipmap rebuild 85..100%.
-void MainWindow::runResampleAsync (double newRate)
+// Resample (+ optional channel remix) on a background thread with a progress
+// dialog so multi-GB files never block the UI. Progress: resampling 0..85%,
+// mipmap rebuild 85..100%. Empty remixWeights keeps the current channels.
+void MainWindow::runResampleAsync (double newRate,
+                                   const std::vector<std::vector<double>>& remixWeights)
 {
-    auto* dlg = new WorkProgressDialog ("Resampling",
-                                        "Resampling to " + juce::String (newRate, 3) + " Hz ...",
+    auto& eng = app.audioEngine();
+    juce::String what = "Resampling to " + juce::String (newRate, 3) + " Hz";
+    if (!remixWeights.empty() && (int) remixWeights.size() != eng.numChannels())
+        what += ", " + juce::String (eng.numChannels()) + " -> "
+                + juce::String ((int) remixWeights.size()) + " channels";
+
+    auto* dlg = new WorkProgressDialog ("Resampling", what + " ...",
                                         true, this);
     dlg->setProgress (0.0);
     dlg->beginModal ();
 
-    std::thread ([this, newRate, dlg] {
+    std::thread ([this, newRate, remixWeights, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
@@ -2292,7 +2555,8 @@ void MainWindow::runResampleAsync (double newRate)
         const bool ok = app.audioEngine().resampleTo (
             newRate,
             [sendProgress] (float f) { sendProgress (0.85 * (double) f); },
-            &dlg->cancelled, &err);
+            &dlg->cancelled, &err,
+            remixWeights.empty() ? nullptr : &remixWeights);
         if (ok)
             app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
                 sendProgress (0.85 + 0.15 * (double) f);
@@ -2305,6 +2569,13 @@ void MainWindow::runResampleAsync (double newRate)
             {
                 // The clipboard's samples belong to the old sample rate.
                 app.clearClipboard ();
+
+                // A channel-count change invalidates the visibility list:
+                // show every channel of the new file.
+                const int n = app.audioEngine().numChannels();
+                app.visibleChannels.clear ();
+                for (int ch = 0; ch < n; ++ch)
+                    app.visibleChannels.push_back (ch);
 
                 // refreshAfterEdit() clears the spectral tile cache and forces
                 // a full re-render: after a rate change the old tiles are stale
@@ -3100,6 +3371,8 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       false);
         menu.addItem (EditPaste, "Paste\tCtrl+V", app.canPaste(), false);
         menu.addItem (EditPasteMix, "Paste Mix\tCtrl+Shift+V", app.canPaste(), false);
+        menu.addItem (EditPasteToNewChannels, "Paste to New Channel(s)",
+                      app.canPaste(), false);
         // With a spectral selection active, DEL zeros the selected (t,f)
         // content instead of trimming samples.
         const bool hasSpectralSel = app.hasSpectralSelection ();

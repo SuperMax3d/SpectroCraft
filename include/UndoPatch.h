@@ -53,6 +53,12 @@ struct Patch
     std::vector<std::vector<float>> oldData;  // per-channel data that was removed (for undo)
     std::vector<std::vector<float>> newData;  // per-channel data that was inserted (for redo)
     int64_t lengthDelta = 0;                  // newTotal - oldTotal
+    // Channel-count change carried by this patch (both zero => unchanged).
+    // Used by edits that add or remove channels, e.g. "Paste to New
+    // Channel(s)" adds the clipboard's channels: newData then has one entry
+    // per channel of the NEW count and oldData covers only the OLD ones.
+    int oldChans = 0;
+    int newChans = 0;
 
     // Human-readable action name shown in the History tab, e.g. "Deleted samples".
     juce::String description;

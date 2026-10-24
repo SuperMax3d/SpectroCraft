@@ -286,10 +286,14 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
                 if (visCount > 0 && zoomRect.getHeight() >= 2)
                 {
                     const double oldAmpPx = rowAmpPx();
-                    const int chanH = pr.getHeight() / visCount;
-                    const int rowIdx = std::clamp ((zoomRect.getCentreY() - pr.getY()) / chanH,
-                                                   0, visCount - 1);
-                    const float centerR = (float) (pr.getY() + rowIdx * chanH + chanH * 0.5f);
+                    const auto rows = channelRowRects (pr.getWidth(), pr.getHeight(), visCount);
+                    int rowIdx = 0;
+                    for (int r = 0; r < visCount; ++r)
+                        if (zoomRect.getCentreY() >= pr.getY() + rows[(size_t) r].getY())
+                            rowIdx = r;
+                    const auto& rrR = rows[(size_t) rowIdx];
+                    const float centerR = (float) (pr.getY() + rrR.getY()
+                                                   + rrR.getHeight() * 0.5f);
 
                     vOffset = std::clamp (vOffset + (centerR - zoomRect.getCentreY()) / oldAmpPx,
                                          -2.0, 2.0);
@@ -343,8 +347,12 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
         if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
     if (visCount <= 0) { onCursorInfo (""); return; }
 
-    const int chanH = pr.getHeight() / visCount;
-    const int row = std::clamp ((e.y - pr.getY()) / chanH, 0, visCount - 1);
+    const auto rows = channelRowRects (pr.getWidth(), pr.getHeight(), visCount);
+    // Row under the cursor (a point inside a gap maps to the row below it).
+    int row = 0;
+    for (int r = 0; r < visCount; ++r)
+        if (e.y >= pr.getY() + rows[(size_t) r].getY())
+            row = r;
 
     // Map the visible-row index back to its channel number.
     int ch = -1, r = 0;
@@ -356,8 +364,9 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
         }
 
     const double t = xToTime ((int) e.x);
-    const float center = pr.getY() + row * chanH + chanH * 0.5f;
-    const float ampPx = chanH * 0.45f * (float) vZoom;   // pixels per unit amplitude
+    const auto& rr = rows[(size_t) row];
+    const float center = pr.getY() + rr.getY() + rr.getHeight() * 0.5f;
+    const float ampPx = rr.getHeight() * 0.45f * (float) vZoom;   // pixels per unit amplitude
     const double value = (ampPx > 1e-6)
         ? vOffset + ((double) center - e.y) / ampPx : 0.0;
 
@@ -529,39 +538,38 @@ void WaveformView::paint (juce::Graphics& g)
     const auto pr = plotRect();
     const int waveH = pr.getHeight();
 
-    // Count visible channels for layout
+    // Count visible channels for layout; rows are separated by a dark gap of
+    // the axis colour (the background shows through between them).
     int visCount = 0;
     for (int ch = 0; ch < chans; ++ch)
         if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
-    const int chanH = waveH / std::max (1, visCount);
-
-    // Channel labels on the left of each track: "L"/"R" for stereo files,
-    // channel numbers when several tracks are shown at once.
-    const bool showChanLabels = (visCount > 1 || chans == 2);
+    const auto rows = channelRowRects (pr.getWidth(), waveH, visCount);
 
     int row = 0;
     for (int ch = 0; ch < chans; ++ch)
     {
         if (ch >= (int) chanVis.size() || !chanVis[ch]) continue;
-        const int chanY = pr.getY() + row * chanH;
+        const auto& rr = rows[(size_t) row];
+        const int chanY = pr.getY() + rr.getY();
+        const int chanH = rr.getHeight();
         const float center = chanY + chanH * 0.5f;
         const float amp = chanH * 0.45f * (float) vZoom;
         g.setColour (juce::Colour::fromRGB (60, 60, 60));
         g.drawHorizontalLine ((int) center, (float) pr.getX(), (float) pr.getRight());
         paintChannel (g, ch, chanY, chanH, center, amp);
 
-        if (showChanLabels)
-        {
-            const juce::String lab = (chans == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
-            g.setFont (10.0f);
-            g.setColour (juce::Colour::fromRGB (190, 190, 190));
-            g.drawText (lab, 2, (int) center - 8, kLeftAxisWidth - 4, 16,
-                       juce::Justification::centredRight, false);
-        }
+        // Channel label on the left of every track: "L"/"R" for stereo files,
+        // channel numbers otherwise. Shown even when a single channel is
+        // visible so the axis always says which track it is.
+        const juce::String lab = (chans == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
+        g.setFont (10.0f);
+        g.setColour (juce::Colour::fromRGB (190, 190, 190));
+        g.drawText (lab, 2, (int) center - 8, kLeftAxisWidth - 4, 16,
+                   juce::Justification::centredRight, false);
         ++row;
     }
 
-    drawAmplitudeAxis (g, visCount, chanH, showChanLabels);
+    drawAmplitudeAxis (g, rows);
     drawRuler (g);
 
     // Overlays are drawn ON TOP of the waveform so they stay visible
@@ -788,22 +796,21 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
     g.restoreState();
 }
 
-void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH, bool showChanLabels)
+void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce::Rectangle<int>>& rows)
 {
     const auto pr = plotRect();
-    if (pr.getHeight() <= 0) return;
+    if (pr.getHeight() <= 0 || rows.empty()) return;
 
     // dB grid levels relative to full scale (1.0). With a scale calibration the
     // labels show physical values in the file's unit instead of dB.
     static const double levels[] = { 0.0, -6.0, -12.0, -18.0, -24.0 };
     const ScaleCalibration& sc = app.scale();
 
-    int row = 0;
-    for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
+    for (size_t r = 0; r < rows.size(); ++r)
     {
-        if (ch >= (int) chanVis.size() || !chanVis[ch]) continue;
-        const float center = pr.getY() + row * chanH + chanH * 0.5f;
-        const float ampScale = chanH * 0.45f * (float) vZoom;
+        const auto& rr = rows[r];
+        const float center = pr.getY() + rr.getY() + rr.getHeight() * 0.5f;
+        const float ampScale = rr.getHeight() * 0.45f * (float) vZoom;
 
         for (double dB : levels)
         {
@@ -821,17 +828,18 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
 
         // Labels only when rows are tall enough to fit them. The scale is
         // symmetric: the same dB values appear above AND below the centre line.
-        if (chanH >= 36 && visCount <= 4)
+        if (rr.getHeight() >= 36 && rows.size() <= 4)
         {
             g.setFont (9.0f);
             for (double dB : levels)
             {
                 const double a = std::pow (10.0, dB / 20.0);
 
-                // Upper side label (value +a above the centre line)
+                // Upper side label (value +a above the centre line); keep it
+                // clear of the channel label that sits at the row centre.
                 const float yUp = center + (float) ((vOffset - a) * ampScale);
                 if (yUp >= pr.getY() + 8 && yUp <= pr.getBottom()
-                    && (!showChanLabels || std::abs (yUp - center) >= 9.0f))
+                    && std::abs (yUp - center) >= 9.0f)
                 {
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
                     g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, true),
@@ -842,7 +850,7 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
                 // Lower side label (value -a below the centre line)
                 const float yDown = center + (float) ((vOffset + a) * ampScale);
                 if (yDown >= pr.getY() && yDown <= pr.getBottom() - 8
-                    && (!showChanLabels || std::abs (yDown - center) >= 9.0f))
+                    && std::abs (yDown - center) >= 9.0f)
                 {
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
                     g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, false),
@@ -851,7 +859,6 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, int visCount, int chanH
                 }
             }
         }
-        ++row;
     }
 
     // Axis title

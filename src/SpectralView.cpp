@@ -34,32 +34,15 @@ void SpectralView::setShowOwnTimeRuler (bool show)
     repaint();
 }
 
-// One row per visible channel with a thin dark gap between the rows.
-static std::vector<juce::Rectangle<int>> spectralRowRects (int w, int h, int nRows)
-{
-    std::vector<juce::Rectangle<int>> rects;
-    if (nRows <= 0 || h <= 0)
-        return rects;
-
-    const int gap = (nRows > 1) ? 2 : 0;   // thin dark separator between channel rows
-    const int totalGap = gap * (nRows - 1);
-    const int baseRowH = std::max (1, (h - totalGap) / nRows);
-
-    for (int r = 0; r < nRows; ++r)
-    {
-        const int y0 = r * (baseRowH + gap);
-        rects.push_back ({ 0, y0, w, std::min (baseRowH, h - y0) }); // last row takes the remainder
-    }
-    return rects;
-}
-
+// One row per visible channel with a dark gap between the rows. The layout
+// is shared with the waveform view so both tracks line up identically.
 std::vector<juce::Rectangle<int>> SpectralView::rowRects() const
 {
     // Channel rows in absolute view coordinates: full component width (so
     // axis drags can hit-test them too), positioned inside the plot area
     // below the top time ruler.
     const auto pr = plotRect();
-    auto rows = spectralRowRects (getWidth(), pr.getHeight(), (int) channels.size());
+    auto rows = WaveformView::channelRowRects (getWidth(), pr.getHeight(), (int) channels.size());
     for (auto& r : rows)
         r.setY (r.getY() + pr.getY());
     return rows;
@@ -1017,8 +1000,8 @@ void SpectralView::paint (juce::Graphics& g)
     drawTimeRuler (g);
 
     // Channel labels on the left of each track: "L"/"R" for stereo files,
-    // channel numbers when several tracks are shown at once.
-    if (channels.size() > 1 || app.audioEngine().numChannels() == 2)
+    // channel numbers otherwise. Shown even when a single channel is visible
+    // so the axis always says which track it is.
     {
         const auto rows = rowRects ();
         g.setFont (10.0f);
@@ -1070,8 +1053,9 @@ bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
     const juce::Image::BitmapData bd (img, 0, 0, w, h, juce::Image::BitmapData::writeOnly);
 
     // One row per visible channel (like the waveform view), separated by
-    // thin dark gaps. Each row gets its own frequency axis on the left.
-    const auto rows = spectralRowRects (w, h, (int) channels.size());
+    // dark gaps of the axis colour. Each row gets its own frequency axis on
+    // the left.
+    const auto rows = WaveformView::channelRowRects (w, h, (int) channels.size());
     for (size_t r = 0; r < rows.size(); ++r)
     {
         if (cancelled()) return false;
@@ -1094,17 +1078,19 @@ bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
         }
     }
 
-    // Paint the gap rows as a thin dark separator between channel tracks.
+    // Paint the gap rows in the axis background colour so the channel tracks
+    // are separated by a dark band matching the left axis.
     if (rows.size() > 1)
     {
         for (size_t r = 1; r < rows.size(); ++r)
         {
-            const int gy = rows[r].getY() - 2;
-            for (int y = 0; y < 2 && gy + y >= 0 && gy + y < h; ++y)
+            const int y0 = rows[r - 1].getBottom();
+            const int y1 = std::min (h, rows[r].getY());
+            for (int y = y0; y < y1; ++y)
             {
-                uint8_t* row = static_cast<uint8_t*> (bd.data) + (size_t) (gy + y) * bd.lineStride;
+                uint8_t* row = static_cast<uint8_t*> (bd.data) + (size_t) y * bd.lineStride;
                 for (int x = 0; x < w; ++x)
-                    ((juce::PixelARGB*) row)[x] = juce::PixelARGB (255, 24, 24, 28);
+                    ((juce::PixelARGB*) row)[x] = juce::PixelARGB (255, 32, 32, 36);
             }
         }
     }

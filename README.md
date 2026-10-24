@@ -20,7 +20,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 - **Waveform view**: mipmap pyramid overview, own time window + horizontal zoom,
   own vertical amplitude axis with dB gridlines and its own vertical zoom level,
   selection with optional zero-crossing snapping, persistent playhead (click to
-  move it), loop playback. When zoomed in to ~4 samples per pixel or fewer the
+  move it), loop playback. When several channels are displayed each gets its
+  own row separated by a thin dark gap, and every row shows its channel label
+  ("L"/"R" for stereo, numbers otherwise) — even when only one channel is
+  visible. When zoomed in to ~4 samples per pixel or fewer the
   view switches from min/max envelope columns to a **per-sample polyline** —
   every individual sample is drawn as a connected line, so at high zoom you see
   the actual sample values (flat tops and vertical jumps on square waves,
@@ -49,9 +52,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     configurable min/max frequency, "Reset Freq" button, own vertical zoom via
     wheel over the left frequency ruler.
   - Per-channel rows: when several channels are displayed each gets its own row
-    with **its own frequency axis** on the left; thin dark gaps separate the
-    rows. Channel labels ("L"/"R" for stereo, channel numbers otherwise) are
-    drawn in the left axis area of every row.
+    with **its own frequency axis** on the left; a 5 px dark gap separates the
+    rows (the same shared layout as the waveform view). Channel labels
+    ("L"/"R" for stereo, channel numbers otherwise) are drawn in the left axis
+    area of every row — even when only one channel is visible.
   - The waveform's dB amplitude axis is symmetric: negative dB values are shown
     on both sides of the centre line.
   - Bilinear smoothing between tiles/frames/bins — no blockiness.
@@ -296,7 +300,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   **Paste Mix** (Ctrl+Shift+V) adds the clipboard to the audio at the selection
   start instead of replacing it — the overlap region is summed in place, and if
   the clipboard extends past end-of-file the remainder is appended. Both are
-  single undoable edits.
+  single undoable edits. **Paste to New Channel(s)** (Edit menu) appends one new
+  file channel per clipboard channel and writes each into it at the selection
+  start (or playhead): the existing channels stay byte-for-byte identical, the
+  file length is unchanged (a paste running past end-of-file is truncated),
+  the added channels become visible, and the whole operation is a single
+  undoable edit.
 - **Large-file loading**: files bigger than ~200 MB are opened on a background
   thread with a modal progress dialog showing an animated bar (read + mipmap
   rebuild progress); smaller files load synchronously as before. The UI stays
@@ -364,9 +373,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   a single Ctrl+Z brings back both the samples and every marker, selection and
   snapshot exactly as before.
 - **Resample**: Effects → Resample… converts the whole file to any sample rate
-  using SoXR's very-high-quality (`SOXR_VHQ`) resampler. Whole-file operation,
-  requires the file fully in memory, not undoable (the old data is discarded);
-  the footer shows the current sample rate.
+  using SoXR's very-high-quality (`SOXR_VHQ`) resampler — and can change the
+  channel count in the same operation. The dialog has a *new channels* field
+  (1–512) plus a remix weight grid: one row per output channel, one column per
+  input channel; each row is normalised to sum to 1 (empty cells are 0), so
+  `{2, 1}` means "two-thirds of L + one-third of R". When the count changes,
+  the default weights mix every input equally into each output. Whole-file
+  operation, requires the file fully in memory, not undoable (the old data is
+  discarded); the footer shows the current sample rate and channel count.
 - **AI features** (built by default; see [AI features](#ai-features) below):
   - *Noise Suppression* — Effects → Noise Suppression… applies a neural
     speech-enhancement model (DeepFilterNet 2/3 or DenseUNet) to the current
@@ -730,6 +744,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | New file (empty document, choose channels + rate) | Ctrl+Shift+N |
 | Cut / Copy / Paste | Ctrl+X / Ctrl+C / Ctrl+V |
 | Paste Mix (add the clipboard at the selection start instead of replacing; appends past end-of-file if it extends that far) | Ctrl+Shift+V |
+| Paste to New Channel(s) (appends one new channel per clipboard channel; existing channels untouched, length unchanged) | Edit menu |
 | Select all | Ctrl+A |
 | Delete time selection (or **zero the spectral selection** when one is active) | Del / Backspace |
 | Play / Pause toggle | Space |
@@ -954,7 +969,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~1800 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~1850 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1010,6 +1025,20 @@ by a single mutex (short critical sections, no lock held during FFT work).
   - **Effect channel scoping**: stereo ramp/DC fixture; silence/normalize/reverse
     restricted to one visible channel leave the other bit-exact and undo
     restores everything.
+  - **Resample remixing**: same-rate downmix (equal-and-opposite channels
+    average to silence), weight rows normalised by their sum (`{2,1}` →
+    two-thirds/one-third), zero-sum rows produce silence while identity rows
+    pass through, and a rate change plus downmix in one call keeps the tone's
+    Goertzel amplitude exact; invalid weight shapes are rejected.
+  - **Paste to New Channel(s)**: existing channels stay byte-for-byte identical
+    with unchanged length, the clipboard lands in the new channels at the
+    selection start (truncated when it runs past end-of-file), added channels
+    become visible, and undo/redo restores the old channel count and content;
+    an empty clipboard is a no-op.
+  - **Channel row geometry**: one row per visible channel with exactly a 5 px
+    gap between rows, the last row absorbing any rounding remainder so rows plus
+    gaps fill the area; the spectral view's row layout matches the waveform
+    view's.
   - **Multi-file support**: two files open at once — per-file playhead/
     selection restoration on switch, Ctrl+Tab cycling (with wrap-around),
     independent marker lists and undo histories per file, closing a non-active

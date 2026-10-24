@@ -113,6 +113,13 @@ public:
         Recorded as one undoable patch. */
     bool pasteMixAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
                      std::string* errOut = nullptr);
+    /** Appends clip.getNumChannels() brand-new channels to the file and
+        pastes the clipboard into them at samplePos; the rest of each new
+        channel is silence. Existing channels are untouched except for the
+        insertion shift. Recorded as one undoable patch that also restores
+        the old channel count on undo. */
+    bool pasteToNewChannelsAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
+                               std::string* errOut = nullptr);
     bool deleteSamples (juce::Range<int64_t> samples, std::string* errOut = nullptr);
     bool silenceSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr,
                          std::string* errOut = nullptr);
@@ -133,13 +140,18 @@ public:
     // Resample the whole file to a new sample rate using SoXR (the same
     // engine Audacity uses). Streaming files are materialised into memory
     // first (see ensureEditable).
+    // remixWeights optionally changes the channel count at the same time:
+    // weights[outCh][inCh] gives each input channel's contribution to each
+    // output channel (rows are normalised by their sum; a zero row is
+    // silence). nullptr keeps the current channels.
     // NOT undoable; clears the clipboard and mipmap pyramid (the caller is
     // expected to rebuild mipmaps on its worker thread afterwards).
     // If cancel points at an atomic set to true, resampling stops at a chunk
     // boundary and false is returned with the engine state unchanged.
     bool resampleTo (double newRate, std::function<void(float)> onProgress = nullptr,
                      const std::atomic<bool>* cancel = nullptr,
-                     std::string* errOut = nullptr);
+                     std::string* errOut = nullptr,
+                     const std::vector<std::vector<double>>* remixWeights = nullptr);
 
     // Apply an undo/redo patch to the in-memory buffer
     // rebuild = false is used by batched undo/redo jumps so the mipmap
@@ -242,7 +254,7 @@ private:
 
     // friends: static edit helpers in AudioEngine.cpp
     friend void recordReplace (AudioEngine&, const juce::Range<int64_t>&,
-                               const std::vector<std::vector<float>>&, const juce::String&);
+                               const std::vector<std::vector<float>>&, const juce::String&, int);
     friend void applyPerSample (AudioEngine&, juce::Range<int64_t>,
                                 std::function<float (float, int, int)>, const std::vector<int>*,
                                 const juce::String&);

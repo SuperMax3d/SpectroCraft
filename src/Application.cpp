@@ -900,6 +900,24 @@ bool Application::pasteMix(std::string* errOut)
     return true;
 }
 
+bool Application::pasteToNewChannels(std::string* errOut)
+{
+    if (!canPaste()) return true;   // nothing to paste - not an error
+    const double t = !selection.isEmpty() ? selection.getStart() : playhead;
+    const int oldN = audioEngine().numChannels();
+    if (!audioEngine().pasteToNewChannelsAt ((int64_t) (t * audioEngine().sampleRate()),
+                                             *clipboard, errOut))
+        return false;
+    // Make the freshly added channels visible (leave other choices alone).
+    const int n = audioEngine().numChannels();
+    for (int ch = oldN; ch < n; ++ch)
+        if (!isChannelVisible (ch))
+            visibleChannels.push_back (ch);
+    std::sort (visibleChannels.begin(), visibleChannels.end());
+    syncActiveDoc ();
+    return true;
+}
+
 namespace
 {
     // Unique display name for a document without a file path:

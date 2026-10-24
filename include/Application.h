@@ -307,6 +307,11 @@ public:
         paste position instead of inserting it (overlap is summed; a
         clipboard tail past EOF extends the file). */
     bool pasteMix(std::string* errOut = nullptr);
+    /** Pastes the clipboard into brand-new channels appended to the file:
+        the file gains one channel per clipboard channel, each containing
+        that clipboard channel at the selection start (or playhead) and
+        silence elsewhere. Undo restores the old channel count. */
+    bool pasteToNewChannels(std::string* errOut = nullptr);
     bool del(std::string* errOut = nullptr);
     bool silence(std::string* errOut = nullptr);
     bool fadeIn(std::string* errOut = nullptr);

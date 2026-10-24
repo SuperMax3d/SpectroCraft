@@ -132,7 +132,10 @@ public:
     /** "New File" dialog: asks for channel count and sample rate, then calls
         Application::newFile(). */
     void showNewFileDialog();
-    void runResampleAsync (double newRate);   // background resample + progress dialog
+    /** Background resample (+ optional channel remix) with a progress
+        dialog. Empty remixWeights keeps the current channels. */
+    void runResampleAsync (double newRate,
+                           const std::vector<std::vector<double>>& remixWeights);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     /** Builds (but does not run modally) the Noise Suppression dialog. The caller
         owns and must delete it; used by showNoiseSuppressDialog() and tests. */
@@ -179,6 +182,7 @@ public:
         FileNew = 999, FileOpen = 1000, FileClose, FileSave, FileSaveAs, FileExportSpectral, FileQuit,
         EditUndo = 2000, EditRedo, EditCut, EditCopy, EditPaste, EditDelete,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,
+        EditPasteToNewChannels,
         ViewZoomIn = 3000, ViewZoomOut, ViewZoomFit, ViewZoomToSelection, ViewZoomOutFull,
         ViewVerticalZoomIn,
         ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels,

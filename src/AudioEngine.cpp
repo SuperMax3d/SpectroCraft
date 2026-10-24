@@ -590,14 +590,23 @@ void AudioEngine::clearMipmaps() { mips.clear(); baseFactor = 1; }
 // NOTE: newData is taken by const reference and copied into the patch — callers
 // may still need it afterwards. oldData is read from the buffer at call time,
 // so this must be called BEFORE the region is modified in place.
+// newChans (when != 0) records a channel-count change alongside the edit;
+// newData then has one row per NEW channel and applyPatch handles both
+// directions of the count change.
 void recordReplace (AudioEngine& eng, const juce::Range<int64_t>& region,
                            const std::vector<std::vector<float>>& newData,
-                           const juce::String& description)
+                           const juce::String& description,
+                           int newChans = 0)
 {
     Patch p;
     p.oldStart = region.getStart();
     p.oldEnd = region.getEnd();
     p.description = description;
+    if (newChans > 0 && newChans != eng.numChannels())
+    {
+        p.oldChans = eng.numChannels();
+        p.newChans = newChans;
+    }
     p.oldData.resize (eng.numChannels());
     for (int ch = 0; ch < eng.numChannels(); ++ch)
     {
@@ -765,6 +774,50 @@ bool AudioEngine::pasteMixAt (int64_t samplePos, const juce::AudioBuffer<float>&
     buffer = std::move (nb);
     totalSamples = newTotal;
     durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+    rebuildMipmaps();
+    return true;
+}
+
+// Pastes the clipboard into brand-new channels appended after the existing
+// ones: the file keeps its length, every existing channel stays byte-for-byte
+// identical, and each added channel is silence except for the pasted clip at
+// samplePos (truncated if it would run past the end of the file).
+bool AudioEngine::pasteToNewChannelsAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
+                                        std::string* errOut)
+{
+    if (!ensureEditable (errOut))
+        return false;
+    if (clip.getNumSamples() <= 0)
+        return failErr (errOut, "Nothing in the clipboard to paste.");
+    const int addChans = clip.getNumChannels();
+    samplePos = std::clamp<int64_t> (samplePos, (int64_t) 0, totalSamples);
+    if (samplePos >= totalSamples)
+        return failErr (errOut, "No room in the file for the paste.");
+    const int64_t usable = std::min<int64_t> (clip.getNumSamples(), totalSamples - samplePos);
+
+    // Whole-file replacement patch that also carries the channel-count change:
+    // existing channels are copied through unchanged; the added channels are
+    // silence except for the pasted clipboard data.
+    std::vector<std::vector<float>> newData ((size_t) (nchans + addChans),
+                                             std::vector<float> ((size_t) totalSamples, 0.0f));
+    for (int ch = 0; ch < nchans; ++ch)
+        std::copy (buffer->getReadPointer (ch), buffer->getReadPointer (ch) + totalSamples,
+                   newData[(size_t) ch].data());
+    for (int ch = 0; ch < addChans; ++ch)
+        std::copy (clip.getReadPointer (ch), clip.getReadPointer (ch) + usable,
+                   newData[(size_t) (nchans + ch)].data() + samplePos);
+
+    recordReplace (*this, { 0, totalSamples }, newData, "Pasted to new channel(s)",
+                  nchans + addChans);
+
+    // Apply the forward patch manually: a whole-file replacement is just a swap.
+    auto nb = std::make_unique<juce::AudioBuffer<float>> (nchans + addChans, (int) totalSamples);
+    for (int ch = 0; ch < nchans + addChans; ++ch)
+        std::copy (newData[(size_t) ch].data(), newData[(size_t) ch].data() + totalSamples,
+                   nb->getWritePointer (ch));
+    buffer = std::move (nb);
+    nchans += addChans;
     unsaved = true;
     rebuildMipmaps();
     return true;
@@ -1051,7 +1104,8 @@ bool AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vecto
 }
 
 bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgress,
-                              const std::atomic<bool>* cancel, std::string* errOut)
+                              const std::atomic<bool>* cancel, std::string* errOut,
+                              const std::vector<std::vector<double>>* remixWeights)
 {
     if (!hasFile)
         return failErr (errOut, "No audio loaded.");
@@ -1062,8 +1116,10 @@ bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgr
         return false;
     if (!std::isfinite (newRate) || newRate <= 0.0)
         return false;
-    if (std::abs (newRate - rate) < 1e-9 * std::max (rate, newRate))
-        return true; // already at that rate
+    const bool doRemix = (remixWeights != nullptr && !remixWeights->empty());
+    if (!doRemix
+        && std::abs (newRate - rate) < 1e-9 * std::max (rate, newRate))
+        return true; // already at that rate and no channel change requested
 
     // Stop playback and wait for any in-flight audio block to finish reading
     // the buffer before we swap the pointer out from under it.
@@ -1079,8 +1135,17 @@ bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgr
     juce::AudioBuffer<float> out;
     // On cancellation the resampler returns false before any buffer swap,
     // so the engine state is left exactly as it was.
-    if (!sc::Resampler::resample (*buffer, rate, newRate, out, onProgress, cancel))
-        return false;
+    if (doRemix)
+    {
+        if (!sc::Resampler::resampleAndRemix (*buffer, rate, newRate, *remixWeights,
+                                              out, onProgress, cancel))
+            return false;
+    }
+    else
+    {
+        if (!sc::Resampler::resample (*buffer, rate, newRate, out, onProgress, cancel))
+            return false;
+    }
 
     // Swap in the resampled buffer. The audio thread is idle (playing==false
     // and no block in flight), so this cannot race with playback reads.
@@ -1088,6 +1153,7 @@ bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgr
     buffer = std::make_unique<juce::AudioBuffer<float>> (std::move (out));
 
     rate = newRate;
+    nchans = buffer->getNumChannels();   // unchanged unless a remix was applied
     // Engine convention: totalSamples is frames PER CHANNEL (matches
     // juce::AudioFormatReader::lengthInSamples used in loadFile()).
     totalSamples = buffer->getNumSamples();
@@ -1113,36 +1179,64 @@ bool AudioEngine::applyPatch (const Patch& p, bool forward, bool rebuild)
     const int64_t oldLen = p.oldEnd - p.oldStart;
     const int64_t newLen = p.newData.empty() ? 0 : (int64_t) p.newData[0].size();
 
+    // Patches that change the channel count carry it explicitly; ordinary
+    // patches keep the engine's current count.
     if (forward)
     {
+        const int targetChans = (p.newChans > 0) ? p.newChans : nchans;
         const int64_t newTotal = totalSamples + p.lengthDelta;
-        auto nb = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) newTotal);
-        for (int ch = 0; ch < nchans; ++ch)
+        auto nb = std::make_unique<juce::AudioBuffer<float>> (targetChans, (int) newTotal);
+        for (int ch = 0; ch < targetChans; ++ch)
         {
-            nb->copyFrom (ch, 0, *buffer, ch, 0, (int) p.oldStart);
-            if (ch < (int) p.newData.size() && newLen > 0)
-                nb->copyFrom (ch, (int) p.oldStart, p.newData[ch].data(), (int) newLen);
-            nb->copyFrom (ch, (int) (p.oldStart + newLen), *buffer, ch, (int) p.oldEnd,
-                          (int) (totalSamples - p.oldEnd));
+            if (ch < nchans)
+            {
+                // Channel exists in the current buffer: splice around it.
+                nb->copyFrom (ch, 0, *buffer, ch, 0, (int) p.oldStart);
+                if (ch < (int) p.newData.size() && newLen > 0)
+                    nb->copyFrom (ch, (int) p.oldStart, p.newData[ch].data(), (int) newLen);
+                nb->copyFrom (ch, (int) (p.oldStart + newLen), *buffer, ch, (int) p.oldEnd,
+                              (int) (totalSamples - p.oldEnd));
+            }
+            else
+            {
+                // Channel did not exist before: silence everywhere except the
+                // inserted region.
+                if (ch < (int) p.newData.size() && newLen > 0)
+                    nb->copyFrom (ch, (int) p.oldStart, p.newData[ch].data(), (int) newLen);
+            }
         }
         buffer = std::move (nb);
+        nchans = targetChans;
         totalSamples = newTotal;
     }
     else
     {
         // Inverse: region in current buffer is [oldStart, oldEnd + lengthDelta)
+        const int targetChans = (p.oldChans > 0) ? p.oldChans : nchans;
         const int64_t curEnd = p.oldEnd + p.lengthDelta;
         const int64_t newTotal = totalSamples - p.lengthDelta;
-        auto nb = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) newTotal);
-        for (int ch = 0; ch < nchans; ++ch)
+        auto nb = std::make_unique<juce::AudioBuffer<float>> (targetChans, (int) newTotal);
+        for (int ch = 0; ch < targetChans; ++ch)
         {
-            nb->copyFrom (ch, 0, *buffer, ch, 0, (int) p.oldStart);
-            if (ch < (int) p.oldData.size() && oldLen > 0)
-                nb->copyFrom (ch, (int) p.oldStart, p.oldData[ch].data(), (int) oldLen);
-            nb->copyFrom (ch, (int) (p.oldStart + oldLen), *buffer, ch, (int) curEnd,
-                          (int) (totalSamples - curEnd));
+            if (ch < nchans)
+            {
+                // Channel exists in the current buffer: splice around it.
+                nb->copyFrom (ch, 0, *buffer, ch, 0, (int) p.oldStart);
+                if (ch < (int) p.oldData.size() && oldLen > 0)
+                    nb->copyFrom (ch, (int) p.oldStart, p.oldData[ch].data(), (int) oldLen);
+                nb->copyFrom (ch, (int) (p.oldStart + oldLen), *buffer, ch, (int) curEnd,
+                              (int) (totalSamples - curEnd));
+            }
+            else
+            {
+                // Channel did not exist before the edit: silence everywhere
+                // except where the inverse patch restores data.
+                if (ch < (int) p.oldData.size() && oldLen > 0)
+                    nb->copyFrom (ch, (int) p.oldStart, p.oldData[ch].data(), (int) oldLen);
+            }
         }
         buffer = std::move (nb);
+        nchans = targetChans;
         totalSamples = newTotal;
     }
 
