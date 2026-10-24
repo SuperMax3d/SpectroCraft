@@ -160,7 +160,8 @@ public:
     void showTranscribeFolderDialog();   // FileChooser -> options dialog -> async run
     void runBatchTranscribeAsync (const juce::File& folder, const std::string& modelId,
                                   const std::string& language, bool translate,
-                                  bool fast, bool skipExisting, bool autoDownload);
+                                  bool fast, bool skipExisting, int channel,
+                                  bool autoDownload);
 #endif
 
     /** Runs the Python script `script` with exactly this editor text on a

@@ -391,7 +391,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     a custom `SCTT` RIFF chunk, so they travel with the file.
   - *Batch transcription* — Effects → Transcribe Folder… transcribes every
     `.wav` in a folder tree headlessly (files never open in the editor) and
-    writes each file's `SCTT` chunk back in place; optional skip-existing mode.
+    writes each file's `SCTT` chunk back in place; choose which channel to
+    analyse (default: channel 1, enter 0 or less to mix all channels),
+    optional skip-existing mode.
 - **Cancelling long operations**: every progress dialog — loading large files,
   resampling, noise suppression, transcription (single and batch), spectrogram
   export — has a Cancel button, and ESC works as well. The operation stops at
@@ -612,8 +614,10 @@ for your microarchitecture at load time.
   *Balanced* uses beam search; *Fast* uses greedy decoding (~1.4× quicker,
   slightly lower accuracy on difficult audio). Segments are
   shown in the **Transcription** tab: double-click a row to jump + select its
-  range; press Ctrl+F (or right-click > Find) to search, then F3 / Ctrl+F3 to
-  cycle through matches.
+  range and pan/zoom both views until the whole selection is visible with ~10%
+  breathing room on each side (same behaviour as marker and stored-selection
+  double-clicks); press Ctrl+F (or right-click > Find) to search, then F3 /
+  Ctrl+F3 to cycle through matches.
   Results are embedded in the WAV as a custom top-level `SCTT` RIFF chunk
   (UTF-8 JSON, times in seconds) — written on save, parsed on load, never shown
   in the Markers panel. *Clear* removes them from the document without touching
@@ -624,16 +628,19 @@ for your microarchitecture at load time.
   are preserved byte-for-byte). The progress dialog has a Cancel button that
   stops after the current file; a summary lists done/skipped/failed per run.
   *Skip files with SCTT* re-runs only transcribe files without an existing
-  transcription.
+  transcription. The **Channel to analyse** field takes a 1-based channel
+  number (default: 1); enter `0` or less to mix all channels together before
+  transcribing. A file whose channel count is below the requested number fails
+  that file only, with the reason listed in the summary.
 - **Device selection** — the noise-suppression dialog offers a *Device*
   dropdown: *Auto* (default) picks GPU over NPU over CPU when the OpenVINO
   runtime exposes it, otherwise CPU; picking *CPU*, *GPU* or *NPU* explicitly
   overrides that. A device that is not available falls back to CPU and the
   progress dialog says so. The choice persists between sessions. Transcription
   has no device option: whisper.cpp's prebuilt runtime is CPU-only.
-- **Model preferences persist** between sessions (last model, language, mode
-  and the auto-download toggle) in the same `SpectroCraft.recent` store as the
-  recent-files list. With *auto-download off*, missing models are never
+- **Model preferences persist** between sessions (last model, language, mode,
+  batch channel and the auto-download toggle) in the same `SpectroCraft.recent`
+  store as the recent-files list. With *auto-download off*, missing models are never
   fetched; the failure dialog then shows exactly where to put them manually.
 
 ### Model sources & licenses
@@ -721,8 +728,15 @@ SpectroCraft.exe --test-transcribe <in.wav> [modelId] [language]
                                            :: headless Whisper transcription,
                                               prints the segments
 SpectroCraft.exe --test-batch-transcribe <folder> [modelId] [language]
+      [skipExisting 0|1] [fast 0|1] [--translate] [--channel N]
+      [--no-auto-download]
                                            :: transcribes every .wav in a folder
-                                              tree and writes each SCTT chunk
+                                              tree and writes each SCTT chunk.
+                                              Defaults: whisper-base, auto
+                                              language, overwrite existing,
+                                              balanced speed, channel 1 (a
+                                              value of 0 or less mixes all
+                                              channels together)
 SpectroCraft.exe --test-ns-failure-alert <in.wav> [modelId] ["fake error"]
                                            :: shows the AI failure dialog (with a
                                               copyable details box)
@@ -969,7 +983,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~1850 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~1900 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.

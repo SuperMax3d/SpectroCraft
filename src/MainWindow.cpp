@@ -3126,7 +3126,9 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
                                      "Every .wav file in this folder (including subfolders)\n"
                                      "will be transcribed by Whisper and its SCTT chunk\n"
                                      "updated in place. The files are NOT opened in the editor.\n"
-                                     "Transcription runs on CPU (whisper.cpp b5454 prebuilt runtime).\n\n"
+                                     "Transcription runs on CPU (whisper.cpp b5454 prebuilt runtime).\n"
+                                     "Channel to analyse: a 1-based channel number; enter 0 or\n"
+                                     "less to mix all channels together before transcribing.\n\n"
                                      + folder.getFullPathName (),
                                      juce::AlertWindow::QuestionIcon, this);
 
@@ -3141,6 +3143,9 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
     w->addComboBox ("existing",
                     juce::StringArray { "Overwrite existing SCTT", "Skip files with SCTT" },
                     "Existing transcriptions");
+
+    w->addTextEditor ("channel", juce::String (app.lastTranscribeChannel),
+                      "Channel to analyse");
 
     // Preselect the persisted choices (defaults when never set).
     if (auto* c = w->getComboBoxComponent ("model"))
@@ -3195,10 +3200,25 @@ void MainWindow::showTranscribeFolderDialog()
                                         && w->getComboBoxComponent ("speed")->getText ().startsWith ("Fast");
     const bool skipExisting        = w->getComboBoxComponent ("existing") != nullptr
                                         && w->getComboBoxComponent ("existing")->getText ().startsWith ("Skip");
+    const juce::String channelText = w->getTextEditorContents ("channel");
     const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
                                        || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
     delete w;
     if (result != 1) return;
+
+    int channel = app.lastTranscribeChannel;
+    if (!Application::parseChannelText (channelText, channel))
+    {
+        juce::AlertWindow bad ("Invalid channel",
+                               "The channel to analyse must be a whole number\n"
+                               "(1-based; 0 or less mixes all channels).\n\n"
+                               + channelText,
+                               juce::AlertWindow::WarningIcon);
+        bad.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        bad.enterModalState (false);
+        bad.runModalLoop ();
+        return;
+    }
 
     // Map the display texts back to registry ids / language codes.
     const auto names = whisperModelNames ();
@@ -3215,11 +3235,12 @@ void MainWindow::showTranscribeFolderDialog()
     app.lastTranscribeLanguage  = language;
     app.lastTranscribeTranslate = translate;
     app.lastTranscribeFast      = fast;
+    app.lastTranscribeChannel   = channel;
     app.aiAutoDownload          = autoDownload;
     app.saveAiSettings ();
 
     runBatchTranscribeAsync (folder, modelId, language, translate, fast, skipExisting,
-                             autoDownload);
+                             channel, autoDownload);
 }
 
 // Batch transcription on a background thread with a cancellable progress
@@ -3227,7 +3248,8 @@ void MainWindow::showTranscribeFolderDialog()
 void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
                                           const std::string& modelId,
                                           const std::string& language, bool translate,
-                                          bool fast, bool skipExisting, bool autoDownload)
+                                          bool fast, bool skipExisting, int channel,
+                                          bool autoDownload)
 {
     auto* dlg = new WorkProgressDialog ("Transcription",
                                         "Scanning " + folder.getFileName ()
@@ -3236,7 +3258,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
     dlg->beginModal ();
 
     std::thread ([this, folder, modelId, language, translate, fast, skipExisting,
-                  autoDownload, dlg] {
+                  channel, autoDownload, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v < 0.0) v = 0.0;
@@ -3254,7 +3276,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
         BatchTranscribeSummary summary;
         std::string err;
         const bool ok = app.batchTranscribeFolder (
-            folder, modelId, language, translate, fast, skipExisting,
+            folder, modelId, language, translate, fast, skipExisting, channel,
             [&sendProgress] (float f) { sendProgress ((double) f); return true; },
             [dlg] (const juce::String& name) {
                 juce::MessageManager::callAsync ([dlg, name] {

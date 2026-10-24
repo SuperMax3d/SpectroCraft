@@ -8,9 +8,12 @@
  *   --test-transcribe <in.wav> [modelId] [language] [fast 0|1]   (AI builds only)
  *       modelId: whisper-base (default) | whisper-small | ... ; language: auto|en|...
  *   --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]
+ *       [fast 0|1] [--translate] [--channel N] [--no-auto-download]
  *       (AI builds only)
  *       Transcribes every .wav in the folder tree headlessly and writes each
- *       file's SCTT chunk back in place.
+ *       file's SCTT chunk back in place. Defaults: whisper-base, auto
+ *       language, overwrite existing, balanced speed, channel 1 (a value of
+ *       0 or less mixes all channels together).
  *   --list-ai-devices                        (AI builds only)
  *       Prints the OpenVINO devices available on this machine.
  *   --generate-test-files [dir]
@@ -380,28 +383,68 @@ public:
             {
                 // Batch-transcribes every .wav in a folder tree headlessly and
                 // writes the SCTT chunk back into each file. Usage:
-                //   --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1] [fast 0|1]
+                //   --test-batch-transcribe <folder> [modelId] [language]
+                //       [skipExisting 0|1] [fast 0|1] [--translate]
+                //       [--channel N] [--no-auto-download]
                 if (i + 1 >= args.size())
                 {
-                    std::cout << "usage: --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1] [fast 0|1]\n";
+                    std::cout << "usage: --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1] [fast 0|1] [--translate] [--channel N] [--no-auto-download]\n";
                     quit();
                     return;
                 }
                 const juce::File folder = resolvePath (args[++i]);
                 std::string modelId  = "whisper-base";
                 std::string language = "auto";
-                bool skipExisting = false, fast = false;
-                if (i + 1 < args.size()) modelId      = args[++i].toStdString ();
-                if (i + 1 < args.size()) language     = args[++i].toStdString ();
-                if (i + 1 < args.size() && args[i + 1] == "1") { skipExisting = true; ++i; }
-                if (i + 1 < args.size() && args[i + 1] == "1") { fast = true; ++i; }
+                bool skipExisting = false, fast = false, translate = false;
+                int channel = 1;   // <= 0 mixes all channels together
+                bool autoDownload = true;
+
+                // Positional options (in this order) are consumed until the
+                // first "--flag" appears.
+                int pos = 0;
+                while (i + 1 < args.size() && !args[i + 1].startsWithChar ('-'))
+                {
+                    const juce::String a = args[++i];
+                    if      (pos == 0) modelId      = a.toStdString ();
+                    else if (pos == 1) language     = a.toStdString ();
+                    else if (pos == 2) skipExisting = (a == "1");
+                    else               fast         = (a == "1");
+                    ++pos;
+                }
+
+                // Named flags, in any order.
+                while (i + 1 < args.size())
+                {
+                    const juce::String a = args[++i];
+                    if (a == "--translate")
+                        translate = true;
+                    else if (a == "--no-auto-download")
+                        autoDownload = false;
+                    else if (a == "--channel" && i + 1 < args.size())
+                    {
+                        const juce::String v = args[++i];
+                        if (!Application::parseChannelText (v, channel))
+                        {
+                            std::cout << "invalid --channel value: "
+                                      << v.toStdString () << "\n";
+                            quit();
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        std::cout << "unknown option: " << a.toStdString () << "\n";
+                        quit();
+                        return;
+                    }
+                }
 
                 Application app;   // no GUI needed for the batch run
                 BatchTranscribeSummary sum;
                 std::string err;
                 const bool ok = app.batchTranscribeFolder (
-                    folder, modelId, language, /*translate=*/false,
-                    fast, skipExisting,
+                    folder, modelId, language, translate,
+                    fast, skipExisting, channel,
                     [] (float f) {
                         static int lastPct = -1;
                         const int pct = (int) (f * 100.0);
@@ -417,7 +460,7 @@ public:
                         std::cout << "  transcribing " << name.toStdString () << "\n";
                         std::flush (std::cout);
                     },
-                    nullptr, &sum, &err);
+                    nullptr, &sum, &err, autoDownload);
                 if (!ok)
                 {
                     std::cout << "batch transcription failed: " << err << "\n";

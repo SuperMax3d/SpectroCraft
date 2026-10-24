@@ -8759,6 +8759,45 @@ static void testWhisperPipeline()
 
 // Phase 4: batch folder transcription — headless WAV scan, SCTT written back
 // in place, skip-existing mode. Real inference with the cached whisper-base.
+// ---------------- Batch transcription option parsing -----------------------
+// The channel option is shared by the GUI dialog and the CLI:
+// parseChannelText validates the user's text, pickBatchChannels maps it to
+// engine channel indices (<= 0 mixes every channel together).
+static void testBatchTranscribeOptions()
+{
+    int v = -12345;
+    CHECK (!Application::parseChannelText ("", v), "empty channel text rejected");
+    CHECK (!Application::parseChannelText ("   ", v), "blank channel text rejected");
+    CHECK (!Application::parseChannelText ("abc", v), "non-numeric text rejected");
+    CHECK (!Application::parseChannelText ("1.5", v), "decimal text rejected");
+    CHECK (!Application::parseChannelText ("-", v), "lone sign rejected");
+    CHECK (!Application::parseChannelText ("99999999999", v), "too many digits rejected");
+    CHECK (Application::parseChannelText ("0", v) && v == 0, "zero accepted (mix all)");
+    CHECK (Application::parseChannelText ("-2", v) && v == -2, "negative accepted (mix all)");
+    CHECK (Application::parseChannelText ("+3", v) && v == 3, "+ sign accepted");
+    CHECK (Application::parseChannelText (" 7 ", v) && v == 7, "surrounding spaces trimmed");
+
+    std::vector<int> chans;
+    std::string err;
+    CHECK (Application::pickBatchChannels (2, 1, chans, err)
+          && chans.size () == 1 && chans[0] == 0,
+           "channel 1 -> engine index 0");
+    CHECK (Application::pickBatchChannels (4, 3, chans, err)
+          && chans.size () == 1 && chans[0] == 2,
+           "channel 3 -> engine index 2");
+    CHECK (Application::pickBatchChannels (3, 0, chans, err) && chans.size () == 3
+          && chans[0] == 0 && chans[1] == 1 && chans[2] == 2,
+           "channel 0 -> mix all channels");
+    CHECK (Application::pickBatchChannels (3, -5, chans, err) && chans.size () == 3,
+           "negative channel -> mix all channels");
+    CHECK (!Application::pickBatchChannels (2, 3, chans, err),
+           "channel beyond the file's count rejected");
+    CHECK (!err.empty () && err.find ("out of range") != std::string::npos,
+           "out-of-range error message");
+    CHECK (!Application::pickBatchChannels (0, 1, chans, err),
+           "zero-channel file rejected");
+}
+
 static void testBatchTranscribe()
 {
     auto& mm = sc::ai::ModelManager::instance ();
@@ -8806,6 +8845,7 @@ static void testBatchTranscribe()
     BatchTranscribeSummary sum;
     const bool ok = app.batchTranscribeFolder (folder, "whisper-base", "en", false,
                                                /*fast=*/false, /*skipExisting=*/false,
+                                               /*channel=*/1,
                                                nullptr, nullptr, nullptr, &sum, &err);
     CHECK (ok, juce::String ("batch transcribe ran: ") + err);
     if (ok)
@@ -8822,11 +8862,43 @@ static void testBatchTranscribe()
         BatchTranscribeSummary sum2;
         const bool ok2 = app.batchTranscribeFolder (folder, "whisper-base", "en", false,
                                                     /*fast=*/false, /*skipExisting=*/true,
+                                                    /*channel=*/1,
                                                     nullptr, nullptr, nullptr, &sum2, &err);
         CHECK (ok2, juce::String ("batch skip run: ") + err);
         if (ok2)
             CHECK (sum2.skipped == 2 && sum2.done == 0 && sum2.failed == 0,
                   "skip-existing honoured");
+
+        // Channel option: a stereo file analysed on its second channel only.
+        const juce::File chFolder = folder.getChildFile ("ch");
+        chFolder.createDirectory ();
+        const juce::File wavC = chFolder.getChildFile ("tone_c.wav");
+        CHECK (writeWav (wavC, 2, 16000.0, 24000,
+            [] (int ch, int64_t i, double rate) {
+                return 0.2f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                               * (ch == 0 ? 440.0 : 880.0)
+                                               * (double) i / rate);
+            }), "stereo wav written for the channel test");
+
+        BatchTranscribeSummary sum3;
+        const bool ok3 = app.batchTranscribeFolder (chFolder, "whisper-base", "en", false,
+                                                    /*fast=*/false, /*skipExisting=*/false,
+                                                    /*channel=*/2,
+                                                    nullptr, nullptr, nullptr, &sum3, &err);
+        CHECK (ok3 && sum3.done == 1 && sum3.failed == 0,
+              juce::String ("single-channel batch ran: ") + err);
+
+        // An out-of-range channel fails that file only.
+        BatchTranscribeSummary sum4;
+        const bool ok4 = app.batchTranscribeFolder (chFolder, "whisper-base", "en", false,
+                                                    /*fast=*/false, /*skipExisting=*/false,
+                                                    /*channel=*/99,
+                                                    nullptr, nullptr, nullptr, &sum4, &err);
+        CHECK (ok4 && sum4.failed == 1 && sum4.done == 0,
+              "out-of-range channel fails the file");
+        CHECK (!sum4.failures.empty ()
+              && juce::String (sum4.failures[0]).contains ("out of range"),
+              "failure message names the problem");
     }
 
     // Clean up the temp tree.
@@ -8886,6 +8958,52 @@ static void testTranscriptionPanelLayout()
 
     wav.deleteFile ();
 }
+
+// ---------------- Transcription double-click zooms the views ---------------
+static void testTranscriptionDoubleClickZoom()
+{
+    const juce::File wav = makeTempFile ("tr_dclick_zoom.wav");
+    writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for transcription zoom test");
+
+    auto* d = app.doc ();
+    d->sctt.segments.push_back ({ 2.0, 3.5, std::string ("hello") });
+
+    TranscriptionPanel panel (app);
+    panel.setSize (300, 420);
+
+    int calls = 0; double lastT0 = -1.0, lastT1 = -1.0;
+    // Mimic MainWindow::applyTimeWindow: record and update the window.
+    app.onSetTimeWindow = [&] (double a, double b)
+    { ++calls; lastT0 = a; lastT1 = b; app.viewStart = a; app.viewEnd = b; };
+    auto approx = [] (double a, double b) { return std::abs (a - b) <= 1e-9; };
+
+    // Segment [2,3.5]: 10% margin -> [1.85,3.65]. View is [0,2] (W=2),
+    // target width 1.7 < 2 -> pan keeping the span: n0 = t1 - W = 1.65.
+    app.viewStart = 0.0; app.viewEnd = 2.0;
+    calls = 0;
+    panel.activateRow (0);
+    CHECK (calls == 1 && approx (lastT0, 1.65) && approx (lastT1, 3.65),
+           "transcription double-click pans to show the segment with margin");
+
+    // Playhead and selection follow the segment.
+    CHECK (app.playhead == 2.0, "playhead at segment start");
+    CHECK (!app.selection.isEmpty () && app.selection.getStart () == 2.0
+          && app.selection.getEnd () == 3.5,
+           "segment range selected");
+
+    // A second jump to the same row is a no-op: [1.85,3.65] lies inside
+    // the current window [1.65,3.65].
+    calls = 0;
+    panel.activateRow (0);
+    CHECK (calls == 0, "already-visible segment: no window change");
+
+    wav.deleteFile ();
+}
 #endif   // SC_ENABLE_AI
 
 // ---------------- Double-clicking a marker / stored selection shows it ----
@@ -8912,6 +9030,7 @@ static void testEnsureTimeRangeVisible()
         ++calls; lastT0 = a; lastT1 = b;
         app.viewStart = a; app.viewEnd = b;
     };
+    auto approx = [] (double a, double b) { return std::abs (a - b) <= 1e-9; };
 
     // Already fully visible -> no-op.
     app.viewStart = 2.0; app.viewEnd = 8.0;
@@ -8919,25 +9038,28 @@ static void testEnsureTimeRangeVisible()
     app.ensureTimeRangeVisible (3.0, 5.0);
     CHECK (calls == 0, "already-visible range is a no-op");
 
+    // The requested range is first expanded by 10% of its length on each side
+    // (clamped to the file), so every expectation below carries that room.
+
     // Target left of the view, narrower than the span -> pan keeping span.
     app.viewStart = 4.0; app.viewEnd = 9.0;   // W=5
     calls = 0;
-    app.ensureTimeRangeVisible (1.0, 3.0);    // S=2 < 5
-    CHECK (calls == 1 && lastT0 == 1.0 && lastT1 == 6.0,
+    app.ensureTimeRangeVisible (1.0, 3.0);    // [1,3] -> [0.8,3.2], S'=2.4 < 5
+    CHECK (calls == 1 && approx (lastT0, 0.8) && approx (lastT1, 5.8),
            "left target: pan keeping the current span");
 
     // Target right of the view -> pan keeping span.
     app.viewStart = 1.0; app.viewEnd = 6.0;   // W=5
     calls = 0;
-    app.ensureTimeRangeVisible (7.0, 9.0);
-    CHECK (calls == 1 && lastT0 == 4.0 && lastT1 == 9.0,
+    app.ensureTimeRangeVisible (7.0, 9.0);    // [7,9] -> [6.8,9.2]
+    CHECK (calls == 1 && approx (lastT0, 4.2) && approx (lastT1, 9.2),
            "right target: pan keeping the current span");
 
     // Target at least as wide as the view -> zoom to it exactly.
     app.viewStart = 2.0; app.viewEnd = 4.0;   // W=2
     calls = 0;
-    app.ensureTimeRangeVisible (1.0, 8.0);    // S=7 >= 2
-    CHECK (calls == 1 && lastT0 == 1.0 && lastT1 == 8.0,
+    app.ensureTimeRangeVisible (1.0, 8.0);    // [1,8] -> [0.3,8.7], S'=8.4 >= 2
+    CHECK (calls == 1 && approx (lastT0, 0.3) && approx (lastT1, 8.7),
            "wide target: zoom to it exactly");
 
     // Point outside on the left -> pan so it lands at the left edge.
@@ -8947,11 +9069,11 @@ static void testEnsureTimeRangeVisible()
     CHECK (calls == 1 && lastT0 == 0.5 && lastT1 == 5.5,
            "point left of view: pan to the edge");
 
-    // Pan near the end of file: window [7,9], target [9.5,9.9] -> [7.9,9.9].
+    // Pan near the end of file: window [7,9], target [9.5,9.9] -> [9.46,9.94].
     app.viewStart = 7.0; app.viewEnd = 9.0;   // W=2, dur=10
     calls = 0;
     app.ensureTimeRangeVisible (9.5, 9.9);
-    CHECK (calls == 1 && lastT0 == 7.9 && lastT1 == 9.9,
+    CHECK (calls == 1 && approx (lastT0, 7.94) && approx (lastT1, 9.94),
            "pan near the end of file keeps the span");
 
     // Degenerate window wider than the whole file: result clamps to [0, dur].
@@ -8963,19 +9085,20 @@ static void testEnsureTimeRangeVisible()
 
     // --- Marker double-click integration ----------------------------------
     app.markers().addRegionMarker (8.0, 9.0, "far region");
-    app.viewStart = 0.0; app.viewEnd = 3.0;   // W=3, target S=1 < 3 -> [6,9]
+    // W=3, [8,9] -> [7.9,9.1], S'=1.2 < 3 -> n0 = t1 - W = 6.1
+    app.viewStart = 0.0; app.viewEnd = 3.0;
 
     MarkerListPanel mp (app);
     mp.setSize (260, 200);
     calls = 0;
     mp.activateRow (0);
-    CHECK (calls == 1 && lastT0 == 6.0 && lastT1 == 9.0,
+    CHECK (calls == 1 && approx (lastT0, 6.1) && approx (lastT1, 9.1),
            "marker double-click pans to include the marker");
     CHECK (app.selection.getStart() == 8.0 && app.selection.getEnd() == 9.0,
            "marker double-click sets the time selection");
 
     calls = 0;
-    mp.activateRow (0);   // window is now [6,9] and contains [8,9]
+    mp.activateRow (0);   // window is now [6.1,9.1] and contains [7.9,9.1]
     CHECK (calls == 0, "visible marker: no window change");
 
     // --- Stored-selection recall integration ------------------------------
@@ -8986,10 +9109,11 @@ static void testEnsureTimeRangeVisible()
 
     SelectionPanel sp (app);
     sp.setSize (300, 240);
-    app.viewStart = 0.0; app.viewEnd = 3.0;   // W=3, target S=1.5 < 3 -> [3.5,6.5]
+    // W=3, rect [5,6.5] -> [4.85,6.65], S'=1.8 < 3 -> n0 = t1 - W = 3.65
+    app.viewStart = 0.0; app.viewEnd = 3.0;
     calls = 0;
     sp.doRecall (0);
-    CHECK (calls == 1 && lastT0 == 3.5 && lastT1 == 6.5,
+    CHECK (calls == 1 && approx (lastT0, 3.65) && approx (lastT1, 6.65),
            "recall pans to include the stored selection");
     CHECK (!d->spectralSel.empty(), "recall restored the spectral selection");
 
@@ -10868,8 +10992,10 @@ static int scRunUnitTestsImpl()
     progress ("denseunet pipeline");  testDenseUnetPipeline();
     progress ("deepfilter pipeline"); testDeepFilterPipeline();
     progress ("whisper pipeline");    testWhisperPipeline();
+    progress ("batch transcribe options"); testBatchTranscribeOptions();
     progress ("batch transcribe");    testBatchTranscribe();
     progress ("transcription panel layout"); testTranscriptionPanelLayout();
+    progress ("transcription dclick zoom"); testTranscriptionDoubleClickZoom();
 #endif
     progress ("ensure time range visible"); testEnsureTimeRangeVisible();
     progress ("find in panels");            testFindInPanels();

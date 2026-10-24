@@ -78,6 +78,7 @@ Application::Application (const juce::File& recentStorePath)
     lastTranscribeLanguage= recentStore->getValue ("ai_transcribe_lang", lastTranscribeLanguage).toStdString ();
     lastTranscribeTranslate = recentStore->getIntValue ("ai_transcribe_translate", 0) != 0;
     lastTranscribeFast      = recentStore->getIntValue ("ai_transcribe_fast", 0) != 0;
+    lastTranscribeChannel   = recentStore->getIntValue ("ai_transcribe_channel", 1);
     aiDevicePref            = recentStore->getValue ("ai_device", aiDevicePref).toStdString ();
 }
 
@@ -126,6 +127,7 @@ void Application::saveAiSettings ()
     recentStore->setValue ("ai_transcribe_lang", juce::String (lastTranscribeLanguage));
     recentStore->setValue ("ai_transcribe_translate", lastTranscribeTranslate ? 1 : 0);
     recentStore->setValue ("ai_transcribe_fast", lastTranscribeFast ? 1 : 0);
+    recentStore->setValue ("ai_transcribe_channel", lastTranscribeChannel);
     recentStore->setValue ("ai_device", juce::String (aiDevicePref));
     recentStore->save ();
 }
@@ -500,6 +502,17 @@ void Application::ensureTimeRangeVisible (double t0, double t1)
     auto cl = [&] (double v) { return std::clamp (v, 0.0, dur); };
     t0 = cl (t0); t1 = cl (t1);
     if (t1 < t0) std::swap (t0, t1);
+
+    // Give the caller some breathing room: expand by 10% of the range length
+    // on each side, as far as the file allows. Zero-length ranges have no
+    // span to take a percentage of and are left alone.
+    const double span = t1 - t0;
+    if (span > 0.0)
+    {
+        const double m = 0.1 * span;
+        t0 = std::max (0.0, t0 - m);
+        t1 = std::min (dur, t1 + m);
+    }
 
     const double vs = viewStart, ve = viewEnd;
     // Already fully inside the current window? Nothing to do.
@@ -1427,10 +1440,61 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
     return true;
 }
 
+bool Application::parseChannelText (const juce::String& text, int& out)
+{
+    const auto t = text.trim();
+    if (t.isEmpty()) return false;
+
+    bool negative = false;
+    int i = 0;
+    if (t[i] == '+' || t[i] == '-') { negative = (t[i] == '-'); ++i; }
+
+    long long v = 0;
+    for (; i < t.length(); ++i)
+    {
+        const char c = t[i];
+        if (c < '0' || c > '9') return false;
+        // At most 9 digits so the value always fits in an int.
+        v = v * 10 + (long long) (c - '0');
+        if (v > 2000000000LL) return false;
+    }
+
+    out = negative ? -(int) v : (int) v;
+    return i > (t[0] == '+' || t[0] == '-' ? 1 : 0);   // at least one digit
+}
+
+bool Application::pickBatchChannels (int numFileChans, int channel,
+                                     std::vector<int>& outChans, std::string& errOut)
+{
+    outChans.clear ();
+    if (numFileChans <= 0)
+    {
+        errOut = "file has no channels";
+        return false;
+    }
+
+    if (channel <= 0)   // mix every channel together
+    {
+        for (int c = 0; c < numFileChans; ++c)
+            outChans.push_back (c);
+        return true;
+    }
+
+    if (channel > numFileChans)
+    {
+        errOut = "channel " + std::to_string (channel) +
+                 " is out of range (file has " + std::to_string (numFileChans) +")";
+        return false;
+    }
+
+    outChans.push_back (channel - 1);   // user-facing numbers are 1-based
+    return true;
+}
+
 bool Application::batchTranscribeFolder (const juce::File& folder,
                                          const std::string& modelId,
                                          const std::string& language, bool translate,
-                                         bool fast, bool skipExisting,
+                                         bool fast, bool skipExisting, int channel,
                                          std::function<bool(float)> onProgress,
                                          std::function<void(const juce::String&)> onStatus,
                                          std::atomic<bool>* cancelOut,
@@ -1523,10 +1587,15 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
                 continue;
             }
 
-            // Mix ALL channels to mono for the transcription.
-            std::vector<int> chans ((size_t) eng.numChannels());
-            for (int c = 0; c < eng.numChannels (); ++c)
-                chans[(size_t) c] = c;
+            // Reduce the requested channel(s) to mono for the transcription:
+            // a single 1-based channel, or every channel mixed when <= 0.
+            std::vector<int> chans;
+            if (!pickBatchChannels (eng.numChannels (), channel, chans, err))
+            {
+                summary.failed++;
+                summary.failures.push_back (f.getFileName ().toStdString () + ": " + err);
+                continue;
+            }
 
             const bool ok = sc::ai::runWhisperPipeline (eng, chans, ggmlModel, opts,
                                                         data.segments,

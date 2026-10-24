@@ -200,6 +200,7 @@ public:
     std::string lastTranscribeLanguage = "auto";
     bool lastTranscribeTranslate = false;
     bool lastTranscribeFast = false;   // true = greedy decode (fast), false = beam search
+    int lastTranscribeChannel = 1;     // batch transcription channel: 1-based, <=0 mixes all
     std::string aiDevicePref = "auto"; // "auto" | "CPU" | "GPU" | "NPU" - shared by NS + transcription
     void saveAiSettings();
     void removeRecentFile (const juce::File& file);// drop one entry and persist
@@ -347,11 +348,25 @@ public:
                      std::string* errOut = nullptr,
                      bool autoDownload = true);
 
+    // Strict integer text for a batch-transcription channel option: an
+    // optional sign followed by at most 9 digits. "0" and negative values are
+    // valid — they mean "mix all channels".
+    static bool parseChannelText (const juce::String& text, int& out);
+
+    // Picks the channels a batch transcription should analyse for one file:
+    // channel <= 0 mixes every channel together; channel >= 1 selects that
+    // single (1-based) channel. Returns false with errOut set when the number
+    // is out of range for the file.
+    static bool pickBatchChannels (int numFileChans, int channel,
+                                   std::vector<int>& outChans, std::string& errOut);
+
     // BLOCKING — call from a worker thread. Transcribes every .wav file in
     // `folder` (recursively) WITHOUT opening it in the editor: each file is
-    // loaded headlessly, mixed to mono, transcribed with Whisper, and its SCTT
-    // chunk replaced in place on disk (all other RIFF chunks preserved).
+    // loaded headlessly, reduced to mono (see pickBatchChannels for which
+    // channels are mixed), transcribed with Whisper, and its SCTT chunk
+    // replaced in place on disk (all other RIFF chunks preserved).
     // skipExisting = true leaves files that already carry an SCTT chunk alone.
+    // channel: 1-based channel number to analyse; <= 0 mixes all channels.
     // onProgress reports overall 0..1; onStatus is called before each file;
     // cancelOut, when set, stops the run after the current file. Returns false
     // (and fills errOut) only for setup failures such as "no WAV files found";
@@ -359,7 +374,7 @@ public:
     bool batchTranscribeFolder (const juce::File& folder,
                                 const std::string& modelId,
                                 const std::string& language, bool translate,
-                                bool fast, bool skipExisting,
+                                bool fast, bool skipExisting, int channel = 1,
                                 std::function<bool(float)> onProgress = nullptr,
                                 std::function<void(const juce::String&)> onStatus = nullptr,
                                 std::atomic<bool>* cancelOut = nullptr,

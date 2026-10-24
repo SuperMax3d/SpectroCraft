@@ -921,6 +921,12 @@ public:
     // marker comment. Persists the sidecar and refreshes all panels/views.
     void addMarkerForRow (int rowNumber);
 
+    // Jumps to a segment: moves the playhead, selects its time range and pans
+    // both views so the whole selection is visible (with 10% breathing room,
+    // like marker / stored-selection double-clicks). Used by double-clicks
+    // and find jumps.
+    void activateRow (int rowNumber);
+
     // Set by MainWindow: opens the model/language dialog and starts the run.
     std::function<void()> onRunRequested;
 

@@ -4697,16 +4697,23 @@ void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::Mou
 
 void TranscriptionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
 {
-    auto* d = owner->app.doc ();
+    owner->activateRow (rowNumber);
+}
+
+void TranscriptionPanel::activateRow (int rowNumber)
+{
+    auto* d = app.doc ();
     if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
 
-    // Jump to the segment and select its range.
+    // Jump to the segment, select its range and make sure both views show it
+    // (with a little breathing room on each side).
     const ScttSegment& s = d->sctt.segments [(size_t) rowNumber];
-    owner->app.setPlayhead (s.startSec);
+    app.setPlayhead (s.startSec);
     if (s.endSec > s.startSec)
-        owner->app.setSelection ({ s.startSec, s.endSec });
-    if (owner->app.onStateChange)
-        owner->app.onStateChange ();   // push the new cursor/selection to both views
+        app.setSelection ({ s.startSec, s.endSec });
+    app.ensureTimeRangeVisible (s.startSec, s.endSec);
+    if (app.onStateChange)
+        app.onStateChange ();   // push the new cursor/selection to both views
 }
 
 void TranscriptionPanel::addMarkerForRow (int rowNumber)
@@ -4837,11 +4844,7 @@ bool TranscriptionPanel::findInDirection (int dir)
             table.scrollToEnsureRowIsOnscreen (row);
 
             // Jump to the segment like a double-click.
-            const ScttSegment& s = d->sctt.segments [(size_t) row];
-            app.setPlayhead (s.startSec);
-            if (s.endSec > s.startSec)
-                app.setSelection ({ s.startSec, s.endSec });
-            if (app.onStateChange) app.onStateChange ();
+            activateRow (row);
         },
         searchAnchorRow);
 }
