@@ -5585,7 +5585,7 @@ void SelectionPanel::doSave()
     SavedSpectralSelection s;
     s.name = nextSelectionName ();   // "Selection 01", "Selection 02", ...
     s.data = std::move (toSave);
-    d->savedSelections.push_back (std::move (s));
+    d->addSavedSelection (std::move (s));
 
     // The list persists with the file's unified metadata on Save.
     refresh();
@@ -5734,6 +5734,7 @@ bool SelectionPanel::loadSelectionsFromFile (const juce::File& f)
     if (!deserialiseSavedSelections (f.loadFileAsString (), list)) return false;
 
     d->savedSelections = std::move (list);
+    d->metaDirty = true;   // the imported list is not on disk yet
     // The imported list persists with the file's unified metadata on Save.
     refresh ();
     return true;
@@ -5853,6 +5854,7 @@ void SelectionPanel::deleteSelected ()
     std::sort (rows.begin (), rows.end (), std::greater<int>());
     for (int r : rows)
         d->savedSelections.erase (d->savedSelections.begin () + r);
+    d->metaDirty = true;   // the list no longer matches what is on disk
 
     anchorRow = -1;
     table.setSelectedRows (juce::SparseSet<int>(), juce::dontSendNotification);

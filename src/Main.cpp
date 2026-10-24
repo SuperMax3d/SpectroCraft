@@ -9,11 +9,15 @@
  *       modelId: whisper-base (default) | whisper-small | ... ; language: auto|en|...
  *   --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]
  *       [fast 0|1] [--translate] [--channel N] [--no-auto-download]
+ *       [--meta-mode auto|embedded|external]
  *       (AI builds only)
  *       Transcribes every .wav in the folder tree headlessly and writes each
  *       file's SCTT chunk back in place. Defaults: whisper-base, auto
  *       language, overwrite existing, balanced speed, channel 1 (a value of
- *       0 or less mixes all channels together).
+ *       0 or less mixes all channels together). --meta-mode forces where the
+ *       file's metadata ends up after the run (auto keeps what it found):
+ *       embedded moves everything into RIFF chunks inside the WAV; external
+ *       consolidates it into a .meta.json sidecar next to the file.
  *   --list-ai-devices                        (AI builds only)
  *       Prints the OpenVINO devices available on this machine.
  *   --generate-test-files [dir]
@@ -385,10 +389,10 @@ public:
                 // writes the SCTT chunk back into each file. Usage:
                 //   --test-batch-transcribe <folder> [modelId] [language]
                 //       [skipExisting 0|1] [fast 0|1] [--translate]
-                //       [--channel N] [--no-auto-download]
+                //       [--channel N] [--no-auto-download] [--meta-mode M]
                 if (i + 1 >= args.size())
                 {
-                    std::cout << "usage: --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1] [fast 0|1] [--translate] [--channel N] [--no-auto-download]\n";
+                    std::cout << "usage: --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1] [fast 0|1] [--translate] [--channel N] [--no-auto-download] [--meta-mode auto|embedded|external]\n";
                     quit();
                     return;
                 }
@@ -398,6 +402,7 @@ public:
                 bool skipExisting = false, fast = false, translate = false;
                 int channel = 1;   // <= 0 mixes all channels together
                 bool autoDownload = true;
+                sc::MetaSaveTarget metaTarget = sc::MetaSaveTarget::Auto;
 
                 // Positional options (in this order) are consumed until the
                 // first "--flag" appears.
@@ -420,6 +425,20 @@ public:
                         translate = true;
                     else if (a == "--no-auto-download")
                         autoDownload = false;
+                    else if (a == "--meta-mode" && i + 1 < args.size())
+                    {
+                        const juce::String v = args[++i].toLowerCase ();
+                        if      (v == "auto")     metaTarget = sc::MetaSaveTarget::Auto;
+                        else if (v == "embedded") metaTarget = sc::MetaSaveTarget::Embedded;
+                        else if (v == "external") metaTarget = sc::MetaSaveTarget::External;
+                        else
+                        {
+                            std::cout << "invalid --meta-mode value: "
+                                      << v.toStdString () << "\n";
+                            quit();
+                            return;
+                        }
+                    }
                     else if (a == "--channel" && i + 1 < args.size())
                     {
                         const juce::String v = args[++i];
@@ -460,7 +479,7 @@ public:
                         std::cout << "  transcribing " << name.toStdString () << "\n";
                         std::flush (std::cout);
                     },
-                    nullptr, &sum, &err, autoDownload);
+                    nullptr, &sum, &err, autoDownload, metaTarget);
                 if (!ok)
                 {
                     std::cout << "batch transcription failed: " << err << "\n";
@@ -658,6 +677,30 @@ public:
 
     void systemRequestedQuit() override
     {
+        // Ask before losing unsaved work: audio edits OR metadata that has
+        // not been written to disk yet (markers, selections, calibrations,
+        // transcription).
+        if (app != nullptr)
+        {
+            const auto unsaved = app->unsavedDocNames ();
+            if (!unsaved.empty ())
+            {
+                juce::String list;
+                for (const auto& n : unsaved)
+                {
+                    if (!list.isEmpty()) list += "\n";
+                    list += n;
+                }
+
+                juce::AlertWindow dlg ("Quit SpectroCraft",
+                    "You have unsaved files:\n\n" + list +
+                    "\n\nDo you want to quit?", juce::AlertWindow::WarningIcon,
+                    mainWindow.get ());
+                dlg.addButton ("Yes, Quit", 1);
+                dlg.addButton ("Cancel", 0);
+                if (dlg.runModalLoop () != 1) return;   // stay open
+            }
+        }
         quit();
     }
     void anotherInstanceStarted (const juce::String&) override {}

@@ -15,6 +15,7 @@ FileDoc::FileDoc()
     engine.setScttForSave (&scttJson);
     engine.setMetaModeForSave (&metaMode);
     engine.setScmdJsonForSave ([this] () { return buildScmdJson (); });
+    markers.onChange = [this] { metaDirty = true; };
 }
 
 bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
@@ -107,6 +108,10 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
     for (int i = 0; i < engine.numChannels(); ++i)
         visibleChannels.push_back (i);
     undo.clear();
+
+    // The restore() calls above fired the marker onChange hook while loading;
+    // a freshly loaded document matches its own disk state, so start clean.
+    metaDirty = false;
     return true;
 }
 

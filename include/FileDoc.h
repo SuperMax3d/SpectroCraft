@@ -33,17 +33,37 @@ public:
     // the file's metadata bundle (embedded SCMD chunk or .meta.json sidecar).
     std::vector<SavedSpectralSelection> savedSelections;
 
+    /** Adds a named selection and marks the document metadata-dirty (the
+        list no longer matches what is on disk). */
+    void addSavedSelection (SavedSpectralSelection s)
+    {
+        savedSelections.push_back (std::move (s));
+        metaDirty = true;
+    }
+
     // Whisper transcription segments. Embedded mode: RIFF "SCTT" chunk inside
     // the WAV; external mode: the "transcription" key of .meta.json. Shown in
     // the Transcription panel, never in the Markers panel.
     ScttData sctt;
-    void setTranscription (std::vector<ScttSegment> segs) { sctt.segments = std::move (segs); refreshScttJson (); }
+    void setTranscription (std::vector<ScttSegment> segs)
+    {
+        sctt.segments = std::move (segs);
+        refreshScttJson ();
+        metaDirty = true;   // transcription is per-file metadata
+    }
 
     // ---- Unified metadata storage -----------------------------------------
     // Where this file's metadata bundle lives. Detected on load: an existing
     // .meta.json (or legacy sidecar) means external, embedded RIFF chunks mean
     // embedded; new files default to embedded for WAV and external otherwise.
     sc::MetaMode metaMode = sc::MetaMode::Embedded;
+
+    /** True when this document's non-audio state (markers, saved selections,
+        calibrations, analysis settings, transcription) differs from what is
+        on disk. Set by the mutation entry points; cleared whenever the
+        metadata is written to disk (Save / Save As / Save Metadata Only /
+        storage-mode switch). load() ends with it false. */
+    bool metaDirty = false;
 
     // Per-file copies of the session-wide display state, persisted with the
     // bundle (restored into the session when this doc becomes active).

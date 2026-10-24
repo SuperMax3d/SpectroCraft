@@ -766,14 +766,20 @@ SpectroCraft.exe --test-transcribe <in.wav> [modelId] [language]
                                               prints the segments
 SpectroCraft.exe --test-batch-transcribe <folder> [modelId] [language]
       [skipExisting 0|1] [fast 0|1] [--translate] [--channel N]
-      [--no-auto-download]
+      [--no-auto-download] [--meta-mode auto|embedded|external]
                                            :: transcribes every .wav in a folder
                                               tree and writes each SCTT chunk.
                                               Defaults: whisper-base, auto
                                               language, overwrite existing,
                                               balanced speed, channel 1 (a
                                               value of 0 or less mixes all
-                                              channels together)
+                                              channels together). --meta-mode
+                                              forces where each file's metadata
+                                              ends up after the run (auto keeps
+                                              what it found): embedded moves
+                                              everything into RIFF chunks in
+                                              the WAV; external consolidates it
+                                              into a .meta.json sidecar.
 SpectroCraft.exe --test-ns-failure-alert <in.wav> [modelId] ["fake error"]
                                            :: shows the AI failure dialog (with a
                                               copyable details box)
@@ -1052,6 +1058,21 @@ including the Frequency Analysis settings that were in effect when it was last
 saved. A freshly opened file with no stored state inherits the session's
 current display settings instead of resetting to defaults.
 
+**File → Metadata → Save Metadata Only** writes just the metadata to disk in
+its current storage mode without touching the audio data: embedded mode
+surgically patches only the managed RIFF chunks inside the WAV, external mode
+rewrites the `.meta.json` sidecar. Useful after editing markers/selections/
+calibrations when you don't want to rewrite a large audio file.
+
+Every document tracks whether its non-audio state differs from what is on disk
+(`FileDoc::metaDirty`, set by marker edits, storing/deleting/importing named
+selections, transcription writes, scale/axis calibration changes and undo/redo
+of such states). The title bar shows `*` for unsaved audio edits *and* dirty
+metadata. **Quit** (Ctrl+Q or closing the window) asks "You have unsaved files…
+Do you want to quit?" when any document has unsaved work, and **File → Close
+All** offers Close all / Close unmodified only / Cancel when some documents are
+dirty (immediate close-all otherwise).
+
 ---
 
 ## Architecture
@@ -1070,9 +1091,9 @@ Clean separation into independent components (see `include/` + `src/`):
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
 | `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`), saved spectral selections, axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
-| `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). |
+| `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
-| `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix` and the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`). |
+| `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
 
 Threading model: the UI thread only draws and dispatches; FFT tiles are computed
@@ -1084,7 +1105,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2200 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2240 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1092,10 +1113,16 @@ by a single mutex (short critical sections, no lock held during FFT work).
     rect/polygon selections, scale calibration, axis calibrations, Frequency
     Analysis settings, transcription); RIFF chunk scanner + surgical patching
     (add/replace/remove while preserving every other byte of the audio);
-    embedded save/load round-trip through `FileDoc`; switching between Embedded
-    and External modes (sidecar written / chunks removed and back again);
-    fresh files inheriting the session's display state; non-WAV files defaulting
-    to external mode.
+    embedded save/load round-trip through `FileDoc` — including named spectral
+    selections surviving an embedded WAV save/reopen; switching between
+    Embedded and External modes (sidecar written / chunks removed and back
+    again); **Save Metadata Only** in both modes (embedded: audio bytes
+    byte-identical afterwards, marker persisted; external: sidecar updated);
+    `migrateFileMetadata` round-trip (chunks → sidecar → chunks with the data
+    intact at every step); the `metaDirty` lifecycle that backs the quit /
+    Close All prompts (fresh docs clean, edits dirty, saves clean) and the
+    unsaved-doc name listing; fresh files inheriting the session's display
+    state; non-WAV files defaulting to external mode.
   - **Markers**: ids, sorting, rename/move/remove, find-near; region markers
     spanning a selection vs point markers at cursor; per-channel visibility
     toggling (arbitrary subsets).

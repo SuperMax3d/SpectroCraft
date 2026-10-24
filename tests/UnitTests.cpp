@@ -6560,6 +6560,227 @@ static void testVersionString()
            "version is x.y.z: " + juce::String (SC_VERSION_STRING));
 }
 
+// TEMP PROBE: do saved selections round-trip through an embedded WAV save?
+// Regression test: named spectral selections must survive a save into the
+// WAV's SCMD chunk and come back when the file is reopened (the user-visible
+// "saved selections don't persist in embedded mode" bug).
+static void testProbeEmbeddedSelections()
+{
+    const juce::File wav = makeTempFile ("probe_sel.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+             { return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); });
+    const juce::File out = makeTempFile ("probe_sel_out.wav");
+    {
+        Application app;
+        CHECK (app.openFile (wav), "embedded sel: open wav");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+
+        SavedSpectralSelection sel;
+        sel.name = "ProbeSel";
+        sel.data.addRect (0.5, 1.5, 100.0, 2000.0, false, false);
+        d->addSavedSelection (std::move (sel));
+        CHECK (d->metaDirty, "embedded sel: storing a selection marks the doc meta-dirty");
+
+        CHECK (app.audioEngine ().saveFileAs (out), "embedded sel: embedded save");
+    }
+    {
+        Application app2;
+        CHECK (app2.openFile (out), "embedded sel: reopen wav");
+        FileDoc* d2 = app2.doc ();
+        if (d2 == nullptr) return;
+
+        CHECK (d2->metaMode == sc::MetaMode::Embedded, "embedded sel: mode detected as embedded");
+        CHECK (d2->savedSelections.size () == 1, "embedded sel: selection restored from embedded wav");
+        if (d2->savedSelections.size () == 1)
+        {
+            const SavedSpectralSelection& s = d2->savedSelections[0];
+            CHECK (s.name == "ProbeSel", "embedded sel: name round-trips");
+            CHECK (s.data.shapes().size() == 1, "embedded sel: shape count round-trips");
+        }
+        CHECK (!d2->metaDirty, "embedded sel: freshly loaded doc is not meta-dirty");
+    }
+    wav.deleteFile (); out.deleteFile ();
+}
+
+// ------------------------------------------------------------------ metadata suite
+// Save Metadata Only, storage-mode migration (migrateFileMetadata) and the
+// metaDirty lifecycle that backs the quit / Close All prompts.
+static void testMetadataSuite()
+{
+    // --- A. migrateFileMetadata round-trip on a real WAV ----------------
+    {
+        const juce::File src = makeTempFile ("meta_mig_src.wav");
+        writeWav (src, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+                 { return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) f / rate); });
+        const juce::File emb = makeTempFile ("meta_mig_emb.wav");
+
+        // Build a doc with a marker + saved selection, save it embedded.
+        {
+            Application app;
+            if (!app.openFile (src)) { src.deleteFile (); return; }
+            FileDoc* d = app.doc ();
+            CHECK (d != nullptr, "meta: doc created");
+            if (d == nullptr) return;
+
+            const int mid = d->markers.addPointMarker (0.25, "MigMark");
+            CHECK (mid > 0, "meta: marker added");
+            SavedSpectralSelection sel;
+            sel.name = "MigSel";
+            sel.data.addRect (0.1, 0.4, 100.0, 2000.0, false, false);
+            d->savedSelections.push_back (sel);
+
+            CHECK (app.audioEngine ().saveFileAs (emb), "meta: embedded save");
+        }
+
+        CHECK (sc::wavHasMetadataChunks (emb), "meta: saved wav carries managed chunks");
+
+        // External: sidecar becomes the single source of truth.
+        std::string err;
+        CHECK (sc::migrateFileMetadata (emb, sc::MetaSaveTarget::External, &err),
+              "meta: migrate to external ok");
+        const juce::File side = sc::fileMetaSidecarPath (emb);
+        CHECK (side.existsAsFile (), "meta: .meta.json sidecar created");
+        CHECK (!sc::wavHasMetadataChunks (emb), "meta: managed chunks removed from wav");
+
+        // The sidecar must hold the marker and the saved selection.
+        sc::MetaBundle b;
+        CHECK (sc::parseBundle (side.loadFileAsString (), b, nullptr),
+              "meta: sidecar bundle parses");
+        bool foundMark = false, foundSel = false;
+        for (const auto& m : b.markers)
+            if (m.name == "MigMark") foundMark = true;
+        for (const auto& s : b.selections)
+            if (s.name == "MigSel") foundSel = true;
+        CHECK (foundMark, "meta: marker present in sidecar");
+        CHECK (foundSel, "meta: saved selection present in sidecar");
+
+        // Back to embedded: chunks restored, sidecar gone.
+        CHECK (sc::migrateFileMetadata (emb, sc::MetaSaveTarget::Embedded),
+              "meta: migrate back to embedded ok");
+        CHECK (!side.existsAsFile (), "meta: sidecar removed after re-embedding");
+        CHECK (sc::wavHasMetadataChunks (emb), "meta: chunks restored in wav");
+
+        // And the data must come back through a normal open.
+        {
+            Application app2;
+            CHECK (app2.openFile (emb), "meta: reopen migrated wav");
+            FileDoc* d2 = app2.doc ();
+            if (d2 != nullptr)
+            {
+                bool okMark = false;
+                for (const auto& m : d2->markers.markers ())
+                    if (m.name == "MigMark") okMark = true;
+                CHECK (okMark, "meta: marker survives the round-trip");
+                CHECK (d2->savedSelections.size () == 1
+                      && d2->savedSelections[0].name == "MigSel",
+                      "meta: saved selection survives the round-trip");
+            }
+        }
+        src.deleteFile (); emb.deleteFile (); side.deleteFile ();
+    }
+
+    // --- B. Save Metadata Only (embedded): audio bytes untouched --------
+    {
+        const juce::File f = makeTempFile ("meta_saveonly.wav");
+        writeWav (f, 1, 8000.0, 4000, [] (int, int64_t s, double rate)
+                 { return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) s / rate); });
+        Application app;
+        if (!app.openFile (f)) { f.deleteFile (); return; }
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+
+        // writeWav emits the lowercase RIFF id "data"; ids are case-sensitive
+        // to memcmp, so read it exactly as written.
+        std::string before, after;
+        CHECK (readRiffChunkPayload (f, "data", before), "meta: data chunk readable");
+
+        const int mid = d->markers.addPointMarker (0.5, "SaveOnlyMark");
+        CHECK (mid > 0 && d->metaDirty,
+              "meta: marker edit marks the doc meta-dirty");
+
+        std::string err;
+        CHECK (app.saveActiveDocMeta (&err), "meta: save metadata only ok");
+        CHECK (!d->metaDirty, "meta: clean after saving metadata");
+        CHECK (app.docIsUnsaved (*d) == false, "meta: doc no longer unsaved");
+
+        CHECK (readRiffChunkPayload (f, "data", after), "meta: data chunk still readable");
+        CHECK (before.size () == after.size () && before == after,
+              "meta: audio bytes byte-identical after metadata-only save");
+
+        // The marker must now be on disk.
+        {
+            Application app2;
+            CHECK (app2.openFile (f), "meta: reopen after metadata-only save");
+            FileDoc* d2 = app2.doc ();
+            bool okMark = false;
+            if (d2 != nullptr)
+                for (const auto& m : d2->markers.markers ())
+                    if (m.name == "SaveOnlyMark") okMark = true;
+            CHECK (okMark, "meta: marker persisted by metadata-only save");
+        }
+        f.deleteFile ();
+    }
+
+    // --- C. Save Metadata Only (external): sidecar updated ---------------
+    {
+        const juce::File f = makeTempFile ("meta_extsave.wav");
+        writeWav (f, 1, 8000.0, 4000, [] (int, int64_t s, double rate)
+                 { return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) s / rate); });
+        Application app;
+        if (!app.openFile (f)) { f.deleteFile (); return; }
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+
+        CHECK (app.setActiveDocMetaMode (sc::MetaMode::External), "meta: switch to external");
+        CHECK (!d->metaDirty, "meta: mode switch itself is not dirty");
+
+        const int mid = d->markers.addPointMarker (0.75, "ExtMark");
+        CHECK (mid > 0 && d->metaDirty, "meta: marker edit dirty in external mode");
+
+        std::string err;
+        CHECK (app.saveActiveDocMeta (&err), "meta: save metadata only (external) ok");
+        CHECK (!d->metaDirty, "meta: clean after external metadata save");
+
+        const juce::File side = sc::fileMetaSidecarPath (f);
+        CHECK (side.existsAsFile (), "meta: sidecar exists in external mode");
+        sc::MetaBundle b;
+        bool okMark = false;
+        if (sc::parseBundle (side.loadFileAsString (), b, nullptr))
+            for (const auto& m : b.markers)
+                if (m.name == "ExtMark") okMark = true;
+        CHECK (okMark, "meta: new marker present in the sidecar");
+
+        f.deleteFile (); side.deleteFile ();
+    }
+
+    // --- D. metaDirty lifecycle + unsaved-doc predicates -----------------
+    {
+        Application app;
+        CHECK (app.newFile (1, 8000.0), "meta: new doc created");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+
+        CHECK (!d->metaDirty && !app.docIsUnsaved (*d),
+              "meta: fresh doc is clean");
+        CHECK (app.unsavedDocNames ().empty (), "meta: no unsaved docs yet");
+
+        const int mid = d->markers.addPointMarker (0.1, "NewDocMark");
+        CHECK (mid > 0 && d->metaDirty, "meta: marker in new doc is dirty");
+        CHECK (app.docIsUnsaved (*d), "meta: new doc counts as unsaved");
+
+        const auto names = app.unsavedDocNames ();
+        bool listed = false;
+        for (const auto& n : names)
+            if (n == d->name) listed = true;
+        CHECK (names.size () == 1 && listed, "meta: unsaved doc appears by name");
+    }
+}
+
 // ------------------------------------------------------------------ resampling
 // SoXR is the same engine Audacity uses. Verify length accuracy, tone
 // preservation, anti-aliasing on downsample and extreme ratios.
@@ -12862,6 +13083,8 @@ static int scRunUnitTestsImpl()
     progress ("channel row geometry");    testChannelRowGeometry();
     progress ("merge files");           testMergeFiles();
     progress ("version string");      testVersionString();
+    progress ("probe embedded selections"); testProbeEmbeddedSelections();
+    progress ("metadata suite");          testMetadataSuite();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

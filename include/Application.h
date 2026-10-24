@@ -290,6 +290,19 @@ public:
         switch is impossible (e.g. embedding a non-WAV file) or I/O fails. */
     bool setActiveDocMetaMode (sc::MetaMode mode);
 
+    /** Writes the active document's metadata to disk in its CURRENT storage
+        mode without touching the audio data: embedded mode surgically patches
+        only the managed RIFF chunks; external mode rewrites the .meta.json
+        sidecar. Returns false with errOut set when impossible or on I/O
+        failure. On success the document is no longer metadata-dirty. */
+    bool saveActiveDocMeta (std::string* errOut = nullptr);
+
+    /** True when a document has unsaved audio edits OR its non-audio state
+        (markers, saved selections, calibrations, transcription) differs from
+        what is on disk. Used by the quit / Close All prompts. */
+    bool docIsUnsaved (const FileDoc& d) const;
+    std::vector<juce::String> unsavedDocNames() const;
+
     void selectAll();
 
     // ---- Spectral selection tools (Selection menu) ----
@@ -458,7 +471,8 @@ public:
                                 std::atomic<bool>* cancelOut = nullptr,
                                 BatchTranscribeSummary* summaryOut = nullptr,
                                 std::string* errOut = nullptr,
-                                bool autoDownload = true);
+                                bool autoDownload = true,
+                                sc::MetaSaveTarget metaTarget = sc::MetaSaveTarget::Auto);
 #endif
 
     // BLOCKING — call from a worker thread. Runs the Python script `script`

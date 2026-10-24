@@ -380,6 +380,12 @@ void Application::pushActiveDocMetaTo (FileDoc& d)
         ar.altFreqRefs.push_back (a);
     }
     d.altRef = ar;
+
+    // A loaded file's stored state just changed: it no longer matches disk.
+    // Brand-new documents have nothing on disk yet, so they stay clean until
+    // something real is added to them.
+    if (!d.file.getFullPathName().isEmpty())
+        d.metaDirty = true;
 }
 
 void Application::pushActiveDocMeta()
@@ -460,7 +466,109 @@ bool Application::setActiveDocMetaMode (sc::MetaMode mode)
     }
 
     d->metaMode = mode;
+    d->metaDirty = false;   // the disk now holds exactly this state
     return true;
+}
+
+bool Application::saveActiveDocMeta (std::string* errOut)
+{
+    FileDoc* d = doc();
+    if (d == nullptr || !d->engine.isFileLoaded ())
+        return false;
+    if (d->file.getFullPathName().isEmpty())
+    {
+        if (errOut != nullptr)
+            *errOut = "This document has no file path yet - use Save As first.";
+        return false;
+    }
+
+    const bool isWav = d->file.getFileExtension().equalsIgnoreCase (".wav");
+    if (!isWav && d->metaMode == sc::MetaMode::Embedded)
+    {
+        if (errOut != nullptr)
+            *errOut = "Only WAV files can carry embedded metadata chunks.";
+        return false;
+    }
+
+    auto makeEntry = [] (const char* id, bool adtlList,
+                         std::string payload, bool present) -> RiffPatchEntry
+    {
+        RiffPatchEntry e;
+        std::memcpy (e.fourcc, id, 4);
+        e.adtlList = adtlList;
+        e.payload  = std::move (payload);
+        e.present  = present;
+        return e;
+    };
+
+    auto deleteLegacySidecars = [&] ()
+    {
+        juce::File m (d->file.getFullPathName() + ".markers.json");
+        if (m.existsAsFile()) m.deleteFile();
+        const juce::File s = savedSelectionsSidecarPath (d->file);
+        if (s.existsAsFile()) s.deleteFile();
+    };
+
+    if (d->metaMode == sc::MetaMode::External)
+    {
+        // The sidecar becomes the single source of truth.
+        if (!d->writeMetaSidecar (d->file))
+        {
+            if (errOut != nullptr) *errOut = "Could not write the .meta.json sidecar.";
+            return false;
+        }
+        // Drop stale embedded chunks so no second copy lingers in the WAV.
+        if (isWav && sc::wavHasMetadataChunks (d->file))
+        {
+            std::vector<RiffPatchEntry> entries;
+            entries.push_back (makeEntry ("cue ", false, {}, false));
+            entries.push_back (makeEntry ("LIST", true,  {}, false));
+            entries.push_back (makeEntry ("SCTT", false, {}, false));
+            entries.push_back (makeEntry ("SCMD", false, {}, false));
+            patchRiffChunks (d->file, entries);   // best effort: sidecar is safe
+        }
+        deleteLegacySidecars ();
+    }
+    else
+    {
+        // Surgical RIFF patch: only the managed chunks are rewritten, every
+        // audio byte stays exactly where it was.
+        const std::vector<Marker>& ms = d->markers.markers();
+        std::vector<RiffPatchEntry> entries;
+        entries.push_back (makeEntry ("cue ", false,
+            buildCueChunkPayload (ms, d->engine.sampleRate(), d->engine.numSamples()), true));
+        entries.push_back (makeEntry ("LIST", true,
+            buildAdtlListPayload (ms, d->engine.sampleRate(), d->engine.numSamples()), true));
+        if (!d->sctt.empty ())
+            entries.push_back (makeEntry ("SCTT", false, scttToJson (d->sctt), true));
+        const std::string scmd = d->buildScmdJson ();   // empty => chunk removed
+        entries.push_back (makeEntry ("SCMD", false, scmd, !scmd.empty ()));
+
+        if (!patchRiffChunks (d->file, entries, errOut))
+            return false;   // WAV untouched
+
+        // The metadata now lives inside the WAV: drop every JSON copy.
+        const juce::File unified = sc::fileMetaSidecarPath (d->file);
+        if (unified.existsAsFile()) unified.deleteFile();
+        deleteLegacySidecars ();
+    }
+
+    d->metaDirty = false;   // disk now matches the in-memory state
+    return true;
+}
+
+bool Application::docIsUnsaved (const FileDoc& d) const
+{
+    return d.engine.hasUnsavedChanges () || d.metaDirty;
+}
+
+std::vector<juce::String> Application::unsavedDocNames() const
+{
+    std::vector<juce::String> names;
+    for (const auto& p : docs)
+        if (docIsUnsaved (*p))
+            names.push_back (p->name.isNotEmpty () ? p->name : p->file.getFileName());
+    return names;
 }
 
 void Application::closeFile()
@@ -1465,6 +1573,7 @@ bool Application::del(std::string* errOut)
         d->markers.adjustForDeletion (a, b);
         for (auto& ss : d->savedSelections)
             ss.data.adjustForDeletion (a, b);
+        d->metaDirty = true;   // the adjusted list no longer matches disk
 
         Patch& p = d->undo.lastRecorded ();
         p.hasSideState = true;
@@ -1908,7 +2017,8 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
                                          std::atomic<bool>* cancelOut,
                                          BatchTranscribeSummary* summaryOut,
                                          std::string* errOut,
-                                         bool autoDownload)
+                                         bool autoDownload,
+                                         sc::MetaSaveTarget metaTarget)
 {
     auto fail = [&errOut] (const juce::String& msg) -> bool
     {
@@ -2030,6 +2140,23 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
             continue;
         }
 
+        // Optional: force the file's metadata into a specific storage mode
+        // (--meta-mode on the command line). Auto keeps whatever it found.
+        if (metaTarget != sc::MetaSaveTarget::Auto)
+        {
+            std::string merr;
+            if (!sc::migrateFileMetadata (f, metaTarget, &merr))
+            {
+                summary.failed++;
+                summary.failures.push_back (f.getFileName ().toStdString ()
+                                            + ": transcription written but metadata "
+                                            + (metaTarget == sc::MetaSaveTarget::Embedded
+                                               ? "embedding failed: " : "sidecar write failed: ")
+                                            + merr);
+                continue;
+            }
+        }
+
         summary.done++;
     }
 
@@ -2082,6 +2209,7 @@ void Application::restorePatchSideState (FileDoc* d, const Patch& p, bool isRedo
 {
     d->markers.restore (isRedo ? p.newMarkers : p.oldMarkers);
     d->savedSelections = isRedo ? p.newSavedSel : p.oldSavedSel;
+    d->metaDirty = true;   // restored state differs from what was last saved
     // Markers/selections persist with the unified metadata on Save - no live sidecar.
     if (onPatchSideStateRestored)
         onPatchSideStateRestored (d, p, isRedo);

@@ -50,6 +50,8 @@ public:
     void handleFileOpen();
     void handleFileSave();
     void handleFileSaveAs();
+    void handleSaveMetadataOnly();
+    void handleCloseAll();
     void updateTitle();
     void setupViews();
     void activateDocUI();   // reset both views + sync panels after a doc switch
@@ -239,7 +241,7 @@ public:
 
     enum MenuIDs
     {
-        FileNew = 999, FileOpen = 1000, FileClose, FileSave, FileSaveAs, FileExportSpectral, FileQuit,
+        FileNew = 999, FileOpen = 1000, FileClose, FileCloseAll, FileSave, FileSaveAs, FileExportSpectral, FileQuit,
         EditUndo = 2000, EditRedo, EditCut, EditCopy, EditPaste, EditDelete,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,
         EditPasteToNewChannels,
@@ -262,7 +264,7 @@ public:
 #endif
         WindowPanelBase = 6500,   // Window menu: per-panel open/close toggles
         HelpAbout = 6000,
-        MetaEmbedded = 7500, MetaExternal,   // File > Metadata storage mode
+        MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ColourMapClassic = 7000, ColourMapViridis, ColourMapPlasma, ColourMapInferno,
         ColourMapMagma, ColourMapHot, ColourMapCool, ColourMapGrayscale,
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index

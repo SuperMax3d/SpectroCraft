@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <vector>
 #include <memory>
+#include <functional>
 
 struct Marker
 {
@@ -41,6 +42,11 @@ public:
 
     // Replace the whole list with `m` (undo/redo restoration of side state).
     void restore (const std::vector<Marker>& m);
+
+    /** Fired after every mutation, including restore() (FileDoc clears its
+        dirty flag at the end of load(), so loading a file does not count as
+        an unsaved change). FileDoc wires this to its metaDirty state. */
+    std::function<void()> onChange;
 
     void clear() { list.clear(); nextId = 1; }
     size_t count() const { return list.size(); }

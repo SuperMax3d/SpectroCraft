@@ -108,4 +108,17 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription);
 bool parseBundle (const juce::String& json, MetaBundle& out,
                   std::string* errOut = nullptr);
 
+/** Where file-level metadata operations should store the bundle.
+    Auto keeps whatever the file currently uses (the default). */
+enum class MetaSaveTarget { Auto, Embedded, External };
+
+/** Migrates a WAV file's per-file metadata to `target` WITHOUT opening it in
+    the editor: every category is read from wherever it currently lives
+    (unified .meta.json > legacy sidecars > embedded RIFF chunks, exactly like
+    FileDoc::load), then written in the requested mode and removed from the
+    other one. Audio bytes are never touched. target == Auto leaves the file
+    alone. Returns false with errOut set on I/O or parse failure. */
+bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
+                          std::string* errOut = nullptr);
+
 } // namespace sc

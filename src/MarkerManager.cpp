@@ -29,6 +29,7 @@ int MarkerManager::addPointMarker (double time, const juce::String& name)
     m.end = -1.0;
     list.push_back (m);
     sort();
+    if (onChange) onChange();
     return m.id;
 }
 
@@ -42,6 +43,7 @@ int MarkerManager::addRegionMarker (double start, double end, const juce::String
     m.end = end;
     list.push_back (m);
     sort();
+    if (onChange) onChange();
     return m.id;
 }
 
@@ -50,20 +52,21 @@ bool MarkerManager::removeMarker (int id)
     auto it = std::find_if (list.begin(), list.end(), [&] (const Marker& m) { return m.id == id; });
     if (it == list.end()) return false;
     list.erase (it);
+    if (onChange) onChange();
     return true;
 }
 
 bool MarkerManager::renameMarker (int id, const juce::String& newName)
 {
     for (auto& m : list)
-        if (m.id == id) { m.name = newName; return true; }
+        if (m.id == id) { m.name = newName; if (onChange) onChange(); return true; }
     return false;
 }
 
 bool MarkerManager::setComment (int id, const juce::String& newComment)
 {
     for (auto& m : list)
-        if (m.id == id) { m.comment = newComment; return true; }
+        if (m.id == id) { m.comment = newComment; if (onChange) onChange(); return true; }
     return false;
 }
 
@@ -77,6 +80,7 @@ bool MarkerManager::moveMarker (int id, double newTime)
             m.start = newTime;
             if (m.end >= 0) m.end += delta;
             sort();
+            if (onChange) onChange();
             return true;
         }
     }
@@ -91,6 +95,7 @@ bool MarkerManager::setRegion (int id, double start, double end)
             m.start = start;
             m.end = end;
             sort();
+            if (onChange) onChange();
             return true;
         }
     return false;
@@ -102,6 +107,7 @@ bool MarkerManager::setPoint (int id)
         if (m.id == id)
         {
             m.end = -1.0;
+            if (onChange) onChange();
             return true;
         }
     return false;
@@ -146,6 +152,7 @@ bool MarkerManager::adjustForDeletion (double a, double b)
                                                                                // old [b, e] -> new [a, e-len]
         }
     }
+    if (changed && onChange) onChange();
     return changed;
 }
 
@@ -157,6 +164,9 @@ void MarkerManager::restore (const std::vector<Marker>& m)
     for (const auto& mk : list)
         if (mk.id >= nextId)
             nextId = mk.id + 1;
+    // Undo/redo and merges restore marker lists this way; FileDoc clears its
+    // dirty flag at the end of load() so plain loading does not count.
+    if (onChange) onChange();
 }
 
 const Marker* MarkerManager::findNear (double time, double tolSecs) const
@@ -629,6 +639,9 @@ int MarkerManager::loadCsv (const juce::File& file, double durationSec)
     }
 
     if (added > 0)
+    {
         sort();
+        if (onChange) onChange();   // CSV import is a user-initiated change
+    }
     return added;
 }

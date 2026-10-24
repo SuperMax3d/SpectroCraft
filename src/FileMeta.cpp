@@ -495,4 +495,141 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// File-level metadata migration (used by the CLI --meta-mode option).
+// ---------------------------------------------------------------------------
+
+bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
+                          std::string* errOut)
+{
+    auto fail = [errOut] (const char* msg) -> bool
+    {
+        if (errOut != nullptr) *errOut = msg;
+        return false;
+    };
+
+    if (target == MetaSaveTarget::Auto)
+        return true;   // keep whatever the file currently uses
+    if (!wav.existsAsFile ())
+        return fail ("file not found");
+    if (target == MetaSaveTarget::Embedded
+        && !wav.getFileExtension().equalsIgnoreCase (".wav"))
+        return fail ("only WAV files can carry embedded metadata chunks");
+
+    // ---- Gather every category from its current home ----------------------
+    // Same priority as FileDoc::load: unified .meta.json > legacy sidecars >
+    // embedded RIFF chunks.
+    MetaBundle b;
+
+    const bool isWav = wav.getFileExtension().equalsIgnoreCase (".wav");
+    const juce::File unified = fileMetaSidecarPath (wav);
+    if (unified.existsAsFile ())
+        parseBundle (unified.loadFileAsString (), b);   // corrupt = partial merge
+
+    std::string scmdJson;
+    if (isWav && readRiffChunkPayload (wav, "SCMD", scmdJson))
+        parseBundle (scmdJson, b);
+
+    // The cue/adtl payloads are sample-based: the file's rate is needed both to
+    // READ them and to REBUILD them below.
+    double rate = 0.0;
+    int64_t frames = 0;
+    if (isWav)
+    {
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        if (auto* reader = fm.createReaderFor (wav))
+        {
+            rate   = reader->sampleRate;
+            frames = reader->lengthInSamples;
+        }
+    }
+
+    // Markers: unified > legacy .markers.json > SCMD > cue/adtl.
+    if (!b.haveMarkers)
+    {
+        const juce::File legacyM = juce::File (wav.getFullPathName() + ".markers.json");
+        MarkerManager mm;
+        if (legacyM.existsAsFile () && mm.loadSidecar (legacyM))
+            b.markers = mm.markers();
+        else if (isWav && mm.loadFromWavFile (wav, rate))
+            b.markers = mm.markers();
+    }
+
+    // Selections: unified > legacy .selections.json > SCMD.
+    if (!b.haveSelections)
+    {
+        const juce::File legacyS = savedSelectionsSidecarPath (wav);
+        if (legacyS.existsAsFile ()
+            && deserialiseSavedSelections (legacyS.loadFileAsString (), b.selections))
+            ;   // filled
+    }
+
+    // Transcription: unified > SCTT chunk.
+    if (!b.haveTranscription && isWav)
+        readScttChunk (wav, b.transcription);
+
+    // ---- Write the bundle in the requested mode ---------------------------
+    const juce::File legacyM = juce::File (wav.getFullPathName() + ".markers.json");
+    const juce::File legacyS = savedSelectionsSidecarPath (wav);
+
+    auto mkEntry = [] (const char* id, bool adtlList,
+                       std::string payload, bool present) -> RiffPatchEntry
+    {
+        RiffPatchEntry e;
+        std::memcpy (e.fourcc, id, 4);
+        e.adtlList = adtlList;
+        e.payload  = std::move (payload);
+        e.present  = present;
+        return e;
+    };
+
+    if (target == MetaSaveTarget::Embedded)
+    {
+        const std::string cueP  = buildCueChunkPayload (b.markers, rate, frames);
+        const std::string adtlP = buildAdtlListPayload (b.markers, rate, frames);
+        const std::string scttP = b.transcription.empty () ? std::string()
+                                                           : scttToJson (b.transcription);
+        const std::string scmdP = b.hasContent () ? serialiseBundle (b, false)
+                                                  : std::string();
+
+        std::vector<RiffPatchEntry> entries;
+        entries.push_back (mkEntry ("cue ", false, cueP,  !cueP.empty ()));
+        entries.push_back (mkEntry ("LIST", true,  adtlP, !adtlP.empty ()));
+        entries.push_back (mkEntry ("SCTT", false, scttP, !scttP.empty ()));
+        entries.push_back (mkEntry ("SCMD", false, scmdP, !scmdP.empty ()));
+
+        if (!patchRiffChunks (wav, entries, errOut))
+            return false;
+
+        // The sidecars no longer hold the authoritative copy.
+        if (unified.existsAsFile())  unified.deleteFile();
+        if (legacyM.existsAsFile())  legacyM.deleteFile();
+        if (legacyS.existsAsFile())  legacyS.deleteFile();
+    }
+    else   // External
+    {
+        const juce::File sidecar = fileMetaSidecarPath (wav);
+        if (!sidecar.replaceWithText (serialiseBundle (b, true)))
+            return fail ("could not write the .meta.json sidecar");
+
+        legacyM.deleteFile();   // consolidated into the unified sidecar
+        legacyS.deleteFile();
+
+        // Drop any stale embedded chunks so the sidecar is the only copy.
+        if (isWav && wavHasMetadataChunks (wav))
+        {
+            std::vector<RiffPatchEntry> entries;
+            entries.push_back (mkEntry ("cue ", false, {}, false));
+            entries.push_back (mkEntry ("LIST", true,  {}, false));
+            entries.push_back (mkEntry ("SCTT", false, {}, false));
+            entries.push_back (mkEntry ("SCMD", false, {}, false));
+            if (!patchRiffChunks (wav, entries, errOut))
+                return false;
+        }
+    }
+
+    return true;
+}
+
 } // namespace sc

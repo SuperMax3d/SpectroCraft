@@ -1125,6 +1125,8 @@ juce::String MainWindow::currentModeText() const
 // Time windows and zoom levels are owned by each view independently.
 void MainWindow::syncSharedState()
 {
+    updateTitle();   // cheap: keeps the * in sync with any state change
+
     if (waveformView)
     {
         waveformView->setSelection (app.selection);
@@ -1477,6 +1479,11 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
                 if (ls.existsAsFile()) ls.deleteFile();
             }
 
+            // The save wrote the audio AND every managed metadata chunk or
+            // sidecar, so the document's state now matches its disk copy.
+            if (d != nullptr)
+                d->metaDirty = false;
+
             updateTitle();
         });
     }).detach();
@@ -1504,6 +1511,54 @@ void MainWindow::handleFileSaveAs()
 
     if (chooser.browseForFileToSave (true))
         runSaveAsync (chooser.getResult(), true);
+}
+
+void MainWindow::handleSaveMetadataOnly()
+{
+    std::string err;
+    if (!app.saveActiveDocMeta (&err))
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Save Metadata Only",
+                                            juce::String::fromUTF8 (err.c_str()),
+                                            "", this);
+    else
+        updateTitle();   // the * disappears if nothing else is unsaved
+}
+
+void MainWindow::handleCloseAll()
+{
+    if (app.numDocs () == 0) return;
+
+    const auto closeMatching = [this] (bool includeUnsaved)
+    {
+        // Close from the back so earlier indices stay valid.
+        for (int i = app.numDocs () - 1; i >= 0; --i)
+            if (includeUnsaved || !app.docIsUnsaved (*app.docs[(size_t) i]))
+                app.closeDoc (i);
+    };
+
+    const auto unsaved = app.unsavedDocNames ();
+    if (!unsaved.empty ())
+    {
+        juce::String list;
+        for (const auto& n : unsaved)
+        {
+            if (!list.isEmpty()) list += "\n";
+            list += n;
+        }
+
+        juce::AlertWindow dlg ("Close All Files",
+            "Some files have unsaved changes:\n\n" + list +
+            "\n\nWhat do you want to do?", juce::AlertWindow::WarningIcon, this);
+        dlg.addButton ("Close All", 1);
+        dlg.addButton ("Close Unmodified Only", 2);
+        dlg.addButton ("Cancel", 0);
+        const int r = dlg.runModalLoop ();
+        if (r == 0) return;
+        closeMatching (r == 1);
+    }
+    else
+        closeMatching (true);   // everything is clean: just close it all
 }
 
 // Render + write the spectrogram PNG on a background thread.
@@ -1539,7 +1594,9 @@ void MainWindow::updateTitle()
                                       ? (app.doc() != nullptr ? app.doc()->name : juce::String())
                                       : f.getFileName();
         title = name + " - " + title;
-        if (app.audioEngine().hasUnsavedChanges())
+        // * covers both unsaved audio edits and metadata that differs from
+        // what is on disk (markers, selections, calibrations, transcription).
+        if (app.doc() != nullptr && app.docIsUnsaved (*app.doc()))
             title = "*" + title;
     }
     // setName() updates the native window caption; Component::setTitle() only
@@ -1735,6 +1792,14 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     {
         case FileNew:  showNewFileDialog(); break;
         case FileOpen: handleFileOpen(); break;
+        case FileCloseAll:
+            handleCloseAll();
+            break;
+
+        case MetaSaveOnly:
+            handleSaveMetadataOnly();
+            break;
+
         case FileClose:
             // closeFile() fires onActiveDocChanged (or resets the empty state),
             // which refreshes every panel and view.
@@ -3802,6 +3867,8 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSubMenu ("Open Recent", recentMenu);
 
         menu.addItem (FileClose, "Close\tCtrl+W", app.audioEngine().isFileLoaded(), false);
+        if (app.numDocs () > 0)
+            menu.addItem (FileCloseAll, "Close All", true, false);
         menu.addSeparator();
         menu.addItem (FileSave, "Save\tCtrl+S", app.audioEngine().isFileLoaded(), false);
         menu.addItem (FileSaveAs, "Save As...\tCtrl+Shift+S", app.audioEngine().isFileLoaded(), false);
@@ -3815,6 +3882,11 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
             const bool wavFile = d != nullptr
                 && (d->file.getFullPathName().isEmpty()
                     || d->file.getFileExtension().equalsIgnoreCase (".wav"));
+            // Save Metadata Only needs a real path: it writes the metadata in
+            // place without touching the audio data.
+            const bool canSaveMetaOnly = hasDoc && !d->file.getFullPathName().isEmpty();
+            metaMenu.addItem (MetaSaveOnly, "Save Metadata Only", canSaveMetaOnly);
+            metaMenu.addSeparator ();
             metaMenu.addItem (MetaEmbedded, "Embedded into Wav",
                               hasDoc && wavFile,
                               hasDoc && d->metaMode == sc::MetaMode::Embedded);
