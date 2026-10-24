@@ -1262,56 +1262,10 @@ namespace
         os.write (b, 4);
     }
     void putFourCC (juce::OutputStream& os, const char* s) { os.write (s, 4); }
-
-    // Legacy DAW-compatible adtl text sub-chunk ("labl" / "note"):
-    //   fourcc + u32(5+len) + u32 cueID + text [+ NUL if len even] + trailing NUL.
-    // When the text length is even, one extra byte is written beyond the
-    // declared size; it doubles as RIFF alignment padding (legacy DAWs do this).
-    void writeAdtlTextEntry (juce::OutputStream& os, const char id[4], int cueId, const juce::String& text)
-    {
-        putFourCC (os, id);
-        putU32 (os, (uint32_t) (5 + text.getNumBytesAsUTF8()));
-        putU32 (os, (uint32_t) cueId);
-        os.write (text.toRawUTF8(), text.getNumBytesAsUTF8());
-        if (text.getNumBytesAsUTF8() % 2 == 0)
-            os.writeByte (0);
-        os.writeByte (0);
-    }
-
-    // Total bytes of the above entry in the file, including its 8-byte header.
-    size_t adtlTextEntrySize (const juce::String& text)
-    {
-        const int len = text.getNumBytesAsUTF8();
-        return 8 + 4 + (size_t) len + ((len % 2 == 0) ? 1 : 0) + 1;
-    }
-
-    // Legacy DAW ltxt sub-chunk: fourcc + u32(20) + u32 cueID + u32 sampleLength
-    // + "rgn " + country/language/dialect/codepage (all zero).
-    void writeLtxtEntry (juce::OutputStream& os, int cueId, uint32_t sampleLength)
-    {
-        putFourCC (os, "ltxt");
-        putU32 (os, 20);
-        putU32 (os, (uint32_t) cueId);
-        putU32 (os, sampleLength);
-        putFourCC (os, "rgn ");
-        putU16 (os, 0); // country
-        putU16 (os, 0); // language
-        putU16 (os, 0); // dialect
-        putU16 (os, 0); // codepage
-    }
-
-    // Legacy DAW cue entry (24 bytes): u32 id + u32 position + "data" +
-    // u32 chunkStart(0) + u32 blockStart(0) + u32 sampleOffset (= position).
-    void writeCueEntry (juce::OutputStream& os, int cueId, uint32_t startSample)
-    {
-        putU32 (os, (uint32_t) cueId);
-        putU32 (os, startSample);
-        putFourCC (os, "data");
-        putU32 (os, 0); // chunkStart
-        putU32 (os, 0); // blockStart
-        putU32 (os, startSample); // sampleOffset (legacy DAWs duplicate the position)
-    }
 }
+
+// The legacy DAW cue / LIST(adtl) payload builders live in ScttChunk.cpp so the
+// full WAV writer and the surgical patcher share one byte-exact implementation.
 
 // Writes a RIFF/WAVE file (IEEE float32) with the markers embedded in the
 // classic DAW marker layout so that saved files load cleanly elsewhere:
@@ -1325,48 +1279,35 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
         return false;
 
     const int64_t dataSize = totalSamples * (int64_t) nchans * 4; // float32 LE
-    const std::vector<Marker>* ms = saveMarkers;
-    const int numMarkers = ms ? (int) ms->size() : 0;
 
-    auto startSampleOf = [this] (const Marker& m) -> uint32_t
-    {
-        return (uint32_t) std::clamp (std::llround (m.start * rate), (int64_t) 0, totalSamples);
-    };
-    auto regionLengthOf = [this] (const Marker& m) -> uint32_t
-    {
-        if (m.end <= 0.0 || m.end <= m.start)
-            return 0; // point marker
-        return (uint32_t) std::clamp (std::llround ((m.end - m.start) * rate), (int64_t) 0, totalSamples);
-    };
+    // Metadata chunks are only written in embedded mode (see include/FileMeta.h).
+    const bool embedded = saveMetaMode == nullptr || *saveMetaMode == sc::MetaMode::Embedded;
 
-    size_t listPayload = 0;
-    if (numMarkers > 0)
+    std::string cuePayload, adtlPayload, scmdPayload;
+    if (embedded && saveMarkers != nullptr)
     {
-        listPayload += 4; // "adtl"
-        for (const auto& m : *ms)
-        {
-            listPayload += 28; // ltxt sub-chunk: header(8) + data(20)
-            if (!m.name.isEmpty())
-                listPayload += adtlTextEntrySize (m.name);
-            if (!m.comment.isEmpty())
-                listPayload += adtlTextEntrySize (m.comment);
-        }
+        cuePayload  = buildCueChunkPayload (*saveMarkers, rate, totalSamples);
+        adtlPayload = buildAdtlListPayload (*saveMarkers, rate, totalSamples);
     }
 
-    const int64_t cueChunk  = numMarkers > 0 ? 8 + 4 + 24LL * numMarkers : 0;
-    const int64_t listChunk = numMarkers > 0 ? 8 + (int64_t) listPayload : 0;
-
     // SCTT chunk: transcription segments as JSON (see include/ScttChunk.h).
-    const std::string* sctt = saveScttJson;
-    const int64_t scttChunk = (sctt != nullptr && !sctt->empty ())
-                              ? 8 + (int64_t) sctt->size () : 0;
+    const std::string* sctt = (embedded && saveScttJson != nullptr && !saveScttJson->empty ())
+                              ? saveScttJson : nullptr;
+    if (embedded && saveScmdBuilder)
+        scmdPayload = saveScmdBuilder();   // unified bundle JSON for the SCMD chunk
+
+    const int64_t cueChunk  = !cuePayload.empty()  ? 8 + (int64_t) cuePayload.size () : 0;
+    const int64_t listChunk = !adtlPayload.empty() ? 8 + (int64_t) adtlPayload.size () : 0;
+    const int64_t scttChunk = sctt != nullptr     ? 8 + (int64_t) sctt->size () : 0;
+    const int64_t scmdChunk = !scmdPayload.empty() ? 8 + (int64_t) scmdPayload.size () : 0;
 
     const int64_t riffSize = 4            // "WAVE"
                            + 8 + 16       // fmt chunk
                            + 8 + dataSize // data chunk
                            + cueChunk
                            + listChunk
-                           + scttChunk;
+                           + scttChunk
+                           + scmdChunk;
 
     file.deleteFile(); // FileOutputStream appends to existing files!
     auto out = std::make_unique<juce::FileOutputStream> (file);
@@ -1421,31 +1362,20 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
         }
     }
 
-    // cue chunk: one 24-byte entry per marker.
-    if (numMarkers > 0 && ok)
+    // cue chunk: one 24-byte legacy DAW entry per marker.
+    if (!cuePayload.empty() && ok)
     {
         putFourCC (*out, "cue ");
-        putU32 (*out, (uint32_t) (4 + 24LL * numMarkers));
-        putU32 (*out, (uint32_t) numMarkers);
-        for (const auto& m : *ms)
-            writeCueEntry (*out, m.id, startSampleOf (m));
+        putU32 (*out, (uint32_t) cuePayload.size());
+        ok = out->write (cuePayload.data(), cuePayload.size());
     }
 
-    // LIST chunk with the adtl sub-chunk: ltxt entries first, then labl titles,
-    // then note comments.
-    if (numMarkers > 0 && ok)
+    // LIST chunk with the adtl sub-chunk.
+    if (!adtlPayload.empty() && ok)
     {
         putFourCC (*out, "LIST");
-        putU32 (*out, (uint32_t) listPayload);
-        putFourCC (*out, "adtl");
-        for (const auto& m : *ms)
-            writeLtxtEntry (*out, m.id, regionLengthOf (m));
-        for (const auto& m : *ms)
-            if (!m.name.isEmpty())
-                writeAdtlTextEntry (*out, "labl", m.id, m.name);
-        for (const auto& m : *ms)
-            if (!m.comment.isEmpty())
-                writeAdtlTextEntry (*out, "note", m.id, m.comment);
+        putU32 (*out, (uint32_t) adtlPayload.size());
+        ok = out->write (adtlPayload.data(), adtlPayload.size());
     }
 
     // SCTT chunk: transcription segments (JSON payload).
@@ -1454,6 +1384,14 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
         putFourCC (*out, "SCTT");
         putU32 (*out, (uint32_t) (scttChunk - 8));
         ok = out->write (sctt->data (), (size_t) sctt->size ());
+    }
+
+    // SCMD chunk: the unified metadata bundle as JSON (see include/FileMeta.h).
+    if (!scmdPayload.empty() && ok)
+    {
+        putFourCC (*out, "SCMD");
+        putU32 (*out, (uint32_t) scmdPayload.size());
+        ok = out->write (scmdPayload.data(), scmdPayload.size());
     }
 
     if (ok)

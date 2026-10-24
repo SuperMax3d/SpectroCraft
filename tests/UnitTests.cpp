@@ -7087,6 +7087,332 @@ static void testScttChunkReplace()
           "rejects missing file");
 }
 
+// ---------------- Unified per-file metadata (embedded RIFF vs external JSON) ----------------
+// Markers, saved selections, scale calibration, axis calibrations and the
+// Frequency Analysis settings live in one bundle that is either embedded in
+// the WAV (cue / LIST(adtl) / SCTT / SCMD chunks) or kept in a sibling
+// .meta.json file. Files keep whichever format they already use; new files
+// default to embedded for WAV, external otherwise.
+static void testUnifiedMetadata()
+{
+    auto makeEntry = [] (const char* id, bool adtlList,
+                         std::string payload, bool present) -> RiffPatchEntry
+    {
+        RiffPatchEntry e;
+        std::memcpy (e.fourcc, id, 4);
+        e.adtlList = adtlList;
+        e.payload  = std::move (payload);
+        e.present  = present;
+        return e;
+    };
+
+    // --- Part 1: bundle JSON round-trip ------------------------------------
+    {
+        sc::MetaBundle b;
+        Marker m1; m1.id = 7; m1.name = "Alpha"; m1.comment = "c1";
+        m1.start = 0.25; m1.end = 1.5; m1.colour = juce::Colour (0xff336699);
+        Marker m2; m2.id = 8; m2.name = "Beta"; m2.start = 2.0;   // point marker
+        b.markers.push_back (m1); b.markers.push_back (m2);
+
+        SavedSpectralSelection sel; sel.name = "SelA";
+        sel.data.addRect (0.1, 0.9, 100.0, 5000.0, false, false);
+        std::vector<std::pair<double, double>> poly = { {0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0} };
+        sel.data.addPolygon (poly, true, false);
+        b.selections.push_back (sel);
+
+        b.scale.unit = ScaleCalibration::Unit::Pascal;
+        b.scale.fullScaleValue = 2.5;
+
+        b.altRef.freqScaleMode = 1; b.altRef.freqFactor = 3.75;
+        b.altRef.altTimeOn = true; b.altRef.altTimeRefSecs = 1.25; b.altRef.altTimeValue = 42.0;
+
+        b.freqAnalysis.axisMode = 3; b.freqAnalysis.fftSize = 4096;
+        b.freqAnalysis.refTime = 1; b.freqAnalysis.smooth = 5; b.freqAnalysis.track = 1;
+
+        ScttData td; td.version = 2;
+        std::string uniBytes = "h\xC3\xA9llo";   // UTF-8 text
+        td.segments.push_back ({ 0.5, 1.25, uniBytes });
+        b.transcription = td;
+
+        CHECK (b.hasContent (), "bundle with content reports hasContent");
+
+        const std::string json = sc::serialiseBundle (b, true);
+        sc::MetaBundle g;
+        std::string err;
+        CHECK (sc::parseBundle (juce::String (json.c_str()), g, &err), "bundle parses back: " + err);
+
+        if (g.haveMarkers && g.markers.size() == 2)
+        {
+            const Marker& a = g.markers[0];
+            CHECK (a.id == 7 && a.name == "Alpha" && a.comment == "c1", "marker fields round-trip");
+            CHECK (std::abs (a.start - 0.25) < 1e-9 && std::abs (a.end - 1.5) < 1e-9, "marker times round-trip");
+            CHECK (a.colour.getRed() == 0x33 && a.colour.getGreen() == 0x66
+                  && a.colour.getBlue() == 0x99 && a.colour.getAlpha() == 0xff, "marker colour round-trips");
+            const Marker& c = g.markers[1];
+            CHECK (c.id == 8 && c.name == "Beta" && std::abs (c.start - 2.0) < 1e-9
+                  && std::abs (c.end + 1.0) < 1e-9, "point marker round-trips");
+        }
+        else CHECK (false, "marker array round-trips");
+
+        if (g.haveSelections && g.selections.size() == 1)
+        {
+            const auto& s = g.selections[0];
+            CHECK (s.name == "SelA", "selection name round-trips");
+            CHECK (s.data.shapes().size() == 2, "both shapes round-trip");
+            if (s.data.shapes().size() == 2)
+            {
+                const auto& r = s.data.shapes()[0];
+                CHECK (r.kind == SpectralShape::Kind::Rect && !r.subtract,
+                      "rect kind + flag round-trip");
+                CHECK (std::abs (r.t0 - 0.1) < 1e-9 && std::abs (r.t1 - 0.9) < 1e-9
+                      && std::abs (r.f0 - 100.0) < 1e-9 && std::abs (r.f1 - 5000.0) < 1e-9,
+                      "rect bounds round-trip");
+                const auto& p = s.data.shapes()[1];
+                CHECK (p.kind == SpectralShape::Kind::Polygon && p.subtract
+                      && p.pts.size() == 3, "polygon kind + flag + points round-trip");
+            }
+        }
+        else CHECK (false, "selection array round-trips");
+
+        if (g.haveScale)
+        {
+            CHECK (g.scale.unit == ScaleCalibration::Unit::Pascal
+                  && std::abs (g.scale.fullScaleValue - 2.5) < 1e-9,
+                  "scale calibration round-trips");
+        }
+        else CHECK (false, "scale present after round-trip");
+
+        if (g.haveAltRef)
+        {
+            const auto& ar = g.altRef;
+            CHECK (ar.freqScaleMode == 1 && std::abs (ar.freqFactor - 3.75) < 1e-9,
+                  "custom frequency units round-trip");
+            CHECK (ar.altTimeOn && std::abs (ar.altTimeRefSecs - 1.25) < 1e-9
+                  && std::abs (ar.altTimeValue - 42.0) < 1e-9, "alt time scale round-trips");
+            CHECK (!ar.altFreqOn, "disabled alt freq scale stays off");
+        }
+        else CHECK (false, "altRef present after round-trip");
+
+        if (g.haveFreqAnalysis)
+        {
+            const auto& fa = g.freqAnalysis;
+            CHECK (fa.axisMode == 3 && fa.fftSize == 4096 && fa.refTime == 1
+                  && fa.smooth == 5 && fa.track == 1, "freq analysis state round-trips");
+        }
+        else CHECK (false, "freqAnalysis present after round-trip");
+
+        if (g.haveTranscription && g.transcription.segments.size() == 1)
+        {
+            const auto& s = g.transcription.segments[0];
+            CHECK (std::abs (s.startSec - 0.5) < 1e-9 && std::abs (s.endSec - 1.25) < 1e-9
+                  && s.text == uniBytes, "transcription segment round-trips");
+        }
+        else CHECK (false, "transcription present after round-trip");
+
+        // The SCMD payload omits the transcription.
+        const std::string json2 = sc::serialiseBundle (b, false);
+        sc::MetaBundle g2;
+        CHECK (sc::parseBundle (juce::String (json2.c_str()), g2, &err), "compact bundle parses");
+        CHECK (!g2.haveTranscription, "transcription omitted from SCMD payload");
+        CHECK (g2.haveMarkers && g2.markers.size() == 2, "markers kept in compact payload");
+
+        // A default-only bundle carries nothing worth storing.
+        sc::MetaBundle empty;
+        CHECK (!empty.hasContent (), "default bundle has no content");
+    }
+
+    // --- Part 2: chunk scanner + surgical RIFF patching --------------------
+    const juce::File wav = makeTempFile ("meta_plain.wav");
+    std::vector<float> orig;
+    {
+        CHECK (writeWav (wav, 1, 8000.0, 4000,
+            [] (int, int64_t f, double rate) {
+                return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                         * 440.0 * (double) f / rate);
+            }), "write base wav");
+        CHECK (!sc::wavHasMetadataChunks (wav), "plain wav has no managed chunks");
+
+        AudioEngine eng;
+        CHECK (eng.loadFile (wav), "load plain wav");
+        orig.resize ((size_t) eng.numSamples());
+        CHECK (eng.readSamples (0, 0, eng.numSamples(), orig.data()), "capture original audio");
+    }
+
+    auto audioIntact = [&] (const juce::File& f) -> bool
+    {
+        AudioEngine e;
+        if (!e.loadFile (f)) return false;
+        if (e.numSamples() != (int64_t) orig.size()) return false;
+        std::vector<float> got ((size_t) e.numSamples());
+        if (!e.readSamples (0, 0, e.numSamples(), got.data())) return false;
+        for (size_t i = 0; i < got.size(); ++i)
+            if (got[i] != orig[i]) return false;
+        return true;
+    };
+
+    {
+        std::string err;
+        std::vector<RiffPatchEntry> entries;
+        entries.push_back (makeEntry ("SCMD", false, "{\"app\":\"SpectroCraft\"}", true));
+        CHECK (patchRiffChunks (wav, entries, &err), "add SCMD chunk: " + err);
+        CHECK (sc::wavHasMetadataChunks (wav), "managed chunk detected after patch");
+        CHECK (countRiffChunks (wav, "SCMD") == 1, "exactly one SCMD chunk");
+        const auto payload = riffChunkPayload (wav, "SCMD");
+        CHECK (payload.size() > 0
+              && std::string ((const char*) payload.data(), payload.size()) == "{\"app\":\"SpectroCraft\"}",
+              "SCMD payload written verbatim");
+        CHECK (audioIntact (wav), "audio bytes untouched by the patch");
+
+        // Replace SCMD and add cue + LIST(adtl) in one pass. The payloads are
+        // arbitrary bytes here - only the chunk bookkeeping is under test.
+        std::string cuePayload (8, '\0');
+        cuePayload[0] = 1;   // numCues = 1 (little-endian)
+        std::string listPayload (8, '\0');
+        std::memcpy (listPayload.data(), "adtl", 4);
+        listPayload[4] = 2;  // numEntries = 2
+        entries.clear();
+        entries.push_back (makeEntry ("SCMD", false, "{\"app\":\"SpectroCraft\",\"version\":1}", true));
+        entries.push_back (makeEntry ("cue ", false, cuePayload, true));
+        entries.push_back (makeEntry ("LIST", true,  listPayload, true));
+        CHECK (patchRiffChunks (wav, entries, &err), "replace + add chunks: " + err);
+        CHECK (countRiffChunks (wav, "SCMD") == 1, "SCMD replaced in place");
+        const auto payload2 = riffChunkPayload (wav, "SCMD");
+        CHECK (std::string ((const char*) payload2.data(), payload2.size())
+              == "{\"app\":\"SpectroCraft\",\"version\":1}", "new SCMD payload in place");
+        CHECK (countRiffChunks (wav, "cue ") == 1 && countRiffChunks (wav, "LIST") == 1,
+              "cue and LIST chunks added");
+        CHECK (audioIntact (wav), "audio bytes still untouched");
+
+        // Remove SCMD again; the other managed chunks stay.
+        entries.clear();
+        entries.push_back (makeEntry ("SCMD", false, {}, false));
+        CHECK (patchRiffChunks (wav, entries, &err), "remove SCMD chunk: " + err);
+        CHECK (countRiffChunks (wav, "SCMD") == 0, "SCMD removed");
+        CHECK (countRiffChunks (wav, "cue ") == 1 && countRiffChunks (wav, "LIST") == 1,
+              "other chunks preserved by the removal pass");
+        CHECK (audioIntact (wav), "audio bytes still untouched after removal");
+    }
+
+    // --- Part 3: embedded save/load round-trip through FileDoc -------------
+    const juce::File embedWav = makeTempFile ("meta_embed.wav");
+    CHECK (writeWav (embedWav, 1, 8000.0, 4000,
+        [] (int, int64_t f, double rate) {
+            return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                     * 300.0 * (double) f / rate);
+        }), "write embedded-test wav");
+    const juce::File embedOut = makeTempFile ("meta_embed_out.wav");
+    {
+        Application app;
+        CHECK (app.openFile (embedWav), "open for embedded meta test");
+        FileDoc* d = app.doc ();
+        CHECK (d != nullptr && d->metaMode == sc::MetaMode::Embedded,
+              "new wav defaults to embedded mode");
+        CHECK (d != nullptr && !d->haveStoredFreqAnalysis, "fresh doc has no stored analysis state");
+
+        // The session's current display state is pushed into the doc and then
+        // persisted with it.
+        app.settings.fftAxisMode = 3;
+        app.settings.fftLocalN   = 4096;
+        app.pushActiveDocMeta ();
+        CHECK (d != nullptr && d->freqAnalysis.axisMode == 3
+              && d->freqAnalysis.fftSize == 4096, "session state pushed into the doc");
+
+        app.markers().addRegionMarker (0.5, 1.5, "MkA");
+        app.markers().addPointMarker (2.0, "MkB");
+
+        CHECK (app.audioEngine ().saveFileAs (embedOut), "embedded save");
+        CHECK (sc::wavHasMetadataChunks (embedOut), "saved wav carries managed chunks");
+        CHECK (countRiffChunks (embedOut, "SCMD") == 1, "SCMD chunk embedded on save");
+        CHECK (countRiffChunks (embedOut, "cue ") == 1, "cue chunk embedded on save");
+
+        // Reopening in a fresh app restores everything from the file itself.
+        Application app2;
+        CHECK (app2.openFile (embedOut), "reopen embedded wav");
+        FileDoc* d2 = app2.doc ();
+        CHECK (d2 != nullptr && d2->metaMode == sc::MetaMode::Embedded,
+              "embedded mode detected on load");
+        CHECK (d2 != nullptr && d2->haveStoredFreqAnalysis, "stored analysis state flagged");
+        CHECK (d2 != nullptr && d2->freqAnalysis.axisMode == 3
+              && d2->freqAnalysis.fftSize == 4096, "analysis state restored from file");
+        CHECK (app2.markers().markers().size() == 2, "markers restored from RIFF chunks");
+    }
+
+    // --- Part 4: switching the storage mode ---------------------------------
+    {
+        Application app;
+        CHECK (app.openFile (embedOut), "open embedded wav for toggle test");
+        FileDoc* d = app.doc ();
+
+        CHECK (app.setActiveDocMetaMode (sc::MetaMode::External), "switch to external mode");
+        CHECK (d != nullptr && d->metaMode == sc::MetaMode::External, "mode updated in the doc");
+        const juce::File sidecar = sc::fileMetaSidecarPath (embedOut);
+        CHECK (sidecar.existsAsFile (), ".meta.json written next to the wav");
+        CHECK (!sc::wavHasMetadataChunks (embedOut), "managed chunks removed from the wav");
+
+        // Reopening detects the external format and restores from the sidecar.
+        Application app2;
+        CHECK (app2.openFile (embedOut), "reopen after switch to external");
+        FileDoc* d2 = app2.doc ();
+        CHECK (d2 != nullptr && d2->metaMode == sc::MetaMode::External,
+              "external mode detected on load");
+        CHECK (app2.markers().markers().size() == 2, "markers restored from sidecar");
+        CHECK (d2 != nullptr && d2->freqAnalysis.axisMode == 3
+              && d2->freqAnalysis.fftSize == 4096, "analysis state restored from sidecar");
+
+        // Switch back: chunks re-embedded and the sidecar goes away.
+        CHECK (app2.setActiveDocMetaMode (sc::MetaMode::Embedded), "switch back to embedded");
+        CHECK (!sidecar.existsAsFile (), "sidecar deleted when switching back");
+        CHECK (countRiffChunks (embedOut, "SCMD") == 1 && countRiffChunks (embedOut, "cue ") == 1,
+              "chunks re-embedded on switch back");
+
+        Application app3;
+        CHECK (app3.openFile (embedOut), "reopen after switching back");
+        FileDoc* d3 = app3.doc ();
+        CHECK (d3 != nullptr && d3->metaMode == sc::MetaMode::Embedded,
+              "embedded mode detected again");
+        CHECK (app3.markers().markers().size() == 2, "markers restored after round trip");
+    }
+
+    // --- Part 5: fresh files inherit the session's display state -----------
+    {
+        Application app;
+        app.settings.fftAxisMode = 5;   // e.g. Amp vs Freq in the current session
+        app.settings.fftLocalN   = 8192;
+
+        const juce::File fresh = makeTempFile ("meta_fresh.wav");
+        CHECK (writeWav (fresh, 1, 8000.0, 4000,
+            [] (int, int64_t f, double rate) {
+                return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                         * 500.0 * (double) f / rate);
+            }), "write fresh wav");
+        CHECK (app.openFile (fresh), "open a file without stored metadata");
+        FileDoc* d = app.doc ();
+        CHECK (d != nullptr && !d->haveStoredFreqAnalysis, "no stored state on the fresh doc");
+        CHECK (d != nullptr && d->freqAnalysis.axisMode == 5
+              && d->freqAnalysis.fftSize == 8192,
+              "fresh doc inherits the session's analysis settings");
+        CHECK (app.settings.fftAxisMode == 5, "activating it does not reset the session mode");
+    }
+
+    // --- Part 6: non-WAV files default to external mode --------------------
+    {
+        const juce::File flac = makeTempFile ("meta_ext.flac");
+        AudioEngine eng;
+        CHECK (eng.loadFile (embedWav), "load source for flac save");
+        CHECK (eng.saveFileAs (flac), "save as real FLAC");
+
+        Application app;
+        CHECK (app.openFile (flac), "open the flac file");
+        FileDoc* d = app.doc ();
+        CHECK (d != nullptr && d->metaMode == sc::MetaMode::External,
+              "non-wav files default to external mode");
+    }
+
+    // Clean up the sidecar left by part 4's final state (embedded: none).
+    const juce::File leftover = sc::fileMetaSidecarPath (embedOut);
+    if (leftover.existsAsFile()) leftover.deleteFile ();
+}
+
 static void testAiSettingsPersistence()
 {
     const juce::File store = makeTempFile ("ai_settings.recent");
@@ -10377,8 +10703,8 @@ static void testSelMoveScaleGesture()
 }
 
 // ---------------- Saved selections: disk reload + drag & drop --------------
-// A sidecar next to the wav auto-loads on open; "Load from disk..." and
-// dropping a .selections.json onto the panel re-read it into memory.
+// A sidecar next to the wav auto-loads on open (legacy .selections.json or
+// the unified .meta.json); dropping a .json onto the panel imports it.
 static void testSelectionsDiskReload()
 {
     const juce::File wav = makeTempFile ("sel_disk_reload.wav");
@@ -10405,16 +10731,16 @@ static void testSelectionsDiskReload()
     CHECK (app.openFile (wav), "open wav with sidecar");
     auto* d = app.doc ();
     CHECK (d != nullptr, "doc exists");
-    CHECK (d->savedSelections.size () == 2 && d->selectionsOnDisk,
+    CHECK (d->savedSelections.size () == 2,
           "sidecar next to the wav loads automatically on open");
 
     SelectionPanel sp (app);
     sp.setSize (300, 240);
 
-    // Manual reload: mutate memory, then load from disk restores it.
+    // Manual reload: mutate memory, then re-reading the sidecar restores it.
     d->savedSelections.clear ();
-    CHECK (sp.loadFromDisk (), "load from disk succeeds with the canonical sidecar");
-    CHECK (d->savedSelections.size () == 2 && d->selectionsOnDisk,
+    CHECK (sp.loadSelectionsFromFile (sidecar), "re-read succeeds with the canonical sidecar");
+    CHECK (d->savedSelections.size () == 2,
           "manual reload restored the sidecar list");
 
     // Drag & drop of another JSON file replaces the in-memory list.
@@ -10982,6 +11308,7 @@ static int scRunUnitTestsImpl()
     progress ("sctt json");             testScttJson();
     progress ("sctt chunk wav");        testScttChunkWav();
     progress ("sctt chunk replace");    testScttChunkReplace();
+    progress ("unified metadata");      testUnifiedMetadata();
     progress ("ai settings persist");   testAiSettingsPersistence();
     progress ("df stft round-trip");  testDfStft();
     progress ("AI device resolution"); testAiDeviceResolution();

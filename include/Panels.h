@@ -297,6 +297,11 @@ public:
     // a single click in either view can refresh the panel immediately.
     void recomputeIfNeeded();
 
+    /** Re-reads the per-file Frequency Analysis settings from app.settings
+        into the panel's combos (called by MainWindow when switching to a
+        document whose saved settings differ). No-op when nothing changed. */
+    void resyncFromSettings();
+
     // Snapshot button semantics (also used by unit tests):
     //   - empty slot:  plain click stores the currently analysed time segment
     //                  into slot i and shows its curve;
@@ -978,8 +983,8 @@ private:
     - The table lists this file's saved selections; double-click recalls one
       (it replaces the current spectral selection). Save stores the CURRENT
       selection under a name (same name = update), Delete removes an entry.
-    - "Save to disk" keeps the list in sync with "<file>.selections.json"
-      next to the audio file, so it survives restarts.
+    - The list persists automatically with the file's unified metadata
+      (embedded SCMD chunk or .meta.json sidecar) on every Save.
     - Clone & Multiply appends additive clones of the current selection at
       user-given frequency multipliers (e.g. 0.5, 2, 5); clone thickness is
       stretched by the same factor. The interactive "Pick points..." mode
@@ -1002,16 +1007,11 @@ public:
     // used by unit tests.
     void doRecall (int row);
 
-    // "Load from disk..." (right-click menu): re-reads the sidecar next to the
-    // audio file, or any .selections.json picked in a chooser when there is
-    // none. Returns false when there is no doc, the chooser was cancelled,
-    // or loading failed. Also used by unit tests.
-    bool loadFromDisk();
-
     // Loads `f` into the active doc's saved-selection list (replacing it).
     // Returns false - leaving everything unchanged - when the file is missing,
-    // not .json, or not a valid saved-selections document. Loading the
-    // canonical sidecar next to the audio file also turns on "Save to disk".
+    // not .json, or not a valid saved-selections document. Used by the
+    // drag & drop import; the loaded list persists with the file's unified
+    // metadata on the next Save.
     bool loadSelectionsFromFile (const juce::File& f);
 
     // Drag & drop of .selections.json files onto the panel (also used by unit tests).
@@ -1044,7 +1044,7 @@ private:
     Model model { this };
     juce::TableListBox table { "", &model };
 
-    juce::TextButton saveBtn, recallBtn, deleteBtn, diskToggle, applyMultBtn, pickBtn;
+    juce::TextButton saveBtn, recallBtn, deleteBtn, applyMultBtn, pickBtn;
     juce::Label savedLab, cloneLab, multHintLab;
     juce::TextEditor multEdit;
 
@@ -1059,7 +1059,6 @@ private:
     void doSave();
     void doDelete();
     void doApplyMultipliers();
-    void toggleDisk();
     void togglePick();
 
     JUCE_DECLARE_NON_COPYABLE (SelectionPanel)

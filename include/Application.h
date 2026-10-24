@@ -172,6 +172,11 @@ public:
 
     bool openFile (const juce::File& file);
 
+    /** For a freshly loaded doc that carried no stored display state, copy
+        the current session's Frequency Analysis + axis-calibration settings
+        into it so activating the doc does not reset the user's view. */
+    void inheritSessionMeta (FileDoc& d);
+
     /** Loads a file on a background thread (for large files). onProgress is
         called from the worker thread with 0..1; onDone runs on the message
         thread once the load finished (ok = success, doc activated).
@@ -212,6 +217,19 @@ public:
     void cycleActiveDoc (bool forward);// Ctrl+Tab / Ctrl+Shift+Tab
     // Copy the current UI state (playhead/selection/channels) into the active doc.
     void syncActiveDoc();
+
+    /** Copies the session's Frequency Analysis settings and axis reference
+        calibrations into a document so they persist with that file
+        (unified metadata). Call after any change to those settings. */
+    void pushActiveDocMetaTo (FileDoc& d);
+    void pushActiveDocMeta();   // same, for the active document
+
+    /** Switches the active document's metadata storage mode and migrates the
+        data on disk: external -> embedded inserts CUE/ADTL/SCTT/SCMD chunks
+        into the WAV; embedded -> external writes .meta.json and removes those
+        chunks (audio bytes are preserved either way). Returns false when the
+        switch is impossible (e.g. embedding a non-WAV file) or I/O fails. */
+    bool setActiveDocMetaMode (sc::MetaMode mode);
 
     void selectAll();
 

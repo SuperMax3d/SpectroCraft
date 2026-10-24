@@ -335,10 +335,11 @@ static bool readU32le(juce::InputStream& in, uint32_t* v)
     return true;
 }
 
-bool readScttChunk(const juce::File& wavFile, ScttData& out, std::string* errOut)
+bool readRiffChunkPayload(const juce::File& wavFile, const char fourcc[4],
+                          std::string& out, bool adtlList)
 {
     juce::FileInputStream in (wavFile);
-    if (in.failedToOpen ()) return false;
+    if (!wavFile.existsAsFile () || in.failedToOpen ()) return false;
 
     char hdr [12];
     if (in.read (hdr, 12) != 12
@@ -349,19 +350,26 @@ bool readScttChunk(const juce::File& wavFile, ScttData& out, std::string* errOut
     const int64_t total = in.getTotalLength ();
     while (in.getPosition () + 8 <= total)
     {
-        char fourcc [4];
+        char id [4];
         uint32_t size = 0;
-        if (!in.read (fourcc, 4) || !readU32le (in, &size)) break;
+        if (!in.read (id, 4) || !readU32le (in, &size)) break;   // truncated header
 
-        if (std::memcmp (fourcc, "SCTT", 4) == 0)
+        bool match = std::memcmp (id, fourcc, 4) == 0;
+        if (match && adtlList)
         {
-            std::string json ((size_t) size, '\0');
-            if (in.read (json.data (), size) != (int) size) return false;
-            while (!json.empty () && json.back () == '\0') json.pop_back ();   // RIFF padding
+            // LIST chunk: only manage sub-lists of type "adtl".
+            char listType [4];
+            const int64_t savePos = in.getPosition();   // at payload start
+            match = size >= 8 && in.read (listType, 4) == 4
+                    && std::memcmp (listType, "adtl", 4) == 0;
+            if (!in.setPosition (savePos)) break;
+        }
 
-            ScttData d;
-            if (!parseScttJson (json, d, errOut)) return false;
-            out = std::move (d);
+        if (match)
+        {
+            out.assign ((size_t) size, '\0');
+            if (in.read (out.data (), size) != (int) size) return false;   // truncated payload
+            while (!out.empty () && out.back () == '\0') out.pop_back ();   // RIFF padding
             return true;
         }
 
@@ -370,7 +378,19 @@ bool readScttChunk(const juce::File& wavFile, ScttData& out, std::string* errOut
         if (!in.setPosition (in.getPosition () + skip)) break;
     }
 
-    return false;   // no SCTT chunk present
+    return false;   // chunk not present
+}
+
+bool readScttChunk(const juce::File& wavFile, ScttData& out, std::string* errOut)
+{
+    std::string json;
+    if (!readRiffChunkPayload (wavFile, "SCTT", json))
+        return false;   // no SCTT chunk present
+
+    ScttData d;
+    if (!parseScttJson (json, d, errOut)) return false;
+    out = std::move (d);
+    return true;
 }
 
 bool replaceScttChunkInWav(const juce::File& wavFile, const std::string& json,
@@ -481,6 +501,246 @@ bool replaceScttChunkInWav(const juce::File& wavFile, const std::string& json,
     // Atomic Win32 ReplaceFile: swaps tmp over wavFile without deleting the
     // destination first. (moveFileTo deletes it up front, which loses data if
     // the subsequent move fails — e.g. when the original is still open.)
+    if (!tmp.replaceFileIn (wavFile))
+    {
+        tmp.deleteFile();
+        return fail ("could not replace the original file");
+    }
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// cue / LIST(adtl) payload builders - shared by the full WAV writer and the
+// surgical patcher so both produce byte-identical legacy DAW layouts.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+void putU32le (std::string& out, uint32_t v)
+{
+    char b [4] = { static_cast<char> (v & 0xff),
+                  static_cast<char> ((v >> 8) & 0xff),
+                  static_cast<char> ((v >> 16) & 0xff),
+                  static_cast<char> ((v >> 24) & 0xff) };
+    out.append (b, 4);
+}
+
+void putU16le (std::string& out, uint16_t v)
+{
+    char b [2] = { static_cast<char> (v & 0xff), static_cast<char> ((v >> 8) & 0xff) };
+    out.append (b, 2);
+}
+
+size_t adtlTextEntrySize (const std::string& utf8)
+{
+    const int len = static_cast<int> (utf8.size());
+    return 8 + 4 + static_cast<size_t> (len) + ((len % 2 == 0) ? 1 : 0) + 1;
+}
+
+void appendAdtlTextEntry (std::string& out, const char* fourcc,
+                          uint32_t cueId, const std::string& utf8)
+{
+    out.append (fourcc, 4);
+    putU32le (out, static_cast<uint32_t> (5 + utf8.size()));
+    putU32le (out, cueId);
+    out += utf8;
+    if (utf8.size() % 2 == 0) out += '\0';   // word-align the text
+    out += '\0';                              // trailing NUL (legacy DAWs)
+}
+
+} // namespace
+
+std::string buildCueChunkPayload(const std::vector<Marker>& markers,
+                                 double sampleRate, int64_t totalSamples)
+{
+    if (markers.empty()) return {};
+
+    auto startSampleOf = [&] (const Marker& m) -> uint32_t
+    {
+        return static_cast<uint32_t> (
+            std::clamp (std::llround (m.start * sampleRate), int64_t(0), totalSamples));
+    };
+
+    std::string out;
+    putU32le (out, static_cast<uint32_t> (markers.size()));
+    for (const auto& m : markers)
+    {
+        const uint32_t pos = startSampleOf (m);
+        // Legacy DAW cue entry (24 bytes): u32 id + u32 position + "data" +
+        // u32 chunkStart(0) + u32 blockStart(0) + u32 sampleOffset (= position).
+        putU32le (out, static_cast<uint32_t> (m.id));
+        putU32le (out, pos);
+        out.append ("data", 4);
+        putU32le (out, 0);
+        putU32le (out, 0);
+        putU32le (out, pos);
+    }
+    return out;
+}
+
+std::string buildAdtlListPayload(const std::vector<Marker>& markers,
+                                 double sampleRate, int64_t totalSamples)
+{
+    if (markers.empty()) return {};
+
+    auto regionLengthOf = [&] (const Marker& m) -> uint32_t
+    {
+        if (m.end <= 0.0 || m.end <= m.start)
+            return 0;   // point marker
+        return static_cast<uint32_t> (
+            std::clamp (std::llround ((m.end - m.start) * sampleRate), int64_t(0), totalSamples));
+    };
+
+    std::string out;
+    out.append ("adtl", 4);
+
+    // ltxt region-length entries first...
+    for (const auto& m : markers)
+    {
+        out.append ("ltxt", 4);
+        putU32le (out, 20);
+        putU32le (out, static_cast<uint32_t> (m.id));
+        putU32le (out, regionLengthOf (m));
+        out.append ("rgn ", 4);
+        putU16le (out, 0);   // country
+        putU16le (out, 0);   // language
+        putU16le (out, 0);   // dialect
+        putU16le (out, 0);   // codepage
+    }
+    // ...then labl titles...
+    for (const auto& m : markers)
+        if (!m.name.isEmpty())
+            appendAdtlTextEntry (out, "labl", static_cast<uint32_t> (m.id), m.name.toRawUTF8());
+    // ...then note comments.
+    for (const auto& m : markers)
+        if (!m.comment.isEmpty())
+            appendAdtlTextEntry (out, "note", static_cast<uint32_t> (m.id), m.comment.toRawUTF8());
+
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Surgical multi-chunk RIFF rewrite.
+// ---------------------------------------------------------------------------
+
+bool patchRiffChunks(const juce::File& wavFile,
+                     const std::vector<RiffPatchEntry>& entries,
+                     std::string* errOut)
+{
+    auto fail = [&] (const char* msg) -> bool
+    {
+        if (errOut != nullptr) *errOut = msg;
+        return false;
+    };
+
+    juce::FileInputStream in (wavFile);
+    if (!wavFile.existsAsFile () || in.failedToOpen ())
+        return fail ("cannot open file for reading");
+
+    char hdr [12];
+    if (in.read (hdr, 12) != 12
+        || std::memcmp (hdr, "RIFF", 4) != 0
+        || std::memcmp (hdr + 8, "WAVE", 4) != 0)
+        return fail ("not a RIFF/WAVE file");
+
+    const int64_t total = in.getTotalLength ();
+
+    // Temp sibling file: same folder so the final replace is atomic.
+    const juce::File tmp = wavFile.getSiblingFile (wavFile.getFileName() + ".scmeta-tmp");
+    if (tmp.existsAsFile()) tmp.deleteFile();
+
+    bool ok = true;
+    {
+    // Scoped stream: the handle must close before replaceFileIn below.
+    juce::FileOutputStream out (tmp);
+    if (!out.openedOk ())
+        return fail ("cannot create temp file");
+
+    out.write ("RIFF", 4);
+    out.writeInt (0);   // placeholder, fixed up at the end
+    out.write ("WAVE", 4);
+
+    std::vector<uint8_t> buf;
+    while (ok && in.getPosition () + 8 <= total)
+    {
+        char fourcc [4];
+        uint32_t size = 0;
+        if (!in.read (fourcc, 4) || !readU32le (in, &size)) { ok = false; break; }
+
+        const int64_t padded = static_cast<int64_t> (size) + ((size & 1) ? 1 : 0);
+
+        // Does this chunk match a managed entry? (LIST matches only "adtl" type.)
+        bool managed = false;
+        for (const auto& e : entries)
+        {
+            if (std::memcmp (e.fourcc, fourcc, 4) != 0) continue;
+            if (!e.adtlList)
+            {
+                managed = true;
+                break;
+            }
+            char listType [4];
+            const int64_t savePos = in.getPosition();   // at payload start
+            if (size >= 8 && in.read (listType, 4) == 4
+                && std::memcmp (listType, "adtl", 4) == 0)
+                managed = true;
+            in.setPosition (savePos);   // always restore: the skip below uses it
+        }
+
+        if (managed)
+        {
+            // Drop the old chunk; a fresh one is appended below when wanted.
+            if (!in.setPosition (in.getPosition () + padded)) ok = false;
+            continue;
+        }
+
+        out.write (fourcc, 4);
+        out.writeInt ((int) size);
+        if (padded > 0)
+        {
+            buf.resize ((size_t) padded);
+            int64_t done = 0;
+            while (done < padded && ok)
+            {
+                int64_t n = padded - done;
+                if (n > static_cast<int64_t> (1 << 20)) n = static_cast<int64_t> (1 << 20);
+                const int got = in.read (buf.data() + (size_t) done, (int) n);
+                if (got <= 0) { ok = false; break; }
+                out.write (buf.data() + (size_t) done, (size_t) got);
+                done += got;
+            }
+        }
+    }
+
+    // Append the fresh chunks (payload word-aligned with a zero pad byte).
+    if (ok)
+        for (const auto& e : entries)
+        {
+            if (!e.present || e.payload.empty()) continue;   // empty == remove
+            out.write (e.fourcc, 4);
+            out.writeInt ((int) e.payload.size());
+            ok = out.write (e.payload.data(), e.payload.size());
+            if (ok && (e.payload.size() & 1))
+                ok = out.writeByte (0);
+        }
+
+    // Fix up the RIFF size field: total file length minus the 8-byte header.
+    if (ok)
+    {
+        const int64_t fileSize = out.getPosition();
+        ok = out.setPosition (4) && out.writeInt ((int) (fileSize - 8));
+    }
+
+    if (ok) out.flush ();
+    }   // <- stream closed here; tmp is no longer open
+
+    if (!ok)
+    {
+        tmp.deleteFile();
+        return fail ("failed while rewriting the file");
+    }
+
     if (!tmp.replaceFileIn (wavFile))
     {
         tmp.deleteFile();

@@ -26,6 +26,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/Resampler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FFTAvx.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ScttChunk.cpp   # SCTT RIFF chunk I/O (no AI dependency)
+        ${CMAKE_CURRENT_SOURCE_DIR}/FileMeta.cpp    # unified metadata bundle + RIFF patching
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
         ${CMAKE_SOURCE_DIR}/tests/UnitTests.cpp
 )

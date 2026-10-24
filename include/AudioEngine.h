@@ -4,6 +4,7 @@
 #include "UndoPatch.h"
 #include "SpectralSelection.h"
 #include "SpectralMaskProcessor.h"
+#include "FileMeta.h"
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -169,6 +170,17 @@ public:
     // (JSON, see include/ScttChunk.h). nullptr or empty string = no chunk.
     void setScttForSave (const std::string* json) { saveScttJson = json; }
 
+    // Metadata mode for WAV saves: embedded writes cue/adtl/SCTT/SCMD chunks,
+    // external writes a plain WAV (the sidecar is handled by the caller).
+    // nullptr keeps the legacy behaviour (embedded).
+    void setMetaModeForSave (const sc::MetaMode* m) { saveMetaMode = m; }
+
+    // Builds the SCMD bundle JSON at save time (called on the save thread).
+    void setScmdJsonForSave (std::function<std::string()> builder)
+    {
+        saveScmdBuilder = std::move (builder);
+    }
+
     // ---- Waveform overview mipmaps (min/max pyramid) ----
     struct MipLevel { int64_t factor; std::vector<std::vector<float>> min, max; };
     const std::vector<MipLevel>& mipmaps() const { return mips; }
@@ -248,6 +260,8 @@ private:
     ::UndoManager* undo = nullptr;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks
     const std::string* saveScttJson = nullptr;          // for the WAV SCTT chunk
+    const sc::MetaMode* saveMetaMode = nullptr;         // for WAV metadata mode
+    std::function<std::string()> saveScmdBuilder;       // SCMD bundle JSON builder
 
     void clearMipmaps();
     bool saveWavWithMarkers (const juce::File& file) const;

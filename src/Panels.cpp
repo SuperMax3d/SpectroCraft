@@ -764,6 +764,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         // Independent from the spectrogram's FFT size.
         localN = fftSizeCombo.getSelectedId();
         app.settings.fftLocalN = localN;   // persisted between sessions
+        app.pushActiveDocMeta();           // ...and with this file's metadata
         settingsGen++;               // stored snapshots must be recomputed too
         mags.clear(); cachedN = 0;   // invalidate cached spectrum
         recomputeSnapshots();
@@ -796,6 +797,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
     axisCombo.onChange = [this] {
         axisMode_ = axisCombo.getSelectedId() - 1;
         app.settings.fftAxisMode = axisMode_;   // persisted between sessions
+        app.pushActiveDocMeta();           // ...and with this file's metadata
         thirdOctMags.clear();   // band cache is only valid for mode 2
         liveCurves.clear();     // curve cache belongs to the previous mode
         cachedCurveMode = -1;
@@ -814,6 +816,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
     refTimeCombo.onChange = [this] {
         refTime_ = refTimeCombo.getSelectedId() - 1;
         app.settings.fftRefTime = refTime_;   // persisted between sessions
+        app.pushActiveDocMeta();           // ...and with this file's metadata
         if (app.onStateChange) app.onStateChange();
         repaint();
     };
@@ -827,6 +830,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         const int id = smoothCombo.getSelectedId();
         smooth_ = (id == 1) ? 0 : ((id == 2) ? 3 : 5);
         app.settings.fftSmooth = smooth_;   // persisted between sessions
+        app.pushActiveDocMeta();           // ...and with this file's metadata
         cachedCurveSmooth = -1;             // live curve must be re-smoothed
         settingsGen++;                      // stored curves follow the current options
         recomputeCurveSlots();
@@ -840,6 +844,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
     trackCombo.onChange = [this] {
         track_ = trackCombo.getSelectedId() - 1;
         app.settings.fftTrack = track_;   // persisted between sessions
+        app.pushActiveDocMeta();           // ...and with this file's metadata
         cachedCurveTrack = -1;            // live curve must be re-tracked
         settingsGen++;                    // stored curves follow the current options
         recomputeCurveSlots();
@@ -1092,6 +1097,54 @@ void FFTAnalysisView::computeRegionFrom (AudioEngine& eng, const std::vector<int
         }
         outMags.push_back (std::move (mag));
     }
+}
+
+void FFTAnalysisView::resyncFromSettings ()
+{
+    const int newMode   = std::clamp (app.settings.fftAxisMode, 0, 5);
+    const int newRefTime = std::clamp (app.settings.fftRefTime, 0, 1);
+    const int sm        = app.settings.fftSmooth;
+    const int newSmooth = (sm == 5) ? 5 : ((sm >= 1 && sm <= 4) ? 3 : 0);
+    const int newTrack  = std::clamp (app.settings.fftTrack, 0, 1);
+    const int newN      = std::clamp (app.settings.fftLocalN, 1024, 65536);
+
+    if (newMode == axisMode_ && newRefTime == refTime_ && newSmooth == smooth_
+        && newTrack == track_ && newN == localN)
+        return;   // nothing changed (e.g. a doc with the default settings)
+
+    const bool modeChanged = (newMode != axisMode_);
+    axisMode_  = newMode;
+    refTime_   = newRefTime;
+    smooth_    = newSmooth;
+    track_     = newTrack;
+    localN     = newN;
+
+    // Update the combos without firing their onChange handlers.
+    axisCombo.setSelectedId (axisMode_ + 1, juce::dontSendNotification);
+    refTimeCombo.setSelectedId (refTime_ + 1, juce::dontSendNotification);
+    smoothCombo.setSelectedId (smooth_ == 0 ? 1 : (smooth_ == 3 ? 2 : 3),
+                               juce::dontSendNotification);
+    trackCombo.setSelectedId (track_ + 1, juce::dontSendNotification);
+    fftSizeCombo.setSelectedId (localN, juce::dontSendNotification);
+
+    // Invalidate every cache that depends on the settings.
+    thirdOctMags.clear();      // band cache is only valid for mode 2
+    liveCurves.clear();        // curve cache belongs to the previous mode
+    cachedCurveMode = -1;
+    cachedCurveTrack = 0;
+    cachedCurveSmooth = 0;
+    mags.clear (); cachedN = 0;
+    settingsGen++;             // stored snapshots/curves must be recomputed too
+    recomputeSnapshots();
+    recomputeCurveSlots();
+    if (modeChanged)
+    {
+        refreshSnapshotBands();      // buttons now address the other store
+        refreshSnapshotButtonStates ();
+        resetDisplayRanges();        // each mode has its own default window
+        resized();                   // row 1/row 3 contents differ per mode
+    }
+    repaint();
 }
 
 void FFTAnalysisView::recomputeIfNeeded()
@@ -3799,7 +3852,6 @@ void MarkerListPanel::Model::deleteKeyPressed (int row)
     {
         const int id = owner->app.markers().markers()[(size_t) row].id;
         owner->app.markers().removeMarker (id);
-        owner->app.markers().saveSidecar (owner->app.audioEngine().getFile());
         owner->selectedRow = -1;
         owner->refresh();
     }
@@ -3845,7 +3897,6 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
         // Region marker spanning the current selection if there is one,
         // otherwise a point marker at the cursor.
         app.addMarkerAtCursor();
-        app.markers().saveSidecar (app.audioEngine().getFile());
         refresh();
         if (app.onStateChange) app.onStateChange();
     };
@@ -3855,7 +3906,6 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
         {
             const int id = app.markers().markers()[(size_t) selectedRow].id;
             app.markers().removeMarker (id);
-            app.markers().saveSidecar (app.audioEngine().getFile());
             selectedRow = -1;
             refresh();
             if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
@@ -3904,7 +3954,6 @@ void MarkerListPanel::onTitleCommentChanged (bool isTitle)
     updateDetails();
     editing = false;
     table.repaint();
-    app.markers().saveSidecar (app.audioEngine().getFile());
     if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
 
@@ -3934,7 +3983,6 @@ void MarkerListPanel::onBeginEndChanged (bool isBegin)
     updateDetails();
     editing = false;
     table.repaint();
-    app.markers().saveSidecar (app.audioEngine().getFile());
     if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
 
@@ -3966,7 +4014,6 @@ void MarkerListPanel::onLengthChanged()
     updateDetails();
     editing = false;
     table.repaint();
-    app.markers().saveSidecar (app.audioEngine().getFile());
     if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
 
@@ -4144,7 +4191,6 @@ int MarkerListPanel::importMarkersCsv()
                                              app.audioEngine().duration());
     if (added > 0)
     {
-        app.markers().saveSidecar (app.audioEngine().getFile());
         refresh();
         if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
     }
@@ -4175,7 +4221,6 @@ void MarkerListPanel::removeAllMarkers()
         return;
 
     app.markers().clear();
-    app.markers().saveSidecar (app.audioEngine().getFile());
     refresh();
     if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
@@ -4313,7 +4358,6 @@ int MarkerListPanel::pasteMarkersFromClipboard()
 
     if (added > 0)
     {
-        app.markers().saveSidecar (app.audioEngine().getFile());
         refresh();
         if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
     }
@@ -4736,7 +4780,6 @@ void TranscriptionPanel::addMarkerForRow (int rowNumber)
     if (!full.isEmpty ())
         app.markers ().setComment (id, full);   // keep the full text
 
-    app.markers ().saveSidecar (app.audioEngine ().getFile ());
     refresh ();
     if (app.onStateChange) app.onStateChange ();   // views + markers panel
 }
@@ -4908,7 +4951,7 @@ void SelectionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::M
 SelectionPanel::SelectionPanel (Application& appIn)
     : app (appIn),
       saveBtn ("Store"), recallBtn ("Recall"), deleteBtn ("Delete"),
-      diskToggle ("Save to disk"), applyMultBtn ("Apply"), pickBtn ("Pick points...")
+      applyMultBtn ("Apply"), pickBtn ("Pick points...")
 {
     auto& header = table.getHeader();
     // JUCE TableHeaderComponent column IDs must be non-zero.
@@ -4925,7 +4968,6 @@ SelectionPanel::SelectionPanel (Application& appIn)
     addAndMakeVisible (&saveBtn);
     addAndMakeVisible (&recallBtn);
     addAndMakeVisible (&deleteBtn);
-    addAndMakeVisible (&diskToggle);
     addAndMakeVisible (&cloneLab);
     addAndMakeVisible (&multHintLab);
     addAndMakeVisible (&multEdit);
@@ -4935,8 +4977,6 @@ SelectionPanel::SelectionPanel (Application& appIn)
     saveBtn.onClick = [this] { doSave (); };
     recallBtn.onClick = [this] { doRecall (table.getSelectedRow ()); };
     deleteBtn.onClick = [this] { doDelete (); };
-    diskToggle.setClickingTogglesState (true);
-    diskToggle.onClick = [this] { toggleDisk (); };
     applyMultBtn.onClick = [this] { doApplyMultipliers (); };
     pickBtn.onClick = [this] { togglePick (); };   // plain button; label driven by refresh()
 
@@ -4945,8 +4985,6 @@ SelectionPanel::SelectionPanel (Application& appIn)
     recallBtn.setTooltip ("Replace the current spectral selection with the selected saved one "
                          "(double-clicking a row does the same).");
     deleteBtn.setTooltip ("Remove the selected saved selection from this file's list.");
-    diskToggle.setTooltip ("Keep the list in sync with \"<file>.selections.json\" next to the audio "
-                          "file so it survives restarts. Off = in-memory only for this session.");
     multHintLab.setTooltip ("Each number becomes a clone of the current selection whose frequencies "
                            "(and thickness) are multiplied by that factor - e.g. 2 and 5 select the "
                            "2nd and 5th harmonics of a fundamental band.");
@@ -4981,9 +5019,7 @@ void SelectionPanel::refresh()
     recallBtn.setEnabled (haveRow);
     deleteBtn.setEnabled (haveRow);
 
-    // Keep the toggle/button states in step with the app without firing clicks.
-    diskToggle.setToggleState (d != nullptr && d->selectionsOnDisk,
-                               juce::dontSendNotification);
+    // Keep the button state in step with the app without firing clicks.
     pickBtn.setButtonText (app.isClonePicking () ? "Stop picking" : "Pick points...");
 }
 
@@ -5024,13 +5060,10 @@ void SelectionPanel::resized()
                     b.getWidth (), std::max (60, btnRow.getY () - savedLab.getBottom () - 8));
 
     const int gap = 8;
-    const int bw = std::max (52, (btnRow.getWidth () - gap * 3) / 4);
+    const int bw = std::max (52, (btnRow.getWidth () - gap * 2) / 3);
     saveBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, bw, rowH);
     recallBtn.setBounds (saveBtn.getRight () + gap, btnRow.getY () + 2, bw, rowH);
     deleteBtn.setBounds (recallBtn.getRight () + gap, btnRow.getY () + 2, bw, rowH);
-    diskToggle.setBounds (deleteBtn.getRight () + gap, btnRow.getY () + 2,
-                         std::max (70, btnRow.getWidth () - (deleteBtn.getRight () - btnRow.getX ()) - gap),
-                         rowH);
 
     cloneLab.setBounds (cloneRow.getX (), cloneRow.getY () + 1, cloneRow.getWidth (), 16);
     multHintLab.setBounds (hintRow.getX (), hintRow.getY (), hintRow.getWidth (), 14);
@@ -5085,8 +5118,7 @@ void SelectionPanel::doSave()
     if (!replaced)
         d->savedSelections.push_back (std::move (s));
 
-    if (d->selectionsOnDisk)
-        d->saveSelectionsToDisk ();
+    // The list persists with the file's unified metadata on Save.
     refresh();
 }
 
@@ -5115,35 +5147,9 @@ void SelectionPanel::mouseDown (const juce::MouseEvent& e)
 void SelectionPanel::showLoadContextMenu()
 {
     juce::PopupMenu m;
-    m.addItem (1, "Load from disk...");
-    m.addSeparator();
-    m.addItem (2, "Close Panel");
+    m.addItem (1, "Close Panel");
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
-    if (id == 1) loadFromDisk ();
-    else if (id == 2 && onCloseRequested) onCloseRequested();
-}
-
-bool SelectionPanel::loadFromDisk()
-{
-    auto* d = app.doc ();
-    if (d == nullptr) return false;
-
-    // Prefer the sidecar next to the audio file; otherwise let the user pick.
-    juce::File source = savedSelectionsSidecarPath (d->file);
-    if (!source.existsAsFile ())
-    {
-        juce::FileChooser chooser ("Load a saved-selections file",
-                                   d->file, "*.json", kUseNativeFileChooser);
-        if (!chooser.browseForFileToOpen ()) return false;
-        source = chooser.getResult ();
-    }
-
-    const bool ok = loadSelectionsFromFile (source);
-    if (!ok)
-        showSelectionMessage ("Load from disk",
-                              "Could not read saved selections from:\n"
-                              + source.getFullPathName());
-    return ok;
+    if (id == 1 && onCloseRequested) onCloseRequested();
 }
 
 bool SelectionPanel::loadSelectionsFromFile (const juce::File& f)
@@ -5156,9 +5162,7 @@ bool SelectionPanel::loadSelectionsFromFile (const juce::File& f)
     if (!deserialiseSavedSelections (f.loadFileAsString (), list)) return false;
 
     d->savedSelections = std::move (list);
-    // Loading the canonical sidecar next to the audio file turns on syncing.
-    if (f == savedSelectionsSidecarPath (d->file))
-        d->selectionsOnDisk = true;
+    // The imported list persists with the file's unified metadata on Save.
     refresh ();
     return true;
 }
@@ -5206,8 +5210,7 @@ void SelectionPanel::doDelete()
     if (row < 0 || row >= (int) d->savedSelections.size ()) return;
 
     d->savedSelections.erase (d->savedSelections.begin () + row);
-    if (d->selectionsOnDisk)
-        d->saveSelectionsToDisk ();
+    // The list persists with the file's unified metadata on Save.
     refresh();
 }
 
@@ -5225,18 +5228,6 @@ void SelectionPanel::doApplyMultipliers()
         showSelectionMessage ("Clone & Multiply", juce::String (err));
         return;
     }
-    refresh();
-}
-
-void SelectionPanel::toggleDisk()
-{
-    auto* d = app.doc ();
-    if (d == nullptr) return;
-    const bool on = diskToggle.getToggleState ();
-    if (on)
-        d->saveSelectionsToDisk ();   // sets selectionsOnDisk=true when it succeeds
-    else
-        d->selectionsOnDisk = false;  // stop syncing; the sidecar file stays as-is
     refresh();
 }
 

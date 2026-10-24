@@ -66,14 +66,15 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   (multi-line box starting on the label row), editable Begin/End times plus an
   editable **Length** field that stays in sync with End (editing Length moves
   End; clearing it converts a region back to a point marker). Sidecar
-  persistence (`<file>.markers.json`); when no sidecar exists, markers are
-  recovered from the WAV file itself by parsing its RIFF `cue` +
-  LIST/`adtl` chunks (the classic DAW marker layout — files saved with that
-  layout load their markers back automatically). Sorted access, find-near. "Add Marker" (button or `M`) creates a **region
+  persistence is automatic via [per-file metadata](#per-file-metadata):
+  markers live either inside the WAV's RIFF `cue` + LIST/`adtl` chunks (the
+  classic DAW marker layout) or in a `.meta.json` sidecar, depending on the
+  file's storage mode — files saved with that layout load their markers back
+  automatically. Sorted access, find-near. "Add Marker" (button or `M`) creates a **region
   marker spanning the current selection** if there is one, otherwise a point
   marker at the cursor. Every file has its own marker list — switching files
-  shows that file's markers, and a sidecar next to a file is re-read when it
-  loads (if present) — and **double-clicking a
+  shows that file's markers, which are restored from the file's metadata store
+  on load — and **double-clicking a
   marker** — in the Markers tab or on its line/region in either view — sets the
   time selection to that marker's range and makes sure both views actually show
   it: if the marker is not fully inside the current time window, the views pan
@@ -352,9 +353,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   and self-heals: entries whose file was deleted or moved are dropped when
   clicked. "Clear Recent Files" empties the list.
 - **Drag & drop**: drop one or more WAV/AIFF/FLAC/MP3/Ogg files onto the
-  window; every valid dropped file becomes its own document. Dropping a
-  `.selections.json` file onto the **Selection** panel loads it into that
-  file's saved-selection list instead.
+  window; every valid dropped file becomes its own document.
 - **Edits** with 50-level undo/redo (patch-based: old/new sample data + length
   delta — memory efficient): silence, fade in/out, normalize, reverse, gain,
   cut/copy/paste, delete, insert. The destructive effects (silence/fade/
@@ -387,8 +386,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     selection via OpenVINO.
   - *Transcription* — Effects → Transcribe… runs Whisper over the whole file;
     segments appear in the **Transcription** tab (double-click a row to jump,
-    Ctrl+F / F3 search for matches). Results are stored inside the WAV as
-    a custom `SCTT` RIFF chunk, so they travel with the file.
+    Ctrl+F / F3 search for matches). Results are stored with the file as a
+    custom `SCTT` RIFF chunk (embedded mode) or inside `.meta.json`
+    (external mode — see [Per-file metadata](#per-file-metadata)), so they
+    travel with the file.
   - *Batch transcription* — Effects → Transcribe Folder… transcribes every
     `.wav` in a folder tree headlessly (files never open in the editor) and
     writes each file's `SCTT` chunk back in place; choose which channel to
@@ -618,8 +619,9 @@ for your microarchitecture at load time.
   breathing room on each side (same behaviour as marker and stored-selection
   double-clicks); press Ctrl+F (or right-click > Find) to search, then F3 /
   Ctrl+F3 to cycle through matches.
-  Results are embedded in the WAV as a custom top-level `SCTT` RIFF chunk
-  (UTF-8 JSON, times in seconds) — written on save, parsed on load, never shown
+  Results are stored as a custom top-level `SCTT` RIFF chunk (UTF-8 JSON,
+  times in seconds) when the file uses embedded metadata, or inside the
+  `.meta.json` sidecar otherwise — written on save, parsed on load, never shown
   in the Markers panel. *Clear* removes them from the document without touching
   the audio.
 - **Transcribe Folder…** (`Effects → Transcribe Folder…`) scans a folder tree
@@ -929,16 +931,9 @@ harmonics of whatever is currently selected.
   a name (storing again with the same name updates that entry); Recall replaces
   the current selection with a saved one (double-clicking a row does the same)
   and makes sure both views show its time range — panning or zooming out when
-  it is not fully inside the current window. The list belongs to each file, and
-  when **Save to disk** is on it is kept in
-  sync with `<file>.selections.json` next to the audio file so it survives
-  restarts.
-- **Load from disk...**: right-click the panel (or drop a `.selections.json`
-  file onto it) to re-read saved selections from disk — the sidecar next to
-  the audio file is used when present, otherwise you pick any JSON file. The
-  in-memory list is replaced by what the file contains, and loading the
-  canonical sidecar also turns **Save to disk** on. A sidecar next to a wav is
-  already loaded automatically whenever that wav opens.
+  it is not fully inside the current window. The list belongs to each file and
+  is persisted automatically with the file's [per-file metadata](#per-file-metadata),
+  so it survives restarts without any manual save.
 - **Clone & Multiply**: enter frequency multipliers such as `0.5, 2, 5` and
   press Apply — additive clones of every shape in the current selection are
   appended at those multiples (the original stays in place), with each clone's
@@ -953,6 +948,42 @@ harmonics of whatever is currently selected.
   stray click can be undone without Esc. **Esc** or the button ends the session
   without touching the selection.
 
+### Per-file metadata (File → Metadata)
+
+Everything that belongs to a file — **markers**, **named spectral selections**,
+the **scale calibration** (Set Unit and Scale), the **axis calibrations**
+(custom frequency units + alternative scales) and the **Frequency Analysis**
+settings (axis mode, FFT size, Ref Time, Smooth, Track) — is stored together
+in one bundle that travels with the file in whichever of two formats it already
+uses:
+
+- **Embedded into Wav** — inside the WAV as RIFF chunks: `cue` + LIST/`adtl`
+  (the classic DAW marker layout), a custom top-level `SCMD` chunk carrying the
+  rest of the bundle as compact JSON, and the transcription in its own `SCTT`
+  chunk. Non-WAV formats cannot carry these chunks.
+- **External Json file** — a sibling `<file>.meta.json` holding the same bundle
+  (readable layout) plus the transcription; the WAV itself stays untouched.
+
+Opening a file picks the format automatically: an existing `.meta.json` wins,
+otherwise managed RIFF chunks inside the WAV are detected, and files with
+neither default to **Embedded** for `.wav` and **External** for everything else.
+A file keeps whichever format it already uses — nothing is migrated silently.
+
+**File → Metadata** switches the active file between the two modes on demand:
+switching to External writes the sidecar and surgically removes every managed
+chunk from the WAV; switching back re-embeds all chunks (audio bytes are
+preserved byte-for-byte in both directions) and deletes the sidecar. Legacy
+sidecars (`<file>.markers.json`, `<file>.selections.json`) are removed when a
+file is switched, since their contents now live in the unified store. Saving a
+non-WAV file while it is in Embedded mode automatically falls back to External.
+
+Because saving and loading handle the bundle transparently, there is no manual
+"save markers / save selections" step anymore: **File → Save** (or Save As) is
+the only persistence point, and reopening a file restores everything —
+including the Frequency Analysis settings that were in effect when it was last
+saved. A freshly opened file with no stored state inherits the session's
+current display settings instead of resetting to defaults.
+
 ---
 
 ## Architecture
@@ -965,12 +996,13 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
-| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with clone & multiply (`SavedSelections` JSON sidecar — auto-loaded on open, re-loadable via right-click "Load from disk..." or by dropping a `.selections.json` onto the panel), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with clone & multiply (persisted automatically with per-file metadata), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
 | `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with three example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
-| `MarkerManager` | Point/region markers with title + comment, sorting, find-near, JSON sidecar persistence next to the audio file. |
+| `MarkerManager` | Point/region markers with title + comment, sorting, find-near; persisted via per-file metadata (embedded RIFF chunks or `.meta.json`). |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
-| `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list and scale calibration (`ScaleCalibration`). Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
+| `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`), saved spectral selections, axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
+| `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked) and `pasteMix`. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop, playhead animation timer and view-range state sync between views/panels. |
 
@@ -983,13 +1015,21 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~1900 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~1950 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
-  - **Markers**: ids, sorting, rename/move/remove, find-near, JSON sidecar
-    round-trip; region markers spanning a selection vs point markers at cursor;
-    per-channel visibility toggling (arbitrary subsets).
+  - **Per-file metadata**: bundle JSON round-trip (markers with colours,
+    rect/polygon selections, scale calibration, axis calibrations, Frequency
+    Analysis settings, transcription); RIFF chunk scanner + surgical patching
+    (add/replace/remove while preserving every other byte of the audio);
+    embedded save/load round-trip through `FileDoc`; switching between Embedded
+    and External modes (sidecar written / chunks removed and back again);
+    fresh files inheriting the session's display state; non-WAV files defaulting
+    to external mode.
+  - **Markers**: ids, sorting, rename/move/remove, find-near; region markers
+    spanning a selection vs point markers at cursor; per-channel visibility
+    toggling (arbitrary subsets).
   - **Undo/redo**: silence → undo restores samples → redo re-silences; stack
     depth; fade-in undo regression (per-sample edits must capture old data
     before the in-place modification, or undo is a no-op).

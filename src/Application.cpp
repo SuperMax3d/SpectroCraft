@@ -12,7 +12,6 @@
     #include "AI/WhisperPipeline.h"
 #endif
 #include <algorithm>
-#include <cstdio>
 #include <thread>
 
 Application::Application (const juce::File& recentStorePath)
@@ -164,6 +163,7 @@ bool Application::openFile (const juce::File& file)
     if (!d->load (file))
         return false;
 
+    inheritSessionMeta (*d);   // fresh files keep the user's current display state
     FileDoc* raw = d.get();
     docs.push_back (std::move (d));
     activate ((int) docs.size() - 1);
@@ -185,6 +185,7 @@ void Application::loadFileAsync (const juce::File& file,
         juce::MessageManager::callAsync ([this, doc, file, ok, onDone] {
             if (ok)
             {
+                inheritSessionMeta (*doc);   // message thread: session state is valid here
                 docs.push_back (std::unique_ptr<FileDoc> (doc));
                 activate ((int) docs.size() - 1);
                 addRecentFile (file);
@@ -260,6 +261,23 @@ void Application::activate (int index)
     selection = d->selection;
     playhead = d->playhead;
     visibleChannels = d->visibleChannels;
+
+    // Pull this file's display state into the session (per-file metadata):
+    // Frequency Analysis settings + axis reference calibrations.
+    settings.fftAxisMode  = std::clamp (d->freqAnalysis.axisMode, 0, 5);
+    settings.fftLocalN    = std::clamp (d->freqAnalysis.fftSize, 1024, 65536);
+    settings.fftRefTime   = std::clamp (d->freqAnalysis.refTime, 0, 1);
+    settings.fftSmooth    = d->freqAnalysis.smooth;
+    settings.fftTrack     = std::clamp (d->freqAnalysis.track, 0, 1);
+    specFreqScaleMode     = d->altRef.freqScaleMode == 1 ? 1 : 0;
+    specFreqFactor        = d->altRef.freqFactor > 1e-30 ? d->altRef.freqFactor : 1.0;
+    altTimeOn             = d->altRef.altTimeOn;
+    altTimeRefSecs        = d->altRef.altTimeRefSecs;
+    altTimeValue          = d->altRef.altTimeValue;
+    altFreqOn             = d->altRef.altFreqOn;
+    altFreqRefHz          = d->altRef.altFreqRefHz;
+    altFreqValue          = d->altRef.altFreqValue;
+
     viewStart = 0.0;
     viewEnd = std::max (d->engine.duration(), 1e-6);
 
@@ -285,6 +303,140 @@ void Application::syncActiveDoc()
     d->selection = selection;
     d->playhead = playhead;
     d->visibleChannels = visibleChannels;
+}
+
+void Application::inheritSessionMeta (FileDoc& d)
+{
+    // Only docs that carried no stored state inherit the session's; a file
+    // with its own saved settings keeps them (activate() restores them).
+    if (!d.haveStoredFreqAnalysis)
+    {
+        sc::FreqAnalysisState fa;
+        fa.axisMode = std::clamp (settings.fftAxisMode, 0, 5);
+        fa.fftSize  = std::clamp (settings.fftLocalN, 1024, 65536);
+        fa.refTime  = std::clamp (settings.fftRefTime, 0, 1);
+        const int sm = settings.fftSmooth;
+        fa.smooth   = (sm == 5) ? 5 : ((sm >= 1 && sm <= 4) ? 3 : 0);
+        fa.track    = std::clamp (settings.fftTrack, 0, 1);
+        d.freqAnalysis = fa;
+    }
+    if (!d.haveStoredAltRef)
+    {
+        sc::AltRefState ar;
+        ar.freqScaleMode  = specFreqScaleMode == 1 ? 1 : 0;
+        ar.freqFactor     = specFreqFactor > 1e-30 ? specFreqFactor : 1.0;
+        ar.altTimeOn      = altTimeOn;
+        ar.altTimeRefSecs = altTimeRefSecs;
+        ar.altTimeValue   = altTimeValue;
+        ar.altFreqOn      = altFreqOn;
+        ar.altFreqRefHz   = altFreqRefHz;
+        ar.altFreqValue   = altFreqValue;
+        d.altRef = ar;
+    }
+}
+
+void Application::pushActiveDocMetaTo (FileDoc& d)
+{
+    sc::FreqAnalysisState fa;
+    fa.axisMode = std::clamp (settings.fftAxisMode, 0, 5);
+    fa.fftSize  = std::clamp (settings.fftLocalN, 1024, 65536);
+    fa.refTime  = std::clamp (settings.fftRefTime, 0, 1);
+    const int sm = settings.fftSmooth;
+    fa.smooth   = (sm == 5) ? 5 : ((sm >= 1 && sm <= 4) ? 3 : 0);
+    fa.track    = std::clamp (settings.fftTrack, 0, 1);
+    d.freqAnalysis = fa;
+
+    sc::AltRefState ar;
+    ar.freqScaleMode  = specFreqScaleMode == 1 ? 1 : 0;
+    ar.freqFactor     = specFreqFactor > 1e-30 ? specFreqFactor : 1.0;
+    ar.altTimeOn      = altTimeOn;
+    ar.altTimeRefSecs = altTimeRefSecs;
+    ar.altTimeValue   = altTimeValue;
+    ar.altFreqOn      = altFreqOn;
+    ar.altFreqRefHz   = altFreqRefHz;
+    ar.altFreqValue   = altFreqValue;
+    d.altRef = ar;
+}
+
+void Application::pushActiveDocMeta()
+{
+    FileDoc* d = doc();
+    if (d != nullptr)
+        pushActiveDocMetaTo (*d);
+}
+
+bool Application::setActiveDocMetaMode (sc::MetaMode mode)
+{
+    FileDoc* d = doc();
+    if (d == nullptr || !d->engine.isFileLoaded () || mode == d->metaMode)
+        return true;   // nothing to do
+
+    auto makeEntry = [] (const char* id, bool adtlList,
+                         std::string payload, bool present) -> RiffPatchEntry
+    {
+        RiffPatchEntry e;
+        std::memcpy (e.fourcc, id, 4);
+        e.adtlList = adtlList;
+        e.payload  = std::move (payload);
+        e.present  = present;
+        return e;
+    };
+
+    const bool isWav = d->file.getFileExtension().equalsIgnoreCase (".wav");
+    if (!isWav && mode == sc::MetaMode::Embedded)
+        return false;   // non-WAV files cannot carry RIFF chunks
+
+    auto deleteLegacySidecars = [&] ()
+    {
+        juce::File m (d->file.getFullPathName() + ".markers.json");
+        if (m.existsAsFile()) m.deleteFile();
+        const juce::File s = savedSelectionsSidecarPath (d->file);
+        if (s.existsAsFile()) s.deleteFile();
+    };
+
+    if (mode == sc::MetaMode::External)
+    {
+        // 1. Write the unified sidecar - it becomes the single source of truth.
+        if (!d->writeMetaSidecar (d->file))
+            return false;
+        // 2. Remove every managed chunk from the WAV (audio bytes preserved).
+        if (isWav)
+        {
+            std::vector<RiffPatchEntry> entries;
+            entries.push_back (makeEntry ("cue ", false, {}, false));
+            entries.push_back (makeEntry ("LIST", true,  {}, false));
+            entries.push_back (makeEntry ("SCTT", false, {}, false));
+            entries.push_back (makeEntry ("SCMD", false, {}, false));
+            patchRiffChunks (d->file, entries);   // best effort: sidecar is safe
+        }
+        deleteLegacySidecars ();
+    }
+    else
+    {
+        // 1. Insert/replace every managed chunk inside the WAV.
+        const std::vector<Marker>& ms = d->markers.markers();
+        std::vector<RiffPatchEntry> entries;
+        entries.push_back (makeEntry ("cue ", false,
+            buildCueChunkPayload (ms, d->engine.sampleRate(), d->engine.numSamples()), true));
+        entries.push_back (makeEntry ("LIST", true,
+            buildAdtlListPayload (ms, d->engine.sampleRate(), d->engine.numSamples()), true));
+        if (!d->sctt.empty ())
+            entries.push_back (makeEntry ("SCTT", false, scttToJson (d->sctt), true));
+        const std::string scmd = d->buildScmdJson ();
+        if (!scmd.empty ())
+            entries.push_back (makeEntry ("SCMD", false, scmd, true));
+
+        if (!patchRiffChunks (d->file, entries))
+            return false;   // WAV untouched; the sidecar (if any) is still valid
+
+        // 2. The metadata now lives inside the WAV: drop every JSON copy.
+        const juce::File unified = sc::fileMetaSidecarPath (d->file);
+        if (unified.existsAsFile()) unified.deleteFile();
+        deleteLegacySidecars ();
+    }
+
+    d->metaMode = mode;
+    return true;
 }
 
 void Application::closeFile()
@@ -964,6 +1116,10 @@ bool Application::newFile (int numChans, double sampleRate)
     for (int i = 0; i < numChans; ++i)
         d->visibleChannels.push_back (i);
 
+    // Inherit the current session's display state so activating the new doc
+    // doesn't reset the Frequency Analysis panel / axis calibrations.
+    pushActiveDocMetaTo (*d);
+
     docs.push_back (std::move (d));
     activate ((int) docs.size() - 1);   // fires onActiveDocChanged -> UI sync
     return true;
@@ -1024,6 +1180,9 @@ bool Application::copyToNewFile (std::string* errOut)
     for (int i = 0; i < nch; ++i)
         nd->visibleChannels.push_back (i);
 
+    // Inherit the current session's display state (see newFile).
+    pushActiveDocMetaTo (*nd);
+
     docs.push_back (std::move (nd));
     activate ((int) docs.size() - 1);   // fires onActiveDocChanged -> UI sync
     return true;
@@ -1055,8 +1214,6 @@ bool Application::del(std::string* errOut)
         d->markers.adjustForDeletion (a, b);
         for (auto& ss : d->savedSelections)
             ss.data.adjustForDeletion (a, b);
-        if (d->selectionsOnDisk)
-            d->saveSelectionsToDisk ();
 
         Patch& p = d->undo.lastRecorded ();
         p.hasSideState = true;
@@ -1674,8 +1831,7 @@ void Application::restorePatchSideState (FileDoc* d, const Patch& p, bool isRedo
 {
     d->markers.restore (isRedo ? p.newMarkers : p.oldMarkers);
     d->savedSelections = isRedo ? p.newSavedSel : p.oldSavedSel;
-    if (d->selectionsOnDisk)
-        d->saveSelectionsToDisk ();
+    // Markers/selections persist with the unified metadata on Save - no live sidecar.
     if (onPatchSideStateRestored)
         onPatchSideStateRestored (d, p, isRedo);
 }

@@ -1358,6 +1358,10 @@ void MainWindow::activateDocUI()
     // it when the new doc has none / Play Spectral Selection is off).
     app.pushSpectralMaskToEngine ();
 
+    // Per-file Frequency Analysis settings: if this document carries its own
+    // saved values, mirror them into the panel's combos (no-op otherwise).
+    if (fftPanel) fftPanel->resyncFromSettings();
+
     syncSharedState();
     updateTitle();
 
@@ -1414,12 +1418,34 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
     dlg->setProgress (-1.0);   // out of range -> indeterminate spinning bar
     dlg->enterModalState (false);
 
-    std::thread ([this, file, saveAs, dlg] {
+    FileDoc* d = app.doc();   // the document being saved (modal loop blocks switches)
+    if (d != nullptr && !file.getFileExtension().equalsIgnoreCase (".wav")
+        && d->metaMode == sc::MetaMode::Embedded)
+        d->metaMode = sc::MetaMode::External;   // non-WAV cannot carry RIFF chunks
+
+    std::thread ([this, file, saveAs, dlg, d] {
         const bool ok = saveAs ? app.audioEngine().saveFileAs (file)
                                : app.audioEngine().saveFile (file);
-        juce::MessageManager::callAsync ([this, dlg, ok] {
+        juce::MessageManager::callAsync ([this, dlg, ok, file, d, saveAs] {
             delete dlg;
-            if (ok) updateTitle();
+            if (!ok) return;
+
+            // Save As: the document's path now points at the new location.
+            if (saveAs && d != nullptr)
+                d->file = file;
+
+            // External mode: the sidecar travels with the saved file and the
+            // legacy per-category sidecars are consolidated into it.
+            if (d != nullptr && d->metaMode == sc::MetaMode::External)
+            {
+                d->writeMetaSidecar (file);
+                juce::File lm (file.getFullPathName() + ".markers.json");
+                if (lm.existsAsFile()) lm.deleteFile();
+                const juce::File ls = savedSelectionsSidecarPath (file);
+                if (ls.existsAsFile()) ls.deleteFile();
+            }
+
+            updateTitle();
         });
     }).detach();
 }
@@ -1684,6 +1710,12 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             break;
         case FileSave: handleFileSave(); break;
         case FileSaveAs: handleFileSaveAs(); break;
+        case MetaEmbedded:
+            app.setActiveDocMetaMode (sc::MetaMode::Embedded);
+            break;
+        case MetaExternal:
+            app.setActiveDocMetaMode (sc::MetaMode::External);
+            break;
         case FileExportSpectral:
             if (spectralView && app.audioEngine().isFileLoaded())
             {
@@ -1892,6 +1924,7 @@ void MainWindow::handleContextMenuAction (int id)
         case CtxScaleSpecHz:
             app.specFreqScaleMode = 0;
             app.specFreqFactor = 1.0;
+            app.pushActiveDocMeta();   // per-file reference calibration
             break;
         case CtxScaleSpecCustom:
             armRefClick (Application::RefClickTarget::SpecFreqCustom);
@@ -1900,13 +1933,19 @@ void MainWindow::handleContextMenuAction (int id)
         // ---- Alternative Scale menu (spectrogram only, checkable) ----
         case CtxAltScaleTime:
             if (app.altTimeOn)
+            {
                 app.altTimeOn = false;   // disable the overlay scale
+                app.pushActiveDocMeta();
+            }
             else
                 armRefClick (Application::RefClickTarget::AltTime);
             break;
         case CtxAltScaleFreq:
             if (app.altFreqOn)
+            {
                 app.altFreqOn = false;
+                app.pushActiveDocMeta();
+            }
             else
                 armRefClick (Application::RefClickTarget::AltFreq);
             break;
@@ -2028,6 +2067,7 @@ void MainWindow::handleRefClickPlaced (double tSecs, double fHz)
         default: break;
     }
 
+    app.pushActiveDocMeta();   // reference calibrations are per-file metadata
     syncSharedState();   // refreshes the status bar + spectral axis labels
 }
 
@@ -3375,6 +3415,24 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSeparator();
         menu.addItem (FileSave, "Save\tCtrl+S", app.audioEngine().isFileLoaded(), false);
         menu.addItem (FileSaveAs, "Save As...\tCtrl+Shift+S", app.audioEngine().isFileLoaded(), false);
+
+        // Metadata storage: where this file's markers/selections/transcription/
+        // calibrations live - inside the WAV or in a .meta.json sidecar.
+        {
+            juce::PopupMenu metaMenu;
+            FileDoc* d = app.doc();
+            const bool hasDoc = d != nullptr && d->engine.isFileLoaded();
+            const bool wavFile = d != nullptr
+                && (d->file.getFullPathName().isEmpty()
+                    || d->file.getFileExtension().equalsIgnoreCase (".wav"));
+            metaMenu.addItem (MetaEmbedded, "Embedded into Wav",
+                              hasDoc && wavFile,
+                              hasDoc && d->metaMode == sc::MetaMode::Embedded);
+            metaMenu.addItem (MetaExternal, "External Json file", hasDoc,
+                              hasDoc && d->metaMode == sc::MetaMode::External);
+            menu.addSubMenu ("Metadata", metaMenu);
+        }
+
         menu.addItem (FileExportSpectral, "Save Spectrogram As...\tCtrl+Shift+E",
                       app.audioEngine().isFileLoaded() && showSpectralView, false);
         menu.addSeparator();
@@ -3749,9 +3807,9 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         || key == juce::KeyPress (juce::KeyPress::F8Key, juce::ModifierKeys::noModifiers, 0))
     {
         // Region marker spanning the selection if there is one,
-        // otherwise a point marker at the cursor.
+        // otherwise a point marker at the cursor. (Markers persist with the
+        // file's unified metadata on Save / mode switch - no live sidecar.)
         app.addMarkerAtCursor();
-        app.markers().saveSidecar (app.audioEngine().getFile());
         if (markersPanel) markersPanel->refresh();
         syncSharedState();
         return true;

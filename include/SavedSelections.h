@@ -2,8 +2,10 @@
 // SpectroCraft - named, storable spectral selections (Selection panel).
 //
 // A SavedSpectralSelection is a full copy of a SpectralSelection under a name.
-// Each FileDoc keeps its own list; when "Save to disk" is on the list is kept
-// in sync with a sidecar file "<audiofile>.selections.json".
+// Each FileDoc keeps its own list, persisted automatically with the file's
+// unified metadata (embedded SCMD chunk or .meta.json sidecar) on Save.
+// The legacy "<audiofile>.selections.json" sidecar format is still read on
+// open and by drag & drop.
 
 #include <JuceHeader.h>
 #include "SpectralSelection.h"

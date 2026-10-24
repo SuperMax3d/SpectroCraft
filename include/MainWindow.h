@@ -203,6 +203,7 @@ public:
 #endif
         WindowPanelBase = 6500,   // Window menu: per-panel open/close toggles
         HelpAbout = 6000,
+        MetaEmbedded = 7500, MetaExternal,   // File > Metadata storage mode
         ColourMapClassic = 7000, ColourMapViridis, ColourMapPlasma, ColourMapInferno,
         ColourMapMagma, ColourMapHot, ColourMapCool, ColourMapGrayscale,
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
