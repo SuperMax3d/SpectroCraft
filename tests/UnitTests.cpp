@@ -2572,6 +2572,13 @@ static void testStatusBarEditing()
     StatusBar bar;
     bar.setSize (900, 20);
 
+    // The editors must be real children of the status bar or they never render
+    // in the live app (regression: they were once parentless members).
+    CHECK (bar.getIndexOfChildComponent (&bar.selStartField()) >= 0, "start field is a child of the bar");
+    CHECK (bar.getIndexOfChildComponent (&bar.selStopField())   >= 0, "stop field is a child of the bar");
+    CHECK (bar.getIndexOfChildComponent (&bar.selLenField())    >= 0, "length field is a child of the bar");
+    CHECK (bar.getIndexOfChildComponent (&bar.selPosField())    >= 0, "position field is a child of the bar");
+
     // No selection: the fields are hidden and empty.
     CHECK (!bar.selFieldsVisible(), "no selection: footer fields hidden");
 
@@ -2643,6 +2650,50 @@ static void testStatusBarEditing()
     CHECK (bar.getPlayheadText() == "Pos: 1:15", "playhead readout uses m:ss past a minute");
     bar.setPlayhead (3661.25);
     CHECK (bar.getPlayheadText() == "Pos: 1:01:01.25", "playhead readout uses h:mm:ss past an hour");
+
+    // The playhead position is itself editable in the footer...
+    bar.setPlayhead (75.0);
+    CHECK (bar.posFieldVisible(), "the position field is visible once a playhead exists");
+    CHECK (bar.getPosText() == "1:15", "position field shows the same clock value");
+
+    double gotP = -1.0;
+    bar.onPositionEdited = [&] (double t) { gotP = t; };
+    pump();
+
+    // ...typing a new position applies it live...
+    bar.selPosField().setText ("2:00", true);
+    pump();
+    CHECK (approx (gotP, 120.0), "typed position applies through the callback");
+
+    // ...unparseable partial text is ignored...
+    bar.selPosField().setText ("-", true);
+    pump();
+    CHECK (approx (gotP, 120.0), "partial position text is ignored");
+
+    // ...and programmatic playhead changes refresh the field without echoing.
+    gotP = -1.0;
+    bar.setPlayhead (30.0);
+    pump();
+    CHECK (gotP < 0.0, "programmatic playhead change does not echo into the callback");
+    CHECK (bar.getPosText() == "30.000", "...but still refreshes the field");
+
+    // Sample mode: the field shows and accepts sample counts...
+    bar.setTimeContext (TimeAxisMode::Sample, 0.0, 8000.0);
+    bar.setPlayhead (2.0);
+    CHECK (bar.getPosText() == "16000", "position in samples");
+    gotP = -1.0;
+    bar.selPosField().setText ("4000", true);
+    pump();
+    CHECK (approx (gotP, 0.5), "typed sample count converts back to seconds");
+
+    // ...and Time Offset mode shows and accepts time + offset.
+    bar.setTimeContext (TimeAxisMode::TimeOffset, 120.0, 8000.0);
+    bar.setPlayhead (75.0);
+    CHECK (bar.getPosText() == "3:15.0000", "offset mode shows time + offset");
+    gotP = -1.0;
+    bar.selPosField().setText ("4:00", true);
+    pump();
+    CHECK (approx (gotP, 120.0), "typed offset value converts back to file time");
 }
 
 // ------------------------------------------------- footer file name wiring
@@ -3246,9 +3297,11 @@ static void testSpectralProbe()
 }
 
 // ------------------------------------------------------------------ arrow keys / Shift+arrow selection
-// Plain Left/Right moves the playhead in 10 ms steps; Ctrl+Left/Right moves it
-// one sample at a time. Holding Shift extends the selection from where the
-// shift-drag started to the current playhead position (in either step size).
+// Plain Left/Right moves the playhead by one percent of the visible time span
+// per press, so zooming in shrinks the steps until deep zoom reaches exactly
+// one sample; Ctrl+Left/Right always moves exactly one sample. Holding Shift
+// extends the selection from where the shift-drag started to the current
+// playhead position (in either step size).
 static void testArrowKeySelection()
 {
     const juce::File wav = makeTempFile ("arrow_keys.wav");
@@ -3266,7 +3319,8 @@ static void testArrowKeySelection()
     std::unique_ptr<MainWindow> win (new MainWindow (app, "arrow key test"));
 
     const double fine = 1.0 / app.audioEngine().sampleRate();   // one sample
-    const double coarse = 0.010;                                // 10 ms step
+    auto coarse = [&] ()
+    { return std::max (fine, (app.viewEnd - app.viewStart) / 100.0); };
     auto pressRight = [&] (juce::ModifierKeys mods)
     { return win->keyPressed (juce::KeyPress (juce::KeyPress::rightKey, mods, 0), nullptr); };
     auto pressLeft  = [&] (juce::ModifierKeys mods)
@@ -3282,27 +3336,27 @@ static void testArrowKeySelection()
     app.setSelection ({ 0.25, 0.3 });   // pre-existing selection must survive plain moves
 
     CHECK (pressRight (juce::ModifierKeys::noModifiers), "plain Right is handled");
-    CHECK (std::abs (app.playhead - (0.1 + coarse)) < 1e-9,
-           "plain Right moves the playhead one 10 ms step to the right");
+    CHECK (std::abs (app.playhead - (0.1 + coarse ())) < 1e-9,
+           "plain Right moves the playhead one zoom-proportional step right");
     CHECK (app.selection == juce::Range<double> (0.25, 0.3),
            "plain movement does not touch the selection");
 
     CHECK (pressRight (juce::ModifierKeys::commandModifier), "Ctrl+Right is handled");
-    CHECK (std::abs (app.playhead - (0.1 + coarse + fine)) < 1e-9,
+    CHECK (std::abs (app.playhead - (0.1 + coarse () + fine)) < 1e-9,
            "Ctrl+Right moves the playhead one sample to the right");
 
-    // Shift+Right: anchor at the current position, extend rightwards in 10 ms steps.
+    // Shift+Right: anchor at the current position, extend rightwards in zoom-proportional steps.
     const double anchor = app.playhead;
     CHECK (pressRight (juce::ModifierKeys::shiftModifier), "Shift+Right is handled");
-    CHECK (std::abs (app.playhead - (anchor + coarse)) < 1e-9,
-           "Shift+Right moves the playhead one 10 ms step to the right");
-    CHECK (selClose (anchor, anchor + coarse),
+    CHECK (std::abs (app.playhead - (anchor + coarse ())) < 1e-9,
+           "Shift+Right moves the playhead one zoom-proportional step right");
+    CHECK (selClose (anchor, anchor + coarse ()),
            "selection spans from the anchor to the new position");
 
     pressRight (juce::ModifierKeys::shiftModifier);
     pressRight (juce::ModifierKeys::shiftModifier);
-    CHECK (std::abs (app.playhead - (anchor + 3.0 * coarse)) < 1e-9, "repeated Shift+Right keeps moving");
-    CHECK (selClose (anchor, anchor + 3.0 * coarse),
+    CHECK (std::abs (app.playhead - (anchor + 3.0 * coarse ())) < 1e-9, "repeated Shift+Right keeps moving");
+    CHECK (selClose (anchor, anchor + 3.0 * coarse ()),
            "selection follows the playhead to the right");
 
     // Release Shift between the two shift-drag sequences so the next one
@@ -3325,14 +3379,14 @@ static void testArrowKeySelection()
 
     // Shift+Left: shrink back across the anchor and flip direction.
     pressLeft (juce::ModifierKeys::shiftModifier);
-    CHECK (std::abs (app.playhead - (anchor2 + fine - coarse)) < 1e-9,
-           "Shift+Left moves one 10 ms step left");
-    CHECK (selClose (anchor2 + fine - coarse, anchor2),
+    CHECK (std::abs (app.playhead - (anchor2 + fine - coarse ())) < 1e-9,
+           "Shift+Left moves one zoom-proportional step left");
+    CHECK (selClose (anchor2 + fine - coarse (), anchor2),
            "selection flips to [playhead, anchor] when crossing");
     for (int i = 0; i < 3; ++i)
         pressLeft (juce::ModifierKeys::shiftModifier);
-    CHECK (std::abs (app.playhead - (anchor2 + fine - 4.0 * coarse)) < 1e-9, "repeated Shift+Left keeps moving");
-    CHECK (selClose (anchor2 + fine - 4.0 * coarse, anchor2),
+    CHECK (std::abs (app.playhead - (anchor2 + fine - 4.0 * coarse ())) < 1e-9, "repeated Shift+Left keeps moving");
+    CHECK (selClose (anchor2 + fine - 4.0 * coarse (), anchor2),
            "selection follows the playhead to the left");
 
     // Release Shift: no physical key is held in this process, so the 30 Hz timer
@@ -3346,6 +3400,23 @@ static void testArrowKeySelection()
     const juce::Range<double> frozen = app.selection;
     pressRight (juce::ModifierKeys::noModifiers);
     CHECK (app.selection == frozen, "after Shift release plain moves no longer change the selection");
+
+    // Zoom-dependent stepping: shrinking the visible span shrinks the plain
+    // arrow step proportionally...
+    app.viewStart = 0.0;
+    app.viewEnd = 0.25;   // quarter of the file: the step is now 1/400 s
+    const double p1 = app.playhead;
+    CHECK (pressRight (juce::ModifierKeys::noModifiers), "zoomed Right is handled");
+    CHECK (std::abs (app.playhead - (p1 + coarse ())) < 1e-9,
+           "plain step follows the visible span (0.25 s -> 2.5 ms)");
+
+    // ...until deep zoom reaches exactly one sample per press.
+    app.viewStart = 0.0;
+    app.viewEnd = 96.0 / app.audioEngine().sampleRate();   // only 96 samples visible
+    const double p2 = app.playhead;
+    CHECK (pressRight (juce::ModifierKeys::noModifiers), "deep-zoom Right is handled");
+    CHECK (std::abs (app.playhead - (p2 + fine)) < 1e-12,
+           "deep zoom steps exactly one sample per press");
 
     win.reset();   // destroy the window while its MessageManager is still alive
     delete mm;

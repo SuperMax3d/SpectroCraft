@@ -280,6 +280,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         statusBar->onSelectionEdited = [this] (double a, double b)
         { app.setSelection (juce::Range<double> (a, b)); };
 
+    // The footer's playhead field pushes the typed position back into the
+    // shared state (Application clamps it to the file and notifies the views).
+    if (statusBar)
+        statusBar->onPositionEdited = [this] (double t) { app.setPlayhead (t); };
+
     // Panels can ask for a time range to be shown in both views (e.g.
     // double-clicking a marker or a stored selection).
     app.onSetTimeWindow = [this] (double t0, double t1) { applyTimeWindow (t0, t1); };
@@ -3700,9 +3705,14 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (app.audioEngine().isFileLoaded() && !mods.isAltDown()
             && (keyCode == juce::KeyPress::leftKey || keyCode == juce::KeyPress::rightKey))
     {
-        // Ctrl = fine 1-sample steps; plain / Shift arrows move in 10 ms steps.
+        // Plain / Shift arrows step by one percent of the visible time span
+        // per press, so zooming in makes the steps smaller until deep zoom
+        // reaches exactly one sample; Ctrl always moves exactly one sample.
         const bool ctrl = mods.isCommandDown() || mods.isCtrlDown();
-        const double step = ctrl ? (1.0 / app.audioEngine().sampleRate()) : 0.010;
+        const double minStep = 1.0 / app.audioEngine().sampleRate();
+        const double step = ctrl ? minStep
+                                 : std::max (minStep,
+                                             (app.viewEnd - app.viewStart) / 100.0);
         const bool right = (keyCode == juce::KeyPress::rightKey);
 
         if (mods.isShiftDown())

@@ -1190,6 +1190,11 @@ public:
         to Application::setSelection. */
     std::function<void (double, double)> onSelectionEdited;
 
+    /** Called when the user edits the playhead-position field below; the
+        callback receives the new position in seconds. MainWindow wires it to
+        Application::setPlayhead (which clamps it to the file). */
+    std::function<void (double)> onPositionEdited;
+
     // Right side: editable selection range and playhead position.
     void setSelection (double t0, double t1);
     void setPlayhead (double t);
@@ -1204,6 +1209,7 @@ public:
         reformatField (startEdit);
         reformatField (stopEdit);
         reformatField (lenEdit);
+        reformatField (posEdit);
     }
 
     // Current field texts (unit tests).
@@ -1211,12 +1217,15 @@ public:
     juce::String getSelStopText()  const { return stopEdit.getText(); }
     juce::String getSelLenText()   const { return lenEdit.getText(); }
     bool selFieldsVisible() const { return startEdit.isVisible(); }
+    juce::String getPosText()      const { return posEdit.getText(); }
+    bool posFieldVisible()         const { return posEdit.isVisible(); }
     juce::String getPlayheadText() const { return playPart; }
 
     // The editable fields themselves (unit tests).
     juce::TextEditor& selStartField() { return startEdit; }
     juce::TextEditor& selStopField()  { return stopEdit; }
     juce::TextEditor& selLenField()   { return lenEdit; }
+    juce::TextEditor& selPosField()   { return posEdit; }
     // Left side: name of the currently active file (empty when none is loaded).
     void setFileName (const juce::String& s)
     {
@@ -1258,20 +1267,20 @@ private:
     juce::String formatFieldTime (double v, bool duration) const;
     bool parseFieldText (const juce::String& s, double& outSecs, bool duration) const;
 
-    // Right-side layout: [Sel:] [start] [-] [stop] [(] [len] [)]  gap  [Pos: t]
+    // Right-side layout: [Sel:] [start] [-] [stop] [(] [len] [)]  gap  [Pos:] [pos]
     struct RightLayout { int selLabelX, startX, dashX, stopX, openX, lenX,
-                          closeX, posX; };
+                          closeX, posLabelX, posX; };
     RightLayout computeRightLayout (int width) const;
 
     juce::String mouseText, playPart, fileName, ratePart, modeText;
-    bool selVisible_ = false, rightFits_ = true;
-    double curStart = 0.0, curStop = 0.0;
+    bool selVisible_ = false, posVisible_ = false, rightFits_ = true;
+    double curStart = 0.0, curStop = 0.0, curPos = 0.0;
 
     // Time-axis scale context (set by MainWindow via setTimeContext).
     TimeAxisMode timeCtxMode = TimeAxisMode::Time;
     double timeCtxOffset = 0.0, timeCtxRate = 48000.0;
 
-    juce::TextEditor startEdit, stopEdit, lenEdit;
+    juce::TextEditor startEdit, stopEdit, lenEdit, posEdit;
 
     JUCE_DECLARE_NON_COPYABLE (StatusBar)
 };

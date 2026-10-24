@@ -4542,15 +4542,17 @@ void MarkerListPanel::paint (juce::Graphics& g)
 // Right-side field widths: [Sel:] [start] [-] [stop] [(] [len] [)]  gap  [Pos: t]
 static constexpr int kSelEditW = 90;   // start / stop field width
 static constexpr int kLenEditW = 84;   // length field width
-static constexpr int kPosAreaW = 120;  // reserved for the "Pos: ..." readout
+static constexpr int kPosLabelW = 30;  // "Pos:" label width
+static constexpr int kPosEditW = 96;   // playhead-position field width
 
 StatusBar::RightLayout StatusBar::computeRightLayout (int width) const
 {
     // selLabelX = -1 marks "does not fit".
-    RightLayout r {-1, 0, 0, 0, 0, 0, 0, 0};
+    RightLayout r {-1, 0, 0, 0, 0, 0, 0, -1, 0};
     constexpr int selLabelW = 34, dashSlot = 10, parenSlot = 8, gap = 16;
     const int groupW = selLabelW + kSelEditW + dashSlot + kSelEditW
-                     + parenSlot + kLenEditW + parenSlot + gap + kPosAreaW;
+                     + parenSlot + kLenEditW + parenSlot + gap
+                     + kPosLabelW + kPosEditW;
     if (width <= groupW + 8) return r;   // too narrow: fields stay hidden
     const int x0 = width - 8 - groupW;
     r.selLabelX = x0;
@@ -4560,17 +4562,18 @@ StatusBar::RightLayout StatusBar::computeRightLayout (int width) const
     r.openX     = r.stopX + kSelEditW;
     r.lenX      = r.openX + parenSlot;
     r.closeX    = r.lenX + kLenEditW;
-    r.posX      = r.closeX + parenSlot + gap;
+    r.posLabelX = r.closeX + parenSlot + gap;
+    r.posX      = r.posLabelX + kPosLabelW;
     return r;
 }
 
 StatusBar::StatusBar()
 {
-    for (auto* e : { &startEdit, &stopEdit, &lenEdit })
+    for (auto* e : { &startEdit, &stopEdit, &lenEdit, &posEdit })
     {
         e->setFont (12.0f);
         e->setMultiLine (false);
-        e->setVisible (false);   // shown once a selection exists and fits
+        e->setVisible (false);   // shown once a selection/playhead exists and fits
         e->setColour (juce::TextEditor::backgroundColourId,
                      juce::Colour::fromRGB (60, 60, 70));
         e->setColour (juce::TextEditor::textColourId,
@@ -4580,17 +4583,26 @@ StatusBar::StatusBar()
         e->addListener (this);
     }
 
+    // The editors are real children so they render in the live app; headless
+    // tests drive them directly without a peer.
+    addChildComponent (startEdit);
+    addChildComponent (stopEdit);
+    addChildComponent (lenEdit);
+    addChildComponent (posEdit);
+
     // Live editing: every parseable change is applied straight away, so a
     // pasted value takes effect without pressing Enter. Unparseable partial
     // text ("-", "2:") is ignored until focus is lost.
     startEdit.onTextChange = [this] { commitField (startEdit); };
     stopEdit.onTextChange  = [this] { commitField (stopEdit); };
     lenEdit.onTextChange   = [this] { commitField (lenEdit); };
+    posEdit.onTextChange   = [this] { commitField (posEdit); };
 
     // Enter normalises the field to the canonical display of its value.
     startEdit.onReturnKey = [this] { reformatField (startEdit); };
     stopEdit.onReturnKey  = [this] { reformatField (stopEdit); };
     lenEdit.onReturnKey   = [this] { reformatField (lenEdit); };
+    posEdit.onReturnKey   = [this] { reformatField (posEdit); };
 }
 
 void StatusBar::resized()
@@ -4603,20 +4615,22 @@ void StatusBar::resized()
     startEdit.setBounds (L.startX, y, kSelEditW, h);
     stopEdit.setBounds (L.stopX, y, kSelEditW, h);
     lenEdit.setBounds (L.lenX, y, kLenEditW, h);
+    posEdit.setBounds (L.posX, y, kPosEditW, h);
 }
 
 void StatusBar::applyFieldVisibility()
 {
-    const bool show = rightFits_ && selVisible_;
-    startEdit.setVisible (show);
-    stopEdit.setVisible (show);
-    lenEdit.setVisible (show);
+    startEdit.setVisible (rightFits_ && selVisible_);
+    stopEdit.setVisible  (rightFits_ && selVisible_);
+    lenEdit.setVisible   (rightFits_ && selVisible_);
+    posEdit.setVisible   (rightFits_ && posVisible_);
 }
 
 double StatusBar::fieldTime (const juce::TextEditor& ed) const
 {
     if (&ed == &startEdit) return curStart;
     if (&ed == &stopEdit)  return curStop;
+    if (&ed == &posEdit)   return curPos;
     return curStop - curStart;
 }
 
@@ -4625,6 +4639,12 @@ void StatusBar::commitField (juce::TextEditor& ed)
     double v;
     if (!parseFieldText (ed.getText(), v, &ed == &lenEdit))
         return;   // mid-typing text: leave the selection alone for now
+
+    if (&ed == &posEdit)
+    {
+        if (onPositionEdited) onPositionEdited (v);
+        return;
+    }
 
     double a = curStart, b = curStop;
     if (&ed == &startEdit)      a = jlimit (0.0, curStop, v);
@@ -4666,7 +4686,8 @@ bool StatusBar::parseFieldText (const juce::String& s, double& outSecs, bool dur
 
 void StatusBar::textEditorFocusLost (juce::TextEditor& ed)
 {
-    if (&ed == &startEdit || &ed == &stopEdit || &ed == &lenEdit)
+    if (&ed == &startEdit || &ed == &stopEdit || &ed == &lenEdit
+            || &ed == &posEdit)
         reformatField (ed);
 }
 
@@ -4748,14 +4769,16 @@ void StatusBar::paint (juce::Graphics& g)
     {
         g.setColour (juce::Colour::fromRGB (160, 190, 235));
         juce::Font f (12.0f);
-        if (rightFits_)
+        if (rightFits_ && posVisible_)
         {
+            // The editable field shows the value; only its label is painted here.
             const auto L = computeRightLayout (b.getWidth());
-            g.drawText (playPart, L.posX, 0, kPosAreaW, b.getHeight(),
-                        juce::Justification::right, false);
+            g.drawText ("Pos:", L.posLabelX, 0, kPosLabelW, b.getHeight(),
+                        juce::Justification::left, false);
         }
-        else
+        else if (!rightFits_)
         {
+            // Too narrow for the field: fall back to plain right-aligned text.
             const int w = std::min (b.getWidth() - 8,
                                     (int) juce::GlyphArrangement::getStringWidth (f, playPart) + 16);
             g.drawText (playPart, b.getWidth() - w, 0, w, b.getHeight(),
@@ -4786,9 +4809,15 @@ void StatusBar::setSelection (double t0, double t1)
 void StatusBar::setPlayhead (double t)
 {
     // The playhead readout follows the active time-axis scale mode.
+    curPos = t;
     const juce::String s = "Pos: " + formatDisplayedTime (t, timeCtxMode,
                                                           timeCtxOffset, timeCtxRate);
     if (s != playPart) { playPart = s; repaint(); }
+    posVisible_ = true;
+    applyFieldVisibility();
+    // Never clobber a field the user is currently editing.
+    if (!posEdit.hasKeyboardFocus (false))
+        posEdit.setText (formatFieldTime (t, false), false);
 }
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI

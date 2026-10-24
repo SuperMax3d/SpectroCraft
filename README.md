@@ -288,7 +288,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     `1:02:35.127`); parseable changes apply live, Enter normalises the field,
     and losing focus reverts invalid text. Times of a minute or more display in
     clock style (`m:ss`, `h:mm:ss[.dddd]`). The current **playhead position**
-    (`Pos: t`) uses the same formatting and tracks playback at 30 Hz.
+    is editable too: click into the `Pos:` field to type/paste where the cursor
+    should go (clamped to the file) — it tracks playback at 30 Hz whenever you
+    are not editing it.
   - The File menu offers **Save Spectrogram As...** (Ctrl+Shift+E), which writes
     the current spectrogram content (per-channel rows included, no axes or
     overlays) to a PNG file.
@@ -767,7 +769,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Select all | Ctrl+A |
 | Delete time selection (or **zero the spectral selection** when one is active) | Del / Backspace |
 | Play / Pause toggle | Space |
-| Move playhead in 10 ms steps left / right | ← / → |
+| Move playhead left / right (one percent of the visible time span per press, so zooming in shrinks the step down to exactly one sample at deep zoom) | ← / → |
 | Move playhead one sample left / right | Ctrl+← / Ctrl+→ |
 | Select while moving the playhead (anchor = position at first Shift press; released when Shift is let go) | Shift+← / Shift+→ |
 | Fine selection, one sample per step | Ctrl+Shift+← / Ctrl+Shift+→ |
