@@ -75,11 +75,6 @@ public:
     std::vector<int> clonePickShapeStarts;
     SpectralSelection clonePickBase;   // snapshot of the selection when picking started
 
-    // Rows multi-selected in the Selection panel: their stored selections are
-    // drawn on top of the spectrogram (amber) so several saved masks can be
-    // compared at a glance. Session-only, cleared on doc switch/close.
-    std::vector<size_t> highlightedSavedSel;
-
     // Move/Scale selection gesture (spectral view right-click menu): the first
     // click sets a reference point, mouse movement previews the transform live,
     // the second click applies it and Esc/right-click cancels.
@@ -360,9 +355,6 @@ public:
     void endClonePick();
     bool isClonePicking() const { return clonePicking; }
 
-    // Selection panel multi-selection highlight (see highlightedSavedSel).
-    void setHighlightedSavedSelections (const std::vector<size_t>& rows);
-    const std::vector<size_t>& highlightedSavedSelections() const { return highlightedSavedSel; }
     double clonePickRefFreq() const { return clonePickRefF; }
     bool hasClonePickRef() const { return haveClonePickRef; }
     const std::vector<std::pair<double, double>>& clonePickPoints() const { return clonePickPts; }

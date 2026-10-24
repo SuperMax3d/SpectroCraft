@@ -262,6 +262,12 @@ void SpectralSelection::appendScaledShapesFrom (const SpectralSelection& src, do
         appendScaledShape (s, m);
 }
 
+void SpectralSelection::appendShapesFrom (const SpectralSelection& src)
+{
+    for (const auto& s : src.shapeList)
+        shapeList.push_back (s);   // deep copy of each shape
+}
+
 void SpectralSelection::removeShapesAt (int start, int count)
 {
     if (start < 0 || count <= 0 || start >= (int) shapeList.size ()) return;

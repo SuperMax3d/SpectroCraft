@@ -245,7 +245,6 @@ void Application::activate (int index)
     if (index < 0 || index >= (int) docs.size()) return;
     endClonePick ();   // a picking session belongs to the doc being left
     cancelSelGesture ();
-    highlightedSavedSel.clear ();   // highlight rows belong to the doc being left
     FileDoc* d = docs[(size_t) index].get();
 
     // Save the current UI state back into the doc being left and stop its
@@ -476,7 +475,6 @@ void Application::closeDoc (int index)
     if (index < 0 || index >= (int) docs.size()) return;
     endClonePick ();   // a picking session belongs to the doc being closed
     cancelSelGesture ();
-    highlightedSavedSel.clear ();   // highlight rows belong to the doc being closed
     FileDoc& d = *docs[(size_t) index];
 
     const bool wasActive = (index == activeDocIndex);
@@ -724,17 +722,6 @@ void Application::startClonePick ()
     clonePickBase = d->spectralSel;
     if (onStateChange)
         onStateChange ();   // status bar hint + panel button state
-}
-
-void Application::setHighlightedSavedSelections (const std::vector<size_t>& rows)
-{
-    // The panels' refresh() re-syncs this set whenever it runs, and the state
-    // change below triggers a panel refresh - only fire when the value really
-    // changed or the loop recurses forever.
-    if (highlightedSavedSel == rows) return;
-    highlightedSavedSel = rows;
-    if (onStateChange)
-        onStateChange ();   // repaint the spectrogram with/without the amber overlays
 }
 
 void Application::endClonePick ()

@@ -143,6 +143,11 @@ public:
         as it was when picking started - never its own previous clones. */
     void appendScaledShapesFrom (const SpectralSelection& src, double m);
 
+    /** Appends deep copies of every shape in `src` after this selection's own
+        shapes, preserving each shape's additive/subtractive flag and order.
+        Used to merge several stored selections into one live selection. */
+    void appendShapesFrom (const SpectralSelection& src);
+
     // Remove the shapes [start, start+count) from the list (no-op when out of
     // range). Used to undo a Clone & Multiply pick point's appended clones.
     void removeShapesAt (int start, int count);

@@ -436,6 +436,11 @@ public:
     juce::String buildCurveCursorInfo (int x, int y, bool& snapped,
                                        float& snapDotX, float& snapDotY) const;
 
+    // "| Alt N=value" suffixes for every enabled alternative frequency
+    // reference (app.altFreqRefs); empty when none are enabled. Appended to
+    // the cursor readout wherever a frequency value is shown.
+    static juce::String altFreqSuffix (const Application& appIn, double freqHz);
+
     // Mapping helpers exposed for unit tests.
     float xToFreq (int x) const;
     double freqToX (double f) const;
@@ -855,23 +860,32 @@ public:
         Empty/invalid text yields 0 in displayed units (parseTimeCode parity). */
     double parseMarkerTime (const juce::String& s, bool duration) const;
 
-    // Double-click a row: sets the time selection to the marker's range and
-    // makes sure both views' time window includes it. Also used by unit tests.
+    // Double-click a row: selects it - which sets the time selection to the
+    // marker's range and makes sure both views' time window includes it (+10%
+    // margin). Also used by unit tests.
     void activateRow (int row);
 
     // Excel-style click handling: Shift+click selects the exact anchor..row
-    // range (replacing any previous selection) and fits all of it in view;
-    // plain clicks move the anchor; Ctrl/Cmd+click toggles one row.
+    // range (replacing any previous selection); plain clicks move the anchor;
+    // Ctrl/Cmd+click toggles one row. Every resulting selection set becomes
+    // the time selection and fits in view (via onSelectionSetChanged).
     void onRowClicked (int row, const juce::MouseEvent& e);
     // Removes every marker whose row is selected; refreshes + notifies.
+    // The context menu's Delete Selected item does this - DEL no longer
+    // touches the list (it deletes audio data instead).
     void deleteSelected ();
+    // DEL key: actually deletes the WAV data of the active selection - zeros
+    // a spectral selection, or trims out a time range (app.del).
+    void deleteAudioData ();
     // Pans/zooms both views so that every selected marker is visible
     // (ensureTimeRangeVisible adds the usual 10% margin).
     void fitViewToSelected ();
     // First selected row (-1 when nothing is selected): the detail editors and
-    // double-click activation follow it, while DEL removes ALL selected rows.
+    // double-click activation follow it, while Delete Selected removes ALL
+    // selected rows.
     int primaryRow() const;
-    // Called on any selection change: re-syncs the detail editors.
+    // Called on any selection change: re-syncs the detail editors, makes the
+    // union of the selected markers the time selection and fits the view to it.
     void onSelectionSetChanged ();
 
     // Accessors for headless unit tests.
@@ -974,6 +988,21 @@ public:
     // marker comment. Persists the sidecar and refreshes all panels/views.
     void addMarkerForRow (int rowNumber);
 
+    // Right-click "Edit...": modal dialog editing start/end/text of the given
+    // segment; commits through applySegmentEdit.
+    void showEditDialog (int rowNumber);
+    // Applies an edit to one segment (times in seconds). Returns false when
+    // there is no document, the times are not finite or negative. Swaps
+    // start/end when they arrive reversed. Persists and refreshes on success.
+    bool applySegmentEdit (int rowNumber, double startSec, double endSec,
+                           const juce::String& text);
+    // Inserts a new empty segment at the selection start (or playhead) in
+    // sorted order and selects it; returns the new row number (-1 = no doc).
+    int addEntry();
+    // Removes every selected row (the fallback row when nothing is selected),
+    // persists and refreshes.
+    void removeSelectedRows (int fallbackRow);
+
     // Jumps to a segment: moves the playhead, selects its time range and pans
     // both views so the whole selection is visible (with 10% breathing room,
     // like marker / stored-selection double-clicks). Used by double-clicks
@@ -1025,27 +1054,24 @@ private:
 
 // ------------------------------------------------- Selection panel
 
-/** Named spectral selections (store / recall) + harmonic cloning.
+/** Named spectral selections (store / recall).
 
-    - The table lists this file's saved selections. Save stores the CURRENT
-      selection under a name (same name = update; the dialog pre-fills the
-      next free index number), Delete removes every selected entry, and DEL
-      does the same from the keyboard. Rows support Excel-style multi-
-      selection: plain click selects one row (and sets the anchor),
-      Ctrl/Cmd+click toggles a single row, Shift+click range-selects from the
-      anchor to the clicked row and fits all selected items in view (+10%).
-    - Double-clicking the Name or Comment cell edits it inline (Enter commits,
-      Esc cancels); double-clicking the Shapes column recalls that entry.
-      Multi-selected entries are drawn on the spectrogram at once (amber
-      overlays) so several saved masks can be compared side by side.
+    - The table lists this file's saved selections (Name + Comment columns;
+      no inline editing anywhere). Save stores the CURRENT selection under a
+      name (auto-named "Selection 01", "Selection 02"...; with no spectral
+      selection active a plain time range is stored as a full-height band).
+    - Double-clicking a row recalls that entry as the live selection. Rows
+      support Excel-style multi-selection: plain click selects one row (and
+      sets the anchor), Ctrl/Cmd+click toggles a single row, Shift+click
+      range-selects from the anchor to the clicked row; the union of all
+      selected entries becomes the live mask and both views fit its time
+      extent (+10%).
+    - Right-click offers "Edit..." (name + comment dialog) and "Delete
+      Selected" (removes list rows only). DEL deletes the AUDIO under the
+      live selection instead (undoable); the Delete button removes selected
+      rows.
     - The list persists automatically with the file's unified metadata
-      (embedded SCMD chunk or .meta.json sidecar) on every Save.
-    - "Clone Harmonics by Numbers..." appends additive clones of the current
-      selection at user-given frequency multipliers (e.g. 0.5, 2, 5); clone
-      thickness is stretched by the same factor. "Clone Harmonics by Mouse"
-      does the same with clicks: first click = reference frequency, each
-      following click adds clones at (clicked freq / ref freq). Both live in
-      the panel's right-click menu. */
+      (embedded SCMD chunk or .meta.json sidecar) on every Save. */
 // Derives from FileDragAndDropTarget so .selections.json files can be
 // dropped straight onto the panel (JUCE routes a drop to the nearest
 // ancestor target under the cursor).
@@ -1059,26 +1085,35 @@ public:
     void refresh();   // call after doc changes / selection or list changes
 
     // Recall a stored selection: replaces the live spectral selection with it
-    // and makes sure both views' time window includes its time range. Also
-    // used by unit tests.
+    // and makes sure both views' time window includes its time range (+10%
+    // margin). Also used by unit tests.
     void doRecall (int row);
+    // Replaces the live spectral selection with the UNION of every selected
+    // stored selection (shapes appended in row order) and fits the view to
+    // their combined time range. Called on any table selection change.
+    void recallSelected ();
 
-    // Excel-style click handling (see class comment): Shift+click selects the
-    // exact anchor..row range and fits all selected items in view; plain
-    // clicks move the anchor; Ctrl/Cmd+click toggles one row. Double-clicking
-    // a Name/Comment cell starts inline editing of that field.
+    // Excel-style click handling: Shift+click selects the exact anchor..row
+    // range; plain clicks move the anchor; Ctrl/Cmd+click toggles one row.
+    // Every resulting selection set becomes the live spectral selection and
+    // fits in view (via onSelectionSetChanged). Double-clicking any cell
+    // recalls that row's stored selection.
     void onRowClicked (int row, const juce::MouseEvent& e);
     // Removes every stored selection whose row is selected; refreshes +
-    // notifies. DEL does this from the keyboard too.
+    // notifies. The Delete button and the context-menu item do this - DEL no
+    // longer touches the list (it deletes audio data instead).
     void deleteSelected ();
+    // DEL key: actually deletes the WAV data of the active selection - zeros
+    // a spectral selection, or trims out a time range (app.del).
+    void deleteAudioData ();
     // Pans/zooms both views so that every selected stored selection's time
     // range is visible (ensureTimeRangeVisible adds the usual 10% margin).
     void fitViewToSelected ();
-    // First selected row (-1 when nothing is selected): recall and inline
-    // editing follow it, while DEL removes ALL selected rows.
+    // First selected row (-1 when nothing is selected): recall and Edit follow
+    // it, while Delete Selected removes ALL selected rows.
     int primaryRow() const;
-    // Called on any selection change: re-syncs the amber spectrogram overlays
-    // (app.highlightedSavedSel) with the table's selected rows.
+    // Called on any selection change: makes the union of the selected stored
+    // selections the live spectral selection and fits the view to it.
     void onSelectionSetChanged ();
 
     // "Clone Harmonics by Numbers..." dialog (replaces the old inline
@@ -1088,14 +1123,16 @@ public:
     // Toggles the interactive "Clone Harmonics by Mouse" pick mode on/off.
     void toggleClonePick ();
 
-    // Inline cell editing (Name / Comment): public so headless unit tests can
-    // drive it without a display. Enter commits, Esc cancels, focus loss
-    // commits; an empty Name keeps the old name.
-    juce::TextEditor& cellEditor() { return cellEdit; }
-    void beginCellEdit (int row, int col);
-    void commitCellEdit (bool cancel);
-    // Smallest positive integer not already used as a name ("1", "2", ...).
-    juce::String nextIndexName() const;
+    // Right-click "Edit...": dialog to rename the primary selected stored
+    // selection and change its comment.
+    void showEditDialog ();
+    // Applies a new name/comment to the primary selected row (an empty name
+    // keeps the old one). The Edit dialog commits through this; unit tests
+    // call it directly.
+    void applyNameComment (const juce::String& name, const juce::String& comment);
+    // Next free auto-assigned store name: "Selection 01", "Selection 02", ...
+    // (the smallest index not already used as a name).
+    juce::String nextSelectionName() const;
 
     // Accessors for headless unit tests.
     int numSelectedRows() const { return table.getNumSelectedRows (); }
@@ -1134,9 +1171,10 @@ private:
         // Shift+click replaces the selection with the exact range from the
         // anchor to this row - handled by the panel, which also fits view.
         void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+        // Double-clicking any cell recalls that row's stored selection.
         void cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
         void selectedRowsChanged (int) override;
-        // DEL removes every selected stored selection.
+        // DEL deletes the audio data of the active selection (app.del).
         void deleteKeyPressed (int) override;
 
     private:
@@ -1151,26 +1189,6 @@ private:
 
     FileDoc* selListDoc = nullptr;   // doc whose list the current rows belong to
     int anchorRow = -1;              // last plain-clicked row: Shift+click origin
-
-    // Inline cell editing (Name / Comment): one reusable editor overlaid on
-    // the double-clicked cell. Enter commits, Esc cancels, focus loss commits.
-    juce::TextEditor cellEdit;
-    int editRow = -1;     // active inline-edit row (-1 = none)
-    int editCol = -1;     // 1 = Name, 3 = Comment
-    class CellEditListener : public juce::Component,
-                             public juce::TextEditor::Listener
-    {
-    public:
-        SelectionPanel* owner;
-        explicit CellEditListener (SelectionPanel* o) : owner (o) {}
-        void textEditorReturnKeyPressed (juce::TextEditor&) override { owner->commitCellEdit (false); }
-        void textEditorEscapeKeyPressed (juce::TextEditor&) override  { owner->commitCellEdit (true); }
-        void textEditorFocusLost (juce::TextEditor&) override         { owner->commitCellEdit (false); }
-    };
-    std::unique_ptr<CellEditListener> cellEditListener;   // child component: auto-deleted
-    // Pushes the table's selected rows to app.highlightedSavedSel so the
-    // spectrogram draws their amber overlays.
-    void syncHighlight();
 
     void mouseDown (const juce::MouseEvent&) override;
     void showLoadContextMenu();

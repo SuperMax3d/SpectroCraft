@@ -31,6 +31,7 @@ static std::vector<int> sparseRows (const juce::SparseSet<int>& s)
 // Forward declarations (defined further down, used by the constructor).
 static void fftAxisLimits (int mode, double rate, double& fLo, double& fHi);
 static int syncSmoothValue (int sm);
+static void showSelectionMessage (const juce::String& title, const juce::String& msg);
 
 juce::String formatTimeCode (double secs)
 {
@@ -2456,6 +2457,7 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
                 info += juce::String (cd.freqHz[nearest[c]] >= 1000.0
                                       ? cd.freqHz[nearest[c]] / 1000.0 : cd.freqHz[nearest[c]], 2)
                       + (cd.freqHz[nearest[c]] >= 1000.0 ? " kHz" : " Hz")
+                      + altFreqSuffix (app, cd.freqHz[nearest[c]])
                       + ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc);
             else
                 info += ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc);
@@ -2473,9 +2475,20 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
             info += ",  Ch" + juce::String ((int) c + 1) + "="
                   + ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc);
         }
+        info += altFreqSuffix (app, f);
     }
 
     return info;
+}
+
+// "| Alt N=value" suffixes for every enabled alternative frequency reference.
+juce::String FFTAnalysisView::altFreqSuffix (const Application& appIn, double freqHz)
+{
+    juce::String s;
+    for (const auto& r : appIn.altFreqRefs)
+        if (r.enabled && std::abs (r.refMain) > 1e-9)
+            s += "   | " + r.name + "=" + juce::String (freqHz * r.altValue / r.refMain, 3);
+    return s;
 }
 
 juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
@@ -2518,7 +2531,8 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
         }
         if (b >= 0)
         {
-            info = "Cursor:  ~" + juce::String ((int) std::lround (kThirdOctCenters[b])) + " Hz band";
+            info = "Cursor:  ~" + juce::String ((int) std::lround (kThirdOctCenters[b])) + " Hz band"
+                 + altFreqSuffix (app, kThirdOctCenters[b]);
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < (int) thirdOctMags[c].size())
                     info += ",  Ch" + juce::String ((int) c + 1) + "="
@@ -2562,6 +2576,7 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
             const double fExact = (double) bin * rate / n;   // exact bin centre
             info = "Cursor:  " + juce::String (fExact >= 1000.0 ? fExact / 1000.0 : fExact, 2)
                  + (fExact >= 1000.0 ? " kHz" : " Hz")
+                 + altFreqSuffix (app, fExact)
                  + "   [snap Ch" + juce::String (snapCh + 1) + "]"
                  + ScaleCalibration::formatSpectralLevel (-kNormFloorDb * (1.0 - (double) mags[snapCh][bin]), sc);
         }
@@ -2575,6 +2590,7 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
                 info += ",  Ch" + juce::String ((int) c + 1) + "="
                       + ScaleCalibration::formatSpectralLevel (-kNormFloorDb * (1.0 - (double) mags[c][bin]), sc);
             }
+            info += altFreqSuffix (app, f);
         }
     }
 
@@ -3963,16 +3979,9 @@ void MarkerListPanel::activateRow (int row)
     if (app.doc () == nullptr || row < 0
         || row >= (int) app.markers().markers().size ()) return;
 
-    selectRow (row);   // single-select + move anchor + sync the detail editors
-
-    // Double-clicking a marker sets the time selection to its range and makes
-    // sure both views actually show it.
-    const Marker& m = app.markers().markers()[(size_t) row];
-    const double end = (m.end > m.start) ? m.end : m.start;
-    app.setSelection ({ m.start, end });
-    app.ensureTimeRangeVisible (m.start, end);
-    if (app.onStateChange)
-        app.onStateChange(); // push the new selection to both views
+    // Selecting the row does the rest via onSelectionSetChanged: playhead,
+    // time selection and view fit (+10% margin).
+    selectRow (row);
 }
 
 void MarkerListPanel::Model::selectedRowsChanged (int)
@@ -3982,21 +3991,32 @@ void MarkerListPanel::Model::selectedRowsChanged (int)
 
 void MarkerListPanel::Model::deleteKeyPressed (int)
 {
-    owner->deleteSelected ();
+    // DEL deletes the audio data of the active selection - not list rows.
+    owner->deleteAudioData ();
+}
+
+void MarkerListPanel::deleteAudioData ()
+{
+    std::string err;
+    if (!app.del (&err))
+        showSelectionMessage ("Delete", juce::String (err.c_str ()));
 }
 
 MarkerListPanel::MarkerListPanel (Application& appIn)
     : app (appIn), addBtn ("Add Marker"), deleteBtn ("Delete")
 {
     auto& header = table.getHeader();
-    // JUCE TableHeaderComponent column IDs must be non-zero.
-    header.addColumn ("Title", 1, 120);
-    header.addColumn ("Begin", 2, 75);
-    header.addColumn ("End", 3, 75);
-    header.addColumn ("Comment", 4, 120);
+    // JUCE TableHeaderComponent column IDs must be non-zero. The Comment
+    // column is not resizable: resized() stretches it to fill the remainder.
+    const int fixedFlags = juce::TableHeaderComponent::notResizableOrSortable;
+    header.addColumn ("Title", 1, 120, 60, -1, fixedFlags);
+    header.addColumn ("Begin", 2, 75, 40, -1, fixedFlags);
+    header.addColumn ("End", 3, 75, 40, -1, fixedFlags);
+    header.addColumn ("Comment", 4, 120, 40, -1, fixedFlags);
 
     // Excel-style multi-selection: Ctrl/Cmd+click toggles rows, Shift+click
-    // range-selects from the anchor row, DEL removes every selected marker.
+    // range-selects from the anchor row. DEL deletes the audio data of the
+    // active selection (the context menu's Delete Selected removes rows).
     table.setMultipleSelectionEnabled (true);
 
     addAndMakeVisible (&table);
@@ -4223,6 +4243,34 @@ void MarkerListPanel::onSelectionSetChanged()
 {
     selectedRow = primaryRow();
     updateDetails();
+
+    // The union of all selected markers becomes the time selection, and both
+    // views are fitted to it with the usual 10% margin.
+    const auto& ms = app.markers().markers();
+    double t0 = 0.0, t1 = 0.0;
+    bool any = false;
+    for (int r : sparseRows (table.getSelectedRows()))
+    {
+        if (r < 0 || r >= (int) ms.size ()) continue;
+        const auto& m = ms [(size_t) r];
+        const double end = (m.end > m.start) ? m.end : m.start;
+        if (!any)
+        {
+            t0 = m.start;
+            t1 = end;
+            any = true;
+        }
+        else
+        {
+            t0 = std::min (t0, m.start);
+            t1 = std::max (t1, end);
+        }
+    }
+    if (!any) return;
+
+    app.setPlayhead (t0);
+    app.setSelection ({ t0, t1 });
+    app.ensureTimeRangeVisible (t0, t1);   // +10% margin
 }
 
 std::vector<int> MarkerListPanel::selectedRowIndices() const
@@ -4369,6 +4417,7 @@ void MarkerListPanel::showMarkerContextMenu()
     m.addItem (5, "Import Markers from CSV...", app.audioEngine().isFileLoaded());
     m.addSeparator();
     m.addItem (6, "Remove All Markers", app.markers().count() > 0);
+    m.addItem (9, "Delete Selected", table.getNumSelectedRows () > 0);
     m.addItem (8, "Fit View to Selected", table.getNumSelectedRows () > 0);
     m.addItem (3, "Find...\tCtrl+F");
     m.addSeparator();
@@ -4385,6 +4434,8 @@ void MarkerListPanel::showMarkerContextMenu()
         importMarkersCsv();
     else if (id == 6)
         removeAllMarkers();
+    else if (id == 9)
+        deleteSelected ();
     else if (id == 8)
         fitViewToSelected ();
     else if (id == 3)
@@ -4613,6 +4664,14 @@ void MarkerListPanel::resized()
 {
     auto b = getLocalBounds().reduced (4, 4);
     table.setBounds (b.removeFromTop (std::max (80, (int) (b.getHeight() * 0.42))));
+
+    // The Comment column fills whatever width is left of the fixed columns.
+    auto& hdr = table.getHeader();
+    const int fixedW = 120 + 75 + 75;
+    hdr.setColumnWidth (1, 120);
+    hdr.setColumnWidth (2, 75);
+    hdr.setColumnWidth (3, 75);
+    hdr.setColumnWidth (4, std::max (40, table.getWidth () - fixedW));
 
     addBtn.setBounds (b.removeFromTop (26));
     deleteBtn.setTopLeftPosition (addBtn.getRight() + 8, b.getY());
@@ -5001,15 +5060,25 @@ void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::Mou
     if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
 
     juce::PopupMenu menu;
-    menu.addItem (1, "Add as marker");
-    menu.addItem (2, "Find...\tCtrl+F");
+    menu.addItem (1, "Edit...");
+    menu.addItem (2, "Add as marker");
+    menu.addItem (3, "Find...\tCtrl+F");
+    menu.addSeparator();
+    menu.addItem (4, "Add entry");
+    menu.addItem (5, "Remove selected");
     // Options() targets the current mouse position - exactly where the user
     // right-clicked.
     const int id = menu.showMenu (juce::PopupMenu::Options ());
     if (id == 1)
-        owner->addMarkerForRow (rowNumber);
+        owner->showEditDialog (rowNumber);
     else if (id == 2)
+        owner->addMarkerForRow (rowNumber);
+    else if (id == 3)
         owner->showFindDialog ();
+    else if (id == 4)
+        owner->addEntry();
+    else if (id == 5)
+        owner->removeSelectedRows (rowNumber);
 }
 
 void TranscriptionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
@@ -5040,7 +5109,7 @@ void TranscriptionPanel::addMarkerForRow (int rowNumber)
 
     const ScttSegment& s = d->sctt.segments [(size_t) rowNumber];
 
-    juce::String full = juce::String (s.text).trim ();
+    juce::String full = juce::String::fromUTF8 (s.text.c_str(), (int) s.text.size()).trim ();
     juce::String title = full;
     if (title.length () > 80)
         title = title.substring (0, 79) + "...";
@@ -5055,6 +5124,136 @@ void TranscriptionPanel::addMarkerForRow (int rowNumber)
 
     refresh ();
     if (app.onStateChange) app.onStateChange ();   // views + markers panel
+}
+
+void TranscriptionPanel::showEditDialog (int rowNumber)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
+    const ScttSegment& s = d->sctt.segments [(size_t) rowNumber];
+
+    juce::AlertWindow dlg ("Edit Segment",
+                          "Start / end in seconds (m:ss.ddd or plain seconds).",
+                          juce::AlertWindow::NoIcon);
+    dlg.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
+    dlg.addTextEditor ("start", formatTimeCode (s.startSec), "Start:");
+    dlg.addTextEditor ("end",   formatTimeCode (s.endSec),   "End:");
+    dlg.addTextEditor ("text",  juce::String::fromUTF8 (s.text.c_str(), (int) s.text.size()), "Text:");
+
+    auto* startEd = dlg.getTextEditor ("start");
+    dlg.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (startEd != nullptr)
+    {
+        startEd->setWantsKeyboardFocus (true);
+        startEd->selectAll();
+        startEd->grabKeyboardFocus();
+    }
+
+    const int result = dlg.runModalLoop ();
+    auto* endEd  = dlg.getTextEditor ("end");
+    auto* textEd = dlg.getTextEditor ("text");
+    if (result != 1 || startEd == nullptr) return;
+
+    double t0 = 0.0, t1 = 0.0;
+    const juce::String endText = (endEd != nullptr) ? endEd->getText() : juce::String();
+    if (!parseTimeText (startEd->getText(), t0) || !parseTimeText (endText, t1))
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Edit Segment",
+                                            "Please enter valid times for Start and End.",
+                                            "", this);
+        return;
+    }
+
+    const juce::String text = (textEd != nullptr) ? textEd->getText().trim() : juce::String();
+    if (!applySegmentEdit (rowNumber, t0, t1, text))
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Edit Segment",
+                                            "Times must be non-negative.",
+                                            "", this);
+}
+
+bool TranscriptionPanel::applySegmentEdit (int rowNumber, double startSec, double endSec,
+                                           const juce::String& text)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return false;
+    if (!std::isfinite (startSec) || !std::isfinite (endSec)) return false;
+    if (startSec < 0.0 || endSec < 0.0) return false;
+
+    double a = startSec, b = endSec;
+    if (b < a) std::swap (a, b);   // tolerate swapped times
+
+    ScttSegment& s = d->sctt.segments [(size_t) rowNumber];
+    s.startSec = a;
+    s.endSec   = b;
+    s.text     = text.trim().toStdString();
+
+    d->setTranscription (std::vector<ScttSegment> (d->sctt.segments));   // persist
+    refresh ();
+    if (app.onStateChange) app.onStateChange ();
+    return true;
+}
+
+int TranscriptionPanel::addEntry()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return -1;
+
+    const juce::Range<double> sel = app.selection;
+    ScttSegment s;
+    if (sel.getLength () > 0.0)
+    {
+        s.startSec = std::max (0.0, sel.getStart());
+        s.endSec   = std::max (s.startSec, sel.getEnd());
+    }
+    else
+    {
+        s.startSec = std::max (0.0, app.playhead);
+        s.endSec   = s.startSec;
+    }
+
+    // Insert in sorted order so the list stays chronological.
+    auto segs = d->sctt.segments;
+    size_t pos = segs.size();
+    for (size_t i = 0; i < segs.size (); ++i)
+        if (segs[i].startSec > s.startSec) { pos = i; break; }
+    segs.insert (segs.begin () + pos, s);
+
+    d->setTranscription (std::move (segs));
+    refresh ();
+    if (app.onStateChange) app.onStateChange ();
+
+    juce::SparseSet<int> rows;
+    rows.addRange ({ (int) pos, (int) pos + 1 });
+    table.setSelectedRows (rows, juce::sendNotification);
+    return (int) pos;
+}
+
+void TranscriptionPanel::removeSelectedRows (int fallbackRow)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || d->sctt.segments.empty ()) return;
+
+    std::vector<int> rows;
+    for (int r : sparseRows (table.getSelectedRows()))
+        if (r >= 0 && r < (int) d->sctt.segments.size())
+            rows.push_back (r);
+    if (rows.empty () && fallbackRow >= 0 && fallbackRow < (int) d->sctt.segments.size())
+        rows.push_back (fallbackRow);
+    if (rows.empty ()) return;
+
+    std::sort (rows.begin (), rows.end (), std::greater<int>());
+    auto segs = d->sctt.segments;
+    for (int r : rows)
+        segs.erase (segs.begin () + r);
+    d->setTranscription (std::move (segs));
+
+    table.setSelectedRows (juce::SparseSet<int>(), juce::dontSendNotification);
+    refresh ();
+    if (app.onStateChange) app.onStateChange ();
 }
 
 TranscriptionPanel::TranscriptionPanel (Application& appIn)
@@ -5086,7 +5285,8 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
                        "the model weights to %APPDATA%/SpectroCraft/models.");
     clearBtn.setTooltip ("Remove all transcription segments from this file (the audio is not modified).");
     table.setTooltip ("Double-click a row to jump to it and select its range.\n"
-                      "Right-click a row to add it as a marker or search (Find).\n"
+                      "Right-click a row to edit it, add it as a marker, search (Find),\n"
+                      "or add / remove entries.\n"
                       "Ctrl+F searches, F3 / Ctrl+F3 find next / previous.");
 
     refresh();
@@ -5094,10 +5294,21 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
 
 // Right-click on empty panel area: offer to close the panel. (Row right-
 // clicks are handled by the table's own context menu in Model::cellClicked.)
+// Right-click on empty panel area: add an entry or close the panel. (Row
+// right-clicks are handled by the table's own context menu in Model::cellClicked.)
 void TranscriptionPanel::mouseDown (const juce::MouseEvent& e)
 {
     if (!e.mods.isRightButtonDown() || e.mods.isLeftButtonDown()) return;
-    if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
+
+    juce::PopupMenu m;
+    m.addItem (1, "Add entry");
+    m.addSeparator();
+    m.addItem (2, "Close Panel");
+    const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
+    if (id == 1)
+        addEntry();
+    else if (id == 2 && onCloseRequested)
+        onCloseRequested();
 }
 
 void TranscriptionPanel::refresh()
@@ -5208,13 +5419,7 @@ void SelectionPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int col
         g.setColour (juce::Colours::white);
         g.drawText (s.name, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
     }
-    else if (columnId == 2)   // shape count
-    {
-        g.setColour (juce::Colours::lightgrey);
-        g.drawText (juce::String (s.data.count ()), 4, 0, width - 8, height,
-                    juce::Justification::centredRight, false);
-    }
-    else   // comment
+    else   // comment (fills the remainder of the table)
     {
         g.setColour (juce::Colours::lightgrey);
         g.drawText (s.comment, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
@@ -5227,13 +5432,10 @@ void SelectionPanel::Model::cellClicked (int rowNumber, int, const juce::MouseEv
         owner->onRowClicked (rowNumber, e);
 }
 
-void SelectionPanel::Model::cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&)
+void SelectionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
 {
-    // Name and Comment cells are edited inline; the Shapes column recalls.
-    if (columnId == 1 || columnId == 3)
-        owner->beginCellEdit (rowNumber, columnId);
-    else
-        owner->doRecall (rowNumber);
+    // Double-clicking any cell recalls that row's stored selection.
+    owner->doRecall (rowNumber);
 }
 
 void SelectionPanel::Model::selectedRowsChanged (int)
@@ -5243,7 +5445,8 @@ void SelectionPanel::Model::selectedRowsChanged (int)
 
 void SelectionPanel::Model::deleteKeyPressed (int)
 {
-    owner->deleteSelected ();
+    // DEL deletes the audio data of the active selection - not list rows.
+    owner->deleteAudioData ();
 }
 
 SelectionPanel::SelectionPanel (Application& appIn)
@@ -5257,10 +5460,11 @@ SelectionPanel::SelectionPanel (Application& appIn)
     recallBtn.setComponentID ("sel-recall-btn");
     deleteBtn.setComponentID ("sel-delete-btn");
     auto& header = table.getHeader();
-    // JUCE TableHeaderComponent column IDs must be non-zero.
-    header.addColumn ("Name", 1, 90);
-    header.addColumn ("Shapes", 2, 45);
-    header.addColumn ("Comment", 3, 95);
+    // JUCE TableHeaderComponent column IDs must be non-zero. The Comment
+    // column is not resizable: resized() stretches it to fill the remainder.
+    const int fixedFlags = juce::TableHeaderComponent::notResizableOrSortable;
+    header.addColumn ("Name", 1, 120, 60, -1, fixedFlags);
+    header.addColumn ("Comment", 2, 95, 40, -1, fixedFlags);
 
     savedLab.setText ("Saved selections", juce::dontSendNotification);
 
@@ -5269,16 +5473,6 @@ SelectionPanel::SelectionPanel (Application& appIn)
     addAndMakeVisible (&saveBtn);
     addAndMakeVisible (&recallBtn);
     addAndMakeVisible (&deleteBtn);
-
-    // Inline cell editor (Name / Comment): hidden until a double-click starts
-    // an edit. The listener is attached as a plain child component so it is
-    // deleted with the panel.
-    addChildComponent (&cellEdit);
-    cellEdit.setMultiLine (false);
-    cellEdit.setVisible (false);
-    cellEditListener = std::make_unique<CellEditListener> (this);
-    addChildComponent (cellEditListener.get());
-    cellEdit.addListener (cellEditListener.get());
 
     // Excel-style multi-selection: Ctrl/Cmd+click toggles rows, Shift+click
     // range-selects from the anchor row and fits all of it in view, DEL
@@ -5289,12 +5483,13 @@ SelectionPanel::SelectionPanel (Application& appIn)
     recallBtn.onClick = [this] { doRecall (primaryRow()); };
     deleteBtn.onClick = [this] { deleteSelected (); };
 
-    saveBtn.setTooltip ("Store the current spectral selection under a name. The dialog pre-fills "
-                        "the next free index number; saving again with the same name updates that entry.");
-    recallBtn.setTooltip ("Replace the current spectral selection with the first selected saved one "
-                         "(double-clicking its Shapes cell does the same).");
-    deleteBtn.setTooltip ("Remove every selected saved selection from this file's list. "
-                          "DEL does the same.");
+    saveBtn.setTooltip ("Store the current spectral selection - or, with no spectral selection, "
+                        "the time-range selection as a full-height band - under an auto-assigned "
+                        "name like 'Selection 01'.");
+    recallBtn.setTooltip ("Replace the current spectral selection with the first selected saved one. "
+                          "Clicking or double-clicking its row does the same.");
+    deleteBtn.setTooltip ("Remove every selected saved selection from this file's list. DEL instead "
+                          "deletes the audio data of the active selection.");
 
     // Right-clicking a row in the table shows the panel context menu (Load
     // from disk / Close Panel). Deep registration is required: clicks on rows
@@ -5320,27 +5515,14 @@ void SelectionPanel::refresh()
         table.setSelectedRows (juce::SparseSet<int>(), juce::dontSendNotification);
     }
 
-    const bool hasSel = app.hasSpectralSelection ();
-    saveBtn.setEnabled (hasSel);
+    // Store is available with a spectral selection OR a time-range selection
+    // (the latter is stored as a full-height band).
+    saveBtn.setEnabled (app.hasSpectralSelection () || app.selection.getLength () > 0.0);
 
     const int nRows = d != nullptr ? (int) d->savedSelections.size () : 0;
     const bool haveRow = table.getNumSelectedRows () > 0 && primaryRow () < nRows;
     recallBtn.setEnabled (haveRow);
     deleteBtn.setEnabled (haveRow);
-
-    syncHighlight ();
-}
-
-// Keeps the amber spectrogram overlays in step with the table's selected rows.
-void SelectionPanel::syncHighlight()
-{
-    auto* d = app.doc ();
-    std::vector<size_t> idx;
-    if (d != nullptr)
-        for (int r : sparseRows (table.getSelectedRows()))
-            if (r >= 0 && r < (int) d->savedSelections.size ())
-                idx.push_back ((size_t) r);
-    app.setHighlightedSavedSelections (idx);
 }
 
 void SelectionPanel::paint (juce::Graphics& g)
@@ -5369,6 +5551,12 @@ void SelectionPanel::resized()
     table.setBounds (b.getX (), savedLab.getBottom () + 4,
                     b.getWidth (), std::max (60, btnRow.getY () - savedLab.getBottom () - 8));
 
+    // The Comment column fills whatever width is left of the Name column.
+    auto& hdr = table.getHeader();
+    const int nameW = std::min (140, std::max (60, table.getWidth () / 3));
+    hdr.setColumnWidth (1, nameW);
+    hdr.setColumnWidth (2, std::max (40, table.getWidth () - nameW));
+
     const int gap = 8;
     const int bw = std::max (52, (btnRow.getWidth () - gap * 2) / 3);
     saveBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, bw, rowH);
@@ -5379,46 +5567,25 @@ void SelectionPanel::resized()
 void SelectionPanel::doSave()
 {
     auto* d = app.doc ();
-    if (d == nullptr || d->spectralSel.empty ()) return;
+    if (d == nullptr) return;
 
-    juce::AlertWindow dlg ("Save Selection",
-                          "Name for this spectral selection:",
-                          juce::AlertWindow::NoIcon);
-    dlg.setColour (juce::AlertWindow::backgroundColourId,
-                   juce::Colour::fromRGB (45, 45, 48));
-
-    // This JUCE build's addTextEditor returns void; fetch the editor by name.
-    // Pre-fill with the next free index number so quick stores line up as
-    // 1, 2, 3, ... - typing replaces it (the text is selected).
-    dlg.addTextEditor ("name", nextIndexName (), "Name:");
-    auto* ed = dlg.getTextEditor ("name");
-    dlg.addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-
-    if (ed != nullptr)
+    SpectralSelection toSave;
+    if (!d->spectralSel.empty ())
+        toSave = d->spectralSel;   // deep copy of the current shapes
+    else if (app.selection.getLength () > 0.0)
     {
-        ed->setWantsKeyboardFocus (true);
-        ed->selectAll();
-        ed->grabKeyboardFocus();
+        // Time Range tool: store the time selection as a full-height band so
+        // it can be recalled/edited like any other spectral selection.
+        const double nyq = app.audioEngine().sampleRate() * 0.5;
+        toSave.addRect (app.selection.getStart (), app.selection.getEnd (),
+                        0.0, nyq, false);
     }
-
-    if (dlg.runModalLoop () != 1 || ed == nullptr) return;
-    const juce::String name = ed->getText ().trim ();
-    if (name.isEmpty ())
-    {
-        showSelectionMessage ("Save Selection", "Please enter a name.");
-        return;
-    }
+    else return;   // nothing to store
 
     SavedSpectralSelection s;
-    s.name = name;
-    s.data = d->spectralSel;   // deep copy of the current shapes
-
-    bool replaced = false;
-    for (auto& e : d->savedSelections)
-        if (e.name == name) { e = std::move (s); replaced = true; break; }
-    if (!replaced)
-        d->savedSelections.push_back (std::move (s));
+    s.name = nextSelectionName ();   // "Selection 01", "Selection 02", ...
+    s.data = std::move (toSave);
+    d->savedSelections.push_back (std::move (s));
 
     // The list persists with the file's unified metadata on Save.
     refresh();
@@ -5429,7 +5596,10 @@ void SelectionPanel::doRecall (int row)
     auto* d = app.doc ();
     if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
     const auto& sel = d->savedSelections [(size_t) row];
-    app.setSpectralSelectionFrom (sel.data);
+
+    SpectralSelection merged;
+    merged.appendShapesFrom (sel.data);
+    app.setSpectralSelectionFrom (merged);
 
     // Make sure both views show the recalled selection's time range.
     if (!sel.data.empty())
@@ -5438,6 +5608,50 @@ void SelectionPanel::doRecall (int row)
         app.ensureTimeRangeVisible (ext.getStart(), ext.getEnd());
     }
     refresh();
+}
+
+void SelectionPanel::recallSelected ()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+
+    SpectralSelection merged;
+    double t0 = 0.0, t1 = 0.0;
+    bool any = false;
+    for (int r : sparseRows (table.getSelectedRows()))
+    {
+        if (r < 0 || r >= (int) d->savedSelections.size ()) continue;
+        const auto& s = d->savedSelections [(size_t) r];
+        if (s.data.empty ()) continue;
+
+        merged.appendShapesFrom (s.data);
+
+        const auto ext = s.data.timeExtent();
+        if (!any)
+        {
+            t0 = ext.getStart ();
+            t1 = ext.getEnd ();
+            any = true;
+        }
+        else
+        {
+            t0 = std::min (t0, ext.getStart());
+            t1 = std::max (t1, ext.getEnd());
+        }
+    }
+    if (!any) return;
+
+    // The union becomes the ACTUAL live spectral selection (not an overlay),
+    // and both views are fitted to its time range with the usual 10% margin.
+    app.setSpectralSelectionFrom (merged);
+    app.ensureTimeRangeVisible (t0, t1);
+}
+
+void SelectionPanel::deleteAudioData ()
+{
+    std::string err;
+    if (!app.del (&err))
+        showSelectionMessage ("Delete", juce::String (err.c_str ()));
 }
 
 // Right-click: select the row under the cursor when nothing is selected yet
@@ -5485,6 +5699,7 @@ void SelectionPanel::showLoadContextMenu()
 
     juce::PopupMenu m;
     m.addItem (10, "Recall", nSel > 0);
+    m.addItem (12, "Edit...", nSel > 0);
     m.addItem (11, "Delete Selected", nSel > 0);
     m.addSeparator();
     m.addItem (20, "Clone Harmonics by Numbers...", hasLive);
@@ -5496,6 +5711,8 @@ void SelectionPanel::showLoadContextMenu()
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (id == 10)
         doRecall (primaryRow());
+    else if (id == 12)
+        showEditDialog ();
     else if (id == 11)
         deleteSelected ();
     else if (id == 20)
@@ -5569,7 +5786,8 @@ int SelectionPanel::primaryRow() const
 
 void SelectionPanel::onSelectionSetChanged()
 {
-    syncHighlight ();
+    if (table.getNumSelectedRows () > 0)
+        recallSelected ();   // union -> live spectral selection + view fit
     refresh ();   // button enablement follows the selection set
 }
 
@@ -5669,20 +5887,68 @@ void SelectionPanel::fitViewToSelected ()
     app.ensureTimeRangeVisible (t0, t1);   // adds the usual 10% margin
 }
 
-juce::String SelectionPanel::nextIndexName() const
+juce::String SelectionPanel::nextSelectionName() const
 {
     auto* d = app.doc ();
     const int n = d != nullptr ? (int) d->savedSelections.size () : 0;
     for (int i = 1; i <= n + 1; ++i)
     {
-        const juce::String cand = juce::String (i);
+        const juce::String cand = "Selection " + juce::String (i).paddedLeft ('0', 2);
         bool used = false;
         if (d != nullptr)
             for (const auto& e : d->savedSelections)
                 if (e.name == cand) { used = true; break; }
         if (!used) return cand;
     }
-    return juce::String (n + 1);
+    return "Selection " + juce::String (n + 1).paddedLeft ('0', 2);
+}
+
+void SelectionPanel::showEditDialog()
+{
+    auto* d = app.doc ();
+    const int row = primaryRow();
+    if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
+    const SavedSpectralSelection& s = d->savedSelections [(size_t) row];
+
+    juce::AlertWindow dlg ("Edit Selection",
+                          "Name and comment:",
+                          juce::AlertWindow::NoIcon);
+    dlg.setColour (juce::AlertWindow::backgroundColourId,
+                   juce::Colour::fromRGB (45, 45, 48));
+
+    // This JUCE build's addTextEditor returns void; fetch the editors by name.
+    dlg.addTextEditor ("name", s.name, "Name:");
+    dlg.addTextEditor ("comment", s.comment, "Comment:");
+    auto* nameEd = dlg.getTextEditor ("name");
+    dlg.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (nameEd != nullptr)
+    {
+        nameEd->setWantsKeyboardFocus (true);
+        nameEd->selectAll();
+        nameEd->grabKeyboardFocus();
+    }
+
+    if (dlg.runModalLoop () != 1 || nameEd == nullptr) return;
+    auto* commentEd = dlg.getTextEditor ("comment");
+    const juce::String comment = commentEd != nullptr ? commentEd->getText ().trim () : s.comment;
+    applyNameComment (nameEd->getText (), comment);
+}
+
+void SelectionPanel::applyNameComment (const juce::String& name, const juce::String& comment)
+{
+    auto* d = app.doc ();
+    const int row = primaryRow();
+    if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
+
+    // An empty title keeps the old name; an empty comment is fine.
+    const juce::String trimmedName = name.trim ();
+    if (!trimmedName.isEmpty ())
+        d->savedSelections [(size_t) row].name = trimmedName;
+    d->savedSelections [(size_t) row].comment = comment;
+
+    refresh();   // repaint the table; persists with the file's metadata on Save
 }
 
 void SelectionPanel::showCloneNumbersDialog()
@@ -5736,56 +6002,6 @@ void SelectionPanel::toggleClonePick ()
         app.endClonePick ();
     else
         app.startClonePick ();   // fires onStateChange -> syncSharedState -> refresh()
-}
-
-// Inline editing of the Name / Comment cells: overlay a single-line editor
-// exactly over the double-clicked cell. Enter commits, Esc cancels, and losing
-// focus (e.g. clicking another row) commits as well.
-void SelectionPanel::beginCellEdit (int row, int col)
-{
-    auto* d = app.doc ();
-    if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
-
-    // Commit any edit that is still open before starting a new one.
-    if (editRow >= 0)
-        commitCellEdit (false);
-
-    const auto cell = table.getCellPosition (col, row, true);   // table coords
-    cellEdit.setBounds (cell.getX () + table.getX (),
-                        cell.getY () + table.getY(),
-                        cell.getWidth (), cell.getHeight());
-    cellEdit.setText (col == 1 ? d->savedSelections [(size_t) row].name
-                               : d->savedSelections [(size_t) row].comment,
-                      juce::dontSendNotification);
-    editRow = row;
-    editCol = col;
-    cellEdit.setVisible (true);
-    cellEdit.setWantsKeyboardFocus (true);
-    cellEdit.grabKeyboardFocus ();
-}
-
-void SelectionPanel::commitCellEdit (bool cancel)
-{
-    if (editRow < 0) return;
-    auto* d = app.doc ();
-    const int row = editRow, col = editCol;
-    editRow = -1;   // guard against re-entrancy from the focus-lost callback
-
-    if (!cancel && d != nullptr && row >= 0 && row < (int) d->savedSelections.size())
-    {
-        const juce::String text = cellEdit.getText ().trim ();
-        if (col == 1)
-        {
-            // An empty title keeps the old name; an empty comment is fine.
-            if (!text.isEmpty ())
-                d->savedSelections [(size_t) row].name = text;
-        }
-        else
-            d->savedSelections [(size_t) row].comment = text;
-    }
-
-    cellEdit.setVisible (false);
-    refresh ();   // repaint the table + re-sync the amber overlays
 }
 
 // ------------------------------------------------- Python script panel

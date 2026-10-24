@@ -7776,6 +7776,161 @@ static void testAiSettingsPersistence()
     }
 }
 
+// ---------------- Frequency Analysis readout shows alternative scales -------
+// When an alternative frequency scale is enabled, every cursor readout in the
+// Frequency Analysis window appends "| Alt N=value" for each shown frequency.
+static void testAltScaleInFFTReadout()
+{
+    const juce::File wav = makeTempFile ("fft_altread.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for alt-scale readout test");
+
+    // One enabled alternative frequency reference: 1000 Hz on the main axis
+    // equals 2.5 on the alternative axis (factor 0.0025).
+    Application::AltScaleRef fr;
+    fr.name = "Alt 1";
+    fr.enabled = true;
+    fr.refMain = 1000.0;
+    fr.altValue = 2.5;
+    app.altFreqRefs.push_back (fr);
+
+    FFTAnalysisView view (app);
+    view.setSize (300, 200);
+    const auto plot = view.plotBounds();
+    { juce::Image img (juce::Image::ARGB, 300, 200, true);
+      juce::Graphics g (img); view.paint (g); }
+
+    if (view.getSpectrum().empty())
+    {
+        CHECK (false, "spectrum computed on paint");
+        wav.deleteFile ();
+        return;
+    }
+
+    // --- Classic mode: plain readout carries the alt value of the cursor freq.
+    {
+        const int xQuiet = (int) std::lround ((float) view.freqToX (50.0));
+        bool snapped = true;
+        float dotX = 0, dotY = 0;
+        const juce::String info = view.buildCursorInfo (xQuiet, plot.getY() + 3,
+                                                       snapped, dotX, dotY);
+        CHECK (!snapped, "quiet cursor does not snap");
+        const double fQuiet = view.xToFreq ((float) xQuiet);
+        CHECK (info.contains ("Alt 1=" + juce::String (fQuiet * 2.5 / 1000.0, 3)),
+               "plain readout shows the alternative scale value");
+    }
+
+    // --- Classic mode: a snapped readout also carries an alt value.
+    {
+        const auto& mags = view.getSpectrum();
+        const int n = view.getCachedN();
+        const double rate = app.audioEngine().sampleRate();
+        const int bin440 = (int) std::lround (440.0 * n / rate);
+        int pb = 0;
+        for (int b = std::max (1, bin440 - 3); b <= std::min (n / 2 - 1, bin440 + 3); ++b)
+            if (mags[0][(size_t) b] > mags[0][(size_t) pb]) pb = b;
+        const double fPeak = (double) pb * rate / n;
+        const int xAtPeak = (int) std::lround ((float) view.freqToX (fPeak));
+        const float yAtPeak = view.levelToY (-160.0 * (1.0 - (double) mags[0][(size_t) pb]));
+
+        bool snapped = false;
+        float dotX = 0, dotY = 0;
+        const juce::String info = view.buildCursorInfo (xAtPeak, (int) std::lround ((float) yAtPeak),
+                                                       snapped, dotX, dotY);
+        CHECK (snapped, "cursor on the curve snaps");
+        CHECK (info.contains ("Alt 1="), "snapped readout shows an alternative scale value");
+    }
+
+    // --- A disabled reference adds nothing.
+    app.altFreqRefs[0].enabled = false;
+    {
+        const int xQuiet = (int) std::lround ((float) view.freqToX (50.0));
+        bool snapped = true;
+        float dotX = 0, dotY = 0;
+        const juce::String info = view.buildCursorInfo (xQuiet, plot.getY() + 3,
+                                                       snapped, dotX, dotY);
+        CHECK (!info.contains ("Alt 1="), "disabled reference is not shown");
+    }
+    app.altFreqRefs[0].enabled = true;
+
+    // --- 1/3 octave mode: the band centre gets its alt value.
+    {
+        view.setAxisMode (2);
+        { juce::Image img (juce::Image::ARGB, 300, 200, true);
+          juce::Graphics g (img); view.paint (g); }
+        const auto p2 = view.plotBounds();   // layout may differ per mode
+
+        const int xAt50 = (int) std::lround ((float) view.freqToX (50.0));
+        bool snapped = false;
+        float dotX = 0, dotY = 0;
+        const juce::String info = view.buildCursorInfo (xAt50, p2.getY() + 3,
+                                                       snapped, dotX, dotY);
+
+        // Whichever band the cursor lands in, its centre must be followed by
+        // the matching alt value.
+        bool matched = false;
+        const double* centres = view.thirdOctCentres();
+        for (int i = 0; i < view.numThirdOctBands() && !matched; ++i)
+            if (info.contains ("~" + juce::String ((int) std::lround (centres[i])) + " Hz band"))
+                matched = info.contains ("Alt 1=" + juce::String (centres[i] * 2.5 / 1000.0, 3));
+        CHECK (matched, "1/3 octave readout shows the alt value of its band centre");
+    }
+
+    // --- Freq vs Time: each channel's tracked frequency gets its alt value.
+    {
+        view.setAxisMode (3);
+        app.setSelection ({ 0.5, 1.5 });
+        { juce::Image img (juce::Image::ARGB, 300, 200, true);
+          juce::Graphics g (img); view.paint (g); }
+        const auto p3 = view.plotBounds();   // layout may differ per mode
+
+        const auto& curves = view.getLiveCurves();
+        CHECK (!curves.empty() && !curves[0].x.empty(), "curve data computed");
+        if (!curves.empty() && !curves[0].x.empty())
+        {
+            const int cx = (p3.getX() + p3.getRight()) / 2;
+            // Replicate the panel's nearest-point search for channel 0.
+            size_t best = 0;
+            double bestDx = 1e30;
+            for (size_t i = 0; i < curves[0].x.size(); ++i)
+            {
+                const double d = std::abs ((double) view.timeToX (curves[0].x[i]) - cx);
+                if (d < bestDx) { bestDx = d; best = i; }
+            }
+
+            bool snapped = false;
+            float dotX = 0, dotY = 0;
+            const juce::String info = view.buildCurveCursorInfo (cx, p3.getY() + 10,
+                                                                snapped, dotX, dotY);
+            CHECK (info.contains ("Alt 1=" + juce::String (curves[0].freqHz[best] * 2.5 / 1000.0, 3)),
+                   "Freq vs Time readout shows the alt value of the tracked frequency");
+        }
+    }
+
+    // --- Amp vs Freq: the cursor frequency gets its alt value.
+    {
+        view.setAxisMode (5);
+        app.setSelection ({ 0.5, 1.5 });
+        { juce::Image img (juce::Image::ARGB, 300, 200, true);
+          juce::Graphics g (img); view.paint (g); }
+        const auto p5 = view.plotBounds();   // layout may differ per mode
+
+        const int cx = (p5.getX() + p5.getRight()) / 2;
+        bool snapped = false;
+        float dotX = 0, dotY = 0;
+        const juce::String info = view.buildCurveCursorInfo (cx, p5.getY() + 10,
+                                                            snapped, dotX, dotY);
+        CHECK (info.contains ("Alt 1=" + juce::String (view.xToFreq ((float) cx) * 2.5 / 1000.0, 3)),
+               "Amp vs Freq readout shows the alt value of the cursor frequency");
+    }
+
+    wav.deleteFile ();
+}
+
 #if defined(SC_ENABLE_AI)
 // Phase 0: OpenVINO runtime smoke test + generic model manager logic.
 // FIPS 180-4 test vectors for our self-contained SHA-256 (this JUCE build has
@@ -9831,6 +9986,119 @@ static void testTranscriptionDoubleClickZoom()
 
     wav.deleteFile ();
 }
+
+// ---------------- Transcription list: edit / add / remove entries -----------
+static void testTranscriptionEditAddRemove()
+{
+    const juce::File wav = makeTempFile ("tr_edit.wav");
+    writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for transcription edit test");
+    auto* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    TranscriptionPanel panel (app);
+    panel.setSize (300, 420);
+
+    juce::TableListBox* table = nullptr;
+    for (int i = 0; i < panel.getNumChildComponents (); ++i)
+        if (auto* tl = dynamic_cast<juce::TableListBox*> (panel.getChildComponent (i))) { table = tl; break; }
+    CHECK (table != nullptr, "segment table found");
+
+    // Three segments to work with.
+    std::vector<ScttSegment> segs;
+    ScttSegment a; a.startSec = 1.0; a.endSec = 2.0; a.text = "alpha";
+    ScttSegment b; b.startSec = 3.0; b.endSec = 4.0; b.text = "beta";
+    ScttSegment c; c.startSec = 5.0; c.endSec = 6.0; c.text = "gamma";
+    segs.push_back (a); segs.push_back (b); segs.push_back (c);
+    d->setTranscription (std::move (segs));
+
+    // --- applySegmentEdit: a valid edit updates the segment and stays in sync.
+    CHECK (panel.applySegmentEdit (1, 3.5, 4.5, "beta edited"), "valid edit accepted");
+    const ScttSegment& s1 = d->sctt.segments[1];
+    CHECK (std::abs (s1.startSec - 3.5) < 1e-9 && std::abs (s1.endSec - 4.5) < 1e-9,
+           "edited times stored");
+    CHECK (s1.text == "beta edited", "edited text stored");
+
+    // --- Swapped times are normalised to start < end.
+    CHECK (panel.applySegmentEdit (0, 2.0, 1.0, "alpha"), "swapped edit accepted");
+    CHECK (d->sctt.segments[0].startSec == 1.0 && d->sctt.segments[0].endSec == 2.0,
+           "swapped times normalised");
+
+    // --- Invalid values are rejected without touching the segment.
+    const ScttSegment before = d->sctt.segments[2];
+    CHECK (!panel.applySegmentEdit (2, -1.0, 6.0, "x"), "negative time rejected");
+    CHECK (!panel.applySegmentEdit (2, std::nan ("double"), 6.0, "x"), "NaN time rejected");
+    CHECK (!panel.applySegmentEdit (99, 1.0, 2.0, "x"), "out-of-range row rejected");
+    const ScttSegment& s2 = d->sctt.segments[2];
+    CHECK (std::abs (s2.startSec - before.startSec) < 1e-9 && s2.text == before.text,
+           "rejected edits leave the segment untouched");
+
+    // --- addEntry: selection start when a selection is active; sorted insert.
+    app.setSelection ({ 0.5, 0.7 });
+    int newRow = panel.addEntry();
+    CHECK (newRow == 0, "entry inserted before later segments");
+    CHECK (d->sctt.segments.size () == 4, "segment count grew by one");
+    const ScttSegment& sNew = d->sctt.segments[0];
+    CHECK (std::abs (sNew.startSec - 0.5) < 1e-9 && std::abs (sNew.endSec - 0.7) < 1e-9,
+           "new entry spans the selection");
+    CHECK (sNew.text.empty(), "new entry starts with empty text");
+
+    // --- addEntry: playhead position when there is no selection.
+    app.setSelection ({ 0.0, 0.0 });
+    app.setPlayhead (4.5);
+    newRow = panel.addEntry();
+    CHECK (newRow == 3, "playhead entry inserted in sorted order");
+    const ScttSegment& sNew2 = d->sctt.segments[3];
+    CHECK (std::abs (sNew2.startSec - 4.5) < 1e-9 && std::abs (sNew2.endSec - 4.5) < 1e-9,
+           "playhead entry is a point segment");
+
+    // --- addEntry without a document is a no-op.
+    { Application emptyApp; TranscriptionPanel p (emptyApp);
+      CHECK (p.addEntry() == -1, "addEntry without a document returns -1"); }
+
+    // Five segments now: ["" 0.5-0.7], alpha, beta edited, ["" 4.5], gamma.
+    if (table != nullptr)
+    {
+        // --- removeSelectedRows: removes every selected row.
+        juce::SparseSet<int> sel;
+        sel.addRange ({ 0, 2 });   // rows 0 and 1
+        table->setSelectedRows (sel, juce::sendNotification);
+        panel.removeSelectedRows (-1);
+        CHECK (d->sctt.segments.size () == 3, "two selected segments removed");
+        CHECK (d->sctt.segments[0].text == "beta edited", "first survivor is old row 2");
+        CHECK (table->getSelectedRows().getNumRanges() == 0, "selection cleared after removal");
+
+        // --- Nothing selected: the fallback row is removed.
+        panel.removeSelectedRows (0);
+        CHECK (d->sctt.segments.size () == 2, "fallback row removed");
+        panel.removeSelectedRows (0);
+        CHECK (d->sctt.segments.size () == 1 && d->sctt.segments[0].text == "gamma",
+               "only the last segment remains");
+
+        // --- Nothing selected and no fallback: nothing happens.
+        panel.removeSelectedRows (-1);
+        CHECK (d->sctt.segments.size () == 1, "no selection + no fallback is a no-op");
+    }
+
+    // --- Persistence: switch to the external sidecar (which writes it) and reload.
+    CHECK (app.setActiveDocMetaMode (sc::MetaMode::External), "meta mode switched to external");
+    {
+        Application app2;
+        CHECK (app2.openFile (wav), "reload for persistence check");
+        auto* d2 = app2.doc ();
+        CHECK (d2 != nullptr && d2->sctt.segments.size () == 1, "segments persisted to disk");
+        if (d2 != nullptr && !d2->sctt.segments.empty())
+            CHECK (d2->sctt.segments[0].text == "gamma", "persisted segment text intact");
+    }
+
+    wav.deleteFile ();
+    { const juce::File side = sc::fileMetaSidecarPath (wav);
+      if (side.existsAsFile()) side.deleteFile(); }
+}
 #endif   // SC_ENABLE_AI
 
 // ---------------- Double-clicking a marker / stored selection shows it ----
@@ -10032,10 +10300,11 @@ static void testFindInPanels()
 // ---------------- Excel-style multi-selection, comments, clone menu --------
 // Both list panels select rows like a spreadsheet: plain click = single row +
 // anchor; Ctrl/Cmd+click toggles one row; Shift+click replaces the selection
-// with the exact anchor..row range and fits all of it in view (10% margin);
-// DEL / Delete removes every selected entry. The Selection panel adds a
-// Comment column, inline cell editing, next-free-index store names and amber
-// spectrogram overlays for the highlighted rows.
+// with the exact anchor..row range. Any change of the selected set updates
+// the time/spectral selection and fits both views (10% margin). DEL deletes
+// the audio data of the active selection; Delete Selected removes list rows.
+// The Selection panel stores auto-named entries ("Selection 01", ...) and
+// makes multi-selected stored selections the live spectral selection.
 static void testPanelMultiSelection()
 {
     const juce::File wav = makeTempFile ("panel_multisel.wav");
@@ -10132,24 +10401,31 @@ static void testPanelMultiSelection()
     SelectionPanel sp (app);
     sp.setSize (300, 240);
 
-    // Plain click: single selection + amber highlight sync.
+    // Plain click: single selection; the row's stored selection becomes the
+    // ACTUAL live spectral selection (no amber overlay).
     sp.onRowClicked (0, mkMouse (sp, 50, 40, {}));
     CHECK (sp.numSelectedRows () == 1 && sp.selectedRowIndices () [0] == 0,
           "selection plain click selects exactly that row");
     {
-        auto hl = app.highlightedSavedSelections ();
-        CHECK (hl.size () == 1 && hl [0] == 0, "highlight follows the selection");
+        const auto& live = d->spectralSel;
+        CHECK (live.count () == 1, "clicking a row makes its shapes the live selection");
+        if (live.count () == 1)
+        {
+            const auto ext = live.timeExtent();
+            CHECK (std::abs (ext.getStart() - 1.0) <= 1e-9
+                  && std::abs (ext.getEnd() - 2.0) <= 1e-9,
+                  "live selection time extent matches the stored one");
+        }
     }
 
-    // Ctrl+click: add a second row.
+    // Ctrl+click: add a second row; live selection is now the union of both.
     sp.onRowClicked (2, mkMouse (sp, 50, 80, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
     {
         auto rows = sp.selectedRowIndices ();
         CHECK (rows.size () == 2 && rows [0] == 0 && rows [1] == 2,
                "selection ctrl+click adds a row");
-        auto hl = app.highlightedSavedSelections ();
-        CHECK (hl.size () == 2 && hl [0] == 0 && hl [1] == 2,
-               "highlight follows the multi-selection");
+        const auto& live = d->spectralSel;
+        CHECK (live.count () == 2, "multi-selection makes the union of shapes the live selection");
     }
 
     // Shift+click: exact range from anchor (row 2) to row 1 - replaces.
@@ -10170,45 +10446,94 @@ static void testPanelMultiSelection()
     sp.deleteSelected ();
     CHECK (d->savedSelections.size () == 1 && d->savedSelections [0].name == "A",
           "bulk delete removes exactly the selected entries");
-    CHECK (app.highlightedSavedSelections ().empty (), "highlight cleared after bulk delete");
 
-    // nextIndexName: {"A"} -> "1"; add "1" -> "2".
-    CHECK (sp.nextIndexName () == "1", "next index with no numeric names is 1");
-    d->savedSelections.push_back ({ "1", sa });
-    CHECK (sp.nextIndexName () == "2", "next index skips used numbers");
+    // nextSelectionName: {"A"} -> "Selection 01"; add "Selection 01" -> "Selection 02".
+    CHECK (sp.nextSelectionName () == "Selection 01",
+          "next auto name with no Selection NN is Selection 01");
+    d->savedSelections.push_back ({ "Selection 01", sa });
+    CHECK (sp.nextSelectionName () == "Selection 02", "next auto name skips used numbers");
 
-    // Inline editing: comment.
-    sp.beginCellEdit (0, 3);
-    CHECK (sp.cellEditor ().getText ().isEmpty (), "comment editor starts empty");
-    sp.cellEditor ().setText ("noise floor band", juce::dontSendNotification);
-    sp.commitCellEdit (false);
-    CHECK (d->savedSelections [0].comment == "noise floor band",
-          "inline comment committed");
+    // Edit dialog commit path: applyNameComment renames and sets the comment;
+    // an empty name keeps the old one, an empty comment is allowed.
+    sp.onRowClicked (0, mkMouse (sp, 50, 40, {}));   // re-select row A after delete
+    sp.applyNameComment ("A2", "noise floor band");
+    CHECK (d->savedSelections [0].name == "A2"
+          && d->savedSelections [0].comment == "noise floor band",
+          "applyNameComment renames and sets the comment");
+    sp.applyNameComment ("   ", "");
+    CHECK (d->savedSelections [0].name == "A2"
+          && d->savedSelections [0].comment.isEmpty (),
+          "empty name keeps the old one; empty comment is allowed");
 
-    // Inline editing: name - an empty commit keeps the old name.
-    sp.beginCellEdit (0, 1);
-    CHECK (sp.cellEditor ().getText () == "A", "name editor starts with the current name");
-    sp.cellEditor ().setText ("   ", juce::dontSendNotification);
-    sp.commitCellEdit (false);
-    CHECK (d->savedSelections [0].name == "A", "empty name commit keeps the old name");
-
-    // Inline editing: cancel.
-    sp.beginCellEdit (1, 3);
-    sp.cellEditor ().setText ("should not stick", juce::dontSendNotification);
-    sp.commitCellEdit (true);
-    CHECK (d->savedSelections [1].comment.isEmpty (),
-          "cancelled edit leaves the comment untouched");
-
-    // Layout: the old Clone & Multiply section is gone - three buttons in one
-    // row pinned to the bottom, and exactly seven children in total.
+    // Layout: three buttons in one row pinned to the bottom, and exactly five
+    // children in total (label + table + 3 buttons).
     auto* store  = sp.findChildWithID ("sel-store-btn");
     auto* recall = sp.findChildWithID ("sel-recall-btn");
     auto* del    = sp.findChildWithID ("sel-delete-btn");
     CHECK (store != nullptr && recall != nullptr && del != nullptr, "buttons exist");
     if (store != nullptr)
         CHECK (store->getY () > 0.8 * sp.getHeight (), "button row pinned to the bottom");
-    CHECK (sp.getNumChildComponents () == 7,
-          "panel has exactly label + table + 3 buttons + editor + listener");
+    CHECK (sp.getNumChildComponents () == 5,
+          "panel has exactly label + table + 3 buttons");
+
+    wav.deleteFile ();
+}
+
+// ---------------- DEL in the list panels deletes audio data, not rows ------
+static void testPanelDelDeletesAudio()
+{
+    const juce::File wav = makeTempFile ("panel_del.wav");
+    // 4 s of DC at 0.5: zeroing/trimming is easy to measure.
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t, double) { return 0.5f; });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for DEL test");   // dur = 4 s
+    auto* d = app.doc ();
+    if (!d) { wav.deleteFile (); return; }
+
+    auto sampleAt = [&] (double t)
+    {
+        float v = 0.0f;
+        app.audioEngine().readSamples (0, (int64_t) std::llround (t * 8000.0), 1, &v);
+        return v;
+    };
+
+    // --- Selection panel: DEL with a live spectral selection zeros the mask.
+    SpectralSelection sa;
+    sa.addRect (1.0, 2.0, 0.0, 4000.0, false);   // full-height band over [1,2]
+    d->savedSelections.push_back ({ "A", sa });
+
+    SelectionPanel sp (app);
+    sp.setSize (300, 240);
+    sp.onRowClicked (0, mkMouse (sp, 50, 40, {}));   // live selection = A
+    CHECK (d->spectralSel.count () == 1,
+          "row click made the stored selection live");
+
+    sp.deleteAudioData ();   // what the DEL key calls
+    CHECK (std::abs (sampleAt (1.5)) < 1e-6, "DEL zeroed the spectral-selected band");
+    CHECK (std::abs (sampleAt (0.5) - 0.5f) < 1e-3,
+          "samples outside the mask are untouched");
+
+    // --- Marker panel: DEL with no spectral selection trims the time range.
+    app.setSpectralSelectionFrom ({});   // clear the live mask
+    CHECK (!app.hasSpectralSelection (), "live mask cleared");
+
+    app.markers().addRegionMarker (1.0, 2.0, "region");
+    MarkerListPanel mp (app);
+    mp.setSize (260, 300);
+    mp.onRowClicked (0, mkMouse (mp, 50, 40, {}));   // time selection = [1,2]
+    CHECK (std::abs (app.selection.getStart() - 1.0) <= 1e-9
+          && std::abs (app.selection.getEnd() - 2.0) <= 1e-9,
+          "marker row click set the time selection");
+
+    mp.deleteAudioData ();   // what the DEL key calls
+    CHECK (std::abs (app.audioEngine().duration() - 3.0) <= 1e-6,
+          "DEL trimmed out [1,2] from the 4 s file");
+    CHECK (std::abs (sampleAt (0.5) - 0.5f) < 1e-3,
+          "samples before the range are untouched");
+    // The region marker sat exactly on [1,2], so the trim consumed it whole.
+    CHECK (app.markers().count () == 0,
+          "a marker fully inside the trimmed range is dropped");
 
     wav.deleteFile ();
 }
@@ -10271,13 +10596,16 @@ static SelectionPanel* findSelectionPanel (juce::Component& c)
     return nullptr;
 }
 
-static void testSpectralHighlightOverlays()
+// ---------------- Selection panel: rows become the live spectral selection --
+// Clicking / multi-selecting stored selections replaces the ACTUAL live
+// spectral selection with their union (drawn like any other mask - never as an
+// amber overlay) and fits both views to the combined time range.
+static void testSelectionRecallLive()
 {
     const juce::File store = makeTempFile ("spec_hl.recent");
     store.deleteFile ();
     const juce::File wav = makeTempFile ("spec_hl.wav");
-    // Silent 2 s file: the spectrogram is uniform noise-floor dark, so the
-    // amber overlays are the only warm pixels in the image.
+    // Silent 2 s file: the spectrogram is uniform noise-floor dark.
     writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t, double) { return 0.0f; });
 
     Application app (store);
@@ -10294,7 +10622,7 @@ static void testSpectralHighlightOverlays()
 
     CHECK (app.openFile (wav), "open silent wav");
     auto* d = app.doc ();
-    CHECK (d != nullptr, "doc exists for highlight test");
+    CHECK (d != nullptr, "doc exists for recall test");
     if (!d)
     {
         wav.deleteFile (); store.deleteFile (); return;
@@ -10306,10 +10634,9 @@ static void testSpectralHighlightOverlays()
     d->savedSelections.push_back ({ "A", sa });
     d->savedSelections.push_back ({ "B", sb });
 
-    // The highlight is driven by the Selection panel's multi-selection (the
-    // only UI path that sets it). TabbedComponent only parents the CURRENT
-    // tab's content, so make the Selection tab current first, then find the
-    // now-attached panel and click it.
+    // TabbedComponent only parents the CURRENT tab's content, so make the
+    // Selection tab current first, then find the now-attached panel and click
+    // its rows.
     auto* bar = win->bottomPanelTabs ();
     const int selIdx = bar->getTabNames ().indexOf ("Selection");
     CHECK (selIdx >= 0, "the Selection tab exists in the bottom group");
@@ -10345,36 +10672,45 @@ static void testSpectralHighlightOverlays()
     { juce::Graphics g (base); sv->paint (g); }
     CHECK (countAmber (base) < 20, "silent spectrogram has no amber-ish pixels");
 
-    // Plain click on row A: exactly one amber overlay.
+    // Plain click on row A: its stored selection becomes the ACTUAL live
+    // spectral selection - drawn in blue like any other mask, never amber.
     sp->onRowClicked (0, mkMouse (*sp, 50, 40, {}));
+    CHECK (d->spectralSel.count () == 1,
+          "clicking a row makes its shapes the live selection");
     {
-        auto hl = app.highlightedSavedSelections ();
-        CHECK (hl.size () == 1 && hl [0] == 0, "panel click highlights row A");
+        const auto ext = d->spectralSel.timeExtent ();
+        CHECK (std::abs (ext.getStart() - 0.25) <= 1e-9
+              && std::abs (ext.getEnd() - 0.75) <= 1e-9,
+              "live selection matches the stored time extent");
     }
     juce::Image one (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
     { juce::Graphics g (one); sv->paint (g); }
-    const int amberOne = countAmber (one);
-    CHECK (amberOne > 100, "one highlighted selection paints an amber overlay");
+    CHECK (countAmber (one) < 20,
+          "recalled selection is not drawn as an amber overlay");
 
-    // Ctrl+click row B: both overlays are visible at once.
+    // Ctrl+click row B: the live selection becomes the union of both.
     sp->onRowClicked (1, mkMouse (*sp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    CHECK (d->spectralSel.count () == 2,
+          "multi-selection makes the union of shapes the live selection");
     {
-        auto hl = app.highlightedSavedSelections ();
-        CHECK (hl.size () == 2 && hl [0] == 0 && hl [1] == 1, "ctrl+click adds row B");
+        const auto ext = d->spectralSel.timeExtent ();
+        CHECK (std::abs (ext.getStart() - 0.25) <= 1e-9
+              && std::abs (ext.getEnd() - 1.75) <= 1e-9,
+              "union time extent spans both stored selections");
     }
     juce::Image two (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
     { juce::Graphics g (two); sv->paint (g); }
-    const int amberTwo = countAmber (two);
-    CHECK (amberTwo > amberOne + 100,
-          "a second highlighted selection adds its own overlay");
+    CHECK (countAmber (two) < 20,
+          "the union is drawn as the live mask, not amber");
 
-    // Ctrl+click both rows again to toggle them off: no overlays left.
+    // Toggling A off makes B alone the live mask; clearing all rows then
+    // leaves that last non-empty selection in place.
     sp->onRowClicked (0, mkMouse (*sp, 50, 40, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    CHECK (d->spectralSel.count () == 1,
+          "toggling A off leaves B as the live selection");
     sp->onRowClicked (1, mkMouse (*sp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
-    CHECK (app.highlightedSavedSelections ().empty (), "toggling off clears the highlight");
-    juce::Image none (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
-    { juce::Graphics g (none); sv->paint (g); }
-    CHECK (countAmber (none) < 20, "clearing the highlight removes the overlays");
+    CHECK (d->spectralSel.count () == 1,
+          "clearing the row selection keeps the last live mask");
 
     wav.deleteFile (); store.deleteFile ();
 }
@@ -12467,6 +12803,7 @@ static int scRunUnitTestsImpl()
     progress ("render cancel");       testRenderToPixelsCancel();
     progress ("fft view rate change"); testFFTAnalysisRateChange();
     progress ("fft harmonic references"); testFFTHarmonicReferences();
+    progress ("alt scale in fft readout"); testAltScaleInFFTReadout();
     progress ("status bar sample rate"); testStatusBarSampleRate();
     progress ("sctt json");             testScttJson();
     progress ("sctt chunk wav");        testScttChunkWav();
@@ -12486,12 +12823,14 @@ static int scRunUnitTestsImpl()
     progress ("batch transcribe");    testBatchTranscribe();
     progress ("transcription panel layout"); testTranscriptionPanelLayout();
     progress ("transcription dclick zoom"); testTranscriptionDoubleClickZoom();
+    progress ("transcription edit/add/remove"); testTranscriptionEditAddRemove();
 #endif
     progress ("ensure time range visible"); testEnsureTimeRangeVisible();
     progress ("find in panels");            testFindInPanels();
     progress ("panel multi-selection");     testPanelMultiSelection();
+    progress ("panel DEL deletes audio");   testPanelDelDeletesAudio();
     progress ("saved selection comment");   testSavedSelectionComment();
-    progress ("spectral highlight overlays"); testSpectralHighlightOverlays();
+    progress ("selection recall live");     testSelectionRecallLive();
     progress ("python scripts");            testPythonScripts();
     progress ("spectral selection model");  testSpectralSelectionModel();
     progress ("selection render hole");     testSpectralSelectionRenderHole();

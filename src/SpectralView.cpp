@@ -1409,21 +1409,6 @@ void SpectralView::drawOverlays (juce::Graphics& g)
         const juce::Colour edgeCol = haveLive ? juce::Colour::fromRGB (140, 180, 255)
                                               : juce::Colour::fromRGB (96, 150, 255);
         drawSpectralShapes (g, committed, haveLive ? &live : nullptr, fillCol, edgeCol);
-
-        // Highlighted stored selections (multi-selected in the Selection panel):
-        // drawn in amber so several saved masks are visible on the track at once.
-        {
-            auto* d = app.doc ();
-            if (d != nullptr && !app.highlightedSavedSel.empty ())
-            {
-                const juce::Colour hlFill (juce::Colour::fromRGBA (255, 176, 64, 80));
-                const juce::Colour hlEdge (juce::Colour::fromRGB (255, 196, 100));
-                for (size_t i : app.highlightedSavedSel)
-                    if (i < d->savedSelections.size () && !d->savedSelections[i].data.empty ())
-                        drawSpectralShapes (g, d->savedSelections[i].data.shapes (), nullptr,
-                                           hlFill, hlEdge);
-            }
-        }
     }
 
     // Markers — clipped to the plot so lines and titles never paint over the

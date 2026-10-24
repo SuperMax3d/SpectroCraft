@@ -248,12 +248,15 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     **Markers** (table with
     a Comment column; select rows Excel-style — plain click selects one row,
     Ctrl/Cmd+click toggles additional rows, Shift+click range-selects from the
-    anchor and fits all of it in view — then edit Title, multi-line Comments,
-    Begin, End and Length of the first selected marker in the detail editors
-    below the table (the comments box starts beside its label and extends to
-    the bottom of the panel); Add Marker; Delete removes every selected row
-    at once (DEL does the same); right-click a row for Copy All Markers / Paste
-    Markers from Clipboard, Export/Import CSV, Remove All Markers,
+    anchor — any change of the selected set makes their union the time
+    selection and fits both views to it with the usual 10% margin); edit Title,
+    multi-line Comments, Begin, End and Length of the first selected marker in
+    the detail editors below the table (the comments box starts beside its label
+    and extends to the bottom of the panel); Add Marker; Delete Selected removes
+    every selected row at once — DEL instead deletes the audio data of the active
+    selection (zeros a spectral selection or trims out a time range, undoable);
+    right-click a row for Copy All Markers / Paste Markers from Clipboard,
+    Export/Import CSV, Remove All Markers, Delete Selected,
     Fit View to Selected or Find (Ctrl+F searches titles and comments, F3 /
     Ctrl+F3 jump to the next / previous match)).
   - **Draggable panel tabs**: drag any tab to reorder the panels within its
@@ -645,7 +648,12 @@ for your microarchitecture at load time.
   range and pan/zoom both views until the whole selection is visible with ~10%
   breathing room on each side (same behaviour as marker and stored-selection
   double-clicks); press Ctrl+F (or right-click > Find) to search, then F3 /
-  Ctrl+F3 to cycle through matches.
+  Ctrl+F3 to cycle through matches. Right-clicking a row offers **Edit...**
+  (start/end/text), **Add as marker**, **Find...**, and **Add entry** /
+  **Remove selected**; right-clicking the list's empty area also offers
+  **Add entry**. New entries are inserted at the selection start (or the
+  playhead when nothing is selected) with empty text, so segments can be added
+  by hand to files that have no transcription.
   Results are stored as a custom top-level `SCTT` RIFF chunk (UTF-8 JSON,
   times in seconds) when the file uses embedded metadata, or inside the
   `.meta.json` sidecar otherwise — written on save, parsed on load, never shown
@@ -903,7 +911,9 @@ across restarts.
   tick positions stay put.
 - **Alternative Scale** (both views): one or more named linear scales anchored
   at zero, shown alongside the normal readout in the cursor probe as
-  `| Name=value` for every enabled reference. The right-click menu has Time and
+  `| Name=value` for every enabled reference — including the Frequency Analysis
+  panel's cursor readout, where each displayed frequency (snapped bin, band
+  centre or tracked component) gets its own suffix. The right-click menu has Time and
   Frequency submenus: **New** arms the usual reference-click flow (click a plot
   point, enter its value; the scale rescales by *value/ref*), and each existing
   reference appears under its name — choosing it opens an edit dialog where you
@@ -967,26 +977,30 @@ The **Selection** tab in the left panel manages *named* spectral selections
 for the active file and provides **Clone Harmonics**, a tool for picking out
 harmonics of whatever is currently selected.
 
-- The table lists each saved selection with its **Name**, a **Shapes** count
-  and a free-text **Comment**. Double-clicking the Name or Comment cell edits
-  it in place (Enter commits, Esc cancels); comments travel with the file via
-  [per-file metadata](#per-file-metadata).
+- The table lists each saved selection with its **Name** and a free-text
+  **Comment** (which fills the remaining width). Right-clicking a row offers
+  **Edit...** — a dialog to change name and comment at once; comments travel
+  with the file via [per-file metadata](#per-file-metadata).
 - **Store / Recall / Delete** buttons below the table: Store saves the current
-  spectral selection under a name (the dialog pre-fills the next free index;
-  storing again with the same name updates that entry); Recall replaces the
-  current selection with the first selected saved one and makes sure both
-  views show its time range — panning or zooming out when it is not fully
-  inside the current window. The list belongs to each file and is persisted
-  automatically, so it survives restarts without any manual save.
+  spectral selection under an auto name — "Selection 01", "Selection 02", ...
+  skipping numbers already in use (when no spectral selection is active but a
+  time range is, that range is stored as a full-height band); storing again
+  with the same name updates that entry. Recall replaces the current selection
+  with the first selected saved one and makes sure both views show its time
+  range — panning or zooming out when it is not fully inside the current window.
+  The list belongs to each file and is persisted automatically, so it survives
+  restarts without any manual save.
 - **Excel-style multi-selection**: plain click selects one row, Ctrl/Cmd+click
   toggles additional rows in or out, Shift+click range-selects from the anchor
-  row and fits all of it in view. Selected saved selections are drawn as
-  **amber overlays** on the spectrogram so several stored masks stay visible at
-  once; DEL (or the Delete button) removes every selected entry at once.
-- Right-clicking a row offers **Recall**, **Delete Selected**, **Clone
-  Harmonics by Numbers...**, **Clone Harmonics by Mouse** / **Stop Picking**,
-  **Fit View to Selected** and **Close Panel**. Double-clicking a row's Shapes
-  cell recalls it.
+  row. Any change of the selected set makes the union of those saved selections
+  the *actual* live spectral selection (drawn like any other mask) and fits both
+  views to its time range with the usual 10% margin; DEL deletes the audio data
+  of that active selection, while Delete Selected removes every selected entry
+  from the list.
+- Right-clicking a row offers **Recall**, **Edit...**, **Delete Selected**,
+  **Clone Harmonics by Numbers...**, **Clone Harmonics by Mouse** /
+  **Stop Picking**, **Fit View to Selected** and **Close Panel**. Double-clicking
+  a row recalls it the same way.
 - **Clone Harmonics by Numbers...** opens a dialog for frequency multipliers
   such as `0.5, 2, 5` — additive clones of every shape in the current
   selection are appended at those multiples (the original stays in place),
@@ -1070,7 +1084,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2150 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2200 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1086,12 +1100,14 @@ by a single mutex (short critical sections, no lock held during FFT work).
     spanning a selection vs point markers at cursor; per-channel visibility
     toggling (arbitrary subsets).
   - **Panel multi-selection** (Markers + Selection tabs): plain / Ctrl+click /
-    Shift+click row semantics with anchor tracking, bulk delete of every
-    selected row, Fit View to Selected panning/zooming the union of the
-    selected ranges with the usual 10% margin, amber highlight overlays on the
-    spectrogram following the Selection panel's multi-selection (one overlay per
-    highlighted entry, all gone when nothing is selected), inline Name/Comment
-    cell editing commit/cancel and the next-free-index name pre-fill.
+    Shift+click row semantics with anchor tracking; any change of the selected
+    set becomes the time selection (markers) or the live spectral selection
+    (Selection tab, union of the stored shapes — verified to be drawn as a real
+    mask, never an amber overlay) and fits both views to it with the usual 10%
+    margin; bulk Delete Selected removes every selected row without touching
+    audio data; DEL deletes the audio data of the active selection (spectral
+    band zeroed / time range trimmed out, marker rows untouched); Edit... dialog
+    commit path for name/comment and the "Selection NN" auto-name pre-fill.
   - **Saved selection comments**: optional comment field round-trips through
     both the legacy JSON format and the unified metadata bundle; empty
     comments are not written.
@@ -1176,6 +1192,18 @@ by a single mutex (short critical sections, no lock held during FFT work).
     changes and parallel merges replace the whole file and are not undoable;
     `createDocFromMerged` activates a fresh document holding the merged audio
     and markers; and the merge menu's item counts with/without an active doc.
+  - **Alternative scale in the Frequency Analysis readout**: every cursor
+    readout (classic snapped/plain, 1/3-octave band centre, Freq-vs-Time
+    tracked frequency, Amp-vs-Freq cursor frequency) appends `| Name=value`
+    for each enabled alternative-frequency reference; disabled references add
+    nothing.
+  - **Transcription list editing**: right-click row menu (Edit... / Add as
+    marker / Find... / Add entry / Remove selected); segment edits validate and
+    normalise reversed times, reject negative/NaN values and out-of-range rows;
+    Add entry inserts at the selection start or playhead in sorted order with an
+    empty text; Remove selected deletes every selected row (fallback to the
+    clicked row); edited segments persist through a metadata-mode switch and a
+    full reload.
   - **Multi-file support**: two files open at once — per-file playhead/
     selection restoration on switch, Ctrl+Tab cycling (with wrap-around),
     independent marker lists and undo histories per file, closing a non-active
