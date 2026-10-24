@@ -185,11 +185,22 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
     m.addSeparator();
     m.addSubMenu ("Scale", scaleMenu);
 
-    // Alternative Scale: checkable overlay scales shown in the status bar.
+    // Alternative Scale: any number of reference points per axis. "New"
+    // arms the ref-click flow and appends one; clicking a name edits it.
     {
+        juce::PopupMenu altTime, altFreq;
+        altTime.addItem (CtxAltScaleTime, "New", true, true);
+        for (int i = 0; i < (int) app.altTimeRefs.size(); ++i)
+            altTime.addItem (CtxAltRefTimeBase + i, app.altTimeRefs[(size_t) i].name,
+                             true, true);
+        altFreq.addItem (CtxAltScaleFreq, "New", true, true);
+        for (int i = 0; i < (int) app.altFreqRefs.size(); ++i)
+            altFreq.addItem (CtxAltRefFreqBase + i, app.altFreqRefs[(size_t) i].name,
+                             true, true);
+
         juce::PopupMenu alt;
-        alt.addItem (CtxAltScaleTime, "Time", true, app.altTimeOn);
-        alt.addItem (CtxAltScaleFreq, "Frequency", true, app.altFreqOn);
+        alt.addSubMenu ("Time", altTime);
+        alt.addSubMenu ("Frequency", altFreq);
         m.addSeparator();
         m.addSubMenu ("Alternative Scale", alt);
     }
@@ -747,11 +758,13 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
     juce::String info = tText + "   f=" + formatFreqAxisLabel (freq, factor)
                         + "   " + ScaleCalibration::formatSpectralLevel (dB, app.scale());
 
-    // Alternative scale overlay: the rescaled coordinates alongside the normal ones.
-    if (app.altTimeOn && std::abs (app.altTimeRefSecs) > 1e-9)
-        info += "   | alt t=" + juce::String (t * app.altTimeValue / app.altTimeRefSecs, 3);
-    if (app.altFreqOn && std::abs (app.altFreqRefHz) > 1e-9)
-        info += "   | alt f=" + juce::String (freq * app.altFreqValue / app.altFreqRefHz, 3);
+    // Alternative scale overlays: every enabled reference, by name.
+    for (const auto& r : app.altTimeRefs)
+        if (r.enabled && std::abs (r.refMain) > 1e-9)
+            info += "   | " + r.name + "=" + juce::String (t * r.altValue / r.refMain, 3);
+    for (const auto& r : app.altFreqRefs)
+        if (r.enabled && std::abs (r.refMain) > 1e-9)
+            info += "   | " + r.name + "=" + juce::String (freq * r.altValue / r.refMain, 3);
 
     if (onCursorInfo)
         onCursorInfo (info);
@@ -1131,9 +1144,12 @@ void SpectralView::drawTimeRuler (juce::Graphics& g)
     const double dispStart = timeToDisplayValue (viewStart, mode, off, rate);
     const double dispEnd   = timeToDisplayValue (viewEnd,   mode, off, rate);
     const double major = (mode == TimeAxisMode::Sample)
-                         ? niceSampleStep (pxPerSec * rate) : niceTimeStep (pxPerSec);
+                         ? niceSampleStep (rate / pxPerSec) : niceTimeStep (pxPerSec);
     // Subdivide each major interval into five when there is room for it.
-    const bool showMinors = major * pxPerSec >= 40.0;
+    // (In Sample mode `major` counts samples, so convert to pixels first.)
+    const double majorPx = (mode == TimeAxisMode::Sample)
+                           ? (major / rate) * pxPerSec : major * pxPerSec;
+    const bool showMinors = majorPx >= 40.0;
 
     g.setColour (juce::Colour::fromRGB (60, 60, 60));
     g.drawLine ((float) pr.getX(), rulerH() - 1, (float) pr.getRight(), rulerH() - 1, 1.0f);

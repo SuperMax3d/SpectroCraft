@@ -278,15 +278,28 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
     scale->setProperty ("fullScaleValue", b.scale.fullScaleValue);
     root->setProperty ("scale", scale);
 
+    auto appendAltRefs = [] (const std::vector<AltScaleRefData>& list,
+                             juce::Array<juce::var>& arr)
+    {
+        for (const auto& r : list)
+        {
+            auto o = new juce::DynamicObject();
+            o->setProperty ("name", r.name);
+            o->setProperty ("enabled", static_cast<int> (r.enabled));
+            o->setProperty ("refMain", r.refMain);
+            o->setProperty ("altValue", r.altValue);
+            arr.add (o);
+        }
+    };
+
     auto altRef = new juce::DynamicObject();
     altRef->setProperty ("freqScaleMode", b.altRef.freqScaleMode);
     altRef->setProperty ("freqFactor", b.altRef.freqFactor);
-    altRef->setProperty ("altTimeOn", static_cast<int> (b.altRef.altTimeOn));
-    altRef->setProperty ("altTimeRefSecs", b.altRef.altTimeRefSecs);
-    altRef->setProperty ("altTimeValue", b.altRef.altTimeValue);
-    altRef->setProperty ("altFreqOn", static_cast<int> (b.altRef.altFreqOn));
-    altRef->setProperty ("altFreqRefHz", b.altRef.altFreqRefHz);
-    altRef->setProperty ("altFreqValue", b.altRef.altFreqValue);
+    juce::Array<juce::var> timeRefs, freqRefs;
+    appendAltRefs (b.altRef.altTimeRefs, timeRefs);
+    appendAltRefs (b.altRef.altFreqRefs, freqRefs);
+    altRef->setProperty ("altTimeRefs", timeRefs);
+    altRef->setProperty ("altFreqRefs", freqRefs);
     root->setProperty ("altRef", altRef);
 
     auto fa = new juce::DynamicObject();
@@ -378,6 +391,28 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
         out.scale = sc;
     }
 
+    auto readAltRefs = [] (const juce::NamedValueSet& ap, const char* key,
+                           std::vector<AltScaleRefData>& list)
+    {
+        if (!ap.contains (key)) return false;
+        const juce::var v = ap.getWithDefault (key, juce::var());
+        if (!v.isArray()) return true;   // present but malformed: keep empty
+        for (const auto& item : *static_cast<const juce::Array<juce::var>*> (v.getArray()))
+        {
+            const auto* o = item.getDynamicObject();
+            if (o == nullptr) continue;
+            AltScaleRefData r;
+            const auto& op = o->getProperties();
+            // NOTE: this vendored build has no String(var) constructor.
+            r.name     = op.getWithDefault ("name", juce::var()).toString();
+            r.enabled  = static_cast<int> (op.getWithDefault ("enabled", 1)) != 0;
+            r.refMain  = static_cast<double> (op.getWithDefault ("refMain", 0.0));
+            r.altValue = static_cast<double> (op.getWithDefault ("altValue", 0.0));
+            if (!r.name.isEmpty()) list.push_back (r);
+        }
+        return true;
+    };
+
     out.haveAltRef = p.contains ("altRef");
     if (const auto* altObj = p.getWithDefault ("altRef", juce::var()).getDynamicObject())
     {
@@ -385,12 +420,38 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
         AltRefState ar;
         ar.freqScaleMode  = std::clamp (static_cast<int> (ap.getWithDefault ("freqScaleMode", 0)), 0, 1);
         ar.freqFactor     = std::max (1e-30, static_cast<double> (ap.getWithDefault ("freqFactor", 1.0)));
-        ar.altTimeOn      = static_cast<int> (ap.getWithDefault ("altTimeOn", 0)) != 0;
-        ar.altTimeRefSecs = static_cast<double> (ap.getWithDefault ("altTimeRefSecs", 0.0));
-        ar.altTimeValue   = static_cast<double> (ap.getWithDefault ("altTimeValue", 0.0));
-        ar.altFreqOn      = static_cast<int> (ap.getWithDefault ("altFreqOn", 0)) != 0;
-        ar.altFreqRefHz   = static_cast<double> (ap.getWithDefault ("altFreqRefHz", 0.0));
-        ar.altFreqValue   = static_cast<double> (ap.getWithDefault ("altFreqValue", 0.0));
+
+        // New array form; fall back to the legacy single-reference keys so old
+        // bundles keep working (they become one "Alt 1" entry each).
+        if (!readAltRefs (ap, "altTimeRefs", ar.altTimeRefs)
+            || !ap.contains ("altTimeRefs"))
+        {
+            const bool on = static_cast<int> (ap.getWithDefault ("altTimeOn", 0)) != 0;
+            if (on)
+            {
+                AltScaleRefData r;
+                r.name     = "Alt 1";
+                r.enabled  = true;
+                r.refMain  = static_cast<double> (ap.getWithDefault ("altTimeRefSecs", 0.0));
+                r.altValue = static_cast<double> (ap.getWithDefault ("altTimeValue", 0.0));
+                ar.altTimeRefs.push_back (r);
+            }
+        }
+        if (!readAltRefs (ap, "altFreqRefs", ar.altFreqRefs)
+            || !ap.contains ("altFreqRefs"))
+        {
+            const bool on = static_cast<int> (ap.getWithDefault ("altFreqOn", 0)) != 0;
+            if (on)
+            {
+                AltScaleRefData r;
+                r.name     = "Alt 1";
+                r.enabled  = true;
+                r.refMain  = static_cast<double> (ap.getWithDefault ("altFreqRefHz", 0.0));
+                r.altValue = static_cast<double> (ap.getWithDefault ("altFreqValue", 0.0));
+                ar.altFreqRefs.push_back (r);
+            }
+        }
+
         out.altRef = ar;
     }
 

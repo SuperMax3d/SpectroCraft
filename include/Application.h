@@ -113,13 +113,43 @@ public:
     int specFreqScaleMode = 0;     // spectrogram frequency axis: 0=Hz, 1=Custom
     double specFreqFactor = 1.0;   // displayed(f) = f * factor (Custom mode)
 
-    // Alternative scale overlay (spectrogram right-click "Alternative Scale").
-    // Each is a linear rescale anchored at zero: the reference point defines
-    // the unit, so alt value at x = x * (value / ref).
-    bool altTimeOn = false;
-    double altTimeRefSecs = 0.0, altTimeValue = 0.0;
-    bool altFreqOn = false;
-    double altFreqRefHz = 0.0, altFreqValue = 0.0;
+    // Alternative scale overlays (spectrogram right-click "Alternative Scale").
+    // Any number of reference points per axis; each is a linear rescale
+    // anchored at zero: the main-axis value at the clicked point defines the
+    // unit, so alt(x) = x * (altValue / refMain).
+    struct AltScaleRef
+    {
+        juce::String name;      // "Alt 1", ... - user-editable in the edit dialog
+        bool enabled = true;    // shown in the cursor readout when true
+        double refMain = 0.0;   // main-axis value at the reference point (s or Hz)
+        double altValue = 0.0;  // alternative-axis value at that point
+    };
+    std::vector<AltScaleRef> altTimeRefs, altFreqRefs;
+
+    /** Alternative-axis value of a reference for a main-axis value x.
+        Returns NaN when the reference is unusable (zero anchor). */
+    static double altScaleValue (const AltScaleRef& r, double x)
+    {
+        return std::abs (r.refMain) > 1e-9 ? x * r.altValue / r.refMain : std::nan ("");
+    }
+
+    /** Next free "Alt N" name for a reference list. */
+    static juce::String nextAltName (const std::vector<AltScaleRef>& list)
+    {
+        int maxN = 0;
+        for (const auto& r : list)
+        {
+            const auto t = r.name.trim();
+            if (t.startsWithIgnoreCase ("Alt ") && t.length() > 4)
+            {
+                bool allDigits = true;
+                for (int i = 4; i < t.length(); ++i)
+                    if (t[i] < L'0' || t[i] > L'9') { allDigits = false; break; }
+                if (allDigits) maxN = std::max (maxN, t.substring (4).getIntValue());
+            }
+        }
+        return "Alt " + juce::String (maxN + 1);
+    }
 
     // Armed reference-click flow: which calibration is waiting for a plot
     // click (the spectral view draws the circle once the point is placed).

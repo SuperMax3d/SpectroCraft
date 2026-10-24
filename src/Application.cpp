@@ -272,12 +272,20 @@ void Application::activate (int index)
     settings.fftTrack     = std::clamp (d->freqAnalysis.track, 0, 1);
     specFreqScaleMode     = d->altRef.freqScaleMode == 1 ? 1 : 0;
     specFreqFactor        = d->altRef.freqFactor > 1e-30 ? d->altRef.freqFactor : 1.0;
-    altTimeOn             = d->altRef.altTimeOn;
-    altTimeRefSecs        = d->altRef.altTimeRefSecs;
-    altTimeValue          = d->altRef.altTimeValue;
-    altFreqOn             = d->altRef.altFreqOn;
-    altFreqRefHz          = d->altRef.altFreqRefHz;
-    altFreqValue          = d->altRef.altFreqValue;
+    altTimeRefs.clear();
+    for (const auto& r : d->altRef.altTimeRefs)
+    {
+        AltScaleRef a;   a.name = r.name; a.enabled = r.enabled;
+        a.refMain = r.refMain; a.altValue = r.altValue;
+        altTimeRefs.push_back (a);
+    }
+    altFreqRefs.clear();
+    for (const auto& r : d->altRef.altFreqRefs)
+    {
+        AltScaleRef a;   a.name = r.name; a.enabled = r.enabled;
+        a.refMain = r.refMain; a.altValue = r.altValue;
+        altFreqRefs.push_back (a);
+    }
 
     viewStart = 0.0;
     viewEnd = std::max (d->engine.duration(), 1e-6);
@@ -326,12 +334,18 @@ void Application::inheritSessionMeta (FileDoc& d)
         sc::AltRefState ar;
         ar.freqScaleMode  = specFreqScaleMode == 1 ? 1 : 0;
         ar.freqFactor     = specFreqFactor > 1e-30 ? specFreqFactor : 1.0;
-        ar.altTimeOn      = altTimeOn;
-        ar.altTimeRefSecs = altTimeRefSecs;
-        ar.altTimeValue   = altTimeValue;
-        ar.altFreqOn      = altFreqOn;
-        ar.altFreqRefHz   = altFreqRefHz;
-        ar.altFreqValue   = altFreqValue;
+        for (const auto& r : altTimeRefs)
+        {
+            sc::AltScaleRefData a;   a.name = r.name; a.enabled = r.enabled;
+            a.refMain = r.refMain; a.altValue = r.altValue;
+            ar.altTimeRefs.push_back (a);
+        }
+        for (const auto& r : altFreqRefs)
+        {
+            sc::AltScaleRefData a;   a.name = r.name; a.enabled = r.enabled;
+            a.refMain = r.refMain; a.altValue = r.altValue;
+            ar.altFreqRefs.push_back (a);
+        }
         d.altRef = ar;
     }
 }
@@ -350,12 +364,18 @@ void Application::pushActiveDocMetaTo (FileDoc& d)
     sc::AltRefState ar;
     ar.freqScaleMode  = specFreqScaleMode == 1 ? 1 : 0;
     ar.freqFactor     = specFreqFactor > 1e-30 ? specFreqFactor : 1.0;
-    ar.altTimeOn      = altTimeOn;
-    ar.altTimeRefSecs = altTimeRefSecs;
-    ar.altTimeValue   = altTimeValue;
-    ar.altFreqOn      = altFreqOn;
-    ar.altFreqRefHz   = altFreqRefHz;
-    ar.altFreqValue   = altFreqValue;
+    for (const auto& r : altTimeRefs)
+    {
+        sc::AltScaleRefData a;   a.name = r.name; a.enabled = r.enabled;
+        a.refMain = r.refMain; a.altValue = r.altValue;
+        ar.altTimeRefs.push_back (a);
+    }
+    for (const auto& r : altFreqRefs)
+    {
+        sc::AltScaleRefData a;   a.name = r.name; a.enabled = r.enabled;
+        a.refMain = r.refMain; a.altValue = r.altValue;
+        ar.altFreqRefs.push_back (a);
+    }
     d.altRef = ar;
 }
 

@@ -1874,9 +1874,10 @@ void MainWindow::cycleViewVisibility (bool forward)
 }
 
 // Prompts for a plain numeric value with OK/Cancel (defined below).
+// clockStyle=true accepts h:mm:ss.xxxx / signed values instead of plain numbers.
 static bool promptNumberValue (juce::Component* parent, const juce::String& title,
                                const juce::String& message, const juce::String& initial,
-                               double& out);
+                               double& out, bool clockStyle = false);
 // Strict plain-number parser (defined below).
 static bool parseGainDbText (const juce::String& s, double& out);
 
@@ -1910,10 +1911,13 @@ void MainWindow::handleContextMenuAction (int id)
         case CtxScaleTimeOffset:
         {
             // Ask for the time that should be shown at the playhead position.
+            // Clock style (h:mm:ss.xxxx) or plain seconds, sign allowed - the
+            // offset may span many hours and go negative.
             double v = 0.0;
             if (promptNumberValue (this, "Time Offset",
-                                   "Current time at the playhead (hh:mm:ss.xxxx):",
-                                   formatOffsetTime (app.playhead), v))
+                                   "Displayed time at the playhead position\n"
+                                   "(h:mm:ss.xxxx or plain seconds, +/- allowed):",
+                                   formatOffsetTime (app.playhead), v, true))
             {
                 app.timeAxisMode = TimeAxisMode::TimeOffset;
                 app.timeOffsetSecs = v - app.playhead;
@@ -1935,26 +1939,21 @@ void MainWindow::handleContextMenuAction (int id)
             armRefClick (Application::RefClickTarget::SpecFreqCustom);
             break;
 
-        // ---- Alternative Scale menu (spectrogram only, checkable) ----
+        // ---- Alternative Scale menu: "New" arms the ref-click flow and
+        // appends a reference; clicking an existing name edits that entry. ----
         case CtxAltScaleTime:
-            if (app.altTimeOn)
-            {
-                app.altTimeOn = false;   // disable the overlay scale
-                app.pushActiveDocMeta();
-            }
-            else
-                armRefClick (Application::RefClickTarget::AltTime);
+            armRefClick (Application::RefClickTarget::AltTime);
             break;
         case CtxAltScaleFreq:
-            if (app.altFreqOn)
-            {
-                app.altFreqOn = false;
-                app.pushActiveDocMeta();
-            }
-            else
-                armRefClick (Application::RefClickTarget::AltFreq);
+            armRefClick (Application::RefClickTarget::AltFreq);
             break;
     }
+
+    // Alternative-scale reference edit dialogs (dynamic menu IDs).
+    if (id >= CtxAltRefTimeBase && id < CtxAltRefFreqBase)
+        showAltRefEditDialog (false, id - CtxAltRefTimeBase);
+    else if (id >= CtxAltRefFreqBase && id < CtxAltRefFreqBase + 100)
+        showAltRefEditDialog (true, id - CtxAltRefFreqBase);
 
     // Scale changes affect both views' rulers, the footer and the markers.
     syncSharedState();
@@ -1964,7 +1963,7 @@ void MainWindow::handleContextMenuAction (int id)
 // cancelled or the text is not a strict number (parseGainDbText rules).
 static bool promptNumberValue (juce::Component* parent, const juce::String& title,
                                const juce::String& message, const juce::String& initial,
-                               double& out)
+                               double& out, bool clockStyle)
 {
     auto* w = new juce::AlertWindow (title, message, juce::AlertWindow::QuestionIcon, parent);
     w->addTextEditor ("value", initial);
@@ -1990,7 +1989,18 @@ static bool promptNumberValue (juce::Component* parent, const juce::String& titl
     delete w;
     if (result != 1) return false;
     double v = 0.0;
-    if (!parseGainDbText (text, v)) return false;
+    const bool parsed = clockStyle ? parseSignedClock (text, v)
+                                   : parseGainDbText (text, v);
+    if (!parsed)
+    {
+        juce::AlertWindow bad ("Invalid value",
+                               "The entered text could not be read as a number.",
+                               juce::AlertWindow::WarningIcon, parent);
+        bad.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        bad.enterModalState (false);
+        bad.runModalLoop ();
+        return false;
+    }
     out = v;
     return true;
 }
@@ -2056,17 +2066,22 @@ void MainWindow::handleRefClickPlaced (double tSecs, double fHz)
         case Application::RefClickTarget::AltTime:
             if (std::abs (tSecs) > 1e-9 && v != 0.0)
             {
-                app.altTimeOn = true;
-                app.altTimeRefSecs = tSecs;     // alt(t) = t * value / ref
-                app.altTimeValue = v;
+                // Append a new "Alt N" reference; existing ones are untouched.
+                Application::AltScaleRef r;
+                r.name     = Application::nextAltName (app.altTimeRefs);
+                r.refMain  = tSecs;             // alt(t) = t * value / ref
+                r.altValue = v;
+                app.altTimeRefs.push_back (r);
             }
             break;
         case Application::RefClickTarget::AltFreq:
             if (fHz > 1e-9 && v != 0.0)
             {
-                app.altFreqOn = true;
-                app.altFreqRefHz = fHz;         // alt(f) = f * value / ref
-                app.altFreqValue = v;
+                Application::AltScaleRef r;
+                r.name     = Application::nextAltName (app.altFreqRefs);
+                r.refMain  = fHz;               // alt(f) = f * value / ref
+                r.altValue = v;
+                app.altFreqRefs.push_back (r);
             }
             break;
         default: break;
@@ -2074,6 +2089,231 @@ void MainWindow::handleRefClickPlaced (double tSecs, double fHz)
 
     app.pushActiveDocMeta();   // reference calibrations are per-file metadata
     syncSharedState();   // refreshes the status bar + spectral axis labels
+}
+
+// ---------------------------------------------------------------------------
+// Alternative-scale reference editing (Alternative Scale > Time/Frequency)
+
+/** Applies an alternative-reference edit dialog's outcome to the session
+    state. result: 1 = OK, 2 = cancel, 3 = delete. Returns true when the
+    state changed (so the caller can persist + refresh). */
+bool MainWindow::applyAltRefEditResult (Application& app, bool isFreq, int index,
+                                         int result, const juce::String& nameText,
+                                         const juce::String& mainText,
+                                         const juce::String& altText, bool visible)
+{
+    std::vector<Application::AltScaleRef>& refs = isFreq ? app.altFreqRefs : app.altTimeRefs;
+    if (index < 0 || index >= (int) refs.size()) return false;
+
+    if (result == 3)
+    {
+        refs.erase (refs.begin () + index);
+        return true;
+    }
+    if (result != 1) return false;
+
+    double mainV = 0.0, altV = 0.0;
+    if (!parseGainDbText (mainText, mainV) || !parseGainDbText (altText, altV))
+        return false;   // invalid text: keep the reference unchanged
+    if (isFreq && mainV <= 1e-9)
+        return false;   // a frequency anchor must be above zero
+
+    Application::AltScaleRef& r = refs[(size_t) index];
+    const juce::String newName = nameText.trim();
+    if (!newName.isEmpty()) r.name = newName;
+    r.refMain  = mainV;
+    r.altValue = altV;
+    r.enabled  = visible;
+    return true;
+}
+
+juce::AlertWindow* MainWindow::createAltRefEditDialog (bool isFreq, int index)
+{
+    std::vector<Application::AltScaleRef>& refs = isFreq ? app.altFreqRefs : app.altTimeRefs;
+    if (index < 0 || index >= (int) refs.size()) return nullptr;
+    const Application::AltScaleRef& r = refs[(size_t) index];
+
+    auto* w = new juce::AlertWindow ("Edit Alternative Scale Reference",
+                                     "Rename the reference, edit its two endpoint values,\n"
+                                     "or delete it. The other references are untouched.",
+                                     juce::AlertWindow::NoIcon, this);
+    const juce::String mainId = isFreq ? "mainHz" : "mainSecs";
+    w->addTextEditor ("name", r.name);
+    w->addTextEditor (mainId, juce::String (r.refMain, isFreq ? 1 : 4));
+    w->addTextEditor ("altValue", juce::String (r.altValue, 3));
+
+    auto* vis = new juce::ToggleButton ();
+    vis->setComponentID ("altref-visible");
+    vis->setButtonText ("Show in mouse readout");
+    vis->setToggleState (r.enabled, juce::dontSendNotification);
+    w->addCustomComponent (vis);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+    w->addButton ("Delete", 3, {});
+    return w;
+}
+
+void MainWindow::showAltRefEditDialog (bool isFreq, int index)
+{
+    auto* w = createAltRefEditDialog (isFreq, index);
+    if (w == nullptr) return;
+
+    // Focus the name field so renaming is one keystroke away.
+    if (auto* ed = w->getTextEditor ("name"))
+    {
+        ed->setWantsKeyboardFocus (true);
+        ed->selectAll();
+    }
+    w->enterModalState (false);
+    if (auto* ed = w->getTextEditor ("name"))
+        ed->grabKeyboardFocus();
+
+    const int result = w->runModalLoop ();
+    // Read everything before destroying the window (the toggle is a child).
+    const juce::String nameText  = w->getTextEditorContents ("name");
+    const juce::String mainText  = w->getTextEditorContents (isFreq ? "mainHz" : "mainSecs");
+    const juce::String altText   = w->getTextEditorContents ("altValue");
+    bool visible = true;
+    if (auto* vis = dynamic_cast<juce::ToggleButton*> (w->findChildWithID ("altref-visible")))
+        visible = vis->getToggleState ();
+    delete w;
+
+    if (applyAltRefEditResult (app, isFreq, index, result, nameText, mainText,
+                               altText, visible))
+    {
+        app.pushActiveDocMeta ();   // reference calibrations are per-file metadata
+        syncSharedState ();         // refreshes the status bar + menus
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Go to Time (Ctrl+G): one field per active time unit - the current main-axis
+// mode plus every enabled alternative time reference.
+
+MainWindow::GoToTimeFields MainWindow::computeGoToTimeFields (Application& app)
+{
+    GoToTimeFields f;
+    switch (app.timeAxisMode)
+    {
+        case TimeAxisMode::TimeOffset:  f.mainId = "Time Offset"; break;
+        case TimeAxisMode::Sample:      f.mainId = "Sample";      break;
+        default:                        f.mainId = "Time (s)";    break;
+    }
+
+    // One field per enabled alternative time reference. Degenerate ones
+    // (zero alt value) cannot be inverted and are skipped, as are duplicate
+    // names (editor ids must stay unique).
+    juce::StringArray used;
+    used.add (f.mainId);
+    for (int i = 0; i < (int) app.altTimeRefs.size(); ++i)
+    {
+        const auto& r = app.altTimeRefs[(size_t) i];
+        if (!r.enabled || std::abs (r.altValue) < 1e-30) continue;
+        juce::String id = r.name.trim();
+        if (id.isEmpty() || used.contains (id)) continue;
+        used.add (id);
+        f.alts.push_back (std::make_pair (i, id));
+    }
+    return f;
+}
+
+bool MainWindow::resolveGoToTime (Application& app, const GoToTimeFields& fields,
+                                  const juce::String& mainText,
+                                  const std::vector<juce::String>& altTexts,
+                                  double& outSecs)
+{
+    const double rate = std::max (1.0, app.audioEngine().sampleRate());
+
+    // Main field first: parsed in the active scale mode's units.
+    if (!mainText.trim().isEmpty()
+        && parseDisplayedTime (mainText, app.timeAxisMode, app.timeOffsetSecs,
+                               rate, outSecs))
+        return true;
+
+    // Then the alternative references in field order: invert their scale,
+    // alt(x) = x * altValue / refMain  ->  x = v * refMain / altValue.
+    for (size_t i = 0; i < fields.alts.size() && i < altTexts.size(); ++i)
+    {
+        const int idx = fields.alts[(int) i].first;
+        if (idx < 0 || idx >= (int) app.altTimeRefs.size()) continue;
+        const auto& r = app.altTimeRefs[(size_t) idx];
+        double v = 0.0;
+        if (!altTexts[i].trim().isEmpty() && parseGainDbText (altTexts[i], v))
+        {
+            outSecs = v * r.refMain / r.altValue;
+            return true;
+        }
+    }
+    return false;
+}
+
+juce::AlertWindow* MainWindow::createGoToTimeDialog ()
+{
+    if (!app.audioEngine().isFileLoaded()) return nullptr;
+    const double rate = std::max (1.0, app.audioEngine().sampleRate());
+    const GoToTimeFields fields = computeGoToTimeFields (app);
+
+    auto* w = new juce::AlertWindow ("Go to Time",
+                                     "Type a time in any field and press OK.\n"
+                                     "The first non-empty value (top to bottom) is used.",
+                                     juce::AlertWindow::QuestionIcon, this);
+
+    // Main-axis field: label + initial text follow the active scale mode.
+    w->addTextEditor (fields.mainId,
+                      formatDisplayedTime (app.playhead, app.timeAxisMode,
+                                           app.timeOffsetSecs, rate));
+
+    for (const auto& a : fields.alts)
+    {
+        const auto& r = app.altTimeRefs[(size_t) a.first];
+        w->addTextEditor (a.second,
+                          juce::String (Application::altScaleValue (r, app.playhead), 3));
+    }
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+    return w;
+}
+
+void MainWindow::showGoToTimeDialog ()
+{
+    auto* w = createGoToTimeDialog ();
+    if (w == nullptr) return;
+
+    // Focus the main field so a value can be typed immediately.
+    const GoToTimeFields fields0 = computeGoToTimeFields (app);
+    if (auto* ed = w->getTextEditor (fields0.mainId))
+    {
+        ed->setWantsKeyboardFocus (true);
+        ed->selectAll();
+    }
+    w->enterModalState (false);
+    if (auto* ed = w->getTextEditor (fields0.mainId))
+        ed->grabKeyboardFocus();
+
+    const int result = w->runModalLoop ();
+    // Read every field before destroying the window.
+    juce::String mainText;
+    std::vector<juce::String> altTexts;
+    if (result == 1)
+    {
+        const GoToTimeFields fields = computeGoToTimeFields (app);
+        if (auto* ed = w->getTextEditor (fields.mainId))
+            mainText = ed->getText();
+        for (const auto& a : fields.alts)
+        {
+            juce::String t;
+            if (auto* ed = w->getTextEditor (a.second)) t = ed->getText();
+            altTexts.push_back (t);
+        }
+    }
+    delete w;
+
+    double tSecs = 0.0;
+    if (result == 1 && resolveGoToTime (app, computeGoToTimeFields (app), mainText,
+                                        altTexts, tSecs))
+        app.setPlayhead (tSecs);   // clamps to the file; updates both views
 }
 
 // Parses a dB value typed into the Change Gain dialog. Returns false for
@@ -3670,6 +3910,8 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('a', juce::ModifierKeys::commandModifier, 0)) { app.selectAll(); syncSharedState(); return true; }
     // Find in the active list panel (Markers / Transcription tab).
     if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier, 0)) { handleFind (true); return true; }
+    // Go to Time: jump the playhead via any of the active time units.
+    if (key == juce::KeyPress ('g', juce::ModifierKeys::commandModifier, 0)) { showGoToTimeDialog (); return true; }
     if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey) { runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); return true; }
     if (key == juce::KeyPress::spaceKey)
     {

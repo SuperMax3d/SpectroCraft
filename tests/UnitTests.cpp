@@ -6007,6 +6007,262 @@ static bool isXyzVersion (const char* s)
 // Right-click "Scale" menu: time axis (Time / Time Offset... / Sample), the
 // waveform vertical axis (Wav Units / dB / Normalized), the spectrogram
 // frequency axis (Hz / Custom...) and the checkable Alternative Scale overlay.
+// ---------------------------------------------------------------------------
+// Alternative scale multi-reference + Go to Time (Ctrl+G)
+
+static void testAltScaleMultiRef()
+{
+    auto approx = [] (double a, double b) { return std::abs (a - b) <= 1e-9; };
+
+    // --- Pure helpers: naming + value computation ------------------------
+    {
+        CHECK (Application::nextAltName ({}) == "Alt 1", "first reference is Alt 1");
+        Application::AltScaleRef a, b;
+        a.name = "Alt 1";   b.name = "Alt 3";
+        std::vector<Application::AltScaleRef> two { a, b };
+        CHECK (Application::nextAltName (two) == "Alt 4", "names follow the highest index");
+        Application::AltScaleRef c;   c.name = "Foo";
+        std::vector<Application::AltScaleRef> renamed { c };
+        CHECK (Application::nextAltName (renamed) == "Alt 1",
+               "renamed refs don't consume numbers");
+
+        Application::AltScaleRef r;   r.refMain = 2.0;   r.altValue = 4.0;
+        CHECK (approx (Application::altScaleValue (r, 5.0), 10.0), "alt(x) = x * alt / ref");
+        Application::AltScaleRef z;   z.refMain = 0.0;   z.altValue = 4.0;
+        CHECK (!std::isfinite (Application::altScaleValue (z, 5.0)), "zero anchor yields NaN");
+    }
+
+    // --- FileMeta: legacy single-reference JSON falls back to one entry ----
+    {
+        const juce::String legacy =
+            "{\"version\":1,\"altRef\":{\"freqScaleMode\":0,\"freqFactor\":1.0,"
+            "\"altTimeOn\":true,\"altTimeRefSecs\":1.5,\"altTimeValue\":3.0,"
+            "\"altFreqOn\":false}}";
+        sc::MetaBundle b;
+        CHECK (sc::parseBundle (legacy, b), "legacy bundle parses");
+        CHECK (b.haveAltRef && b.altRef.altTimeRefs.size() == 1
+              && b.altRef.altTimeRefs[0].name == "Alt 1"
+              && approx (b.altRef.altTimeRefs[0].refMain, 1.5)
+              && approx (b.altRef.altTimeRefs[0].altValue, 3.0),
+               "legacy single time ref becomes one Alt 1 entry");
+        CHECK (b.altRef.altFreqRefs.empty(), "disabled legacy freq ref is dropped");
+
+        // New array form round-trips names + disabled flags.
+        sc::MetaBundle c;
+        sc::AltScaleRefData d1, d2;
+        d1.name = "Tone A";   d1.refMain = 100.0;   d1.altValue = 200.0;
+        d2.name = "Off";      d2.enabled = false;   d2.refMain = 5.0;   d2.altValue = 7.0;
+        c.altRef.altTimeRefs.push_back (d1);
+        c.altRef.altTimeRefs.push_back (d2);
+        sc::MetaBundle back;
+        CHECK (sc::parseBundle (sc::serialiseBundle (c, false), back),
+               "array form round-trips");
+        CHECK (back.haveAltRef && back.altRef.altTimeRefs.size() == 2
+              && back.altRef.altTimeRefs[0].name == "Tone A"
+              && approx (back.altRef.altTimeRefs[0].altValue, 200.0)
+              && !back.altRef.altTimeRefs[1].enabled,
+               "names + enabled flags survive the round trip");
+    }
+
+    // --- Sample-mode tick density: samples-per-pixel = rate / pxPerSec ----
+    {
+        // 44.1 kHz file shown at ~50 px/s -> 882 smp/px; with the ~80 px tick
+        // spacing that is a target of 70560 samples -> step 1e5.
+        CHECK (niceSampleStep (44100.0 / 50.0) == 100000.0, "wide view gets 1e5-sample ticks");
+        // Deep zoom: 96 px/s at 48 kHz -> 500 smp/px -> target 40000 -> step 5e4.
+        CHECK (niceSampleStep (48000.0 / 96.0) == 50000.0, "deep zoom gets 5e4-sample ticks");
+    }
+
+    // --- Negative clock formatting ----------------------------------------
+    {
+        CHECK (formatClockTime (-3755.25, 4) == "-1:02:35.25",
+               "negative offset formats with a minus sign: " + formatClockTime (-3755.25, 4));
+        CHECK (formatClockTime (-155.99996, 4) == "-2:36",
+               "carry rounds the absolute value first");
+        CHECK (formatClockTime (0.0, 4) == "0:00", "zero stays unsigned");
+    }
+
+    // --- Go to Time field layout + resolution -----------------------------
+    {
+        const juce::File store = makeTempFile ("goto_fields.recent");
+        store.deleteFile();
+        Application app (store);   // no file loaded yet: default rate 44100 Hz
+
+        Application::AltScaleRef on, off, dup;
+        on.name  = "TRef";   on.refMain = 2.0;    on.altValue = 4.0;
+        off.name = "Off";    off.enabled = false; off.refMain = 1.0; off.altValue = 2.0;
+        dup.name = "TRef";   dup.refMain = 8.0;   dup.altValue = 16.0;   // duplicate name
+        app.altTimeRefs.push_back (on);
+        app.altTimeRefs.push_back (off);
+        app.altTimeRefs.push_back (dup);
+
+        MainWindow::GoToTimeFields f = MainWindow::computeGoToTimeFields (app);
+        CHECK (f.mainId == "Time (s)", "main field id follows Time mode");
+        CHECK (f.alts.size() == 1 && f.alts[0].first == 0 && f.alts[0].second == "TRef",
+               "only the enabled, uniquely-named reference gets a field");
+
+        app.timeAxisMode = TimeAxisMode::Sample;
+        f = MainWindow::computeGoToTimeFields (app);
+        CHECK (f.mainId == "Sample", "main field id follows Sample mode");
+        app.timeAxisMode = TimeAxisMode::TimeOffset;
+        f = MainWindow::computeGoToTimeFields (app);
+        CHECK (f.mainId == "Time Offset", "main field id follows offset mode");
+
+        // Resolution: main field wins, then alt fields in order.
+        double t = -1.0;
+        app.timeAxisMode = TimeAxisMode::Time;
+        f = MainWindow::computeGoToTimeFields (app);
+        CHECK (MainWindow::resolveGoToTime (app, f, "2.5", { "9" }, t) && approx (t, 2.5),
+               "main field takes priority over alt fields");
+        CHECK (MainWindow::resolveGoToTime (app, f, "", { "9" }, t) && approx (t, 4.5),
+               "alt value inverts the reference: 9 * 2 / 4 = 4.5");
+        CHECK (!MainWindow::resolveGoToTime (app, f, "", { "" }, t),
+               "empty fields resolve to nothing");
+
+        // Sample mode main field parses sample counts.
+        app.timeAxisMode = TimeAxisMode::Sample;
+        f = MainWindow::computeGoToTimeFields (app);
+        CHECK (MainWindow::resolveGoToTime (app, f, "9600", {}, t)
+                  && approx (t, 9600.0 / 44100.0),
+               "sample count converts back to seconds");
+
+        // Offset mode main field parses clock text through the offset.
+        app.timeAxisMode = TimeAxisMode::TimeOffset;
+        app.timeOffsetSecs = 3600.0;
+        f = MainWindow::computeGoToTimeFields (app);
+        CHECK (MainWindow::resolveGoToTime (app, f, "1:00:10", {}, t) && approx (t, 10.0),
+               "clock text resolves through the offset");
+
+        store.deleteFile();
+    }
+
+    // --- Dialogs + apply logic --------------------------------------------
+    {
+        const juce::File store = makeTempFile ("altref_dlg.recent");
+        const juce::File wav = makeTempFile ("altref_dlg.wav");
+        writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 440.0 * (double) f / rate);
+        });
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "alt ref dialog test"));
+        CHECK (app.openFile (wav), "file ready for alt-ref dialogs");
+
+        // createGoToTimeDialog: main field + one editor per enabled reference.
+        app.playhead = 1.0;
+        Application::AltScaleRef gref;   gref.name = "GRef"; gref.refMain = 2.0; gref.altValue = 4.0;
+        app.altTimeRefs.push_back (gref);
+
+        juce::AlertWindow* gd = win->createGoToTimeDialog ();
+        CHECK (gd != nullptr, "go-to dialog created");
+        if (gd != nullptr)
+        {
+            auto* mainEd = gd->getTextEditor ("Time (s)");
+            CHECK (mainEd != nullptr && mainEd->getText() == juce::String (1.0, 3),
+                   "main field shows the playhead in Time mode: "
+                   + (mainEd ? mainEd->getText() : juce::String("missing")));
+            auto* altEd = gd->getTextEditor ("GRef");
+            CHECK (altEd != nullptr && altEd->getText() == juce::String (2.0, 3),
+                   "alt field shows the reference value at the playhead: "
+                   + (altEd ? altEd->getText() : juce::String("missing")));
+            delete gd;
+        }
+
+        // createAltRefEditDialog: fields mirror the stored reference.
+        Application::AltScaleRef er;   er.name = "E1"; er.refMain = 2.5; er.altValue = 7.0;
+        app.altTimeRefs.push_back (er);
+        juce::AlertWindow* ed = win->createAltRefEditDialog (false, 1);
+        CHECK (ed != nullptr, "edit dialog created");
+        if (ed != nullptr)
+        {
+            auto* nameEd  = ed->getTextEditor ("name");
+            auto* mainEd2 = ed->getTextEditor ("mainSecs");
+            auto* altEd2  = ed->getTextEditor ("altValue");
+            CHECK (nameEd != nullptr && nameEd->getText() == "E1", "name field pre-filled");
+            CHECK (mainEd2 != nullptr && mainEd2->getText() == juce::String (2.5, 4),
+                   "main value pre-filled: " + (mainEd2 ? mainEd2->getText() : juce::String("?")));
+            CHECK (altEd2 != nullptr && altEd2->getText() == juce::String (7.0, 3),
+                   "alt value pre-filled");
+            auto* vis = dynamic_cast<juce::ToggleButton*> (ed->findChildWithID ("altref-visible"));
+            CHECK (vis != nullptr && vis->getToggleState(), "visibility toggle mirrors the ref");
+            CHECK (ed->getButton ("OK") != nullptr && ed->getButton ("Cancel") != nullptr
+                  && ed->getButton ("Delete") != nullptr, "OK/Cancel/Delete buttons exist");
+            delete ed;
+        }
+        CHECK (win->createAltRefEditDialog (false, 99) == nullptr,
+               "out-of-range index yields no dialog");
+
+        // applyAltRefEditResult: cancel keeps, OK edits, Delete removes.
+        const int idx = 1;   // the "E1" reference
+        CHECK (!MainWindow::applyAltRefEditResult (app, false, idx, 2, "X", "9", "9", true),
+               "cancel changes nothing");
+        CHECK (approx (app.altTimeRefs[idx].refMain, 2.5) && app.altTimeRefs[idx].name == "E1",
+               "reference untouched after cancel");
+
+        CHECK (MainWindow::applyAltRefEditResult (app, false, idx, 1, "Renamed", "3.0", "6.0", false),
+               "OK applies the edit");
+        CHECK (app.altTimeRefs[idx].name == "Renamed" && approx (app.altTimeRefs[idx].refMain, 3.0)
+              && approx (app.altTimeRefs[idx].altValue, 6.0) && !app.altTimeRefs[idx].enabled,
+               "rename + both values + visibility applied");
+
+        CHECK (!MainWindow::applyAltRefEditResult (app, false, idx, 1, "", "abc", "6.0", true),
+               "invalid main text is rejected");
+        CHECK (approx (app.altTimeRefs[idx].refMain, 3.0), "rejected edit keeps the value");
+
+        // Frequency refs need a positive anchor.
+        Application::AltScaleRef fr;   fr.name = "F1"; fr.refMain = 100.0; fr.altValue = 50.0;
+        app.altFreqRefs.push_back (fr);
+        CHECK (!MainWindow::applyAltRefEditResult (app, true, 0, 1, "", "-5", "50", true),
+               "non-positive frequency anchor rejected");
+
+        CHECK (MainWindow::applyAltRefEditResult (app, false, idx, 3, "", "", "", true),
+               "delete removes the reference");
+        CHECK ((int) app.altTimeRefs.size() == 1 && app.altTimeRefs[0].name == "GRef",
+               "only the other reference remains");
+
+        // Waveform probe shows every enabled time reference by name.
+        WaveformView* wv = nullptr;
+        for (auto* c : win->getChildren ())
+            if ((wv = dynamic_cast<WaveformView*> (c)) != nullptr) break;
+        CHECK (wv != nullptr, "waveform view found");
+        if (wv != nullptr)
+        {
+            juce::String probe;
+            wv->onCursorInfo = [&probe] (const juce::String& s) { probe = s; };
+            const int xMid = (int) std::lround (wv->timeToX (1.0));
+            Application::AltScaleRef wr;   wr.name = "WRef"; wr.refMain = 2.0; wr.altValue = 4.0;
+            app.altTimeRefs.push_back (wr);
+            wv->mouseMove (mkMouse (*wv, xMid, wv->getHeight() / 2, {}));
+            const double tAt = wv->xToTime (xMid);
+            CHECK (probe.contains ("| WRef=" + juce::String (tAt * 4.0 / 2.0, 3)),
+                   "waveform probe lists the reference: " + probe);
+
+            // Negative offset mode: the probe shows a signed clock time.
+            app.timeAxisMode = TimeAxisMode::TimeOffset;
+            app.timeOffsetSecs = -3723.5;
+            wv->mouseMove (mkMouse (*wv, xMid, wv->getHeight() / 2, {}));
+            CHECK (probe.startsWith ("t=" + formatClockTime (tAt - 3723.5, 4)),
+                   "negative offset probe shows a signed clock: " + probe);
+
+            // Sample-mode ruler still draws tick labels at this zoom.
+            app.timeAxisMode = TimeAxisMode::Sample;
+            juce::Image img (juce::Image::ARGB, std::max (1, wv->getWidth()),
+                             std::max (1, wv->getHeight()), true);
+            { juce::Graphics g (img); wv->paint (g); }
+            int labelPx = 0;   // light pixels inside the ruler strip
+            for (int y = 2; y < WaveformView::kRulerH - 2; ++y)
+                for (int x = 4; x < wv->getWidth() - 4; ++x)
+                    if (img.getPixelAt (x, y).getBrightness () > 0.5f) ++labelPx;
+            CHECK (labelPx > 100, "sample-mode ruler draws tick labels");
+
+            app.timeAxisMode = TimeAxisMode::Time;
+        }
+
+        wav.deleteFile (); store.deleteFile ();
+    }
+}
+
 static void testAxisScaleModes()
 {
     auto approx = [] (double a, double b) { return std::abs (a - b) <= 1e-9; };
@@ -6181,21 +6437,30 @@ static void testAxisScaleModes()
         CHECK (diffCount (sHz, capture()) > 30,
                "custom frequency scale relabels the axis");
 
-        // Alternative scales append to the probe text.
+        // Alternative scales append to the probe text - one named entry per
+        // enabled reference.
         juce::String probe;
         sv->onCursorInfo = [&probe] (const juce::String& s) { probe = s; };
         const int px = 2 + sv->getWidth() / 3, py = 60 + sv->getHeight() / 3;
 
-        app.altTimeOn = true;   app.altTimeRefSecs = 1.0;  app.altTimeValue = 2.0;
-        app.altFreqOn = true;   app.altFreqRefHz = 1000.0; app.altFreqValue = 500.0;
-        sv->mouseMove (mkMouse (*sv, px, py, {}));
-        CHECK (probe.contains ("| alt t=") && probe.contains ("| alt f="),
-               "alternative scales appear in the probe: " + probe);
+        Application::AltScaleRef tr;   tr.name = "TRef"; tr.refMain = 1.0;    tr.altValue = 2.0;
+        app.altTimeRefs.push_back (tr);
+        Application::AltScaleRef fr;   fr.name = "FRef"; fr.refMain = 1000.0; fr.altValue = 500.0;
+        app.altFreqRefs.push_back (fr);
 
-        app.altTimeOn = false;  app.altFreqOn = false;
         sv->mouseMove (mkMouse (*sv, px, py, {}));
-        CHECK (!probe.contains ("| alt t=") && !probe.contains ("| alt f="),
-               "disabling removes the alternative scales: " + probe);
+        const double tAt = sv->xToTime (px), fAt = sv->freqAtY (py);
+        CHECK (probe.contains ("| TRef=" + juce::String (tAt * 2.0 / 1.0, 3)),
+               "time reference appears with its value in the probe: " + probe);
+        CHECK (probe.contains ("| FRef=" + juce::String (fAt * 500.0 / 1000.0, 3)),
+               "frequency reference appears with its value in the probe: " + probe);
+
+        app.altTimeRefs[0].enabled = false;
+        sv->mouseMove (mkMouse (*sv, px, py, {}));
+        CHECK (!probe.contains ("| TRef=") && probe.contains ("| FRef="),
+               "disabling one reference hides only that one: " + probe);
+
+        app.altTimeRefs.clear ();   app.altFreqRefs.clear ();
 
         // With both views visible MainWindow hides the spectral view's own
         // time ruler; it can be re-enabled and hidden again.
@@ -7195,7 +7460,8 @@ static void testUnifiedMetadata()
         b.scale.fullScaleValue = 2.5;
 
         b.altRef.freqScaleMode = 1; b.altRef.freqFactor = 3.75;
-        b.altRef.altTimeOn = true; b.altRef.altTimeRefSecs = 1.25; b.altRef.altTimeValue = 42.0;
+        sc::AltScaleRefData trd;   trd.name = "Alt 1"; trd.refMain = 1.25; trd.altValue = 42.0;
+        b.altRef.altTimeRefs.push_back (trd);
 
         b.freqAnalysis.axisMode = 3; b.freqAnalysis.fftSize = 4096;
         b.freqAnalysis.refTime = 1; b.freqAnalysis.smooth = 5; b.freqAnalysis.track = 1;
@@ -7258,9 +7524,11 @@ static void testUnifiedMetadata()
             const auto& ar = g.altRef;
             CHECK (ar.freqScaleMode == 1 && std::abs (ar.freqFactor - 3.75) < 1e-9,
                   "custom frequency units round-trip");
-            CHECK (ar.altTimeOn && std::abs (ar.altTimeRefSecs - 1.25) < 1e-9
-                  && std::abs (ar.altTimeValue - 42.0) < 1e-9, "alt time scale round-trips");
-            CHECK (!ar.altFreqOn, "disabled alt freq scale stays off");
+            CHECK (ar.altTimeRefs.size() == 1 && ar.altTimeRefs[0].name == "Alt 1"
+                  && std::abs (ar.altTimeRefs[0].refMain - 1.25) < 1e-9
+                  && std::abs (ar.altTimeRefs[0].altValue - 42.0) < 1e-9,
+                  "alt time scale round-trips");
+            CHECK (ar.altFreqRefs.empty(), "disabled alt freq scale stays off");
         }
         else CHECK (false, "altRef present after round-trip");
 
@@ -11775,6 +12043,7 @@ static int scRunUnitTestsImpl()
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
     progress ("axis scale modes");        testAxisScaleModes();
+    progress ("alt scale multi-ref + go-to"); testAltScaleMultiRef();
     progress ("resample remix");          testResampleRemix();
     progress ("paste to new channels");   testPasteToNewChannels();
     progress ("channel row geometry");    testChannelRowGeometry();

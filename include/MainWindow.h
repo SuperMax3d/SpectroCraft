@@ -125,6 +125,53 @@ public:
     /** Builds (but does not run modally) the Change Gain dialog. The caller
         owns and must delete it; used by showChangeGainDialog() and tests. */
     juce::AlertWindow* createGainDialog();
+
+    // ---- Alternative scale references + Go to Time -----------------------
+
+    /** Builds (but does not run modally) the edit dialog for one alternative-
+        scale reference: rename, edit both endpoint values, enable/disable,
+        delete. The caller owns the returned window. */
+    juce::AlertWindow* createAltRefEditDialog(bool isFreq, int index);
+
+    /** Runs the alternative-reference edit dialog modally and applies its
+        outcome to the session state (persisted with per-file metadata). */
+    void showAltRefEditDialog(bool isFreq, int index);
+
+    /** Applies an alternative-reference edit dialog's outcome to the session
+        state. result: 1 = OK, 2 = cancel, 3 = delete. Returns true when the
+        state changed (so the caller can persist + refresh). */
+    static bool applyAltRefEditResult(Application& app, bool isFreq, int index,
+                                      int result, const juce::String& nameText,
+                                      const juce::String& mainText,
+                                      const juce::String& altText, bool visible);
+
+    /** Field layout of the Go to Time dialog: the main-axis field id plus one
+        entry per enabled alternative time reference (index into
+        Application::altTimeRefs + editor id), in display order. */
+    struct GoToTimeFields
+    {
+        juce::String mainId;
+        std::vector<std::pair<int, juce::String>> alts;
+    };
+
+    static GoToTimeFields computeGoToTimeFields(Application& app);
+
+    /** Resolves which Go to Time field was filled in and converts it to
+        seconds. altTexts must match the order of fields.alts. Returns false
+        when no usable value was found. */
+    static bool resolveGoToTime(Application& app, const GoToTimeFields& fields,
+                                const juce::String& mainText,
+                                const std::vector<juce::String>& altTexts,
+                                double& outSecs);
+
+    /** Builds (but does not run modally) the Go to Time dialog. The caller
+        owns the returned window. */
+    juce::AlertWindow* createGoToTimeDialog();
+
+    /** Runs the Go to Time dialog modally and moves the playhead to the first
+        non-empty, parseable field (main axis mode or an alternative time
+        reference). Ctrl+G. */
+    void showGoToTimeDialog();
     void showResampleDialog();
     /** Builds (but does not run modally) the Resample dialog. The caller owns
         and must delete it; used by showResampleDialog() and tests. */

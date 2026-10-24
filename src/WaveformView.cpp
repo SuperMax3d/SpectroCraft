@@ -405,8 +405,14 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
             break;
     }
 
+    // Alternative scale overlays: every enabled time reference, by name.
+    juce::String altText;
+    for (const auto& r : app.altTimeRefs)
+        if (r.enabled && std::abs (r.refMain) > 1e-9)
+            altText += "   | " + r.name + "=" + juce::String (t * r.altValue / r.refMain, 3);
+
     if (onCursorInfo)
-        onCursorInfo (tText + "   ch " + lab + ": " + vText);
+        onCursorInfo (tText + "   ch " + lab + ": " + vText + altText);
 }
 
 void WaveformView::mouseExit (const juce::MouseEvent&)
@@ -910,7 +916,9 @@ double niceTimeStep (double pxPerSec)
 
 juce::String formatClockTime (double t, int maxDecimals)
 {
-    if (!std::isfinite (t) || t < 0.0) t = 0.0;
+    if (!std::isfinite (t)) t = 0.0;
+    const bool neg = t < 0.0;   // negative displayed times (negative offsets)
+    t = std::abs (t);
 
     // Round the fractional part to `maxDecimals` digits first so a carry can
     // bump the whole-second count (e.g. 155.99996 @4dp -> 2:36). With no
@@ -943,7 +951,7 @@ juce::String formatClockTime (double t, int maxDecimals)
         while (fs.endsWith ("0")) fs = fs.dropLastCharacters (1);
         if (!fs.isEmpty()) s << "." << fs;
     }
-    return s;
+    return neg ? "-" + s : s;
 }
 
 juce::String formatFooterTime (double t)
@@ -1213,9 +1221,12 @@ void WaveformView::drawRuler (juce::Graphics& g)
     const double dispStart = timeToDisplayValue (viewStart, mode, off, rate);
     const double dispEnd   = timeToDisplayValue (viewEnd,   mode, off, rate);
     const double major = (mode == TimeAxisMode::Sample)
-                         ? niceSampleStep (pxPerSec * rate) : niceTimeStep (pxPerSec);
+                         ? niceSampleStep (rate / pxPerSec) : niceTimeStep (pxPerSec);
     // Subdivide each major interval into five when there is room for it.
-    const bool showMinors = major * pxPerSec >= 40.0;
+    // (In Sample mode `major` counts samples, so convert to pixels first.)
+    const double majorPx = (mode == TimeAxisMode::Sample)
+                           ? (major / rate) * pxPerSec : major * pxPerSec;
+    const bool showMinors = majorPx >= 40.0;
 
     g.setColour (juce::Colour::fromRGB (60, 60, 60));
     g.drawLine ((float) pr.getX(), kRulerH - 1, (float) pr.getRight(), kRulerH - 1, 1.0f);

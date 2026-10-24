@@ -778,6 +778,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Find in the active list panel (Markers / Transcription tab; right-click > Find also works) | Ctrl+F |
 | Find next match (opens the dialog first when no query is set yet) | F3 |
 | Find previous match | Ctrl+F3 |
+| Go to Time... (jump the playhead by time, sample count or any alternative-scale value) | Ctrl+G |
 | Add marker (region if selected, else point at cursor) | F2 / F8 |
 | Selection tool: Time Range / Marquee / Lasso / Paintbrush | S / M / L / P |
 | Brush radius smaller / larger (Paintbrush only) | [ / ] |
@@ -838,7 +839,7 @@ Mouse (waveform *and* spectral views):
 | Left-drag on the top time ruler | Pan the shared time window at half cursor speed (same as middle-drag); does not create a selection |
 | Middle-drag | Pan the shared time window (both views stay in sync). The content follows the cursor at half speed; panning against a file edge pins that edge, and reversing direction responds immediately (no dead zone) |
 | Right-drag a region | **Box zoom**: dragging on the track zooms **both** axes at once — time from the box's horizontal span, amplitude (waveform) or frequency (spectral) from its vertical span. Dragging that starts on an axis zooms only that axis: left axis → vertical range, top time ruler (waveform) → time range. A rubber-band rectangle is shown while dragging |
-| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete, plus a **Scale** submenu (time axis Time/Time Offset.../Sample; vertical axis Wav Units/dB/Normalized in the waveform, Hz/Custom... in the spectrogram; checkable Alternative Scale time/frequency overlays there). On the **left axis**, "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
+| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete, plus a **Scale** submenu (time axis Time/Time Offset.../Sample; vertical axis Wav Units/dB/Normalized in the waveform, Hz/Custom... in the spectrogram; and Alternative Scale Time/Frequency submenus with named reference entries in both views). On the **left axis**, "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
 | Mouse wheel over the plot / time ruler | Horizontal zoom around the cursor (both views) |
 | Mouse wheel over the left axis (or Shift + wheel anywhere) | Vertical amplitude zoom (waveform) / frequency-range zoom around the cursor (spectral) — independent per view |
 | Drag the divider between the views | Resize waveform vs spectral area |
@@ -859,13 +860,16 @@ across restarts.
 - **Time Axis** (both views):
   - **Time** (default): seconds, with clock-style labels past a minute.
   - **Time Offset...**: a dialog asks for the time that should appear at the
-    playhead position (`hh:mm:ss.xxxx`); from then on every time readout shows
-    *time + offset*, and typing a clock value in any footer/marker field applies
-    it with the offset removed. Ruler ticks land on round clock values.
+    playhead position — plain seconds (`-123.5`) or clock style
+    (`hh:mm:ss.xxxx`, negative and multi-hour values both work); from then on
+    every time readout shows *time + offset* (with a minus sign when it goes
+    below zero), and typing a clock value in any footer/marker field applies it
+    with the offset removed. Ruler ticks land on round clock values.
   - **Sample**: times are shown as sample counts at the active file's rate;
-    ruler ticks land on nice 1-2-5×10^k sample steps, and footer/marker fields
-    accept integer or decimal sample counts (the length field is a duration in
-    samples).
+    ruler ticks land on nice 1-2-5×10^k sample steps chosen from the current
+    zoom (samples-per-pixel), so numbers stay visible at every magnification,
+    and footer/marker fields accept integer or decimal sample counts (the
+    length field is a duration in samples).
 - **Vertical Axis** (waveform): how the left amplitude axis is labelled —
   **Wav Units** (physical value when calibrated, relative dB otherwise),
   **dB** (plain 0/−6/−12…) or **Normalized** (signed linear amplitude: +a above
@@ -875,11 +879,20 @@ across restarts.
   click — click any point in the plot, then enter the value that should appear
   at its frequency; the whole axis is relabelled by the resulting factor while
   tick positions stay put.
-- **Alternative Scale** (spectrogram only, checkable): a second linear scale
-  anchored at zero, shown alongside the normal readout in the status-bar probe
-  as `| alt t=…` / `| alt f=…`. Enabling one arms the same reference-click flow:
-  click a point and enter its value; the overlay rescales time or frequency by
-  *value/ref*. Disabling just hides the overlay.
+- **Alternative Scale** (both views): one or more named linear scales anchored
+  at zero, shown alongside the normal readout in the cursor probe as
+  `| Name=value` for every enabled reference. The right-click menu has Time and
+  Frequency submenus: **New** arms the usual reference-click flow (click a plot
+  point, enter its value; the scale rescales by *value/ref*), and each existing
+  reference appears under its name — choosing it opens an edit dialog where you
+  can rename it, re-enter both endpoint values directly, toggle whether it shows
+  in the probe, or delete it. References are stored with the file's metadata.
+- **Go to Time... (Ctrl+G)**: a small dialog with one field for the active time
+  axis mode plus one field per enabled alternative-time reference. Type into any
+  of them and OK jumps the playhead there — the main field takes plain seconds,
+  sample counts or clock text depending on the mode, while an alternative field
+  inverts its reference (*value × ref / alt*). The fields are pre-filled with
+  the current values at the playhead.
 - While both views are visible, the spectrogram hides its own (identical) time
   ruler to save plot space; it reappears when only the spectrogram is shown.
 
@@ -1034,7 +1047,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2000 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2100 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1159,6 +1172,17 @@ by a single mutex (short critical sections, no lock held during FFT work).
     rendering diffs, probe text in Sample/TimeOffset modes, frequency-factor
     relabelling, StatusBar field/playhead round-trips with typed input, and the
     marker panel's time cells + detail editors.
+  - **Alternative-scale multi-reference + Go to Time**: reference naming /
+    value-inversion helpers; legacy single-reference metadata falling back to one
+    "Alt 1" entry plus array-form round-trip of names/enabled flags; sample-mode
+    tick density at two zoom levels (samples-per-pixel, not seconds); negative
+    clock formatting with carry rounding; Go-to-Time field layout per axis mode
+    and resolution priority (main field first, then alt fields inverting their
+    references, sample counts and clock-through-offset parsing); dialog structure
+    (pre-filled main/alt/reference editors, visibility toggle, OK/Cancel/Delete)
+    and the apply logic for edit/cancel/delete with invalid-text rejection;
+    waveform probe listing every enabled reference by name, signed readout in
+    negative offset mode, and sample-mode ruler labels actually rendering.
   - **Zero-crossing snap selection**: with the toggle off (the default) drag
     edges are untouched; with it on both edges land on tone zero crossings;
     zero-length and programmatic selections are never snapped. The analysis

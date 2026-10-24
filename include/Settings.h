@@ -34,9 +34,11 @@ enum ContextMenuIDs : int
     CtxScaleWaveNorm      = 20,
     CtxScaleSpecHz        = 21,   // spectrogram frequency axis only
     CtxScaleSpecCustom    = 22,   // arms the reference-click flow
-    // Alternative Scale menu (spectrogram right-click only): checkable.
-    CtxAltScaleTime       = 23,
-    CtxAltScaleFreq       = 24
+    // Alternative Scale menu (spectrogram right-click only).
+    CtxAltScaleTime       = 23,   // "New" time reference: arms the ref-click flow
+    CtxAltScaleFreq       = 24,   // "New" frequency reference: arms the ref-click flow
+    CtxAltRefTimeBase     = 100,  // + index: edit an existing time reference
+    CtxAltRefFreqBase     = 200   // + index: edit an existing frequency reference
 };
 
 // Time-axis scale for the shared time window (both views, footer, markers).

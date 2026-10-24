@@ -42,24 +42,29 @@ struct FreqAnalysisState
     }
 };
 
+/** One alternative-axis reference point (per-file copy of the session state).
+    alt(x) = x * altValue / refMain, anchored at zero. */
+struct AltScaleRefData
+{
+    juce::String name = "Alt";
+    bool enabled = true;
+    double refMain = 0.0;   // main-axis value at the reference point (s or Hz)
+    double altValue = 0.0;  // alternative-axis value at that point
+};
+
 /** Axis reference calibrations - per-file copy of the session state. */
 struct AltRefState
 {
     int freqScaleMode = 0;      // 0 Hz, 1 custom units (ref-click calibrated)
     double freqFactor = 1.0;    // displayed(f) = f * factor
 
-    bool altTimeOn = false;     // alternative time scale overlay
-    double altTimeRefSecs = 0.0;
-    double altTimeValue = 0.0;
-
-    bool altFreqOn = false;     // alternative frequency scale overlay
-    double altFreqRefHz = 0.0;
-    double altFreqValue = 0.0;
+    std::vector<AltScaleRefData> altTimeRefs;   // alternative time scale overlays
+    std::vector<AltScaleRefData> altFreqRefs;   // alternative frequency scale overlays
 
     bool isDefault() const
     {
         return freqScaleMode == 0 && freqFactor == 1.0
-            && !altTimeOn && !altFreqOn;
+            && altTimeRefs.empty() && altFreqRefs.empty();
     }
 };
 
