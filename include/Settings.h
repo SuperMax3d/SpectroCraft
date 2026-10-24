@@ -71,8 +71,8 @@ struct Settings
     int fftLocalN = 2048;       // Frequency Analysis FFT size (power of two)
     // Curve-mode options (modes 3..5), persisted between sessions:
     int fftRefTime = 0;         // time-based modes: 0=Relative, 1=Absolute
-    int fftSmooth = 0;          // curve smoothing window: 0=None, 3, or 5 points
-    int fftTrack = 0;           // 0=Max (strongest component), 1=Total
+    int fftSmooth = 0;          // curve smoothing window in frames: 0=None, or 3/5/7/9/11
+    int fftTrack = 0;           // 0=Max (strongest component), 1=Total, 2=Weighted
 
     bool operator== (const Settings& o) const
     {

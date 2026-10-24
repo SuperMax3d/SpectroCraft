@@ -120,17 +120,20 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     **Freq vs Time** (the tracked dominant frequency plotted against time —
     the cursor readout also shows each channel's level), **Amp vs Time**
     (level over time) and **Amp vs Freq** (a per-bin spectrum of the analysed
-    region, using the FFT size + window type like the classic modes). The curve modes
-    analyse the selection frame by frame (fixed 2048-point Hann frames in the
-    two time-based modes, capped at 2048 points per curve) and honour a
-    spectral-selection mask — bins outside it do not count. Their extra row of
-    options offers **Ref Time** (Relative = ticks counted from the selection
-    start, Absolute = file time), **Smooth** (None / 3 / 5-frame centred moving
-    average) and **Track** (Max = strongest component per frame/bin with its
-    frequency; Total = summed level with amplitude-weighted centroid
-    frequency). In the time-based modes the bottom axis is fixed to the
-    analysed region: left-drag/wheel/right-drag box zoom only affect the
-    vertical range, and **Zoom Out Full** resets just that range. The 8
+    region; it uses fixed 2048-point Hann frames, so the FFT size / window type
+    controls are hidden in that mode). The curve modes analyse the selection
+    frame by frame with fixed 2048-point Hann frames (capped at 2048 points per
+    curve) and honour a spectral-selection mask — bins outside it do not count.
+    Their options row offers **Smooth** (None / 3 / 5 / 7 / 9 / 11-frame centred
+    moving average) and **Track** (Max = strongest component per frame/bin with
+    its frequency; Total = summed level with amplitude-weighted centroid
+    frequency; Weighted = same as Total for the level, using the weighted mean
+    frequency). The two time-based modes add a **Ref Time** option (Relative =
+    ticks counted from the selection start, Absolute = file time) and have a
+    horizontal view window over the analysed region: the mouse wheel zooms both
+    axes at the cursor, a right-drag box sets both windows, left-dragging the
+    bottom axis pans the time window, and **Zoom Out Full** resets everything to
+    defaults. The 8
     snapshot buttons keep working in these modes but store a *separate* set of
     curve snapshots per mode (a slot saved in Freq vs Time is empty when you
     switch to Amp vs Time); stored curves follow the current Track/Smooth
@@ -168,8 +171,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     - **Right-drag a box** (a rubber-band rectangle is shown while dragging):
       horizontal span sets the frequency window, vertical span sets the level
       window (both at once if you drag in both directions). A plain right-click
-      shows a context menu with **Zoom Out Full**, **Copy Spectrum to
-      Clipboard**, and the harmonic-reference tools below; right-clicking the
+      shows a context menu with **Zoom Out Full**, **Copy** (in the curve modes
+      it copies the currently displayed points of the live curve — only what is
+      on screen), and the harmonic-reference tools below; right-clicking the
       *level* axis resets only the level window, the *frequency* axis only the
       frequency window.
     - **Set Harmonic References** (right-click): a popup asks which harmonic
@@ -1105,6 +1109,14 @@ by a single mutex (short critical sections, no lock held during FFT work).
     out-of-bounds magnitude read that crashed the tab — and in all three axis
     modes: linear peak position, log peak position, and 1/3-octave band values
     peaking in the correct IEC band).
+  - **Curve-mode options & zooming**: Amp vs Freq hides the FFT size / window
+    type row and always uses fixed 2048-point frames (bin count independent of
+    the panel's FFT setting); Smooth offers None/3/5/7/9/11 with a persisted
+    value surviving a resync; Track's Weighted option matches Total exactly;
+    time-based modes zoom horizontally via wheel, bottom-axis left-drag pan,
+    right-drag box and Zoom Out Full (all clamped to the analysed region);
+    Copy exports only the points inside the visible window in both time-based
+    and Amp vs Freq modes.
   - **Independent view components**: driven directly, each view keeps its own
     time window without cross-talk and has an independent vertical zoom
     (amplitude / frequency axis); at app level `MainWindow` syncs the horizontal

@@ -8795,6 +8795,168 @@ static void testCurveAnalysisModes()
         view.restoreSnapshotSlots (d, p, true);
         CHECK (view.curveSnapMode (2) < 0, "redo clears the curve slot again");
     }
+
+    // --- Mode 5: no first row + fixed 2048-point frames ---------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        const int classicTop = view.plotBounds().getY();   // default mode 0
+        view.setAxisMode (5);
+        CHECK (view.plotBounds().getY() == classicTop,
+              "mode 5 has no extra control row");
+        CHECK (!view.fftSizeComboRef().isVisible(), "fft size combo hidden in mode 5");
+        CHECK (!view.windowComboRef().isVisible(), "window type combo hidden in mode 5");
+
+        // Fixed frames: the panel's FFT size setting must not change the bins.
+        app.settings.fftLocalN = 65536;
+        view.resyncFromSettings();
+        view.recomputeIfNeeded();
+        const auto& curves = view.getLiveCurves();
+        CHECK (curves.size() == 1 && (int) curves[0].x.size() == 1024,
+              "mode 5 always uses fixed 2048-point frames (1024 bins at 8 kHz)");
+    }
+
+    // --- Smooth/Track options -------------------------------------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        CHECK (view.smoothComboRef().getNumItems() == 6, "smooth combo has six items");
+        CHECK (view.trackComboRef().getNumItems() == 3, "track combo has three items");
+
+        // Weighted tracking is numerically identical to Total.
+        view.setAxisMode (4);
+        app.settings.fftTrack = 1;
+        view.resyncFromSettings();
+        view.recomputeIfNeeded();
+        const auto& totalCurves = view.getLiveCurves();
+        std::vector<float> totalDb (totalCurves[0].ampDb.begin(), totalCurves[0].ampDb.end());
+
+        app.settings.fftTrack = 2;
+        view.resyncFromSettings();
+        view.recomputeIfNeeded();
+        const auto& weighted = view.getLiveCurves();
+        bool same = totalDb.size() == weighted[0].ampDb.size();
+        for (size_t i = 0; same && i < totalDb.size(); ++i)
+            same = std::abs ((double) totalDb[i] - (double) weighted[0].ampDb[i]) < 1e-6;
+        CHECK (same, "weighted track matches the total track");
+
+        // A persisted smoothing window survives a resync.
+        app.settings.fftSmooth = 9;
+        view.resyncFromSettings();
+        CHECK (view.smoothingWindow() == 9, "smooth=9 survives a resync");
+    }
+
+    // --- Horizontal zoom in time-based modes ------------------------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (4);
+        view.recomputeIfNeeded();
+        const auto plot = view.plotBounds();
+        const int midX = plot.getX() + plot.getWidth() / 2;
+        const int midY = plot.getY() + plot.getHeight() / 2;
+        const int axisY = plot.getBottom() + 8;
+
+        CHECK (std::abs (view.getCurveViewT0() - 0.0) < 1e-9
+             && std::abs (view.getCurveViewT1() - 1.0) < 1e-9,
+              "time window starts at the full analysed region");
+
+        // Wheel zoom-in at the centre: both edges move inward.
+        juce::MouseWheelDetails wheel;
+        wheel.deltaY = -2.0f;   // factor = 1.25^2 > 1 -> zoom in
+        view.mouseWheelMove (mkMouse (view, midX, midY, {}), wheel);
+        CHECK (view.getCurveViewT0() > 0.0 && view.getCurveViewT1() < 1.0
+             && view.getCurveViewT1() - view.getCurveViewT0() < 1.0,
+              "wheel zoom shrinks the time window around the cursor");
+
+        // Wheel out hard: clamps back to the full region.
+        juce::MouseWheelDetails wheel2;
+        wheel2.deltaY = 8.0f;   // factor << 1 -> zoom out
+        view.mouseWheelMove (mkMouse (view, midX, midY, {}), wheel2);
+        CHECK (std::abs (view.getCurveViewT0() - 0.0) < 1e-6
+             && std::abs (view.getCurveViewT1() - 1.0) < 1e-6,
+              "wheel zoom-out clamps back to the full region");
+
+        // Left-drag on the bottom axis pans the time window (content follows).
+        const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+        view.zoomTimeAtX (midX, 2.0);   // window [0.25, 0.75]
+        CHECK (std::abs (view.getCurveViewT0() - 0.25) < 1e-4
+             && std::abs (view.getCurveViewT1() - 0.75) < 1e-4,
+              "zoomTimeAtX halves the window around the cursor");
+        view.mouseDown (mkMouse (view, midX, axisY, lmb));
+        view.mouseDrag (mkMouse (view, plot.getRight(), axisY, lmb));
+        view.mouseUp   (mkMouse (view, plot.getRight(), axisY, lmb));
+        CHECK (std::abs (view.getCurveViewT0() - 0.0) < 1e-4
+             && std::abs (view.getCurveViewT1() - 0.5) < 1e-4,
+              "bottom-axis drag pans the time window earlier");
+
+        // Right-drag box from inside the plot sets both windows.
+        const int xA = view.timeToX (0.2);   // current window is [0, 0.5]
+        const int xB = view.timeToX (0.4);
+        juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
+        view.mouseDown (mkMouse (view, xA, midY, rmb));
+        view.mouseDrag (mkMouse (view, xB, midY + 12, rmb));
+        view.mouseUp   (mkMouse (view, xB, midY + 12, rmb));
+        CHECK (std::abs (view.getCurveViewT0() - 0.2) < 5e-3
+             && view.getCurveViewT1() > 0.38 && view.getCurveViewT1() <= 0.4 + 5e-3,
+              "right-drag box sets the time window");
+
+        // Zoom Out Full resets to defaults.
+        view.resetDisplayRanges();
+        CHECK (std::abs (view.getCurveViewT0() - 0.0) < 1e-9
+             && std::abs (view.getCurveViewT1() - 1.0) < 1e-9,
+              "reset restores the full region");
+    }
+
+    // --- Copy exports only visible points ---------------------------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (4);
+        view.recomputeIfNeeded();
+        const auto plot = view.plotBounds();
+
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard();
+        int fullLines = (int) juce::StringArray::fromLines (
+            juce::SystemClipboard::getTextFromClipboard()).size() - 1;
+        CHECK (fullLines >= 8, "full-region copy has many points");
+
+        // Zoom to the first half of the region: every exported time must lie
+        // inside the visible window [0, 0.5].
+        view.zoomTimeAtX ((int) plot.getX(), 2.0);
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard();
+        {
+            const auto lines = juce::StringArray::fromLines (
+                juce::SystemClipboard::getTextFromClipboard());
+            int dataLines = std::max (0, (int) lines.size() - 1);
+            double tMax = -1e30;
+            for (int i = 1; i < (int) lines.size(); ++i)
+                tMax = std::max (tMax, lines[i].substring (0,
+                        lines[i].indexOf (",")).getDoubleValue());
+            CHECK (dataLines >= 2 && dataLines < fullLines,
+                  "copy exports fewer points when zoomed in");
+            CHECK (tMax <= 0.5 + 1e-6,
+                  "no exported point lies outside the visible time window");
+        }
+
+        // Amp vs Freq: frequency-window filtering.
+        view.setAxisMode (5);
+        view.recomputeIfNeeded();
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard();
+        int m5full = (int) juce::StringArray::fromLines (
+            juce::SystemClipboard::getTextFromClipboard()).size() - 1;
+        CHECK (m5full > 900, "mode-5 copy covers the default frequency window");
+
+        view.zoomFreqAtX ((int) plot.getX(), 4.0);   // zoom in at the left edge
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard();
+        int m5zoom = (int) juce::StringArray::fromLines (
+            juce::SystemClipboard::getTextFromClipboard()).size() - 1;
+        CHECK (m5zoom * 2 < m5full, "mode-5 copy follows the frequency window");
+    }
 }
 
 static void testMaskedGainAndZero()

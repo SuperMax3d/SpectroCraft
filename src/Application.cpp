@@ -98,11 +98,12 @@ void Application::loadSettings ()
     settings.fftAxisMode   = std::clamp ((int) recentStore->getIntValue ("fft_axis_mode", settings.fftAxisMode), 0, 5);
     settings.fftLocalN     = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_local_n", settings.fftLocalN), 1024, 65536);
     settings.fftRefTime    = std::clamp ((int) recentStore->getIntValue ("fft_ref_time", settings.fftRefTime), 0, 1);
-    {   // smoothing window is one of None / 3 / 5 points
+    {   // smoothing window is one of None / 3 / 5 / 7 / 9 / 11 frames
         const int sm = recentStore->getIntValue ("fft_smooth", settings.fftSmooth);
-        settings.fftSmooth = (sm == 5) ? 5 : ((sm >= 1 && sm <= 4) ? 3 : 0);
+        settings.fftSmooth = (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11)
+                             ? sm : ((sm >= 1 && sm <= 4) ? 3 : 0);
     }
-    settings.fftTrack      = std::clamp ((int) recentStore->getIntValue ("fft_track", settings.fftTrack), 0, 1);
+    settings.fftTrack      = std::clamp ((int) recentStore->getIntValue ("fft_track", settings.fftTrack), 0, 2);
 }
 
 void Application::saveSettings ()
@@ -269,7 +270,7 @@ void Application::activate (int index)
     settings.fftLocalN    = std::clamp (d->freqAnalysis.fftSize, 1024, 65536);
     settings.fftRefTime   = std::clamp (d->freqAnalysis.refTime, 0, 1);
     settings.fftSmooth    = d->freqAnalysis.smooth;
-    settings.fftTrack     = std::clamp (d->freqAnalysis.track, 0, 1);
+    settings.fftTrack     = std::clamp (d->freqAnalysis.track, 0, 2);
     specFreqScaleMode     = d->altRef.freqScaleMode == 1 ? 1 : 0;
     specFreqFactor        = d->altRef.freqFactor > 1e-30 ? d->altRef.freqFactor : 1.0;
     altTimeRefs.clear();
@@ -325,8 +326,9 @@ void Application::inheritSessionMeta (FileDoc& d)
         fa.fftSize  = std::clamp (settings.fftLocalN, 1024, 65536);
         fa.refTime  = std::clamp (settings.fftRefTime, 0, 1);
         const int sm = settings.fftSmooth;
-        fa.smooth   = (sm == 5) ? 5 : ((sm >= 1 && sm <= 4) ? 3 : 0);
-        fa.track    = std::clamp (settings.fftTrack, 0, 1);
+        fa.smooth   = (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11)
+                      ? sm : ((sm >= 1 && sm <= 4) ? 3 : 0);
+        fa.track    = std::clamp (settings.fftTrack, 0, 2);
         d.freqAnalysis = fa;
     }
     if (!d.haveStoredAltRef)
@@ -357,8 +359,9 @@ void Application::pushActiveDocMetaTo (FileDoc& d)
     fa.fftSize  = std::clamp (settings.fftLocalN, 1024, 65536);
     fa.refTime  = std::clamp (settings.fftRefTime, 0, 1);
     const int sm = settings.fftSmooth;
-    fa.smooth   = (sm == 5) ? 5 : ((sm >= 1 && sm <= 4) ? 3 : 0);
-    fa.track    = std::clamp (settings.fftTrack, 0, 1);
+    fa.smooth   = (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11)
+                  ? sm : ((sm >= 1 && sm <= 4) ? 3 : 0);
+    fa.track    = std::clamp (settings.fftTrack, 0, 2);
     d.freqAnalysis = fa;
 
     sc::AltRefState ar;

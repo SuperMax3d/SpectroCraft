@@ -329,13 +329,15 @@ public:
     int fftSize() const { return localN; }
     int axisMode() const { return axisMode_; }
     juce::ComboBox& fftSizeComboRef() { return fftSizeCombo; }
+    juce::ComboBox& windowComboRef() { return windowCombo; }
     juce::ComboBox& axisComboRef() { return axisCombo; }
 
     // Curve-mode options (axis modes 3..5):
     //   refTime: 0 = Relative (time axis starts at the selection),
     //            1 = Absolute (file time scale).
-    //   smoothing window in points: 0 = None, 3 or 5.
-    //   track: 0 = Max (strongest component), 1 = Total (sum / centroid).
+    //   smoothing window in frames: 0 = None, or 3/5/7/9/11.
+    //   track: 0 = Max (strongest component), 1 = Total (sum / centroid),
+    //          2 = Weighted (amplitude-weighted average frequency; level like Total).
     int refTimeMode() const { return refTime_; }
     int smoothingWindow() const { return smooth_; }
     int trackMode() const { return track_; }
@@ -408,8 +410,20 @@ public:
     double getDbTop() const { return dbTop_; }
     double getDbBottom() const { return dbBottom_; }
 
+    // Horizontal view window of the time-based curve modes (absolute seconds,
+    // always inside the analysed region [cachedT0, cachedT1]).
+    double getCurveViewT0() const { return curveViewT0_; }
+    double getCurveViewT1() const { return curveViewT1_; }
+
     // Reset both display ranges to their defaults ("Zoom Out Full").
     void resetDisplayRanges();
+
+    // Public so headless unit tests can drive the zoom/copy paths directly.
+    void copySpectrumToClipboard();
+    void zoomFreqAtX (int x, double factor);
+    // Zoom the horizontal time window around the cursor x position
+    // (time-based curve modes); stays inside the analysed region.
+    void zoomTimeAtX (int x, double factor);
     // Called after a resample: re-clamp the frequency window to the new
     // Nyquist and force stored snapshots to be recomputed at the new rate.
     void onSampleRateChanged();
@@ -499,16 +513,22 @@ private:
 
     // Curve-mode options (persisted in app.settings):
     int refTime_ = 0;           // 0 = Relative, 1 = Absolute (time-based modes)
-    int smooth_ = 0;            // smoothing window in points: 0 / 3 / 5
-    int track_ = 0;             // 0 = Max, 1 = Total
+    int smooth_ = 0;            // smoothing window in frames: 0 / 3 / 5 / 7 / 9 / 11
+    int track_ = 0;             // 0 = Max, 1 = Total, 2 = Weighted
 
     // Local display ranges: the frequency window and the level window are
     // independent of app.settings.dBRange and of the spectrogram view.
     double fLo_ = 20.0, fHi_ = 20000.0;   // visible frequency range (Hz)
     double dbTop_ = 0.0, dbBottom_ = -80.0; // visible level window (dB rel.)
 
+    // Horizontal view window of the time-based curve modes (absolute seconds),
+    // always clamped inside the analysed region [cachedT0, cachedT1].
+    double curveViewT0_ = 0.0;
+    double curveViewT1_ = 0.0;
+    bool haveCurveView_ = false;
+
     // Interaction state for axis panning / box zooming.
-    enum class DragMode { None, PanFreq, PanLevel, PanFreqV, ZoomDrag };
+    enum class DragMode { None, PanFreq, PanLevel, PanFreqV, PanTime, ZoomDrag };
     // PanFreqV: vertical frequency panning in Freq vs Time mode.
     DragMode dragMode = DragMode::None;
     int dragStartX = 0, dragStartY = 0;
@@ -579,10 +599,8 @@ private:
     int settingsGen = 0;
 
     int axisWidth() const;   // right level-axis width (wider for linear V/g labels)
-    void copySpectrumToClipboard();
 
     // Zoom helpers for the local display ranges.
-    void zoomFreqAtX (int x, double factor);
     void zoomFreqAtY (float y, double factor);
     void zoomLevelAtY (float y, double factor);
     void showContextMenu (bool onLevelAxis, bool onFreqAxis, int clickX);
@@ -625,7 +643,11 @@ private:
 
     // Top control area height: 52 px for the classic modes, 78 px when the
     // third option row (Smoothing / Track) is visible.
-    int topHeight() const { return axisMode_ >= 3 ? 78 : 52; }
+    // Classic modes and Amp vs Freq have two control rows (52 px); the
+    // time-based curve modes add a Ref Time row on top (78 px).
+    // Two control rows in the classic modes and Amp vs Freq, three in the
+    // time-based curve modes (Ref Time row).
+    int topHeight() const { return isTimeAxisMode() ? 78 : 52; }
 
     // Rebuild curve slot i from its source file using the parameters stored
     // in the slot itself. Clears the slot when the source is gone.

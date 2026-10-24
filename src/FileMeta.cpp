@@ -464,8 +464,9 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
         fa.fftSize  = std::clamp (static_cast<int> (fp.getWithDefault ("fftSize", 2048)), 1024, 65536);
         fa.refTime  = std::clamp (static_cast<int> (fp.getWithDefault ("refTime", 0)), 0, 1);
         const int sm = static_cast<int> (fp.getWithDefault ("smooth", 0));
-        fa.smooth   = (sm == 5) ? 5 : ((sm >= 1 && sm <= 4) ? 3 : 0);
-        fa.track    = std::clamp (static_cast<int> (fp.getWithDefault ("track", 0)), 0, 1);
+        fa.smooth   = (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11)
+                      ? sm : ((sm >= 1 && sm <= 4) ? 3 : 0);
+        fa.track    = std::clamp (static_cast<int> (fp.getWithDefault ("track", 0)), 0, 2);
         out.freqAnalysis = fa;
     }
 
