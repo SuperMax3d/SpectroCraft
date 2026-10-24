@@ -925,6 +925,12 @@ across restarts.
   reference appears under its name — choosing it opens an edit dialog where you
   can rename it, re-enter both endpoint values directly, toggle whether it shows
   in the probe, or delete it. References are stored with the file's metadata.
+  **Copy Spectrum to Clipboard** from the Frequency Analysis panel carries them
+  along: every exported frequency value gains one extra column per enabled
+  reference — `chN_Name` right next to each channel's Hz in Freq/Amp-vs-Time
+  curve modes, and a shared `Name` column after `freq_Hz` in Amp-vs-Freq and
+  the classic/1/3-octave tables — converted by exactly the same factor as the
+  axis overlay, so the clipboard table holds both raw Hz and your scaled units.
 - **Go to Time... (Ctrl+G)**: a small dialog with one field for the active time
   axis mode plus one field per enabled alternative-time reference. Type into any
   of them and OK jumps the playhead there — the main field takes plain seconds,
@@ -1105,7 +1111,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2240 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2250 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1224,6 +1230,13 @@ by a single mutex (short critical sections, no lock held during FFT work).
     tracked frequency, Amp-vs-Freq cursor frequency) appends `| Name=value`
     for each enabled alternative-frequency reference; disabled references add
     nothing.
+  - **Alternative scales in copied curves**: Copy Spectrum to Clipboard appends
+    one column per enabled alternative-frequency reference next to every
+    exported frequency (per-channel `chN_Name` after each channel's Hz in the
+    curve modes, a shared `Name` column after `freq_Hz` in Amp-vs-Freq and the
+    classic/1/3-octave tables); every row's scaled value matches the axis
+    conversion; disabled references add nothing and with no reference set the
+    output is unchanged.
   - **Transcription list editing**: right-click row menu (Edit... / Add as
     marker / Find... / Add entry / Remove selected); segment edits validate and
     normalise reversed times, reject negative/NaN values and out-of-range rows;

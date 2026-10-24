@@ -3489,6 +3489,28 @@ void FFTAnalysisView::copySpectrumToClipboard()
         return juce::String (relDb + off, 2);
     };
 
+    // Alternative frequency scales: one extra column per enabled reference,
+    // converting every exported Hz value exactly like the axis overlay does
+    // (alt(x) = x * altValue / refMain). No columns are added when none is set.
+    std::vector<const Application::AltScaleRef*> altRefs;
+    for (const auto& r : app.altFreqRefs)
+        if (r.enabled && std::abs (r.refMain) > 1e-9)
+            altRefs.push_back (&r);
+
+    // Appends ",<value>" for every alternative reference to a data line.
+    auto appendAlts = [&] (juce::String& line, double freqHz)
+    {
+        for (const auto* r : altRefs)
+            line += "," + juce::String (Application::altScaleValue (*r, freqHz), 3);
+    };
+
+    // Appends the alternative-reference column names to a header.
+    auto appendAltHeaders = [&] (juce::String& header, const juce::String& prefix)
+    {
+        for (const auto* r : altRefs)
+            header += "," + prefix + r->name;
+    };
+
     // Curve modes export the points of the currently displayed curve instead
     // of a bin table (only what is on screen): Freq vs Time: time, per
     // channel freq+level; Amp vs Time: time, per channel level+freq;
@@ -3498,16 +3520,24 @@ void FFTAnalysisView::copySpectrumToClipboard()
         juce::StringArray lines;
         const int nCh = std::min ((int) liveCurves.size(), 4);
         juce::String header = isTimeAxisMode() ? "time_s" : "freq_Hz";
+        if (!isTimeAxisMode())
+            appendAltHeaders (header, "");   // Amp vs Freq: shared frequency axis
         for (int c = 0; c < nCh; ++c)
         {
+            const juce::String chName = "ch" + juce::String (c + 1) + "_";
             if (axisMode_ == 3)
-                header += ",ch" + juce::String (c + 1) + "_Hz,ch"
-                        + juce::String (c + 1) + "_" + sc.spectralUnitLabel();
+            {
+                header += "," + chName + "Hz";
+                appendAltHeaders (header, chName);
+                header += "," + chName + sc.spectralUnitLabel();
+            }
             else if (axisMode_ == 4)
-                header += ",ch" + juce::String (c + 1) + "_" + sc.spectralUnitLabel()
-                        + ",ch" + juce::String (c + 1) + "_Hz";
+            {
+                header += "," + chName + sc.spectralUnitLabel() + "," + chName + "Hz";
+                appendAltHeaders (header, chName);
+            }
             else
-                header += ",ch" + juce::String (c + 1) + "_" + sc.spectralUnitLabel();
+                header += "," + chName + sc.spectralUnitLabel();
         }
         lines.add (header);
 
@@ -3533,14 +3563,23 @@ void FFTAnalysisView::copySpectrumToClipboard()
             const size_t i = idxs[k];
             juce::String line = isTimeAxisMode() ? juce::String (liveCurves[0].x[i], 6)
                                                  : juce::String (liveCurves[0].x[i], 3);
+            if (!isTimeAxisMode())
+                appendAlts (line, liveCurves[0].x[i]);   // Amp vs Freq: shared axis
             for (int c = 0; c < nCh; ++c)
             {
                 const auto& cd = liveCurves[(size_t) c];
                 if (i >= cd.x.size()) continue;   // defensive: channels are equal-sized
                 if (axisMode_ == 3)
-                    line += "," + juce::String (cd.freqHz[i], 2) + "," + fmtLevel (cd.ampDb[i]);
+                {
+                    line += "," + juce::String (cd.freqHz[i], 2);
+                    appendAlts (line, cd.freqHz[i]);
+                    line += "," + fmtLevel (cd.ampDb[i]);
+                }
                 else if (axisMode_ == 4)
+                {
                     line += "," + fmtLevel (cd.ampDb[i]) + "," + juce::String (cd.freqHz[i], 2);
+                    appendAlts (line, cd.freqHz[i]);
+                }
                 else
                     line += "," + fmtLevel (cd.ampDb[i]);
             }
@@ -3553,6 +3592,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
 
     juce::StringArray lines;
     juce::String header = "freq_Hz";
+    appendAltHeaders (header, "");
     for (size_t c = 0; c < mags.size() && c < 4; ++c)
         header += ",ch" + juce::String ((int) c + 1) + "_" + sc.spectralUnitLabel();
     lines.add (header);
@@ -3563,6 +3603,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
         for (size_t b = 0; b < thirdOctMags[0].size(); ++b)
         {
             juce::String line = juce::String (kThirdOctCenters[b], 1);
+            appendAlts (line, kThirdOctCenters[b]);
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < thirdOctMags[c].size())
                     // Magnitudes are normalised against the fixed floor, so
@@ -3579,6 +3620,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
         const double f = (double) k * rate / (double) cachedN;
         if (f < fLo || f > fHi) continue;
         juce::String line = juce::String (f, 3);
+        appendAlts (line, f);
         for (size_t c = 0; c < mags.size() && c < 4; ++c)
         {
             const int bin = std::min (k, (int) mags[c].size() - 1);

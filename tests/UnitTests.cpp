@@ -9335,6 +9335,176 @@ static void testCurveAnalysisModes()
     }
 }
 
+// ============================================================ Copy + alt scales
+
+static void testCopyCurveAltScales()
+{
+    // One second mono @ 8 kHz: first half a 400 Hz tone, second half 1600 Hz.
+    const juce::File wav = makeTempFile ("curve_alt_scales.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (f < 4000 ? 400.0 : 1600.0) * (double) f / rate); }),
+          "wrote two-tone wav for alt-scale copy test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for alt-scale copy test");
+    app.setSelection ({ 0.0, 1.0 });
+
+    auto clipCols = [] () -> juce::StringArray
+    {
+        const auto lines = juce::StringArray::fromLines (
+            juce::SystemClipboard::getTextFromClipboard());
+        return lines.isEmpty() ? juce::StringArray {}
+                               : juce::StringArray::fromTokens (lines[0], ",", "");
+    };
+
+    // --- No alternative scales: output is unchanged ----------------------
+    {
+        app.altFreqRefs.clear();
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (5);
+        view.recomputeIfNeeded();
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard();
+        const auto cols = clipCols();
+        CHECK (cols.size() == 2 && cols[0] == "freq_Hz",
+              "no alt columns when no alternative scale is set");
+    }
+
+    // --- One reference: f / 1000 -> kHz in every export path --------------
+    Application::AltScaleRef r1;
+    r1.name = "Alt 1";
+    r1.refMain = 1000.0;
+    r1.altValue = 1.0;
+    app.altFreqRefs.clear();
+    app.altFreqRefs.push_back (r1);
+
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+
+        // Amp vs Freq: shared frequency axis gets one alt column after it.
+        view.setAxisMode (5);
+        view.recomputeIfNeeded();
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard();
+        {
+            const auto lines = juce::StringArray::fromLines (
+                juce::SystemClipboard::getTextFromClipboard());
+            const auto cols = clipCols();
+            CHECK (cols.size() == 3 && cols[1] == "Alt 1",
+                  "mode-5 header gains the alt column after freq_Hz");
+            int checked = 0;
+            bool ok = true;
+            for (int i = 1; i < lines.size(); ++i)
+            {
+                const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                if (rc.size() != 3) { ok = false; break; }
+                // Both columns are rounded to 3 decimals: allow the sum.
+                if (std::abs (rc[1].getDoubleValue()
+                             - rc[0].getDoubleValue() / 1000.0) > 1.5e-3)
+                    { ok = false; break; }
+                ++checked;
+            }
+            CHECK (ok && checked >= 10, "every mode-5 row carries the scaled value");
+        }
+
+        // Amp vs Time: per-channel alt column after that channel's Hz.
+        view.setAxisMode (4);
+        view.recomputeIfNeeded();
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard();
+        {
+            const auto lines = juce::StringArray::fromLines (
+                juce::SystemClipboard::getTextFromClipboard());
+            const auto cols = clipCols();
+            CHECK (cols.size() == 4 && cols[3] == "ch1_Alt 1",
+                  "mode-4 header gains ch1 alt column after ch1_Hz");
+            int checked = 0;
+            bool ok = true;
+            for (int i = 1; i < lines.size(); ++i)
+            {
+                const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                if (rc.size() != 4) { ok = false; break; }
+                if (std::abs (rc[3].getDoubleValue()
+                             - rc[2].getDoubleValue() / 1000.0) > 1.5e-3)
+                    { ok = false; break; }
+                ++checked;
+            }
+            CHECK (ok && checked >= 8, "every mode-4 row carries the scaled value");
+        }
+
+        // Classic FFT bin table: alt column after freq_Hz.
+        view.setAxisMode (0);
+        view.recomputeIfNeeded();
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard();
+        {
+            const auto lines = juce::StringArray::fromLines (
+                juce::SystemClipboard::getTextFromClipboard());
+            const auto cols = clipCols();
+            CHECK (cols.size() == 3 && cols[1] == "Alt 1",
+                  "classic header gains the alt column after freq_Hz");
+            int checked = 0;
+            bool ok = true;
+            for (int i = 1; i < lines.size(); ++i)
+            {
+                const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                if (rc.size() != 3) { ok = false; break; }
+                if (std::abs (rc[1].getDoubleValue()
+                             - rc[0].getDoubleValue() / 1000.0) > 1.5e-3)
+                    { ok = false; break; }
+                ++checked;
+            }
+            CHECK (ok && checked >= 10, "every classic row carries the scaled value");
+        }
+    }
+
+    // --- Two enabled + one disabled reference ----------------------------
+    Application::AltScaleRef r2;
+    r2.name = "Alt 2";   // f / 4000
+    r2.refMain = 4000.0;
+    r2.altValue = 1.0;
+    Application::AltScaleRef off;
+    off.name = "Off";
+    off.enabled = false;
+    app.altFreqRefs.clear();
+    app.altFreqRefs.push_back (r1);
+    app.altFreqRefs.push_back (r2);
+    app.altFreqRefs.push_back (off);
+
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (5);
+        view.recomputeIfNeeded();
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard();
+        const auto lines = juce::StringArray::fromLines (
+            juce::SystemClipboard::getTextFromClipboard());
+        const auto cols = clipCols();
+        CHECK (cols.size() == 4 && cols[1] == "Alt 1" && cols[2] == "Alt 2",
+              "both enabled refs appear in order; disabled one is skipped");
+        int checked = 0;
+        bool ok = true;
+        for (int i = 1; i < lines.size(); ++i)
+        {
+            const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+            if (rc.size() != 4) { ok = false; break; }
+            if (std::abs (rc[1].getDoubleValue()
+                         - rc[0].getDoubleValue() / 1000.0) > 1.5e-3
+                || std::abs (rc[2].getDoubleValue()
+                            - rc[0].getDoubleValue() / 4000.0) > 1.5e-3)
+                { ok = false; break; }
+            ++checked;
+        }
+        CHECK (ok && checked >= 10, "both scaled columns are correct per row");
+    }
+
+    app.altFreqRefs.clear();
+}
+
 static void testMaskedGainAndZero()
 {
     const juce::File wav = makeTempFile ("masked_gain.wav");
@@ -13076,6 +13246,7 @@ static int scRunUnitTestsImpl()
     progress ("delete shifts markers/saved sel"); testDeleteShiftsMarkersAndSavedSelections();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
+    progress ("copy curve alt scales");    testCopyCurveAltScales();
     progress ("axis scale modes");        testAxisScaleModes();
     progress ("alt scale multi-ref + go-to"); testAltScaleMultiRef();
     progress ("resample remix");          testResampleRemix();
