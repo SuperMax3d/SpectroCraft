@@ -17,6 +17,17 @@
 #include <shellapi.h>   // ShellExecuteW (Open Containing Folder)
 #endif
 
+// This vendored JUCE's SparseSet has no begin()/end(): expand its ranges
+// into a plain vector so panels can iterate their selected rows.
+static std::vector<int> sparseRows (const juce::SparseSet<int>& s)
+{
+    std::vector<int> out;
+    for (int i = 0; i < s.getNumRanges (); ++i)
+        for (int r = s.getRange (i).getStart (); r < s.getRange (i).getEnd (); ++r)
+            out.push_back (r);
+    return out;
+}
+
 // Forward declaration (defined further down, used by the constructor).
 static void fftAxisLimits (int mode, double rate, double& fLo, double& fHi);
 
@@ -3813,6 +3824,12 @@ void MarkerListPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int co
     }
 }
 
+void MarkerListPanel::Model::cellClicked (int rowNumber, int, const juce::MouseEvent& e)
+{
+    if (rowNumber >= 0 && rowNumber < getNumRows())
+        owner->onRowClicked (rowNumber, e);
+}
+
 void MarkerListPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
 {
     if (rowNumber >= 0 && rowNumber < getNumRows())
@@ -3824,8 +3841,7 @@ void MarkerListPanel::activateRow (int row)
     if (app.doc () == nullptr || row < 0
         || row >= (int) app.markers().markers().size ()) return;
 
-    selectedRow = row;
-    updateDetails(); // Title/Comment are edited in the detail editors below
+    selectRow (row);   // single-select + move anchor + sync the detail editors
 
     // Double-clicking a marker sets the time selection to its range and makes
     // sure both views actually show it.
@@ -3837,24 +3853,14 @@ void MarkerListPanel::activateRow (int row)
         app.onStateChange(); // push the new selection to both views
 }
 
-void MarkerListPanel::Model::selectedRowsChanged (int row)
+void MarkerListPanel::Model::selectedRowsChanged (int)
 {
-    if (row >= 0 && row < getNumRows())
-    {
-        owner->selectedRow = row;
-        owner->updateDetails();
-    }
+    owner->onSelectionSetChanged ();
 }
 
-void MarkerListPanel::Model::deleteKeyPressed (int row)
+void MarkerListPanel::Model::deleteKeyPressed (int)
 {
-    if (row >= 0 && row < getNumRows())
-    {
-        const int id = owner->app.markers().markers()[(size_t) row].id;
-        owner->app.markers().removeMarker (id);
-        owner->selectedRow = -1;
-        owner->refresh();
-    }
+    owner->deleteSelected ();
 }
 
 MarkerListPanel::MarkerListPanel (Application& appIn)
@@ -3866,6 +3872,10 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
     header.addColumn ("Begin", 2, 75);
     header.addColumn ("End", 3, 75);
     header.addColumn ("Comment", 4, 120);
+
+    // Excel-style multi-selection: Ctrl/Cmd+click toggles rows, Shift+click
+    // range-selects from the anchor row, DEL removes every selected marker.
+    table.setMultipleSelectionEnabled (true);
 
     addAndMakeVisible (&table);
     addAndMakeVisible (&addBtn);
@@ -3901,16 +3911,7 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
         if (app.onStateChange) app.onStateChange();
     };
 
-    deleteBtn.onClick = [this] {
-        if (selectedRow >= 0 && selectedRow < (int) app.markers().count())
-        {
-            const int id = app.markers().markers()[(size_t) selectedRow].id;
-            app.markers().removeMarker (id);
-            selectedRow = -1;
-            refresh();
-            if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
-        }
-    };
+    deleteBtn.onClick = [this] { deleteSelected (); };
 
     beginEdit.onTextChange   = [this] { onBeginEndChanged (true); };
     endEdit.onTextChange     = [this] { onBeginEndChanged (false); };
@@ -3925,9 +3926,11 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
 
     addBtn.setTooltip ("Add a marker at the playhead. With an active selection it creates a "
                        "region marker spanning the selection; otherwise a point marker.");
-    deleteBtn.setTooltip ("Delete the selected marker from the list and from both views.");
+    deleteBtn.setTooltip ("Delete every selected marker from the list and from both views.");
     table.setTooltip ("Double-click a row to edit its details in the fields below. "
-                      "Right-click for copy/paste of markers. Press Delete to remove the selected marker.");
+                      "Ctrl+click toggles rows, Shift+click range-selects from the last plain click "
+                      "and fits all of it in view; DEL removes every selected marker. "
+                      "Right-click for copy/paste.");
     beginEdit.setTooltip ("Begin time of the selected marker, in seconds.");
     endEdit.setTooltip ("End time of the selected marker, in seconds (leave empty for a point marker).");
     lengthEdit.setTooltip ("Length of the selected region marker. Editing it adjusts the End time "
@@ -4074,8 +4077,121 @@ void MarkerListPanel::refresh()
 
 void MarkerListPanel::selectRow (int row)
 {
-    selectedRow = (row >= 0 && row < (int) app.markers().count()) ? row : -1;
+    if (row < 0 || row >= (int) app.markers().count())
+    {
+        selectedRow = -1;
+        anchorRow = -1;
+        table.setSelectedRows (juce::SparseSet<int>(), juce::dontSendNotification);
+        updateDetails();
+        return;
+    }
+
+    anchorRow = row;
+    juce::SparseSet<int> sel;
+    sel.addRange ({ row, row + 1 });
+    table.setSelectedRows (sel, juce::sendNotification); // -> onSelectionSetChanged
+}
+
+int MarkerListPanel::primaryRow() const
+{
+    return table.getNumSelectedRows () > 0 ? table.getSelectedRow (0) : -1;
+}
+
+void MarkerListPanel::onSelectionSetChanged()
+{
+    selectedRow = primaryRow();
     updateDetails();
+}
+
+std::vector<int> MarkerListPanel::selectedRowIndices() const
+{
+    return sparseRows (table.getSelectedRows());
+}
+
+// Excel-style click handling. JUCE already applied the plain-click / Ctrl+click
+// part before this runs; Shift+click gets replaced here with the EXACT range
+// from the anchor (JUCE's built-in shift behaviour unions instead), and the
+// view is fitted to everything selected.
+void MarkerListPanel::onRowClicked (int row, const juce::MouseEvent& e)
+{
+    table.setWantsKeyboardFocus (true);
+    table.grabKeyboardFocus ();   // so DEL works right after a click
+
+    if (e.mods.isShiftDown ())
+    {
+        // Excel: the selection becomes EXACTLY anchor..row (JUCE's built-in
+        // shift behaviour unions instead), then fit everything selected.
+        const int n = app.markers().count();
+        const int a = (anchorRow >= 0 && anchorRow < n) ? anchorRow : row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ std::min (a, row), std::max (a, row) + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+        fitViewToSelected ();
+    }
+    else if (e.mods.isCommandDown () || e.mods.isCtrlDown ())
+    {
+        // Toggle this row within the existing selection.
+        auto sel = table.getSelectedRows();
+        if (sel.contains (row))
+            sel.removeRange ({ row, row + 1 });
+        else
+            sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+        anchorRow = row;
+    }
+    else
+    {
+        // Plain click: single selection and move the anchor.
+        anchorRow = row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+    }
+}
+
+void MarkerListPanel::deleteSelected ()
+{
+    const int n = app.markers().count();
+    std::vector<int> ids;
+    for (int r : sparseRows (table.getSelectedRows()))
+        if (r >= 0 && r < n)
+            ids.push_back (app.markers().markers()[(size_t) r].id);
+
+    if (ids.empty()) return;
+    for (int id : ids)
+        app.markers().removeMarker (id);
+
+    selectedRow = -1;
+    anchorRow = -1;
+    table.setSelectedRows (juce::SparseSet<int>(), juce::dontSendNotification);
+    refresh();
+    if (app.onStateChange) app.onStateChange (); // refresh the spectral view's marker overlay
+}
+
+void MarkerListPanel::fitViewToSelected ()
+{
+    const int n = app.markers().count();
+    double t0 = 0.0, t1 = 0.0;
+    bool any = false;
+    for (int r : sparseRows (table.getSelectedRows()))
+    {
+        if (r < 0 || r >= n) continue;
+        const auto& m = app.markers().markers()[(size_t) r];
+        const double end = (m.end > m.start) ? m.end : m.start;
+        if (!any)
+        {
+            t0 = std::min (m.start, end);
+            t1 = std::max (m.start, end);
+            any = true;
+        }
+        else
+        {
+            t0 = std::min (t0, m.start);
+            t1 = std::max (t1, end);
+        }
+    }
+    if (!any) return;
+    app.ensureTimeRangeVisible (t0, t1);   // adds the usual 10% margin
 }
 
 // Right-click on the marker table: select the row under the cursor and show
@@ -4108,11 +4224,14 @@ void MarkerListPanel::mouseDown (const juce::MouseEvent& e)
             break;
         }
 
-    if (row >= 0 && row != selectedRow)
+    // Right-clicking a row selects it only when nothing is selected yet - an
+    // existing multi-selection is left alone so the menu can act on all of it.
+    if (row >= 0 && table.getNumSelectedRows () == 0)
     {
+        anchorRow = row;
         juce::SparseSet<int> sel;
         sel.addRange ({ row, row + 1 });
-        table.setSelectedRows (sel, juce::sendNotificationSync); // -> selectedRowsChanged
+        table.setSelectedRows (sel, juce::sendNotification); // -> onSelectionSetChanged
     }
 
     showMarkerContextMenu();
@@ -4128,6 +4247,7 @@ void MarkerListPanel::showMarkerContextMenu()
     m.addItem (5, "Import Markers from CSV...", app.audioEngine().isFileLoaded());
     m.addSeparator();
     m.addItem (6, "Remove All Markers", app.markers().count() > 0);
+    m.addItem (8, "Fit View to Selected", table.getNumSelectedRows () > 0);
     m.addItem (3, "Find...\tCtrl+F");
     m.addSeparator();
     m.addItem (7, "Close Panel");
@@ -4143,6 +4263,8 @@ void MarkerListPanel::showMarkerContextMenu()
         importMarkersCsv();
     else if (id == 6)
         removeAllMarkers();
+    else if (id == 8)
+        fitViewToSelected ();
     else if (id == 3)
         showFindDialog();
     else if (id == 7 && onCloseRequested) onCloseRequested();
@@ -4260,7 +4382,7 @@ bool MarkerListPanel::findInDirection (int dir)
         [this] (int row) {
             juce::SparseSet<int> sel;
             sel.addRange ({ row, row + 1 });
-            table.setSelectedRows (sel, juce::sendNotificationSync); // -> selectedRowsChanged
+            table.setSelectedRows (sel, juce::sendNotification); // -> selectedRowsChanged
             table.scrollToEnsureRowIsOnscreen (row);
 
             const Marker& m = app.markers().markers() [(size_t) row];
@@ -4935,63 +5057,93 @@ void SelectionPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int col
         g.setColour (juce::Colours::white);
         g.drawText (s.name, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
     }
-    else   // shape count
+    else if (columnId == 2)   // shape count
     {
         g.setColour (juce::Colours::lightgrey);
         g.drawText (juce::String (s.data.count ()), 4, 0, width - 8, height,
                     juce::Justification::centredRight, false);
     }
+    else   // comment
+    {
+        g.setColour (juce::Colours::lightgrey);
+        g.drawText (s.comment, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
+    }
 }
 
-void SelectionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
+void SelectionPanel::Model::cellClicked (int rowNumber, int, const juce::MouseEvent& e)
 {
-    owner->doRecall (rowNumber);
+    if (rowNumber >= 0 && rowNumber < getNumRows())
+        owner->onRowClicked (rowNumber, e);
+}
+
+void SelectionPanel::Model::cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&)
+{
+    // Name and Comment cells are edited inline; the Shapes column recalls.
+    if (columnId == 1 || columnId == 3)
+        owner->beginCellEdit (rowNumber, columnId);
+    else
+        owner->doRecall (rowNumber);
+}
+
+void SelectionPanel::Model::selectedRowsChanged (int)
+{
+    owner->onSelectionSetChanged ();
+}
+
+void SelectionPanel::Model::deleteKeyPressed (int)
+{
+    owner->deleteSelected ();
 }
 
 SelectionPanel::SelectionPanel (Application& appIn)
     : app (appIn),
-      saveBtn ("Store"), recallBtn ("Recall"), deleteBtn ("Delete"),
-      applyMultBtn ("Apply"), pickBtn ("Pick points...")
+      selListDoc (appIn.doc()),   // rows belong to the doc open at construction
+      saveBtn ("Store"), recallBtn ("Recall"), deleteBtn ("Delete")
 {
+    // Names let headless unit tests locate the buttons by name.
+    // setComponentID (not setName): findChildWithID matches the component ID.
+    saveBtn.setComponentID ("sel-store-btn");
+    recallBtn.setComponentID ("sel-recall-btn");
+    deleteBtn.setComponentID ("sel-delete-btn");
     auto& header = table.getHeader();
     // JUCE TableHeaderComponent column IDs must be non-zero.
-    header.addColumn ("Name", 1, 160);
-    header.addColumn ("Shapes", 2, 70);
+    header.addColumn ("Name", 1, 90);
+    header.addColumn ("Shapes", 2, 45);
+    header.addColumn ("Comment", 3, 95);
 
     savedLab.setText ("Saved selections", juce::dontSendNotification);
-    cloneLab.setText ("Clone & Multiply", juce::dontSendNotification);
-    multHintLab.setText ("Multipliers of the current selection, e.g. 0.5, 2, 5",
-                        juce::dontSendNotification);
 
     addAndMakeVisible (&savedLab);
     addAndMakeVisible (&table);
     addAndMakeVisible (&saveBtn);
     addAndMakeVisible (&recallBtn);
     addAndMakeVisible (&deleteBtn);
-    addAndMakeVisible (&cloneLab);
-    addAndMakeVisible (&multHintLab);
-    addAndMakeVisible (&multEdit);
-    addAndMakeVisible (&applyMultBtn);
-    addAndMakeVisible (&pickBtn);
+
+    // Inline cell editor (Name / Comment): hidden until a double-click starts
+    // an edit. The listener is attached as a plain child component so it is
+    // deleted with the panel.
+    addChildComponent (&cellEdit);
+    cellEdit.setMultiLine (false);
+    cellEdit.setVisible (false);
+    cellEditListener = std::make_unique<CellEditListener> (this);
+    addChildComponent (cellEditListener.get());
+    cellEdit.addListener (cellEditListener.get());
+
+    // Excel-style multi-selection: Ctrl/Cmd+click toggles rows, Shift+click
+    // range-selects from the anchor row and fits all of it in view, DEL
+    // removes every selected entry.
+    table.setMultipleSelectionEnabled (true);
 
     saveBtn.onClick = [this] { doSave (); };
-    recallBtn.onClick = [this] { doRecall (table.getSelectedRow ()); };
-    deleteBtn.onClick = [this] { doDelete (); };
-    applyMultBtn.onClick = [this] { doApplyMultipliers (); };
-    pickBtn.onClick = [this] { togglePick (); };   // plain button; label driven by refresh()
+    recallBtn.onClick = [this] { doRecall (primaryRow()); };
+    deleteBtn.onClick = [this] { deleteSelected (); };
 
-    saveBtn.setTooltip ("Store the current spectral selection under a name. Saving again with "
-                        "the same name updates that entry.");
-    recallBtn.setTooltip ("Replace the current spectral selection with the selected saved one "
-                         "(double-clicking a row does the same).");
-    deleteBtn.setTooltip ("Remove the selected saved selection from this file's list.");
-    multHintLab.setTooltip ("Each number becomes a clone of the current selection whose frequencies "
-                           "(and thickness) are multiplied by that factor - e.g. 2 and 5 select the "
-                           "2nd and 5th harmonics of a fundamental band.");
-    applyMultBtn.setTooltip ("Append clones of the current selection at the given frequency multipliers.");
-    pickBtn.setTooltip ("Interactive mode: click a reference point in the spectrogram, then click "
-                       "each target frequency. Each click adds clones scaled by (clicked / reference). "
-                       "Esc or this button ends the session.");
+    saveBtn.setTooltip ("Store the current spectral selection under a name. The dialog pre-fills "
+                        "the next free index number; saving again with the same name updates that entry.");
+    recallBtn.setTooltip ("Replace the current spectral selection with the first selected saved one "
+                         "(double-clicking its Shapes cell does the same).");
+    deleteBtn.setTooltip ("Remove every selected saved selection from this file's list. "
+                          "DEL does the same.");
 
     // Right-clicking a row in the table shows the panel context menu (Load
     // from disk / Close Panel). Deep registration is required: clicks on rows
@@ -5007,33 +5159,42 @@ void SelectionPanel::refresh()
     table.repaint ();
 
     auto* d = app.doc ();
+
+    // The row selection belongs to the document whose list is shown: reset it
+    // when switching files so stale rows never point at another file's entries.
+    if (d != selListDoc)
+    {
+        selListDoc = d;
+        anchorRow = -1;
+        table.setSelectedRows (juce::SparseSet<int>(), juce::dontSendNotification);
+    }
+
     const bool hasSel = app.hasSpectralSelection ();
     saveBtn.setEnabled (hasSel);
-    applyMultBtn.setEnabled (hasSel);
-    // The button must stay enabled while a picking session is active so the
-    // user can click "Stop picking" to end it (Esc works too).
-    pickBtn.setEnabled (d != nullptr && hasSel);
 
-    const int selRow = table.getSelectedRow ();
-    const bool haveRow = d != nullptr && selRow >= 0 && selRow < (int) d->savedSelections.size ();
+    const int nRows = d != nullptr ? (int) d->savedSelections.size () : 0;
+    const bool haveRow = table.getNumSelectedRows () > 0 && primaryRow () < nRows;
     recallBtn.setEnabled (haveRow);
     deleteBtn.setEnabled (haveRow);
 
-    // Keep the button state in step with the app without firing clicks.
-    pickBtn.setButtonText (app.isClonePicking () ? "Stop picking" : "Pick points...");
+    syncHighlight ();
+}
+
+// Keeps the amber spectrogram overlays in step with the table's selected rows.
+void SelectionPanel::syncHighlight()
+{
+    auto* d = app.doc ();
+    std::vector<size_t> idx;
+    if (d != nullptr)
+        for (int r : sparseRows (table.getSelectedRows()))
+            if (r >= 0 && r < (int) d->savedSelections.size ())
+                idx.push_back ((size_t) r);
+    app.setHighlightedSavedSelections (idx);
 }
 
 void SelectionPanel::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour::fromRGB (45, 45, 48));
-
-    // Separator between the saved-selections and clone & multiply sections.
-    const int y = multHintLab.getY () - 6;
-    if (y > table.getBottom ())
-    {
-        g.setColour (juce::Colour::fromRGB (70, 70, 76));
-        g.drawLine (4, y, getWidth () - 4, y);
-    }
 
     // Highlight while a .selections.json drag hovers over the panel.
     if (dragOver)
@@ -5047,13 +5208,11 @@ void SelectionPanel::resized()
 {
     auto b = getLocalBounds ().reduced (4, 4);
 
-    // Fixed-height rows from the bottom up; the table takes what is left.
+    // The button strip is pinned to the bottom; the saved-selections list
+    // takes all of the space above it (the old Clone & Multiply section was
+    // moved into the right-click menu so the list gets more room).
     const int rowH = 28;
-    auto pickRow   = b.removeFromBottom (rowH + 6);
-    auto applyRow  = b.removeFromBottom (rowH + 6);
-    auto hintRow   = b.removeFromBottom (18);
-    auto cloneRow  = b.removeFromBottom (20);
-    auto btnRow    = b.removeFromBottom (rowH + 8);
+    auto btnRow = b.removeFromBottom (rowH + 8);
 
     savedLab.setBounds (b.getX (), b.getY () + 2, b.getWidth (), 16);
     table.setBounds (b.getX (), savedLab.getBottom () + 4,
@@ -5064,16 +5223,6 @@ void SelectionPanel::resized()
     saveBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, bw, rowH);
     recallBtn.setBounds (saveBtn.getRight () + gap, btnRow.getY () + 2, bw, rowH);
     deleteBtn.setBounds (recallBtn.getRight () + gap, btnRow.getY () + 2, bw, rowH);
-
-    cloneLab.setBounds (cloneRow.getX (), cloneRow.getY () + 1, cloneRow.getWidth (), 16);
-    multHintLab.setBounds (hintRow.getX (), hintRow.getY (), hintRow.getWidth (), 14);
-
-    const int applyW = 70;
-    multEdit.setBounds (applyRow.getX (), applyRow.getY () + 2,
-                       std::max (80, applyRow.getWidth () - applyW - gap), rowH);
-    applyMultBtn.setBounds (multEdit.getRight () + gap, applyRow.getY () + 2, applyW, rowH);
-
-    pickBtn.setBounds (pickRow.getX (), pickRow.getY () + 2, pickRow.getWidth (), rowH);
 }
 
 void SelectionPanel::doSave()
@@ -5088,7 +5237,9 @@ void SelectionPanel::doSave()
                    juce::Colour::fromRGB (45, 45, 48));
 
     // This JUCE build's addTextEditor returns void; fetch the editor by name.
-    dlg.addTextEditor ("name", "", "Name:");
+    // Pre-fill with the next free index number so quick stores line up as
+    // 1, 2, 3, ... - typing replaces it (the text is selected).
+    dlg.addTextEditor ("name", nextIndexName (), "Name:");
     auto* ed = dlg.getTextEditor ("name");
     dlg.addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
     dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -5138,18 +5289,71 @@ void SelectionPanel::doRecall (int row)
     refresh();
 }
 
+// Right-click: select the row under the cursor when nothing is selected yet
+// (an existing multi-selection is left alone), then show the context menu.
 void SelectionPanel::mouseDown (const juce::MouseEvent& e)
 {
     if (!e.mods.isRightButtonDown() || e.mods.isLeftButtonDown()) return;
+
+    // The event position is relative to the component that was actually hit
+    // (a row child of the table); walk up the parent chain to get it in
+    // table coordinates.
+    float px = e.getPosition().x;
+    float py = e.getPosition().y;
+    for (auto* c = e.eventComponent; c != nullptr && c != &table;
+         c = c->getParentComponent())
+    {
+        px += static_cast<float> (c->getX());
+        py += static_cast<float> (c->getY());
+    }
+    const auto pInTable = juce::Point<float> (px, py);
+
+    int row = -1;
+    for (int r = 0; r < table.getNumRows(); ++r)
+        if (table.getCellPosition (1, r, true).contains ((int) pInTable.x, (int) pInTable.y))
+        {
+            row = r;
+            break;
+        }
+
+    if (row >= 0 && table.getNumSelectedRows () == 0)
+    {
+        anchorRow = row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification); // -> onSelectionSetChanged
+    }
+
     showLoadContextMenu ();
 }
 
 void SelectionPanel::showLoadContextMenu()
 {
+    const int nSel = table.getNumSelectedRows ();
+    const bool hasLive = app.hasSpectralSelection ();
+
     juce::PopupMenu m;
+    m.addItem (10, "Recall", nSel > 0);
+    m.addItem (11, "Delete Selected", nSel > 0);
+    m.addSeparator();
+    m.addItem (20, "Clone Harmonics by Numbers...", hasLive);
+    m.addItem (21, app.isClonePicking () ? "Stop Picking" : "Clone Harmonics by Mouse", hasLive);
+    m.addSeparator();
+    m.addItem (30, "Fit View to Selected", nSel > 0);
     m.addItem (1, "Close Panel");
+
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
-    if (id == 1 && onCloseRequested) onCloseRequested();
+    if (id == 10)
+        doRecall (primaryRow());
+    else if (id == 11)
+        deleteSelected ();
+    else if (id == 20)
+        showCloneNumbersDialog();
+    else if (id == 21)
+        toggleClonePick ();
+    else if (id == 30)
+        fitViewToSelected ();
+    else if (id == 1 && onCloseRequested) onCloseRequested();
 }
 
 bool SelectionPanel::loadSelectionsFromFile (const juce::File& f)
@@ -5204,39 +5408,233 @@ void SelectionPanel::fileDragExit (const juce::StringArray&)
 
 void SelectionPanel::doDelete()
 {
+    deleteSelected ();
+}
+
+int SelectionPanel::primaryRow() const
+{
+    return table.getNumSelectedRows () > 0 ? table.getSelectedRow (0) : -1;
+}
+
+void SelectionPanel::onSelectionSetChanged()
+{
+    syncHighlight ();
+    refresh ();   // button enablement follows the selection set
+}
+
+std::vector<int> SelectionPanel::selectedRowIndices() const
+{
+    return sparseRows (table.getSelectedRows());
+}
+
+// Excel-style click handling. JUCE already applied the plain-click /
+// Ctrl+click part before this runs; Shift+click gets replaced here with the
+// EXACT range from the anchor (JUCE's built-in shift behaviour unions
+// instead), and the view is fitted to everything selected.
+void SelectionPanel::onRowClicked (int row, const juce::MouseEvent& e)
+{
+    table.setWantsKeyboardFocus (true);
+    table.grabKeyboardFocus ();   // so DEL works right after a click
+
+    if (e.mods.isShiftDown ())
+    {
+        // Excel: the selection becomes EXACTLY anchor..row (JUCE's built-in
+        // shift behaviour unions instead), then fit everything selected.
+        auto* d = app.doc ();
+        const int n = d != nullptr ? (int) d->savedSelections.size () : 0;
+        const int a = (anchorRow >= 0 && anchorRow < n) ? anchorRow : row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ std::min (a, row), std::max (a, row) + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+        fitViewToSelected ();
+    }
+    else if (e.mods.isCommandDown () || e.mods.isCtrlDown ())
+    {
+        // Toggle this row within the existing selection.
+        auto sel = table.getSelectedRows();
+        if (sel.contains (row))
+            sel.removeRange ({ row, row + 1 });
+        else
+            sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+        anchorRow = row;
+    }
+    else
+    {
+        // Plain click: single selection and move the anchor.
+        anchorRow = row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+    }
+}
+
+void SelectionPanel::deleteSelected ()
+{
     auto* d = app.doc ();
     if (d == nullptr) return;
-    const int row = table.getSelectedRow ();
-    if (row < 0 || row >= (int) d->savedSelections.size ()) return;
 
-    d->savedSelections.erase (d->savedSelections.begin () + row);
+    std::vector<int> rows;
+    for (int r : sparseRows (table.getSelectedRows()))
+        if (r >= 0 && r < (int) d->savedSelections.size ())
+            rows.push_back (r);
+    if (rows.empty()) return;
+
+    // Erase from the bottom up so earlier indices stay valid.
+    std::sort (rows.begin (), rows.end (), std::greater<int>());
+    for (int r : rows)
+        d->savedSelections.erase (d->savedSelections.begin () + r);
+
+    anchorRow = -1;
+    table.setSelectedRows (juce::SparseSet<int>(), juce::dontSendNotification);
     // The list persists with the file's unified metadata on Save.
     refresh();
 }
 
-void SelectionPanel::doApplyMultipliers()
+void SelectionPanel::fitViewToSelected ()
 {
-    std::string err;
-    const auto mults = Application::parseMultiplierList (multEdit.getText (), &err);
-    if (mults.empty ())
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+
+    double t0 = 0.0, t1 = 0.0;
+    bool any = false;
+    for (int r : sparseRows (table.getSelectedRows()))
     {
-        showSelectionMessage ("Clone & Multiply", juce::String (err));
-        return;
+        if (r < 0 || r >= (int) d->savedSelections.size ()) continue;
+        const auto ext = d->savedSelections [(size_t) r].data.timeExtent();
+        if (!any)
+        {
+            t0 = ext.getStart ();
+            t1 = ext.getEnd ();
+            any = true;
+        }
+        else
+        {
+            t0 = std::min (t0, ext.getStart());
+            t1 = std::max (t1, ext.getEnd());
+        }
     }
-    if (!app.cloneAndMultiplySelection (mults, &err))
-    {
-        showSelectionMessage ("Clone & Multiply", juce::String (err));
-        return;
-    }
-    refresh();
+    if (!any) return;
+    app.ensureTimeRangeVisible (t0, t1);   // adds the usual 10% margin
 }
 
-void SelectionPanel::togglePick()
+juce::String SelectionPanel::nextIndexName() const
 {
+    auto* d = app.doc ();
+    const int n = d != nullptr ? (int) d->savedSelections.size () : 0;
+    for (int i = 1; i <= n + 1; ++i)
+    {
+        const juce::String cand = juce::String (i);
+        bool used = false;
+        if (d != nullptr)
+            for (const auto& e : d->savedSelections)
+                if (e.name == cand) { used = true; break; }
+        if (!used) return cand;
+    }
+    return juce::String (n + 1);
+}
+
+void SelectionPanel::showCloneNumbersDialog()
+{
+    auto* d = app.doc ();
+    if (d == nullptr || d->spectralSel.empty ())
+    {
+        showSelectionMessage ("Clone Harmonics by Numbers",
+                              "There is no spectral selection to clone.");
+        return;
+    }
+
+    juce::AlertWindow dlg ("Clone Harmonics by Numbers",
+                          "Multipliers of the current selection, e.g. 0.5, 2, 5:",
+                          juce::AlertWindow::NoIcon);
+    dlg.setColour (juce::AlertWindow::backgroundColourId,
+                   juce::Colour::fromRGB (45, 45, 48));
+
+    // This JUCE build's addTextEditor returns void; fetch the editor by name.
+    dlg.addTextEditor ("mults", "2, 3", "Multipliers:");
+    auto* ed = dlg.getTextEditor ("mults");
+    dlg.addButton ("Clone", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (ed != nullptr)
+    {
+        ed->setWantsKeyboardFocus (true);
+        ed->selectAll();
+        ed->grabKeyboardFocus();
+    }
+
+    if (dlg.runModalLoop () != 1 || ed == nullptr) return;
+
+    std::string err;
+    const auto mults = Application::parseMultiplierList (ed->getText (), &err);
+    if (!app.cloneAndMultiplySelection (mults, &err))
+        showSelectionMessage ("Clone Harmonics by Numbers", juce::String (err));
+}
+
+void SelectionPanel::toggleClonePick ()
+{
+    auto* d = app.doc ();
+    if (!app.isClonePicking () && (d == nullptr || d->spectralSel.empty()))
+    {
+        showSelectionMessage ("Clone Harmonics by Mouse",
+                              "There is no spectral selection to clone.");
+        return;
+    }
+
     if (app.isClonePicking ())
         app.endClonePick ();
     else
         app.startClonePick ();   // fires onStateChange -> syncSharedState -> refresh()
+}
+
+// Inline editing of the Name / Comment cells: overlay a single-line editor
+// exactly over the double-clicked cell. Enter commits, Esc cancels, and losing
+// focus (e.g. clicking another row) commits as well.
+void SelectionPanel::beginCellEdit (int row, int col)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
+
+    // Commit any edit that is still open before starting a new one.
+    if (editRow >= 0)
+        commitCellEdit (false);
+
+    const auto cell = table.getCellPosition (col, row, true);   // table coords
+    cellEdit.setBounds (cell.getX () + table.getX (),
+                        cell.getY () + table.getY(),
+                        cell.getWidth (), cell.getHeight());
+    cellEdit.setText (col == 1 ? d->savedSelections [(size_t) row].name
+                               : d->savedSelections [(size_t) row].comment,
+                      juce::dontSendNotification);
+    editRow = row;
+    editCol = col;
+    cellEdit.setVisible (true);
+    cellEdit.setWantsKeyboardFocus (true);
+    cellEdit.grabKeyboardFocus ();
+}
+
+void SelectionPanel::commitCellEdit (bool cancel)
+{
+    if (editRow < 0) return;
+    auto* d = app.doc ();
+    const int row = editRow, col = editCol;
+    editRow = -1;   // guard against re-entrancy from the focus-lost callback
+
+    if (!cancel && d != nullptr && row >= 0 && row < (int) d->savedSelections.size())
+    {
+        const juce::String text = cellEdit.getText ().trim ();
+        if (col == 1)
+        {
+            // An empty title keeps the old name; an empty comment is fine.
+            if (!text.isEmpty ())
+                d->savedSelections [(size_t) row].name = text;
+        }
+        else
+            d->savedSelections [(size_t) row].comment = text;
+    }
+
+    cellEdit.setVisible (false);
+    refresh ();   // repaint the table + re-sync the amber overlays
 }
 
 // ------------------------------------------------- Python script panel

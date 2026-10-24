@@ -837,6 +837,25 @@ public:
     // makes sure both views' time window includes it. Also used by unit tests.
     void activateRow (int row);
 
+    // Excel-style click handling: Shift+click selects the exact anchor..row
+    // range (replacing any previous selection) and fits all of it in view;
+    // plain clicks move the anchor; Ctrl/Cmd+click toggles one row.
+    void onRowClicked (int row, const juce::MouseEvent& e);
+    // Removes every marker whose row is selected; refreshes + notifies.
+    void deleteSelected ();
+    // Pans/zooms both views so that every selected marker is visible
+    // (ensureTimeRangeVisible adds the usual 10% margin).
+    void fitViewToSelected ();
+    // First selected row (-1 when nothing is selected): the detail editors and
+    // double-click activation follow it, while DEL removes ALL selected rows.
+    int primaryRow() const;
+    // Called on any selection change: re-syncs the detail editors.
+    void onSelectionSetChanged ();
+
+    // Accessors for headless unit tests.
+    int numSelectedRows() const { return table.getNumSelectedRows (); }
+    std::vector<int> selectedRowIndices() const;
+
     // Find (Ctrl+F / F3 / Ctrl+F3): case-insensitive substring search over
     // marker titles and comments. The query/anchor state is independent of
     // the transcription panel's own search.
@@ -863,9 +882,15 @@ private:
                                  bool selected) override;
         void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
                         bool selected) override;
+        // Excel-style multi-selection: plain click = anchor + single select
+        // (JUCE default), Ctrl/Cmd+click toggles one row (JUCE default),
+        // Shift+click replaces the selection with the exact range from the
+        // anchor to this row - handled by the panel, which also fits view.
+        void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
         void cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
-        void selectedRowsChanged (int row) override;
-        void deleteKeyPressed (int row) override;
+        void selectedRowsChanged (int) override;
+        // DEL removes every selected marker (not just the last-clicked one).
+        void deleteKeyPressed (int) override;
 
     private:
         MarkerListPanel* owner;
@@ -878,6 +903,7 @@ private:
     juce::TextEditor beginEdit, endEdit, lengthEdit, titleEdit, commentEdit;
     int selectedRow = -1;
     bool editing = false; // guard against feedback loops in text editors
+    int anchorRow = -1;   // last plain-clicked row: the Shift+click range origin
 
     juce::String searchNeedle;   // current find query (empty = none)
     int searchAnchorRow = -1;    // row of the last found match (-1 = none)
@@ -977,19 +1003,27 @@ private:
 
 // ------------------------------------------------- Selection panel
 
-/** Named spectral selections (store / recall) + "Clone & Multiply" for
-    picking out harmonics of the current selection.
+/** Named spectral selections (store / recall) + harmonic cloning.
 
-    - The table lists this file's saved selections; double-click recalls one
-      (it replaces the current spectral selection). Save stores the CURRENT
-      selection under a name (same name = update), Delete removes an entry.
+    - The table lists this file's saved selections. Save stores the CURRENT
+      selection under a name (same name = update; the dialog pre-fills the
+      next free index number), Delete removes every selected entry, and DEL
+      does the same from the keyboard. Rows support Excel-style multi-
+      selection: plain click selects one row (and sets the anchor),
+      Ctrl/Cmd+click toggles a single row, Shift+click range-selects from the
+      anchor to the clicked row and fits all selected items in view (+10%).
+    - Double-clicking the Name or Comment cell edits it inline (Enter commits,
+      Esc cancels); double-clicking the Shapes column recalls that entry.
+      Multi-selected entries are drawn on the spectrogram at once (amber
+      overlays) so several saved masks can be compared side by side.
     - The list persists automatically with the file's unified metadata
       (embedded SCMD chunk or .meta.json sidecar) on every Save.
-    - Clone & Multiply appends additive clones of the current selection at
-      user-given frequency multipliers (e.g. 0.5, 2, 5); clone thickness is
-      stretched by the same factor. The interactive "Pick points..." mode
+    - "Clone Harmonics by Numbers..." appends additive clones of the current
+      selection at user-given frequency multipliers (e.g. 0.5, 2, 5); clone
+      thickness is stretched by the same factor. "Clone Harmonics by Mouse"
       does the same with clicks: first click = reference frequency, each
-      following click adds clones at (clicked freq / ref freq). */
+      following click adds clones at (clicked freq / ref freq). Both live in
+      the panel's right-click menu. */
 // Derives from FileDragAndDropTarget so .selections.json files can be
 // dropped straight onto the panel (JUCE routes a drop to the nearest
 // ancestor target under the cursor).
@@ -1006,6 +1040,44 @@ public:
     // and makes sure both views' time window includes its time range. Also
     // used by unit tests.
     void doRecall (int row);
+
+    // Excel-style click handling (see class comment): Shift+click selects the
+    // exact anchor..row range and fits all selected items in view; plain
+    // clicks move the anchor; Ctrl/Cmd+click toggles one row. Double-clicking
+    // a Name/Comment cell starts inline editing of that field.
+    void onRowClicked (int row, const juce::MouseEvent& e);
+    // Removes every stored selection whose row is selected; refreshes +
+    // notifies. DEL does this from the keyboard too.
+    void deleteSelected ();
+    // Pans/zooms both views so that every selected stored selection's time
+    // range is visible (ensureTimeRangeVisible adds the usual 10% margin).
+    void fitViewToSelected ();
+    // First selected row (-1 when nothing is selected): recall and inline
+    // editing follow it, while DEL removes ALL selected rows.
+    int primaryRow() const;
+    // Called on any selection change: re-syncs the amber spectrogram overlays
+    // (app.highlightedSavedSel) with the table's selected rows.
+    void onSelectionSetChanged ();
+
+    // "Clone Harmonics by Numbers..." dialog (replaces the old inline
+    // multiplier field + Apply button). Returns without doing anything when
+    // there is no current spectral selection to clone.
+    void showCloneNumbersDialog();
+    // Toggles the interactive "Clone Harmonics by Mouse" pick mode on/off.
+    void toggleClonePick ();
+
+    // Inline cell editing (Name / Comment): public so headless unit tests can
+    // drive it without a display. Enter commits, Esc cancels, focus loss
+    // commits; an empty Name keeps the old name.
+    juce::TextEditor& cellEditor() { return cellEdit; }
+    void beginCellEdit (int row, int col);
+    void commitCellEdit (bool cancel);
+    // Smallest positive integer not already used as a name ("1", "2", ...).
+    juce::String nextIndexName() const;
+
+    // Accessors for headless unit tests.
+    int numSelectedRows() const { return table.getNumSelectedRows (); }
+    std::vector<int> selectedRowIndices() const;
 
     // Loads `f` into the active doc's saved-selection list (replacing it).
     // Returns false - leaving everything unchanged - when the file is missing,
@@ -1035,7 +1107,15 @@ private:
                                  bool selected) override;
         void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
                         bool selected) override;
+        // Excel-style multi-selection: plain click = anchor + single select
+        // (JUCE default), Ctrl/Cmd+click toggles one row (JUCE default),
+        // Shift+click replaces the selection with the exact range from the
+        // anchor to this row - handled by the panel, which also fits view.
+        void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
         void cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+        void selectedRowsChanged (int) override;
+        // DEL removes every selected stored selection.
+        void deleteKeyPressed (int) override;
 
     private:
         SelectionPanel* owner;
@@ -1044,9 +1124,31 @@ private:
     Model model { this };
     juce::TableListBox table { "", &model };
 
-    juce::TextButton saveBtn, recallBtn, deleteBtn, applyMultBtn, pickBtn;
-    juce::Label savedLab, cloneLab, multHintLab;
-    juce::TextEditor multEdit;
+    juce::TextButton saveBtn, recallBtn, deleteBtn;
+    juce::Label savedLab;
+
+    FileDoc* selListDoc = nullptr;   // doc whose list the current rows belong to
+    int anchorRow = -1;              // last plain-clicked row: Shift+click origin
+
+    // Inline cell editing (Name / Comment): one reusable editor overlaid on
+    // the double-clicked cell. Enter commits, Esc cancels, focus loss commits.
+    juce::TextEditor cellEdit;
+    int editRow = -1;     // active inline-edit row (-1 = none)
+    int editCol = -1;     // 1 = Name, 3 = Comment
+    class CellEditListener : public juce::Component,
+                             public juce::TextEditor::Listener
+    {
+    public:
+        SelectionPanel* owner;
+        explicit CellEditListener (SelectionPanel* o) : owner (o) {}
+        void textEditorReturnKeyPressed (juce::TextEditor&) override { owner->commitCellEdit (false); }
+        void textEditorEscapeKeyPressed (juce::TextEditor&) override  { owner->commitCellEdit (true); }
+        void textEditorFocusLost (juce::TextEditor&) override         { owner->commitCellEdit (false); }
+    };
+    std::unique_ptr<CellEditListener> cellEditListener;   // child component: auto-deleted
+    // Pushes the table's selected rows to app.highlightedSavedSel so the
+    // spectrogram draws their amber overlays.
+    void syncHighlight();
 
     void mouseDown (const juce::MouseEvent&) override;
     void showLoadContextMenu();
@@ -1058,8 +1160,6 @@ private:
 
     void doSave();
     void doDelete();
-    void doApplyMultipliers();
-    void togglePick();
 
     JUCE_DECLARE_NON_COPYABLE (SelectionPanel)
 };

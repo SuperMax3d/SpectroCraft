@@ -15,6 +15,8 @@ struct SavedSpectralSelection
 {
     juce::String name;
     SpectralSelection data;   // deep copy of the shapes at save time
+    juce::String comment;     // free-form note, editable in the Selection panel
+                              // (kept last so {name, data} aggregates still work)
 };
 
 // Sidecar path for an audio file: "<full path>.selections.json".

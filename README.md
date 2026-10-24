@@ -242,13 +242,16 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     full scale). The labels follow both the dB-range slider and calibration
     changes.
     **Markers** (table with
-    a Comment column; select a row to edit its Title, multi-line Comments,
-    Begin, End and Length in the detail editors below the table — the comments
-    box starts beside its label and extends to the bottom of the panel;
-    Add Marker, delete; right-click a row for Copy All Markers / Paste Markers
-    from Clipboard, Export/Import CSV, Remove All Markers or Find (Ctrl+F
-    searches titles and comments, F3 / Ctrl+F3 jump to the next / previous
-    match)).
+    a Comment column; select rows Excel-style — plain click selects one row,
+    Ctrl/Cmd+click toggles additional rows, Shift+click range-selects from the
+    anchor and fits all of it in view — then edit Title, multi-line Comments,
+    Begin, End and Length of the first selected marker in the detail editors
+    below the table (the comments box starts beside its label and extends to
+    the bottom of the panel); Add Marker; Delete removes every selected row
+    at once (DEL does the same); right-click a row for Copy All Markers / Paste
+    Markers from Clipboard, Export/Import CSV, Remove All Markers,
+    Fit View to Selected or Find (Ctrl+F searches titles and comments, F3 /
+    Ctrl+F3 jump to the next / previous match)).
   - **Draggable panel tabs**: drag any tab to reorder the panels within its
     group, or drop it onto a tab of the other group to move it across — e.g.
     put Markers next to Frequency Analysis. The arrangement (plus the column
@@ -921,32 +924,46 @@ the edit, and undo/redo works as usual. **Play Spectral Selection**
 (Transport menu) plays back with the selection masked out in real time,
 without modifying the file.
 
-### Selection panel (named selections + clone & multiply)
+### Selection panel (named selections + harmonic cloning)
 
 The **Selection** tab in the left panel manages *named* spectral selections
-for the active file and provides **Clone & Multiply**, a tool for picking out
+for the active file and provides **Clone Harmonics**, a tool for picking out
 harmonics of whatever is currently selected.
 
-- **Store / Recall / Delete**: Store saves the current spectral selection under
-  a name (storing again with the same name updates that entry); Recall replaces
-  the current selection with a saved one (double-clicking a row does the same)
-  and makes sure both views show its time range — panning or zooming out when
-  it is not fully inside the current window. The list belongs to each file and
-  is persisted automatically with the file's [per-file metadata](#per-file-metadata),
-  so it survives restarts without any manual save.
-- **Clone & Multiply**: enter frequency multipliers such as `0.5, 2, 5` and
-  press Apply — additive clones of every shape in the current selection are
-  appended at those multiples (the original stays in place), with each clone's
-  thickness stretched by the same factor. This is exactly what you need to
-  select harmonics: pick a fundamental band, then multiply by 2, 3, 5...
-- **Pick points...** switches to interactive mode: click a reference point in
-  the spectrogram (shown as an orange circle), then click each target
+- The table lists each saved selection with its **Name**, a **Shapes** count
+  and a free-text **Comment**. Double-clicking the Name or Comment cell edits
+  it in place (Enter commits, Esc cancels); comments travel with the file via
+  [per-file metadata](#per-file-metadata).
+- **Store / Recall / Delete** buttons below the table: Store saves the current
+  spectral selection under a name (the dialog pre-fills the next free index;
+  storing again with the same name updates that entry); Recall replaces the
+  current selection with the first selected saved one and makes sure both
+  views show its time range — panning or zooming out when it is not fully
+  inside the current window. The list belongs to each file and is persisted
+  automatically, so it survives restarts without any manual save.
+- **Excel-style multi-selection**: plain click selects one row, Ctrl/Cmd+click
+  toggles additional rows in or out, Shift+click range-selects from the anchor
+  row and fits all of it in view. Selected saved selections are drawn as
+  **amber overlays** on the spectrogram so several stored masks stay visible at
+  once; DEL (or the Delete button) removes every selected entry at once.
+- Right-clicking a row offers **Recall**, **Delete Selected**, **Clone
+  Harmonics by Numbers...**, **Clone Harmonics by Mouse** / **Stop Picking**,
+  **Fit View to Selected** and **Close Panel**. Double-clicking a row's Shapes
+  cell recalls it.
+- **Clone Harmonics by Numbers...** opens a dialog for frequency multipliers
+  such as `0.5, 2, 5` — additive clones of every shape in the current
+  selection are appended at those multiples (the original stays in place),
+  with each clone's thickness stretched by the same factor. This is exactly
+  what you need to select harmonics: pick a fundamental band, then multiply by
+  2, 3, 5...
+- **Clone Harmonics by Mouse** switches to interactive mode: click a reference
+  point in the spectrogram (shown as an orange circle), then click each target
   frequency — every click appends clones scaled by `clicked / reference` (e.g.
   reference 100 Hz plus clicks at 50/200/500 Hz gives multipliers 0.5, 2 and
   5). Picked points are drawn as circles on every channel row; clicking near
   an already-picked point removes it (and the clones its pick added), so a
-  stray click can be undone without Esc. **Esc** or the button ends the session
-  without touching the selection.
+  stray click can be undone without Esc. **Esc** or choosing *Stop Picking*
+  ends the session without touching the selection.
 
 ### Per-file metadata (File → Metadata)
 
@@ -996,7 +1013,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
-| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with clone & multiply (persisted automatically with per-file metadata), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with comments + harmonic cloning (Excel-style multi-selection in both list panels; persisted automatically with per-file metadata), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
 | `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with three example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near; persisted via per-file metadata (embedded RIFF chunks or `.meta.json`). |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
@@ -1015,7 +1032,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~1950 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2000 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1030,6 +1047,16 @@ by a single mutex (short critical sections, no lock held during FFT work).
   - **Markers**: ids, sorting, rename/move/remove, find-near; region markers
     spanning a selection vs point markers at cursor; per-channel visibility
     toggling (arbitrary subsets).
+  - **Panel multi-selection** (Markers + Selection tabs): plain / Ctrl+click /
+    Shift+click row semantics with anchor tracking, bulk delete of every
+    selected row, Fit View to Selected panning/zooming the union of the
+    selected ranges with the usual 10% margin, amber highlight overlays on the
+    spectrogram following the Selection panel's multi-selection (one overlay per
+    highlighted entry, all gone when nothing is selected), inline Name/Comment
+    cell editing commit/cancel and the next-free-index name pre-fill.
+  - **Saved selection comments**: optional comment field round-trips through
+    both the legacy JSON format and the unified metadata bundle; empty
+    comments are not written.
   - **Undo/redo**: silence → undo restores samples → redo re-silences; stack
     depth; fade-in undo regression (per-sample edits must capture old data
     before the in-place modification, or undo is a no-op).

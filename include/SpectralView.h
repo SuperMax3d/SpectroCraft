@@ -205,11 +205,15 @@ private:
     Application::AxisLock axisLockForEvent (const juce::MouseEvent& e) const;
     void updateSelGestureFromEvent (const juce::MouseEvent& e);
     int64_t selGestLastClickMs = 0;   // guards mouseDoubleClick after a gesture click
-    // Draws the committed spectral selection plus an optional live preview
-    // shape, evaluated together as one ordered boolean list in every channel row.
+    // Draws a spectral selection's shapes (plus an optional live preview
+    // shape), evaluated together as one ordered boolean list in every channel
+    // row. fillCol/edgeCol let the caller recolour - used for the amber
+    // overlays of stored selections highlighted from the Selection panel.
     void drawSpectralShapes (juce::Graphics& g,
                              const std::vector<SpectralShape>& committedIn,
-                             const SpectralShape* live);
+                             const SpectralShape* live,
+                             juce::Colour fillCol,
+                             juce::Colour edgeCol);
     void zoomAtX (int x, double factor);
     void panByTime (double dt);
     void zoomFreqAtY (float y, double factor);

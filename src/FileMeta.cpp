@@ -114,6 +114,8 @@ static void appendSelectionObjects (const std::vector<SavedSpectralSelection>& l
     {
         auto o = new juce::DynamicObject();
         o->setProperty ("name", sel.name);
+        if (!sel.comment.isEmpty ())
+            o->setProperty ("comment", sel.comment);
 
         juce::Array<juce::var> shapes;
         for (const auto& sh : sel.data.shapes())
@@ -187,7 +189,9 @@ static bool readSelectionObjects (const juce::var& v, std::vector<SavedSpectralS
         const auto* o = (*arr)[i].getDynamicObject();
         if (o == nullptr) continue;
         SavedSpectralSelection sel;
-        sel.name = o->getProperties().getWithDefault ("name", "").toString();
+        const auto& props = o->getProperties();
+        sel.name    = props.getWithDefault ("name", "").toString();
+        sel.comment = props.getWithDefault ("comment", "").toString();
 
         const auto& p = o->getProperties();
         const juce::var shapesVar = p.getWithDefault ("shapes", juce::var());

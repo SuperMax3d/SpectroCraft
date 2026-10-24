@@ -9528,6 +9528,356 @@ static void testFindInPanels()
     wav.deleteFile ();
 }
 
+// ---------------- Excel-style multi-selection, comments, clone menu --------
+// Both list panels select rows like a spreadsheet: plain click = single row +
+// anchor; Ctrl/Cmd+click toggles one row; Shift+click replaces the selection
+// with the exact anchor..row range and fits all of it in view (10% margin);
+// DEL / Delete removes every selected entry. The Selection panel adds a
+// Comment column, inline cell editing, next-free-index store names and amber
+// spectrogram overlays for the highlighted rows.
+static void testPanelMultiSelection()
+{
+    const juce::File wav = makeTempFile ("panel_multisel.wav");
+    // 6 s at 8 kHz.
+    writeWav (wav, 1, 8000.0, 48000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for multi-selection test");   // dur = 6 s
+
+    int calls = 0;
+    double lastT0 = -1, lastT1 = -1;
+    app.onSetTimeWindow = [&] (double a, double b)
+    { ++calls; lastT0 = a; lastT1 = b; app.viewStart = a; app.viewEnd = b; };
+    auto approx = [] (double a, double b) { return std::abs (a - b) <= 1e-9; };
+
+    // --- Markers panel ----------------------------------------------------
+    for (int i = 0; i < 5; ++i)
+        app.markers().addPointMarker ((double) (1 + i), juce::String ("m") + juce::String (i + 1));
+
+    MarkerListPanel mp (app);
+    mp.setSize (260, 300);
+
+    // Plain click: single selection + anchor.
+    mp.onRowClicked (1, mkMouse (mp, 50, 40, {}));
+    CHECK (mp.numSelectedRows () == 1 && mp.selectedRowIndices () [0] == 1,
+          "marker plain click selects exactly that row");
+
+    // Ctrl+click: toggle a second row in.
+    mp.onRowClicked (3, mkMouse (mp, 50, 80, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    {
+        auto rows = mp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 1 && rows [1] == 3,
+               "marker ctrl+click adds a row to the selection");
+    }
+
+    // Shift+click: exact range from anchor (row 3) to row 4 - replaces.
+    app.viewStart = 0.0; app.viewEnd = 2.0;   // W=2
+    calls = 0;
+    mp.onRowClicked (4, mkMouse (mp, 50, 100, juce::ModifierKeys (juce::ModifierKeys::shiftModifier)));
+    {
+        auto rows = mp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 3 && rows [1] == 4,
+               "marker shift+click selects exactly anchor..row");
+    }
+    // Markers at t=4 and t=5 -> [4,5], expanded by 10% each side to [3.9,5.1];
+    // S'=1.2 < W=2 -> keep the span and pan: n0 = t1 - W = 3.1.
+    CHECK (calls == 1 && approx (lastT0, 3.1) && approx (lastT1, 5.1),
+           "marker shift+click fits the selected range with margin");
+
+    // Shift+click above the anchor: the range is reversed.
+    calls = 0;
+    mp.onRowClicked (2, mkMouse (mp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::shiftModifier)));
+    {
+        auto rows = mp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 2 && rows [1] == 3,
+               "marker shift+click above the anchor reverses the range");
+    }
+
+    // Delete: removes exactly the selected markers (m3, m4).
+    mp.deleteSelected ();
+    {
+        std::vector<juce::String> names;
+        for (const auto& m : app.markers().markers ()) names.push_back (m.name);
+        CHECK (names.size () == 3 && names [0] == "m1" && names [1] == "m2"
+               && names [2] == "m5", "marker delete removes exactly the selected rows");
+    }
+    CHECK (mp.numSelectedRows () == 0, "marker selection cleared after delete");
+
+    // fitViewToSelected: select rows 0..1 (t=1, t=2) and fit.
+    mp.onRowClicked (0, mkMouse (mp, 50, 40, {}));
+    mp.onRowClicked (1, mkMouse (mp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    app.viewStart = 4.0; app.viewEnd = 6.0;   // W=2
+    calls = 0;
+    mp.fitViewToSelected ();
+    // [1,2] -> [0.9,2.1]; S'=1.2 < W=2 -> pan keeping the span: n0 = t0 = 0.9.
+    CHECK (calls == 1 && approx (lastT0, 0.9) && approx (lastT1, 2.9),
+           "marker fitViewToSelected covers the union of selected markers");
+
+    // --- Selections panel ---------------------------------------------------
+    auto* d = app.doc ();
+    CHECK (d != nullptr, "doc exists for selections test");
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    SpectralSelection sa, sb, sc_;
+    sa.addRect (1.0, 2.0, 100.0, 2000.0, false);
+    sb.addRect (3.0, 4.0, 100.0, 2000.0, false);
+    sc_.addRect (5.0, 6.0, 100.0, 2000.0, false);
+    d->savedSelections.push_back ({ "A", sa });
+    d->savedSelections.push_back ({ "B", sb });
+    d->savedSelections.push_back ({ "C", sc_ });
+
+    SelectionPanel sp (app);
+    sp.setSize (300, 240);
+
+    // Plain click: single selection + amber highlight sync.
+    sp.onRowClicked (0, mkMouse (sp, 50, 40, {}));
+    CHECK (sp.numSelectedRows () == 1 && sp.selectedRowIndices () [0] == 0,
+          "selection plain click selects exactly that row");
+    {
+        auto hl = app.highlightedSavedSelections ();
+        CHECK (hl.size () == 1 && hl [0] == 0, "highlight follows the selection");
+    }
+
+    // Ctrl+click: add a second row.
+    sp.onRowClicked (2, mkMouse (sp, 50, 80, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    {
+        auto rows = sp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 0 && rows [1] == 2,
+               "selection ctrl+click adds a row");
+        auto hl = app.highlightedSavedSelections ();
+        CHECK (hl.size () == 2 && hl [0] == 0 && hl [1] == 2,
+               "highlight follows the multi-selection");
+    }
+
+    // Shift+click: exact range from anchor (row 2) to row 1 - replaces.
+    app.viewStart = 0.0; app.viewEnd = 1.0;   // W=1
+    calls = 0;
+    sp.onRowClicked (1, mkMouse (sp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::shiftModifier)));
+    {
+        auto rows = sp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 1 && rows [1] == 2,
+               "selection shift+click selects exactly anchor..row");
+    }
+    // B[3,4] + C[5,6] -> union [3,6], expanded to [2.7,6.3]; t1 clamps to
+    // the 6 s file end; S'=3.3 >= W=1 -> zoom exactly to [2.7,6].
+    CHECK (calls == 1 && approx (lastT0, 2.7) && approx (lastT1, 6.0),
+           "selection shift+click fits the union of selected ranges");
+
+    // Bulk delete: removes B and C; A remains.
+    sp.deleteSelected ();
+    CHECK (d->savedSelections.size () == 1 && d->savedSelections [0].name == "A",
+          "bulk delete removes exactly the selected entries");
+    CHECK (app.highlightedSavedSelections ().empty (), "highlight cleared after bulk delete");
+
+    // nextIndexName: {"A"} -> "1"; add "1" -> "2".
+    CHECK (sp.nextIndexName () == "1", "next index with no numeric names is 1");
+    d->savedSelections.push_back ({ "1", sa });
+    CHECK (sp.nextIndexName () == "2", "next index skips used numbers");
+
+    // Inline editing: comment.
+    sp.beginCellEdit (0, 3);
+    CHECK (sp.cellEditor ().getText ().isEmpty (), "comment editor starts empty");
+    sp.cellEditor ().setText ("noise floor band", juce::dontSendNotification);
+    sp.commitCellEdit (false);
+    CHECK (d->savedSelections [0].comment == "noise floor band",
+          "inline comment committed");
+
+    // Inline editing: name - an empty commit keeps the old name.
+    sp.beginCellEdit (0, 1);
+    CHECK (sp.cellEditor ().getText () == "A", "name editor starts with the current name");
+    sp.cellEditor ().setText ("   ", juce::dontSendNotification);
+    sp.commitCellEdit (false);
+    CHECK (d->savedSelections [0].name == "A", "empty name commit keeps the old name");
+
+    // Inline editing: cancel.
+    sp.beginCellEdit (1, 3);
+    sp.cellEditor ().setText ("should not stick", juce::dontSendNotification);
+    sp.commitCellEdit (true);
+    CHECK (d->savedSelections [1].comment.isEmpty (),
+          "cancelled edit leaves the comment untouched");
+
+    // Layout: the old Clone & Multiply section is gone - three buttons in one
+    // row pinned to the bottom, and exactly seven children in total.
+    auto* store  = sp.findChildWithID ("sel-store-btn");
+    auto* recall = sp.findChildWithID ("sel-recall-btn");
+    auto* del    = sp.findChildWithID ("sel-delete-btn");
+    CHECK (store != nullptr && recall != nullptr && del != nullptr, "buttons exist");
+    if (store != nullptr)
+        CHECK (store->getY () > 0.8 * sp.getHeight (), "button row pinned to the bottom");
+    CHECK (sp.getNumChildComponents () == 7,
+          "panel has exactly label + table + 3 buttons + editor + listener");
+
+    wav.deleteFile ();
+}
+
+// ---------------- Saved-selection comments: serialisation round-trips -------
+static void testSavedSelectionComment()
+{
+    SpectralSelection s1;
+    s1.addRect (0.5, 1.5, 200.0, 3000.0, false);
+
+    // Legacy .selections.json round-trip keeps comments; entries without one
+    // read back with an empty comment.
+    std::vector<SavedSpectralSelection> list;
+    SavedSpectralSelection a { "A", s1, "band A note" };
+    SavedSpectralSelection b { "B", s1 };
+    list.push_back (a); list.push_back (b);
+
+    const juce::String json = serialiseSavedSelections (list);
+    CHECK (json.contains ("band A note"), "serialised JSON carries the comment");
+
+    std::vector<SavedSpectralSelection> back;
+    std::string err;
+    CHECK (deserialiseSavedSelections (json, back), "legacy JSON parses");
+    if (back.size () == 2)
+    {
+        CHECK (back [0].name == "A" && back [0].comment == "band A note",
+               "comment round-trips through the legacy format");
+        CHECK (back [1].name == "B" && back [1].comment.isEmpty (),
+               "missing comment key reads as empty");
+    }
+    else CHECK (false, "legacy list size round-trips");
+
+    // Empty comments are not written at all, so old-format files stay unchanged.
+    std::vector<SavedSpectralSelection> noComments;
+    SavedSpectralSelection x { "X", s1 };
+    noComments.push_back (x);
+    const juce::String json2 = serialiseSavedSelections (noComments);
+    CHECK (!json2.contains ("comment"), "empty comment is not written");
+
+    // The unified metadata bundle round-trips comments as well.
+    sc::MetaBundle mb;
+    SavedSpectralSelection sel { "SelA", s1, "unified note" };
+    mb.selections.push_back (sel);
+    const std::string ujson = sc::serialiseBundle (mb, true);
+    sc::MetaBundle g;
+    CHECK (sc::parseBundle (juce::String (ujson.c_str()), g, &err), "bundle parses: " + err);
+    if (g.haveSelections && g.selections.size () == 1)
+        CHECK (g.selections [0].name == "SelA" && g.selections [0].comment == "unified note",
+               "comment round-trips through the unified bundle");
+    else CHECK (false, "bundle selection array round-trips");
+}
+
+// ---------------- Amber overlays for highlighted saved selections -----------
+// Depth-first search for the Selection panel inside a component tree.
+static SelectionPanel* findSelectionPanel (juce::Component& c)
+{
+    if (auto* sp = dynamic_cast<SelectionPanel*> (&c)) return sp;
+    for (auto* ch : c.getChildren())
+        if (auto* r = findSelectionPanel (*ch)) return r;
+    return nullptr;
+}
+
+static void testSpectralHighlightOverlays()
+{
+    const juce::File store = makeTempFile ("spec_hl.recent");
+    store.deleteFile ();
+    const juce::File wav = makeTempFile ("spec_hl.wav");
+    // Silent 2 s file: the spectrogram is uniform noise-floor dark, so the
+    // amber overlays are the only warm pixels in the image.
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t, double) { return 0.0f; });
+
+    Application app (store);
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "spec highlight test"));
+
+    SpectralView* sv = nullptr;
+    for (auto* c : win->getChildren ())
+        if ((sv = dynamic_cast<SpectralView*> (c)) != nullptr) break;
+    CHECK (sv != nullptr, "found the spectral view in the main window");
+    if (!sv)
+    {
+        wav.deleteFile (); store.deleteFile (); return;
+    }
+
+    CHECK (app.openFile (wav), "open silent wav");
+    auto* d = app.doc ();
+    CHECK (d != nullptr, "doc exists for highlight test");
+    if (!d)
+    {
+        wav.deleteFile (); store.deleteFile (); return;
+    }
+
+    SpectralSelection sa, sb;
+    sa.addRect (0.25, 0.75, 400.0, 900.0, false);
+    sb.addRect (1.25, 1.75, 400.0, 900.0, false);
+    d->savedSelections.push_back ({ "A", sa });
+    d->savedSelections.push_back ({ "B", sb });
+
+    // The highlight is driven by the Selection panel's multi-selection (the
+    // only UI path that sets it). TabbedComponent only parents the CURRENT
+    // tab's content, so make the Selection tab current first, then find the
+    // now-attached panel and click it.
+    auto* bar = win->bottomPanelTabs ();
+    const int selIdx = bar->getTabNames ().indexOf ("Selection");
+    CHECK (selIdx >= 0, "the Selection tab exists in the bottom group");
+    if (selIdx < 0)
+    {
+        wav.deleteFile (); store.deleteFile (); return;
+    }
+    bar->setCurrentTabIndex (selIdx, true);
+    SelectionPanel* sp = findSelectionPanel (*win);
+    CHECK (sp != nullptr, "found the selection panel in the main window");
+    if (!sp)
+    {
+        wav.deleteFile (); store.deleteFile (); return;
+    }
+    sp->setSize (300, 240);
+
+    // Warm = clearly orange: red dominates and green beats blue by >= 10.
+    // (The playhead is pure red with g == b, so it never matches.)
+    auto countAmber = [] (const juce::Image& img)
+    {
+        int n = 0;
+        for (int y = 0; y < img.getHeight(); ++y)
+            for (int x = 0; x < img.getWidth(); ++x)
+            {
+                const auto p = img.getPixelAt (x, y);
+                if (p.getRed () > p.getGreen () && p.getGreen () >= p.getBlue () + 10
+                    && p.getRed () - p.getBlue () >= 40 && p.getRed () >= 60) ++n;
+            }
+        return n;
+    };
+
+    juce::Image base (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
+    { juce::Graphics g (base); sv->paint (g); }
+    CHECK (countAmber (base) < 20, "silent spectrogram has no amber-ish pixels");
+
+    // Plain click on row A: exactly one amber overlay.
+    sp->onRowClicked (0, mkMouse (*sp, 50, 40, {}));
+    {
+        auto hl = app.highlightedSavedSelections ();
+        CHECK (hl.size () == 1 && hl [0] == 0, "panel click highlights row A");
+    }
+    juce::Image one (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
+    { juce::Graphics g (one); sv->paint (g); }
+    const int amberOne = countAmber (one);
+    CHECK (amberOne > 100, "one highlighted selection paints an amber overlay");
+
+    // Ctrl+click row B: both overlays are visible at once.
+    sp->onRowClicked (1, mkMouse (*sp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    {
+        auto hl = app.highlightedSavedSelections ();
+        CHECK (hl.size () == 2 && hl [0] == 0 && hl [1] == 1, "ctrl+click adds row B");
+    }
+    juce::Image two (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
+    { juce::Graphics g (two); sv->paint (g); }
+    const int amberTwo = countAmber (two);
+    CHECK (amberTwo > amberOne + 100,
+          "a second highlighted selection adds its own overlay");
+
+    // Ctrl+click both rows again to toggle them off: no overlays left.
+    sp->onRowClicked (0, mkMouse (*sp, 50, 40, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    sp->onRowClicked (1, mkMouse (*sp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    CHECK (app.highlightedSavedSelections ().empty (), "toggling off clears the highlight");
+    juce::Image none (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
+    { juce::Graphics g (none); sv->paint (g); }
+    CHECK (countAmber (none) < 20, "clearing the highlight removes the overlays");
+
+    wav.deleteFile (); store.deleteFile ();
+}
+
 // ------------------------------------------------- Python script panel
 static void testPythonScripts()
 {
@@ -11326,6 +11676,9 @@ static int scRunUnitTestsImpl()
 #endif
     progress ("ensure time range visible"); testEnsureTimeRangeVisible();
     progress ("find in panels");            testFindInPanels();
+    progress ("panel multi-selection");     testPanelMultiSelection();
+    progress ("saved selection comment");   testSavedSelectionComment();
+    progress ("spectral highlight overlays"); testSpectralHighlightOverlays();
     progress ("python scripts");            testPythonScripts();
     progress ("spectral selection model");  testSpectralSelectionModel();
     progress ("selection render hole");     testSpectralSelectionRenderHole();
@@ -11355,6 +11708,7 @@ static int scRunUnitTestsImpl()
     progress ("paste to new channels");   testPasteToNewChannels();
     progress ("channel row geometry");    testChannelRowGeometry();
     progress ("version string");      testVersionString();
+
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
     return failures == 0 ? 0 : 1;

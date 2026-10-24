@@ -1387,7 +1387,27 @@ void SpectralView::drawOverlays (juce::Graphics& g)
             haveLive = true;
         }
 
-        drawSpectralShapes (g, committed, haveLive ? &live : nullptr);
+        // Same blue family as the time selection; previews are brighter.
+        const juce::Colour fillCol = haveLive ? juce::Colour::fromRGBA (70, 130, 255, 96)
+                                              : juce::Colour::fromRGBA (70, 130, 255, 80);
+        const juce::Colour edgeCol = haveLive ? juce::Colour::fromRGB (140, 180, 255)
+                                              : juce::Colour::fromRGB (96, 150, 255);
+        drawSpectralShapes (g, committed, haveLive ? &live : nullptr, fillCol, edgeCol);
+
+        // Highlighted stored selections (multi-selected in the Selection panel):
+        // drawn in amber so several saved masks are visible on the track at once.
+        {
+            auto* d = app.doc ();
+            if (d != nullptr && !app.highlightedSavedSel.empty ())
+            {
+                const juce::Colour hlFill (juce::Colour::fromRGBA (255, 176, 64, 80));
+                const juce::Colour hlEdge (juce::Colour::fromRGB (255, 196, 100));
+                for (size_t i : app.highlightedSavedSel)
+                    if (i < d->savedSelections.size () && !d->savedSelections[i].data.empty ())
+                        drawSpectralShapes (g, d->savedSelections[i].data.shapes (), nullptr,
+                                           hlFill, hlEdge);
+            }
+        }
     }
 
     // Markers — clipped to the plot so lines and titles never paint over the
@@ -1579,7 +1599,9 @@ void SpectralView::updateSelGestureFromEvent (const juce::MouseEvent& e)
 
 void SpectralView::drawSpectralShapes (juce::Graphics& g,
                                       const std::vector<SpectralShape>& committedIn,
-                                      const SpectralShape* live)
+                                      const SpectralShape* live,
+                                      juce::Colour fillCol,
+                                      juce::Colour edgeCol)
 {
     const bool preview = (live != nullptr);
     if (committedIn.empty() && !preview) return;
@@ -1593,11 +1615,8 @@ void SpectralView::drawSpectralShapes (juce::Graphics& g,
         return i < (int) committedIn.size() ? committedIn[(size_t) i] : *live;
     };
 
-    // Same blue family as the time selection; previews are brighter and dashed.
-    const juce::Colour fillCol  = preview ? juce::Colour::fromRGBA (70, 130, 255, 96)
-                                          : juce::Colour::fromRGBA (70, 130, 255, 80);
-    const juce::Colour edgeCol  = preview ? juce::Colour::fromRGB (140, 180, 255)
-                                          : juce::Colour::fromRGB (96, 150, 255);
+    // The caller supplies the colours (blue for the live selection, amber for
+    // highlighted stored selections); previews stay dashed as before.
 
     // Rasterise the ordered shape list into a per-pixel boolean mask: additive
     // shapes set bits, subtractive ones clear them. This is exactly what

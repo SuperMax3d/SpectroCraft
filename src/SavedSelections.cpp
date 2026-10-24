@@ -42,7 +42,10 @@ juce::String serialiseSavedSelections (const std::vector<SavedSpectralSelection>
     {
         const auto& sel = list[i];
         if (i > 0) s += ",";
-        s += "\n { \"name\": \"" + jsonEscape (sel.name) + "\", \"shapes\": [";
+        s += "\n { \"name\": \"" + jsonEscape (sel.name) + "\""
+           + (sel.comment.isEmpty () ? juce::String() : juce::String(", \"comment\": \"")
+                                      + jsonEscape (sel.comment) + "\"")
+           + ", \"shapes\": [";
 
         bool firstShape = true;
         for (const auto& sh : sel.data.shapes())
@@ -254,6 +257,9 @@ bool deserialiseSavedSelections (const juce::String& json,
         SavedSpectralSelection sel;
         if (!findKeyStr (json, objStart, objEnd, "\"name\"", sel.name))
             return false;
+
+        // Optional free-form note (older files have no comment key).
+        findKeyStr (json, objStart, objEnd, "\"comment\"", sel.comment);
 
         // Locate the "shapes" array inside this selection object.
         const auto shpKey = json.indexOf ((int) objStart, "\"shapes\"");
