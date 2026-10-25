@@ -124,8 +124,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     classic reference analysers: fixed 65536-point symmetric-Hann frames at
     50% overlap, frame-averaged power spectrum, Butterworth band weighting and
     the classic +98.5 dB offset — levels then read in **dB-SPL** up to ~20 kHz,
-    and an **Order** dropdown (1/2/3/4/5/10/20/30/40, default 40) replaces the
-    FFT size / window controls since the frame size is fixed), plus three
+    and an **Order** dropdown (1/2/3/4/5/10/20/30/40, default 40) appears to
+    the right of the FFT size / window controls since the frame size is fixed),
+    plus three
     curve-analysis modes:
     **Freq vs Time** (the tracked dominant frequency plotted against time —
     the cursor readout also shows each channel's level), **Amp vs Time**

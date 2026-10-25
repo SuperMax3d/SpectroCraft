@@ -1878,7 +1878,9 @@ void FFTAnalysisView::refreshSnapshotBands()
 int FFTAnalysisView::axisWidth() const
 {
     // Linear V/g labels are wider than plain dB numbers.
-    return app.scale().usesLinearLevels() ? 50 : 34;
+    if (app.scale().usesLinearLevels()) return 50;
+    // "-92.0 dB-SPL" needs more room than a plain dB label.
+    return app.scale().unit == ScaleCalibration::Unit::Pascal ? 68 : 34;
 }
 
 juce::Rectangle<int> FFTAnalysisView::plotBounds() const
@@ -1938,13 +1940,16 @@ void FFTAnalysisView::resized()
         }
         else if (axisMode_ == 2 && pascalThirdOct())
         {
-            // The dB-SPL pipeline uses fixed 65536-point Hanning frames, so the
-            // FFT size / window options are replaced by the octave order.
+            // The dB-SPL pipeline uses fixed 65536-point Hanning frames for its
+            // bands; the FFT size / window options stay visible next to the
+            // octave order, which sets the bandpass filter steepness.
             refTimeCombo.setVisible (false);
-            fftSizeCombo.setVisible (false);
-            windowCombo.setVisible (false);
+            fftSizeCombo.setVisible (true);
+            windowCombo.setVisible (true);
             orderCombo.setVisible (true);
-            orderCombo.setBounds (30, row1.getY(), 85, 22);
+            fftSizeCombo.setBounds (30, row1.getY(), 85, 22);
+            windowCombo.setBounds (148, row1.getY(), 90, 22);
+            orderCombo.setBounds (279, row1.getY(), 85, 22);
         }
         else
         {
@@ -2005,7 +2010,11 @@ void FFTAnalysisView::paint (juce::Graphics& g)
         if (isTimeAxisMode())
             g.drawText ("Ref Time", 6, topRow.getY() + 5, 48, 16, juce::Justification::centredLeft, false);
         else if (axisMode_ == 2 && pascalThirdOct())
-            g.drawText ("Order", 6, topRow.getY() + 5, 30, 16, juce::Justification::centredLeft, false);
+        {
+            g.drawText ("FFT", 6, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
+            g.drawText ("Win", 124, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
+            g.drawText ("Order", 247, topRow.getY() + 5, 30, 16, juce::Justification::centredLeft, false);
+        }
         else
         {
             g.drawText ("FFT", 6, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
@@ -2170,7 +2179,7 @@ void FFTAnalysisView::paint (juce::Graphics& g)
             }
 
         if (axisMode_ == 2)
-            for (size_t c = 0; c < mags.size() && c < 4; ++c)
+            for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 drawBandCurve (thirdOctMags[c], fftColours[c], 1.2f);
         else
             for (size_t c = 0; c < mags.size() && c < 4; ++c)
