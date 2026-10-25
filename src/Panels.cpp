@@ -5581,9 +5581,9 @@ SelectionPanel::SelectionPanel (Application& appIn)
     recallBtn.onClick = [this] { doRecall (primaryRow()); };
     deleteBtn.onClick = [this] { deleteSelected (); };
 
-    saveBtn.setTooltip ("Store the current spectral selection - or, with no spectral selection, "
-                        "the time-range selection as a full-height band - under an auto-assigned "
-                        "name like 'Selection 01'.");
+    saveBtn.setTooltip ("In Time Range mode this stores the current time range; otherwise it "
+                        "stores the live spectral selection - or, with none active, the time-range "
+                        "selection as a full-height band - under an auto-assigned name like 'Selection 01'.");
     recallBtn.setTooltip ("Replace the current spectral selection with the first selected saved one. "
                           "Clicking or double-clicking its row does the same.");
     deleteBtn.setTooltip ("Remove every selected saved selection from this file's list. DEL instead "
@@ -5668,11 +5668,22 @@ void SelectionPanel::doSave()
     if (d == nullptr) return;
 
     SpectralSelection toSave;
-    if (!d->spectralSel.empty ())
-        toSave = d->spectralSel;   // deep copy of the current shapes
-    else if (app.selection.getLength () > 0.0)
+    const bool haveTimeSel = app.selection.getLength () > 0.0;
+
+    if (app.selMode == SpectralSelMode::TimeRange && haveTimeSel)
     {
-        // Time Range tool: store the time selection as a full-height band so
+        // The Time Range tool operates on the time selection: store it even
+        // when a recalled spectral selection is still live, so storing a
+        // sequence of different ranges doesn't re-save the first one.
+        const double nyq = app.audioEngine().sampleRate() * 0.5;
+        toSave.addRect (app.selection.getStart (), app.selection.getEnd (),
+                        0.0, nyq, false);
+    }
+    else if (!d->spectralSel.empty ())
+        toSave = d->spectralSel;   // deep copy of the current shapes
+    else if (haveTimeSel)
+    {
+        // No spectral selection: store the time range as a full-height band so
         // it can be recalled/edited like any other spectral selection.
         const double nyq = app.audioEngine().sampleRate() * 0.5;
         toSave.addRect (app.selection.getStart (), app.selection.getEnd (),

@@ -351,16 +351,29 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   from it.
 - **Scale calibration (Set Unit and Scale)**: right-clicking a file in the Files list
   offers **Set Unit and Scale...**, which asks for physical units (**Volts, Pascal, g or
-  None**) and the value at full scale — e.g. "2 Pascal" means a full-scale sample
-  (|1.0|) corresponds to 2 Pa of pressure. The calibration is stored per file
-  (for the session) and displayed under the corresponding entry in the Files
-  list. When set, readouts are converted from relative dB into absolute levels:
-  the waveform's amplitude axis shows physical values in that unit (Pa/V/g),
-  and the frequency/spectral readouts — the spectrogram hover probe, the
-  Spectral Controls level-scale labels, and the frequency analysis view (FFT
-  curves as well as 1/3-octave bands, including its axis labels, cursor readout
-  and clipboard export) — show **dB-SPL** for Pascal files but plain linear
-  values in **V** or **g** for Volts/g files. "None" restores plain relative dB.
+  None**) — one shared unit for all channels — plus **one full-scale value per
+  channel** — e.g. "2 Pascal" means a full-scale sample (|1.0|) corresponds to
+  2 Pa of pressure on that channel. Equal values are stored as a single shared
+  number; differing ones are kept per channel and shown joined in the Files list
+  (e.g. `2/3 Pa`). The calibration is stored per file (for the session) and
+  displayed under the corresponding entry in the Files list. When set, readouts
+  are converted from relative dB into absolute levels: the waveform's amplitude
+  axis shows physical values in that unit (Pa/V/g), with each channel row using
+  its own full-scale value when they differ, and the frequency/spectral readouts
+  — the spectrogram hover probe, the Spectral Controls level-scale labels, and
+  the frequency analysis view (FFT curves as well as 1/3-octave bands,
+  including its axis labels, cursor readout and clipboard export) — show
+  **dB-SPL** for Pascal files but plain linear values in **V** or **g** for
+  Volts/g files. "None" restores plain relative dB.
+- **Automatic calibration from `bkdk` WAV chunks**: some legacy measurement WAV
+  files carry a custom top-level RIFF chunk named `bkdk` with per-channel
+  *Calibration* gains (sample × Calibration = pascals). Loading such a file
+  automatically sets the unit to **Pascal** and takes each channel's full-scale
+  value from its Calibration field — a single defined group applies to every
+  channel, and missing/unparseable values default to no scaling. This overrides
+  any previously stored scale for that file. The raw `bkdk` chunk is preserved
+  byte-for-byte when the file is saved as WAV again (and never added to files
+  that don't have one).
 - **Open Recent**: File → Open Recent lists up to the ten most recently opened
   files (most recent first) and re-opens them with one click. The list is
   persisted in a `PropertiesFile` (`SpectroCraft.recent` under the user's
@@ -1031,10 +1044,12 @@ harmonics of whatever is currently selected.
   **Edit...** — a dialog to change name and comment at once; comments travel
   with the file via [per-file metadata](#per-file-metadata).
 - **Store / Recall / Delete** buttons below the table: Store saves the current
-  spectral selection under an auto name — "Selection 01", "Selection 02", ...
-  skipping numbers already in use (when no spectral selection is active but a
-  time range is, that range is stored as a full-height band); storing again
-  with the same name updates that entry. Recall replaces the current selection
+  selection under an auto name — "Selection 01", "Selection 02", ... skipping
+  numbers already in use. In Time Range mode it stores the time range (as a
+  full-height band) even when a recalled spectral selection is still live, so
+  storing several different ranges keeps each one distinct; with a spectral
+  tool active it stores the live spectral selection instead — falling back to
+  the time range as a full-height band when there is none. Recall replaces the current selection
   with the first selected saved one and makes sure both views show its time
   range — panning or zooming out when it is not fully inside the current window.
   The list belongs to each file and is persisted automatically, so it survives
@@ -1129,11 +1144,12 @@ Clean separation into independent components (see `include/` + `src/`):
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
 | `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with comments + harmonic cloning (Excel-style multi-selection in both list panels; persisted automatically with per-file metadata), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
-| `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with three example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
+| `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with six example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near; persisted via per-file metadata (embedded RIFF chunks or `.meta.json`). |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
-| `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`), saved spectral selections, axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
+| `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`, including optional per-channel full-scale values), saved spectral selections, axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Also keeps the raw `bkdk` payload of the source file (when present) so WAV saves preserve it byte-for-byte. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
+| `BkdkChunk` (`src/BkdkChunk.cpp`) | Parser for the custom `bkdk` RIFF chunk found in some legacy measurement WAV files: NUL-separated ASCII fields, one 11-field group per channel whose Calibration field (sample × gain = pascals) drives the automatic Pascal calibration on load. A single defined group applies to every channel; missing/unparseable values fall back to no scaling. |
 | `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`) | Video-container audio extraction (Windows + FFmpeg only): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
@@ -1149,7 +1165,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2300 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2360 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1182,6 +1198,18 @@ by a single mutex (short critical sections, no lock held during FFT work).
   - **Saved selection comments**: optional comment field round-trips through
     both the legacy JSON format and the unified metadata bundle; empty
     comments are not written.
+  - **Store in Time Range mode after a recall**: storing several different time
+    ranges keeps each one distinct even when clicking/recalling a saved row has
+    installed its shapes into the live spectral selection (the old behaviour
+    re-saved the first range over and over); with a spectral tool active the
+    live selection is still what gets stored.
+  - **bkdk calibration**: payload parsing (multi-group, single-group, malformed,
+    trailing padding, unparseable Calibration → no scaling); loading a WAV with
+    a `bkdk` chunk auto-calibrates to Pascal per channel (single group applies
+    to all channels; it overrides any stored scale) and saving preserves the
+    raw chunk byte-for-byte while files without one gain none; per-channel
+    full-scale storage/collapse in the Set Unit and Scale dialog commit path;
+    `ScaleCalibration` per-channel helpers + level labels.
   - **Undo/redo**: silence → undo restores samples → redo re-silences; stack
     depth; fade-in undo regression (per-sample edits must capture old data
     before the in-place modification, or undo is a no-op).

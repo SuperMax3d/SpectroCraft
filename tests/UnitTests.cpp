@@ -12687,6 +12687,74 @@ static void testSelectionsDiskReload()
     notJson.deleteFile (); corrupt.deleteFile ();
 }
 
+// ---------------- Store: distinct time ranges after a recall --------------
+// Storing several different Time Range selections must capture each range -
+// even when clicking/recalling a saved row has installed its shapes into the
+// live spectral selection (which used to shadow every later store).
+static void testStoreTimeRangesAfterRecall()
+{
+    const juce::File wav = makeTempFile ("store_ranges.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for store test");
+    auto* d = app.doc ();
+    CHECK (d != nullptr, "doc exists");
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    SelectionPanel sp (app);
+    sp.setSize (300, 240);
+
+    // Time Range mode: first range [0.5, 1.5].
+    app.setSelectionTool (SpectralSelMode::TimeRange);
+    app.setSelection ({ 0.5, 1.5 });
+    sp.doSave ();
+    CHECK (d->savedSelections.size () == 1, "first store adds a row");
+    if (d->savedSelections.empty ()) { wav.deleteFile (); return; }
+    const auto e1 = d->savedSelections [(size_t) 0].data.timeExtent();
+    CHECK (std::abs (e1.getStart() - 0.5) < 1e-9 && std::abs (e1.getEnd() - 1.5) < 1e-9,
+          "first stored range is [0.5, 1.5]");
+
+    // Recall it: the recalled band becomes the LIVE spectral selection.
+    sp.doRecall (0);
+    CHECK (!d->spectralSel.empty (), "recall installs the live spectral selection");
+
+    // A new time range [2.5, 3.5] while the recalled one is still live must be
+    // stored as its own entry - not a copy of the first.
+    app.setSelection ({ 2.5, 3.5 });
+    sp.doSave ();
+    CHECK (d->savedSelections.size () == 2, "second store adds a row");
+    if (d->savedSelections.size() != 2) { wav.deleteFile (); return; }
+    const auto e2 = d->savedSelections [(size_t) 1].data.timeExtent();
+    CHECK (std::abs (e2.getStart() - 2.5) < 1e-9 && std::abs (e2.getEnd() - 3.5) < 1e-9,
+          "second stored range is [2.5, 3.5] - not the recalled one");
+
+    // A third different range keeps working too.
+    app.setSelection ({ 0.2, 0.8 });
+    sp.doSave ();
+    CHECK (d->savedSelections.size () == 3, "third store adds a row");
+    if (d->savedSelections.size() != 3) { wav.deleteFile (); return; }
+    const auto e3 = d->savedSelections [(size_t) 2].data.timeExtent();
+    CHECK (std::abs (e3.getStart() - 0.2) < 1e-9 && std::abs (e3.getEnd() - 0.8) < 1e-9,
+          "third stored range is [0.2, 0.8]");
+
+    // In a spectral tool mode the live selection still wins over the time
+    // range: with Marquee active and a live shape present, Store saves it.
+    app.setSelectionTool (SpectralSelMode::Marquee);
+    d->spectralSel.addRect (1.0, 2.0, 100.0, 500.0, false);   // replaces the recalled band
+    app.setSelection ({ 3.0, 4.0 });                          // different time range
+    sp.doSave ();
+    CHECK (d->savedSelections.size () == 4, "fourth store adds a row");
+    if (d->savedSelections.size() != 4) { wav.deleteFile (); return; }
+    const auto& s4 = d->savedSelections [(size_t) 3].data;
+    CHECK (s4.count () == 1 && s4.contains (1.5, 300.0),
+          "in Marquee mode the live spectral selection is stored");
+
+    wav.deleteFile ();
+}
+
 static void testClonePickFlow()
 {
     const juce::File wav = makeTempFile ("clonepick.wav");
@@ -13968,6 +14036,7 @@ static int scRunUnitTestsImpl()
     progress ("parse multiplier list");     testParseMultiplierList();
     progress ("saved selections round-trip"); testSavedSelectionsRoundTrip();
     progress ("selections disk reload + dnd"); testSelectionsDiskReload();
+    progress ("store time ranges after recall"); testStoreTimeRangesAfterRecall();
     progress ("clone pick flow");           testClonePickFlow();
     progress ("pick toggle + brush floor + modifier hints");
     testClonePickToggleAndHints();

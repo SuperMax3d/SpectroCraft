@@ -187,16 +187,17 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
 
     // Alternative Scale: any number of reference points per axis. "New"
     // arms the ref-click flow and appends one; clicking a name edits it.
+    // No check marks: these are actions, not toggle states.
     {
         juce::PopupMenu altTime, altFreq;
-        altTime.addItem (CtxAltScaleTime, "New", true, true);
+        altTime.addItem (CtxAltScaleTime, "New", true, false);
         for (int i = 0; i < (int) app.altTimeRefs.size(); ++i)
             altTime.addItem (CtxAltRefTimeBase + i, app.altTimeRefs[(size_t) i].name,
-                             true, true);
-        altFreq.addItem (CtxAltScaleFreq, "New", true, true);
+                             true, false);
+        altFreq.addItem (CtxAltScaleFreq, "New", true, false);
         for (int i = 0; i < (int) app.altFreqRefs.size(); ++i)
             altFreq.addItem (CtxAltRefFreqBase + i, app.altFreqRefs[(size_t) i].name,
-                             true, true);
+                             true, false);
 
         juce::PopupMenu alt;
         alt.addSubMenu ("Time", altTime);

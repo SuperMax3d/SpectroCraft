@@ -1091,6 +1091,10 @@ public:
     void resized() override;
     void refresh();   // call after doc changes / selection or list changes
 
+    // Store the current selection (time range in Time Range mode, live
+    // spectral selection otherwise) under an auto-assigned name. Also used
+    // by unit tests.
+    void doSave();
     // Recall a stored selection: replaces the live spectral selection with it
     // and makes sure both views' time window includes its time range (+10%
     // margin). Also used by unit tests.
@@ -1205,7 +1209,6 @@ private:
     void fileDragExit (const juce::StringArray&) override;
     bool dragOver = false;
 
-    void doSave();
     void doDelete();
 
     JUCE_DECLARE_NON_COPYABLE (SelectionPanel)
