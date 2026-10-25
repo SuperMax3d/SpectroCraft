@@ -9,6 +9,7 @@ The following third-party code is included or used:
 | OpenVINO runtime 2024.6 (headers + DLLs) | `extern/OpenVINO/` | Apache-2.0 (+ model licences, see `extern/OpenVINO/licensing/`) | Used only when `-DSPECTRO_ENABLE_AI=ON`. Loaded at runtime; the app runs without it (delay-loaded import). |
 | SoXR resampler | `extern/soxr/` | LGPL-2.1 (`COPYING.LGPL`, `LICENCE`, `AUTHORS`) | Built statically into the exe for Effects → Resample… and internal AI-rate conversion. |
 | whisper.cpp b5454 prebuilt binaries (+ ggml, llama.cpp) | `extern/whisper-b5454/` | MIT (see `extern/whisper-b5454/README.md`) | Speech transcription engine: official release DLLs loaded at runtime (`LoadLibrary`), CPU-only via ggml's per-microarchitecture SIMD backends. Only the C API headers are vendored for compilation. |
+| FFmpeg 7.1.1 (minimal audio-only build: libavformat, libavcodec, libavutil, libswresample) | `extern/ffmpeg/` | LGPL-2.1-or-later (`extern/ffmpeg/licensing/`) | Reads the audio track of video/audio files. Built without GPL/nonfree parts and without any video decoder; shipped as separate DLLs (replaceable). Source tag `n7.1.1` + exact configure options in `extern/ffmpeg/build.sh`. |
 | DeepFilterNet DSP port | `src/AI/DfStft.*`, `src/AI/DeepFilter*.*`, `include/AI/*` | GPL-3.0-only — Copyright (C) 2024 Intel Corporation | Ported from Intel's `openvino-plugins-ai-audacity` plugin (`mod-openvino/noise_suppression/deepfilternet/`). libtorch replaced by plain C++ on top of SpectroCraft's FFT infrastructure. Full licence text: `GPL-3.0-intel-deepfilternet.txt`. Attribution headers are kept in every ported file. |
 
 ## Model weights (not distributed with the source)
@@ -25,5 +26,5 @@ Model files are downloaded on demand to `%APPDATA%/SpectroCraft/models/<model-id
 ## Resulting licence of SpectroCraft
 
 AGPL-3.0 + GPL-3.0-only (JUCE, Intel DSP port) + LGPL-2.1 (SoXR) + MIT
-(whisper.cpp) + Apache-2.0 (OpenVINO runtime) is compatible; the combined
-work remains **AGPL-3.0**.
+(whisper.cpp) + Apache-2.0 (OpenVINO runtime) + LGPL-2.1-or-later (FFmpeg DLLs)
+is compatible; the combined work remains **AGPL-3.0**.

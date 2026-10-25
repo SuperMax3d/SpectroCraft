@@ -3,6 +3,7 @@
 #include "FileMeta.h"
 #include "Resampler.h"
 #include "ScttChunk.h"
+#include "VideoAudio.h"
 
 namespace sc {
 
@@ -190,6 +191,7 @@ bool readMergeSource (const juce::File& f, double targetRate, MergeSource& out,
 
     juce::AudioFormatManager fm;   // local: safe to use off the message thread
     fm.registerBasicFormats ();
+    registerVideoFormats (fm);     // allow video containers as merge sources too
     auto* reader = fm.createReaderFor (f);
     if (reader == nullptr)
         return false;

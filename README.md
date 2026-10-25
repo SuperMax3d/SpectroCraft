@@ -13,7 +13,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 ## Features
 
 - **Formats**: WAV / AIFF / FLAC / MP3 / Ogg via JUCE AudioFormatManager
-  (PCM 8/16/24/32-bit int, 32-bit float), up to 32+ channels.
+  (PCM 8/16/24/32-bit int, 32-bit float), up to 32+ channels — plus the audio
+  track of video containers (.mp4/.m4a, .mkv, .avi, .webm, .mov, .wmv, .flv,
+  .ts, .wma, .ac3, ...) through a vendored minimal FFmpeg build (Windows only,
+  see **Video files** below).
 - **Streaming engine**: files larger than ~256 MB of samples stay on disk and are
   read through the `AudioFormatReader` under a mutex; small files are materialized
   in memory for fast editing. Edits require the in-memory buffer.
@@ -364,8 +367,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   application-data folder), survives restarts, deduplicates repeated opens,
   and self-heals: entries whose file was deleted or moved are dropped when
   clicked. "Clear Recent Files" empties the list.
-- **Drag & drop**: drop one or more WAV/AIFF/FLAC/MP3/Ogg files onto the
-  window; every valid dropped file becomes its own document.
+- **Drag & drop**: drop one or more audio (or video) files onto the window;
+  every valid dropped file becomes its own document.
 - **Merge (Shift + drag & drop)**: dropping files while holding Shift shows a
   menu at the cursor with four merge options (plus plain *Open*):
   - *Open in sequence in current file / …in a new file*: concatenate the files
@@ -434,6 +437,34 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   `--test-load` times a headless load and prints mipmap stats (useful for
   multi-hour files); `--generate-test-files` creates the test WAVs;
   `--run-unit-tests` runs the unit suite from either executable.
+
+---
+
+## Video files
+
+On Windows, SpectroCraft can open video containers directly: the first audio
+stream is decoded and treated as a normal audio file — the video track is
+ignored entirely. Supported extensions include `.mp4`, `.m4a`, `.mov`,
+`.mkv`, `.webm`, `.avi`, `.wmv`, `.asf`, `.flv`, `.ts`/`.m2ts`, `.wma`,
+`.ac3`, `.ape`, `.tta` and more; any audio codec the bundled FFmpeg build
+knows (AAC, MP3, Vorbis, Opus, AC-3, PCM, ...) works inside those containers.
+
+The extraction is done in-process by a small `juce::AudioFormatReader`
+wrapper (`src/VideoAudio.cpp`) around libavformat/libavcodec/libswresample —
+no external converter executable. Because it plugs into the normal
+`AudioFormatManager`, everything else just works: large video files stream
+from disk tile by tile like any other file, and **saving always produces a
+plain audio file** (WAV/FLAC/AIFF) with the decoded audio.
+
+The FFmpeg runtime is vendored in `extern/ffmpeg/` as four prebuilt Windows x64
+DLLs (~2.6 MB total: `avformat-61`, `avcodec-61`, `swresample-5`,
+`avutil-59`) that are copied next to the executable at build time. It is a
+minimal **audio-only** build (demuxers + audio decoders, no video decoding,
+no encoders/filters/network) under **LGPL-2.1-or-later**, so it can be
+dynamically linked without affecting SpectroCraft's AGPL-3.0 licence — see
+`third_party/licenses/NOTICE.md` and `extern/ffmpeg/README.md`. Disable with
+`-DSPECTRO_ENABLE_FFMPEG=OFF`; on non-Windows platforms the feature is simply
+absent (the built-in JUCE formats still cover WAV/AIFF/FLAC/MP3/Ogg).
 
 ---
 
@@ -1099,6 +1130,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`), saved spectral selections, axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
 | `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
+| `VideoAudio` (`src/VideoAudio.cpp`) | Video-container audio extraction (Windows + FFmpeg only): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
 
@@ -1111,7 +1143,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2250 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2300 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1225,6 +1257,13 @@ by a single mutex (short critical sections, no lock held during FFT work).
     changes and parallel merges replace the whole file and are not undoable;
     `createDocFromMerged` activates a fresh document holding the merged audio
     and markers; and the merge menu's item counts with/without an active doc.
+  - **Video audio extraction** (Windows + FFmpeg builds): hand-crafted PCM AVI
+    files are read through the FFmpeg reader — channel count/rate/length,
+    sample-exact sequential *and* random-access reads, zero-fill beyond EOF;
+    a full `AudioEngine` load of an AVI verifies tone amplitudes and a save-as-
+    WAV round-trip; a video-only AVI (no audio stream) is rejected gracefully;
+    native formats keep priority on `.wav`. Without FFmpeg the registration is
+    verified to be a harmless no-op.
   - **Alternative scale in the Frequency Analysis readout**: every cursor
     readout (classic snapped/plain, 1/3-octave band centre, Freq-vs-Time
     tracked frequency, Amp-vs-Freq cursor frequency) appends `| Name=value`

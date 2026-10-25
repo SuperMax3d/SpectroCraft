@@ -28,6 +28,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/ScttChunk.cpp   # SCTT RIFF chunk I/O (no AI dependency)
         ${CMAKE_CURRENT_SOURCE_DIR}/FileMeta.cpp    # unified metadata bundle + RIFF patching
         ${CMAKE_CURRENT_SOURCE_DIR}/MergeFiles.cpp  # multi-file merge (Shift + drag & drop)
+        ${CMAKE_CURRENT_SOURCE_DIR}/VideoAudio.cpp  # FFmpeg video-container audio extraction
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
         ${CMAKE_SOURCE_DIR}/tests/UnitTests.cpp
 )
@@ -50,6 +51,11 @@ if (TARGET sc_openvino)
     # loaded at runtime — see extern/whisper-b5454/README.md).
     target_include_directories (SpectroCraft PRIVATE ${CMAKE_SOURCE_DIR}/extern/whisper-b5454/include)
     sc_enable_ai (SpectroCraft)
+endif()
+
+# FFmpeg runtime for video-container audio extraction (Windows only).
+if (TARGET sc_ffmpeg)
+    sc_enable_ffmpeg (SpectroCraft)
 endif()
 
 # Application icon (icon.ico) is embedded at runtime: include/IconData.h holds

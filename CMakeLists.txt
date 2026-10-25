@@ -19,6 +19,15 @@ if (SPECTRO_ENABLE_AI AND WIN32)
     add_subdirectory(extern/OpenVINO)
 endif()
 
+# FFmpeg (LGPL-2.1+) audio extraction for video containers (.mp4, .mkv, ...).
+# The runtime is vendored in extern/ffmpeg as prebuilt Windows x64 DLLs +
+# import libraries; on other platforms this is a no-op and SpectroCraft
+# falls back to the built-in JUCE formats only.
+option(SPECTRO_ENABLE_FFMPEG "Enable FFmpeg-based video audio extraction" ON)
+if (SPECTRO_ENABLE_FFMPEG AND WIN32)
+    add_subdirectory(extern/ffmpeg)
+endif()
+
 # Auto-incremented version: this target runs on EVERY build and bumps the
 # patch number in VERSION.txt (1.0.0 -> 1.0.1 -> ...), then regenerates
 # generated/Version.h (About box) + SC_VERSION.txt. The sc_patch_generated

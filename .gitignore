@@ -16,9 +16,15 @@ cmake-build-*/
 *.lib
 # ...except the vendored OpenVINO import library (required for linking)
 !extern/OpenVINO/lib/openvino.lib
+# ...and the vendored FFmpeg import libraries
+!extern/ffmpeg/lib/*.lib
 
 # OS junk
 Thumbs.db
 desktop.ini
 .DS_Store
 /VERSION.txt
+
+# FFmpeg rebuild scratch dirs (extern/ffmpeg/build.sh)
+/extern/ffmpeg/_build/
+/extern/ffmpeg/_native/

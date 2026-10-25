@@ -25,6 +25,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/ScttChunk.cpp   # SCTT RIFF chunk I/O (no AI dependency)
         ${CMAKE_SOURCE_DIR}/src/FileMeta.cpp    # unified metadata bundle + RIFF patching
         ${CMAKE_SOURCE_DIR}/src/MergeFiles.cpp  # multi-file merge (Shift + drag & drop)
+        ${CMAKE_SOURCE_DIR}/src/VideoAudio.cpp  # FFmpeg video-container audio extraction
         ${CMAKE_SOURCE_DIR}/src/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
 )
 
@@ -44,6 +45,11 @@ if (TARGET sc_openvino)
     # Vendored whisper.cpp b5454 C API header (see src/CMakeLists.txt).
     target_include_directories (SpectroCraftTests PRIVATE ${CMAKE_SOURCE_DIR}/extern/whisper-b5454/include)
     sc_enable_ai (SpectroCraftTests)
+endif()
+
+# FFmpeg runtime for video-container audio extraction (Windows only).
+if (TARGET sc_ffmpeg)
+    sc_enable_ffmpeg (SpectroCraftTests)
 endif()
 
 if (MSVC)

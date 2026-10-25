@@ -367,6 +367,9 @@ namespace scCrash
             // Fallback: hand-rolled .pdata walk (no dbghelp, no stale frames).
             std::fprintf (stderr, "[crash] StackWalk64 failed; raw Rip=0x%llX Rsp=0x%llX\n",
                           (unsigned long long) ctx->Rip, (unsigned long long) ctx->Rsp);
+            printAddr ("[crash] raw-rip", (DWORD64) ctx->Rip);
+            std::fprintf (stderr, "---- crashing-thread stack scan ----\n");
+            scanThreadStack (*ctx);
             manualWalk (ctx);
         }
 

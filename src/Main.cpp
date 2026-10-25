@@ -221,7 +221,7 @@ public:
                 {
                     std::cout << "failed to open " << in.getFullPathName() << "\n";
                     quit();
-                    return;
+                    return;   // ~AudioEngine runs here
                 }
                 const int64_t ms = juce::Time::getMillisecondCounter() - t0;
 

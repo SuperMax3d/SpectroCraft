@@ -25,6 +25,7 @@
 #include "SpectralMaskProcessor.h"
 #include "AI/DfStft.h"   // pure DSP, no OpenVINO dependency
 #include "ScttChunk.h"   // SCTT RIFF chunk + JSON (no AI dependency)
+#include "VideoAudio.h"  // video-container audio extraction (FFmpeg, Windows)
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
 #include "AI/ModelManager.h"
@@ -13106,6 +13107,385 @@ static void testMergeFiles()
     }
 }
 
+// ==============================================================================
+// Video container audio extraction (FFmpeg, Windows only).
+//
+// Builds tiny AVI files by hand so no external fixtures are needed:
+//  * makePcmAvi      - stereo PCM s16le audio track (440 Hz left / 880 Hz right)
+//  * makeVideoOnlyAvi- a video stream and NO audio stream
+// ==============================================================================
+namespace {   // file-local AVI builders for the video tests
+
+void aviPut32 (std::vector<uint8_t>& v, uint32_t x) {
+    v.push_back ((uint8_t) (x & 0xff)); v.push_back ((uint8_t) ((x >> 8) & 0xff));
+    v.push_back ((uint8_t) ((x >> 16) & 0xff)); v.push_back ((uint8_t) ((x >> 24) & 0xff)); }
+void aviPut16 (std::vector<uint8_t>& v, uint16_t x) {
+    v.push_back ((uint8_t) (x & 0xff)); v.push_back ((uint8_t) ((x >> 8) & 0xff)); }
+void aviPut4cc (std::vector<uint8_t>& v, const char* s) { for (int i = 0; i < 4; ++i) v.push_back ((uint8_t) s[i]); }
+
+/** Emits a RIFF chunk: 4-byte id + little-endian size + payload. */
+void aviChunk (std::vector<uint8_t>& out, const char* id, const std::vector<uint8_t>& payload)
+{
+    aviPut4cc (out, id);
+    aviPut32 (out, (uint32_t) payload.size());
+    out.insert (out.end(), payload.begin(), payload.end());
+}
+
+/** 56-byte AVI main header. */
+std::vector<uint8_t> aviMainHeader (uint32_t microPerSec, uint32_t totalFrames, uint32_t nStreams)
+{
+    std::vector<uint8_t> h;
+    aviPut32 (h, microPerSec);          // dwMicroPerSec
+    aviPut32 (h, 0);                    // dwMaxBytesPerSec
+    aviPut32 (h, 0);                    // dwPaddingBytes
+    aviPut32 (h, 0);                    // dwFlags
+    aviPut32 (h, totalFrames);          // dwTotalFrames
+    aviPut32 (h, 0);                    // dwInitialFrames
+    aviPut32 (h, nStreams);             // dwStreams
+    aviPut32 (h, 1 << 20);              // dwSuggestedBufferSize
+    aviPut32 (h, 0); aviPut32 (h, 0);   // dwWidth / dwHeight
+    return h;
+}
+
+/** 56-byte AVI stream header as written by FFmpeg's own muxer:
+    fccType(4) fccHandler(4) flags(4) priority(2) language(2)
+    initialFrames(4) scale(4) rate(4) start(4) length(4)
+    bufferSize(4) quality(4) sampleSize(4) reserved(4) width(2) height(2).
+    For audio: rate/scale = samples per unit, length = total samples,
+    sampleSize = block align (bytes per frame). */
+std::vector<uint8_t> aviStreamHeader (const char* type, const char* handler,
+                                      uint32_t scale, uint32_t rate,
+                                      uint32_t length, uint32_t sampleSize)
+{
+    std::vector<uint8_t> h;
+    aviPut4cc (h, type);                // fccType
+    aviPut4cc (h, handler);             // fccHandler
+    aviPut32 (h, 0);                    // flags
+    aviPut16 (h, 0);                    // priority
+    aviPut16 (h, 0);                    // language
+    aviPut32 (h, 0);                    // initial frames
+    aviPut32 (h, scale);                // scale
+    aviPut32 (h, rate);                 // rate (samples/sec for audio)
+    aviPut32 (h, 0);                    // start
+    aviPut32 (h, length);               // length (total samples for audio)
+    aviPut32 (h, 12 * 1024);            // suggested buffer size
+    aviPut32 (h, 0xFFFFFFFFu);          // quality (-1)
+    aviPut32 (h, sampleSize);           // sample size (block align for audio)
+    aviPut32 (h, 0);                    // reserved
+    aviPut16 (h, 0);                    // width
+    aviPut16 (h, 0);                    // height
+    return h;
+}
+
+/** Writes a stereo PCM s16le AVI: 440 Hz on the left channel, 880 Hz on the
+    right, quantised exactly like a classic 16-bit writer. */
+juce::File makePcmAvi (const juce::String& name, int rate, int totalSamples)
+{
+    const juce::File f = makeTempFile (name);
+    f.deleteFile();   // FileOutputStream appends to existing files!
+
+    const int samplesPerChunk = 882;
+    const int nChunks = (totalSamples + samplesPerChunk - 1) / samplesPerChunk;
+
+    // strf: WAVEFORMATEX, PCM s16le stereo.
+    std::vector<uint8_t> strf;
+    aviPut16 (strf, 1);                 // wFormatTag = PCM
+    aviPut16 (strf, 2);                 // nChannels
+    aviPut32 (strf, (uint32_t) rate);   // nSamplesPerSec
+    aviPut32 (strf, (uint32_t) rate * 4);// nAvgBytesPerSec
+    aviPut16 (strf, 4);                 // wBlockAlign
+    aviPut16 (strf, 16);                // wBitsPerSample
+    aviPut16 (strf, 0);                 // cbSize
+
+    std::vector<uint8_t> strk;
+    // The stream header chunk must be tagged "strh" (FFmpeg's demuxer only
+    // recognises that tag inside the strk list).
+    aviChunk (strk, "strh", aviStreamHeader ("auds", "intg", 1u, (uint32_t) rate,
+                                             (uint32_t) totalSamples, 4u));
+    aviChunk (strk, "strf", strf);
+
+    // 882 samples per chunk at `rate` Hz is exactly 20 ms = 20000 us/frame.
+    std::vector<uint8_t> hdrl;
+    aviChunk (hdrl, "avih", aviMainHeader (20000u, (uint32_t) nChunks, 1));
+    aviChunk (hdrl, "LIST", [] (const std::vector<uint8_t>& strk)
+             {   std::vector<uint8_t> l; aviPut4cc (l, "strk");
+                 l.insert (l.end(), strk.begin(), strk.end()); return l; } (strk));
+
+    // movi: 00db PCM data chunks (stream 0).
+    // Each chunk holds samplesPerChunk consecutive samples of the global
+    // timeline (440 Hz left / 880 Hz right), so the file is one continuous tone.
+    std::vector<uint8_t> movi;
+    for (int c = 0; c < nChunks; ++c)
+    {
+        const int inChunk = std::min (samplesPerChunk, totalSamples - c * samplesPerChunk);
+        std::vector<uint8_t> pcm;
+        for (int i = 0; i < inChunk; ++i)
+        {
+            const double t = (double) (c * samplesPerChunk + i) / rate;
+            const int16_t l = (int16_t) std::lround (std::sin (2.0 * juce::MathConstants<double>::pi
+                                                              * 440.0 * t) * 32767.0);
+            const int16_t r = (int16_t) std::lround (std::sin (2.0 * juce::MathConstants<double>::pi
+                                                              * 880.0 * t) * 32767.0);
+            aviPut16 (pcm, (uint16_t) l); aviPut16 (pcm, (uint16_t) r);
+        }
+
+        aviChunk (movi, "00db", pcm);
+    }
+
+    // A RIFF LIST chunk's payload starts with a 4-byte list-type fourcc.
+    std::vector<uint8_t> body;
+    aviPut4cc (body, "AVI ");
+    {   std::vector<uint8_t> l;
+        aviPut4cc (l, "LIST");
+        aviPut32 (l, 4u + (uint32_t) hdrl.size());
+        aviPut4cc (l, "hdrl");
+        l.insert (l.end(), hdrl.begin(), hdrl.end());
+        body.insert (body.end(), l.begin(), l.end()); }
+    {   std::vector<uint8_t> l;
+        aviPut4cc (l, "LIST");
+        aviPut32 (l, 4u + (uint32_t) movi.size());
+        aviPut4cc (l, "movi");
+        l.insert (l.end(), movi.begin(), movi.end());
+        body.insert (body.end(), l.begin(), l.end()); }
+
+    std::vector<uint8_t> file;
+    aviPut4cc (file, "RIFF");
+    aviPut32 (file, (uint32_t) body.size());
+    file.insert (file.end(), body.begin(), body.end());
+
+    if (auto out = f.createOutputStream())
+        out->write (file.data(), (int) file.size());
+    return f;
+}
+
+/** Writes an AVI with a single video stream and no audio at all. */
+juce::File makeVideoOnlyAvi (const juce::String& name)
+{
+    const juce::File f = makeTempFile (name);
+    f.deleteFile();   // FileOutputStream appends to existing files!
+
+    // strf: BITMAPINFOHEADER, 16x16 uncompressed RGB.
+    std::vector<uint8_t> strf;
+    aviPut32 (strf, 40);                // biSize
+    aviPut32 (strf, 16);                 // biWidth
+    aviPut32 (strf, 16);                 // biHeight
+    aviPut16 (strf, 1);                  // biPlanes
+    aviPut16 (strf, 24);                 // biBitCount
+    aviPut32 (strf, 0);                  // biCompression = BI_RGB
+    aviPut32 (strf, 0);                  // biSizeImage
+    for (int i = 0; i < 6; ++i) aviPut32 (strf, 0);
+
+    std::vector<uint8_t> strk;
+    // Video stream: rate/scale = frames per unit; sample size is 0.
+    aviChunk (strk, "strh", aviStreamHeader ("vids", "DIB ", 1u, 25u, 10u, 0u));
+    aviChunk (strk, "strf", strf);
+
+    std::vector<uint8_t> hdrl;
+    aviChunk (hdrl, "avih", aviMainHeader (40000, 10, 1));    // 25 fps = 40000 us/frame
+    {   std::vector<uint8_t> l; aviPut4cc (l, "strk");
+        l.insert (l.end(), strk.begin(), strk.end());
+        aviChunk (hdrl, "LIST", l); }
+
+    std::vector<uint8_t> frame (16 * 16 * 3, 0xAB);
+    std::vector<uint8_t> movi;
+    for (int i = 0; i < 10; ++i)
+        aviChunk (movi, "00dc", frame);   // video data chunks
+
+    // A RIFF LIST chunk's payload starts with a 4-byte list-type fourcc.
+    std::vector<uint8_t> body;
+    aviPut4cc (body, "AVI ");
+    {   std::vector<uint8_t> l; aviPut4cc (l, "LIST");
+        aviPut32 (l, 4u + (uint32_t) hdrl.size());
+        aviPut4cc (l, "hdrl");
+        l.insert (l.end(), hdrl.begin(), hdrl.end());
+        body.insert (body.end(), l.begin(), l.end()); }
+    {   std::vector<uint8_t> l; aviPut4cc (l, "LIST");
+        aviPut32 (l, 4u + (uint32_t) movi.size());
+        aviPut4cc (l, "movi");
+        l.insert (l.end(), movi.begin(), movi.end());
+        body.insert (body.end(), l.begin(), l.end()); }
+
+    std::vector<uint8_t> file;
+    aviPut4cc (file, "RIFF");
+    aviPut32 (file, (uint32_t) body.size());
+    file.insert (file.end(), body.begin(), body.end());
+
+    if (auto out = f.createOutputStream())
+        out->write (file.data(), (int) file.size());
+    return f;
+}
+
+} // namespace
+
+static void testVideoAudioExtraction()
+{
+#if defined(SC_ENABLE_FFMPEG) && SC_ENABLE_FFMPEG
+    const int rate = 44100;
+    const int totalSamples = 88200;   // exactly 2 s, and a multiple of the chunk size
+
+    auto expectedL = [] (int64_t i, double r) { return (float) std::lround (
+        std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (double) i / r) * 32767.0) / 32768.0f; };
+    auto expectedR = [] (int64_t i, double r) { return (float) std::lround (
+        std::sin (2.0 * juce::MathConstants<double>::pi * 880.0 * (double) i / r) * 32767.0) / 32768.0f; };
+
+    // --- 1. Reader level: hand-crafted PCM AVI ------------------------------
+    {
+        const juce::File avi = makePcmAvi ("video_test_audio.avi", rate, totalSamples);
+        CHECK (avi.existsAsFile(), "pcm avi written");
+
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        sc::registerVideoFormats (fm);
+        auto* r = fm.createReaderFor (avi);
+        CHECK (r != nullptr, "ffmpeg reader created for pcm avi");
+
+        if (r != nullptr)
+        {
+            CHECK (r->numChannels == 2u, "avi channel count");
+            CHECK (std::abs (r->sampleRate - rate) < 0.5, "avi sample rate");
+            CHECK (r->lengthInSamples == totalSamples, "avi length in samples");
+
+            // Sequential read from the start: sample-exact against what we wrote.
+            juce::AudioBuffer<float> buf (2, 1000);
+        
+            CHECK (r->read (&buf, 0, 1000, 0, true, true), "sequential avi read");
+
+        
+            bool exact = true;
+            for (int i = 0; i < 1000 && exact; ++i)
+                if (std::abs (buf.getSample (0, i) - expectedL (i, rate)) > 1e-6f
+                 || std::abs (buf.getSample (1, i) - expectedR (i, rate)) > 1e-6f)
+                    exact = false;
+            CHECK (exact, "sequential avi samples match the written sines");
+
+            // Random access mid-file: also sample-exact.
+            const int64 off = 12345;
+            juce::AudioBuffer<float> buf2 (2, 500);
+            CHECK (r->read (&buf2, 0, 500, off, true, true), "random-access avi read");
+            bool exact2 = true;
+            for (int i = 0; i < 500 && exact2; ++i)
+                if (std::abs (buf2.getSample (0, i) - expectedL (off + i, rate)) > 1e-6f
+                 || std::abs (buf2.getSample (1, i) - expectedR (off + i, rate)) > 1e-6f)
+                    exact2 = false;
+            CHECK (exact2, "random-access avi samples match the written sines");
+
+            // Reading past EOF: the in-range part is real data, the rest zeros.
+            juce::AudioBuffer<float> buf3 (2, 50);
+            CHECK (r->read (&buf3, 0, 50, totalSamples - 10, true, true), "tail avi read");
+            bool tailOk = std::abs (buf3.getSample (0, 9) - expectedL (totalSamples - 1, rate)) < 1e-6f;
+            for (int i = 10; i < 50 && tailOk; ++i)
+                if (buf3.getSample (0, i) != 0.0f || buf3.getSample (1, i) != 0.0f)
+                    tailOk = false;
+            CHECK (tailOk, "beyond-EOF region is zero-filled");
+
+            delete r;
+        }
+    }
+
+    // --- 2. Full engine load + save round-trip ------------------------------
+    {
+        const juce::File avi = makePcmAvi ("video_test_engine.avi", rate, totalSamples);
+        AudioEngine eng;
+        CHECK (eng.loadFile (avi), "engine loads the pcm avi");
+        CHECK (eng.isFileLoaded(), "engine has file after avi load");
+        CHECK (eng.numChannels() == 2, "engine channel count from avi");
+        CHECK (std::abs (eng.sampleRate() - rate) < 0.5, "engine sample rate from avi");
+        CHECK (eng.numSamples() == totalSamples, "engine length from avi");
+
+        std::vector<std::vector<float>> win;
+        CHECK (eng.readRange (44100, 44100, win), "engine readRange on avi");   // second half
+        CHECK (win.size() == 2u, "readRange returned both channels");
+        if (win.size() == 2u)
+        {
+            // goertzelAmp returns the sine's peak amplitude; our tones are
+            // written at full scale (32767/32768), so expect ~1.0.
+            const double aL = goertzelAmp (win[0].data(), (int) win[0].size(), 440.0, rate);
+            const double aR = goertzelAmp (win[1].data(), (int) win[1].size(), 880.0, rate);
+            CHECK (std::abs (aL - 32767.0 / 32768.0) < 0.02, "left channel holds the 440 Hz tone");
+            CHECK (std::abs (aR - 32767.0 / 32768.0) < 0.02, "right channel holds the 880 Hz tone");
+        }
+
+        // Save as a plain WAV and verify the audio survived the round-trip.
+        const juce::File wavOut = makeTempFile ("video_test_saved.wav");
+        {
+            juce::WavAudioFormat wavFmt;
+            auto rawStream = std::make_unique<juce::FileOutputStream> (wavOut);
+            if (!rawStream->failedToOpen())
+            {
+                std::unique_ptr<juce::OutputStream> fileStream (std::move (rawStream));   // writer takes ownership
+                const juce::AudioFormatWriterOptions opts =
+                    juce::AudioFormatWriterOptions {}.withNumChannels (2)
+                                                      .withSampleRate ((double) rate)
+                                                      .withBitsPerSample (16);
+                auto writer = wavFmt.createWriterFor (fileStream, opts);   // takes ownership
+                if (writer != nullptr)
+                {
+                    juce::AudioBuffer<float> all (2, totalSamples);
+                    std::vector<std::vector<float>> full;
+                    if (eng.readRange (0, totalSamples, full) && full.size() == 2u)
+                        for (int c = 0; c < 2; ++c)
+                            std::memcpy (all.getWritePointer (c), full[c].data(),
+                                         (size_t) totalSamples * sizeof (float));
+                    CHECK (writer->writeFromAudioSampleBuffer (all, 0, totalSamples),
+                          "wav writer wrote the avi audio");
+                }
+            }
+        }
+        CHECK (wavOut.existsAsFile(), "saved wav exists");
+
+        juce::AudioFormatManager fm2;
+        fm2.registerBasicFormats();
+        auto* r = fm2.createReaderFor (wavOut);
+        CHECK (r != nullptr, "saved wav readable by native formats");
+        if (r != nullptr)
+        {
+            CHECK (r->numChannels == 2u, "saved wav channel count");
+            CHECK (std::abs (r->sampleRate - rate) < 0.5, "saved wav sample rate");
+            CHECK (r->lengthInSamples == totalSamples, "saved wav length");
+            juce::AudioBuffer<float> back (2, 1000);
+            r->read (&back, 0, 1000, 0, true, true);
+            bool close = true;
+            for (int i = 0; i < 1000 && close; ++i)
+                if (std::abs (back.getSample (0, i) - expectedL (i, rate)) > 2e-4f
+                 || std::abs (back.getSample (1, i) - expectedR (i, rate)) > 2e-4f)
+                    close = false;
+            CHECK (close, "saved wav samples match the original sines");
+            delete r;
+        }
+    }
+
+    // --- 3. Video-only AVI: no audio stream -> rejected gracefully ----------
+    {
+        const juce::File avi = makeVideoOnlyAvi ("video_test_videoonly.avi");
+        CHECK (avi.existsAsFile(), "video-only avi written");
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        sc::registerVideoFormats (fm);
+        CHECK (fm.createReaderFor (avi) == nullptr, "no-audio avi is rejected");
+    }
+
+    // --- 4. Native formats keep priority on shared extensions ---------------
+    {
+        const juce::File wav = makeTempFile ("video_test_priority.wav");
+        writeWav (wav, 1, 8000.0, 800,
+                  [] (int, int64_t s, double r) { return 0.5f * (float) std::sin (
+                      2.0 * juce::MathConstants<double>::pi * 100.0 * (double) s / r); });
+        juce::AudioFormatManager fm;
+        fm.registerBasicFormats();
+        sc::registerVideoFormats (fm);
+        auto* r = fm.createReaderFor (wav);
+        CHECK (r != nullptr && r->getFormatName() == "WAV file",
+              "native wav reader wins over ffmpeg");
+        delete r;
+    }
+#else
+    // No FFmpeg on this platform: registration must be a harmless no-op.
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    sc::registerVideoFormats (fm);
+#endif
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -13253,6 +13633,7 @@ static int scRunUnitTestsImpl()
     progress ("paste to new channels");   testPasteToNewChannels();
     progress ("channel row geometry");    testChannelRowGeometry();
     progress ("merge files");           testMergeFiles();
+    progress ("video audio extraction"); testVideoAudioExtraction();
     progress ("version string");      testVersionString();
     progress ("probe embedded selections"); testProbeEmbeddedSelections();
     progress ("metadata suite");          testMetadataSuite();

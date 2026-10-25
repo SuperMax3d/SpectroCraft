@@ -3,6 +3,7 @@
  */
 
 #include "AudioEngine.h"
+#include "VideoAudio.h"
 #include "SpectralMaskProcessor.h"
 #include "Resampler.h"
 #include "UndoManager.h"
@@ -15,6 +16,7 @@ AudioEngine::AudioEngine()
 {
     fm = std::make_unique<juce::AudioFormatManager>();
     fm->registerBasicFormats();
+    sc::registerVideoFormats (*fm);   // video containers (.mp4/.mkv/...) — no-op without FFmpeg
 }
 
 AudioEngine::~AudioEngine()
@@ -69,7 +71,7 @@ bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> o
     }
 
     // Mipmap construction is the second half of the load for streamed files.
-    bool mipsOk = true;
+    bool mipsOk;
     if (onProgress)
     {
         auto p = std::move (onProgress);
