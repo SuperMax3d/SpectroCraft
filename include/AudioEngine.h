@@ -204,6 +204,10 @@ public:
         saveScmdBuilder = std::move (builder);
     }
 
+    // Raw payload of the source file's "bkdk" calibration chunk, preserved
+    // byte-for-byte in WAV saves. nullptr or empty string = no chunk.
+    void setBkdkForSave (const std::string* raw) { saveBkdkPayload = raw; }
+
     // ---- Waveform overview mipmaps (min/max pyramid) ----
     struct MipLevel { int64_t factor; std::vector<std::vector<float>> min, max; };
     const std::vector<MipLevel>& mipmaps() const { return mips; }
@@ -285,6 +289,7 @@ private:
     const std::string* saveScttJson = nullptr;          // for the WAV SCTT chunk
     const sc::MetaMode* saveMetaMode = nullptr;         // for WAV metadata mode
     std::function<std::string()> saveScmdBuilder;       // SCMD bundle JSON builder
+    const std::string* saveBkdkPayload = nullptr;       // raw "bkdk" chunk to preserve
 
     void clearMipmaps();
     bool saveWavWithMarkers (const juce::File& file) const;

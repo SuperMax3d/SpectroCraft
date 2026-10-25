@@ -25,6 +25,7 @@
 #include "SpectralMaskProcessor.h"
 #include "AI/DfStft.h"   // pure DSP, no OpenVINO dependency
 #include "ScttChunk.h"   // SCTT RIFF chunk + JSON (no AI dependency)
+#include "BkdkChunk.h"   // bkdk per-channel calibration chunk parsing
 #include "VideoAudio.h"  // video-container audio extraction (FFmpeg, Windows)
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
@@ -3974,8 +3975,9 @@ static void testSetScaleDialog()
             CHECK (combo->getSelectedId () == 1, "defaults to None for an uncalibrated file");
         }
 
-        auto* editor = dlg->getTextEditor ("value");
-        CHECK (editor != nullptr, "scale value field exists");
+        // One full-scale field per channel; this file is mono so there is one.
+        auto* editor = dlg->getTextEditor ("fs0");
+        CHECK (editor != nullptr, "per-channel scale field exists");
         if (editor != nullptr)
         {
             CHECK (editor->getHighlightedRegion () == juce::Range<int> (0, 3),
@@ -4002,6 +4004,325 @@ static void testSetScaleDialog()
     panel.reset();
     delete mm;
     wav.deleteFile ();
+}
+
+// ------------------------------------------------- bkdk calibration
+// The custom "bkdk" RIFF chunk found in some legacy measurement WAV files
+// carries per-channel Calibration gains: loading such a WAV must
+// auto-calibrate to Pascal, and saving it again must preserve the chunk
+// byte-for-byte.
+static void testBkdkCalibration()
+{
+    // Helper: append NUL-terminated fields to a payload.
+    auto makePayload = [] (std::vector<std::string> fields) -> std::string
+    {
+        std::string p;
+        for (const auto& s : fields)
+        {
+            p += s;
+            p += '\0';
+        }
+        return p;
+    };
+    // One 11-field channel group with the given Calibration value.
+    auto group = [] (const std::string& cal) -> std::vector<std::string>
+    {
+        return { "None", "0.050", "", "0 dB", "", "1.00", "",
+                 cal, "0.0", "130.0", "SQ0" };
+    };
+
+    // ---- Parser: payload with two channel groups ----
+    {
+        std::vector<std::string> f = { "2.10", "2024-05-01 10:00:00" };
+        for (const auto& s : group ("2.5"))  f.push_back (s);
+        for (const auto& s : group ("3.75")) f.push_back (s);
+        f.push_back ("END");   // Foot
+        const std::string p = makePayload (f) + "\0\0\0";   // trailing padding
+
+        sc::BkdkData bk;
+        CHECK (sc::parseBkdkPayload (p, bk), "two-group payload parses");
+        CHECK (bk.version == "2.10" && bk.date.contains ("2024-05-01"),
+               "version + date parsed");
+        CHECK (bk.numGroups () == 2, "two channel groups found");
+        CHECK (std::abs (bk.calibrationFor (0) - 2.5) < 1e-9,
+               "ch1 calibration = 2.5");
+        CHECK (std::abs (bk.calibrationFor (1) - 3.75) < 1e-9,
+               "ch2 calibration = 3.75");
+        CHECK (bk.calibrationFor (2) == 1.0, "missing group falls back to 1.0");
+        CHECK (bk.foot == "END", "foot parsed after the groups");
+    }
+
+    // ---- Parser: single-group payload applies to all channels ----
+    {
+        std::vector<std::string> f = { "2.10", "date" };
+        for (const auto& s : group ("4")) f.push_back (s);
+        f.push_back ("END");
+
+        sc::BkdkData bk;
+        CHECK (sc::parseBkdkPayload (makePayload (f), bk), "single-group payload parses");
+        CHECK (bk.numGroups () == 1, "one channel group found");
+        CHECK (std::abs (bk.calibrationFor (0) - 4.0) < 1e-9
+              && std::abs (bk.calibrationFor (7) - 4.0) < 1e-9,
+               "single group applies to every channel");
+    }
+
+    // ---- Parser: malformed payloads are rejected or defaulted ----
+    {
+        sc::BkdkData bk;
+        CHECK (!sc::parseBkdkPayload ("", bk), "empty payload rejected");
+        std::string one = "onlyone\0";
+        CHECK (!sc::parseBkdkPayload (one, bk), "single token rejected");
+
+        sc::BkdkData b2;
+        CHECK (sc::parseBkdkPayload (makePayload ({ "v", "d" }), b2),
+               "version+date only parses");
+        CHECK (b2.numGroups () == 0 && b2.calibrationFor (0) == 1.0,
+               "no groups -> uncalibrated fallback");
+
+        // Unparseable calibration text falls back to 1.0.
+        std::vector<std::string> f = { "v", "d" };
+        for (const auto& s : group ("oops")) f.push_back (s);
+        sc::BkdkData b3;
+        CHECK (sc::parseBkdkPayload (makePayload (f), b3),
+               "group with bad calibration text parses");
+        CHECK (b3.calibrationFor (0) == 1.0, "bad calibration text -> 1.0");
+    }
+
+    // ---- FileDoc load: per-channel Pascal auto-calibration + save round-trip ----
+    {
+        const juce::File wav = makeTempFile ("bkdk_multi.wav");
+        writeWav (wav, 2, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * (ch == 0 ? 300.0 : 700.0) * (double) f / rate);
+        });
+
+        std::vector<std::string> f = { "2.10", "date" };
+        for (const auto& s : group ("2.5"))  f.push_back (s);
+        for (const auto& s : group ("3.75")) f.push_back (s);
+        f.push_back ("END");
+        const std::string payload = makePayload (f) + "\0\0\0";
+
+        RiffPatchEntry e;
+        std::memcpy (e.fourcc, "bkdk", 4);
+        e.payload = payload;
+        std::vector<RiffPatchEntry> entries;
+        entries.push_back (e);
+        std::string err;
+        CHECK (patchRiffChunks (wav, entries, &err), "add bkdk chunk: " + err);
+
+        Application app;
+        CHECK (app.openFile (wav), "open bkdk wav");
+        FileDoc& d = *app.docs[0];
+        CHECK (d.scale.unit == ScaleCalibration::Unit::Pascal,
+               "bkdk switches the unit to Pascal");
+        CHECK (std::abs (d.scale.fullScaleFor (0) - 2.5) < 1e-9,
+               "ch1 full scale from its bkdk Calibration");
+        CHECK (std::abs (d.scale.fullScaleFor (1) - 3.75) < 1e-9,
+               "ch2 full scale from its bkdk Calibration");
+        CHECK (d.scale.hasPerChannelValues (), "per-channel values stored");
+        CHECK (d.scale.shortDescription () == "2.5/3.75 Pa",
+               "file list shows both distinct values");
+
+        // Save to a new WAV: the bkdk chunk must survive byte-for-byte.
+        const juce::File out = makeTempFile ("bkdk_saved.wav");
+        CHECK (d.engine.saveFileAs (out), "save as wav");
+        std::string saved;
+        CHECK (readRiffChunkPayload (out, "bkdk", saved, false, true),
+               "saved file has bkdk chunk");
+        CHECK (saved == payload, "bkdk payload preserved byte-for-byte");
+
+        // The audio data must still be intact after the save.
+        Application app2;
+        CHECK (app2.openFile (out), "reopen saved wav");
+        CHECK (app2.audioEngine().numChannels () == 2
+              && app2.audioEngine().numSamples () == 4000,
+               "saved audio intact (channels + length)");
+    }
+
+    // ---- FileDoc load: single group applies to every channel ----
+    {
+        const juce::File wav = makeTempFile ("bkdk_single.wav");
+        writeWav (wav, 2, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 400.0 * (double) f / rate);
+        });
+
+        std::vector<std::string> f = { "2.10", "date" };
+        for (const auto& s : group ("4")) f.push_back (s);
+        f.push_back ("END");
+        const std::string payload = makePayload (f);
+
+        RiffPatchEntry e;
+        std::memcpy (e.fourcc, "bkdk", 4);
+        e.payload = payload;
+        std::vector<RiffPatchEntry> entries;
+        entries.push_back (e);
+        std::string err;
+        CHECK (patchRiffChunks (wav, entries, &err), "add single-group bkdk: " + err);
+
+        Application app;
+        CHECK (app.openFile (wav), "open single-group bkdk wav");
+        FileDoc& d = *app.docs[0];
+        CHECK (d.scale.unit == ScaleCalibration::Unit::Pascal, "unit is Pascal");
+        CHECK (std::abs (d.scale.fullScaleFor (0) - 4.0) < 1e-9
+              && std::abs (d.scale.fullScaleFor (1) - 4.0) < 1e-9,
+               "single group value applied to both channels");
+        CHECK (!d.scale.hasPerChannelValues (), "equal values collapse to one");
+        CHECK (d.scale.shortDescription () == "4 Pa", "file list shows the shared value");
+    }
+
+    // ---- A stored (SCMD) calibration must be overridden by bkdk ----
+    {
+        const juce::File wav = makeTempFile ("bkdk_override.wav");
+        writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 400.0 * (double) f / rate);
+        });
+
+        RiffPatchEntry scmd;
+        std::memcpy (scmd.fourcc, "SCMD", 4);
+        scmd.payload = "{\"app\":\"SpectroCraft\",\"version\":1,"\
+                       "\"scale\":{\"unit\":1,\"fullScaleValue\":9}}";   // Volts 9
+        RiffPatchEntry bk;
+        std::memcpy (bk.fourcc, "bkdk", 4);
+        std::vector<std::string> f = { "2.10", "date" };
+        for (const auto& s : group ("7")) f.push_back (s);
+        bk.payload = makePayload (f);
+
+        std::vector<RiffPatchEntry> entries;
+        entries.push_back (scmd);
+        entries.push_back (bk);
+        std::string err;
+        CHECK (patchRiffChunks (wav, entries, &err), "add SCMD + bkdk: " + err);
+
+        Application app;
+        CHECK (app.openFile (wav), "open wav with SCMD scale + bkdk");
+        FileDoc& d = *app.docs[0];
+        CHECK (d.scale.unit == ScaleCalibration::Unit::Pascal,
+               "bkdk overrides the stored Volts calibration");
+        CHECK (std::abs (d.scale.fullScaleFor (0) - 7.0) < 1e-9,
+               "full scale comes from bkdk, not SCMD");
+    }
+
+    // ---- Files without bkdk: no auto-calibration, save adds no chunk ----
+    {
+        const juce::File wav = makeTempFile ("bkdk_absent.wav");
+        writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 400.0 * (double) f / rate);
+        });
+
+        Application app;
+        CHECK (app.openFile (wav), "open plain wav");
+        FileDoc& d = *app.docs[0];
+        CHECK (!d.scale.isCalibrated (), "no bkdk -> no auto-calibration");
+
+        const juce::File out = makeTempFile ("bkdk_absent_saved.wav");
+        CHECK (d.engine.saveFileAs (out), "save plain wav");
+        std::string saved;
+        CHECK (!readRiffChunkPayload (out, "bkdk", saved), "no bkdk chunk added");
+    }
+
+    // ---- ScaleCalibration per-channel helpers + formatters ----
+    {
+        ScaleCalibration sc;
+        sc.unit = ScaleCalibration::Unit::Pascal;
+        sc.fullScaleValue = 2.0;
+        std::vector<double> pv { 3.0 };
+        sc.channelFullScale = pv;
+
+        CHECK (sc.isCalibratedFor (0) && sc.isCalibratedFor (1),
+               "both channels calibrated (ch2 via the shared fallback)");
+        CHECK (std::abs (sc.fullScaleFor (-1) - 2.0) < 1e-9,
+               "default channel uses the shared value");
+        CHECK (std::abs (sc.fullScaleFor (5) - 2.0) < 1e-9,
+               "out-of-range channel falls back to the shared value");
+
+        // Pascal: offset = 20*log10(full/2e-5). full=2 -> +100 dB, full=3 -> +103.52 dB.
+        CHECK (ScaleCalibration::formatSpectralLevel (-6.0, sc) == "94.0 dB-SPL",
+               "default channel level label");
+        CHECK (ScaleCalibration::formatSpectralLevel (-6.0, sc, 0) == "97.5 dB-SPL",
+               "per-channel level label uses its own full scale");
+
+        ScaleCalibration plain;
+        plain.unit = ScaleCalibration::Unit::Pascal;
+        plain.fullScaleValue = 2.0;
+        CHECK (plain.shortDescription () == "2 Pa", "uniform short description");
+    }
+
+    // ---- applyScaleValues commit semantics (scale dialog OK button) ----
+    {
+        FileDoc d;
+        std::vector<double> two { 2.5, 3.75 };
+        CHECK (FileListPanel::applyScaleValues (d, ScaleCalibration::Unit::Pascal, two),
+               "distinct values accepted");
+        CHECK (d.scale.unit == ScaleCalibration::Unit::Pascal
+              && d.scale.hasPerChannelValues ()
+              && std::abs (d.scale.fullScaleFor (0) - 2.5) < 1e-9
+              && std::abs (d.scale.fullScaleFor (1) - 3.75) < 1e-9,
+               "distinct values stored per channel");
+
+        std::vector<double> same { 4.0, 4.0 };
+        CHECK (FileListPanel::applyScaleValues (d, ScaleCalibration::Unit::Volts, same),
+               "equal values accepted");
+        CHECK (!d.scale.hasPerChannelValues () && d.scale.fullScaleValue == 4.0,
+               "equal values collapse into one shared value");
+
+        std::vector<double> bad { 1.0, -1.0 };
+        CHECK (!FileListPanel::applyScaleValues (d, ScaleCalibration::Unit::Volts, bad),
+               "negative value rejected");
+        CHECK (d.scale.fullScaleValue == 4.0 && !d.scale.hasPerChannelValues (),
+               "rejected commit leaves the scale untouched");
+
+        std::vector<double> any { -5.0 };
+        CHECK (FileListPanel::applyScaleValues (d, ScaleCalibration::Unit::None, any),
+               "unit None always accepted");
+        CHECK (!d.scale.isCalibrated () && d.scale.fullScaleValue == 0.0,
+               "unit None clears the calibration");
+    }
+
+    // ---- Scale dialog: one field per channel with per-channel prefill ----
+    {
+        const juce::File wav = makeTempFile ("bkdk_dialog.wav");
+        writeWav (wav, 2, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+        {
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 400.0 * (double) f / rate);
+        });
+
+        Application app;
+        CHECK (app.openFile (wav), "open wav for per-channel dialog test");
+        FileDoc& d = *app.docs[0];
+        d.scale.unit = ScaleCalibration::Unit::Pascal;
+        d.scale.fullScaleValue = 2.5;
+        std::vector<double> pv { 2.5, 3.75 };
+        d.scale.channelFullScale = pv;
+
+        juce::MessageManager* mm = juce::MessageManager::getInstance();
+        std::unique_ptr<FileListPanel> panel (new FileListPanel (app));
+        juce::AlertWindow* dlg = panel->createScaleDialog (d);
+        CHECK (dlg != nullptr, "per-channel dialog created");
+        if (dlg != nullptr)
+        {
+            auto* e0 = dlg->getTextEditor ("fs0");
+            auto* e1 = dlg->getTextEditor ("fs1");
+            CHECK (e0 != nullptr && e1 != nullptr, "one field per channel");
+            if (e0 != nullptr && e1 != nullptr)
+            {
+                CHECK (e0->getText () == "2.5", "ch1 prefilled with its value");
+                CHECK (e1->getText () == "3.75", "ch2 prefilled with its value");
+            }
+            delete dlg;
+        }
+
+        panel.reset();
+        delete mm;
+        wav.deleteFile ();
+    }
 }
 
 // ------------------------------------- spectral controls level scale labels
@@ -13580,6 +13901,7 @@ static int scRunUnitTestsImpl()
     progress ("change gain dialog");  testChangeGainDialog();
     progress ("scale calibration");   testScaleCalibration();
     progress ("set scale dialog");    testSetScaleDialog();
+    progress ("bkdk calibration");    testBkdkCalibration();
     progress ("spectral scale labels"); testSpectralScaleLabels();
     progress ("spectral dB window"); testSpectralDbWindow();
     progress ("right-drag box zoom"); testRightDragZoom();

@@ -39,8 +39,11 @@ bool parseScttJson(const std::string& json, ScttData& out, std::string* errOut =
 
 // Read the raw payload of one top-level RIFF chunk (e.g. "SCMD"). For LIST
 // chunks set adtlList to only match sub-lists of type "adtl".
+// keepTrailingZeros keeps trailing NUL bytes verbatim instead of trimming them
+// (needed for byte-for-byte preservation of chunks that end in zeros).
 bool readRiffChunkPayload(const juce::File& wavFile, const char fourcc[4],
-                          std::string& out, bool adtlList = false);
+                          std::string& out, bool adtlList = false,
+                          bool keepTrailingZeros = false);
 
 // Read the "SCTT" chunk from a WAV file. Returns false when absent or unreadable.
 bool readScttChunk(const juce::File& wavFile, ScttData& out, std::string* errOut = nullptr);

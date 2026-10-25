@@ -2,6 +2,7 @@
 // SpectroCraft - per-file scale calibration (physical units at full scale)
 #include <JuceHeader.h>
 #include <cmath>
+#include <algorithm>
 
 /** Physical-unit calibration for one loaded file.
     When the user sets e.g. "2 Pascal", a full-scale sample (|1.0|) corresponds
@@ -9,22 +10,49 @@
       - Pascal -> dB-SPL   (reference 20 uPa)
       - Volts  -> dBV      (reference 1 V)
       - g      -> dB/g     (reference 1 g)
-    "None" leaves every readout as plain relative dB. */
+    "None" leaves every readout as plain relative dB.
+
+    The unit is shared by all channels, but each channel may carry its own
+    full-scale value (e.g. some legacy "bkdk" WAV files store one Calibration per
+    channel). An empty channelFullScale means every channel uses the single
+    fullScaleValue. */
 struct ScaleCalibration
 {
     enum class Unit { None, Volts, Pascal, Grams };
 
     Unit unit = Unit::None;
     double fullScaleValue = 0.0;   // physical value at |1.0| (in the chosen unit)
+    std::vector<double> channelFullScale;   // per-channel overrides (empty = uniform)
 
-    bool isCalibrated() const { return unit != Unit::None && fullScaleValue > 0.0; }
-
-    /** dB offset added to relative-dB readouts: 20*log10(fullScaleValue/ref). */
-    double levelOffsetDb() const
+    bool isCalibrated() const
     {
-        if (!isCalibrated()) return 0.0;
+        if (unit == Unit::None) return false;
+        if (fullScaleValue > 0.0) return true;
+        for (const double v : channelFullScale)
+            if (v > 0.0) return true;
+        return false;
+    }
+
+    bool hasPerChannelValues() const { return !channelFullScale.empty(); }
+
+    /** Full-scale value for one channel; ch < 0 or out of range = the default. */
+    double fullScaleFor (int ch) const
+    {
+        if (ch >= 0 && ch < static_cast<int> (channelFullScale.size())
+            && channelFullScale[static_cast<size_t> (ch)] > 0.0)
+            return channelFullScale[static_cast<size_t> (ch)];
+        return fullScaleValue;
+    }
+
+    bool isCalibratedFor (int ch = -1) const { return unit != Unit::None && fullScaleFor (ch) > 0.0; }
+
+    /** dB offset added to relative-dB readouts: 20*log10(fullScale/ref).
+        ch < 0 = default full-scale value. */
+    double levelOffsetDb (int ch = -1) const
+    {
+        if (!isCalibratedFor (ch)) return 0.0;
         const double ref = (unit == Unit::Pascal) ? 2e-5 : 1.0;
-        return 20.0 * std::log10 (fullScaleValue / ref);
+        return 20.0 * std::log10 (fullScaleFor (ch) / ref);
     }
 
     /** Label for absolute level readouts: "dB-SPL" / "dBV" / "dB/g" / "dB". */
@@ -63,10 +91,22 @@ struct ScaleCalibration
         }
     }
 
-    /** Short description for the file list, e.g. "2 Pa" (empty when unset). */
+    /** Short description for the file list, e.g. "2 Pa" (empty when unset).
+        Per-channel files show the distinct values joined, e.g. "2/3 Pa". */
     juce::String shortDescription() const
     {
         if (!isCalibrated()) return {};
+        if (hasPerChannelValues())
+        {
+            std::vector<double> uniq;
+            for (const double v : channelFullScale)
+                if (std::find (uniq.begin(), uniq.end(), v) == uniq.end())
+                    uniq.push_back (v);
+            juce::String joined;
+            for (size_t i = 0; i < uniq.size(); ++i)
+                joined += (i == 0 ? "" : "/") + formatPhysicalValue (uniq[i]);
+            return joined + unitSuffix();
+        }
         return formatPhysicalValue (fullScaleValue) + unitSuffix();
     }
 
@@ -101,25 +141,26 @@ struct ScaleCalibration
         return s;
     }
 
-    /** Absolute level readout for a relative-dB value: "-18.1 dB-SPL" / "-96.1 dB". */
-    static juce::String formatLevelDb (double relativeDb, const ScaleCalibration& sc)
+    /** Absolute level readout for a relative-dB value: "-18.1 dB-SPL" / "-96.1 dB".
+        ch < 0 = default full-scale value. */
+    static juce::String formatLevelDb (double relativeDb, const ScaleCalibration& sc, int ch = -1)
     {
-        const double v = (relativeDb > -290.0 ? relativeDb : -300.0) + sc.levelOffsetDb();
+        const double v = (relativeDb > -290.0 ? relativeDb : -300.0) + sc.levelOffsetDb (ch);
         return juce::String (v, 1) + " " + sc.levelUnitLabel();
     }
 
     /** Waveform axis label for a grid line `gridDb` dB below full scale. */
-    static juce::String formatWaveformAxisValue (double gridDb, const ScaleCalibration& sc)
+    static juce::String formatWaveformAxisValue (double gridDb, const ScaleCalibration& sc, int ch = -1)
     {
-        if (!sc.isCalibrated()) return juce::String ((int) gridDb);
-        return formatPhysicalValue (sc.fullScaleValue * std::pow (10.0, gridDb / 20.0));
+        if (!sc.isCalibratedFor (ch)) return juce::String ((int) gridDb);
+        return formatPhysicalValue (sc.fullScaleFor (ch) * std::pow (10.0, gridDb / 20.0));
     }
 
     /** Linear time-domain value under the cursor: "0.42" or "1.68 Pa". */
-    static juce::String formatLinearValue (double normalized, const ScaleCalibration& sc)
+    static juce::String formatLinearValue (double normalized, const ScaleCalibration& sc, int ch = -1)
     {
-        if (!sc.isCalibrated()) return juce::String (normalized, 2);
-        return formatPhysicalValue (normalized * sc.fullScaleValue) + sc.unitSuffix();
+        if (!sc.isCalibratedFor (ch)) return juce::String (normalized, 2);
+        return formatPhysicalValue (normalized * sc.fullScaleFor (ch)) + sc.unitSuffix();
     }
 
     /** True when frequency/spectral level readouts should be plain physical values
@@ -166,25 +207,26 @@ struct ScaleCalibration
     }
 
     /** Level readout for frequency/spectral displays. Volts/Grams show the linear
-        physical value ("0.42 V"); Pascal shows dB-SPL; uncalibrated shows plain dB. */
-    static juce::String formatSpectralLevel (double relativeDb, const ScaleCalibration& sc)
+        physical value ("0.42 V"); Pascal shows dB-SPL; uncalibrated shows plain dB.
+        ch < 0 = default full-scale value. */
+    static juce::String formatSpectralLevel (double relativeDb, const ScaleCalibration& sc, int ch = -1)
     {
-        if (!sc.isCalibrated()) return juce::String (relativeDb, 1) + " dB";
+        if (!sc.isCalibratedFor (ch)) return juce::String (relativeDb, 1) + " dB";
         if (sc.usesLinearLevels())
-            return formatLevelValue (sc.fullScaleValue * std::pow (10.0, relativeDb / 20.0))
+            return formatLevelValue (sc.fullScaleFor (ch) * std::pow (10.0, relativeDb / 20.0))
                    + sc.unitSuffix();
-        return formatLevelDb (relativeDb, sc);
+        return formatLevelDb (relativeDb, sc, ch);
     }
 
     /** FFT-view axis label for a grid line `gridDb` dB below full scale.
         Volts/Grams show the linear value with unit ("0.251 V"); Pascal shows the
         absolute level; uncalibrated keeps plain relative dB. */
-    static juce::String formatAxisLabel (int gridDb, const ScaleCalibration& sc)
+    static juce::String formatAxisLabel (int gridDb, const ScaleCalibration& sc, int ch = -1)
     {
-        if (!sc.isCalibrated()) return juce::String (gridDb);
+        if (!sc.isCalibratedFor (ch)) return juce::String (gridDb);
         if (sc.usesLinearLevels())
-            return formatLevelValue (sc.fullScaleValue * std::pow (10.0, gridDb / 20.0))
+            return formatLevelValue (sc.fullScaleFor (ch) * std::pow (10.0, gridDb / 20.0))
                    + sc.unitSuffix();
-        return juce::String ((int) std::lround ((double) gridDb + sc.levelOffsetDb()));
+        return juce::String ((int) std::lround ((double) gridDb + sc.levelOffsetDb (ch)));
     }
 };

@@ -401,7 +401,7 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
             vText = juce::String (value, 3);
             break;
         default:
-            vText = ScaleCalibration::formatLinearValue (value, app.scale());
+            vText = ScaleCalibration::formatLinearValue (value, app.scale(), ch);
             break;
     }
 
@@ -552,9 +552,11 @@ void WaveformView::paint (juce::Graphics& g)
     const auto rows = channelRowRects (pr.getWidth(), waveH, visCount);
 
     int row = 0;
+    std::vector<int> rowChans;   // channel index per visible row (per-channel scales)
     for (int ch = 0; ch < chans; ++ch)
     {
         if (ch >= (int) chanVis.size() || !chanVis[ch]) continue;
+        rowChans.push_back (ch);
         const auto& rr = rows[(size_t) row];
         const int chanY = pr.getY() + rr.getY();
         const int chanH = rr.getHeight();
@@ -575,7 +577,7 @@ void WaveformView::paint (juce::Graphics& g)
         ++row;
     }
 
-    drawAmplitudeAxis (g, rows);
+    drawAmplitudeAxis (g, rows, rowChans);
     drawRuler (g);
 
     // Overlays are drawn ON TOP of the waveform so they stay visible
@@ -802,7 +804,8 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
     g.restoreState();
 }
 
-void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce::Rectangle<int>>& rows)
+void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce::Rectangle<int>>& rows,
+                                      const std::vector<int>& rowChans)
 {
     const auto pr = plotRect();
     if (pr.getHeight() <= 0 || rows.empty()) return;
@@ -848,7 +851,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
                     && std::abs (yUp - center) >= 9.0f)
                 {
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
-                    g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, true),
+                    const int chUp = (r < rowChans.size()) ? rowChans[r] : -1;
+                    g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, true, chUp),
                                2, (int) yUp - 7,
                                kLeftAxisWidth - 4, 14, juce::Justification::centredRight, false);
                 }
@@ -859,7 +863,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
                     && std::abs (yDown - center) >= 9.0f)
                 {
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
-                    g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, false),
+                    const int chDn = (r < rowChans.size()) ? rowChans[r] : -1;
+                    g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, false, chDn),
                                2, (int) yDown - 7,
                                kLeftAxisWidth - 4, 14, juce::Justification::centredRight, false);
                 }
@@ -1129,7 +1134,7 @@ double niceSampleStep (double samplesPerPixel)
 }
 
 juce::String formatWaveVScaleLabel (double gridDb, int mode, const ScaleCalibration& sc,
-                                    bool positiveSide)
+                                    bool positiveSide, int ch)
 {
     switch (mode)
     {
@@ -1147,7 +1152,7 @@ juce::String formatWaveVScaleLabel (double gridDb, int mode, const ScaleCalibrat
         }
         default:
             // Wav Units: physical value when calibrated, relative dB otherwise.
-            return ScaleCalibration::formatWaveformAxisValue (gridDb, sc);
+            return ScaleCalibration::formatWaveformAxisValue (gridDb, sc, ch);
     }
 }
 

@@ -276,6 +276,13 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
     auto scale = new juce::DynamicObject();
     scale->setProperty ("unit", static_cast<int> (b.scale.unit));
     scale->setProperty ("fullScaleValue", b.scale.fullScaleValue);
+    if (!b.scale.channelFullScale.empty())
+    {
+        juce::Array<juce::var> arr;
+        for (const double v : b.scale.channelFullScale)
+            arr.add (juce::var (v));
+        scale->setProperty ("channelFullScale", arr);
+    }
     root->setProperty ("scale", scale);
 
     auto appendAltRefs = [] (const std::vector<AltScaleRefData>& list,
@@ -388,6 +395,13 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
         ScaleCalibration sc;
         sc.unit = static_cast<ScaleCalibration::Unit> (static_cast<int> (sp.getWithDefault ("unit", 0)));
         sc.fullScaleValue = std::max (1e-30, static_cast<double> (sp.getWithDefault ("fullScaleValue", 1.0)));
+        if (sp.contains ("channelFullScale"))
+        {
+            const juce::var v = sp.getWithDefault ("channelFullScale", juce::var());
+            if (v.isArray())
+                for (const auto& item : *static_cast<const juce::Array<juce::var>*> (v.getArray()))
+                    sc.channelFullScale.push_back (std::max (1e-30, static_cast<double> (item)));
+        }
         out.scale = sc;
     }
 

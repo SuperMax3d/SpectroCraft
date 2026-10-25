@@ -1384,10 +1384,16 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
     if (embedded && saveScmdBuilder)
         scmdPayload = saveScmdBuilder();   // unified bundle JSON for the SCMD chunk
 
+    // "bkdk" calibration chunk: preserved byte-for-byte from the source
+    // file whenever it was present there (independent of metadata mode).
+    const std::string* bkdk = (saveBkdkPayload != nullptr && !saveBkdkPayload->empty ())
+                              ? saveBkdkPayload : nullptr;
+
     const int64_t cueChunk  = !cuePayload.empty()  ? 8 + (int64_t) cuePayload.size () : 0;
     const int64_t listChunk = !adtlPayload.empty() ? 8 + (int64_t) adtlPayload.size () : 0;
     const int64_t scttChunk = sctt != nullptr     ? 8 + (int64_t) sctt->size () : 0;
     const int64_t scmdChunk = !scmdPayload.empty() ? 8 + (int64_t) scmdPayload.size () : 0;
+    const int64_t bkdkChunk = bkdk != nullptr     ? 8 + (int64_t) bkdk->size () : 0;
 
     const int64_t riffSize = 4            // "WAVE"
                            + 8 + 16       // fmt chunk
@@ -1395,7 +1401,8 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
                            + cueChunk
                            + listChunk
                            + scttChunk
-                           + scmdChunk;
+                           + scmdChunk
+                           + bkdkChunk;
 
     file.deleteFile(); // FileOutputStream appends to existing files!
     auto out = std::make_unique<juce::FileOutputStream> (file);
@@ -1480,6 +1487,14 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
         putFourCC (*out, "SCMD");
         putU32 (*out, (uint32_t) scmdPayload.size());
         ok = out->write (scmdPayload.data(), scmdPayload.size());
+    }
+
+    // bkdk chunk: the source file's calibration data, verbatim.
+    if (bkdkChunk > 0 && ok)
+    {
+        putFourCC (*out, "bkdk");
+        putU32 (*out, (uint32_t) (bkdkChunk - 8));
+        ok = out->write (bkdk->data (), bkdk->size());
     }
 
     if (ok)

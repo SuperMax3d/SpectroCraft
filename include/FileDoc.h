@@ -6,6 +6,7 @@
 #include "SavedSelections.h"
 #include "ScaleCalibration.h"
 #include "ScttChunk.h"
+#include "BkdkChunk.h"
 #include "FileMeta.h"
 #include "UndoManager.h"
 
@@ -28,6 +29,12 @@ public:
     SpectralSelection spectralSel;     // per-file spectral (time x frequency) selection
     std::vector<int> visibleChannels;  // sorted channel indices to display
     ScaleCalibration scale;            // physical-unit calibration (Set Unit and Scale menu)
+
+    /** Raw payload of the source file's "bkdk" RIFF chunk, kept so WAV
+        saves can preserve it byte-for-byte. Empty when the source had none.
+        Loading a file with this chunk auto-calibrates `scale` to Pascal using
+        each channel's Calibration field (see src/FileDoc.cpp). */
+    std::string originalBkdkPayload;
 
     // Named spectral selections (Selection panel). Persisted automatically with
     // the file's metadata bundle (embedded SCMD chunk or .meta.json sidecar).

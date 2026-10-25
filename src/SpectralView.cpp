@@ -756,7 +756,7 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
 
     const double factor = (app.specFreqScaleMode == 1) ? app.specFreqFactor : 1.0;
     juce::String info = tText + "   f=" + formatFreqAxisLabel (freq, factor)
-                        + "   " + ScaleCalibration::formatSpectralLevel (dB, app.scale());
+                        + "   " + ScaleCalibration::formatSpectralLevel (dB, app.scale(), ch);
 
     // Alternative scale overlays: every enabled reference, by name.
     for (const auto& r : app.altTimeRefs)

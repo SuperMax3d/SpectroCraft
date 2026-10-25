@@ -155,6 +155,13 @@ public:
         without running the modal loop). */
     juce::AlertWindow* createScaleDialog (FileDoc& d);
 
+    /** Applies confirmed scale-dialog values to a document: unit None clears
+        the calibration; equal per-channel values collapse into one shared
+        full-scale value, differing ones are stored per channel. Returns false
+        when any value is not positive (unit None always succeeds). */
+    static bool applyScaleValues (FileDoc& d, ScaleCalibration::Unit unit,
+                                  const std::vector<double>& vals);
+
 private:
     Application& app;
     juce::TextButton openBtn, closeBtn;

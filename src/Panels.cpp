@@ -328,26 +328,59 @@ void FileListPanel::showFileMenu (int row)
     else if (r == 5 && onCloseRequested) onCloseRequested();
 }
 
+// Field name for channel ch's full-scale editor in the scale dialog.
+static juce::String scaleFieldId (int ch) { return juce::String ("fs") + juce::String (ch); }
+
+bool FileListPanel::applyScaleValues (FileDoc& d, ScaleCalibration::Unit unit,
+                                      const std::vector<double>& vals)
+{
+    if (unit == ScaleCalibration::Unit::None || vals.empty())
+    {
+        d.scale.unit = unit;
+        d.scale.fullScaleValue = 0.0;
+        d.scale.channelFullScale.clear();
+        return true;
+    }
+
+    for (const double v : vals)
+        if (!(v > 0.0)) return false;   // caller shows the error dialog
+
+    bool same = true;
+    for (size_t i = 1; i < vals.size() && same; ++i)
+        if (vals[i] != vals[0]) same = false;
+
+    d.scale.unit = unit;
+    d.scale.fullScaleValue = vals[0];
+    d.scale.channelFullScale.clear();
+    if (!same && vals.size() > 1)
+        d.scale.channelFullScale = vals;   // per-channel full-scale values
+    return true;
+}
+
 juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
 {
     auto* dlg = new juce::AlertWindow (
         "Set Unit and Scale",
         "Calibrate the physical units of this file.\n"
-        "Full scale (|1.0|) equals the value you enter below.",
+        "Full scale (|1.0|) equals the value you enter below.\n"
+        "Each channel can have its own full-scale value.",
         juce::AlertWindow::NoIcon);
     dlg->setColour (juce::AlertWindow::backgroundColourId,
                    juce::Colour::fromRGB (45, 45, 48));
 
+    // One shared unit for all channels...
     dlg->addComboBox ("unit", { "None", "Volts", "Pascal", "g" }, "Units:");
     auto* unitCombo = dlg->getComboBoxComponent ("unit");
 
-    dlg->addTextEditor (
-        "value",
-        d.scale.fullScaleValue > 0.0 ? juce::String (d.scale.fullScaleValue) : "1.0",
-        "Full scale:");
-    auto* valEdit = dlg->getTextEditor ("value");
+    // ...and one full-scale field per channel.
+    const int nch = std::max (1, d.engine.numChannels());
+    for (int ch = 0; ch < nch; ++ch)
+        dlg->addTextEditor (
+            scaleFieldId (ch),
+            d.scale.fullScaleFor (ch) > 0.0 ? juce::String (d.scale.fullScaleFor (ch)) : "1.0",
+            "Full scale ch" + juce::String (ch + 1) + ":");
 
-    if (unitCombo == nullptr || valEdit == nullptr)
+    if (unitCombo == nullptr || dlg->getTextEditor (scaleFieldId (0)) == nullptr)
     {
         delete dlg;
         return nullptr;
@@ -357,9 +390,15 @@ juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
     unitCombo->setSelectedId ((int) d.scale.unit + 1,
                              juce::NotificationType::dontSendNotification);
 
-    // The value field only makes sense when a unit is selected.
-    auto syncEnabled = [unitCombo, valEdit] {
-        valEdit->setEnabled (unitCombo->getSelectedId() != 1);
+    // The value fields only make sense when a unit is selected.
+    auto syncEnabled = [dlg, unitCombo] {
+        const bool on = (unitCombo->getSelectedId() != 1);
+        for (int ch = 0; ; ++ch)
+        {
+            juce::TextEditor* e = dlg->getTextEditor (scaleFieldId (ch));
+            if (e == nullptr) break;
+            e->setEnabled (on);
+        }
     };
     unitCombo->onChange = syncEnabled;
     syncEnabled();
@@ -367,9 +406,10 @@ juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
     dlg->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     dlg->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
-    // Focus the field with its text pre-selected so a new value can be typed
-    // in immediately. AlertWindow disables keyboard focus on its editors, so
-    // re-enable it first or grabKeyboardFocus() would bounce to a button.
+    // Focus the first field with its text pre-selected so a new value can be
+    // typed in immediately. AlertWindow disables keyboard focus on its editors,
+    // so re-enable it first or grabKeyboardFocus() would bounce to a button.
+    auto* valEdit = dlg->getTextEditor (scaleFieldId (0));
     valEdit->setWantsKeyboardFocus (true);
     valEdit->selectAll();
     valEdit->grabKeyboardFocus();
@@ -385,23 +425,27 @@ void FileListPanel::showScaleDialog (int row)
     auto* dlg = createScaleDialog (d);
     const int result = dlg->runModalLoop();
     juce::ComboBox* unitCombo = dlg->getComboBoxComponent ("unit");
-    juce::TextEditor* valEdit = dlg->getTextEditor ("value");
 
-    if (result == 1 && unitCombo != nullptr && valEdit != nullptr)
+    if (result == 1 && unitCombo != nullptr)
     {
         const auto unit = (ScaleCalibration::Unit) (unitCombo->getSelectedId() - 1);
-        const double v = valEdit->getText().trim().getDoubleValue();
-        if (unit == ScaleCalibration::Unit::None || v > 0.0)
+        const int nch = std::max (1, d.engine.numChannels());
+        std::vector<double> vals ((size_t) nch);
+        for (int ch = 0; ch < nch; ++ch)
         {
-            d.scale.unit = unit;
-            d.scale.fullScaleValue = (unit == ScaleCalibration::Unit::None) ? 0.0 : v;
+            juce::TextEditor* e = dlg->getTextEditor (scaleFieldId (ch));
+            vals[(size_t) ch] = (e != nullptr) ? e->getText().trim().getDoubleValue() : -1.0;
+        }
+
+        if (applyScaleValues (d, unit, vals))
+        {
             refresh();   // file list shows the new scale under the entry
             if (app.onStateChange) app.onStateChange();   // repaint views with the new units
         }
         else
         {
             juce::AlertWindow err ("Set Unit and Scale",
-                                   "Please enter a positive value for the full-scale level.",
+                                   "Please enter a positive value for every channel's full-scale level.",
                                    juce::AlertWindow::NoIcon);
             err.setColour (juce::AlertWindow::backgroundColourId,
                            juce::Colour::fromRGB (45, 45, 48));
@@ -2445,6 +2489,12 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
         snapDotY = pxy.second;
     }
 
+    // Curve index c maps to visible channel app.visibleChannels[c].
+    auto curveCh = [&] (size_t c) -> int
+    {
+        return (c < app.visibleChannels.size()) ? app.visibleChannels[(size_t) c] : -1;
+    };
+
     if (isTimeAxisMode())
     {
         info = "Cursor:  t=" + formatTimeTickLabel (xToTime ((double) x));
@@ -2458,9 +2508,11 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
                                       ? cd.freqHz[nearest[c]] / 1000.0 : cd.freqHz[nearest[c]], 2)
                       + (cd.freqHz[nearest[c]] >= 1000.0 ? " kHz" : " Hz")
                       + altFreqSuffix (app, cd.freqHz[nearest[c]])
-                      + ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc);
+                      + ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc,
+                                                              curveCh (c));
             else
-                info += ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc);
+                info += ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc,
+                                                              curveCh (c));
         }
     }
     else   // Amp vs Freq: cursor frequency + per-channel level at the nearest bin.
@@ -2473,7 +2525,8 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
             const auto& cd = liveCurves[c];
             if (cd.x.empty()) continue;
             info += ",  Ch" + juce::String ((int) c + 1) + "="
-                  + ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc);
+                  + ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc,
+                                                          curveCh (c));
         }
         info += altFreqSuffix (app, f);
     }
@@ -2536,7 +2589,8 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < (int) thirdOctMags[c].size())
                     info += ",  Ch" + juce::String ((int) c + 1) + "="
-                          + ScaleCalibration::formatSpectralLevel (-kNormFloorDb + thirdOctMags[c][(size_t) b] * kNormFloorDb, sc);
+                          + ScaleCalibration::formatSpectralLevel (-kNormFloorDb + thirdOctMags[c][(size_t) b] * kNormFloorDb, sc,
+                                                                  (c < app.visibleChannels.size()) ? app.visibleChannels[(size_t) c] : -1);
         }
     }
     else
@@ -2578,7 +2632,8 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
                  + (fExact >= 1000.0 ? " kHz" : " Hz")
                  + altFreqSuffix (app, fExact)
                  + "   [snap Ch" + juce::String (snapCh + 1) + "]"
-                 + ScaleCalibration::formatSpectralLevel (-kNormFloorDb * (1.0 - (double) mags[snapCh][bin]), sc);
+                 + ScaleCalibration::formatSpectralLevel (-kNormFloorDb * (1.0 - (double) mags[snapCh][bin]), sc,
+                                                          (snapCh < (int) app.visibleChannels.size()) ? app.visibleChannels[(size_t) snapCh] : -1);
         }
         else
         {
@@ -2588,7 +2643,8 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
                 if (mags[c].empty()) continue;
                 const int bin = binAt (f);
                 info += ",  Ch" + juce::String ((int) c + 1) + "="
-                      + ScaleCalibration::formatSpectralLevel (-kNormFloorDb * (1.0 - (double) mags[c][bin]), sc);
+                      + ScaleCalibration::formatSpectralLevel (-kNormFloorDb * (1.0 - (double) mags[c][bin]), sc,
+                                                              (c < app.visibleChannels.size()) ? app.visibleChannels[(size_t) c] : -1);
             }
             info += altFreqSuffix (app, f);
         }

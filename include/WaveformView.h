@@ -180,7 +180,9 @@ private:
 
     void paintChannel (juce::Graphics& g, int ch, int chanY, int chanH, float center, float amp);
     void drawRuler (juce::Graphics& g);
-    void drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce::Rectangle<int>>& rows);
+    /** rowChans[r] = channel index displayed in row r (per-channel scales). */
+    void drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce::Rectangle<int>>& rows,
+                            const std::vector<int>& rowChans);
     void zoomAtX (int x, double factor);
     void panByTime (double dt);
 
@@ -249,6 +251,6 @@ double niceSampleStep (double samplesPerPixel);
 /** Label text for the grid line `gridDb` dB below full scale.
     `positiveSide` selects the +a / -a sign in Normalized mode. */
 juce::String formatWaveVScaleLabel (double gridDb, int mode, const ScaleCalibration& sc,
-                                    bool positiveSide);
+                                    bool positiveSide, int ch = -1);
 /** Axis title for the waveform's left axis under the active vertical scale. */
 juce::String waveVScaleTitle (int mode, const ScaleCalibration& sc);

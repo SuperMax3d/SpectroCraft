@@ -336,7 +336,8 @@ static bool readU32le(juce::InputStream& in, uint32_t* v)
 }
 
 bool readRiffChunkPayload(const juce::File& wavFile, const char fourcc[4],
-                          std::string& out, bool adtlList)
+                          std::string& out, bool adtlList,
+                          bool keepTrailingZeros)
 {
     juce::FileInputStream in (wavFile);
     if (!wavFile.existsAsFile () || in.failedToOpen ()) return false;
@@ -369,7 +370,8 @@ bool readRiffChunkPayload(const juce::File& wavFile, const char fourcc[4],
         {
             out.assign ((size_t) size, '\0');
             if (in.read (out.data (), size) != (int) size) return false;   // truncated payload
-            while (!out.empty () && out.back () == '\0') out.pop_back ();   // RIFF padding
+            if (!keepTrailingZeros)
+                while (!out.empty () && out.back () == '\0') out.pop_back ();   // RIFF padding
             return true;
         }
 

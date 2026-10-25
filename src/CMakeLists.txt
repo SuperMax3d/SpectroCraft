@@ -26,6 +26,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/Resampler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FFTAvx.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ScttChunk.cpp   # SCTT RIFF chunk I/O (no AI dependency)
+        ${CMAKE_CURRENT_SOURCE_DIR}/BkdkChunk.cpp   # B&K bkdk calibration chunk parsing
         ${CMAKE_CURRENT_SOURCE_DIR}/FileMeta.cpp    # unified metadata bundle + RIFF patching
         ${CMAKE_CURRENT_SOURCE_DIR}/MergeFiles.cpp  # multi-file merge (Shift + drag & drop)
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoAudio.cpp  # FFmpeg video-container audio extraction

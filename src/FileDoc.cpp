@@ -14,6 +14,7 @@ FileDoc::FileDoc()
     engine.setMarkersForSave (&markers.markers());
     engine.setScttForSave (&scttJson);
     engine.setMetaModeForSave (&metaMode);
+    engine.setBkdkForSave (&originalBkdkPayload);   // preserve the source's bkdk chunk on WAV saves
     engine.setScmdJsonForSave ([this] () { return buildScmdJson (); });
     markers.onChange = [this] { metaDirty = true; };
 }
@@ -92,6 +93,36 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
                    : (scmdB.haveFreqAnalysis ? scmdB.freqAnalysis : sc::FreqAnalysisState {});
     haveStoredAltRef       = unifiedB.haveAltRef || scmdB.haveAltRef;
     haveStoredFreqAnalysis = unifiedB.haveFreqAnalysis || scmdB.haveFreqAnalysis;
+
+    // "bkdk" calibration chunk (if present): auto-calibrate to Pascal using
+    // each channel's Calibration field. A single defined group applies to every
+    // channel; the raw payload is kept so WAV saves preserve it byte-for-byte.
+    originalBkdkPayload.clear();
+    if (isWav)
+    {
+        std::string raw;
+        if (readRiffChunkPayload (f, "bkdk", raw, false, true))
+        {
+            sc::BkdkData bk;
+            if (sc::parseBkdkPayload (raw, bk))
+            {
+                originalBkdkPayload = raw;
+                const int nch = engine.numChannels();
+                std::vector<double> vals ((size_t) nch);
+                for (int i = 0; i < nch; ++i)
+                    vals[(size_t) i] = bk.calibrationFor (i);
+
+                scale.unit = ScaleCalibration::Unit::Pascal;
+                bool same = true;
+                for (int i = 1; i < nch && same; ++i)
+                    if (vals[(size_t) i] != vals[0]) same = false;
+                scale.fullScaleValue = vals.empty() ? 1.0 : vals[0];
+                scale.channelFullScale.clear();
+                if (!same && vals.size() > 1)
+                    scale.channelFullScale = std::move (vals);
+            }
+        }
+    }
 
     // Transcription: unified > SCTT chunk (legacy files may carry it embedded
     // even when other categories live in sidecars).
