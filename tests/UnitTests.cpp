@@ -4592,10 +4592,10 @@ static void testSpectralDbWindow()
     SpectralControlsPanel panel (app);
     panel.setSize (260, 170);
 
-    // Defaults: window [-80, 0], range 80.
-    CHECK (app.settings.dbMinDb == -80.0f && app.settings.dbMaxDb == 0.0f, "default window");
-    CHECK (panel.getDbRangeSliderValue() == 80.0, "slider shows default range");
-    CHECK (panel.getDbMinText() == "-80.0 dB", "default min label");
+    // Defaults: window [-120, 0], range 120.
+    CHECK (app.settings.dbMinDb == -120.0f && app.settings.dbMaxDb == 0.0f, "default window");
+    CHECK (panel.getDbRangeSliderValue() == 120.0, "slider shows default range");
+    CHECK (panel.getDbMinText() == "-120.0 dB", "default min label");
     CHECK (panel.getDbMaxText() == "0.0 dB",   "default max label");
 
     // The slider reaches 160 dB: the top edge stays fixed, the bottom moves down.
@@ -5526,7 +5526,7 @@ static void testFFTViewInteractions()
     const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
     const juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
 
-    // --- Wheel zoom: factor = pow(1.25, -deltaY) around the cursor frequency ---
+    // --- Wheel zoom: factor = pow(1.25, deltaY), same direction as the tracks ---
     {
         FFTAnalysisView view (app);
         view.setSize (300, 200);
@@ -5547,19 +5547,39 @@ static void testFFTViewInteractions()
             view.mouseWheelMove (mkMouse (view, x, y, {}), wd);
         };
 
-        // Wheel down (deltaY=-1) zooms in by 1.25x around the cursor.
-        wheel (cx, plot.getY() + plot.getHeight() / 2, -1.0f);
+        // Wheel up (deltaY=+1) zooms in by 1.25x around the cursor.
+        wheel (cx, plot.getY() + plot.getHeight() / 2, +1.0f);
         const double expLo = std::exp (std::log (fC) + (std::log (fLo0) - std::log (fC)) / 1.25);
         const double expHi = std::exp (std::log (fC) + (std::log (fHi0) - std::log (fC)) / 1.25);
         CHECK (std::abs (view.getFreqLo() - expLo) / expLo < 1e-6
               && std::abs (view.getFreqHi() - expHi) / expHi < 1e-6,
-               "wheel down zooms the frequency window in around the cursor");
+               "wheel up zooms the frequency window in around the cursor");
 
-        // Wheel up again restores the original range.
-        wheel (cx, plot.getY() + plot.getHeight() / 2, +1.0f);
+        // Wheel down again restores the original range.
+        wheel (cx, plot.getY() + plot.getHeight() / 2, -1.0f);
         CHECK (std::abs (view.getFreqLo() - fLo0) / fLo0 < 1e-6
               && std::abs (view.getFreqHi() - fHi0) / fHi0 < 1e-6,
-               "wheel up restores the original frequency window");
+               "wheel down restores the original frequency window");
+
+        // Shift+wheel zooms only vertically around the cursor level: up shrinks
+        // the window, down expands it again (no reset to defaults).
+        const double dbTop0 = view.getDbTop(), dbBot0 = view.getDbBottom();
+        const int cy = plot.getY() + plot.getHeight() / 2;
+        const double dbC = view.yToLevel ((float) cy);
+        juce::MouseWheelDetails wdShift; wdShift.deltaY = +1.0f;
+        view.mouseWheelMove (mkMouse (view, cx, cy,
+                                      juce::ModifierKeys (juce::ModifierKeys::shiftModifier)), wdShift);
+        const double expTop = dbC + (dbTop0 - dbC) / 1.25;
+        const double expBot = dbC + (dbBot0 - dbC) / 1.25;
+        CHECK (std::abs (view.getDbTop() - expTop) < 1e-6
+              && std::abs (view.getDbBottom() - expBot) < 1e-6,
+               "shift+wheel up zooms the level window in around the cursor");
+        juce::MouseWheelDetails wdShift2; wdShift2.deltaY = -1.0f;
+        view.mouseWheelMove (mkMouse (view, cx, cy,
+                                      juce::ModifierKeys (juce::ModifierKeys::shiftModifier)), wdShift2);
+        CHECK (std::abs (view.getDbTop() - dbTop0) < 1e-6
+              && std::abs (view.getDbBottom() - dbBot0) < 1e-6,
+               "shift+wheel down restores the original level window");
     }
 
     // --- Right-drag box zoom: horizontal = frequency, vertical = level ---
@@ -5936,7 +5956,7 @@ static void testFFTViewExtremeZoom()
         const int cx = plot.getX() + plot.getWidth() / 2;
         for (int i = 0; i < 40; ++i)
         {
-            juce::MouseWheelDetails wd; wd.deltaY = -1.0f;
+            juce::MouseWheelDetails wd; wd.deltaY = +1.0f;
             view.mouseWheelMove (mkMouse (view, cx, plot.getY() + plot.getHeight() / 2, {}), wd);
         }
 
@@ -9670,7 +9690,7 @@ static void testCurveAnalysisModes()
 
         // Wheel zoom-in at the centre: both edges move inward.
         juce::MouseWheelDetails wheel;
-        wheel.deltaY = -2.0f;   // factor = 1.25^2 > 1 -> zoom in
+        wheel.deltaY = +2.0f;   // factor = 1.25^2 > 1 -> zoom in
         view.mouseWheelMove (mkMouse (view, midX, midY, {}), wheel);
         CHECK (view.getCurveViewT0() > 0.0 && view.getCurveViewT1() < 1.0
              && view.getCurveViewT1() - view.getCurveViewT0() < 1.0,
@@ -9678,7 +9698,7 @@ static void testCurveAnalysisModes()
 
         // Wheel out hard: clamps back to the full region.
         juce::MouseWheelDetails wheel2;
-        wheel2.deltaY = 8.0f;   // factor << 1 -> zoom out
+        wheel2.deltaY = -8.0f;   // factor << 1 -> zoom out
         view.mouseWheelMove (mkMouse (view, midX, midY, {}), wheel2);
         CHECK (std::abs (view.getCurveViewT0() - 0.0) < 1e-6
              && std::abs (view.getCurveViewT1() - 1.0) < 1e-6,

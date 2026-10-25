@@ -1262,8 +1262,10 @@ void FFTAnalysisView::zoomLevelAtY (float y, double factor)
     if (plot.getHeight() <= 0) return;
 
     const double dbCursor = std::clamp ((double) yToLevel (y), -240.0, 40.0);
-    double top = dbTop_ + (dbTop_ - dbCursor) / factor;
-    double bot = dbBottom_ + (dbBottom_ - dbCursor) / factor;
+    // Anchor on the cursor like the frequency/time zooms: factor > 1 shrinks
+    // the window around it (zoom in), factor < 1 expands it (zoom out).
+    double top = dbCursor + (dbTop_ - dbCursor) / factor;
+    double bot = dbCursor + (dbBottom_ - dbCursor) / factor;
 
     // Keep the window span in a sane range and stay inside absolute limits.
     const double span = std::clamp (top - bot, 10.0, 320.0);
@@ -3811,7 +3813,8 @@ void FFTAnalysisView::mouseWheelMove (const juce::MouseEvent& e, const juce::Mou
     if (!plot.contains (e.x, e.y) && e.x <= plot.getRight() && e.y <= plot.getBottom())
         return;   // ignore the control strip
 
-    const double factor = std::pow (1.25, -wheel.deltaY);
+    // Same direction as the waveform view: wheel up zooms in, down zooms out.
+    const double factor = std::pow (1.25, wheel.deltaY);
     if (isTimeAxisMode())
     {
         // Time-based modes: the wheel zooms both axes at the cursor - the

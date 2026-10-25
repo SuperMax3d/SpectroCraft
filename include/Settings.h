@@ -54,7 +54,7 @@ struct Settings
     float maxFrequency = 20000.0f;
     // Spectrogram level window in dB relative to full scale (0 = FS): the
     // colour map spans [dbMinDb, dbMaxDb] and magnitudes outside it clamp.
-    float dbMinDb = -80.0f;     // bottom of the window (left end of the palette)
+    float dbMinDb = -120.0f;    // bottom of the window (left end of the palette)
     float dbMaxDb = 0.0f;       // top of the window (right end; 0 = full scale)
 
     /** Window width in dB (the "dB range"). */

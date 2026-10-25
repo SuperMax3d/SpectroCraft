@@ -173,11 +173,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     settings**: magnitudes are always normalised against a fixed −160 dB
     floor, while what you *see* is controlled by two independent windows —
     a frequency window (default 20 Hz–20 kHz in log mode) and a level window
-    (default 0…−80 dB). Interactions:
+    (default 0…−120 dB). Interactions:
 
     - **Mouse wheel** over the plot zooms the frequency window around the
-      cursor; **Shift+wheel** (or wheel over the right level axis) zooms the
-      level window instead.
+      cursor — same direction as the tracks: wheel up zooms in, wheel down
+      zooms out; **Shift+wheel** (or wheel over the right level axis) zooms
+      only the level window instead, anchored on the cursor.
     - **Right-drag a box** (a rubber-band rectangle is shown while dragging):
       horizontal span sets the frequency window, vertical span sets the level
       window (both at once if you drag in both directions). A plain right-click
