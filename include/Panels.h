@@ -505,18 +505,45 @@ public:
     static const double* thirdOctCentres() noexcept;
     static int numThirdOctBands() noexcept;
 
-private:
-    Application& app;
-    juce::ComboBox fftSizeCombo, windowCombo, axisCombo;
-    // Curve-mode options (visible only in the new analysis modes):
-    juce::ComboBox refTimeCombo, smoothCombo, trackCombo;
-    SnapshotButton snapBtns[8];
+    // Decade-based band centres of the dB-SPL pipeline: fc(i) = 1000 * 10^((i-30)/10)
+    // for i = 17..43 (50.12 Hz .. 19952.6 Hz, 27 bands). Used when a Pascal
+    // full-scale value is set and the view shows dB-SPL levels that match the
+    // reference analyzer's 1/3-octave computation.
+    static const double* thirdOptCentresRef() noexcept;
+    static int numThirdOptBandsRef() noexcept;
+
+    /** Reference-analyzer 1/3-octave band levels (the dB-SPL pipeline): fixed
+        65536-point Hanning frames at 50% overlap, frame-averaged power spectrum,
+        Butterworth bandpass weighting of order 2*`order`, and the classic +98.5 dB
+        offset. Returns one value per band (27 bands) in this view's relative-dB
+        level space: formatSpectralLevel() renders it as dB-SPL once a Pascal
+        full-scale value is set, reproducing the reference analyzer's numbers. */
+    static std::vector<float> thirdOctBandsRef (const AudioEngine& eng, int ch,
+                                                double t0, double t1, int order);
+
+    // True when the 1/3-octave view runs the dB-SPL pipeline (Pascal-calibrated file).
+    bool pascalThirdOct() const;
+
+    // Centre frequencies / band count of the active 1/3-octave pipeline.
+    const double* bandCentres() const;
+    int numBands() const;
 
     // Fixed normalization floor for the stored magnitudes: independent of the
     // visible level window so zooming out never changes the curve data.
     static constexpr double kNormFloorDb = 160.0;
 
+private:
+    Application& app;
+    juce::ComboBox fftSizeCombo, windowCombo, axisCombo;
+    // Octave order of the dB-SPL bandpass (1/3-octave mode with Pascal scale).
+    juce::ComboBox orderCombo;
+    // Curve-mode options (visible only in the new analysis modes):
+    juce::ComboBox refTimeCombo, smoothCombo, trackCombo;
+    SnapshotButton snapBtns[8];
+
     int localN = 2048;          // independent from the spectrogram's FFT size
+    // Octave order of the dB-SPL bandpass (one of 1,2,3,4,5,10,20,30,40).
+    int thirdOctOrder_ = 40;
     // Axis mode: 0 = "FFT Linear", 1 = "FFT Log" (default),
     // 2 = "1/3 Octave" (band plot, 50 Hz .. 16 kHz),
     // 3 = "Freq vs Time", 4 = "Amp vs Time", 5 = "Amp vs Freq".
@@ -555,6 +582,7 @@ private:
         bool shown = false;
         std::vector<std::vector<float>> mags;   // per channel, dB-normalized 0..1
         std::vector<std::vector<float>> bands;  // 1/3-octave conversion (per channel)
+        bool dbSpl = false;                     // bands came from the dB-SPL pipeline
         FileDoc* source = nullptr;              // file this snapshot was stored from
         std::vector<int> chans;                 // visible channels at store time
     };
@@ -580,8 +608,8 @@ private:
 
     // Cached spectrum data
     std::vector<std::vector<float>> mags;   // per channel, normalized 0..1 vs kNormFloorDb
-    // Per-channel 1/3-octave band values (normalized 0..1), one entry per
-    // band with centre <= Nyquist. Only populated when axisMode_ == 2.
+    // Per-channel 1/3-octave band values in the view's relative-dB space (dB
+    // below full scale), one entry per band. Only populated when axisMode_ == 2.
     std::vector<std::vector<float>> thirdOctMags;
     // Live curves for the new analysis modes (one per visible channel).
     std::vector<CurveData> liveCurves;
@@ -596,6 +624,11 @@ private:
     // hit on t0/t1 alone would draw stale curves.
     double cachedRate = -1.0;
     juce::File cachedFile;
+    // Scale unit at compute time: switching between calibrated (Pascal) and
+    // uncalibrated files changes the 1/3-octave pipeline, so it is part of the
+    // live-cache key.
+    int cachedScaleUnit_ = -1;
+    bool cachedPascalMode_ = false;
     int64_t lastComputeMs = 0;
     bool lastComputeWasExpensive = false;   // multi-window averaging (throttle key)
     int cursorX = -1, cursorY = -1;

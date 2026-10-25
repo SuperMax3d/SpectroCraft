@@ -31,6 +31,7 @@ struct FreqAnalysisState
     // mode when it is activated.
     int axisMode = 1;     // 0..5 (classic FFT / log / 1/3-oct + curve modes)
     int fftSize = 2048;   // local FFT size (classic + Amp vs Freq mode)
+    int thirdOctOrder = 40;   // dB-SPL bandpass order: 1,2,3,4,5,10,20,30 or 40
     int refTime = 0;      // 0 relative, 1 absolute
     int smooth = 0;       // 0 / 3 / 5 cent window
     int track = 0;        // 0 max component, 1 total level

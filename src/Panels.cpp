@@ -29,8 +29,9 @@ static std::vector<int> sparseRows (const juce::SparseSet<int>& s)
 }
 
 // Forward declarations (defined further down, used by the constructor).
-static void fftAxisLimits (int mode, double rate, double& fLo, double& fHi);
+static void fftAxisLimits (int mode, double rate, bool pascal20k, double& fLo, double& fHi);
 static int syncSmoothValue (int sm);
+static int syncThirdOctOrderLocal (int v);
 static void showSelectionMessage (const juce::String& title, const juce::String& msg);
 
 juce::String formatTimeCode (double secs)
@@ -565,12 +566,160 @@ static constexpr int kNumThirdOctBands = (int) (sizeof (kThirdOctCenters) / size
 const double* FFTAnalysisView::thirdOctCentres() noexcept { return kThirdOctCenters; }
 int FFTAnalysisView::numThirdOctBands() noexcept { return kNumThirdOctBands; }
 
+// Decade-based 1/3-octave band centres of the dB-SPL pipeline:
+// fc(i) = 1000 * 10^((i-30)/10), i = 17..43 (50.12 Hz .. 19952.6 Hz).
+static const double kThirdOptCentersRef[] = {
+    50.1187,   63.0957,   79.4328,  100.0,     125.8925,  158.4893,
+    199.5262,  251.1886,  316.2278,  398.1072,  501.1872,  630.9573,
+    794.3282,  1000.0,    1258.9254, 1584.8932, 1995.2623, 2511.8864,
+    3162.2777, 3981.0717, 5011.8723, 6309.5734, 7943.2823, 10000.0,
+    12589.2541, 15848.9319, 19952.6231
+};
+static const int kNumThirdOptBandsRef = 27;
+
+const double* FFTAnalysisView::thirdOptCentresRef() noexcept { return kThirdOptCentersRef; }
+int FFTAnalysisView::numThirdOptBandsRef() noexcept { return kNumThirdOptBandsRef; }
+
+bool FFTAnalysisView::pascalThirdOct() const
+{
+    return axisMode_ == 2 && app.scale().unit == ScaleCalibration::Unit::Pascal;
+}
+
+const double* FFTAnalysisView::bandCentres() const
+{
+    return pascalThirdOct() ? kThirdOptCentersRef : kThirdOctCenters;
+}
+
+int FFTAnalysisView::numBands() const
+{
+    return pascalThirdOct() ? kNumThirdOptBandsRef : kNumThirdOctBands;
+}
+
+// Convert normalized [0..1] band values to the view's relative-dB space.
+static std::vector<float> bandsNormalizedToDb (const std::vector<float>& norm)
+{
+    std::vector<float> out (norm.size());
+    for (size_t i = 0; i < norm.size(); ++i)
+        out[i] = (float) (-FFTAnalysisView::kNormFloorDb * (1.0 - (double) norm[i]));
+    return out;
+}
+
+std::vector<float> FFTAnalysisView::thirdOctBandsRef (const AudioEngine& eng, int ch,
+                                                      double t0, double t1, int order)
+{
+    // Reference-analyzer 1/3-octave pipeline: fixed 65536-point Hanning frames
+    // at 50% overlap, frame-averaged power spectrum (no coherent-gain
+    // correction), Butterworth bandpass weighting of order 2*`order`, and the
+    // classic +98.5 dB offset. The result is expressed in this view's
+    // relative-dB space so that formatSpectralLevel() renders it as dB-SPL
+    // once a Pascal full-scale value is set, reproducing the reference
+    // analyzer's numbers.
+    const int N = 65536;
+    const double rate = eng.sampleRate();
+    if (!(rate > 0.0) || ch < 0 || ch >= eng.numChannels()) return {};
+    const double dur = eng.duration();
+    t0 = std::clamp (t0, 0.0, dur);
+    t1 = std::clamp (t1, t0, dur);
+
+    // Frame starts: the reference frames the analysed slice from its start with
+    // a hop of N/2; long regions are capped and spread evenly so interactive
+    // use stays responsive. A region shorter than one frame gets a single
+    // centred (zero-padded) frame.
+    std::vector<int64_t> starts;
+    const int64_t s0 = (int64_t) (t0 * rate);
+    const int64_t s1 = (int64_t) (t1 * rate);
+    const int64_t total = eng.numSamples();
+    if (s1 - s0 <= N)
+        starts.push_back (std::clamp<int64_t> ((s0 + s1) / 2 - N / 2, 0,
+                                               std::max<int64_t> (0, total - N)));
+    else
+    {
+        const int64_t hop = N / 2;
+        const int64_t full = (s1 - s0) / hop;   // reference frame count for the slice
+        const int maxFrames = 2048;            // cap for interactive use
+        if (full <= maxFrames)
+            for (int64_t i = 0; i < full; ++i)
+                starts.push_back (s0 + i * hop);
+        else
+            for (int i = 0; i < maxFrames; ++i)
+                starts.push_back (std::clamp<int64_t>
+                                  (s0 + (int64_t) ((double) i * (full - 1) / (maxFrames - 1)) * hop,
+                                   s0, std::min<int64_t> (s1, total - N)));
+    }
+
+    // Symmetric Hanning window exactly as the reference uses it.
+    std::vector<float> win ((size_t) N);
+    for (int i = 0; i < N; ++i)
+        win[i] = 0.5f - 0.5f * std::cos (2.0 * juce::MathConstants<double>::pi
+                                          * (double) (i + 1) / (N + 1));
+
+    const int orderLog = 16;   // log2(65536)
+    std::vector<float> buf ((size_t) N * 2);
+    std::vector<double> psd ((size_t) N / 2, 0.0);
+    for (int64_t s : starts)
+    {
+        // Zero-fill first: reads near the file end are clamped and leave
+        // the tail untouched, which must stay silent.
+        std::fill (buf.begin(), buf.end(), 0.0f);
+        if (!eng.readSamples (ch, s, N, buf.data())) continue;
+        for (int i = 0; i < N; ++i) buf[i] *= win[i];
+        scfft::realForward (buf.data(), orderLog);
+        for (int j = 0; j < N / 2; ++j)
+            psd[(size_t) j] += (double) buf[j * 2] * buf[j * 2]
+                             + (double) buf[j * 2 + 1] * buf[j * 2 + 1];
+    }
+    // Reference PSD normalisation: divide by frame count and (N+1).
+    const double invN = 1.0 / ((double) starts.size() * (N + 1));
+    for (auto& v : psd) v *= invN;
+
+    // Butterworth bandpass weighting per the reference's PSD2OneThirdOctave.
+    const int nOrd = 2 * order;
+    const double lowerF = std::pow (2.0, -1.0 / 6.0), upperF = std::pow (2.0, 1.0 / 6.0);
+    const double Qr = 1.0 / (upperF - lowerF);
+    const double piC = juce::MathConstants<double>::pi;
+    const double Qd = piC * Qr / ((double) nOrd * std::sin (piC / (double) nOrd));
+    const double binHz = rate / N;
+
+    std::vector<float> out;
+    for (int i = 17; i <= 43; ++i)
+    {
+        const double fc = 1000.0 * std::pow (10.0, (i - 30) / 10.0);
+        double sum = 0.0;
+        // Upper scan: from the middle bin upward while the weighting is > 1e-4.
+        for (int j = (int) std::floor (fc / binHz); j < N / 2; ++j)
+        {
+            const double ratio = (double) j * binHz / fc;
+            const double gain = 1.0 / (1.0 + std::pow (Qd * (ratio - 1.0 / ratio), nOrd));
+            if (gain <= 1e-4) break;
+            sum += psd[(size_t) j] * gain;
+        }
+        // Lower scan: from the bin below the middle downward while > 1e-6.
+        for (int j = (int) std::floor (fc / binHz) - 1; j >= 0 && j < N / 2; --j)
+        {
+            const double ratio = (double) j * binHz / fc;
+            const double gain = 1.0 / (1.0 + std::pow (Qd * (ratio - 1.0 / ratio), nOrd));
+            if (gain <= 1e-6) break;
+            sum += psd[(size_t) j] * gain;
+        }
+        // Reference dB conversion: 10*log10(sum/(N/2)) + 98.5; empty bands
+        // read as -999 (the reference's "no data" sentinel).
+        const double L = (sum > 0.0) ? 10.0 * std::log10 (sum / (N / 2)) + 98.5 : -999.0;
+        // Express in the view's relative-dB space: formatSpectralLevel() adds
+        // levelOffsetDb(ch) = 20*log10(F/2e-5), so subtracting the dB-SPL
+        // reference (20*log10(2e-5)) leaves exactly the reference value.
+        out.push_back ((float) L + (float) (20.0 * std::log10 (2e-5)));
+    }
+    return out;
+}
+
 // Only a subset of band centres gets an axis label (every ~3rd band), so the
 // 26 grid lines do not crowd the bottom axis.
 static bool isThirdOctLabelFreq (double f)
 {
+    // A small relative tolerance so the decade-based dB-SPL centres (50.12,
+    // 7943.3, ...) still match their rounded labels.
     for (double c : { 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0 })
-        if (std::abs (f - c) < 1e-6)
+        if (std::abs (f - c) < std::max (1e-6, c * 0.005))
             return true;
     return false;
 }
@@ -844,6 +993,33 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         repaint();
     };
 
+    // Octave order of the dB-SPL bandpass: only visible in 1/3-octave mode
+    // when a Pascal full-scale value is set. Values mirror the reference
+    // analyzer's Order parameter (the filter itself is 2*order).
+    thirdOctOrder_ = syncThirdOctOrderLocal (app.settings.fftThirdOctOrder);
+    static const int kOrderValues[9] = { 1, 2, 3, 4, 5, 10, 20, 30, 40 };
+    for (int i = 0; i < 9; ++i)
+        orderCombo.addItem (juce::String (kOrderValues[i]), i + 1);
+    {
+        int id = 9;   // default: 40
+        for (int i = 0; i < 9; ++i)
+            if (thirdOctOrder_ == kOrderValues[i]) { id = i + 1; break; }
+        orderCombo.setSelectedId (id, juce::dontSendNotification);
+    }
+    orderCombo.onChange = [this] {
+        static const int kOrd[9] = { 1, 2, 3, 4, 5, 10, 20, 30, 40 };
+        thirdOctOrder_ = (orderCombo.getSelectedId() >= 1 && orderCombo.getSelectedId() <= 9)
+                         ? kOrd[orderCombo.getSelectedId() - 1] : 40;
+        app.settings.fftThirdOctOrder = thirdOctOrder_;   // persisted between sessions
+        app.pushActiveDocMeta();           // ...and with this file's metadata
+        settingsGen++;               // stored snapshots must be recomputed too
+        mags.clear(); cachedN = 0;   // invalidate the live cache (both pipelines)
+        thirdOctMags.clear();      // ...and the band cache (order-dependent)
+        recomputeSnapshots();
+        if (app.onStateChange) app.onStateChange();   // triggers the settings save
+        repaint();
+    };
+
     axisCombo.addItem ("FFT Linear", 1);
     axisCombo.addItem ("FFT Log", 2);
     axisCombo.addItem ("1/3 Octave", 3);
@@ -945,8 +1121,12 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
     trackCombo.setTooltip ("Max tracks the strongest component per frame/bin (its level and frequency); "
                            "Total tracks the summed signal level and the amplitude-weighted centroid frequency.");
 
+    orderCombo.setTooltip ("Butterworth bandpass order for the dB-SPL 1/3-octave pipeline "
+                           "(visible when a Pascal full-scale value is set): higher orders give "
+                           "sharper, more selective bands.");
     addAndMakeVisible (&fftSizeCombo);
     addAndMakeVisible (&windowCombo);
+    addAndMakeVisible (&orderCombo);
     addAndMakeVisible (&axisCombo);
     addAndMakeVisible (&refTimeCombo);
     addAndMakeVisible (&smoothCombo);
@@ -961,7 +1141,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
 void FFTAnalysisView::resetDisplayRanges()
 {
     const double rate = app.audioEngine().sampleRate();
-    fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+    fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
     dbTop_ = 0.0;
     dbBottom_ = -80.0;
     if (isTimeAxisMode() && haveCurveView_)
@@ -978,7 +1158,7 @@ void FFTAnalysisView::onSampleRateChanged()
     // defaults for the current rate and force every snapshot to recompute
     // from its source engine.
     const double rate = app.audioEngine().sampleRate();
-    fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+    fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
     settingsGen++;
     recomputeSnapshots();
     recomputeCurveSlots();
@@ -1027,7 +1207,7 @@ void FFTAnalysisView::zoomFreqAtX (int x, double factor)
     if (fHi_ <= fLo_ * 1.0001)
     {
         // Degenerate: fall back to the mode defaults.
-        fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+        fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
     }
     repaint();
 }
@@ -1047,7 +1227,7 @@ void FFTAnalysisView::zoomFreqAtY (float y, double factor)
     fHi_ = std::clamp (fCursor + (fHi_ - fCursor) / factor, 0.0, nyq);
 
     if (fHi_ <= fLo_ * 1.0001)
-        fftAxisLimits (axisMode_, rate, fLo_, fHi_);   // degenerate: mode defaults
+        fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);   // degenerate: mode defaults
     repaint();
 }
 
@@ -1097,15 +1277,26 @@ void FFTAnalysisView::zoomLevelAtY (float y, double factor)
 }
 
 // Frequency-axis limits for the current mode.
-static void fftAxisLimits (int mode, double rate, double& fLo, double& fHi)
+static void fftAxisLimits (int mode, double rate, bool pascal20k, double& fLo, double& fHi)
 {
     if (mode == 0) { fLo = 0.0; fHi = rate * 0.5; }
     else if (mode == 2 && rate * 0.5 > 50.0)
-        { fLo = 50.0; fHi = std::min (rate * 0.5, 16000.0); }   // 1/3-octave range
+        // The dB-SPL pipeline's top band centre is ~19.95 kHz, so extend the
+        // window to 20 kHz in that mode.
+        { fLo = 50.0; fHi = std::min (rate * 0.5, pascal20k ? 20000.0 : 16000.0); }
     else          { fLo = 20.0; fHi = std::min (rate * 0.5, 20000.0); }
 }
 
 // Normalise a persisted smoothing window into one of None / 3 / 5 / 7 / 9 / 11.
+// Normalise an octave order to one of the supported values.
+static int syncThirdOctOrderLocal (int v)
+{
+    static const int kOrders[9] = { 1, 2, 3, 4, 5, 10, 20, 30, 40 };
+    for (int i = 0; i < 9; ++i)
+        if (kOrders[i] == v) return v;
+    return 40;
+}
+
 static int syncSmoothValue (int sm)
 {
     return (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11)
@@ -1206,9 +1397,10 @@ void FFTAnalysisView::resyncFromSettings ()
     const int newSmooth = syncSmoothValue (app.settings.fftSmooth);
     const int newTrack  = std::clamp (app.settings.fftTrack, 0, 2);
     const int newN      = std::clamp (app.settings.fftLocalN, 1024, 65536);
+    const int newOrder  = syncThirdOctOrderLocal (app.settings.fftThirdOctOrder);
 
     if (newMode == axisMode_ && newRefTime == refTime_ && newSmooth == smooth_
-        && newTrack == track_ && newN == localN)
+        && newTrack == track_ && newN == localN && newOrder == thirdOctOrder_)
         return;   // nothing changed (e.g. a doc with the default settings)
 
     const bool modeChanged = (newMode != axisMode_);
@@ -1217,6 +1409,7 @@ void FFTAnalysisView::resyncFromSettings ()
     smooth_    = newSmooth;
     track_     = newTrack;
     localN     = newN;
+    thirdOctOrder_ = newOrder;
 
     // Update the combos without firing their onChange handlers.
     axisCombo.setSelectedId (axisMode_ + 1, juce::dontSendNotification);
@@ -1230,6 +1423,13 @@ void FFTAnalysisView::resyncFromSettings ()
     }
     trackCombo.setSelectedId (track_ + 1, juce::dontSendNotification);
     fftSizeCombo.setSelectedId (localN, juce::dontSendNotification);
+    {
+        static const int kOrderValues[9] = { 1, 2, 3, 4, 5, 10, 20, 30, 40 };
+        int id = 9;
+        for (int i = 0; i < 9; ++i)
+            if (kOrderValues[i] == thirdOctOrder_) { id = i + 1; break; }
+        orderCombo.setSelectedId (id, juce::dontSendNotification);
+    }
 
     // Invalidate every cache that depends on the settings.
     thirdOctMags.clear();      // band cache is only valid for mode 2
@@ -1270,15 +1470,59 @@ void FFTAnalysisView::recomputeIfNeeded()
         return;
     }
 
+    const auto& eng = app.audioEngine();
     const int n = localN;
-    const auto file = app.audioEngine().getFile();
+    const auto file = eng.getFile();
+    const int scaleUnit = (int) app.scale().unit;
+    // The dB-SPL pipeline runs when a Pascal full-scale value is set: band
+    // levels then come from the reference-analyzer computation instead of
+    // the averaged amplitude spectrum.
+    const bool dbSpl = (axisMode_ == 2 && scaleUnit == (int) ScaleCalibration::Unit::Pascal);
+
+    // Row-1 layout differs between the two pipelines (FFT size / window vs
+    // octave order), so re-lay out when the pipeline flips.
+    if (dbSpl != cachedPascalMode_) resized();
+
+    if (dbSpl)
+    {
+        const bool upToDate = !thirdOctMags.empty()
+            && thirdOctMags.size() == app.visibleChannels.size()
+            && cachedT0 == t0 && cachedT1 == t1 && cachedRate == eng.sampleRate()
+            && cachedFile == file && cachedScaleUnit_ == scaleUnit;
+        if (upToDate) return;
+
+        // Throttle repeated expensive computations the same way as below.
+        const int64_t now = juce::Time::getMillisecondCounter();
+        const double regionLenS = std::max (0.0, (t1 - t0) * eng.sampleRate());
+        if (!thirdOctMags.empty() && regionLenS > 65536.0 && lastComputeWasExpensive
+            && now - lastComputeMs < 60)
+            return;
+
+        // No amplitude spectrum is needed in this mode: the band levels come
+        // straight from the reference-analyzer computation. Replace the cache
+        // on every recompute — never accumulate stale curves.
+        mags.clear (); cachedN = 0;
+        thirdOctMags.clear();
+        for (int ch : app.visibleChannels)
+            if (ch >= 0 && ch < eng.numChannels())
+                thirdOctMags.push_back (thirdOctBandsRef (eng, ch, t0, t1, thirdOctOrder_));
+
+        cachedT0 = t0; cachedT1 = t1;
+        cachedRate = eng.sampleRate();
+        cachedFile = file;
+        cachedScaleUnit_ = scaleUnit;
+        cachedPascalMode_ = true;
+        lastComputeMs = now;
+        lastComputeWasExpensive = (regionLenS > 65536.0);
+        return;
+    }
 
     // NOTE: switching files does NOT clear stored snapshots - they are shared
     // across all open files and each one remembers its own source document.
 
     if (mags.size() == app.visibleChannels.size() && cachedN == n && cachedT0 == t0
-        && cachedT1 == t1 && cachedRate == app.audioEngine().sampleRate()
-        && cachedFile == file
+        && cachedT1 == t1 && cachedRate == eng.sampleRate()
+        && cachedFile == file && cachedScaleUnit_ == scaleUnit
         && (axisMode_ != 2 || thirdOctMags.size() == mags.size()))
         return;
 
@@ -1287,24 +1531,27 @@ void FFTAnalysisView::recomputeIfNeeded()
     // run on every click or playhead move, and the first compute of a new
     // region always runs so clicks stay responsive.
     const int64_t now = juce::Time::getMillisecondCounter();
-    const double regionLenS = std::max (0.0, (t1 - t0) * app.audioEngine().sampleRate());
+    const double regionLenS = std::max (0.0, (t1 - t0) * eng.sampleRate());
     if (!mags.empty() && regionLenS > (double) n && lastComputeWasExpensive
         && now - lastComputeMs < 60)
         return;
 
     computeRegion (t0, t1, n, mags);
 
-    // 1/3-octave band values for mode 2 (power-averaged per band).
-    // Replace the cache on every recompute — never accumulate, or stale
-    // curves from earlier clicks would be drawn alongside the live one.
+    // 1/3-octave band values for mode 2 (power-averaged per band), stored in
+    // the view's relative-dB space. Replace the cache on every recompute —
+    // never accumulate, or stale curves from earlier clicks would be drawn
+    // alongside the live one.
     thirdOctMags.clear();
     if (axisMode_ == 2)
         for (auto& m : mags)
-            thirdOctMags.push_back (toThirdOctBands (m, n, app.audioEngine().sampleRate()));
+            thirdOctMags.push_back (bandsNormalizedToDb (toThirdOctBands (m, n, eng.sampleRate())));
 
     cachedN = n; cachedT0 = t0; cachedT1 = t1;
-    cachedRate = app.audioEngine().sampleRate();
+    cachedRate = eng.sampleRate();
     cachedFile = file;
+    cachedScaleUnit_ = scaleUnit;
+    cachedPascalMode_ = false;
     lastComputeMs = now;
     lastComputeWasExpensive = (regionLenS > (double) n);
 }
@@ -1603,14 +1850,26 @@ void FFTAnalysisView::refreshSnapshotBands()
     for (int i = 0; i < 8; ++i)
     {
         auto& s = snapshots[i];
-        if (!(s.n > 0 && !s.mags.empty())) continue;
+        if (!(s.n > 0)) continue;
+        // Snapshots taken from Pascal-calibrated sources use the dB-SPL
+        // pipeline on their own engine (no magnitude curves needed); everything
+        // else converts the stored magnitude curves.
+        const bool pascalSrc = (axisMode_ == 2) && s.source != nullptr
+                               && s.source->scale.unit == ScaleCalibration::Unit::Pascal;
+        if (!pascalSrc && s.mags.empty()) continue;
         // Band conversion needs the source file's sample rate, which may
         // differ from the active file's.
         const double rate = (s.source != nullptr)
             ? s.source->engine.sampleRate() : app.audioEngine().sampleRate();
         s.bands.clear();
-        for (auto& m : s.mags)
-            s.bands.push_back (toThirdOctBands (m, s.n, rate));
+        s.dbSpl = pascalSrc;
+        if (pascalSrc)
+            for (int ch : s.chans)
+                if (ch >= 0 && ch < s.source->engine.numChannels())
+                    s.bands.push_back (thirdOctBandsRef (s.source->engine, ch, s.t0, s.t1, thirdOctOrder_));
+        else
+            for (auto& m : s.mags)
+                s.bands.push_back (bandsNormalizedToDb (toThirdOctBands (m, s.n, rate)));
     }
 }
 
@@ -1675,11 +1934,22 @@ void FFTAnalysisView::resized()
             windowCombo.setVisible (false);
             refTimeCombo.setBounds (58, row1.getY(), 120, 22);
         }
+        else if (axisMode_ == 2 && pascalThirdOct())
+        {
+            // The dB-SPL pipeline uses fixed 65536-point Hanning frames, so the
+            // FFT size / window options are replaced by the octave order.
+            refTimeCombo.setVisible (false);
+            fftSizeCombo.setVisible (false);
+            windowCombo.setVisible (false);
+            orderCombo.setVisible (true);
+            orderCombo.setBounds (30, row1.getY(), 85, 22);
+        }
         else
         {
             refTimeCombo.setVisible (false);
             fftSizeCombo.setVisible (true);
             windowCombo.setVisible (true);
+            orderCombo.setVisible (false);
             fftSizeCombo.setBounds (30, row1.getY(), 85, 22);
             windowCombo.setBounds (148, row1.getY(), 90, 22);
         }
@@ -1689,6 +1959,7 @@ void FFTAnalysisView::resized()
         refTimeCombo.setVisible (false);
         fftSizeCombo.setVisible (false);
         windowCombo.setVisible (false);
+        orderCombo.setVisible (false);
     }
 
     auto row2 = b.removeFromTop (26);
@@ -1731,6 +2002,8 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     {
         if (isTimeAxisMode())
             g.drawText ("Ref Time", 6, topRow.getY() + 5, 48, 16, juce::Justification::centredLeft, false);
+        else if (axisMode_ == 2 && pascalThirdOct())
+            g.drawText ("Order", 6, topRow.getY() + 5, 30, 16, juce::Justification::centredLeft, false);
         else
         {
             g.drawText ("FFT", 6, topRow.getY() + 5, 22, 16, juce::Justification::centredLeft, false);
@@ -1769,8 +2042,11 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     // Local display ranges (independent of the spectrogram's settings).
     const double fLo = fLo_, fHi = fHi_;
     const int n = cachedN;
-    const bool haveSpectrum = (n > 1) && !mags.empty()
-                              && (axisMode_ != 2 || !thirdOctMags.empty());
+    // In the dB-SPL pipeline `mags` is intentionally empty: the band values
+    // alone carry the spectrum.
+    const bool haveSpectrum = ((n > 1) && !mags.empty()
+                               && (axisMode_ != 2 || !thirdOctMags.empty()))
+                              || (pascalThirdOct() && !thirdOctMags.empty());
 
     // Frequency grid ticks for the current axis mode.
     std::vector<double> freqTicks;
@@ -1837,22 +2113,27 @@ void FFTAnalysisView::paint (juce::Graphics& g)
         // frequency edges with vertical connectors at the boundaries — the
         // classic 1/3-octave band-plot look, not a smooth curve.
         auto drawBandCurve = [&](const std::vector<float>& bands, const juce::Colour& col,
-                                 float w)
+                                 float w, const double* snapCentres = nullptr, int snapNBands = -1)
         {
             if (bands.empty()) return;
             g.setColour (col);
             juce::Path path;
             bool started = false;
-            for (int b = 0; b < kNumThirdOctBands && b < (int) bands.size(); ++b)
+            // Snapshots may come from the other pipeline than the live view
+            // (dB-SPL vs classic), so they can carry their own band centres.
+            const double* centres = (snapCentres != nullptr) ? snapCentres : bandCentres();
+            const int nBands = (snapNBands > 0) ? snapNBands : numBands();
+            for (int b = 0; b < nBands && b < (int) bands.size(); ++b)
             {
-                const double fc = kThirdOctCenters[b];
+                const double fc = centres[(size_t) b];
                 if (fc > fHi + 1e-6) break;
                 const double lo = std::max (fLo, fc * std::pow (2.0, -1.0 / 6.0));
                 const double hi = std::min (fHi, fc * std::pow (2.0,  1.0 / 6.0));
                 if (hi <= lo) continue;
                 const float xLo = (float) freqToX (lo);
                 const float xHi = (float) freqToX (hi);
-                const double dBb = -kNormFloorDb * (1.0 - (double) bands[(size_t) b]);
+                // Band values are stored in the view's relative-dB space.
+                const double dBb = (double) bands[(size_t) b];
                 const float y   = levelToY (dBb);
                 if (!started) { path.startNewSubPath (xLo, y); started = true; }
                 else          path.lineTo (xLo, y);    // vertical connector at the shared boundary
@@ -1864,18 +2145,27 @@ void FFTAnalysisView::paint (juce::Graphics& g)
         // Stored snapshot overlays first: full slot colour, just a little
         // thinner than the live curves. Live curves go on top.
         for (int i = 0; i < 8; ++i)
-            if (snapshots[i].shown && snapshots[i].n > 1 && !snapshots[i].mags.empty())
-                for (size_t c = 0; c < snapshots[i].mags.size() && c < 4; ++c)
+            if (snapshots[i].shown && snapshots[i].n > 1
+                && (!snapshots[i].mags.empty() || !snapshots[i].bands.empty()))
+            {
+                // In 1/3-octave mode the band arrays are the curves to draw; in
+                // the dB-SPL pipeline mags may be empty while bands is full.
+                const size_t nChans = (axisMode_ == 2) ? snapshots[i].bands.size()
+                                                      : snapshots[i].mags.size();
+                for (size_t c = 0; c < nChans && c < 4; ++c)
                     if (axisMode_ == 2)
                     {
                         // Braces are required here: without them the else below
                         // would bind to the inner if and snapshot curves would
                         // never be drawn in linear/log axis modes.
                         if (!snapshots[i].bands.empty())
-                            drawBandCurve (snapshots[i].bands[c], snapColours[i], 1.0f);
+                            drawBandCurve (snapshots[i].bands[c], snapColours[i], 1.0f,
+                                           snapshots[i].dbSpl ? FFTAnalysisView::thirdOptCentresRef() : nullptr,
+                                           snapshots[i].dbSpl ? FFTAnalysisView::numThirdOptBandsRef() : -1);
                     }
                     else
                         drawCurve (snapshots[i].mags[c], snapshots[i].n, snapColours[i], 1.0f);
+            }
 
         if (axisMode_ == 2)
             for (size_t c = 0; c < mags.size() && c < 4; ++c)
@@ -2305,8 +2595,9 @@ void FFTAnalysisView::buildFreqAxisTicks (std::vector<double>& freqTicks,
     if (axisMode_ == 2)
     {
         // One grid line per 1/3-octave band centre.
-        for (int b = 0; b < kNumThirdOctBands && kThirdOctCenters[b] <= fHi + 1e-6; ++b)
-            if (kThirdOctCenters[b] >= fLo - 1e-6) freqTicks.push_back (kThirdOctCenters[b]);
+        const double* centres = bandCentres();
+        for (int b = 0; b < numBands() && centres[(size_t) b] <= fHi + 1e-6; ++b)
+            if (centres[(size_t) b] >= fLo - 1e-6) freqTicks.push_back (centres[(size_t) b]);
         // Deep zooms can land between band centres: fall back to even
         // divisions so the axis never disappears.
         if (freqTicks.empty())
@@ -2556,8 +2847,11 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
 
     const auto plot = plotBounds();
     const int n = cachedN;
-    const bool haveSpectrum = (n > 1) && !mags.empty()
-                              && (axisMode_ != 2 || !thirdOctMags.empty());
+    // In the dB-SPL pipeline `mags` is intentionally empty: the band values
+    // alone carry the spectrum.
+    const bool haveSpectrum = ((n > 1) && !mags.empty()
+                               && (axisMode_ != 2 || !thirdOctMags.empty()))
+                              || (pascalThirdOct() && !thirdOctMags.empty());
     if (!haveSpectrum || x < plot.getX() || x > plot.getRight()
         || y < plot.getY() || y > plot.getBottom())
         return {};
@@ -2573,9 +2867,10 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
         // Report the band containing the cursor frequency (or nearest centre).
         int b = -1;
         double bestD = 1e30;
-        for (int i = 0; i < kNumThirdOctBands && i < (int) thirdOctMags[0].size(); ++i)
+        const double* centres = bandCentres();
+        for (int i = 0; i < numBands() && i < (int) thirdOctMags[0].size(); ++i)
         {
-            const double fc = kThirdOctCenters[i];
+            const double fc = centres[(size_t) i];
             const double lo = fc * std::pow (2.0, -1.0 / 6.0);
             const double hi = fc * std::pow (2.0,  1.0 / 6.0);
             if (f >= lo && f <= hi) { b = i; break; }
@@ -2584,12 +2879,13 @@ juce::String FFTAnalysisView::buildCursorInfo (int x, int y, bool& snapped,
         }
         if (b >= 0)
         {
-            info = "Cursor:  ~" + juce::String ((int) std::lround (kThirdOctCenters[b])) + " Hz band"
-                 + altFreqSuffix (app, kThirdOctCenters[b]);
+            info = "Cursor:  ~" + juce::String ((int) std::lround (centres[(size_t) b])) + " Hz band"
+                 + altFreqSuffix (app, centres[(size_t) b]);
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < (int) thirdOctMags[c].size())
                     info += ",  Ch" + juce::String ((int) c + 1) + "="
-                          + ScaleCalibration::formatSpectralLevel (-kNormFloorDb + thirdOctMags[c][(size_t) b] * kNormFloorDb, sc,
+                          // Band values are stored in the view's relative-dB space.
+                          + ScaleCalibration::formatSpectralLevel ((double) thirdOctMags[c][(size_t) b], sc,
                                                                   (c < app.visibleChannels.size()) ? app.visibleChannels[(size_t) c] : -1);
         }
     }
@@ -2770,7 +3066,11 @@ void FFTAnalysisView::handleSnapshotClick (int i, juce::ModifierKeys mods)
         // region at the current settings, so a copy suffices; later changes
         // of FFT size / window type recompute it from t0..t1 (from its source
         // file's engine - snapshots are shared across all open files).
-        if (!(cachedN > 1) || mags.empty())
+        // In the dB-SPL pipeline the live cache holds band values only (mags is
+        // empty); that is still storable - snapshots rebuild their bands from
+        // the source engine.
+        const bool pascalStore = pascalThirdOct() && !thirdOctMags.empty();
+        if (!pascalStore && (!(cachedN > 1) || mags.empty()))
         {
             snapBtns[i].setToggleState (false, juce::dontSendNotification); // nothing to store yet
             return;
@@ -2778,9 +3078,10 @@ void FFTAnalysisView::handleSnapshotClick (int i, juce::ModifierKeys mods)
 
         s.t0 = cachedT0;
         s.t1 = cachedT1;
-        s.n = cachedN;
+        s.n  = pascalStore ? 65536 : cachedN;   // the dB-SPL pipeline's fixed frame size
         s.gen = settingsGen;
         s.mags = mags;
+        s.dbSpl = pascalStore;
         s.source = app.doc();           // remember which file this came from
         s.chans = app.visibleChannels;  // channels visible at store time
         refreshSnapshotBands();
@@ -3149,7 +3450,7 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
                 if (axisMode_ == 3)
                 {
                     const double rate = app.audioEngine().sampleRate();
-                    fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+                    fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
                 }
                 else
                 { dbTop_ = 0.0; dbBottom_ = -80.0; }
@@ -3161,7 +3462,7 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
             else if (onFreqAxis && !onLevelAxis)
             {
                 const double rate = app.audioEngine().sampleRate();
-                fftAxisLimits (axisMode_, rate, fLo_, fHi_);
+                fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
                 repaint();
             }
             else resetDisplayRanges();   // plot or corner: reset both windows
@@ -3656,15 +3957,15 @@ void FFTAnalysisView::copySpectrumToClipboard()
     if (axisMode_ == 2 && !thirdOctMags.empty())
     {
         // One line per 1/3-octave band centre.
-        for (size_t b = 0; b < thirdOctMags[0].size(); ++b)
+        const double* centres = bandCentres();
+        for (size_t b = 0; b < thirdOctMags[0].size() && b < (size_t) numBands(); ++b)
         {
-            juce::String line = juce::String (kThirdOctCenters[b], 1);
-            appendAlts (line, kThirdOctCenters[b]);
+            juce::String line = juce::String (centres[b], 1);
+            appendAlts (line, centres[b]);
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < thirdOctMags[c].size())
-                    // Magnitudes are normalised against the fixed floor, so
-                    // the level is -kNormFloorDb * (1 - mag), exactly as painted.
-                    line += "," + fmtLevel (-kNormFloorDb * (1.0 - (double) thirdOctMags[c][b]));
+                    // Band values are stored in relative-dB space, exactly as painted.
+                    line += "," + fmtLevel ((double) thirdOctMags[c][b]);
             lines.add (line);
         }
         juce::SystemClipboard::copyTextToClipboard (lines.joinIntoString ("\n"));

@@ -312,6 +312,7 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
     auto fa = new juce::DynamicObject();
     fa->setProperty ("axisMode", b.freqAnalysis.axisMode);
     fa->setProperty ("fftSize", b.freqAnalysis.fftSize);
+    fa->setProperty ("thirdOctOrder", b.freqAnalysis.thirdOctOrder);
     fa->setProperty ("refTime", b.freqAnalysis.refTime);
     fa->setProperty ("smooth", b.freqAnalysis.smooth);
     fa->setProperty ("track", b.freqAnalysis.track);
@@ -476,6 +477,14 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
         FreqAnalysisState fa;
         fa.axisMode = std::clamp (static_cast<int> (fp.getWithDefault ("axisMode", 0)), 0, 5);
         fa.fftSize  = std::clamp (static_cast<int> (fp.getWithDefault ("fftSize", 2048)), 1024, 65536);
+        {
+            // Normalise to one of the supported octave orders.
+            static const int kOrders[9] = { 1, 2, 3, 4, 5, 10, 20, 30, 40 };
+            const int ord = static_cast<int> (fp.getWithDefault ("thirdOctOrder", 40));
+            fa.thirdOctOrder = 40;
+            for (int i = 0; i < 9; ++i)
+                if (kOrders[i] == ord) { fa.thirdOctOrder = ord; break; }
+        }
         fa.refTime  = std::clamp (static_cast<int> (fp.getWithDefault ("refTime", 0)), 0, 1);
         const int sm = static_cast<int> (fp.getWithDefault ("smooth", 0));
         fa.smooth   = (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11)

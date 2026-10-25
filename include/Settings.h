@@ -69,6 +69,9 @@ struct Settings
     int fftAxisMode = 1;        // 0=FFT Linear, 1=FFT Log, 2=1/3 Octave,
                                 // 3=Freq vs Time, 4=Amp vs Time, 5=Amp vs Freq
     int fftLocalN = 2048;       // Frequency Analysis FFT size (power of two)
+    // Butterworth bandpass order for the 1/3-octave dB-SPL pipeline (one of
+    // 1, 2, 3, 4, 5, 10, 20, 30 or 40; the filter itself is 2*order).
+    int fftThirdOctOrder = 40;
     // Curve-mode options (modes 3..5), persisted between sessions:
     int fftRefTime = 0;         // time-based modes: 0=Relative, 1=Absolute
     int fftSmooth = 0;          // curve smoothing window in frames: 0=None, or 3/5/7/9/11
@@ -90,6 +93,7 @@ struct Settings
         return fftSize == o.fftSize && logFrequency == o.logFrequency
             && snapToZeroCrossings == o.snapToZeroCrossings
             && fftAxisMode == o.fftAxisMode && fftLocalN == o.fftLocalN
+            && fftThirdOctOrder == o.fftThirdOctOrder
             && fftRefTime == o.fftRefTime && fftSmooth == o.fftSmooth
             && fftTrack == o.fftTrack;
     }

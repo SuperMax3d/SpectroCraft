@@ -1938,8 +1938,10 @@ static void testThirdOctave()
         for (int b = 0; b < FFTAnalysisView::numThirdOctBands(); ++b)
             if (std::abs (centres[(size_t) b] - 1000.0) < 1e-6) { k1k = b; break; }
         CHECK (k1k >= 0 && k1k < (int) bands[0].size(), "1 kHz band exists");
+        // Band values are stored in relative-dB space: a far band must be at
+        // least 30 dB below the tone's own band.
         if (k1k >= 0)
-            CHECK (bands[0][(size_t) k1k] < bands[0][(size_t) peak] - 0.25,
+            CHECK (bands[0][(size_t) k1k] < bands[0][(size_t) peak] - 30.0,
                    "far band is much quieter than the tone's band");
 
         // The live band curve (channel colour = pink) must be drawn near the
@@ -1963,6 +1965,113 @@ static void testThirdOctave()
         // Switching back to log mode must clear the band cache.
         view.setAxisMode (1);
         CHECK (view.getThirdOctMags().empty(), "band cache cleared when leaving 1/3 octave mode");
+    }
+}
+
+// ------------------------------------------------------------------ 1/3-octave dB-SPL pipeline (Pascal calibration)
+// With a Pascal full-scale value set, the 1/3-octave view must run the
+// reference-analyzer pipeline: fixed 65536-point Hanning frames at 50% overlap,
+// frame-averaged PSD, Butterworth bandpass weighting and the +98.5 dB offset —
+// so a full-scale tone reads ~91.0 dB-SPL in its own band, exactly as the
+// reference analyzer does (verified against an independent implementation). The octave order must change the band-edge response.
+static void testThirdOctaveDbSpl()
+{
+    // Fs = 48000, N = 65536 -> bin width 48000/65536 Hz. Bin 1365 sits at
+    // 999.755859375 Hz: inside the 1 kHz band (~949 .. ~1122 Hz) and exactly
+    // on an FFT bin, so a tone there has no leakage into other bins.
+    const double rate = 48000.0;
+    const int jTone = 1365;
+    const double fTone = (double) jTone * rate / 65536.0;
+
+    const juce::File wav = makeTempFile ("third_oct_db.wav");
+    writeWav (wav, 1, rate, 48000, [fTone] (int, int64_t f, double r)
+    {
+        return (float) std::sin (2.0 * juce::MathConstants<double>::pi * fTone * (double) f / r);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for dB-SPL third-octave test");
+    std::vector<double> one { 1.0 };
+    CHECK (FileListPanel::applyScaleValues (*app.docs[0], ScaleCalibration::Unit::Pascal, one),
+          "pascal calibration applied");
+
+    FFTAnalysisView view (app);
+    view.setSize (300, 200);
+    view.setAxisMode (2);   // "1/3 Octave"
+    CHECK (view.pascalThirdOct(), "dB-SPL pipeline active for Pascal files");
+
+    juce::Image img (juce::Image::ARGB, 300, 200, true);
+    { juce::Graphics g (img); view.paint (g); }
+
+    const auto& bands = view.getThirdOctMags();
+    CHECK (!bands.empty() && bands[0].size() == FFTAnalysisView::numThirdOptBandsRef(),
+          "27 dB-SPL band values computed");
+    if (!bands.empty())
+    {
+        const double* centres = FFTAnalysisView::thirdOptCentresRef();
+        int k1k = -1;
+        for (int b = 0; b < FFTAnalysisView::numThirdOptBandsRef(); ++b)
+            if (std::abs (centres[(size_t) b] - 1000.0) < 1e-9) { k1k = b; break; }
+        CHECK (k1k >= 0 && k1k < (int) bands[0].size(), "1 kHz band exists");
+
+        if (k1k >= 0)
+        {
+            // Full-scale tone: the reference reads ~91.0 dB-SPL in-band, which
+            // is -3.0 dB in this view's relative space (offset by the dB-SPL
+            // reference 20*log10(2e-5)).
+            const double relDb = (double) bands[0][(size_t) k1k];
+    CHECK (std::abs (relDb - (-3.0)) < 1.0, "full-scale tone reads ~-3.0 dB rel");
+
+            // The rendered label must be in dB-SPL and carry the reference value.
+            const juce::String label = ScaleCalibration::formatSpectralLevel (relDb, app.scale(), 0);
+            CHECK (label.contains ("dB-SPL"), "level rendered as dB-SPL");
+            const double shown = label.upToFirstOccurrenceOf (" ", false, false).getDoubleValue();
+            CHECK (std::abs (shown - 91.0) < 1.0, "rendered value matches the reference (~91.0 dB-SPL)");
+
+            // Neighbouring bands must be far below: a bin-exact tone has no
+            // leakage into them at this filter order.
+            CHECK (k1k > 0 && bands[0][(size_t) k1k] - (double) bands[0][(size_t) (k1k - 1)] > 30.0,
+                  "band below the tone is far quieter");
+        }
+
+        // Octave order: a tone at bin 1533 (1122.79 Hz) sits on the upper edge
+        // of the 1 kHz band. The Tustin-corrected Butterworth response gives
+        // ~-6.5 dB there for order 40 but ~-8.4 dB for order 1, so switching
+        // the order must lower the reading by at least 1.5 dB.
+        const juce::File wavEdge2 = makeTempFile ("third_oct_edge.wav");
+        writeWav (wavEdge2, 1, rate, 48000, [] (int, int64_t f, double r)
+        {
+            return (float) std::sin (2.0 * juce::MathConstants<double>::pi * 1533.0 * (double) f / 65536.0);
+        });
+        CHECK (app.openFile (wavEdge2), "open edge-tone wav");
+        std::vector<double> one2 { 1.0 };
+        CHECK (FileListPanel::applyScaleValues (*app.docs.back().get(), ScaleCalibration::Unit::Pascal, one2),
+              "pascal calibration applied to edge tone");
+
+        app.settings.fftThirdOctOrder = 40;
+        view.resyncFromSettings ();
+        { juce::Graphics g (img); view.paint (g); }
+        // Copy by value: getThirdOctMags() references the live cache, which is
+        // replaced when the order changes below.
+        auto b40 = view.getThirdOctMags();
+        CHECK (!b40.empty(), "order-40 bands computed");
+
+        app.settings.fftThirdOctOrder = 1;
+        view.resyncFromSettings ();
+        { juce::Graphics g (img); view.paint (g); }
+        auto b1 = view.getThirdOctMags();
+        CHECK (!b1.empty(), "order-1 bands computed");
+
+        if (!b40.empty() && !b1.empty())
+        {
+            int k1k2 = -1;
+            for (int b = 0; b < FFTAnalysisView::numThirdOptBandsRef(); ++b)
+                if (std::abs (centres[(size_t) b] - 1000.0) < 1e-9) { k1k2 = b; break; }
+            CHECK (k1k2 >= 0, "edge tone: 1 kHz band exists");
+            if (k1k2 >= 0)
+                CHECK ((double) b40[0][(size_t) k1k2] - (double) b1[0][(size_t) k1k2] > 1.5,
+                      "lower octave order reads lower at the band edge");
+        }
     }
 }
 
@@ -13941,6 +14050,7 @@ static int scRunUnitTestsImpl()
     progress ("playhead sync");       testPlayheadSync();
     progress ("fft follow window");   testFFTFollowPlayhead();
     progress ("1/3 octave bands");    testThirdOctave();
+    progress ("1/3 octave dB-SPL pipeline");    testThirdOctaveDbSpl ();
     progress ("fft click+average");   testFFTClickAndAverage();
     progress ("1/3 octave step draw"); testThirdOctaveStepDrawing();
     progress ("snapshot button paint"); testSnapshotButtonPaint();

@@ -119,7 +119,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     per visible channel, each band drawn as a flat-topped step across its
     frequency edges with vertical connectors at the boundaries — the classic
     1/3-octave band-plot look; every click replaces the curve instead of
-    adding another), plus three curve-analysis modes:
+    adding another. When the file is calibrated in **Pascal**, this mode
+    switches to a dedicated dB-SPL pipeline that reproduces the numbers of
+    classic reference analysers: fixed 65536-point symmetric-Hann frames at
+    50% overlap, frame-averaged power spectrum, Butterworth band weighting and
+    the classic +98.5 dB offset — levels then read in **dB-SPL** up to ~20 kHz,
+    and an **Order** dropdown (1/2/3/4/5/10/20/30/40, default 40) replaces the
+    FFT size / window controls since the frame size is fixed), plus three
+    curve-analysis modes:
     **Freq vs Time** (the tracked dominant frequency plotted against time —
     the cursor readout also shows each channel's level), **Amp vs Time**
     (level over time) and **Amp vs Freq** (a per-bin spectrum of the analysed
@@ -364,7 +371,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   the frequency analysis view (FFT curves as well as 1/3-octave bands,
   including its axis labels, cursor readout and clipboard export) — show
   **dB-SPL** for Pascal files but plain linear values in **V** or **g** for
-  Volts/g files. "None" restores plain relative dB.
+  Volts/g files (in the 1/3 Octave view, Pascal calibration additionally
+  switches the whole band computation to the reference-analyser pipeline
+  described above, so its readings match those instruments). "None" restores
+  plain relative dB.
 - **Automatic calibration from `bkdk` WAV chunks**: some legacy measurement WAV
   files carry a custom top-level RIFF chunk named `bkdk` with per-channel
   *Calibration* gains (sample × Calibration = pascals). Loading such a file
@@ -911,9 +921,10 @@ toggles that channel, **Ctrl/Shift+click shows only it**.
 
 **Remembered between sessions**: the spectrogram's Log/Linear state and FFT
 size, the Frequency Analysis axis mode (FFT Linear / FFT Log / 1/3 Octave /
-Freq vs Time / Amp vs Time / Amp vs Freq), its independent FFT size, and the
-curve-mode options (Ref Time, Smooth, Track) are saved to the same properties
-file as the recent-files list and restored on startup.
+Freq vs Time / Amp vs Time / Amp vs Freq), its independent FFT size, its
+1/3-octave order, and the curve-mode options (Ref Time, Smooth, Track) are
+saved to the same properties file as the recent-files list and restored on
+startup.
 
 Mouse (waveform *and* spectral views):
 
@@ -1165,7 +1176,7 @@ by a single mutex (short critical sections, no lock held during FFT work).
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2360 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2380 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1224,6 +1235,11 @@ by a single mutex (short critical sections, no lock held during FFT work).
   - **1/3-octave step drawing**: a single tone renders as a flat-topped step
     across its whole band cell (topmost curve pixel at the same height in
     every column of the cell), not a smooth curve.
+  - **dB-SPL 1/3-octave pipeline (Pascal files)**: a full-scale bin-exact tone
+    reads ~-3 dB in the view's relative space, which renders as ~91 dB-SPL —
+    matching the reference-analyser computation; neighbouring bands stay far
+    below; and switching the octave order from 40 to 1 lowers an edge-of-band
+    reading by more than 1.5 dB (the Tustin-corrected Butterworth response).
   - **Change Gain**: +6 dB scales the selected samples by exactly 10^(dB/20),
     leaves everything outside the selection untouched, and undo restores the
     original level.

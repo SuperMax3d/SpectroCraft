@@ -1350,6 +1350,14 @@ namespace
         os.write (b, 4);
     }
     void putFourCC (juce::OutputStream& os, const char* s) { os.write (s, 4); }
+    auto writeChunkPayload = [] (juce::OutputStream& os, const std::string& p) -> bool
+    {
+        bool ok = os.write (p.data (), p.size());
+        const char padByte = 0;
+        if (ok && (p.size () & 1))   // RIFF word-alignment pad byte
+            ok = os.write (&padByte, 1);
+        return ok;
+    };
 }
 
 // The legacy DAW cue / LIST(adtl) payload builders live in ScttChunk.cpp so the
@@ -1389,11 +1397,14 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
     const std::string* bkdk = (saveBkdkPayload != nullptr && !saveBkdkPayload->empty ())
                               ? saveBkdkPayload : nullptr;
 
-    const int64_t cueChunk  = !cuePayload.empty()  ? 8 + (int64_t) cuePayload.size () : 0;
-    const int64_t listChunk = !adtlPayload.empty() ? 8 + (int64_t) adtlPayload.size () : 0;
-    const int64_t scttChunk = sctt != nullptr     ? 8 + (int64_t) sctt->size () : 0;
-    const int64_t scmdChunk = !scmdPayload.empty() ? 8 + (int64_t) scmdPayload.size () : 0;
-    const int64_t bkdkChunk = bkdk != nullptr     ? 8 + (int64_t) bkdk->size () : 0;
+    // RIFF chunks must be word-aligned: odd-sized payloads get one pad byte.
+    auto chunkBytes = [] (const std::string& p) -> int64
+    { return p.empty() ? 0 : 8 + (int64_t) p.size () + ((p.size () & 1) ? 1 : 0); };
+    const int64_t cueChunk  = chunkBytes (cuePayload);
+    const int64_t listChunk = chunkBytes (adtlPayload);
+    const int64_t scttChunk = sctt != nullptr ? chunkBytes (*sctt) : 0;
+    const int64_t scmdChunk = chunkBytes (scmdPayload);
+    const int64_t bkdkChunk = bkdk != nullptr ? chunkBytes (*bkdk) : 0;
 
     const int64_t riffSize = 4            // "WAVE"
                            + 8 + 16       // fmt chunk
@@ -1462,7 +1473,7 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
     {
         putFourCC (*out, "cue ");
         putU32 (*out, (uint32_t) cuePayload.size());
-        ok = out->write (cuePayload.data(), cuePayload.size());
+        ok = writeChunkPayload (*out, cuePayload);
     }
 
     // LIST chunk with the adtl sub-chunk.
@@ -1470,15 +1481,15 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
     {
         putFourCC (*out, "LIST");
         putU32 (*out, (uint32_t) adtlPayload.size());
-        ok = out->write (adtlPayload.data(), adtlPayload.size());
+        ok = writeChunkPayload (*out, adtlPayload);
     }
 
     // SCTT chunk: transcription segments (JSON payload).
     if (scttChunk > 0 && ok)
     {
         putFourCC (*out, "SCTT");
-        putU32 (*out, (uint32_t) (scttChunk - 8));
-        ok = out->write (sctt->data (), (size_t) sctt->size ());
+        putU32 (*out, (uint32_t) sctt->size());
+        ok = writeChunkPayload (*out, *sctt);
     }
 
     // SCMD chunk: the unified metadata bundle as JSON (see include/FileMeta.h).
@@ -1486,15 +1497,15 @@ bool AudioEngine::saveWavWithMarkers (const juce::File& file) const
     {
         putFourCC (*out, "SCMD");
         putU32 (*out, (uint32_t) scmdPayload.size());
-        ok = out->write (scmdPayload.data(), scmdPayload.size());
+        ok = writeChunkPayload (*out, scmdPayload);
     }
 
     // bkdk chunk: the source file's calibration data, verbatim.
     if (bkdkChunk > 0 && ok)
     {
         putFourCC (*out, "bkdk");
-        putU32 (*out, (uint32_t) (bkdkChunk - 8));
-        ok = out->write (bkdk->data (), bkdk->size());
+        putU32 (*out, (uint32_t) bkdk->size());
+        ok = writeChunkPayload (*out, *bkdk);
     }
 
     if (ok)

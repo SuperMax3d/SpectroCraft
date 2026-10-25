@@ -91,6 +91,15 @@ static int roundUpPow2Clamped (int v, int lo, int hi)
     return std::clamp (p, lo, hi);
 }
 
+// Normalise a persisted octave order to one of the supported values.
+static int syncThirdOctOrder (int v)
+{
+    static const int kOrders[9] = { 1, 2, 3, 4, 5, 10, 20, 30, 40 };
+    for (int i = 0; i < 9; ++i)
+        if (kOrders[i] == v) return v;
+    return 40;
+}
+
 void Application::loadSettings ()
 {
     settings.fftSize       = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_size", settings.fftSize), 512, 65536);
@@ -98,6 +107,7 @@ void Application::loadSettings ()
     settings.snapToZeroCrossings = recentStore->getIntValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0) != 0;
     settings.fftAxisMode   = std::clamp ((int) recentStore->getIntValue ("fft_axis_mode", settings.fftAxisMode), 0, 5);
     settings.fftLocalN     = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_local_n", settings.fftLocalN), 1024, 65536);
+    settings.fftThirdOctOrder = syncThirdOctOrder (recentStore->getIntValue ("fft_third_oct_order", settings.fftThirdOctOrder));
     settings.fftRefTime    = std::clamp ((int) recentStore->getIntValue ("fft_ref_time", settings.fftRefTime), 0, 1);
     {   // smoothing window is one of None / 3 / 5 / 7 / 9 / 11 frames
         const int sm = recentStore->getIntValue ("fft_smooth", settings.fftSmooth);
@@ -114,6 +124,7 @@ void Application::saveSettings ()
     recentStore->setValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0);
     recentStore->setValue ("fft_axis_mode", settings.fftAxisMode);
     recentStore->setValue ("fft_local_n", settings.fftLocalN);
+    recentStore->setValue ("fft_third_oct_order", settings.fftThirdOctOrder);
     recentStore->setValue ("fft_ref_time", settings.fftRefTime);
     recentStore->setValue ("fft_smooth", settings.fftSmooth);
     recentStore->setValue ("fft_track", settings.fftTrack);
@@ -268,6 +279,7 @@ void Application::activate (int index)
     // Frequency Analysis settings + axis reference calibrations.
     settings.fftAxisMode  = std::clamp (d->freqAnalysis.axisMode, 0, 5);
     settings.fftLocalN    = std::clamp (d->freqAnalysis.fftSize, 1024, 65536);
+    settings.fftThirdOctOrder = syncThirdOctOrder (d->freqAnalysis.thirdOctOrder);
     settings.fftRefTime   = std::clamp (d->freqAnalysis.refTime, 0, 1);
     settings.fftSmooth    = d->freqAnalysis.smooth;
     settings.fftTrack     = std::clamp (d->freqAnalysis.track, 0, 2);
@@ -324,6 +336,7 @@ void Application::inheritSessionMeta (FileDoc& d)
         sc::FreqAnalysisState fa;
         fa.axisMode = std::clamp (settings.fftAxisMode, 0, 5);
         fa.fftSize  = std::clamp (settings.fftLocalN, 1024, 65536);
+        fa.thirdOctOrder = syncThirdOctOrder (settings.fftThirdOctOrder);
         fa.refTime  = std::clamp (settings.fftRefTime, 0, 1);
         const int sm = settings.fftSmooth;
         fa.smooth   = (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11)
@@ -357,6 +370,7 @@ void Application::pushActiveDocMetaTo (FileDoc& d)
     sc::FreqAnalysisState fa;
     fa.axisMode = std::clamp (settings.fftAxisMode, 0, 5);
     fa.fftSize  = std::clamp (settings.fftLocalN, 1024, 65536);
+    fa.thirdOctOrder = syncThirdOctOrder (settings.fftThirdOctOrder);
     fa.refTime  = std::clamp (settings.fftRefTime, 0, 1);
     const int sm = settings.fftSmooth;
     fa.smooth   = (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11)
