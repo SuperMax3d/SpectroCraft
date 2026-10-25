@@ -12,6 +12,7 @@
 #include "SpectralView.h"
 #include "Panels.h"
 #include "MarkerManager.h"
+#include "VideoAudio.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "AI/ModelManager.h"
     #include "AI/OvRuntime.h"
@@ -1002,9 +1003,36 @@ void MainWindow::visibilityChanged()
 
 // ------------------------------------------------------------- drag & drop
 
+// Every extension the engine can open as audio: JUCE's native formats plus
+// video containers when built with FFmpeg. Shared by File Open and drag & drop
+// so neither ever drifts from what AudioFormatManager actually accepts.
+static const juce::String& allOpenableExtensions()
+{
+    // Trailing space: the video list starts with its own extension, so without
+    // it the last native and first video token would glue together (.m4a.mp4).
+    static const juce::String exts =
+        ".wav .aiff .aif .flac .mp3 .ogg .m4a " + sc::videoContainerExtensions();
+    return exts;
+}
+
+juce::String MainWindow::openAudioWildcard()
+{
+    static const juce::String w = [] {
+        juce::StringArray list;
+        for (const auto& e : juce::StringArray::fromTokens (allOpenableExtensions(), " ", ""))
+            if (list.indexOf ("*" + e) < 0)
+                list.add ("*" + e);
+        juce::String out;
+        for (int i = 0; i < list.size(); ++i)
+            out += (i == 0 ? String() : ";") + list[i];
+        return out;
+    } ();
+    return w;
+}
+
 bool MainWindow::isInterestedInFileDrag (const juce::StringArray& files)
 {
-    static const juce::String supported = ".wav .aiff .aif .flac .mp3 .ogg .m4a";
+    static const juce::String supported = allOpenableExtensions();
     for (const auto& f : files)
         if (supported.contains (juce::File (f).getFileExtension().toLowerCase()))
             return true;
@@ -1436,7 +1464,7 @@ void MainWindow::handleFileOpen()
     juce::FileChooser chooser ("Open Audio File",
         app.audioEngine().isFileLoaded() ? app.audioEngine().getFile().getParentDirectory()
                                        : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
-        "*.wav;*.aiff;*.aif;*.flac;*.mp3;*.ogg;*.m4a",
+        openAudioWildcard(),
         kUseNativeFileChooser);
 
     if (chooser.browseForFileToOpen())
@@ -3168,7 +3196,7 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
             else if (device == "NPU")
                 details += "  openvino_npu_plugin.dll         (needed because you selected NPU)\n";
             details += "\nWhere to get them:\n"
-                       "- If you built SpectroCraft from source: extern/OpenVINO/bin/ in the repository.\n"
+                       "- If you built SpectroCraft from source: bin/Release in the repository.\n"
                        "- Otherwise download OpenVINO 2024.6 from https://github.com/openvinotoolkit/openvino/releases\n"
                        "  and take the DLLs from its runtime\\Windows\\bin folder.";
         }

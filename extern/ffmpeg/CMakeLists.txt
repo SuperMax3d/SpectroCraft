@@ -24,8 +24,9 @@ else ()
     message(WARNING "FFmpeg runtime is only vendored for Windows x64 (MSVC); video-audio extraction is unavailable.")
 endif ()
 
-# Runtime DLLs (all four are required, they depend on each other).
-set(SC_FFMPEG_BIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/bin)
+# Runtime DLLs (all four are required, they depend on each other). They live
+# in the repo's self-contained runtime folder, bin/Release.
+set(SC_FFMPEG_BIN_DIR ${CMAKE_SOURCE_DIR}/bin/Release)
 set(SC_FFMPEG_DLLS
     ${SC_FFMPEG_BIN_DIR}/avformat-61.dll
     ${SC_FFMPEG_BIN_DIR}/avcodec-61.dll
@@ -42,12 +43,14 @@ function (sc_enable_ffmpeg tgt)
     target_compile_definitions(${tgt} PRIVATE SC_ENABLE_FFMPEG=1)
     target_link_libraries(${tgt} PRIVATE sc_ffmpeg)
 
+    # The prebuilt DLLs live in the repo's self-contained runtime folder,
+    # bin/Release (the same folder that ships on GitHub with the app).
     add_custom_command(TARGET ${tgt} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/extern/ffmpeg/bin/avformat-61.dll
-            ${CMAKE_SOURCE_DIR}/extern/ffmpeg/bin/avcodec-61.dll
-            ${CMAKE_SOURCE_DIR}/extern/ffmpeg/bin/swresample-5.dll
-            ${CMAKE_SOURCE_DIR}/extern/ffmpeg/bin/avutil-59.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/avformat-61.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/avcodec-61.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/swresample-5.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/avutil-59.dll
             $<TARGET_FILE_DIR:${tgt}>
         COMMENT "Copying FFmpeg (audio extraction) runtime DLLs next to ${tgt}")
 endfunction ()

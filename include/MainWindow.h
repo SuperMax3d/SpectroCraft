@@ -192,6 +192,10 @@ public:
         only exist when a document is loaded (public static so headless tests
         can check the menu contents). */
     static juce::PopupMenu buildMergeMenu (bool haveActiveDoc);
+    /** File Open dialog wildcard: every extension the engine can open as
+        audio (native formats + video containers when built with FFmpeg).
+        Public static so headless tests can check it. */
+    static juce::String openAudioWildcard();
     void showMergeMenu (const std::vector<juce::File>& files);
     /** Background merge with a progress dialog. intoCurrent merges into the
         active document; otherwise a new document is created from the result. */

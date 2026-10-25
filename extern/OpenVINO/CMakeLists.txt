@@ -39,19 +39,24 @@ function (sc_enable_ai tgt)
     set_property (TARGET ${tgt} APPEND PROPERTY LINK_OPTIONS
         "/DELAYLOAD:openvino.dll" "delayimp.lib")
 
+    # The prebuilt runtime DLLs live in the repo's self-contained folder,
+    # bin/Release (the same folder that ships on GitHub with the app).
     add_custom_command (TARGET ${tgt} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/openvino.dll
-            ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/openvino_intel_cpu_plugin.dll
-            ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/openvino_ir_frontend.dll
-            ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/tbb12.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/openvino.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/openvino_intel_cpu_plugin.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/openvino_ir_frontend.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/tbb12.dll
             $<TARGET_FILE_DIR:${tgt}>
         COMMENT "Copying OpenVINO runtime DLLs next to ${tgt}")
 
     # whisper.cpp b5454 prebuilt binaries (transcription, CPU-only): the C API
     # library plus ggml's per-microarchitecture backends. See
     # extern/whisper-b5454/README.md for the full set and provenance.
-    file (GLOB SC_WHISPER_DLLS ${CMAKE_SOURCE_DIR}/extern/whisper-b5454/bin/*.dll)
+    file (GLOB SC_WHISPER_DLLS ${CMAKE_SOURCE_DIR}/bin/Release/ggml*.dll)
+    list (APPEND SC_WHISPER_DLLS
+        ${CMAKE_SOURCE_DIR}/bin/Release/llama.dll
+        ${CMAKE_SOURCE_DIR}/bin/Release/whisper.dll)
     add_custom_command (TARGET ${tgt} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SC_WHISPER_DLLS}
             $<TARGET_FILE_DIR:${tgt}>

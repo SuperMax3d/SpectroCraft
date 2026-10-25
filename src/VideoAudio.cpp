@@ -18,6 +18,24 @@ extern "C" {
 namespace sc {
 
 //==============================================================================
+static bool isPcmCodecId (AVCodecID id)
+{
+    switch (id)
+    {
+        case AV_CODEC_ID_PCM_S16LE:
+        case AV_CODEC_ID_PCM_S16BE:
+        case AV_CODEC_ID_PCM_S24LE:
+        case AV_CODEC_ID_PCM_S24BE:
+        case AV_CODEC_ID_PCM_S32LE:
+        case AV_CODEC_ID_PCM_S32BE:
+        case AV_CODEC_ID_PCM_U8:
+            return true;
+        default:
+            return false;
+    }
+}
+
+//==============================================================================
 /** AudioFormatReader over an FFmpeg audio stream.
 
     Every readSamples() call seeks to the requested position (cheap: one
@@ -77,17 +95,15 @@ VideoAudioReader::VideoAudioReader (const juce::File& file, juce::InputStream* s
     if (sampleRate <= 0.0 || numChannels == 0)
         return;
 
-    // Length: prefer an explicit sample count when the container provides one
-    // (AVI's strh dwLength and MP4/MKV track headers store exact counts; the
-    // duration field is often only an estimate).
-    if (st->nb_frames > 0)
+    // Length. NB: st->nb_frames is only a *sample* count for PCM streams
+    // (AVI's strh dwLength); for compressed formats like MP4/AAC it is the
+    // number of packets (e.g. 647 AAC frames), so prefer the stream duration,
+    // which is exact there (derived from the sample tables).
+    const int64_t dur_tb = (st->duration != AV_NOPTS_VALUE ? st->duration : fmt_->duration);
+    if (isPcmCodecId (st->codecpar->codec_id) && st->nb_frames > 0)
         lengthInSamples = st->nb_frames;
-    else
-    {
-        const int64_t dur_tb = (st->duration != AV_NOPTS_VALUE ? st->duration : fmt_->duration);
-        if (dur_tb > 0)
-            lengthInSamples = av_rescale_q (dur_tb, st->time_base, AVRational { 1, (int) sampleRate });
-    }
+    else if (dur_tb > 0)
+        lengthInSamples = av_rescale_q (dur_tb, st->time_base, AVRational { 1, (int) sampleRate });
 
     // Rare containers without a duration: estimate from file size / bitrate.
     if (lengthInSamples <= 0 && st->codecpar->bit_rate > 0 && file.getSize() > 0)
@@ -279,13 +295,22 @@ bool VideoAudioReader::readSamples (int* const* destChannels, int numDestChannel
 }
 
 //==============================================================================
+const juce::String& videoContainerExtensions()
+{
+    static const juce::String exts =
+        ".mp4 .m4a .m4b .3gp .3g2 .mov .mkv .webm .avi .wmv .asf .flv "
+        ".ts .m2ts .mts .ogv .wma .ac3 .eac3 .dts .dtshd .ape .wv .tta .amr .caf .mpc";
+    return exts;
+}
+
 class VideoAudioFormat : public juce::AudioFormat
 {
 public:
     VideoAudioFormat()
-        : AudioFormat ("FFmpeg audio",
-                       ".mp4 .m4a .m4b .3gp .3g2 .mov .mkv .webm .avi .wmv .asf .flv "
-                       ".ts .m2ts .mts .ogv .wma .ac3 .eac3 .dts .dtshd .ape .wv .tta .amr .caf .mpc") {}
+        // Explicit StringRefs: a bare String would be ambiguous between the
+        // (String, StringArray) and (StringRef, StringRef) constructors.
+        : AudioFormat (juce::StringRef ("FFmpeg audio"),
+                      juce::StringRef (videoContainerExtensions())) {}
 
     // We accept whatever the container holds: no fixed rate/bit-depth lists.
     juce::Array<int> getPossibleSampleRates() override { return {}; }
@@ -334,6 +359,12 @@ void registerVideoFormats (juce::AudioFormatManager& fm)
 #else   // !SC_ENABLE_FFMPEG — no FFmpeg available on this platform/build.
 
 namespace sc {
+const juce::String& videoContainerExtensions()
+{
+    static const juce::String none;   // empty: nothing extra can be opened
+    return none;
+}
+
 void registerVideoFormats (juce::AudioFormatManager& fm)
 {
     (void) fm;

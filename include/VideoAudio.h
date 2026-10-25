@@ -25,4 +25,10 @@ class VideoAudioFormat;   // Defined in src/VideoAudio.cpp when FFmpeg is enable
     shared extensions (.wav, .mp3, .flac, ...). */
 void registerVideoFormats (juce::AudioFormatManager&);
 
+/** Space-separated list of container extensions that can be opened as audio
+    (".mp4 .m4a .mkv ..."). Empty when built without FFmpeg, in which case no
+    video file can be read at all. The File Open dialog and drag & drop use this
+    so they always match what the engine can actually open. */
+const juce::String& videoContainerExtensions();
+
 } // namespace sc

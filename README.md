@@ -456,9 +456,10 @@ no external converter executable. Because it plugs into the normal
 from disk tile by tile like any other file, and **saving always produces a
 plain audio file** (WAV/FLAC/AIFF) with the decoded audio.
 
-The FFmpeg runtime is vendored in `extern/ffmpeg/` as four prebuilt Windows x64
-DLLs (~2.6 MB total: `avformat-61`, `avcodec-61`, `swresample-5`,
-`avutil-59`) that are copied next to the executable at build time. It is a
+The FFmpeg runtime is vendored in `extern/ffmpeg/` (headers + import
+libraries) with its four prebuilt Windows x64 DLLs (~2.6 MB total:
+`avformat-61`, `avcodec-61`, `swresample-5`, `avutil-59`) in `bin/Release`,
+copied next to the executable at build time. It is a
 minimal **audio-only** build (demuxers + audio decoders, no video decoding,
 no encoders/filters/network) under **LGPL-2.1-or-later**, so it can be
 dynamically linked without affecting SpectroCraft's AGPL-3.0 licence — see
@@ -484,6 +485,11 @@ Outputs:
 - Debug:   `build/src/SpectroCraft_artefacts/Debug/SpectroCraft.exe`,
             `build/tests/SpectroCraftTests_artefacts/Debug/SpectroCraftTests.exe`
 - Release: `cmake --build build --config Release` → same paths under `Release/`
+
+Every exe is self-contained after a build: all runtime DLLs (FFmpeg, OpenVINO,
+whisper) are copied next to it by CMake. The repo's `bin/Release` folder holds the
+prebuilt app plus every external DLL, so downloading just that folder gives you a
+working installation.
 
 Notes:
 
@@ -741,12 +747,12 @@ whisper-base: \  ggml-base.bin   (i.e. a single ggml-<name>.bin for every model)
 The failure dialog always shows the exact destination folder and the download
 URLs in a copyable text box. The **OpenVINO runtime DLLs** (`openvino.dll`,
 `openvino_intel_cpu_plugin.dll`, `openvino_ir_frontend.dll`, `tbb12.dll`) must sit
-next to `SpectroCraft.exe` for noise suppression — they are copied there by the
-CMake build (from `extern/OpenVINO/bin/`). A prebuilt exe without them fails
+next to `SpectroCraft.exe` for noise suppression — they ship in `bin/Release`
+and are copied there by the CMake build. A prebuilt exe without them fails
 gracefully; even a *partial* set (e.g. only `openvino.dll`) is detected and the
 dialog lists all four required files plus where to get them. Transcription needs
-the **whisper runtime DLLs** (`whisper.dll` plus 12 ggml/llama DLLs — see
-`extern/whisper-b5454/bin/`) next to `SpectroCraft.exe`; the CMake build copies
+the **whisper runtime DLLs** (`whisper.dll` plus 12 ggml/llama DLLs — all in
+`bin/Release`, see `extern/whisper-b5454/README.md`) next to `SpectroCraft.exe`; the CMake build copies
 them there too, and a missing or incompatible set is reported with a clear error.
 
 To use a **GPU or NPU**, install its plugin DLL from the same OpenVINO release
@@ -1371,6 +1377,9 @@ should agree.
 ## Project layout
 
 ```
+bin/Release             self-contained runtime folder: SpectroCraft.exe plus all
+                        external DLLs (FFmpeg, OpenVINO, whisper) — download this
+                        folder alone for a working install
 icon.ico                application icon (embedded via include/IconData.h)
 CMakeLists.txt            root build (JUCE vendored in extern/)
 include/                  component headers

@@ -8311,7 +8311,7 @@ static void testNsFailureDetails()
     const std::string d1 = sc::buildNsFailureDetails (rtErr, "deepfilternet2");
     CHECK (d1.find ("openvino.dll") != std::string::npos, "runtime-missing: lists openvino.dll");
     CHECK (d1.find ("tbb12.dll") != std::string::npos, "runtime-missing: lists tbb12.dll");
-    CHECK (d1.find ("extern/OpenVINO/bin/") != std::string::npos, "runtime-missing: points at repo DLL folder");
+    CHECK (d1.find ("bin/Release") != std::string::npos, "runtime-missing: points at repo DLL folder");
     CHECK (d1.find ("openvinotoolkit/openvino/releases") != std::string::npos, "runtime-missing: gives download source");
     CHECK (d1.find ("huggingface.co/Intel") == std::string::npos, "runtime-missing: no model URLs");
 
@@ -13478,11 +13478,45 @@ static void testVideoAudioExtraction()
               "native wav reader wins over ffmpeg");
         delete r;
     }
+
+    // --- 5. File Open / drag & drop gates accept video extensions -----------
+    {
+        const juce::String exts = sc::videoContainerExtensions();
+        CHECK (!exts.isEmpty(), "video extension list is non-empty");
+        CHECK (exts.contains (".mp4"), "extension list has .mp4");
+        CHECK (exts.contains (".mkv"), "extension list has .mkv");
+
+        const juce::String w = MainWindow::openAudioWildcard();
+        CHECK (w.contains ("*.wav"), "wildcard keeps native wav");
+        CHECK (w.contains ("*.mp4"), "wildcard offers mp4");
+        CHECK (w.contains ("*.mkv"), "wildcard offers mkv");
+        // .m4a is in both the native and video lists: must appear exactly once.
+        int m4aCount = 0, pos = 0;
+        while ((pos = w.indexOf (pos + 1, "*.m4a")) >= 0) { ++m4aCount; }
+        CHECK (m4aCount == 1, "wildcard lists .m4a exactly once");
+
+        Application app;
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "video open gates test"));
+        juce::StringArray mp4;   mp4.add ("movie.mp4");
+        CHECK (win->isInterestedInFileDrag (mp4), "drag & drop accepts .mp4");
+        juce::StringArray mixed; mixed.add ("clip.mkv"); mixed.add ("notes.txt");
+        CHECK (win->isInterestedInFileDrag (mixed), "drag & drop accepts a batch containing .mkv");
+        juce::StringArray txt;   txt.add ("readme.txt");
+        CHECK (!win->isInterestedInFileDrag (txt), "drag & drop rejects plain text");
+    }
 #else
-    // No FFmpeg on this platform: registration must be a harmless no-op.
+    // No FFmpeg on this platform: registration must be a harmless no-op and the
+    // File Open / drag & drop gates must not offer video extensions.
     juce::AudioFormatManager fm;
     fm.registerBasicFormats();
     sc::registerVideoFormats (fm);
+    CHECK (sc::videoContainerExtensions().isEmpty(), "no video extensions without FFmpeg");
+    const juce::String w = MainWindow::openAudioWildcard();
+    CHECK (!w.contains ("*.mp4"), "wildcard has no mp4 without FFmpeg");
+    Application app;
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "video open gates test"));
+    juce::StringArray mp4;   mp4.add ("movie.mp4");
+    CHECK (!win->isInterestedInFileDrag (mp4), "drag & drop rejects .mp4 without FFmpeg");
 #endif
 }
 

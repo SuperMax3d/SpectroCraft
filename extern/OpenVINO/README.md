@@ -15,9 +15,9 @@ the toolkit (GPU/NPU plugins, Python, samples) is omitted.
 ## Contents
 
 ```
-bin/
-  openvino.dll                    core runtime (ov::Core, model read/compile)
-  openvino_intel_cpu_plugin.dll   CPU inference plugin
+<repo>/bin/Release/              the runtime DLLs live in the repo's self-contained
+  openvino.dll                    folder (shipped on GitHub with the app):
+  openvino_intel_cpu_plugin.dll   core runtime (ov::Core, model read/compile)
   openvino_ir_frontend.dll        OpenVINO IR (.xml/.bin) frontend
   tbb12.dll                       oneTBB (threading; required by core + CPU plugin)
 include/openvino/                 C++ API headers (openvino.hpp et al.)
@@ -42,6 +42,7 @@ licensing/
 ## How it is used
 
 `src/AI/OvRuntime.cpp` loads `openvino.dll` from the application directory at
-runtime (the CMake build copies `bin/*.dll` next to the exe). The CPU plugin
+runtime (the CMake build copies them from `<repo>/bin/Release` next to the exe).
+The CPU plugin
 and IR frontend are discovered by OpenVINO automatically because they sit in
 the same folder as `openvino.dll`.

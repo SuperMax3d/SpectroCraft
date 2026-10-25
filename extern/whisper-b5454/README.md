@@ -14,7 +14,7 @@ runtime SIMD dispatch, plus a prebuilt decoder path via `llama.dll`.
 | `include/whisper.h` | The C API header from b5454, verbatim (MIT). |
 | `include/ggml.h` | The ggml header from b5454, verbatim (MIT) — needed because whisper.h includes it; only two typedefs are actually used. |
 | `include/ggml-cpu.h` | Minimal shim: whisper.h includes this file but uses nothing from it, so the full backend headers are not needed to compile against the C API. |
-| `bin/*.dll` | The runtime DLLs, copied next to SpectroCraft.exe at build time (see `sc_enable_ai()` in `extern/OpenVINO/CMakeLists.txt`). |
+| `<repo>/bin/Release/*.dll` | The runtime DLLs live in the repo's self-contained runtime folder (shipped on GitHub with the app) and are copied next to SpectroCraft.exe at build time (see `sc_enable_ai()` in `extern/OpenVINO/CMakeLists.txt`). |
 
 ## Runtime DLL set (all required)
 

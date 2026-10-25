@@ -61,11 +61,17 @@ grep -q "License: LGPL version 2.1 or later" configure.log || { echo "NOT LGPL 2
 make -j"$(nproc)"
 make install
 
-# --- install into extern/ffmpeg ------------------------------------------------
-rm -rf "$HERE/bin" "$HERE/lib" "$HERE/include" "$HERE/licensing"
-mkdir -p "$HERE/bin" "$HERE/lib" "$HERE/include" "$HERE/licensing"
-cp "$PREFIX"/bin/*.dll "$HERE/bin/"
-x86_64-w64-mingw32-strip --strip-unneeded "$HERE"/bin/*.dll
+# --- install into the repo -----------------------------------------------------
+# DLLs live in <repo>/bin/Release (the self-contained runtime folder that ships
+# on GitHub); headers/libs/licensing stay under extern/ffmpeg.
+rm -rf "$HERE/lib" "$HERE/include" "$HERE/licensing"
+mkdir -p "$HERE/lib" "$HERE/include" "$HERE/licensing" "$HERE/../../bin/Release"
+cp "$PREFIX"/bin/*.dll "$HERE/../../bin/Release/"
+x86_64-w64-mingw32-strip --strip-unneeded \
+    "$HERE/../../bin/Release/avcodec-61.dll" \
+    "$HERE/../../bin/Release/avformat-61.dll" \
+    "$HERE/../../bin/Release/avutil-59.dll" \
+    "$HERE/../../bin/Release/swresample-5.dll"
 cp -r "$PREFIX"/include/libavcodec "$PREFIX"/include/libavformat \
       "$PREFIX"/include/libavutil  "$PREFIX"/include/libswresample "$HERE/include/"
 cp "$WORK/FFmpeg/COPYING.LGPLv2.1" "$WORK/FFmpeg/LICENSE.md" "$HERE/licensing/"
@@ -77,4 +83,5 @@ for def in "$PREFIX"/lib/*.def; do
   llvm-dlltool -m i386:x86-64 -d "$def" -D "$base.dll" -l "$HERE/lib/$name.lib"
 done
 
-echo "Installed into $HERE:"; ls -la "$HERE/bin" "$HERE/lib"
+echo "Installed into $HERE and $(cd "$HERE/../.." && pwd)/bin/Release:"
+ls -la "$HERE/lib" "$HERE/../../bin/Release"
