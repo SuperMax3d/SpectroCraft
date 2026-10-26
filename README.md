@@ -343,9 +343,18 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     is editable too: click into the `Pos:` field to type/paste where the cursor
     should go (clamped to the file) — it tracks playback at 30 Hz whenever you
     are not editing it.
-  - The File menu offers **Save Spectrogram As...** (Ctrl+Shift+E), which writes
-    the current spectrogram content (per-channel rows included, no axes or
-    overlays) to a PNG file.
+  - The File menu's **Spectrogram** submenu offers:
+    - **Save Spectrogram As...** (Ctrl+Shift+E) — writes the current spectrogram
+      content (per-channel rows included) to a PNG file.
+    - **Take Snapshot PrintScreen** — saves a PNG right next to the WAV file with
+      a timestamped name (`<name>_snapshot_<yyyy-mm-dd>_<hh-mm-ss>.png`, numeric
+      suffix on collision); falls back to a save dialog when no file is loaded.
+    - Four checkable options, persisted across restarts, that add overlays to
+      the exported image (all off by default):
+      **Save Axes** (frequency + time axes around the plot), **Save Markers**
+      (marker lines and titles), **Save Selections** (time selection band plus
+      spectral selection shapes) and **Save Drawing** (your committed drawings —
+      text, arrows, rectangles, freehand).
 - **New files**: File → **New...** (Ctrl+Shift+N) creates an empty document with
   the chosen channel count and sample rate (defaults: 2 channels / 44100 Hz,
   or the active file's values). New documents are named *Untitled*,

@@ -20,6 +20,8 @@ static constexpr double kPanSpeedFactor = 0.5;
 
 juce::Rectangle<int> SpectralView::plotRect() const
 {
+    if (haveExportLayout_)
+        return exportLayout_;   // offscreen export canvas layout
     return { kLeftAxisWidth, rulerH(),
              std::max (1, getWidth() - kLeftAxisWidth),
              std::max (1, getHeight() - rulerH()) };
@@ -42,7 +44,7 @@ std::vector<juce::Rectangle<int>> SpectralView::rowRects() const
     // axis drags can hit-test them too), positioned inside the plot area
     // below the top time ruler.
     const auto pr = plotRect();
-    auto rows = WaveformView::channelRowRects (getWidth(), pr.getHeight(), (int) channels.size());
+    auto rows = WaveformView::channelRowRects (layoutWidth(), pr.getHeight(), (int) channels.size());
     for (auto& r : rows)
         r.setY (r.getY() + pr.getY());
     return rows;
@@ -1005,31 +1007,77 @@ void SpectralView::setFrequencyRange (double lo, double hi)
     if (onFrequencyRangeChanged) onFrequencyRangeChanged (freqMin, freqMax);
 }
 
-bool SpectralView::saveAsPng (const juce::File& file, const std::atomic<bool>* cancel)
+bool SpectralView::saveAsPng (const juce::File& file,
+                             const std::atomic<bool>* cancel,
+                             const SpectralExportOptions& opts)
 {
     if (!app.audioEngine().isFileLoaded() || channels.empty()) return false;
     const auto pr = plotRect();
+    const int pw = pr.getWidth(), ph = pr.getHeight();
+    if (pw <= 0 || ph <= 0) return false;
+
     Settings rs = settings_;
     rs.minFrequency = (float) std::max (1.0, freqMin);
     rs.maxFrequency = (float) std::min (app.audioEngine().sampleRate() * 0.5, freqMax);
 
-    juce::Image img (juce::Image::ARGB, pr.getWidth(), pr.getHeight(), true);
-    if (!renderSpectralContent (img, rs, cancel))
+    // The spectral content is the only long-running step: render it first so
+    // a cancel never wastes time on the overlay composition.
+    juce::Image plotImg (juce::Image::ARGB, pw, ph, true);
+    if (!renderSpectralContent (plotImg, rs, cancel))
         return false;   // cancelled: no PNG is written
 
+    const int ox = opts.axes ? kLeftAxisWidth : 0;
+    const int oy = opts.axes ? kRulerH : 0;
+    const int W = pw + ox, H = ph + oy;
+
+    // Compose the final image. For this block only, plotRect()/rulerH() and
+    // everything built on them (row rects, timeToX, rulers, overlays) address
+    // the export canvas instead of the live component bounds.
+    haveExportLayout_ = true;
+    exportLayout_ = juce::Rectangle<int> (ox, oy, pw, ph);
+
+    juce::Image img (juce::Image::ARGB, W, H, true);
+    {
+        juce::Graphics g (img);
+        g.fillAll (juce::Colours::black);
+        g.drawImage (plotImg,
+                     juce::Rectangle<float> ((float) ox, (float) oy, (float) pw, (float) ph),
+                     juce::RectanglePlacement::fillDestination);
+
+        if (opts.axes)
+        {
+            // Opaque ruler background so the labels stay readable over the spectrum.
+            g.setColour (juce::Colour::fromRGB (32, 32, 36));
+            g.fillRect (0, 0, kLeftAxisWidth, H);
+            drawFrequencyRuler (g);
+            drawTimeRuler (g);
+            drawChannelLabels (g);
+        }
+
+        if (opts.selections)
+        {
+            drawTimeSelectionOverlay (g);
+            drawSpectralShapesOverlay (g, false);   // committed shapes only
+        }
+        if (opts.markers)  drawMarkersOverlay (g);
+        if (opts.drawings) drawDrawings (g, false); // committed items only
+    }
+
+    haveExportLayout_ = false;
+
     // Extract raw pixels and write a PNG with our own writer.
-    std::vector<uint8_t> rgba ((size_t) pr.getWidth() * pr.getHeight() * 4);
-    for (int y = 0; y < pr.getHeight(); ++y)
-        for (int x = 0; x < pr.getWidth(); ++x)
+    std::vector<uint8_t> rgba ((size_t) W * H * 4);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x)
         {
             const juce::Colour c = img.getPixelAt (x, y);
-            const size_t o = ((size_t) y * pr.getWidth() + x) * 4;
+            const size_t o = ((size_t) y * W + x) * 4;
             rgba[o + 0] = (uint8_t) c.getRed();
             rgba[o + 1] = (uint8_t) c.getGreen();
             rgba[o + 2] = (uint8_t) c.getBlue();
             rgba[o + 3] = (uint8_t) c.getAlpha();
         }
-    return PngWriter::writePng (file, pr.getWidth(), pr.getHeight(), rgba);
+    return PngWriter::writePng (file, W, H, rgba);
 }
 
 void SpectralView::zoomFrequencyBy (double factor)
@@ -1131,19 +1179,7 @@ void SpectralView::paint (juce::Graphics& g)
     // Channel labels on the left of each track: "L"/"R" for stereo files,
     // channel numbers otherwise. Shown even when a single channel is visible
     // so the axis always says which track it is.
-    {
-        const auto rows = rowRects ();
-        g.setFont (10.0f);
-        for (size_t r = 0; r < rows.size(); ++r)
-        {
-            const int ch = channels[r];
-            const auto& rr = rows[r];
-            const juce::String lab = (app.audioEngine().numChannels() == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
-            g.setColour (juce::Colour::fromRGB (190, 190, 190));
-            g.drawText (lab, 4, rr.getY() + rr.getHeight() / 2 - 8, kLeftAxisWidth - 6, 16,
-                       juce::Justification::centredRight, false);
-        }
-    }
+    drawChannelLabels (g);
 
     drawOverlays (g);
     drawDrawings (g);
@@ -1352,7 +1388,7 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
             const float y = (float) rr.getY() + freqToY (f, rr.getHeight());
             g.setColour (minor ? juce::Colour::fromRGB (48, 48, 52)
                                : juce::Colour::fromRGB (60, 60, 60));
-            g.drawLine ((float) kLeftAxisWidth, y, (float) getWidth(), y, 1.0f);
+            g.drawLine ((float) kLeftAxisWidth, y, (float) layoutWidth(), y, 1.0f);
             if (!showLabels || !withLabel) return;
             if (hasChanLabel && std::abs (y - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
                 return; // room for the channel label
@@ -1464,37 +1500,39 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
     }
 }
 
-void SpectralView::drawOverlays (juce::Graphics& g)
+// Time selection — blue fill with solid edge lines so it stays clearly
+// visible over the spectrogram image. Clipped to the plot so an edge that
+// lies before the visible window never paints over the frequency axis.
+void SpectralView::drawTimeSelectionOverlay (juce::Graphics& g)
 {
     const auto pr = plotRect();
+    if (selection.isEmpty()) return;
+    const double x1 = timeToX (selection.getStart());
+    const double x2 = timeToX (selection.getEnd());
+    const juce::Graphics::ScopedSaveState save (g);
+    g.reduceClipRegion (pr);
+    g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
+    g.fillRect ((float) x1, (float) pr.getY(), (float) std::max (0.0, x2 - x1), (float) pr.getHeight());
+    g.setColour (juce::Colour::fromRGB (96, 150, 255));
+    g.drawVerticalLine ((float) x1, (float) pr.getY(), (float) pr.getBottom());
+    g.drawVerticalLine ((float) x2, (float) pr.getY(), (float) pr.getBottom());
+}
 
-    // Time selection — blue fill with solid edge lines so it stays clearly
-    // visible over the spectrogram image. Clipped to the plot so an edge that
-    // lies before the visible window never paints over the frequency axis.
-    if (!selection.isEmpty())
+// Committed spectral selection shapes from the active doc plus (optionally)
+// the live preview while a tool drag is in progress. They are evaluated
+// TOGETHER so a Ctrl-drag shows its hole in the existing selection
+// immediately.
+void SpectralView::drawSpectralShapesOverlay (juce::Graphics& g, bool includeLivePreview)
+{
+    static const std::vector<SpectralShape> emptyShapes;
+    auto* d = app.doc();
+    const std::vector<SpectralShape>& committed =
+        (d && !d->spectralSel.empty ()) ? d->spectralSel.shapes () : emptyShapes;
+
+    SpectralShape live;
+    bool haveLive = false;
+    if (includeLivePreview)
     {
-        const double x1 = timeToX (selection.getStart());
-        const double x2 = timeToX (selection.getEnd());
-        const juce::Graphics::ScopedSaveState save (g);
-        g.reduceClipRegion (pr);
-        g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
-        g.fillRect ((float) x1, (float) pr.getY(), (float) std::max (0.0, x2 - x1), (float) pr.getHeight());
-        g.setColour (juce::Colour::fromRGB (96, 150, 255));
-        g.drawVerticalLine ((float) x1, (float) pr.getY(), (float) pr.getBottom());
-        g.drawVerticalLine ((float) x2, (float) pr.getY(), (float) pr.getBottom());
-    }
-
-    // Spectral selection: committed shapes from the active doc plus the live
-    // preview while a tool drag is in progress. They are evaluated TOGETHER so
-    // a Ctrl-drag shows its hole in the existing selection immediately.
-    {
-        static const std::vector<SpectralShape> emptyShapes;
-        auto* d = app.doc();
-        const std::vector<SpectralShape>& committed =
-            (d && !d->spectralSel.empty ()) ? d->spectralSel.shapes () : emptyShapes;
-
-        SpectralShape live;
-        bool haveLive = false;
         if (dragMode == DragMode::Marquee)
         {
             live.kind = SpectralShape::Kind::Rect;
@@ -1519,18 +1557,22 @@ void SpectralView::drawOverlays (juce::Graphics& g)
                 live.rasteriseStroke (app.brushRadiusHz);   // grid needed for contains()
             haveLive = true;
         }
-
-        // Same blue family as the time selection; previews are brighter.
-        const juce::Colour fillCol = haveLive ? juce::Colour::fromRGBA (70, 130, 255, 96)
-                                              : juce::Colour::fromRGBA (70, 130, 255, 80);
-        const juce::Colour edgeCol = haveLive ? juce::Colour::fromRGB (140, 180, 255)
-                                              : juce::Colour::fromRGB (96, 150, 255);
-        drawSpectralShapes (g, committed, haveLive ? &live : nullptr, fillCol, edgeCol);
     }
 
-    // Markers — clipped to the plot so lines and titles never paint over the
-    // left frequency axis when a marker starts before the visible window.
-    if (markerList)
+    // Same blue family as the time selection; previews are brighter.
+    const juce::Colour fillCol = haveLive ? juce::Colour::fromRGBA (70, 130, 255, 96)
+                                          : juce::Colour::fromRGBA (70, 130, 255, 80);
+    const juce::Colour edgeCol = haveLive ? juce::Colour::fromRGB (140, 180, 255)
+                                          : juce::Colour::fromRGB (96, 150, 255);
+    drawSpectralShapes (g, committed, haveLive ? &live : nullptr, fillCol, edgeCol);
+}
+
+// Markers — clipped to the plot so lines and titles never paint over the
+// left frequency axis when a marker starts before the visible window.
+void SpectralView::drawMarkersOverlay (juce::Graphics& g)
+{
+    if (!markerList) return;
+    const auto pr = plotRect();
     {
         const juce::Graphics::ScopedSaveState save (g);
         g.reduceClipRegion (pr);
@@ -1539,7 +1581,7 @@ void SpectralView::drawOverlays (juce::Graphics& g)
         {
             const Marker& m = ms[i];
             const double x = timeToX (m.start);
-            if (x < -50 || x > getWidth() + 50)
+            if (x < -50 || x > layoutWidth() + 50)
                 continue;
             g.setColour (m.colour.withAlpha (0.8f));
             if (m.end < 0)
@@ -1560,13 +1602,22 @@ void SpectralView::drawOverlays (juce::Graphics& g)
             const double textX = x + 4;
             const double rightEdge = (i + 1 < ms.size())
                 ? timeToX (ms[i + 1].start) - 2.0
-                : (double) getWidth() + 50.0;
+                : (double) layoutWidth() + 50.0;
             const double w = std::max (0.0, rightEdge - textX);
             if (w > 0.0)
                 g.drawText (m.name, (int) textX, pr.getY() + 8, (int) w, 14,
                             juce::Justification::topLeft, true);
         }
     }
+}
+
+void SpectralView::drawOverlays (juce::Graphics& g)
+{
+    const auto pr = plotRect();
+
+    drawTimeSelectionOverlay (g);
+    drawSpectralShapesOverlay (g, true);
+    drawMarkersOverlay (g);
 
     // Paintbrush cursor: a translucent band showing the brush's frequency
     // width at the current cursor position.
@@ -1700,10 +1751,28 @@ void SpectralView::estimateTextExtent (int px, int py, const juce::String& text,
                      rr.getHeight());
 }
 
-void SpectralView::drawDrawings (juce::Graphics& g)
+// Channel labels on the left of each track: "L"/"R" for stereo files,
+// channel numbers otherwise. Shown even when a single channel is visible so
+// the axis always says which track it is.
+void SpectralView::drawChannelLabels (juce::Graphics& g)
+{
+    const auto rows = rowRects ();
+    g.setFont (10.0f);
+    for (size_t r = 0; r < rows.size(); ++r)
+    {
+        const int ch = channels[r];
+        const auto& rr = rows[r];
+        const juce::String lab = (app.audioEngine().numChannels() == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
+        g.setColour (juce::Colour::fromRGB (190, 190, 190));
+        g.drawText (lab, 4, rr.getY() + rr.getHeight() / 2 - 8, kLeftAxisWidth - 6, 16,
+                   juce::Justification::centredRight, false);
+    }
+}
+
+void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
 {
     auto* d = app.doc ();
-    if (d == nullptr && !drawingNew_) return;
+    if (d == nullptr && !(drawingNew_ && includeLivePreview)) return;
 
     // Committed items from the active doc plus the live in-progress preview.
     std::vector<DrawingItem> items;
@@ -1711,7 +1780,7 @@ void SpectralView::drawDrawings (juce::Graphics& g)
 
     DrawingItem live;
     bool haveLive = false;
-    if (drawingNew_)
+    if (drawingNew_ && includeLivePreview)
     {
         const double tEnd = xToTime ((double) drawEndX_);
         const double fEnd = freqAtY (drawEndY_);

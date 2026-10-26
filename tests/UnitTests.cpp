@@ -14861,6 +14861,170 @@ static void testDrawingKeyShortcuts()
     wav.deleteFile();
 }
 
+// ---------------- File > Spectrogram submenu: snapshot + export overlays -----
+
+// PNG signature + IHDR carry width/height as big-endian u32s at offsets 16..23:
+// enough to verify an exported image's size without a full decoder.
+static std::pair<int, int> pngDimensions (const juce::File& f)
+{
+    if (!f.existsAsFile ()) return { -1, -1 };
+    std::vector<uint8_t> head (24);
+    if (auto in = f.createInputStream ())
+    {
+        const int got = in->read (head.data(), 24);
+        if (got != 24) return { -1, -1 };
+    }
+    static const uint8_t sig[8] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    if (std::memcmp (head.data(), sig, 8) != 0) return { -1, -1 };
+    auto be32 = [&] (int off)
+    {
+        return ((int) head[off] << 24) | ((int) head[off + 1] << 16)
+             | ((int) head[off + 2] << 8) | (int) head[off + 3];
+    };
+    return { be32 (16), be32 (20) };
+}
+
+// Cheap whole-file checksum: only used to prove two exports differ.
+static uint64_t fileChecksum (const juce::File& f)
+{
+    if (!f.existsAsFile ()) return 0;
+    std::vector<uint8_t> all;
+    if (auto in = f.createInputStream ())
+        for (;;)
+        {
+            uint8_t buf[65536];
+            const int n = in->read (buf, 65536);
+            if (n <= 0) break;
+            all.insert (all.end(), buf, buf + n);
+        }
+    uint64_t h = 1469598103934665603ULL;   // FNV-1a
+    for (size_t i = 0; i < all.size(); ++i)
+    {
+        h ^= all[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void testSpectrogramExportOptions()
+{
+    const juce::File dir = makeTempFile ("export_opts_dir").getParentDirectory ()
+                           .getChildFile ("spectrocraft_export_test");
+    dir.createDirectory ();
+    for (auto entry : juce::RangedDirectoryIterator (dir, false))      // never trust leftovers
+        if (entry.getFile ().existsAsFile ())
+            entry.getFile ().deleteFile ();
+
+    // --- 1) Snapshot path: naming, location and collision suffixes ---
+    {
+        const juce::File wav = dir.getChildFile ("snap_src.wav");
+        // This JUCE build's Time constructor takes the month zero-based.
+        const juce::Time fixed (2026, 0, 30, 15, 30, 45);
+        const juce::File p = MainWindow::makeSnapshotPath (wav, &fixed);
+        CHECK (p.getParentDirectory () == dir, "snapshot lands next to the WAV");
+        CHECK (p.getFileName () == "snap_src_snapshot_2026-01-30_15-30-45.png",
+              "snapshot name is <name>_snapshot_<yyyy-mm-dd>_<hh-mm-ss>.png");
+
+        p.replaceWithText ("");   // simulate an earlier snapshot in the same second
+        const juce::File p2 = MainWindow::makeSnapshotPath (wav, &fixed);
+        CHECK (p2.getFileName () == "snap_src_snapshot_2026-01-30_15-30-45_1.png",
+              "a collision gets a numeric suffix");
+        p2.replaceWithText ("");
+        const juce::File p3 = MainWindow::makeSnapshotPath (wav, &fixed);
+        CHECK (p3.getFileName () == "snap_src_snapshot_2026-01-30_15-30-45_2.png",
+              "the suffix keeps counting up");
+    }
+
+    // --- 2) Export sizes + overlay content, and the menu toggles ---
+    const juce::File store = makeTempFile ("export_opts.recent");
+    store.deleteFile ();
+    {
+        const juce::File wav = dir.getChildFile ("export_src.wav");
+        writeWav (wav, 2, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+            { return (float) (std::sin ((double) f * 0.05 + ch) * 0.3); });
+
+        Application app (store);
+        CHECK (app.openFile (wav), "open wav for export options test");
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "export options"));
+        SpectralView* sv = win->spectralViewComp ();
+        CHECK (sv != nullptr, "main window owns a spectral view");
+
+        const auto pr = sv->plotRect ();
+        const int pw = pr.getWidth (), ph = pr.getHeight();
+        CHECK (pw > 0 && ph > 0, "the plot has a size");
+
+        // Content for the overlays: one marker, a time selection, one drawing.
+        app.markers().addPointMarker (0.25, "ExportMark");
+        app.setSelection ({ 0.1, 0.3 });
+        DrawingItem arrow;
+        arrow.kind = DrawingItem::Kind::Arrow;
+        arrow.points.push_back (std::make_pair (0.2, 100.0));
+        arrow.points.push_back (std::make_pair (0.4, 300.0));
+        app.addDrawing (arrow);
+
+        const juce::File outPlain = dir.getChildFile ("out_plain.png");
+        CHECK (sv->saveAsPng (outPlain), "plain export writes a PNG");
+        const auto dp = pngDimensions (outPlain);
+        CHECK (dp.first == pw && dp.second == ph, "plain export is exactly plot-sized");
+
+        SpectralView::SpectralExportOptions axes;
+        axes.axes = true;
+        const juce::File outAxes = dir.getChildFile ("out_axes.png");
+        CHECK (sv->saveAsPng (outAxes, nullptr, axes), "axes export writes a PNG");
+        const auto da = pngDimensions (outAxes);
+        CHECK (da.first == pw + kLeftAxisWidth && da.second == ph + SpectralView::kRulerH,
+              "Save Axes adds the axis margins around the plot");
+
+        SpectralView::SpectralExportOptions all;
+        all.axes = true;  all.markers = true;
+        all.selections = true;  all.drawings = true;
+        const juce::File outAll = dir.getChildFile ("out_all.png");
+        CHECK (sv->saveAsPng (outAll, nullptr, all), "full export writes a PNG");
+        const auto dAll = pngDimensions (outAll);
+        CHECK (dAll.first == pw + kLeftAxisWidth && dAll.second == ph + SpectralView::kRulerH,
+              "overlays do not change the image size");
+
+        // The overlays must actually alter the pixels.
+        const uint64_t cPlain = fileChecksum (outPlain);
+        const uint64_t cAxes  = fileChecksum (outAxes);
+        const uint64_t cAll   = fileChecksum (outAll);
+        CHECK (cAxes != cPlain, "Save Axes changes the pixels");
+        CHECK (cAll != cAxes, "markers/selections/drawings change the pixels");
+
+        SpectralView::SpectralExportOptions noAx;
+        noAx.markers = true;  noAx.selections = true;  noAx.drawings = true;
+        const juce::File outNoAx = dir.getChildFile ("out_noax.png");
+        CHECK (sv->saveAsPng (outNoAx, nullptr, noAx), "no-axes overlay export writes a PNG");
+        const auto dn = pngDimensions (outNoAx);
+        CHECK (dn.first == pw && dn.second == ph, "without Save Axes the image stays plot-sized");
+        CHECK (fileChecksum (outNoAx) != cPlain, "overlays change the pixels without axes");
+
+        // The File > Spectrogram submenu toggles persist through the store.
+        CHECK (!app.settings.exportAxes && !app.settings.exportMarkers
+               && !app.settings.exportSelections && !app.settings.exportDrawings,
+              "export overlays default off");
+        win->menuItemSelected (MainWindow::ExpAxes, 0);
+        CHECK (app.settings.exportAxes, "Save Axes toggles on from the menu");
+        win->menuItemSelected (MainWindow::ExpDrawings, 0);
+        CHECK (app.settings.exportDrawings && !app.settings.exportMarkers
+               && !app.settings.exportSelections,
+              "each overlay flag toggles independently");
+    }
+    {
+        Application app2 (store);
+        CHECK (app2.settings.exportAxes && app2.settings.exportDrawings
+               && !app2.settings.exportMarkers && !app2.settings.exportSelections,
+              "menu toggles persisted to the settings store");
+    }
+
+    for (const char* n : { "out_plain.png", "out_axes.png", "out_all.png",
+                           "out_noax.png", "snap_src_snapshot_2026-01-30_15-30-45.png",
+                           "snap_src_snapshot_2026-01-30_15-30-45_1.png",
+                           "snap_src_snapshot_2026-01-30_15-30-45_2.png" })
+        dir.getChildFile (n).deleteFile ();
+    dir.getChildFile ("export_src.wav").deleteFile ();
+}
+
 static void testStartupTrace()
 {
     const juce::File log = makeTempFile ("startup_trace.log");
@@ -15094,6 +15258,7 @@ static int scRunUnitTestsImpl()
     progress ("arrow head geometry");     testArrowHeadGeometry();
     progress ("drawing panel");           testDrawingPanel();
     progress ("drawing key shortcuts");   testDrawingKeyShortcuts();
+    progress ("spectrogram export options"); testSpectrogramExportOptions();
 
 
 

@@ -49,7 +49,15 @@ public:
     void openFile (const juce::File& file);   // routes large files to the async path
     void openFileWithProgress (const juce::File& file);  // background load + progress dialog
     void runSaveAsync (const juce::File& file, bool saveAs);      // background save + dialog
-    void exportSpectralAsync (const juce::File& file);            // background PNG render + dialog
+    void exportSpectralAsync (const juce::File& file,
+                              const SpectralView::SpectralExportOptions& opts = {});
+                                                          // background PNG render + dialog
+    void handleExportSpectral();                            // File > Spectrogram > Save As... / Ctrl+Shift+E
+    void takeSpectrogramSnapshot();                         // File > Spectrogram > Take snapshot (PrintScreen)
+    /** Timestamped snapshot path next to the WAV: <name>_snapshot_<yyyy-mm-dd>_<hh-mm-ss>.png,
+        with a numeric suffix if that exact file already exists. `when` is
+        injectable for unit tests (defaults to now). */
+    static juce::File makeSnapshotPath (const juce::File& wav, const juce::Time* when = nullptr);
     void handleFileOpen();
     void handleFileSave();
     void handleFileSaveAs();
@@ -254,7 +262,8 @@ public:
 
     enum MenuIDs
     {
-        FileNew = 999, FileOpen = 1000, FileClose, FileCloseAll, FileSave, FileSaveAs, FileExportSpectral, FileQuit,
+        FileNew = 999, FileOpen = 1000, FileClose, FileCloseAll, FileSave, FileSaveAs,
+        FileExportSpectral, FileSnapshot, ExpAxes, ExpMarkers, ExpSelections, ExpDrawings, FileQuit,
         EditUndo = 2000, EditRedo, EditCut, EditCopy, EditPaste, EditDelete,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,
         EditPasteToNewChannels,

@@ -1681,8 +1681,20 @@ void MainWindow::handleCloseAll()
         closeMatching (true);   // everything is clean: just close it all
 }
 
+// The overlay options currently armed in the File > Spectrogram submenu.
+static SpectralView::SpectralExportOptions spectralExportOptionsFromSettings (const Settings& s)
+{
+    SpectralView::SpectralExportOptions o;
+    o.axes       = s.exportAxes;
+    o.markers    = s.exportMarkers;
+    o.selections = s.exportSelections;
+    o.drawings   = s.exportDrawings;
+    return o;
+}
+
 // Render + write the spectrogram PNG on a background thread.
-void MainWindow::exportSpectralAsync (const juce::File& file)
+void MainWindow::exportSpectralAsync (const juce::File& file,
+                                      const SpectralView::SpectralExportOptions& opts)
 {
     auto* dlg = new WorkProgressDialog ("Exporting",
                                         "Rendering spectrogram to " + file.getFileName() + " ...",
@@ -1690,8 +1702,8 @@ void MainWindow::exportSpectralAsync (const juce::File& file)
     dlg->setProgress (-1.0);   // out of range -> indeterminate spinning bar
     dlg->beginModal ();
 
-    std::thread ([this, file, dlg] {
-        const bool ok = spectralView ? spectralView->saveAsPng (file, &dlg->cancelled) : false;
+    std::thread ([this, file, opts, dlg] {
+        const bool ok = spectralView ? spectralView->saveAsPng (file, &dlg->cancelled, opts) : false;
         juce::MessageManager::callAsync ([this, file, dlg, ok] {
             const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
@@ -1701,6 +1713,54 @@ void MainWindow::exportSpectralAsync (const juce::File& file)
                                                     "Could not write the PNG file.", "", this);
         });
     }).detach();
+}
+
+// File > Spectrogram > Save Spectrogram As... (also Ctrl+Shift+E).
+void MainWindow::handleExportSpectral()
+{
+    if (!spectralView || !app.audioEngine().isFileLoaded()) return;
+    juce::FileChooser chooser ("Save Spectrogram As",
+        app.audioEngine().getFile().getParentDirectory(), "*.png",
+        kUseNativeFileChooser);
+    if (chooser.browseForFileToSave (true))
+        exportSpectralAsync (chooser.getResult(),
+                             spectralExportOptionsFromSettings (app.settings));
+}
+
+// File > Spectrogram > Take snapshot (also the PrintScreen key): writes a PNG
+// next to the WAV file with a date/time stamp in its name. If the audio has
+// no file location yet, falls back to the normal save dialog.
+void MainWindow::takeSpectrogramSnapshot()
+{
+    if (!spectralView || !app.audioEngine().isFileLoaded()) return;
+    const juce::File f = app.audioEngine().getFile();
+    juce::File target;
+    if (f.getFullPathName().isEmpty())
+    {
+        juce::FileChooser chooser ("Save Spectrogram As",
+            f.getParentDirectory(), "*.png", kUseNativeFileChooser);
+        if (!chooser.browseForFileToSave (true)) return;
+        target = chooser.getResult();
+    }
+    else
+        target = makeSnapshotPath (f);
+    exportSpectralAsync (target, spectralExportOptionsFromSettings (app.settings));
+}
+
+juce::File MainWindow::makeSnapshotPath (const juce::File& wav, const juce::Time* when)
+{
+    const juce::Time now = (when != nullptr) ? *when : juce::Time::getCurrentTime ();
+    auto pad2 = [] (int v) { return v < 10 ? juce::String ("0") + juce::String (v) : juce::String (v); };
+    // NOTE: this JUCE build's getMonth() is zero-based (January = 0).
+    const juce::String stamp = juce::String (now.getYear()) + "-" + pad2 (now.getMonth () + 1) + "-"
+                             + pad2 (now.getDayOfMonth ()) + "_" + pad2 (now.getHours ()) + "-"
+                             + pad2 (now.getMinutes ()) + "-" + pad2 (now.getSeconds ());
+    const juce::File dir = wav.getParentDirectory();
+    const juce::String base = wav.getFileNameWithoutExtension ();
+    juce::File out = dir.getChildFile (base + "_snapshot_" + stamp + ".png");
+    for (int i = 1; out.existsAsFile () && i < 1000; ++i)
+        out = dir.getChildFile (base + "_snapshot_" + stamp + "_" + juce::String (i) + ".png");
+    return out;
 }
 
 void MainWindow::updateTitle()
@@ -1934,14 +1994,29 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             app.setActiveDocMetaMode (sc::MetaMode::External);
             break;
         case FileExportSpectral:
-            if (spectralView && app.audioEngine().isFileLoaded())
-            {
-                juce::FileChooser chooser ("Save Spectrogram As",
-                    app.audioEngine().getFile().getParentDirectory(), "*.png",
-                    kUseNativeFileChooser);
-                if (chooser.browseForFileToSave (true))
-                    exportSpectralAsync (chooser.getResult());
-            }
+            handleExportSpectral ();
+            break;
+
+        case FileSnapshot:
+            takeSpectrogramSnapshot ();
+            break;
+
+        // Spectrogram export overlays: toggle + persist (via onStateChange).
+        case ExpAxes:
+            app.settings.exportAxes = !app.settings.exportAxes;
+            if (app.onStateChange) app.onStateChange();
+            break;
+        case ExpMarkers:
+            app.settings.exportMarkers = !app.settings.exportMarkers;
+            if (app.onStateChange) app.onStateChange();
+            break;
+        case ExpSelections:
+            app.settings.exportSelections = !app.settings.exportSelections;
+            if (app.onStateChange) app.onStateChange();
+            break;
+        case ExpDrawings:
+            app.settings.exportDrawings = !app.settings.exportDrawings;
+            if (app.onStateChange) app.onStateChange();
             break;
         case FileQuit: JUCEApplication::getInstance()->systemRequestedQuit(); break;
 
@@ -4063,8 +4138,20 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
             menu.addSubMenu ("Metadata", metaMenu);
         }
 
-        menu.addItem (FileExportSpectral, "Save Spectrogram As...\tCtrl+Shift+E",
-                      app.audioEngine().isFileLoaded() && showSpectralView, false);
+        // Spectrogram export: the plain item plus a submenu with the snapshot
+        // action and the persistent overlay options.
+        {
+            const bool canExport = app.audioEngine().isFileLoaded() && showSpectralView;
+            juce::PopupMenu specMenu;
+            specMenu.addItem (FileExportSpectral, "Save Spectrogram As...\tCtrl+Shift+E", canExport);
+            specMenu.addItem (FileSnapshot, "Take Snapshot\tPrintScreen", canExport);
+            specMenu.addSeparator ();
+            specMenu.addItem (ExpAxes, "Save Axes", true, app.settings.exportAxes);
+            specMenu.addItem (ExpMarkers, "Save Markers", true, app.settings.exportMarkers);
+            specMenu.addItem (ExpSelections, "Save Selections", true, app.settings.exportSelections);
+            specMenu.addItem (ExpDrawings, "Save Drawing", true, app.settings.exportDrawings);
+            menu.addSubMenu ("Spectrogram", specMenu);
+        }
         menu.addSeparator();
         menu.addItem (FileQuit, "Quit\tCtrl+Q", true, false);
     }
@@ -4283,6 +4370,10 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { handleFileOpen(); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0)) { handleFileSave(); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleFileSaveAs(); return true; }
+    // Ctrl+Shift+E exports the spectrogram (the shortcut shown in the menu).
+    if (key == juce::KeyPress ('e', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleExportSpectral(); return true; }
+    // PrintScreen takes a timestamped snapshot next to the WAV file.
+    if (key.getKeyCode() == 0x2c) { takeSpectrogramSnapshot(); return true; }
     if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }
     // Ctrl+F4 also closes the active file (browser-style tab close).
     if (key == juce::KeyPress (juce::KeyPress::F4Key, juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }

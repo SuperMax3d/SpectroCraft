@@ -131,6 +131,11 @@ void Application::loadSettings ()
     settings.drawTextSize   = std::clamp (recentStore->getValue ("draw_text_size",
                                                                 juce::String (settings.drawTextSize)).getFloatValue(),
                                           6.0f, 72.0f);
+    // Spectrogram export overlays (File -> Spectrogram submenu).
+    settings.exportAxes       = recentStore->getIntValue ("exp_axes", 0) != 0;
+    settings.exportMarkers    = recentStore->getIntValue ("exp_markers", 0) != 0;
+    settings.exportSelections = recentStore->getIntValue ("exp_selections", 0) != 0;
+    settings.exportDrawings   = recentStore->getIntValue ("exp_drawings", 0) != 0;
 }
 
 void Application::saveSettings ()
@@ -147,6 +152,10 @@ void Application::saveSettings ()
     recentStore->setValue ("draw_width", settings.drawWidth);
     recentStore->setValue ("draw_colour", settings.drawColourARGB);
     recentStore->setValue ("draw_text_size", settings.drawTextSize);
+    recentStore->setValue ("exp_axes", settings.exportAxes ? 1 : 0);
+    recentStore->setValue ("exp_markers", settings.exportMarkers ? 1 : 0);
+    recentStore->setValue ("exp_selections", settings.exportSelections ? 1 : 0);
+    recentStore->setValue ("exp_drawings", settings.exportDrawings ? 1 : 0);
     recentStore->save ();
 }
 

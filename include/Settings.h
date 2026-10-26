@@ -85,6 +85,13 @@ struct Settings
     int drawColourARGB = 0xFF00FF00;     // ink colour, AARRGGBB (bright green)
     float drawTextSize = 14.0f;          // font size for Text drawings
 
+    // Spectrogram export overlays - which extras to bake into exported PNGs
+    // (File -> Spectrogram submenu). Persisted between sessions.
+    bool exportAxes = false;        // include frequency + time axes around the plot
+    bool exportMarkers = false;     // draw marker lines and titles
+    bool exportSelections = false;  // draw time selection band + spectral selection shapes
+    bool exportDrawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
+
     bool operator== (const Settings& o) const
     {
         return fftSize == o.fftSize && hopSize == o.hopSize && windowType == o.windowType
@@ -103,7 +110,9 @@ struct Settings
             && fftAxisMode == o.fftAxisMode && fftLocalN == o.fftLocalN
             && fftThirdOctOrder == o.fftThirdOctOrder
             && fftRefTime == o.fftRefTime && fftSmooth == o.fftSmooth
-            && fftTrack == o.fftTrack;
+            && fftTrack == o.fftTrack
+            && exportAxes == o.exportAxes && exportMarkers == o.exportMarkers
+            && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings;
     }
 };
 

@@ -14,6 +14,17 @@ class SpectralView : public juce::Component,
                       public juce::SettableTooltipClient
 {
 public:
+    /** Overlays to bake into an exported spectrogram PNG (File -> Spectrogram).
+        All off by default: a plain export is just the spectral plot, exactly as
+        before these options existed. */
+    struct SpectralExportOptions
+    {
+        bool axes = false;        // include frequency + time axes around the plot
+        bool markers = false;     // draw marker lines and titles
+        bool selections = false;  // draw time selection band + spectral selection shapes
+        bool drawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
+    };
+
     explicit SpectralView (Application& app);
     ~SpectralView();
 
@@ -110,10 +121,14 @@ public:
     void estimateTextExtent (int px, int py, const juce::String& text,
                              float textSizePx, double& outT1, double& outF1) const;
 
-    // Render the current spectral content (no axes/overlays) to a PNG file.
-    // If cancel points at an atomic set to true, rendering stops early and
-    // false is returned without writing any file.
-    bool saveAsPng (const juce::File& file, const std::atomic<bool>* cancel = nullptr);
+    /** Render the current spectral view to a PNG file. With default options
+        only the spectral plot area is written; `opts` can additionally bake
+        in the axes and/or the markers / selections / drawings overlays.
+        If cancel points at an atomic set to true, rendering stops early and
+        false is returned without writing any file. */
+    bool saveAsPng (const juce::File& file,
+                   const std::atomic<bool>* cancel = nullptr,
+                   const SpectralExportOptions& opts = {});
 
     // Notify MainWindow that the time window changed: (newStart, newEnd).
     // MainWindow applies it to BOTH views so they always show the same range.
@@ -133,7 +148,13 @@ public:
         (the waveform's top ruler covers it). */
     void setShowOwnTimeRuler (bool show);
     bool showsOwnTimeRuler() const { return showOwnTimeRuler; }
-    int rulerH() const { return showOwnTimeRuler ? kRulerH : 0; }
+    // While an export is composing its offscreen image, rulerH()/plotRect()
+    // address the EXPORT layout instead of the live component bounds.
+    int rulerH() const
+    {
+        return haveExportLayout_ ? exportLayout_.getY()
+                                 : (showOwnTimeRuler ? kRulerH : 0);
+    }
 
     double getViewStart() const { return viewStart; }
     double getViewEnd() const { return viewEnd; }
@@ -161,6 +182,17 @@ public:
         Public so headless unit tests can verify the shared row layout. */
     std::vector<juce::Rectangle<int>> rowRects() const;
 
+    // Full canvas size used by the drawing code: normally the component's own
+    // bounds, but the export layout while saveAsPng() is composing.
+    int layoutWidth()  const { return haveExportLayout_ ? (kLeftAxisWidth + exportLayout_.getWidth())  : getWidth(); }
+    int layoutHeight() const { return haveExportLayout_ ? (exportLayout_.getY() + exportLayout_.getHeight()) : getHeight(); }
+
+    // Overlay pieces, split so an export can bake in a subset of them.
+    void drawTimeSelectionOverlay (juce::Graphics& g);
+    void drawSpectralShapesOverlay (juce::Graphics& g, bool includeLivePreview);
+    void drawMarkersOverlay (juce::Graphics& g);
+    void drawChannelLabels (juce::Graphics& g);
+
 private:
     Application& app;   // audio data read live via app.audioEngine() (active doc)
 
@@ -175,6 +207,10 @@ private:
     std::vector<std::pair<double, double>> freePts_;   // (tSecs, fHz) path
 
     bool showOwnTimeRuler = true;
+    // Offscreen export layout: when set, plotRect()/rulerH()/layoutWidth() /
+    // layoutHeight() address this rectangle instead of the component bounds.
+    bool haveExportLayout_ = false;
+    juce::Rectangle<int> exportLayout_;
     SpectralEngine& spectral;
     double viewStart = 0, viewEnd = 10;
     double freqMin = 20.0, freqMax = 20000.0;   // local frequency axis limits
@@ -238,9 +274,10 @@ private:
     void drawFrequencyRuler (juce::Graphics& g);
     void drawOverlays (juce::Graphics& g);
 
-    // Draws the active doc's drawings plus the live in-progress preview on
-    // every visible channel row.
-    void drawDrawings (juce::Graphics& g);
+    // Draws the active doc's drawings plus (optionally) the live in-progress
+    // preview on every visible channel row. Exports pass false so only
+    // committed items are baked into the image.
+    void drawDrawings (juce::Graphics& g, bool includeLivePreview = true);
 
     // Mirror a live tool shape's time extent into the shared time selection.
     void syncToolTimeExtent (juce::Range<double> ext);
