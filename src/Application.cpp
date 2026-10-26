@@ -2017,23 +2017,66 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
         return fail ("Could not read the script's output WAV.");
     }
 
+    // The output must keep the sample rate and channel count, but its length
+    // may differ: scripts like "Make Loop" intentionally shorten the file.
     const int64_t want = samples.getLength ();
+    const int64_t got  = newData.empty () ? 0 : (int64_t) newData[0].size ();
     bool bad = std::abs (outRate - rate) > 1e-9 || outCh != nch;
     for (int ch = 0; !bad && ch < nch; ++ch)
-        if ((int64_t) newData[(size_t) ch].size () != want) bad = true;
+        if ((int64_t) newData[(size_t) ch].size () != got) bad = true;
 
     if (bad)
     {
         cleanup ();
         return fail ("The script's output does not match the input: expected "
                      + juce::String (nch) + " channel(s), " + juce::String ((int64_t) rate)
-                     + " Hz and " + juce::String (want) + " samples.");
+                     + " Hz and consistent per-channel lengths.");
+    }
+
+    if (got <= 0)
+    {
+        cleanup ();
+        return fail ("The script's output is empty.");
     }
 
     if (!prog (0.9f)) { cleanup (); return false; }   // cancelled before commit - silent
 
-    if (!audioEngine ().replaceSamples (samples, newData,
-                                        "Python script '" + script.getFileName () + "'", &err))
+    const juce::String desc = "Python script '" + script.getFileName () + "'";
+    bool ok;
+    if (got == want)
+        ok = audioEngine ().replaceSamples (samples, newData, desc, &err);
+    else
+    {
+        // Length-changing output: capture the non-audio state first so undo
+        // can restore it, exactly like a manual deletion does.
+        const size_t depthBefore = d->undo.depth ();
+        std::vector<Marker> oldMarkers = d->markers.markers ();
+        auto oldSavedSel = d->savedSelections;
+
+        ok = audioEngine ().replaceRangeWithDifferentLength (samples, newData, desc, &err);
+        if (ok && got < want && d->undo.depth () > depthBefore)
+        {
+            // The tail of the processed range is gone: drop / clip anything that
+            // referred to it.
+            const double aSec = (double) (samples.getStart () + got) / rate;
+            const double bSec = (double) samples.getEnd () / rate;
+            d->markers.adjustForDeletion (aSec, bSec);
+            for (auto& ss : d->savedSelections)
+                ss.data.adjustForDeletion (aSec, bSec);
+            d->metaDirty = true;
+
+            Patch& p = d->undo.lastRecorded ();
+            p.hasSideState = true;
+            p.oldMarkers  = std::move (oldMarkers);
+            p.newMarkers  = d->markers.markers ();
+            p.oldSavedSel = std::move (oldSavedSel);
+            p.newSavedSel = d->savedSelections;
+            if (onTimeRangeDeleted)
+                onTimeRangeDeleted (d, aSec, bSec, p);
+        }
+    }
+
+    if (!ok)
     {
         cleanup ();
         return fail (err);

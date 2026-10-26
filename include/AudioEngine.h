@@ -243,6 +243,16 @@ public:
                         const juce::String& description,
                         std::string* errOut = nullptr);
 
+    /** Replace `region` with newData whose length may differ from the region's.
+        The file grows or shrinks accordingly; everything after the region is
+        shifted. Records one undoable patch (see Patch::lengthDelta).
+        Returns false (and sets *errOut when non-null) if the file could not be
+        made editable first. */
+    bool replaceRangeWithDifferentLength(const juce::Range<int64_t>& region,
+                                         const std::vector<std::vector<float>>& newData,
+                                         const juce::String& description,
+                                         std::string* errOut = nullptr);
+
     // ---- Zero-crossing snapping (nearest sign change of `channel` within
     //      +/- windowSecs around timeSecs; returns the crossing in seconds,
     //      quantised to a sample boundary). Falls back to timeSecs when no

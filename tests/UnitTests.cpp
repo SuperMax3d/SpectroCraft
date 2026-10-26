@@ -7648,6 +7648,113 @@ static void testEditStreamingFile()
     }
 }
 
+static void testReplaceRangeDifferentLength()
+{
+    // Shorter replacement: [20,50) -> 10 samples.
+    {
+        AudioEngine eng;
+        ::UndoManager um;
+        eng.setUndoManager (&um);
+        std::vector<std::vector<float>> data (1, std::vector<float> (100));
+        for (int i = 0; i < 100; ++i) data[0][i] = float (i);
+        CHECK (eng.initNew (1, 8000.0, &data), "initNew");
+
+        std::vector<std::vector<float>> repl (1, std::vector<float> (10));
+        for (int i = 0; i < 10; ++i) repl[0][i] = 1000.0f + float (i);
+        CHECK (eng.replaceRangeWithDifferentLength ({ 20, 50 }, repl,
+                                                   juce::String ("shorter replace")),
+              "shorter replace");
+        CHECK (eng.numSamples () == 80, "length reduced by the replacement");
+
+        std::vector<float> d (80);
+        CHECK (eng.readSamples (0, 0, 80, d.data ()), "read after shorter replace");
+        bool okHead = true;
+        for (int i = 0; i < 20; ++i)
+            if (std::abs ((double) d[i] - (double) i) > 1e-6) okHead = false;
+        CHECK (okHead, "head untouched");
+        bool okMid = true;
+        for (int i = 0; i < 10; ++i)
+            if (std::abs ((double) d[20 + i] - (1000.0 + (double) i)) > 1e-6) okMid = false;
+        CHECK (okMid, "replacement content in place");
+        bool okTail = true;
+        for (int i = 30; i < 80; ++i)
+            if (std::abs ((double) d[i] - (double) (i + 20)) > 1e-6) okTail = false;
+        CHECK (okTail, "tail shifted up by the length delta");
+
+        CHECK (um.depth () == 1, "one undo step recorded");
+        Patch p;
+        CHECK (um.popUndo (p), "pop undo");
+        CHECK (eng.applyPatch (p, false), "undo shorter replace");
+        CHECK (eng.numSamples () == 100, "length restored by undo");
+    }
+
+    // Longer replacement: [10,20) -> 40 samples.
+    {
+        AudioEngine eng;
+        ::UndoManager um;
+        eng.setUndoManager (&um);
+        std::vector<std::vector<float>> data (1, std::vector<float> (100));
+        for (int i = 0; i < 100; ++i) data[0][i] = float (i);
+        CHECK (eng.initNew (1, 8000.0, &data), "initNew 2");
+
+        std::vector<std::vector<float>> repl (1, std::vector<float> (40));
+        for (int i = 0; i < 40; ++i) repl[0][i] = -5.0f + float (i);
+        CHECK (eng.replaceRangeWithDifferentLength ({ 10, 20 }, repl,
+                                                   juce::String ("longer replace")),
+              "longer replace");
+        CHECK (eng.numSamples () == 130, "length grew by the replacement");
+
+        std::vector<float> d (130);
+        CHECK (eng.readSamples (0, 0, 130, d.data ()), "read after longer replace");
+        bool okHead = true;
+        for (int i = 0; i < 10; ++i)
+            if (std::abs ((double) d[i] - (double) i) > 1e-6) okHead = false;
+        CHECK (okHead, "head untouched (longer)");
+        bool okMid = true;
+        for (int i = 0; i < 40; ++i)
+            if (std::abs ((double) d[10 + i] - (-5.0 + (double) i)) > 1e-6) okMid = false;
+        CHECK (okMid, "replacement content in place (longer)");
+        bool okTail = true;
+        for (int i = 50; i < 130; ++i)
+            if (std::abs ((double) d[i] - (double) (i - 30)) > 1e-6) okTail = false;
+        CHECK (okTail, "tail shifted down by the length delta");
+
+        CHECK (um.depth () == 1, "one undo step recorded (longer)");
+        Patch p;
+        CHECK (um.popUndo (p), "pop undo (longer)");
+        CHECK (eng.applyPatch (p, false), "undo longer replace");
+        CHECK (eng.numSamples () == 100, "length restored by undo (longer)");
+    }
+
+    // Error paths.
+    {
+        AudioEngine eng;
+        std::vector<std::vector<float>> data (2, std::vector<float> (100));
+        for (int i = 0; i < 100; ++i)
+            for (int c = 0; c < 2; ++c) data[c][i] = float (i + c);
+        CHECK (eng.initNew (2, 8000.0, &data), "initNew 3");
+
+        std::string err;
+        // Wrong channel count.
+        std::vector<std::vector<float>> badCh (3, std::vector<float> (10));
+        CHECK (!eng.replaceRangeWithDifferentLength ({ 0, 10 }, badCh, juce::String (), &err),
+              "wrong channel count rejected");
+        CHECK (!err.empty (), "channel error message set");
+
+        // Inconsistent per-channel lengths.
+        std::vector<std::vector<float>> badLen (2);
+        badLen[0].resize (5);
+        badLen[1].resize (7);
+        CHECK (!eng.replaceRangeWithDifferentLength ({ 0, 10 }, badLen, juce::String (), &err),
+              "inconsistent lengths rejected");
+
+        // Empty result.
+        std::vector<std::vector<float>> all (2, std::vector<float> (0));
+        CHECK (!eng.replaceRangeWithDifferentLength ({ 0, 100 }, all, juce::String (), &err),
+              "empty result rejected");
+    }
+}
+
 static void testResampleCancel()
 {
     const juce::File wav = makeTempFile ("resample_cancel.wav");
@@ -11599,14 +11706,16 @@ static void testPythonScripts()
 
     // 2) listScripts returns the sorted .py files.
     const auto scripts = sc::py::listScripts (dir);
-    CHECK (scripts.size () == 6, "six scripts listed");
-    if (scripts.size () == 6)
+    CHECK (scripts.size () == 8, "eight scripts listed");
+    if (scripts.size () == 8)
         CHECK (scripts[0].getFileName () == "Add Echo.py"
                && scripts[1].getFileName () == "Dynamic processing.py"
                && scripts[2].getFileName () == "Generate Tones.py"
                && scripts[3].getFileName () == "Generate White Noise.py"
-               && scripts[4].getFileName () == "Modulation.py"
-               && scripts[5].getFileName () == "Threshold.py",
+               && scripts[4].getFileName () == "Make Loop.py"
+               && scripts[5].getFileName () == "Modulation.py"
+               && scripts[6].getFileName () == "Sync And Merge.py"
+               && scripts[7].getFileName () == "Threshold.py",
               "scripts sorted by name");
 
     // 3) Metadata JSON carries rate/channels/selection/markers.
@@ -11858,6 +11967,111 @@ static void testPythonScripts()
 
             wavN.deleteFile ();
         }
+
+        // --- Make Loop: ramp -> shorter file with a seamless loop point ---
+        {
+            const juce::File wavL = makeTempFile ("py_makeloop.wav");
+            writeWav (wavL, 1, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+                     { return float ((double) f / 4000.0); });   // ramp: every sample distinct
+
+            Application appL;
+            CHECK (appL.openFile (wavL), "opened make-loop wav");
+            appL.setSelection ({ 0.0, 0.5 });   // whole file @ 8 kHz = [0, 4000)
+
+            const juce::File scriptL = dir.getChildFile ("Make Loop.py");
+            std::string errL;
+            const bool okL = appL.runPythonScript (scriptL, scriptL.loadFileAsString (), pyCmd,
+                                                   nullptr, &errL);
+            CHECK (okL, "make loop script ran"
+                       + (okL ? juce::String () : ": " + juce::String (errL)));
+
+            if (okL)
+            {
+                // PCT=20 -> overlap O = 800 samples; output is T - O = 3200.
+                CHECK (appL.audioEngine ().numSamples () == 3200, "shortened by the overlap");
+
+                std::vector<float> sel ((size_t) 3200);
+                appL.audioEngine ().readSamples (0, 0, 3200, sel.data ());
+                // Loop point: last sample is the original sample before the tail,
+                // first sample is the original tail's first sample -> no hard cut.
+                CHECK (std::abs ((double) sel[3199] - 3199.0 / 4000.0) < 1e-6,
+                       "loop point: end of middle untouched");
+                CHECK (std::abs ((double) sel[0] - 3200.0 / 4000.0) < 1e-5,
+                       "loop point: start is the faded-in tail");
+                // End of the crossfade region matches the head's last sample there.
+                CHECK (std::abs ((double) sel[799] - 799.0 / 4000.0) < 1e-4,
+                       "crossfade end follows the head");
+
+                // Middle of the file must be untouched.
+                bool midOk = true;
+                for (int i = 800; i < 3200 && midOk; i += 97)
+                    if (std::abs ((double) sel[(size_t) i] - (double) i / 4000.0) > 1e-6)
+                        midOk = false;
+                CHECK (midOk, "middle of the file untouched");
+
+                CHECK (appL.undo ().undoSize () == 1, "make loop recorded one undo step");
+            }
+
+            wavL.deleteFile ();
+        }
+
+        // --- Sync And Merge: three jittered copies -> one aligned copy ---
+        {
+            const juce::File wavS = makeTempFile ("py_syncmerge.wav");
+            writeWav (wavS, 1, 8000.0, 6000, [] (int ch, int64_t f, double rate)
+                     {
+                         // Three copies of the same burst: DC floor 0.1 with a +1.0
+                         // impulse at internal offset 100, jittered around the grid.
+                         const int64_t starts[3] = { 100, 2007, 3995 };
+                         for (int s = 0; s < 3; ++s)
+                             if (f >= starts[s] && f < starts[s] + 800)
+                                 return 0.1f + ((f - starts[s]) == 100 ? 1.0f : 0.0f);
+                         return 0.0f;
+                     });
+
+            Application appS;
+            CHECK (appS.openFile (wavS), "opened sync-merge wav");
+            appS.setSelection ({ 0.0, 0.75 });   // whole file @ 8 kHz = [0, 6000)
+
+            const juce::File scriptS = dir.getChildFile ("Sync And Merge.py");
+            juce::String scriptText = scriptS.loadFileAsString ();
+            CHECK (scriptText.contains ("N_REPETITIONS      = 4"), "found N_REPETITIONS");
+            // The test file holds three copies, not the default four.
+            scriptText = scriptText.replaceFirstOccurrenceOf
+                               ("N_REPETITIONS      = 4", "N_REPETITIONS      = 3");
+
+            std::string errS;
+            const bool okS = appS.runPythonScript (scriptS, scriptText, pyCmd, nullptr, &errS);
+            CHECK (okS, "sync merge script ran"
+                       + (okS ? juce::String () : ": " + juce::String (errS)));
+
+            if (okS)
+            {
+                // One segment long: T / N = 6000 / 3 = 2000.
+                CHECK (appS.audioEngine ().numSamples () == 2000, "one segment long");
+
+                std::vector<float> sel ((size_t) 2000);
+                appS.audioEngine ().readSamples (0, 0, 2000, sel.data ());
+                // All three copies align: the impulse keeps its full level.
+                CHECK (std::abs ((double) sel[200] - 1.1) < 1e-4, "aligned impulse in the mix");
+
+                bool floorOk = true;
+                for (int i = 100; i < 900 && floorOk; i += 37)
+                    if (i != 200 && std::abs ((double) sel[(size_t) i] - 0.1) > 1e-5)
+                        floorOk = false;
+                CHECK (floorOk, "DC floor aligned across the copies");
+
+                bool zeroOk = true;
+                for (int i = 0; i < 2000 && zeroOk; i += 89)
+                    if ((i >= 100 && i < 900) == false && std::abs ((double) sel[(size_t) i]) > 1e-6)
+                        zeroOk = false;
+                CHECK (zeroOk, "silence outside the bursts stays silent");
+
+                CHECK (appS.undo ().undoSize () == 1, "sync merge recorded one undo step");
+            }
+
+            wavS.deleteFile ();
+        }
     }
     else
     {
@@ -11898,10 +12112,10 @@ static void testPythonScripts()
 
         if (box != nullptr)
         {
-            CHECK (box->getNumItems () == 6, "combo lists the six scripts");
+            CHECK (box->getNumItems () == 8, "combo lists the eight scripts");
             // sendNotificationSync: the headless test has no message loop to
             // process the async update that plain sendNotification would queue.
-            box->setSelectedId (5, juce::sendNotificationSync);   // modulation.py
+            box->setSelectedId (6, juce::sendNotificationSync);   // Modulation.py
             const juce::String expect = dir.getChildFile ("Modulation.py").loadFileAsString ();
             CHECK (ed != nullptr && ed->getText () == expect,
                   "selecting a script loads its text into the editor");
@@ -14585,6 +14799,7 @@ static int scRunUnitTestsImpl()
     progress ("large in-memory load"); testLargeInMemoryLoad();
     progress ("mipmap reflects edits");  testMipmapReflectsEdits();
     progress ("edit streamed file");     testEditStreamingFile();
+    progress ("replace range len");      testReplaceRangeDifferentLength ();
     progress ("resample cancel");     testResampleCancel();
     progress ("render cancel");       testRenderToPixelsCancel();
     progress ("fft view rate change"); testFFTAnalysisRateChange();

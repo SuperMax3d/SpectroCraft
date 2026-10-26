@@ -367,6 +367,235 @@ main()
     return juce::String (s.c_str ());
 }
 
+static juce::String syncAndMergeScript ()
+{
+    const std::string s = std::string (R"PY(
+# SpectroCraft example: sync and merge repeated signals (stacking).
+#
+# The recording contains N_REPETITIONS copies of the same signal, one after
+# another (for example a hammer tap recorded four times in a single take).
+# The first copy is used as reference; cross-correlation finds where every
+# other copy starts, all copies are aligned sample-accurately and mixed
+# together. Averaging N copies reduces uncorrelated noise by about
+# 10*log10(sqrt(N)) dB (roughly 3 dB for 4 copies).
+#
+# Called by SpectroCraft as:
+#   python "Sync And Merge.py" <input.wav> <output.wav> <meta.json>
+# The output is ONE aligned copy, so it is much shorter than the input.
+
+import sys, math
+
+)PY") + kWavIo + R"PY(
+
+N_REPETITIONS      = 4        # how many copies of the signal are in the file
+SEARCH_MARGIN_FRAC = 0.45     # search +/- this fraction of a segment around each expected position
+MIX_MODE           = "average"   # "average" (noise reduction) or "sum"
+
+COARSE_RATE = 1000           # internal rate for the coarse correlation stage
+
+
+def next_pow2(n):
+    p = 1
+    while p < n:
+        p <<= 1
+    return p
+
+
+def fft(x):
+    """In-place iterative radix-2 complex FFT; len(x) must be a power of two."""
+    n = len(x)
+    j = 0
+    for i in range(1, n):
+        bit = n >> 1
+        while j & bit:
+            j ^= bit
+            bit >>= 1
+        j |= bit
+        if i < j:
+            x[i], x[j] = x[j], x[i]
+    length = 2
+    while length <= n:
+        ang = -2.0 * math.pi / length
+        wlen = complex(math.cos(ang), math.sin(ang))
+        half = length >> 1
+        for i in range(0, n, length):
+            w = 1.0 + 0.0j
+            for k in range(i, i + half):
+                u = x[k]
+                v = x[k + half] * w
+                x[k] = u + v
+                x[k + half] = u - v
+                w *= wlen
+        length <<= 1
+
+
+def ifft(x):
+    n = len(x)
+    for i in range(n):
+        x[i] = x[i].conjugate()
+    fft(x)
+    for i in range(n):
+        x[i] = x[i].conjugate() / n
+
+
+def main():
+    in_path, out_path, meta_path = sys.argv[1:4]
+    rate, nch, x = read_wav(in_path)
+    T = len(x) // nch
+
+    N = max(2, int(N_REPETITIONS))
+    L = T // N                       # nominal segment length (samples)
+    if L < 64:
+        raise SystemExit("file too short for %d repetitions" % N)
+
+    # Mono mixdown at full rate.
+    mono = [0.0] * T
+    for i in range(T):
+        base = i * nch
+        s = 0.0
+        for c in range(nch):
+            s += x[base + c]
+        mono[i] = s / nch
+
+    # Coarse stage: decimate to COARSE_RATE by block averaging, then find each
+    # instance with one FFT-based cross-correlation against the first segment.
+    k = max(1, int(round(rate / float(COARSE_RATE))))
+    Tc = (T + k - 1) // k
+    mc = [0.0] * Tc
+    for i in range(Tc):
+        a = i * k
+        b = min(a + k, T)
+        s = 0.0
+        for j in range(a, b):
+            s += mono[j]
+        mc[i] = s / (b - a)
+
+    Lc = max(16, (L + k - 1) // k)   # coarse reference length
+    S = next_pow2(Tc + Lc - 1)
+    if S > (1 << 20):
+        raise SystemExit("recording too long for the built-in correlator; "
+                         "select just the region containing the repetitions")
+
+    A = [complex(v, 0.0) for v in mc[:Lc]] + [0j] * (S - Lc)
+    B = [complex(v, 0.0) for v in mc]     + [0j] * (S - Tc)
+    fft(A)
+    fft(B)
+    P = [A[i] * B[i].conjugate() for i in range(S)]
+    ifft(P)
+    # ifft(A*conj(B))[k] carries lag -k, so the positive-lag correlation is
+    # read back mirrored: C[s] = P[(S-s) mod S].
+    C = [P[(S - s) % S].real for s in range(Tc - Lc + 1)]   # C[s]: ref vs file shifted by s
+
+    # Instance 0 is the reference at position 0; find the rest around their
+    # nominal positions (i * L).
+    m = int(Lc * SEARCH_MARGIN_FRAC)
+    starts = [0]
+    for i in range(1, N):
+        lo = max(0, i * Lc - m)
+        hi = min(len(C) - 1, i * Lc + m)
+        best, bv = lo, None
+        for s in range(lo, hi + 1):
+            v = C[s]
+            if bv is None or v > bv:
+                best, bv = s, v
+        starts.append(best * k)
+
+    # Fine stage: refine each start with direct correlation at full rate.
+    ref = mono[:L]
+    for i in range(1, N):
+        c0 = starts[i]
+        lo = max(0, c0 - k)
+        hi = min(T - L, c0 + 2 * k)
+        best, bv = lo, None
+        for s in range(lo, hi + 1):
+            v = 0.0
+            for j in range(L):
+                v += ref[j] * mono[s + j]
+            if bv is None or v > bv:
+                best, bv = s, v
+        starts[i] = best
+
+    # Mix all aligned copies into one output of length L.
+    g = 1.0 / N if MIX_MODE != "sum" else 1.0
+    out = [0.0] * (L * nch)
+    for i in range(N):
+        st = starts[i]
+        for j in range(L):
+            bi = (st + j) * nch
+            bo = j * nch
+            for c in range(nch):
+                out[bo + c] += x[bi + c] * g
+
+    write_wav(out_path, rate, nch, array.array("f", out))
+
+
+main()
+)PY";
+    return juce::String (s.c_str ());
+}
+
+static juce::String makeLoopScript ()
+{
+    const std::string s = std::string (R"PY(
+# SpectroCraft example: make the file loop seamlessly.
+#
+# Takes the last PCT percent of the file and overlaps it with the first PCT
+# percent, crossfading them together (the tail fades out while the head fades
+# in). The result is shorter by exactly that overlap, and when played on
+# loop there is no hard cut at the end: the ending flows straight into the
+# beginning.
+#
+# Called by SpectroCraft as:
+#   python "Make Loop.py" <input.wav> <output.wav> <meta.json>
+
+import sys, math
+
+)PY") + kWavIo + R"PY(
+
+PCT  = 20            # percent of duration to overlap (1..50)
+FADE = "equal-power" # or "linear"
+
+
+def main():
+    in_path, out_path, meta_path = sys.argv[1:4]
+    rate, nch, x = read_wav(in_path)
+    T = len(x) // nch
+
+    pct = min(50.0, max(1.0, float(PCT)))
+    O = int(round(T * pct / 100.0))
+    if O < 2:
+        raise SystemExit("file too short to overlap")
+    O = min(O, T // 2)
+
+    head = x[:O * nch]
+    tail = x[(T - O) * nch:]
+    mid  = x[O * nch:(T - O) * nch]
+
+    out = array.array("f")
+    if FADE == "linear":
+        for i in range(O):
+            w1 = float(i) / (O - 1)      # head weight: 0 -> 1
+            w2 = 1.0 - w1                # tail weight: 1 -> 0
+            b = i * nch
+            for c in range(nch):
+                out.append(head[b + c] * w1 + tail[b + c] * w2)
+    else:   # equal-power (sine/cosine) crossfade
+        for i in range(O):
+            a = math.pi * float(i) / (2.0 * (O - 1))
+            w1, w2 = math.sin(a), math.cos(a)
+            b = i * nch
+            for c in range(nch):
+                out.append(head[b + c] * w1 + tail[b + c] * w2)
+    out.extend(mid)
+
+    write_wav(out_path, rate, nch, out)
+
+
+main()
+)PY";
+    return juce::String (s.c_str ());
+}
+
 // ============================================================================
 // Script folder management
 // ============================================================================
@@ -391,6 +620,8 @@ void ensureExampleScripts (const juce::File& dir)
         { "Generate White Noise.py", whiteNoiseScript () },
         { "Generate Tones.py",       tonesScript () },
         { "Add Echo.py",             echoScript () },
+        { "Sync And Merge.py",       syncAndMergeScript () },
+        { "Make Loop.py",            makeLoopScript () },
     };
 
     for (const auto& e : examples)

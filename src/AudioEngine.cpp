@@ -1002,6 +1002,50 @@ bool AudioEngine::replaceSamples (const juce::Range<int64_t>& samplesIn,
     return true;
 }
 
+bool AudioEngine::replaceRangeWithDifferentLength (const juce::Range<int64_t>& regionIn,
+                                                    const std::vector<std::vector<float>>& newData,
+                                                    const juce::String& description,
+                                                    std::string* errOut)
+{
+    if (!ensureEditable (errOut)) return false;
+    auto region = regionIn.getIntersectionWith ({ 0, totalSamples });
+    if (region.getLength() <= 0) return true;   // nothing to replace
+
+    if ((int) newData.size () != nchans)
+        return failErr (errOut, "Replacement data must have one vector per channel.");
+
+    const int64_t newLen = (int64_t) newData[0].size ();
+    for (const auto& v : newData)
+        if ((int64_t) v.size () != (size_t) std::max<int64_t> (0, newLen))
+            return failErr (errOut, "Inconsistent channel lengths in the replacement data.");
+
+    const int64_t start = region.getStart ();
+    const int64_t end   = region.getEnd ();
+    const int64_t newTotal = totalSamples - (end - start) + newLen;
+    if (newTotal <= 0)
+        return failErr (errOut, "The replacement would leave the file empty.");
+
+    // Record the patch BEFORE touching the buffer so oldData is pristine.
+    recordReplace (*this, region, newData, description);
+
+    auto nb = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) newTotal);
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        nb->copyFrom (ch, 0, *buffer, ch, 0, (int) start);
+        if (newLen > 0)
+            nb->copyFrom (ch, (int) start, newData[ch].data (), (int) newLen);
+        nb->copyFrom (ch, (int) (start + newLen), *buffer, ch, (int) end,
+                      (int) (totalSamples - end));
+    }
+
+    buffer = std::move (nb);
+    totalSamples = newTotal;
+    durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+    rebuildMipmaps();
+    return true;
+}
+
 void AudioEngine::setSpectralPlaybackMask (std::shared_ptr<const SpectralSelection> selIn)
 {
     std::lock_guard<std::mutex> lk (maskMutex);
