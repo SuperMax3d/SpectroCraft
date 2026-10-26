@@ -64,6 +64,26 @@ string(REGEX REPLACE "(\"FileVersion\",[ ]*\")[0-9]+\.[0-9]+\.[0-9]+"
        "\\1${new_version}" rc "${rc}")
 string(REGEX REPLACE "(\"ProductVersion\",[ ]*\")[0-9]+\.[0-9]+\.[0-9]+"
        "\\1${new_version}" rc "${rc}")
+
+# --- application icon --------------------------------------------------------
+# Append an ICON statement so the exe carries a real PE icon resource
+# (RT_ICON + RT_GROUP_ICON). Verified with this toolchain's rc.exe: an ICON
+# statement emits correct RT_ICON/RT_GROUP_ICON entries, which Windows Explorer
+# and the taskbar use for the .exe file icon. (An earlier note claiming rc.exe
+# emitted RT_CURSOR instead was wrong.)
+# Strip any previously appended icon line first (juceaide may keep an already
+# patched .rc, so this keeps the patch idempotent). Note: CMake's regex engine
+# does not interpret backslash escapes inside bracket expressions, so avoid
+# them; \\n outside brackets matches a real newline.
+string(REGEX REPLACE "\\nIDI_APP ICON \".*icon\\.ico\"" "" rc "${rc}")
+if(DEFINED ICON_FILE AND EXISTS "${ICON_FILE}")
+    get_filename_component (icon_abs "${ICON_FILE}" ABSOLUTE)
+    string(REPLACE "\\" "/" icon_path "${icon_abs}")
+    string(APPEND rc "\nIDI_APP ICON \"${icon_path}\"\n")
+else()
+    message(WARNING "patch_generated.cmake: ${ICON_FILE} not found, exe will have no PE icon resource")
+endif()
+
 file(WRITE "${RC_FILE}" "${rc}")
 
 # --- JuceHeader.h -----------------------------------------------------------

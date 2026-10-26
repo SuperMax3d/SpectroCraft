@@ -352,12 +352,13 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 - **Save / Save As / Export Spectral** also run on background threads behind a
   modal dialog with an indeterminate spinning bar, so multi-second writes never
   freeze the window (and no stale wait cursor is left behind afterwards).
-- **Application icon**: `icon.ico` (project root) is embedded in
-  `include/IconData.h` and applied to the main window at startup via
-  `CreateIconFromResourceEx` + `WM_SETICON`, so it appears in the title bar,
-  taskbar and Alt-Tab. It is set at runtime rather than through a `.rc`
-  resource file because this toolchain's rc.exe emits ICON statements as
-  RT_CURSOR entries, which Windows ignores for window icons.
+- **Application icon**: `icon.ico` (project root) is embedded into the exe as
+  a proper PE resource (`RT_ICON` + `RT_GROUP_ICON`) — an `ICON` statement is
+  appended to JUCE's generated `.rc` at build time by
+  `cmake/patch_generated.cmake` — so Windows Explorer and the taskbar show it.
+  The same icon is additionally applied to the main window at startup via
+  `CreateIconFromResourceEx` + `WM_SETICON` (from `include/IconData.h`) as a
+  fallback for the title bar and Alt-Tab.
 - **Multi-file support**: any number of files can be open at once. The **Files**
   tab lists every loaded file with its properties (sample rate, channel count,
   duration); **double-click a row to make that file active** — it is loaded
@@ -1479,7 +1480,7 @@ should agree.
 bin/Release             self-contained runtime folder: SpectroCraft.exe plus all
                         external DLLs (FFmpeg, OpenVINO, whisper) — download this
                         folder alone for a working install
-icon.ico                application icon (embedded via include/IconData.h)
+icon.ico                application icon (PE resource + runtime WM_SETICON)
 CMakeLists.txt            root build (JUCE vendored in extern/)
 include/                  component headers
 src/                      app sources + Main.cpp (CLI flags)

@@ -59,12 +59,12 @@ if (TARGET sc_ffmpeg)
     sc_enable_ffmpeg (SpectroCraft)
 endif()
 
-# Application icon (icon.ico) is embedded at runtime: include/IconData.h holds
-# the raw ICO bytes and MainWindow applies them via CreateIconFromResourceEx +
-# WM_SETICON. A .rc resource file with ICON statements is not used because this
-# toolchain's rc.exe emits them as RT_CURSOR entries, which Windows ignores for
-# window icons. (The version resource below is a VERSIONINFO-only .rc, which
-# rc.exe handles correctly.)
+# Application icon: icon.ico is embedded into the exe as a proper PE resource
+# (RT_ICON + RT_GROUP_ICON) by appending an ICON statement to JUCE's generated
+# resources.rc in sc_patch_generated below. This makes Windows Explorer and the
+# taskbar show the app icon without any runtime help. MainWindow additionally
+# applies the same icon via CreateIconFromResourceEx + WM_SETICON (include/
+# IconData.h) as a fallback for the window title-bar icon.
 
 # Version handling: sc_bump_version (root CMakeLists) bumps VERSION.txt on every
 # build and regenerates generated/Version.h (About box). sc_patch_generated then
@@ -85,8 +85,9 @@ add_custom_command (
             -DHEADER_FILE=${SC_HEADER_FILE}
             -DVERSION_FILE=${CMAKE_BINARY_DIR}/generated/SC_VERSION.txt
             -DSTAMP_FILE=${CMAKE_BINARY_DIR}/generated/generated_patched.stamp
+            -DICON_FILE=${CMAKE_SOURCE_DIR}/icon.ico
             -P ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake
-    DEPENDS ${SC_RC_FILE} ${SC_HEADER_FILE}
+    DEPENDS ${SC_RC_FILE} ${SC_HEADER_FILE} ${CMAKE_SOURCE_DIR}/icon.ico
     COMMENT "Applying bumped version to generated resources.rc / JuceHeader.h")
 add_custom_target (sc_patch_generated
     DEPENDS ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp)
