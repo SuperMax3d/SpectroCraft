@@ -56,9 +56,10 @@ if(NOT EXISTS "${RC_FILE}")
 endif()
 
 file(READ "${RC_FILE}" rc)
-string(REGEX REPLACE "(FILEVERSION[ ]+)[0-9]+,[0-9]+,[0-9]+,[0-9]+"
+# juceaide writes a 3-part version (e.g. 1,0,42); accept an optional 4th part.
+string(REGEX REPLACE "(FILEVERSION[ ]+)[0-9]+,[0-9]+,[0-9]+(,[0-9]+)?"
        "\\1${new_comma}" rc "${rc}")
-string(REGEX REPLACE "(PRODUCTVERSION[ ]+)[0-9]+,[0-9]+,[0-9]+,[0-9]+"
+string(REGEX REPLACE "(PRODUCTVERSION[ ]+)[0-9]+,[0-9]+,[0-9]+(,[0-9]+)?"
        "\\1${new_comma}" rc "${rc}")
 string(REGEX REPLACE "(\"FileVersion\",[ ]*\")[0-9]+\.[0-9]+\.[0-9]+"
        "\\1${new_version}" rc "${rc}")
@@ -71,11 +72,15 @@ string(REGEX REPLACE "(\"ProductVersion\",[ ]*\")[0-9]+\.[0-9]+\.[0-9]+"
 # statement emits correct RT_ICON/RT_GROUP_ICON entries, which Windows Explorer
 # and the taskbar use for the .exe file icon. (An earlier note claiming rc.exe
 # emitted RT_CURSOR instead was wrong.)
-# Strip any previously appended icon line first (juceaide may keep an already
-# patched .rc, so this keeps the patch idempotent). Note: CMake's regex engine
-# does not interpret backslash escapes inside bracket expressions, so avoid
-# them; \\n outside brackets matches a real newline.
-string(REGEX REPLACE "\\nIDI_APP ICON \".*icon\\.ico\"" "" rc "${rc}")
+#
+# Idempotency: any previously appended IDI_APP line(s) always sit at the very
+# end of the file (juceaide never emits them), so truncate everything from the
+# first IDI_APP onward. This avoids regex newline matching entirely, which is
+# unreliable in this CMake version's regex engine.
+string(FIND "${rc}" "IDI_APP" icon_pos)
+if (icon_pos GREATER 0)
+    string(SUBSTRING "${rc}" 0 ${icon_pos} rc)
+endif()
 if(DEFINED ICON_FILE AND EXISTS "${ICON_FILE}")
     get_filename_component (icon_abs "${ICON_FILE}" ABSOLUTE)
     string(REPLACE "\\" "/" icon_path "${icon_abs}")

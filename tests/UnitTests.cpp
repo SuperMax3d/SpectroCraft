@@ -36,6 +36,9 @@
 #endif
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include "CrashTrace.h"  // crash stack traces in the test binary
+#include "StartupTrace.h"
+#include <thread>
+#include <chrono>
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -14359,6 +14362,50 @@ static void testDrawingPanel()
     }
 }
 
+static void testStartupTrace()
+{
+    const juce::File log = makeTempFile ("startup_trace.log");
+    log.deleteFile();
+
+    scStart::begin();
+    const juce::File used = scStart::enable (log);
+    CHECK (scStart::isEnabled (), "enable turns measurement on");
+    CHECK (used == log, "writable preferred path is used");
+
+    const int64 a = scStart::mark ("phase-a");
+    std::this_thread::sleep_for (std::chrono::milliseconds (30));
+    const int64 b = scStart::mark ("phase-b");
+    CHECK (a >= 0 && b > a, "marks are monotonically increasing");
+
+    scStart::note ("custom-note-line");
+
+    const juce::String content = log.loadFileAsString();
+    CHECK (content.contains ("==== SpectroCraft load-time measurement ===="),
+          "header block written");
+    CHECK (content.contains ("[startup] phase-a: T+"), "phase-a line written");
+    CHECK (content.contains ("[startup] phase-b: T+"), "phase-b line written");
+    CHECK (content.contains ("custom-note-line"), "note line written");
+
+    scStart::disable();
+    const int64 c = scStart::mark ("phase-c");
+    CHECK (c < 0, "disabled mark returns -1");
+    CHECK (!log.loadFileAsString().contains ("phase-c"),
+          "disabled mark writes nothing to the log");
+
+    // Unwritable preferred path falls back to the app-data folder.
+    const juce::File bad = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                               .getChildFile ("sc_missing_dir_xyz")
+                               .getChildFile ("trace.log");
+    const juce::File fallback = scStart::enable (bad);
+    CHECK (fallback != bad, "unwritable path is rejected");
+    CHECK (fallback.getFileName() == "SpectroCraft_load_time.log",
+          "falls back to the app-data log name");
+    CHECK (scStart::isEnabled (), "re-enable works after disable");
+
+    scStart::disable();
+    log.deleteFile();
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -14513,7 +14560,8 @@ static int scRunUnitTestsImpl()
     progress ("version string");      testVersionString();
     progress ("probe embedded selections"); testProbeEmbeddedSelections();
     progress ("metadata suite");          testMetadataSuite();
-    progress ("drawing panel");         testDrawingPanel();
+    progress ("drawing panel");
+    progress ("startup trace");   testStartupTrace();         testDrawingPanel();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

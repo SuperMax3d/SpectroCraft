@@ -91,6 +91,9 @@ add_custom_command (
     COMMENT "Applying bumped version to generated resources.rc / JuceHeader.h")
 add_custom_target (sc_patch_generated
     DEPENDS ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp)
+# bump must run first: the patch reads SC_VERSION.txt, and bump deletes the
+# stamp that makes this command re-run on every build.
+add_dependencies (sc_patch_generated sc_bump_version)
 if (TARGET SpectroCraft_rc_lib)   # must compile the rc only after it is patched
     add_dependencies (SpectroCraft_rc_lib sc_bump_version sc_patch_generated)
 endif()

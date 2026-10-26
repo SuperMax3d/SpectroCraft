@@ -7,6 +7,7 @@
 
 #include "MainWindow.h"
 #include "Application.h"
+#include "StartupTrace.h"
 #include <thread>
 #include "WaveformView.h"
 #include "SpectralView.h"
@@ -268,7 +269,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     lastSyncedColourMap = app.colourMap;
     lastSyncedSettings  = app.settings;   // baseline for the settings-save trigger
 
+    scStart::mark ("before-setup-views");
     setupViews();
+    scStart::mark ("after-setup-views");
     updateTitle();   // a file may already be loaded (opened from the CLI)
     if (statusBar)   // ...and the footer must show its name too
         statusBar->setFileName (app.audioEngine().isFileLoaded()
@@ -408,6 +411,15 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
             }
         }
     }
+
+    scStart::mark ("end-of-MainWindow-ctor");
+    // Proxy for "window visible": the first paint happens shortly after the
+    // window is shown, so a short delay gives a stable end-to-end number.
+    if (scStart::isEnabled())
+        juce::Timer::callAfterDelay (150, [] {
+            const int64 ms = scStart::mark ("window-shown(+150ms)");
+            scStart::note (juce::String ("total launch->window: T+") + juce::String (ms) + " ms");
+        });
 
     setVisible (true);
 }

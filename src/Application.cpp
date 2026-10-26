@@ -3,6 +3,7 @@
  */
 
 #include "Application.h"
+#include "StartupTrace.h"
 #include "SpectralMaskProcessor.h"
 #include "PythonScripts.h"
 #include "Resampler.h"
@@ -25,9 +26,11 @@ Application::Application (const juce::File& recentStorePath)
     // Real-time output: the player streams from the active engine's transport
     // into the default output device, so play/pause/loop actually produce sound.
     sourcePlayer.setSource (&emptyEngine);
+    scStart::mark ("before-audio-device-init");
     audioDevice = std::make_unique<juce::AudioDeviceManager>();
     audioDevice->addAudioCallback (&sourcePlayer);
     audioDevice->initialiseWithDefaultDevices (0, 2); // no input, stereo output
+    scStart::mark ("after-audio-device-init");
 
     // Recent-files store: persisted in the user's app-data folder so the File >
     // Open Recent list survives restarts. Saving is explicit (no auto-save timer)
@@ -58,7 +61,9 @@ Application::Application (const juce::File& recentStorePath)
     else
         storePath = opts.getDefaultFile();
 #endif
+    scStart::mark ("before-properties-file");
     recentStore = std::make_unique<juce::PropertiesFile> (storePath, opts);
+    scStart::mark ("after-properties-file");
 
     for (int i = 0; i < kMaxRecentFiles; ++i)
     {

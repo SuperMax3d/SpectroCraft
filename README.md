@@ -475,7 +475,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   inference a cancel takes effect after the current phase finishes.
 - **Offline tools**: `--test-spectral` renders a spectrogram PNG headlessly;
   `--test-load` times a headless load and prints mipmap stats (useful for
-  multi-hour files); `--generate-test-files` creates the test WAVs;
+  multi-hour files); `--measure_load_time` logs startup phase timings to
+  `SpectroCraft_load_time.log`; `--generate-test-files` creates the test WAVs;
   `--run-unit-tests` runs the unit suite from either executable.
 
 ---
@@ -830,6 +831,16 @@ SpectroCraft.exe --test-spectral tests/data/tone_10s_stereo.wav out.png 512 256 
 SpectroCraft.exe --test-load <in.wav>
                                            :: headless load timing + mipmap stats,
                                               e.g. for multi-hour files
+SpectroCraft.exe --measure_load_time        :: launch the GUI normally, but record
+                                           :: startup phase timings (process start ->
+                                           :: audio device init -> properties file ->
+                                           :: views -> window shown) to a log file.
+                                           :: The log is appended next to the exe as
+                                           :: SpectroCraft_load_time.log (falls back to
+                                           :: the app-data folder if that location is not
+                                           :: writable); each run adds one block with a
+                                           :: timestamp, version and per-phase T+ms lines,
+                                           :: ending in "total launch->window".
 ```
 
 AI builds additionally accept (see [AI features](#ai-features)):

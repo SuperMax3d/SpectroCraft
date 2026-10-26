@@ -27,6 +27,7 @@
 #include <JuceHeader.h>
 #include "Application.h"
 #include "CrashTrace.h"
+#include "StartupTrace.h"
 #include "MainWindow.h"
 #include "SpectralEngine.h"
 #include "PngWriter.h"
@@ -44,6 +45,10 @@
 // ---- Offline test hooks (implemented in tests/UnitTests.cpp) ----
 extern int scRunUnitTests();
 extern bool scGenerateTestFiles (const juce::String& dir);
+
+// T0 for --measure_load_time: fires as soon as this module's static init runs,
+// i.e. right after the process image and imported DLLs have been loaded.
+namespace { struct StartTrace { StartTrace() { scStart::begin(); } } startTrace; }
 
 // juce::File(String) asserts on relative paths, so resolve them against the
 // current working directory first (CLI args are often relative).
@@ -152,6 +157,21 @@ public:
             if (!cur.isEmpty())
                 args.add (cur);
         }
+
+        // --measure_load_time: record startup phase timings in a log file.
+        // Must be armed before the Application ctor runs, since audio device
+        // initialisation is the dominant startup cost.
+        for (int i = 0; i < args.size(); ++i)
+            if (args[i] == "--measure_load_time")
+            {
+                const juce::File preferred = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                                                 .getParentDirectory()
+                                                 .getChildFile ("SpectroCraft_load_time.log");
+                const juce::File log = scStart::enable (preferred);
+                std::printf ("load-time measurement enabled, log: %s\n",
+                             log.getFullPathName().toRawUTF8());
+                std::fflush (stdout);
+            }
 
         for (int i = 0; i < args.size(); ++i)
         {
