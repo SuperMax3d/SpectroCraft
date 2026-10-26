@@ -14406,6 +14406,34 @@ static void testStartupTrace()
     log.deleteFile();
 }
 
+// Lazy audio device init: startup must not open the WASAPI device; async init
+// completes and sets the ready flag; start is idempotent; play() gates on it.
+static void testLazyAudioInit()
+{
+    Application app;   // SC_TESTS_EXE builds use an isolated temp recent-store
+
+    CHECK (!app.audioDeviceReady(), "device not initialised eagerly at startup");
+
+    app.startAudioInitAsync();
+    CHECK (app.ensureAudioReady (60000), "async device init completes in time");
+    CHECK (app.audioDeviceReady(), "ready flag set after async init");
+
+    // Idempotent: a redundant start must not spawn another worker thread.
+    app.startAudioInitAsync();
+    CHECK (app.ensureAudioReady (1000), "still ready after redundant start");
+
+    // play() works once the device is up and advances the transport.
+    const juce::File wav = makeTempFile ("lazy_play.wav");
+    writeWav (wav, 1, 8000, 4000, [] (int, int64_t f, double)
+             { return (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * f / 8000.0); });
+    CHECK (app.openFile (wav), "open wav for lazy play test");
+    app.play();
+    CHECK (app.audioEngine().isPlaying(), "play() starts the transport once ready");
+    app.stop();
+
+    wav.deleteFile();
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -14560,8 +14588,9 @@ static int scRunUnitTestsImpl()
     progress ("version string");      testVersionString();
     progress ("probe embedded selections"); testProbeEmbeddedSelections();
     progress ("metadata suite");          testMetadataSuite();
-    progress ("drawing panel");
-    progress ("startup trace");   testStartupTrace();         testDrawingPanel();
+    progress ("startup trace");           testStartupTrace();
+    progress ("lazy audio init");         testLazyAudioInit();
+    progress ("drawing panel");           testDrawingPanel();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

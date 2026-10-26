@@ -833,9 +833,12 @@ SpectroCraft.exe --test-load <in.wav>
                                               e.g. for multi-hour files
 SpectroCraft.exe --measure_load_time        :: launch the GUI normally, but record
                                            :: startup phase timings (process start ->
-                                           :: audio device init -> properties file ->
+                                           :: audio device creation -> properties file ->
                                            :: views -> window shown) to a log file.
-                                           :: The log is appended next to the exe as
+                                           :: The expensive WASAPI open runs on a worker
+                                           :: thread and is logged as an extra
+                                           :: "audio-device-ready(async)" line once it
+                                           :: finishes. The log is appended next to the exe as
                                            :: SpectroCraft_load_time.log (falls back to
                                            :: the app-data folder if that location is not
                                            :: writable); each run adds one block with a
@@ -1231,6 +1234,13 @@ Threading model: the UI thread only draws and dispatches; FFT tiles are computed
 on a pool sized to hardware threads; file reads happen on the reader under a
 mutex with bounded copies. Tile results are published through an LRU cache guarded
 by a single mutex (short critical sections, no lock held during FFT work).
+
+Audio device initialisation is lazy: creating the `AudioDeviceManager` happens at
+startup (cheap), but the expensive WASAPI enumeration/open runs on a worker
+thread kicked off right after the window appears (`Application::startAudioInitAsync`).
+The first playback request waits for completion (`ensureAudioReady`) and shows a
+short "Preparing audio" dialog if it is still running, so a slow audio stack never
+delays the window from appearing.
 
 ---
 

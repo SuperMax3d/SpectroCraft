@@ -26,11 +26,14 @@ Application::Application (const juce::File& recentStorePath)
     // Real-time output: the player streams from the active engine's transport
     // into the default output device, so play/pause/loop actually produce sound.
     sourcePlayer.setSource (&emptyEngine);
-    scStart::mark ("before-audio-device-init");
+    scStart::mark ("before-audio-device-create");
     audioDevice = std::make_unique<juce::AudioDeviceManager>();
     audioDevice->addAudioCallback (&sourcePlayer);
-    audioDevice->initialiseWithDefaultDevices (0, 2); // no input, stereo output
-    scStart::mark ("after-audio-device-init");
+    // The expensive part - enumerating and opening the default WASAPI device -
+    // is deferred: it runs on a worker thread (see startAudioInitAsync), kicked
+    // off right after the window appears so startup is never blocked by a slow
+    // audio stack. First playback waits for completion via ensureAudioReady.
+    scStart::mark ("after-audio-device-create");
 
     // Recent-files store: persisted in the user's app-data folder so the File >
     // Open Recent list survives restarts. Saving is explicit (no auto-save timer)
@@ -160,7 +163,11 @@ void Application::saveAiSettings ()
     recentStore->save ();
 }
 
-Application::~Application() {}
+Application::~Application()
+{
+    if (audioInitThread.joinable())
+        audioInitThread.join();   // never let the worker outlive this object
+}
 
 FileDoc* Application::doc() const
 {
@@ -2351,12 +2358,55 @@ void Application::restorePatchSideState (FileDoc* d, const Patch& p, bool isRedo
 void Application::undoStep() { undoSteps (1); }
 void Application::redoStep() { redoSteps (1); }
 
+bool Application::audioDeviceReady() const
+{
+    return audioDeviceIsReady.load();
+}
+
+void Application::startAudioInitAsync()
+{
+    bool expected = false;
+    if (!audioInitStarted.compare_exchange_strong (expected, true))
+        return;   // already started or done - never spawn a second worker
+
+    audioInitThread = std::thread ([this] {
+        audioDevice->initialiseWithDefaultDevices (0, 2); // no input, stereo output
+        {
+            std::lock_guard<std::mutex> g (audioInitLock);
+            audioDeviceIsReady.store (true);
+        }
+        audioInitCv.notify_all();
+        scStart::mark ("audio-device-ready(async)");
+    });
+}
+
+bool Application::ensureAudioReady (int timeoutMs)
+{
+    if (audioDeviceIsReady.load())
+        return true;
+
+    startAudioInitAsync();   // idempotent: starts the worker if not already running
+
+    std::unique_lock<std::mutex> lk (audioInitLock);
+    if (timeoutMs < 0)
+    {
+        audioInitCv.wait (lk, [this] { return audioDeviceIsReady.load(); });
+        return true;
+    }
+    return audioInitCv.wait_for (lk, std::chrono::milliseconds (timeoutMs),
+                                 [this] { return audioDeviceIsReady.load(); });
+}
+
 void Application::play()
 {
     if (!audioEngine().isFileLoaded()) return;
 
-    // Self-heal: if no output device is running (initialisation can fail at
-    // startup when the default device isn't available yet), try again now.
+    // Lazy init: make sure the output device is up before advancing transport,
+    // otherwise playback would silently skip ahead while no audio thread runs.
+    ensureAudioReady();
+
+    // Self-heal: if no output device is running (initialisation can fail when
+    // the default device isn't available yet), try again now.
     if (audioDevice->getCurrentAudioDevice() == nullptr)
         audioDevice->initialiseWithDefaultDevices (0, 2);
 

@@ -424,7 +424,95 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     setVisible (true);
 }
 
-MainWindow::~MainWindow() {}
+// Modal progress dialog: a message plus a progress bar below it. Used for
+// long-running background work (loading, saving, exporting) so the UI stays
+// responsive and Windows never shows its own wait cursor over our windows.
+class WorkProgressDialog : public juce::AlertWindow
+{
+public:
+    // withCancel adds a Cancel button that sets `cancelled` and exits the
+    // modal loop. The worker thread must keep owning the dialog's lifetime:
+    // it checks `cancelled` between units of work and deletes the dialog.
+    WorkProgressDialog (const juce::String& title, const juce::String& message,
+                        bool withCancel = false, Component* centreAround = nullptr)
+        : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon, centreAround)
+    {
+        // Use the AlertWindow's own progress bar so its layout code accounts
+        // for it: when setStatusText() changes the message, updateLayout()
+        // repositions text, bar and buttons together. A manually added child
+        // bar plus a setSize() hack breaks that invariant - on the first
+        // status change the Cancel button drops down onto the bar strip.
+        addProgressBarComponent (progressValue);
+
+        if (withCancel)
+            addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+        for (auto* c : getChildren())
+        {
+            if (auto* pb = dynamic_cast<juce::ProgressBar*> (c))
+            {
+                // The default LookAndFeel tables define no ProgressBar colours,
+                // which resolve to transparent - set them explicitly so the bar
+                // is visible on the dark dialog background.
+                pb->setColour (juce::ProgressBar::backgroundColourId, juce::Colour (0xff232327));
+                pb->setColour (juce::ProgressBar::foregroundColourId, juce::Colours::dodgerblue);
+
+                // The bar's self-polling timer only starts when visibility
+                // *changes*; toggle it once so updates are picked up from the start.
+                pb->setVisible (false);
+                pb->setVisible (true);
+            }
+        }
+
+        if (withCancel)
+        {
+            for (auto* c : getChildren())
+                if (auto* b = dynamic_cast<juce::TextButton*> (c))
+                {
+                    // The AlertWindow's own click listener exits the modal state
+                    // when the button is pressed; this flag tells the worker
+                    // thread to stop.
+                    if (b->getButtonText () == "Cancel")
+                        b->onClick = [this] { cancelled.store (true); };
+                }
+        }
+    }
+
+    // Set by the Cancel button / ESC; the worker thread checks it between
+    // units of work and then deletes this dialog.
+    std::atomic<bool> cancelled { false };
+
+    void setProgress (double v) { progressValue = v; }
+
+    // Update the message text (call on the message thread).
+    void setStatusText (const juce::String& s) { setMessage (s); }
+
+    /** Enters modal state and grabs keyboard focus so that ESC reaches the
+        Cancel button's shortcut (AlertWindow::keyPressed checks its buttons'
+        registered shortcuts). Progress dialogs contain no text fields, so
+        taking focus is safe. The worker thread still owns this dialog's
+        lifetime: after a cancel it finishes the current unit of work and
+        deletes the dialog. */
+    void beginModal()
+    {
+        enterModalState (false);
+        setWantsKeyboardFocus (true);   // AlertWindow disables this when it has children
+        grabKeyboardFocus ();
+    }
+
+private:
+    double progressValue = 0.0;
+};
+
+MainWindow::~MainWindow()
+{
+    if (audioInitDialog != nullptr)
+    {
+        auto* dlg = audioInitDialog;   // deleting exits the modal state
+        audioInitDialog = nullptr;
+        delete dlg;
+    }
+}
 
 void MainWindow::setupViews()
 {
@@ -1005,6 +1093,24 @@ void MainWindow::closeButtonPressed()
 
 void MainWindow::timerCallback()
 {
+    // Kick off the lazy audio device init on the first tick. The timer only
+    // runs while this window is alive, so no deferred callback can outlive it.
+    if (!audioInitKickedOff)
+    {
+        audioInitKickedOff = true;
+        app.startAudioInitAsync();
+    }
+
+    // A "Preparing audio" dialog is open and the init has finished: close it
+    // and start the playback that was requested.
+    if (audioInitDialog != nullptr && app.audioDeviceReady())
+    {
+        auto* dlg = audioInitDialog;   // deleting exits the modal state
+        audioInitDialog = nullptr;
+        delete dlg;
+        app.play();
+    }
+
     // Cancel a pending Shift+arrow selection anchor once Shift is released
     // (JUCE has no key-up callback, so poll the live modifier state).
     if (shiftAnchorTime >= 0.0 && !juce::ModifierKeys::getCurrentModifiers().isShiftDown())
@@ -1296,85 +1402,20 @@ void MainWindow::openFile (const juce::File& file)
         return;
 }
 
-// Modal progress dialog: a message plus a progress bar below it. Used for
-// long-running background work (loading, saving, exporting) so the UI stays
-// responsive and Windows never shows its own wait cursor over our windows.
-class WorkProgressDialog : public juce::AlertWindow
+void MainWindow::playWithAudioInit()
 {
-public:
-    // withCancel adds a Cancel button that sets `cancelled` and exits the
-    // modal loop. The worker thread must keep owning the dialog's lifetime:
-    // it checks `cancelled` between units of work and deletes the dialog.
-    WorkProgressDialog (const juce::String& title, const juce::String& message,
-                        bool withCancel = false, Component* centreAround = nullptr)
-        : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon, centreAround)
-    {
-        // Use the AlertWindow's own progress bar so its layout code accounts
-        // for it: when setStatusText() changes the message, updateLayout()
-        // repositions text, bar and buttons together. A manually added child
-        // bar plus a setSize() hack breaks that invariant - on the first
-        // status change the Cancel button drops down onto the bar strip.
-        addProgressBarComponent (progressValue);
+    if (audioInitDialog != nullptr) return;   // already waiting - modal dialog open
+    if (app.audioDeviceReady()) { app.play(); return; }
 
-        if (withCancel)
-            addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
-
-        for (auto* c : getChildren())
-        {
-            if (auto* pb = dynamic_cast<juce::ProgressBar*> (c))
-            {
-                // The default LookAndFeel tables define no ProgressBar colours,
-                // which resolve to transparent - set them explicitly so the bar
-                // is visible on the dark dialog background.
-                pb->setColour (juce::ProgressBar::backgroundColourId, juce::Colour (0xff232327));
-                pb->setColour (juce::ProgressBar::foregroundColourId, juce::Colours::dodgerblue);
-
-                // The bar's self-polling timer only starts when visibility
-                // *changes*; toggle it once so updates are picked up from the start.
-                pb->setVisible (false);
-                pb->setVisible (true);
-            }
-        }
-
-        if (withCancel)
-        {
-            for (auto* c : getChildren())
-                if (auto* b = dynamic_cast<juce::TextButton*> (c))
-                {
-                    // The AlertWindow's own click listener exits the modal state
-                    // when the button is pressed; this flag tells the worker
-                    // thread to stop.
-                    if (b->getButtonText () == "Cancel")
-                        b->onClick = [this] { cancelled.store (true); };
-                }
-        }
-    }
-
-    // Set by the Cancel button / ESC; the worker thread checks it between
-    // units of work and then deletes this dialog.
-    std::atomic<bool> cancelled { false };
-
-    void setProgress (double v) { progressValue = v; }
-
-    // Update the message text (call on the message thread).
-    void setStatusText (const juce::String& s) { setMessage (s); }
-
-    /** Enters modal state and grabs keyboard focus so that ESC reaches the
-        Cancel button's shortcut (AlertWindow::keyPressed checks its buttons'
-        registered shortcuts). Progress dialogs contain no text fields, so
-        taking focus is safe. The worker thread still owns this dialog's
-        lifetime: after a cancel it finishes the current unit of work and
-        deletes the dialog. */
-    void beginModal()
-    {
-        enterModalState (false);
-        setWantsKeyboardFocus (true);   // AlertWindow disables this when it has children
-        grabKeyboardFocus ();
-    }
-
-private:
-    double progressValue = 0.0;
-};
+    // Init is almost certainly already running (kicked off at window show);
+    // startAudioInitAsync() is idempotent. The 30 Hz timer closes the dialog
+    // and starts playback as soon as audioDeviceReady() turns true.
+    app.startAudioInitAsync();
+    audioInitDialog = new WorkProgressDialog ("Preparing audio",
+                                              "Initialising the audio output device...\nThis only takes a moment.",
+                                              false, this);
+    audioInitDialog->beginModal();
+}
 
 void MainWindow::showEditError (const std::string& err)
 {
@@ -1941,7 +1982,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ColourMapCool: applyColourMap (ColourMap::Cool); break;
         case ColourMapGrayscale: applyColourMap (ColourMap::Grayscale); break;
 
-        case TransportPlay: app.play(); break;
+        case TransportPlay: playWithAudioInit(); break;
         case TransportStop: app.stop(); break;
         case TransportPause: app.pause(); break;
         case TransportLoop: app.toggleLoop(); break;
@@ -4275,7 +4316,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress::spaceKey)
     {
         // Space toggles play/pause (not stop).
-        if (app.audioEngine().isPlaying()) app.pause(); else app.play();
+        if (app.audioEngine().isPlaying()) app.pause(); else playWithAudioInit();
         return true;
     }
     // Arrow keys nudge the playhead by one frame. Holding Shift selects from

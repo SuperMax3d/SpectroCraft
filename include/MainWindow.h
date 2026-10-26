@@ -9,6 +9,9 @@
 #include <memory>
 #include <algorithm>
 
+// Defined in MainWindow.cpp (file-local); only a pointer is kept here.
+class WorkProgressDialog;
+
 class MainWindow : public juce::DocumentWindow,
                    private juce::KeyListener,
                    public juce::MenuBarModel,
@@ -84,6 +87,10 @@ public:
         error message box is shown (unless the user cancelled). */
     void runDestructiveEdit(std::function<bool(std::string*)> edit);
     void showEditError (const std::string& err);
+
+    // Play request that first guarantees the lazy audio device init has
+    // completed; shows a short progress dialog if it still needs to run.
+    void playWithAudioInit();
     void refreshPanels();
     void applyColourMap (ColourMap m);
     void zoomHorizontal (double factor);   // both views
@@ -294,6 +301,8 @@ private:
     Settings lastSyncedSettings;              // baseline for the settings-save trigger
     double shiftAnchorTime = -1.0;           // Shift+arrow selection anchor (-1 = inactive)
     bool iconApplied = false;                 // window icon set once HWND is available
+    bool audioInitKickedOff = false;          // lazy device init started (timer-driven)
+    WorkProgressDialog* audioInitDialog = nullptr;   // open while waiting for init
 
     // Left-side panels
     std::unique_ptr<FileListPanel> fileListPanel;

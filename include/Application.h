@@ -12,6 +12,9 @@
 #include <memory>
 #include <functional>
 #include <atomic>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
 
 // Result of a batch folder transcription run (see Application::batchTranscribeFolder).
 struct BatchTranscribeSummary
@@ -518,6 +521,14 @@ public:
     // go with a single mipmap rebuild at the end (fast for long jumps).
     void undoSteps (int n); void redoSteps (int n);
 
+    // Lazy audio device initialisation. The expensive WASAPI enumeration/open
+    // is deferred out of the startup path: startAudioInitAsync() runs it on a
+    // worker thread (kicked off right after the window appears, and/or by the
+    // first play request); ensureAudioReady() blocks until it has completed.
+    bool audioDeviceReady() const;
+    void startAudioInitAsync();
+    bool ensureAudioReady (int timeoutMs = -1);
+
     void play(); void stop(); void pause();
     // Toggle looping. When enabling, the loop range is taken from the current
     // selection (or the whole file if there is no selection).
@@ -572,6 +583,14 @@ public:
     std::function<void()> onActiveDocChanged;
 
 private:
+    // Lazy audio init state. audioInitThread is joined in the destructor so a
+    // pending worker can never outlive the AudioDeviceManager it initialises.
+    std::atomic<bool> audioInitStarted { false };
+    std::atomic<bool> audioDeviceIsReady { false };
+    mutable std::mutex audioInitLock;
+    std::condition_variable audioInitCv;
+    std::thread audioInitThread;
+
     void loadSettings();   // restore persisted session settings from recentStore
 
     // Restores the non-audio state recorded in a patch (see Patch::hasSideState).
