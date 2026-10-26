@@ -554,6 +554,11 @@ public:
     // [lo, hi] (used by ensureDrawingVisible()).
     std::function<void(double, double)> onSetSpectralFreqRange;
 
+    // Set by MainWindow: returns the spectrogram's current local frequency
+    // axis as {lo, hi} ({0, 0} when there is no view). Lets
+    // ensureDrawingVisible() skip an axis change that would be a no-op.
+    std::function<std::pair<double, double>()> getSpectralFreqRange;
+
     // Set by MainWindow: arms a new-drawing mode of the given kind on the
     // spectrogram (Drawing panel context menu / t,a,r,d shortcuts).
     std::function<void(DrawingItem::Kind)> onArmNewDrawing;

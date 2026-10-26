@@ -5,6 +5,8 @@
 #include "SpectralEngine.h"
 #include "Settings.h"
 #include "MarkerManager.h"
+#include <array>
+#include <utility>
 #include <vector>
 #include <functional>
 
@@ -88,6 +90,13 @@ public:
     bool isPendingDraw() const { return havePendingDraw_; }
     bool isDrawingNew() const { return drawingNew_; }
     DrawingItem::Kind pendingDrawKind() const { return pendingDraw_; }
+
+    // Arrowhead geometry shared by the renderer and the unit tests: returns
+    // the two barb endpoints for an arrow whose tip is at (x0, y0) and tail
+    // at (x1, y1). Each barb sits `headLen` pixels behind the tip.
+    static std::array<std::pair<float, float>, 2> arrowHeadBarbs (float x0, float y0,
+                                                                 float x1, float y1,
+                                                                 double headLen);
 
     // Fired when a Text drawing's anchor was clicked: data coordinates plus
     // the anchor pixel position (for estimating the text's extent).

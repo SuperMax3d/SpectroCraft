@@ -63,6 +63,24 @@ SpectralView::SpectralView (Application& appIn)
 
 SpectralView::~SpectralView() {}
 
+std::array<std::pair<float, float>, 2> SpectralView::arrowHeadBarbs (float x0, float y0,
+                                                                   float x1, float y1,
+                                                                   double headLen)
+{
+    // The barbs trail behind the tip: from the tip back along the shaft
+    // direction, rotated ~26 degrees either way.
+    const double ang = std::atan2 ((double) (y0 - y1), (double) (x0 - x1));
+    static const int sides[2] = { -1, 1 };
+    std::array<std::pair<float, float>, 2> out;
+    for (int i = 0; i < 2; ++i)
+    {
+        const double a2 = ang + sides[i] * 0.45;
+        out[i] = { x0 - (float) (headLen * std::cos (a2)),
+                   y0 - (float) (headLen * std::sin (a2)) };
+    }
+    return out;
+}
+
 void SpectralView::setWindow (double t0, double t1)
 {
     if (t0 != viewStart || t1 != viewEnd)
@@ -1750,25 +1768,21 @@ void SpectralView::drawDrawings (juce::Graphics& g)
                 case DrawingItem::Kind::Arrow:
                 {
                     if (it.points.size () < 2) break;
+                    // The tip is at the drag start point: you place the arrowhead
+                    // first and pull the shaft back, so the arrow points toward
+                    // where you began dragging.
                     const float x0 = timeToX (it.points[0].first);
                     const float y0 = rr.getY () + freqToY (it.points[0].second, rr.getHeight());
                     const float x1 = timeToX (it.points[1].first);
                     const float y1 = rr.getY () + freqToY (it.points[1].second, rr.getHeight());
                     // Arrowhead: two short lines at ~26 degrees off the shaft.
-                    const double ang = std::atan2 ((double) (y1 - y0), (double) (x1 - x0));
                     const double headLen = 8.0 + 3.0 * it.widthPx;
-                    static const int sides[2] = { -1, 1 };
+                    const auto barbs = arrowHeadBarbs (x0, y0, x1, y1, headLen);
                     auto drawArrow = [&] (float w)
                     {
-                        g.drawLine (x0, y0, x1, y1, w);
+                        g.drawLine (x1, y1, x0, y0, w);
                         for (int i = 0; i < 2; ++i)
-                        {
-                            const double a2 = ang + sides[i] * 0.45;
-                            g.drawLine (x1, y1,
-                                        x1 - (float) (headLen * std::cos (a2)),
-                                        y1 - (float) (headLen * std::sin (a2)),
-                                        w);
-                        }
+                            g.drawLine (x0, y0, barbs[i].first, barbs[i].second, w);
                     };
                     g.setColour (halo);  drawArrow (it.widthPx + 3.0f);
                     g.setColour (ink);   drawArrow (it.widthPx);

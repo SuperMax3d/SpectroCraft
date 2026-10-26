@@ -309,6 +309,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     app.onSetSpectralFreqRange = [this] (double lo, double hi)
     { if (spectralView) spectralView->setFrequencyRange (lo, hi); };
 
+    app.getSpectralFreqRange = [this] () -> std::pair<double, double>
+    { return spectralView != nullptr ? std::make_pair (spectralView->getFreqMin (),
+                                                     spectralView->getFreqMax ())
+                                     : std::make_pair (0.0, 0.0); };
+
     // Keep the playhead in both views identical whenever it moves (clicks,
     // Home/End, file load). The 30 Hz timer already pushes playback position to
     // both views directly.

@@ -2311,7 +2311,8 @@ static void testThirdOctaveStepDrawing()
     const double fLo = 50.0, fHi = std::min (8000.0 * 0.5, 16000.0);
     auto freqToX = [fLo, fHi] (double f)
     {
-        return 2 + (int) std::lround ((std::log (f / fLo) / std::log (fHi / fLo)) * (300 - 34 - 4));
+        // The right level axis is 60 px wide in dB mode (see FFTAnalysisView::axisWidth).
+        return 2 + (int) std::lround ((std::log (f / fLo) / std::log (fHi / fLo)) * (300 - 60 - 4));
     };
     const int xLo = freqToX (400.0 * std::pow (2.0, -1.0 / 6.0));
     const int xHi = freqToX (400.0 * std::pow (2.0,  1.0 / 6.0));
@@ -5735,7 +5736,14 @@ static void testFFTViewInteractions()
 
             const double fPeak = (double) pb * rate / n;
             const int xAtPeak = (int) std::lround ((float) view.freqToX (fPeak));
-            const float yAtPeak = view.levelToY (-160.0 * (1.0 - (double) mags[0][(size_t) pb]));
+            // The integer cursor pixel may round-trip to a neighbouring bin on
+            // the log axis; use the bin that pixel actually represents so the
+            // cursor sits exactly on the curve.
+            const int binAtCursor = (int) std::clamp ((double) std::lround (view.xToFreq ((float) xAtPeak) * n / rate),
+                                                     0.0, (double) (n / 2 - 1));
+            CHECK (std::abs ((double) binAtCursor - pb) <= 1, "cursor pixel maps to the peak's bin");
+            const double fCursor = (double) binAtCursor * rate / n;
+            const float yAtPeak = view.levelToY (-160.0 * (1.0 - (double) mags[0][(size_t) binAtCursor]));
 
             bool snapped = false;
             float dotX = 0, dotY = 0;
@@ -5743,7 +5751,7 @@ static void testFFTViewInteractions()
                                                            snapped, dotX, dotY);
             CHECK (snapped, "cursor on the curve snaps to it");
             CHECK (info.contains ("[snap Ch1]"), "readout names the snapped channel");
-            CHECK (info.contains (juce::String (fPeak >= 1000.0 ? fPeak / 1000.0 : fPeak, 2)),
+            CHECK (info.contains (juce::String (fCursor >= 1000.0 ? fCursor / 1000.0 : fCursor, 2)),
                    "readout shows the exact bin centre frequency");
 
             // Far from any curve: no snap, plain per-channel readout.
@@ -8619,7 +8627,11 @@ static void testAltScaleInFFTReadout()
             if (mags[0][(size_t) b] > mags[0][(size_t) pb]) pb = b;
         const double fPeak = (double) pb * rate / n;
         const int xAtPeak = (int) std::lround ((float) view.freqToX (fPeak));
-        const float yAtPeak = view.levelToY (-160.0 * (1.0 - (double) mags[0][(size_t) pb]));
+        // The integer cursor pixel may round-trip to a neighbouring bin on the
+        // log axis; use the bin that pixel actually represents.
+        const int binAtCursor = (int) std::clamp ((double) std::lround (view.xToFreq ((float) xAtPeak) * n / rate),
+                                                 0.0, (double) (n / 2 - 1));
+        const float yAtPeak = view.levelToY (-160.0 * (1.0 - (double) mags[0][(size_t) binAtCursor]));
 
         bool snapped = false;
         float dotX = 0, dotY = 0;
@@ -11052,6 +11064,103 @@ static void testTranscriptionEditAddRemove()
     wav.deleteFile ();
     { const juce::File side = sc::fileMetaSidecarPath (wav);
       if (side.existsAsFile()) side.deleteFile(); }
+}
+
+// ---------------- Transcription clipboard: Excel-friendly TSV --------------
+// The Windows clipboard can be briefly held by another process, in which case
+// JUCE's write silently does nothing. Write and then verify (bounded) that the
+// text is actually readable before proceeding.
+static void setClipboardText (const juce::String& text)
+{
+    for (int i = 0; i < 50; ++i)
+    {
+        juce::SystemClipboard::copyTextToClipboard (text);
+        if (juce::SystemClipboard::getTextFromClipboard () == text)
+            return;
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+    }
+}
+
+static void testTranscriptionClipboard()
+{
+    const juce::File wav = makeTempFile ("tr_clip.wav");
+    writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for clipboard test");
+    auto* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    TranscriptionPanel panel (app);
+    panel.setSize (300, 420);
+
+    juce::TableListBox* table = nullptr;
+    for (int i = 0; i < panel.getNumChildComponents (); ++i)
+        if (auto* tl = dynamic_cast<juce::TableListBox*> (panel.getChildComponent (i))) { table = tl; break; }
+    CHECK (table != nullptr, "segment table found");
+    if (table == nullptr) { wav.deleteFile (); return; }
+
+    // --- Paste: header + two rows in arbitrary order -> sorted insert.
+    setClipboardText (
+        "Start\tEnd\tText\n"
+        "2:00.000\t2:04.000\tsecond line\n"
+        "0:01.500\t0:03.250\thello world");
+    panel.pasteFromClipboard ();
+    CHECK (d->sctt.segments.size () == 2, "paste inserted two segments");
+    if (d->sctt.segments.size () == 2)
+    {
+        const ScttSegment& s0 = d->sctt.segments[0];
+        const ScttSegment& s1 = d->sctt.segments[1];
+        CHECK (std::abs (s0.startSec - 1.5) < 1e-9 && std::abs (s0.endSec - 3.25) < 1e-9
+              && s0.text == "hello world", "first pasted row sorted to the front");
+        CHECK (std::abs (s1.startSec - 120.0) < 1e-9 && std::abs (s1.endSec - 124.0) < 1e-9
+              && s1.text == "second line", "second pasted row kept its order");
+    }
+
+    // --- Copy All: exact Excel-friendly TSV round trip.
+    panel.copyAllRows ();
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (juce::SystemClipboard::getTextFromClipboard () ==
+           "Start\tEnd\tText\n0:01.500\t0:03.250\thello world\n"
+           "2:00.000\t2:04.000\tsecond line",
+           "copy all produces the Excel-friendly TSV");
+
+    // --- Copy Selected: only the selected rows, in row order.
+    juce::SparseSet<int> sel;
+    sel.addRange ({ 1, 2 });   // just the second segment
+    table->setSelectedRows (sel, juce::sendNotification);
+    panel.copySelectedRows ();
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (juce::SystemClipboard::getTextFromClipboard () ==
+           "Start\tEnd\tText\n2:00.000\t2:04.000\tsecond line",
+           "copy selected copies only the selected rows");
+
+    // --- Paste without a header: plain seconds and an empty end column.
+    setClipboardText (
+        "12.5\t13.25\tno header here\n"
+        "0:07.000\t\tpoint segment");
+    panel.pasteFromClipboard ();
+    CHECK (d->sctt.segments.size () == 4, "second paste added two more segments");
+    if (d->sctt.segments.size () == 4)
+    {
+        // Sorted order: 1.5, 7.0, 12.5, 120.0.
+        CHECK (std::abs (d->sctt.segments[1].startSec - 7.0) < 1e-9
+              && d->sctt.segments[1].endSec == 7.0
+              && d->sctt.segments[1].text == "point segment",
+               "empty end column becomes a point segment");
+        CHECK (std::abs (d->sctt.segments[2].startSec - 12.5) < 1e-9
+              && std::abs (d->sctt.segments[2].endSec - 13.25) < 1e-9,
+               "plain seconds accepted");
+    }
+
+    // --- Whitespace-only clipboard: silent no-op.
+    setClipboardText ("   \n  \n");
+    panel.pasteFromClipboard ();
+    CHECK (d->sctt.segments.size () == 4, "whitespace-only clipboard is a no-op");
+
+    wav.deleteFile ();
 }
 #endif   // SC_ENABLE_AI
 
@@ -14262,6 +14371,41 @@ static void testVideoAudioExtraction()
 // Drawings live in data coordinates (time x frequency), persist with the file's
 // metadata bundle, are listed in the Drawing tab with per-item and master
 // visibility, and are created through the spectrogram's pending-creation mode.
+// ------------------------------------------------------------------ arrow geometry
+// The tip of an arrow is at points[0] (the drag start point): both barbs must
+// trail behind the tip toward the tail, each exactly headLen pixels away.
+static void testArrowHeadGeometry()
+{
+    const float x0 = 100.0f, y0 = 60.0f;   // tip (drag start)
+    const float x1 = 200.0f, y1 = 100.0f;  // tail (drag end)
+    const double headLen = 8.0 + 3.0 * 2.0;
+
+    const auto barbs = SpectralView::arrowHeadBarbs (x0, y0, x1, y1, headLen);
+    for (int i = 0; i < 2; ++i)
+    {
+        CHECK (std::abs (std::hypot ((double) (barbs[i].first - x0),
+                                    (double) (barbs[i].second - y0)) - headLen) < 1e-3,
+               "each barb sits exactly headLen behind the tip");
+        const double proj = ((double) barbs[i].first - x0) * (x1 - x0)
+                          + ((double) barbs[i].second - y0) * (y1 - y0);
+        CHECK (proj > 0.0, "each barb trails toward the tail");
+    }
+
+    const double c0 = ((double) (barbs[0].first - x0)) * (y1 - y0)
+                    - ((double) (barbs[0].second - y0)) * (x1 - x0);
+    const double c1 = ((double) (barbs[1].first - x0)) * (y1 - y0)
+                    - ((double) (barbs[1].second - y0)) * (x1 - x0);
+    CHECK (c0 * c1 < 0.0, "the two barbs straddle the shaft line");
+
+    // A purely horizontal arrow: both barbs trail to the right of the tip and
+    // straddle it vertically.
+    const auto hb = SpectralView::arrowHeadBarbs (100.0f, 50.0f, 200.0f, 50.0f, headLen);
+    CHECK (hb[0].first > x0 && hb[1].first > x0,
+           "horizontal arrow barbs trail toward the tail");
+    CHECK ((hb[0].second - 50.0f) * (hb[1].second - 50.0f) < 0.0,
+           "horizontal arrow barbs straddle the shaft vertically");
+}
+
 static void testDrawingPanel()
 {
     // --- 1) Bundle round trip: all four kinds + hidden flag + points ---
@@ -14411,6 +14555,23 @@ static void testDrawingPanel()
         CHECK (std::abs (capF0 - 3840.0) < 1e-9 && std::abs (capF1 - 4000.0) < 1e-9,
                "frequency clamps at Nyquist");
 
+        // Idempotent: a range that is already fully visible changes neither axis.
+        double curFLo = 50.0, curFHi = 450.0;
+        app.getSpectralFreqRange = [&] () { return std::make_pair (curFLo, curFHi); };
+        capT0 = capT1 = -1; capF0 = capF1 = -1;
+        // t [0.2, 0.8]+10% -> [0.14, 0.86] inside [0, 2];
+        // f [100, 400]+10% -> [70, 430] inside [50, 450].
+        app.ensureDrawingVisible (0.2, 100.0, 0.8, 400.0);
+        CHECK (capT0 < 0 && capF0 < 0, "already-visible drawing changes neither axis");
+
+        // A partially visible frequency band still gets adjusted.
+        curFLo = 300.0; curFHi = 500.0;   // [70, 430] is not contained in [300, 500]
+        capT0 = capT1 = -1; capF0 = capF1 = -1;
+        app.ensureDrawingVisible (0.2, 100.0, 0.8, 400.0);
+        CHECK (capT0 < 0 && std::abs (capF0 - 70.0) < 1e-9
+              && std::abs (capF1 - 430.0) < 1e-9,
+               "only the uncovered frequency axis is adjusted");
+
         wav.deleteFile();
     }
 
@@ -14435,6 +14596,12 @@ static void testDrawingPanel()
         double capT0 = -1, capT1 = -1, capF0 = -1, capF1 = -1;
         app.onSetTimeWindow = [&] (double a, double b) { capT0 = a; capT1 = b; };
         app.onSetSpectralFreqRange = [&] (double lo, double hi) { capF0 = lo; capF1 = hi; };
+
+        // The live spectrogram axis starts at [20, 20000], which already
+        // contains every test band and would make the idempotent fit skip the
+        // frequency side. Drive it explicitly so both axes are exercised.
+        double curFLo = 300.0, curFHi = 500.0;
+        app.getSpectralFreqRange = [&] () { return std::make_pair (curFLo, curFHi); };
 
         auto* bar = win->bottomPanelTabs ();
         const int dIdx = bar->getTabNames ().indexOf ("Drawing");
@@ -14470,6 +14637,23 @@ static void testDrawingPanel()
         dp->simulateCellClick (1, 1, mkMouse (*dp, 5, 5, juce::ModifierKeys()));
         CHECK (!app.doc()->drawings[1].hidden, "second eye click shows it again");
 
+        // An eye-icon click cancels any pending view-fit, so toggling
+        // visibility never moves the viewed data section.
+        app.viewStart = 0.5; app.viewEnd = 1.5;
+        capT0 = capT1 = -1; capF0 = capF1 = -1;
+        const juce::ModifierKeys lmbFit (juce::ModifierKeys::leftButtonModifier);
+        dp->onRowClicked (0, mkMouse (*dp, 5, 5, lmbFit));   // schedules a deferred fit
+        CHECK (capT0 < 0, "fit is deferred until the message loop runs");
+        dp->simulateCellClick (0, 1, mkMouse (*dp, 5, 5, juce::ModifierKeys()));   // eye: hide + cancel
+        for (int i = 0; i < 25; ++i) mm->runDispatchLoopUntil (4);   // bounded pump
+        CHECK (capT0 < 0 && capF0 < 0, "eye click discarded the pending fit");
+
+        // Show it again and re-select: a plain selection still fits.
+        dp->simulateCellClick (0, 1, mkMouse (*dp, 5, 5, juce::ModifierKeys()));
+        dp->onRowClicked (0, mkMouse (*dp, 5, 5, lmbFit));
+        for (int i = 0; i < 25; ++i) mm->runDispatchLoopUntil (4);   // bounded pump
+        CHECK (capT0 >= 0 && capF0 >= 0, "plain selection still fits the view");
+
         // Master switch syncs with the app state.
         auto* showAll = dynamic_cast<EyeButton*> (dp->findChildWithID ("draw-showall-btn"));
         CHECK (showAll != nullptr && showAll->shown, "master visibility starts on");
@@ -14494,6 +14678,11 @@ static void testDrawingPanel()
         capT0 = capT1 = -1; capF0 = capF1 = -1;
         dp->onRowClicked (1, mkMouse (*dp, 5, 5, shiftLmb));
         CHECK (dp->numSelectedRows() == 2, "shift click extends the selection");
+
+        // The view fit is deferred to the message loop: pump it now. On a slow
+        // machine message delivery can take longer than a few milliseconds,
+        // so pump with a generous bounded wait.
+        for (int i = 0; i < 25 && capT0 < 0; ++i) mm->runDispatchLoopUntil (4);
 
         // Fit ran on the union of items one+two: t [0.2, 0.8] -> [0.14, 0.86],
         // f [100, 400] -> [70, 430].
@@ -14825,6 +15014,7 @@ static int scRunUnitTestsImpl()
     progress ("transcription panel layout"); testTranscriptionPanelLayout();
     progress ("transcription dclick zoom"); testTranscriptionDoubleClickZoom();
     progress ("transcription edit/add/remove"); testTranscriptionEditAddRemove();
+    progress ("transcription clipboard");       testTranscriptionClipboard();
 #endif
     progress ("ensure time range visible"); testEnsureTimeRangeVisible();
     progress ("find in panels");            testFindInPanels();
@@ -14870,6 +15060,7 @@ static int scRunUnitTestsImpl()
     progress ("metadata suite");          testMetadataSuite();
     progress ("startup trace");           testStartupTrace();
     progress ("lazy audio init");         testLazyAudioInit();
+    progress ("arrow head geometry");     testArrowHeadGeometry();
     progress ("drawing panel");           testDrawingPanel();
     progress ("drawing key shortcuts");   testDrawingKeyShortcuts();
 

@@ -1879,8 +1879,9 @@ int FFTAnalysisView::axisWidth() const
 {
     // Linear V/g labels are wider than plain dB numbers.
     if (app.scale().usesLinearLevels()) return 50;
-    // "-92.0 dB-SPL" needs more room than a plain dB label.
-    return app.scale().unit == ScaleCalibration::Unit::Pascal ? 68 : 34;
+    // "-92.0 dB-SPL" needs more room than a plain dB label, and even the
+    // uncalibrated "-120.0 dB" form overflows a narrow axis at 11pt.
+    return app.scale().unit == ScaleCalibration::Unit::Pascal ? 68 : 60;
 }
 
 juce::Rectangle<int> FFTAnalysisView::plotBounds() const
@@ -5477,6 +5478,9 @@ void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::Mou
     menu.addSeparator();
     menu.addItem (4, "Add entry");
     menu.addItem (5, "Remove selected");
+    menu.addItem (6, "Copy Selected");
+    menu.addItem (7, "Copy All");
+    menu.addItem (8, "Paste");
     // Options() targets the current mouse position - exactly where the user
     // right-clicked.
     const int id = menu.showMenu (juce::PopupMenu::Options ());
@@ -5490,6 +5494,12 @@ void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::Mou
         owner->addEntry();
     else if (id == 5)
         owner->removeSelectedRows (rowNumber);
+    else if (id == 6)
+        owner->copySelectedRows();
+    else if (id == 7)
+        owner->copyAllRows();
+    else if (id == 8)
+        owner->pasteFromClipboard ();
 }
 
 void TranscriptionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
@@ -5667,6 +5677,193 @@ void TranscriptionPanel::removeSelectedRows (int fallbackRow)
     if (app.onStateChange) app.onStateChange ();
 }
 
+// Parses "M:SS.mmm" time codes as written by formatTimeCode, or plain
+// seconds; used when pasting transcription rows from the clipboard.
+static bool parseTimeCodeForPaste (const juce::String& in, double& outSecs)
+{
+    const juce::String s = in.trim ();
+
+    auto parseDecimal = [] (const juce::String& t, double& vOut) -> bool
+    {
+        if (t.isEmpty ()) return false;
+        double intPart = 0.0, fracPart = 0.0, fracScale = 1.0;
+        bool seenDot = false, anyDigit = false;
+        for (int i = 0; i < t.length (); ++i)
+        {
+            const juce_wchar ch = t[(size_t) i];
+            if (ch >= '0' && ch <= '9')
+            {
+                const double d = (double) (ch - '0');
+                if (!seenDot)
+                    intPart = intPart * 10.0 + d;
+                else
+                {
+                    fracScale *= 0.1;
+                    fracPart += d * fracScale;
+                }
+                anyDigit = true;
+            }
+            else if (ch == '.' && !seenDot)
+                seenDot = true;
+            else
+                return false;
+        }
+        if (!anyDigit) return false;
+        vOut = intPart + fracPart;
+        return true;
+    };
+
+    double total = 0.0;
+    // int on purpose: indexOf returns -1 when the character is absent.
+    const int colonPos = s.indexOf (0, ":");
+    if (colonPos >= 0)
+    {
+        double mins = 0.0, secs = 0.0;
+        if (!parseDecimal (s.upToFirstOccurrenceOf (":", false, false), mins)) return false;
+        if (!parseDecimal (s.fromFirstOccurrenceOf (":", false, false), secs)) return false;
+        total = mins * 60.0 + secs;
+    }
+    else if (!parseDecimal (s, total))
+        return false;
+
+    outSecs = total;
+    return true;
+}
+
+juce::String TranscriptionPanel::buildSegmentsTsv (const std::vector<int>& rows) const
+{
+    auto* d = app.doc ();
+    juce::String out;
+    for (int r : rows)
+    {
+        if (d == nullptr || r < 0 || r >= (int) d->sctt.segments.size ()) continue;
+        const ScttSegment& s = d->sctt.segments [(size_t) r];
+        // One line per segment: Excel rows must not contain newlines.
+        juce::String txt = juce::String (s.text)
+                               .replaceCharacter ('\r', ' ')
+                               .replaceCharacter ('\n', ' ');
+        if (!out.isEmpty ()) out += "\n";
+        out += formatTimeCode (s.startSec) + "\t" + formatTimeCode (s.endSec) + "\t" + txt;
+    }
+    return "Start\tEnd\tText\n" + out;
+}
+
+void TranscriptionPanel::copySelectedRows()
+{
+    auto* d = app.doc ();
+    if (d == nullptr || d->sctt.segments.empty ()) return;
+
+    std::vector<int> rows;
+    for (int r : sparseRows (table.getSelectedRows()))
+        if (r >= 0 && r < (int) d->sctt.segments.size ())
+            rows.push_back (r);
+    if (!rows.empty ())
+        juce::SystemClipboard::copyTextToClipboard (buildSegmentsTsv (rows));
+}
+
+void TranscriptionPanel::copyAllRows()
+{
+    auto* d = app.doc ();
+    if (d == nullptr || d->sctt.segments.empty ()) return;
+
+    std::vector<int> rows (d->sctt.segments.size());
+    for (size_t i = 0; i < rows.size (); ++i) rows[i] = (int) i;
+    juce::SystemClipboard::copyTextToClipboard (buildSegmentsTsv (rows));
+}
+
+void TranscriptionPanel::pasteFromClipboard()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+
+    // The Windows clipboard can be briefly held by another process, in which
+    // case the read silently comes back empty. Retry a few times before
+    // treating it as a genuinely empty clipboard.
+    juce::String text = juce::SystemClipboard::getTextFromClipboard();
+    for (int i = 0; i < 8 && text.isEmpty (); ++i)
+    {
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (4);
+        text = juce::SystemClipboard::getTextFromClipboard();
+    }
+
+    std::vector<ScttSegment> newSegs;
+    bool sawHeader = false;
+
+    const juce::StringArray lines = juce::StringArray::fromLines (text);
+    for (int i = 0; i < lines.size (); ++i)
+    {
+        const juce::String line = lines[i].trim ();
+        if (line.isEmpty ()) continue;
+
+        // Optional Excel header row: "Start\tEnd\tText".
+        if (!sawHeader && line.startsWithIgnoreCase ("Start"))
+        { sawHeader = true; continue; }
+
+        const int t1 = line.indexOf (0, "\t");
+        if (t1 < 0) continue;   // not a data row - skip it
+        const juce::String startStr = line.upToFirstOccurrenceOf ("\t", false, false);
+        const juce::String rest     = line.fromFirstOccurrenceOf ("\t", false, false);
+
+        double st = 0.0;
+        if (!parseTimeCodeForPaste (startStr, st)) continue;   // malformed - skip the row
+
+        juce::String endStr, txtPart;
+        const int t2 = rest.indexOf (0, "\t");
+        if (t2 >= 0)
+        {
+            endStr  = rest.upToFirstOccurrenceOf ("\t", false, false);
+            txtPart = rest.fromFirstOccurrenceOf ("\t", false, false);
+        }
+        else
+            txtPart = rest;
+
+        double en = st;   // no/invalid end column -> point segment at the start
+        if (!endStr.trim ().isEmpty ())
+        {
+            if (!parseTimeCodeForPaste (endStr, en)) en = st;
+            if (en < st) std::swap (st, en);
+        }
+
+        ScttSegment s;
+        s.startSec = st;
+        s.endSec   = en;
+        s.text     = txtPart.trim ().toStdString ();
+        newSegs.push_back (s);
+    }
+
+    if (newSegs.empty ())
+    {
+        // An empty clipboard is a silent no-op; only complain when there was
+        // text on the clipboard but nothing parseable in it.
+        if (!text.trim ().isEmpty ())
+            showSelectionMessage ("Paste",
+                                  "No transcription rows found on the clipboard.\n"
+                                  "Expected tab-separated Start, End and Text columns.");
+        return;
+    }
+
+    // Insert everything in sorted order and remember where each row landed.
+    auto segs = d->sctt.segments;
+    std::vector<int> newRows;
+    for (const ScttSegment& s : newSegs)
+    {
+        size_t pos = segs.size ();
+        for (size_t i = 0; i < segs.size (); ++i)
+            if (segs[i].startSec > s.startSec) { pos = i; break; }
+        segs.insert (segs.begin () + pos, s);
+        newRows.push_back ((int) pos);
+    }
+
+    d->setTranscription (std::move (segs));
+    refresh ();
+    if (app.onStateChange) app.onStateChange ();
+
+    juce::SparseSet<int> rows;
+    for (int r : newRows)
+        rows.addRange ({ r, r + 1 });
+    table.setSelectedRows (rows, juce::sendNotification);
+}
+
 TranscriptionPanel::TranscriptionPanel (Application& appIn)
     : app (appIn), runBtn ("Transcribe..."), clearBtn ("Clear")
 {
@@ -5700,25 +5897,48 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
                       "or add / remove entries.\n"
                       "Ctrl+F searches, F3 / Ctrl+F3 find next / previous.");
 
+    // Deep registration: right-clicks in the table's empty area (below the
+    // last segment - or everywhere when no transcription exists) reach this
+    // panel so the context menu can offer "Add entry" there too. Row and
+    // header clicks are filtered out in mouseDown().
+    table.addMouseListener (this, true);
+
     refresh();
 }
 
-// Right-click on empty panel area: offer to close the panel. (Row right-
-// clicks are handled by the table's own context menu in Model::cellClicked.)
-// Right-click on empty panel area: add an entry or close the panel. (Row
-// right-clicks are handled by the table's own context menu in Model::cellClicked.)
+// Right-click on empty panel area or the table's empty background: offer to
+// add an entry, copy / paste rows and close the panel. Row right-clicks are
+// handled by the table's own context menu in Model::cellClicked; header
+// clicks keep JUCE's built-in column menu.
 void TranscriptionPanel::mouseDown (const juce::MouseEvent& e)
 {
     if (!e.mods.isRightButtonDown() || e.mods.isLeftButtonDown()) return;
 
+    const Point<int> local = getLocalPoint (e.eventComponent, Point<int> (e.x, e.y));
+    if (table.getBounds ().contains (local))
+    {
+        // The header has its own context menu; rows have theirs in cellClicked.
+        if (table.getHeader ().getBounds ().contains (local)) return;
+        if (table.getRowContainingPosition (local.getX (), local.getY ()) >= 0) return;
+    }
+
     juce::PopupMenu m;
     m.addItem (1, "Add entry");
+    m.addItem (2, "Copy Selected");
+    m.addItem (3, "Copy All");
+    m.addItem (4, "Paste");
     m.addSeparator();
-    m.addItem (2, "Close Panel");
+    m.addItem (5, "Close Panel");
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (id == 1)
         addEntry();
-    else if (id == 2 && onCloseRequested)
+    else if (id == 2)
+        copySelectedRows();
+    else if (id == 3)
+        copyAllRows();
+    else if (id == 4)
+        pasteFromClipboard();
+    else if (id == 5 && onCloseRequested)
         onCloseRequested();
 }
 
@@ -6762,9 +6982,14 @@ void DrawingPanel::Model::cellClicked (int rowNumber, int columnId, const juce::
 {
     if (rowNumber < 0 || rowNumber >= getNumRows ()) return;
     if (columnId == 1)   // eye icon: toggle this item's visibility only
+    {
+        // The list box already auto-selected this row before calling us, which
+        // scheduled a view fit - cancel it so the viewed range stays put.
+        owner->cancelPendingFit ();
         owner->app.toggleDrawingHidden (rowNumber);
-    else
-        owner->onRowClicked (rowNumber, e);
+        return;
+    }
+    owner->onRowClicked (rowNumber, e);
 }
 
 void DrawingPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
@@ -6778,7 +7003,18 @@ void DrawingPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::Mou
 
 void DrawingPanel::Model::selectedRowsChanged (int)
 {
-    owner->fitViewToSelected ();
+    owner->scheduleFit ();
+}
+
+void DrawingPanel::scheduleFit ()
+{
+    const int token = ++fitToken_;
+    juce::MessageManager::callAsync ([this, token] { if (token == fitToken_) fitViewToSelected (); });
+}
+
+void DrawingPanel::cancelPendingFit ()
+{
+    ++fitToken_;   // any scheduled fit now sees a stale token and is discarded
 }
 
 DrawingPanel::DrawingPanel (Application& appIn)

@@ -1043,6 +1043,14 @@ public:
     // persists and refreshes.
     void removeSelectedRows (int fallbackRow);
 
+    // Excel-friendly clipboard exchange: a "Start\tEnd\tText" header plus one
+    // tab-separated line per segment. Paste accepts the same layout (the
+    // header row is optional) and inserts every parsed segment in sorted
+    // order, then selects them all.
+    void copySelectedRows();
+    void copyAllRows();
+    void pasteFromClipboard();
+
     // Jumps to a segment: moves the playhead, selects its time range and pans
     // both views so the whole selection is visible (with 10% breathing room,
     // like marker / stored-selection double-clicks). Used by double-clicks
@@ -1084,6 +1092,8 @@ private:
     juce::TextButton runBtn, clearBtn;
 
     bool findInDirection (int dir);
+
+    juce::String buildSegmentsTsv (const std::vector<int>& rows) const;
 
     juce::String searchNeedle;   // current find query (empty = none)
     int searchAnchorRow = -1;    // row of the last found match (-1 = none)
@@ -1282,6 +1292,11 @@ public:
     // toggles a row, Shift range-selects from the anchor; every selection
     // change fits all selected drawings into view (10% margin each side).
     void onRowClicked (int row, const juce::MouseEvent& e);
+    // The fit is deferred to the message loop so an eye-icon click can cancel
+    // it: TableListBox auto-selects the clicked row BEFORE cellClicked runs,
+    // which would otherwise move the view when only visibility was toggled.
+    void scheduleFit();
+    void cancelPendingFit();
     // Removes every drawing whose row is selected.
     void deleteSelected ();
     // Pans/zooms both views so that every selected drawing is visible with a
@@ -1324,7 +1339,8 @@ private:
         void paintRowBackground (juce::Graphics& g, int rowNumber, int width, int height,
                                  bool selected) override;
         // Column 1 draws the per-item visibility eye icon; clicking it
-        // toggles that item's hidden state instead of selecting the row.
+        // toggles that item's hidden state and cancels the pending view fit,
+        // so the viewed range never changes.
         void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
                         bool selected) override;
         void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
@@ -1347,6 +1363,7 @@ private:
 
     FileDoc* listDoc = nullptr;   // doc whose list the current rows belong to
     int anchorRow = -1;           // last plain-clicked row: Shift+click origin
+    int fitToken_ = 0;            // invalidates a deferred fitViewToSelected
 
     void mouseDown (const juce::MouseEvent&) override;
     void showContextMenu (int row);

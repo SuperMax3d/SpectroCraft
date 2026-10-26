@@ -104,11 +104,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   values persist between sessions). Every drawing is stored in data coordinates
   so it stays anchored to the spectrum under zooming and panning; the Drawing
   tab lists each item with a Type + Comment column, a per-item visibility eye
-  icon plus a master Show/Hide switch, Excel-style multi-selection that fits all
-  selected drawings into view (10% margin on every side), right-click **Edit...**
-  and **Delete Selected**. New items are created from the panel's context menu or
-  with **T / A / R / D** by clicking (text) or dragging (the rest) in the
-  spectrogram; **Esc** cancels a pending creation. Drawings persist with the file
+  icon (toggling it never moves the viewed data section) plus a master Show/Hide
+  switch, Excel-style multi-selection that fits all selected drawings into view
+  (10% margin on every side, and only when they are not already fully visible),
+  right-click **Edit...** and **Delete Selected**. New items are created from the
+  panel's context menu or with **T / A / R / D** by clicking (text) or dragging
+  (the rest) in the spectrogram — arrows point toward where you started dragging,
+  so you place the arrowhead first and pull the shaft back; **Esc** cancels a
+  pending creation. Drawings persist with the file
   via [per-file metadata](#per-file-metadata), exactly like selections.
 - **Classic DAW waveform-editor layout**:
   - Top-left tab group: **Files** (lists every loaded file with its sample
@@ -743,9 +746,13 @@ for your microarchitecture at load time.
   breathing room on each side (same behaviour as marker and stored-selection
   double-clicks); press Ctrl+F (or right-click > Find) to search, then F3 /
   Ctrl+F3 to cycle through matches. Right-clicking a row offers **Edit...**
-  (start/end/text), **Add as marker**, **Find...**, and **Add entry** /
-  **Remove selected**; right-clicking the list's empty area also offers
-  **Add entry**. New entries are inserted at the selection start (or the
+  (start/end/text), **Add as marker**, **Find...**, **Add entry** /
+  **Remove selected**, and **Copy Selected** / **Copy All** / **Paste**;
+  right-clicking the list's empty area also offers **Add entry** plus the same
+  copy/paste items. Copy writes Excel-friendly tab-separated text with a
+  Start / End / Text header row (times as M:SS.mmm); Paste accepts that layout —
+  the header row is optional, plain seconds are accepted too, and rows are
+  inserted in sorted order and selected. New entries are inserted at the selection start (or the
   playhead when nothing is selected) with empty text, so segments can be added
   by hand to files that have no transcription.
   Results are stored as a custom top-level `SCTT` RIFF chunk (UTF-8 JSON,

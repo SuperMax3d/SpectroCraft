@@ -951,10 +951,20 @@ void Application::ensureDrawingVisible (double t0, double f0, double t1, double 
         }
     }
 
-    // Frequency window: the spectrogram's local axis always gets set so the
-    // drawing's band is inside it.
+    // Frequency window: only adjust when the band isn't already fully visible
+    // in the spectrogram's local axis - same policy as the time side above.
     if (onSetSpectralFreqRange && f1 > f0)
-        onSetSpectralFreqRange (f0, f1);
+    {
+        bool inside = false;
+        if (getSpectralFreqRange)
+        {
+            const auto cur = getSpectralFreqRange ();
+            inside = cur.first <= f0 + 1e-9 && cur.second >= f1 - 1e-9
+                     && cur.second > cur.first;
+        }
+        if (!inside)
+            onSetSpectralFreqRange (f0, f1);
+    }
 }
 
 void Application::startClonePick ()
