@@ -7065,6 +7065,16 @@ DrawingPanel::DrawingPanel (Application& appIn)
         app.saveSettings ();
     };
 
+    // Tooltips explain what each default applies to.
+    const juce::String widthTip ("Line width in pixels for new arrows, rectangles and freehand strokes.");
+    const juce::String sizeTip  ("Font size in points for new text items.");
+    showAllBtn.setTooltip ("Show or hide all drawings of this file.");
+    widthSlider.setTooltip (widthTip);
+    widthLab.setTooltip (widthTip);
+    colourBtn.setTooltip ("Ink colour used by new drawings.");
+    textSizeSlider.setTooltip (sizeTip);
+    sizeLab.setTooltip (sizeTip);
+
     addAndMakeVisible (&showAllBtn);
     addAndMakeVisible (&widthSlider);
     addAndMakeVisible (&widthLab);

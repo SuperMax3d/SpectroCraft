@@ -14775,8 +14775,10 @@ static void testDrawingKeyShortcuts()
         { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
                                         * 300.0 * (double) f / rate); });
 
+    // openFile (not a bare engine load): the drag-commit part below needs an
+    // active FileDoc so addDrawing() has somewhere to store the item.
     Application app;
-    CHECK (app.audioEngine().loadFile (wav), "load for key shortcut test");
+    CHECK (app.openFile (wav), "open for key shortcut test");
     std::unique_ptr<MainWindow> win (new MainWindow (app, "draw keys test"));
     SpectralView* sv = win->spectralViewComp ();
     CHECK (sv != nullptr, "main window owns a spectral view");
@@ -14798,6 +14800,35 @@ static void testDrawingKeyShortcuts()
         CHECK (win->keyPressed (juce::KeyPress (lower[i], {}, 0), nullptr)
                && sv->isPendingDraw (), "lowercase letter arms a drawing tool");
         win->keyPressed (juce::KeyPress (juce::KeyPress::escapeKey, {}, 0), nullptr);
+    }
+
+    // A committed non-text shape takes the Drawing panel's current ink colour
+    // and line width (not the DrawingItem defaults).
+    {
+        app.settings.drawColourARGB = 0xFF112233;
+        app.settings.drawWidth      = 4.5f;
+        CHECK (win->keyPressed (juce::KeyPress ('A', {}, 0), nullptr)
+               && sv->isPendingDraw (), "arrow tool armed for the drag test");
+        const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+        const int x0 = std::max (60, sv->getWidth () / 2);
+        const int y0 = std::max (40, sv->getHeight () / 2);
+        const int x1 = std::min (sv->getWidth () - 10, x0 + 60);
+        const int y1 = std::min (sv->getHeight () - 10, y0 + 40);
+        sv->mouseDown (mkMouse (*sv, x0, y0, lmb));
+        sv->mouseDrag (mkMouse (*sv, x1, y1, lmb));
+        sv->mouseUp   (mkMouse (*sv, x1, y1, lmb));
+
+        auto* d = app.doc ();
+        CHECK (d != nullptr && !d->drawings.empty (), "drag committed an arrow");
+        if (d != nullptr && !d->drawings.empty ())
+        {
+            const DrawingItem& it = d->drawings.back ();
+            CHECK (it.kind == DrawingItem::Kind::Arrow, "committed item is an arrow");
+            CHECK (it.colourARGB == app.settings.drawColourARGB,
+                  "arrow takes the panel's ink colour");
+            CHECK (std::abs ((double) it.widthPx - (double) app.settings.drawWidth) < 1e-6,
+                  "arrow takes the panel's line width");
+        }
     }
 
     // A focused text editor suppresses the shortcuts. The editor must be

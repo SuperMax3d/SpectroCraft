@@ -1213,7 +1213,7 @@ including the Frequency Analysis settings that were in effect when it was last
 saved. A freshly opened file with no stored state inherits the session's
 current display settings instead of resetting to defaults.
 
-**File → Metadata → Save Metadata Only** writes just the metadata to disk in
+**File → Metadata → Save Metadata** writes just the metadata to disk in
 its current storage mode without touching the audio data: embedded mode
 surgically patches only the managed RIFF chunks inside the WAV, external mode
 rewrites the `.meta.json` sidecar. Useful after editing markers/selections/
@@ -1280,7 +1280,7 @@ delays the window from appearing.
     embedded save/load round-trip through `FileDoc` — including named spectral
     selections surviving an embedded WAV save/reopen; switching between
     Embedded and External modes (sidecar written / chunks removed and back
-    again); **Save Metadata Only** in both modes (embedded: audio bytes
+    again); **Save Metadata** in both modes (embedded: audio bytes
     byte-identical afterwards, marker persisted; external: sidecar updated);
     `migrateFileMetadata` round-trip (chunks → sidecar → chunks with the data
     intact at every step); the `metaDirty` lifecycle that backs the quit /

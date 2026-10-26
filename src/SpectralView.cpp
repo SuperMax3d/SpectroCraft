@@ -650,7 +650,14 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
 
         freePts_.clear ();
         repaint();
-        if (ok && onDrawingCreated) onDrawingCreated (item);
+        if (ok)
+        {
+            // New shapes take the Drawing panel's current ink colour and
+            // line width, exactly like text items do.
+            item.colourARGB = app.settings.drawColourARGB;
+            item.widthPx    = app.settings.drawWidth;
+            if (onDrawingCreated) onDrawingCreated (item);
+        }
         return;
     }
 
@@ -1709,6 +1716,10 @@ void SpectralView::drawDrawings (juce::Graphics& g)
         const double tEnd = xToTime ((double) drawEndX_);
         const double fEnd = freqAtY (drawEndY_);
         live.kind = pendingDraw_;
+        // Preview with the same ink colour / line width the committed item
+        // will get, so what you drag is what you place.
+        live.colourARGB = app.settings.drawColourARGB;
+        live.widthPx    = app.settings.drawWidth;
         if (pendingDraw_ == DrawingItem::Kind::Freehand)
             live.points = freePts_;
         else

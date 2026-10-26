@@ -1638,7 +1638,7 @@ void MainWindow::handleSaveMetadataOnly()
     std::string err;
     if (!app.saveActiveDocMeta (&err))
         juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
-                                            "Save Metadata Only",
+                                            "Save Metadata",
                                             juce::String::fromUTF8 (err.c_str()),
                                             "", this);
     else
@@ -2542,8 +2542,14 @@ void MainWindow::showNewTextDialog (double tSecs, double fHz, int px, int py)
     dlg.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
 
+    // Enter modal state WITHOUT taking keyboard focus, then grab it for the
+    // field once the window is showing so typing can start immediately.
     if (ed != nullptr)
         ed->setWantsKeyboardFocus (true);
+
+    dlg.enterModalState (false);
+    if (ed != nullptr)
+        ed->grabKeyboardFocus();
 
     const int result = dlg.runModalLoop ();
     // Read the editor before the window goes out of scope.
@@ -4044,10 +4050,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
             const bool wavFile = d != nullptr
                 && (d->file.getFullPathName().isEmpty()
                     || d->file.getFileExtension().equalsIgnoreCase (".wav"));
-            // Save Metadata Only needs a real path: it writes the metadata in
+            // Save Metadata needs a real path: it writes the metadata in
             // place without touching the audio data.
             const bool canSaveMetaOnly = hasDoc && !d->file.getFullPathName().isEmpty();
-            metaMenu.addItem (MetaSaveOnly, "Save Metadata Only", canSaveMetaOnly);
+            metaMenu.addItem (MetaSaveOnly, "Save Metadata", canSaveMetaOnly);
             metaMenu.addSeparator ();
             metaMenu.addItem (MetaEmbedded, "Embedded into Wav",
                               hasDoc && wavFile,

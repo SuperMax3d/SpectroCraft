@@ -73,7 +73,7 @@ public:
     /** True when this document's non-audio state (markers, saved selections,
         calibrations, analysis settings, transcription) differs from what is
         on disk. Set by the mutation entry points; cleared whenever the
-        metadata is written to disk (Save / Save As / Save Metadata Only /
+        metadata is written to disk (Save / Save As / Save Metadata /
         storage-mode switch). load() ends with it false. */
     bool metaDirty = false;
 
