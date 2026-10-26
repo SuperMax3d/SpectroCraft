@@ -14362,6 +14362,71 @@ static void testDrawingPanel()
     }
 }
 
+
+// ------------------------------------------------------------------ drawing key shortcuts
+static void testDrawingKeyShortcuts()
+{
+    // Windows reports letter key codes in uppercase; both cases must arm the tools.
+    const juce::File wav = makeTempFile ("draw_keys.wav");
+    writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load for key shortcut test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "draw keys test"));
+    SpectralView* sv = win->spectralViewComp ();
+    CHECK (sv != nullptr, "main window owns a spectral view");
+
+    const int upper[4] = { 'T', 'A', 'R', 'D' };
+    for (int i = 0; i < 4; ++i)
+    {
+        CHECK (!sv->isPendingDraw (), "not armed before key press");
+        CHECK (win->keyPressed (juce::KeyPress (upper[i], {}, 0), nullptr),
+              "uppercase letter is consumed");
+        CHECK (sv->isPendingDraw (), "uppercase letter arms a drawing tool");
+        win->keyPressed (juce::KeyPress (juce::KeyPress::escapeKey, {}, 0), nullptr);
+        CHECK (!sv->isPendingDraw (), "Esc cancels the armed tool");
+    }
+
+    const int lower[4] = { 't', 'a', 'r', 'd' };
+    for (int i = 0; i < 4; ++i)
+    {
+        CHECK (win->keyPressed (juce::KeyPress (lower[i], {}, 0), nullptr)
+               && sv->isPendingDraw (), "lowercase letter arms a drawing tool");
+        win->keyPressed (juce::KeyPress (juce::KeyPress::escapeKey, {}, 0), nullptr);
+    }
+
+    // A focused text editor suppresses the shortcuts. The editor must be
+    // inside a showing window: JUCE ignores focus grabs on hidden components.
+    juce::Component host;
+    host.addToDesktop (0);
+    host.setSize (200, 100);
+    host.setVisible (true);
+    juce::TextEditor ed;
+    host.addChildComponent (&ed);
+    ed.setBounds (10, 10, 120, 24);
+    ed.setVisible (true);
+    ed.grabKeyboardFocus ();
+    CHECK (juce::Component::getCurrentlyFocusedComponent () == &ed, "editor has focus");
+    win->keyPressed (juce::KeyPress ('T', {}, 0), nullptr);
+    CHECK (!sv->isPendingDraw (), "letter ignored while a text editor is focused");
+
+    // Ctrl+letter never arms either (focus on a plain button now).
+    juce::TextButton sink ("focus sink");
+    host.addChildComponent (&sink);
+    sink.setBounds (10, 40, 60, 24);
+    sink.setVisible (true);
+    sink.grabKeyboardFocus ();
+    CHECK (juce::Component::getCurrentlyFocusedComponent () == &sink, "button has focus");
+    const juce::ModifierKeys cmd (juce::ModifierKeys::commandModifier);
+    win->keyPressed (juce::KeyPress ('T', cmd, 0), nullptr);
+    CHECK (!sv->isPendingDraw (), "Ctrl+letter does not arm a drawing tool");
+
+    host.removeFromDesktop ();
+    wav.deleteFile();
+}
+
 static void testStartupTrace()
 {
     const juce::File log = makeTempFile ("startup_trace.log");
@@ -14591,6 +14656,8 @@ static int scRunUnitTestsImpl()
     progress ("startup trace");           testStartupTrace();
     progress ("lazy audio init");         testLazyAudioInit();
     progress ("drawing panel");           testDrawingPanel();
+    progress ("drawing key shortcuts");   testDrawingKeyShortcuts();
+
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

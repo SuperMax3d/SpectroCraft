@@ -77,6 +77,7 @@ public:
     double waveformAmpHalf()   const { return waveformView->getVisibleAmpHalf(); }
     double spectralFreqMin()   const { return spectralView->getFreqMin(); }
     double spectralFreqMax()   const { return spectralView->getFreqMax(); }
+    SpectralView* spectralViewComp() { return spectralView.get (); }
     void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
     void refreshAfterEdit();   // clamp ranges, repaint waveform, re-render spectral image
     /** Applies a destructive edit (`edit` returns false and fills errOut on

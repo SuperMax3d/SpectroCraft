@@ -4296,7 +4296,11 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         const bool inEditor = dynamic_cast<juce::TextEditor*> (focused) != nullptr;
         if (!inEditor)
         {
-            switch (key.getKeyCode())
+            // Windows reports letter key codes in uppercase; normalise like the
+            // selection-tool shortcuts below.
+            const int kc = (key.getKeyCode () >= 'A' && key.getKeyCode () <= 'Z')
+                               ? key.getKeyCode () + 32 : key.getKeyCode ();
+            switch (kc)
             {
                 case 't': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Text); return true;
                 case 'a': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Arrow); return true;
