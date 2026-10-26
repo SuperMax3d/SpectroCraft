@@ -361,6 +361,30 @@ public:
     // both views (and keep app.viewStart/viewEnd in sync).
     void ensureTimeRangeVisible (double t0, double t1);
 
+    // ---- Spectrogram drawings (Drawing panel) -----------------------------
+    /** Appends a drawing to the active document's list and marks its metadata
+        dirty (the list persists with the file's unified metadata on Save). */
+    void addDrawing (const DrawingItem& item);
+    /** Removes the drawings at the given row indices (bottom-up safe) from the
+        active document and marks its metadata dirty. */
+    void deleteSelectedDrawings (const std::vector<int>& rows);
+    /** Applies an edited drawing's editable fields (text, comment, colour,
+        width, text size) to the row; kind and geometry are unchanged. */
+    void applyDrawingEdit (int row, const DrawingItem& updated);
+    /** Pans/zooms both views so that [t0,t1] x [f0,f1] is visible with a 10%
+        margin on every side (clamped to the file's duration and Nyquist). */
+    void ensureDrawingVisible (double t0, double f0, double t1, double f1);
+
+    /** Master switch for drawing rendering (session state): when off, all
+        committed drawings are hidden from the spectrogram; live creation
+        previews stay visible so new items can still be placed. */
+    bool showAllDrawings = true;
+    void setShowAllDrawings (bool on);
+
+    /** Toggles one item's per-element visibility (the eye icon in the
+        Drawing panel list). The state persists with the file metadata. */
+    void toggleDrawingHidden (int row);
+
     // Interactive clone picking: first click = reference frequency, each later
     // click adds clones at (clicked freq / ref freq). Esc or the panel button
     // ends the session; switching/closing documents does too.
@@ -514,6 +538,17 @@ public:
     // Set by MainWindow: sets both views' time window to [t0, t1]. Used by
     // ensureTimeRangeVisible() when a panel asks for something to be shown.
     std::function<void(double, double)> onSetTimeWindow;
+
+    // Set by MainWindow: sets the spectrogram's local frequency axis to
+    // [lo, hi] (used by ensureDrawingVisible()).
+    std::function<void(double, double)> onSetSpectralFreqRange;
+
+    // Set by MainWindow: arms a new-drawing mode of the given kind on the
+    // spectrogram (Drawing panel context menu / t,a,r,d shortcuts).
+    std::function<void(DrawingItem::Kind)> onArmNewDrawing;
+
+    // Set by MainWindow: refreshes the Drawing panel after its list changed.
+    std::function<void()> onDrawingsChanged;
 
     // Set by MainWindow: called whenever setPlayhead() moves the cursor, so both
     // views always show the same playhead position.

@@ -141,6 +141,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     transcriptionPanel = std::make_unique<TranscriptionPanel> (app);
 #endif
     selectionPanel = std::make_unique<SelectionPanel> (app);
+    drawingPanel   = std::make_unique<DrawingPanel> (app);
     historyPanel  = std::make_unique<HistoryPanel> (app);
     pythonPanel   = std::make_unique<PythonPanel> (app);
 
@@ -173,6 +174,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     pythonPanel->onRunRequested = [this] (const juce::File& f, const juce::String& t)
                                   { runPythonScriptAsync (f, t); };
     bottomTabs.addTab ("Selection", kDarkTabBg, selectionPanel.get(), false);
+    bottomTabs.addTab ("Drawing", kDarkTabBg, drawingPanel.get(), false);
     // Frequency Analysis is the default tab in the top group.
     topTabs.setCurrentTabIndex (1, false);
     bottomTabs.setCurrentTabIndex (0, false);
@@ -198,6 +200,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
             [this] { setPanelVisible ("transcription", false); };
 #endif
     selectionPanel->onCloseRequested  = [this] { setPanelVisible ("selection", false); };
+    drawingPanel->onCloseRequested    = [this] { setPanelVisible ("drawing", false); };
 
     // Restore the user's saved arrangement + column geometry.
     applySavedLeftLayout();
@@ -289,6 +292,19 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // Panels can ask for a time range to be shown in both views (e.g.
     // double-clicking a marker or a stored selection).
     app.onSetTimeWindow = [this] (double t0, double t1) { applyTimeWindow (t0, t1); };
+
+    // Drawing panel <-> spectrogram wiring: arming a new element from the
+    // panel's context menu, refreshing after any list change, and fitting
+    // the spectral frequency axis when a drawing is recalled.
+    app.onArmNewDrawing = [this] (DrawingItem::Kind k)
+    { if (spectralView) spectralView->startPendingDraw (k); };
+    app.onDrawingsChanged = [this]
+    {
+        if (drawingPanel) drawingPanel->refresh();
+        if (spectralView) spectralView->repaint();
+    };
+    app.onSetSpectralFreqRange = [this] (double lo, double hi)
+    { if (spectralView) spectralView->setFrequencyRange (lo, hi); };
 
     // Keep the playhead in both views identical whenever it moves (clicks,
     // Home/End, file load). The 30 Hz timer already pushes playback position to
@@ -430,6 +446,14 @@ void MainWindow::setupViews()
     {
         handleRefClickPlaced (t, f);
     };
+
+    // Placing a new text drawing prompts for its content, then commits it.
+    spectralView->onNewTextPlaced = [this] (double t, double f, int px, int py)
+    { showNewTextDialog (t, f, px, py); };
+
+    // Arrow / Rectangle / Freehand commit once the drag ends with a usable size.
+    spectralView->onDrawingCreated = [this] (DrawingItem item)
+    { app.addDrawing (item); };
 
     // Cursor probes feed the status bar: time + amplitude over the waveform,
     // time + frequency + level over the spectrogram.
@@ -682,6 +706,7 @@ const char* MainWindow::panelIdFor (juce::Component* c) const
     if (c == transcriptionPanel.get())  return "transcription";
 #endif
     if (c == selectionPanel.get())      return "selection";
+    if (c == drawingPanel.get())        return "drawing";
     return nullptr;
 }
 
@@ -740,6 +765,7 @@ std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
         { "transcription","Transcription",     false },
 #endif
         { "selection",   "Selection",          false },
+        { "drawing",     "Drawing",            false },
     };
 }
 
@@ -755,6 +781,7 @@ juce::Component* MainWindow::panelForId (const juce::String& id) const
     if (id == "transcription") return transcriptionPanel.get ();
 #endif
     if (id == "selection")   return selectionPanel.get ();
+    if (id == "drawing")     return drawingPanel.get ();
     return nullptr;
 }
 
@@ -858,6 +885,7 @@ void MainWindow::applySavedLeftLayout()
         { "transcription","Transcription",     transcriptionPanel.get(), false },
 #endif
         { "selection",   "Selection",           selectionPanel.get(),  false },
+        { "drawing",     "Drawing",             drawingPanel.get(),    false },
     };
 
     const juce::String saved = app.recentStore->getValue ("left_tab_layout");
@@ -1100,6 +1128,11 @@ juce::String MainWindow::applyModifierHint (const juce::String& mode,
 // holding SHIFT appends "Add Selection" and CTRL appends "Subtract Selection".
 juce::String MainWindow::currentModeText() const
 {
+    // Armed drawing creation overrides every other tool indicator.
+    if (spectralView != nullptr &&
+        (spectralView->isPendingDraw () || spectralView->isDrawingNew ()))
+        return "New drawing: click / drag in the spectrogram  (Esc cancels)";
+
     juce::String mode;
     switch (app.selMode)
     {
@@ -1223,6 +1256,7 @@ void MainWindow::refreshPanels()
     if (transcriptionPanel) transcriptionPanel->refresh();
 #endif
     if (selectionPanel)   selectionPanel->refresh();
+    if (drawingPanel)     drawingPanel->refresh();
     if (historyPanel)   historyPanel->refresh();
     if (fftPanel)       fftPanel->repaint();
 }
@@ -2434,6 +2468,48 @@ void MainWindow::showGoToTimeDialog ()
     if (result == 1 && resolveGoToTime (app, computeGoToTimeFields (app), mainText,
                                         altTexts, tSecs))
         app.setPlayhead (tSecs);   // clamps to the file; updates both views
+}
+
+// Prompts for the text content at the clicked anchor and commits a new Text
+// drawing. The bounding box is estimated from the rendered pixel size so
+// clicking this item in the Drawing panel can fit it into view.
+void MainWindow::showNewTextDialog (double tSecs, double fHz, int px, int py)
+{
+    juce::AlertWindow dlg ("Drawing text", "Type the text to place at this point.",
+                          juce::AlertWindow::NoIcon);
+    dlg.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
+
+    dlg.addTextEditor ("text", "", "Text:");
+    auto* ed = dlg.getTextEditor ("text");
+    dlg.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (ed != nullptr)
+        ed->setWantsKeyboardFocus (true);
+
+    const int result = dlg.runModalLoop ();
+    // Read the editor before the window goes out of scope.
+    juce::String text;
+    if (result == 1 && ed != nullptr)
+        text = ed->getText().trim();
+    if (text.isEmpty()) return;
+
+    DrawingItem item;
+    item.kind       = DrawingItem::Kind::Text;
+    item.t0         = tSecs;
+    item.f0         = fHz;
+    item.text       = text;
+    item.colourARGB = app.settings.drawColourARGB;
+    item.widthPx    = app.settings.drawWidth;
+    item.textSize   = app.settings.drawTextSize;
+
+    double t1 = tSecs, f1 = fHz;
+    if (spectralView)
+        spectralView->estimateTextExtent (px, py, text, app.settings.drawTextSize, t1, f1);
+    item.t1 = std::max (tSecs, t1);
+    item.f1 = std::max (fHz, f1);
+
+    app.addDrawing (item);   // fires onDrawingsChanged -> panel refresh + repaint
 }
 
 // Parses a dB value typed into the Change Gain dialog. Returns false for
@@ -4157,6 +4233,32 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier, 0)) { handleFind (true); return true; }
     // Go to Time: jump the playhead via any of the active time units.
     if (key == juce::KeyPress ('g', juce::ModifierKeys::commandModifier, 0)) { showGoToTimeDialog (); return true; }
+
+    // Drawing tools (ignored while a text editor has focus): t = Text,
+    // a = Arrow, r = Rectangle, d = Free Drawing. Esc cancels an armed or
+    // in-progress creation.
+    if (!key.getModifiers().isCommandDown() && !key.getModifiers().isAltDown())
+    {
+        auto* focused = juce::Component::getCurrentlyFocusedComponent();
+        const bool inEditor = dynamic_cast<juce::TextEditor*> (focused) != nullptr;
+        if (!inEditor)
+        {
+            switch (key.getKeyCode())
+            {
+                case 't': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Text); return true;
+                case 'a': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Arrow); return true;
+                case 'r': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Rectangle); return true;
+                case 'd': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Freehand); return true;
+                default: break;
+            }
+        }
+    }
+    if (key.getKeyCode() == juce::KeyPress::escapeKey && spectralView != nullptr
+        && (spectralView->isPendingDraw () || spectralView->isDrawingNew ()))
+    {
+        spectralView->cancelPendingDraw();
+        return true;
+    }
     if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey) { runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); return true; }
     if (key == juce::KeyPress::spaceKey)
     {

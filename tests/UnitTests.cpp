@@ -2917,10 +2917,11 @@ static void testLeftPanelLayout()
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     const juce::StringArray defaultBottom { "Spectral Controls", "Markers",
-                                            "Transcription", "Selection" };
+                                            "Transcription", "Selection",
+                                            "Drawing" };
 #else
     const juce::StringArray defaultBottom { "Spectral Controls", "Markers",
-                                            "Selection" };
+                                            "Selection", "Drawing" };
 #endif
     const juce::StringArray defaultTop { "Files", "Frequency Analysis", "History",
                                           "Python" };
@@ -2996,9 +2997,9 @@ static void testCrossBarTabMove()
     store.deleteFile ();
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    const int kNumPanels = 8;
+    const int kNumPanels = 9;
 #else
-    const int kNumPanels = 7;
+    const int kNumPanels = 8;
 #endif
 
     {
@@ -3190,9 +3191,9 @@ static void testClosePanelsAndWindowMenu()
     store.deleteFile ();   // deterministic per-run name: never trust leftovers
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    const int kNumPanels = 8;
+    const int kNumPanels = 9;
 #else
-    const int kNumPanels = 7;
+    const int kNumPanels = 8;
 #endif
 
     auto windowMenuIndex = [] (MainWindow& win) -> int
@@ -3215,7 +3216,7 @@ static void testClosePanelsAndWindowMenu()
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
             && win->isPanelOpen ("transcription")
 #endif
-            && win->isPanelOpen ("selection");
+            && win->isPanelOpen ("selection") && win->isPanelOpen ("drawing");
         CHECK (allOpen, "all panels open by default");
 
         const int wIdx = windowMenuIndex (*win);
@@ -3232,6 +3233,7 @@ static void testClosePanelsAndWindowMenu()
         ids.add ("transcription");
 #endif
         ids.add ("selection");
+        ids.add ("drawing");
         for (int i = 0; i < kNumPanels; ++i)
         {
             const bool wasOpen = win->isPanelOpen (ids[i]);
@@ -14038,6 +14040,325 @@ static void testVideoAudioExtraction()
 #endif
 }
 
+
+// ------------------------------------------------------- drawing panel
+// Drawings live in data coordinates (time x frequency), persist with the file's
+// metadata bundle, are listed in the Drawing tab with per-item and master
+// visibility, and are created through the spectrogram's pending-creation mode.
+static void testDrawingPanel()
+{
+    // --- 1) Bundle round trip: all four kinds + hidden flag + points ---
+    {
+        sc::MetaBundle b;
+
+        DrawingItem t;
+        t.kind = DrawingItem::Kind::Text;
+        t.text = "hello";
+        t.comment = "note";
+        t.colourARGB = static_cast<int> (0xFF112233);
+        t.t0 = 1.0; t.f0 = 100.0; t.t1 = 2.0; t.f1 = 200.0;
+        b.drawings.push_back (t);
+
+        DrawingItem a;
+        a.kind = DrawingItem::Kind::Arrow;
+        a.hidden = true;
+        a.points.push_back (std::make_pair (3.0, 50.0));
+        a.points.push_back (std::make_pair (4.0, 60.0));
+        b.drawings.push_back (a);
+
+        DrawingItem r;
+        r.kind = DrawingItem::Kind::Rectangle;
+        r.t0 = 5.0; r.f0 = 10.0; r.t1 = 6.0; r.f1 = 30.0;
+        b.drawings.push_back (r);
+
+        DrawingItem f;
+        f.kind = DrawingItem::Kind::Freehand;
+        f.points.push_back (std::make_pair (7.0, 40.0));
+        f.points.push_back (std::make_pair (8.0, 90.0));
+        b.drawings.push_back (f);
+
+        const std::string json = sc::serialiseBundle (b, false);
+        sc::MetaBundle back;
+        CHECK (sc::parseBundle (juce::String::fromUTF8 (json.c_str(), (int) json.size()), back),
+              "drawings bundle parses");
+        CHECK (back.drawings.size() == 4, "all four drawings survived the round trip");
+        if (back.drawings.size() == 4)
+        {
+            const auto& d0 = back.drawings[0];
+            CHECK (d0.kind == DrawingItem::Kind::Text && d0.text == "hello"
+                  && d0.comment == "note"
+                  && d0.colourARGB == static_cast<int> (0xFF112233)
+                  && std::abs (d0.t0 - 1.0) < 1e-9 && std::abs (d0.f1 - 200.0) < 1e-9,
+                  "text drawing fields round-trip");
+            const auto& d1 = back.drawings[1];
+            CHECK (d1.kind == DrawingItem::Kind::Arrow && d1.hidden
+                  && d1.points.size() == 2
+                  && std::abs (d1.points[0].first - 3.0) < 1e-9,
+                  "arrow drawing + hidden flag round-trip");
+            const auto& d2 = back.drawings[2];
+            CHECK (d2.kind == DrawingItem::Kind::Rectangle && std::abs (d2.t1 - 6.0) < 1e-9,
+                  "rectangle round-trips");
+            const auto& d3 = back.drawings[3];
+            CHECK (d3.kind == DrawingItem::Kind::Freehand && d3.points.size() == 2
+                  && std::abs (d3.points[1].second - 90.0) < 1e-9,
+                  "freehand round-trips");
+        }
+    }
+
+    // --- 2) FileDoc: drawings load from the unified metadata file and are
+    //         carried in the embedded SCMD payload ---
+    {
+        const juce::File wav = makeTempFile ("draw_doc.wav");
+        writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+            { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 400.0 * (double) f / rate); });
+
+        sc::MetaBundle b;
+        DrawingItem t;
+        t.kind = DrawingItem::Kind::Text;
+        t.text = "sidecar";
+        t.t0 = 0.5; t.f0 = 300.0; t.t1 = 1.0; t.f1 = 400.0;
+        b.drawings.push_back (t);
+        const std::string json = sc::serialiseBundle (b, false);
+        juce::File meta = wav.getSiblingFile (wav.getFileName() + ".meta.json");
+        meta.replaceWithText (juce::String::fromUTF8 (json.c_str(), (int) json.size()));
+
+        Application app;
+        CHECK (app.openFile (wav), "file with a drawing sidecar opens");
+        FileDoc& d = *app.docs[0];
+        CHECK (d.drawings.size() == 1 && d.drawings[0].text == "sidecar",
+              "drawings loaded from the unified metadata file");
+        const std::string scmd = d.buildScmdJson ();
+        CHECK (scmd.find ("\"drawings\"") != std::string::npos,
+              "SCMD payload carries the drawings array");
+
+        meta.deleteFile();
+        wav.deleteFile();
+    }
+
+    // --- 3) Settings persistence: width / colour / text size ---
+    {
+        const juce::File store = makeTempFile ("draw_settings.recent");
+        store.deleteFile ();
+        {
+            Application app (store);
+            app.settings.drawWidth = 4.5f;
+            app.settings.drawColourARGB = static_cast<int> (0xFFAABBCC);
+            app.settings.drawTextSize = 21.0f;
+            app.saveSettings ();
+        }
+        {
+            Application app (store);
+            CHECK (std::abs (app.settings.drawWidth - 4.5f) < 1e-6, "draw width persisted");
+            CHECK (app.settings.drawColourARGB == static_cast<int> (0xFFAABBCC),
+                  "draw colour persisted");
+            CHECK (std::abs (app.settings.drawTextSize - 21.0f) < 1e-6, "text size persisted");
+        }
+        store.deleteFile ();
+    }
+
+    // --- 4) ensureDrawingVisible: +10% margin, pan/zoom policy, clamping ---
+    {
+        const juce::File wav = makeTempFile ("draw_fit.wav");
+        writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+            { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 400.0 * (double) f / rate); });
+
+        Application app;
+        CHECK (app.audioEngine().loadFile (wav), "load for fit test");   // 2 s @ 8 kHz
+
+        double capT0 = -1, capT1 = -1, capF0 = -1, capF1 = -1;
+        app.onSetTimeWindow = [&] (double a, double b) { capT0 = a; capT1 = b; };
+        app.onSetSpectralFreqRange = [&] (double lo, double hi) { capF0 = lo; capF1 = hi; };
+
+        // Current window [0.5, 1.5]; target t [0.2, 0.8] + 10% -> [0.14, 0.86].
+        app.viewStart = 0.5; app.viewEnd = 1.5;
+        capT0 = capT1 = -1;
+        app.ensureDrawingVisible (0.2, 100.0, 0.8, 400.0);
+        CHECK (std::abs (capT0 - 0.14) < 1e-9 && std::abs (capT1 - 1.14) < 1e-9,
+               "fit pans left-aligned with the 10% margin");
+        CHECK (std::abs (capF0 - 70.0) < 1e-9 && std::abs (capF1 - 430.0) < 1e-9,
+               "frequency band gets its own 10% margin");
+
+        // Target wider than the window -> zoom to the exact span.
+        app.viewStart = 1.05; app.viewEnd = 1.15;
+        capT0 = capT1 = -1;
+        app.ensureDrawingVisible (1.0, 50.0, 1.2, 80.0);   // +10% -> [0.98, 1.22]
+        CHECK (std::abs (capT0 - 0.98) < 1e-9 && std::abs (capT1 - 1.22) < 1e-9,
+               "fit zooms to the exact span when it is wider than the window");
+
+        // Frequency clamps at Nyquist; time clamps at the file end.
+        app.viewStart = 0.0; app.viewEnd = 2.0;
+        capF0 = capF1 = -1;
+        app.ensureDrawingVisible (1.9, 3900.0, 2.5, 4500.0);   // t1 -> 2.0, f1 -> 4000
+        CHECK (std::abs (capF0 - 3840.0) < 1e-9 && std::abs (capF1 - 4000.0) < 1e-9,
+               "frequency clamps at Nyquist");
+
+        wav.deleteFile();
+    }
+
+    // --- 5) Drawing panel: rows, eye toggle, master switch, Excel selection,
+    //         fit-view margins and delete ---
+    {
+        const juce::File store = makeTempFile ("draw_panel.recent");
+        store.deleteFile ();
+        const juce::File wav = makeTempFile ("draw_panel.wav");
+        writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+            { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 400.0 * (double) f / rate); });
+
+        Application app (store);
+        CHECK (app.openFile (wav), "load for drawing panel test");
+
+        juce::MessageManager* mm = juce::MessageManager::getInstance();
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "drawing panel test"));
+
+        // Capture the fit callbacks AFTER construction: the MainWindow wires
+        // its own handlers in its constructor.
+        double capT0 = -1, capT1 = -1, capF0 = -1, capF1 = -1;
+        app.onSetTimeWindow = [&] (double a, double b) { capT0 = a; capT1 = b; };
+        app.onSetSpectralFreqRange = [&] (double lo, double hi) { capF0 = lo; capF1 = hi; };
+
+        auto* bar = win->bottomPanelTabs ();
+        const int dIdx = bar->getTabNames ().indexOf ("Drawing");
+        CHECK (dIdx >= 0, "Drawing tab exists in the bottom group");
+        if (dIdx < 0) { win.reset(); delete mm; store.deleteFile(); wav.deleteFile(); return; }
+        bar->setCurrentTabIndex (dIdx, true);   // parents the panel
+
+        DrawingPanel* dp = dynamic_cast<DrawingPanel*> (bar->getCurrentContentComponent());
+        CHECK (dp != nullptr, "Drawing panel is the current tab content");
+        if (dp == nullptr) { win.reset(); delete mm; store.deleteFile(); wav.deleteFile(); return; }
+
+        // Three drawings through the app API.
+        DrawingItem t1;
+        t1.kind = DrawingItem::Kind::Text;
+        t1.text = "one";
+        t1.t0 = 0.2; t1.f0 = 100.0; t1.t1 = 0.4; t1.f1 = 200.0;
+        app.addDrawing (t1);
+        DrawingItem a1;
+        a1.kind = DrawingItem::Kind::Arrow;
+        a1.points.push_back (std::make_pair (0.5, 300.0));
+        a1.points.push_back (std::make_pair (0.8, 400.0));
+        app.addDrawing (a1);
+        DrawingItem r1;
+        r1.kind = DrawingItem::Kind::Rectangle;
+        r1.t0 = 1.0; r1.f0 = 50.0; r1.t1 = 1.2; r1.f1 = 80.0;
+        app.addDrawing (r1);
+
+        CHECK (dp->listTable().getNumRows() == 3, "panel lists all drawings");
+
+        // Eye-icon click toggles per-item visibility only.
+        dp->simulateCellClick (1, 1, mkMouse (*dp, 5, 5, juce::ModifierKeys()));
+        CHECK (app.doc()->drawings[1].hidden, "eye click hid item two");
+        dp->simulateCellClick (1, 1, mkMouse (*dp, 5, 5, juce::ModifierKeys()));
+        CHECK (!app.doc()->drawings[1].hidden, "second eye click shows it again");
+
+        // Master switch syncs with the app state.
+        auto* showAll = dynamic_cast<EyeButton*> (dp->findChildWithID ("draw-showall-btn"));
+        CHECK (showAll != nullptr && showAll->shown, "master visibility starts on");
+        if (showAll != nullptr)
+        {
+            app.setShowAllDrawings (false);
+            CHECK (!app.showAllDrawings && !showAll->shown, "master switch off state synced");
+            app.setShowAllDrawings (true);
+            CHECK (app.showAllDrawings && showAll->shown, "master switch back on");
+        }
+
+        // Excel-style selection: plain click then Shift+click extends it.
+        // Start from a known sub-window so the fit callbacks must fire.
+        app.viewStart = 0.5; app.viewEnd = 1.5;
+        const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+        dp->onRowClicked (0, mkMouse (*dp, 5, 5, lmb));
+        CHECK (dp->numSelectedRows() == 1 && dp->selectedRowIndices()[0] == 0,
+              "plain click selects one row");
+
+        const juce::ModifierKeys shiftLmb (juce::ModifierKeys::leftButtonModifier
+                                           | juce::ModifierKeys::shiftModifier);
+        capT0 = capT1 = -1; capF0 = capF1 = -1;
+        dp->onRowClicked (1, mkMouse (*dp, 5, 5, shiftLmb));
+        CHECK (dp->numSelectedRows() == 2, "shift click extends the selection");
+
+        // Fit ran on the union of items one+two: t [0.2, 0.8] -> [0.14, 0.86],
+        // f [100, 400] -> [70, 430].
+        CHECK (std::abs (capT0 - 0.14) < 1e-9 && std::abs (capF0 - 70.0) < 1e-9
+              && std::abs (capF1 - 430.0) < 1e-9,
+               "fit view covers the selected drawings with a 10% margin");
+
+        // Delete Selected removes exactly the two selected rows.
+        dp->deleteSelected ();
+        CHECK (app.doc()->drawings.size() == 1
+              && app.doc()->drawings[0].kind == DrawingItem::Kind::Rectangle,
+              "delete selected removed the two selected drawings");
+        CHECK (dp->listTable().getNumRows() == 1, "panel row count follows deletion");
+
+        win.reset();
+        delete mm;
+        store.deleteFile ();
+        wav.deleteFile ();
+    }
+
+    // --- 6) SpectralView pending creation: text click, arrow drag, cancel ---
+    {
+        const juce::File wav = makeTempFile ("draw_create.wav");
+        writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+            { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 400.0 * (double) f / rate); });
+
+        Application app;
+        CHECK (app.audioEngine().loadFile (wav), "load for pending draw test");
+
+        SpectralView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 2.0);
+        view.setVisibleChannels ({ 0 });
+
+        const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+
+        // Text: a single click inside the plot fires onNewTextPlaced at data coords.
+        double nt = -1, nf = -1; int npx = -1, npy = -1;
+        view.onNewTextPlaced = [&] (double t, double f, int px, int py)
+            { nt = t; nf = f; npx = px; npy = py; };
+        view.startPendingDraw (DrawingItem::Kind::Text);
+        CHECK (view.isPendingDraw (), "text creation armed");
+        view.mouseDown (mkMouse (view, 100, 60, lmb));
+        CHECK (!view.isPendingDraw () && npx == 100 && npy == 60,
+              "click disarms the pending mode and reports pixel position");
+        CHECK (std::abs (nt - view.xToTime (100)) < 1e-9
+              && std::abs (nf - view.freqAtY (60)) < 1e-9,
+               "text anchor reported in data coordinates");
+
+        // Arrow: a drag commits an item with two points.
+        DrawingItem created; bool got = false;
+        view.onDrawingCreated = [&] (DrawingItem it) { created = it; got = true; };
+        view.startPendingDraw (DrawingItem::Kind::Arrow);
+        view.mouseDown (mkMouse (view, 100, 60, lmb));
+        CHECK (!view.isPendingDraw () && view.isDrawingNew (), "arrow drag started");
+        view.mouseDrag (mkMouse (view, 200, 100, lmb));
+        view.mouseUp   (mkMouse (view, 200, 100, lmb));
+        CHECK (got && created.kind == DrawingItem::Kind::Arrow
+              && created.points.size() == 2
+              && std::abs (created.points[0].first - view.xToTime (100)) < 1e-9
+              && std::abs (created.points[1].second - view.freqAtY (100)) < 1e-9,
+               "arrow committed with start and end points");
+
+        // A tiny drag is discarded as an accidental click.
+        got = false;
+        view.startPendingDraw (DrawingItem::Kind::Rectangle);
+        view.mouseDown (mkMouse (view, 100, 60, lmb));
+        view.mouseDrag (mkMouse (view, 102, 61, lmb));
+        view.mouseUp   (mkMouse (view, 102, 61, lmb));
+        CHECK (!got && !view.isDrawingNew (), "sub-3px drag creates no item");
+
+        // Esc cancels an armed mode.
+        view.startPendingDraw (DrawingItem::Kind::Rectangle);
+        view.cancelPendingDraw ();
+        CHECK (!view.isPendingDraw () && !view.isDrawingNew (),
+              "cancel clears the pending mode");
+
+        wav.deleteFile();
+    }
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -14192,6 +14513,7 @@ static int scRunUnitTestsImpl()
     progress ("version string");      testVersionString();
     progress ("probe embedded selections"); testProbeEmbeddedSelections();
     progress ("metadata suite");          testMetadataSuite();
+    progress ("drawing panel");         testDrawingPanel();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

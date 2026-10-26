@@ -48,6 +48,11 @@ public:
         metaDirty = true;
     }
 
+    // Spectrogram drawings (Drawing panel): text, arrow, rectangle and free
+    // annotations in time x frequency coordinates. Persisted with the file's
+    // metadata bundle like the saved selections.
+    std::vector<DrawingItem> drawings;
+
     // Whisper transcription segments. Embedded mode: RIFF "SCTT" chunk inside
     // the WAV; external mode: the "transcription" key of .meta.json. Shown in
     // the Transcription panel, never in the Markers panel.

@@ -272,6 +272,39 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
         appendSelectionObjects (b.selections, arr);
         root->setProperty ("selections", arr);
     }
+    if (!b.drawings.empty())
+    {
+        juce::Array<juce::var> arr;
+        for (const auto& d : b.drawings)
+        {
+            auto o = new juce::DynamicObject();
+            o->setProperty ("kind", static_cast<int> (d.kind));
+            if (!d.text.isEmpty())    o->setProperty ("text", d.text);
+            if (!d.comment.isEmpty()) o->setProperty ("comment", d.comment);
+            o->setProperty ("colour", d.colourARGB);
+            if (d.hidden)          o->setProperty ("hidden", 1);
+            o->setProperty ("width", d.widthPx);
+            o->setProperty ("textSize", d.textSize);
+            o->setProperty ("t0", d.t0);
+            o->setProperty ("f0", d.f0);
+            o->setProperty ("t1", d.t1);
+            o->setProperty ("f1", d.f1);
+            if (!d.points.empty())
+            {
+                juce::Array<juce::var> pts;
+                for (const auto& p : d.points)
+                {
+                    auto po = new juce::DynamicObject();
+                    po->setProperty ("t", p.first);
+                    po->setProperty ("f", p.second);
+                    pts.add (po);
+                }
+                o->setProperty ("points", pts);
+            }
+            arr.add (o);
+        }
+        root->setProperty ("drawings", arr);
+    }
 
     auto scale = new juce::DynamicObject();
     scale->setProperty ("unit", static_cast<int> (b.scale.unit));
@@ -387,6 +420,52 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
         if (!readSelectionObjects (p.getWithDefault ("selections", juce::var()), sels))
             return false;
         out.selections = std::move (sels);
+    }
+
+    out.haveDrawings = p.contains ("drawings");
+    if (out.haveDrawings)
+    {
+        const juce::var dv = p.getWithDefault ("drawings", juce::var());
+        if (dv.isArray())
+        {
+            std::vector<DrawingItem> list;
+            for (const auto& item : *static_cast<const juce::Array<juce::var>*> (dv.getArray()))
+            {
+                const auto* o = item.getDynamicObject();
+                if (o == nullptr) continue;
+                const auto& op = o->getProperties();
+                DrawingItem d;
+                d.kind       = DrawingItem::kindFromInt (static_cast<int> (op.getWithDefault ("kind", 0)));
+                d.text       = op.getWithDefault ("text", juce::var()).toString();
+                d.comment    = op.getWithDefault ("comment", juce::var()).toString();
+                // 0xFF00FF00 doesn't fit in a signed int: var has no unsigned ctor.
+                d.colourARGB = static_cast<int> (op.getWithDefault ("colour",
+                                                                   juce::var(static_cast<int> (0xFF00FF00))));
+                d.hidden     = static_cast<int> (op.getWithDefault ("hidden", 0)) != 0;
+                d.widthPx    = std::max (0.5f, static_cast<float> (op.getWithDefault ("width", 2.0)));
+                d.textSize   = std::clamp (static_cast<float> (op.getWithDefault ("textSize", 14.0)),
+                                          6.0f, 72.0f);
+                d.t0 = static_cast<double> (op.getWithDefault ("t0", 0.0));
+                d.f0 = static_cast<double> (op.getWithDefault ("f0", 0.0));
+                d.t1 = static_cast<double> (op.getWithDefault ("t1", 0.0));
+                d.f1 = static_cast<double> (op.getWithDefault ("f1", 0.0));
+                if (const juce::var pv = op.getWithDefault ("points", juce::var());
+                    pv.isArray())
+                {
+                    for (const auto& pt : *static_cast<const juce::Array<juce::var>*> (pv.getArray()))
+                    {
+                        const auto* po = pt.getDynamicObject();
+                        if (po == nullptr) continue;
+                        const auto& pp = po->getProperties();
+                        d.points.emplace_back (static_cast<double> (pp.getWithDefault ("t", 0.0)),
+                                               static_cast<double> (pp.getWithDefault ("f", 0.0)));
+                    }
+                }
+                d.normaliseBounds ();
+                list.push_back (d);
+            }
+            out.drawings = std::move (list);
+        }
     }
 
     out.haveScale = p.contains ("scale");

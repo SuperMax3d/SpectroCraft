@@ -115,6 +115,14 @@ void Application::loadSettings ()
                              ? sm : ((sm >= 1 && sm <= 4) ? 3 : 0);
     }
     settings.fftTrack      = std::clamp ((int) recentStore->getIntValue ("fft_track", settings.fftTrack), 0, 2);
+    // Drawing panel defaults (last used ink settings for new drawings).
+    settings.drawWidth     = std::clamp (recentStore->getValue ("draw_width",
+                                                               juce::String (settings.drawWidth)).getFloatValue(),
+                                         0.5f, 20.0f);
+    settings.drawColourARGB = recentStore->getIntValue ("draw_colour", settings.drawColourARGB);
+    settings.drawTextSize   = std::clamp (recentStore->getValue ("draw_text_size",
+                                                                juce::String (settings.drawTextSize)).getFloatValue(),
+                                          6.0f, 72.0f);
 }
 
 void Application::saveSettings ()
@@ -128,6 +136,9 @@ void Application::saveSettings ()
     recentStore->setValue ("fft_ref_time", settings.fftRefTime);
     recentStore->setValue ("fft_smooth", settings.fftSmooth);
     recentStore->setValue ("fft_track", settings.fftTrack);
+    recentStore->setValue ("draw_width", settings.drawWidth);
+    recentStore->setValue ("draw_colour", settings.drawColourARGB);
+    recentStore->setValue ("draw_text_size", settings.drawTextSize);
     recentStore->save ();
 }
 
@@ -829,6 +840,109 @@ void Application::ensureTimeRangeVisible (double t0, double t1)
     const double n0 = std::clamp ((t0 < vs) ? t0 : t1 - W,
                                   0.0, std::max (0.0, dur - W));
     onSetTimeWindow (n0, std::min (n0 + W, dur));
+}
+
+void Application::addDrawing (const DrawingItem& item)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr) return;
+    DrawingItem it = item;
+    it.normaliseBounds ();
+    d->drawings.push_back (it);
+    d->metaDirty = true;   // the list persists with the file's metadata on Save
+    if (onDrawingsChanged)
+        onDrawingsChanged ();
+}
+
+void Application::deleteSelectedDrawings (const std::vector<int>& rowsIn)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr) return;
+
+    std::vector<int> rows;
+    for (int r : rowsIn)
+        if (r >= 0 && r < (int) d->drawings.size ())
+            rows.push_back (r);
+    if (rows.empty()) return;
+
+    // Erase from the bottom up so earlier indices stay valid.
+    std::sort (rows.begin (), rows.end (), std::greater<int>());
+    for (int r : rows)
+        d->drawings.erase (d->drawings.begin () + r);
+    d->metaDirty = true;
+    if (onDrawingsChanged)
+        onDrawingsChanged ();
+}
+
+void Application::applyDrawingEdit (int row, const DrawingItem& updated)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr || row < 0 || row >= (int) d->drawings.size ()) return;
+
+    // The edit dialog changes only the editable fields; kind and geometry
+    // stay where the user placed them.
+    DrawingItem& it = d->drawings [(size_t) row];
+    it.text       = updated.text;
+    it.comment    = updated.comment;
+    it.colourARGB = updated.colourARGB;
+    it.widthPx    = std::clamp (updated.widthPx, 0.5f, 20.0f);
+    it.textSize   = std::clamp (updated.textSize, 6.0f, 72.0f);
+
+    d->metaDirty = true;
+    if (onDrawingsChanged)
+        onDrawingsChanged ();
+}
+
+void Application::setShowAllDrawings (bool on)
+{
+    if (showAllDrawings == on) return;
+    showAllDrawings = on;
+    if (onStateChange) onStateChange ();   // repaints the views + refreshes panels
+}
+
+void Application::toggleDrawingHidden (int row)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr || row < 0 || row >= (int) d->drawings.size ()) return;
+    d->drawings [(size_t) row].hidden = !d->drawings [(size_t) row].hidden;
+    d->metaDirty = true;   // the visibility state persists with the metadata
+    if (onDrawingsChanged)
+        onDrawingsChanged ();
+}
+
+void Application::ensureDrawingVisible (double t0, double f0, double t1, double f1)
+{
+    const double dur = audioEngine().duration();
+    if (!(dur > 0.0)) return;
+    const double maxF = 0.5 * audioEngine().sampleRate();
+
+    // The usual +10% breathing room on every side, clamped to the file.
+    DrawingItem::expandBounds10 (t0, f0, t1, f1, dur, maxF);
+
+    // Time window: same pan/zoom policy as ensureTimeRangeVisible(), but the
+    // 10% margin was already applied above (no double expansion).
+    if (onSetTimeWindow)
+    {
+        const double vs = viewStart, ve = viewEnd;
+        if (!(t0 >= vs - 1e-9 && t1 <= ve + 1e-9))
+        {
+            const double W = std::max (ve - vs, 1e-9);
+            const double S = t1 - t0;
+            if (S >= W)
+                onSetTimeWindow (t0, t1);
+            else
+            {
+                const double n0 = std::clamp ((t0 < vs) ? t0 : t1 - W,
+                                              0.0, std::max (0.0, dur - W));
+                onSetTimeWindow (n0, std::min (n0 + W, dur));
+            }
+        }
+    }
+
+    // Frequency window: the spectrogram's local axis always gets set so the
+    // drawing's band is inside it.
+    if (onSetSpectralFreqRange && f1 > f0)
+        onSetSpectralFreqRange (f0, f1);
 }
 
 void Application::startClonePick ()

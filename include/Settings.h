@@ -77,6 +77,14 @@ struct Settings
     int fftSmooth = 0;          // curve smoothing window in frames: 0=None, or 3/5/7/9/11
     int fftTrack = 0;           // 0=Max (strongest component), 1=Total, 2=Weighted
 
+    // Drawing panel defaults - the last used ink settings for NEW drawings.
+    // Persisted between sessions (saved by the Drawing panel on change); not
+    // part of operator==/samePersistent so changing them never invalidates
+    // rendered spectral images.
+    float drawWidth = 2.0f;             // line width in px (Arrow/Rect/Freehand)
+    int drawColourARGB = 0xFF00FF00;     // ink colour, AARRGGBB (bright green)
+    float drawTextSize = 14.0f;          // font size for Text drawings
+
     bool operator== (const Settings& o) const
     {
         return fftSize == o.fftSize && hopSize == o.hopSize && windowType == o.windowType

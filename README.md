@@ -99,6 +99,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   its start sample, plus a `LIST`/`adtl` sub-chunk containing one `labl`
   (title) and one `ltxt` (comment) entry per marker. The audio data is written
   as IEEE float32 exactly as before; other formats keep the plain JUCE writer.
+- **Drawing panel**: annotate the spectrogram with **text, arrows, rectangles
+  and freehand strokes** in an adjustable colour/width/text size (the last-used
+  values persist between sessions). Every drawing is stored in data coordinates
+  so it stays anchored to the spectrum under zooming and panning; the Drawing
+  tab lists each item with a Type + Comment column, a per-item visibility eye
+  icon plus a master Show/Hide switch, Excel-style multi-selection that fits all
+  selected drawings into view (10% margin on every side), right-click **Edit...**
+  and **Delete Selected**. New items are created from the panel's context menu or
+  with **T / A / R / D** by clicking (text) or dragging (the rest) in the
+  spectrogram; **Esc** cancels a pending creation. Drawings persist with the file
+  via [per-file metadata](#per-file-metadata), exactly like selections.
 - **Classic DAW waveform-editor layout**:
   - Top-left tab group: **Files** (lists every loaded file with its sample
     rate, channel count and duration — plus its scale calibration when set;
@@ -271,6 +282,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     Export/Import CSV, Remove All Markers, Delete Selected,
     Fit View to Selected or Find (Ctrl+F searches titles and comments, F3 /
     Ctrl+F3 jump to the next / previous match)).
+  - **Drawing**: a table of user annotations drawn over the spectrogram — text,
+    arrows, rectangles and freehand strokes with per-item comments and
+    visibility; see [Drawing panel](#drawing-panel) below.
   - **Draggable panel tabs**: drag any tab to reorder the panels within its
     group, or drop it onto a tab of the other group to move it across — e.g.
     put Markers next to Frequency Analysis. The arrangement (plus the column
@@ -881,7 +895,8 @@ The test executable accepts the same flags (useful for CI without a display).
 | Selection tool: Time Range / Marquee / Lasso / Paintbrush | S / M / L / P |
 | Brush radius smaller / larger (Paintbrush only) | [ / ] |
 | Paintbrush: straight line from the last stroke's end point to the click position (straight in linear-frequency space) | Alt+click |
-| Clear the active spectral selection (time selection untouched) | Esc |
+| New drawing on the spectrogram: Text / Arrow / Rectangle / Free Drawing | T / A / R / D |
+| Cancel a pending drawing creation (otherwise clears the active spectral selection) | Esc |
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
 | Zoom to fit (both views) | Ctrl+0 |
 | Vertical zoom in / out (waveform amplitude + spectral frequency) | Ctrl+Shift+= / Ctrl+Shift+- |
@@ -1093,9 +1108,40 @@ harmonics of whatever is currently selected.
   stray click can be undone without Esc. **Esc** or choosing *Stop Picking*
   ends the session without touching the selection.
 
+### Drawing panel (annotations over the spectrogram)
+
+The **Drawing** tab in the left panel lists user annotations drawn on top of
+the spectrogram: **Text**, **Arrow**, **Rectangle** and **Free Drawing**.
+
+- The table shows each item's type and a free-text **Comment**; right-clicking
+  a row offers **Edit...** (text/comment, colour, line width, text size),
+  **Delete Selected** and **Close Panel**. Double-clicking a row fits it into
+  view the same way as selecting it.
+- The first column is an eye icon that toggles *that* drawing's visibility;
+  the **Show** button at the top of the panel is the master switch for all of
+  them. Hidden items stay in the list but are not drawn on the spectrogram.
+- Above the table sit the defaults applied to *new* drawings: a **Colour**
+  picker, a line-width slider and a text-size slider. The last-used values are
+  remembered between sessions.
+- **Excel-style multi-selection**: plain click selects one row, Ctrl/Cmd+click
+  toggles rows in or out, Shift+click range-selects from the anchor. Any change
+  of the selected set fits every selected drawing into view — both time and
+  frequency axes get a 10% margin on each side (clamped to the file).
+- New items are created from the panel's right-click menu (**New Text / New
+  Arrow / New Rectangle / New Free Drawing**) or with **T / A / R / D**: the
+  status bar shows "New drawing: click / drag in the spectrogram", a single
+  click places text (a dialog asks for its content) and a drag draws an arrow,
+  rectangle or freehand stroke. **Esc** cancels a pending creation.
+- Drawings are stored in data coordinates (time seconds × frequency Hz), so they
+  stay anchored to the spectrum under zooming and panning, and are drawn on every
+  visible channel row like spectral selection shapes. They persist with the file
+  via [per-file metadata](#per-file-metadata) — embedded in the WAV's `SCMD`
+  chunk or in the `.meta.json` sidecar, exactly like selections.
+
 ### Per-file metadata (File → Metadata)
 
-Everything that belongs to a file — **markers**, **named spectral selections**,
+Everything that belongs to a file — **markers**, **user drawings**,
+**named spectral selections**,
 the **scale calibration** (Set Unit and Scale), the **axis calibrations**
 (custom frequency units + alternative scales) and the **Frequency Analysis**
 settings (axis mode, FFT size, Ref Time, Smooth, Track) — is stored together
@@ -1156,7 +1202,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
-| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with comments + harmonic cloning (Excel-style multi-selection in both list panels; persisted automatically with per-file metadata), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `DrawingPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with comments + harmonic cloning, user drawings over the spectrogram (text/arrow/rectangle/freehand with per-item comments, visibility toggles and fit-to-view; Excel-style multi-selection in all three list panels; persisted automatically with per-file metadata), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
 | `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with six example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near; persisted via per-file metadata (embedded RIFF chunks or `.meta.json`). |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
@@ -1208,6 +1254,13 @@ by a single mutex (short critical sections, no lock held during FFT work).
     audio data; DEL deletes the audio data of the active selection (spectral
     band zeroed / time range trimmed out, marker rows untouched); Edit... dialog
     commit path for name/comment and the "Selection NN" auto-name pre-fill.
+  - **Drawing panel**: bundle round-trip for all four drawing kinds (hidden flag
+    and point lists included), sidecar load + SCMD payload, settings persistence
+    (width/colour/text size), `ensureDrawingVisible` margin/pan/zoom/clamp math,
+    headless DrawingPanel row operations (eye toggle, master switch, Excel-style
+    selection with fit margins, Delete Selected) and SpectralView pending-creation
+    simulation (text click data coordinates, arrow drag commit, sub-3px discard,
+    Esc cancel).
   - **Saved selection comments**: optional comment field round-trips through
     both the legacy JSON format and the unified metadata bundle; empty
     comments are not written.

@@ -79,6 +79,28 @@ public:
     // Set the frequency axis directly (called by the vertical scrollbar).
     void setFrequencyRange (double lo, double hi);
 
+    // ---- New-drawing creation (Drawing panel / t,a,r,d shortcuts) ---------
+    /** Arms "new drawing" mode for one of the four kinds. The next left click
+        inside the plot places a Text item; Arrow/Rectangle/Freehand are made
+        by dragging. Esc or clicking outside the plot cancels the mode. */
+    void startPendingDraw (DrawingItem::Kind k);
+    void cancelPendingDraw();
+    bool isPendingDraw() const { return havePendingDraw_; }
+    bool isDrawingNew() const { return drawingNew_; }
+    DrawingItem::Kind pendingDrawKind() const { return pendingDraw_; }
+
+    // Fired when a Text drawing's anchor was clicked: data coordinates plus
+    // the anchor pixel position (for estimating the text's extent).
+    std::function<void(double t, double f, int px, int py)> onNewTextPlaced;
+    // Fired when an Arrow/Rectangle/Freehand drag finished with a valid item.
+    std::function<void(DrawingItem item)> onDrawingCreated;
+
+    /** Approximate data-space extent of `text` rendered at textSizePx with its
+        baseline anchor at pixel (px, py): used for a Text item's bounding box
+        so clicking it in the Drawing panel can fit it into view. */
+    void estimateTextExtent (int px, int py, const juce::String& text,
+                             float textSizePx, double& outT1, double& outF1) const;
+
     // Render the current spectral content (no axes/overlays) to a PNG file.
     // If cancel points at an atomic set to true, rendering stops early and
     // false is returned without writing any file.
@@ -132,6 +154,17 @@ public:
 
 private:
     Application& app;   // audio data read live via app.audioEngine() (active doc)
+
+    // New-drawing creation state (armed by startPendingDraw()).
+    bool havePendingDraw_ = false;
+    DrawingItem::Kind pendingDraw_ = DrawingItem::Kind::Text;
+    bool drawingNew_ = false;      // a new Arrow/Rectangle/Freehand drag is live
+    int drawStartX_ = 0, drawStartY_ = 0;
+    double drawStartT_ = 0.0, drawStartF_ = 0.0;
+    int drawEndX_ = 0, drawEndY_ = 0;   // live end point (pixels)
+    int lastFreeX_ = 0, lastFreeY_ = 0;  // freehand decimation in pixels
+    std::vector<std::pair<double, double>> freePts_;   // (tSecs, fHz) path
+
     bool showOwnTimeRuler = true;
     SpectralEngine& spectral;
     double viewStart = 0, viewEnd = 10;
@@ -195,6 +228,10 @@ private:
     void drawTimeRuler (juce::Graphics& g);
     void drawFrequencyRuler (juce::Graphics& g);
     void drawOverlays (juce::Graphics& g);
+
+    // Draws the active doc's drawings plus the live in-progress preview on
+    // every visible channel row.
+    void drawDrawings (juce::Graphics& g);
 
     // Mirror a live tool shape's time extent into the shared time selection.
     void syncToolTimeExtent (juce::Range<double> ext);

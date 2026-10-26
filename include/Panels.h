@@ -1247,6 +1247,116 @@ private:
     JUCE_DECLARE_NON_COPYABLE (SelectionPanel)
 };
 
+// ---------------------------------------------------------------- Drawing panel
+
+/** Small toggle button that paints a visibility eye icon. Used as the master
+    show/hide switch at the top of the Drawing panel (shown = all visible). */
+class EyeButton : public juce::Button
+{
+public:
+    explicit EyeButton (const juce::String& name) : juce::Button (name) {}
+
+    bool shown = true;   // what the icon depicts: are drawings currently visible?
+    void paintButton (juce::Graphics& g, bool over, bool down) override;
+};
+
+/** Bottom tab listing the active file's spectrogram drawings: text, arrows,
+    rectangles and freehand strokes. Each row carries a visibility eye icon;
+    the top-left button is the master show/hide switch for all of them. New
+    items are created from the context menu (or the t/a/r/d shortcuts) by
+    clicking or dragging on the spectrogram itself. The list persists with
+    the file's unified metadata, like the saved selections. */
+class DrawingPanel : public juce::Component
+{
+public:
+    explicit DrawingPanel (Application& app);
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+    /** Re-reads the active doc's drawing list into the table and syncs the
+        master show/hide button state. */
+    void refresh();
+
+    // Excel-style multi-selection: plain click selects one row, Ctrl/Cmd
+    // toggles a row, Shift range-selects from the anchor; every selection
+    // change fits all selected drawings into view (10% margin each side).
+    void onRowClicked (int row, const juce::MouseEvent& e);
+    // Removes every drawing whose row is selected.
+    void deleteSelected ();
+    // Pans/zooms both views so that every selected drawing is visible with a
+    // 10% margin on each side (ensureDrawingVisible applies the margin).
+    void fitViewToSelected ();
+    int primaryRow() const;
+
+    // Right-click "Edit...": dialog for the row's text/comment, colour,
+    // width and text size. Kind and geometry are unchanged.
+    void showEditDialog (int row);
+    // Applies an edited item's fields to the row (used by the Edit dialog;
+    // unit tests call it directly).
+    void applyDrawingEdit (int row, const DrawingItem& updated)
+    {
+        app.applyDrawingEdit (row, updated);
+    }
+
+    // Accessors for headless unit tests.
+    int numSelectedRows() const { return table.getNumSelectedRows (); }
+    std::vector<int> selectedRowIndices() const;
+    juce::TableListBox& listTable() { return table; }
+    void simulateCellClick (int row, int columnId, const juce::MouseEvent& e)
+    {
+        model.cellClicked (row, columnId, e);
+    }
+
+    // Right-click "Close Panel": set by MainWindow. requestClose() is the
+    // testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
+
+private:
+    Application& app;
+
+    class Model : public juce::TableListBoxModel
+    {
+    public:
+        explicit Model (DrawingPanel* owner);
+        int getNumRows() override;
+        void paintRowBackground (juce::Graphics& g, int rowNumber, int width, int height,
+                                 bool selected) override;
+        // Column 1 draws the per-item visibility eye icon; clicking it
+        // toggles that item's hidden state instead of selecting the row.
+        void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
+                        bool selected) override;
+        void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+        // Double-click selects the row and fits it into view.
+        void cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+        void selectedRowsChanged (int) override;
+
+    private:
+        DrawingPanel* owner;
+    };
+
+    Model model { this };
+    juce::TableListBox table { "", &model };
+
+    // Top row: master visibility switch + the defaults for NEW drawings.
+    EyeButton showAllBtn { "Show" };
+    juce::TextButton colourBtn { "Colour" }, deleteBtn { "Delete Selected" };
+    juce::Slider widthSlider, textSizeSlider;
+    juce::Label widthLab, sizeLab;
+
+    FileDoc* listDoc = nullptr;   // doc whose list the current rows belong to
+    int anchorRow = -1;           // last plain-clicked row: Shift+click origin
+
+    void mouseDown (const juce::MouseEvent&) override;
+    void showContextMenu (int row);
+    void doDelete();
+    void toggleShowAll();
+    void showColourPicker (std::function<void(juce::Colour)> onPicked);
+
+    JUCE_DECLARE_NON_COPYABLE (DrawingPanel)
+};
+
 // ---------------------------------------------------------------- Status bar
 
 // Thin strip at the bottom of the window: active file name + mouse probe info

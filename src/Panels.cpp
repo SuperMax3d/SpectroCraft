@@ -6623,3 +6623,518 @@ void PythonPanel::resized ()
 
     editor.setBounds (b);
 }
+
+
+// ============================================================= Drawing panel
+
+static void drawEyeIcon (juce::Graphics& g, juce::Rectangle<float> r, bool visible)
+{
+    // Simple almond eye: ellipse outline + pupil. Hidden items are drawn in
+    // grey with a diagonal strike line through them.
+    const auto col = visible ? juce::Colours::white : juce::Colour (0xFF8A8A8A);
+    g.setColour (col);
+    g.drawEllipse (r.reduced (1.5f), 1.4f);
+    const float pr = r.getHeight () * 0.20f;
+    g.fillEllipse (juce::Rectangle<float> (r.getCentreX () - pr, r.getCentreY () - pr,
+                                           2.0f * pr, 2.0f * pr));
+    if (!visible)
+        g.drawLine (r.getX () + 1.0f, r.getBottom () - 1.0f,
+                    r.getRight () - 1.0f, r.getY () + 1.0f, 1.4f);
+}
+
+void EyeButton::paintButton (juce::Graphics& g, bool over, bool down)
+{
+    const auto b = getLocalBounds ().toFloat ();
+    g.setColour (down ? juce::Colour (0xFF2A3148)
+                      : (over ? juce::Colour (0xFF46537A)
+                             : juce::Colour (0xFF39415A)));
+    g.fillRoundedRectangle (b, 3.0f);
+    drawEyeIcon (g, b.reduced (6.0f), shown);
+}
+
+// Custom colour picker: this JUCE build has no ColourChooser widget, so the
+// dialog is an AlertWindow with R/G/B sliders (named components get auto-
+// drawn labels) and a live preview swatch on top. Returns the chosen colour,
+// or `initial` when cancelled.
+static juce::Colour showColourPickerDialog (juce::Colour initial)
+{
+    class Swatch : public juce::Component
+    {
+    public:
+        juce::Colour c;
+        void paint (juce::Graphics& g) override
+        {
+            g.setColour (c);
+            g.fillAll ();
+        }
+    };
+
+    juce::AlertWindow w ("Drawing colour", "Choose the ink colour.",
+                        juce::AlertWindow::NoIcon);
+    w.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
+
+    auto* sw = new Swatch ();
+    sw->c = initial;
+    sw->setSize (200, 24);
+    w.addCustomComponent (sw);   // unnamed: no label is drawn above it
+
+    std::vector<juce::Slider*> sliders;
+    const char* names[3] = { "Red", "Green", "Blue" };
+    int inits[3] = { initial.getRed (), initial.getGreen (), initial.getBlue () };
+    for (int i = 0; i < 3; ++i)
+    {
+        auto* s = new juce::Slider ();
+        s->setRange (0.0, 255.0, 1.0);
+        s->setValue ((double) inits[i]);
+        s->setSize (240, 20);
+        s->setName (names[i]);   // AlertWindow draws this as a label above the slider
+        w.addCustomComponent (s);
+        sliders.push_back (s);
+    }
+
+    auto updateSwatch = [&] ()
+    {
+        sw->c = juce::Colour::fromRGB ((juce::uint8) sliders[0]->getValue (),
+                                       (juce::uint8) sliders[1]->getValue (),
+                                       (juce::uint8) sliders[2]->getValue ());
+        sw->repaint ();
+    };
+    for (auto* s : sliders)
+        s->onValueChange = [&updateSwatch] () { updateSwatch (); };
+
+    w.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (w.runModalLoop () == 1)
+        return juce::Colour::fromRGB ((juce::uint8) sliders[0]->getValue (),
+                                      (juce::uint8) sliders[1]->getValue (),
+                                      (juce::uint8) sliders[2]->getValue ());
+    return initial;
+}
+
+DrawingPanel::Model::Model (DrawingPanel* o) : owner (o) {}
+
+int DrawingPanel::Model::getNumRows()
+{
+    auto* d = owner->app.doc ();
+    return d != nullptr ? (int) d->drawings.size () : 0;
+}
+
+void DrawingPanel::Model::paintRowBackground (juce::Graphics& g, int, int width, int height,
+                                              bool selected)
+{
+    if (selected)
+    {
+        g.setColour (juce::Colour::fromRGB (60, 80, 120));
+        g.fillRect (0, 0, width, height);
+    }
+}
+
+void DrawingPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int columnId,
+                                     int width, int height, bool)
+{
+    auto* d = owner->app.doc ();
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->drawings.size ()) return;
+    const DrawingItem& it = d->drawings [(size_t) rowNumber];
+
+    g.setFont (11.0f);
+    if (columnId == 1)   // per-item visibility eye icon
+    {
+        drawEyeIcon (g, juce::Rectangle<float> ((float) width / 2.0f - 8.0f,
+                                                (float) height / 2.0f - 6.0f,
+                                                16.0f, 12.0f),
+                     !it.hidden);
+    }
+    else if (columnId == 2)   // type
+    {
+        g.setColour (juce::Colours::white);
+        g.drawText (DrawingItem::kindName (it.kind), 4, 0, width - 8, height,
+                    juce::Justification::centredLeft, false);
+    }
+    else   // comment (fills the remainder of the table)
+    {
+        g.setColour (juce::Colours::lightgrey);
+        g.drawText (it.comment, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
+    }
+}
+
+void DrawingPanel::Model::cellClicked (int rowNumber, int columnId, const juce::MouseEvent& e)
+{
+    if (rowNumber < 0 || rowNumber >= getNumRows ()) return;
+    if (columnId == 1)   // eye icon: toggle this item's visibility only
+        owner->app.toggleDrawingHidden (rowNumber);
+    else
+        owner->onRowClicked (rowNumber, e);
+}
+
+void DrawingPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
+{
+    if (rowNumber < 0 || rowNumber >= getNumRows ()) return;
+    owner->anchorRow = rowNumber;
+    juce::SparseSet<int> sel;
+    sel.addRange ({ rowNumber, rowNumber + 1 });
+    owner->table.setSelectedRows (sel, juce::sendNotification);   // -> fitViewToSelected
+}
+
+void DrawingPanel::Model::selectedRowsChanged (int)
+{
+    owner->fitViewToSelected ();
+}
+
+DrawingPanel::DrawingPanel (Application& appIn)
+    : app (appIn),
+      listDoc (appIn.doc())   // rows belong to the doc open at construction
+{
+    // IDs let headless unit tests locate the buttons by name.
+    showAllBtn.setComponentID ("draw-showall-btn");
+    colourBtn.setComponentID ("draw-colour-btn");
+    deleteBtn.setComponentID ("draw-delete-btn");
+
+    auto& header = table.getHeader ();
+    const int fixedFlags = juce::TableHeaderComponent::notResizableOrSortable;
+    header.addColumn ("Show", 1, 40, 30, -1, fixedFlags);
+    header.addColumn ("Type", 2, 95, 60, -1, fixedFlags);
+    header.addColumn ("Comment", 3, 120, 40, -1, fixedFlags);
+
+    // Defaults for NEW drawings: persisted in the session settings.
+    widthSlider.setRange (0.5, 10.0, 0.5);
+    widthSlider.setValue (app.settings.drawWidth);
+    textSizeSlider.setRange (6.0, 72.0, 1.0);
+    textSizeSlider.setValue (app.settings.drawTextSize);
+
+    showAllBtn.onClick = [this] { toggleShowAll (); };
+    deleteBtn.onClick = [this] { doDelete (); };
+    colourBtn.onClick = [this]
+    {
+        const juce::int32 argb0 = app.settings.drawColourARGB;
+        const auto c = showColourPickerDialog (juce::Colour::fromRGBA ((juce::uint8) ((argb0 >> 16) & 0xFF),
+                                                                 (juce::uint8) ((argb0 >> 8) & 0xFF),
+                                                                 (juce::uint8) (argb0 & 0xFF),
+                                                                 (juce::uint8) ((argb0 >> 24) & 0xFF)));
+        app.settings.drawColourARGB = c.getARGB ();
+        app.saveSettings ();
+        repaint ();
+    };
+
+    widthSlider.onValueChange = [this] ()
+    {
+        app.settings.drawWidth = (float) widthSlider.getValue ();
+        widthLab.setText (juce::String (app.settings.drawWidth, 1), juce::dontSendNotification);
+        app.saveSettings ();
+    };
+    textSizeSlider.onValueChange = [this] ()
+    {
+        app.settings.drawTextSize = (float) textSizeSlider.getValue ();
+        sizeLab.setText (juce::String ((int) std::lround (app.settings.drawTextSize)), juce::dontSendNotification);
+        app.saveSettings ();
+    };
+
+    addAndMakeVisible (&showAllBtn);
+    addAndMakeVisible (&widthSlider);
+    addAndMakeVisible (&widthLab);
+    addAndMakeVisible (&colourBtn);
+    addAndMakeVisible (&textSizeSlider);
+    addAndMakeVisible (&sizeLab);
+    addAndMakeVisible (&table);
+    addAndMakeVisible (&deleteBtn);
+
+    table.setMultipleSelectionEnabled (true);
+
+    // Right-clicking a row in the table shows the panel context menu. Deep
+    // registration is required: clicks on rows are delivered to the row's own
+    // component, not to the TableListBox.
+    table.addMouseListener (this, true);
+
+    refresh ();
+}
+
+void DrawingPanel::refresh()
+{
+    table.updateContent ();
+    table.repaint ();
+
+    auto* d = app.doc ();
+
+    // The row selection belongs to the document whose list is shown: reset it
+    // when switching files so stale rows never point at another file's entries.
+    if (d != listDoc)
+    {
+        listDoc = d;
+        anchorRow = -1;
+        juce::SparseSet<int> none;
+        table.setSelectedRows (none, juce::sendNotification);
+    }
+
+    showAllBtn.shown = app.showAllDrawings;
+    showAllBtn.repaint ();
+    deleteBtn.setEnabled (table.getNumSelectedRows () > 0);
+}
+
+void DrawingPanel::onRowClicked (int row, const juce::MouseEvent& e)
+{
+    table.setWantsKeyboardFocus (true);
+    table.grabKeyboardFocus ();   // so clicks keep the selection live
+
+    if (e.mods.isShiftDown ())
+    {
+        // Excel: the selection becomes EXACTLY anchor..row, then fit it.
+        auto* d = app.doc ();
+        const int n = d != nullptr ? (int) d->drawings.size () : 0;
+        const int a = (anchorRow >= 0 && anchorRow < n) ? anchorRow : row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ std::min (a, row), std::max (a, row) + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);   // -> fitViewToSelected
+    }
+    else if (e.mods.isCommandDown () || e.mods.isCtrlDown ())
+    {
+        // Toggle this row within the existing selection.
+        auto sel = table.getSelectedRows ();
+        if (sel.contains (row))
+            sel.removeRange ({ row, row + 1 });
+        else
+            sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+        anchorRow = row;
+    }
+    else
+    {
+        // Plain click: single selection and move the anchor.
+        anchorRow = row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+    }
+}
+
+void DrawingPanel::deleteSelected ()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+
+    std::vector<int> rows;
+    for (int r : sparseRows (table.getSelectedRows ()))
+        if (r >= 0 && r < (int) d->drawings.size ())
+            rows.push_back (r);
+    if (rows.empty()) return;
+
+    app.deleteSelectedDrawings (rows);   // fires onDrawingsChanged -> refresh + repaint
+}
+
+void DrawingPanel::doDelete()
+{
+    deleteSelected ();
+}
+
+void DrawingPanel::fitViewToSelected ()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+
+    double t0 = 1e300, f0 = 1e300, t1 = -1e300, f1 = -1e300;
+    bool any = false;
+    for (int r : sparseRows (table.getSelectedRows ()))
+        if (r >= 0 && r < (int) d->drawings.size ())
+        {
+            const auto& it = d->drawings [(size_t) r];
+            t0 = std::min (t0, it.t0); f0 = std::min (f0, it.f0);
+            t1 = std::max (t1, it.t1); f1 = std::max (f1, it.f1);
+            any = true;
+        }
+    if (any)
+        app.ensureDrawingVisible (t0, f0, t1, f1);   // adds the 10% margin itself
+}
+
+int DrawingPanel::primaryRow() const
+{
+    return table.getNumSelectedRows () > 0 ? table.getSelectedRow (0) : -1;
+}
+
+std::vector<int> DrawingPanel::selectedRowIndices() const
+{
+    std::vector<int> out;
+    for (int r : sparseRows (table.getSelectedRows ()))
+        out.push_back (r);
+    return out;
+}
+
+void DrawingPanel::toggleShowAll()
+{
+    // Fires onStateChange: repaints the views and refreshPanels() syncs this
+    // panel's button state.
+    app.setShowAllDrawings (!app.showAllDrawings);
+}
+
+void DrawingPanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (!e.mods.isRightButtonDown () || e.mods.isLeftButtonDown ()) return;
+
+    // The event position is relative to the component that was actually hit
+    // (a row child of the table); walk up the parent chain to get it in
+    // table coordinates.
+    float px = e.getPosition ().x;
+    float py = e.getPosition ().y;
+    for (auto* c = e.eventComponent; c != nullptr && c != &table;
+         c = c->getParentComponent ())
+    {
+        px += static_cast<float> (c->getX ());
+        py += static_cast<float> (c->getY ());
+    }
+    const auto pInTable = juce::Point<float> (px, py);
+
+    int row = -1;
+    for (int r = 0; r < table.getNumRows (); ++r)
+        if (table.getCellPosition (1, r, true).contains ((int) pInTable.x, (int) pInTable.y))
+        {
+            row = r;
+            break;
+        }
+
+    if (row >= 0 && table.getNumSelectedRows () == 0)
+    {
+        anchorRow = row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification); // -> fitViewToSelected
+    }
+
+    showContextMenu (row);
+}
+
+void DrawingPanel::showContextMenu (int)
+{
+    const int nSel = table.getNumSelectedRows ();
+
+    juce::PopupMenu m;
+    m.addItem (10, "New Text\tT");
+    m.addItem (11, "New Arrow\tA");
+    m.addItem (12, "New Rectangle\tR");
+    m.addItem (13, "New Free Drawing\tD");
+    m.addSeparator ();
+    m.addItem (20, app.showAllDrawings ? "Hide All Drawings" : "Show All Drawings");
+    m.addSeparator ();
+    m.addItem (30, "Edit...", nSel > 0);
+    m.addItem (31, "Delete Selected", nSel > 0);
+    m.addSeparator ();
+    m.addItem (40, "Close Panel");
+
+    const int id = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
+    if (id == 10)      { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Text); }
+    else if (id == 11) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Arrow); }
+    else if (id == 12) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Rectangle); }
+    else if (id == 13) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Freehand); }
+    else if (id == 20) toggleShowAll ();
+    else if (id == 30) showEditDialog (primaryRow ());
+    else if (id == 31) deleteSelected ();
+    else if (id == 40) requestClose ();
+}
+
+void DrawingPanel::showEditDialog (int row)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || row < 0 || row >= (int) d->drawings.size ()) return;
+    const DrawingItem& it = d->drawings [(size_t) row];
+
+    juce::AlertWindow dlg ("Edit drawing",
+                          "Change this drawing's appearance and note.",
+                          juce::AlertWindow::NoIcon);
+    dlg.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
+
+    juce::TextEditor* textEd = nullptr;
+    if (it.kind == DrawingItem::Kind::Text)
+        dlg.addTextEditor ("text", it.text, "Text:");
+    dlg.addTextEditor ("comment", it.comment, "Comment:");
+    textEd      = dlg.getTextEditor ("text");
+    auto* commentEd = dlg.getTextEditor ("comment");
+
+    // Live preview swatch + R/G/B sliders for the ink colour.
+    class Swatch : public juce::Component
+    {
+    public:
+        juce::Colour c;
+        void paint (juce::Graphics& g) override
+        {
+            g.setColour (c);
+            g.fillAll ();
+        }
+    };
+    auto* sw = new Swatch ();
+    sw->c = it.colour ();
+    sw->setSize (200, 24);
+    dlg.addCustomComponent (sw);
+
+    std::vector<juce::Slider*> sliders;
+    const char* names[3] = { "Red", "Green", "Blue" };
+    int inits[3] = { it.colour ().getRed (), it.colour ().getGreen (), it.colour ().getBlue () };
+    for (int i = 0; i < 3; ++i)
+    {
+        auto* s = new juce::Slider ();
+        s->setRange (0.0, 255.0, 1.0);
+        s->setValue ((double) inits[i]);
+        s->setSize (240, 20);
+        s->setName (names[i]);   // AlertWindow draws this as a label above the slider
+        dlg.addCustomComponent (s);
+        sliders.push_back (s);
+    }
+
+    auto* widthSl = new juce::Slider ();
+    widthSl->setRange (0.5, 10.0, 0.5);
+    widthSl->setValue ((double) it.widthPx);
+    widthSl->setSize (240, 20);
+    widthSl->setName ("Width");
+    dlg.addCustomComponent (widthSl);
+
+    auto* sizeSl = new juce::Slider ();
+    sizeSl->setRange (6.0, 72.0, 1.0);
+    sizeSl->setValue ((double) it.textSize);
+    sizeSl->setSize (240, 20);
+    sizeSl->setName ("Text size");
+    dlg.addCustomComponent (sizeSl);
+
+    auto updateSwatch = [&] ()
+    {
+        sw->c = juce::Colour::fromRGB ((juce::uint8) sliders[0]->getValue (),
+                                       (juce::uint8) sliders[1]->getValue (),
+                                       (juce::uint8) sliders[2]->getValue ());
+        sw->repaint ();
+    };
+    for (auto* s : sliders)
+        s->onValueChange = [&updateSwatch] () { updateSwatch (); };
+
+    dlg.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (dlg.runModalLoop () != 1) return;
+
+    DrawingItem updated = it;   // kind + geometry stay where the user placed them
+    if (textEd != nullptr)
+        updated.text = textEd->getText ();
+    updated.comment    = commentEd->getText ();
+    updated.colourARGB = juce::Colour::fromRGB ((juce::uint8) sliders[0]->getValue (),
+                                                (juce::uint8) sliders[1]->getValue (),
+                                                (juce::uint8) sliders[2]->getValue ()).getARGB ();
+    updated.widthPx  = std::clamp ((float) widthSl->getValue (), 0.5f, 10.0f);
+    updated.textSize = std::clamp ((float) sizeSl->getValue (), 6.0f, 72.0f);
+
+    applyDrawingEdit (row, updated);   // -> app.applyDrawingEdit -> refresh + repaint
+}
+
+void DrawingPanel::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+}
+
+void DrawingPanel::resized()
+{
+    const auto r = getLocalBounds ();
+
+    // Top row: master visibility switch + new-drawing defaults.
+    showAllBtn.setBounds (6, 4, 26, 22);
+    widthSlider.setBounds (40, 8, 110, 16);
+    widthLab.setBounds (154, 8, 34, 16);
+    colourBtn.setBounds (194, 4, 26, 22);
+    textSizeSlider.setBounds (228, 8, 110, 16);
+    sizeLab.setBounds (342, 8, 34, 16);
+
+    table.setBounds (6, 34, r.getWidth () - 12, r.getHeight () - 34 - 30);
+    deleteBtn.setBounds (6, r.getHeight () - 28, 110, 24);
+}

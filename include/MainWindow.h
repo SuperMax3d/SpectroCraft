@@ -174,6 +174,7 @@ public:
         non-empty, parseable field (main axis mode or an alternative time
         reference). Ctrl+G. */
     void showGoToTimeDialog();
+    void showNewTextDialog (double tSecs, double fHz, int px, int py);
     void showResampleDialog();
     /** Builds (but does not run modally) the Resample dialog. The caller owns
         and must delete it; used by showResampleDialog() and tests. */
@@ -303,6 +304,7 @@ private:
     std::unique_ptr<TranscriptionPanel> transcriptionPanel;   // Whisper segments (Phase 3)
 #endif
     std::unique_ptr<SelectionPanel> selectionPanel;           // named selections + clone & multiply
+    std::unique_ptr<DrawingPanel> drawingPanel;               // spectrogram drawings (bottom group)
     std::unique_ptr<HistoryPanel> historyPanel;
     std::unique_ptr<PythonPanel> pythonPanel;                 // user Python scripts (top group)
 

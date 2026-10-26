@@ -261,6 +261,40 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    // New-drawing mode armed by the Drawing panel or the t/a/r/d shortcuts:
+    // a left click inside the plot starts the item (Text places immediately,
+    // the other kinds drag). Clicking outside the plot cancels the mode.
+    if (havePendingDraw_ && e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown())
+    {
+        const auto pr = plotRect();
+        const bool inPlot = e.x >= pr.getX() && e.x < pr.getRight()
+                            && e.y >= pr.getY() && e.y < pr.getBottom();
+        if (inPlot)
+        {
+            const double t = xToTime ((double) e.x);
+            const double f = freqAtY (e.y);
+            if (pendingDraw_ == DrawingItem::Kind::Text)
+            {
+                havePendingDraw_ = false;
+                repaint();
+                if (onNewTextPlaced) onNewTextPlaced (t, f, e.x, e.y);
+                return;
+            }
+            havePendingDraw_ = false;   // each gesture consumes the armed mode
+            drawingNew_ = true;
+            drawStartX_ = e.x;  drawStartY_ = e.y;
+            drawEndX_   = e.x;  drawEndY_   = e.y;
+            drawStartT_ = t;    drawStartF_ = f;
+            lastFreeX_  = e.x;  lastFreeY_  = e.y;
+            freePts_.clear ();
+            freePts_.push_back ({ t, f });
+            repaint();
+            return;
+        }
+        havePendingDraw_ = false;
+        repaint();
+    }
+
     // Right button: box-zoom drag. A plain right-click (no significant
     // movement) still shows the context menu, deferred to mouseUp.
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
@@ -384,6 +418,23 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
     // Keep the status-bar probe / brush cursor position current.
     probeX = e.x;
     probeY = e.y;
+
+    // Live drag of a new Arrow/Rectangle/Freehand drawing: track the end
+    // point (freehand decimates to ~2 px steps) and repaint the preview.
+    if (drawingNew_)
+    {
+        drawEndX_ = e.x;
+        drawEndY_ = e.y;
+        if (pendingDraw_ == DrawingItem::Kind::Freehand
+            && std::abs (e.x - lastFreeX_) + std::abs (e.y - lastFreeY_) >= 2)
+        {
+            freePts_.push_back ({ xToTime ((double) e.x), freqAtY (e.y) });
+            lastFreeX_ = e.x;
+            lastFreeY_ = e.y;
+        }
+        repaint();
+        return;
+    }
 
     // Move/Scale gesture: dragging from the reference click previews live too.
     if (app.haveSelGestureRef ())
@@ -546,6 +597,45 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
 
 void SpectralView::mouseUp (const juce::MouseEvent&)
 {
+    // Finish a new Arrow/Rectangle/Freehand drawing. Accidental clicks
+    // (drags under 3 px in either axis) and near-empty freehand strokes are
+    // discarded without creating an item.
+    if (drawingNew_)
+    {
+        drawingNew_ = false;
+        havePendingDraw_ = false;
+
+        DrawingItem item;
+        bool ok = false;
+        const double tEnd = xToTime ((double) drawEndX_);
+        const double fEnd = freqAtY (drawEndY_);
+        if (pendingDraw_ == DrawingItem::Kind::Arrow
+            || pendingDraw_ == DrawingItem::Kind::Rectangle)
+        {
+            if (std::abs (drawEndX_ - drawStartX_) >= 3
+                && std::abs (drawEndY_ - drawStartY_) >= 3)
+            {
+                item.kind = pendingDraw_;
+                std::pair<double, double> p0 { drawStartT_, drawStartF_ };
+                std::pair<double, double> p1 { tEnd, fEnd };
+                item.points.push_back (p0);
+                item.points.push_back (p1);
+                ok = true;
+            }
+        }
+        else if (pendingDraw_ == DrawingItem::Kind::Freehand && freePts_.size() >= 3)
+        {
+            item.kind = pendingDraw_;
+            item.points = freePts_;
+            ok = true;
+        }
+
+        freePts_.clear ();
+        repaint();
+        if (ok && onDrawingCreated) onDrawingCreated (item);
+        return;
+    }
+
     if (dragMode == DragMode::ZoomDrag)
     {
         if (!haveZoomRect)
@@ -1031,6 +1121,7 @@ void SpectralView::paint (juce::Graphics& g)
     }
 
     drawOverlays (g);
+    drawDrawings (g);
 
     // Right-drag box-zoom rubber band: the same translucent blue as the
     // time selection in the tracks, so it reads as "this region" rather
@@ -1535,6 +1626,198 @@ void SpectralView::drawOverlays (juce::Graphics& g)
     {
         g.setColour (juce::Colour::fromRGB (255, 60, 60));
         g.drawVerticalLine ((int) px, (float) pr.getY(), (float) pr.getBottom());
+    }
+}
+
+// ------------------------------------------------- drawings (Drawing panel)
+
+void SpectralView::startPendingDraw (DrawingItem::Kind k)
+{
+    havePendingDraw_ = true;
+    pendingDraw_ = k;
+    drawingNew_ = false;
+    freePts_.clear ();
+    repaint();   // the status-bar hint comes from MainWindow's mode text
+}
+
+void SpectralView::cancelPendingDraw()
+{
+    if (!havePendingDraw_ && !drawingNew_) return;
+    havePendingDraw_ = false;
+    drawingNew_ = false;
+    freePts_.clear ();
+    repaint();
+}
+
+void SpectralView::estimateTextExtent (int px, int py, const juce::String& text,
+                                       float textSizePx, double& outT1,
+                                       double& outF1) const
+{
+    auto rows = rowRects ();
+    if (rows.empty()) { outT1 = 0.0; outF1 = 0.0; return; }
+
+    // The channel row containing the anchor pixel position.
+    juce::Rectangle<int> rr = rows.front();
+    for (const auto& r2 : rows)
+        if (r2.contains (px, py)) { rr = r2; break; }
+
+    const double dtPerPx  = std::abs (xToTime (rr.getX () + 1) - xToTime (rr.getX ()));
+    const float dfPerPx   = std::abs (yToFreq (1.0f, rr.getHeight ())
+                                     - yToFreq (0.0f, rr.getHeight ()));
+
+    // Rough glyph metrics: ~55% of the font size per character, 120% line height.
+    const double wPx = (text.isEmpty () ? 4 : text.length ()) * 0.55 * textSizePx;
+    const double hPx = textSizePx * 1.2;
+
+    outT1 = xToTime ((double) px + wPx);
+    // The text body sits ABOVE its baseline anchor pixel.
+    outF1 = yToFreq ((float) std::max (0, py - rr.getY () - (int) hPx),
+                     rr.getHeight());
+}
+
+void SpectralView::drawDrawings (juce::Graphics& g)
+{
+    auto* d = app.doc ();
+    if (d == nullptr && !drawingNew_) return;
+
+    // Committed items from the active doc plus the live in-progress preview.
+    std::vector<DrawingItem> items;
+    if (d != nullptr) items = d->drawings;   // copy: cheap, and paint-safe
+
+    DrawingItem live;
+    bool haveLive = false;
+    if (drawingNew_)
+    {
+        const double tEnd = xToTime ((double) drawEndX_);
+        const double fEnd = freqAtY (drawEndY_);
+        live.kind = pendingDraw_;
+        if (pendingDraw_ == DrawingItem::Kind::Freehand)
+            live.points = freePts_;
+        else
+        {
+            std::pair<double, double> p0 { drawStartT_, drawStartF_ };
+            std::pair<double, double> p1 { tEnd, fEnd };
+            live.points.push_back (p0);
+            live.points.push_back (p1);
+        }
+        haveLive = true;
+    }
+
+    const auto rows = rowRects ();
+    if (rows.empty()) return;
+
+    // Draw every item on every visible channel row, like the spectral
+    // selection shapes: geometry is in data coordinates so it stays anchored.
+    for (const auto& rr : rows)
+    {
+        const juce::Graphics::ScopedSaveState save (g);
+        g.reduceClipRegion (rr);
+
+        auto drawOne = [&] (const DrawingItem& it, bool preview)
+        {
+            // Every ink pass is preceded by a dark halo so the default bright
+            // colours stay readable over any part of the colour map (the classic
+            // map's yellow end would otherwise swallow thin green lines).
+            const float alphaScale = preview ? 0.6f : 1.0f;
+        const juce::Colour ink  = it.colour().withAlpha (alphaScale);
+        const juce::Colour halo = juce::Colours::black.withAlpha (0.55f * alphaScale);
+
+            switch (it.kind)
+            {
+                case DrawingItem::Kind::Text:
+                {
+                    g.setFont (it.textSize);
+                    const float x = timeToX (it.t0);
+                    const float y = rr.getY () + freqToY (it.f0, rr.getHeight());
+                    const juce::String txt = it.text.isEmpty () ? juce::String ("(text)") : it.text;
+                    // Halo: the same text in dark ink at 8 small offsets.
+                    const int off = std::max (1, (int) (it.textSize / 12.0f));
+                    g.setColour (halo);
+                    static const int offs[3] = { -1, 0, 1 };
+                    for (int oi = 0; oi < 3; ++oi)
+                        for (int oj = 0; oj < 3; ++oj)
+                            if (offs[oi] != 0 || offs[oj] != 0)
+                                g.drawText (txt, (int) x + offs[oi] * off,
+                                            (int) y - (int) it.textSize + offs[oj] * off,
+                                            4096, (int) (it.textSize * 2.5f),
+                                            juce::Justification::centredLeft);
+                    g.setColour (ink);
+                    g.drawText (txt, (int) x, (int) y - (int) it.textSize,
+                                4096, (int) (it.textSize * 2.5f),
+                                juce::Justification::centredLeft);
+                    break;
+                }
+                case DrawingItem::Kind::Arrow:
+                {
+                    if (it.points.size () < 2) break;
+                    const float x0 = timeToX (it.points[0].first);
+                    const float y0 = rr.getY () + freqToY (it.points[0].second, rr.getHeight());
+                    const float x1 = timeToX (it.points[1].first);
+                    const float y1 = rr.getY () + freqToY (it.points[1].second, rr.getHeight());
+                    // Arrowhead: two short lines at ~26 degrees off the shaft.
+                    const double ang = std::atan2 ((double) (y1 - y0), (double) (x1 - x0));
+                    const double headLen = 8.0 + 3.0 * it.widthPx;
+                    static const int sides[2] = { -1, 1 };
+                    auto drawArrow = [&] (float w)
+                    {
+                        g.drawLine (x0, y0, x1, y1, w);
+                        for (int i = 0; i < 2; ++i)
+                        {
+                            const double a2 = ang + sides[i] * 0.45;
+                            g.drawLine (x1, y1,
+                                        x1 - (float) (headLen * std::cos (a2)),
+                                        y1 - (float) (headLen * std::sin (a2)),
+                                        w);
+                        }
+                    };
+                    g.setColour (halo);  drawArrow (it.widthPx + 3.0f);
+                    g.setColour (ink);   drawArrow (it.widthPx);
+                    break;
+                }
+                case DrawingItem::Kind::Rectangle:
+                {
+                    // Outline only: the inside stays empty.
+                    const float x0 = timeToX (it.t0);
+                    const float x1 = timeToX (it.t1);
+                    const float yTop = rr.getY () + freqToY (it.f1, rr.getHeight());
+                    const float yBot = rr.getY () + freqToY (it.f0, rr.getHeight());
+                    const juce::Rectangle<float> box (x0, std::min (yTop, yBot),
+                                                     std::max (1.0f, x1 - x0),
+                                                     std::max (1.0f, std::abs (yBot - yTop)));
+                    g.setColour (halo);  g.drawRect (box, it.widthPx + 3.0f);
+                    g.setColour (ink);   g.drawRect (box, it.widthPx);
+                    break;
+                }
+                case DrawingItem::Kind::Freehand:
+                {
+                    juce::Path p;
+                    for (size_t i = 0; i < it.points.size (); ++i)
+                    {
+                        const float x = timeToX (it.points[i].first);
+                        const float y = rr.getY () + freqToY (it.points[i].second, rr.getHeight());
+                        if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
+                    }
+                    auto strokeIt = [&] (float w)
+                    {
+                        juce::PathStrokeType st (w);
+                        st.setJointStyle (juce::PathStrokeType::curved);
+                        g.strokePath (p, st);
+                    };
+                    g.setColour (halo);  strokeIt (it.widthPx + 3.0f);
+                    g.setColour (ink);   strokeIt (it.widthPx);
+                    break;
+                }
+            }
+        };
+
+        // Committed items respect the master switch and each item's own
+        // visibility toggle; the live preview always draws so a new item can
+        // be placed even while everything else is hidden.
+        for (const auto& it : items)
+            if (app.showAllDrawings && !it.hidden)
+                drawOne (it, false);
+        if (haveLive)
+            drawOne (live, true);
     }
 }
 

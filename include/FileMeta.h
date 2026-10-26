@@ -8,6 +8,7 @@
 // whole bundle as JSON) or in an external "<file>.meta.json" sidecar.
 #pragma once
 
+#include "DrawingItem.h"      // DrawingItem
 #include "MarkerManager.h"     // Marker
 #include "SavedSelections.h"   // SavedSpectralSelection
 #include "ScaleCalibration.h"  // ScaleCalibration
@@ -74,6 +75,7 @@ struct MetaBundle
 {
     std::vector<Marker> markers;
     std::vector<SavedSpectralSelection> selections;
+    std::vector<DrawingItem> drawings;   // spectrogram annotations (Drawing panel)
     ScaleCalibration scale;
     AltRefState altRef;
     FreqAnalysisState freqAnalysis;
@@ -81,14 +83,16 @@ struct MetaBundle
 
     /** Set by parseBundle() when the corresponding key was present in the
         document (used to merge bundles from several sources). */
-    bool haveMarkers = false, haveSelections = false, haveScale = false,
-         haveAltRef = false, haveFreqAnalysis = false, haveTranscription = false;
+    bool haveMarkers = false, haveSelections = false, haveDrawings = false,
+         haveScale = false, haveAltRef = false, haveFreqAnalysis = false,
+         haveTranscription = false;
 
     /** True when the bundle holds anything worth persisting. */
     bool hasContent() const
     {
-        return !markers.empty() || !selections.empty() || scale.isCalibrated()
-            || !altRef.isDefault() || !freqAnalysis.isDefault();
+        return !markers.empty() || !selections.empty() || !drawings.empty()
+            || scale.isCalibrated() || !altRef.isDefault()
+            || !freqAnalysis.isDefault();
     }
 };
 
