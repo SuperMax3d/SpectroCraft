@@ -30,6 +30,7 @@ public:
 
     void resized() override;
     void closeButtonPressed() override;
+    void userTriedToCloseWindow() override;   // native-title-bar X button
     void timerCallback() override; // animates the playhead while playing
     void visibilityChanged() override; // applies the window icon once the HWND exists
 
@@ -46,6 +47,9 @@ public:
 
     // KeyListener
     bool keyPressed (const juce::KeyPress& key, juce::Component* originatingComponent) override;
+
+    // The open Stem Separation window, if any (null when closed).
+    StemSeparationWindow* stemSepWindow() const { return stemWin_.get (); }
 
     void openFile (const juce::File& file);   // routes large files to the async path
     void openFileWithProgress (const juce::File& file);  // background load + progress dialog
@@ -338,6 +342,7 @@ private:
 
     // Effects > Stem Separation window (at most one open at a time).
     std::unique_ptr<StemSeparationWindow> stemWin_;
+
 
     // Zoom/pan scrollbars: time bar at the bottom, one vertical
     // scrollbar per view on its right edge.

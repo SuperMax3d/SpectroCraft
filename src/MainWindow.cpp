@@ -1028,6 +1028,14 @@ void MainWindow::closeButtonPressed()
     JUCEApplication::getInstance()->systemRequestedQuit();
 }
 
+// With a native title bar the X button posts WM_CLOSE, which routes here
+// instead of to closeButtonPressed() (both base implementations are no-op
+// asserts in this JUCE build).
+void MainWindow::userTriedToCloseWindow()
+{
+    closeButtonPressed ();
+}
+
 void MainWindow::timerCallback()
 {
     // Kick off the lazy audio device init on the first tick. The timer only
@@ -2973,6 +2981,9 @@ void MainWindow::showStemSeparationWindow()
         return;
     }
     stemWin_ = std::make_unique<StemSeparationWindow> (app);
+    // The X button routes to userTriedToCloseWindow(); let the window ask us
+    // to release ownership so it can be destroyed safely.
+    stemWin_->onCloseRequested = [this] { stemWin_.reset (); };
 }
 
 void MainWindow::showResampleDialog()

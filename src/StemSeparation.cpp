@@ -233,6 +233,20 @@ StemSeparationWindow::~StemSeparationWindow()
     if (alive_) alive_->store (false);   // stop any pending worker callbacks
 }
 
+void StemSeparationWindow::userTriedToCloseWindow()
+{
+    // The owner's callback releases the unique_ptr that owns this window, so
+    // `this` is destroyed while we are still inside this call. JUCE's WndProc
+    // does not touch the component after handleUserClosingWindow() returns,
+    // which makes this safe (same idiom as a self-deleting popup).
+    if (onCloseRequested) onCloseRequested ();
+}
+
+void StemSeparationWindow::closeButtonPressed()
+{
+    userTriedToCloseWindow ();
+}
+
 void StemSeparationWindow::timerCallback()
 {
     selRangeLabel_.setText (selectionRangeText (), juce::dontSendNotification);

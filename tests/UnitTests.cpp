@@ -28,6 +28,7 @@
 #include "BkdkChunk.h"   // bkdk per-channel calibration chunk parsing
 #include "VideoAudio.h"  // video-container audio extraction (FFmpeg, Windows)
 #include "AudioCpp.h"     // stem-separation CLI argument building + file discovery
+#include "StemSeparation.h"   // the Effects > Stem Separation window
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
 #include "AI/ModelManager.h"
@@ -5274,6 +5275,132 @@ static void testZoomOutFullFitsData()
     }
 
     wav.deleteFile();
+}
+
+// ---------------- Stem Separation window: layout + close button ----------
+// The native title bar's X button routes to userTriedToCloseWindow(); without
+// an override the base implementation is a no-op assert, so the window could
+// never be closed. The owner callback must release the unique_ptr.
+static void testStemSepWindowLayoutAndClose()
+{
+    const juce::File wav = makeTempFile ("stemsep_win.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 2000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote wav for stem-sep window test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for stem-sep window test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "stem sep window"));
+
+    // Open the dialog through the menu action.
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    StemSeparationWindow* dlg = win->stemSepWindow();
+    CHECK (dlg != nullptr, "stem separation window opened from the menu");
+    if (dlg == nullptr) return;
+
+    // Every control must be laid out with a visible size. In simple mode the
+    // advanced-only rowsHost_ and advancedHint_ stay at zero bounds, so of the
+    // 12 content children exactly 10 are visible (a non-native test peer adds
+    // two more internal minimise/close buttons, which we ignore).
+    int visible = 0;
+    for (int i = 0; i < dlg->getNumChildComponents(); ++i)
+        if (!dlg->getChildComponent (i)->getBounds().isEmpty())
+            ++visible;
+    CHECK (dlg->getNumChildComponents() >= 12 && visible == 10,
+          "stem separation window lays out all its controls");
+
+    // X button path: userTriedToCloseWindow must release ownership.
+    dlg->userTriedToCloseWindow ();
+    CHECK (win->stemSepWindow () == nullptr, "closing the window releases it");
+
+    // Re-opening creates a fresh instance.
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    CHECK (win->stemSepWindow () != nullptr,
+          "re-open works after close");
+}
+
+// ---------------- Axis-mode change triggers a zoom fit --------------------
+// Changing the analysis method used to reset the axes to their defaults
+// BEFORE the new mode's data existed, so the user saw default ranges. The
+// fit is now deferred until recomputeIfNeeded() has fresh numbers.
+static void testAxisModeChangeTriggersFit()
+{
+    // 2 s mono @ 8 kHz: a 300 Hz tone at half amplitude (Nyquist = 4 kHz).
+    const juce::File wav = makeTempFile ("modefit.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote tone wav for mode-fit test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for mode-fit test");
+    const double dur = app.audioEngine().duration();
+    // A partial selection so the fitted time window differs from the full file.
+    const double tSel0 = 0.25 * dur, tSel1 = 0.75 * dur;
+    app.setSelection ({ tSel0, tSel1 });
+
+    // Mirrors fitDataRange(): expand to at least minSpan around the centre,
+    // then add +10% total margin (5% above max, 5% below min).
+    auto expectFit = [] (double dmin, double dmax, double lo, double hi)
+    {
+        const double centre = 0.5 * (dmin + dmax);
+        double span = std::max (1e-9, dmax - dmin);
+        const double minSpan = std::max (1e-6, std::abs (centre) * 0.1);
+        if (span < minSpan)
+            { dmin = centre - 0.5 * minSpan; dmax = centre + 0.5 * minSpan; span = minSpan; }
+        const double m = span * 0.05;
+        return std::abs (lo - (dmin - m)) < 1e-6 && std::abs (hi - (dmax + m)) < 1e-6;
+    };
+
+    FFTAnalysisView view (app);
+    view.setSize (320, 200);
+
+    // --- Amp vs Time: the deferred fit runs once curves exist -------------
+    view.setAxisMode (4);   // combo handler sets the pending-fit flag
+    CHECK (view.getDbTop () == 0.0 && view.getDbBottom () == -80.0,
+          "no fit before the new mode's data exists");
+    view.recomputeIfNeeded ();
+
+    double amin = 1e30, amax = -1e30;
+    for (const auto& cd : view.getLiveCurves ())
+        for (float v : cd.ampDb)
+            { amin = std::min (amin, (double) v); amax = std::max (amax, (double) v); }
+    CHECK (!view.getLiveCurves ().empty () && amax < 0.0,
+          "amp-vs-time curves computed after mode switch");
+    CHECK (expectFit (amin, amax, view.getDbBottom (), view.getDbTop ()),
+          "vertical axis fitted to the amp-vs-time data");
+
+    // --- Switch to FFT Linear: fit stays deferred until recompute ---------
+    const double topBefore = view.getDbTop ();
+    view.setAxisMode (0);
+    CHECK (view.getDbTop () == topBefore,
+          "fit is deferred while the new mode's data is missing");
+
+    view.recomputeIfNeeded ();   // computes the spectrum AND runs the pending fit
+    const auto& mags = view.getSpectrum();
+    CHECK (!mags.empty () && view.getCachedN () > 1, "mode-0 spectrum computed");
+
+    double dmin = 0.0, dmax = -FFTAnalysisView::kNormFloorDb;
+    for (const auto& mag : mags)
+        for (int k = 1; k < (int) mag.size(); ++k)
+        {
+            const double dB = -FFTAnalysisView::kNormFloorDb * (1.0 - (double) mag[k]);
+            dmin = std::min (dmin, dB);
+            dmax = std::max (dmax, dB);
+        }
+    CHECK (expectFit (dmin, dmax, view.getDbBottom (), view.getDbTop ()),
+          "vertical axis fitted to the fft-linear data after the switch");
+
+    // --- Switch back to Amp vs Time: horizontal time window refits --------
+    const double topAfterFft = view.getDbTop ();
+    view.setAxisMode (4);
+    CHECK (view.getDbTop () == topAfterFft,
+          "fit stays deferred for the third mode as well");
+    view.recomputeIfNeeded ();
+    CHECK (std::abs (view.getCurveViewT0 () - tSel0) < 1e-9
+           && std::abs (view.getCurveViewT1 () - tSel1) < 1e-9,
+          "time window refits to the analysed region after the switch");
 }
 
 // ---------------- Time-pan speed + reversal responsiveness ----------------
@@ -15865,6 +15992,8 @@ static int scRunUnitTestsImpl()
     progress ("right-drag box zoom"); testRightDragZoom();
     progress ("ctx menu zoom-out-full"); testCtxZoomOutFull();
     progress ("zoom-out-full fits data"); testZoomOutFullFitsData();
+    progress ("axis-mode change triggers zoom fit"); testAxisModeChangeTriggersFit ();
+    progress ("stem-sep window layout + close"); testStemSepWindowLayoutAndClose ();
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("time axis ticks");     testTimeAxisTicks();

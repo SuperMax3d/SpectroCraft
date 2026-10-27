@@ -10,6 +10,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,7 +36,18 @@ public:
 
     void timerCallback() override;
 
+    // The native title bar's X button routes to userTriedToCloseWindow()
+    // (DocumentWindow::closeButtonPressed is never called for it in this JUCE
+    // build, where both base implementations are no-op asserts). Call the
+    // owner-provided callback so MainWindow can release its unique_ptr.
+    void userTriedToCloseWindow() override;
+    void closeButtonPressed() override;
+
 public:
+    // Set by the owner (MainWindow) to take back ownership when the window is
+    // closed via X; called from within this object, so it must not touch `this`.
+    std::function<void()> onCloseRequested;
+
     // Called by the DescRow buttons (a separate class), so these are public.
     void addAnchorFromSelection(int descIndex, bool include);
     void removeAnchor(int descIndex, int anchorIndex);

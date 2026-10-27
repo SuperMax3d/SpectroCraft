@@ -437,6 +437,9 @@ public:
     // True when the live curve cache matches the current mode/region/settings
     // (same conditions recomputeCurve uses to skip its work).
     bool curveCacheValid() const;
+    // True when the current mode's data cache holds numbers (used to defer
+    // the post-mode-change zoom fit until fresh data exists).
+    bool fitDataReady() const;
 
     // Public so headless unit tests can drive the zoom/copy paths directly.
     void copySpectrumToClipboard();
@@ -644,6 +647,9 @@ private:
     bool cachedPascalMode_ = false;
     int64_t lastComputeMs = 0;
     bool lastComputeWasExpensive = false;   // multi-window averaging (throttle key)
+    // Set by the axis-mode combo: fit both axes once the new mode's data has
+    // been computed (the onChange fires before recomputeIfNeeded runs).
+    bool fitPending_ = false;
     int cursorX = -1, cursorY = -1;
 
     // Harmonic reference mode state (see the public accessors above).
@@ -694,6 +700,10 @@ private:
                                    double t0, double t1, int n, int windowType,
                                    int track, const SpectralSelection* mask,
                                    std::vector<CurveData>& out);
+
+    // The actual cache refresh; recomputeIfNeeded() wraps it with the
+    // deferred post-mode-change zoom fit.
+    void doRecompute ();
 
     // Recompute the live curves for the current mode/track/smoothing over
     // region [t0, t1] (called from recomputeIfNeeded()).

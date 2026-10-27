@@ -1037,7 +1037,8 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         cachedCurveMode = -1;
         refreshSnapshotBands(); // re-derive stored snapshots' bands for the new mode
         refreshSnapshotButtonStates();   // buttons now address the other store
-        resetDisplayRanges();   // each mode has its own default frequency window
+        fitPending_ = true;    // zoom-fit once the new mode's data is computed
+                               // (paint() runs resetDisplayRanges then)
         resized();              // row 1/row 3 contents differ per mode
         if (app.onStateChange) app.onStateChange();   // triggers the settings save
     };
@@ -1139,6 +1140,14 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
 
 // True when the live curve cache matches the current mode/region/settings
 // (same conditions recomputeCurve uses to skip its work).
+bool FFTAnalysisView::fitDataReady() const
+{
+    if (!app.audioEngine().isFileLoaded()) return false;
+    if (axisMode_ >= 3) return curveCacheValid ();
+    if (axisMode_ == 2) return !thirdOctMags.empty ();
+    return cachedN > 1 && !mags.empty ();
+}
+
 bool FFTAnalysisView::curveCacheValid() const
 {
     if (!app.audioEngine().isFileLoaded()) return false;
@@ -1578,6 +1587,21 @@ void FFTAnalysisView::resyncFromSettings ()
 }
 
 void FFTAnalysisView::recomputeIfNeeded()
+{
+    doRecompute ();
+
+    // A mode change requests a zoom fit, but the combo's onChange fires before
+    // this mode's data has been computed; run the fit now that fresh numbers
+    // exist. The flag stays set until the cache is ready (e.g. when an
+    // expensive recompute is still throttled).
+    if (fitPending_ && fitDataReady ())
+    {
+        fitPending_ = false;
+        resetDisplayRanges ();
+    }
+}
+
+void FFTAnalysisView::doRecompute()
 {
     const int w = getWidth(), h = getHeight();
     if (w <= 0 || !app.audioEngine().isFileLoaded()) return;
