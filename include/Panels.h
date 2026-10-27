@@ -4,7 +4,9 @@
 #include "Application.h"
 #include "PythonScripts.h"
 
+#include <atomic>
 #include <cmath>
+#include <memory>
 
 /** Formats seconds as M:SS.mmm (e.g. 0:04.536) */
 juce::String formatTimeCode (double secs);
@@ -931,6 +933,7 @@ public:
     // Accessors for headless unit tests.
     int numSelectedRows() const { return table.getNumSelectedRows (); }
     std::vector<int> selectedRowIndices() const;
+    juce::TableListBox& listTable() { return table; }
 
     // Find (Ctrl+F / F3 / Ctrl+F3): case-insensitive substring search over
     // marker titles and comments. The query/anchor state is independent of
@@ -1057,6 +1060,17 @@ public:
     // and find jumps.
     void activateRow (int rowNumber);
 
+    // Excel-style click handling for the segment table: plain click selects
+    // one row, Ctrl/Cmd+click toggles a row, Shift+click selects exactly from
+    // the anchor to the clicked row. Right-clicks are ignored here - they only
+    // show the context menu and must never disturb an existing multi-selection.
+    void onRowClicked (int row, const juce::MouseEvent& e);
+
+    // Accessors for headless unit tests.
+    int numSelectedRows() const { return table.getNumSelectedRows (); }
+    std::vector<int> selectedRowIndices() const;
+    juce::TableListBox& listTable() { return table; }
+
     // Set by MainWindow: opens the model/language dialog and starts the run.
     std::function<void()> onRunRequested;
 
@@ -1097,6 +1111,7 @@ private:
 
     juce::String searchNeedle;   // current find query (empty = none)
     int searchAnchorRow = -1;    // row of the last found match (-1 = none)
+    int anchorRow = -1;          // Excel-style selection anchor for Shift+click
 
     JUCE_DECLARE_NON_COPYABLE (TranscriptionPanel)
 };
@@ -1191,6 +1206,7 @@ public:
     // Accessors for headless unit tests.
     int numSelectedRows() const { return table.getNumSelectedRows (); }
     std::vector<int> selectedRowIndices() const;
+    juce::TableListBox& listTable() { return table; }
 
     // Loads `f` into the active doc's saved-selection list (replacing it).
     // Returns false - leaving everything unchanged - when the file is missing,
@@ -1280,6 +1296,7 @@ class DrawingPanel : public juce::Component
 {
 public:
     explicit DrawingPanel (Application& app);
+    ~DrawingPanel();
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -1363,7 +1380,13 @@ private:
 
     FileDoc* listDoc = nullptr;   // doc whose list the current rows belong to
     int anchorRow = -1;           // last plain-clicked row: Shift+click origin
-    int fitToken_ = 0;            // invalidates a deferred fitViewToSelected
+
+    // Deferred-fit bookkeeping lives in a shared object so pending callAsync
+    // lambdas never read freed panel memory: each lambda holds its own
+    // reference, and destruction flips alive=false (same-thread guarantee:
+    // both run on the message thread).
+    struct FitState { std::atomic<int> token { 0 }; bool alive = true; };
+    std::shared_ptr<FitState> fitState_;
 
     void mouseDown (const juce::MouseEvent&) override;
     void showContextMenu (int row);

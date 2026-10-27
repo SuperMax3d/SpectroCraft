@@ -4692,6 +4692,23 @@ static juce::MouseEvent mkMouse (juce::Component& c, int x, int y, juce::Modifie
                              juce::Time(), 1, false);
 }
 
+// Simulates a full click on the row component of a table list box: it goes
+// through JUCE's real selection path (plain / Ctrl-toggle / Shift-range in
+// selectRowsBasedOnModifierKeys) and then fires the model's cellClicked -
+// exactly what happens with real mouse input. Calling the panels'
+// onRowClicked() directly would skip JUCE's part, which matters for the
+// Ctrl+click toggle (JUCE flips the row BEFORE cellClicked runs).
+static void clickTableRow (juce::TableListBox& t, int rowIndex, juce::ModifierKeys mods)
+{
+    auto* rc = t.getComponentForRowNumber (rowIndex);
+    if (rc == nullptr) return;
+    const auto r = t.getRowPosition (rowIndex, true);   // table-relative
+    const int x = r.getWidth () / 2;                     // row-local centre
+    const int y = r.getHeight () / 2;
+    rc->mouseDown (mkMouse (*rc, x, y, mods));
+    rc->mouseUp (mkMouse (*rc, x, y, mods));
+}
+
 // ---------------- Harmonic reference lines (FFT panel) ----------------
 // Right-click "Set Harmonic References" treats the frequency under the cursor
 // as harmonic #N of a fundamental: delicate vertical lines mark harmonics
@@ -11392,13 +11409,15 @@ static void testPanelMultiSelection()
     MarkerListPanel mp (app);
     mp.setSize (260, 300);
 
-    // Plain click: single selection + anchor.
-    mp.onRowClicked (1, mkMouse (mp, 50, 40, {}));
+    // Plain click: single selection + anchor. Real mouse events go through
+    // JUCE's row component first (selectRowsBasedOnModifierKeys), then the
+    // panel's onRowClicked - the same order as with a real mouse.
+    clickTableRow (mp.listTable (), 1, {});
     CHECK (mp.numSelectedRows () == 1 && mp.selectedRowIndices () [0] == 1,
           "marker plain click selects exactly that row");
 
     // Ctrl+click: toggle a second row in.
-    mp.onRowClicked (3, mkMouse (mp, 50, 80, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    clickTableRow (mp.listTable (), 3, juce::ModifierKeys (juce::ModifierKeys::commandModifier));
     {
         auto rows = mp.selectedRowIndices ();
         CHECK (rows.size () == 2 && rows [0] == 1 && rows [1] == 3,
@@ -11408,7 +11427,7 @@ static void testPanelMultiSelection()
     // Shift+click: exact range from anchor (row 3) to row 4 - replaces.
     app.viewStart = 0.0; app.viewEnd = 2.0;   // W=2
     calls = 0;
-    mp.onRowClicked (4, mkMouse (mp, 50, 100, juce::ModifierKeys (juce::ModifierKeys::shiftModifier)));
+    clickTableRow (mp.listTable (), 4, juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
     {
         auto rows = mp.selectedRowIndices ();
         CHECK (rows.size () == 2 && rows [0] == 3 && rows [1] == 4,
@@ -11416,12 +11435,14 @@ static void testPanelMultiSelection()
     }
     // Markers at t=4 and t=5 -> [4,5], expanded by 10% each side to [3.9,5.1];
     // S'=1.2 < W=2 -> keep the span and pan: n0 = t1 - W = 3.1.
-    CHECK (calls == 1 && approx (lastT0, 3.1) && approx (lastT1, 5.1),
+    // Two fit calls: JUCE's own selection change fires first (with its
+    // intermediate union), then the panel replaces it with the exact range.
+    CHECK (calls == 2 && approx (lastT0, 3.1) && approx (lastT1, 5.1),
            "marker shift+click fits the selected range with margin");
 
     // Shift+click above the anchor: the range is reversed.
     calls = 0;
-    mp.onRowClicked (2, mkMouse (mp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::shiftModifier)));
+    clickTableRow (mp.listTable (), 2, juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
     {
         auto rows = mp.selectedRowIndices ();
         CHECK (rows.size () == 2 && rows [0] == 2 && rows [1] == 3,
@@ -11439,8 +11460,8 @@ static void testPanelMultiSelection()
     CHECK (mp.numSelectedRows () == 0, "marker selection cleared after delete");
 
     // fitViewToSelected: select rows 0..1 (t=1, t=2) and fit.
-    mp.onRowClicked (0, mkMouse (mp, 50, 40, {}));
-    mp.onRowClicked (1, mkMouse (mp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    clickTableRow (mp.listTable (), 0, {});
+    clickTableRow (mp.listTable (), 1, juce::ModifierKeys (juce::ModifierKeys::commandModifier));
     app.viewStart = 4.0; app.viewEnd = 6.0;   // W=2
     calls = 0;
     mp.fitViewToSelected ();
@@ -11466,7 +11487,7 @@ static void testPanelMultiSelection()
 
     // Plain click: single selection; the row's stored selection becomes the
     // ACTUAL live spectral selection (no amber overlay).
-    sp.onRowClicked (0, mkMouse (sp, 50, 40, {}));
+    clickTableRow (sp.listTable (), 0, {});
     CHECK (sp.numSelectedRows () == 1 && sp.selectedRowIndices () [0] == 0,
           "selection plain click selects exactly that row");
     {
@@ -11482,7 +11503,7 @@ static void testPanelMultiSelection()
     }
 
     // Ctrl+click: add a second row; live selection is now the union of both.
-    sp.onRowClicked (2, mkMouse (sp, 50, 80, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    clickTableRow (sp.listTable (), 2, juce::ModifierKeys (juce::ModifierKeys::commandModifier));
     {
         auto rows = sp.selectedRowIndices ();
         CHECK (rows.size () == 2 && rows [0] == 0 && rows [1] == 2,
@@ -11494,7 +11515,7 @@ static void testPanelMultiSelection()
     // Shift+click: exact range from anchor (row 2) to row 1 - replaces.
     app.viewStart = 0.0; app.viewEnd = 1.0;   // W=1
     calls = 0;
-    sp.onRowClicked (1, mkMouse (sp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::shiftModifier)));
+    clickTableRow (sp.listTable (), 1, juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
     {
         auto rows = sp.selectedRowIndices ();
         CHECK (rows.size () == 2 && rows [0] == 1 && rows [1] == 2,
@@ -11502,7 +11523,9 @@ static void testPanelMultiSelection()
     }
     // B[3,4] + C[5,6] -> union [3,6], expanded to [2.7,6.3]; t1 clamps to
     // the 6 s file end; S'=3.3 >= W=1 -> zoom exactly to [2.7,6].
-    CHECK (calls == 1 && approx (lastT0, 2.7) && approx (lastT1, 6.0),
+    // Two fit calls: JUCE's own selection change fires first (with its
+    // intermediate union), then the panel replaces it with the exact range.
+    CHECK (calls == 2 && approx (lastT0, 2.7) && approx (lastT1, 6.0),
            "selection shift+click fits the union of selected ranges");
 
     // Bulk delete: removes B and C; A remains.
@@ -11518,7 +11541,7 @@ static void testPanelMultiSelection()
 
     // Edit dialog commit path: applyNameComment renames and sets the comment;
     // an empty name keeps the old one, an empty comment is allowed.
-    sp.onRowClicked (0, mkMouse (sp, 50, 40, {}));   // re-select row A after delete
+    clickTableRow (sp.listTable (), 0, {});          // re-select row A after delete
     sp.applyNameComment ("A2", "noise floor band");
     CHECK (d->savedSelections [0].name == "A2"
           && d->savedSelections [0].comment == "noise floor band",
@@ -11540,6 +11563,178 @@ static void testPanelMultiSelection()
           "panel has exactly label + table + 3 buttons");
 
     wav.deleteFile ();
+}
+
+// ---------------- Right-click must never disturb a multi-selection ---------
+// With several rows selected, right-clicking any row only shows the context
+// menu - JUCE's row component used to collapse the whole selection down to
+// the clicked row before the panel even saw the click. A right-click with
+// nothing selected still selects exactly that row (so the menu has a
+// sensible target). The transcription list supports multi-selection too and
+// must behave identically.
+static void testRightClickKeepsMultiSelection()
+{
+    const juce::File wav = makeTempFile ("rc_multisel.wav");
+    writeWav (wav, 1, 8000.0, 48000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for right-click test");   // dur = 6 s
+
+    const auto rmb = juce::ModifierKeys (juce::ModifierKeys::rightButtonModifier);
+    const auto cmd = juce::ModifierKeys (juce::ModifierKeys::commandModifier);
+
+    // --- Markers panel ----------------------------------------------------
+    for (int i = 0; i < 5; ++i)
+        app.markers().addPointMarker ((double) (1 + i), juce::String ("m") + juce::String (i + 1));
+
+    MarkerListPanel mp (app);
+    mp.setSize (260, 300);
+
+    // Build a multi-selection {1,3} with real clicks.
+    clickTableRow (mp.listTable (), 1, {});
+    clickTableRow (mp.listTable (), 3, cmd);
+    CHECK (mp.numSelectedRows () == 2, "marker setup: two rows selected");
+
+    // Right-click an UNSELECTED row while a multi-selection is active.
+    clickTableRow (mp.listTable (), 0, rmb);
+    {
+        auto rows = mp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 1 && rows [1] == 3,
+               "marker right-click on an unselected row keeps the multi-selection");
+    }
+
+    // Right-click a SELECTED row: same - no collapse.
+    clickTableRow (mp.listTable (), 1, rmb);
+    {
+        auto rows = mp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 1 && rows [1] == 3,
+               "marker right-click on a selected row keeps the multi-selection");
+    }
+
+    // Right-click with NOTHING selected selects exactly that row.
+    mp.listTable ().setSelectedRows (juce::SparseSet<int> (), juce::dontSendNotification);
+    clickTableRow (mp.listTable (), 2, rmb);
+    CHECK (mp.numSelectedRows () == 1 && mp.selectedRowIndices () [0] == 2,
+          "marker right-click with empty selection selects the clicked row");
+
+    // --- Selections panel ---------------------------------------------------
+    auto* d = app.doc ();
+    CHECK (d != nullptr, "doc exists for right-click test");
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    SpectralSelection sa, sb, sc_;
+    sa.addRect (1.0, 2.0, 100.0, 2000.0, false);
+    sb.addRect (3.0, 4.0, 100.0, 2000.0, false);
+    sc_.addRect (5.0, 6.0, 100.0, 2000.0, false);
+    d->savedSelections.push_back ({ "A", sa });
+    d->savedSelections.push_back ({ "B", sb });
+    d->savedSelections.push_back ({ "C", sc_ });
+
+    SelectionPanel sp (app);
+    sp.setSize (300, 240);
+
+    clickTableRow (sp.listTable (), 0, {});
+    clickTableRow (sp.listTable (), 2, cmd);
+    CHECK (sp.numSelectedRows () == 2, "selection setup: two rows selected");
+
+    clickTableRow (sp.listTable (), 1, rmb);
+    {
+        auto rows = sp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 0 && rows [1] == 2,
+               "selection right-click keeps the multi-selection");
+    }
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    // --- Transcription panel: multi-selection + right-click -----------------
+    std::vector<ScttSegment> segs;
+    ScttSegment a; a.startSec = 1.0; a.endSec = 2.0; a.text = "alpha";
+    ScttSegment b; b.startSec = 3.0; b.endSec = 4.0; b.text = "beta";
+    ScttSegment c; c.startSec = 5.0; c.endSec = 6.0; c.text = "gamma";
+    segs.push_back (a); segs.push_back (b); segs.push_back (c);
+    d->setTranscription (std::move (segs));
+
+    TranscriptionPanel tp (app);
+    tp.setSize (300, 420);
+
+    // Plain click selects one row; Ctrl+click toggles a second in.
+    clickTableRow (tp.listTable (), 0, {});
+    CHECK (tp.numSelectedRows () == 1 && tp.selectedRowIndices () [0] == 0,
+          "transcription plain click selects exactly that row");
+    clickTableRow (tp.listTable (), 2, cmd);
+    {
+        auto rows = tp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 0 && rows [1] == 2,
+               "transcription ctrl+click adds a row to the selection");
+    }
+
+    // Shift+click selects exactly anchor..row (anchor = row 2 from the Ctrl).
+    clickTableRow (tp.listTable (), 1, juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
+    {
+        auto rows = tp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 1 && rows [1] == 2,
+               "transcription shift+click selects exactly anchor..row");
+    }
+
+    // Right-click must not disturb the multi-selection. The JUCE-side part of
+    // this (selectRowsBasedOnModifierKeys) is covered by the real-click tests
+    // above; here we drive that same public function on the transcription
+    // table directly, since a simulated right-click would also open the row's
+    // modal context menu.
+    tp.listTable ().selectRowsBasedOnModifierKeys (0, rmb, false);
+    {
+        auto rows = tp.selectedRowIndices ();
+        CHECK (rows.size () == 2 && rows [0] == 1 && rows [1] == 2,
+               "transcription right-click keeps the multi-selection");
+    }
+
+    // Right-click with nothing selected selects exactly that row.
+    tp.listTable ().setSelectedRows (juce::SparseSet<int> (), juce::dontSendNotification);
+    tp.listTable ().selectRowsBasedOnModifierKeys (1, rmb, false);
+    CHECK (tp.numSelectedRows () == 1 && tp.selectedRowIndices () [0] == 1,
+          "transcription right-click with empty selection selects the clicked row");
+#endif
+
+    wav.deleteFile ();
+}
+
+// ---------------- Pending fits from destroyed DrawingPanels are discarded ----
+static void testDestroyedPanelPendingFit()
+{
+    const juce::File store = makeTempFile ("fit_dead.recent");
+    const juce::File wav = makeTempFile ("fit_dead.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate) { return 0.5f; });
+    Application app (store);
+    CHECK (app.openFile (wav), "open file for the dead-panel fit test");
+
+    // One drawing whose range is NOT in the current view: if a stale fit ever
+    // ran, onSetTimeWindow would fire.
+    DrawingItem it;
+    it.kind = DrawingItem::Kind::Rectangle;
+    it.t0 = 0.25; it.f0 = 100.0; it.t1 = 0.75; it.f1 = 400.0;
+    app.doc()->drawings.push_back (it);
+    app.viewStart = 1.5; app.viewEnd = 2.0;
+
+    int fitCalls = 0;
+    app.onSetTimeWindow = [&] (double, double) { ++fitCalls; };
+
+    {
+        DrawingPanel panel (app);
+        panel.setSize (320, 200);
+        juce::SparseSet<int> sel;
+        sel.addRange ({ 0, 1 });
+        // selectedRowsChanged schedules the deferred fit.
+        panel.listTable ().setSelectedRows (sel, juce::sendNotification);
+    }   // panel destroyed while its fit message is still queued
+
+    // Pumping must not crash and must not move the view: the dead panel's fit
+    // has to be discarded instead of touching freed memory.
+    for (int i = 0; i < 8; ++i)
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+
+    CHECK (fitCalls == 0, "pending fit from a destroyed panel is discarded");
+    wav.deleteFile (); store.deleteFile ();
 }
 
 // ---------------- DEL in the list panels deletes audio data, not rows ------
@@ -11737,7 +11932,7 @@ static void testSelectionRecallLive()
 
     // Plain click on row A: its stored selection becomes the ACTUAL live
     // spectral selection - drawn in blue like any other mask, never amber.
-    sp->onRowClicked (0, mkMouse (*sp, 50, 40, {}));
+    clickTableRow (sp->listTable (), 0, {});
     CHECK (d->spectralSel.count () == 1,
           "clicking a row makes its shapes the live selection");
     {
@@ -11752,7 +11947,7 @@ static void testSelectionRecallLive()
           "recalled selection is not drawn as an amber overlay");
 
     // Ctrl+click row B: the live selection becomes the union of both.
-    sp->onRowClicked (1, mkMouse (*sp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    clickTableRow (sp->listTable (), 1, juce::ModifierKeys (juce::ModifierKeys::commandModifier));
     CHECK (d->spectralSel.count () == 2,
           "multi-selection makes the union of shapes the live selection");
     {
@@ -11768,10 +11963,10 @@ static void testSelectionRecallLive()
 
     // Toggling A off makes B alone the live mask; clearing all rows then
     // leaves that last non-empty selection in place.
-    sp->onRowClicked (0, mkMouse (*sp, 50, 40, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    clickTableRow (sp->listTable (), 0, juce::ModifierKeys (juce::ModifierKeys::commandModifier));
     CHECK (d->spectralSel.count () == 1,
           "toggling A off leaves B as the live selection");
-    sp->onRowClicked (1, mkMouse (*sp, 50, 60, juce::ModifierKeys (juce::ModifierKeys::commandModifier)));
+    clickTableRow (sp->listTable (), 1, juce::ModifierKeys (juce::ModifierKeys::commandModifier));
     CHECK (d->spectralSel.count () == 1,
           "clearing the row selection keeps the last live mask");
 
@@ -15214,6 +15409,8 @@ static int scRunUnitTestsImpl()
     progress ("ensure time range visible"); testEnsureTimeRangeVisible();
     progress ("find in panels");            testFindInPanels();
     progress ("panel multi-selection");     testPanelMultiSelection();
+    progress ("right-click keeps selection"); testRightClickKeepsMultiSelection();
+    progress ("dead panel pending fit");    testDestroyedPanelPendingFit();
     progress ("panel DEL deletes audio");   testPanelDelDeletesAudio();
     progress ("saved selection comment");   testSavedSelectionComment();
     progress ("selection recall live");     testSelectionRecallLive();

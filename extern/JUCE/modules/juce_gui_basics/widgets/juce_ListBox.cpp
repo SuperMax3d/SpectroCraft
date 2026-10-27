@@ -814,12 +814,21 @@ void ListBox::selectRowsBasedOnModifierKeys (const int row,
     {
         flipRowSelection (row);
     }
-    else if (multipleSelection && mods.isShiftDown() && lastRowSelected >= 0)
+    // SPECTROCRAFT PATCH: panels that implement their own Excel-style
+    // exact-range shift selection suppress JUCE's built-in union behaviour.
+    else if (multipleSelection && mods.isShiftDown() && lastRowSelected >= 0
+             && ! suppressShiftRangeSelection)
     {
         selectRangeOfRows (lastRowSelected, row);
     }
     else if ((! mods.isPopupMenu()) || ! isRowSelected (row))
     {
+        // Right-clicks only ever show context menus: never collapse an
+        // existing multi-selection down to the clicked row, so a menu can act
+        // on everything that was already selected.
+        if (mods.isPopupMenu() && selected.size () > 1)
+            return;
+
         selectRowInternal (row, false, ! (multipleSelection && (! isMouseUpEvent) && isRowSelected (row)), true);
     }
 }

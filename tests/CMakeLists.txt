@@ -58,6 +58,9 @@ if (MSVC)
         PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 endif()
 
+# The test target compiles its own JuceHeader.h (module includes + defs).
+juce_generate_juce_header (SpectroCraftTests)
+
 # /EHa on the OpenVINO wrapper so catch(...) can intercept the delay-load
 # failure SEH code (0xC06D007E) raised when openvino.dll cannot be loaded.
 if (MSVC AND TARGET sc_openvino)

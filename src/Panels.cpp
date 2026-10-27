@@ -4430,6 +4430,7 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
     // range-selects from the anchor row. DEL deletes the audio data of the
     // active selection (the context menu's Delete Selected removes rows).
     table.setMultipleSelectionEnabled (true);
+    table.setSuppressShiftRangeSelection (true);   // we do the exact-range shift select ourselves
 
     addAndMakeVisible (&table);
     addAndMakeVisible (&addBtn);
@@ -4696,6 +4697,9 @@ std::vector<int> MarkerListPanel::selectedRowIndices() const
 // view is fitted to everything selected.
 void MarkerListPanel::onRowClicked (int row, const juce::MouseEvent& e)
 {
+    if (e.mods.isPopupMenu ())
+        return;   // right-click: just show the context menu - keep any multi-selection
+
     table.setWantsKeyboardFocus (true);
     table.grabKeyboardFocus ();   // so DEL works right after a click
 
@@ -4712,13 +4716,8 @@ void MarkerListPanel::onRowClicked (int row, const juce::MouseEvent& e)
     }
     else if (e.mods.isCommandDown () || e.mods.isCtrlDown ())
     {
-        // Toggle this row within the existing selection.
-        auto sel = table.getSelectedRows();
-        if (sel.contains (row))
-            sel.removeRange ({ row, row + 1 });
-        else
-            sel.addRange ({ row, row + 1 });
-        table.setSelectedRows (sel, juce::sendNotification);
+        // JUCE already toggled this row in selectRowsBasedOnModifierKeys before
+        // cellClicked fires - just track the anchor here.
         anchorRow = row;
     }
     else
@@ -5464,9 +5463,13 @@ void TranscriptionPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int
 
 void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::MouseEvent& e)
 {
-    // Left clicks only change the selection; a right click shows a small
-    // context menu for the segment under the cursor.
-    if (!e.mods.isRightButtonDown ()) return;
+    // Left clicks drive the Excel-style multi-selection; a right click shows
+    // a small context menu for the segment under the cursor.
+    if (!e.mods.isRightButtonDown ())
+    {
+        owner->onRowClicked (rowNumber, e);
+        return;
+    }
 
     auto* d = owner->app.doc ();
     if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
@@ -5505,6 +5508,47 @@ void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::Mou
 void TranscriptionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
 {
     owner->activateRow (rowNumber);
+}
+
+std::vector<int> TranscriptionPanel::selectedRowIndices() const
+{
+    return sparseRows (table.getSelectedRows());
+}
+
+void TranscriptionPanel::onRowClicked (int row, const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu ())
+        return;   // right-click: just show the context menu - keep any multi-selection
+
+    table.setWantsKeyboardFocus (true);
+    table.grabKeyboardFocus ();
+
+    auto* d = app.doc ();
+    const int n = d != nullptr ? (int) d->sctt.segments.size () : 0;
+
+    if (e.mods.isShiftDown ())
+    {
+        // Excel: the selection becomes EXACTLY anchor..row (JUCE's built-in
+        // shift behaviour unions instead).
+        const int a = (anchorRow >= 0 && anchorRow < n) ? anchorRow : row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ std::min (a, row), std::max (a, row) + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+    }
+    else if (e.mods.isCommandDown () || e.mods.isCtrlDown ())
+    {
+        // JUCE already toggled this row in selectRowsBasedOnModifierKeys before
+        // cellClicked fires - just track the anchor here.
+        anchorRow = row;
+    }
+    else
+    {
+        // Plain click: single selection and move the anchor.
+        anchorRow = row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+    }
 }
 
 void TranscriptionPanel::activateRow (int rowNumber)
@@ -5889,13 +5933,20 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
         }
     };
 
+    // Multi-line selection like the marker / selection / drawing lists:
+    // plain click = one row, Ctrl/Cmd+click = toggle a row, Shift+click =
+    // exact range from the anchor. Right-clicks never disturb it.
+    table.setMultipleSelectionEnabled (true);
+    table.setSuppressShiftRangeSelection (true);   // we do the exact-range shift select ourselves
+
     runBtn.setTooltip ("Run Whisper transcription on the whole file. The first use downloads "
                        "the model weights to %APPDATA%/SpectroCraft/models.");
     clearBtn.setTooltip ("Remove all transcription segments from this file (the audio is not modified).");
-    table.setTooltip ("Double-click a row to jump to it and select its range.\n"
-                      "Right-click a row to edit it, add it as a marker, search (Find),\n"
-                      "or add / remove entries.\n"
-                      "Ctrl+F searches, F3 / Ctrl+F3 find next / previous.");
+    table.setTooltip ("Click a row to select it; Ctrl/Cmd+click toggles rows, Shift+click\n"
+                      "selects the exact range from the anchor. Double-click jumps to the\n"
+                      "segment and selects its range. Right-click edits / adds markers /\n"
+                      "searches (Find) or adds / removes entries without disturbing a\n"
+                      "multi-selection. Ctrl+F searches, F3 / Ctrl+F3 find next / previous.");
 
     // Deep registration: right-clicks in the table's empty area (below the
     // last segment - or everywhere when no transcription exists) reach this
@@ -6109,6 +6160,7 @@ SelectionPanel::SelectionPanel (Application& appIn)
     // range-selects from the anchor row and fits all of it in view, DEL
     // removes every selected entry.
     table.setMultipleSelectionEnabled (true);
+    table.setSuppressShiftRangeSelection (true);   // we do the exact-range shift select ourselves
 
     saveBtn.onClick = [this] { doSave (); };
     recallBtn.onClick = [this] { doRecall (primaryRow()); };
@@ -6445,6 +6497,9 @@ std::vector<int> SelectionPanel::selectedRowIndices() const
 // instead), and the view is fitted to everything selected.
 void SelectionPanel::onRowClicked (int row, const juce::MouseEvent& e)
 {
+    if (e.mods.isPopupMenu ())
+        return;   // right-click: just show the context menu - keep any multi-selection
+
     table.setWantsKeyboardFocus (true);
     table.grabKeyboardFocus ();   // so DEL works right after a click
 
@@ -6462,13 +6517,8 @@ void SelectionPanel::onRowClicked (int row, const juce::MouseEvent& e)
     }
     else if (e.mods.isCommandDown () || e.mods.isCtrlDown ())
     {
-        // Toggle this row within the existing selection.
-        auto sel = table.getSelectedRows();
-        if (sel.contains (row))
-            sel.removeRange ({ row, row + 1 });
-        else
-            sel.addRange ({ row, row + 1 });
-        table.setSelectedRows (sel, juce::sendNotification);
+        // JUCE already toggled this row in selectRowsBasedOnModifierKeys before
+        // cellClicked fires - just track the anchor here.
         anchorRow = row;
     }
     else
@@ -6981,7 +7031,9 @@ void DrawingPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int colum
 void DrawingPanel::Model::cellClicked (int rowNumber, int columnId, const juce::MouseEvent& e)
 {
     if (rowNumber < 0 || rowNumber >= getNumRows ()) return;
-    if (columnId == 1)   // eye icon: toggle this item's visibility only
+    // The eye icon toggles visibility on LEFT clicks only; a right-click there
+    // just shows the context menu like any other cell.
+    if (columnId == 1 && !e.mods.isRightButtonDown())
     {
         // The list box already auto-selected this row before calling us, which
         // scheduled a view fit - cancel it so the viewed range stays put.
@@ -7006,20 +7058,31 @@ void DrawingPanel::Model::selectedRowsChanged (int)
     owner->scheduleFit ();
 }
 
+DrawingPanel::~DrawingPanel()
+{
+    fitState_->alive = false;   // pending fits must never touch freed memory
+}
+
 void DrawingPanel::scheduleFit ()
 {
-    const int token = ++fitToken_;
-    juce::MessageManager::callAsync ([this, token] { if (token == fitToken_) fitViewToSelected (); });
+    auto state = fitState_;     // lambda keeps the state alive past destruction
+    const int token = ++state->token;
+    juce::MessageManager::callAsync ([this, state, token]
+    {
+        if (state->alive && state->token == token)
+            fitViewToSelected ();
+    });
 }
 
 void DrawingPanel::cancelPendingFit ()
 {
-    ++fitToken_;   // any scheduled fit now sees a stale token and is discarded
+    ++fitState_->token;   // any scheduled fit now sees a stale token and is discarded
 }
 
 DrawingPanel::DrawingPanel (Application& appIn)
     : app (appIn),
-      listDoc (appIn.doc())   // rows belong to the doc open at construction
+      listDoc (appIn.doc()),   // rows belong to the doc open at construction
+      fitState_ (std::make_shared<FitState>())
 {
     // IDs let headless unit tests locate the buttons by name.
     showAllBtn.setComponentID ("draw-showall-btn");
@@ -7085,6 +7148,7 @@ DrawingPanel::DrawingPanel (Application& appIn)
     addAndMakeVisible (&deleteBtn);
 
     table.setMultipleSelectionEnabled (true);
+    table.setSuppressShiftRangeSelection (true);   // we do the exact-range shift select ourselves
 
     // Right-clicking a row in the table shows the panel context menu. Deep
     // registration is required: clicks on rows are delivered to the row's own
@@ -7118,6 +7182,9 @@ void DrawingPanel::refresh()
 
 void DrawingPanel::onRowClicked (int row, const juce::MouseEvent& e)
 {
+    if (e.mods.isPopupMenu ())
+        return;   // right-click: just show the context menu - keep any multi-selection
+
     table.setWantsKeyboardFocus (true);
     table.grabKeyboardFocus ();   // so clicks keep the selection live
 
@@ -7133,13 +7200,8 @@ void DrawingPanel::onRowClicked (int row, const juce::MouseEvent& e)
     }
     else if (e.mods.isCommandDown () || e.mods.isCtrlDown ())
     {
-        // Toggle this row within the existing selection.
-        auto sel = table.getSelectedRows ();
-        if (sel.contains (row))
-            sel.removeRange ({ row, row + 1 });
-        else
-            sel.addRange ({ row, row + 1 });
-        table.setSelectedRows (sel, juce::sendNotification);
+        // JUCE already toggled this row in selectRowsBasedOnModifierKeys before
+        // cellClicked fires - just track the anchor here.
         anchorRow = row;
     }
     else

@@ -624,6 +624,14 @@ public:
     ListBoxModel* getModel() const noexcept  { return getListBoxModel(); }
     /** @endcond */
 
+    // SPECTROCRAFT PATCH: when true, shift+click no longer extends the
+    // selection to the range from lastRowSelected - it behaves like a plain
+    // click on that row instead. Panels that implement their own Excel-style
+    // exact-range semantics set this so JUCE's intermediate union does not
+    // transiently change the view/selection before they replace it with the
+    // exact anchor..row range.
+    void setSuppressShiftRangeSelection (bool shouldBeSuppressed) noexcept { suppressShiftRangeSelection = shouldBeSuppressed; }
+
 private:
     //==============================================================================
     JUCE_PUBLIC_IN_DLL_BUILD (class ListViewport)
@@ -639,6 +647,7 @@ private:
     int outlineThickness = 0;
     int lastRowSelected = -1;
     bool multipleSelection = false, alwaysFlipSelection = false, hasDoneInitialUpdate = false, selectOnMouseDown = true;
+    bool suppressShiftRangeSelection = false;   // SPECTROCRAFT PATCH
 
    #if ! JUCE_DISABLE_ASSERTIONS
     std::weak_ptr<ListBoxModel::Empty> weakModelPtr;

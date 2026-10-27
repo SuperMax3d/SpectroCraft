@@ -300,7 +300,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     right-click a row for Copy All Markers / Paste Markers from Clipboard,
     Export/Import CSV, Remove All Markers, Delete Selected,
     Fit View to Selected or Find (Ctrl+F searches titles and comments, F3 /
-    Ctrl+F3 jump to the next / previous match)).
+    Ctrl+F3 jump to the next / previous match). A right-click only shows that
+    menu — it never collapses an active multi-selection down to the clicked row
+    (with nothing selected it selects exactly that row first).
   - **Drawing**: a table of user annotations drawn over the spectrogram — text,
     arrows, rectangles and freehand strokes with per-item comments and
     visibility; see [Drawing panel](#drawing-panel) below.
@@ -750,11 +752,14 @@ for your microarchitecture at load time.
   pauses transcribe several times faster than their length would suggest.
   *Balanced* uses beam search; *Fast* uses greedy decoding (~1.4× quicker,
   slightly lower accuracy on difficult audio). Segments are
-  shown in the **Transcription** tab: double-click a row to jump + select its
-  range and pan/zoom both views until the whole selection is visible with ~10%
-  breathing room on each side (same behaviour as marker and stored-selection
-  double-clicks); press Ctrl+F (or right-click > Find) to search, then F3 /
-  Ctrl+F3 to cycle through matches. Right-clicking a row offers **Edit...**
+  shown in the **Transcription** tab: rows support the same Excel-style
+  multi-selection as the other list panels (plain click selects one row,
+  Ctrl/Cmd+click toggles a row, Shift+click range-selects from the anchor), and
+  right-clicking never disturbs an active multi-selection. Double-click a row to
+  jump + select its range and pan/zoom both views until the whole selection is
+  visible with ~10% breathing room on each side (same behaviour as marker and
+  stored-selection double-clicks); press Ctrl+F (or right-click > Find) to
+  search, then F3 / Ctrl+F3 to cycle through matches. Right-clicking a row offers **Edit...**
   (start/end/text), **Add as marker**, **Find...**, **Add entry** /
   **Remove selected**, and **Copy Selected** / **Copy All** / **Paste**;
   right-clicking the list's empty area also offers **Add entry** plus the same
