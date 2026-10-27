@@ -5133,6 +5133,149 @@ static void testCtxZoomOutFull()
     wav.deleteFile();
 }
 
+// ---------------- Zoom Out Full fits the data (+10%) -----------------------
+// Frequency Analysis "Zoom Out Full" (and resetDisplayRanges) now frames the
+// displayed data: vertical axis = data min/max + 10% total margin, horizontal
+// axis = full extent of the plotted points. Amp vs Freq uses a linear
+// frequency axis.
+static void testZoomOutFullFitsData()
+{
+    // 2 s mono @ 8 kHz: a 300 Hz tone at half amplitude (Nyquist = 4 kHz).
+    const juce::File wav = makeTempFile ("zoomfit.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote tone wav for zoom-fit test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for zoom-fit test");
+    const double dur = app.audioEngine().duration();
+    app.setSelection ({ 0.0, dur });
+
+    // Expected fit: data range expanded to at least minSpan around its centre,
+    // then +10% total margin (5% above max, 5% below min).
+    auto expectFit = [] (double dmin, double dmax, double minSpan, double lo, double hi)
+    {
+        const double centre = 0.5 * (dmin + dmax);
+        const double span = std::max ({ 1e-9, dmax - dmin, minSpan });
+        const double m = span * 0.05;
+        return std::abs (lo - (centre - 0.5 * span - m)) < 1e-6
+            && std::abs (hi - (centre + 0.5 * span + m)) < 1e-6;
+    };
+
+    // --- Mode 0: vertical dB fit from the spectrum ------------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (0);
+        view.recomputeIfNeeded();
+        const auto& mags = view.getSpectrum();
+        CHECK (!mags.empty() && view.getCachedN() > 1, "mode-0 spectrum computed");
+
+        double dmin = 0.0, dmax = -FFTAnalysisView::kNormFloorDb;
+        for (const auto& mag : mags)
+            for (int k = 1; k < (int) mag.size(); ++k)
+            {
+                const double dB = -FFTAnalysisView::kNormFloorDb * (1.0 - (double) mag[k]);
+                dmin = std::min (dmin, dB);
+                dmax = std::max (dmax, dB);
+            }
+
+        const double minSpan = std::max (1e-6, std::abs (0.5 * (dmin + dmax)) * 0.1);
+        view.resetDisplayRanges();
+        CHECK (expectFit (dmin, dmax, minSpan, view.getDbBottom(), view.getDbTop()),
+              "mode-0 vertical fits the spectrum data +10%");
+        const double rate = app.audioEngine().sampleRate();
+        CHECK (std::abs (view.getFreqLo() - rate / (double) view.getCachedN()) < 1e-9
+             && std::abs (view.getFreqHi() - rate * 0.5) < 1e-9,
+              "mode-0 horizontal fits the plotted bin extent");
+    }
+
+    // --- Mode 4: vertical dB fit from the live curve ----------------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (4);
+        view.recomputeIfNeeded();
+        const auto& curves = view.getLiveCurves();
+        CHECK (!curves.empty() && !curves[0].ampDb.empty(), "mode-4 curve computed");
+
+        double dmin = 1e30, dmax = -1e30;
+        for (const auto& cd : curves)
+            for (float v : cd.ampDb)
+                { dmin = std::min (dmin, (double) v); dmax = std::max (dmax, (double) v); }
+
+        const double minSpan = std::max (1e-6, std::abs (0.5 * (dmin + dmax)) * 0.1);
+        view.resetDisplayRanges();
+        CHECK (expectFit (dmin, dmax, minSpan, view.getDbBottom(), view.getDbTop()),
+              "mode-4 vertical fits the curve data +10%");
+        CHECK (std::abs (view.getCurveViewT0()) < 1e-9
+             && std::abs (view.getCurveViewT1() - dur) < 1e-9,
+              "mode-4 horizontal fits the full analysed region");
+    }
+
+    // --- Mode 3: vertical frequency fit, tight around a pure tone ---------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (3);
+        view.recomputeIfNeeded();
+        const auto& curves = view.getLiveCurves();
+        CHECK (!curves.empty() && !curves[0].freqHz.empty(), "mode-3 curve computed");
+
+        double dmin = 1e30, dmax = -1e30;
+        for (const auto& cd : curves)
+            for (float f : cd.freqHz)
+                { dmin = std::min (dmin, (double) f); dmax = std::max (dmax, (double) f); }
+
+        const double minSpan = std::max (1e-6, std::abs (0.5 * (dmin + dmax)) * 0.1);
+        view.resetDisplayRanges();
+        CHECK (expectFit (dmin, dmax, minSpan, view.getFreqLo(), view.getFreqHi()),
+              "mode-3 vertical fits the tracked frequencies +10%");
+        // A pure tone must not leave the default ~4 kHz window: the fitted
+        // span stays small around 300 Hz.
+        CHECK (view.getFreqHi() - view.getFreqLo() < 200.0,
+              "mode-3 vertical does not fall back to the full frequency range");
+    }
+
+    // --- Mode 5: linear horizontal axis + fit to the curve extent ---------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (320, 200);
+        view.setAxisMode (5);
+        view.recomputeIfNeeded();
+        const auto& curves = view.getLiveCurves();
+        CHECK (!curves.empty() && !curves[0].x.empty(), "mode-5 curve computed");
+
+        double dmin = 1e30, dmax = -1e30;
+        for (const auto& cd : curves)
+            if (!cd.x.empty())
+                { dmin = std::min (dmin, cd.x.front()); dmax = std::max (dmax, cd.x.back()); }
+
+        view.resetDisplayRanges();
+        CHECK (std::abs (view.getFreqLo() - dmin) < 1e-9
+             && std::abs (view.getFreqHi() - dmax) < 1e-9,
+              "mode-5 horizontal fits the plotted curve extent");
+
+        // Linear axis: the plot midpoint maps to the arithmetic mean of the
+        // window (a log mapping would give sqrt(fLo*fHi)). Tolerance = half a
+        // pixel's worth of frequency for the integer midX.
+        const auto plot = view.plotBounds();
+        const double pxHz = (view.getFreqHi() - view.getFreqLo()) / std::max (1, plot.getWidth());
+        const int midX = (plot.getX() + plot.getRight()) / 2;
+        const double fMid = (double) view.xToFreq (midX);
+        CHECK (std::abs (fMid - 0.5 * (view.getFreqLo() + view.getFreqHi())) <= pxHz / 2.0 + 1e-9,
+              "mode-5 axis is linear at the plot midpoint");
+        // Round-trip through integer pixels: error bounded by one pixel's worth
+        // of frequency.
+        const double fProbe = 0.37 * view.getFreqLo() + 0.63 * view.getFreqHi();
+        CHECK (std::abs ((double) view.xToFreq ((int) view.freqToX (fProbe)) - fProbe) <= pxHz + 1e-9,
+              "mode-5 freqToX/xToFreq round-trip on the linear axis");
+    }
+
+    wav.deleteFile();
+}
+
 // ---------------- Time-pan speed + reversal responsiveness ----------------
 // Middle-drag (and left-drag on the time ruler) pans the shared time window
 // at half cursor speed, incrementally: deltas absorbed by an edge clamp do
@@ -15711,6 +15854,7 @@ static int scRunUnitTestsImpl()
     progress ("spectral dB window"); testSpectralDbWindow();
     progress ("right-drag box zoom"); testRightDragZoom();
     progress ("ctx menu zoom-out-full"); testCtxZoomOutFull();
+    progress ("zoom-out-full fits data"); testZoomOutFullFitsData();
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("time axis ticks");     testTimeAxisTicks();

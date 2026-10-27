@@ -426,8 +426,17 @@ public:
     double getCurveViewT0() const { return curveViewT0_; }
     double getCurveViewT1() const { return curveViewT1_; }
 
-    // Reset both display ranges to their defaults ("Zoom Out Full").
+    // "Zoom Out Full": fit the vertical axis to the displayed data (+10% margin)
+    // and the horizontal axis to the full extent of the data.
     void resetDisplayRanges();
+    // Fit only the vertical axis (dB level, or frequency in Freq vs Time mode).
+    void fitVerticalRange();
+    // Fit only the horizontal axis (analysed region, or the frequency range
+    // covered by the plotted points).
+    void fitHorizontalRange();
+    // True when the live curve cache matches the current mode/region/settings
+    // (same conditions recomputeCurve uses to skip its work).
+    bool curveCacheValid() const;
 
     // Public so headless unit tests can drive the zoom/copy paths directly.
     void copySpectrumToClipboard();

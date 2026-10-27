@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
@@ -1136,16 +1137,139 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
     resetDisplayRanges();   // start at the mode defaults for the current file
 }
 
-// Reset the local display ranges: frequency window to the axis-mode default,
-// level window to 0 .. -80 dB.
+// True when the live curve cache matches the current mode/region/settings
+// (same conditions recomputeCurve uses to skip its work).
+bool FFTAnalysisView::curveCacheValid() const
+{
+    if (!app.audioEngine().isFileLoaded()) return false;
+    double t0, t1;
+    if (!app.selection.isEmpty()) { t0 = app.selection.getStart(); t1 = app.selection.getEnd(); }
+    else                          { t0 = app.playhead;          t1 = app.playhead; }
+    const auto& eng = app.audioEngine();
+    return !liveCurves.empty() && cachedCurveMode == axisMode_
+        && cachedCurveTrack == track_ && cachedCurveSmooth == smooth_
+        && cachedT0 == t0 && cachedT1 == t1
+        && cachedRate == eng.sampleRate() && cachedFile == eng.getFile()
+        && liveCurves.size() == app.visibleChannels.size();
+}
+
+// Fit [lo, hi] to a data range with a total margin of +10% (5% above the max,
+// 5% below the min). Degenerate spans are expanded to at least 10% of |centre|
+// so flat data cannot collapse the axis.
+static void fitDataRange (double dmin, double dmax, double& lo, double& hi)
+{
+    const double centre = 0.5 * (dmin + dmax);
+    double span = std::max (1e-9, dmax - dmin);
+    const double minSpan = std::max (1e-6, std::abs (centre) * 0.1);
+    if (span < minSpan)
+        { dmin = centre - 0.5 * minSpan; dmax = centre + 0.5 * minSpan; span = minSpan; }
+    const double m = span * 0.05;
+    lo = dmin - m;
+    hi = dmax + m;
+}
+
+// Fit the vertical axis to the currently displayed data (+10% margin): dB level
+// in every mode except Freq vs Time, where it is frequency. Falls back to the
+// mode defaults when there is no (valid) data yet.
+void FFTAnalysisView::fitVerticalRange()
+{
+    if (axisMode_ == 3)
+    {
+        double dmin = std::numeric_limits<double>::max();
+        double dmax = -std::numeric_limits<double>::max();
+        for (const auto& cd : liveCurves)
+            for (float f : cd.freqHz)
+                { dmin = std::min (dmin, (double) f); dmax = std::max (dmax, (double) f); }
+        if (curveCacheValid() && dmax > dmin - 1e-9)
+            fitDataRange (dmin, dmax, fLo_, fHi_);
+        else
+        {
+            const double rate = app.audioEngine().sampleRate();
+            fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
+        }
+    }
+    else
+    {
+        bool have = false;
+        double dmin = 0.0, dmax = -kNormFloorDb;
+        if (axisMode_ == 2)
+        {
+            for (const auto& bands : thirdOctMags)
+                for (float v : bands)
+                    { dmin = std::min (dmin, (double) v); dmax = std::max (dmax, (double) v); }
+            have = !thirdOctMags.empty();
+        }
+        else if (axisMode_ >= 4)
+        {
+            // Amp vs Time / Amp vs Freq: level data lives in the live curves.
+            for (const auto& cd : liveCurves)
+                for (float v : cd.ampDb)
+                    { dmin = std::min (dmin, (double) v); dmax = std::max (dmax, (double) v); }
+            have = curveCacheValid();
+        }
+        else if (!mags.empty() && cachedN > 1)
+        {
+            for (const auto& mag : mags)
+                for (int k = 1; k < (int) mag.size(); ++k)
+                {
+                    const double dB = -kNormFloorDb * (1.0 - (double) mag[k]);
+                    dmin = std::min (dmin, dB);
+                    dmax = std::max (dmax, dB);
+                }
+            have = true;
+        }
+        if (have) fitDataRange (dmin, dmax, dbBottom_, dbTop_);
+        else      { dbTop_ = 0.0; dbBottom_ = -80.0; }
+    }
+}
+
+// Fit the horizontal axis to the full extent of the data: the analysed region
+// in the time-based modes, otherwise the frequency range actually covered by
+// the plotted points (mode defaults when there is no data yet).
+void FFTAnalysisView::fitHorizontalRange()
+{
+    if (isTimeAxisMode())
+    {
+        // No analysed region yet: nothing to fit.
+        if (!haveCurveView_) return;
+        curveViewT0_ = cachedT0;
+        curveViewT1_ = std::max (cachedT1, cachedT0 + 1e-9);
+    }
+    else if (axisMode_ == 5)
+    {
+        // Amp vs Freq: the fixed 2048-point frames span [rate/2048 .. Nyquist].
+        double dmin = std::numeric_limits<double>::max();
+        double dmax = -std::numeric_limits<double>::max();
+        for (const auto& cd : liveCurves)
+            if (!cd.x.empty())
+                { dmin = std::min (dmin, cd.x.front()); dmax = std::max (dmax, cd.x.back()); }
+        if (curveCacheValid() && dmax > dmin)
+            { fLo_ = dmin; fHi_ = dmax; }
+        else
+        {
+            const double rate = app.audioEngine().sampleRate();
+            fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
+        }
+    }
+    else if (axisMode_ != 2 && !mags.empty() && cachedN > 1)
+    {
+        // Classic spectrum: the plotted bins span [rate/n .. Nyquist].
+        const double rate = app.audioEngine().sampleRate();
+        fLo_ = std::max (0.0, rate / (double) cachedN);
+        fHi_ = rate * 0.5;
+    }
+    else
+    {
+        const double rate = app.audioEngine().sampleRate();
+        fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
+    }
+}
+
+// "Zoom Out Full": fit both display ranges to the data.
 void FFTAnalysisView::resetDisplayRanges()
 {
-    const double rate = app.audioEngine().sampleRate();
-    fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
-    dbTop_ = 0.0;
-    dbBottom_ = -80.0;
-    if (isTimeAxisMode() && haveCurveView_)
-        { curveViewT0_ = cachedT0; curveViewT1_ = std::max (cachedT1, cachedT0 + 1e-9); }
+    fitVerticalRange();
+    fitHorizontalRange();
     repaint();
 }
 
@@ -1899,7 +2023,7 @@ float FFTAnalysisView::xToFreq (int x) const
     const auto plot = plotBounds();
     if (plot.getWidth() <= 0 || fHi_ <= fLo_) return (float) fLo_;
     const double t = std::clamp ((double) (x - plot.getX()) / (double) plot.getWidth(), 0.0, 1.0);
-    if (axisMode_ == 0)
+    if (axisMode_ == 0 || axisMode_ == 5)
         return (float) (fLo_ + t * (fHi_ - fLo_));
     const double llo = std::log (std::max (1e-9, fLo_)), lhi = std::log (fHi_);
     return (float) std::exp (llo + t * (lhi - llo));
@@ -1910,7 +2034,7 @@ double FFTAnalysisView::freqToX (double f) const
     const auto plot = plotBounds();
     if (plot.getWidth() <= 0 || fHi_ <= fLo_) return (float) plot.getX();
     double t;
-    if (axisMode_ == 0)
+    if (axisMode_ == 0 || axisMode_ == 5)
         t = (f - fLo_) / std::max (1e-9, fHi_ - fLo_);
     else
     {
@@ -3474,30 +3598,13 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
     switch (sel)
     {
         case CtxZoomOutFull:
-            if (isTimeAxisMode())
-            {
-                // Time-based modes: reset the vertical range (frequency in
-                // mode 3, level in mode 4) and the horizontal time window to
-                // the full analysed region.
-                if (axisMode_ == 3)
-                {
-                    const double rate = app.audioEngine().sampleRate();
-                    fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
-                }
-                else
-                { dbTop_ = 0.0; dbBottom_ = -80.0; }
-                curveViewT0_ = cachedT0;
-                curveViewT1_ = std::max (cachedT1, cachedT0 + 1e-9);
-                repaint();
-            }
-            else if (onLevelAxis && !onFreqAxis) { dbTop_ = 0.0; dbBottom_ = -80.0; repaint(); }
-            else if (onFreqAxis && !onLevelAxis)
-            {
-                const double rate = app.audioEngine().sampleRate();
-                fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
-                repaint();
-            }
-            else resetDisplayRanges();   // plot or corner: reset both windows
+            // The right strip is always the vertical axis and the bottom strip
+            // the horizontal one (in Freq vs Time the vertical happens to be
+            // frequency). A click on the plot or a corner resets both.
+            if (onLevelAxis && !onFreqAxis)      fitVerticalRange();
+            else if (onFreqAxis && !onLevelAxis) fitHorizontalRange();
+            else { fitVerticalRange(); fitHorizontalRange(); }
+            repaint();
             break;
         case 100:
             copySpectrumToClipboard();
