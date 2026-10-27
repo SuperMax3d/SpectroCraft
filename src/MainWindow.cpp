@@ -1727,7 +1727,7 @@ void MainWindow::handleExportSpectral()
                              spectralExportOptionsFromSettings (app.settings));
 }
 
-// File > Spectrogram > Take snapshot (also the PrintScreen key): writes a PNG
+// File > Spectrogram > Take snapshot (also Ctrl+Shift+F): writes a PNG
 // next to the WAV file with a date/time stamp in its name. If the audio has
 // no file location yet, falls back to the normal save dialog.
 void MainWindow::takeSpectrogramSnapshot()
@@ -4144,7 +4144,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
             const bool canExport = app.audioEngine().isFileLoaded() && showSpectralView;
             juce::PopupMenu specMenu;
             specMenu.addItem (FileExportSpectral, "Save Spectrogram As...\tCtrl+Shift+E", canExport);
-            specMenu.addItem (FileSnapshot, "Take Snapshot\tPrintScreen", canExport);
+            specMenu.addItem (FileSnapshot, "Take Snapshot\tCtrl+Shift+F", canExport);
             specMenu.addSeparator ();
             specMenu.addItem (ExpAxes, "Save Axes", true, app.settings.exportAxes);
             specMenu.addItem (ExpMarkers, "Save Markers", true, app.settings.exportMarkers);
@@ -4216,7 +4216,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ViewShowWaveform, "Waveform View", true, showWaveformView);
         menu.addItem (ViewShowSpectral, "Spectrogram View", true, showSpectralView);
         menu.addItem (ViewShowAllChannels, "Show All Channels", app.audioEngine().isFileLoaded(), false);
-        menu.addItem (ViewShowLeftPanels, "Left Panels", true, leftPanelsVisible);
+        menu.addItem (ViewShowLeftPanels, "Left Panels\tCtrl+Shift+Enter", true, leftPanelsVisible);
         menu.addSeparator();
         juce::PopupMenu colourMapMenu;
         colourMapMenu.addItem (ColourMapClassic, "Classic (Default)", true, app.colourMap == ColourMap::Classic);
@@ -4273,7 +4273,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSeparator();
         // Whole-file operation. Streamed files are materialised into memory
         // first when the resample actually runs.
-        menu.addItem (ToolsResample, "Resample...",
+        menu.addItem (ToolsResample, "Resample...\tF11",
                       app.audioEngine().isFileLoaded(), false);
     }
     else if (menuName == "Window")
@@ -4372,8 +4372,12 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleFileSaveAs(); return true; }
     // Ctrl+Shift+E exports the spectrogram (the shortcut shown in the menu).
     if (key == juce::KeyPress ('e', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleExportSpectral(); return true; }
-    // PrintScreen takes a timestamped snapshot next to the WAV file.
-    if (key.getKeyCode() == 0x2c) { takeSpectrogramSnapshot(); return true; }
+    // Ctrl+Shift+F takes a timestamped snapshot next to the WAV file.
+    if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { takeSpectrogramSnapshot(); return true; }
+    // F11 opens Effects > Resample... (no-op when no file is loaded).
+    if (key.getKeyCode() == juce::KeyPress::F11Key) { showResampleDialog(); return true; }
+    // Ctrl+Shift+Enter toggles the left panel column.
+    if (key == juce::KeyPress (juce::KeyPress::returnKey, juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { setLeftPanelsVisible (!leftPanelsVisible); return true; }
     if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }
     // Ctrl+F4 also closes the active file (browser-style tab close).
     if (key == juce::KeyPress (juce::KeyPress::F4Key, juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }

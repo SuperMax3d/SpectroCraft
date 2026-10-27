@@ -1971,9 +1971,29 @@ void FFTAnalysisView::resized()
     }
 
     auto row2 = b.removeFromTop (26);
-    axisCombo.setBounds (4, row2.getY() + 2, 90, 22);
-    for (int i = 0; i < 8; ++i)
-        snapBtns[i].setBounds (98 + i * 24, row2.getY() + 2, 23, 20);
+    // The axis combo grows to show its full text when the panel is wide
+    // enough; otherwise it keeps its compact width and the eight snapshot
+    // buttons keep their fixed slots (they always take priority over the
+    // combo's extra width).
+    {
+        const int btnPitch = 24, btnW = 23;
+        const int buttonsTotal = 8 * btnPitch - (btnPitch - btnW);   // 191 px
+        const juce::Font f = getLookAndFeel().getComboBoxFont (axisCombo);
+        const int idealW = std::max (90,
+            juce::GlyphArrangement::getStringWidthInt (f, axisCombo.getText()) + 36);
+        if (b.getWidth() >= 4 + idealW + 6 + buttonsTotal + 8)
+        {
+            axisCombo.setBounds (4, row2.getY() + 2, idealW, 22);
+            for (int i = 0; i < 8; ++i)
+                snapBtns[i].setBounds (10 + idealW + i * btnPitch, row2.getY() + 2, btnW, 20);
+        }
+        else
+        {
+            axisCombo.setBounds (4, row2.getY() + 2, 90, 22);
+            for (int i = 0; i < 8; ++i)
+                snapBtns[i].setBounds (98 + i * btnPitch, row2.getY() + 2, btnW, 20);
+        }
+    }
 
     // Row 3 (curve modes only): Smoothing + Track.
     if (axisMode_ >= 3)
@@ -3783,18 +3803,19 @@ void FFTAnalysisView::mouseUp (const juce::MouseEvent& e)
             }
 
             // Vertical part of the box: frequency window in Freq vs Time mode,
-            // level window everywhere else.
+            // level window everywhere else. Frequency increases upward, so
+            // the rect's TOP edge is the high end and its BOTTOM edge the low.
             if (!startOnBottomAxis && zoomRect.getHeight() >= 2)
                 {
                     if (axisMode_ == 3)
                     {
-                        const double fA = yToFreq ((float) std::clamp (zoomRect.getY(), plot.getY(), plot.getBottom()));
-                        const double fB = yToFreq ((float) std::clamp (zoomRect.getBottom() - 1, plot.getY(), plot.getBottom()));
-                        if (fB > fA * 1.0001)
+                        const double fTop = yToFreq ((float) std::clamp (zoomRect.getY(), plot.getY(), plot.getBottom()));
+                        const double fBot = yToFreq ((float) std::clamp (zoomRect.getBottom() - 1, plot.getY(), plot.getBottom()));
+                        if (fTop > fBot * 1.0001)
                         {
                             const double nyq = app.audioEngine().sampleRate() * 0.5;
-                            fLo_ = std::clamp (fA, 0.0, nyq);
-                            fHi_ = std::clamp (fB, 0.0, nyq);
+                            fLo_ = std::clamp (fBot, 0.0, nyq);
+                            fHi_ = std::clamp (fTop, 0.0, nyq);
                         }
                     }
                     else

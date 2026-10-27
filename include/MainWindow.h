@@ -53,7 +53,7 @@ public:
                               const SpectralView::SpectralExportOptions& opts = {});
                                                           // background PNG render + dialog
     void handleExportSpectral();                            // File > Spectrogram > Save As... / Ctrl+Shift+E
-    void takeSpectrogramSnapshot();                         // File > Spectrogram > Take snapshot (PrintScreen)
+    void takeSpectrogramSnapshot();                         // File > Spectrogram > Take snapshot (Ctrl+Shift+F)
     /** Timestamped snapshot path next to the WAV: <name>_snapshot_<yyyy-mm-dd>_<hh-mm-ss>.png,
         with a numeric suffix if that exact file already exists. `when` is
         injectable for unit tests (defaults to now). */
@@ -127,6 +127,7 @@ public:
     void saveLeftLayout();                    // persist tab order + column geometry
     void applySavedLeftLayout();              // restore a persisted arrangement at startup
     void setLeftPanelsVisible (bool visible); // View > Left Panels toggle
+    bool areLeftPanelsVisible() const { return leftPanelsVisible; }
     juce::StringArray topPanelTabNames() const { return topTabs.getTabNames (); }
     juce::StringArray bottomPanelTabNames() const { return bottomTabs.getTabNames (); }
     juce::TabbedComponent* topPanelTabs() { return &topTabs; }

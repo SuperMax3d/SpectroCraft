@@ -340,6 +340,8 @@ public:
     juce::ComboBox& fftSizeComboRef() { return fftSizeCombo; }
     juce::ComboBox& windowComboRef() { return windowCombo; }
     juce::ComboBox& axisComboRef() { return axisCombo; }
+    // Row-2 snapshot buttons (unit tests for the dynamic row layout).
+    juce::Button& snapshotButtonForTest (int i) { return snapBtns[i]; }
 
     // Curve-mode options (axis modes 3..5):
     //   refTime: 0 = Relative (time axis starts at the selection),

@@ -127,7 +127,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     several evenly spaced windows are computed and their magnitudes averaged
     (the classic "average over the selection" behaviour). Its FFT size is
     **independent of the spectrogram's**, plus a window-type selector
-    (Rectangular/Hann/Hamming) and a frequency-axis dropdown with six modes:
+    (Rectangular/Hann/Hamming) and a frequency-axis dropdown with six modes
+    (the dropdown widens to show its full item text whenever the panel is wide
+    enough; the eight snapshot buttons always keep their slots):
     **FFT Linear** (linear Hz axis), **FFT Log** (logarithmic axis, the default)
     and **1/3 Octave** (IEC 61260-1 band plot from 50 Hz to 16 kHz — one curve
     per visible channel, each band drawn as a flat-topped step across its
@@ -156,9 +158,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     frequency). The two time-based modes add a **Ref Time** option (Relative =
     ticks counted from the selection start, Absolute = file time) and have a
     horizontal view window over the analysed region: the mouse wheel zooms both
-    axes at the cursor, a right-drag box sets both windows, left-dragging the
-    bottom axis pans the time window, and **Zoom Out Full** resets everything to
-    defaults. The 8
+    axes at the cursor, a right-drag box sets both windows (the box's x span
+    becomes the time window and its y span the frequency/level window — in
+    Freq vs Time the vertical axis is frequency), dragging that starts on an
+    axis zooms only that axis, left-dragging the bottom axis pans the time
+    window, and **Zoom Out Full** resets everything to defaults. The 8
     snapshot buttons keep working in these modes but store a *separate* set of
     curve snapshots per mode (a slot saved in Freq vs Time is empty when you
     switch to Amp vs Time); stored curves follow the current Track/Smooth
@@ -348,7 +352,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - The File menu's **Spectrogram** submenu offers:
     - **Save Spectrogram As...** (Ctrl+Shift+E) — writes the current spectrogram
       content (per-channel rows included) to a PNG file.
-    - **Take Snapshot PrintScreen** — saves a PNG right next to the WAV file with
+    - **Take Snapshot** (Ctrl+Shift+F) — saves a PNG right next to the WAV file with
       a timestamped name (`<name>_snapshot_<yyyy-mm-dd>_<hh-mm-ss>.png`, numeric
       suffix on collision); falls back to a save dialog when no file is loaded.
     - Four checkable options, persisted across restarts, that add overlays to
@@ -954,6 +958,10 @@ The test executable accepts the same flags (useful for CI without a display).
 | Vertical zoom in / out (waveform amplitude + spectral frequency) | Ctrl+Shift+= / Ctrl+Shift+- |
 | Toggle a channel's visibility (like the View menu items); show ONLY that channel with Shift held | Ctrl+1..9 / Ctrl+Shift+1..9 |
 | Cycle view layout: both → waveform only → spectrogram only (reverse direction with Shift) | F9 / Shift+F9 |
+| Save Spectrogram As... (PNG of the current spectrogram content) | Ctrl+Shift+E |
+| Take Snapshot (timestamped PNG saved next to the WAV file) | Ctrl+Shift+F |
+| Resample... (Effects menu: new sample rate + optional channel remix) | F11 |
+| Toggle the left panels column (View > Left Panels) | Ctrl+Shift+Enter |
 
 Keyboard focus follows the mouse: clicking either view puts keyboard focus on
 that view, so ←/→ and Shift+←/→ work immediately after any click inside a plot.

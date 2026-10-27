@@ -5009,6 +5009,68 @@ static void testRightDragZoom()
         CHECK (app.playhead == 0.0, "right-button does not move the playhead");
     }
 
+    // --- FFT analysis, Freq vs Time: track drag -> BOTH axes ---
+    // The vertical axis is frequency there (increasing upward), so a box's
+    // y span must set the frequency window and its x span the time window.
+    {
+        app.setSelection ({ 0.5, 2.5 });   // analysed region = 2 s
+        FFTAnalysisView view (app);
+        view.setSize (400, 300);
+        view.setAxisMode (3);
+        view.recomputeIfNeeded();
+
+        const auto plot = view.plotBounds();
+        CHECK (plot.getWidth() > 100 && plot.getHeight() > 60,
+               "mode-3 plot has room for the drag test");
+
+        // Drag down-right, fully inside the plot.
+        const int x0 = plot.getX() + 20, y0 = plot.getY() + 10;
+        const int x1 = plot.getRight() - 20, y1 = plot.getBottom() - 30;
+
+        const double tA = view.xToTime (x0), tB = view.xToTime (x1);
+        const double fTop = view.yToFreq ((float) y0);   // top edge = high end
+        const double fBot = view.yToFreq ((float) y1);   // bottom edge = low end
+
+        view.mouseDown (mkMouse (view, x0, y0, rmb));
+        view.mouseDrag (mkMouse (view, x1, y1, rmb));
+        view.mouseUp   (mkMouse (view, x1, y1, rmb));
+
+        CHECK (std::abs (view.getCurveViewT0() - tA) < 1e-9
+             && std::abs (view.getCurveViewT1() - tB) < 1e-9,
+              "curve-mode track right-drag zooms the time window to the x span");
+        CHECK (std::abs (view.getFreqLo() - fBot) < 1e-6
+             && std::abs (view.getFreqHi() - fTop) < 1e-6,
+              "curve-mode track right-drag sets the frequency axis to the y span");
+    }
+
+    // --- FFT analysis, Freq vs Time: drag starting on the right axis -> vertical only ---
+    {
+        app.setSelection ({ 0.5, 2.5 });
+        FFTAnalysisView view (app);
+        view.setSize (400, 300);
+        view.setAxisMode (3);
+        view.recomputeIfNeeded();
+
+        const auto plot = view.plotBounds();
+        // Start just past the plot's right edge: on the frequency axis.
+        const int ax = std::min (plot.getRight() + 5, view.getWidth() - 1);
+        const int y0 = plot.getY() + 20, y1 = plot.getBottom() - 40;
+
+        const double fTop = view.yToFreq ((float) y0);
+        const double fBot = view.yToFreq ((float) y1);
+
+        view.mouseDown (mkMouse (view, ax, y0, rmb));
+        view.mouseDrag (mkMouse (view, ax + 8, y1, rmb));
+        view.mouseUp   (mkMouse (view, ax + 8, y1, rmb));
+
+        CHECK (std::abs (view.getFreqLo() - fBot) < 1e-6
+             && std::abs (view.getFreqHi() - fTop) < 1e-6,
+              "curve-mode axis right-drag sets the frequency axis to the y span");
+        CHECK (std::abs (view.getCurveViewT0() - 0.5) < 1e-9
+             && std::abs (view.getCurveViewT1() - 2.5) < 1e-9,
+              "curve-mode axis right-drag leaves the time window unchanged");
+    }
+
     wav.deleteFile();
 }
 
@@ -9924,6 +9986,32 @@ static void testCurveAnalysisModes()
         int m5zoom = (int) juce::StringArray::fromLines (
             juce::SystemClipboard::getTextFromClipboard()).size() - 1;
         CHECK (m5zoom * 2 < m5full, "mode-5 copy follows the frequency window");
+    }
+
+    // --- Row-2 layout: axis combo grows with panel width ------------------
+    {
+        FFTAnalysisView view (app);
+        view.setAxisMode (3);   // "Freq vs Time" is the widest item text
+
+        // Wide panel: the combo must show its full text and all eight buttons.
+        view.setSize (700, 200);
+        {
+            const auto cb = view.axisComboRef().getBounds();
+            CHECK (cb.getWidth() > 90, "wide panel widens the axis combo");
+            bool allVisible = true;
+            for (int i = 0; i < 8; ++i)
+                if (!view.getLocalBounds ().contains (view.snapshotButtonForTest (i).getBounds()))
+                    allVisible = false;
+            CHECK (allVisible, "wide panel keeps all eight snapshot buttons visible");
+            const auto b0 = view.snapshotButtonForTest (0).getBounds();
+            CHECK (b0.getX() >= cb.getRight(), "first button sits clear of the combo");
+        }
+
+        // Narrow panel: compact layout with fixed slots (the wide layout
+        // needs at least idealW + 210 px, and idealW is always >= 90).
+        view.setSize (280, 200);
+        CHECK (view.axisComboRef().getBounds().getWidth() == 90,
+              "narrow panel keeps the compact combo width");
     }
 }
 
@@ -15056,6 +15144,34 @@ static void testDrawingKeyShortcuts()
     wav.deleteFile();
 }
 
+// ------------------------------------------------- View > Left Panels shortcut
+static void testLeftPanelsToggleShortcut()
+{
+    const juce::File wav = makeTempFile ("left_panels_key.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open for left-panels shortcut test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "left panels key test"));
+
+    CHECK (win->areLeftPanelsVisible (), "setup: left panels start visible");
+    const juce::ModifierKeys mods (juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier);
+    CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::returnKey, mods, 0), nullptr),
+          "Ctrl+Shift+Enter is consumed");
+    CHECK (!win->areLeftPanelsVisible (), "first press hides the left panels");
+    CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::returnKey, mods, 0), nullptr)
+           && win->areLeftPanelsVisible (), "second press shows them again");
+
+    // Plain Enter must not toggle.
+    CHECK (!win->keyPressed (juce::KeyPress (juce::KeyPress::returnKey, {}, 0), nullptr),
+          "plain Enter is not consumed by the shortcut");
+    CHECK (win->areLeftPanelsVisible (), "plain Enter leaves the panels visible");
+
+    wav.deleteFile();
+}
+
 // ---------------- File > Spectrogram submenu: snapshot + export overlays -----
 
 // PNG signature + IHDR carry width/height as big-endian u32s at offsets 16..23:
@@ -15455,6 +15571,7 @@ static int scRunUnitTestsImpl()
     progress ("arrow head geometry");     testArrowHeadGeometry();
     progress ("drawing panel");           testDrawingPanel();
     progress ("drawing key shortcuts");   testDrawingKeyShortcuts();
+    progress ("left panels toggle shortcut"); testLeftPanelsToggleShortcut();
     progress ("spectrogram export options"); testSpectrogramExportOptions();
 
 
