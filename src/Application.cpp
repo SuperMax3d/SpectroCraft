@@ -139,6 +139,10 @@ void Application::loadSettings ()
     settings.exportMarkers    = recentStore->getIntValue ("exp_markers", 0) != 0;
     settings.exportSelections = recentStore->getIntValue ("exp_selections", 0) != 0;
     settings.exportDrawings   = recentStore->getIntValue ("exp_drawings", 0) != 0;
+    // Stem Separation (Effects menu).
+    settings.acppModel          = recentStore->getValue ("acpp_model", juce::String ());
+    settings.acppBackend        = std::clamp ((int) recentStore->getIntValue ("acpp_backend", 1), 1, 3);
+    settings.acppExtractOriginal = recentStore->getIntValue ("acpp_extract_orig", 1) != 0;
 }
 
 void Application::saveSettings ()
@@ -161,6 +165,9 @@ void Application::saveSettings ()
     recentStore->setValue ("exp_markers", settings.exportMarkers ? 1 : 0);
     recentStore->setValue ("exp_selections", settings.exportSelections ? 1 : 0);
     recentStore->setValue ("exp_drawings", settings.exportDrawings ? 1 : 0);
+    recentStore->setValue ("acpp_model", settings.acppModel);
+    recentStore->setValue ("acpp_backend", settings.acppBackend);
+    recentStore->setValue ("acpp_extract_orig", settings.acppExtractOriginal ? 1 : 0);
     recentStore->save ();
 }
 
@@ -1591,7 +1598,8 @@ namespace
 // Message-thread only: creates a new document from an already-computed merge
 // result and activates it. The heavy reading/resampling work is done by the
 // caller on a worker thread (sc::mergeFilesToResult).
-bool Application::createDocFromMerged (sc::MergeResult& r, std::string* errOut)
+bool Application::createDocFromMerged (sc::MergeResult& r, std::string* errOut,
+                                       const juce::String& suggestedName)
 {
     if (r.channels <= 0 || !std::isfinite (r.rate) || r.rate <= 0.0
         || r.data.empty () || r.data.size () != (size_t) r.channels)
@@ -1607,7 +1615,17 @@ bool Application::createDocFromMerged (sc::MergeResult& r, std::string* errOut)
         return false;
     }
 
-    d->name = uniqueUntitledName (docs);
+    if (!suggestedName.isEmpty ())
+    {
+        // Keep document names unique across the open set.
+        d->name = suggestedName;
+        int n = 2;
+        while (std::find_if (docs.begin (), docs.end (),
+                             [&] (const auto& x) { return x->name == d->name; }) != docs.end ())
+            d->name = suggestedName + juce::String (" ") + juce::String (n++);
+    }
+    else
+        d->name = uniqueUntitledName (docs);
     d->file = juce::File();   // no path until Save As
     d->playhead = 0.0;
     d->selection = { 0, 0 };

@@ -98,6 +98,11 @@ struct Settings
     bool exportSelections = false;  // draw time selection band + spectral selection shapes
     bool exportDrawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
 
+    // Stem Separation (Effects menu): last used choices, persisted per session.
+    juce::String acppModel;              // selected GGUF model file name ("" = none)
+    int acppBackend = 0;                 // backend combo index: 1=Cpu 2=Cuda 3=Vulkan
+    bool acppExtractOriginal = true;     // "Extract from original" toggle
+
     bool operator== (const Settings& o) const
     {
         return fftSize == o.fftSize && hopSize == o.hopSize && windowType == o.windowType

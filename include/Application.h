@@ -230,7 +230,10 @@ public:
                                   std::function<void(float)> onProgress = nullptr,
                                   const std::atomic<bool>* cancel = nullptr,
                                   std::string* errOut = nullptr);
-    bool createDocFromMerged (sc::MergeResult& r, std::string* errOut = nullptr);
+    // suggestedName (optional) names the new document instead of the usual
+    // "Untitled N"; collisions get a numeric suffix appended.
+    bool createDocFromMerged (sc::MergeResult& r, std::string* errOut = nullptr,
+                              const juce::String& suggestedName = {});
 
     bool openFile (const juce::File& file);
 
