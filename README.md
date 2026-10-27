@@ -489,7 +489,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   the audio patch (snapshot curves are recomputed from the restored audio), so
   a single Ctrl+Z brings back both the samples and every marker, selection and
   snapshot exactly as before.
-- **Resample**: Effects → Resample… converts the whole file to any sample rate
+- **Resample**: Edit → Resample… converts the whole file to any sample rate
   using SoXR's very-high-quality (`SOXR_VHQ`) resampler — and can change the
   channel count in the same operation. The dialog has a *new channels* field
   (1–512) plus a remix weight grid: one row per output channel, one column per
@@ -1038,7 +1038,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Cycle view layout: both → waveform only → spectrogram only (reverse direction with Shift) | F9 / Shift+F9 |
 | Save Spectrogram As... (PNG of the current spectrogram content) | Ctrl+Shift+E |
 | Take Snapshot (timestamped PNG saved next to the WAV file) | Ctrl+Shift+F |
-| Resample... (Effects menu: new sample rate + optional channel remix) | F11 |
+| Resample... (Edit menu, own section: new sample rate + optional channel remix) | F11 |
 | Toggle the left panels column (View > Left Panels) | Ctrl+Shift+Enter |
 
 Keyboard focus follows the mouse: clicking either view puts keyboard focus on

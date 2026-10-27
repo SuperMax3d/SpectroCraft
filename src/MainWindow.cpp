@@ -4142,6 +4142,11 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (EditSelectAll, "Select All\tCtrl+A", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         menu.addItem (EditSnapToZeroCrossings, "Snap to Zero Crossings", true, app.settings.snapToZeroCrossings);
+        menu.addSeparator();
+        // Whole-file operation. Streamed files are materialised into memory
+        // first when the resample actually runs.
+        menu.addItem (ToolsResample, "Resample...\tF11",
+                      app.audioEngine().isFileLoaded(), false);
     }
     else if (menuName == "Selection")
     {
@@ -4242,10 +4247,6 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsTranscribeFolder, "Transcribe Folder...", true, false);
 #endif
         menu.addSeparator();
-        // Whole-file operation. Streamed files are materialised into memory
-        // first when the resample actually runs.
-        menu.addItem (ToolsResample, "Resample...\tF11",
-                      app.audioEngine().isFileLoaded(), false);
         // AI stem separation via an external CLI tool; first use downloads
         // the binary + model weights. A selection is optional - without one
         // the whole file becomes the input.
@@ -4350,7 +4351,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('e', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleExportSpectral(); return true; }
     // Ctrl+Shift+F takes a timestamped snapshot next to the WAV file.
     if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { takeSpectrogramSnapshot(); return true; }
-    // F11 opens Effects > Resample... (no-op when no file is loaded).
+    // F11 opens Edit > Resample... (no-op when no file is loaded).
     if (key.getKeyCode() == juce::KeyPress::F11Key) { showResampleDialog(); return true; }
     // Ctrl+Shift+Enter toggles the left panel column.
     if (key == juce::KeyPress (juce::KeyPress::returnKey, juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { setLeftPanelsVisible (!leftPanelsVisible); return true; }

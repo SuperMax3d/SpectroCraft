@@ -15419,6 +15419,16 @@ static void testTrackAxisPlacement()
     const juce::PopupMenu viewMenu = win->getMenuForIndex (3, "View");
     CHECK (viewMenu.getNumItems() == 16, "View menu item count with stereo file");
 
+    // --- Resample lives in its own section of the Edit menu -----------------
+    const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
+    CHECK (editMenu.getNumItems() == 12, "Edit menu includes the Resample item");
+    const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    CHECK (fxMenu.getNumItems() == 10, "Effects menu no longer lists Resample");
+#else
+    CHECK (fxMenu.getNumItems() == 7, "Effects menu no longer lists Resample");
+#endif
+
     app.settings.trackAxisOnRight = false;
     app.settings.trackRulerAtBottom = false;
     win->menuItemSelected (MainWindow::MenuIDs::ViewAxisOnRight, 3);
