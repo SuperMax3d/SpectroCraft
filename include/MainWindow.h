@@ -9,8 +9,9 @@
 #include <memory>
 #include <algorithm>
 
-// Defined in MainWindow.cpp (file-local); only a pointer is kept here.
-class WorkProgressDialog;
+#include "WorkProgress.h"
+
+class StemSeparationWindow;   // defined in StemSeparation.h
 
 class MainWindow : public juce::DocumentWindow,
                    private juce::KeyListener,
@@ -200,6 +201,9 @@ public:
     /** "New File" dialog: asks for channel count and sample rate, then calls
         Application::newFile(). */
     void showNewFileDialog();
+    /** Effects > Stem Separation... - opens (or brings to front) the
+        non-modal window that drives the external stem-separation CLI. */
+    void showStemSeparationWindow();
     /** Background resample (+ optional channel remix) with a progress
         dialog. Empty remixWeights keeps the current channels. */
     void runResampleAsync (double newRate,
@@ -283,6 +287,7 @@ public:
         TransportPlaySpectralSel,
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsResample,
+        ToolsStemSeparate,   // AI stem separation via the audio.cpp CLI tool
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         ToolsNoiseSuppress,   // AI noise suppression (built with -DSPECTRO_ENABLE_AI=ON)
         ToolsTranscribe,      // AI Whisper transcription (whole file)
@@ -316,7 +321,7 @@ private:
     double shiftAnchorTime = -1.0;           // Shift+arrow selection anchor (-1 = inactive)
     bool iconApplied = false;                 // window icon set once HWND is available
     bool audioInitKickedOff = false;          // lazy device init started (timer-driven)
-    WorkProgressDialog* audioInitDialog = nullptr;   // open while waiting for init
+    sc::WorkProgressDialog* audioInitDialog = nullptr;   // open while waiting for init
 
     // Left-side panels
     std::unique_ptr<FileListPanel> fileListPanel;
@@ -330,6 +335,9 @@ private:
     std::unique_ptr<DrawingPanel> drawingPanel;               // spectrogram drawings (bottom group)
     std::unique_ptr<HistoryPanel> historyPanel;
     std::unique_ptr<PythonPanel> pythonPanel;                 // user Python scripts (top group)
+
+    // Effects > Stem Separation window (at most one open at a time).
+    std::unique_ptr<StemSeparationWindow> stemWin_;
 
     // Zoom/pan scrollbars: time bar at the bottom, one vertical
     // scrollbar per view on its right edge.

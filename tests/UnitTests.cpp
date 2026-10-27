@@ -27,6 +27,7 @@
 #include "ScttChunk.h"   // SCTT RIFF chunk + JSON (no AI dependency)
 #include "BkdkChunk.h"   // bkdk per-channel calibration chunk parsing
 #include "VideoAudio.h"  // video-container audio extraction (FFmpeg, Windows)
+#include "AudioCpp.h"     // stem-separation CLI argument building + file discovery
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
 #include "AI/ModelManager.h"
@@ -15487,6 +15488,91 @@ static void testSpectrogramExportOptions()
     dir.getChildFile ("export_src.wav").deleteFile ();
 }
 
+// Stem Separation: pure logic of the audio.cpp CLI wrapper - argument
+// building, anchor formatting and file discovery in an injectable folder.
+static void testAudioCppCli()
+{
+    using namespace sc::acpp;
+
+    // --- formatAnchorTime ---------------------------------------------------
+    CHECK (formatAnchorTime (0.0) == "0",            "anchor time 0 formats as '0'");
+    CHECK (formatAnchorTime (10.0) == "10",          "anchor time 10 trims trailing zeros");
+    CHECK (formatAnchorTime (0.5) == "0.5",         "anchor time 0.5 keeps one decimal");
+    CHECK (formatAnchorTime (6.9) == "6.9",         "anchor time 6.9 trims trailing zeros");
+    CHECK (formatAnchorTime (0.12345678) == "0.1235", "anchor time rounds to 4 decimals");
+
+    // --- buildAnchorsOption ---------------------------------------------------
+    const std::vector<Anchor> none;
+    CHECK (buildAnchorsOption (none) == "anchors=[]",  "no anchors -> empty anchor list");
+
+    Anchor inc;  inc.include = true;   inc.startSecs = 1.5; inc.stopSecs = 4.9;
+    std::vector<Anchor> one;
+    one.push_back (inc);
+    CHECK (buildAnchorsOption (one) == "anchors=[[\"+\",1.5,4.9]]",
+          "single include anchor format");
+
+    Anchor exc;  exc.include = false;  exc.startSecs = 0.1; exc.stopSecs = 0.5;
+    std::vector<Anchor> two;
+    two.push_back (exc);
+    two.push_back (inc);
+    CHECK (buildAnchorsOption (two) == "anchors=[[\"-\",0.1,0.5],[\"+\",1.5,4.9]]",
+          "exclude + include anchor format");
+
+    // --- buildCliArgs ---------------------------------------------------------
+    const juce::File model ("/tmp/m.gguf"), audioIn ("/tmp/in.wav"), outDir ("/tmp/out");
+
+    juce::StringArray expectedNo;
+    expectedNo.add ("--task");            expectedNo.add ("s2s");
+    expectedNo.add ("--family");          expectedNo.add ("sam_audio");
+    expectedNo.add ("--model");           expectedNo.add (model.getFullPathName ());
+    expectedNo.add ("--backend");         expectedNo.add ("cpu");
+    expectedNo.add ("--audio");           expectedNo.add (audioIn.getFullPathName ());
+    expectedNo.add ("--text");            expectedNo.add ("birds");
+    expectedNo.add ("--out-dir");         expectedNo.add (outDir.getFullPathName ());
+    expectedNo.add ("--log");
+    CHECK (buildCliArgs (model, "cpu", audioIn, "birds", none, outDir) == expectedNo,
+          "cli args without anchors");
+
+    juce::StringArray expectedYes = expectedNo;
+    const int atBackend = expectedYes.indexOf ("--backend") + 1;   // the value slot
+    expectedYes.remove (atBackend);
+    expectedYes.insert (atBackend, "cuda12.4");
+    const int at = expectedYes.indexOf ("--out-dir");
+    expectedYes.insert (at, "--request-option");
+    expectedYes.insert (at + 1, buildAnchorsOption (two));
+    CHECK (buildCliArgs (model, "cuda12.4", audioIn, "birds", two, outDir) == expectedYes,
+          "cli args with anchors insert --request-option before --out-dir");
+
+    // --- discovery in an injectable folder -------------------------------------
+    const juce::File root = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        .getChildFile ("sc_acpp_test_"
+                       + juce::String (juce::Random::getSystemRandom().nextInt (999998) + 1));
+    root.createDirectory ();
+
+    CHECK (!hasBinary (root),              "empty folder has no binary");
+    CHECK (listModels (root).empty (),     "empty folder lists no models");
+
+    const juce::File modelFile = root.getChildFile ("sam-audio-small-q8_0.gguf");
+    modelFile.replaceWithText ("dummy");
+    root.getChildFile ("notamodel.bin").replaceWithText ("x");
+    CHECK (listModels (root).size () == 1, "only sam-audio-*.gguf files are listed");
+    if (listModels (root).size () == 1)
+        CHECK (listModels (root)[0].getFileName() == "sam-audio-small-q8_0.gguf",
+              "listed model keeps its file name");
+
+    const juce::File bin = root.getChildFile ("audiocpp_cli.exe");
+    bin.replaceWithText ("x");
+    CHECK (hasBinary (root),               "installed binary is detected");
+
+    setInstalledVariant ("cpu", root);
+    CHECK (installedVariant (root) == "cpu", "variant marker round-trips");
+
+    bin.deleteFile ();
+    CHECK (!hasBinary (root),              "deleted binary no longer detected");
+
+    root.deleteRecursively ();
+}
+
 static void testStartupTrace()
 {
     const juce::File log = makeTempFile ("startup_trace.log");
@@ -15726,6 +15812,7 @@ static int scRunUnitTestsImpl()
     progress ("ctrl+0 zoom out full"); testCtrl0ZoomOutFull();
     progress ("track axis placement"); testTrackAxisPlacement();
     progress ("spectrogram export options"); testSpectrogramExportOptions();
+    progress ("audio.cpp cli wrapper");  testAudioCppCli();
 
 
 

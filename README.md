@@ -513,6 +513,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     writes each file's `SCTT` chunk back in place; choose which channel to
     analyse (default: channel 1, enter 0 or less to mix all channels),
     optional skip-existing mode.
+- **Stem separation** (`Effects → Stem Separation…`, see [below](#stem-separation)):
+  describes an audio element in plain text and the tool separates it from the
+  current selection (or whole file) into a *target* plus *residual*; advanced
+  mode runs several descriptions in one pass with optional include/exclude time
+  anchors. Runs an external prebuilt CLI — binary and model weights are
+  downloaded on demand or installed manually.
 - **Cancelling long operations**: every progress dialog — loading large files,
   resampling, noise suppression, transcription (single and batch), spectrogram
   export — has a Cancel button, and ESC works as well. The operation stops at
@@ -868,6 +874,67 @@ explicitly falls back to CPU with a note in the progress dialog.
 - VAD silence skipping + *Fast* (greedy) mode stack: on a 60 s file with two
   20 s speech regions, `whisper-base` drops from ~53 s to ~19 s (beam) or
   ~15 s (fast) on a modern desktop CPU.
+
+---
+
+## Stem separation
+
+**Effects → Stem Separation…** separates an audio element you describe in plain
+language ("birds", "a cello", "the bass drum") from the current selection — or
+from the whole file when nothing is selected. It runs the prebuilt
+`audiocpp_cli.exe` tool as a child process; no part of it is compiled into
+SpectroCraft.
+
+### Getting the binary and models
+
+The dialog's **Download…** button fetches what is missing (with progress and
+cancel):
+
+- **Binary** — one Windows x64 variant from the [0xShug0/audio.cpp](https://github.com/0xShug0/audio.cpp)
+  releases: *CPU portable* (~29 MB), *CUDA 12.4* (~465 MB), *CUDA 13.3*
+  (~276 MB) or *Vulkan portable* (~63 MB). The zip is extracted into the models
+  folder and a variant marker is written so the dialog knows what you have.
+- **Models** — any number of `sam-audio-*.gguf` weights from
+  [audio-cpp/SAM-Audio-GGUF](https://huggingface.co/audio-cpp/SAM-Audio-GGUF/tree/main)
+  (small/base/large in q8_0/bf16/f32). The model dropdown lists every `.gguf`
+  found, so you can install more manually and they appear automatically.
+
+Everything lives in `%APPDATA%\SpectroCraft\models\audiocpp\` — put
+`audiocpp_cli.exe` (plus its runtime DLLs) and one or more `sam-audio-*.gguf`
+files there by hand if you prefer not to use the downloader. The *Backend*
+dropdown (*Cpu* / *Cuda* / *Vulkan*) must match the installed binary variant.
+
+### How a run works
+
+1. The selection range (or whole file) is extracted to a temporary WAV.
+2. For each description, `audiocpp_cli.exe` runs with
+   `--task s2s --family sam_audio`, the chosen model and backend, the text,
+   optional anchor ranges and an output directory; its log lines stream into
+   the progress dialog (cancellable).
+3. The tool's `target.wav` (the described element) and `residual.wav`
+   (everything else) are read back, resampled to the source rate if needed and
+   padded to equal length.
+4. A new document `<name>_stems` opens with one track per output channel —
+target first, then residual — ready for further editing or saving as WAV/FLAC/AIFF.
+
+### Advanced mode
+
+**Advanced…** expands the dialog into multiple description rows. Each row has:
+
+- a text field,
+- **Include Selection** / **Exclude Selection** buttons that add the current
+  track selection as an anchor range (times are converted to the extracted
+  input's timeline when the run starts),
+- per-anchor remove and per-row remove controls.
+
+Anchors reach the tool as `--request-option "anchors=[[\"+\",t0,t1],…]]`
+(`+` = include, `-` = exclude). The **Extract from original** checkbox (on by
+default) runs every description against the original extraction; unchecked,
+each description after the first works on the previous *residual* instead — a
+simple way to peel several elements off one recording in sequence.
+
+The last model, backend and extract-from-original choice persist between
+sessions in `SpectroCraft.recent`.
 
 ---
 
@@ -1304,7 +1371,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2380 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2640 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1423,6 +1490,13 @@ delays the window from appearing.
     two-thirds/one-third), zero-sum rows produce silence while identity rows
     pass through, and a rate change plus downmix in one call keeps the tone's
     Goertzel amplitude exact; invalid weight shapes are rejected.
+  - **Stem separation (audio.cpp CLI wrapper)**: anchor-time formatting and the
+    `--request-option` anchors JSON (include/exclude signs, escaping); full CLI
+    argument construction with and without anchors (`--task s2s --family
+    sam_audio`, model/backend/audio/text/out-dir/log in order, `--request-option`
+    inserted before `--out-dir` only when anchors exist); binary/model discovery
+    against an injectable folder (only `audiocpp_cli.exe` and `sam-audio-*.gguf`
+    count).
   - **Paste to New Channel(s)**: existing channels stay byte-for-byte identical
     with unchanged length, the clipboard lands in the new channels at the
     selection start (truncated when it runs past end-of-file), added channels

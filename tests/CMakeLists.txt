@@ -27,6 +27,8 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/FileMeta.cpp    # unified metadata bundle + RIFF patching
         ${CMAKE_SOURCE_DIR}/src/MergeFiles.cpp  # multi-file merge (Shift + drag & drop)
         ${CMAKE_SOURCE_DIR}/src/VideoAudio.cpp  # FFmpeg video-container audio extraction
+        ${CMAKE_SOURCE_DIR}/src/AudioCpp.cpp    # audio.cpp stem-separation CLI support
+        ${CMAKE_SOURCE_DIR}/src/StemSeparation.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
 )
 
