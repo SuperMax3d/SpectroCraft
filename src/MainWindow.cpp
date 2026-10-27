@@ -705,13 +705,14 @@ void MainWindow::resized()
     const bool showWave = showWaveformView && (waveformView != nullptr);
     const bool showSpec = showSpectralView && (spectralView != nullptr);
     if (waveformView) waveformView->setVisible (showWave);
-    if (spectralView)
-    {
-        spectralView->setVisible (showSpec);
-        // In the stacked dual view the spectrogram drops its own time ruler -
-        // the waveform's top ruler covers it. Alone, it draws one again.
-        spectralView->setShowOwnTimeRuler (!showWave);
-    }
+    if (spectralView) spectralView->setVisible (showSpec);
+
+    // The shared time ruler lives in the top view when it is at the top and
+    // in the bottom view (the spectrogram) when it is at the bottom; a lone
+    // view always draws its own. The other view hides its strip and expands.
+    const bool rulerBottom = app.settings.trackRulerAtBottom;
+    if (waveformView) waveformView->setShowTimeRuler (!showSpec || !rulerBottom);
+    if (spectralView) spectralView->setShowOwnTimeRuler (!showWave || rulerBottom);
 
     // Time scrollbar at the bottom of the main area.
     if (timeBar) timeBar->setVisible (haveFile);
@@ -761,12 +762,16 @@ void MainWindow::resized()
         placeViewWithScrollBar (mainArea, spectralView.get(), specVScroll.get());
     }
 
-    // Aligned with the views' plot area: starts at the left-axis edge and
-    // stops where their vertical scrollbars begin, so the thumb tracks
-    // exactly the visible data.
+    // Aligned with the views' plot area: inset by the axis strip on whichever
+    // side it is placed and stopping where their vertical scrollbars begin,
+    // so the thumb tracks exactly the visible data.
     if (haveFile && timeBar)
-        timeBar->setBounds (mainArea.getX() + kLeftAxisWidth, mainArea.getBottom() + 2,
-                            std::max (0, mainArea.getWidth() - vScrollW - kLeftAxisWidth), 16);
+    {
+        const int axL = app.settings.trackAxisOnRight ? 0 : kLeftAxisWidth;
+        const int axR = app.settings.trackAxisOnRight ? kLeftAxisWidth : 0;
+        timeBar->setBounds (mainArea.getX() + axL, mainArea.getBottom() + 2,
+                            std::max (0, mainArea.getWidth() - vScrollW - axL - axR), 16);
+    }
 
     // Now that the bars have real sizes, sync their thumbs with the views.
     updateScrollBars();
@@ -1965,6 +1970,23 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     if (menuItemID == ViewShowLeftPanels)
     {
         setLeftPanelsVisible (!leftPanelsVisible);
+        return;
+    }
+
+    // Track axis placement: toggle, realign the time bar with the plot edge,
+    // then repaint both views and persist via syncSharedState().
+    if (menuItemID == ViewAxisOnRight)
+    {
+        app.settings.trackAxisOnRight = !app.settings.trackAxisOnRight;
+        resized();
+        if (app.onStateChange) app.onStateChange ();
+        return;
+    }
+    if (menuItemID == ViewRulerAtBottom)
+    {
+        app.settings.trackRulerAtBottom = !app.settings.trackRulerAtBottom;
+        resized();
+        if (app.onStateChange) app.onStateChange ();
         return;
     }
 
@@ -4206,9 +4228,9 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     {
         menu.addItem (ViewZoomIn, "Zoom In\tCtrl++", true, false);
         menu.addItem (ViewZoomOut, "Zoom Out\tCtrl+-", true, false);
-        menu.addItem (ViewZoomFit, "Zoom Fit\tCtrl+0", app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ViewZoomFit, "Zoom Fit", app.audioEngine().isFileLoaded(), false);
         menu.addItem (ViewZoomToSelection, "Zoom to Selection", !app.selection.isEmpty(), false);
-        menu.addItem (ViewZoomOutFull, "Zoom Out Full", app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ViewZoomOutFull, "Zoom Out Full\tCtrl+0", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         menu.addItem (ViewVerticalZoomIn, "Vertical Zoom In\tCtrl+Shift+=", true, false);
         menu.addItem (ViewVerticalZoomOut, "Vertical Zoom Out\tCtrl+Shift+-", true, false);
@@ -4217,6 +4239,14 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ViewShowSpectral, "Spectrogram View", true, showSpectralView);
         menu.addItem (ViewShowAllChannels, "Show All Channels", app.audioEngine().isFileLoaded(), false);
         menu.addItem (ViewShowLeftPanels, "Left Panels\tCtrl+Shift+Enter", true, leftPanelsVisible);
+        menu.addSeparator();
+        // Track axis placement: the vertical axis can sit on the right and
+        // the time ruler at the bottom of both track views. The choices are
+        // remembered between sessions.
+        menu.addItem (ViewAxisOnRight, "Vertical Axis on Right", true,
+                      app.settings.trackAxisOnRight);
+        menu.addItem (ViewRulerAtBottom, "Time Ruler at Bottom", true,
+                      app.settings.trackRulerAtBottom);
         menu.addSeparator();
         juce::PopupMenu colourMapMenu;
         colourMapMenu.addItem (ColourMapClassic, "Classic (Default)", true, app.colourMap == ColourMap::Classic);
@@ -4506,7 +4536,9 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     // Vertical zoom: Ctrl+Shift+= / Ctrl+Shift+- (waveform amplitude + spectral frequency)
     if (key == juce::KeyPress ('>', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { zoomVerticalBoth (1.5); return true; }
     if (key == juce::KeyPress ('-', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { zoomVerticalBoth (1.0 / 1.5); return true; }
-    if (key == juce::KeyPress ('0', juce::ModifierKeys::commandModifier, 0)) { zoomToFit(); return true; }
+    // Ctrl+0 = Zoom Out Full: resets the shared time window AND both views'
+    // vertical ranges (amplitude / frequency) back to their defaults.
+    if (key == juce::KeyPress ('0', juce::ModifierKeys::commandModifier, 0)) { zoomOutFull(); return true; }
     // Selection tools: S = Time Range, M = Marquee, L = Lasso, P = Paintbrush.
     // (M and L were reassigned from "add marker" / "loop", which moved to
     // F2/F8 and Ctrl+L respectively.)

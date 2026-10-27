@@ -85,6 +85,12 @@ struct Settings
     int drawColourARGB = 0xFF00FF00;     // ink colour, AARRGGBB (bright green)
     float drawTextSize = 14.0f;          // font size for Text drawings
 
+    // Track axis placement (View menu), persisted between sessions:
+    // the vertical axis can sit on the right and the time ruler at the
+    // bottom of both track views instead of their default left/top spots.
+    bool trackAxisOnRight = false;
+    bool trackRulerAtBottom = false;
+
     // Spectrogram export overlays - which extras to bake into exported PNGs
     // (File -> Spectrogram submenu). Persisted between sessions.
     bool exportAxes = false;        // include frequency + time axes around the plot
@@ -111,6 +117,8 @@ struct Settings
             && fftThirdOctOrder == o.fftThirdOctOrder
             && fftRefTime == o.fftRefTime && fftSmooth == o.fftSmooth
             && fftTrack == o.fftTrack
+            && trackAxisOnRight == o.trackAxisOnRight
+            && trackRulerAtBottom == o.trackRulerAtBottom
             && exportAxes == o.exportAxes && exportMarkers == o.exportMarkers
             && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings;
     }

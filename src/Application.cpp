@@ -131,6 +131,9 @@ void Application::loadSettings ()
     settings.drawTextSize   = std::clamp (recentStore->getValue ("draw_text_size",
                                                                 juce::String (settings.drawTextSize)).getFloatValue(),
                                           6.0f, 72.0f);
+    // Track axis placement (View menu).
+    settings.trackAxisOnRight   = recentStore->getIntValue ("track_axis_right", 0) != 0;
+    settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
     // Spectrogram export overlays (File -> Spectrogram submenu).
     settings.exportAxes       = recentStore->getIntValue ("exp_axes", 0) != 0;
     settings.exportMarkers    = recentStore->getIntValue ("exp_markers", 0) != 0;
@@ -152,6 +155,8 @@ void Application::saveSettings ()
     recentStore->setValue ("draw_width", settings.drawWidth);
     recentStore->setValue ("draw_colour", settings.drawColourARGB);
     recentStore->setValue ("draw_text_size", settings.drawTextSize);
+    recentStore->setValue ("track_axis_right", settings.trackAxisOnRight ? 1 : 0);
+    recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("exp_axes", settings.exportAxes ? 1 : 0);
     recentStore->setValue ("exp_markers", settings.exportMarkers ? 1 : 0);
     recentStore->setValue ("exp_selections", settings.exportSelections ? 1 : 0);

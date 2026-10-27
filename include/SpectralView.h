@@ -160,6 +160,22 @@ public:
     double getViewEnd() const { return viewEnd; }
     double xToTime (int x) const;
     double timeToX (double t) const;
+
+    // Axis/ruler placement (View menu): the frequency axis sits on the left by
+    // default and can be moved to the right; the time ruler sits at the top
+    // by default and can be moved to the bottom. Both apply to both tracks.
+    bool axisOnRight() const { return app.settings.trackAxisOnRight; }
+    bool rulerAtBottom() const { return app.settings.trackRulerAtBottom; }
+    // Hit tests for the two chrome strips (full component height/width).
+    bool onAxisX (int x) const
+    {
+        return axisOnRight() ? x >= getWidth() - kLeftAxisWidth : x < kLeftAxisWidth;
+    }
+    bool onRulerY (int y) const
+    {
+        if (!showOwnTimeRuler) return false;   // stacked: the waveform's ruler covers it
+        return rulerAtBottom() ? y >= getHeight() - kRulerH : y < rulerH();
+    }
     float freqToY (double freq, int height) const;
     double yToFreq (float y, int height) const;
     // Absolute frequency at a screen y position (mapped through the channel row

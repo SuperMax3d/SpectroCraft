@@ -22,7 +22,11 @@ juce::Rectangle<int> SpectralView::plotRect() const
 {
     if (haveExportLayout_)
         return exportLayout_;   // offscreen export canvas layout
-    return { kLeftAxisWidth, rulerH(),
+    // The axis strip always takes kLeftAxisWidth of horizontal space; only
+    // its side changes with the View menu choice.
+    const int x0 = axisOnRight() ? 0 : kLeftAxisWidth;
+    const int ruY = (showOwnTimeRuler && rulerAtBottom()) ? 0 : rulerH();
+    return { x0, ruY,
              std::max (1, getWidth() - kLeftAxisWidth),
              std::max (1, getHeight() - rulerH()) };
 }
@@ -261,7 +265,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     // Move/Scale selection gesture: left clicks inside the plot set the
     // reference point first, then apply the change on the second click.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
-        && e.x >= kLeftAxisWidth && e.y >= rulerH() && app.isSelGesturing ())
+        && !onAxisX (e.x) && !onRulerY (e.y) && app.isSelGesturing ())
     {
         selGestLastClickMs = juce::Time::getMillisecondCounter();
         app.selGestureClick (xToTime ((double) e.x), freqAtY (e.y),
@@ -272,7 +276,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     // Clone & Multiply picking (Selection panel): left clicks inside the plot
     // pick a reference frequency first, then target frequencies afterwards.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
-        && e.x >= kLeftAxisWidth && e.y >= rulerH() && app.isClonePicking ())
+        && !onAxisX (e.x) && !onRulerY (e.y) && app.isClonePicking ())
     {
         // ~8 px hit radius in data units: clicking on a picked point removes it.
         const double dtTol = std::abs (xToTime (e.x + 4) - xToTime (e.x - 4));
@@ -332,14 +336,14 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     dragStartTime = xToTime (e.x);
 
     const bool leftOnAxis = e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
-                            && !e.mods.isMiddleButtonDown() && e.x < kLeftAxisWidth;
+                            && !e.mods.isMiddleButtonDown() && onAxisX (e.x);
 
     // Spectral selection tools (Selection menu): a left-drag on the plot draws
     // a shape in time-frequency space. Plain = replace, SHIFT = add,
     // CTRL = subtract. Tool drags never move the playhead.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
-        && !e.mods.isMiddleButtonDown() && e.x >= kLeftAxisWidth
-        && e.y >= rulerH()
+        && !e.mods.isMiddleButtonDown() && !onAxisX (e.x)
+        && !onRulerY (e.y)
         && app.selMode != SpectralSelMode::TimeRange)
     {
         toolSubtract = e.mods.isCtrlDown();
@@ -400,7 +404,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && !e.mods.isMiddleButtonDown())
     {
-        const bool onTimeRuler = e.y < rulerH();
+        const bool onTimeRuler = onRulerY (e.y);
         if (onTimeRuler)
         {
             // Left-drag on the top time ruler pans horizontally at half speed
@@ -667,9 +671,10 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
     {
         if (!haveZoomRect)
         {
-            // Right-clicking the left frequency axis makes "Zoom Out Full"
-            // reset the vertical range instead of the time window.
-            const bool onAxis = dragStartX < kLeftAxisWidth;
+            // Right-clicking the frequency axis (left or right) makes
+            // "Zoom Out Full" reset the vertical range instead of the time
+            // window.
+            const bool onAxis = onAxisX (dragStartX);
             // Only show the menu when there is something to do with it: an
             // external action callback, or a local axis reset. (Headless test
             // views have neither and must not enter a modal loop.)
@@ -694,10 +699,10 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
             // The drag START position selects which axes get zoomed:
             //  - inside the plot ("the track"): BOTH axes — time from the box's
             //    x span, frequency from its y span;
-            //  - on the left frequency axis: vertical only;
-            //  - on the top time ruler: horizontal only.
-            const bool startOnAxis  = dragStartX < kLeftAxisWidth;
-            const bool startOnRuler = !startOnAxis && dragStartY < rulerH();
+            //  - on the frequency axis: vertical only;
+            //  - on the time ruler: horizontal only.
+            const bool startOnAxis  = onAxisX (dragStartX);
+            const bool startOnRuler = !startOnAxis && onRulerY (dragStartY);
 
             auto zoomTime = [this] ()
             {
@@ -898,9 +903,10 @@ void SpectralView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
     if (!app.audioEngine().isFileLoaded()) return;
     const double factor = wheel.deltaY > 0 ? 1.2 : (1.0 / 1.2);
 
-    // Wheel over the left frequency axis (or Shift+wheel anywhere) zooms the
-    // frequency range around the cursor; otherwise it zooms in time at the cursor.
-    if (e.mods.isShiftDown() || e.x < kLeftAxisWidth)
+    // Wheel over the frequency axis (left or right, or Shift+wheel anywhere)
+    // zooms the frequency range around the cursor; otherwise it zooms in
+    // time at the cursor.
+    if (e.mods.isShiftDown() || onAxisX (e.x))
         zoomFreqAtY ((float) e.y, factor);
     else
         zoomAtX (e.x, factor); // notifies via setWindow()
@@ -1026,8 +1032,9 @@ bool SpectralView::saveAsPng (const juce::File& file,
     if (!renderSpectralContent (plotImg, rs, cancel))
         return false;   // cancelled: no PNG is written
 
-    const int ox = opts.axes ? kLeftAxisWidth : 0;
-    const int oy = opts.axes ? kRulerH : 0;
+    // The export canvas follows the current axis/ruler placement (View menu).
+    const int ox = opts.axes ? (axisOnRight() ? 0 : kLeftAxisWidth) : 0;
+    const int oy = opts.axes ? (rulerAtBottom() ? 0 : kRulerH) : 0;
     const int W = pw + ox, H = ph + oy;
 
     // Compose the final image. For this block only, plotRect()/rulerH() and
@@ -1048,7 +1055,10 @@ bool SpectralView::saveAsPng (const juce::File& file,
         {
             // Opaque ruler background so the labels stay readable over the spectrum.
             g.setColour (juce::Colour::fromRGB (32, 32, 36));
-            g.fillRect (0, 0, kLeftAxisWidth, H);
+            if (axisOnRight())
+                g.fillRect (W - kLeftAxisWidth, 0, kLeftAxisWidth, H);
+            else
+                g.fillRect (0, 0, kLeftAxisWidth, H);
             drawFrequencyRuler (g);
             drawTimeRuler (g);
             drawChannelLabels (g);
@@ -1172,7 +1182,10 @@ void SpectralView::paint (juce::Graphics& g)
 
     // Opaque ruler background so the labels stay readable over the spectrum.
     g.setColour (juce::Colour::fromRGB (32, 32, 36));
-    g.fillRect (0, 0, kLeftAxisWidth, getHeight());
+    if (axisOnRight())
+        g.fillRect (getWidth() - kLeftAxisWidth, 0, kLeftAxisWidth, getHeight());
+    else
+        g.fillRect (0, 0, kLeftAxisWidth, getHeight());
     drawFrequencyRuler (g);
     drawTimeRuler (g);
 
@@ -1192,12 +1205,14 @@ void SpectralView::paint (juce::Graphics& g)
     if (haveZoomRect && dragMode == DragMode::ZoomDrag)
     {
         auto zr = zoomRect;
-        const bool startOnAxis  = dragStartX < kLeftAxisWidth;
-        const bool startOnRuler = !startOnAxis && dragStartY < rulerH();
+        const bool startOnAxis  = onAxisX (dragStartX);
+        const bool startOnRuler = !startOnAxis && onRulerY (dragStartY);
         if (startOnAxis)
-            zr = juce::Rectangle<int> (0, zr.getY(), kLeftAxisWidth, zr.getHeight());
+            zr = juce::Rectangle<int> (axisOnRight() ? getWidth() - kLeftAxisWidth : 0,
+                                       zr.getY(), kLeftAxisWidth, zr.getHeight());
         else if (startOnRuler)
-            zr = juce::Rectangle<int> (zr.getX(), 0, zr.getWidth(), rulerH());
+            zr = juce::Rectangle<int> (zr.getX(), rulerAtBottom() ? getHeight() - kRulerH : 0,
+                                       zr.getWidth(), rulerH());
 
         g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
         g.fillRect (zr);
@@ -1273,9 +1288,17 @@ void SpectralView::drawTimeRuler (juce::Graphics& g)
     if (w <= 0 || pr.getWidth() <= 0 || rulerH() <= 0)
         return;
 
+    // The ruler strip sits at the top by default or at the bottom when moved
+    // there via the View menu; ticks point from the plot edge into it.
+    // Relative to the plot rect so offscreen exports lay out identically.
+    const int rulerTop = rulerAtBottom() ? pr.getBottom() : pr.getY() - kRulerH;
+    const float sepY   = rulerAtBottom() ? (float) (rulerTop + 1) : (float) (pr.getY() - 1);
+    const float tickEnd   = rulerAtBottom() ? sepY + 7.0f : sepY - 7.0f;
+    const float minorEnd  = rulerAtBottom() ? sepY + 3.0f : sepY - 3.0f;
+
     // Opaque background so the labels stay readable over the spectrum.
     g.setColour (juce::Colour::fromRGB (32, 32, 36));
-    g.fillRect (pr.getX(), 0, pr.getWidth(), rulerH());
+    g.fillRect (pr.getX(), rulerTop, pr.getWidth(), rulerH());
 
     // Ticks are placed at nice values of the DISPLAYED axis: seconds for
     // Time/TimeOffset, sample counts for Sample.
@@ -1305,7 +1328,7 @@ void SpectralView::drawTimeRuler (juce::Graphics& g)
     const bool showMinors = majorPx >= 40.0;
 
     g.setColour (juce::Colour::fromRGB (60, 60, 60));
-    g.drawLine ((float) pr.getX(), rulerH() - 1, (float) pr.getRight(), rulerH() - 1, 1.0f);
+    g.drawLine ((float) pr.getX(), sepY, (float) pr.getRight(), sepY, 1.0f);
 
     const double first = std::ceil (dispStart / major) * major;
     if (first > dispEnd + 1e-9)
@@ -1322,14 +1345,15 @@ void SpectralView::drawTimeRuler (juce::Graphics& g)
         const float x = timeToX (t);
 
         g.setColour (juce::Colour::fromRGB (60, 60, 60));
-        g.drawLine (x, rulerH() - 8, x, rulerH() - 1, 1.0f);
+        g.drawLine (x, std::min (sepY, tickEnd), x, std::max (sepY, tickEnd), 1.0f);
 
         if (showMinors)
             for (int j = 1; j < 5; ++j)
             {
                 const double tm = dispToTime (d + (double) j * major / 5.0);
                 if (tm > viewEnd + 1e-9 || tm < viewStart - 1e-9) break;
-                g.drawLine (timeToX (tm), rulerH() - 4, timeToX (tm), rulerH() - 1, 1.0f);
+                g.drawLine (timeToX (tm), std::min (sepY, minorEnd),
+                            timeToX (tm), std::max (sepY, minorEnd), 1.0f);
             }
 
         juce::String label;
@@ -1341,7 +1365,7 @@ void SpectralView::drawTimeRuler (juce::Graphics& g)
         }
 
         g.setColour (juce::Colour::fromRGB (200, 200, 200));
-        g.drawText (label, (int) x + 3, 2, 90, rulerH() - 4,
+        g.drawText (label, (int) x + 3, rulerTop + 2, 90, rulerH() - 4,
                     juce::Justification::centredLeft, false);
     }
 }
@@ -1386,9 +1410,14 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
         auto drawTickAndLabel = [&](double f, bool minor = false, bool withLabel = true)
         {
             const float y = (float) rr.getY() + freqToY (f, rr.getHeight());
+            // Grid line spans the plot only; labels sit in the axis strip on
+            // whichever side it is placed.
+            const float tickX0 = axisOnRight() ? 0.0f : (float) kLeftAxisWidth;
+            const float tickX1 = axisOnRight() ? (float) (layoutWidth() - kLeftAxisWidth)
+                                               : (float) layoutWidth();
             g.setColour (minor ? juce::Colour::fromRGB (48, 48, 52)
                                : juce::Colour::fromRGB (60, 60, 60));
-            g.drawLine ((float) kLeftAxisWidth, y, (float) layoutWidth(), y, 1.0f);
+            g.drawLine (tickX0, y, tickX1, y, 1.0f);
             if (!showLabels || !withLabel) return;
             if (hasChanLabel && std::abs (y - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
                 return; // room for the channel label
@@ -1400,8 +1429,10 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
             g.setColour (minor ? juce::Colour::fromRGB (130, 130, 138)
                                : juce::Colour::fromRGB (200, 200, 200));
             const double factor = (app.specFreqScaleMode == 1) ? app.specFreqFactor : 1.0;
-            g.drawText (formatFreqAxisLabel (f, factor), 4, (int) y - 12,
-                        kLeftAxisWidth - 6, 12, juce::Justification::bottomLeft, false);
+            g.drawText (formatFreqAxisLabel (f, factor),
+                       axisOnRight() ? layoutWidth() - kLeftAxisWidth + 2 : 4,
+                       (int) y - 12, kLeftAxisWidth - 6, 12,
+                       juce::Justification::bottomLeft, false);
         };
 
         if (settings_.logFrequency)
@@ -1764,8 +1795,15 @@ void SpectralView::drawChannelLabels (juce::Graphics& g)
         const auto& rr = rows[r];
         const juce::String lab = (app.audioEngine().numChannels() == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
         g.setColour (juce::Colour::fromRGB (190, 190, 190));
-        g.drawText (lab, 4, rr.getY() + rr.getHeight() / 2 - 8, kLeftAxisWidth - 6, 16,
-                   juce::Justification::centredRight, false);
+        if (axisOnRight())
+            // Right edge of the axis strip: keeps the channel label clear of
+            // the frequency tick labels that start at its left edge.
+            g.drawText (lab, layoutWidth() - kLeftAxisWidth + 4,
+                        rr.getY() + rr.getHeight() / 2 - 8, kLeftAxisWidth - 6, 16,
+                        juce::Justification::centredRight, false);
+        else
+            g.drawText (lab, 4, rr.getY() + rr.getHeight() / 2 - 8, kLeftAxisWidth - 6, 16,
+                       juce::Justification::centredRight, false);
     }
 }
 
@@ -2007,8 +2045,9 @@ void SpectralView::drawSpectralShapes (juce::Graphics& g,
     if (selMask.size() < totalPx) selMask.assign (totalPx, 0);
     std::fill (selMask.begin(), selMask.begin() + totalPx, 0);
 
-    const int plotX = kLeftAxisWidth;
-    const int plotRight = W - 1;
+    // The mask covers the plot only; a right-placed axis keeps its strip out.
+    const int plotX = axisOnRight() ? 0 : kLeftAxisWidth;
+    const int plotRight = axisOnRight() ? W - kLeftAxisWidth - 1 : W - 1;
 
     for (const auto& row : rows)
     {

@@ -128,8 +128,8 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     dragStartTime = xToTime (e.x);
 
     const bool leftOnAxis = e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
-                            && !e.mods.isMiddleButtonDown() && e.x < kLeftAxisWidth;
-    const bool onTimeRuler = e.y < kRulerH;
+                            && !e.mods.isMiddleButtonDown() && onAxisX (e.x);
+    const bool onTimeRuler = onRulerY (e.y);
 
     if (!leftOnAxis)
     {
@@ -242,9 +242,10 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
     {
         if (!haveZoomRect)
         {
-            // Right-clicking the left amplitude axis makes "Zoom Out Full"
-            // reset the vertical range instead of the time window.
-            const bool onAxis = dragStartX < kLeftAxisWidth;
+            // Right-clicking the amplitude axis (left or right) makes
+            // "Zoom Out Full" reset the vertical range instead of the time
+            // window.
+            const bool onAxis = onAxisX (dragStartX);
             // Only show the menu when there is something to do with it: an
             // external action callback, or a local axis reset. (Headless test
             // views have neither and must not enter a modal loop.)
@@ -260,10 +261,10 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
             // The drag START position selects which axes get zoomed:
             //  - inside the plot ("the track"): BOTH axes — time from the box's
             //    x span, amplitude from its y span;
-            //  - on the left amplitude axis: vertical only;
-            //  - on the top time ruler: horizontal only.
-            const bool startOnAxis  = dragStartX < kLeftAxisWidth;
-            const bool startOnRuler = !startOnAxis && dragStartY < kRulerH;
+            //  - on the amplitude axis: vertical only;
+            //  - on the time ruler: horizontal only.
+            const bool startOnAxis  = onAxisX (dragStartX);
+            const bool startOnRuler = !startOnAxis && onRulerY (dragStartY);
 
             auto zoomTime = [this] ()
             {
@@ -425,9 +426,9 @@ void WaveformView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
     if (!app.audioEngine().isFileLoaded()) return;
     const double factor = wheel.deltaY > 0 ? 1.2 : (1.0 / 1.2);
 
-    // Wheel over the left amplitude axis (or Shift+wheel anywhere) zooms vertically;
-    // otherwise it zooms in time around the cursor.
-    if (e.mods.isShiftDown() || e.x < kLeftAxisWidth)
+    // Wheel over the amplitude axis (left or right, or Shift+wheel anywhere)
+    // zooms vertically; otherwise it zooms in time around the cursor.
+    if (e.mods.isShiftDown() || onAxisX (e.x))
         zoomVerticalBy (factor);
     else
         zoomAtX (e.x, factor); // notifies via setWindow()
@@ -572,8 +573,14 @@ void WaveformView::paint (juce::Graphics& g)
         const juce::String lab = (chans == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
         g.setFont (10.0f);
         g.setColour (juce::Colour::fromRGB (190, 190, 190));
-        g.drawText (lab, 2, (int) center - 8, kLeftAxisWidth - 4, 16,
-                   juce::Justification::centredRight, false);
+        if (axisOnRight())
+            // Right edge of the axis strip: keeps the channel label clear of
+            // the dB tick labels that start at its left edge.
+            g.drawText (lab, getWidth() - kLeftAxisWidth + 4, (int) center - 8,
+                       kLeftAxisWidth - 6, 16, juce::Justification::centredRight, false);
+        else
+            g.drawText (lab, 2, (int) center - 8, kLeftAxisWidth - 4, 16,
+                       juce::Justification::centredRight, false);
         ++row;
     }
 
@@ -614,17 +621,22 @@ void WaveformView::paint (juce::Graphics& g)
             const double x = timeToX (m.start);
             if (x < -50 || x > getWidth() + 50)
                 continue;
+            // The range bracket sits at the ruler edge: just below the top
+            // ruler by default, or just above the bottom ruler when it is
+            // moved there (View menu).
+            const float brY = rulerAtBottom() ? pr.getBottom() - 14.0f : pr.getY() + 6.0f;
             g.setColour (m.colour.withAlpha (0.8f));
             if (m.end < 0)
             {
-                g.drawVerticalLine ((int) x, (float) kRulerH, (float) getHeight());
+                g.drawVerticalLine ((int) x, (float) pr.getY(), (float) pr.getBottom());
             }
             else
             {
                 const double x2 = timeToX (m.end);
-                g.drawLine ((float) x, (float) kRulerH + 6, (float) x2, (float) kRulerH + 6, 2.0f);
-                g.drawLine ((float) x, (float) kRulerH + 6, (float) x, getHeight(), 1.0f);
-                g.drawLine ((float) x2, (float) kRulerH + 6, (float) x2, getHeight(), 1.0f);
+                const float vEnd = rulerAtBottom() ? (float) pr.getY() : (float) pr.getBottom();
+                g.drawLine ((float) x, brY, (float) x2, brY, 2.0f);
+                g.drawLine ((float) x, brY, (float) x, vEnd, 1.0f);
+                g.drawLine ((float) x2, brY, (float) x2, vEnd, 1.0f);
             }
             // Title: may run past this marker's own range, but must stop
             // before the next marker starts so that marker's title has room.
@@ -635,8 +647,9 @@ void WaveformView::paint (juce::Graphics& g)
                 ? timeToX (ms[i + 1].start) - 2.0
                 : (double) getWidth() + 50.0;
             const double w = std::max (0.0, rightEdge - textX);
+            const int titleY = rulerAtBottom() ? pr.getBottom() - 20 : pr.getY() + 8;
             if (w > 0.0)
-                g.drawText (m.name, (int) textX, kRulerH + 8, (int) w, 14,
+                g.drawText (m.name, (int) textX, titleY, (int) w, 14,
                             juce::Justification::topLeft, true);
         }
     }
@@ -653,11 +666,23 @@ void WaveformView::paint (juce::Graphics& g)
         const int pxI = (int) std::lround (px);
         g.setColour (juce::Colour::fromRGB (255, 60, 60));
         g.drawVerticalLine (pxI, 0.0f, (float) bounds.getHeight());
-        juce::Path tri;
-        tri.addTriangle ((float) pxI - 4.5f, (float) kRulerH,
-                         (float) pxI + 5.5f, (float) kRulerH,
-                         (float) pxI + 0.5f, 0.0f);
-        g.fillPath (tri);
+        // The arrow sits on the ruler edge and points into the plot: down
+        // from the top ruler by default, up from the bottom ruler when it is
+        // moved there. With no ruler in this view (stacked dual view with a
+        // bottom ruler) only the plain line is drawn.
+        if (showTimeRuler)
+        {
+            juce::Path tri;
+            if (rulerAtBottom())
+                tri.addTriangle ((float) pxI - 4.5f, (float) pr.getBottom(),
+                                 (float) pxI + 5.5f, (float) pr.getBottom(),
+                                 (float) pxI + 0.5f, (float) pr.getY());
+            else
+                tri.addTriangle ((float) pxI - 4.5f, (float) kRulerH,
+                                 (float) pxI + 5.5f, (float) kRulerH,
+                                 (float) pxI + 0.5f, 0.0f);
+            g.fillPath (tri);
+        }
     }
 
     // Right-drag box-zoom rubber band: the same translucent blue as the
@@ -668,12 +693,14 @@ void WaveformView::paint (juce::Graphics& g)
     if (haveZoomRect && dragMode == DragMode::ZoomDrag)
     {
         auto zr = zoomRect;
-        const bool startOnAxis  = dragStartX < kLeftAxisWidth;
-        const bool startOnRuler = !startOnAxis && dragStartY < kRulerH;
+        const bool startOnAxis  = onAxisX (dragStartX);
+        const bool startOnRuler = !startOnAxis && onRulerY (dragStartY);
         if (startOnAxis)
-            zr = juce::Rectangle<int> (0, zr.getY(), kLeftAxisWidth, zr.getHeight());
+            zr = juce::Rectangle<int> (axisOnRight() ? getWidth() - kLeftAxisWidth : 0,
+                                       zr.getY(), kLeftAxisWidth, zr.getHeight());
         else if (startOnRuler)
-            zr = juce::Rectangle<int> (zr.getX(), 0, zr.getWidth(), kRulerH);
+            zr = juce::Rectangle<int> (zr.getX(), rulerAtBottom() ? getHeight() - kRulerH : 0,
+                                       zr.getWidth(), kRulerH);
 
         g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
         g.fillRect (zr);
@@ -815,6 +842,12 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
     static const double levels[] = { 0.0, -6.0, -12.0, -18.0, -24.0 };
     const ScaleCalibration& sc = app.scale();
 
+    // Label placement follows the axis side: right-aligned against the plot
+    // edge on a left axis, left-aligned on a right one.
+    const int labX = axisOnRight() ? getWidth() - kLeftAxisWidth + 2 : 2;
+    const juce::Justification labJ = axisOnRight() ? juce::Justification::centredLeft
+                                                   : juce::Justification::centredRight;
+
     for (size_t r = 0; r < rows.size(); ++r)
     {
         const auto& rr = rows[r];
@@ -853,8 +886,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
                     const int chUp = (r < rowChans.size()) ? rowChans[r] : -1;
                     g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, true, chUp),
-                               2, (int) yUp - 7,
-                               kLeftAxisWidth - 4, 14, juce::Justification::centredRight, false);
+                               labX, (int) yUp - 7,
+                               kLeftAxisWidth - 4, 14, labJ, false);
                 }
 
                 // Lower side label (value -a below the centre line)
@@ -865,8 +898,8 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
                     const int chDn = (r < rowChans.size()) ? rowChans[r] : -1;
                     g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, false, chDn),
-                               2, (int) yDown - 7,
-                               kLeftAxisWidth - 4, 14, juce::Justification::centredRight, false);
+                               labX, (int) yDown - 7,
+                               kLeftAxisWidth - 4, 14, labJ, false);
                 }
             }
         }
@@ -875,8 +908,10 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
     // Axis title
     g.setFont (9.0f);
     g.setColour (juce::Colour::fromRGB (150, 150, 150));
-    g.drawText (waveVScaleTitle (app.waveVScaleMode, sc), 2, pr.getY() + 2,
-               kLeftAxisWidth - 4, 12, juce::Justification::centredLeft, false);
+    g.drawText (waveVScaleTitle (app.waveVScaleMode, sc), labX, pr.getY() + 2,
+               kLeftAxisWidth - 4, 12,
+               axisOnRight() ? juce::Justification::centredRight
+                             : juce::Justification::centredLeft, false);
 }
 
 // ---------------------------------------------------------------- time axis
@@ -1200,6 +1235,7 @@ juce::String formatTimeTickLabel (double t, double step, double span)
 
 void WaveformView::drawRuler (juce::Graphics& g)
 {
+    if (!showTimeRuler) return;   // stacked dual view: the other view draws it
     const auto pr = plotRect();
     const double w = viewEnd - viewStart;
     if (w <= 0 || pr.getWidth() <= 0)
@@ -1233,8 +1269,15 @@ void WaveformView::drawRuler (juce::Graphics& g)
                            ? (major / rate) * pxPerSec : major * pxPerSec;
     const bool showMinors = majorPx >= 40.0;
 
+    // The ruler strip sits at the top by default or at the bottom when moved
+    // there via the View menu; ticks point from the plot edge into it.
+    const int rulerTop = rulerAtBottom() ? pr.getBottom() : pr.getY() - kRulerH;
+    const float sepY   = rulerAtBottom() ? (float) (rulerTop + 1) : (float) (pr.getY() - 1);
+    const float tickEnd   = rulerAtBottom() ? sepY + 7.0f : sepY - 7.0f;
+    const float minorEnd  = rulerAtBottom() ? sepY + 3.0f : sepY - 3.0f;
+
     g.setColour (juce::Colour::fromRGB (60, 60, 60));
-    g.drawLine ((float) pr.getX(), kRulerH - 1, (float) pr.getRight(), kRulerH - 1, 1.0f);
+    g.drawLine ((float) pr.getX(), sepY, (float) pr.getRight(), sepY, 1.0f);
 
     const double first = std::ceil (dispStart / major) * major;
     if (first > dispEnd + 1e-9)
@@ -1251,7 +1294,7 @@ void WaveformView::drawRuler (juce::Graphics& g)
         const float x = timeToX (t);
 
         g.setColour (juce::Colour::fromRGB (60, 60, 60));
-        g.drawLine (x, kRulerH - 8, x, kRulerH - 1, 1.0f);
+        g.drawLine (x, std::min (sepY, tickEnd), x, std::max (sepY, tickEnd), 1.0f);
 
         if (showMinors)
             for (int j = 1; j < 5; ++j)
@@ -1259,7 +1302,8 @@ void WaveformView::drawRuler (juce::Graphics& g)
                 const double dm = d + (double) j * major / 5.0;
                 const double tm = dispToTime (dm);
                 if (tm > viewEnd + 1e-9 || tm < viewStart - 1e-9) break;
-                g.drawLine (timeToX (tm), kRulerH - 4, timeToX (tm), kRulerH - 1, 1.0f);
+                g.drawLine (timeToX (tm), std::min (sepY, minorEnd),
+                            timeToX (tm), std::max (sepY, minorEnd), 1.0f);
             }
 
         juce::String label;
@@ -1271,7 +1315,7 @@ void WaveformView::drawRuler (juce::Graphics& g)
         }
 
         g.setColour (juce::Colour::fromRGB (200, 200, 200));
-        g.drawText (label, (int) x + 3, 2, 90, kRulerH - 4,
+        g.drawText (label, (int) x + 3, rulerTop + 2, 90, kRulerH - 4,
                     juce::Justification::centredLeft, false);
     }
 }

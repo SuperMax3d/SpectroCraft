@@ -1,6 +1,6 @@
 #pragma once
 // SpectroCraft - Waveform view component (own time window + vertical zoom,
-// left amplitude axis, top time ruler)
+// amplitude axis on the left or right, time ruler at the top or bottom)
 #include <JuceHeader.h>
 #include "Application.h"
 #include "MarkerManager.h"
@@ -135,10 +135,53 @@ public:
     double xToTime (int x) const;
     double timeToX (double t) const;
 
+    // Axis/ruler placement (View menu): the vertical axis sits on the left by
+    // default and can be moved to the right; the time ruler sits at the top
+    // by default and can be moved to the bottom. Both apply to both tracks.
+    bool axisOnRight() const { return app.settings.trackAxisOnRight; }
+    bool rulerAtBottom() const { return app.settings.trackRulerAtBottom; }
+    // When both views are stacked only one of them draws the shared time
+    // ruler: the top view when it is at the top, the bottom view (the
+    // spectrogram) when it is at the bottom. The other hides its strip and
+    // expands into that space.
+    void setShowTimeRuler (bool show)
+    {
+        if (show != showTimeRuler) { showTimeRuler = show; repaint(); }
+    }
+    bool showsTimeRuler() const { return showTimeRuler; }
+    // Hit tests for the two chrome strips (full component height/width).
+    bool onAxisX (int x) const
+    {
+        return axisOnRight() ? x >= getWidth() - kLeftAxisWidth : x < kLeftAxisWidth;
+    }
+    bool onRulerY (int y) const
+    {
+        if (!showTimeRuler) return false;
+        return rulerAtBottom() ? y >= getHeight() - kRulerH : y < kRulerH;
+    }
+
+    juce::Rectangle<int> plotRect() const
+    {
+        // The axis strip always takes kLeftAxisWidth of horizontal space and
+        // the ruler strip kRulerH of vertical space; only their sides change
+        // with the View menu choices. When the ruler is hidden (stacked dual
+        // view), the plot fills the whole height.
+        const int x0 = axisOnRight() ? 0 : kLeftAxisWidth;
+        if (!showTimeRuler)
+            return { x0, 0,
+                     std::max (1, getWidth() - kLeftAxisWidth),
+                     std::max (1, getHeight()) };
+        const int ruY = rulerAtBottom() ? 0 : kRulerH;
+        return { x0, ruY,
+                 std::max (1, getWidth() - kLeftAxisWidth),
+                 std::max (1, getHeight() - kRulerH) };
+    }
+
     static constexpr int kRulerH = 24;  // top time ruler height
 
 private:
     Application& app;   // audio data read live via app.audioEngine() (active doc)
+    bool showTimeRuler = true;   // stacked dual view: only one view draws it
     double viewStart = 0, viewEnd = 10, vZoom = 1;
     double vOffset = 0;   // amplitude value at each row's centre (vertical pan)
     juce::Range<double> selection{ 0, 0 };
@@ -156,13 +199,6 @@ private:
     int panLastX = 0;   // last delivered cursor x during time panning
     juce::Rectangle<int> zoomRect;   // right-drag box-zoom rubber band
     bool haveZoomRect = false;
-
-    juce::Rectangle<int> plotRect() const
-    {
-        return { kLeftAxisWidth, kRulerH,
-                 std::max (1, getWidth() - kLeftAxisWidth),
-                 std::max (1, getHeight() - kRulerH) };
-    }
 
     // Single path for all time-window changes: updates state and notifies
     // MainWindow with the new range.

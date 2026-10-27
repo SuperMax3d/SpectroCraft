@@ -86,6 +86,7 @@ public:
     double spectralFreqMin()   const { return spectralView->getFreqMin(); }
     double spectralFreqMax()   const { return spectralView->getFreqMax(); }
     SpectralView* spectralViewComp() { return spectralView.get (); }
+    WaveformView* waveformViewComp() { return waveformView.get (); }
     void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
     void refreshAfterEdit();   // clamp ranges, repaint waveform, re-render spectral image
     /** Applies a destructive edit (`edit` returns false and fills errOut on
@@ -272,6 +273,8 @@ public:
         ViewVerticalZoomIn,
         ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels,
         ViewShowLeftPanels,   // hide/show the whole left panel column
+        ViewAxisOnRight,      // vertical axis on the right of both track views
+        ViewRulerAtBottom,    // time ruler at the bottom of both track views
         ViewColourMap,
         SelectionToolTimeRange = 3500, SelectionToolMarquee, SelectionToolLasso,
         SelectionToolPaintbrush, SelectionClear, SelectionBrushSmaller,

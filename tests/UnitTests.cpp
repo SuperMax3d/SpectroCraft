@@ -15172,6 +15172,157 @@ static void testLeftPanelsToggleShortcut()
     wav.deleteFile();
 }
 
+// ---------------- Ctrl+0: Zoom Out Full resets both axes --------------------
+
+static void testCtrl0ZoomOutFull()
+{
+    const juce::File wav = makeTempFile ("ctrl0_zoom_out_full.wav");
+    writeWav (wav, 2, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (ch == 0 ? 300.0 : 700.0) * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open for ctrl+0 zoom out full test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "ctrl0 zoom out full"));
+
+    const double dur = app.audioEngine().duration();
+    const double nyq = 0.5 * app.audioEngine().sampleRate();
+    const double defAmpHalf = 1.0 / 0.9;   // getVisibleAmpHalf() at vZoom == 1
+    const double defFLo = std::max (1.0, (double) app.settings.minFrequency);
+    const double defFHi = std::min (nyq, (double) app.settings.maxFrequency);
+
+    // Zoom in on the time axis and both vertical axes via their shortcuts.
+    CHECK (win->keyPressed (juce::KeyPress ('=', juce::ModifierKeys::commandModifier, 0), nullptr),
+          "ctrl+= zooms in horizontally");
+    CHECK (win->keyPressed (juce::KeyPress ('>', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0), nullptr),
+          "ctrl+shift+= zooms in vertically on both views");
+
+    const bool timeZoomed = app.viewStart > 1e-9 || app.viewEnd < dur - 1e-9;
+    const bool waveZoomed = win->waveformAmpHalf() < defAmpHalf - 1e-9;
+    const bool specZoomed = win->spectralFreqMin() > defFLo + 1e-9
+                          || win->spectralFreqMax() < defFHi - 1e-9;
+    CHECK (timeZoomed && waveZoomed && specZoomed, "all three axes are zoomed in before ctrl+0");
+
+    // Ctrl+0 = Zoom Out Full: resets the shared time window AND both views'
+    // vertical ranges back to their defaults.
+    CHECK (win->keyPressed (juce::KeyPress ('0', juce::ModifierKeys::commandModifier, 0), nullptr),
+          "ctrl+0 is consumed");
+    CHECK (std::abs (app.viewStart) < 1e-9 && std::abs (app.viewEnd - dur) < 1e-9,
+          "time window back to the full file");
+    CHECK (std::abs (win->waveformAmpHalf() - defAmpHalf) < 1e-9, "waveform amplitude zoom reset");
+    CHECK (std::abs (win->spectralFreqMin() - defFLo) < 1e-9
+        && std::abs (win->spectralFreqMax() - defFHi) < 1e-9, "spectral frequency range reset");
+
+    wav.deleteFile();
+}
+
+// ---------------- View menu: axis on right / ruler at bottom (persisted) -----
+
+static void testTrackAxisPlacement()
+{
+    const juce::File wav = makeTempFile ("track_axis_placement.wav");
+    writeWav (wav, 2, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (ch == 0 ? 300.0 : 700.0) * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open for track axis placement test");
+
+    // --- plotRect follows the two flags in both views ----------------------
+    WaveformView wv (app);
+    wv.setSize (400, 300);
+    SpectralView sv (app);
+    sv.setSize (400, 300);
+
+    CHECK (wv.plotRect() == juce::Rectangle<int> (60, 24, 340, 276), "waveform default plot");
+    CHECK (sv.plotRect() == juce::Rectangle<int> (60, 24, 340, 276), "spectral default plot");
+
+    app.settings.trackAxisOnRight = true;
+    // The axis strip is reserved on the right: data stops at its left edge.
+    CHECK (wv.plotRect() == juce::Rectangle<int> (0, 24, 340, 276), "waveform axis-right plot");
+    CHECK (sv.plotRect() == juce::Rectangle<int> (0, 24, 340, 276), "spectral axis-right plot");
+
+    app.settings.trackRulerAtBottom = true;
+    // The ruler strip still takes its height; only the side changes.
+    CHECK (wv.plotRect() == juce::Rectangle<int> (0, 0, 340, 276), "waveform both-moved plot");
+    CHECK (sv.plotRect() == juce::Rectangle<int> (0, 0, 340, 276), "spectral both-moved plot");
+
+    // --- hit tests follow the placement -------------------------------------
+    CHECK (!wv.onAxisX (10) && wv.onAxisX (395), "waveform axis-right hit test");
+    CHECK (!wv.onRulerY (10) && wv.onRulerY (295), "waveform ruler-bottom hit test");
+
+    app.settings.trackAxisOnRight = false;
+    app.settings.trackRulerAtBottom = false;
+    CHECK (wv.onAxisX (10) && !wv.onAxisX (395), "waveform axis-left hit test");
+    CHECK (wv.onRulerY (10) && !wv.onRulerY (295), "waveform ruler-top hit test");
+
+    // A stacked spectral view keeps its own ruler hidden in both placements.
+    sv.setShowOwnTimeRuler (false);
+    app.settings.trackRulerAtBottom = true;
+    CHECK (!sv.onRulerY (10) && !sv.onRulerY (295), "stacked spectral has no ruler strip");
+    CHECK (sv.plotRect().getY() == 0, "stacked spectral plot starts at the top");
+
+    // --- persistence: samePersistent notices both flags ---------------------
+    const Settings base = app.settings;
+    CHECK (app.settings.samePersistent (base), "unchanged settings compare equal");
+    app.settings.trackAxisOnRight = true;
+    CHECK (!app.settings.samePersistent (base), "axis flag change is persistent-dirty");
+    app.settings.trackRulerAtBottom = false;
+    CHECK (!app.settings.samePersistent (base), "ruler flag change is persistent-dirty");
+
+    // --- View menu: two checkable items; clicking toggles the settings ------
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "track axis placement"));
+    const juce::PopupMenu viewMenu = win->getMenuForIndex (3, "View");
+    CHECK (viewMenu.getNumItems() == 16, "View menu item count with stereo file");
+
+    app.settings.trackAxisOnRight = false;
+    app.settings.trackRulerAtBottom = false;
+    win->menuItemSelected (MainWindow::MenuIDs::ViewAxisOnRight, 3);
+    CHECK (app.settings.trackAxisOnRight && !app.settings.trackRulerAtBottom,
+          "menu toggles the axis placement");
+    win->menuItemSelected (MainWindow::MenuIDs::ViewRulerAtBottom, 3);
+    CHECK (app.settings.trackAxisOnRight && app.settings.trackRulerAtBottom,
+          "menu toggles the ruler placement");
+
+    // --- Stacked dual view: the bottom ruler moves to the spectrogram ------
+    {
+        WaveformView* wv2 = win->waveformViewComp();
+        SpectralView* sv2  = win->spectralViewComp();
+        CHECK (wv2 != nullptr && sv2 != nullptr, "both views reachable");
+
+        // Ruler at the bottom with both views visible: the spectrogram draws
+        // it and the waveform hides its strip, expanding to full height.
+        CHECK (!wv2->showsTimeRuler(), "waveform hides ruler when stacked with a bottom ruler");
+        CHECK (sv2->showsOwnTimeRuler(), "spectrogram shows ruler when stacked with a bottom ruler");
+        CHECK (wv2->plotRect().getY() == 0 && wv2->plotRect().getHeight() == wv2->getHeight(),
+              "waveform plot fills the height without its ruler");
+
+        // Back at the top: the waveform draws it again and the spectrogram hides.
+        win->menuItemSelected (MainWindow::MenuIDs::ViewRulerAtBottom, 3);
+        CHECK (!app.settings.trackRulerAtBottom, "ruler back at the top");
+        CHECK (wv2->showsTimeRuler(), "waveform shows ruler when stacked with a top ruler");
+        CHECK (!sv2->showsOwnTimeRuler(), "spectrogram hides ruler when stacked with a top ruler");
+
+        // A lone view always draws its own ruler, on either side.
+        win->menuItemSelected (MainWindow::MenuIDs::ViewShowSpectral, 3);
+        CHECK (!win->spectrogramVisible(), "spectrogram hidden");
+        CHECK (wv2->showsTimeRuler() && wv2->onRulerY (5), "lone waveform shows top ruler");
+        win->menuItemSelected (MainWindow::MenuIDs::ViewRulerAtBottom, 3);
+        CHECK (wv2->showsTimeRuler() && wv2->onRulerY (wv2->getHeight() - 5),
+              "lone waveform shows bottom ruler");
+
+        // Lone spectrogram: re-show it first, then hide the waveform.
+        win->menuItemSelected (MainWindow::MenuIDs::ViewShowSpectral, 3);
+        CHECK (win->spectrogramVisible(), "spectrogram shown again");
+        win->menuItemSelected (MainWindow::MenuIDs::ViewShowWaveform, 3);
+        CHECK (!win->waveformVisible(), "waveform hidden");
+        CHECK (sv2->showsOwnTimeRuler() && sv2->onRulerY (sv2->getHeight() - 5),
+              "lone spectrogram shows bottom ruler");
+    }
+
+    wav.deleteFile();
+}
+
 // ---------------- File > Spectrogram submenu: snapshot + export overlays -----
 
 // PNG signature + IHDR carry width/height as big-endian u32s at offsets 16..23:
@@ -15572,6 +15723,8 @@ static int scRunUnitTestsImpl()
     progress ("drawing panel");           testDrawingPanel();
     progress ("drawing key shortcuts");   testDrawingKeyShortcuts();
     progress ("left panels toggle shortcut"); testLeftPanelsToggleShortcut();
+    progress ("ctrl+0 zoom out full"); testCtrl0ZoomOutFull();
+    progress ("track axis placement"); testTrackAxisPlacement();
     progress ("spectrogram export options"); testSpectrogramExportOptions();
 
 

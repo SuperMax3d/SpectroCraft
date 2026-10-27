@@ -53,12 +53,13 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     level), computed in parallel on a `juce::ThreadPool`, LRU tile cache.
   - Own frequency axis (independent of the waveform view): log or linear scale,
     configurable min/max frequency, "Reset Freq" button, own vertical zoom via
-    wheel over the left frequency ruler.
+    wheel over the frequency axis strip (left or right).
   - Per-channel rows: when several channels are displayed each gets its own row
-    with **its own frequency axis** on the left; a 5 px dark gap separates the
-    rows (the same shared layout as the waveform view). Channel labels
-    ("L"/"R" for stereo, channel numbers otherwise) are drawn in the left axis
-    area of every row — even when only one channel is visible.
+    with **its own frequency axis**; a 5 px dark gap separates the rows (the
+    same shared layout as the waveform view). Channel labels ("L"/"R" for
+    stereo, channel numbers otherwise) are drawn in the axis strip of every
+    row — even when only one channel is visible — at its right edge when the
+    axis sits on the right so they never collide with the tick labels.
   - The waveform's dB amplitude axis is symmetric: negative dB values are shown
     on both sides of the centre line.
   - Bilinear smoothing between tiles/frames/bins — no blockiness.
@@ -329,9 +330,19 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - The View menu also has **Waveform View / Spectrogram View** visibility
     toggles; at least one view is always kept visible — hiding the last one is
     refused and the remaining view takes the whole main area.
+  - Track axis placement (both views at once, remembered between sessions):
+    **Vertical Axis on Right** moves the amplitude/frequency axis strip from
+    the left edge to the right edge of both track views (the data stops at its
+    left edge and the channel labels sit at the strip's right side), and
+    **Time Ruler at Bottom** moves the time ruler strip from the top to the
+    bottom. When both views are stacked, exactly one of them draws the shared
+    time ruler: the waveform when it is at the top, the spectrogram (the lower
+    view) when it is at the bottom — the other hides its strip and expands.
   - Main area: waveform view on top, spectral view below, separated by a
     **draggable divider** — drag it up/down to resize the two views. A time
-    scrollbar runs along the bottom; each view has its own vertical scrollbar.
+    scrollbar runs along the bottom, aligned with the data region (inset by
+    the axis strip on whichever side it is placed); each view has its own
+    vertical scrollbar.
   - Bottom status bar: left side shows the **name of the file currently in
     the views** (updated on open, when switching between loaded files and
     after closing; empty while no file is loaded) followed by a live cursor
@@ -954,7 +965,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | New drawing on the spectrogram: Text / Arrow / Rectangle / Free Drawing | T / A / R / D |
 | Cancel a pending drawing creation (otherwise clears the active spectral selection) | Esc |
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
-| Zoom to fit (both views) | Ctrl+0 |
+| Zoom Out Full — reset the time window and both vertical ranges (Zoom Fit is menu-only now) | Ctrl+0 |
 | Vertical zoom in / out (waveform amplitude + spectral frequency) | Ctrl+Shift+= / Ctrl+Shift+- |
 | Toggle a channel's visibility (like the View menu items); show ONLY that channel with Shift held | Ctrl+1..9 / Ctrl+Shift+1..9 |
 | Cycle view layout: both → waveform only → spectrogram only (reverse direction with Shift) | F9 / Shift+F9 |
@@ -1009,13 +1020,13 @@ Mouse (waveform *and* spectral views):
 |---|---|
 | Click | Move the playhead to that position in **both** views (selection drags start from it) |
 | Left-drag | Select a time range |
-| Left-drag on the left axis | **Vertical pan**: drag up/down to shift the amplitude window (waveform) or frequency window (spectral, log-aware). The content follows the cursor at half speed; panning against a range limit pins that edge and keeps the span. Does not move the playhead |
-| Left-drag on the top time ruler | Pan the shared time window at half cursor speed (same as middle-drag); does not create a selection |
+| Left-drag on the amplitude/frequency axis strip (left or right) | **Vertical pan**: drag up/down to shift the amplitude window (waveform) or frequency window (spectral, log-aware). The content follows the cursor at half speed; panning against a range limit pins that edge and keeps the span. Does not move the playhead |
+| Left-drag on the time ruler (top or bottom) | Pan the shared time window at half cursor speed (same as middle-drag); does not create a selection |
 | Middle-drag | Pan the shared time window (both views stay in sync). The content follows the cursor at half speed; panning against a file edge pins that edge, and reversing direction responds immediately (no dead zone) |
-| Right-drag a region | **Box zoom**: dragging on the track zooms **both** axes at once — time from the box's horizontal span, amplitude (waveform) or frequency (spectral) from its vertical span. Dragging that starts on an axis zooms only that axis: left axis → vertical range, top time ruler (waveform) → time range. A rubber-band rectangle is shown while dragging |
-| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete, plus a **Scale** submenu (time axis Time/Time Offset.../Sample; vertical axis Wav Units/dB/Normalized in the waveform, Hz/Custom... in the spectrogram; and Alternative Scale Time/Frequency submenus with named reference entries in both views). On the **left axis**, "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
+| Right-drag a region | **Box zoom**: dragging on the track zooms **both** axes at once — time from the box's horizontal span, amplitude (waveform) or frequency (spectral) from its vertical span. Dragging that starts on an axis zooms only that axis: the amplitude/frequency axis strip (left or right) → vertical range, the time ruler strip (top or bottom of whichever view draws it) → time range. A rubber-band rectangle is shown while dragging |
+| Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete, plus a **Scale** submenu (time axis Time/Time Offset.../Sample; vertical axis Wav Units/dB/Normalized in the waveform, Hz/Custom... in the spectrogram; and Alternative Scale Time/Frequency submenus with named reference entries in both views). On the **amplitude/frequency axis strip** (on either side), "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
 | Mouse wheel over the plot / time ruler | Horizontal zoom around the cursor (both views) |
-| Mouse wheel over the left axis (or Shift + wheel anywhere) | Vertical amplitude zoom (waveform) / frequency-range zoom around the cursor (spectral) — independent per view |
+| Mouse wheel over the amplitude/frequency axis strip (left or right; or Shift + wheel anywhere) | Vertical amplitude zoom (waveform) / frequency-range zoom around the cursor (spectral) — independent per view |
 | Drag the divider between the views | Resize waveform vs spectral area |
 | Double-click a marker (line/region) | Set the selection to that marker's range (both views) |
 | Double-click elsewhere | **Select the whole file** and fit it in both views |
@@ -1075,8 +1086,10 @@ across restarts.
   sample counts or clock text depending on the mode, while an alternative field
   inverts its reference (*value × ref / alt*). The fields are pre-filled with
   the current values at the playhead.
-- While both views are visible, the spectrogram hides its own (identical) time
-  ruler to save plot space; it reappears when only the spectrogram is shown.
+- While both views are stacked, exactly one of them draws the shared time
+  ruler: the waveform by default (ruler at the top), or the spectrogram when
+  **View > Time Ruler at Bottom** is set — the other view hides its strip and
+  expands into that space. A lone view always draws its own ruler.
 
 ### Spectral selections (Selection menu)
 
