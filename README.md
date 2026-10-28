@@ -523,10 +523,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   mode runs several descriptions in one pass with optional include/exclude time
   anchors. Runs an external prebuilt CLI — binary and model weights are
   downloaded on demand or installed manually.
-- **Split spectral selection** (`Effects → Split Spectral Selection`, enabled
+- **Split spectral selection** (`Effects → Split Spectral Selection (All Tracks)`, F12; enabled
   only while a spectral selection is active): moves the selected band content
   out of each visible source channel into one new appended channel per source
-  channel. The blend is trapezoidal (25% linear ramp at each band edge, full
+  channel. The `Split Spectral Selection (Track 1->2)` item (Shift+F12) does
+  the same for track 1 only and mixes the result into track 2 instead of
+  appending a channel. The blend is trapezoidal (25% linear ramp at each band edge, full
   weight across the middle), and where energy is removed the original channels
   are refilled with synthetic noise at the per-frame estimated floor level —
   so *original + new track* reconstructs the pre-edit signal with no hard
@@ -1142,6 +1144,8 @@ The test executable accepts the same flags (useful for CI without a display).
 | Save Spectrogram As... (PNG of the current spectrogram content) | Ctrl+Shift+E |
 | Take Snapshot (timestamped PNG saved next to the WAV file) | Ctrl+Shift+F |
 | Resample... (Edit menu, own section: new sample rate + optional channel remix) | F11 |
+| Split Spectral Selection (All Tracks) — needs an active spectral selection | F12 |
+| Split Spectral Selection (Track 1->2) — track 1's band mixed into track 2; needs an active spectral selection | Shift+F12 |
 | Toggle the left panels column (View > Left Panels) | Ctrl+Shift+Enter |
 
 Keyboard focus follows the mouse: clicking either view puts keyboard focus on
@@ -1319,6 +1323,14 @@ reconstructs the pre-edit signal — no hard spectral edge to hear or see.
 The whole operation (content change *and* channel-count change) is a single
 undoable step; undo restores the original channels bit-exact. New channels are
 made visible automatically.
+
+**Split Spectral Selection (Track 1->2)** (Shift+F12) applies the same
+processing to track 1 only, regardless of visibility, and writes the
+extracted band into track 2 instead of appending a channel: if the file has
+fewer than two channels it grows to exactly two; if track 2 already exists,
+the extracted content is mixed with what is already there. Track 1 receives
+the same noise-floor fill as in the all-tracks variant, and the operation is
+again a single undoable step.
 
 ### Selection panel (named selections + harmonic cloning)
 

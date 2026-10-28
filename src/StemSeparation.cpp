@@ -166,6 +166,8 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     startLbl_.setText ("Start (s)", juce::dontSendNotification);
     endLbl_.setFont (juce::FontOptions (13.0f));
     endLbl_.setText ("End (s)", juce::dontSendNotification);
+    modelLbl_.setFont (juce::FontOptions (13.0f));
+    modelLbl_.setText ("Model:", juce::dontSendNotification);
 
     for (auto* e : { &startEdit_, &endEdit_ })
     {
@@ -254,6 +256,7 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     juce::Component::addAndMakeVisible (&endLbl_);
     juce::Component::addAndMakeVisible (&endEdit_);
     juce::Component::addAndMakeVisible (&selectAllBtn_);
+    juce::Component::addAndMakeVisible (&modelLbl_);
     juce::Component::addAndMakeVisible (&modelCombo_);
     juce::Component::addAndMakeVisible (&backendCombo_);
     juce::Component::addAndMakeVisible (&extractOrigToggle_);
@@ -456,6 +459,7 @@ void StemSeparationWindow::resized()
     selectAllBtn_.setBounds (getWidth () - kMargin - 96, y.sourceRow, 96, 24);
 
     // Model row.
+    modelLbl_.setBounds (x, y.modelRow + 5, 48, 18);
     modelCombo_.setBounds (x + 56, y.modelRow, w - 56, 28);
 
     // Backend row: combo + extract-from-original toggle.

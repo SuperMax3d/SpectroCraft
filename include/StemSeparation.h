@@ -77,6 +77,7 @@ private:
     juce::Label startLbl_, endLbl_;
     juce::TextEditor startEdit_, endEdit_;
     juce::TextButton selectAllBtn_;
+    juce::Label modelLbl_;
     juce::ComboBox modelCombo_;
     juce::ComboBox backendCombo_;
     juce::ToggleButton extractOrigToggle_;

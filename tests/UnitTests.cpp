@@ -5302,14 +5302,14 @@ static void testStemSepWindowLayoutAndClose()
 
     // Every control must be laid out with a visible size. In simple mode the
     // advanced-only addDescBtn_, rowsHost_ and advancedHint_ stay at zero
-    // bounds, so of the 17 content children exactly 14 are visible (a
+    // bounds, so of the 18 content children exactly 15 are visible (a
     // non-native test peer adds two more internal minimise/close buttons,
     // which we ignore).
     int visible = 0;
     for (int i = 0; i < dlg->getNumChildComponents(); ++i)
         if (!dlg->getChildComponent (i)->getBounds().isEmpty())
             ++visible;
-    CHECK (dlg->getNumChildComponents() >= 17 && visible == 14,
+    CHECK (dlg->getNumChildComponents() >= 18 && visible == 15,
           "stem separation window lays out all its controls");
 
     // X button path: userTriedToCloseWindow must release ownership.
@@ -10745,9 +10745,9 @@ static void testSplitSpectralSelectionApp()
         std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
         const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 11, "Effects menu lists the split item");
+        CHECK (fxMenu.getNumItems() == 12, "Effects menu lists the split items");
 #else
-        CHECK (fxMenu.getNumItems() == 8, "Effects menu lists the split item");
+        CHECK (fxMenu.getNumItems() == 9, "Effects menu lists the split items");
 #endif
     }
     std::string err;
@@ -10796,6 +10796,105 @@ static void testSplitSpectralSelectionApp()
 
     app.redoStep ();
     CHECK (eng.numChannels () == 2, "redo re-applies the split");
+}
+
+static void testSplitSpectralSelectionTrack1To2App()
+{
+    const juce::File wav = makeTempFile ("split_sel_t12.wav");
+    CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened two-tone wav");
+    FileDoc* d = app.doc();
+    if (!d) return;
+    AudioEngine& eng = app.audioEngine ();
+
+    std::string err;
+    CHECK (!app.splitSpectralSelectionTrack1To2 (&err) && !err.empty (),
+          "t1->t2 split without a selection fails with a message");
+    CHECK (eng.numChannels () == 1, "failed split leaves the file untouched");
+
+    // With an active spectral selection: track 1's band goes to track 2.
+    d->spectralSel = lowBandSel ();
+    std::vector<float> before ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, before.data()), "read before");
+
+    CHECK (app.splitSpectralSelectionTrack1To2 (&err), "t1->t2 split applied: " + err);
+    CHECK (eng.numChannels () == 2, "file grew from 1 to 2 channels");
+    CHECK ((int) eng.numSamples () == (int) kToneFrames, "length unchanged");
+
+    std::vector<float> ch0 ((size_t) kToneFrames), ch1 ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, ch0.data()), "read ch0 after");
+    CHECK (eng.readSamples (1, 0, (int) kToneFrames, ch1.data()), "read ch1 after");
+
+    const float c0_500 = toneAmp (ch0, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float c0_3500 = toneAmp (ch0, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (c0_500 < 0.01f, "track 1 lost the selected tone");
+    CHECK (std::abs (c0_3500 - 0.5f) < 0.005f, "track 1 keeps the rest");
+
+    const float c1_500 = toneAmp (ch1, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float c1_3500 = toneAmp (ch1, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (std::abs (c1_500 - 0.5f) < 0.01f, "track 2 holds the selected tone");
+    CHECK (c1_3500 < 0.01f, "track 2 excludes the unselected tone");
+
+    // Track 2 is made visible.
+    CHECK (app.isChannelVisible (1), "track 2 becomes visible");
+
+    // One undoable step: undo restores one channel with the original content;
+    // redo re-applies the split.
+    CHECK (app.undo ().canUndo (), "t1->t2 split recorded in undo history");
+    app.undoStep ();
+    CHECK (eng.numChannels () == 1 && (int) eng.numSamples () == (int) kToneFrames,
+          "undo back to one channel, same length");
+    std::vector<float> undone ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, undone.data()), "read after undo");
+    bool bitExact = true;
+    for (size_t i = 0; i < before.size (); ++i)
+        if (undone[i] != before[i]) { bitExact = false; break; }
+    CHECK (bitExact, "undo restores the original content exactly");
+
+    app.redoStep ();
+    CHECK (eng.numChannels () == 2, "redo re-applies the t1->t2 split");
+}
+
+static void testSplitSpectralSelectionTrack1To2MixesIntoExisting()
+{
+    // Stereo: track 1 carries both tones, track 2 already has a 1000 Hz tone.
+    const juce::File wav = makeTempFile ("split_sel_t12_mix.wav");
+    CHECK (writeWav (wav, 2, kToneRate, kToneFrames,
+        [] (int ch, int64_t f, double rate) {
+            const double t = (double) f / rate;
+            if (ch == 0)
+                return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                               * 500.0 * t)
+                     + 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                               * 3500.0 * t);
+            return 0.3f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 1000.0 * t);
+        }), "wrote stereo mix wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened stereo mix wav");
+    FileDoc* d = app.doc();
+    if (!d) return;
+    AudioEngine& eng = app.audioEngine ();
+
+    d->spectralSel = lowBandSel ();
+    std::string err;
+    CHECK (app.splitSpectralSelectionTrack1To2 (&err), "t1->t2 mix applied: " + err);
+    CHECK (eng.numChannels () == 2, "channel count unchanged");
+
+    std::vector<float> ch0 ((size_t) kToneFrames), ch1 ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, ch0.data()), "read ch0 after");
+    CHECK (eng.readSamples (1, 0, (int) kToneFrames, ch1.data()), "read ch1 after");
+
+    const float c0_500 = toneAmp (ch0, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    CHECK (c0_500 < 0.01f, "track 1 lost the selected tone");
+
+    const float c1_500 = toneAmp (ch1, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float c1_1000 = toneAmp (ch1, 2048, (size_t) kToneFrames - 2048, 1000.0, kToneRate);
+    CHECK (std::abs (c1_500 - 0.5f) < 0.01f, "track 2 gained the selected tone");
+    CHECK (std::abs (c1_1000 - 0.3f) < 0.01f, "track 2 kept its original content");
 }
 
 // ------------------------------------------------- playback mask (streaming OLA)
@@ -15730,9 +15829,9 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 12, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 11, "Effects menu includes the split item");
+    CHECK (fxMenu.getNumItems() == 12, "Effects menu includes the split items");
 #else
-    CHECK (fxMenu.getNumItems() == 8, "Effects menu includes the split item");
+    CHECK (fxMenu.getNumItems() == 9, "Effects menu includes the split items");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -16527,6 +16626,8 @@ static int scRunUnitTestsImpl()
     progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
     progress ("extract masked A+B=orig");   testExtractMasked();
     progress ("split spectral selection (processor)");
+    testSplitSpectralSelectionTrack1To2App();
+    testSplitSpectralSelectionTrack1To2MixesIntoExisting();
     testSplitSpectralSelectionProcessor();
     progress ("split spectral selection (app + undo)");
     testSplitSpectralSelectionApp();

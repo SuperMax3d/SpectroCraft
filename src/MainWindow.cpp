@@ -2246,6 +2246,9 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsSplitSpectralSel:
             runDestructiveEdit ([&] (std::string* e) { return app.splitSpectralSelection (e); });
             break;
+        case ToolsSplitSpectralSelT12:
+            runDestructiveEdit ([&] (std::string* e) { return app.splitSpectralSelectionTrack1To2 (e); });
+            break;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         case ToolsNoiseSuppress: showNoiseSuppressDialog(); break;
         case ToolsTranscribe: showTranscribeDialog(); break;
@@ -4480,7 +4483,12 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         // content goes to the added track(s) with a soft 25%/50%/25% frequency
         // blend and noise-floor subtraction; the originals get noise fill at
         // the estimated floor level so nothing is hard-cut.
-        menu.addItem (ToolsSplitSpectralSel, "Split Spectral Selection",
+        menu.addItem (ToolsSplitSpectralSel, "Split Spectral Selection (All Tracks)\tF12",
+                      app.hasSpectralSelection(), false);
+        // Track 1 -> track 2 variant: only channel 0's band content is
+        // extracted and mixed into channel 1 (created if missing); track 1
+        // gets the noise-floor fill.
+        menu.addItem (ToolsSplitSpectralSelT12, "Split Spectral Selection (Track 1->2)\tShift+F12",
                       app.hasSpectralSelection(), false);
     }
     else if (menuName == "Window")
@@ -4583,6 +4591,16 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { takeSpectrogramSnapshot(); return true; }
     // F11 opens Edit > Resample... (no-op when no file is loaded).
     if (key.getKeyCode() == juce::KeyPress::F11Key) { showResampleDialog(); return true; }
+    // F12 splits the active spectral selection into new channel(s);
+    // Shift+F12 moves track 1's band content to track 2 instead.
+    if (key.getKeyCode() == juce::KeyPress::F12Key && app.hasSpectralSelection ())
+    {
+        const bool toTrack2 = key.getModifiers().isShiftDown ();
+        runDestructiveEdit ([&] (std::string* e)
+            { return toTrack2 ? app.splitSpectralSelectionTrack1To2 (e)
+                              : app.splitSpectralSelection (e); });
+        return true;
+    }
     // Ctrl+Shift+Enter toggles the left panel column.
     if (key == juce::KeyPress (juce::KeyPress::returnKey, juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { setLeftPanelsVisible (!leftPanelsVisible); return true; }
     if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }

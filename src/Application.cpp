@@ -2154,6 +2154,66 @@ bool Application::splitSpectralSelection (std::string* errOut)
     return true;
 }
 
+bool Application::splitSpectralSelectionTrack1To2 (std::string* errOut)
+{
+    auto fail = [errOut] (const juce::String& msg) {
+        if (errOut != nullptr) *errOut = msg.toStdString ();
+        return false;
+    };
+
+    auto* d = doc();
+    if (!d || d->spectralSel.empty ())
+        return fail ("No spectral selection is active.");
+
+    AudioEngine& eng = audioEngine ();
+    const int nch0 = eng.numChannels ();
+    if (nch0 < 1) return fail ("No audio loaded.");
+
+    const juce::Range<int64_t> range = spectralSelSamples (*this);
+    if (range.getLength () <= 0) return true;   // nothing to do
+
+    // The source is always channel 0 (track 1), regardless of visibility.
+    std::vector<int> srcChans { 0 };
+    std::vector<std::vector<float>> ext, res;
+    juce::Range<int64_t> extent;
+    if (!SpectralMask::splitSpectralSelection (eng, range, d->spectralSel,
+                                               &srcChans, ext, res, extent))
+        return fail ("Splitting the spectral selection failed.");
+    if (extent.getLength () <= 0) return true;   // no frames inside the selection
+
+    // The destination is channel 1 (track 2); grow to two channels if needed.
+    const int nch = std::max (nch0, 2);
+    const int64_t total = eng.numSamples ();
+    std::vector<std::vector<float>> newData ((size_t) nch,
+                                             std::vector<float> ((size_t) total, 0.0f));
+    for (int ch = 0; ch < nch0; ++ch)
+        if (!eng.readSamples (ch, 0, total, newData[(size_t) ch].data ()))
+            return fail ("Failed to read audio.");
+
+    // Track 1: replace the selected band with noise-floor fill.
+    const auto& r = res[(size_t) 0];
+    std::copy (r.begin (), r.end(),
+               newData[(size_t) 0].begin () + (size_t) extent.getStart());
+    // Track 2: mix in the extracted band content.
+    const auto& e = ext[(size_t) 0];
+    for (size_t i = 0; i < e.size (); ++i)
+        newData[(size_t) 1][(size_t) extent.getStart() + i] += e[i];
+
+    if (!eng.replaceWholeFileUndoable (newData,
+                                       "Split spectral selection track 1 to track 2"))
+        return fail ("Could not apply the split.");
+
+    // Make sure track 2 is visible (leave other choices alone).
+    if (!isChannelVisible (1))
+    {
+        visibleChannels.push_back (1);
+        std::sort (visibleChannels.begin (), visibleChannels.end());
+    }
+    syncActiveDoc ();
+
+    return true;
+}
+
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 bool Application::noiseSuppress (const std::string& modelId, const std::string& device,
                                  float attenLimDb, bool df3PostFilter,
