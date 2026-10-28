@@ -157,7 +157,33 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
       app_ (app),
       alive_ (std::make_shared<std::atomic<bool>> (true))
 {
-    selRangeLabel_.setFont (juce::FontOptions (13.0f));
+    // Use the OS title bar (like MainWindow and the other dialogs): it shows
+    // the "Stem Separation" title properly, while the JUCE-drawn fallback
+    // renders broken glyphs on some platforms.
+    setUsingNativeTitleBar (true);
+
+    startLbl_.setFont (juce::FontOptions (13.0f));
+    startLbl_.setText ("Start (s)", juce::dontSendNotification);
+    endLbl_.setFont (juce::FontOptions (13.0f));
+    endLbl_.setText ("End (s)", juce::dontSendNotification);
+
+    for (auto* e : { &startEdit_, &endEdit_ })
+    {
+        e->setMultiLine (false);
+        e->setColour (juce::CaretComponent::caretColourId, juce::Colours::white);
+    }
+
+    // Seed the range from the current track selection ONCE. Later changes to
+    // that selection must not update these fields: advanced mode needs stable
+    // per-run ranges for its include/exclude anchors.
+    {
+        const double dur = app_.audioEngine().isFileLoaded () ? app_.audioEngine().duration () : 0.0;
+        auto sel = app_.selection;
+        double s0 = 0.0, s1 = dur;
+        if (sel.getLength () > 0.0) { s0 = sel.getStart (); s1 = sel.getEnd (); }
+        startEdit_.setText (juce::String (s0, 3), juce::dontSendNotification);
+        endEdit_.setText (juce::String (s1, 3), juce::dontSendNotification);
+    }
 
     selectAllBtn_.setButtonText ("Select All");
     selectAllBtn_.onClick = [this] { doSelectAll (); };
@@ -197,6 +223,14 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     advancedBtn_.setButtonText ("Advanced...");
     advancedBtn_.onClick = [this] { setAdvanced (!advanced_); };
 
+    addDescBtn_.setButtonText ("Add Description...");
+    addDescBtn_.onClick = [this]
+    {
+        descs_.push_back (StemDescEntry {});
+        rebuildRows ();
+        setSize (kWinW, computeHeight ());
+    };
+
     advancedHint_.setFont (juce::FontOptions (11.5f));
     advancedHint_.setText ("Anchor times come from the track selection and are converted to the "
                            "extracted input's timeline when the run starts.", juce::dontSendNotification);
@@ -209,26 +243,33 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     runBtn_.setButtonText ("Run");
     runBtn_.onClick = [this] { startRun (); };
 
+    cancelBtn_.setButtonText ("Cancel");
+    cancelBtn_.onClick = [this] { userTriedToCloseWindow (); };
+
     // DocumentWindow inherits ResizableWindow, whose addAndMakeVisible() asserts;
     // call the base-class method explicitly to side-step it. (Must use
     // addAndMakeVisible - plain addChildComponent leaves the children invisible.)
-    juce::Component::addAndMakeVisible (&selRangeLabel_);
+    juce::Component::addAndMakeVisible (&startLbl_);
+    juce::Component::addAndMakeVisible (&startEdit_);
+    juce::Component::addAndMakeVisible (&endLbl_);
+    juce::Component::addAndMakeVisible (&endEdit_);
     juce::Component::addAndMakeVisible (&selectAllBtn_);
     juce::Component::addAndMakeVisible (&modelCombo_);
     juce::Component::addAndMakeVisible (&backendCombo_);
     juce::Component::addAndMakeVisible (&extractOrigToggle_);
     juce::Component::addAndMakeVisible (&descEdit_);
     juce::Component::addAndMakeVisible (&advancedBtn_);
+    juce::Component::addAndMakeVisible (&addDescBtn_);
     juce::Component::addAndMakeVisible (&rowsHost_);
     juce::Component::addAndMakeVisible (&advancedHint_);
     juce::Component::addAndMakeVisible (&statusLabel_);
+    juce::Component::addAndMakeVisible (&cancelBtn_);
     juce::Component::addAndMakeVisible (&downloadBtn_);
     juce::Component::addAndMakeVisible (&runBtn_);
 
     refreshModelList ();
     centreWithSize (kWinW, computeHeight ());
     setVisible (true);
-    startTimerHz (3);
 }
 
 StemSeparationWindow::~StemSeparationWindow()
@@ -248,25 +289,6 @@ void StemSeparationWindow::userTriedToCloseWindow()
 void StemSeparationWindow::closeButtonPressed()
 {
     userTriedToCloseWindow ();
-}
-
-void StemSeparationWindow::timerCallback()
-{
-    selRangeLabel_.setText (selectionRangeText (), juce::dontSendNotification);
-}
-
-juce::String StemSeparationWindow::selectionRangeText() const
-{
-    if (!app_.audioEngine().isFileLoaded ())
-        return "No file loaded";
-
-    const auto dur = app_.audioEngine().duration ();
-    const auto sel = app_.selection;
-    if (sel.getLength () > 0.0)
-        return juce::String ("Selection: ") + sc::acpp::formatAnchorTime (sel.getStart ())
-             + " - " + sc::acpp::formatAnchorTime (sel.getEnd ()) + " s"
-             + "  (" + sc::acpp::formatAnchorTime (sel.getLength ()) + " s)";
-    return juce::String ("Whole file: 0 - ") + sc::acpp::formatAnchorTime (dur) + " s";
 }
 
 void StemSeparationWindow::refreshModelList()
@@ -389,7 +411,8 @@ struct LayoutYs
             y.rowsTop = y.descAreaTop + 28 + 8 + 24 + 8;   // editor row + advanced button
         else
         {
-            y.rowsTop = y.descAreaTop + 26 + 8;           // header row (add description)
+            y.rowsTop = y.descAreaTop + 26 + 8;           // below the header buttons
+            y.rowsTop += 16 + 8;                          // hint line + gap
             y.rowsTop += rowsH;                           // the DescRow stack itself
         }
 
@@ -425,8 +448,11 @@ void StemSeparationWindow::resized()
     const auto y = LayoutYs::compute (advanced_, rowsH);
     const int x = kMargin, w = getWidth () - 2 * kMargin;
 
-    // Source row: live selection range + Select All.
-    selRangeLabel_.setBounds (x + 64, y.sourceRow + 3, std::max (80, w - 64 - 100), 18);
+    // Range row: editable start/end seconds + Select All.
+    startLbl_.setBounds (x, y.sourceRow + 3, 56, 18);
+    startEdit_.setBounds (x + 58, y.sourceRow, 70, 24);
+    endLbl_.setBounds (x + 134, y.sourceRow + 3, 48, 18);
+    endEdit_.setBounds (x + 186, y.sourceRow, 70, 24);
     selectAllBtn_.setBounds (getWidth () - kMargin - 96, y.sourceRow, 96, 24);
 
     // Model row.
@@ -440,26 +466,35 @@ void StemSeparationWindow::resized()
     {
         descEdit_.setBounds (x + 96, y.descAreaTop, std::max (80, w - 96), 28);
         advancedBtn_.setBounds (x, y.descAreaTop + 34, 110, 24);
+        // The advanced-only controls must not keep their old bounds here:
+        // after a round-trip through advanced mode they would overlap the
+        // description editor.
+        addDescBtn_.setBounds (0, 0, 0, 0);
+        advancedHint_.setBounds (0, 0, 0, 0);
     }
     else
     {
-        // Header row: "Simple view" toggle on the left, hint text right of it.
+        // Header row: "Simple view" toggle + Add Description button; the hint
+        // sits on its own line below so it has the full width.
         advancedBtn_.setBounds (x, y.descAreaTop + 2, 110, 24);
+        addDescBtn_.setBounds (x + 118, y.descAreaTop + 2, 130, 24);
+        advancedHint_.setBounds (x, y.descAreaTop + 34, w, 16);
         rowsHost_.setBounds (x, y.rowsTop - rowsH, kWinW, std::max (0, rowsH));
-        advancedHint_.setBounds (x + 130, y.descAreaTop + 6, w - 130, 18);
     }
 
     statusLabel_.setBounds (x, y.statusTop, w, 40);
     runBtn_.setBounds (getWidth () - kMargin - 90, y.bottomRow, 90, 28);
     downloadBtn_.setBounds (runBtn_.getX () - 110, y.bottomRow, 104, 28);
+    cancelBtn_.setBounds (downloadBtn_.getX () - 96, y.bottomRow, 88, 28);
 
     if (advanced_) rebuildRows ();   // re-lay out rows for the current width
 }
 
 void StemSeparationWindow::doSelectAll()
 {
-    app_.selectAll ();
-    selRangeLabel_.setText (selectionRangeText (), juce::dontSendNotification);
+    const double dur = app_.audioEngine().isFileLoaded () ? app_.audioEngine().duration () : 0.0;
+    startEdit_.setText (juce::String (0.0, 3), juce::dontSendNotification);
+    endEdit_.setText (juce::String (dur, 3), juce::dontSendNotification);
 }
 
 void StemSeparationWindow::addAnchorFromSelection(int descIndex, bool include)
@@ -655,14 +690,17 @@ void StemSeparationWindow::startRun()
     // Collect the descriptions to run.
     std::vector<StemDescEntry> descs;
     if (advanced_)
+    {
         for (auto& d : descs_)
             if (!d.text.trim().isEmpty()) descs.push_back (d);
+    }
     else
     {
         StemDescEntry e;
         e.text = descEdit_.getText ();
         if (!e.text.trim().isEmpty()) descs.push_back (e);
     }
+
     if (descs.empty ())
     { statusLabel_.setText ("Enter a description first.", juce::dontSendNotification); return; }
 
@@ -674,11 +712,14 @@ void StemSeparationWindow::startRun()
     if (mi < 0)
     { statusLabel_.setText ("Pick a model first.", juce::dontSendNotification); return; }
 
-    // Capture the extraction range on the message thread.
+    // Capture the extraction range from the editable fields on the message
+    // thread (they were seeded from the track selection when the window
+    // opened and are independent of later changes to it).
     const double dur = eng.duration ();
-    auto sel = app_.selection;
-    double s0 = 0.0, s1 = dur;
-    if (sel.getLength () > 0.0) { s0 = sel.getStart (); s1 = sel.getEnd (); }
+    double s0 = jlimit (0.0, dur, startEdit_.getText ().getDoubleValue ());
+    double s1 = jlimit (0.0, dur, endEdit_.getText ().getDoubleValue ());
+    if (s1 <= s0)
+    { statusLabel_.setText ("The end time must be after the start time.", juce::dontSendNotification); return; }
 
     RunJob job;
     job.descs = std::move (descs);
@@ -742,6 +783,8 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
             .getChildFile ("SpectroCraft_stem_"
                            + juce::String (juce::Random::getSystemRandom().nextInt (999998) + 1)));
         const juce::File tmpIn = cleaner.dir_.getChildFile ("input.wav");
+        if (!cleaner.dir_.createDirectory ())
+        { fail ("Could not create the temporary working folder."); return; }
 
         std::vector<std::vector<float>> inData;
         if (!eng.readRange (startFrame, nFrames, inData) || inData.empty () || inData[0].empty ())
@@ -791,8 +834,14 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
 
             if (!ok)
             {
-                const juce::String detail = rr.stderrText.isEmpty () ? juce::String (err)
-                                                                    : tail (rr.stderrText);
+                if (rr.cancelled)
+                { fail ("Run cancelled."); return; }
+
+                // The CLI reports errors on stdout as well as stderr, so fall
+                // back to the output tail when stderr is empty.
+                const juce::String detail = rr.stderrText.isNotEmpty () ? tail (rr.stderrText)
+                                : rr.stdoutText.isNotEmpty ()          ? tail (rr.stdoutText)
+                                                                        : juce::String (err);
                 fail ("Stem separation failed for '" + d.text + "'.", detail);
                 return;
             }

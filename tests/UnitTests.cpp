@@ -5301,14 +5301,15 @@ static void testStemSepWindowLayoutAndClose()
     if (dlg == nullptr) return;
 
     // Every control must be laid out with a visible size. In simple mode the
-    // advanced-only rowsHost_ and advancedHint_ stay at zero bounds, so of the
-    // 12 content children exactly 10 are visible (a non-native test peer adds
-    // two more internal minimise/close buttons, which we ignore).
+    // advanced-only addDescBtn_, rowsHost_ and advancedHint_ stay at zero
+    // bounds, so of the 17 content children exactly 14 are visible (a
+    // non-native test peer adds two more internal minimise/close buttons,
+    // which we ignore).
     int visible = 0;
     for (int i = 0; i < dlg->getNumChildComponents(); ++i)
         if (!dlg->getChildComponent (i)->getBounds().isEmpty())
             ++visible;
-    CHECK (dlg->getNumChildComponents() >= 12 && visible == 10,
+    CHECK (dlg->getNumChildComponents() >= 17 && visible == 14,
           "stem separation window lays out all its controls");
 
     // X button path: userTriedToCloseWindow must release ownership.

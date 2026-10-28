@@ -1,10 +1,11 @@
 // SpectroCraft - Stem Separation window (drives the audio.cpp CLI tool).
 //
 // Non-modal document window so the user can keep working in the main window
-// while configuring runs. The current track selection is shown live at the
-// top; "Include/Exclude Selection" captures it as a time range relative to
-// the input file that will be extracted (the current selection, or the whole
-// file when nothing is selected).
+// while configuring runs. The extraction range (start/end seconds) is seeded
+// from the track selection once when the window opens and is then editable;
+// later changes to that selection do not update it. "Include/Exclude
+// Selection" captures the current selection as a time-range anchor relative
+// to the input file that will be extracted.
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -26,15 +27,12 @@ struct StemDescEntry
     std::vector<sc::acpp::Anchor> anchors;   // times relative to extracted input
 };
 
-class StemSeparationWindow : public juce::DocumentWindow,
-                             private juce::Timer
+class StemSeparationWindow : public juce::DocumentWindow
 {
 public:
     /** @param app  the owning application (must outlive this window). */
     explicit StemSeparationWindow(Application& app);
     ~StemSeparationWindow() override;
-
-    void timerCallback() override;
 
     // The native title bar's X button routes to userTriedToCloseWindow()
     // (DocumentWindow::closeButtonPressed is never called for it in this JUCE
@@ -61,7 +59,6 @@ private:
     void refreshStatusIdle();
     void rebuildRows();
     void setAdvanced(bool on);
-    juce::String selectionRangeText() const;
 
     // --- actions ------------------------------------------------------------
     void doSelectAll();
@@ -74,14 +71,18 @@ private:
 
     Application& app_;
 
-    // top section
-    juce::Label selRangeLabel_;
+    // top section: the extraction range in seconds. Seeded from the track
+    // selection when the window opens, then editable and independent of later
+    // changes to that selection (advanced mode needs stable per-run ranges).
+    juce::Label startLbl_, endLbl_;
+    juce::TextEditor startEdit_, endEdit_;
     juce::TextButton selectAllBtn_;
     juce::ComboBox modelCombo_;
     juce::ComboBox backendCombo_;
     juce::ToggleButton extractOrigToggle_;
     juce::TextEditor descEdit_;          // simple mode
     juce::TextButton advancedBtn_;       // expands the multi-description area
+    juce::TextButton addDescBtn_;        // advanced: append another description
 
     // advanced section
     bool advanced_ = false;
@@ -90,6 +91,7 @@ private:
     juce::Label advancedHint_;
 
     juce::Label statusLabel_;
+    juce::TextButton cancelBtn_;         // closes the window without running
     juce::TextButton downloadBtn_;
     juce::TextButton runBtn_;
 

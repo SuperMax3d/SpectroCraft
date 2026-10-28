@@ -355,8 +355,11 @@ bool runStemSeparation(const juce::File& binary, const juce::File& model,
     PROCESS_INFORMATION pi {};
     // CreateProcessW may modify the command line buffer, so it needs a mutable copy.
     std::wstring cmdW = cmdLine.toWideCharPointer ();
+    // CREATE_NO_WINDOW: the CLI is a console app; without this flag Windows
+    // pops up a black console window over the UI for every run. All output
+    // is captured through the pipes above, so nothing is lost.
     const BOOL created = CreateProcessW (nullptr, cmdW.data (), nullptr, nullptr,
-                                         TRUE, 0, nullptr, nullptr, &si, &pi);
+                                         TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     CloseHandle (outW);
     CloseHandle (errW);
     if (!created)
@@ -423,6 +426,7 @@ bool runStemSeparation(const juce::File& binary, const juce::File& model,
         resOut->exitCode = rc;
         resOut->stdoutText = juce::String (outBuf);
         resOut->stderrText = juce::String (errBuf);
+        resOut->cancelled = killed;
     }
     if (killed)
     {

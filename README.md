@@ -1006,7 +1006,9 @@ dropdown (*Cpu* / *Cuda* / *Vulkan*) must match the installed binary variant.
 
 ### How a run works
 
-1. The selection range (or whole file) is extracted to a temporary WAV.
+1. The time range comes from the dialog's editable **Start**/**End** fields
+   (seeded once from the current selection when the window opens; **Select All**
+   resets them to the full duration). That range is extracted to a temporary WAV.
 2. For each description, `audiocpp_cli.exe` runs with
    `--task s2s --family sam_audio`, the chosen model and backend, the text,
    optional anchor ranges and an output directory; its log lines stream into
@@ -1019,7 +1021,8 @@ target first, then residual — ready for further editing or saving as WAV/FLAC/
 
 ### Advanced mode
 
-**Advanced…** expands the dialog into multiple description rows. Each row has:
+**Advanced…** expands the dialog, and **Add Description…** appends another
+row so you can describe several elements in one run. Each row has:
 
 - a text field,
 - **Include Selection** / **Exclude Selection** buttons that add the current

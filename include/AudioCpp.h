@@ -121,6 +121,7 @@ struct RunResult
     int exitCode = -1;
     juce::String stdoutText;
     juce::String stderrText;
+    bool cancelled = false;   // true when the user stopped the run
 };
 
 /** Blocking stem-separation run (call from a worker thread). The process is
