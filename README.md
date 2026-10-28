@@ -1146,6 +1146,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Paste to New Channel(s) (appends one new channel per clipboard channel; existing channels untouched, length unchanged) | Edit menu |
 | Select all | Ctrl+A |
 | Delete time selection (or **zero the spectral selection** when one is active) | Del / Backspace |
+| Trim Selection (keep only the selected range; deletes everything before and after it in one undoable step) | Ctrl+T |
 | Play / Pause toggle | Space |
 | Move playhead left / right (one percent of the visible time span per press, so zooming in shrinks the step down to exactly one sample at deep zoom) | ← / → |
 | Move playhead one sample left / right | Ctrl+← / Ctrl+→ |

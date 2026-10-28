@@ -374,7 +374,11 @@ public:
     // Called after [a, b] seconds were removed from file d: shifts / trims /
     // clears every stored snapshot whose source is d and records the before/
     // after state of each touched slot into p.snapshotSlots for undo/redo.
-    void recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a, double b, Patch& p);
+    // preserveExistingBefore: when one edit deletes two ranges (trim), the
+    // second call keeps the original pre-deletion state recorded by the first
+    // call for slots touched by both deletions.
+    void recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a, double b,
+                                              Patch& p, bool preserveExistingBefore = false);
 
     // Restores the snapshot slots recorded in patch p after an undo (!isRedo)
     // or redo (isRedo). Curves are recomputed from each slot's source file.

@@ -291,6 +291,7 @@ public:
         FileNew = 999, FileOpen = 1000, FileClose, FileCloseAll, FileSave, FileSaveAs,
         FileExportSpectral, FileSnapshot, ExpAxes, ExpMarkers, ExpSelections, ExpDrawings, FileQuit,
         EditUndo = 2000, EditRedo, EditCut, EditCopy, EditPaste, EditDelete,
+        EditTrimSelection,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,
         EditPasteToNewChannels,
         ViewZoomIn = 3000, ViewZoomOut, ViewZoomFit, ViewZoomToSelection, ViewZoomOutFull,

@@ -10093,6 +10093,86 @@ static void testDeleteShiftsMarkersAndSavedSelections()
           "redo shifts the saved spectral rect again");
 }
 
+static void testTrimSelection()
+{
+    const juce::File wav = makeTempFile ("trim_side.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 64000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); }),
+          "wrote test wav for trim");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for trim test");
+    FileDoc* d = app.doc();
+    CHECK (d != nullptr, "active doc exists");
+
+    // Markers: in the deleted head, at the kept range's start edge, inside
+    // it, and in the deleted tail.
+    const int mHead   = app.markers().addPointMarker (3.0, "head");
+    const int mEdge   = app.markers().addPointMarker (4.0, "edge");
+    const int mInside = app.markers().addPointMarker (5.0, "inside");
+    const int mTail   = app.markers().addPointMarker (7.0, "tail");
+
+    // No-op cases: empty selection and full-range selection record no patch.
+    const size_t depth0 = d->undo.depth();
+    app.setSelection ({ 0.0, 0.0 });
+    CHECK (app.trimSelection (), "empty selection trims as a no-op");
+    CHECK (d->undo.depth () == depth0, "no patch for an empty selection");
+
+    app.selectAll ();
+    CHECK (app.trimSelection (), "full-range trim succeeds");
+    CHECK (d->undo.depth () == depth0, "no patch when the whole file is kept");
+
+    // Trim to [4, 6]: keep the middle 2 s of the 8 s file.
+    app.setSelection ({ 4.0, 6.0 });
+    CHECK (app.trimSelection (), "trim succeeds");
+
+    auto& eng = app.audioEngine();
+    CHECK (std::abs (eng.duration () - 2.0) < 1e-9, "duration is the kept range length");
+    CHECK (eng.numSamples () == 16000, "sample count matches the kept range");
+
+    // The kept data must be exactly the original [4 s .. 6 s).
+    const int n = 257;
+    std::vector<float> got ((size_t) n);
+    CHECK (eng.readSamples (0, 0, n, got.data()), "read trimmed head");
+    bool same = true;
+    for (int i = 0; i < n; ++i)
+        same = same && std::abs (got[(size_t) i]
+                                 - 0.5f * (float) std::sin (2.0
+                                     * juce::MathConstants<double>::pi
+                                     * 440.0 * ((double) (32000 + i)) / 8000.0)) < 1e-6;
+    CHECK (same, "trimmed data equals the original kept range");
+
+    auto findMarker = [&] (int id) -> const Marker*
+    { for (const auto& m : app.markers().markers()) if (m.id == id) return &m; return nullptr; };
+
+    CHECK (findMarker (mHead) == nullptr, "marker in the deleted head is dropped");
+    const Marker* me = findMarker (mEdge);
+    CHECK (me && std::abs (me->start - 0.0) < 1e-9,
+          "marker at the kept range's start edge moves to zero");
+    const Marker* mi = findMarker (mInside);
+    CHECK (mi && std::abs (mi->start - 1.0) < 1e-9, "marker inside the kept range shifted left");
+    CHECK (findMarker (mTail) == nullptr, "marker in the deleted tail is dropped");
+
+    // One undo step restores everything.
+    app.undoStep ();
+    CHECK (std::abs (eng.duration () - 8.0) < 1e-9, "undo restores the full duration");
+    const Marker* mh = findMarker (mHead);
+    CHECK (mh && std::abs (mh->start - 3.0) < 1e-9, "undo restores the head marker");
+    me = findMarker (mEdge);
+    CHECK (me && std::abs (me->start - 4.0) < 1e-9, "undo restores the edge marker");
+    mi = findMarker (mInside);
+    CHECK (mi && std::abs (mi->start - 5.0) < 1e-9, "undo restores the inside marker");
+    const Marker* mt = findMarker (mTail);
+    CHECK (mt && std::abs (mt->start - 7.0) < 1e-9, "undo restores the tail marker");
+
+    // Redo re-applies the trim.
+    app.redoStep ();
+    CHECK (std::abs (eng.duration () - 2.0) < 1e-9, "redo trims again");
+    CHECK (findMarker (mHead) == nullptr && findMarker (mTail) == nullptr,
+          "redo drops the head and tail markers again");
+}
+
 static void testDeleteAdjustsSnapshots()
 {
     const juce::File wav = makeTempFile ("snap_del.wav");
@@ -16282,7 +16362,7 @@ static void testTrackAxisPlacement()
 
     // --- Resample lives in its own section of the Edit menu -----------------
     const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
-    CHECK (editMenu.getNumItems() == 12, "Edit menu includes the Resample item");
+    CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     CHECK (fxMenu.getNumItems() == 12, "Effects menu includes the split items");
@@ -17096,6 +17176,7 @@ static int scRunUnitTestsImpl()
     progress ("marker deletion adjust");  testMarkerAdjustForDeletion();
     progress ("spectral sel deletion adjust"); testSpectralSelectionAdjustForDeletion();
     progress ("delete shifts markers/saved sel"); testDeleteShiftsMarkersAndSavedSelections();
+    progress ("trim selection");            testTrimSelection();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
     progress ("copy curve alt scales");    testCopyCurveAltScales();

@@ -343,9 +343,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 
     // Deleting a time range also shifts / trims / drops the FFT snapshot slots
     // stored from that file; record their before/after state into the patch.
-    app.onTimeRangeDeleted = [this] (FileDoc* d, double a, double b, Patch& p)
+    app.onTimeRangeDeleted = [this] (FileDoc* d, double a, double b, Patch& p, bool preserveBefore)
     {
-        if (fftPanel) fftPanel->recordAndAdjustSnapshotsForDeletion (d, a, b, p);
+        if (fftPanel) fftPanel->recordAndAdjustSnapshotsForDeletion (d, a, b, p, preserveBefore);
     };
 
     // Undo/redo of such a patch restores the snapshot slots too.
@@ -2195,6 +2195,9 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             runDestructiveEdit ([&] (std::string* e) { return app.pasteToNewChannels (e); });
             break;
         case EditDelete: runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); break;
+        case EditTrimSelection:
+            runDestructiveEdit ([&] (std::string* e) { return app.trimSelection (e); });
+            break;
         case EditSelectAll: app.selectAll(); syncSharedState(); break;
         case EditSnapToZeroCrossings:
             app.settings.snapToZeroCrossings = !app.settings.snapToZeroCrossings;
@@ -4359,6 +4362,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (EditDelete,
                       hasSpectralSel ? "Zero Spectral Selection\tDel" : "Delete\tDel",
                       !app.selection.isEmpty() || hasSpectralSel, false);
+        menu.addItem (EditTrimSelection, "Trim Selection\tCtrl+T", !app.selection.isEmpty(), false);
         menu.addItem (EditSelectAll, "Select All\tCtrl+A", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         menu.addItem (EditSnapToZeroCrossings, "Snap to Zero Crossings", true, app.settings.snapToZeroCrossings);
@@ -4609,6 +4613,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) { app.undoStep(); refreshAfterEdit(); return true; }
     if (key == juce::KeyPress ('y', juce::ModifierKeys::commandModifier, 0)) { app.redoStep(); refreshAfterEdit(); return true; }
     if (key == juce::KeyPress ('x', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); return true; }
+    if (key == juce::KeyPress ('t', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.trimSelection (e); }); return true; }
     if (key == juce::KeyPress ('c', juce::ModifierKeys::commandModifier, 0)) { app.copy(); return true; }   // read-only
     if (key == juce::KeyPress ('v', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); return true; }
     if (key == juce::KeyPress ('v', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.pasteMix (e); }); return true; }

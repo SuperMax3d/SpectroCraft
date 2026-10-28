@@ -133,6 +133,10 @@ public:
     bool pasteToNewChannelsAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
                                std::string* errOut = nullptr);
     bool deleteSamples (juce::Range<int64_t> samples, std::string* errOut = nullptr);
+    /** Keeps only the given sample range and deletes everything before and
+        after it. Recorded as a single undoable patch replacing the whole
+        buffer with the kept data. */
+    bool trimToRange (juce::Range<int64_t> keep, std::string* errOut = nullptr);
     bool silenceSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr,
                          std::string* errOut = nullptr);
     bool fadeInSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr,

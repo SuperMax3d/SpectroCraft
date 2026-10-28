@@ -471,6 +471,9 @@ public:
         silence elsewhere. Undo restores the old channel count. */
     bool pasteToNewChannels(std::string* errOut = nullptr);
     bool del(std::string* errOut = nullptr);
+    /** Trim Selection: keep only the selected time range, deleting everything
+        before and after it in a single undoable step. */
+    bool trimSelection(std::string* errOut = nullptr);
     bool silence(std::string* errOut = nullptr);
     bool fadeIn(std::string* errOut = nullptr);
     bool fadeOut(std::string* errOut = nullptr);
@@ -636,7 +639,10 @@ public:
     // Set by MainWindow: called right after [a, b] seconds were deleted from d
     // (the audio patch is already recorded). Lets shared UI state - the FFT
     // snapshot slots - record its before/after into the patch and adjust.
-    std::function<void(FileDoc*, double, double, Patch&)> onTimeRangeDeleted;
+    // preserveExistingBefore: when one edit deletes two ranges (trim), the
+    // second call must keep the original pre-deletion state recorded by the
+    // first call instead of overwriting it.
+    std::function<void(FileDoc*, double, double, Patch&, bool)> onTimeRangeDeleted;
 
     // Set by MainWindow: called after an undo (!isRedo) or redo (isRedo)
     // applied a patch with side state to d, so shared UI state is restored too.

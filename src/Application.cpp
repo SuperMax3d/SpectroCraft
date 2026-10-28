@@ -1992,9 +1992,67 @@ bool Application::del(std::string* errOut)
         p.oldSavedSel = std::move (oldSavedSel);
         p.newSavedSel = d->savedSelections;
         if (onTimeRangeDeleted)
-            onTimeRangeDeleted (d, a, b, p);   // records + adjusts FFT snapshots
+            onTimeRangeDeleted (d, a, b, p, false);   // records + adjusts FFT snapshots
     }
 
+    syncActiveDoc ();
+    return true;
+}
+
+// Trim Selection: keep only the selected time range. Everything before and
+// after it is deleted in one undoable step; markers, saved selections and
+// FFT snapshot slots are adjusted for both removed ranges.
+bool Application::trimSelection (std::string* errOut)
+{
+    if (selection.getLength() <= 0) return true;   // nothing to trim - not an error
+    FileDoc* d = doc();
+    auto& eng = audioEngine ();
+    const double totalSecs = eng.duration();
+    auto range = selectionSamples (*this).getIntersectionWith ({ 0, eng.numSamples () });
+    if (range.getLength() <= 0 || range.getLength() >= eng.numSamples ()) return true;
+
+    const double aSec = (double) range.getStart() / eng.sampleRate ();
+    const double bSec = (double) range.getEnd() / eng.sampleRate ();
+
+    // Non-audio state that this trim will shift / drop. Captured before the
+    // edit so undo/redo can restore it (Patch::hasSideState).
+    const size_t depthBefore = d->undo.depth();
+    std::vector<Marker> oldMarkers = d->markers.markers ();
+    auto oldSavedSel = d->savedSelections;
+
+    if (!eng.trimToRange (range, errOut))
+        return false;
+
+    // Two deletions: [0, aSec) and [bSec, totalSecs). Adjust in that order so
+    // the second range is expressed in post-first-deletion coordinates.
+    d->markers.adjustForDeletion (0.0, aSec);
+    for (auto& ss : d->savedSelections)
+        ss.data.adjustForDeletion (0.0, aSec);
+    const double bNew = bSec - aSec;
+    const double totalNew = totalSecs - aSec;
+    d->markers.adjustForDeletion (bNew, totalNew);
+    for (auto& ss : d->savedSelections)
+        ss.data.adjustForDeletion (bNew, totalNew);
+    d->metaDirty = true;   // the adjusted list no longer matches disk
+
+    if (d->undo.depth() > depthBefore)   // a patch was actually recorded
+    {
+        Patch& p = d->undo.lastRecorded ();
+        p.hasSideState = true;
+        p.oldMarkers = std::move (oldMarkers);
+        p.newMarkers = d->markers.markers();
+        p.oldSavedSel = std::move (oldSavedSel);
+        p.newSavedSel = d->savedSelections;
+        if (onTimeRangeDeleted)
+        {
+            onTimeRangeDeleted (d, 0.0, aSec, p, false);
+            // Second range: keep the original before-state recorded above for
+            // any slot touched by both deletions.
+            onTimeRangeDeleted (d, bNew, totalNew, p, true);
+        }
+    }
+
+    selection = { 0.0, eng.duration() };   // the whole trimmed track is now selected
     syncActiveDoc ();
     return true;
 }
@@ -2467,7 +2525,7 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
             p.oldSavedSel = std::move (oldSavedSel);
             p.newSavedSel = d->savedSelections;
             if (onTimeRangeDeleted)
-                onTimeRangeDeleted (d, aSec, bSec, p);
+                onTimeRangeDeleted (d, aSec, bSec, p, false);
         }
     }
 

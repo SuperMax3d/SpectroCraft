@@ -883,6 +883,34 @@ bool AudioEngine::deleteSamples (juce::Range<int64_t> samples, std::string* errO
     return true;
 }
 
+bool AudioEngine::trimToRange (juce::Range<int64_t> keep, std::string* errOut)
+{
+    if (!ensureEditable (errOut)) return false;
+    keep = keep.getIntersectionWith ({ 0, totalSamples });
+    const int64_t keepLen = keep.getLength();
+    if (keepLen <= 0 || keepLen >= totalSamples) return true;   // nothing to trim
+
+    // One undoable patch: the whole old buffer is replaced by the kept range,
+    // so a single Undo restores everything that was trimmed away.
+    std::vector<std::vector<float>> newData (nchans);
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        newData[ch].resize ((size_t) keepLen);
+        readSamples (ch, keep.getStart(), keepLen, newData[ch].data());
+    }
+    recordReplace (*this, { 0, totalSamples }, newData, "Trimmed to selection");
+
+    auto nb = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) keepLen);
+    for (int ch = 0; ch < nchans; ++ch)
+        nb->copyFrom (ch, 0, *buffer, ch, (int) keep.getStart(), (int) keepLen);
+    buffer = std::move (nb);
+    totalSamples = keepLen;
+    durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+    rebuildMipmaps();
+    return true;
+}
+
 // Returns true if the channel is affected by `chans` (nullptr => all).
 static bool channelAffected (const std::vector<int>* chans, int ch)
 {

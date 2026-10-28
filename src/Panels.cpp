@@ -3392,7 +3392,8 @@ void FFTAnalysisView::recomputeCurveSlots()
             recomputeCurveSlot (i);
 }
 
-void FFTAnalysisView::recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a, double b, Patch& p)
+void FFTAnalysisView::recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a, double b,
+                                                           Patch& p, bool preserveExistingBefore)
 {
     if (d == nullptr || !(b > a))
         return;
@@ -3430,6 +3431,8 @@ void FFTAnalysisView::recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a,
 
         auto& s2 = snapshots[i];               // may have been reset by clearSnapshotSlot
         ch.changed = true;
+        if (preserveExistingBefore && p.snapshotSlots[(size_t) i].changed)
+            ch.before = p.snapshotSlots[(size_t) i].before;   // keep the original state
         ch.after.n = s2.n;  ch.after.t0 = s2.t0;  ch.after.t1 = s2.t1;
         ch.after.shown = s2.shown;  ch.after.chans = s2.chans;
         p.snapshotSlots[(size_t) i] = ch;
@@ -3467,6 +3470,8 @@ void FFTAnalysisView::recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a,
 
         auto& cs2 = curveSnaps[i];             // may have been reset by clearCurveSlot
         ch.changed = true;
+        if (preserveExistingBefore && p.curveSlots[(size_t) i].changed)
+            ch.before = p.curveSlots[(size_t) i].before;   // keep the original state
         ch.after.mode = cs2.mode;  ch.after.t0 = cs2.t0;  ch.after.t1 = cs2.t1;
         ch.after.track = track_;  ch.after.smooth = smooth_;
         ch.after.shown = cs2.shown;  ch.after.chans = cs2.chans;
