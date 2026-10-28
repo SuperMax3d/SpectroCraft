@@ -63,11 +63,11 @@ public:
         removeBtn_.setButtonText ("Remove");
         removeBtn_.onClick = [this] { owner_->removeDesc (index_); };
 
-        addChildComponent (numLabel_);
-        addChildComponent (edit_);
-        addChildComponent (includeBtn_);
-        addChildComponent (excludeBtn_);
-        addChildComponent (removeBtn_);
+        addAndMakeVisible (numLabel_);
+        addAndMakeVisible (edit_);
+        addAndMakeVisible (includeBtn_);
+        addAndMakeVisible (excludeBtn_);
+        addAndMakeVisible (removeBtn_);
     }
 
     void layoutChildren (int w)
@@ -107,7 +107,7 @@ private:
             const size_t idx = i;
             b->onClick = [this, idx] { owner_->removeAnchor (index_, (int) idx); };
             chips_.push_back (b);
-            addChildComponent (b);
+            addAndMakeVisible (b);
         }
     }
 
@@ -172,11 +172,13 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     backendCombo_.addItem ("Cpu", 1);
     backendCombo_.addItem ("Cuda", 2);
     backendCombo_.addItem ("Vulkan", 3);
-    backendCombo_.setSelectedItemIndex (std::clamp (app_.settings.acppBackend, 1, 3),
+    // This JUCE build uses 0-based combo positions; the stored setting is a
+    // 1-based id (1=Cpu 2=Cuda 3=Vulkan), so convert in both directions.
+    backendCombo_.setSelectedItemIndex (std::clamp (app_.settings.acppBackend, 1, 3) - 1,
                                        juce::dontSendNotification);
     backendCombo_.onChange = [this]
     {
-        app_.settings.acppBackend = backendCombo_.getSelectedItemIndex ();
+        app_.settings.acppBackend = backendCombo_.getSelectedItemIndex () + 1;
         app_.saveSettings ();
         refreshStatusIdle ();
     };
@@ -208,19 +210,20 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     runBtn_.onClick = [this] { startRun (); };
 
     // DocumentWindow inherits ResizableWindow, whose addAndMakeVisible() asserts;
-    // call the base-class method explicitly to side-step it.
-    juce::Component::addChildComponent (&selRangeLabel_);
-    juce::Component::addChildComponent (&selectAllBtn_);
-    juce::Component::addChildComponent (&modelCombo_);
-    juce::Component::addChildComponent (&backendCombo_);
-    juce::Component::addChildComponent (&extractOrigToggle_);
-    juce::Component::addChildComponent (&descEdit_);
-    juce::Component::addChildComponent (&advancedBtn_);
-    juce::Component::addChildComponent (&rowsHost_);
-    juce::Component::addChildComponent (&advancedHint_);
-    juce::Component::addChildComponent (&statusLabel_);
-    juce::Component::addChildComponent (&downloadBtn_);
-    juce::Component::addChildComponent (&runBtn_);
+    // call the base-class method explicitly to side-step it. (Must use
+    // addAndMakeVisible - plain addChildComponent leaves the children invisible.)
+    juce::Component::addAndMakeVisible (&selRangeLabel_);
+    juce::Component::addAndMakeVisible (&selectAllBtn_);
+    juce::Component::addAndMakeVisible (&modelCombo_);
+    juce::Component::addAndMakeVisible (&backendCombo_);
+    juce::Component::addAndMakeVisible (&extractOrigToggle_);
+    juce::Component::addAndMakeVisible (&descEdit_);
+    juce::Component::addAndMakeVisible (&advancedBtn_);
+    juce::Component::addAndMakeVisible (&rowsHost_);
+    juce::Component::addAndMakeVisible (&advancedHint_);
+    juce::Component::addAndMakeVisible (&statusLabel_);
+    juce::Component::addAndMakeVisible (&downloadBtn_);
+    juce::Component::addAndMakeVisible (&runBtn_);
 
     refreshModelList ();
     centreWithSize (kWinW, computeHeight ());
@@ -273,18 +276,19 @@ void StemSeparationWindow::refreshModelList()
     if (models.empty ())
     {
         modelCombo_.addItem ("(no models installed)", 1);
-        modelCombo_.setSelectedItemIndex (1, juce::dontSendNotification);
+        // This JUCE build uses 0-based combo positions.
+        modelCombo_.setSelectedItemIndex (0, juce::dontSendNotification);
     }
     else
     {
         for (size_t i = 0; i < models.size (); ++i)
             modelCombo_.addItem (models[i].getFileName (), (int) i + 1);
         // Restore the last used model when it is still installed.
-        int sel = 1;
+        int pos = 0;
         const juce::String saved = app_.settings.acppModel;
         for (size_t i = 0; i < models.size (); ++i)
-            if (models[i].getFileName() == saved) { sel = (int) i + 1; break; }
-        modelCombo_.setSelectedItemIndex (sel, juce::dontSendNotification);
+            if (models[i].getFileName() == saved) { pos = (int) i; break; }
+        modelCombo_.setSelectedItemIndex (pos, juce::dontSendNotification);
     }
     refreshStatusIdle ();
 }
@@ -294,8 +298,8 @@ void StemSeparationWindow::refreshStatusIdle()
     if (running_.load ()) return;
 
     const bool hasBin = sc::acpp::hasBinary ();
-    const int modelIdx = modelCombo_.getSelectedItemIndex ();
-    const bool hasModel = !sc::acpp::listModels ().empty () && modelIdx > 0;
+    const int modelIdx = modelCombo_.getSelectedItemIndex ();   // 0-based position
+    const bool hasModel = !sc::acpp::listModels ().empty () && modelIdx >= 0;
 
     juce::String s;
     if (!hasBin)
@@ -305,7 +309,8 @@ void StemSeparationWindow::refreshStatusIdle()
     else
     {
         const juce::String variant = sc::acpp::installedVariant ();
-        const int backendIdx = backendCombo_.getSelectedItemIndex ();
+        // Convert the 0-based position back to the stored 1-based id.
+        const int backendIdx = backendCombo_.getSelectedItemIndex () + 1;
         const bool mismatch = (variant == "cpu" && backendIdx != 1)
                           || ((variant == "cuda12.4" || variant == "cuda13.3") && backendIdx != 2)
                           || (variant == "vulkan" && backendIdx != 3);
@@ -356,7 +361,7 @@ void StemSeparationWindow::rebuildRows()
         const int h = DescRow::heightFor ((int) descs_[i].anchors.size (), w);
         row->setBounds (0, y, kWinW, h);
         row->layoutChildren (kWinW);
-        rowsHost_.addChildComponent (row);
+        rowsHost_.addAndMakeVisible (row);
         y += h + 4;
     }
 }
@@ -527,7 +532,8 @@ void StemSeparationWindow::openDownloadDialog()
         const auto choices = sc::acpp::binaryChoices ();
         for (size_t i = 0; i < choices.size (); ++i)
             cb->addItem (choices[i].label + "   (" + juce::String ((double) choices[i].sizeBytes / 1.0e6, 1) + " MB)", (int) i + 1);
-        cb->setSelectedItemIndex (1, juce::dontSendNotification);
+        // This JUCE build uses 0-based combo positions.
+        cb->setSelectedItemIndex (0, juce::dontSendNotification);
         dlg.addCustomComponent (cb);   // slot customSlot + 1
         binaryComboSlot = customSlot + 1;
         customSlot += 2;
@@ -544,7 +550,8 @@ void StemSeparationWindow::openDownloadDialog()
             cb->addItem (juce::String (choices[i].file) + "   ("
                          + juce::String ((double) choices[i].sizeBytes / 1.0e9, 2) + " GB)",
                          (int) i + 1);
-        cb->setSelectedItemIndex (1, juce::dontSendNotification);
+        // This JUCE build uses 0-based combo positions.
+        cb->setSelectedItemIndex (0, juce::dontSendNotification);
         dlg.addCustomComponent (cb);   // slot customSlot + 1
         modelComboSlot = customSlot + 1;
     }
@@ -554,10 +561,12 @@ void StemSeparationWindow::openDownloadDialog()
     int binaryChoice = 1, modelChoice = 1;
     if (binaryComboSlot >= 0)
         if (auto* cb = dynamic_cast<juce::ComboBox*> (dlg.getCustomComponent (binaryComboSlot)))
-            binaryChoice = std::max (1, cb->getSelectedItemIndex ());
+            if (const int p = cb->getSelectedItemIndex (); p >= 0)   // 0-based position -> 1-based id
+                binaryChoice = p + 1;
     if (modelComboSlot >= 0)
         if (auto* cb = dynamic_cast<juce::ComboBox*> (dlg.getCustomComponent (modelComboSlot)))
-            modelChoice = std::max (1, cb->getSelectedItemIndex ());
+            if (const int p = cb->getSelectedItemIndex (); p >= 0)   // 0-based position -> 1-based id
+                modelChoice = p + 1;
 
     // Download on a worker thread with a cancellable progress dialog. The
     // binary is installed first; then the model (when both were missing).
@@ -661,8 +670,8 @@ void StemSeparationWindow::startRun()
     if (!sc::acpp::hasBinary () || models.empty ())
     { openDownloadDialog (); return; }
 
-    const int mi = modelCombo_.getSelectedItemIndex ();
-    if (mi <= 0)
+    const int mi = modelCombo_.getSelectedItemIndex ();   // 0-based position
+    if (mi < 0)
     { statusLabel_.setText ("Pick a model first.", juce::dontSendNotification); return; }
 
     // Capture the extraction range on the message thread.
@@ -673,8 +682,9 @@ void StemSeparationWindow::startRun()
 
     RunJob job;
     job.descs = std::move (descs);
-    job.model = models[(size_t) mi - 1];
-    const int bi = backendCombo_.getSelectedItemIndex ();
+    job.model = models[(size_t) mi];
+    // Convert the 0-based position back to the stored 1-based id.
+    const int bi = backendCombo_.getSelectedItemIndex () + 1;
     job.backendCli = (bi == 2 ? "cuda" : bi == 3 ? "vulkan" : "cpu");
     job.extractFromOriginal = extractOrigToggle_.getToggleState ();
     job.extStartSecs = s0;

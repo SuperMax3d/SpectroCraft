@@ -6975,7 +6975,8 @@ void PythonPanel::showAddDialog ()
         if (scripts[(size_t) i].getFullPathName () == f.getFullPathName ())
         {
             currentIdx = i;
-            scriptBox.setSelectedItemIndex (i + 1, juce::NotificationType::dontSendNotification);
+            // This JUCE build uses 0-based combo positions.
+            scriptBox.setSelectedItemIndex (i, juce::NotificationType::dontSendNotification);
             loadCurrentScript ();
             break;
         }
