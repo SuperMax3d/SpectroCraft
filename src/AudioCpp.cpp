@@ -255,6 +255,23 @@ juce::String buildAnchorsOption(const std::vector<Anchor>& anchors)
     return s + "]";
 }
 
+std::vector<float> downmixToMono(const std::vector<std::vector<float>>& in)
+{
+    // Plain comparison: this file includes <windows.h> without NOMINATE,
+    // where `max` is a macro and would break std::max.
+    int64_t len = 0;
+    for (const auto& c : in)
+        if ((int64_t) c.size () > len) len = (int64_t) c.size ();
+    if (in.empty () || len <= 0) return {};
+
+    std::vector<float> out ((size_t) len, 0.0f);
+    const double invN = 1.0 / (double) in.size ();
+    for (const auto& c : in)
+        for (int64_t i = 0; i < (int64_t) c.size (); ++i)
+            out[(size_t) i] += (float) ((double) c[(size_t) i] * invN);
+    return out;
+}
+
 juce::StringArray buildCliArgs(const juce::File& model, const juce::String& backend,
                                const juce::File& audioIn, const juce::String& text,
                                const std::vector<Anchor>& anchors,

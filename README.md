@@ -1037,8 +1037,10 @@ another row so you can describe several elements in one run. Each row has:
 - a text field,
 - **Include Selection** / **Exclude Selection** buttons that add the current
   track selection as an anchor range (times are converted to the extracted
-  input's timeline when the run starts),
-- per-anchor remove and per-row remove controls.
+  input's timeline when the run starts). Every added anchor appears in a list
+  under its description as `Included: t0 - t1 s` or `Excluded: t0 - t1 s`, and
+  each listed entry has its own **Remove** button (the row's **Remove** still
+  drops the whole description),
 
 Anchors reach the tool as `--request-option "anchors=[[\"+\",t0,t1],…]]`
 (`+` = include, `-` = exclude). The **Extract subsequent stem from original**
@@ -1047,6 +1049,12 @@ one description: checked, every description runs against the original
 extraction; unchecked, each description after the first works on the previous
 *residual* instead — a simple way to peel several elements off one recording
 in sequence.
+
+Subsequent descriptions never work on the whole multichannel extraction: the
+first description gets the full extracted range as-is, but every later one
+works on a single mono track — either the previous run's *residual* (chained
+mode) or a downmix of the original extraction (from-original mode). Mono
+sources are unaffected since their input is already one track.
 
 The last model, backend and extract-from-original choice persist between
 sessions in `SpectroCraft.recent`.

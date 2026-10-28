@@ -14,9 +14,8 @@ namespace {
 
 constexpr int kWinW     = 620;
 constexpr int kMargin   = 12;
-constexpr int kRowBaseH = 30;   // first row of a description (editor + buttons)
-constexpr int kChipH    = 24;   // one wrapped line of anchor chips
-constexpr int kChipW    = 132;  // chip width used for the wrap calculation
+constexpr int kRowBaseH    = 30;   // first row of a description (editor + buttons)
+constexpr int kAnchorLineH = 20;   // one line of the anchor list under it
 
 /** Converts absolute document-time anchors to input-file-relative ones.
     Ranges that fall outside the extracted input are clamped; empty results
@@ -34,15 +33,15 @@ std::vector<sc::acpp::Anchor> anchorsRelativeToInput(const std::vector<sc::acpp:
     return out;
 }
 
-/** One row of the advanced section: description text + anchor chips. */
+/** One row of the advanced section: description text + its anchor list
+    (one "Included/Excluded: t0 - t1 s" line per anchor, each with its own
+    Remove button). */
 class DescRow : public juce::Component, private juce::TextEditor::Listener
 {
 public:
-    static int heightFor (int numAnchors, int width)
+    static int heightFor (int numAnchors, int)
     {
-        const int cols = std::max (1, (width - 2 * kMargin) / (kChipW + 6));
-        const int lines = numAnchors == 0 ? 0 : (numAnchors + cols - 1) / cols;
-        return kRowBaseH + lines * kChipH;
+        return kRowBaseH + std::max (0, numAnchors) * kAnchorLineH;
     }
 
     DescRow (int index, StemDescEntry& entry, StemSeparationWindow* owner)
@@ -68,6 +67,8 @@ public:
         addAndMakeVisible (includeBtn_);
         addAndMakeVisible (excludeBtn_);
         addAndMakeVisible (removeBtn_);
+
+        rebuildAnchorList ();   // show any anchors this entry already carries
     }
 
     void layoutChildren (int w)
@@ -83,31 +84,42 @@ public:
         bx -= 92 + 6;
         includeBtn_.setBounds (bx, 4, 92, 22);
 
-        const int cols = std::max (1, (w - 2 * kMargin) / (kChipW + 6));
-        for (size_t i = 0; i < chips_.size (); ++i)
-            chips_[i]->setBounds (kMargin + 26 + (int) (i % cols) * (kChipW + 6),
-                                kRowBaseH + 2 + (int) (i / cols) * kChipH,
-                                kChipW, kChipH - 4);
+        // Anchor list: one line per anchor - a label on the left and its own
+        // Remove button in the same right-hand column as the row's Remove.
+        for (size_t i = 0; i + 1 < anchorWidgets_.size (); i += 2)
+        {
+            const int ay = kRowBaseH + 2 + (int) (i / 2) * kAnchorLineH;
+            auto* lbl = dynamic_cast<juce::Label*> (anchorWidgets_[i]);
+            auto* btn = dynamic_cast<juce::TextButton*> (anchorWidgets_[i + 1]);
+            if (lbl == nullptr || btn == nullptr) continue;
+            lbl->setBounds (kMargin + 26, ay, std::max (40, w - kMargin * 2 - 26 - 70), kAnchorLineH);
+            btn->setBounds (w - kMargin - 64, ay, 64, kAnchorLineH - 2);
+        }
     }
 
 private:
-    void rebuildChips()
+    void rebuildAnchorList()
     {
-        for (auto* c : chips_) delete c;
-        chips_.clear ();
+        for (auto* c : anchorWidgets_) delete c;
+        anchorWidgets_.clear ();
 
         for (size_t i = 0; i < entry_.anchors.size (); ++i)
         {
             const auto& a = entry_.anchors[i];
-            auto* b = new juce::TextButton();
-            b->setButtonText (juce::String (a.include ? "+" : "-") + " "
-                              + sc::acpp::formatAnchorTime (a.startSecs) + " - "
-                              + sc::acpp::formatAnchorTime (a.stopSecs) + " s");
-            b->setTooltip ("Click to remove this range");
+            auto* lbl = new juce::Label();
+            lbl->setFont (juce::FontOptions (12.5f));
+            lbl->setText ((a.include ? "Included: " : "Excluded: ")
+                          + sc::acpp::formatAnchorTime (a.startSecs) + " - "
+                          + sc::acpp::formatAnchorTime (a.stopSecs) + " s",
+                         juce::dontSendNotification);
+            auto* btn = new juce::TextButton();
+            btn->setButtonText ("Remove");
             const size_t idx = i;
-            b->onClick = [this, idx] { owner_->removeAnchor (index_, (int) idx); };
-            chips_.push_back (b);
-            addAndMakeVisible (b);
+            btn->onClick = [this, idx] { owner_->removeAnchor (index_, (int) idx); };
+            anchorWidgets_.push_back (lbl);
+            anchorWidgets_.push_back (btn);
+            addAndMakeVisible (lbl);
+            addAndMakeVisible (btn);
         }
     }
 
@@ -122,7 +134,7 @@ private:
     juce::Label numLabel_;
     juce::TextEditor edit_;
     juce::TextButton includeBtn_, excludeBtn_, removeBtn_;
-    std::vector<juce::TextButton*> chips_;
+    std::vector<juce::Component*> anchorWidgets_;   // label + Remove button per anchor
 };
 
 /** RAII cleanup for the per-run temporary folder. */
@@ -894,6 +906,20 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
         if (!sc::py::writeFloatWav (tmpIn, inData, j.rate))
         { fail ("Could not write the temporary input file."); return; }
 
+        // Subsequent descriptions must work on a single mono track rather than
+        // the whole multichannel extraction. Write a downmixed copy once when
+        // the source has more than one channel (mono sources need none).
+        const juce::File tmpInMono = cleaner.dir_.getChildFile ("input_mono.wav");
+        bool haveMonoCopy = false;
+        if (inData.size () > 1)
+        {
+            std::vector<std::vector<float>> mono;
+            mono.push_back (sc::acpp::downmixToMono (inData));
+            if (!sc::py::writeFloatWav (tmpInMono, mono, j.rate))
+                { fail ("Could not write the temporary mono input file."); return; }
+            haveMonoCopy = true;
+        }
+
         const double inputDur = (double) nFrames / j.rate;
         const int N = (int) j.descs.size ();
 
@@ -914,8 +940,13 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
             setProgress ((double) i / (double) N);
 
             // Chained mode: every description after the first works on the
-            // previous residual instead of the original input.
-            const juce::File inWav = (!j.extractFromOriginal && i > 0) ? prevResidual : tmpIn;
+            // previous residual. From-original mode: subsequent descriptions
+            // work on a single mono track of the original extraction - never
+            // the whole multichannel file (the first keeps the full input).
+            juce::File inWav;
+            if (!j.extractFromOriginal && i > 0)   inWav = prevResidual;
+            else if (i > 0 && haveMonoCopy)        inWav = tmpInMono;
+            else                                   inWav = tmpIn;
             const juce::File outDir = cleaner.dir_.getChildFile ("d" + juce::String (i + 1));
 
             auto relAnchors = anchorsRelativeToInput (d.anchors, j.extStartSecs, inputDur);

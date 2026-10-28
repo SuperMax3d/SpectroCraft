@@ -107,6 +107,11 @@ juce::String formatAnchorTime(double secs);
     anchors=[[\"-\",0.1,0.5],[\"+\",1.5,4.9]]  - empty string when no anchors. */
 juce::String buildAnchorsOption(const std::vector<Anchor>& anchors);
 
+/** Average every channel of a multichannel buffer into one mono track
+    (shorter channels are padded with zeros before averaging). A single-
+    channel input is returned as-is; an empty input gives an empty result. */
+std::vector<float> downmixToMono(const std::vector<std::vector<float>>& in);
+
 /** Full argument vector (exe path excluded) in the documented order:
     --task s2s --family sam_audio --model <m> --backend <b> --audio <a>
     --text <t> [--request-option anchors=...] --out-dir <d> --log */

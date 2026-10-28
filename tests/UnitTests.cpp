@@ -5449,6 +5449,171 @@ static void testStemSepRememberDescs()
     dlg->userTriedToCloseWindow ();
 }
 
+// ---------------- acpp::downmixToMono ---------------------------------------
+// Subsequent stem-separation descriptions must work on one mono track rather
+// than the whole multichannel extraction; this is the pure helper that builds
+// it. (The CLI itself always outputs mono, so chained residuals are already
+// single-channel.)
+static void testAcppDownmixToMono()
+{
+    // Stereo average.
+    {
+        std::vector<std::vector<float>> in = { { 1.f, 2.f, 3.f }, { 3.f, 4.f, 5.f } };
+        const auto out = sc::acpp::downmixToMono (in);
+        CHECK (out.size () == 3 && std::abs ((double) out[0] - 2.0) < 1e-6
+              && std::abs ((double) out[1] - 3.0) < 1e-6
+              && std::abs ((double) out[2] - 4.0) < 1e-6,
+              "stereo input averages to mono");
+    }
+    // Uneven channels: the shorter one is padded with zeros.
+    {
+        std::vector<std::vector<float>> in = { { 2.f, 2.f }, { 4.f } };
+        const auto out = sc::acpp::downmixToMono (in);
+        CHECK (out.size () == 2 && std::abs ((double) out[0] - 3.0) < 1e-6
+              && std::abs ((double) out[1] - 1.0) < 1e-6,
+              "shorter channel is zero-padded before averaging");
+    }
+    // Mono passes through unchanged.
+    {
+        std::vector<std::vector<float>> in = { { 0.25f, -0.75f } };
+        const auto out = sc::acpp::downmixToMono (in);
+        CHECK (out.size () == 2 && out[0] == 0.25f && out[1] == -0.75f,
+              "mono input is returned as-is");
+    }
+    // Empty input.
+    {
+        const auto out = sc::acpp::downmixToMono ({});
+        CHECK (out.empty (), "empty input gives an empty result");
+    }
+}
+
+// ---------------- Stem Separation anchor list ---------------------------------
+// Each include/exclude anchor shows up under its description as an
+// "Included/Excluded: t0 - t1 s" line with its own Remove button; clicking it
+// removes just that one anchor.
+static void testStemSepAnchorList()
+{
+    const juce::File wav = makeTempFile ("stemsep_anchors.wav");   // 4 s
+    CHECK (writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote wav for anchor-list test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for anchor-list test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "stem sep anchors"));
+
+    auto findButton = [] (juce::Component* w, const juce::String& text)
+        -> juce::TextButton*
+    {
+        for (int i = 0; i < w->getNumChildComponents (); ++i)
+            if (auto* b = dynamic_cast<juce::TextButton*> (w->getChildComponent (i)))
+                if (b->getButtonText() == text) return b;
+        return nullptr;
+    };
+
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    StemSeparationWindow* dlg = win->stemSepWindow();
+    CHECK (dlg != nullptr, "window opened for anchor-list test");
+    if (!dlg) return;
+
+    // Enter advanced mode with one description.
+    dlg->descriptionEditor()->setText ("vocal", juce::dontSendNotification);
+    juce::TextButton* advBtn = findButton (dlg, "Advanced...");
+    CHECK (advBtn != nullptr, "advanced button found in simple mode");
+    if (!advBtn) { dlg->userTriedToCloseWindow (); return; }
+    advBtn->onClick ();   // enter advanced mode (carries the text over)
+
+    auto* rowsHost = dlg->rowsHostForTest();
+    CHECK (rowsHost != nullptr && rowsHost->getNumChildComponents () == 1,
+          "one DescRow in advanced mode");
+    if (!rowsHost || rowsHost->getNumChildComponents () != 1)
+    { dlg->userTriedToCloseWindow (); return; }
+
+    auto* row = rowsHost->getChildComponent (0);
+    CHECK (row->getNumChildComponents () == 5, "no anchors: base widgets only");
+
+    const int hBefore = dlg->getHeight ();
+
+    // Add an include anchor from the track selection. Note that every anchor
+    // change rebuilds all rows, so `row` must be re-fetched after each click.
+    app.setSelection ({ 1.0, 3.5 });
+    auto* incBtn = dynamic_cast<juce::TextButton*> (row->getChildComponent (2));
+    CHECK (incBtn != nullptr && incBtn->getButtonText() == "Include Selection",
+          "include button exists on the row");
+    if (!incBtn) { dlg->userTriedToCloseWindow (); return; }
+    incBtn->onClick ();
+
+    app.setSelection ({ 0.5, 1.2 });
+    row = rowsHost->getChildComponent (0);
+    auto* excBtn = dynamic_cast<juce::TextButton*> (row->getChildComponent (3));
+    CHECK (excBtn != nullptr && excBtn->getButtonText() == "Exclude Selection",
+          "exclude button exists on the row");
+    if (!excBtn) { dlg->userTriedToCloseWindow (); return; }
+    excBtn->onClick ();
+
+    // The rebuilt row now carries two anchor lines: label + Remove each.
+    row = rowsHost->getChildComponent (0);
+    CHECK (row->getNumChildComponents () == 9, "two anchors add four widgets");
+    if (row->getNumChildComponents () != 9) { dlg->userTriedToCloseWindow (); return; }
+
+    auto findLabel = [] (juce::Component* w, const juce::String& text) -> juce::Label*
+    {
+        for (int i = 0; i < w->getNumChildComponents (); ++i)
+            if (auto* l = dynamic_cast<juce::Label*> (w->getChildComponent (i)))
+                if (l->getText() == text) return l;
+        return nullptr;
+    };
+
+    CHECK (findLabel (row, "Included: 1 - 3.5 s") != nullptr,
+          "include anchor listed as 'Included: t0 - t1 s'");
+    CHECK (findLabel (row, "Excluded: 0.5 - 1.2 s") != nullptr,
+          "exclude anchor listed as 'Excluded: t0 - t1 s'");
+
+    // The window grew by one line per anchor (kAnchorLineH = 20).
+    CHECK (dlg->getHeight () == hBefore + 40, "window grows with the anchors");
+
+    // Render headlessly so the anchor-list layout can be visually inspected.
+    {
+        const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("sc_ss_anchor_snapshot.png");
+        const juce::Image img = dlg->createComponentSnapshot (dlg->getLocalBounds (), true, 2.0f);
+        std::vector<uint8_t> px;
+        px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
+        for (int yy = 0; yy < img.getHeight (); ++yy)
+            for (int xx = 0; xx < img.getWidth (); ++xx)
+            {
+                const juce::Colour c = img.getPixelAt (xx, yy);
+                px.push_back ((uint8_t) c.getRed());
+                px.push_back ((uint8_t) c.getGreen());
+                px.push_back ((uint8_t) c.getBlue());
+                px.push_back ((uint8_t) c.getAlpha());
+            }
+        CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
+               "saved anchor-list snapshot: " + out.getFullPathName());
+    }
+
+    // Remove just the first anchor through its own button (child index 6).
+    auto* rmBtn = dynamic_cast<juce::TextButton*> (row->getChildComponent (6));
+    CHECK (rmBtn != nullptr && rmBtn->getButtonText() == "Remove",
+          "first anchor has its own Remove button");
+    if (!rmBtn) { dlg->userTriedToCloseWindow (); return; }
+    rmBtn->onClick ();
+
+    const auto& d = dlg->descriptions();
+    CHECK (d.size () == 1 && d[0].anchors.size () == 1,
+          "only the clicked anchor is removed");
+    if (d.size () == 1)
+        CHECK (!d[0].anchors.empty () && !d[0].anchors[0].include,
+              "the remaining anchor is the exclude one");
+
+    row = rowsHost->getChildComponent (0);
+    CHECK (row != nullptr && row->getNumChildComponents () == 7,
+          "one anchor line remains in the rebuilt row");
+
+    dlg->userTriedToCloseWindow ();
+}
+
 // ---------------- Axis-mode change triggers a zoom fit --------------------
 // Changing the analysis method used to reset the axes to their defaults
 // BEFORE the new mode's data existed, so the user saw default ranges. The
@@ -16842,6 +17007,8 @@ static int scRunUnitTestsImpl()
     progress ("axis-mode change triggers zoom fit"); testAxisModeChangeTriggersFit ();
     progress ("stem-sep window layout + close"); testStemSepWindowLayoutAndClose ();
     progress ("stem-sep remember descriptions"); testStemSepRememberDescs ();
+    progress ("acpp downmix to mono"); testAcppDownmixToMono ();
+    progress ("stem-sep anchor list"); testStemSepAnchorList ();
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("time axis ticks");     testTimeAxisTicks();
