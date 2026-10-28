@@ -29,6 +29,7 @@
 #include "VideoAudio.h"  // video-container audio extraction (FFmpeg, Windows)
 #include "AudioCpp.h"     // stem-separation CLI argument building + file discovery
 #include "StemSeparation.h"   // the Effects > Stem Separation window
+#include "Recorder.h"         // recorder plugin host (Transport > Record)
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
 #include "AI/ModelManager.h"
@@ -15925,6 +15926,284 @@ static void testLazyAudioInit()
     wav.deleteFile();
 }
 
+// ============================================================================
+// Recording (plugin-based capture)
+// ============================================================================
+
+/** Full C-ABI round trip against the deterministic fake plugin DLL that
+    CMake copies to <exe dir>/recorders/. */
+static void testRecorderPluginApi()
+{
+    using namespace sc::rec;
+    auto& host = RecorderHost::instance ();
+    host.scanPlugins ();   // idempotent; finds fake_rec.dll in exe/recorders
+
+    const Plugin* fake = host.findPlugin ("fake");
+    CHECK (fake != nullptr, "fake recorder plugin discovered in <exe>/recorders");
+    if (fake == nullptr) return;
+
+    CHECK (fake->devices.size () == 2, "fake plugin exposes two devices");
+    if (fake->devices.size () != 2) return;
+    CHECK (fake->devices[0].id == "dev2ch", "device 1 id");
+    CHECK (fake->devices[0].name == "Fake 2 ch @ 8 kHz", "device 1 name");
+    CHECK (fake->devices[0].minChannels == 2 && fake->devices[0].maxChannels == 2,
+          "device 1 is fixed 2-channel");
+    CHECK (!fake->devices[0].rates.empty ()
+           && std::abs (fake->devices[0].rates[0] - 8000.0) < 1e-9,
+          "device 1 rate list contains 8000 Hz");
+    CHECK (!fake->devices[0].depths.empty () && fake->devices[0].depths[0] == 32,
+          "device 1 depth list contains 32 bit");
+
+    sc_rec_negotiated neg {};
+    std::string err;
+    CHECK (host.configure ("fake", "dev2ch", 2, 8000.0, 32, &neg, &err),
+          "configure dev2ch: " + err);
+    CHECK (neg.channels == 2 && std::abs (neg.rate - 8000.0) < 1e-9
+           && neg.bitDepth == 32, "negotiated format matches the request");
+
+    // Unsupported formats must be rejected with a message.
+    err.clear ();
+    CHECK (!host.configure ("fake", "dev2ch", 4, 8000.0, 32, &neg, &err),
+          "wrong channel count is rejected");
+    CHECK (!err.empty (), "rejection carries an error message");
+
+    CHECK (host.start (&err), "start capture: " + err);
+    CHECK (host.running (), "plugin reports running after start");
+
+    juce::Thread::sleep (150);   // the fake plugin generates as fast as possible
+    const long long avail = host.availableFrames ();
+    CHECK (avail > 100, "frames available shortly after start");
+
+    std::vector<float> buf ((size_t) 2 * 100);
+    const int frames = host.read (buf.data (), 2, 100);
+    CHECK (frames == 100, "read returns the requested frame count");
+
+    // The generator thread has been running since start(), so the first sample
+    // we read sits at an arbitrary phase. Recover it from two consecutive
+    // samples: with x[k] = sin(a + th*k),
+    //   x[1] - cos(th) x[0] = sin(a+th) - cos(th) sin(a) = cos(a) sin(th).
+    const double pi = juce::MathConstants<double>::pi;
+    const double theta = 2.0 * pi * 440.0 / 8000.0;
+    // NOTE: the buffer is interleaved, so sample #2 of channel 0 is buf[2].
+    double cosA0 = (buf[2] - std::cos (theta) * buf[0]) / std::sin (theta);
+    cosA0 = std::max (-1.0, std::min (1.0, cosA0));
+    const double a0 = std::atan2 ((double) buf[0], cosA0);
+    double maxErr = 0.0;
+    for (int k = 0; k < 100; ++k)
+        maxErr = std::max (maxErr,
+                           std::abs (buf[(size_t) 2 * k] - std::sin (a0 + theta * k)));
+    CHECK (maxErr < 5e-3, "channel 0 is the fake plugin's 440 Hz sine");
+
+    double maxCh1 = 0.0;
+    for (int k = 0; k < 100; ++k)
+        maxCh1 = std::max (maxCh1, (double) std::abs (buf[(size_t) 2 * k + 1]));
+    CHECK (maxCh1 < 1e-9, "channel 1 is silence");
+
+    host.stop ();
+    CHECK (!host.running (), "plugin reports stopped after stop");
+}
+
+/** The follow-end state machine: ramp up from an empty document, slide,
+    freeze when the user pans away, re-engage when they return to the end. */
+static void testRecordingFollowWindow()
+{
+    using App = Application;
+
+    // Ramp up from a fresh (empty) recording.
+    double t0 = 0.0, t1 = 1e-3; bool follow = true;
+    for (double d = 0.5; d <= 4.999; d += 0.5)
+        App::stepRecordingWindow (t0, t1, follow, d);
+    CHECK (follow, "still following during ramp-up");
+    CHECK (std::abs (t1 - 4.5) < 1e-9 && std::abs (t0) < 1e-9,
+          "window anchored at time zero while data is shorter than the min width");
+
+    // Once the data exceeds the minimum follow width, sliding begins.
+    App::stepRecordingWindow (t0, t1, follow, 5.5);
+    CHECK (follow && std::abs (t1 - 5.5) < 1e-9 && std::abs (t0 - 0.5) < 1e-9,
+          "window slides with the minimum follow width");
+
+    // The user zooms in while following: their narrower width is preserved.
+    t0 = 4.9; t1 = 5.5;   // width 0.6 s, right edge at the data end
+    App::stepRecordingWindow (t0, t1, follow, 5.7);
+    CHECK (follow && std::abs (t1 - 5.7) < 1e-9 && std::abs ((t1 - t0) - 0.6) < 1e-9,
+          "user's zoomed-in width is kept while following");
+
+    // The user pans away from the end: following stops, window frozen.
+    t0 = 0.0; t1 = 2.0;
+    const double pT0 = t0, pT1 = t1;
+    App::stepRecordingWindow (t0, t1, follow, 6.0);
+    CHECK (!follow, "following disengaged after pan away");
+    CHECK (std::abs (t0 - pT0) < 1e-12 && std::abs (t1 - pT1) < 1e-9,
+          "window left exactly where the user put it");
+
+    // The user returns to the end: following re-engages on the next tick.
+    t0 = 5.4; t1 = 6.0;
+    App::stepRecordingWindow (t0, t1, follow, 6.2);
+    CHECK (follow && std::abs (t1 - 6.2) < 1e-9,
+          "following re-engages when the window is back at the end");
+
+    // A window clearly behind the data must never snap forward.
+    t0 = 3.0; t1 = 4.5; follow = false;
+    App::stepRecordingWindow (t0, t1, follow, 6.2);
+    CHECK (!follow && std::abs (t1 - 4.5) < 1e-9,
+          "no snap while clearly behind the data");
+}
+
+/** Full session: start from a fake device, drive ticks headlessly, verify
+    live growth + follow behaviour, stop and check the recorded content. */
+static void testRecordingSession()
+{
+    auto& host = sc::rec::RecorderHost::instance ();
+    CHECK (host.findPlugin ("fake") != nullptr,
+          "fake plugin available for the session test");
+    if (host.findPlugin ("fake") == nullptr) return;
+
+    Application app;   // SC_TESTS_EXE builds use an isolated temp recent-store
+    app.recording.pluginId = "fake";
+    app.recording.deviceId = "dev2ch";
+    app.recording.channels = 2;
+    app.recording.rate     = 8000.0;
+    app.recording.bitDepth = 32;
+
+    std::string err;
+    CHECK (app.startRecording (&err), "start recording: " + err);
+    if (!app.recording.active) return;
+
+    CHECK (app.recDoc () != nullptr && app.doc () == app.recDoc (),
+          "the recording document is the active one");
+    CHECK (app.audioEngine ().numChannels () == 2, "doc created with device channels");
+    CHECK (std::abs (app.audioEngine ().sampleRate () - 8000.0) < 1e-9,
+          "doc created at the device sample rate");
+    CHECK (app.doc ()->name.startsWith ("Recording_"),
+          "document named Recording_<timestamp>");
+
+    // Drive the capture ticks manually (headless: no message pump). The fake
+    // plugin generates as fast as possible, so data is available at once.
+    for (int i = 0; i < 12; ++i)
+    {
+        juce::Thread::sleep (40);
+        app.timerCallback ();
+    }
+
+    CHECK (app.recording.framesRecorded > 8000, "at least ~1 s of frames appended");
+    const double dur = app.audioEngine ().duration ();
+    CHECK (dur >= 1.0, "document grew while recording");
+    CHECK (std::abs (app.viewEnd - dur) < 1e-9, "view follows the recording end");
+    CHECK (app.viewStart >= 0.0
+           && (app.viewEnd - app.viewStart)
+              <= Application::kRecFollowMinWidthSecs + 0.5,
+          "follow window never zooms out beyond the minimum width");
+
+    // Pan away: following stops and the window stays put.
+    const double pT0 = 0.0;
+    const double pT1 = std::min (2.0, dur * 0.4);
+    app.viewStart = pT0; app.viewEnd = pT1;
+    app.timerCallback ();
+    CHECK (!app.recording.followEnd, "following stopped after pan away");
+    CHECK (std::abs (app.viewStart - pT0) < 1e-12
+           && std::abs (app.viewEnd - pT1) < 1e-9,
+          "window frozen while panned away");
+
+    // Return to the end: following re-engages. Use a fresh duration - data
+    // keeps growing between ticks, and one tick can add up to a second.
+    const double dNow = app.audioEngine ().duration ();
+    app.viewStart = dNow; app.viewEnd = dNow;
+    app.timerCallback ();
+    CHECK (app.recording.followEnd
+           && std::abs (app.viewEnd - app.audioEngine ().duration ()) < 1e-9,
+          "following re-engaged when back at the end");
+
+    // Stop: the document stays open with all its data.
+    app.stopRecording ();
+    CHECK (!app.recording.active, "recording stopped");
+    CHECK (app.doc () != nullptr && app.audioEngine ().numSamples () > 0,
+          "document kept after stop");
+
+    // Content check: channel 0 must be the fake plugin's 440 Hz sine @ 8 kHz.
+    // The generator runs faster than we pull, so once its ring saturates it
+    // drops oldest samples and our first appended chunk can start at an
+    // arbitrary phase. Recover that phase from two consecutive samples:
+    // with x[k] = sin(a + th*k),  x[1] - cos(th) x[0] = cos(a) sin(th).
+    std::vector<float> buf (100);
+    app.audioEngine ().readSamples (0, 0, 100, buf.data ());
+    const double pi = juce::MathConstants<double>::pi;
+    const double theta = 2.0 * pi * 440.0 / 8000.0;
+    double cosA0 = (buf[1] - std::cos (theta) * buf[0]) / std::sin (theta);
+    cosA0 = std::max (-1.0, std::min (1.0, cosA0));
+    const double a0 = std::atan2 ((double) buf[0], cosA0);
+    double maxErr = 0.0;
+    for (int k = 0; k < 100; ++k)
+        maxErr = std::max (maxErr,
+                           std::abs (buf[k] - std::sin (a0 + theta * k)));
+    CHECK (maxErr < 5e-3, "recorded channel 0 is the fake plugin's sine");
+
+    // Closing the recording document while a session is active must stop it.
+    app.recording.pluginId = "fake";
+    app.recording.deviceId = "dev2ch";
+    err.clear ();
+    CHECK (app.startRecording (&err), "second session starts: " + err);
+    if (!app.recording.active) return;
+    const int idx = (int) app.docs.size () - 1;
+    app.closeDoc (idx);
+    CHECK (!app.recording.active, "closing the recording doc stops the session");
+}
+
+/** Transport menu: Record toggle + Recording Device submenu structure. */
+static void testTransportRecordingMenu()
+{
+    auto& host = sc::rec::RecorderHost::instance ();
+    host.scanPlugins ();
+
+    int piFake = -1;
+    for (int i = 0; i < (int) host.plugins ().size (); ++i)
+        if (host.plugins ()[(size_t) i].id == "fake") { piFake = i; break; }
+    CHECK (piFake >= 0, "the fake plugin is loaded");
+
+    Application app;
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "recording menu test"));
+
+    const juce::StringArray names = win->getMenuBarNames ();
+    int tIdx = -1;
+    for (int i = 0; i < names.size (); ++i)
+        if (names[i] == "Transport") { tIdx = i; break; }
+    CHECK (tIdx >= 0, "Transport menu exists in the menu bar");
+
+    // Play, Stop, Pause, separator, Loop, Play Spectral Selection,
+    // separator, Record, Recording Device. getNumItems() excludes separators.
+    const juce::PopupMenu tm = win->getMenuForIndex (tIdx, "Transport");
+    CHECK (tm.getNumItems () == 7, "Record + Recording Device added to Transport");
+
+    // The device menu has one entry per loaded plugin.
+    const juce::PopupMenu dm = MainWindow::buildRecordingDeviceMenu (app);
+    CHECK ((int) dm.getNumItems () == (int) host.plugins ().size (),
+          "one device-menu entry per loaded plugin");
+
+    // The fake plugin's sub-menu items: encoded IDs, names, no ticks yet.
+    const auto items = MainWindow::recordingDeviceItems (app, piFake);
+    bool ok2ch = false, ok4ch = false;
+    for (const auto& it : items)
+    {
+        if (it.text == "Fake 2 ch @ 8 kHz")
+            ok2ch = it.id == MainWindow::RecDeviceBase + piFake * 1000 + 0 && !it.checked;
+        if (it.text == "Fake 4 ch @ 16 kHz")
+            ok4ch = it.id == MainWindow::RecDeviceBase + piFake * 1000 + 1 && !it.checked;
+    }
+    CHECK (ok2ch, "first fake device item has the encoded ID and no tick");
+    CHECK (ok4ch, "second fake device item has the encoded ID and no tick");
+
+    // Selecting a device ticks exactly that entry.
+    app.recording.pluginId = "fake";
+    app.recording.deviceId = "dev2ch";
+    const auto items2 = MainWindow::recordingDeviceItems (app, piFake);
+    bool tickedFirst = false, anyOtherTicked = false;
+    for (size_t i = 0; i < items2.size (); ++i)
+    {
+        if (i == 0) tickedFirst = items2[i].checked;
+        else if (items2[i].checked) anyOtherTicked = true;
+    }
+    CHECK (tickedFirst && !anyOtherTicked, "the selected device is the only ticked entry");
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -16088,6 +16367,10 @@ static int scRunUnitTestsImpl()
     progress ("metadata suite");          testMetadataSuite();
     progress ("startup trace");           testStartupTrace();
     progress ("lazy audio init");         testLazyAudioInit();
+    progress ("recorder plugin API");     testRecorderPluginApi();
+    progress ("recording follow window"); testRecordingFollowWindow();
+    progress ("recording session");       testRecordingSession();
+    progress ("transport recording menu");testTransportRecordingMenu();
     progress ("arrow head geometry");     testArrowHeadGeometry();
     progress ("drawing panel");           testDrawingPanel();
     progress ("drawing key shortcuts");   testDrawingKeyShortcuts();

@@ -17,6 +17,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   track of video containers (.mp4/.m4a, .mkv, .avi, .webm, .mov, .wmv, .flv,
   .ts, .wma, .ac3, ...) through a vendored minimal FFmpeg build (Windows only,
   see **Video files** below).
+- **Recording** (Windows): capture from any recorder plugin — WASAPI capture and
+  loopback devices ship out of the box, and third-party DLLs (ASIO, network,
+  ...) can be dropped into `recorders/` without recompiling. The waveform and
+  spectrogram update live while recording; see **Recording** below.
 - **Streaming engine**: files larger than ~256 MB of samples stay on disk and are
   read through the `AudioFormatReader` under a mutex; small files are materialized
   in memory for fast editing. Edits require the in-memory buffer.
@@ -558,6 +562,94 @@ dynamically linked without affecting SpectroCraft's AGPL-3.0 licence — see
 `third_party/licenses/NOTICE.md` and `extern/ffmpeg/README.md`. Disable with
 `-DSPECTRO_ENABLE_FFMPEG=OFF`; on non-Windows platforms the feature is simply
 absent (the built-in JUCE formats still cover WAV/AIFF/FLAC/MP3/Ogg).
+
+---
+
+## Recording
+
+SpectroCraft can record audio into a new document while you watch it come in:
+the waveform and spectrogram update live, and when your view range is at the end
+of the file it follows the recording edge (keeping your current zoom width — it
+never auto-zooms out to show everything). If you pan away from the end during a
+recording the view stays exactly where you left it; once you come back within
+~1.5 s of the end, following resumes automatically.
+
+### Using it
+
+1. **Transport > Recording Device** — pick a plugin and device. The submenu is
+   built from every loaded recorder plugin (see below); each device opens a small
+   dialog where you choose channel count, sample rate and bit depth from what
+   the device offers.
+2. **Transport > Record** — starts recording into a new document named
+   `rec_YYYYMMDD_HHMMSS.wav` (made unique against other open documents). The menu
+   item becomes **Stop**; stopping drains whatever is still buffered in the
+   plugin and rebuilds the mipmap pyramid so the overview shows the whole take.
+3. Save the document as usual (File > Save) to keep it on disk — until then it
+   lives only in memory like any other unsaved file.
+
+### Recorder plugins
+
+Recording is extensible through native DLLs implementing a small standard C ABI
+(`include/RecorderPlugin.h`, API version 1). The host loads every `*.dll` found in:
+
+- `<executable directory>/recorders/`
+- `%APPDATA%/SpectroCraft/recorders/`
+
+and lists them under **Transport > Recording Device**. New DLLs dropped into
+those folders are picked up the next time the menu is opened — no restart needed.
+
+A plugin exports these functions (all return 0 on success; `sc_rec_last_error()`
+gives a human-readable message):
+
+| Export | Purpose |
+|---|---|
+| `sc_rec_get_api_version` | must return `SC_RECORDER_API_VERSION` (1) |
+| `sc_rec_get_plugin_info` | id / display name / version string |
+| `sc_rec_count_devices`, `sc_rec_get_device` | enumerate devices with their capabilities: min/max channels, supported sample rates and bit depths (16/24/32) — arbitrary channel counts are fine (e.g. a 16-channel ASIO card) |
+| `sc_rec_configure(deviceId, wantChans, wantRate, wantDepth, actual)` | select device + desired format; the plugin clamps to what the hardware supports and reports the real values back in `actual` |
+| `sc_rec_start` / `sc_rec_stop` / `sc_rec_is_running` | begin/end capture (stop joins the capture thread) |
+| `sc_rec_available_frames`, `sc_rec_read(dest, channels, maxFrames)` | **pull model**: the host polls these at 25 Hz; data is always interleaved float32 in [-1, 1] in device channel order. The plugin must keep a bounded internal buffer (drop-oldest when full) so a stalled host never blocks the capture thread |
+| `sc_rec_last_error` | last error message (`""` if none) |
+
+Strings are UTF-8 NUL-terminated; pointers returned by the plugin stay valid only
+until the next call into that plugin, so the host copies them immediately.
+
+### The WASAPI recorder (shipped)
+
+`plugins/wasapi/` builds `wasapi_recorder.dll`, deployed to `<exe>/recorders/`
+automatically. It enumerates:
+
+- **Loopback devices** — every render endpoint, listed first with a
+  `[Loopback]` suffix (Audacity-style "record what you hear"), captured via the
+  `AUDCLNT_STREAMFLAGS_LOOPBACK` flag;
+- **Capture devices** — every capture endpoint.
+
+It opens endpoints in shared mode and negotiates the format: it tries the
+endpoint's native mix format first, then falls back to auto-conversion (native,
+then PCM16) so unusual device formats still work; exclusive mode is a last-resort
+fallback for non-loopback devices. All WASAPI calls run on one dedicated worker
+thread inside the DLL.
+
+Notes:
+- Loopback capture requires Windows 8+ and works best when something is actually
+  playing through that endpoint (silence otherwise).
+- On some virtualized/VM audio stacks the shared-mode engine accepts
+  `Initialize`/`Start` but never advances the capture buffer; on such systems
+  recording starts cleanly but no data arrives. This is an environmental
+  limitation of the VM's audio service, not a plugin bug — regular Windows
+  machines deliver data normally.
+- Device friendly names come from the endpoint property store where available,
+  with sensible fallbacks ("Loopback device", "Capture device").
+
+### How the host drives it
+
+`src/Recorder.cpp` (`sc::rec::RecorderHost`) loads/unloads plugins, caches each
+plugin's device list, and forwards configure/start/stop. While recording,
+a 25 Hz `juce::Timer` in `Application` pulls up to one second of audio per tick
+through `AudioEngine::appendSamples()` (which resizes the in-memory buffer under
+a race guard against the playback thread) and steps the follow-end window
+(`stepRecordingWindow`). Mipmaps are rebuilt throttled during recording (only
+while the file is small enough that it matters) and once more on stop.
 
 ---
 
@@ -1371,7 +1463,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2680 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2730 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1594,6 +1686,14 @@ delays the window from appearing.
     edges are untouched; with it on both edges land on tone zero crossings;
     zero-length and programmatic selections are never snapped. The analysis
     view's combos write their axis mode / FFT size back to the shared settings.
+  - **Recording** (plugin ABI + host): a deterministic fake recorder plugin
+    (`tests/plugins/fake_rec/`) drives the full session — configure/start,
+    pulling interleaved float32 through `AudioEngine::appendSamples` until stop,
+    phase-recovered sine content checks on the recorded document, re-engagement
+    after a stop; the follow-end window state machine is tested statically
+    (follows at the end, freezes when panned away, resumes within ~1.5 s of the
+    end, never narrows below 5 s); and the Transport menu structure itself is
+    verified (Record + Recording Device present with correct item counts).
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,
@@ -1635,9 +1735,11 @@ bin/Release             self-contained runtime folder: SpectroCraft.exe plus all
                         folder alone for a working install
 icon.ico                application icon (PE resource + runtime WM_SETICON)
 CMakeLists.txt            root build (JUCE vendored in extern/)
-include/                  component headers
+include/                  component headers (incl. RecorderPlugin.h plugin ABI)
+plugins/wasapi/           WASAPI recorder DLL source (deployed to <exe>/recorders/)
 src/                      app sources + Main.cpp (CLI flags)
-tests/                    UnitTests.cpp, CMakeLists.txt, data/ fixtures
+tests/                    UnitTests.cpp, CMakeLists.txt, data/ fixtures,
+                          plugins/fake_rec/ deterministic test recorder plugin
 tools/                    auxiliary diagnostics (address→symbol resolvers,
                           GDI stress test) used while debugging this project
 extern/JUCE               vendored JUCE 9.0.4

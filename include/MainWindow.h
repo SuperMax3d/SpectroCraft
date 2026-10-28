@@ -219,6 +219,22 @@ public:
         only exist when a document is loaded (public static so headless tests
         can check the menu contents). */
     static juce::PopupMenu buildMergeMenu (bool haveActiveDoc);
+
+    /** Transport > Recording Device menu: one sub-menu per recorder plugin.
+        Public static so headless tests can check it. */
+    static juce::PopupMenu buildRecordingDeviceMenu (const Application& app);
+
+    /** One entry of a Recording Device sub-menu (plain data for tests). */
+    struct RecDeviceMenuItem { int id = 0; juce::String text; bool checked = false; };
+
+    /** The device-level items for the plugin at `pluginIndex` (same IDs and
+        texts as its sub-menu). Public static so headless tests can check it. */
+    static std::vector<RecDeviceMenuItem> recordingDeviceItems (const Application& app,
+                                                                int pluginIndex);
+    static juce::PopupMenu buildRecordingDeviceItems (const Application& app, int pluginIndex);
+
+    void handleStartStopRecording();
+    void handleRecDevicePick (int id);
     /** File Open dialog wildcard: every extension the engine can open as
         audio (native formats + video containers when built with FFmpeg).
         Public static so headless tests can check it. */
@@ -289,6 +305,8 @@ public:
         SelectionBrushLarger,
         TransportPlay = 4000, TransportStop, TransportPause, TransportLoop,
         TransportPlaySpectralSel,
+        TransportRecord,          // start/stop recording (plugin-based capture)
+        RecDeviceBase = 4500,     // Recording Device submenu: + pluginIndex*1000 + deviceIndex
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsResample,
         ToolsStemSeparate,   // AI stem separation via the audio.cpp CLI tool

@@ -3,6 +3,7 @@
  */
 
 #include "Application.h"
+#include "Recorder.h"
 #include "StartupTrace.h"
 #include "SpectralMaskProcessor.h"
 #include "PythonScripts.h"
@@ -143,6 +144,15 @@ void Application::loadSettings ()
     settings.acppModel          = recentStore->getValue ("acpp_model", juce::String ());
     settings.acppBackend        = std::clamp ((int) recentStore->getIntValue ("acpp_backend", 1), 1, 3);
     settings.acppExtractOriginal = recentStore->getIntValue ("acpp_extract_orig", 1) != 0;
+    // Recording device selection (Transport menu).
+    recording.pluginId   = recentStore->getValue ("rec_plugin", juce::String ());
+    recording.deviceId   = recentStore->getValue ("rec_device", juce::String ());
+    recording.channels   = std::clamp (recentStore->getIntValue ("rec_channels", recording.channels), 1, 512);
+    {
+        const double r = recentStore->getValue ("rec_rate", juce::String (recording.rate)).getDoubleValue ();
+        recording.rate = r > 100.0 ? r : 48000.0;
+    }
+    recording.bitDepth   = std::clamp (recentStore->getIntValue ("rec_depth", recording.bitDepth), 8, 64);
 }
 
 void Application::saveSettings ()
@@ -168,6 +178,11 @@ void Application::saveSettings ()
     recentStore->setValue ("acpp_model", settings.acppModel);
     recentStore->setValue ("acpp_backend", settings.acppBackend);
     recentStore->setValue ("acpp_extract_orig", settings.acppExtractOriginal ? 1 : 0);
+    recentStore->setValue ("rec_plugin", recording.pluginId);
+    recentStore->setValue ("rec_device", recording.deviceId);
+    recentStore->setValue ("rec_channels", recording.channels);
+    recentStore->setValue ("rec_rate", juce::String (recording.rate));
+    recentStore->setValue ("rec_depth", recording.bitDepth);
     recentStore->save ();
 }
 
@@ -639,6 +654,10 @@ void Application::closeFile()
 void Application::closeDoc (int index)
 {
     if (index < 0 || index >= (int) docs.size()) return;
+    // Closing the document being recorded into ends the session first, so
+    // recDoc_ can never dangle.
+    if (recording.active && recDoc_ == docs[(size_t) index].get ())
+        stopRecording ();
     endClonePick ();   // a picking session belongs to the doc being closed
     cancelSelGesture ();
     FileDoc& d = *docs[(size_t) index];
@@ -674,6 +693,215 @@ void Application::closeDoc (int index)
         viewStart = 0; viewEnd = 10;
         sourcePlayer.setSource (&emptyEngine);
         if (onActiveDocChanged) onActiveDocChanged ();
+    }
+}
+
+// ============================================================================
+// Recording (plugin-based capture)
+// ============================================================================
+
+void Application::stepRecordingWindow (double& t0, double& t1, bool& followEnd,
+                                       double newDur)
+{
+    // "At the end" = right edge within epsBehind behind / epsAhead ahead of
+    // the data. A single tick can append up to one second of audio (the
+    // per-tick read cap), so epsBehind must be wider than that or following
+    // would disengage on every big tick.
+    const double epsBehind = 1.5, epsAhead = 0.1;
+    const auto atEnd = [&] (double d) { return t1 >= d - epsBehind && t1 <= d + epsAhead; };
+
+    if (followEnd)
+    {
+        if (!atEnd (newDur))
+        {   // The user moved the window away from the edge: stop following and
+            // leave it exactly where they put it.
+            followEnd = false;
+            return;
+        }
+    }
+    else if (!atEnd (newDur))
+        return;   // not at the end yet - don't touch the user's window
+
+    followEnd = true;
+    double w = (t1 - t0) > 0.05 ? (t1 - t0) : kRecFollowMinWidthSecs;
+    // While the window is still anchored at time zero it is ramping up from
+    // the start of the recording: grow it to the minimum follow width so the
+    // user gets a comfortable view instead of a sliver. Once the window has
+    // started sliding (t0 > 0) its width is whatever the user set.
+    if (t0 <= 0.05 && w < kRecFollowMinWidthSecs)
+        w = kRecFollowMinWidthSecs;
+    t1 = newDur;
+    t0 = std::max (0.0, t1 - w);
+}
+
+static juce::String recordingDocName()
+{
+    const auto now = juce::Time::getCurrentTime ();
+    // getMonth() is zero-based in this JUCE build.
+    juce::String s = "Recording_" + juce::String (now.getYear ()) + "-"
+                    + juce::String (now.getMonth () + 1).paddedLeft ('0', 2) + "-"
+                    + juce::String (now.getDayOfMonth ()).paddedLeft ('0', 2)
+                    + "_" + juce::String (now.getHours ()).paddedLeft ('0', 2)
+                    + juce::String (now.getMinutes ()).paddedLeft ('0', 2)
+                    + juce::String (now.getSeconds ()).paddedLeft ('0', 2);
+    return s;
+}
+
+bool Application::startRecording (std::string* errOut)
+{
+    auto fail = [errOut] (const juce::String& msg) {
+        if (errOut != nullptr) *errOut = msg.toStdString ();
+        return false;
+    };
+
+    if (recording.active)
+        return fail ("Already recording.");
+
+    auto& host = sc::rec::RecorderHost::instance ();
+    host.scanPlugins ();   // idempotent; picks up DLLs dropped in since startup
+
+    if (recording.pluginId.isEmpty () || recording.deviceId.isEmpty ())
+        return fail ("Choose a recording device first: Transport > Recording Device.");
+
+    if (host.findPlugin (recording.pluginId) == nullptr)
+        return fail ("The selected recorder plugin is no longer available.");
+
+    sc_rec_negotiated neg {};
+    if (!host.configure (recording.pluginId, recording.deviceId,
+                         recording.channels, recording.rate, recording.bitDepth,
+                         &neg, errOut))
+        return false;   // *errOut already set by the host
+    recording.channels = neg.channels;
+    recording.rate     = neg.rate;
+    recording.bitDepth = neg.bitDepth;
+
+    if (!newFile (recording.channels, recording.rate))
+        return fail ("Could not create a new document for the recording.");
+    FileDoc* d = doc ();
+
+    // Timestamped name, made unique against the other open documents.
+    juce::String nm = recordingDocName ();
+    int k = 2;
+    for (;;)
+    {
+        bool used = false;
+        for (const auto& dd : docs)
+            if (dd->name == nm) { used = true; break; }
+        if (!used) break;
+        nm = recordingDocName () + " " + juce::String (k++);
+    }
+    d->name = nm;
+
+    recDoc_ = d;
+    if (!host.start (errOut))
+    {
+        host.stop ();
+        recDoc_ = nullptr;
+        closeDoc ((int) docs.size () - 1);   // drop the empty document we just made
+        return false;   // *errOut already set by the host
+    }
+
+    recording.active = true;
+    recording.framesRecorded = 0;
+    recording.followEnd = true;
+    viewStart = 0.0;
+    viewEnd = std::max (1e-3, d->engine.duration ());   // ~0 at start; the first
+                                                       // tick snaps to the end
+    recTmpBuf_.clear ();
+    startTimerHz (25);
+    if (onStateChange) onStateChange ();
+    return true;
+}
+
+void Application::stopRecording ()
+{
+    if (!recording.active)
+        return;
+
+    auto& host = sc::rec::RecorderHost::instance ();
+    host.stop ();
+
+    // Drain whatever the plugin still has buffered.
+    if (recDoc_ != nullptr)
+    {
+        FileDoc* d = recDoc_;
+        auto& eng = d->engine;
+        const int ch = eng.numChannels ();
+        for (int guard = 0; guard < 100 && host.availableFrames () > 0; ++guard)
+        {
+            const long long avail = host.availableFrames ();
+            if (avail <= 0) break;
+            // Up to ~1 s of audio per pass keeps the drain quick.
+            const long long cap = std::min (avail, (long long) eng.sampleRate ());
+            recTmpBuf_.resize ((size_t) cap * (size_t) ch);
+            const int frames = host.read (recTmpBuf_.data (), ch, cap);
+            if (frames <= 0) break;
+            if (!eng.appendSamples (recTmpBuf_.data (), frames))
+                break;   // audio thread busy - the rest stays in the plugin ring
+            recording.framesRecorded += frames;
+        }
+        eng.rebuildMipmaps ();   // final overview refresh for the finished file
+    }
+
+    recording.active = false;
+    recDoc_ = nullptr;
+    stopTimer ();
+    if (onStateChange) onStateChange ();
+}
+
+void Application::timerCallback ()
+{
+    if (!recording.active || recDoc_ == nullptr)
+        return;
+
+    // Validate the pointer: closeDoc() stops recording first, but be safe.
+    bool stillThere = false;
+    for (const auto& dd : docs)
+        if (dd.get () == recDoc_) { stillThere = true; break; }
+    if (!stillThere) { stopRecording (); return; }
+
+    FileDoc* d = recDoc_;
+    auto& eng = d->engine;
+    const int ch = eng.numChannels ();
+    if (ch <= 0)
+        return;
+
+    // Pull whatever the plugin has produced. Skip this tick while the audio
+    // thread is inside the buffer - the data stays in the plugin's ring and
+    // is picked up next tick, so nothing is lost.
+    bool appended = false;
+    if (!eng.audioThreadInBuffer ())
+    {
+        auto& host = sc::rec::RecorderHost::instance ();
+        const long long avail = host.availableFrames ();
+        if (avail > 0)
+        {
+            // Up to ~1 s of audio per tick keeps the UI responsive.
+            const long long cap = std::min (avail, (long long) eng.sampleRate ());
+            recTmpBuf_.resize ((size_t) cap * (size_t) ch);
+            const int frames = host.read (recTmpBuf_.data (), ch, cap);
+            if (frames > 0 && eng.appendSamples (recTmpBuf_.data (), frames))
+            {
+                recording.framesRecorded += frames;
+                appended = true;
+            }
+        }
+    }
+
+    // Follow-end logic + view updates. Only push the window while the recorded
+    // document is the active one; otherwise data keeps accumulating silently.
+    if (doc () == d)
+    {
+        const double oldT0 = viewStart, oldT1 = viewEnd;
+        stepRecordingWindow (viewStart, viewEnd, recording.followEnd, eng.duration ());
+        if (viewStart != oldT0 || viewEnd != oldT1)
+        {
+            if (onSetTimeWindow) onSetTimeWindow (viewStart, viewEnd);
+        }
+        else if (appended && onStateChange)
+        {
+            onStateChange ();   // repaint both views with the same window
+        }
     }
 }
 

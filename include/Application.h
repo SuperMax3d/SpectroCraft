@@ -26,7 +26,7 @@ struct BatchTranscribeSummary
     std::vector<std::string> failures;   // "<file name>: <error>", in run order
 };
 
-class Application
+class Application : public juce::Timer
 {
 public:
     // recentStorePath: optional override for the persisted recent-files store
@@ -93,6 +93,35 @@ public:
     // and through setSelection()/setPlayhead()/toggleChannelVisible()).
     juce::Range<double> selection{ 0, 0 };
     double viewStart = 0, viewEnd = 10;   // canonical time window (follows the waveform view)
+
+    // ---- Recording (plugin-based capture, see include/RecorderPlugin.h) ----
+    struct RecordingState
+    {
+        bool active = false;
+        juce::String pluginId, deviceId;   // selected device (persisted)
+        int channels = 2;
+        double rate = 48000.0;
+        int bitDepth = 32;                 // negotiated at start
+        int64_t framesRecorded = 0;
+        bool followEnd = true;             // view follows the recording edge
+    };
+    RecordingState recording;
+
+    /** Creates a fresh in-memory document and starts capturing from the
+        selected recorder plugin/device (Transport > Recording Device). */
+    bool startRecording (std::string* errOut);
+    void stopRecording();
+    FileDoc* recDoc() const { return recDoc_; }
+
+    /** Follow-end state machine: when the window's right edge sits at the end
+        of the data it slides to newDur keeping its width; otherwise the
+        window is left exactly where the user put it. Pure function so tests
+        can drive it directly. */
+    static void stepRecordingWindow (double& t0, double& t1, bool& followEnd,
+                                     double newDur);
+    static constexpr double kRecFollowMinWidthSecs = 5.0;
+
+    void timerCallback() override;
 
     // Audio clipboard: app-level so content copied from one document can be
     // pasted into another (e.g. a freshly created "New File"). With a spectral
@@ -598,6 +627,10 @@ private:
     mutable std::mutex audioInitLock;
     std::condition_variable audioInitCv;
     std::thread audioInitThread;
+
+    // Recording session state (see startRecording/stopRecording).
+    FileDoc* recDoc_ = nullptr;      // document being recorded into (validated on every tick)
+    std::vector<float> recTmpBuf_;   // scratch for pulled frames
 
     void loadSettings();   // restore persisted session settings from recentStore
 

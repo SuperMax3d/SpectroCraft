@@ -29,6 +29,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/VideoAudio.cpp  # FFmpeg video-container audio extraction
         ${CMAKE_SOURCE_DIR}/src/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_SOURCE_DIR}/src/StemSeparation.cpp
+        ${CMAKE_SOURCE_DIR}/src/Recorder.cpp    # recorder plugin host (Transport > Record)
         ${CMAKE_SOURCE_DIR}/src/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
 )
 
@@ -95,3 +96,32 @@ target_compile_definitions (SpectroCraftTests
         SC_NO_AUDIO_DEVICE=1   # headless tests: no real output device
         SC_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
+
+# ---------------------------------------------------------------------------
+# Recorder plugins for testing (standard API, see include/RecorderPlugin.h).
+# The fake plugin is a deterministic test double; the real WASAPI plugin is
+# shipped alongside so loading it can be exercised when devices exist. Both
+# land in <test exe dir>/recorders/, which RecorderHost scans by default.
+# ---------------------------------------------------------------------------
+add_library (sc_fake_recorder SHARED plugins/fake_rec/FakeRecPlugin.cpp)
+target_include_directories (sc_fake_recorder PRIVATE ${CMAKE_SOURCE_DIR}/include)
+set_target_properties (sc_fake_recorder PROPERTIES
+    OUTPUT_NAME fake_rec
+    PREFIX ""
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON)
+
+add_custom_command(TARGET sc_fake_recorder POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:SpectroCraftTests>/recorders
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:sc_fake_recorder>
+            $<TARGET_FILE_DIR:SpectroCraftTests>/recorders/fake_rec.dll)
+
+if (WIN32 AND TARGET sc_wasapi_recorder)
+    add_custom_command(TARGET SpectroCraftTests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:sc_wasapi_recorder>
+                $<TARGET_FILE_DIR:SpectroCraftTests>/recorders/wasapi_recorder.dll)
+endif()
+
+add_dependencies (SpectroCraftTests sc_fake_recorder)

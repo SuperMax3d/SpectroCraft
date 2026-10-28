@@ -28,6 +28,12 @@ if (SPECTRO_ENABLE_FFMPEG AND WIN32)
     add_subdirectory(extern/ffmpeg)
 endif()
 
+# Recorder plugins (standard C ABI, see include/RecorderPlugin.h). The WASAPI
+# plugin is shipped in <exe dir>/recorders/ and picked up at startup.
+if (WIN32)
+    add_subdirectory(plugins/wasapi)
+endif()
+
 # Auto-incremented version: this target runs on EVERY build and bumps the
 # patch number in VERSION.txt (1.0.0 -> 1.0.1 -> ...), then regenerates
 # generated/Version.h (About box) + SC_VERSION.txt. The sc_patch_generated

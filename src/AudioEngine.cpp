@@ -130,6 +130,39 @@ bool AudioEngine::readSamples (int channel, int64_t start, int64_t count, float*
     return false;
 }
 
+bool AudioEngine::appendSamples (const float* interleaved, int64_t numFrames)
+{
+    if (!hasFile || buffer == nullptr || reader != nullptr
+            || interleaved == nullptr || numFrames <= 0 || nchans <= 0)
+        return false;
+    // The audio thread must not be inside `buffer` while we resize it.
+    if (audioInBufferSection.load () > 0)
+        return false;
+
+    const int64_t old = totalSamples;
+    buffer->setSize (nchans, (int) (old + numFrames), true);   // keep existing content
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        float* dst = buffer->getWritePointer (ch, (int) old);
+        const float* src = interleaved + (size_t) ch;
+        for (int64_t i = 0; i < numFrames; ++i)
+            dst[i] = src[(size_t) i * (size_t) nchans];
+    }
+
+    totalSamples += numFrames;
+    durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+
+    // Keep the overview pyramid fresh while it is still cheap to rebuild; for
+    // long recordings the caller does one final rebuild when recording stops.
+    if (totalSamples <= 8000000 && (mipBaseTotal == 0 || totalSamples >= mipBaseTotal * 5 / 4))
+    {
+        rebuildMipmaps ();
+        mipBaseTotal = totalSamples;
+    }
+    return true;
+}
+
 void AudioEngine::play()
 {
     if (hasFile) { playing = true; paused = false; }
@@ -582,10 +615,11 @@ bool AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress,
         clearMipmaps();
         return false;
     }
+    mipBaseTotal = totalSamples;
     return true;
 }
 
-void AudioEngine::clearMipmaps() { mips.clear(); baseFactor = 1; }
+void AudioEngine::clearMipmaps() { mips.clear(); baseFactor = 1; mipBaseTotal = 0; }
 
 // ---- Editing ----
 

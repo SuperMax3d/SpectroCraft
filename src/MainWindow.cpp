@@ -7,6 +7,7 @@
 
 #include "MainWindow.h"
 #include "Application.h"
+#include "Recorder.h"
 #include "StartupTrace.h"
 #include <thread>
 #include "WaveformView.h"
@@ -1062,9 +1063,19 @@ void MainWindow::timerCallback()
         shiftAnchorTime = -1.0;
 
     // Keep the status-bar tool indicator in sync with live SHIFT/CTRL state
-    // (setModeText() is a no-op when nothing changed).
+    // (setModeText() is a no-op when nothing changed). While recording, show a
+    // REC indicator with the elapsed capture length.
     if (statusBar)
-        statusBar->setModeText (currentModeText());
+    {
+        juce::String mode = currentModeText ();
+        if (app.recording.active && app.recDoc () != nullptr)
+        {
+            const double secs = app.recDoc ()->engine.duration ();
+            mode = "● REC " + juce::String (secs, 2) + " s"
+                   + (mode.isEmpty () ? juce::String () : "   " + mode);
+        }
+        statusBar->setModeText (mode);
+    }
 
     // The Frequency Analysis panel follows the playhead while playing.
     if (fftPanel) { fftPanel->setFollowPlayhead (app.audioEngine().isPlaying()); fftPanel->repaint(); }
@@ -1166,6 +1177,187 @@ juce::PopupMenu MainWindow::buildMergeMenu (bool haveActiveDoc)
         m.addItem (4, "Open in parallel in current file");
     m.addItem (5, "Open in parallel in a new file");
     return m;
+}
+
+// ============================================================================
+// Recording (plugin-based capture; see include/RecorderPlugin.h)
+// ============================================================================
+
+std::vector<MainWindow::RecDeviceMenuItem> MainWindow::recordingDeviceItems (
+        const Application& app, int pluginIndex)
+{
+    std::vector<RecDeviceMenuItem> out;
+    const auto& plugins = sc::rec::RecorderHost::instance ().plugins ();
+    if (pluginIndex < 0 || pluginIndex >= (int) plugins.size ())
+        return out;
+
+    const auto& p = plugins[(size_t) pluginIndex];
+    for (size_t j = 0; j < p.devices.size (); ++j)
+    {
+        RecDeviceMenuItem item;
+        item.id      = (int) (RecDeviceBase + pluginIndex * 1000 + j);
+        item.text    = p.devices[j].name;
+        item.checked = app.recording.pluginId == p.id
+                       && app.recording.deviceId == p.devices[j].id;
+        out.push_back (item);
+    }
+    return out;
+}
+
+juce::PopupMenu MainWindow::buildRecordingDeviceItems (const Application& app, int pluginIndex)
+{
+    juce::PopupMenu m;
+    const auto items = recordingDeviceItems (app, pluginIndex);
+    if (items.empty ())
+    {
+        m.addItem (0, "(no devices)", false);
+        return m;
+    }
+    for (const auto& item : items)
+        m.addItem (item.id, item.text, true, item.checked);
+    return m;
+}
+
+juce::PopupMenu MainWindow::buildRecordingDeviceMenu (const Application& app)
+{
+    // Scan on every menu build so plugins dropped into a recorders/ folder
+    // after startup show up without a restart. (Device lists are cached per
+    // plugin load; new hardware appears on the next app start.)
+    sc::rec::RecorderHost::instance ().scanPlugins ();
+
+    juce::PopupMenu m;
+    const auto& plugins = sc::rec::RecorderHost::instance ().plugins ();
+    if (plugins.empty ())
+    {
+        m.addItem (0, "(no recorder plugins found)", false);
+        return m;
+    }
+
+    for (int i = 0; i < (int) plugins.size (); ++i)
+        m.addSubMenu (plugins[(size_t) i].name,
+                     buildRecordingDeviceItems (app, i));
+    return m;
+}
+
+void MainWindow::handleStartStopRecording ()
+{
+    if (app.recording.active)
+    {
+        app.stopRecording ();
+        syncSharedState ();
+        return;
+    }
+
+    std::string err;
+    if (!app.startRecording (&err))
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                           "Recording",
+                                           juce::String::fromUTF8 (err.c_str ()));
+}
+
+void MainWindow::handleRecDevicePick (int id)
+{
+    auto& host = sc::rec::RecorderHost::instance ();
+    const auto& plugins = host.plugins ();
+    const int pi = (id - RecDeviceBase) / 1000;
+    const int di = (id - RecDeviceBase) % 1000;
+    if (pi < 0 || pi >= (int) plugins.size ()) return;
+    const auto& p = plugins[pi];
+    if (di < 0 || di >= (int) p.devices.size ()) return;
+
+    const sc::rec::DeviceInfo& dev = p.devices[(size_t) di];
+
+    // --- Build the format dialog ------------------------------------------
+    juce::AlertWindow dlg ("Recording Device", "", juce::AlertWindow::NoIcon);
+    dlg.addButton ("OK", 1, {});
+    dlg.addButton ("Cancel", 0, {});
+    dlg.addTextBlock (dev.name + "   [" + p.name + "]");
+
+    // Channels: every count the device offers (capped so a 64-ch ASIO card
+    // doesn't produce an absurd list).
+    juce::StringArray chItems;
+    for (int c = dev.minChannels; c <= std::min (dev.maxChannels, dev.minChannels + 127); ++c)
+        chItems.add (juce::String (c));
+
+    // Sample rates: the device's list, or common rates inside its range.
+    juce::StringArray rateItems;
+    if (!dev.rates.empty ())
+    {
+        for (double r : dev.rates)
+            rateItems.add (juce::String ((int) std::lround (r)) + " Hz");
+    }
+    else
+    {
+        const double common[] = { 8000.0, 16000.0, 22050.0, 32000.0,
+                                  44100.0, 48000.0, 88200.0, 96000.0 };
+        for (double r : common)
+            if (r >= dev.minRate && r <= dev.maxRate)
+                rateItems.add (juce::String ((int) std::lround (r)) + " Hz");
+    }
+
+    // Bit depths: the device's list, or the usual three.
+    juce::StringArray depthItems;
+    if (!dev.depths.empty ())
+        for (int b : dev.depths)
+            depthItems.add (juce::String (b) + " bit");
+    else
+    {
+        depthItems.add ("16 bit");
+        depthItems.add ("24 bit");
+        depthItems.add ("32 bit");
+    }
+
+    dlg.addComboBox ("Channels", chItems);
+    dlg.addComboBox ("Sample rate", rateItems);
+    dlg.addComboBox ("Bit depth", depthItems);
+
+    // Preselect the currently stored values when they are valid for this device.
+    auto pickIndex = [] (const juce::StringArray& items, const juce::String& want) {
+        int idx = items.indexOf (want);
+        return idx >= 0 ? idx + 1 : 1;
+    };
+    if (auto* c = dlg.getComboBoxComponent ("Channels"))
+        c->setSelectedId (pickIndex (chItems, juce::String (app.recording.channels)),
+                          juce::dontSendNotification);
+    if (auto* c = dlg.getComboBoxComponent ("Sample rate"))
+        c->setSelectedId (pickIndex (rateItems,
+                                     juce::String ((int) std::lround (app.recording.rate)) + " Hz"),
+                          juce::dontSendNotification);
+    if (auto* c = dlg.getComboBoxComponent ("Bit depth"))
+        c->setSelectedId (pickIndex (depthItems, juce::String (app.recording.bitDepth) + " bit"),
+                          juce::dontSendNotification);
+
+    const int result = dlg.runModalLoop ();
+    if (result != 1)
+        return;
+
+    auto* chC   = dlg.getComboBoxComponent ("Channels");
+    auto* rateC = dlg.getComboBoxComponent ("Sample rate");
+    auto* depC  = dlg.getComboBoxComponent ("Bit depth");
+    if (chC == nullptr || rateC == nullptr || depC == nullptr)
+        return;
+
+    const int wantCh   = chItems[(size_t) std::max (0, chC->getSelectedItemIndex ())].getIntValue ();
+    const double wantRate = rateItems[(size_t) std::max (0, rateC->getSelectedItemIndex ())].getDoubleValue ();
+    const int wantDepth   = depthItems[(size_t) std::max (0, depC->getSelectedItemIndex ())].getIntValue ();
+
+    sc_rec_negotiated neg {};
+    std::string err;
+    if (!host.configure (p.id, dev.id, wantCh, wantRate, wantDepth, &neg, &err))
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                           "Recording Device",
+                                           juce::String::fromUTF8 (err.c_str ()));
+        return;
+    }
+
+    app.recording.pluginId   = p.id;
+    app.recording.deviceId   = dev.id;
+    app.recording.channels   = neg.channels;
+    app.recording.rate       = neg.rate;
+    app.recording.bitDepth   = neg.bitDepth;
+    app.saveSettings ();
+    syncSharedState ();
 }
 
 
@@ -1795,6 +1987,13 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 {
     using enum MenuIDs;
 
+    // Recording Device submenu: RecDeviceBase + pluginIndex*1000 + deviceIndex.
+    if (menuItemID >= RecDeviceBase && menuItemID < 5000)
+    {
+        handleRecDevicePick (menuItemID);
+        return;
+    }
+
     // Window menu: toggle a left-column panel open/closed.
     if (menuItemID >= WindowPanelBase && menuItemID < WindowPanelBase + 16)
     {
@@ -2031,6 +2230,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
                 app.playSpectralSel = false;
             app.pushSpectralMaskToEngine ();
             syncSharedState ();
+            break;
+
+        case TransportRecord:
+            handleStartStopRecording ();
             break;
 
         case ToolsSilence:   runDestructiveEdit ([&] (std::string* e) { return app.silence (e); }); break;
@@ -4238,6 +4441,13 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (TransportPlaySpectralSel, "Play Spectral Selection",
                       app.hasSpectralSelection (),
                       app.playSpectralSel && app.hasSpectralSelection ());
+
+        // Recording: start/stop toggle + device selection via plugins.
+        menu.addSeparator ();
+        menu.addItem (TransportRecord,
+                      app.recording.active ? "Stop Recording" : "Record",
+                      true, false);
+        menu.addSubMenu ("Recording Device", buildRecordingDeviceMenu (app));
     }
     else if (menuName == "Effects")
     {

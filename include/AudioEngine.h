@@ -51,6 +51,17 @@ public:
     // Uses the in-memory buffer if present, otherwise streams from the file.
     bool readSamples (int channel, int64_t start, int64_t count, float* dest) const;
 
+    /** Grows an in-memory document by numFrames frames and copies interleaved
+        float32 data into it (used while recording). Returns false for
+        streaming documents or bad arguments. Mipmaps are refreshed with a
+        throttle so long recordings stay responsive; the caller should do one
+        final rebuild when recording stops. */
+    bool appendSamples (const float* interleaved, int64_t numFrames);
+
+    /** True while the audio thread is reading from the in-memory buffer.
+        Callers that mutate `buffer` must wait for this to be false. */
+    bool audioThreadInBuffer() const { return audioInBufferSection.load () > 0; }
+
     // ---- Transport ----
     void play(); void stop(); void pause();
     bool isPlaying() const { return playing.load(); }
@@ -268,6 +279,7 @@ private:
     std::unique_ptr<juce::AudioBuffer<float>> buffer;
     std::vector<MipLevel> mips;
     int64_t baseFactor = 1;
+    int64_t mipBaseTotal = 0;   // totalSamples at the last mipmap rebuild (append throttle)
     int64_t inMemoryLimit = 64ll * 1024 * 1024; // sample-channels
 
     int nchans = 0;
