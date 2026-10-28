@@ -329,7 +329,12 @@ namespace SpectralMask
         // be overlap-added so the residual is exact at eStart.
         const int64_t kCtx = std::max<int64_t> (0, ceilDiv (eStart - N + 1, H));
         const int64_t xStart = kCtx * (int64_t) H;
-        const int64_t extLen = eEnd - xStart;
+
+        // The output vectors cover exactly the reported extent [eStart..eEnd).
+        // Frames before eStart are overlap-add context only; if they were part
+        // of the output, their unfilled leading samples would be written past
+        // eEnd into the original channels (a silent gap after the selection).
+        const int64_t outLen = eEnd - eStart;
 
         // The accumulation buffers must cover every frame window: the last
         // frame's window may extend past eEnd (which is clamped to EOF).
@@ -339,8 +344,8 @@ namespace SpectralMask
         outResidual.resize ((size_t) eng.numChannels());
         for (int ch = 0; ch < eng.numChannels(); ++ch)
         {
-            outExtracted[(size_t) ch].assign ((size_t) extLen, 0.0f);
-            outResidual[(size_t) ch].assign ((size_t) extLen, 0.0f);
+            outExtracted[(size_t) ch].assign ((size_t) outLen, 0.0f);
+            outResidual[(size_t) ch].assign ((size_t) outLen, 0.0f);
         }
 
         std::vector<float> x;
@@ -359,7 +364,10 @@ namespace SpectralMask
                 x.assign ((size_t) bufLen, 0.0f);
                 if (!eng.readSamples (ch, xStart, bufLen, x.data()))
                     return false;
-                std::copy (x.begin(), x.begin() + extLen,
+                // Copy exactly the extent's samples: the read buffer starts at
+                // xStart, which precedes eStart by up to N-H context samples.
+                std::copy (x.begin() + (eStart - xStart),
+                           x.begin() + (eEnd - xStart),
                            outResidual[(size_t) ch].begin());
                 continue;   // extracted stays all-zero
             }

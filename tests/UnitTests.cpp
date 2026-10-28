@@ -10891,6 +10891,13 @@ static void testSplitSpectralSelectionEdgeFade()
     // kLast = (38400-1)/512 = 74 -> extent ends at 74*512+2048 = 39936.
     CHECK (extent == juce::Range<int64_t> (19 * H, 74 * H + N), "edge extent");
 
+    // The output vectors must be exactly as long as the reported extent: any
+    // extra leading context samples would be written past eEnd into the
+    // original channel (a silent gap right after the selection end).
+    CHECK (ext[0].size() == (size_t) extent.getLength ()
+           && res[0].size() == (size_t) extent.getLength (),
+          "output vectors are exactly as long as the reported extent");
+
     const std::vector<float>& e = ext[0];
     const std::vector<float>& r = res[0];
     std::vector<float> orig ((size_t) nSamples);
@@ -10934,6 +10941,82 @@ static void testSplitSpectralSelectionEdgeFade()
         headMax = std::max (headMax,
                             (double) std::abs (ext2[0][(size_t) (s - extent2.getStart ())]));
     CHECK (headMax < 0.5, "no spike at file start where coverage is partial");
+}
+
+static void testSplitSpectralSelectionExtentBounds()
+{
+    // Regression: the output vectors used to be sized to cover context frames
+    // before eStart, leaving trailing zeros that were copied past eEnd into
+    // the original channels (a silent gap right after the selection end), and
+    // hidden-channel content was shifted left by the same amount.
+    const double rate = 48000.0;
+    const int64_t nSamples = 48000;   // 1 second
+
+    auto noiseGen = [] (int ch, int64_t f, double) {
+        uint64_t v = (uint64_t) (f + 1) * 0x9E3779B97F4A7C15ull ^ ((uint64_t) ch << 32);
+        v ^= v >> 30; v *= 0xBF58476D1CE4E5B9ull; v ^= v >> 27;
+        return (float) ((double) (v & 0xFFFFFF) / 16777216.0 - 0.5) * 0.4;
+    };
+
+    const juce::File wav = makeTempFile ("split_bounds.wav");
+    CHECK (writeWav (wav, 2, rate, nSamples, noiseGen), "wrote stereo noise wav");
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "loaded stereo noise wav");
+
+    SpectralSelection sel;
+    sel.addRect (0.2, 0.8, 8000.0, 12000.0, false);
+
+    const std::vector<int> chans = { 0 };
+    std::vector<std::vector<float>> ext, res;
+    juce::Range<int64_t> extent;
+    CHECK (SpectralMask::splitSpectralSelection (eng, { 9600, 38400 }, sel,
+                                                 &chans, ext, res, extent),
+          "bounds split ran");
+
+    const int N = SpectralMask::fftSize(), H = SpectralMask::hopSize();
+    CHECK (extent == juce::Range<int64_t> (19 * H, 74 * H + N), "bounds extent");
+    CHECK (ext[0].size() == (size_t) extent.getLength ()
+           && res[0].size() == (size_t) extent.getLength (),
+          "affected channel outputs are exactly as long as the extent");
+
+    // Hidden channel: residual must be the bit-exact original over the whole
+    // extent (no shift), and extracted stays all-zero.
+    std::vector<float> orig1 ((size_t) nSamples);
+    CHECK (eng.readSamples (1, 0, (int) nSamples, orig1.data()), "read ch1");
+    bool exact = true;
+    for (size_t i = 0; i < res[1].size(); ++i)
+        if (res[1][i] != orig1[(size_t) extent.getStart () + i]) { exact = false; break; }
+    CHECK (exact, "hidden channel residual is bit-exact original over the extent");
+    bool extZero = true;
+    for (float v : ext[1]) if (v != 0.0f) { extZero = false; break; }
+    CHECK (extZero, "hidden channel extracted stays all-zero");
+
+    // Application level: after a real split with a mid-file selection the
+    // original channel must be untouched from eEnd to EOF (no silent gap).
+    const juce::File wav2 = makeTempFile ("split_bounds_app.wav");
+    CHECK (writeWav (wav2, 1, rate, nSamples, noiseGen), "wrote mono noise wav");
+
+    Application app;
+    CHECK (app.openFile (wav2), "opened mono noise wav");
+    FileDoc* d = app.doc();
+    if (!d) return;
+    AudioEngine& aeng = app.audioEngine ();
+
+    std::vector<float> before ((size_t) nSamples);
+    CHECK (aeng.readSamples (0, 0, (int) nSamples, before.data()), "read before");
+
+    d->spectralSel = sel;
+    std::string err;
+    CHECK (app.splitSpectralSelection (&err), "bounds split applied: " + err);
+
+    const int64_t eEnd = extent.getEnd ();
+    std::vector<float> after0 ((size_t) nSamples);
+    CHECK (aeng.readSamples (0, 0, (int) nSamples, after0.data()), "read ch0 after");
+    bool tailExact = true;
+    for (int64_t s = eEnd; s < nSamples; ++s)
+        if (after0[(size_t) s] != before[(size_t) s]) { tailExact = false; break; }
+    CHECK (tailExact, "original channel untouched from the extent end to EOF");
 }
 
 static void testSplitSpectralSelectionApp()
@@ -16839,6 +16922,7 @@ static int scRunUnitTestsImpl()
     testSplitSpectralSelectionTrack1To2MixesIntoExisting();
     testSplitSpectralSelectionProcessor();
     testSplitSpectralSelectionEdgeFade();
+    testSplitSpectralSelectionExtentBounds();
     progress ("split spectral selection (app + undo)");
     testSplitSpectralSelectionApp();
     progress ("playback mask streaming");   testPlaybackMaskStreaming();

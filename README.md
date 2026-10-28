@@ -1346,7 +1346,9 @@ overlap-added on both sides, giving every output sample full window
 coverage — the extracted track fades in/out with the Hann taper at the
 two ends of the extent and the original channels crossfade back to their
 pre-edit content over those same regions, so no amplitude spike or hard
-cut appears at either end of the selection.
+cut appears at either end of the selection. Everything from the end of the
+extent to EOF stays bit-identical to the pre-edit content (no silent gap is
+written after the selection).
 The whole operation (content change *and* channel-count change) is a single
 undoable step; undo restores the original channels bit-exact. New channels are
 made visible automatically.
