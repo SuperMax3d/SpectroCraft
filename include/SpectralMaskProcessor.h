@@ -50,6 +50,32 @@ namespace SpectralMask
                         const SpectralSelection& sel,
                         std::vector<std::vector<float>>& outA);
 
+    /** Splits the selected spectral content over [range] into two per-channel
+        results:
+          - outExtracted: the band content with a trapezoidal blend weight in
+            frequency (1.0 across the middle 50% of each selected band, linear
+            ramps to 0 over the top and bottom 25%) and the estimated noise
+            floor subtracted from its amplitude;
+          - outResidual: what stays in the original channels - bit-exact outside
+            the selection's frames; inside it, the unselected part of each bin
+            plus synthetic noise at the estimated floor level (weighted by the
+            same trapezoid), so extracted + residual ~= original with no sharp
+            spectral edge.
+        The per-frame noise floor is the mean magnitude of the bins in windows
+        just outside each selected band (25% of the band height, min 4 bins);
+        if none exist it falls back to all unselected bins, then to zero.
+        Both outputs have one vector per channel listed in `channels` (nullptr
+        = every channel), each of length outExtent.getLength(); outExtent is
+        the synthesis extent of the frames whose start lies inside [range]
+        (slightly wider than [range] itself). Read-only; works on streamed
+        engines too. Returns false on failure. */
+    bool splitSpectralSelection (const AudioEngine& eng, juce::Range<int64_t> range,
+                                 const SpectralSelection& sel,
+                                 const std::vector<int>* channels,
+                                 std::vector<std::vector<float>>& outExtracted,
+                                 std::vector<std::vector<float>>& outResidual,
+                                 juce::Range<int64_t>& outExtent);
+
     /** Stateful streaming mask for the audio thread. process() is called with
         consecutive absolute file-sample ranges; overlap-add state persists
         between calls so no clicks appear at block boundaries. Non-consecutive

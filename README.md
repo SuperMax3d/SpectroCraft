@@ -523,6 +523,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   mode runs several descriptions in one pass with optional include/exclude time
   anchors. Runs an external prebuilt CLI — binary and model weights are
   downloaded on demand or installed manually.
+- **Split spectral selection** (`Effects → Split Spectral Selection`, enabled
+  only while a spectral selection is active): moves the selected band content
+  out of each visible source channel into one new appended channel per source
+  channel. The blend is trapezoidal (25% linear ramp at each band edge, full
+  weight across the middle), and where energy is removed the original channels
+  are refilled with synthetic noise at the per-frame estimated floor level —
+  so *original + new track* reconstructs the pre-edit signal with no hard
+  spectral edge. One undoable step (content change plus channel-count change).
 - **Cancelling long operations**: every progress dialog — loading large files,
   resampling, noise suppression, transcription (single and batch), spectrogram
   export — has a Cancel button, and ESC works as well. The operation stops at
@@ -1293,6 +1301,22 @@ the edit, and undo/redo works as usual. **Play Spectral Selection**
 (Transport menu) plays back with the selection masked out in real time,
 without modifying the file.
 
+**Split Spectral Selection** (Effects menu) goes one step further: instead of
+just zeroing the band, it *moves* the band content into new channels — one per
+affected visible source channel, appended at the end. Each FFT frame inside
+the selection's time extent gets a trapezoidal vertical profile (linear ramps
+over the bottom and top 25% of every contiguous selected band, full weight in
+the middle); the extracted part is the band content with its amplitude reduced
+by the per-frame noise floor (mean magnitude of the bins just outside the
+bands), and the removed energy in the original channels is replaced by
+synthetic noise at that same floor level with a deterministic pseudo-random
+phase. The result: the new track(s) carry the isolated band, the originals keep
+everything else plus an uncorrelated noise fill inside the bands, and their sum
+reconstructs the pre-edit signal — no hard spectral edge to hear or see.
+The whole operation (content change *and* channel-count change) is a single
+undoable step; undo restores the original channels bit-exact. New channels are
+made visible automatically.
+
 ### Selection panel (named selections + harmonic cloning)
 
 The **Selection** tab in the left panel manages *named* spectral selections
@@ -1463,7 +1487,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2730 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~2770 checks), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -1518,6 +1542,14 @@ delays the window from appearing.
   - **Undo/redo**: silence → undo restores samples → redo re-silences; stack
     depth; fade-in undo regression (per-sample edits must capture old data
     before the in-place modification, or undo is a no-op).
+  - **Split spectral selection**: processor-level two-tone file — the extracted
+    channel carries the selected band and nothing of the out-of-band tone,
+    the residual keeps the out-of-band tone and loses the band, and their sum
+    reconstructs the original; with a strong in-window noise floor the weak
+    in-band tone is fully swallowed by the floor subtraction while the residual
+    gains the synthetic noise fill. App-level: menu enablement (Effects item
+    appears only with an active spectral selection), one new channel per visible
+    source made visible, and undo/redo restoring the pre-edit file bit-exact.
   - **FFT follow-playhead window**: with a very narrow selection and
     follow-playhead mode on, the panel still analyses a full-size window
     centred on the cursor — a pure tone peaks at its true frequency instead of

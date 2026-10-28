@@ -181,6 +181,263 @@ namespace SpectralMask
         }, nullptr, outA);
     }
 
+    // ------------------------------------------------------- split selection
+
+    /** Deterministic pseudo-random phase in [0, 2*pi) for the synthetic noise
+        fill: stable across runs (so tests can verify exact values) and
+        uncorrelated between (frame, bin) pairs. */
+    static float noisePhase (int64_t frameStart, int bin)
+    {
+        const double v = std::sin ((double) frameStart * 12.9898
+                                   + (double) bin * 78.233) * 43758.5453;
+        return (float) ((v - std::floor (v)) * kTwoPi);
+    }
+
+    /** Per-frame vertical profile of the selection at time tSecs: for every
+        FFT bin, the trapezoidal blend weight (1 across the middle 50% of each
+        contiguous selected band, linear ramps to 0 over its top and bottom
+        25%) plus the list of bins just outside the bands used for the noise-
+        floor estimate. Returns false when no bin is selected at this time. */
+    static bool frameWeights (const SpectralSelection& sel, double tSecs,
+                              int N, double rate,
+                              std::vector<float>& w, std::vector<int>& noiseBins)
+    {
+        const int half = N / 2;
+        const double binHz = rate / N;
+        w.assign ((size_t) (half + 1), 0.0f);
+
+        // Vertical profile: which bins are inside the selection at tSecs.
+        std::vector<uint8_t> inSel ((size_t) (half + 1), 0);
+        for (int b = 0; b <= half; ++b)
+            if (sel.contains (tSecs, (double) b * binHz))
+                inSel[(size_t) b] = 1;
+
+        // Contiguous runs of selected bins (single-bin speckle is ignored).
+        struct Run { int lo, hi; };
+        std::vector<Run> runs;
+        int start = -1;
+        for (int b = 0; b <= half + 1; ++b)
+        {
+            const bool on = (b <= half) && inSel[(size_t) b];
+            if (on && start < 0) start = b;
+            if (!on && start >= 0)
+            {
+                if (b - 1 - start + 1 >= 3)   // need at least 3 bins for a band
+                    runs.push_back ({ start, b - 1 });
+                start = -1;
+            }
+        }
+        if (runs.empty()) return false;
+
+        // Trapezoidal weight per run: ramps of 25% of the band height at each
+        // edge; clamped so very thin bands still peak at 1 in the middle.
+        std::vector<uint8_t> isNoise ((size_t) (half + 1), 0);
+        for (const auto& rn : runs)
+        {
+            const double fLo = (double) rn.lo * binHz;
+            const double fHi = (double) rn.hi * binHz;
+            const double ramp = std::max (binHz, 0.25 * (fHi - fLo));
+            for (int b = rn.lo; b <= rn.hi; ++b)
+            {
+                const double f = (double) b * binHz;
+                const float up   = (float) juce::jlimit (0.0, 1.0, (f - fLo) / ramp);
+                const float down = (float) juce::jlimit (0.0, 1.0, (fHi - f) / ramp);
+                w[(size_t) b] = std::min (up, down);
+            }
+
+            // Noise-floor window: 25% of the band height (min 4 bins) on each
+            // side, outside the band.
+            const int W = std::max (4, (int) std::lround (0.25 * (rn.hi - rn.lo)));
+            for (int b = std::max (0, rn.lo - W); b < rn.lo; ++b)
+                isNoise[(size_t) b] = 1;
+            for (int b = rn.hi + 1; b <= std::min (half, rn.hi + W); ++b)
+                isNoise[(size_t) b] = 1;
+        }
+
+        noiseBins.clear ();
+        int nCount = 0;
+        for (int b = 0; b <= half; ++b)
+            if (isNoise[(size_t) b]) { noiseBins.push_back (b); ++nCount; }
+        if (nCount == 0)   // selection covers the whole spectrum: fall back to
+        {
+            for (int b = 0; b <= half; ++b)
+                if (!inSel[(size_t) b]) noiseBins.push_back (b);
+        }
+        return true;
+    }
+
+    /** Splits an active spectral selection into new channels: one new channel
+        per affected source channel, each containing the selected band content
+        with a trapezoidal blend (25% linear ramp at each band edge, 50% full
+        weight in the middle). The original channels keep everything outside
+        the bands; inside them the removed energy is replaced by synthetic
+        noise at the per-frame estimated floor level (mean magnitude of the
+        bins just outside the selection), so that original + new channel(s)
+        reconstruct the pre-edit signal with no hard spectral edge.
+
+        outExtracted[ch] / outResidual[ch] are filled for every channel over
+        the synthesis extent reported in outExtent (residual = what stays in
+        the source channel; extracted = content of the appended copy). */
+    bool splitSpectralSelection (const AudioEngine& eng, juce::Range<int64_t> range,
+                                 const SpectralSelection& sel,
+                                 const std::vector<int>* channels,
+                                 std::vector<std::vector<float>>& outExtracted,
+                                 std::vector<std::vector<float>>& outResidual,
+                                 juce::Range<int64_t>& outExtent)
+    {
+        if (!eng.isFileLoaded()) return false;
+        auto r = range.getIntersectionWith ({ 0, eng.numSamples() });
+        outExtracted.clear ();
+        outResidual.clear ();
+        outExtent = { 0, 0 };
+        if (r.getLength() <= 0 || sel.empty()) return true;   // nothing to do
+
+        const int N = fftSize(), H = hopSize();
+        const double rate = eng.sampleRate();
+        const int64_t total = eng.numSamples();
+
+        // Frames whose START lies inside the selection's time range carry the
+        // mask; their synthesis extent is the output range.
+        const int64_t kFirst = std::max<int64_t> (0, ceilDiv (r.getStart(), H));
+        const int64_t kLast  = (r.getEnd() - 1) / H;
+        if (kLast < kFirst) return true;   // selection shorter than one hop
+
+        const int64_t eStart = kFirst * (int64_t) H;
+        const int64_t eEnd   = std::min<int64_t> (kLast * (int64_t) H + N, total);
+        outExtent = { eStart, eEnd };
+
+        // Earlier frames (start < r0) have weight 0 everywhere but must still
+        // be overlap-added so the residual is exact at eStart.
+        const int64_t kCtx = std::max<int64_t> (0, ceilDiv (eStart - N + 1, H));
+        const int64_t xStart = kCtx * (int64_t) H;
+        const int64_t extLen = eEnd - xStart;
+
+        // The accumulation buffers must cover every frame window: the last
+        // frame's window may extend past eEnd (which is clamped to EOF).
+        const int64_t bufLen = kLast * (int64_t) H + N - xStart;
+
+        outExtracted.resize ((size_t) eng.numChannels());
+        outResidual.resize ((size_t) eng.numChannels());
+        for (int ch = 0; ch < eng.numChannels(); ++ch)
+        {
+            outExtracted[(size_t) ch].assign ((size_t) extLen, 0.0f);
+            outResidual[(size_t) ch].assign ((size_t) extLen, 0.0f);
+        }
+
+        std::vector<float> x;
+        const auto& win = hannWindow (N);
+        juce::dsp::FFT fft (11);   // N == 2^11
+        std::vector<float> buf ((size_t) N * 2, 0.0f);
+        std::vector<float> extBuf ((size_t) N * 2, 0.0f);
+        std::vector<float> w;
+        std::vector<int> noiseBins;
+
+        for (int ch = 0; ch < eng.numChannels(); ++ch)
+        {
+            if (!channelInList (channels, ch))
+            {
+                // Untouched channel: residual is the original signal itself.
+                x.assign ((size_t) bufLen, 0.0f);
+                if (!eng.readSamples (ch, xStart, bufLen, x.data()))
+                    return false;
+                std::copy (x.begin(), x.begin() + extLen,
+                           outResidual[(size_t) ch].begin());
+                continue;   // extracted stays all-zero
+            }
+
+            x.assign ((size_t) bufLen, 0.0f);
+            if (!eng.readSamples (ch, xStart, bufLen, x.data()))
+                return false;
+
+            std::vector<float> accExt ((size_t) bufLen, 0.0f);
+            std::vector<float> accRes ((size_t) bufLen, 0.0f);
+            std::vector<float> winSum ((size_t) bufLen, 0.0f);
+
+            for (int64_t k = kCtx; k <= kLast; ++k)
+            {
+                const int64_t s_k = k * (int64_t) H;
+                const size_t off = (size_t) (s_k - xStart);
+
+                // Nothing selected at this frame time? Pure pass-through for the
+                // residual (no FFT needed: ifft(fft(y)) == y).
+                const double tSecs = (double) s_k / rate;
+                if (!frameWeights (sel, tSecs, N, rate, w, noiseBins))
+                {
+                    for (int i = 0; i < N; ++i)
+                    {
+                        const float wv = win[(size_t) i];
+                        accRes[off + (size_t) i] += wv * x[off + (size_t) i];
+                        winSum[off + (size_t) i]  += wv * wv;
+                    }
+                    continue;
+                }
+
+                float* d = buf.data();
+                for (int i = 0; i < N; ++i)
+                    d[(size_t) i] = x[off + (size_t) i] * win[(size_t) i];
+                fft.performRealOnlyForwardTransform (d, true);
+
+                // Per-frame noise floor: mean magnitude of the bins just outside
+                // the selected bands.
+                double nSum = 0.0;
+                for (int b : noiseBins)
+                    nSum += std::hypot ((double) d[(size_t) b * 2],
+                                        (double) d[(size_t) b * 2 + 1]);
+                const float Nk = noiseBins.empty () ? 0.0f
+                                                    : (float) (nSum / (double) noiseBins.size());
+
+                // Build the extracted and residual spectra bin by bin.
+                std::fill (extBuf.begin(), extBuf.end(), 0.0f);
+                for (int b = 0; b <= N / 2; ++b)
+                {
+                    const float re = d[(size_t) b * 2];
+                    const float im = d[(size_t) b * 2 + 1];
+                    const float wb = w[(size_t) b];
+
+                    if (wb <= 0.0f)
+                        continue;   // extracted: silence; residual: original bin
+
+                    const double mag = std::hypot ((double) re, (double) im);
+                    // Extracted part: the band content with the noise floor
+                    // subtracted from its amplitude, scaled by the blend weight.
+                    float sExt = 0.0f;
+                    if (mag > 1e-9)
+                        sExt = wb * (float) std::max (0.0, 1.0 - Nk / (float) mag);
+                    extBuf[(size_t) b * 2]     = re * sExt;
+                    extBuf[(size_t) b * 2 + 1] = im * sExt;
+
+                    // Residual part: the unselected fraction of the bin plus
+                    // synthetic noise at the floor level (deterministic phase).
+                    const float th = noisePhase (s_k, b);
+                    d[(size_t) b * 2]     = re * (1.0f - wb) + Nk * std::cos (th) * wb;
+                    d[(size_t) b * 2 + 1] = im * (1.0f - wb) + Nk * std::sin (th) * wb;
+                }
+
+                fft.performRealOnlyInverseTransform (d);
+                fft.performRealOnlyInverseTransform (extBuf.data());
+
+                for (int i = 0; i < N; ++i)
+                {
+                    const float wv = win[(size_t) i];
+                    accExt[off + (size_t) i] += wv * extBuf[(size_t) i];
+                    accRes[off + (size_t) i] += wv * d[(size_t) i];
+                    winSum[off + (size_t) i]  += wv * wv;
+                }
+            }
+
+            for (int64_t s = eStart; s < eEnd; ++s)
+            {
+                const size_t i = (size_t) (s - xStart);
+                const float ws = winSum[i];
+                outExtracted[(size_t) ch][(size_t) (s - eStart)] =
+                    (ws > 1e-6f) ? accExt[i] / ws : 0.0f;
+                outResidual[(size_t) ch][(size_t) (s - eStart)] =
+                    (ws > 1e-6f) ? accRes[i] / ws : 0.0f;
+            }
+        }
+        return true;
+    }
+
     // ---------------------------------------------------------- playback mask
 
     void PlaybackMask::prepare (double fileRate, int numChannels)

@@ -10620,6 +10620,183 @@ static void testExtractMasked()
     CHECK (maxErr < 1e-6, "A + B reconstructs the original");
 }
 
+// Mean |FFT| over the bins whose centres lie in [fLoHz, fHiHz], taken from a
+// 2048-sample segment starting at `from`.
+static float bandMeanMag (const std::vector<float>& x, size_t from,
+                          double fLoHz, double fHiHz, double rate)
+{
+    const int N = 2048;
+    juce::dsp::FFT fft (11);
+    std::vector<float> buf ((size_t) N * 2, 0.0f);
+    for (int i = 0; i < N && from + (size_t) i < x.size(); ++i)
+        buf[(size_t) i] = x[from + (size_t) i];
+    fft.performRealOnlyForwardTransform (buf.data(), true);
+    double sum = 0.0;
+    int nBins = 0;
+    for (int b = 0; b <= N / 2; ++b)
+    {
+        const double f = (double) b * rate / N;
+        if (f < fLoHz || f > fHiHz) continue;
+        sum += std::hypot ((double) buf[(size_t) b * 2],
+                           (double) buf[(size_t) b * 2 + 1]);
+        ++nBins;
+    }
+    return nBins > 0 ? (float) (sum / (double) nBins) : 0.0f;
+}
+
+// ------------------------------------------------- split spectral selection
+
+static void testSplitSpectralSelectionProcessor()
+{
+    const juce::File wav = makeTempFile ("split_sel.wav");
+    CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "loaded two-tone wav");
+
+    SpectralSelection sel = lowBandSel();
+    std::vector<std::vector<float>> ext, res;
+    juce::Range<int64_t> extent;
+    CHECK (SpectralMask::splitSpectralSelection (eng, { 0, kToneFrames }, sel,
+                                                 nullptr, ext, res, extent),
+          "split ran");
+
+    // The selection covers the whole file: frames start at sample 0 and the
+    // last frame's window ends exactly at EOF.
+    CHECK (extent.getStart () == 0 && extent.getEnd () == kToneFrames,
+          "extent is the synthesis range of the selected frames");
+    CHECK (ext.size() == 1 && res.size() == 1
+           && ext[0].size() == (size_t) extent.getLength()
+           && res[0].size() == (size_t) extent.getLength(),
+          "one extracted + one residual vector per channel, extent-long");
+
+    const float e500 = toneAmp (ext[0], 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float e3500 = toneAmp (ext[0], 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (std::abs (e500 - 0.5f) < 0.01f, "extracted contains the selected tone");
+    CHECK (e3500 < 0.01f, "extracted excludes the unselected tone");
+
+    const float r500 = toneAmp (res[0], 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float r3500 = toneAmp (res[0], 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (r500 < 0.01f, "residual has no selected-tone content");
+    CHECK (std::abs (r3500 - 0.5f) < 0.005f, "residual keeps the unselected tone");
+
+    // The surroundings are silent so the noise floor is ~0: extracted +
+    // residual must reconstruct the original to within STFT round-trip error.
+    std::vector<float> orig ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, orig.data()), "read original");
+    double maxErr = 0.0;
+    for (size_t i = 2048; i + 2048 < ext[0].size(); ++i)
+        maxErr = std::max (maxErr,
+                           (double) std::abs (ext[0][i] + res[0][i] - orig[i]));
+    CHECK (maxErr < 0.01, "extracted + residual ~= original (no hard cut)");
+
+    // --- strong noise floor: a loud tone just below the band --------------
+    const juce::File wav2 = makeTempFile ("split_sel_floor.wav");
+    CHECK (writeWav (wav2, 1, kToneRate, kToneFrames,
+        [] (int, int64_t f, double rate) {
+            const double t = (double) f / rate;
+            return 0.005f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                              * 500.0 * t)
+                 + 0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                             * 250.0 * t);
+        }), "wrote floor wav");
+
+    AudioEngine eng2;
+    CHECK (eng2.loadFile (wav2), "loaded floor wav");
+
+    SpectralSelection sel2 = lowBandSel();
+    std::vector<std::vector<float>> ext2, res2;
+    juce::Range<int64_t> extent2;
+    CHECK (SpectralMask::splitSpectralSelection (eng2, { 0, kToneFrames }, sel2,
+                                                 nullptr, ext2, res2, extent2),
+          "floor split ran");
+
+    // The 250 Hz tone sits in the noise-estimation window below the band, so
+    // the floor swallows the weak 500 Hz tone entirely.
+    const float e500b = toneAmp (ext2[0], 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    CHECK (e500b < 0.002f, "weak in-band tone fully subtracted by the floor");
+    const float e250 = toneAmp (ext2[0], 2048, (size_t) kToneFrames - 2048, 250.0, kToneRate);
+    CHECK (e250 < 0.01f, "out-of-band tone is not extracted");
+
+    // The residual must carry the synthetic noise fill in-band: its mean |FFT|
+    // across the band is a substantial fraction of the floor level.
+    const float fill = bandMeanMag (res2[0], kToneFrames / 2 - 1024, 300.0, 700.0,
+                                    kToneRate);
+    CHECK (fill > 1.0f, "residual carries the noise-floor fill in-band");
+    const float r250 = toneAmp (res2[0], 2048, (size_t) kToneFrames - 2048, 250.0, kToneRate);
+    CHECK (std::abs (r250 - 0.4f) < 0.01f, "residual keeps the out-of-band tone");
+}
+
+static void testSplitSpectralSelectionApp()
+{
+    const juce::File wav = makeTempFile ("split_sel_app.wav");
+    CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened two-tone wav");
+    FileDoc* d = app.doc();
+    if (!d) return;
+    AudioEngine& eng = app.audioEngine ();
+
+    // The Effects menu always lists the item; without a spectral selection it
+    // is disabled and the direct call reports an error.
+    {
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
+        const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+        CHECK (fxMenu.getNumItems() == 11, "Effects menu lists the split item");
+#else
+        CHECK (fxMenu.getNumItems() == 8, "Effects menu lists the split item");
+#endif
+    }
+    std::string err;
+    CHECK (!app.splitSpectralSelection (&err) && !err.empty (),
+          "split without a selection fails with a message");
+    CHECK (eng.numChannels () == 1, "failed split leaves the file untouched");
+
+    // With an active spectral selection: one new channel per visible source.
+    d->spectralSel = lowBandSel ();
+    std::vector<float> before ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, before.data()), "read before");
+
+    CHECK (app.splitSpectralSelection (&err), "split applied: " + err);
+    CHECK (eng.numChannels () == 2, "file grew from 1 to 2 channels");
+    CHECK ((int) eng.numSamples () == (int) kToneFrames, "length unchanged");
+
+    std::vector<float> orig0 ((size_t) kToneFrames), new1 ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, orig0.data()), "read ch0 after");
+    CHECK (eng.readSamples (1, 0, (int) kToneFrames, new1.data()), "read ch1 after");
+
+    const float n500 = toneAmp (new1, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float n3500 = toneAmp (new1, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (std::abs (n500 - 0.5f) < 0.01f, "new channel holds the selected tone");
+    CHECK (n3500 < 0.01f, "new channel excludes the unselected tone");
+
+    const float o500 = toneAmp (orig0, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float o3500 = toneAmp (orig0, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (o500 < 0.01f, "original channel lost the selected tone");
+    CHECK (std::abs (o3500 - 0.5f) < 0.005f, "original channel keeps the rest");
+
+    // The new channel is made visible.
+    CHECK (app.isChannelVisible (1), "added channel becomes visible");
+
+    // One undoable step: undo restores one channel with the original content;
+    // redo re-applies the split.
+    CHECK (app.undo ().canUndo (), "split recorded in undo history");
+    app.undoStep ();
+    CHECK (eng.numChannels () == 1 && (int) eng.numSamples () == (int) kToneFrames,
+          "undo back to one channel, same length");
+    std::vector<float> undone ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, undone.data()), "read after undo");
+    bool bitExact = true;
+    for (size_t i = 0; i < before.size(); ++i)
+        if (undone[i] != before[i]) { bitExact = false; break; }
+    CHECK (bitExact, "undo restores the original content exactly");
+
+    app.redoStep ();
+    CHECK (eng.numChannels () == 2, "redo re-applies the split");
+}
+
 // ------------------------------------------------- playback mask (streaming OLA)
 
 static void testPlaybackMaskStreaming()
@@ -15552,9 +15729,9 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 12, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 10, "Effects menu no longer lists Resample");
+    CHECK (fxMenu.getNumItems() == 11, "Effects menu includes the split item");
 #else
-    CHECK (fxMenu.getNumItems() == 7, "Effects menu no longer lists Resample");
+    CHECK (fxMenu.getNumItems() == 8, "Effects menu includes the split item");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -16348,6 +16525,10 @@ static int scRunUnitTestsImpl()
     progress ("masked gain + zero-out");    testMaskedGainAndZero();
     progress ("masked edit mipmap refresh"); testMaskedEditRebuildsMipmaps();
     progress ("extract masked A+B=orig");   testExtractMasked();
+    progress ("split spectral selection (processor)");
+    testSplitSpectralSelectionProcessor();
+    progress ("split spectral selection (app + undo)");
+    testSplitSpectralSelectionApp();
     progress ("playback mask streaming");   testPlaybackMaskStreaming();
     progress ("marker deletion adjust");  testMarkerAdjustForDeletion();
     progress ("spectral sel deletion adjust"); testSpectralSelectionAdjustForDeletion();

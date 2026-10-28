@@ -471,6 +471,17 @@ public:
     bool reverse(std::string* errOut = nullptr);
     // Multiply the selection by 10^(gainDb/20) on the visible channels.
     bool changeGain (float gainDb, std::string* errOut = nullptr);
+
+    /** Splits the active spectral selection: the selected band content is
+        copied into one new channel per affected (visible) source channel,
+        with a trapezoidal frequency blend (25% ramps top and bottom, 50%
+        intact middle) and the estimated per-frame noise floor subtracted;
+        the original channels keep everything outside the selection and get
+        synthetic noise at the estimated floor level inside it, so that
+        original + extracted ~= the pre-edit signal with no sharp spectral
+        edge. One undoable step (adds the new channel(s) and rewrites the
+        originals together). Returns false with *errOut set on failure. */
+    bool splitSpectralSelection (std::string* errOut = nullptr);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     // BLOCKING — call from a worker thread. Applies AI noise suppression
     // (denseunet or DeepFilterNet2/3, selected by modelId) to the current

@@ -2089,6 +2089,71 @@ bool Application::changeGain (float gainDb, std::string* errOut)
     return audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this), errOut);
 }
 
+bool Application::splitSpectralSelection (std::string* errOut)
+{
+    auto fail = [errOut] (const juce::String& msg) {
+        if (errOut != nullptr) *errOut = msg.toStdString ();
+        return false;
+    };
+
+    auto* d = doc();
+    if (!d || d->spectralSel.empty ())
+        return fail ("No spectral selection is active.");
+
+    AudioEngine& eng = audioEngine ();
+    const juce::Range<int64_t> range = spectralSelSamples (*this);
+    if (range.getLength () <= 0) return true;   // nothing to do
+
+    std::vector<std::vector<float>> ext, res;
+    juce::Range<int64_t> extent;
+    if (!SpectralMask::splitSpectralSelection (eng, range, d->spectralSel,
+                                               &visibleChannels, ext, res, extent))
+        return fail ("Splitting the spectral selection failed.");
+    if (extent.getLength () <= 0) return true;   // no frames inside the selection
+
+    const int nch = eng.numChannels ();
+    std::vector<int> affected;
+    for (int ch : visibleChannels)
+        if (ch >= 0 && ch < nch) affected.push_back (ch);
+    if (affected.empty ()) return true;         // nothing visible: no-op
+
+    // Assemble the new whole file: existing channels with their selected band
+    // replaced by noise-floor fill, plus one new channel per affected channel
+    // holding the extracted band content.
+    const int64_t total = eng.numSamples ();
+    std::vector<std::vector<float>> newData ((size_t) (nch + affected.size()),
+                                             std::vector<float> ((size_t) total, 0.0f));
+    for (int ch = 0; ch < nch; ++ch)
+        if (!eng.readSamples (ch, 0, total, newData[(size_t) ch].data ()))
+            return fail ("Failed to read audio.");
+
+    int ai = 0;
+    for (int ch : affected)
+    {
+        const auto& r = res[(size_t) ch];
+        std::copy (r.begin (), r.end(),
+                   newData[(size_t) ch].begin () + (size_t) extent.getStart());
+        const auto& e = ext[(size_t) ch];
+        std::copy (e.begin (), e.end(),
+                   newData[(size_t) (nch + ai)].begin () + (size_t) extent.getStart());
+        ++ai;
+    }
+
+    if (!eng.replaceWholeFileUndoable (newData,
+                                       "Split spectral selection to new channel(s)"))
+        return fail ("Could not apply the split.");
+
+    // Make the freshly added channels visible (leave other choices alone).
+    const int n = eng.numChannels ();
+    for (int ch = nch; ch < n; ++ch)
+        if (!isChannelVisible (ch))
+            visibleChannels.push_back (ch);
+    std::sort (visibleChannels.begin (), visibleChannels.end());
+    syncActiveDoc ();
+
+    return true;
+}
+
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 bool Application::noiseSuppress (const std::string& modelId, const std::string& device,
                                  float attenLimDb, bool df3PostFilter,

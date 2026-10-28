@@ -310,6 +310,7 @@ public:
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsResample,
         ToolsStemSeparate,   // AI stem separation via the audio.cpp CLI tool
+        ToolsSplitSpectralSel,  // split active spectral selection into new channel(s)
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         ToolsNoiseSuppress,   // AI noise suppression (built with -DSPECTRO_ENABLE_AI=ON)
         ToolsTranscribe,      // AI Whisper transcription (whole file)

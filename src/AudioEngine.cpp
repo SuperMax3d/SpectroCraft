@@ -1294,6 +1294,36 @@ bool AudioEngine::replaceWholeFile (const juce::AudioBuffer<float>& data, double
     return true;
 }
 
+bool AudioEngine::replaceWholeFileUndoable (const std::vector<std::vector<float>>& data,
+                                            const juce::String& description)
+{
+    if (!ensureEditable ())
+        return false;
+    if (data.empty () || data[0].empty ())
+        return false;
+    const int64_t len = (int64_t) data[0].size ();
+    for (const auto& row : data)
+        if ((int64_t) row.size () != len)
+            return false;
+
+    // One undoable patch: old whole file + new whole file (+ channel change).
+    recordReplace (*this, { 0, totalSamples }, data, description,
+                   (int) data.size ());
+
+    auto nb = std::make_unique<juce::AudioBuffer<float>> ((int) data.size (),
+                                                         (int) len);
+    for (size_t ch = 0; ch < data.size (); ++ch)
+        std::copy (data[ch].begin (), data[ch].end (),
+                   nb->getWritePointer ((int) ch));
+    buffer = std::move (nb);
+    nchans = (int) data.size ();
+    totalSamples = len;
+    durationSecs = (double) len / rate;
+    unsaved = true;
+    rebuildMipmaps();
+    return true;
+}
+
 bool AudioEngine::appendSamples (const juce::AudioBuffer<float>& append,
                                  const juce::String& description)
 {

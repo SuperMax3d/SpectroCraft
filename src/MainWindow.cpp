@@ -2243,6 +2243,9 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsChangeGain: showChangeGainDialog(); break;
         case ToolsResample: showResampleDialog(); break;
         case ToolsStemSeparate: showStemSeparationWindow(); break;
+        case ToolsSplitSpectralSel:
+            runDestructiveEdit ([&] (std::string* e) { return app.splitSpectralSelection (e); });
+            break;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         case ToolsNoiseSuppress: showNoiseSuppressDialog(); break;
         case ToolsTranscribe: showTranscribeDialog(); break;
@@ -4473,6 +4476,12 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         // the whole file becomes the input.
         menu.addItem (ToolsStemSeparate, "Stem Separation...",
                       app.audioEngine().isFileLoaded(), false);
+        // Splits the active spectral selection into new channel(s): the band
+        // content goes to the added track(s) with a soft 25%/50%/25% frequency
+        // blend and noise-floor subtraction; the originals get noise fill at
+        // the estimated floor level so nothing is hard-cut.
+        menu.addItem (ToolsSplitSpectralSel, "Split Spectral Selection",
+                      app.hasSpectralSelection(), false);
     }
     else if (menuName == "Window")
     {

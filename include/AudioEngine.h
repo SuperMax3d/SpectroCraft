@@ -178,6 +178,17 @@ public:
     bool replaceWholeFile (const juce::AudioBuffer<float>& data, double newRate,
                            std::string* errOut = nullptr);
 
+    /** Replaces the entire audio content with `data` (one row per channel,
+        all the same length) and records ONE undoable patch carrying both the
+        old data and any channel-count change. Used by edits that modify
+        content and add channels in a single step (e.g. "Split Spectral
+        Selection"). The file must be editable first; playback is stopped and
+        in-flight blocks awaited, and the mipmap pyramid is rebuilt afterwards.
+        Returns false when `data` is empty or its rows have inconsistent
+        lengths. */
+    bool replaceWholeFileUndoable (const std::vector<std::vector<float>>& data,
+                                   const juce::String& description);
+
     // Append `append` after the current content. Channels beyond the appended
     // data's own count receive silence; when it has more channels than the
     // file currently does the channel count grows to match (existing channels
