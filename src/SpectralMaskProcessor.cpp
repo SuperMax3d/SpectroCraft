@@ -277,7 +277,15 @@ namespace SpectralMask
 
         outExtracted[ch] / outResidual[ch] are filled for every channel over
         the synthesis extent reported in outExtent (residual = what stays in
-        the source channel; extracted = content of the appended copy). */
+        the source channel; extracted = content of the appended copy).
+
+        Edge handling: frames whose start lies inside [range] have windows that
+        extend up to N-H samples past it, so outExtent is slightly wider than
+        [range]. Extra unmasked frames are overlap-added over that tail (and
+        context frames over the head) so every output sample has full window
+        coverage: the extracted channel fades in/out with the Hann taper and
+        the residual crossfades back to the original signal - no amplitude
+        spike or hard cut at either end of the selection. */
     bool splitSpectralSelection (const AudioEngine& eng, juce::Range<int64_t> range,
                                  const SpectralSelection& sel,
                                  const std::vector<int>* channels,
@@ -306,6 +314,17 @@ namespace SpectralMask
         const int64_t eEnd   = std::min<int64_t> (kLast * (int64_t) H + N, total);
         outExtent = { eStart, eEnd };
 
+        // Frames whose start lies past the selection's bounding end are never
+        // masked, but they must still be overlap-added: without them the last
+        // ~N-H samples of the extent would be covered by a single frame and
+        // normalised by w^2 with only one window contributing (w * buf), which
+        // diverges as w -> 0 at the window edge - an amplitude spike followed
+        // by a hard cut just after the selection end. Processing them as pure
+        // pass-throughs restores full overlap coverage, so the extracted
+        // channel fades out with the Hann taper and the residual crossfades
+        // back to the original signal over that tail.
+        const int64_t kTail = (eEnd - 1) / H;
+
         // Earlier frames (start < r0) have weight 0 everywhere but must still
         // be overlap-added so the residual is exact at eStart.
         const int64_t kCtx = std::max<int64_t> (0, ceilDiv (eStart - N + 1, H));
@@ -314,7 +333,7 @@ namespace SpectralMask
 
         // The accumulation buffers must cover every frame window: the last
         // frame's window may extend past eEnd (which is clamped to EOF).
-        const int64_t bufLen = kLast * (int64_t) H + N - xStart;
+        const int64_t bufLen = kTail * (int64_t) H + N - xStart;
 
         outExtracted.resize ((size_t) eng.numChannels());
         outResidual.resize ((size_t) eng.numChannels());
@@ -353,7 +372,7 @@ namespace SpectralMask
             std::vector<float> accRes ((size_t) bufLen, 0.0f);
             std::vector<float> winSum ((size_t) bufLen, 0.0f);
 
-            for (int64_t k = kCtx; k <= kLast; ++k)
+            for (int64_t k = kCtx; k <= kTail; ++k)
             {
                 const int64_t s_k = k * (int64_t) H;
                 const size_t off = (size_t) (s_k - xStart);
@@ -425,14 +444,29 @@ namespace SpectralMask
                 }
             }
 
+            // Full-coverage overlap sum for this window/hop (Hann @ N/4 -> 1.5).
+            double wFull = 0.0;
+            for (int m = 0; m < N / H; ++m)
+            {
+                const int j = ((N / 2 - m * H) % N + N) % N;
+                const double wv = 0.5 - 0.5 * std::cos
+                    (2.0 * juce::MathConstants<double>::pi * j / N);
+                wFull += wv * wv;
+            }
+
             for (int64_t s = eStart; s < eEnd; ++s)
             {
                 const size_t i = (size_t) (s - xStart);
                 const float ws = winSum[i];
-                outExtracted[(size_t) ch][(size_t) (s - eStart)] =
-                    (ws > 1e-6f) ? accExt[i] / ws : 0.0f;
                 outResidual[(size_t) ch][(size_t) (s - eStart)] =
                     (ws > 1e-6f) ? accRes[i] / ws : 0.0f;
+                // Where frame coverage is partial (only possible at file
+                // start), accExt/ws == buf/w diverges as w -> 0; scaling by
+                // ws/wFull restores the window's natural ramp-up.
+                outExtracted[(size_t) ch][(size_t) (s - eStart)] =
+                    (ws > 1e-6f)
+                        ? accExt[i] / ws * std::min (1.0f, ws / (float) wFull)
+                        : 0.0f;
             }
         }
         return true;

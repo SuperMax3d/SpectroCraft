@@ -532,7 +532,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   weight across the middle), and where energy is removed the original channels
   are refilled with synthetic noise at the per-frame estimated floor level —
   so *original + new track* reconstructs the pre-edit signal with no hard
-  spectral edge. One undoable step (content change plus channel-count change).
+  spectral edge; at both time ends of the selection the extracted content
+  fades in/out smoothly and the originals crossfade back, so there is no
+  spike or hard cut either. One undoable step (content change plus
+  channel-count change).
 - **Cancelling long operations**: every progress dialog — loading large files,
   resampling, noise suppression, transcription (single and batch), spectrogram
   export — has a Cancel button, and ESC works as well. The operation stops at
@@ -1336,6 +1339,14 @@ synthetic noise at that same floor level with a deterministic pseudo-random
 phase. The result: the new track(s) carry the isolated band, the originals keep
 everything else plus an uncorrelated noise fill inside the bands, and their sum
 reconstructs the pre-edit signal — no hard spectral edge to hear or see.
+Time edges are handled the same way: FFT frames straddle both ends of the
+selection (each window spans 2048 samples), so the processed extent extends
+slightly beyond the drawn rectangle. Unmasked context frames are
+overlap-added on both sides, giving every output sample full window
+coverage — the extracted track fades in/out with the Hann taper at the
+two ends of the extent and the original channels crossfade back to their
+pre-edit content over those same regions, so no amplitude spike or hard
+cut appears at either end of the selection.
 The whole operation (content change *and* channel-count change) is a single
 undoable step; undo restores the original channels bit-exact. New channels are
 made visible automatically.

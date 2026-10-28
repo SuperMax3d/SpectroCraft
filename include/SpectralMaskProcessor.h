@@ -67,7 +67,10 @@ namespace SpectralMask
         Both outputs have one vector per channel listed in `channels` (nullptr
         = every channel), each of length outExtent.getLength(); outExtent is
         the synthesis extent of the frames whose start lies inside [range]
-        (slightly wider than [range] itself). Read-only; works on streamed
+        (slightly wider than [range] itself). At both ends of outExtent the
+        extracted channel fades with the analysis window and the residual
+        crossfades back to the original signal, so no hard edge or spike
+        appears at the selection boundaries. Read-only; works on streamed
         engines too. Returns false on failure. */
     bool splitSpectralSelection (const AudioEngine& eng, juce::Range<int64_t> range,
                                  const SpectralSelection& sel,

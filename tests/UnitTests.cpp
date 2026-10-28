@@ -10855,6 +10855,87 @@ static void testSplitSpectralSelectionProcessor()
     CHECK (std::abs (r250 - 0.4f) < 0.01f, "residual keeps the out-of-band tone");
 }
 
+static void testSplitSpectralSelectionEdgeFade()
+{
+    // White noise with a selection that ends mid-file: the extracted channel
+    // must fade out smoothly at the end of the synthesis extent (no amplitude
+    // spike, no hard cut) and the residual must crossfade back to the original
+    // signal over that tail.
+    const double rate = 48000.0;
+    const int64_t nSamples = 48000;   // 1 second mono
+
+    auto noiseGen = [] (int, int64_t f, double) {
+        uint64_t v = (uint64_t) (f + 1) * 0x9E3779B97F4A7C15ull;
+        v ^= v >> 30; v *= 0xBF58476D1CE4E5B9ull; v ^= v >> 27;
+        return (float) ((double) (v & 0xFFFFFF) / 16777216.0 - 0.5) * 0.4;
+    };
+
+    const juce::File wav = makeTempFile ("split_edge.wav");
+    CHECK (writeWav (wav, 1, rate, nSamples, noiseGen), "wrote noise wav");
+
+    AudioEngine eng;
+    CHECK (eng.loadFile (wav), "loaded noise wav");
+
+    SpectralSelection sel;
+    sel.addRect (0.2, 0.8, 8000.0, 12000.0, false);
+
+    std::vector<std::vector<float>> ext, res;
+    juce::Range<int64_t> extent;
+    // Pass the selection's own time extent in samples, as Application does.
+    CHECK (SpectralMask::splitSpectralSelection (eng, { 9600, 38400 }, sel,
+                                                 nullptr, ext, res, extent),
+          "edge split ran");
+
+    const int N = SpectralMask::fftSize(), H = SpectralMask::hopSize();
+    // Frames starting inside [0.2s, 0.8s]: kFirst = ceil(9600/512) = 19,
+    // kLast = (38400-1)/512 = 74 -> extent ends at 74*512+2048 = 39936.
+    CHECK (extent == juce::Range<int64_t> (19 * H, 74 * H + N), "edge extent");
+
+    const std::vector<float>& e = ext[0];
+    const std::vector<float>& r = res[0];
+    std::vector<float> orig ((size_t) nSamples);
+    CHECK (eng.readSamples (0, 0, (int) nSamples, orig.data()), "read original");
+
+    auto getE = [&e, &extent] (int64_t s) { return e[(size_t) (s - extent.getStart ())]; };
+    auto getR = [&r, &extent] (int64_t s) { return r[(size_t) (s - extent.getStart ())]; };
+
+    // Interior of the extent: extracted carries real band content.
+    double interiorSq = 0.0;
+    for (int64_t s = 12000; s < 37000; ++s)
+        interiorSq += (double) getE (s) * getE (s);
+    CHECK (std::sqrt (interiorSq / (37000 - 12000)) > 0.005,
+           "extracted carries band content in the interior");
+
+    // Tail of the extent: no amplitude spike, and the extracted channel fades
+    // to zero at the window edge.
+    double tailMax = 0.0;
+    for (int64_t s = extent.getEnd () - H; s < extent.getEnd (); ++s)
+        tailMax = std::max (tailMax, (double) std::abs (getE (s)));
+    CHECK (tailMax < 0.5, "no spike at the end of the synthesis extent");
+    CHECK (std::abs (getE (extent.getEnd () - 1)) < 0.05,
+           "extracted fades out at the window edge");
+
+    // The residual must crossfade back to the original signal over that tail.
+    double resTailErr = 0.0;
+    for (int64_t s = extent.getEnd () - H; s < extent.getEnd (); ++s)
+        resTailErr = std::max (resTailErr, (double) std::abs (getR (s) - orig[(size_t) s]));
+    CHECK (resTailErr < 0.3, "residual crossfades back to the original in the tail");
+
+    // Selection starting at file start: no spike where coverage is partial.
+    SpectralSelection sel2;
+    sel2.addRect (0.0, 0.8, 8000.0, 12000.0, false);
+    std::vector<std::vector<float>> ext2, res2;
+    juce::Range<int64_t> extent2;
+    CHECK (SpectralMask::splitSpectralSelection (eng, { 0, 38400 }, sel2,
+                                                 nullptr, ext2, res2, extent2),
+          "start split ran");
+    double headMax = 0.0;
+    for (int64_t s = extent2.getStart (); s < extent2.getStart () + H; ++s)
+        headMax = std::max (headMax,
+                            (double) std::abs (ext2[0][(size_t) (s - extent2.getStart ())]));
+    CHECK (headMax < 0.5, "no spike at file start where coverage is partial");
+}
+
 static void testSplitSpectralSelectionApp()
 {
     const juce::File wav = makeTempFile ("split_sel_app.wav");
@@ -16757,6 +16838,7 @@ static int scRunUnitTestsImpl()
     testSplitSpectralSelectionTrack1To2App();
     testSplitSpectralSelectionTrack1To2MixesIntoExisting();
     testSplitSpectralSelectionProcessor();
+    testSplitSpectralSelectionEdgeFade();
     progress ("split spectral selection (app + undo)");
     testSplitSpectralSelectionApp();
     progress ("playback mask streaming");   testPlaybackMaskStreaming();
