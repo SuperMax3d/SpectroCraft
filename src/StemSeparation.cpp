@@ -168,11 +168,17 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     endLbl_.setText ("End (s)", juce::dontSendNotification);
     modelLbl_.setFont (juce::FontOptions (13.0f));
     modelLbl_.setText ("Model:", juce::dontSendNotification);
+    backendLbl_.setFont (juce::FontOptions (13.0f));
+    backendLbl_.setText ("Backend:", juce::dontSendNotification);
+    descLbl_.setFont (juce::FontOptions (13.0f));
+    descLbl_.setText ("Description:", juce::dontSendNotification);
+    durLbl_.setFont (juce::FontOptions (12.5f));
 
     for (auto* e : { &startEdit_, &endEdit_ })
     {
         e->setMultiLine (false);
         e->setColour (juce::CaretComponent::caretColourId, juce::Colours::white);
+        e->addListener (this);   // keep the duration label in sync
     }
 
     // Seed the range from the current track selection ONCE. Later changes to
@@ -186,6 +192,44 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
         startEdit_.setText (juce::String (s0, 3), juce::dontSendNotification);
         endEdit_.setText (juce::String (s1, 3), juce::dontSendNotification);
     }
+
+    // Restore descriptions remembered from a previous open of this window
+    // (the Application keeps them between close/reopen). Anchors are absolute
+    // document times; keep only those that still fit inside the current file.
+    {
+        const double dur = app_.audioEngine().isFileLoaded () ? app_.audioEngine().duration () : 0.0;
+        for (const auto& s : app_.stemSepSavedDescs)
+        {
+            StemDescEntry e;
+            e.text = s.text;
+            for (const auto& a : s.anchors)
+                if (a.startSecs >= -1e-6 && a.stopSecs > a.startSecs + 1e-9
+                    && a.stopSecs <= dur + 1e-6)
+                    e.anchors.push_back (a);
+            descs_.push_back (e);
+        }
+
+        if (!descs_.empty ())
+        {
+            const bool anyAnchors = std::any_of (descs_.begin (), descs_.end (),
+                [] (const StemDescEntry& d) { return !d.anchors.empty (); });
+            // Multiple descriptions - or a single one carrying anchors - need
+            // the advanced section to be visible; plain text goes back into
+            // the simple-mode editor.
+            if (descs_.size () > 1 || anyAnchors)
+            {
+                advanced_ = true;
+                advancedBtn_.setButtonText ("Simple view");
+            }
+            else
+            {
+                descEdit_.setText (descs_[0].text, juce::dontSendNotification);
+                descs_.clear ();
+            }
+        }
+    }
+
+    refreshDurationLabel ();
 
     selectAllBtn_.setButtonText ("Select All");
     selectAllBtn_.onClick = [this] { doSelectAll (); };
@@ -211,7 +255,7 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
         refreshStatusIdle ();
     };
 
-    extractOrigToggle_.setButtonText ("Extract from original");
+    extractOrigToggle_.setButtonText ("Extract subsequent stem from original");
     extractOrigToggle_.setToggleState (app_.settings.acppExtractOriginal, juce::dontSendNotification);
     extractOrigToggle_.onClick = [this]
     {
@@ -222,7 +266,8 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     descEdit_.setMultiLine (false);
     descEdit_.setColour (juce::CaretComponent::caretColourId, juce::Colours::white);
 
-    advancedBtn_.setButtonText ("Advanced...");
+    // The constructor's restore block may have entered advanced mode already.
+    advancedBtn_.setButtonText (advanced_ ? "Simple view" : "Advanced...");
     advancedBtn_.onClick = [this] { setAdvanced (!advanced_); };
 
     addDescBtn_.setButtonText ("Add Description...");
@@ -255,11 +300,14 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     juce::Component::addAndMakeVisible (&startEdit_);
     juce::Component::addAndMakeVisible (&endLbl_);
     juce::Component::addAndMakeVisible (&endEdit_);
+    juce::Component::addAndMakeVisible (&durLbl_);
     juce::Component::addAndMakeVisible (&selectAllBtn_);
     juce::Component::addAndMakeVisible (&modelLbl_);
     juce::Component::addAndMakeVisible (&modelCombo_);
+    juce::Component::addAndMakeVisible (&backendLbl_);
     juce::Component::addAndMakeVisible (&backendCombo_);
     juce::Component::addAndMakeVisible (&extractOrigToggle_);
+    juce::Component::addAndMakeVisible (&descLbl_);
     juce::Component::addAndMakeVisible (&descEdit_);
     juce::Component::addAndMakeVisible (&advancedBtn_);
     juce::Component::addAndMakeVisible (&addDescBtn_);
@@ -282,6 +330,8 @@ StemSeparationWindow::~StemSeparationWindow()
 
 void StemSeparationWindow::userTriedToCloseWindow()
 {
+    rememberDescs ();   // keep the typed descriptions for the next open
+
     // The owner's callback releases the unique_ptr that owns this window, so
     // `this` is destroyed while we are still inside this call. JUCE's WndProc
     // does not touch the component after handleUserClosingWindow() returns,
@@ -451,37 +501,50 @@ void StemSeparationWindow::resized()
     const auto y = LayoutYs::compute (advanced_, rowsH);
     const int x = kMargin, w = getWidth () - 2 * kMargin;
 
-    // Range row: editable start/end seconds + Select All.
+    // Range row: editable start/end seconds + duration + Select All.
     startLbl_.setBounds (x, y.sourceRow + 3, 56, 18);
     startEdit_.setBounds (x + 58, y.sourceRow, 70, 24);
     endLbl_.setBounds (x + 134, y.sourceRow + 3, 48, 18);
     endEdit_.setBounds (x + 186, y.sourceRow, 70, 24);
+    durLbl_.setBounds (x + 264, y.sourceRow + 3, 150, 18);
     selectAllBtn_.setBounds (getWidth () - kMargin - 96, y.sourceRow, 96, 24);
 
-    // Model row.
-    modelLbl_.setBounds (x, y.modelRow + 5, 48, 18);
-    modelCombo_.setBounds (x + 56, y.modelRow, w - 56, 28);
+    // Model / backend rows: the labels share one column and every field starts
+    // at the same left coordinate.
+    modelLbl_.setBounds (x, y.modelRow + 5, 92, 18);
+    modelCombo_.setBounds (x + 96, y.modelRow, w - 96, 28);
 
-    // Backend row: combo + extract-from-original toggle.
-    backendCombo_.setBounds (x + 70, y.backendRow, 110, 28);
-    extractOrigToggle_.setBounds (x + 190, y.backendRow + 4, w - 190, 20);
+    backendLbl_.setBounds (x, y.backendRow + 5, 92, 18);
+    backendCombo_.setBounds (x + 96, y.backendRow, 110, 28);
 
     if (!advanced_)
     {
+        descLbl_.setBounds (x, y.descAreaTop + 5, 92, 18);
         descEdit_.setBounds (x + 96, y.descAreaTop, std::max (80, w - 96), 28);
         advancedBtn_.setBounds (x, y.descAreaTop + 34, 110, 24);
         // The advanced-only controls must not keep their old bounds here:
         // after a round-trip through advanced mode they would overlap the
         // description editor.
         addDescBtn_.setBounds (0, 0, 0, 0);
+        extractOrigToggle_.setBounds (0, 0, 0, 0);
         advancedHint_.setBounds (0, 0, 0, 0);
     }
     else
     {
         // Header row: "Simple view" toggle + Add Description button; the hint
-        // sits on its own line below so it has the full width.
+        // sits on its own line below so it has the full width. The regular
+        // description editor is hidden in advanced mode (each DescRow carries
+        // its own field), which also keeps the header from overlapping it.
+        descLbl_.setBounds (0, 0, 0, 0);
+        descEdit_.setBounds (0, 0, 0, 0);
         advancedBtn_.setBounds (x, y.descAreaTop + 2, 110, 24);
         addDescBtn_.setBounds (x + 118, y.descAreaTop + 2, 130, 24);
+        // Only meaningful with more than one description: it switches the run
+        // from chained residuals back to extracting every stem from the original.
+        if (descs_.size () > 1)
+            extractOrigToggle_.setBounds (x + w - 300, y.descAreaTop + 5, 300, 20);
+        else
+            extractOrigToggle_.setBounds (0, 0, 0, 0);
         advancedHint_.setBounds (x, y.descAreaTop + 34, w, 16);
         rowsHost_.setBounds (x, y.rowsTop - rowsH, kWinW, std::max (0, rowsH));
     }
@@ -499,6 +562,41 @@ void StemSeparationWindow::doSelectAll()
     const double dur = app_.audioEngine().isFileLoaded () ? app_.audioEngine().duration () : 0.0;
     startEdit_.setText (juce::String (0.0, 3), juce::dontSendNotification);
     endEdit_.setText (juce::String (dur, 3), juce::dontSendNotification);
+    refreshDurationLabel ();
+}
+
+void StemSeparationWindow::refreshDurationLabel()
+{
+    const double dur = app_.audioEngine().isFileLoaded () ? app_.audioEngine().duration () : 0.0;
+    const double s0 = jlimit (0.0, dur, startEdit_.getText ().getDoubleValue ());
+    const double s1 = jlimit (0.0, dur, endEdit_.getText ().getDoubleValue ());
+    durLbl_.setText ("Duration: " + juce::String (std::max (0.0, s1 - s0), 3) + " s",
+                     juce::dontSendNotification);
+}
+
+void StemSeparationWindow::textEditorTextChanged(juce::TextEditor& editor)
+{
+    if (&editor == &startEdit_ || &editor == &endEdit_)
+        refreshDurationLabel ();
+}
+
+/** Copies the currently typed descriptions into the Application so a later
+    open of this window can restore them (see the constructor). */
+void StemSeparationWindow::rememberDescs()
+{
+    app_.stemSepSavedDescs.clear ();
+    if (advanced_)
+    {
+        for (const auto& d : descs_)
+            if (!d.text.trim ().isEmpty ())
+                app_.stemSepSavedDescs.push_back (d);
+    }
+    else
+    {
+        const juce::String t = descEdit_.getText ().trim ();
+        if (!t.isEmpty ())
+            app_.stemSepSavedDescs.push_back ({ t, {} });
+    }
 }
 
 void StemSeparationWindow::addAnchorFromSelection(int descIndex, bool include)
@@ -909,10 +1007,14 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
                 statusLabel_.setText ("Could not create the result document: " + juce::String (err),
                                       juce::dontSendNotification);
             else
+            {
                 statusLabel_.setText ("Created '" + app_.docs.back()->name + "' with "
                                       + juce::String (nTracks)
                                       + " tracks - target/residual per description.",
                                       juce::dontSendNotification);
+                rememberDescs ();   // keep the typed descriptions for next time
+                if (onCloseRequested) onCloseRequested ();   // close on success
+            }
             delete resPtr;
         });
     }).detach ();

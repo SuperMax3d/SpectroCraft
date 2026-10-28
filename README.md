@@ -1010,7 +1010,8 @@ dropdown (*Cpu* / *Cuda* / *Vulkan*) must match the installed binary variant.
 
 1. The time range comes from the dialog's editable **Start**/**End** fields
    (seeded once from the current selection when the window opens; **Select All**
-   resets them to the full duration). That range is extracted to a temporary WAV.
+   resets them to the full duration), with the resulting length shown in the
+   **Duration** label next to them. That range is extracted to a temporary WAV.
 2. For each description, `audiocpp_cli.exe` runs with
    `--task s2s --family sam_audio`, the chosen model and backend, the text,
    optional anchor ranges and an output directory; its log lines stream into
@@ -1021,10 +1022,14 @@ dropdown (*Cpu* / *Cuda* / *Vulkan*) must match the installed binary variant.
 4. A new document `<name>_stems` opens with one track per output channel —
 target first, then residual — ready for further editing or saving as WAV/FLAC/AIFF.
 
+When a run finishes successfully the Stem Separation window closes itself;
+on failure or cancellation it stays open so you can read the status and retry.
+
 ### Advanced mode
 
-**Advanced…** expands the dialog, and **Add Description…** appends another
-row so you can describe several elements in one run. Each row has:
+**Advanced…** expands the dialog (the single *Description* box is hidden —
+each advanced row carries its own editor), and **Add Description…** appends
+another row so you can describe several elements in one run. Each row has:
 
 - a text field,
 - **Include Selection** / **Exclude Selection** buttons that add the current
@@ -1033,13 +1038,24 @@ row so you can describe several elements in one run. Each row has:
 - per-anchor remove and per-row remove controls.
 
 Anchors reach the tool as `--request-option "anchors=[[\"+\",t0,t1],…]]`
-(`+` = include, `-` = exclude). The **Extract from original** checkbox (on by
-default) runs every description against the original extraction; unchecked,
-each description after the first works on the previous *residual* instead — a
-simple way to peel several elements off one recording in sequence.
+(`+` = include, `-` = exclude). The **Extract subsequent stem from original**
+checkbox (on by default) is shown in advanced mode once there is more than
+one description: checked, every description runs against the original
+extraction; unchecked, each description after the first works on the previous
+*residual* instead — a simple way to peel several elements off one recording
+in sequence.
 
 The last model, backend and extract-from-original choice persist between
 sessions in `SpectroCraft.recent`.
+
+### Remembered descriptions
+
+Descriptions you have typed are remembered for the session: closing the
+window (or a successful run) stores them, and reopening restores them —
+multiple descriptions, or any description with anchors, reopen straight into
+advanced mode. Anchor ranges are absolute document times, so on restore an
+anchor is kept only if it still fits inside the current file's duration;
+anchors that no longer fit are dropped while their text is kept.
 
 ---
 

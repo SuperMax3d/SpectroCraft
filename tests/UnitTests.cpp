@@ -5302,14 +5302,15 @@ static void testStemSepWindowLayoutAndClose()
 
     // Every control must be laid out with a visible size. In simple mode the
     // advanced-only addDescBtn_, rowsHost_ and advancedHint_ stay at zero
-    // bounds, so of the 18 content children exactly 15 are visible (a
-    // non-native test peer adds two more internal minimise/close buttons,
-    // which we ignore).
+    // bounds, as does extractOrigToggle_ (it only appears in advanced mode
+    // with more than one description), so of the 21 content children exactly
+    // 17 are visible (a non-native test peer adds two more internal
+    // minimise/close buttons, which we ignore).
     int visible = 0;
     for (int i = 0; i < dlg->getNumChildComponents(); ++i)
         if (!dlg->getChildComponent (i)->getBounds().isEmpty())
             ++visible;
-    CHECK (dlg->getNumChildComponents() >= 18 && visible == 15,
+    CHECK (dlg->getNumChildComponents() >= 21 && visible == 17,
           "stem separation window lays out all its controls");
 
     // X button path: userTriedToCloseWindow must release ownership.
@@ -5320,6 +5321,132 @@ static void testStemSepWindowLayoutAndClose()
     win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
     CHECK (win->stemSepWindow () != nullptr,
           "re-open works after close");
+}
+
+// ---------------- Stem Separation remembers typed descriptions --------------
+// Closing the window must keep the typed descriptions in the Application so a
+// later open restores them. Anchors are absolute document times; on restore
+// only those that still fit inside the current file's duration survive.
+static void testStemSepRememberDescs()
+{
+    const juce::File wavA = makeTempFile ("stem_remember_a.wav");   // 4 s
+    CHECK (writeWav (wavA, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote 4 s wav for remember-descs test");
+    const juce::File wavB = makeTempFile ("stem_remember_b.wav");   // 2 s
+    CHECK (writeWav (wavB, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote 2 s wav for remember-descs test");
+
+    Application app;
+    CHECK (app.openFile (wavA), "open 4 s wav for remember-descs test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "stem sep remember"));
+
+    auto findButton = [] (StemSeparationWindow* w, const juce::String& text)
+        -> juce::TextButton*
+    {
+        for (int i = 0; i < w->getNumChildComponents (); ++i)
+            if (auto* b = dynamic_cast<juce::TextButton*> (w->getChildComponent (i)))
+                if (b->getButtonText() == text) return b;
+        return nullptr;
+    };
+
+    // --- Type two descriptions in advanced mode + one include anchor. ---
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    StemSeparationWindow* dlg = win->stemSepWindow();
+    CHECK (dlg != nullptr, "window opened for remember-descs test");
+    if (!dlg) return;
+
+    dlg->descriptionEditor()->setText ("vocal", juce::dontSendNotification);
+
+    // Note: Button::triggerClick() only posts an async command message, which
+    // never runs in the test's non-pumped message loop - call onClick() (the
+    // exact handler a real click invokes) instead.
+    juce::TextButton* advBtn = findButton (dlg, "Advanced...");
+    CHECK (advBtn != nullptr, "advanced button found in simple mode");
+    if (!advBtn) { dlg->userTriedToCloseWindow (); return; }
+    advBtn->onClick ();   // enter advanced mode (carries the text over)
+
+    juce::TextButton* addBtn = findButton (dlg, "Add Description...");
+    CHECK (addBtn != nullptr, "add-description button found in advanced mode");
+    if (!addBtn) { dlg->userTriedToCloseWindow (); return; }
+    addBtn->onClick ();   // append a second description row
+
+    auto* rowsHost = dlg->rowsHostForTest();
+    CHECK (rowsHost != nullptr && rowsHost->getNumChildComponents () == 2,
+          "advanced mode shows one DescRow per description");
+    if (!rowsHost || rowsHost->getNumChildComponents () != 2)
+    { dlg->userTriedToCloseWindow (); return; }
+
+    // Row layout: [number label, editor, include, exclude, remove].
+    auto* row0 = rowsHost->getChildComponent (0);
+    auto* row1 = rowsHost->getChildComponent (1);
+    CHECK (dynamic_cast<juce::TextEditor*> (row1->getChildComponent (1)) != nullptr,
+          "second description editor exists");
+
+    // The live typing path (editor -> entry) goes through an async command
+    // message that the test's non-pumped loop never delivers; write the stored
+    // text directly - it is exactly the state the listener would set.
+    dlg->descriptionsForTest()[1].text = "drums";
+
+    app.setSelection ({ 1.0, 3.5 });
+    auto* incBtn = dynamic_cast<juce::TextButton*> (row0->getChildComponent (2));
+    CHECK (incBtn != nullptr && incBtn->getButtonText() == "Include Selection",
+          "include button exists on the first row");
+    if (!incBtn) { dlg->userTriedToCloseWindow (); return; }
+    incBtn->onClick ();   // captures {1.0, 3.5} as an absolute anchor
+
+    CHECK (dlg->descriptions().size () == 2, "two descriptions collected");
+    if (dlg->descriptions().size () == 2)
+    {
+        const auto& d = dlg->descriptions();
+        CHECK (d[0].text == "vocal" && d[1].text == "drums",
+              "description texts are stored per row");
+        CHECK (d[0].anchors.size () == 1
+              && std::abs (d[0].anchors[0].startSecs - 1.0) < 1e-6
+              && std::abs (d[0].anchors[0].stopSecs - 3.5) < 1e-6
+              && d[0].anchors[0].include,
+              "include anchor captured from the track selection");
+    }
+
+    // --- Close: descriptions must be remembered by the Application. ---
+    dlg->userTriedToCloseWindow ();
+    CHECK (win->stemSepWindow () == nullptr, "window closed");
+    CHECK (app.stemSepSavedDescs.size () == 2, "descriptions saved on close");
+
+    // --- Reopen over the SAME file: texts and the fitting anchor survive. ---
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    dlg = win->stemSepWindow();
+    CHECK (dlg != nullptr, "window reopened over the same file");
+    if (!dlg) return;
+
+    const auto& d2 = dlg->descriptions();
+    CHECK (d2.size () == 2 && d2[0].text == "vocal" && d2[1].text == "drums",
+          "both descriptions are restored on reopen");
+    CHECK (!d2.empty () && d2[0].anchors.size () == 1
+          && std::abs (d2[0].anchors[0].startSecs - 1.0) < 1e-6
+          && std::abs (d2[0].anchors[0].stopSecs - 3.5) < 1e-6,
+          "anchor that fits the current file is restored");
+    CHECK (findButton (dlg, "Simple view") != nullptr,
+          "advanced mode is restored automatically");
+
+    // --- Reopen over a SHORTER file: the anchor no longer fits and drops. ---
+    dlg->userTriedToCloseWindow ();
+    CHECK (app.openFile (wavB), "switch to the 2 s wav");
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    dlg = win->stemSepWindow();
+    CHECK (dlg != nullptr, "window reopened over the shorter file");
+    if (!dlg) return;
+
+    const auto& d3 = dlg->descriptions();
+    CHECK (d3.size () == 2 && d3[0].text == "vocal" && d3[1].text == "drums",
+          "both descriptions are still restored over the shorter file");
+    CHECK (d3.empty () || d3[0].anchors.empty (),
+          "anchor outside the new file's duration is dropped");
+
+    dlg->userTriedToCloseWindow ();
 }
 
 // ---------------- Axis-mode change triggers a zoom fit --------------------
@@ -16550,6 +16677,7 @@ static int scRunUnitTestsImpl()
     progress ("zoom-out-full fits data"); testZoomOutFullFitsData();
     progress ("axis-mode change triggers zoom fit"); testAxisModeChangeTriggersFit ();
     progress ("stem-sep window layout + close"); testStemSepWindowLayoutAndClose ();
+    progress ("stem-sep remember descriptions"); testStemSepRememberDescs ();
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("time axis ticks");     testTimeAxisTicks();

@@ -8,6 +8,7 @@
 #include "MergeFiles.h"
 #include "UndoManager.h"
 #include "FileDoc.h"
+#include "StemSeparation.h"
 #include <vector>
 #include <memory>
 #include <functional>
@@ -56,6 +57,12 @@ public:
 
     Settings settings;
     ColourMap colourMap = ColourMap::Classic;
+
+    // Descriptions remembered between open/close cycles of the Stem Separation
+    // window (see StemSeparationWindow::rememberDescs()). Anchors are absolute
+    // document times; they are dropped on restore when they no longer fit the
+    // current file's duration.
+    std::vector<StemDescEntry> stemSepSavedDescs;
 
     // Spectral selection tools (Selection menu). The tool + brush size are app-
     // level (persist across document switches); the shapes themselves live in

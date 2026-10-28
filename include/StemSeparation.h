@@ -27,7 +27,7 @@ struct StemDescEntry
     std::vector<sc::acpp::Anchor> anchors;   // times relative to extracted input
 };
 
-class StemSeparationWindow : public juce::DocumentWindow
+class StemSeparationWindow : public juce::DocumentWindow, private juce::TextEditor::Listener
 {
 public:
     /** @param app  the owning application (must outlive this window). */
@@ -46,6 +46,12 @@ public:
     // closed via X; called from within this object, so it must not touch `this`.
     std::function<void()> onCloseRequested;
 
+    // Small public surface used by unit tests (the widgets are private).
+    juce::TextEditor* descriptionEditor() { return &descEdit_; }
+    const std::vector<StemDescEntry>& descriptions() const { return descs_; }
+    std::vector<StemDescEntry>& descriptionsForTest() { return descs_; }
+    juce::Component* rowsHostForTest() { return &rowsHost_; }
+
     // Called by the DescRow buttons (a separate class), so these are public.
     void addAnchorFromSelection(int descIndex, bool include);
     void removeAnchor(int descIndex, int anchorIndex);
@@ -54,11 +60,14 @@ public:
 private:
     // --- layout -----------------------------------------------------------
     void resized() override;
+    void textEditorTextChanged (juce::TextEditor&) override;
     int computeHeight() const;
     void refreshModelList();
     void refreshStatusIdle();
     void rebuildRows();
     void setAdvanced(bool on);
+    void refreshDurationLabel();
+    void rememberDescs();
 
     // --- actions ------------------------------------------------------------
     void doSelectAll();
@@ -74,10 +83,10 @@ private:
     // top section: the extraction range in seconds. Seeded from the track
     // selection when the window opens, then editable and independent of later
     // changes to that selection (advanced mode needs stable per-run ranges).
-    juce::Label startLbl_, endLbl_;
+    juce::Label startLbl_, endLbl_, durLbl_;
     juce::TextEditor startEdit_, endEdit_;
     juce::TextButton selectAllBtn_;
-    juce::Label modelLbl_;
+    juce::Label modelLbl_, backendLbl_, descLbl_;
     juce::ComboBox modelCombo_;
     juce::ComboBox backendCombo_;
     juce::ToggleButton extractOrigToggle_;
