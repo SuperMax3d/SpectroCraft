@@ -487,6 +487,27 @@ public:
     // Multiply the selection by 10^(gainDb/20) on the visible channels.
     bool changeGain (float gainDb, std::string* errOut = nullptr);
 
+    /** Invert: negates every sample in the active spectral selection region,
+        or in the time selection if there is one, or over the whole file when
+        nothing is selected. One undoable step. */
+    bool invertSelection (std::string* errOut = nullptr);
+
+    /** Time Stretch (Audacity's Change Tempo): pitch-preserving tempo change
+        of the time selection, or of the whole file when nothing is selected.
+        percentChange uses Audacity semantics (+ faster / - slower). The file
+        length changes; markers, saved spectral selections and FFT snapshots
+        are warped through onTimeRangeStretched. One undoable step restores
+        both content and length. A spectral selection is ignored (this is a
+        time-domain edit). */
+    bool timeStretch (float percentChange, std::string* errOut = nullptr);
+
+    /** Filter EQ: FFT-based zero-phase curve equaliser on the active spectral
+        selection region, or on the time selection if there is one, or over
+        the whole file when nothing is selected. pts must be sorted by
+        ascending frequency; a flat curve is a no-op. One undoable step. */
+    bool applyFilterEq (const std::vector<sc::eq::EqPoint>& pts,
+                        std::string* errOut = nullptr);
+
     /** Effects > Generate ...: replaces the active spectral selection region,
         or the time selection if there is one; with neither present it inserts
         durationSecs of generated signal at the playhead. Each call is a
@@ -658,6 +679,10 @@ public:
     // second call must keep the original pre-deletion state recorded by the
     // first call instead of overwriting it.
     std::function<void(FileDoc*, double, double, Patch&, bool)> onTimeRangeDeleted;
+
+    // Set by MainWindow: called after timeStretch() stretched [a, bOld] of d
+    // to [a, bNew], so FFT snapshot slots can be warped and re-recorded.
+    std::function<void(FileDoc*, double, double, double, Patch&)> onTimeRangeStretched;
 
     // Set by MainWindow: called after an undo (!isRedo) or redo (isRedo)
     // applied a patch with side state to d, so shared UI state is restored too.

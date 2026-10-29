@@ -553,6 +553,26 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     together, rendered as sine, square, sawtooth or triangle. Phase is
     continuous with absolute file time, so generated tones line up with
     surrounding audio instead of clicking at the boundary.
+- **Invert / Time Stretch / Filter EQ** (`Effects → Invert`, `Time Stretch…`,
+  `Filter EQ…`): three classic waveform effects added after *Reverse*:
+  - *Invert* — negates every sample in the target (spectral selection if
+    active, else the time selection, else the whole file). One undoable step.
+  - *Time Stretch…* — SoundTouch-based tempo change that preserves pitch;
+    positive percent makes the region shorter and faster. It changes the
+    file's length, so **all channels** are stretched (the engine holds one
+    fixed-length buffer) and markers, saved spectral selections and FFT
+    snapshot/curve slots are warped through the same time-warp function —
+    nothing is dropped, everything stays in sync. One undoable step that
+    restores both the old content and the old length; a spectral selection,
+    if present, is ignored (a stretch is a time-domain operation).
+  - *Filter EQ…* — Audacity-style graphical curve equalizer: an interactive
+    log-frequency/dB editor (click to add points, drag to move them,
+    double-click to remove) with the ten built-in Audacity presets plus Flat.
+    The curve is applied as a zero-phase FFT filter (16384-point windows,
+    4001-sample Blackman-windowed impulse response, overlap-add), so phase
+    is preserved and no pre-/post-ringing appears. Works on the spectral
+    selection if active, else the time selection, else the whole file; a flat
+    curve is a bit-exact no-op that records nothing.
 - **Cancelling long operations**: every progress dialog — loading large files,
   resampling, noise suppression, transcription (single and batch), spectrogram
   export — has a Cancel button, and ESC works as well. The operation stops at
@@ -1214,7 +1234,11 @@ cutting samples). Copy/Cut respect an active spectral selection too: only the
 selected (time, frequency) content goes onto the app-level clipboard, which is
 shared across all open files — you can copy from one file and paste into
 another. **Copy to New File** and **Paste Mix** are described above. Effects offers Silence,
-Fade In/Out, Normalize, Reverse and **Change Gain...** (a dB dialog whose
+Fade In/Out, Normalize, Reverse, **Invert**, **Time Stretch…** (SoundTouch
+tempo change that preserves pitch; changes the file length and warps markers,
+saved selections and FFT snapshots through the same time-warp) and
+**Filter EQ…** (graphical curve equalizer applied as a zero-phase FFT filter;
+see [above](#features)) — plus **Change Gain...** (a dB dialog whose
 field opens focused with its value pre-selected so a new one can be typed in
 right away; it also has a -60..+24 dB slider kept two-way synced with the box —
 dragging rewrites the field, typing moves the slider clamped to its range,

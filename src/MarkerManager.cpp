@@ -156,6 +156,35 @@ bool MarkerManager::adjustForDeletion (double a, double b)
     return changed;
 }
 
+bool MarkerManager::adjustForStretch (double a, double bOld, double bNew)
+{
+    if (!(bOld > a))
+        return false;
+    const double k = (bNew - a) / (bOld - a);
+    const double shiftAfter = bNew - bOld;
+    auto W = [a, bOld, k, shiftAfter] (double t) -> double
+    {
+        if (t < a) return t;
+        if (t <= bOld) return a + (t - a) * k;
+        return t + shiftAfter;
+    };
+
+    bool changed = false;
+    for (auto& m : list)
+    {
+        const double ns = W (m.start);
+        const double ne = (m.end < 0.0) ? -1.0 : W (m.end);
+        if (ns != m.start || ne != m.end)
+        {
+            m.start = ns;
+            m.end = ne;
+            changed = true;
+        }
+    }
+    if (changed && onChange) onChange();
+    return changed;
+}
+
 void MarkerManager::restore (const std::vector<Marker>& m)
 {
     list = m;

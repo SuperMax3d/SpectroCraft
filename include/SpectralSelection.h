@@ -163,6 +163,13 @@ public:
     // fully contained shapes are dropped. Returns true when anything changed.
     bool adjustForDeletion (double a, double b);
 
+    /** Adjust this selection after [a, bOld] seconds has been stretched to
+        [a, bNew]: every time coordinate is warped through W(t) = t for
+        t < a, a + (t-a)*(bNew-a)/(bOld-a) inside the range, and
+        t + (bNew-bOld) after it. Stroke grids are resampled column-wise.
+        The frequency axis is untouched. Returns true when anything changed. */
+    bool adjustForStretch (double a, double bOld, double bNew);
+
     // True if the point (tSecs, fHz) lies inside the final boolean result.
     bool contains (double tSecs, double fHz) const;
 

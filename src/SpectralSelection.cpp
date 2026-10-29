@@ -676,3 +676,97 @@ bool SpectralSelection::adjustForDeletion (double a, double b)
         shapeList = std::move (newList);
     return changed;
 }
+
+bool SpectralSelection::adjustForStretch (double a, double bOld, double bNew)
+{
+    if (!(bOld > a))
+        return false;
+    const double k = (bNew - a) / (bOld - a);
+    auto W = [a, bOld, bNew, k] (double t) -> double
+    {
+        if (t < a) return t;
+        if (t <= bOld) return a + (t - a) * k;
+        return t + (bNew - bOld);
+    };
+
+    bool changed = false;
+    for (auto& s : shapeList)
+    {
+        switch (s.kind)
+        {
+            case SpectralShape::Kind::Rect:
+            {
+                const double lo = std::min (s.t0, s.t1);
+                const double hi = std::max (s.t0, s.t1);
+                const double nlo = W (lo), nhi = W (hi);
+                if (nlo != lo || nhi != hi)
+                {
+                    s.t0 = nlo;
+                    s.t1 = nhi;
+                    changed = true;
+                }
+                break;   // frequency axis is untouched
+            }
+
+            case SpectralShape::Kind::Polygon:
+                for (auto& p : s.pts)
+                    if (p.first != W (p.first))
+                    {
+                        p.first = W (p.first);
+                        changed = true;
+                    }
+                break;
+
+            case SpectralShape::Kind::Stroke:
+            {
+                const double nt0 = W (s.t0), nt1 = W (s.t1);
+                if (nt0 == s.t0 && nt1 == s.t1)
+                    break;   // entirely outside the stretched range: unchanged
+                if (s.cols <= 0 || s.rows <= 0 || s.grid.empty())
+                {
+                    s.t0 = nt0;
+                    s.t1 = nt1;
+                    changed = true;
+                    break;
+                }
+
+                // Nearest-neighbour column resampling: each output column maps
+                // back through the inverse warp to a source column. Rows are
+                // unchanged (the frequency axis is unaffected).
+                const double oldSpan = std::max (1e-9, s.t1 - s.t0);
+                const double newSpan = std::max (1e-9, nt1 - nt0);
+                const double shiftAfter = bNew - bOld;
+                auto Winv = [a, bOld, k, shiftAfter] (double tp) -> double
+                {
+                    if (tp < a) return tp;
+                    if (tp <= a + (bOld - a) * k) return a + (tp - a) / k;
+                    return tp - shiftAfter;
+                };
+
+                std::vector<uint8_t> g ((size_t) (s.cols * s.rows + 7) / 8, 0);
+                for (int c = 0; c < s.cols; ++c)
+                {
+                    const double tc = nt0 + ((double) c + 0.5) * newSpan / (double) s.cols;
+                    int cs = (int) std::floor (((Winv (tc) - s.t0) / oldSpan) * (double) s.cols);
+                    cs = jlimit (0, s.cols - 1, cs);
+                    for (int r = 0; r < s.rows; ++r)
+                    {
+                        const size_t srcBit = (size_t) cs * s.rows + (size_t) r;
+                        if ((s.grid[srcBit >> 3] & (1u << (srcBit & 7))) != 0)
+                        {
+                            const size_t dstBit = (size_t) c * s.rows + (size_t) r;
+                            g[dstBit >> 3] |= (uint8_t) (1u << (dstBit & 7));
+                        }
+                    }
+                }
+
+                s.t0 = nt0;
+                s.t1 = nt1;
+                s.grid = std::move (g);
+                changed = true;
+                break;
+            }
+        }
+    }
+    return changed;
+}

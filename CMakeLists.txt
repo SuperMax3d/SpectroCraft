@@ -11,6 +11,10 @@ add_subdirectory(extern/JUCE)
 # SoXR resampler library (LGPL-2.1) — same engine Audacity uses for resampling.
 add_subdirectory(extern/soxr)
 
+# SoundTouch audio processing library (LGPL-2.1) — the same engine Audacity
+# uses for its Change Tempo / Time Stretch effect.
+add_subdirectory(extern/soundtouch)
+
 # AI features (OpenVINO noise suppression, later Whisper). The OpenVINO runtime
 # is vendored in extern/OpenVINO; model weights are downloaded on first use and
 # never committed. Disable with -DSPECTRO_ENABLE_AI=OFF for a lean build.

@@ -348,6 +348,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (fftPanel) fftPanel->recordAndAdjustSnapshotsForDeletion (d, a, b, p, preserveBefore);
     };
 
+    app.onTimeRangeStretched = [this] (FileDoc* d, double a, double bOld, double bNew, Patch& p)
+    {
+        if (fftPanel) fftPanel->recordAndAdjustSnapshotsForStretch (d, a, bOld, bNew, p);
+    };
+
     // Undo/redo of such a patch restores the snapshot slots too.
     app.onPatchSideStateRestored = [this] (FileDoc* d, const Patch& p, bool isRedo)
     {
@@ -2268,6 +2273,9 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsTranscribeFolder: showTranscribeFolderDialog(); break;
 #endif
         case ToolsReverse: runDestructiveEdit ([&] (std::string* e) { return app.reverse (e); }); break;
+        case ToolsInvert:      runDestructiveEdit ([&] (std::string* e) { return app.invertSelection (e); }); break;
+        case ToolsTimeStretch: showTimeStretchDialog(); break;
+        case ToolsFilterEq:    showFilterEqDialog(); break;
 
         case HelpAbout:
             showAboutDialog (this);
@@ -3362,6 +3370,138 @@ public:
     }
 };
 } // namespace
+
+// Effects > Time Stretch... — Audacity's Change Tempo: a pitch-preserving
+// tempo change (SoundTouch WSOLA) that changes the file length. Positive
+// percent = faster/shorter, negative = slower/longer.
+juce::AlertWindow* MainWindow::createTimeStretchDialog()
+{
+    auto* w = new juce::AlertWindow ("Time Stretch",
+        "Change the tempo by a percentage - the pitch is preserved and the file "
+        "length changes accordingly. Positive values make the audio shorter and "
+        "faster, negative values longer and slower.",
+        juce::AlertWindow::QuestionIcon, this);
+    w->addTextEditor ("stretchPercent", "0");
+
+    auto* slider = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::NoTextBox);
+    slider->setName ("Tempo change (%)");
+    slider->setRange (-95.0, 3000.0, 1.0);   // Audacity's range
+    slider->setValue (0.0, juce::dontSendNotification);
+    slider->setSize (280, 30);
+
+    if (auto* editor = w->getTextEditor ("stretchPercent"))
+    {
+        // Let Enter/Escape reach the OK/Cancel shortcuts even while the field
+        // has keyboard focus.
+        editor->setEscapeAndReturnKeysConsumed (false);
+
+        slider->onValueChange = [editor, slider]
+        {
+            editor->setText (juce::String ((int) std::lround (slider->getValue ())));
+        };
+
+        editor->onTextChange = [slider, editor]
+        {
+            double v;
+            if (!parseGainDbText (editor->getText (), v)) return;   // mid-typing: leave the slider alone
+            slider->setValue (jlimit (-95.0, 3000.0, v), juce::dontSendNotification);
+        };
+    }
+
+    w->addCustomComponent (slider);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (auto* editor = w->getTextEditor ("stretchPercent"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+    }
+
+    return w;
+}
+
+void MainWindow::showTimeStretchDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createTimeStretchDialog ();
+
+    // Enter modal state WITHOUT taking keyboard focus (see showChangeGainDialog).
+    w->enterModalState (false);
+    if (auto* editor = w->getTextEditor ("stretchPercent"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop ();
+    const juce::String text = w->getTextEditorContents ("stretchPercent");
+    delete w;
+    if (result != 1) return;
+
+    double v;
+    if (!parseGainDbText (text.trim (), v)) return;   // invalid: ignore
+    runDestructiveEdit ([&] (std::string* e)
+        { return app.timeStretch ((float) jlimit (-95.0, 3000.0, v), e); });
+}
+
+// Effects > Filter EQ... — Audacity's classic Filter Curve: an FFT-based
+// zero-phase equaliser with an interactive control-point curve and the ten
+// built-in presets from Audacity's default curve set.
+juce::AlertWindow* MainWindow::createFilterEqDialog()
+{
+    auto* w = new juce::AlertWindow ("Filter EQ",
+        "Drag points to shape the curve; click empty space to add a point and "
+        "double-click a point to remove it. The response passes exactly through "
+        "every control point.",
+        juce::AlertWindow::QuestionIcon, this);
+
+    auto* editor = new EqCurveEditor ();
+    const double nyq = app.audioEngine().sampleRate () * 0.5;
+    if (nyq > 0.0)
+        editor->setFreqHi (nyq);
+    w->addCustomComponent (editor);
+
+    auto* presetCombo = new juce::ComboBox ();
+    presetCombo->setName ("Preset");
+    const auto& presets = sc::eq::presets ();
+    for (size_t i = 0; i < presets.size (); ++i)
+        presetCombo->addItem (presets[i].name, (int) i + 1);
+    presetCombo->setSize (240, 26);
+    presetCombo->onChange = [editor, presetCombo]
+    {
+        const int id = presetCombo->getSelectedId ();
+        if (id > 0)
+            editor->setPoints (sc::eq::presets()[(size_t) (id - 1)].points);
+    };
+    w->addCustomComponent (presetCombo);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    return w;
+}
+
+void MainWindow::showFilterEqDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createFilterEqDialog ();
+
+    // Locate the curve editor so its points can be read after the modal loop.
+    EqCurveEditor* editor = nullptr;
+    for (auto* c : w->getChildren ())
+        if (auto* e = dynamic_cast<EqCurveEditor*> (c)) { editor = e; break; }
+
+    w->enterModalState (false);
+    const int result = w->runModalLoop ();
+    std::vector<sc::eq::EqPoint> pts;
+    if (editor != nullptr)
+        pts = editor->getPoints ();
+    delete w;
+    if (result != 1 || sc::eq::isFlatCurve (pts)) return;   // flat curve: no-op
+
+    runDestructiveEdit ([&] (std::string* e) { return app.applyFilterEq (pts, e); });
+}
 
 juce::AlertWindow* MainWindow::createResampleDialog()
 {
@@ -4700,6 +4840,14 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsNormalize, "Normalize", hasSel, false);
         menu.addItem (ToolsChangeGain, "Change Gain...", hasSel, false);
         menu.addItem (ToolsReverse, "Reverse", hasSel, false);
+
+        // Whole-file-capable effects: they act on the active spectral
+        // selection if there is one, else on the time selection, else on the
+        // whole file - so only a loaded file is required.
+        menu.addSeparator();
+        menu.addItem (ToolsInvert,      "Invert",          app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ToolsTimeStretch, "Time Stretch...", app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ToolsFilterEq,    "Filter EQ...",    app.audioEngine().isFileLoaded(), false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         // AI effects: first use downloads the model weights.
         menu.addSeparator();

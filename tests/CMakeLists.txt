@@ -12,6 +12,8 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/SavedSelections.cpp
         ${CMAKE_SOURCE_DIR}/src/SpectralMaskProcessor.cpp
         ${CMAKE_SOURCE_DIR}/src/SignalGenerator.cpp
+        ${CMAKE_SOURCE_DIR}/src/TimeStretch.cpp   # SoundTouch tempo-change wrapper
+        ${CMAKE_SOURCE_DIR}/src/FilterEQ.cpp      # FFT zero-phase curve equaliser
         ${CMAKE_SOURCE_DIR}/src/MarkerManager.cpp
         ${CMAKE_SOURCE_DIR}/src/PythonScripts.cpp
         ${CMAKE_SOURCE_DIR}/src/WaveformView.cpp
@@ -79,7 +81,8 @@ target_include_directories (SpectroCraftTests PRIVATE ${CMAKE_SOURCE_DIR}/includ
 
 target_link_libraries (SpectroCraftTests
     PRIVATE
-        soxr   # SoXR resampler (LGPL-2.1), same engine Audacity uses
+        soxr         # SoXR resampler (LGPL-2.1), same engine Audacity uses
+        soundtouch   # SoundTouch tempo change (LGPL-2.1)
         juce::juce_audio_basics
         juce::juce_audio_devices
         juce::juce_audio_formats

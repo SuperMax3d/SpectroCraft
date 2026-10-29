@@ -3,6 +3,8 @@
  */
 
 #include "AudioEngine.h"
+#include "FilterEQ.h"
+#include "TimeStretch.h"
 #include "VideoAudio.h"
 #include "SpectralMaskProcessor.h"
 #include "Resampler.h"
@@ -1242,6 +1244,91 @@ bool AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vecto
                        buffer->getWritePointer (ch, (int) samples.getStart()));
     unsaved = true;
     rebuildMipmaps();
+    return true;
+}
+
+bool AudioEngine::stretchRange (juce::Range<int64_t> samples, float tempoPercent,
+                                std::string* errOut)
+{
+    if (!ensureEditable (errOut)) return false;
+    samples = samples.getIntersectionWith ({ 0, totalSamples });
+    const int64_t len = samples.getLength();
+    if (len <= 0 || std::abs ((double) tempoPercent) < 1e-6)
+        return true;   // nothing to stretch
+
+    // The engine holds one fixed-length buffer, so every channel is stretched
+    // by the same factor - stretching a subset would desynchronise the tracks.
+    const int nch = numChannels ();
+    std::vector<std::vector<float>> newData ((size_t) nch);
+    for (int ch = 0; ch < nch; ++ch)
+        sc::stretch::stretchTempo (buffer->getReadPointer (ch, (int) samples.getStart()),
+                                   (int) len, rate, tempoPercent,
+                                   newData[(size_t) ch]);
+
+    const int64_t newLen = newData.empty () ? 0 : (int64_t) newData[0].size ();
+    if (newLen <= 0 || newLen == len)
+        return true;   // degenerate result: leave the file untouched
+
+    // One undoable patch over the whole buffer, so a single Undo restores both
+    // the old content and the old length.
+    const int64_t totalNew = totalSamples + (newLen - len);
+    std::vector<std::vector<float>> fullNew ((size_t) nch);
+    for (int ch = 0; ch < nch; ++ch)
+    {
+        fullNew[(size_t) ch].resize ((size_t) totalNew, 0.0f);
+        const float* src = buffer->getReadPointer (ch, 0);
+        std::copy (src, src + samples.getStart (),
+                   fullNew[(size_t) ch].begin ());
+        std::copy (newData[(size_t) ch].data (), newData[(size_t) ch].data () + newLen,
+                   fullNew[(size_t) ch].begin () + samples.getStart ());
+        std::copy (src + samples.getEnd (), src + totalSamples,
+                   fullNew[(size_t) ch].begin () + samples.getStart () + newLen);
+    }
+
+    recordReplace (*this, { 0, totalSamples }, fullNew, "Time-stretched selection");
+
+    auto nb = std::make_unique<juce::AudioBuffer<float>> (nch, (int) totalNew);
+    for (int ch = 0; ch < nch; ++ch)
+        nb->copyFrom (ch, 0, fullNew[(size_t) ch].data (), (int) totalNew);
+    buffer = std::move (nb);
+    totalSamples = totalNew;
+    durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+    rebuildMipmaps ();
+    return true;
+}
+
+bool AudioEngine::eqFilterRange (juce::Range<int64_t> samples,
+                                 const std::vector<sc::eq::EqPoint>& pts,
+                                 const std::vector<int>* chans, std::string* errOut)
+{
+    if (!ensureEditable (errOut)) return false;
+    samples = samples.getIntersectionWith ({ 0, totalSamples });
+    const int64_t len = samples.getLength ();
+    if (len <= 0 || sc::eq::isFlatCurve (pts))
+        return true;   // nothing to filter
+
+    std::vector<std::vector<float>> newData ((size_t) nchans);
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        const float* d = buffer->getReadPointer (ch, (int) samples.getStart ());
+        newData[(size_t) ch].resize ((size_t) len);
+        if (channelAffected (chans, ch))
+        {
+            std::copy (d, d + len, newData[(size_t) ch].data ());
+            sc::eq::applyEq (newData[(size_t) ch].data (), (int) len, rate, pts);
+        }
+        else
+            std::copy (d, d + len, newData[(size_t) ch].begin ());   // unchanged copy
+    }
+
+    recordReplace (*this, samples, newData, "Filter EQ applied");
+    for (int ch = 0; ch < nchans; ++ch)
+        if (channelAffected (chans, ch))
+            std::copy (newData[(size_t) ch].data (), newData[(size_t) ch].data () + len,
+                      buffer->getWritePointer (ch, (int) samples.getStart ()));
+    unsaved = true;
+    rebuildMipmaps ();
     return true;
 }
 

@@ -11281,9 +11281,9 @@ static void testSplitSpectralSelectionApp()
         std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
         const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 15, "Effects menu lists the split + generate items");
+        CHECK (fxMenu.getNumItems() == 18, "Effects menu lists the invert/stretch/eq + split + generate items");
 #else
-        CHECK (fxMenu.getNumItems() == 12, "Effects menu lists the split + generate items");
+        CHECK (fxMenu.getNumItems() == 15, "Effects menu lists the invert/stretch/eq + split + generate items");
 #endif
     }
     std::string err;
@@ -13687,6 +13687,361 @@ static void testGenerateDialogs()
     }
 
     wav.deleteFile ();
+}
+
+// ------------------------------------------------- Invert / Time Stretch / Filter EQ
+
+static void testNewEffectDialogs()
+{
+    const juce::File wav = makeTempFile ("fx_dialogs.wav");
+    CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+            [] (int, int64_t f, double) { return 0.0f; }), "wrote silence wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened silence wav");
+    FileDoc* d = app.doc ();
+    if (!d) { wav.deleteFile (); return; }
+
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "fx dialogs"));
+
+    // --- Time Stretch dialog -------------------------------------------------
+    {
+        auto* w = win->createTimeStretchDialog ();
+        CHECK (w != nullptr && w->getTextEditor ("stretchPercent") != nullptr,
+              "time stretch dialog has a percent field");
+        bool hasSlider = false;
+        for (int i = 0; i < w->getNumChildComponents (); ++i)
+            if (dynamic_cast<juce::Slider*> (w->getChildComponent (i)) != nullptr) hasSlider = true;
+        CHECK (hasSlider, "time stretch dialog has a tempo slider");
+
+        const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("sc_time_stretch_snapshot.png");
+        const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
+        std::vector<uint8_t> px;
+        px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
+        for (int yy = 0; yy < img.getHeight (); ++yy)
+            for (int xx = 0; xx < img.getWidth (); ++xx)
+            {
+                const juce::Colour c = img.getPixelAt (xx, yy);
+                px.push_back ((uint8_t) c.getRed());
+                px.push_back ((uint8_t) c.getGreen());
+                px.push_back ((uint8_t) c.getBlue());
+                px.push_back ((uint8_t) c.getAlpha());
+            }
+        CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
+               "saved time-stretch snapshot: " + out.getFullPathName ());
+
+        delete w;
+    }
+
+    // --- Filter EQ dialog -----------------------------------------------------
+    {
+        auto* w = win->createFilterEqDialog ();
+        EqCurveEditor* editor = nullptr;
+        juce::ComboBox* combo = nullptr;
+        for (int i = 0; i < w->getNumChildComponents (); ++i)
+        {
+            if ((editor = dynamic_cast<EqCurveEditor*> (w->getChildComponent (i))) != nullptr) break;
+        }
+        CHECK (editor != nullptr, "filter eq dialog has a curve editor");
+        for (int i = 0; i < w->getNumChildComponents (); ++i)
+            if ((combo = dynamic_cast<juce::ComboBox*> (w->getChildComponent (i))) != nullptr) break;
+        CHECK (combo != nullptr && combo->getNumItems () == 11,
+              "preset combo lists Flat + the ten Audacity presets");
+
+        // Selecting a preset loads its points into the editor.
+        if (editor != nullptr && combo != nullptr)
+        {
+            const int bassBoostId = [&] { for (int i = 1; i <= combo->getNumItems (); ++i) if (combo->getItemText (i - 1) == "Bass Boost") return i; return -1; }();
+            CHECK (bassBoostId > 0, "Bass Boost preset is present");
+            combo->setSelectedId (bassBoostId);
+            const auto pts = editor->getPoints ();
+            CHECK (!pts.empty (), "preset loaded points into the editor");
+        }
+
+        const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("sc_filter_eq_snapshot.png");
+        const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
+        std::vector<uint8_t> px;
+        px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
+        for (int yy = 0; yy < img.getHeight (); ++yy)
+            for (int xx = 0; xx < img.getWidth (); ++xx)
+            {
+                const juce::Colour c = img.getPixelAt (xx, yy);
+                px.push_back ((uint8_t) c.getRed());
+                px.push_back ((uint8_t) c.getGreen());
+                px.push_back ((uint8_t) c.getBlue());
+                px.push_back ((uint8_t) c.getAlpha());
+            }
+        CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
+               "saved filter-eq snapshot: " + out.getFullPathName ());
+
+        delete w;
+    }
+
+    wav.deleteFile ();
+}
+
+static void testInvertEffect()
+{
+    const juce::File wav = makeTempFile ("invert_test.wav");
+    CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+            [] (int, int64_t f, double rate) {
+                return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate);
+            }), "wrote tone wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened invert wav");
+    AudioEngine& eng = app.audioEngine ();
+
+    // Invert the time selection: sign flip exactly inside [4000, 8000).
+    app.selection = { 0.5, 1.0 };
+    std::string err;
+    CHECK (app.invertSelection (&err), "invert ran: " + err);
+
+    std::vector<float> x ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, x.data()), "read after invert");
+    bool ok = true;
+    for (size_t i = 0; i < x.size (); ++i)
+    {
+        const double t = (double) i / kToneRate;
+        const float orig = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                   * 300.0 * t);
+        const float expect = ((i >= 4000 && i < 8000) ? -orig : orig);
+        if (std::abs ((double) x[i] - expect) > 1e-6)
+            { ok = false; break; }
+    }
+    CHECK (ok, "sign flipped exactly inside the selection");
+
+    // One undoable step: undo restores the original sign.
+    CHECK (app.undo ().undoSize () == 1, "invert recorded one undo step");
+    app.undoStep ();
+    std::vector<float> undone ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 4000, 4000, undone.data()), "read after undo");
+    bool restored = true;
+    for (int64_t i = 0; i < 4000 && restored; ++i)
+    {
+        const double t = (double) (i + 4000) / kToneRate;
+        if (std::abs ((double) undone[(size_t) i] - 0.5 * std::sin (2.0
+                * juce::MathConstants<double>::pi * 300.0 * t)) > 1e-6)
+            restored = false;
+    }
+    CHECK (restored, "undo restores the original sign");
+
+    // No selection: the whole file is inverted.
+    app.selection = {};
+    CHECK (app.invertSelection (&err), "whole-file invert ran");
+    std::vector<float> y ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, y.data()), "read after whole-file invert");
+    bool allFlipped = true;
+    for (size_t i = 0; i < y.size (); ++i)
+    {
+        const double t = (double) i / kToneRate;
+        if (std::abs ((double) y[i] + 0.5 * std::sin (2.0
+                * juce::MathConstants<double>::pi * 300.0 * t)) > 1e-6)
+            { allFlipped = false; break; }
+    }
+    CHECK (allFlipped, "whole-file invert flips every sample");
+
+    wav.deleteFile ();
+}
+
+static void testTimeStretchEffect()
+{
+    const juce::File wav = makeTempFile ("stretch_test.wav");
+    CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+            [] (int, int64_t f, double rate) {
+                return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate);
+            }), "wrote tone wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened stretch wav");
+    FileDoc* d = app.doc ();
+    AudioEngine& eng = app.audioEngine ();
+
+    // Markers on both sides of the stretched region: 0.75 s inside [0.5, 1.0)
+    // and 1.5 s after it.
+    const int mIn  = app.markers ().addPointMarker (0.75, "inside");
+    const int mOut = app.markers ().addPointMarker (1.5,  "after");
+
+    // Stretch the middle second by +100%: it should become about half as long.
+    app.selection = { 0.5, 1.0 };
+    std::string err;
+    CHECK (app.timeStretch (100.0f, &err), "stretch ran: " + err);
+
+    // SoundTouch's WSOLA output is within a few samples of len*100/(100+pct):
+    // the middle 4000 samples become ~2000, so the total should be ~14384.
+    const int64_t stretchedTotal = eng.numSamples ();
+    CHECK (std::abs ((double) stretchedTotal - 14384.0) <= 20.0,
+          "file shortened by about half of the region");
+
+    // The prefix (4000) and suffix (8384) are untouched: derive the actual
+    // stretched length from them, then check everything against that.
+    const double newLen = (double) (stretchedTotal - 12384);
+    CHECK (std::abs (newLen - 2000.0) <= 20.0, "region roughly halved");
+
+    // The stretched region stays selected: [0.5, 0.5 + newLen/rate).
+    const double bNew = 0.5 + newLen / kToneRate;
+    CHECK (std::abs (app.selection.getStart () - 0.5) < 1e-9
+              && std::abs (app.selection.getEnd () - bNew) < 1e-9,
+          "stretched region stays selected");
+
+    // Pitch is preserved: a 300 Hz sine crosses zero twice per cycle, so the
+    // stretched region holds ~2*300*(newLen/8000) crossings.
+    std::vector<float> x ((size_t) newLen);
+    CHECK (eng.readSamples (0, 4000, (int) newLen, x.data()), "read stretched region");
+    int crossings = 0;
+    for (size_t i = 1; i < x.size (); ++i)
+        if ((x[i - 1] <= 0.0f && x[i] > 0.0f) || (x[i - 1] >= 0.0f && x[i] < 0.0f))
+            ++crossings;
+    CHECK (std::abs ((double) crossings - 2.0 * 300.0 * newLen / kToneRate) <= 3.0,
+          "pitch preserved after stretch");
+
+    // Markers are warped through the same W(t): inside scales by k=newLen/4000,
+    // after shifts left by the removed length (1.0 - bNew).
+    auto findMarker = [&] (int id) -> const Marker*
+    { for (const auto& m : app.markers ().markers ()) if (m.id == id) return &m; return nullptr; };
+    const double k = newLen / 4000.0;
+    const Marker* mkIn  = findMarker (mIn);
+    const Marker* mkOut = findMarker (mOut);
+    CHECK (mkIn  && std::abs (mkIn->start  - (0.5 + 0.25 * k)) < 1e-9,
+          "inside marker warped by the stretch factor");
+    CHECK (mkOut && std::abs (mkOut->start - (1.5 + (bNew - 1.0))) < 1e-9,
+          "after marker shifted left by the removed length");
+
+    // One undoable step: undo restores length AND content.
+    CHECK (app.undo ().undoSize () == 1, "stretch recorded one undo step");
+    app.undoStep ();
+    CHECK (eng.numSamples () == kToneFrames, "undo restores the original length");
+    std::vector<float> undone ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 4000, 4000, undone.data()), "read after undo");
+    bool restored = true;
+    for (int64_t i = 0; i < 4000 && restored; ++i)
+    {
+        const double t = (double) (i + 4000) / kToneRate;
+        if (std::abs ((double) undone[(size_t) i] - 0.5 * std::sin (2.0
+                * juce::MathConstants<double>::pi * 300.0 * t)) > 1e-4)
+            restored = false;
+    }
+    CHECK (restored, "undo restores the original content");
+    mkIn  = findMarker (mIn);
+    mkOut = findMarker (mOut);
+    CHECK (mkIn  && std::abs (mkIn->start  - 0.75) < 1e-9, "undo restores the inside marker");
+    CHECK (mkOut && std::abs (mkOut->start - 1.5)  < 1e-9, "undo restores the after marker");
+
+    // Redo re-applies the stretch: back to exactly the stretched length.
+    app.redoStep ();
+    CHECK (eng.numSamples () == stretchedTotal, "redo re-stretches the file");
+
+    wav.deleteFile ();
+}
+
+static void testFilterEqEffect()
+{
+    // --- Curve math ---------------------------------------------------------
+    {
+        const std::vector<sc::eq::EqPoint> pts { { 100.0, 6.0 }, { 1000.0, -3.0 } };
+        CHECK (std::abs (sc::eq::curveGainDb (pts, 20.0, 20000.0, 100.0)  - 6.0) < 1e-9,
+              "gain is exact at a control point");
+        CHECK (std::abs (sc::eq::curveGainDb (pts, 20.0, 20000.0, 1000.0) + 3.0) < 1e-9,
+              "gain is exact at the second control point");
+        // Midpoint in log space: 10^(log10(100)+0.5*(log10(1000)-log10(100))) = 316.2 Hz
+        const double midF = std::pow (10.0, 0.5 * (std::log10 (100.0) + std::log10 (1000.0)));
+        CHECK (std::abs (sc::eq::curveGainDb (pts, 20.0, 20000.0, midF) - 1.5) < 1e-9,
+              "linear interpolation in log frequency");
+        CHECK (std::abs (sc::eq::curveGainDb (pts, 20.0, 20000.0, 50.0)  - 6.0) < 1e-9,
+              "below the first point: clamped to its gain");
+        CHECK (std::abs (sc::eq::curveGainDb (pts, 20.0, 20000.0, 8000.0) + 3.0) < 1e-9,
+              "above the last point: clamped to its gain");
+        CHECK (!sc::eq::isFlatCurve (pts), "non-flat curve detected");
+        CHECK (sc::eq::isFlatCurve ({ { 100.0, 0.0 }, { 1000.0, 0.0 } }), "flat curve detected");
+
+        const auto& presets = sc::eq::presets ();
+        CHECK (presets.size () == 11, "Flat + the ten Audacity presets");
+    }
+
+    // --- Flat curve is a bit-exact no-op -------------------------------------
+    {
+        const juce::File wav = makeTempFile ("eq_flat.wav");
+        CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+                [] (int ch, int64_t f, double rate) {
+                    return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * (ch == 0 ? 300.0 : 1500.0) * (double) f / rate);
+                }), "wrote two-tone wav");
+
+        Application app;
+        CHECK (app.openFile (wav), "opened eq wav");
+        AudioEngine& eng = app.audioEngine ();
+
+        std::vector<float> before ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, before.data()), "read before");
+
+        std::string err;
+        CHECK (app.applyFilterEq ({ { 100.0, 0.0 }, { 1000.0, 0.0 } }, &err),
+              "flat curve accepted: " + err);
+        CHECK (eng.numSamples () == kToneFrames, "flat curve does not change the length");
+
+        std::vector<float> after ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, after.data()), "read after");
+        bool identical = true;
+        for (size_t i = 0; i < before.size (); ++i)
+            if (before[i] != after[i]) { identical = false; break; }
+        CHECK (identical, "flat curve leaves the audio bit-exact");
+        CHECK (app.undo ().undoSize () == 0, "flat curve records no undo step");
+
+        wav.deleteFile ();
+    }
+
+    // --- Bass boost raises low-frequency energy ------------------------------
+    {
+        const juce::File wav = makeTempFile ("eq_bass.wav");
+        CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+                [] (int, int64_t f, double rate) {
+                    return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) f / rate);
+                }), "wrote low tone wav");
+
+        Application app;
+        CHECK (app.openFile (wav), "opened bass wav");
+        AudioEngine& eng = app.audioEngine ();
+
+        // Baseline peak in the middle of the file (away from edge effects).
+        auto peakOf = [&] (int64_t a, int64_t b) {
+            std::vector<float> v ((size_t) (b - a));
+            if (!eng.readSamples (0, a, b - a, v.data())) return 0.0f;
+            float p = 0.0f;
+            for (float s : v) p = std::max (p, std::abs (s));
+            return p;
+        };
+        const float beforePeak = peakOf (4096, 8192);
+
+        // +12 dB at 300 Hz, flat elsewhere: the 300 Hz sine should grow by x4.
+        std::string err;
+        CHECK (app.applyFilterEq ({ { 300.0, 12.0 }, { 5000.0, 0.0 } }, &err),
+              "bass boost ran: " + err);
+
+        std::vector<float> mid ((size_t) 4096);
+        CHECK (eng.readSamples (0, 4096, 4096, mid.data()), "read boosted middle");
+        float boostedPeak = 0.0f;
+        for (float s : mid) boostedPeak = std::max (boostedPeak, std::abs (s));
+
+        CHECK (std::abs ((double) boostedPeak - 4.0 * beforePeak) / beforePeak < 0.15,
+              "300 Hz tone grew by ~+12 dB (x4)");
+
+        // One undoable step.
+        CHECK (app.undo ().undoSize () == 1, "EQ recorded one undo step");
+        app.undoStep ();
+        std::vector<float> undone ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 4096, 4096, undone.data()), "read after undo");
+        float undonePeak = 0.0f;
+        for (float s : undone) undonePeak = std::max (undonePeak, std::abs (s));
+        CHECK (std::abs ((double) undonePeak - beforePeak) < 1e-4,
+              "undo restores the original level");
+
+        wav.deleteFile ();
+    }
 }
 
 // ------------------------------------------------- Python script panel
@@ -16812,9 +17167,9 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 15, "Effects menu includes the split + generate items");
+    CHECK (fxMenu.getNumItems() == 18, "Effects menu includes the invert/stretch/eq + split + generate items");
 #else
-    CHECK (fxMenu.getNumItems() == 12, "Effects menu includes the split + generate items");
+    CHECK (fxMenu.getNumItems() == 15, "Effects menu includes the invert/stretch/eq + split + generate items");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -17628,6 +17983,10 @@ static int scRunUnitTestsImpl()
     progress ("signal generators");         testSignalGenerators();
     progress ("generate effects (app)");    testGenerateEffectsApp();
     progress ("generate dialogs");          testGenerateDialogs();
+    progress ("new effect dialogs");        testNewEffectDialogs();
+    progress ("invert effect");             testInvertEffect();
+    progress ("time stretch effect");       testTimeStretchEffect();
+    progress ("filter eq effect");          testFilterEqEffect();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
     progress ("copy curve alt scales");    testCopyCurveAltScales();

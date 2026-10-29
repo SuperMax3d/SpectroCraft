@@ -161,6 +161,15 @@ public:
     juce::AlertWindow* createGenerateNoiseDialog();
     juce::AlertWindow* createGenerateToneDialog();
 
+    // ---- Effects > Invert / Time Stretch... / Filter EQ... ---------------
+    void showTimeStretchDialog();
+    void showFilterEqDialog();
+    /** Build (but do not run modally) the Time Stretch and Filter EQ dialogs.
+        The caller owns and must delete them; used by the show* functions and
+        tests. */
+    juce::AlertWindow* createTimeStretchDialog();
+    juce::AlertWindow* createFilterEqDialog();
+
     // ---- Alternative scale references + Go to Time -----------------------
 
     /** Builds (but does not run modally) the edit dialog for one alternative-
@@ -319,6 +328,9 @@ public:
         TransportRecord,          // start/stop recording (plugin-based capture)
         RecDeviceBase = 4500,     // Recording Device submenu: + pluginIndex*1000 + deviceIndex
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
+        ToolsInvert,           // Effects > Invert (spectral sel / time sel / whole file)
+        ToolsTimeStretch,      // Effects > Time Stretch... (SoundTouch tempo change)
+        ToolsFilterEq,         // Effects > Filter EQ... (FFT curve equaliser)
         ToolsResample,
         ToolsStemSeparate,   // AI stem separation via the audio.cpp CLI tool
         ToolsSplitSpectralSel,     // split active spectral selection into new channel(s) (F12)

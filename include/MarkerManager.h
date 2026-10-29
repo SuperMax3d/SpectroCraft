@@ -40,6 +40,13 @@ public:
     // Returns true when any marker changed.
     bool adjustForDeletion (double a, double b);
 
+    // Adjust the markers after [a, bOld] seconds has been stretched to
+    // [a, bNew]: every time is warped through W(t) = t for t < a,
+    // a + (t-a)*(bNew-a)/(bOld-a) inside the stretched range, and
+    // t + (bNew-bOld) after it. No markers are dropped.
+    // Returns true when any marker changed.
+    bool adjustForStretch (double a, double bOld, double bNew);
+
     // Replace the whole list with `m` (undo/redo restoration of side state).
     void restore (const std::vector<Marker>& m);
 

@@ -2,6 +2,7 @@
 // SpectroCraft - Left-side panels
 #include <JuceHeader.h>
 #include "Application.h"
+#include "FilterEQ.h"
 #include "PythonScripts.h"
 
 #include <atomic>
@@ -379,6 +380,13 @@ public:
     // call for slots touched by both deletions.
     void recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a, double b,
                                               Patch& p, bool preserveExistingBefore = false);
+
+    // Called after [a, bOld] seconds of file d were stretched to [a, bNew]:
+    // warps every stored snapshot's time segment through the same W(t) used
+    // for markers and records before/after state into p.snapshotSlots /
+    // p.curveSlots. Curves are recomputed from the post-stretch source data.
+    void recordAndAdjustSnapshotsForStretch (FileDoc* d, double a, double bOld,
+                                             double bNew, Patch& p);
 
     // Restores the snapshot slots recorded in patch p after an undo (!isRedo)
     // or redo (isRedo). Curves are recomputed from each slot's source file.
@@ -818,6 +826,59 @@ private:
     juce::TextButton addBtn;
 
     JUCE_DECLARE_NON_COPYABLE (ToneListEditor)
+};
+
+/** Interactive EQ curve editor for the Filter EQ effect.
+    Log-frequency axis (20 Hz .. `freqHi`) x dB axis (-30..+30), Audacity's
+    classic Filter Curve interaction:
+      - click an existing point and drag to move it,
+      - click empty space to add a new point (drag it immediately),
+      - double-click a point to remove it.
+    The curve is drawn as straight segments between the control points, which
+    is exact because both axes are affine in (log10 f, dB). */
+class EqCurveEditor : public juce::Component
+{
+public:
+    static constexpr double kFreqLo = 20.0;   // Hz
+    static constexpr double kDbMin = -30.0;
+    static constexpr double kDbMax = 30.0;
+
+    EqCurveEditor();
+
+    /** Replaces the control points (kept sorted by ascending frequency). */
+    void setPoints (std::vector<sc::eq::EqPoint> pts);
+
+    /** The current control points, sorted by ascending frequency. */
+    std::vector<sc::eq::EqPoint> getPoints() const;
+
+    /** Sets the right edge of the frequency axis (the file's Nyquist). */
+    void setFreqHi (double nyquistHz);
+
+private:
+    int freqToX (double f) const;
+    double xToFreq (int x) const;
+    int dbToY (double db) const;
+    double yToDb (int y) const;
+
+    /** Index of the control point within `maxDistPx` of p, else -1. */
+    int findNearestPoint (const juce::Point<int>& p, int maxDistPx) const;
+
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void paint (juce::Graphics&) override;
+
+    static constexpr int kLeftMargin = 42, kBottomMargin = 20, kTopMargin = 8,
+                        kRightMargin = 8;
+
+    std::vector<sc::eq::EqPoint> points_;   // sorted by ascending frequency
+    double freqHi_ = 20000.0;
+    int dragIndex_ = -1;                    // point being dragged, else -1
+    bool pressAddedPoint_ = false;          // this mouse-down created a new point
+    juce::Time lastDownTime_ {};
+    juce::Point<int> lastDownPos_{ -1, -1 };
+
+    JUCE_DECLARE_NON_COPYABLE (EqCurveEditor)
 };
 
 // ---------------------------------------------------- Spectral Controls panel

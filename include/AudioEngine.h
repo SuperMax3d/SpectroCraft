@@ -1,6 +1,7 @@
 #pragma once
 // SpectroCraft - Audio Engine: streaming file access, playback, waveform mipmaps, edits
 #include <JuceHeader.h>
+#include "FilterEQ.h"
 #include "UndoPatch.h"
 #include "SpectralSelection.h"
 #include "SpectralMaskProcessor.h"
@@ -156,6 +157,19 @@ public:
                       std::string* errOut = nullptr);
     bool reverseSamples (juce::Range<int64_t> samples, const std::vector<int>* channels = nullptr,
                          std::string* errOut = nullptr);
+    /** Pitch-preserving time stretch of the given sample range using the
+        SoundTouch WSOLA engine (Audacity's Change Tempo). The whole buffer
+        changes length - every channel is stretched by the same factor.
+        tempoPercent uses Audacity semantics: +50 % makes the range 2/3 as
+        long, -50 % doubles it. One undoable step restores old content and
+        old length. */
+    bool stretchRange (juce::Range<int64_t> samples, float tempoPercent,
+                       std::string* errOut = nullptr);
+    /** FFT-based zero-phase EQ of the given channels inside the range.
+        pts must be sorted by ascending frequency; a flat curve is a no-op. */
+    bool eqFilterRange (juce::Range<int64_t> samples, const std::vector<sc::eq::EqPoint>& pts,
+                        const std::vector<int>* channels = nullptr,
+                        std::string* errOut = nullptr);
 
     // Resample the whole file to a new sample rate using SoXR (the same
     // engine Audacity uses). Streaming files are materialised into memory

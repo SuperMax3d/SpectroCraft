@@ -3482,6 +3482,74 @@ void FFTAnalysisView::recordAndAdjustSnapshotsForDeletion (FileDoc* d, double a,
     }
 }
 
+void FFTAnalysisView::recordAndAdjustSnapshotsForStretch (FileDoc* d, double a,
+                                                          double bOld, double bNew,
+                                                          Patch& p)
+{
+    if (d == nullptr || !(bOld > a))
+        return;
+    const double k = (bNew - a) / (bOld - a);
+    auto W = [a, bOld, bNew, k] (double t) -> double
+    {
+        if (t < a) return t;
+        if (t <= bOld) return a + (t - a) * k;
+        return t + (bNew - bOld);
+    };
+
+    for (int i = 0; i < 8; ++i)
+    {
+        auto& s = snapshots[i];
+        if (s.source != d)   // slots are shared across files: only adjust this one's
+            continue;
+
+        const double nt0 = W (s.t0), nt1 = W (s.t1);
+        if (nt0 == s.t0 && nt1 == s.t1)
+            continue;   // entirely outside the stretched range: unchanged
+
+        SnapshotSlotChange ch;
+        ch.before.t0 = s.t0;  ch.before.t1 = s.t1;
+        ch.before.n = s.n;    ch.before.shown = s.shown;
+        ch.before.chans = s.chans;
+        ch.changed = true;
+
+        s.t0 = nt0;
+        s.t1 = nt1;
+        ch.after.n = s.n;  ch.after.t0 = s.t0;  ch.after.t1 = s.t1;
+        ch.after.shown = s.shown;  ch.after.chans = s.chans;
+        p.snapshotSlots[(size_t) i] = ch;
+
+        if (app.isDocLoaded (d))
+            recomputeSnapshotSlot (i);   // rebuild from the post-stretch source data
+    }
+
+    for (int i = 0; i < 8; ++i)
+    {
+        auto& cs = curveSnaps[i];
+        if (cs.source != d || cs.mode < 3)   // slots are shared across files
+            continue;
+
+        const double nt0 = W (cs.t0), nt1 = W (cs.t1);
+        if (nt0 == cs.t0 && nt1 == cs.t1)
+            continue;   // entirely outside the stretched range: unchanged
+
+        CurveSlotChange ch;
+        ch.before.t0 = cs.t0;  ch.before.t1 = cs.t1;
+        ch.before.mode = cs.mode;  ch.before.track = track_;  ch.before.smooth = smooth_;
+        ch.before.shown = cs.shown;  ch.before.chans = cs.chans;
+        ch.changed = true;
+
+        cs.t0 = nt0;
+        cs.t1 = nt1;
+        ch.after.mode = cs.mode;  ch.after.t0 = cs.t0;  ch.after.t1 = cs.t1;
+        ch.after.track = track_;  ch.after.smooth = smooth_;
+        ch.after.shown = cs.shown;  ch.after.chans = cs.chans;
+        p.curveSlots[(size_t) i] = ch;
+
+        if (app.isDocLoaded (d))
+            recomputeCurveSlot (i);   // rebuild from the post-stretch source data
+    }
+}
+
 void FFTAnalysisView::restoreSnapshotSlots (FileDoc* d, const Patch& p, bool isRedo)
 {
     if (d == nullptr)
@@ -4257,6 +4325,240 @@ std::vector<std::pair<double, double>> ToneListEditor::getTones() const
                          std::isfinite (a) ? a : 0.0 });
     }
     return out;
+}
+
+// ============================================================ EqCurveEditor
+
+namespace {
+constexpr int kEqPointRadius = 3;
+juce::Colour eqGridMinor() { return juce::Colour::fromRGB (40, 40, 46); }
+juce::Colour eqGridMajor() { return juce::Colour::fromRGB (58, 58, 66); }
+}
+
+EqCurveEditor::EqCurveEditor()
+{
+    setPoints ({ sc::eq::EqPoint { 1000.0, 0.0 } });
+    setSize (560, 340);
+}
+
+void EqCurveEditor::setPoints (std::vector<sc::eq::EqPoint> pts)
+{
+    std::sort (pts.begin (), pts.end (),
+               [] (const sc::eq::EqPoint& a, const sc::eq::EqPoint& b) { return a.freqHz < b.freqHz; });
+    points_ = std::move (pts);
+    dragIndex_ = -1;
+    pressAddedPoint_ = false;
+    repaint ();
+}
+
+std::vector<sc::eq::EqPoint> EqCurveEditor::getPoints() const
+{
+    // Normalise: sort by frequency and merge points that ended up on the same
+    // frequency (a fast drag can cross neighbours).
+    auto pts = points_;
+    std::sort (pts.begin (), pts.end (),
+               [] (const sc::eq::EqPoint& a, const sc::eq::EqPoint& b) { return a.freqHz < b.freqHz; });
+    std::vector<sc::eq::EqPoint> out;
+    for (auto& p : pts)
+    {
+        if (!out.empty () && std::abs (out.back ().freqHz - p.freqHz) < 1e-9)
+            out.back ().gainDb = p.gainDb;   // later point wins
+        else
+            out.push_back (p);
+    }
+    return out;
+}
+
+void EqCurveEditor::setFreqHi (double nyquistHz)
+{
+    if (std::isfinite (nyquistHz) && nyquistHz > kFreqLo * 1.5)
+        freqHi_ = nyquistHz;
+    repaint ();
+}
+
+int EqCurveEditor::freqToX (double f) const
+{
+    const int w = getWidth () - kLeftMargin - kRightMargin;
+    const double la = std::log10 (kFreqLo);
+    const double lb = std::log10 (std::max (kFreqLo * 1.5, freqHi_));
+    return (int) std::lround (kLeftMargin + w * (std::log10 (std::max (1e-9, f)) - la) / (lb - la));
+}
+
+double EqCurveEditor::xToFreq (int x) const
+{
+    const int w = getWidth () - kLeftMargin - kRightMargin;
+    if (w <= 0) return kFreqLo;
+    const double la = std::log10 (kFreqLo);
+    const double lb = std::log10 (std::max (kFreqLo * 1.5, freqHi_));
+    const double t = jlimit (0.0, 1.0, (double) (x - kLeftMargin) / (double) w);
+    return std::pow (10.0, la + t * (lb - la));
+}
+
+int EqCurveEditor::dbToY (double db) const
+{
+    const int h = getHeight () - kTopMargin - kBottomMargin;
+    if (h <= 0) return kTopMargin;
+    const double t = jlimit (0.0, 1.0, (kDbMax - db) / (kDbMax - kDbMin));
+    return (int) std::lround (kTopMargin + h * t);
+}
+
+double EqCurveEditor::yToDb (int y) const
+{
+    const int h = getHeight () - kTopMargin - kBottomMargin;
+    if (h <= 0) return 0.0;
+    const double t = jlimit (0.0, 1.0, (double) (y - kTopMargin) / (double) h);
+    return kDbMax - t * (kDbMax - kDbMin);
+}
+
+int EqCurveEditor::findNearestPoint (const juce::Point<int>& p, int maxDistPx) const
+{
+    double bestD2 = (double) maxDistPx * (double) maxDistPx;
+    int best = -1;
+    for (size_t i = 0; i < points_.size (); ++i)
+    {
+        const int dx = freqToX (points_[i].freqHz) - p.x;
+        const int dy = dbToY (points_[i].gainDb) - p.y;
+        const double d2 = (double) dx * dx + (double) dy * dy;
+        if (d2 <= bestD2)
+        {
+            bestD2 = d2;
+            best = (int) i;
+        }
+    }
+    return best;
+}
+
+void EqCurveEditor::mouseDown (const juce::MouseEvent& e)
+{
+    const auto p = e.getPosition ();
+
+    // Double-click on a point removes it.
+    if ((e.eventTime - lastDownTime_).inMilliseconds() < 400 && lastDownPos_ != juce::Point<int> (-1, -1))
+    {
+        const int dx = lastDownPos_.x - p.x;
+        const int dy = lastDownPos_.y - p.y;
+        if (dx * dx + dy * dy <= 36)
+        {
+            const int idx = findNearestPoint (p, kEqPointRadius + 4);
+            if (idx >= 0)
+                points_.erase (points_.begin () + idx);
+            dragIndex_ = -1;
+            pressAddedPoint_ = false;
+            lastDownTime_ = juce::Time ();   // no chained deletes on triple clicks
+            repaint ();
+            return;
+        }
+    }
+    lastDownTime_ = juce::Time ();
+    lastDownPos_ = p;
+
+    const int idx = findNearestPoint (p, kEqPointRadius + 4);
+    if (idx >= 0)
+    {
+        dragIndex_ = idx;
+        pressAddedPoint_ = false;
+    }
+    else
+    {
+        // Clicking empty space adds a new point at the cursor and starts dragging it.
+        sc::eq::EqPoint np;
+        np.freqHz = jlimit (kFreqLo, freqHi_, xToFreq (p.x));
+        np.gainDb = jlimit (kDbMin, kDbMax, yToDb (p.y));
+        auto it = std::lower_bound (points_.begin (), points_.end (), np.freqHz,
+                                    [] (const sc::eq::EqPoint& a, double f) { return a.freqHz < f; });
+        if (it != points_.end () && std::abs (it->freqHz - np.freqHz) < 1e-9)
+            it = points_.erase (it);   // replace an existing point on this frequency
+        dragIndex_ = (int) (points_.insert (it, np) - points_.begin ());
+        pressAddedPoint_ = true;
+    }
+    repaint ();
+}
+
+void EqCurveEditor::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragIndex_ < 0 || dragIndex_ >= (int) points_.size ()) return;
+    const auto p = e.getPosition ();
+    sc::eq::EqPoint& pt = points_[(size_t) dragIndex_];
+    pt.freqHz = jlimit (kFreqLo, freqHi_, xToFreq (p.x));
+    pt.gainDb = jlimit (kDbMin, kDbMax, yToDb (p.y));
+    repaint ();
+}
+
+void EqCurveEditor::mouseUp (const juce::MouseEvent&)
+{
+    dragIndex_ = -1;
+    pressAddedPoint_ = false;
+}
+
+void EqCurveEditor::paint (juce::Graphics& g)
+{
+    const int w = getWidth () - kLeftMargin - kRightMargin;
+    const int h = getHeight () - kTopMargin - kBottomMargin;
+    if (w <= 10 || h <= 10) return;
+
+    g.fillAll (juce::Colour::fromRGB (24, 24, 28));
+    g.setFont (10.0f);
+
+    // Vertical grid: minor lines at 2..9 x each decade, major at the decades.
+    for (int dec = -1; dec <= 5; ++dec)
+    {
+        const double base = std::pow (10.0, (double) dec);
+        if (base < kFreqLo * 0.5 || base > freqHi_ * 2.0) continue;
+        for (int m = 1; m <= 9; ++m)
+        {
+            const double f = base * (double) m;
+            if (f < kFreqLo || f > freqHi_) continue;
+            const int x = freqToX (f);
+            g.setColour (m == 1 ? eqGridMajor () : eqGridMinor ());
+            g.drawLine (x, kTopMargin, x, kTopMargin + h, m == 1 ? 1.0f : 0.5f);
+        }
+    }
+
+    // Horizontal grid every 10 dB; the 0 dB line is brighter.
+    for (int db = -30; db <= 30; db += 10)
+    {
+        const int y = dbToY ((double) db);
+        g.setColour (db == 0 ? eqGridMajor () : eqGridMinor ());
+        g.drawLine (kLeftMargin, y, kLeftMargin + w, y, db == 0 ? 1.0f : 0.5f);
+    }
+
+    // Axis labels.
+    g.setColour (juce::Colour::fromRGB (140, 140, 150));
+    for (int dec = -1; dec <= 5; ++dec)
+    {
+        const double base = std::pow (10.0, (double) dec);
+        if (base < kFreqLo || base > freqHi_) continue;
+        juce::String label;
+        if (base >= 1000.0) label = juce::String ((int) (base / 1000.0)) + "k";
+        else                label = juce::String ((int) base);
+        g.drawText (label, freqToX (base) - 24, getHeight () - kBottomMargin + 3, 48, 15,
+                    juce::Justification::centred);
+    }
+    for (int db = -30; db <= 30; db += 10)
+        g.drawText (juce::String (db), 2, dbToY ((double) db) - 8, kLeftMargin - 6, 15,
+                    juce::Justification::centredRight);
+
+    // The curve: straight segments between control points are exact on this
+    // (log f, dB) grid. Gains outside the visible range clamp to the edges.
+    if (!points_.empty ())
+    {
+        g.setColour (juce::Colours::dodgerblue.withAlpha (0.9f));
+        for (size_t i = 1; i < points_.size (); ++i)
+            g.drawLine (freqToX (points_[i - 1].freqHz), dbToY (jlimit (kDbMin, kDbMax, points_[i - 1].gainDb)),
+                        freqToX (points_[i].freqHz),     dbToY (jlimit (kDbMin, kDbMax, points_[i].gainDb)),
+                        2.0f);
+    }
+
+    // Control points.
+    for (size_t i = 0; i < points_.size (); ++i)
+    {
+        const int x = freqToX (points_[i].freqHz);
+        const int y = dbToY (jlimit (kDbMin, kDbMax, points_[i].gainDb));
+        const bool dragging = ((int) i == dragIndex_);
+        g.setColour (dragging ? juce::Colours::white : juce::Colour::fromRGB (255, 196, 0));
+        g.fillEllipse (x - kEqPointRadius - (dragging ? 1 : 0), y - kEqPointRadius - (dragging ? 1 : 0),
+                       2 * (kEqPointRadius + (dragging ? 1 : 0)), 2 * (kEqPointRadius + (dragging ? 1 : 0)));
+    }
 }
 
 // ============================================================ SpectralControlsPanel

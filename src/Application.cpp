@@ -2147,6 +2147,114 @@ bool Application::changeGain (float gainDb, std::string* errOut)
     return audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this), errOut);
 }
 
+// ------------------------------------------------- Invert / Time Stretch / Filter EQ
+
+namespace {
+/** Target range for the whole-file-capable effects: the time selection when
+    present, otherwise the entire file. */
+juce::Range<int64_t> effectTargetRange (Application& app)
+{
+    auto& eng = app.audioEngine ();
+    const int64_t total = eng.numSamples ();
+    if (!app.selection.isEmpty ())
+        return selectionSamples (app).getIntersectionWith ({ 0, total });
+    return { 0, total };
+}
+} // namespace
+
+bool Application::invertSelection (std::string* errOut)
+{
+    auto& eng = audioEngine ();
+    if (!eng.isFileLoaded ())
+        return true;   // nothing to invert - not an error
+
+    if (hasSpectralSelection ())
+        return applyMaskedEffect (*this, "Inverted spectral selection",
+                                  [] (float* d, int len) {
+                                      for (int i = 0; i < len; ++i)
+                                          d[i] = -d[i];
+                                  }, errOut);
+
+    const auto range = effectTargetRange (*this);
+    if (range.getLength () <= 0) return true;
+    applyPerSample (eng, range, [] (float v, int, int) { return -v; },
+                    &visibleChans (*this), "Inverted selection");
+    return true;
+}
+
+bool Application::timeStretch (float percentChange, std::string* errOut)
+{
+    auto& eng = audioEngine ();
+    if (!eng.isFileLoaded ())
+        return false;   // the dialog is only reachable with a file loaded
+    if (std::abs ((double) percentChange) < 1e-6)
+        return true;   // 0 %: no-op, bit-exact
+
+    FileDoc* d = doc ();
+    const double rate = eng.sampleRate ();
+    const int64_t totalBefore = eng.numSamples ();
+    juce::Range<int64_t> range;
+    if (!selection.isEmpty ())
+        range = selectionSamples (*this).getIntersectionWith ({ 0, totalBefore });
+    else
+        range = { 0, totalBefore };
+    if (range.getLength () <= 0) return true;
+
+    const double aSec = (double) range.getStart () / rate;
+    const size_t depthBefore = d->undo.depth ();
+    std::vector<Marker> oldMarkers = d->markers.markers ();
+    auto oldSavedSel = d->savedSelections;
+
+    if (!eng.stretchRange (range, percentChange, errOut))
+        return false;
+
+    // The stretched region now occupies [aSec, bNew) on the new timeline.
+    const int64_t delta = eng.numSamples () - totalBefore;
+    const double bNew = ((double) range.getStart () + (double) range.getLength ()
+                         + (double) delta) / rate;
+
+    if (d->undo.depth () > depthBefore)   // a patch was actually recorded
+    {
+        d->markers.adjustForStretch (aSec, (double) range.getEnd () / rate, bNew);
+        for (auto& ss : d->savedSelections)
+            ss.data.adjustForStretch (aSec, (double) range.getEnd () / rate, bNew);
+        d->metaDirty = true;   // the adjusted lists no longer match disk
+
+        Patch& p = d->undo.lastRecorded ();
+        p.hasSideState = true;
+        p.oldMarkers = std::move (oldMarkers);
+        p.newMarkers = d->markers.markers ();
+        p.oldSavedSel = std::move (oldSavedSel);
+        p.newSavedSel = d->savedSelections;
+        if (onTimeRangeStretched)
+            onTimeRangeStretched (d, aSec, (double) range.getEnd () / rate, bNew, p);
+    }
+
+    selection = { aSec, bNew };   // the stretched region stays selected
+    syncActiveDoc ();
+    return true;
+}
+
+bool Application::applyFilterEq (const std::vector<sc::eq::EqPoint>& pts,
+                                 std::string* errOut)
+{
+    auto& eng = audioEngine ();
+    if (!eng.isFileLoaded ())
+        return true;   // nothing to filter - not an error
+    if (sc::eq::isFlatCurve (pts))
+        return true;   // flat curve: bit-exact no-op, no undo entry
+
+    if (hasSpectralSelection ())
+        return applyMaskedEffect (*this, "Filter EQ on spectral selection",
+            [rate = eng.sampleRate (), &pts] (float* d, int len) {
+                sc::eq::applyEq (d, len, rate, pts);
+            }, errOut);
+
+    const auto range = effectTargetRange (*this);
+    if (range.getLength () <= 0) return true;
+    return eng.eqFilterRange (range, pts, &visibleChans (*this), errOut);
+}
+
 // ------------------------------------------------- signal generation (Effects > Generate ...)
 
 namespace {
