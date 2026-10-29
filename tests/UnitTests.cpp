@@ -3584,14 +3584,252 @@ static void testCtrlNumberChannelToggle()
            "Ctrl+Shift+1 is handled");
     CHECK (app.isChannelVisible (0) && !app.isChannelVisible (1), "Ctrl+Shift+1 solos channel 1");
 
+    // Pressing Ctrl+Shift+1 again while solo on that channel restores every
+    // channel.
+    CHECK (press ('1', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier),
+           "second Ctrl+Shift+1 is handled");
+    CHECK (app.isChannelVisible (0) && app.isChannelVisible (1),
+          "solo toggle-off restores all channels");
+
+    // Soloing another channel while solo on one moves the solo.
+    CHECK (press ('2', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier),
+           "Ctrl+Shift+2 is handled");
+    CHECK (!app.isChannelVisible (0) && app.isChannelVisible (1), "solo moves to channel 2");
+
     // Ctrl+9: a stereo file has no channel 9 -> unhandled, state untouched.
     CHECK (!press ('9', juce::ModifierKeys::commandModifier), "Ctrl+9 is left unhandled for a stereo file");
-    CHECK (app.isChannelVisible (0) && !app.isChannelVisible (1), "unhandled key leaves visibility alone");
+    CHECK (!app.isChannelVisible (0) && app.isChannelVisible (1), "unhandled key leaves visibility alone");
 
-    // Ctrl+2 toggles channel 2 back on.
-    CHECK (press ('2', juce::ModifierKeys::commandModifier), "Ctrl+2 is handled again");
+    // Ctrl+1 toggles channel 1 back on -> both visible.
+    CHECK (press ('1', juce::ModifierKeys::commandModifier), "Ctrl+1 is handled again");
     CHECK (app.isChannelVisible (0) && app.isChannelVisible (1), "both channels visible again");
 
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile();
+}
+
+// ------------------------------------------------- Resample dialog fill buttons + labels
+// The resample dialog shows "Sample Rate:" / "Number of Channels:" captions in
+// front of their fields, tooltips on every field and button, and five remix-
+// matrix fill buttons (Default/Identity/Merge/Ones/Zeros).
+static void testResampleDialogFillButtons()
+{
+    const juce::File wav = makeTempFile ("resample_fill.wav");
+    writeWav (wav, 2, 8000.0, 4000, [] (int ch, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (ch == 0 ? 300.0 : 500.0) * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for resample fill test");
+
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "resample fill test"));
+
+    auto* w = win->createResampleDialog ();
+    CHECK (w != nullptr, "resample dialog created");
+    if (!w) { win.reset (); delete mm; wav.deleteFile (); return; }
+
+
+    // Collect the named input fields and all weight editors. The two named
+    // TextEditors are the sample-rate / channel-count fields; every other
+    // TextEditor is a remix-matrix cell (row-major order).
+    juce::TextEditor* rateEd = nullptr, *chansEd = nullptr;
+    std::vector<juce::TextEditor*> weightEds;
+    auto collect = [&] ()
+    {
+        rateEd = nullptr; chansEd = nullptr; weightEds.clear ();
+        std::vector<juce::Component*> stack { w };
+        while (!stack.empty ())
+        {
+            // Classify at pop time: pops happen in document order (children
+            // are pushed in reverse below).
+            auto* c = stack.back (); stack.pop_back ();
+            if (auto* ed = dynamic_cast<juce::TextEditor*> (c))
+            {
+                if (ed->getName () == "newRate") rateEd = ed;
+                else if (ed->getName () == "newChans") chansEd = ed;
+                else weightEds.push_back (ed);
+            }
+            const int nch = c->getNumChildComponents ();
+            for (int i = nch - 1; i >= 0; --i)
+                stack.push_back (c->getChildComponent (i));
+        }
+    };
+    collect ();
+
+    CHECK (rateEd != nullptr, "sample-rate field found");
+    CHECK (chansEd != nullptr, "channel-count field found");
+    CHECK (weightEds.size () == 4, "2x2 weight fields for a stereo file");
+    if (!rateEd) { win.reset (); delete mm; wav.deleteFile (); return; }
+
+    // The input fields carry tooltips.
+    CHECK (!rateEd->getTooltip ().isEmpty (), "sample-rate field has a tooltip");
+    CHECK (!chansEd->getTooltip ().isEmpty (), "channel-count field has a tooltip");
+
+    // Every weight cell carries a tooltip.
+    bool allWeightTips = true;
+    for (auto* ed : weightEds)
+        if (ed->getTooltip ().isEmpty ()) { allWeightTips = false; break; }
+    CHECK (allWeightTips, "weight fields have tooltips");
+
+    // The two caption rows: each holds one Label and one TextEditor side by
+    // side, and each row must already carry a real size (AlertWindow never
+// resizes custom components itself).
+    std::vector<juce::Component*> rows;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+    {
+        auto* c = w->getChildComponent (i);
+        int labels = 0, eds = 0;
+        for (int j = 0; j < c->getNumChildComponents (); ++j)
+        {
+            if (dynamic_cast<juce::Label*> (c->getChildComponent (j))) ++labels;
+            else if (dynamic_cast<juce::TextEditor*> (c->getChildComponent (j))) ++eds;
+        }
+        if (labels == 1 && eds == 1) rows.push_back (c);
+    }
+    CHECK (rows.size () == 2, "two captioned input rows");
+
+    std::vector<juce::String> captions;
+    for (auto* row : rows)
+    {
+        juce::Label* lbl = nullptr; juce::TextEditor* ed = nullptr;
+        for (int j = 0; j < row->getNumChildComponents (); ++j)
+        {
+            if (auto* l = dynamic_cast<juce::Label*> (row->getChildComponent (j))) lbl = l;
+            else if (auto* e = dynamic_cast<juce::TextEditor*> (row->getChildComponent (j))) ed = e;
+        }
+        CHECK (lbl != nullptr && ed != nullptr, "row holds a label and an editor");
+        if (!lbl || !ed) continue;
+        CHECK (row->getWidth () >= 150 && row->getHeight () >= 20,
+               "input row '" + lbl->getText () + "' is sized by the dialog");
+        captions.push_back (lbl->getText ());
+        CHECK (lbl->getX () < ed->getX (),
+              "label '" + lbl->getText () + "' sits to the left of its field");
+    }
+    CHECK (captions.size () == 2 && captions[0] == "Sample Rate:"
+           && captions[1] == "Number of Channels:",
+          "captions are 'Sample Rate:' and 'Number of Channels:'");
+
+    // The weight grid carries its caption as the component name (AlertWindow
+    // draws a named custom component's name above it).
+    bool gridNamed = false;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+        if (w->getChildComponent (i)->getName ()
+            == "Mix weights per output channel (each row is normalised to sum to 1):")
+            gridNamed = true;
+    CHECK (gridNamed, "weight grid carries its caption as the component name");
+
+    // The five fill buttons. AlertWindow's OK/Cancel are TextButtons too, so
+    // match by text.
+    std::vector<juce::TextButton*> allBtns;
+    {
+        std::vector<juce::Component*> stack { w };
+        while (!stack.empty ())
+        {
+            auto* c = stack.back (); stack.pop_back ();
+            for (int i = c->getNumChildComponents () - 1; i >= 0; --i)
+            {
+                auto* child = c->getChildComponent (i);
+                if (auto* b = dynamic_cast<juce::TextButton*> (child)) allBtns.push_back (b);
+                stack.push_back (child);
+            }
+        }
+    }
+
+    const char* want[5] = { "Default", "Identity", "Merge", "Ones", "Zeros" };
+    std::vector<juce::TextButton*> fillBtns;
+    for (int i = 0; i < 5; ++i)
+    {
+        juce::TextButton* found = nullptr;
+        for (auto* b : allBtns)
+            if (b->getButtonText () == want[i]) found = b;
+        CHECK (found != nullptr, "fill button '" + juce::String (want[i]) + "' present");
+        if (!found) continue;
+        fillBtns.push_back (found);
+        CHECK (found->getWidth () > 0 && found->getHeight () > 0,
+              "'" + juce::String (want[i]) + "' button is visible");
+        CHECK (!found->getTooltip ().isEmpty (),
+              "'" + juce::String (want[i]) + "' has a tooltip");
+    }
+
+    auto weightsText = [&] () -> std::vector<juce::String>
+    {
+        collect ();   // refresh pointers (the grid may have been rebuilt)
+        std::vector<juce::String> t;
+        for (auto* ed : weightEds) t.push_back (ed->getText ().trim ());
+        return t;
+    };
+
+    auto expectWeights = [&] (const char* what, const std::vector<juce::String>& expected)
+    {
+        CHECK (weightsText () == expected,
+              "fill '" + juce::String (what) + "' sets the matrix");
+    };
+
+    // Initial state: same count -> identity.
+    expectWeights ("initial", { "1", "0", "0", "1" });
+
+    if (fillBtns.size () == 5)
+    {
+        fillBtns[3]->onClick ();   // Ones
+        expectWeights ("Ones", { "1", "1", "1", "1" });
+
+        fillBtns[4]->onClick ();   // Zeros
+        expectWeights ("Zeros", { "0", "0", "0", "0" });
+
+        fillBtns[2]->onClick ();   // Merge: each output averages both inputs
+        expectWeights ("Merge", { "0.5", "0.5", "0.5", "0.5" });
+
+        fillBtns[1]->onClick ();   // Identity
+        expectWeights ("Identity", { "1", "0", "0", "1" });
+
+        fillBtns[0]->onClick ();   // Default: identity again for the same count
+        expectWeights ("Default", { "1", "0", "0", "1" });
+    }
+
+    // Change the channel count to 4: the grid rebuilds with default weights
+    // (each of the four outputs averages both inputs). The text-change
+    // notification is posted asynchronously, so pump the queue.
+    chansEd->setText ("4");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    expectWeights ("rebuild at 4 channels", { "0.5", "0.5", "0.5", "0.5",
+                                              "0.5", "0.5", "0.5", "0.5" });
+
+    if (fillBtns.size () == 5)
+    {
+        fillBtns[1]->onClick ();   // Identity on a 4x2 matrix
+        expectWeights ("Identity at 4 channels",
+                       { "1", "0", "0", "1", "0", "0", "0", "0" });
+
+        fillBtns[3]->onClick ();   // Ones: every cell is 1
+        expectWeights ("Ones at 4 channels",
+                       { "1", "1", "1", "1", "1", "1", "1", "1" });
+    }
+
+    // Render headlessly so the layout can be visually inspected.
+    {
+        const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("sc_resample_snapshot.png");
+        const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
+        std::vector<uint8_t> px;
+        px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
+        for (int yy = 0; yy < img.getHeight (); ++yy)
+            for (int xx = 0; xx < img.getWidth (); ++xx)
+            {
+                const juce::Colour c = img.getPixelAt (xx, yy);
+                px.push_back ((uint8_t) c.getRed());
+                px.push_back ((uint8_t) c.getGreen());
+                px.push_back ((uint8_t) c.getBlue());
+                px.push_back ((uint8_t) c.getAlpha());
+            }
+        CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
+               "saved resample-dialog snapshot: " + out.getFullPathName());
+    }
+
+    delete w;
     win.reset();   // destroy the window while its MessageManager is still alive
     delete mm;
     wav.deleteFile();
@@ -18500,6 +18738,7 @@ static int scRunUnitTestsImpl()
     progress ("axis scale modes");        testAxisScaleModes();
     progress ("alt scale multi-ref + go-to"); testAltScaleMultiRef();
     progress ("resample remix");          testResampleRemix();
+    progress ("resample dialog fill buttons"); testResampleDialogFillButtons();
     progress ("paste to new channels");   testPasteToNewChannels();
     progress ("channel row geometry");    testChannelRowGeometry();
     progress ("merge files");           testMergeFiles();

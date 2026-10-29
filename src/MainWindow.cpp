@@ -2082,28 +2082,31 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     }
 
     // Per-channel visibility toggles: ChannelBase + channel index.
-    // Ctrl/Shift+click on a channel shows ONLY that channel (solo).
+    // Ctrl/Shift+click on a channel shows ONLY that channel (solo); doing it
+    // again while solo on that channel restores every channel.
     if (menuItemID >= ChannelBase && menuItemID < ChannelBase + app.audioEngine().numChannels())
     {
         const int ch = menuItemID - ChannelBase;
         const auto mods = juce::ModifierKeys::getCurrentModifiers();
-        if (mods.isCommandDown() || mods.isShiftDown())
+        const bool soloMods = mods.isCommandDown() || mods.isShiftDown();
+        if (soloMods && app.visibleChannels.size() == 1
+                && app.visibleChannels[0] == ch)
+            showEveryChannel();   // solo off: back to all channels
+        else if (soloMods)
+        {
             app.visibleChannels = { ch };
+            app.syncActiveDoc ();   // keep the active document's copy in step
+            syncSharedState();
+        }
         else
             app.toggleChannelVisible (ch);
-        app.syncActiveDoc ();   // keep the active document's copy in step
-        syncSharedState();
         return;
     }
 
     // Show every channel in both views.
     if (menuItemID == ViewShowAllChannels)
     {
-        app.visibleChannels.clear();
-        for (int i = 0; i < app.audioEngine().numChannels(); ++i)
-            app.visibleChannels.push_back (i);
-        app.syncActiveDoc ();   // keep the active document's copy in step
-        syncSharedState();
+        showEveryChannel();
         return;
     }
 
@@ -3260,18 +3263,36 @@ juce::String formatWeightText (double v)
     return juce::String (v, 4).trimCharactersAtEnd ("0").trimCharactersAtEnd (".");
 }
 
-/** Default mix matrix: identity when the count is unchanged, otherwise each
-    output channel averages all inputs. */
-std::vector<std::vector<double>> defaultRemixWeights (int outChans, int inChans)
+/** Fill patterns for the remix-matrix buttons (see RemixFillButtons). */
+enum class RemixFill { Default, Identity, Merge, Ones, Zeros };
+
+/** Builds the weight matrix for one of the fill patterns. */
+std::vector<std::vector<double>> remixFillWeights (RemixFill mode,
+                                                   int outChans, int inChans)
 {
     std::vector<std::vector<double>> w ((size_t) outChans,
                                         std::vector<double> ((size_t) inChans, 0.0));
     for (int r = 0; r < outChans; ++r)
         for (int c = 0; c < inChans; ++c)
-            w[(size_t) r][(size_t) c] = (outChans == inChans)
-                                           ? (r == c ? 1.0 : 0.0)
-                                           : 1.0 / (double) inChans;
+            switch (mode)
+            {
+                case RemixFill::Default:   // identity when the count is unchanged,
+                    w[(size_t) r][(size_t) c] = (outChans == inChans)             // otherwise each output averages all inputs.
+                                                 ? (r == c ? 1.0 : 0.0)
+                                                 : 1.0 / (double) inChans;
+                    break;
+                case RemixFill::Identity:  w[(size_t) r][(size_t) c] = (r == c) ? 1.0 : 0.0; break;
+                case RemixFill::Merge:     w[(size_t) r][(size_t) c] = 1.0 / (double) inChans; break;
+                case RemixFill::Ones:      w[(size_t) r][(size_t) c] = 1.0; break;
+                case RemixFill::Zeros:     w[(size_t) r][(size_t) c] = 0.0; break;
+            }
     return w;
+}
+
+/** Default mix matrix (used when the channel count changes). */
+std::vector<std::vector<double>> defaultRemixWeights (int outChans, int inChans)
+{
+    return remixFillWeights (RemixFill::Default, outChans, inChans);
 }
 
 /** Divides every row by its sum (zero rows stay silence). */
@@ -3327,6 +3348,9 @@ public:
                 auto* ed = new juce::TextEditor();
                 ed->setMultiLine (false);
                 ed->setText (formatWeightText (defaults[(size_t) r][(size_t) c]));
+                ed->setTooltip ("Weight of input channel " + juce::String (c + 1)
+                                + " on output channel " + juce::String (r + 1)
+                                + ". Empty means 0; each row is normalised to sum to 1 when applied.");
                 addAndMakeVisible (ed);
                 row.editors.push_back (ed);
             }
@@ -3334,6 +3358,14 @@ public:
         }
         setSize (widthFor (inChans_), (int) rows_.size() * kRowH + 8);
         resized();
+    }
+
+    /** Replaces the field texts without rebuilding (used by the fill buttons). */
+    void setWeights (const std::vector<std::vector<double>>& w)
+    {
+        for (size_t r = 0; r < rows_.size() && r < w.size(); ++r)
+            for (size_t c = 0; c < rows_[r].editors.size() && c < w[r].size(); ++c)
+                rows_[r].editors[c]->setText (formatWeightText (w[(size_t) r][(size_t) c]));
     }
 
     /** Parsed weights; false if any field is not a plain number. */
@@ -3426,6 +3458,96 @@ public:
         }
     }
 };
+
+/** A caption and a text editor laid out side by side on one row, so the
+    label sits in front of (left of) its field instead of above it. */
+// Fixed sizes for the dialog's custom rows. AlertWindow stacks custom
+// components by their height at layout time and never resizes them itself.
+static constexpr int kInputRowW = 300, kInputRowH = 24;
+static constexpr int kFillRowW = 360, kFillRowH = 26;
+
+class LabeledField : public juce::Component
+{
+public:
+    LabeledField (const juce::String& labelText, const juce::String& initialText,
+                  const juce::String& fieldTooltip)
+    {
+        label_ = new juce::Label ("", labelText);
+        editor_ = new juce::TextEditor();
+        editor_->setMultiLine (false);
+        editor_->setText (initialText);
+        if (!fieldTooltip.isEmpty())
+            editor_->setTooltip (fieldTooltip);
+        addAndMakeVisible (label_);
+        addAndMakeVisible (editor_);
+    }
+
+    juce::TextEditor* editor() const { return editor_; }
+
+    void resized() override
+    {
+        label_->setBounds (0, 3, kLabelW, 18);
+        editor_->setBounds (kLabelW + 6, 0,
+                           std::max (40, getWidth() - kLabelW - 6), 24);
+    }
+
+private:
+    juce::Label* label_ = nullptr;
+    juce::TextEditor* editor_ = nullptr;
+    static constexpr int kLabelW = 132;
+};
+
+/** One row of buttons that fill the remix matrix with preset patterns. */
+class RemixFillButtons : public juce::Component
+{
+public:
+    /** Called with the pattern index (0..4, see RemixFill) on a click. */
+    std::function<void(int)> onFill;
+
+    RemixFillButtons()
+    {
+        const char* texts[5] = { "Default", "Identity", "Merge", "Ones", "Zeros" };
+        const char* tips[5]  = {
+            "The default mix: identity when the channel count is unchanged, otherwise each output averages all inputs.",
+            "Put 1 on the diagonal and 0 elsewhere - output N takes input N directly (extra outputs stay silent).",
+            "Split every input equally onto every output - e.g. mono becomes identical stereo channels.",
+            "Put 1 in every cell; rows are normalised to sum to 1 when applied, so all inputs mix equally into every output.",
+            "Put 0 everywhere - every output channel will be silent." };
+        for (int i = 0; i < 5; ++i)
+        {
+            auto* b = new juce::TextButton (texts[i], tips[i]);
+            const int mode = i;
+            b->onClick = [this, mode] { if (onFill != nullptr) onFill (mode); };
+            addAndMakeVisible (b);
+            buttons_.push_back (b);
+        }
+    }
+
+    void resized() override
+    {
+        const int n = (int) buttons_.size();
+        if (n == 0) return;
+        const int bw = getWidth() / n;
+        for (int i = 0; i < n; ++i)
+            buttons_[i]->setBounds (i * bw, 0, bw - 4, 26);
+    }
+
+private:
+    std::vector<juce::TextButton*> buttons_;
+};
+
+/** Finds a named TextEditor anywhere under root (the resample dialog nests
+    its fields inside LabeledField rows). */
+juce::TextEditor* findNamedEditor (juce::Component& root, const juce::String& name)
+{
+    for (auto* c : root.getChildren())
+    {
+        if (auto* ed = dynamic_cast<juce::TextEditor*> (c))
+            if (ed->getName() == name) return ed;
+        if (auto* e2 = findNamedEditor (*c, name)) return e2;
+    }
+    return nullptr;
+}
 } // namespace
 
 // Effects > Time Stretch... — Audacity's Change Tempo: a pitch-preserving
@@ -3569,23 +3691,47 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     auto* w = new juce::AlertWindow ("Resample",
                                      "Current rate: " + juce::String (cur, 3) + " Hz, "
                                      + juce::String (curChans) + " channel(s)\n"
-                                     "New sample rate (Hz):\n"
-                                     "New channel count:\n"
-                                     "Mix weights per output channel (each row is normalised to sum to 1):\n"
                                      "(whole file; cannot be undone)",
                                      juce::AlertWindow::QuestionIcon, this);
-    w->addTextEditor ("newRate", juce::String (cur, 3));
-    w->addTextEditor ("newChans", juce::String (curChans));
+
+    // Captioned input rows: the label sits in front of (left of) its field.
+    // AlertWindow stacks custom components by their current height, so each
+    // one must be sized before it is added.
+    auto* rateRow = new LabeledField ("Sample Rate:", juce::String (cur, 3),
+        "New sample rate in Hz - the whole file is resampled with SoXR.");
+    rateRow->setSize (kInputRowW, kInputRowH);
+    w->addCustomComponent (rateRow);
+    auto* chansRow = new LabeledField ("Number of Channels:", juce::String (curChans),
+        "Number of output channels (1-" + juce::String (kResampleMaxChans)
+        + "). Changing it rebuilds the mix matrix below.");
+    chansRow->setSize (kInputRowW, kInputRowH);
+    w->addCustomComponent (chansRow);
 
     auto* grid = new RemixGrid (curChans);
     grid->rebuild (curChans, defaultRemixWeights (curChans, curChans));
+    // AlertWindow draws a named custom component's name above it.
+    grid->setName ("Mix weights per output channel (each row is normalised to sum to 1):");
+
+    // Fill buttons between the input rows and the matrix. Add order defines
+    // the vertical stacking, so this goes in before the grid.
+    auto* fillRow = new RemixFillButtons();
+    fillRow->onFill = [grid, curChans] (int mode)
+    {
+        grid->setWeights (remixFillWeights ((RemixFill) mode,
+                                             grid->numRows(), curChans));
+    };
+    fillRow->setSize (kFillRowW, kFillRowH);
+    w->addCustomComponent (fillRow);
     w->addCustomComponent (grid);
 
-    for (const char* name : { "newRate", "newChans" })
-        if (auto* editor = w->getTextEditor (name))
-            // Let Enter/Escape reach the OK/Cancel shortcuts even while a
-            // field has keyboard focus.
-            editor->setEscapeAndReturnKeysConsumed (false);
+    auto* rateEditor = rateRow->editor();
+    auto* chansEditor = chansRow->editor();
+    rateEditor->setName ("newRate");
+    chansEditor->setName ("newChans");
+    for (auto* editor : { rateEditor, chansEditor })
+        // Let Enter/Escape reach the OK/Cancel shortcuts even while a
+        // field has keyboard focus.
+        editor->setEscapeAndReturnKeysConsumed (false);
 
     // Rebuild the weight grid whenever the requested channel count changes.
     auto* chansListener = new NewChansListener();
@@ -3593,8 +3739,7 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     chansListener->grid = grid;
     chansListener->inChans = curChans;
     w->addChildComponent (chansListener);   // owned by the dialog
-    if (auto* editor = w->getTextEditor ("newChans"))
-        editor->addListener (chansListener);
+    chansEditor->addListener (chansListener);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -3602,11 +3747,9 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     // AlertWindow disables keyboard focus on its editors, so re-enable it and
     // pre-select the text. The actual grabKeyboardFocus() happens in
     // showResampleDialog() once the window is showing.
-    for (const char* name : { "newRate", "newChans" })
-        if (auto* editor = w->getTextEditor (name))
-            editor->setWantsKeyboardFocus (true);
-    if (auto* editor = w->getTextEditor ("newRate"))
-        editor->selectAll();
+    rateEditor->setWantsKeyboardFocus (true);
+    chansEditor->setWantsKeyboardFocus (true);
+    rateEditor->selectAll();
 
     return w;
 }
@@ -3627,6 +3770,17 @@ void MainWindow::showStemSeparationWindow()
     stemWin_->onCloseRequested = [this] { stemWin_.reset (); };
 }
 
+// Show every channel in both views (View > All Channels, and the solo-off
+// half of the Ctrl/Shift+click / Ctrl+Shift+N toggle).
+void MainWindow::showEveryChannel()
+{
+    app.visibleChannels.clear();
+    for (int i = 0; i < app.audioEngine().numChannels(); ++i)
+        app.visibleChannels.push_back (i);
+    app.syncActiveDoc ();   // keep the active document's copy in step
+    syncSharedState();
+}
+
 void MainWindow::showResampleDialog()
 {
     // Streamed files are fine: resampleTo materialises them into memory first
@@ -3639,12 +3793,13 @@ void MainWindow::showResampleDialog()
     // Enter modal state WITHOUT taking keyboard focus (see showChangeGainDialog).
     w->enterModalState (false);
 
-    if (auto* editor = w->getTextEditor ("newRate"))
+    if (auto* editor = findNamedEditor (*w, "newRate"))
         editor->grabKeyboardFocus();
 
     const int result = w->runModalLoop();
-    const juce::String rateText = w->getTextEditorContents ("newRate");
-    const juce::String chansText = w->getTextEditorContents ("newChans");
+    juce::String rateText, chansText;
+    if (auto* ed = findNamedEditor (*w, "newRate"))   rateText = ed->getText().trim();
+    if (auto* ed = findNamedEditor (*w, "newChans"))  chansText = ed->getText().trim();
     std::vector<std::vector<double>> weights;
     bool weightsOk = false;
     for (int i = 0; i < w->getNumChildComponents() && !weightsOk; ++i)
@@ -5131,19 +5286,26 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     const juce::ModifierKeys mods = key.getModifiers();
 
     // Channel visibility, like the View menu items: Ctrl+1..9 toggles that
-    // channel in both views; Ctrl+Shift+1..9 shows ONLY it (solo), matching
-    // the menu's Ctrl/Shift-click behaviour.
+    // channel in both views; Ctrl+Shift+1..9 shows ONLY it (solo) - pressing
+    // it again while solo on that channel restores every channel.
     if (mods.isCommandDown() && !mods.isAltDown() && keyCode >= '1' && keyCode <= '9')
     {
         const int ch = keyCode - '1';   // 0-based channel index
         if (app.audioEngine().isFileLoaded() && ch < app.audioEngine().numChannels())
         {
             if (mods.isShiftDown())
-                app.visibleChannels = { ch };
+            {
+                if (app.visibleChannels.size() == 1 && app.visibleChannels[0] == ch)
+                    showEveryChannel();   // solo off: back to all channels
+                else
+                {
+                    app.visibleChannels = { ch };
+                    app.syncActiveDoc ();   // keep the active document's copy in step
+                    syncSharedState();
+                }
+            }
             else
                 app.toggleChannelVisible (ch);
-            app.syncActiveDoc ();   // keep the active document's copy in step
-            syncSharedState();
             return true;
         }
     }

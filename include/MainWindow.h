@@ -218,6 +218,9 @@ public:
         reference). Ctrl+G. */
     void showGoToTimeDialog();
     void showNewTextDialog (double tSecs, double fHz, int px, int py);
+    /** Shows every channel in both views (View > All Channels; also the
+        solo-off half of the Ctrl/Shift+click and Ctrl+Shift+N toggles). */
+    void showEveryChannel();
     void showResampleDialog();
     /** Builds (but does not run modally) the Resample dialog. The caller owns
         and must delete it; used by showResampleDialog() and tests. */

@@ -343,7 +343,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - Per-channel display selection lives in the **View menu**: one checkable item
     per channel ("Channel 1", "Channel 2", …) that toggles each channel
     independently for any number of channels and applies to both views.
-    **Ctrl/Shift+click** on a channel item shows *only* that channel (solo).
+    **Ctrl/Shift+click** on a channel item shows *only* that channel (solo);
+    repeating the same solo click restores every channel, and solo-clicking a
+    different channel switches the solo to it. The keyboard shortcuts
+    Ctrl+Shift+1..9 behave the same way.
   - The View menu also has **Waveform View / Spectrogram View** visibility
     toggles; at least one view is always kept visible — hiding the last one is
     refused and the remaining view takes the whole main area.
@@ -513,13 +516,18 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   snapshot exactly as before.
 - **Resample**: Edit → Resample… converts the whole file to any sample rate
   using SoXR's very-high-quality (`SOXR_VHQ`) resampler — and can change the
-  channel count in the same operation. The dialog has a *new channels* field
-  (1–512) plus a remix weight grid: one row per output channel, one column per
-  input channel; each row is normalised to sum to 1 (empty cells are 0), so
-  `{2, 1}` means "two-thirds of L + one-third of R". When the count changes,
-  the default weights mix every input equally into each output. Whole-file
-  operation, requires the file fully in memory, not undoable (the old data is
-  discarded); the footer shows the current sample rate and channel count.
+  channel count in the same operation. The dialog has captioned *Sample Rate*
+  and *Number of Channels* fields (1–512) plus a remix weight grid: one row
+  per output channel, one column per input channel; each row is normalised to
+  sum to 1 (empty cells are 0), so `{2, 1}` means "two-thirds of L +
+  one-third of R". When the count changes, the default weights mix every
+  input equally into each output. A row of five **fill buttons** above the
+  grid presets the whole matrix: *Default* (identity for an unchanged count,
+  equal split otherwise), *Identity* (1 on the diagonal, 0 elsewhere),
+  *Merge* (every input averaged onto every output), *Ones* and *Zeros*. All
+  fields and buttons carry explanatory tooltips. Whole-file operation,
+  requires the file fully in memory, not undoable (the old data is discarded);
+  the footer shows the current sample rate and channel count.
 - **AI features** (built by default; see [AI features](#ai-features) below):
   - *Noise Suppression* — Effects → Noise Suppression… applies a neural
     speech-enhancement model (DeepFilterNet 2/3 or DenseUNet) to the current
@@ -1244,7 +1252,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
 | Zoom Out Full — reset the time window and both vertical ranges (Zoom Fit is menu-only now) | Ctrl+0 |
 | Vertical zoom in / out (waveform amplitude + spectral frequency) | Ctrl+Shift+= / Ctrl+Shift+- |
-| Toggle a channel's visibility (like the View menu items); show ONLY that channel with Shift held | Ctrl+1..9 / Ctrl+Shift+1..9 |
+| Toggle a channel's visibility (like the View menu items); show ONLY that channel with Shift held — pressing again while solo restores every channel | Ctrl+1..9 / Ctrl+Shift+1..9 |
 | Cycle view layout: both → waveform only → spectrogram only (reverse direction with Shift) | F9 / Shift+F9 |
 | Save Spectrogram As... (PNG of the current spectrogram content) | Ctrl+Shift+E |
 | Take Snapshot (timestamped PNG saved next to the WAV file) | Ctrl+Shift+F |
