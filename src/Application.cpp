@@ -2807,6 +2807,7 @@ void Application::undoSteps (int n)
     FileDoc* d = doc();
     if (!d || n <= 0) return;
 
+    const int chBefore = d->engine.numChannels ();
     int done = 0;
     while (done < n)
     {
@@ -2817,7 +2818,11 @@ void Application::undoSteps (int n)
         ++done;
     }
     if (done > 0)
+    {
+        syncVisibleChannelsToEngine (chBefore);
+        syncActiveDoc ();
         d->engine.rebuildMipmaps();   // one rebuild for the whole jump
+    }
 }
 
 void Application::redoSteps (int n)
@@ -2825,6 +2830,7 @@ void Application::redoSteps (int n)
     FileDoc* d = doc();
     if (!d || n <= 0) return;
 
+    const int chBefore = d->engine.numChannels ();
     int done = 0;
     while (done < n)
     {
@@ -2835,7 +2841,32 @@ void Application::redoSteps (int n)
         ++done;
     }
     if (done > 0)
+    {
+        syncVisibleChannelsToEngine (chBefore);
+        syncActiveDoc ();
         d->engine.rebuildMipmaps();
+    }
+}
+
+// The channel count may have changed by an undo/redo (e.g. reverting a split
+// that grew the file from mono to stereo): when it did, show every remaining
+// track so the views never draw phantom channels or go blank. When the count
+// is unchanged, just drop any stale flags defensively.
+void Application::syncVisibleChannelsToEngine (int chBefore)
+{
+    const int nch = audioEngine ().numChannels ();
+    if (nch <= 0) { visibleChannels.clear (); return; }
+    if (nch != chBefore)
+    {
+        visibleChannels.clear ();
+        for (int ch = 0; ch < nch; ++ch)
+            visibleChannels.push_back (ch);
+        return;
+    }
+    visibleChannels.erase (std::remove_if (visibleChannels.begin (),
+                                           visibleChannels.end (),
+                                           [nch] (int ch) { return ch < 0 || ch >= nch; }),
+                           visibleChannels.end ());
 }
 
 // Restores the non-audio state recorded in a patch: markers and named saved

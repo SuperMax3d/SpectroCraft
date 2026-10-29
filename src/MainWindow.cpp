@@ -501,6 +501,13 @@ void MainWindow::setupViews()
         if (spectralView) { spectralView->resetFrequencyRange(); spectralView->repaint(); }
     };
 
+    // Spectral Controls > Refresh: discard every cached tile and force a full
+    // re-render of the spectrogram from the audio.
+    controlsPanel->onRefresh = [this] {
+        app.spectralEngine.clearCache ();
+        if (spectralView) spectralView->invalidateImage ();
+    };
+
     // Reset both views to the whole file with default zoom levels.
     const double dur = app.audioEngine().duration();
     app.playhead = 0.0;

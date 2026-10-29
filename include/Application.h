@@ -318,6 +318,10 @@ public:
     void cycleActiveDoc (bool forward);// Ctrl+Tab / Ctrl+Shift+Tab
     // Copy the current UI state (playhead/selection/channels) into the active doc.
     void syncActiveDoc();
+    // Re-sync track visibility with the engine's channel count after an
+    // undo/redo (a step may have grown or shrunk the file, e.g. reverting a
+    // mono->stereo split): show all tracks when the count changed.
+    void syncVisibleChannelsToEngine (int chBefore);
 
     /** Copies the session's Frequency Analysis settings and axis reference
         calibrations into a document so they persist with that file

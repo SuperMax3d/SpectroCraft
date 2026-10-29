@@ -4242,6 +4242,9 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         if (app.onStateChange) app.onStateChange();
     };
 
+    refreshBtn.setButtonText ("Refresh");
+    refreshBtn.onClick = [this] { if (onRefresh) onRefresh (); };
+
     colourMapCombo.setTooltip ("Colour map used by the spectrogram. 'Classic (Default)' is the "
                                 "traditional DAW spectral palette.");
     dBRangeSlider.setTooltip ("Spectral dynamic range in dB (1-160): how far below the top of "
@@ -4253,6 +4256,8 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
                           "(dB, V or g) to change it; the dB range follows.");
     logToggle.setTooltip ("Toggle the spectrogram's frequency axis between logarithmic and linear scaling.");
     resetFreqBtn.setTooltip ("Reset the spectrogram's vertical (frequency) zoom to its default range.");
+    refreshBtn.setTooltip ("Force a full recomputation of the spectrogram: discards every cached tile "
+                            "and re-renders all tracks from the audio.");
     fftSizeCombo.setTooltip ("FFT size used by the spectrogram tiles. Larger values give finer "
                              "frequency resolution but render more slowly.");
 
@@ -4272,6 +4277,7 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     addAndMakeVisible (&logToggle);
     addAndMakeVisible (&resetFreqBtn);
     addAndMakeVisible (&fftSizeCombo);
+    addAndMakeVisible (&refreshBtn);
 }
 
 void SpectralControlsPanel::refresh()
@@ -4312,6 +4318,11 @@ void SpectralControlsPanel::resized()
         logToggle.setBounds (row.removeFromLeft (104));
         resetFreqBtn.setBounds (row.removeFromRight (86));
         fftSizeCombo.setBounds (row.reduced (6, 0));
+    }
+
+    {   // Refresh button at the bottom: full spectrogram recomputation
+        auto row = b.removeFromTop (28);
+        refreshBtn.setBounds (row);
     }
 }
 

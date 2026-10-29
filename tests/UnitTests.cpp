@@ -11323,6 +11323,9 @@ static void testSplitSpectralSelectionApp()
     app.undoStep ();
     CHECK (eng.numChannels () == 1 && (int) eng.numSamples () == (int) kToneFrames,
           "undo back to one channel, same length");
+    // Undoing a split that changed the channel count must also drop the
+    // visibility flag for the now-gone second channel (no phantom track).
+    CHECK (!app.isChannelVisible (1), "gone channel is no longer visible after undo");
     std::vector<float> undone ((size_t) kToneFrames);
     CHECK (eng.readSamples (0, 0, (int) kToneFrames, undone.data()), "read after undo");
     bool bitExact = true;
@@ -11332,6 +11335,94 @@ static void testSplitSpectralSelectionApp()
 
     app.redoStep ();
     CHECK (eng.numChannels () == 2, "redo re-applies the split");
+    CHECK (app.isChannelVisible (1), "channel becomes visible again on redo");
+}
+
+// The live view must show fresh data for EVERY channel row right after a
+// split. Two complementary checks:
+//   (1) tile data - probe each channel's tone bins straight through the
+//       engine; a stale tile cache would fail this;
+//   (2) rendered image - force an actual paint and compare it against a
+//       ground-truth render with identical parameters; a stale view image
+//       would fail this. Frequency gridlines drawn over the plot add at most
+//       ~60 luminance, so allow that much difference; genuinely stale content
+//       (a tone present where it was removed) adds around 150.
+static void testSplitSpectralSelectionViewRefresh()
+{
+    const juce::File wav = makeTempFile ("split_sel_view_refresh.wav");
+    CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened two-tone wav");
+    FileDoc* d = app.doc();
+    if (!d) return;
+    AudioEngine& eng = app.audioEngine ();
+
+    // Before the split both tones are present in channel 0.
+    const double midT = eng.duration () * 0.5;
+    CHECK (app.spectralEngine.probeMagnitude (eng, 0, midT, 500.0, app.settings, 0) > -40.0f,
+          "ch0 has the low tone before split");
+    CHECK (app.spectralEngine.probeMagnitude (eng, 0, midT, 3500.0, app.settings, 0) > -40.0f,
+          "ch0 has the high tone before split");
+
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "split view refresh"));
+    SpectralView* sv = win->spectralViewComp();
+    CHECK (sv != nullptr, "main window owns a spectral view");
+    const auto pr = sv->plotRect ();
+    CHECK (pr.getWidth () > 0 && pr.getHeight () > 0, "the plot has a size");
+
+    d->spectralSel = lowBandSel ();
+    std::string err;
+    CHECK (app.splitSpectralSelection (&err), "split applied: " + err);
+    win->refreshAfterEdit();
+
+    // (1) The tile data must be fresh for every channel.
+    const float lo0 = app.spectralEngine.probeMagnitude (eng, 0, midT, 500.0,  app.settings, 0);
+    const float hi0 = app.spectralEngine.probeMagnitude (eng, 0, midT, 3500.0, app.settings, 0);
+    const float lo1 = app.spectralEngine.probeMagnitude (eng, 1, midT, 500.0,  app.settings, 0);
+    const float hi1 = app.spectralEngine.probeMagnitude (eng, 1, midT, 3500.0, app.settings, 0);
+    CHECK (lo0 < -80.0f && hi0 > -40.0f,
+          "ch0 tiles: selected band removed, other tone kept");
+    CHECK (lo1 > -40.0f && hi1 < -80.0f,
+          "ch1 tiles: extracted band present, nothing else");
+
+    // (2) The view's image must have been re-rendered from the fresh tiles.
+    // Drop the marquee first so its border lines cannot skew the comparison.
+    d->spectralSel.clear ();
+    const juce::Image shot = sv->createComponentSnapshot (sv->getLocalBounds());
+
+    const auto rows = WaveformView::channelRowRects (pr.getWidth (), pr.getHeight (), 2);
+    CHECK (rows.size () == 2, "two visible channel rows");
+
+    // Ground truth rendered with exactly the parameters the view uses.
+    Settings rs = app.settings;
+    rs.minFrequency = (float) std::max (1.0, sv->getFreqMin());
+    rs.maxFrequency = (float) std::min (eng.sampleRate () * 0.5, sv->getFreqMax());
+
+    for (int r = 0; r < 2; ++r)
+    {
+        const int ry = pr.getY () + rows[(size_t) r].getY ();
+        const int rh = rows[(size_t) r].getHeight ();
+        CHECK (rh > 8, "channel row has a usable height");
+
+        std::vector<uint8_t> truth;
+        app.spectralEngine.renderToPixels (eng, rs, pr.getWidth (), rh,
+                                           0.0, eng.duration(), { r }, truth);
+        double maxDiff = 0.0;
+        const int x0 = pr.getX () + pr.getWidth () / 4;
+        const int bw = pr.getWidth () / 2;
+        for (int y = std::max (ry + 2, 0); y < std::min (ry + rh - 2, shot.getHeight ()); ++y)
+            for (int x = x0; x < x0 + bw; ++x)
+            {
+                const auto c = shot.getPixelAt (x, y);
+                const double v = 0.299 * c.getRed () + 0.587 * c.getGreen () + 0.114 * c.getBlue ();
+                const size_t ti = ((size_t) (y - ry) * pr.getWidth () + (x - pr.getX ())) * 4;
+                const double t = 0.299 * truth[ti] + 0.587 * truth[ti + 1] + 0.114 * truth[ti + 2];
+                const double diff = std::abs (v - t);
+                if (diff > maxDiff) maxDiff = diff;
+            }
+        CHECK (maxDiff < 90.0, "view row matches the fresh engine render");
+    }
 }
 
 static void testSplitSpectralSelectionTrack1To2App()
@@ -17172,6 +17263,7 @@ static int scRunUnitTestsImpl()
     testSplitSpectralSelectionExtentBounds();
     progress ("split spectral selection (app + undo)");
     testSplitSpectralSelectionApp();
+    progress ("split view refresh");        testSplitSpectralSelectionViewRefresh();
     progress ("playback mask streaming");   testPlaybackMaskStreaming();
     progress ("marker deletion adjust");  testMarkerAdjustForDeletion();
     progress ("spectral sel deletion adjust"); testSpectralSelectionAdjustForDeletion();

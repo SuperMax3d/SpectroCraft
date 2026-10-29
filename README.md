@@ -289,7 +289,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     processing is slow on long selections — select shorter ranges for big jobs.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
     range, Log/Linear toggle, Reset Freq, FFT size — from **512**, the finest
-    frequency resolution, up to 65536). Above the colour-map
+    frequency resolution, up to 65536; a full-width **Refresh** button at the
+    bottom forces a complete spectrogram recomputation by discarding every
+    cached tile and re-rendering all tracks). Above the colour-map
     gradient the panel shows the absolute level of each end of the scale in
     the active file's unit — plain `dB` when uncalibrated, or calibrated values
     after **Set Scale**: `14.0 dB-SPL … 94.0 dB-SPL` for a 1 Pa full scale,
@@ -535,7 +537,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   spectral edge; at both time ends of the selection the extracted content
   fades in/out smoothly and the originals crossfade back, so there is no
   spike or hard cut either. One undoable step (content change plus
-  channel-count change).
+  channel-count change); undo/redo keeps track visibility in sync with the
+  file's channel count, so reverting a mono→stereo split returns to a single
+  visible track instead of leaving a phantom silent one.
 - **Cancelling long operations**: every progress dialog — loading large files,
   resampling, noise suppression, transcription (single and batch), spectrogram
   export — has a Cancel button, and ESC works as well. The operation stops at
@@ -1360,7 +1364,10 @@ extent to EOF stays bit-identical to the pre-edit content (no silent gap is
 written after the selection).
 The whole operation (content change *and* channel-count change) is a single
 undoable step; undo restores the original channels bit-exact. New channels are
-made visible automatically.
+made visible automatically, and any undo/redo that changes the channel count
+re-syncs track visibility to the file — reverting a mono→stereo split returns
+to a single visible track (no phantom silent track), re-applying it shows all
+tracks again.
 
 **Split Spectral Selection (Track 1->2)** (Shift+F12) applies the same
 processing to track 1 only, regardless of visibility, and writes the

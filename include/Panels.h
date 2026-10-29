@@ -808,6 +808,10 @@ public:
     // Set by MainWindow: resets the spectral view's frequency axis.
     std::function<void()> onResetFreq;
 
+    // Set by MainWindow: forces a full recomputation of the spectrogram
+    // (discards every cached tile and re-renders from the audio).
+    std::function<void()> onRefresh;
+
     // Right-click "Close Panel": set by MainWindow. requestClose() is the
     // testable entry point.
     std::function<void()> onCloseRequested;
@@ -836,6 +840,7 @@ private:
     juce::TextButton logToggle;
     juce::Label colourMapLab, dbRangeLab;
     juce::TextButton resetFreqBtn;
+    juce::TextButton refreshBtn;
 
     class MapPreview : public juce::Component
     {
