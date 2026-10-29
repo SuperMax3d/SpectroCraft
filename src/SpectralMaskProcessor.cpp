@@ -36,23 +36,26 @@ namespace SpectralMask
         return a >= 0 ? (a + b - 1) / b : a / b;
     }
 
-    /** Core overlap-add pass over an engine range. For every FFT frame whose
-        window intersects the extended range, the bins are multiplied by
-        binGain(frameTimeSecs, binFreqHz) and the frames are recombined with
-        Hann windows + running w^2 normalisation (exact for any hop). Only
-        samples inside `range` are returned in out (one vector per channel).
-        Channels not in `chans` pass through bit-exact without an STFT. */
-    static bool stftPass (const AudioEngine& eng, juce::Range<int64_t> range,
-                          std::function<float (double tSecs, double fHz)> binGain,
-                          const std::vector<int>* chans,
-                          std::vector<std::vector<float>>& out)
+    /** Core overlap-add pass over an abstract sample source. For every FFT
+        frame whose window intersects the extended range, the bins are
+        multiplied by binGain(frameTimeSecs, binFreqHz) and the frames are
+        recombined with Hann windows + running w^2 normalisation (exact for
+        any hop). Only samples inside `range` are returned in out (one vector
+        per channel). Channels not in `chans` pass through bit-exact without
+        an STFT. read(ch, pos, len, dest) must zero-pad positions outside the
+        source's [0, totalSamples) extent and return false on failure. */
+    static bool stftPassReader (const std::function<bool (int ch, int64_t pos,
+                                                         int64_t len, float* dest)>& read,
+                                int64_t totalSamples, double rate, int nch,
+                                juce::Range<int64_t> range,
+                                const std::function<float (double tSecs, double fHz)>& binGain,
+                                const std::vector<int>* chans,
+                                std::vector<std::vector<float>>& out)
     {
-        if (!eng.isFileLoaded()) return false;
-        auto r = range.getIntersectionWith ({ 0, eng.numSamples() });
+        auto r = range.getIntersectionWith ({ 0, totalSamples });
         if (r.getLength() <= 0) return true;   // nothing to do
 
         const int N = fftSize(), H = hopSize();
-        const double rate = eng.sampleRate();
 
         // Output sample s receives contributions from frames starting at
         // s_k in (s-N, s].  So the earliest frame that can touch r.start is
@@ -69,7 +72,6 @@ namespace SpectralMask
         const int64_t extLen = eEnd - eStart;
 
         out.clear();
-        const int nch = eng.numChannels();
         out.resize ((size_t) nch);
         for (int ch = 0; ch < nch; ++ch)
             out[(size_t) ch].assign ((size_t) r.getLength(), 0.0f);
@@ -82,9 +84,9 @@ namespace SpectralMask
         for (int ch = 0; ch < nch; ++ch)
         {
             // One sequential read of the whole extended range (zero-padded at
-            // the file edges by initialisation).
+            // the source edges by initialisation).
             x.assign ((size_t) extLen, 0.0f);
-            if (!eng.readSamples (ch, eStart, extLen, x.data()))
+            if (!read (ch, eStart, extLen, x.data ()))
                 return false;
 
             if (!channelInList (chans, ch))   // untouched channel: bit-exact copy
@@ -139,6 +141,21 @@ namespace SpectralMask
         return true;
     }
 
+    /** Engine-bound convenience wrapper around stftPassReader. */
+    static bool stftPass (const AudioEngine& eng, juce::Range<int64_t> range,
+                          std::function<float (double tSecs, double fHz)> binGain,
+                          const std::vector<int>* chans,
+                          std::vector<std::vector<float>>& out)
+    {
+        if (!eng.isFileLoaded()) return false;
+        auto r = range.getIntersectionWith ({ 0, eng.numSamples() });
+        if (r.getLength() <= 0) return true;   // nothing to do
+        return stftPassReader ([&eng] (int ch, int64_t pos, int64_t len, float* dest) {
+            return eng.readSamples (ch, pos, len, dest);
+        }, eng.numSamples (), eng.sampleRate (), eng.numChannels (), r,
+                          binGain, chans, out);
+    }
+
     bool applyMaskedGain (AudioEngine& eng, juce::Range<int64_t> range,
                           const SpectralSelection& sel, float linearGain,
                           const juce::String& description,
@@ -179,6 +196,37 @@ namespace SpectralMask
         return stftPass (eng, r, [&sel] (double tSecs, double fHz) {
             return sel.contains (tSecs, fHz) ? 1.0f : 0.0f;
         }, nullptr, outA);
+    }
+
+    bool maskBufferToSelection (const std::vector<std::vector<float>>& buf,
+                                int64_t rangeStart, const SpectralSelection& sel,
+                                double rate, std::vector<std::vector<float>>& outA)
+    {
+        if (buf.empty () || buf[0].empty ()) return true;   // nothing to mask
+        const int nch = (int) buf.size ();
+        const int64_t len = (int64_t) buf[0].size ();
+        for (const auto& c : buf)
+            if ((int64_t) c.size () != len) return false;   // inconsistent channel lengths
+
+        outA.assign ((size_t) nch, std::vector<float> ((size_t) len, 0.0f));
+        if (sel.empty ()) return true;                     // empty mask -> all zeros
+
+        const int64_t total = rangeStart + len;            // virtual file length
+        auto r = juce::Range<int64_t> { rangeStart, total }.getIntersectionWith ({ 0, total });
+        if (r.getLength () <= 0) return true;
+
+        return stftPassReader ([&buf, rangeStart, len] (int ch, int64_t pos, int64_t l, float* dest) {
+            for (int64_t i = 0; i < l; ++i)
+            {
+                const int64_t idx = pos + i - rangeStart;
+                dest[(size_t) i] = (idx >= 0 && idx < len)
+                                    ? buf[(size_t) ch][(size_t) idx] : 0.0f;
+            }
+            return true;
+        }, total, rate, nch, r,
+           [&sel] (double tSecs, double fHz) {
+               return sel.contains (tSecs, fHz) ? 1.0f : 0.0f;
+           }, nullptr, outA);
     }
 
     // ------------------------------------------------------- split selection

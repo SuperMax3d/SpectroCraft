@@ -758,6 +758,40 @@ bool AudioEngine::pasteAt (int64_t samplePos, const juce::AudioBuffer<float>& cl
     return true;
 }
 
+bool AudioEngine::insertSamples (int64_t samplePos, const std::vector<std::vector<float>>& data,
+                                 const juce::String& description, std::string* errOut)
+{
+    if (!ensureEditable (errOut))
+        return false;
+    if (data.empty () || data[0].empty ())
+        return failErr (errOut, "Nothing to insert.");
+    const int64_t pasteLen = (int64_t) data[0].size ();
+    for (const auto& c : data)
+        if ((int64_t) c.size () != pasteLen || (int) data.size () != nchans)
+            return failErr (errOut, "Inconsistent generated data.");
+
+    samplePos = std::clamp<int64_t> (samplePos, (int64_t) 0, totalSamples);
+
+    // Insert = replace empty region [pos, pos) with the new data.
+    recordReplace (*this, { samplePos, samplePos }, data, description);
+
+    const int64_t newTotal = totalSamples + pasteLen;
+    auto nb = std::make_unique<juce::AudioBuffer<float>> (nchans, (int) newTotal);
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        nb->copyFrom (ch, 0, *buffer, ch, 0, (int) samplePos);
+        nb->copyFrom (ch, (int) samplePos, data[(size_t) ch].data (), (int) pasteLen);
+        nb->copyFrom (ch, (int) (samplePos + pasteLen), *buffer, ch, (int) samplePos,
+                      (int) (totalSamples - samplePos));
+    }
+    buffer = std::move (nb);
+    totalSamples = newTotal;
+    durationSecs = (double) totalSamples / rate;
+    unsaved = true;
+    rebuildMipmaps();
+    return true;
+}
+
 bool AudioEngine::pasteMixAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
                               std::string* errOut)
 {

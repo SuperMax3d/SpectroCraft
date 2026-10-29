@@ -11281,9 +11281,9 @@ static void testSplitSpectralSelectionApp()
         std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
         const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 12, "Effects menu lists the split items");
+        CHECK (fxMenu.getNumItems() == 15, "Effects menu lists the split + generate items");
 #else
-        CHECK (fxMenu.getNumItems() == 9, "Effects menu lists the split items");
+        CHECK (fxMenu.getNumItems() == 12, "Effects menu lists the split + generate items");
 #endif
     }
     std::string err;
@@ -13237,6 +13237,416 @@ static void testSelectionRecallLive()
     wav.deleteFile (); store.deleteFile ();
 }
 
+// ------------------------------------------------- signal generators (Effects > Generate ...)
+
+// Local mirror of the generator's waveform shapes for exact-value checks.
+static double genShapeValue (sc::WaveShape shape, double p)
+{
+    switch (shape)
+    {
+        case sc::WaveShape::Sine:     return std::sin (2.0 * juce::MathConstants<double>::pi * p);
+        case sc::WaveShape::Square:   return p < 0.5 ? 1.0 : -1.0;
+        case sc::WaveShape::Sawtooth: return 2.0 * p - 1.0;
+        default:                      return p < 0.5 ? (4.0 * p - 1.0) : (3.0 - 4.0 * p);
+    }
+}
+
+static void testSignalGenerators()
+{
+    const int nch = 2;
+    const int64_t len = 8000;   // one second at 8 kHz
+
+    // White noise: reproducible with a fixed seed, bounded by the intensity.
+    {
+        std::vector<std::vector<float>> a, b;
+        sc::generateNoise (sc::NoiseType::White, 0.25f, nch, len, 42, a);
+        sc::generateNoise (sc::NoiseType::White, 0.25f, nch, len, 42, b);
+        CHECK (a == b, "white noise is reproducible with the same seed");
+
+        bool bounded = true;
+        for (const auto& ch : a)
+            for (float v : ch)
+                if (std::abs ((double) v) > 0.25 + 1e-6) { bounded = false; break; }
+        CHECK (bounded, "white noise stays within +/- intensity");
+
+        double rms = 0.0;
+        for (float v : a[0]) rms += (double) v * v;
+        rms = std::sqrt (rms / (double) len);
+        // uniform on [-I, I] has RMS I/sqrt(3)
+        CHECK (std::abs (rms - 0.25 / std::sqrt (3.0)) < 0.01,
+               "white noise RMS matches the uniform distribution");
+
+        std::vector<std::vector<float>> c;
+        sc::generateNoise (sc::NoiseType::White, 0.25f, nch, len, 43, c);
+        CHECK (a != c, "different seeds give different noise");
+
+        std::vector<std::vector<float>> z;
+        sc::generateNoise (sc::NoiseType::White, 0.0f, nch, len, 42, z);
+        bool silent = true;
+        for (float v : z[0]) if (v != 0.0f) { silent = false; break; }
+        CHECK (silent, "zero intensity is silence");
+    }
+
+    // Pink / brown: non-silent and peak-normalised to the intensity.
+    for (int t = 1; t <= 2; ++t)
+    {
+        std::vector<std::vector<float>> n;
+        sc::generateNoise ((sc::NoiseType) t, 0.5f, nch, len, 7, n);
+        bool anyNonZero = false;
+        double peak = 0.0;
+        for (const auto& ch : n)
+            for (float v : ch)
+            {
+                if (v != 0.0f) anyNonZero = true;
+                peak = std::max (peak, (double) std::abs (v));
+            }
+        CHECK (anyNonZero, "filtered noise is not silent");
+        CHECK (std::abs (peak - 0.5) < 1e-4,
+               "filtered noise is peak-normalised to the intensity");
+
+        bool same = true;
+        for (int64_t i = 0; i < len && same; ++i)
+            if (n[0][(size_t) i] != n[1][(size_t) i]) same = false;
+        CHECK (same, "noise channels are identical");
+    }
+
+    // Tones: exact waveform values with phase continuous in absolute file time.
+    {
+        const double rate = 8000.0, t0 = 0.125;   // start mid-cycle on purpose
+        std::vector<sc::ToneSpec> tones = { { 440.0, 0.5f }, { 880.0, 0.25f } };
+
+        for (int s = 0; s < 4; ++s)
+        {
+            std::vector<std::vector<float>> out;
+            sc::generateTone (tones, (sc::WaveShape) s, rate, t0, nch, len, out);
+            bool match = true;
+            for (int64_t i = 0; i < len && match; ++i)
+            {
+                const double t = t0 + (double) i / rate;
+                double v = 0.0;
+                for (const auto& tone : tones)
+                    v += (double) tone.amplitude
+                         * genShapeValue ((sc::WaveShape) s, std::fmod (tone.freqHz * t, 1.0));
+                if (std::abs ((double) out[0][(size_t) i] - v) > 1e-4) match = false;
+            }
+            CHECK (match, "generated tone matches the expected waveform");
+        }
+
+        // Empty list -> silence.
+        std::vector<std::vector<float>> empty;
+        sc::generateTone ({}, sc::WaveShape::Sine, rate, 0.0, nch, len, empty);
+        bool silent = true;
+        for (float v : empty[0]) if (v != 0.0f) { silent = false; break; }
+        CHECK (silent, "empty tone list is silence");
+
+        // Two sines at the same frequency add linearly.
+        std::vector<std::vector<float>> sum;
+        sc::generateTone ({ { 440.0, 0.3f }, { 440.0, 0.2f } }, sc::WaveShape::Sine,
+                          rate, 0.0, nch, len, sum);
+        bool match = true;
+        for (int64_t i = 0; i < len && match; ++i)
+        {
+            const double t = (double) i / rate;
+            if (std::abs ((double) sum[0][(size_t) i] - 0.5 * std::sin (2.0
+                    * juce::MathConstants<double>::pi * 440.0 * t)) > 1e-4)
+                match = false;
+        }
+        CHECK (match, "same-frequency tones add linearly");
+    }
+}
+
+// ------------------------------------------------- generate effects (Application level)
+
+static void testGenerateEffectsApp()
+{
+    // --- Replace a time selection with a tone ------------------------------
+    {
+        const juce::File wav = makeTempFile ("gen_tone_sel.wav");
+        CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+                [] (int, int64_t f, double rate) { return 0.0f; }), "wrote silence wav");
+
+        Application app;
+        CHECK (app.openFile (wav), "opened silence wav");
+        AudioEngine& eng = app.audioEngine ();
+        app.selection = { 0.5, 1.0 };   // [4000, 8000) samples
+
+        std::string err;
+        CHECK (app.generateTone ({ { 440.0, 0.5f } }, sc::WaveShape::Sine, 1.0, &err),
+              "tone generated into the selection: " + err);
+
+        std::vector<float> x ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, x.data()), "read after tone");
+        bool inside = true;
+        for (int64_t i = 4000; i < 8000 && inside; ++i)
+        {
+            const double t = (double) i / kToneRate;
+            if (std::abs ((double) x[(size_t) i] - 0.5 * std::sin (2.0
+                    * juce::MathConstants<double>::pi * 440.0 * t)) > 1e-4)
+                inside = false;
+        }
+        CHECK (inside, "selected range holds the generated tone");
+        bool outside = true;
+        for (size_t i = 0; i < x.size(); ++i)
+            if ((i < 4000 || i >= 8000) && x[i] != 0.0f) { outside = false; break; }
+        CHECK (outside, "audio outside the selection is untouched");
+
+        // One undoable step: undo restores silence, redo re-applies.
+        CHECK (app.undo ().undoSize () == 1, "generation recorded one undo step");
+        app.undoStep ();
+        std::vector<float> undone ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 4000, 4000, undone.data()), "read after undo");
+        bool silent = true;
+        for (float v : undone) if (v != 0.0f) { silent = false; break; }
+        CHECK (silent, "undo restores the original silence");
+        app.redoStep ();
+        std::vector<float> redone ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 4000, 4000, redone.data()), "read after redo");
+        bool back = true;
+        for (int64_t i = 0; i < 4000 && back; ++i)
+        {
+            const double t = (double) (i + 4000) / kToneRate;
+            if (std::abs ((double) redone[(size_t) i] - 0.5 * std::sin (2.0
+                    * juce::MathConstants<double>::pi * 440.0 * t)) > 1e-4)
+                back = false;
+        }
+        CHECK (back, "redo re-applies the tone");
+
+        wav.deleteFile ();
+    }
+
+    // --- Replace a time selection with noise ---------------------------------
+    {
+        const juce::File wav = makeTempFile ("gen_noise_sel.wav");
+        CHECK (writeTwoToneWav (wav), "wrote two-tone wav");
+
+        Application app;
+        CHECK (app.openFile (wav), "opened two-tone wav");
+        AudioEngine& eng = app.audioEngine ();
+        app.selection = { 0.5, 1.0 };
+
+        std::string err;
+        CHECK (app.generateNoise (sc::NoiseType::White, 0.25f, 1.0, &err),
+              "noise generated into the selection: " + err);
+
+        std::vector<float> x ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, x.data()), "read after noise");
+        bool nonSilent = false, bounded = true;
+        for (int64_t i = 4000; i < 8000; ++i)
+        {
+            if (x[(size_t) i] != 0.0f) nonSilent = true;
+            if (std::abs ((double) x[(size_t) i]) > 0.25 + 1e-6) bounded = false;
+        }
+        CHECK (nonSilent, "selected range now contains noise");
+        CHECK (bounded, "noise stays within +/- intensity");
+
+        // Outside the selection the original tones are intact.
+        CHECK (std::abs (toneAmp (x, 0, 4000, 500.0, kToneRate) - 0.5f) < 0.01f,
+              "head tone untouched");
+        CHECK (std::abs (toneAmp (x, 8000, (size_t) kToneFrames, 3500.0, kToneRate) - 0.5f) < 0.01f,
+              "tail tone untouched");
+
+        wav.deleteFile ();
+    }
+
+    // --- Insert at the playhead with no selection ----------------------------
+    {
+        const juce::File wav = makeTempFile ("gen_insert.wav");
+        CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+                [] (int, int64_t f, double) { return (float) ((double) f / (double) kToneFrames); }),
+              "wrote ramp wav");
+
+        Application app;
+        CHECK (app.openFile (wav), "opened ramp wav");
+        AudioEngine& eng = app.audioEngine ();
+        app.selection = { 0.0, 0.0 };
+        app.playhead = 1.0;   // sample 8000
+
+        std::string err;
+        CHECK (app.generateSilence (0.5, &err), "silence inserted at playhead: " + err);
+        CHECK ((int) eng.numSamples () == (int) kToneFrames + 4000,
+              "file grew by the inserted duration");
+
+        std::vector<float> x ((size_t) (kToneFrames + 4000));
+        CHECK (eng.readSamples (0, 0, (int) x.size (), x.data()), "read after insert");
+        bool headOk = true;
+        for (int64_t i = 0; i < 8000 && headOk; ++i)
+            if (std::abs ((double) x[(size_t) i] - (double) i / (double) kToneFrames) > 1e-5)
+                headOk = false;
+        CHECK (headOk, "content before the playhead is unchanged");
+
+        bool gapSilent = true;
+        for (int64_t i = 8000; i < 12000 && gapSilent; ++i)
+            if (x[(size_t) i] != 0.0f) gapSilent = false;
+        CHECK (gapSilent, "inserted range is silence");
+
+        bool tailOk = true;
+        for (int64_t i = 12000; i < x.size () && tailOk; ++i)
+            if (std::abs ((double) x[(size_t) i] - (double) (i - 4000) / (double) kToneFrames) > 1e-5)
+                tailOk = false;
+        CHECK (tailOk, "content after the playhead shifted right by the insert");
+
+        app.undoStep ();
+        CHECK ((int) eng.numSamples () == (int) kToneFrames, "undo restores the original length");
+
+        wav.deleteFile ();
+    }
+
+    // --- Replace only a spectral selection region ----------------------------
+    {
+        const juce::File wav = makeTempFile ("gen_spectral.wav");
+        CHECK (writeTwoToneWav (wav), "wrote two-tone wav for spectral gen");
+
+        Application app;
+        CHECK (app.openFile (wav), "opened two-tone wav");
+        FileDoc* d = app.doc();
+        if (!d) { wav.deleteFile (); return; }
+        AudioEngine& eng = app.audioEngine ();
+        d->spectralSel = lowBandSel ();   // [300, 700] Hz over the whole file
+
+        std::string err;
+        CHECK (app.generateTone ({ { 600.0, 1.0f } }, sc::WaveShape::Sine, 1.0, &err),
+              "tone generated into the spectral region: " + err);
+
+        std::vector<float> x ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, x.data()), "read after spectral gen");
+        const float g600 = toneAmp (x, 2048, (size_t) kToneFrames - 2048, 600.0, kToneRate);
+        const float g500 = toneAmp (x, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+        const float g3500 = toneAmp (x, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+        CHECK (std::abs (g600 - 1.0f) < 0.05f, "generated tone present in the band");
+        CHECK (g500 < 0.05f, "original in-band tone removed");
+        CHECK (std::abs (g3500 - 0.5f) < 0.01f, "out-of-band tone untouched");
+
+        // Undo restores the original two-tone signal.
+        app.undoStep ();
+        std::vector<float> undone ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, undone.data()), "read after undo");
+        const float u500 = toneAmp (undone, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+        const float u600 = toneAmp (undone, 2048, (size_t) kToneFrames - 2048, 600.0, kToneRate);
+        CHECK (std::abs (u500 - 0.5f) < 0.01f, "undo restores the original in-band tone");
+        CHECK (u600 < 0.02f, "undo removes the generated tone");
+
+        // Spectral silence: same region, zero content.
+        d->spectralSel = lowBandSel ();
+        CHECK (app.generateSilence (1.0, &err), "silence generated into the spectral region: " + err);
+        std::vector<float> s ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, s.data()), "read after spectral silence");
+        const float z500 = toneAmp (s, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+        const float z3500 = toneAmp (s, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+        CHECK (z500 < 0.01f, "in-band content silenced");
+        CHECK (std::abs (z3500 - 0.5f) < 0.01f, "out-of-band tone still intact");
+
+        wav.deleteFile ();
+    }
+}
+
+// ------------------------------------------------- generate dialogs (structure only)
+
+static void testGenerateDialogs()
+{
+    const juce::File wav = makeTempFile ("gen_dialogs.wav");
+    CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+            [] (int, int64_t f, double) { return 0.0f; }), "wrote silence wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened silence wav");
+    FileDoc* d = app.doc();
+    if (!d) { wav.deleteFile (); return; }
+
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "gen dialogs"));
+
+    // No selection at all: every dialog asks for a duration.
+    {
+        auto* w = win->createGenerateSilenceDialog();
+        CHECK (w != nullptr && w->getTextEditor ("genDuration") != nullptr,
+              "silence dialog has a duration field without a target");
+        delete w;
+
+        auto* wn = win->createGenerateNoiseDialog();
+        bool hasCombo = false, hasSlider = false;
+        for (int i = 0; i < wn->getNumChildComponents (); ++i)
+        {
+            if (dynamic_cast<juce::ComboBox*> (wn->getChildComponent (i)) != nullptr) hasCombo = true;
+            if (dynamic_cast<juce::Slider*> (wn->getChildComponent (i)) != nullptr) hasSlider = true;
+        }
+        CHECK (hasCombo && hasSlider, "noise dialog has a type combo and an intensity slider");
+        CHECK (wn->getTextEditor ("genDuration") != nullptr,
+              "noise dialog has a duration field without a target");
+        delete wn;
+
+        auto* wt = win->createGenerateToneDialog();
+        ToneListEditor* tones = nullptr;
+        for (int i = 0; i < wt->getNumChildComponents (); ++i)
+            if ((tones = dynamic_cast<ToneListEditor*> (wt->getChildComponent (i))) != nullptr) break;
+        CHECK (tones != nullptr, "tone dialog has a tone list");
+        if (tones != nullptr)
+        {
+            CHECK (tones->numRows () == 1, "tone dialog starts with one default row");
+            const auto t = tones->getTones ();
+            CHECK (t.size () == 1 && std::abs (t[0].first - 440.0) < 1e-9
+                  && std::abs (t[0].second - 0.5) < 1e-6,
+                  "default row is 440 Hz at amplitude 0.5");
+        }
+        CHECK (wt->getTextEditor ("genDuration") != nullptr,
+              "tone dialog has a duration field without a target");
+        delete wt;
+    }
+
+    // With a time selection: no duration field needed.
+    app.selection = { 0.5, 1.0 };
+    {
+        auto* w = win->createGenerateSilenceDialog();
+        CHECK (w != nullptr && w->getTextEditor ("genDuration") == nullptr,
+              "silence dialog drops the duration field with a time selection");
+        delete w;
+
+        auto* wn = win->createGenerateNoiseDialog();
+        CHECK (wn->getTextEditor ("genDuration") == nullptr,
+              "noise dialog drops the duration field with a time selection");
+        delete wn;
+    }
+
+    // With a spectral selection: no duration field either.
+    app.selection = { 0.0, 0.0 };
+    d->spectralSel = lowBandSel ();
+    {
+        auto* wt = win->createGenerateToneDialog();
+        CHECK (wt->getTextEditor ("genDuration") == nullptr,
+              "tone dialog drops the duration field with a spectral selection");
+        delete wt;
+    }
+
+    // ToneListEditor row management.
+    {
+        ToneListEditor tle;
+        tle.addRow (100.0, 0.25f);
+        tle.addRow (200.0, 0.75f);
+        CHECK (tle.numRows () == 2, "rows are added");
+
+        auto* first = tle.firstFreqEditor();
+        CHECK (first != nullptr && first->getText ().contains ("100"),
+              "first row's frequency editor holds the first value");
+
+        // Clear the first row via its button handler.
+        for (int i = 0; i < tle.getNumChildComponents (); ++i)
+            if (auto* r = dynamic_cast<ToneListEditor::Row*> (tle.getChildComponent (i)))
+            {
+                r->clear.onClick();   // synchronous in tests
+                break;
+            }
+        CHECK (tle.numRows () == 1, "clearing a row drops it");
+        const auto t = tle.getTones ();
+        CHECK (t.size () == 1 && std::abs (t[0].first - 200.0) < 1e-9,
+              "the surviving row is the second one");
+
+        // Invalid rows are skipped by getTones.
+        tle.addRow (-5.0, 0.5f);
+        const auto t2 = tle.getTones ();
+        CHECK (t2.size () == 1, "negative frequency is rejected");
+    }
+
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------- Python script panel
 static void testPythonScripts()
 {
@@ -13251,18 +13661,12 @@ static void testPythonScripts()
     CHECK (dir.getChildFile ("Dynamic processing.py").existsAsFile (),
           "dynamic processing example created");
     CHECK (dir.getChildFile ("Modulation.py").existsAsFile (), "modulation example created");
-    CHECK (dir.getChildFile ("Generate White Noise.py").existsAsFile (),
-          "white noise example created");
-    CHECK (dir.getChildFile ("Generate Tones.py").existsAsFile (),
-          "tones example created");
     CHECK (dir.getChildFile ("Add Echo.py").existsAsFile (), "echo example created");
 
     const juce::String thrText = dir.getChildFile ("Threshold.py").loadFileAsString ();
     CHECK (thrText.contains ("THRESHOLD"), "threshold script has a threshold constant");
-    CHECK (dir.getChildFile ("Generate White Noise.py").loadFileAsString ().contains ("AMPLITUDE")
-           && dir.getChildFile ("Generate Tones.py").loadFileAsString ().contains ("TONES")
-           && dir.getChildFile ("Add Echo.py").loadFileAsString ().contains ("DELAY_MS"),
-          "new examples carry their tuning constants");
+    CHECK (dir.getChildFile ("Add Echo.py").loadFileAsString ().contains ("DELAY_MS"),
+          "echo example carries its tuning constant");
 
     {
         const juce::File t = dir.getChildFile ("Threshold.py");
@@ -13274,16 +13678,14 @@ static void testPythonScripts()
 
     // 2) listScripts returns the sorted .py files.
     const auto scripts = sc::py::listScripts (dir);
-    CHECK (scripts.size () == 8, "eight scripts listed");
-    if (scripts.size () == 8)
+    CHECK (scripts.size () == 6, "six scripts listed");
+    if (scripts.size () == 6)
         CHECK (scripts[0].getFileName () == "Add Echo.py"
                && scripts[1].getFileName () == "Dynamic processing.py"
-               && scripts[2].getFileName () == "Generate Tones.py"
-               && scripts[3].getFileName () == "Generate White Noise.py"
-               && scripts[4].getFileName () == "Make Loop.py"
-               && scripts[5].getFileName () == "Modulation.py"
-               && scripts[6].getFileName () == "Sync And Merge.py"
-               && scripts[7].getFileName () == "Threshold.py",
+               && scripts[2].getFileName () == "Make Loop.py"
+               && scripts[3].getFileName () == "Modulation.py"
+               && scripts[4].getFileName () == "Sync And Merge.py"
+               && scripts[5].getFileName () == "Threshold.py",
               "scripts sorted by name");
 
     // 3) Metadata JSON carries rate/channels/selection/markers.
@@ -13410,51 +13812,6 @@ static void testPythonScripts()
 
         wav.deleteFile ();
 
-        // --- Generate Tones: deterministic sine replacement ---
-        {
-            const juce::File wavT = makeTempFile ("py_tones.wav");
-            writeWav (wavT, 1, 8000.0, 4000, [] (int ch, int64_t f, double rate)
-                     { return 0.0f; });   // silence
-
-            Application appT;
-            CHECK (appT.openFile (wavT), "opened tones wav");
-            appT.setSelection ({ 0.1, 0.3 });   // [800, 2400) @ 8 kHz
-
-            const juce::File scriptT = dir.getChildFile ("Generate Tones.py");
-            std::string errT;
-            const bool okT = appT.runPythonScript (scriptT, scriptT.loadFileAsString (), pyCmd,
-                                                   nullptr, &errT);
-            CHECK (okT, "tones script ran"
-                       + (okT ? juce::String () : ": " + juce::String (errT)));
-
-            if (okT)
-            {
-                std::vector<float> sel ((size_t) 1600);
-                appT.audioEngine ().readSamples (0, 800, 1600, sel.data ());
-                bool match = true;
-                for (int i = 0; i < 1600 && match; ++i)
-                {
-                    const double t = 0.1 + (double) i / 8000.0;
-                    const double v = 0.5 * std::sin (2.0 * juce::MathConstants<double>::pi
-                                                    * 440.0 * t)
-                                   + 0.25 * std::sin (2.0 * juce::MathConstants<double>::pi
-                                                     * 880.0 * t);
-                    if (std::abs ((double) sel[(size_t) i] - v) > 1e-4) match = false;
-                }
-                CHECK (match, "generated tones match the expected sines");
-
-                // Outside the selection must remain silence.
-                std::vector<float> tail ((size_t) 1600);
-                appT.audioEngine ().readSamples (0, 2400, 1600, tail.data ());
-                bool silent = true;
-                for (float v : tail)
-                    if (v != 0.0f) { silent = false; break; }
-                CHECK (silent, "audio outside the selection is untouched");
-            }
-
-            wavT.deleteFile ();
-        }
-
         // --- Add Echo: impulse response check ---
         {
             const juce::File wavE = makeTempFile ("py_echo.wav");
@@ -13491,49 +13848,6 @@ static void testPythonScripts()
             }
 
             wavE.deleteFile ();
-        }
-
-        // --- Generate White Noise: smoke run (content is random by design) ---
-        {
-            const juce::File wavN = makeTempFile ("py_noise.wav");
-            writeWav (wavN, 1, 8000.0, 4000, [] (int ch, int64_t f, double rate)
-                     { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
-                                                   * 440.0 * ((double) f / rate)); });
-
-            Application appN;
-            CHECK (appN.openFile (wavN), "opened noise wav");
-            appN.setSelection ({ 0.1, 0.3 });   // [800, 2400) @ 8 kHz
-
-            const juce::File scriptN = dir.getChildFile ("Generate White Noise.py");
-            std::string errN;
-            const bool okN = appN.runPythonScript (scriptN, scriptN.loadFileAsString (), pyCmd,
-                                                   nullptr, &errN);
-            CHECK (okN, "white noise script ran"
-                       + (okN ? juce::String () : ": " + juce::String (errN)));
-
-            if (okN)
-            {
-                std::vector<float> sel ((size_t) 1600);
-                appN.audioEngine ().readSamples (0, 800, 1600, sel.data ());
-
-                bool anyNonZero = false;
-                for (float v : sel)
-                    if (v != 0.0f) { anyNonZero = true; break; }
-                CHECK (anyNonZero, "generated noise is not silent");
-
-                // The tone must be gone: count samples that differ from it.
-                int diffs = 0;
-                for (int i = 0; i < 1600 && diffs <= 100; ++i)
-                {
-                    const double t = 0.1 + (double) i / 8000.0;
-                    const double v = 0.5 * std::sin (2.0 * juce::MathConstants<double>::pi
-                                                    * 440.0 * t);
-                    if (std::abs ((double) sel[(size_t) i] - v) > 1e-6) ++diffs;
-                }
-                CHECK (diffs > 100, "generated noise replaced the tone");
-            }
-
-            wavN.deleteFile ();
         }
 
         // --- Make Loop: ramp -> shorter file with a seamless loop point ---
@@ -13680,10 +13994,10 @@ static void testPythonScripts()
 
         if (box != nullptr)
         {
-            CHECK (box->getNumItems () == 8, "combo lists the eight scripts");
+            CHECK (box->getNumItems () == 6, "combo lists the six scripts");
             // sendNotificationSync: the headless test has no message loop to
             // process the async update that plain sendNotification would queue.
-            box->setSelectedId (6, juce::sendNotificationSync);   // Modulation.py
+            box->setSelectedId (4, juce::sendNotificationSync);   // Modulation.py
             const juce::String expect = dir.getChildFile ("Modulation.py").loadFileAsString ();
             CHECK (ed != nullptr && ed->getText () == expect,
                   "selecting a script loads its text into the editor");
@@ -16456,9 +16770,9 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 12, "Effects menu includes the split items");
+    CHECK (fxMenu.getNumItems() == 15, "Effects menu includes the split + generate items");
 #else
-    CHECK (fxMenu.getNumItems() == 9, "Effects menu includes the split items");
+    CHECK (fxMenu.getNumItems() == 12, "Effects menu includes the split + generate items");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -17269,6 +17583,9 @@ static int scRunUnitTestsImpl()
     progress ("spectral sel deletion adjust"); testSpectralSelectionAdjustForDeletion();
     progress ("delete shifts markers/saved sel"); testDeleteShiftsMarkersAndSavedSelections();
     progress ("trim selection");            testTrimSelection();
+    progress ("signal generators");         testSignalGenerators();
+    progress ("generate effects (app)");    testGenerateEffectsApp();
+    progress ("generate dialogs");          testGenerateDialogs();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
     progress ("copy curve alt scales");    testCopyCurveAltScales();

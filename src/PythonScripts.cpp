@@ -199,92 +199,6 @@ main()
     return juce::String (s.c_str ());
 }
 
-static juce::String whiteNoiseScript ()
-{
-    const std::string s = std::string (R"PY(
-# SpectroCraft example: generate white noise.
-# Replaces every sample in the processed range with uncorrelated random
-# values of amplitude AMPLITUDE (linear, 0..1). Set SEED to an integer for
-# reproducible output; leave it None for a fresh pattern on every run.
-#
-# Called by SpectroCraft as:
-#   python "Generate White Noise.py" <input.wav> <output.wav> <meta.json>
-
-import sys, random
-
-)PY") + kWavIo + R"PY(
-
-AMPLITUDE = 0.25   # linear amplitude (0..1) of the generated noise
-SEED      = None   # e.g. 42 for reproducible noise
-
-
-def main():
-    in_path, out_path, meta_path = sys.argv[1:4]
-    rate, nch, x = read_wav(in_path)
-
-    if SEED is not None:
-        random.seed(SEED)
-
-    out = array.array("f", [0.0]) * len(x)
-    for i in range(len(out)):
-        # uniform on [-AMPLITUDE, AMPLITUDE]
-        out[i] = (random.random() * 2.0 - 1.0) * AMPLITUDE
-
-    write_wav(out_path, rate, nch, out)
-
-
-main()
-)PY";
-    return juce::String (s.c_str ());
-}
-
-static juce::String tonesScript ()
-{
-    const std::string s = std::string (R"PY(
-# SpectroCraft example: generate tones.
-# Replaces every sample in the processed range with the sum of sine waves
-# listed in TONES as (frequency_hz, amplitude) pairs. Phases are continuous
-# with file time (meta.json's selectionStartSec), so generating over adjacent
-# selections does not click. The same mix is written to every channel.
-#
-# Called by SpectroCraft as:
-#   python "Generate Tones.py" <input.wav> <output.wav> <meta.json>
-
-import sys, math, json
-
-)PY") + kWavIo + R"PY(
-
-TONES = [
-    (440.0, 0.5),   # A4 at half scale
-    (880.0, 0.25),  # A5 at a quarter
-]
-
-
-def main():
-    in_path, out_path, meta_path = sys.argv[1:4]
-    rate, nch, x = read_wav(in_path)
-
-    with open(meta_path) as f:
-        t0 = float(json.load(f).get("selectionStartSec", 0.0))
-
-    n = len(x) // nch
-    out = array.array("f", [0.0]) * (n * nch)
-    for i in range(n):
-        t = t0 + i / rate
-        v = 0.0
-        for freq, amp in TONES:
-            v += amp * math.sin(2.0 * math.pi * freq * t)
-        for ch in range(nch):
-            out[ch + i * nch] = v
-
-    write_wav(out_path, rate, nch, out)
-
-
-main()
-)PY";
-    return juce::String (s.c_str ());
-}
-
 static juce::String echoScript ()
 {
     const std::string s = std::string (R"PY(
@@ -617,8 +531,6 @@ void ensureExampleScripts (const juce::File& dir)
         { "Dynamic processing.py",  dynamicProcessingScript () },
         { "Threshold.py",           thresholdScript () },
         { "Modulation.py",          modulationScript () },
-        { "Generate White Noise.py", whiteNoiseScript () },
-        { "Generate Tones.py",       tonesScript () },
         { "Add Echo.py",             echoScript () },
         { "Sync And Merge.py",       syncAndMergeScript () },
         { "Make Loop.py",            makeLoopScript () },

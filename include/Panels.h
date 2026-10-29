@@ -766,6 +766,60 @@ public:
     }
 };
 
+// ---------------------------------------------------- Generate Tone dialog helper
+
+/** Editable list of (frequency Hz, amplitude) tone rows for the Generate Tone
+    dialog. A fixed number of row slots is always visible (the component has a
+    constant size, so its AlertWindow parent never needs re-laying out):
+    each slot has a frequency editor, an amplitude editor and a Clear button;
+    "Add Tone" fills the first empty slot with default values. Empty or
+    invalid slots are ignored by getTones(). */
+class ToneListEditor : public juce::Component
+{
+public:
+    static constexpr int kMaxRows = 6;
+
+    ToneListEditor();
+
+    /** Fills the first empty slot with (freqHz, amp); no-op when all slots are
+        filled. */
+    void addRow (double freqHz, float amp);
+
+    /** Number of rows that currently hold a valid tone (same set as
+        getTones()). */
+    int numRows() const;
+
+    /** The frequency editor of the first row holding a valid tone; when none
+        is valid, the first slot's editor. For grabbing keyboard focus. */
+    juce::TextEditor* firstFreqEditor() const;
+
+    /** Parsed tones in slot order; slots with an empty or non-positive /
+        non-finite frequency are skipped. */
+    std::vector<std::pair<double, double>> getTones() const;
+
+    /** One editable (frequency, amplitude) row. Public so tests can reach the
+        Clear button handler directly. */
+    struct Row : public juce::Component
+    {
+        juce::TextEditor freq, amp;
+        juce::TextButton clear;
+        Row();
+    };
+
+private:
+    void resized() override;
+
+    static constexpr int kFreqW = 90, kAmpW = 70, kClearW = 58, kGap = 8,
+                        kRowH = 26, kAddH = 26;
+    static int width() { return kFreqW + kGap + kAmpW + kGap + kClearW; }
+    static int height() { return kMaxRows * (kRowH + kGap) + kAddH - kGap; }
+
+    std::vector<std::unique_ptr<Row>> rows;
+    juce::TextButton addBtn;
+
+    JUCE_DECLARE_NON_COPYABLE (ToneListEditor)
+};
+
 // ---------------------------------------------------- Spectral Controls panel
 
 class SpectralControlsPanel : public juce::Component

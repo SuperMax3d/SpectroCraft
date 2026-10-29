@@ -119,6 +119,10 @@ public:
         channel count receive silence. */
     bool pasteAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
                   std::string* errOut = nullptr);
+    /** Inserts pre-generated data at samplePos (one undoable step). data must
+        hold exactly numChannels() channels of equal length. */
+    bool insertSamples (int64_t samplePos, const std::vector<std::vector<float>>& data,
+                        const juce::String& description, std::string* errOut = nullptr);
     /** Adds clip to the existing content at samplePos instead of replacing:
         the overlap [pos, pos+clipLen) is summed sample-wise; if the
         clipboard extends past the end of file, the remainder is appended.

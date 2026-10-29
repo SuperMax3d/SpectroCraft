@@ -50,6 +50,16 @@ namespace SpectralMask
                         const SpectralSelection& sel,
                         std::vector<std::vector<float>>& outA);
 
+    /** Band-limits an in-memory buffer to the spectral selection region.
+        buf holds nch channels of len samples starting at absolute file
+        position rangeStart; outA (nch x len) receives the part of the signal
+        that lies inside sel over [rangeStart, rangeStart+len). Uses the same
+        Hann-windowed STFT overlap-add as extractMasked, so results are
+        consistent with the masked edits. Returns false on failure. */
+    bool maskBufferToSelection (const std::vector<std::vector<float>>& buf,
+                                int64_t rangeStart, const SpectralSelection& sel,
+                                double rate, std::vector<std::vector<float>>& outA);
+
     /** Splits the selected spectral content over [range] into two per-channel
         results:
           - outExtracted: the band content with a trapezoidal blend weight in

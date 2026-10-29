@@ -4161,6 +4161,101 @@ void FFTAnalysisView::copySpectrumToClipboard()
     juce::SystemClipboard::copyTextToClipboard (lines.joinIntoString ("\n"));
 }
 
+// ============================================================ ToneListEditor
+
+ToneListEditor::Row::Row()
+{
+    addAndMakeVisible (&freq);
+    addAndMakeVisible (&amp);
+    addAndMakeVisible (&clear);
+}
+
+namespace {
+bool toneSlotValid (const juce::String& freqText)
+{
+    const double f = freqText.trim ().getDoubleValue ();
+    return std::isfinite (f) && f > 0.0;
+}
+} // namespace
+
+ToneListEditor::ToneListEditor()
+{
+    for (int i = 0; i < kMaxRows; ++i)
+    {
+        auto row = std::make_unique<Row>();
+        Row* raw = row.get();
+        row->clear.setButtonText ("Clear");
+        row->clear.onClick = [raw] {
+            raw->freq.setText ("", juce::dontSendNotification);
+            raw->amp.setText ("", juce::dontSendNotification);
+        };
+        rows.push_back (std::move (row));
+        addAndMakeVisible (raw);
+    }
+
+    addBtn.setButtonText ("Add Tone");
+    addBtn.onClick = [this] { addRow (440.0, 0.5f); };
+    addAndMakeVisible (&addBtn);
+    setSize (width (), height());
+}
+
+void ToneListEditor::addRow (double freqHz, float amp)
+{
+    for (auto& row : rows)
+        if (!toneSlotValid (row->freq.getText ()) && row->amp.getText ().isEmpty())
+        {
+            row->freq.setText (juce::String (freqHz, 3), juce::dontSendNotification);
+            row->amp.setText (juce::String (amp, 2), juce::dontSendNotification);
+            return;
+        }
+    // All slots are filled: nothing to do.
+}
+
+int ToneListEditor::numRows() const
+{
+    int n = 0;
+    for (const auto& row : rows)
+        if (toneSlotValid (row->freq.getText())) ++n;
+    return n;
+}
+
+juce::TextEditor* ToneListEditor::firstFreqEditor() const
+{
+    for (const auto& row : rows)
+        if (toneSlotValid (row->freq.getText()))
+            return &row->freq;
+    return rows.empty () ? nullptr : &rows[0]->freq;
+}
+
+void ToneListEditor::resized()
+{
+    auto b = getLocalBounds ();
+    for (const auto& row : rows)
+    {
+        Row& r = *row;
+        const int y = b.getY();
+        r.freq.setBounds (b.getX(), y, kFreqW, kRowH);
+        r.amp.setBounds (b.getX() + kFreqW + kGap, y, kAmpW, kRowH);
+        r.clear.setBounds (b.getX() + kFreqW + kGap + kAmpW + kGap, y,
+                           kClearW, kRowH);
+    }
+    addBtn.setBounds (b.removeFromBottom (kAddH));
+}
+
+std::vector<std::pair<double, double>> ToneListEditor::getTones() const
+{
+    std::vector<std::pair<double, double>> out;
+    for (const auto& row : rows)
+    {
+        const juce::String freqText = row->freq.getText ();
+        if (!toneSlotValid (freqText)) continue;   // skip empty / invalid slots
+        const double a = row->amp.getText ().trim ().getDoubleValue ();
+        out.push_back ({ freqText.trim ().getDoubleValue (),
+                         std::isfinite (a) ? a : 0.0 });
+    }
+    return out;
+}
+
 // ============================================================ SpectralControlsPanel
 
 SpectralControlsPanel::SpectralControlsPanel (Application& appIn)

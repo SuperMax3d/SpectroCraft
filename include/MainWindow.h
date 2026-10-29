@@ -151,6 +151,16 @@ public:
         owns and must delete it; used by showChangeGainDialog() and tests. */
     juce::AlertWindow* createGainDialog();
 
+    // ---- Effects > Generate ... dialogs ----------------------------------
+    void showGenerateSilenceDialog();
+    void showGenerateNoiseDialog();
+    void showGenerateToneDialog();
+    /** Build (but do not run modally) the generation dialogs. The caller owns
+        and must delete them; used by the show* functions and tests. */
+    juce::AlertWindow* createGenerateSilenceDialog();
+    juce::AlertWindow* createGenerateNoiseDialog();
+    juce::AlertWindow* createGenerateToneDialog();
+
     // ---- Alternative scale references + Go to Time -----------------------
 
     /** Builds (but does not run modally) the edit dialog for one alternative-
@@ -313,6 +323,9 @@ public:
         ToolsStemSeparate,   // AI stem separation via the audio.cpp CLI tool
         ToolsSplitSpectralSel,     // split active spectral selection into new channel(s) (F12)
         ToolsSplitSpectralSelT12,  // move track 1's selected band to track 2 (Shift+F12)
+        ToolsGenSilence,           // Effects > Generate Silence...
+        ToolsGenNoise,             // Effects > Generate Noise...
+        ToolsGenTone,              // Effects > Generate Tone...
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         ToolsNoiseSuppress,   // AI noise suppression (built with -DSPECTRO_ENABLE_AI=ON)
         ToolsTranscribe,      // AI Whisper transcription (whole file)

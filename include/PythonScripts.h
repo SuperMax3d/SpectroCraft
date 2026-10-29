@@ -15,7 +15,7 @@ juce::File scriptFolder();
 
 /** Creates `dir` if needed and writes the six example scripts
     ("Dynamic processing.py", "Threshold.py", "Modulation.py",
-    "Generate White Noise.py", "Generate Tones.py", "Add Echo.py") into it -
+    "Add Echo.py", "Sync And Merge.py", "Make Loop.py") into it -
     but only when a file does not exist yet, so user edits are never clobbered. */
 void ensureExampleScripts (const juce::File& dir);
 

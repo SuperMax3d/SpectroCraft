@@ -2147,6 +2147,216 @@ bool Application::changeGain (float gainDb, std::string* errOut)
     return audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this), errOut);
 }
 
+// ------------------------------------------------- signal generation (Effects > Generate ...)
+
+namespace {
+
+struct GenPlan
+{
+    enum class Mode { Spectral, TimeRange, InsertAtPlayhead };
+    Mode mode = Mode::InsertAtPlayhead;
+    juce::Range<int64_t> range;      // Spectral / TimeRange modes (absolute samples)
+    int64_t insertPos = 0;          // InsertAtPlayhead mode
+};
+
+/** Resolves where the generated signal goes: an active spectral selection is
+    replaced inside its region, else a time selection is replaced, else the
+    signal is inserted at the playhead with the given duration. */
+static bool resolveGenPlan (Application& app, double durationSecs, GenPlan& plan,
+                            std::string* errOut)
+{
+    auto* d = app.doc();
+    if (!d || !app.audioEngine().isFileLoaded())
+    {
+        if (errOut != nullptr) *errOut = "No file is open.";
+        return false;
+    }
+
+    AudioEngine& eng = app.audioEngine ();
+    if (app.hasSpectralSelection ())
+    {
+        plan.mode = GenPlan::Mode::Spectral;
+        plan.range = spectralSelSamples (app);
+        return true;   // a zero-length range is a harmless no-op downstream
+    }
+
+    if (!app.selection.isEmpty ())
+    {
+        plan.mode = GenPlan::Mode::TimeRange;
+        plan.range = selectionSamples (app).getIntersectionWith ({ 0, eng.numSamples () });
+        return true;
+    }
+
+    const double dur = std::isfinite (durationSecs) && durationSecs > 0.0 ? durationSecs : 1.0;
+    plan.mode = GenPlan::Mode::InsertAtPlayhead;
+    plan.insertPos = std::clamp ((int64_t) (app.playhead * eng.sampleRate ()),
+                                 (int64_t) 0, eng.numSamples ());
+    return true;
+}
+
+static int64_t genInsertLength (AudioEngine& eng, double durationSecs)
+{
+    const double dur = std::isfinite (durationSecs) && durationSecs > 0.0 ? durationSecs : 1.0;
+    return std::max<int64_t> (1, (int64_t) std::llround (dur * eng.sampleRate ()));
+}
+
+/** Replaces plan.range with generated data on the visible channels only; the
+    other channels keep their current content so the undo patch stays complete. */
+static bool replaceRangeWithGen (Application& app, const GenPlan& plan,
+                                 std::vector<std::vector<float>>& data,
+                                 const juce::String& desc, std::string* errOut)
+{
+    AudioEngine& eng = app.audioEngine ();
+    const int nch = eng.numChannels ();
+    const int64_t len = plan.range.getLength ();
+
+    std::vector<std::vector<float>> newData ((size_t) nch);
+    for (int ch = 0; ch < nch; ++ch)
+    {
+        if (app.isChannelVisible (ch))
+            newData[ch] = data[(size_t) ch];
+        else
+        {
+            newData[ch].assign ((size_t) len, 0.0f);
+            eng.readSamples (ch, plan.range.getStart (), len, newData[ch].data ());
+        }
+    }
+
+    if (!eng.replaceSamples (plan.range, newData, desc, errOut))
+        return false;
+    eng.rebuildMipmaps ();   // replaceSamples does not rebuild them
+    return true;
+}
+
+/** Band-limits the generated data to the spectral selection region and mixes
+    it back: inside the band the original content is replaced by the generated
+    signal, outside it everything passes through bit-exact. */
+static bool applyGenToSpectralSel (Application& app, const GenPlan& plan,
+                                   std::vector<std::vector<float>>& data,
+                                   const juce::String& desc, std::string* errOut)
+{
+    auto* d = app.doc();
+    AudioEngine& eng = app.audioEngine ();
+
+    // The generators fill every channel identically and the mask is a pure
+    // time/frequency region, so one masked copy suffices for all channels.
+    std::vector<std::vector<float>> genA;
+    if (!SpectralMask::maskBufferToSelection (data, plan.range.getStart (), d->spectralSel,
+                                              eng.sampleRate (), genA))
+    {
+        if (errOut != nullptr) *errOut = "Spectral masking failed.";
+        return false;
+    }
+    const std::vector<float> genMono = genA.empty () ? std::vector<float> {} : genA[0];
+
+    // Same structure as applyMaskedEffect: out = (original - A) + fn(A), with
+    // fn replacing the extracted band content by the generated signal.
+    auto fn = [&genMono] (float* dst, int len) {
+        std::copy (genMono.begin (), genMono.end (), dst);
+    };
+    return applyMaskedEffect (app, desc, fn, errOut);
+}
+
+} // namespace
+
+bool Application::generateSilence (double durationSecs, std::string* errOut)
+{
+    GenPlan plan;
+    if (!resolveGenPlan (*this, durationSecs, plan, errOut)) return false;
+
+    AudioEngine& eng = audioEngine ();
+
+    if (plan.mode == GenPlan::Mode::Spectral)
+        return maskedGainEdit (*this, "Generated silence in spectral selection", 0.0f, errOut);
+
+    const int64_t len = plan.mode == GenPlan::Mode::InsertAtPlayhead
+                        ? genInsertLength (eng, durationSecs) : plan.range.getLength ();
+    if (len <= 0) return true;   // nothing to do
+
+    std::vector<std::vector<float>> data ((size_t) eng.numChannels (),
+                                          std::vector<float> ((size_t) len, 0.0f));
+
+    if (plan.mode == GenPlan::Mode::InsertAtPlayhead)
+        return eng.insertSamples (plan.insertPos, data, "Generated silence", errOut);
+    return replaceRangeWithGen (*this, plan, data, "Generated silence", errOut);
+}
+
+bool Application::generateNoise (sc::NoiseType type, float intensity,
+                                 double durationSecs, std::string* errOut)
+{
+    GenPlan plan;
+    if (!resolveGenPlan (*this, durationSecs, plan, errOut)) return false;
+
+    AudioEngine& eng = audioEngine ();
+    const juce::String typeName = type == sc::NoiseType::White ? "white"
+                              : (type == sc::NoiseType::Pink  ? "pink" : "brown");
+
+    if (plan.mode == GenPlan::Mode::Spectral)
+    {
+        const int64_t len = plan.range.getLength ();
+        if (len <= 0) return true;   // nothing to do
+        std::vector<std::vector<float>> data;
+        sc::generateNoise (type, intensity, eng.numChannels (), len, 0, data);
+        return applyGenToSpectralSel (*this, plan, data,
+                                      "Generated " + typeName + " noise in spectral selection",
+                                      errOut);
+    }
+
+    const int64_t len = plan.mode == GenPlan::Mode::InsertAtPlayhead
+                        ? genInsertLength (eng, durationSecs) : plan.range.getLength ();
+    if (len <= 0) return true;   // nothing to do
+
+    std::vector<std::vector<float>> data;
+    sc::generateNoise (type, intensity, eng.numChannels (), len, 0, data);
+
+    if (plan.mode == GenPlan::Mode::InsertAtPlayhead)
+        return eng.insertSamples (plan.insertPos, data,
+                                  "Generated " + typeName + " noise", errOut);
+    return replaceRangeWithGen (*this, plan, data, "Generated " + typeName + " noise", errOut);
+}
+
+bool Application::generateTone (const std::vector<sc::ToneSpec>& tones, sc::WaveShape shape,
+                                double durationSecs, std::string* errOut)
+{
+    if (tones.empty ())
+    {
+        if (errOut != nullptr) *errOut = "No tones specified.";
+        return false;
+    }
+
+    GenPlan plan;
+    if (!resolveGenPlan (*this, durationSecs, plan, errOut)) return false;
+
+    AudioEngine& eng = audioEngine ();
+
+    if (plan.mode == GenPlan::Mode::Spectral)
+    {
+        const int64_t len = plan.range.getLength ();
+        if (len <= 0) return true;   // nothing to do
+        std::vector<std::vector<float>> data;
+        sc::generateTone (tones, shape, eng.sampleRate (),
+                          (double) plan.range.getStart () / eng.sampleRate (),
+                          eng.numChannels (), len, data);
+        return applyGenToSpectralSel (*this, plan, data,
+                                      "Generated tone in spectral selection", errOut);
+    }
+
+    const int64_t len = plan.mode == GenPlan::Mode::InsertAtPlayhead
+                        ? genInsertLength (eng, durationSecs) : plan.range.getLength ();
+    if (len <= 0) return true;   // nothing to do
+
+    std::vector<std::vector<float>> data;
+    const double t0 = plan.mode == GenPlan::Mode::InsertAtPlayhead
+                      ? (double) plan.insertPos / eng.sampleRate ()
+                      : (double) plan.range.getStart () / eng.sampleRate ();
+    sc::generateTone (tones, shape, eng.sampleRate (), t0,
+                      eng.numChannels (), len, data);
+
+    if (plan.mode == GenPlan::Mode::InsertAtPlayhead)
+        return eng.insertSamples (plan.insertPos, data, "Generated tone", errOut);
+    return replaceRangeWithGen (*this, plan, data, "Generated tone", errOut);
+}
+
 bool Application::splitSpectralSelection (std::string* errOut)
 {
     auto fail = [errOut] (const juce::String& msg) {

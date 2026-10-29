@@ -2259,6 +2259,9 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsSplitSpectralSelT12:
             runDestructiveEdit ([&] (std::string* e) { return app.splitSpectralSelectionTrack1To2 (e); });
             break;
+        case ToolsGenSilence: showGenerateSilenceDialog(); break;
+        case ToolsGenNoise:   showGenerateNoiseDialog(); break;
+        case ToolsGenTone:    showGenerateToneDialog(); break;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         case ToolsNoiseSuppress: showNoiseSuppressDialog(); break;
         case ToolsTranscribe: showTranscribeDialog(); break;
@@ -2934,6 +2937,226 @@ void MainWindow::showChangeGainDialog()
 
     const float db = (float) text.trim().getDoubleValue();
     runDestructiveEdit ([&] (std::string* e) { return app.changeGain (db, e); });
+}
+
+// Effects > Generate Silence / Noise / Tone — each opens a small dialog. With
+// an active spectral selection only that region is replaced; with a time
+// selection it is replaced in full; otherwise the dialog asks for a duration
+// and inserts at the playhead.
+namespace {
+
+juce::String genTargetMessage (Application& app, const juce::String& what)
+{
+    if (app.hasSpectralSelection ())
+        return "Replaces the content inside the spectral selection with generated " + what + ".";
+    if (!app.selection.isEmpty())
+        return "Replaces the selected " + juce::String (app.selection.getLength (), 3)
+               + "s with generated " + what + ".";
+    return "Inserts generated " + what + " at the playhead position.";
+}
+
+} // namespace
+
+juce::AlertWindow* MainWindow::createGenerateSilenceDialog()
+{
+    auto* w = new juce::AlertWindow ("Generate Silence", genTargetMessage (app, "silence"),
+                                     juce::AlertWindow::QuestionIcon, this);
+    if (!app.hasSpectralSelection () && app.selection.isEmpty ())
+        w->addTextEditor ("genDuration", "1.0");
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (auto* editor = w->getTextEditor ("genDuration"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+    }
+    return w;
+}
+
+void MainWindow::showGenerateSilenceDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createGenerateSilenceDialog();
+    w->enterModalState (false);
+    if (auto* editor = w->getTextEditor ("genDuration"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    double dur = 1.0;
+    if (auto* editor = w->getTextEditor ("genDuration"))
+        dur = editor->getText().trim().getDoubleValue ();
+    delete w;
+    if (result != 1) return;
+
+    runDestructiveEdit ([&] (std::string* e) { return app.generateSilence (dur, e); });
+}
+
+juce::AlertWindow* MainWindow::createGenerateNoiseDialog()
+{
+    auto* w = new juce::AlertWindow ("Generate Noise", genTargetMessage (app, "noise"),
+                                     juce::AlertWindow::QuestionIcon, this);
+
+    auto* typeCombo = new juce::ComboBox();
+    typeCombo->setName ("Type");
+    typeCombo->addItem ("White noise", 1);
+    typeCombo->addItem ("Pink noise", 2);
+    typeCombo->addItem ("Brown noise", 3);
+    typeCombo->setSize (200, 28);
+    w->addCustomComponent (typeCombo);
+
+    auto* intensity = new juce::Slider (juce::Slider::LinearHorizontal,
+                                        juce::Slider::TextBoxLeft);
+    intensity->setName ("Intensity");
+    intensity->setRange (0.0, 1.0, 0.01);
+    intensity->setValue (0.25, juce::dontSendNotification);
+    intensity->setSize (200, 30);
+    w->addCustomComponent (intensity);
+
+    if (!app.hasSpectralSelection () && app.selection.isEmpty ())
+        w->addTextEditor ("genDuration", "1.0");
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (auto* editor = w->getTextEditor ("genDuration"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+    }
+    return w;
+}
+
+void MainWindow::showGenerateNoiseDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createGenerateNoiseDialog();
+    w->enterModalState (false);
+    if (auto* editor = w->getTextEditor ("genDuration"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    double dur = 1.0;
+    if (auto* editor = w->getTextEditor ("genDuration"))
+        dur = editor->getText().trim().getDoubleValue ();
+
+    int typeId = 1;
+    float intensity = 0.25f;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+    {
+        auto* c = w->getChildComponent (i);
+        if (auto* combo = dynamic_cast<juce::ComboBox*> (c))
+            typeId = combo->getSelectedId ();
+        else if (auto* slider = dynamic_cast<juce::Slider*> (c))
+            intensity = (float) slider->getValue ();
+    }
+    delete w;
+    if (result != 1) return;
+
+    const sc::NoiseType type = typeId == 2 ? sc::NoiseType::Pink
+                              : (typeId == 3 ? sc::NoiseType::Brown : sc::NoiseType::White);
+    runDestructiveEdit ([&] (std::string* e) { return app.generateNoise (type, intensity, dur, e); });
+}
+
+juce::AlertWindow* MainWindow::createGenerateToneDialog()
+{
+    auto* w = new juce::AlertWindow ("Generate Tone", genTargetMessage (app, "tone"),
+                                     juce::AlertWindow::QuestionIcon, this);
+
+    auto* waveCombo = new juce::ComboBox();
+    waveCombo->setName ("Waveform");
+    waveCombo->addItem ("Sine", 1);
+    waveCombo->addItem ("Square", 2);
+    waveCombo->addItem ("Sawtooth", 3);
+    waveCombo->addItem ("Triangle", 4);
+    waveCombo->setSize (200, 28);
+    w->addCustomComponent (waveCombo);
+
+    auto* tones = new ToneListEditor();
+    tones->setName ("Tones");
+    tones->addRow (440.0, 0.5f);
+    w->addCustomComponent (tones);
+
+    if (!app.hasSpectralSelection () && app.selection.isEmpty ())
+        w->addTextEditor ("genDuration", "1.0");
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // Focus the first tone's frequency field so a new value can be typed right
+    // away; fall back to the duration field when there are no rows.
+    ToneListEditor* tonesPtr = nullptr;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+        if (auto* tl = dynamic_cast<ToneListEditor*> (w->getChildComponent (i)))
+            tonesPtr = tl;
+    juce::TextEditor* focusTarget = nullptr;
+    if (tonesPtr != nullptr && tonesPtr->firstFreqEditor() != nullptr)
+        focusTarget = tonesPtr->firstFreqEditor();
+    else
+        focusTarget = w->getTextEditor ("genDuration");
+    if (focusTarget != nullptr)
+    {
+        focusTarget->setWantsKeyboardFocus (true);
+        focusTarget->selectAll();
+    }
+    return w;
+}
+
+void MainWindow::showGenerateToneDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createGenerateToneDialog();
+    w->enterModalState (false);
+
+    ToneListEditor* tonesPtr = nullptr;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+        if (auto* tl = dynamic_cast<ToneListEditor*> (w->getChildComponent (i)))
+            tonesPtr = tl;
+    if (tonesPtr != nullptr && tonesPtr->firstFreqEditor() != nullptr)
+        tonesPtr->firstFreqEditor()->grabKeyboardFocus();
+    else if (auto* editor = w->getTextEditor ("genDuration"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    double dur = 1.0;
+    if (auto* editor = w->getTextEditor ("genDuration"))
+        dur = editor->getText().trim().getDoubleValue ();
+
+    std::vector<sc::ToneSpec> tones;
+    int waveId = 1;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+    {
+        auto* c = w->getChildComponent (i);
+        if (auto* combo = dynamic_cast<juce::ComboBox*> (c))
+            waveId = combo->getSelectedId ();
+        else if (auto* tl = dynamic_cast<ToneListEditor*> (c))
+        {
+            const auto pairs = tl->getTones ();
+            tones.reserve (pairs.size());
+            for (const auto& p : pairs)
+                tones.push_back ({ p.first, (float) p.second });
+        }
+    }
+    delete w;
+    if (result != 1) return;
+
+    if (tones.empty())
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Invalid tone list",
+                                            "Please enter at least one tone with a positive frequency.",
+                                            "", this);
+        return;
+    }
+
+    const sc::WaveShape shape = waveId == 2 ? sc::WaveShape::Square
+                              : (waveId == 3 ? sc::WaveShape::Sawtooth
+                              : (waveId == 4 ? sc::WaveShape::Triangle : sc::WaveShape::Sine));
+    runDestructiveEdit ([&] (std::string* e) { return app.generateTone (tones, shape, dur, e); });
 }
 
 // Effects > Resample... — prompt for a new sample rate AND channel count and
@@ -4501,6 +4724,14 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         // gets the noise-floor fill.
         menu.addItem (ToolsSplitSpectralSelT12, "Split Spectral Selection (Track 1->2)\tShift+F12",
                       app.hasSpectralSelection(), false);
+
+        // Generation: replaces the spectral selection region if one is active,
+        // else the time selection; with neither present a dialog asks for a
+        // duration and inserts at the playhead.
+        menu.addSeparator();
+        menu.addItem (ToolsGenSilence, "Generate Silence...", app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ToolsGenNoise,   "Generate Noise...",   app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ToolsGenTone,    "Generate Tone...",    app.audioEngine().isFileLoaded(), false);
     }
     else if (menuName == "Window")
     {

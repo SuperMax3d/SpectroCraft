@@ -244,10 +244,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     the whole run instead of one per step). The header shows "N of M applied".
   - **Python**: a script editor next to History. The dropdown lists every
     `*.py` file in your personal script folder (`%APPDATA%/SpectroCraft/python`
-    on Windows, created automatically with eight examples: *Dynamic
-    processing*, *Threshold*, *Modulation*, *Generate White Noise*,
-    *Generate Tones*, *Add Echo*, *Sync And Merge* and *Make Loop*
-    (the last two are described below). **Add** creates a new script
+    on Windows, created automatically with six examples: *Dynamic
+    processing*, *Threshold*, *Modulation*, *Add Echo*, *Sync And Merge*
+    and *Make Loop* (the last two are described below). **Add** creates a new script
     from a template, **Remove** deletes the selected one, and **Run** executes
     it against the current selection — or against the whole file when nothing
     is selected. The run is undoable (it appears in History as "Python script
@@ -540,6 +539,20 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   channel-count change); undo/redo keeps track visibility in sync with the
   file's channel count, so reverting a mono→stereo split returns to a single
   visible track instead of leaving a phantom silent one.
+- **Generate Silence / Noise / Tone** (`Effects → Generate …`): inserts or
+  replaces generated audio, each as one undoable step. The target depends on
+  the active selection state: with a *spectral* selection only the content
+  inside that region is replaced (the rest of the signal is untouched); with a
+  *time* selection the selected range is replaced; with neither, the generated
+  audio is inserted at the playhead position and everything after it shifts
+  right. The dialogs:
+  - *Generate Silence…* — fills the target with digital silence.
+  - *Generate Noise…* — white, pink (Vos six-stage filter) or brown (random
+    walk) noise; the intensity slider sets the peak amplitude from 0 to 1.
+  - *Generate Tone…* — any number of frequency + amplitude pairs added
+    together, rendered as sine, square, sawtooth or triangle. Phase is
+    continuous with absolute file time, so generated tones line up with
+    surrounding audio instead of clicking at the boundary.
 - **Cancelling long operations**: every progress dialog — loading large files,
   resampling, noise suppression, transcription (single and batch), spectrogram
   export — has a Cancel button, and ESC works as well. The operation stops at

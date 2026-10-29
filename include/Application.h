@@ -9,6 +9,7 @@
 #include "UndoManager.h"
 #include "FileDoc.h"
 #include "StemSeparation.h"
+#include "SignalGenerator.h"
 #include <vector>
 #include <memory>
 #include <functional>
@@ -485,6 +486,16 @@ public:
     bool reverse(std::string* errOut = nullptr);
     // Multiply the selection by 10^(gainDb/20) on the visible channels.
     bool changeGain (float gainDb, std::string* errOut = nullptr);
+
+    /** Effects > Generate ...: replaces the active spectral selection region,
+        or the time selection if there is one; with neither present it inserts
+        durationSecs of generated signal at the playhead. Each call is a
+        single undoable step. */
+    bool generateSilence (double durationSecs, std::string* errOut = nullptr);
+    bool generateNoise (sc::NoiseType type, float intensity,
+                        double durationSecs, std::string* errOut = nullptr);
+    bool generateTone (const std::vector<sc::ToneSpec>& tones, sc::WaveShape shape,
+                       double durationSecs, std::string* errOut = nullptr);
 
     /** Splits the active spectral selection: the selected band content is
         copied into one new channel per affected (visible) source channel,
