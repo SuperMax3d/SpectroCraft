@@ -18135,6 +18135,138 @@ static void testRecordingSession()
     CHECK (!app.recording.active, "closing the recording doc stops the session");
 }
 
+/** Channel combo items: per-channel options for fixed-width devices, a count
+    list for variable-width ones. */
+static void testRecChannelComboItems()
+{
+    sc::rec::DeviceInfo fixed;
+    fixed.id = "x"; fixed.name = "Fixed 4 ch";
+    fixed.minChannels = 4; fixed.maxChannels = 4;
+
+    const juce::StringArray items = MainWindow::recChannelComboItems (fixed);
+    CHECK (items.size () == 5, "fixed-width device offers All + 4 channel options");
+    if (items.size () == 5)
+    {
+        CHECK (items[0] == "All (4)", "first item is 'All (N)'");
+        CHECK (items[1] == "Channel 1", "second item is 'Channel 1'");
+        CHECK (items[4] == "Channel 4", "last item is 'Channel N'");
+    }
+
+    sc::rec::DeviceInfo var;
+    var.id = "y"; var.name = "Var 2..8 ch";
+    var.minChannels = 2; var.maxChannels = 8;
+    const juce::StringArray vItems = MainWindow::recChannelComboItems (var);
+    CHECK (vItems.size () == 7, "variable-width device lists every count");
+    if (vItems.size () == 7)
+        CHECK (vItems[0] == "2" && vItems[6] == "8", "count list spans min..max");
+
+    sc::rec::DeviceInfo mono;
+    mono.id = "z"; mono.name = "Mono";
+    mono.minChannels = 1; mono.maxChannels = 1;
+    const juce::StringArray mItems = MainWindow::recChannelComboItems (mono);
+    CHECK (mItems.size () == 2 && mItems[0] == "All (1)" && mItems[1] == "Channel 1",
+          "mono device offers All + Channel 1");
+}
+
+/** Single-channel selection: the plugin captures its full width and the host
+    picks out the wanted channel into a mono document. */
+static void testRecChannelSelection()
+{
+    auto& host = sc::rec::RecorderHost::instance ();
+    CHECK (host.findPlugin ("fake") != nullptr,
+          "fake plugin available for the channel-selection test");
+    if (host.findPlugin ("fake") == nullptr) return;
+
+    const double pi = juce::MathConstants<double>::pi;
+    const double theta = 2.0 * pi * 440.0 / 8000.0;   // fake dev2ch: ch1=440 Hz, ch2=silence
+
+    auto driveTicksAndStop = [] (Application& app) {
+        for (int i = 0; i < 12; ++i)
+        {
+            juce::Thread::sleep (40);
+            app.timerCallback ();
+        }
+        app.stopRecording ();
+        CHECK (!app.recording.active, "recording stopped");
+    };
+
+    // --- Channel 1: the 440 Hz sine --------------------------------------
+    {
+        Application app;
+        app.recording.pluginId   = "fake";
+        app.recording.deviceId   = "dev2ch";
+        app.recording.channelMode = 1;      // only source channel 1
+        app.recording.channels   = 1;
+        app.recording.rate       = 8000.0;
+        app.recording.bitDepth   = 32;
+
+        std::string err;
+        CHECK (app.startRecording (&err), "start recording on channel 1: " + err);
+        if (!app.recording.active) return;
+
+        CHECK (app.audioEngine ().numChannels () == 1, "doc created mono for a single-channel pick");
+        CHECK (app.recording.srcChannels == 2, "source width remembered as the device's full width");
+
+        driveTicksAndStop (app);
+
+        // Content: channel 0 must be the fake plugin's 440 Hz sine. Recover
+        // the arbitrary start phase from two consecutive samples.
+        std::vector<float> buf (100);
+        app.audioEngine ().readSamples (0, 0, 100, buf.data ());
+        double cosA0 = (buf[1] - std::cos (theta) * buf[0]) / std::sin (theta);
+        cosA0 = std::max (-1.0, std::min (1.0, cosA0));
+        const double a0 = std::atan2 ((double) buf[0], cosA0);
+        double maxErr = 0.0;
+        for (int k = 0; k < 100; ++k)
+            maxErr = std::max (maxErr, std::abs (buf[k] - std::sin (a0 + theta * k)));
+        CHECK (maxErr < 5e-3, "picked channel is the fake plugin's 440 Hz sine");
+    }
+
+    // --- Channel 2: silence ----------------------------------------------
+    {
+        Application app;
+        app.recording.pluginId   = "fake";
+        app.recording.deviceId   = "dev2ch";
+        app.recording.channelMode = 2;      // only source channel 2
+        app.recording.channels   = 1;
+        app.recording.rate       = 8000.0;
+        app.recording.bitDepth   = 32;
+
+        std::string err;
+        CHECK (app.startRecording (&err), "start recording on channel 2: " + err);
+        if (!app.recording.active) return;
+
+        CHECK (app.audioEngine ().numChannels () == 1, "doc created mono for a single-channel pick");
+
+        driveTicksAndStop (app);
+
+        std::vector<float> buf (100);
+        app.audioEngine ().readSamples (0, 0, 100, buf.data ());
+        double maxAbs = 0.0;
+        for (float v : buf) maxAbs = std::max (maxAbs, (double) std::abs (v));
+        CHECK (maxAbs < 1e-9, "picked channel is the fake plugin's silent channel");
+    }
+
+    // --- Stale mode beyond the device width falls back to all channels ----
+    {
+        Application app;
+        app.recording.pluginId   = "fake";
+        app.recording.deviceId   = "dev2ch";
+        app.recording.channelMode = 9;      // dev2ch has only 2 channels
+        app.recording.channels   = 2;
+        app.recording.rate       = 8000.0;
+        app.recording.bitDepth   = 32;
+
+        std::string err;
+        CHECK (app.startRecording (&err), "start recording with stale channel mode: " + err);
+        if (!app.recording.active) return;
+
+        CHECK (app.recording.channelMode == 0, "stale mode reset to 'all channels'");
+        CHECK (app.audioEngine ().numChannels () == 2, "doc created with the full device width");
+        app.stopRecording ();
+    }
+}
+
 /** Transport menu: Record toggle + Recording Device submenu structure. */
 static void testTransportRecordingMenu()
 {
@@ -18380,6 +18512,8 @@ static int scRunUnitTestsImpl()
     progress ("recorder plugin API");     testRecorderPluginApi();
     progress ("recording follow window"); testRecordingFollowWindow();
     progress ("recording session");       testRecordingSession();
+    progress ("rec channel combo items"); testRecChannelComboItems();
+    progress ("rec channel selection");   testRecChannelSelection();
     progress ("transport recording menu");testTransportRecordingMenu();
     progress ("arrow head geometry");     testArrowHeadGeometry();
     progress ("drawing panel");           testDrawingPanel();

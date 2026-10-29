@@ -107,13 +107,20 @@ public:
     {
         bool active = false;
         juce::String pluginId, deviceId;   // selected device (persisted)
-        int channels = 2;
+        int channels = 2;                  // output channel count of the recording doc
+        int srcChannels = 0;               // source channels delivered by the plugin (0 = same as channels)
+        int channelMode = 0;               // 0 = all source channels; k>=1 = only source channel k
         double rate = 48000.0;
         int bitDepth = 32;                 // negotiated at start
         int64_t framesRecorded = 0;
         bool followEnd = true;             // view follows the recording edge
     };
     RecordingState recording;
+
+    /** Pulls up to `cap` frames of audio from the active plugin into the
+        recording document, honouring a single-channel selection. Returns
+        false when nothing was appended (ring empty or audio thread busy). */
+    bool pullRecFrames (FileDoc* d, long long cap);
 
     /** Creates a fresh in-memory document and starts capturing from the
         selected recorder plugin/device (Transport > Recording Device). */

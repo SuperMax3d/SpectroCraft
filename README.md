@@ -649,6 +649,13 @@ recording the view stays exactly where you left it; once you come back within
    built from every loaded recorder plugin (see below); each device opens a small
    dialog where you choose channel count, sample rate and bit depth from what
    the device offers.
+   - For devices with a fixed channel width the **Channels** combo lists
+     `All (N)` plus one entry per source channel (`Channel 1` … `Channel N`).
+     Picking a single channel records only that input into a mono document —
+     e.g. keep just the left mic of a stereo pair. The mapping happens in the
+     host, so any plugin works with it.
+   - Devices whose width varies (e.g. loopback endpoints) show a plain count
+     list instead.
 2. **Transport > Record** — starts recording into a new document named
    `rec_YYYYMMDD_HHMMSS.wav` (made unique against other open documents). The menu
    item becomes **Stop**; stopping drains whatever is still buffered in the
@@ -707,8 +714,17 @@ Notes:
   recording starts cleanly but no data arrives. This is an environmental
   limitation of the VM's audio service, not a plugin bug — regular Windows
   machines deliver data normally.
-- Device friendly names come from the endpoint property store where available,
-  with sensible fallbacks ("Loopback device", "Capture device").
+- Device labels are composed Audacity-style as `"name (manufacturer)"`:
+  first from `IMMDevice::GetProperty(PKEY_FriendlyName)` on standard Windows,
+  otherwise from the endpoint property store. Some reduced/virtualized stacks
+  expose `IPropertyStore` with a non-standard vtable layout and no working
+  `GetProperty`; the plugin detects that at runtime with crash-free ABI probes
+  (no SEH — SpectroCraft's first-chance vectored exception handler would
+  terminate the process on any deliberate access violation) and reads the
+  name/manufacturer keys it finds there. Fallbacks: "Loopback device",
+  "Capture device".
+- Loopback stream flags are probed (`AUDCLNT_STREAMFLAGS_LOOPBACK` first, then a
+  reduced-stack alternative) so both standard and virtualized stacks start.
 
 ### How the host drives it
 
@@ -1852,8 +1868,11 @@ delays the window from appearing.
     phase-recovered sine content checks on the recorded document, re-engagement
     after a stop; the follow-end window state machine is tested statically
     (follows at the end, freezes when panned away, resumes within ~1.5 s of the
-    end, never narrows below 5 s); and the Transport menu structure itself is
-    verified (Record + Recording Device present with correct item counts).
+    end, never narrows below 5 s); per-channel selection is covered end-to-end
+    (a stereo fake device recording only its second channel yields a mono
+    document with exactly that channel's content; stale saved modes fall back
+    to `All`), and the Transport menu structure itself is verified (Record +
+    Recording Device present with correct item counts).
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,

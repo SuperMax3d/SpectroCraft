@@ -2,6 +2,7 @@
 // SpectroCraft - Main window
 #include <JuceHeader.h>
 #include "Application.h"
+#include "Recorder.h"   // sc::rec::DeviceInfo for the recording dialog helpers
 #include "WaveformView.h"
 #include "SpectralView.h"
 #include "ScrollBars.h"
@@ -242,6 +243,12 @@ public:
     /** Transport > Recording Device menu: one sub-menu per recorder plugin.
         Public static so headless tests can check it. */
     static juce::PopupMenu buildRecordingDeviceMenu (const Application& app);
+
+    /** Channel combo items for the recording device dialog: explicit
+        per-channel options ("All (N)", "Channel 1", ...) for fixed-width
+        devices, or every count the device offers otherwise. Public static so
+        headless tests can check it. */
+    static juce::StringArray recChannelComboItems (const sc::rec::DeviceInfo& dev);
 
     /** One entry of a Recording Device sub-menu (plain data for tests). */
     struct RecDeviceMenuItem { int id = 0; juce::String text; bool checked = false; };

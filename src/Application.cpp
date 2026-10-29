@@ -150,6 +150,8 @@ void Application::loadSettings ()
     recording.pluginId   = recentStore->getValue ("rec_plugin", juce::String ());
     recording.deviceId   = recentStore->getValue ("rec_device", juce::String ());
     recording.channels   = std::clamp (recentStore->getIntValue ("rec_channels", recording.channels), 1, 512);
+    recording.channelMode = std::clamp (recentStore->getIntValue ("rec_channel_mode", 0), 0, 512);
+    recording.srcChannels = std::clamp (recentStore->getIntValue ("rec_src_channels", 0), 0, 512);
     {
         const double r = recentStore->getValue ("rec_rate", juce::String (recording.rate)).getDoubleValue ();
         recording.rate = r > 100.0 ? r : 48000.0;
@@ -185,6 +187,8 @@ void Application::saveSettings ()
     recentStore->setValue ("rec_plugin", recording.pluginId);
     recentStore->setValue ("rec_device", recording.deviceId);
     recentStore->setValue ("rec_channels", recording.channels);
+    recentStore->setValue ("rec_channel_mode", recording.channelMode);
+    recentStore->setValue ("rec_src_channels", recording.srcChannels);
     recentStore->setValue ("rec_rate", juce::String (recording.rate));
     recentStore->setValue ("rec_depth", recording.bitDepth);
     recentStore->save ();
@@ -751,6 +755,47 @@ static juce::String recordingDocName()
     return s;
 }
 
+bool Application::pullRecFrames (FileDoc* d, long long cap)
+{
+    auto& eng = d->engine;
+    const int ch = eng.numChannels ();
+    if (ch <= 0 || cap <= 0) return false;
+
+    auto& host = sc::rec::RecorderHost::instance ();
+    const long long avail = host.availableFrames ();
+    if (avail <= 0) return false;
+    const long long n = std::min (avail, cap);
+
+    // The plugin delivers in its own source layout. When a single channel is
+    // selected we read the full source width and pick that channel out.
+    const int srcCh = std::max (ch, recording.srcChannels > 0 ? recording.srcChannels : ch);
+    recTmpBuf_.resize ((size_t) n * (size_t) srcCh);
+    const int frames = host.read (recTmpBuf_.data (), srcCh, n);
+    if (frames <= 0) return false;
+
+    if (srcCh == ch && recording.channelMode == 0)
+    {
+        // Fast path: layout already matches the document.
+        if (!eng.appendSamples (recTmpBuf_.data (), frames))
+            return false;   // audio thread busy - data stays in the plugin ring
+    }
+    else
+    {
+        const int pick = recording.channelMode >= 1 ? recording.channelMode - 1 : 0;
+        std::vector<float> mapped ((size_t) frames * (size_t) ch);
+        for (long long f = 0; f < frames; ++f)
+            for (int c = 0; c < ch; ++c)
+                mapped[(size_t) f * (size_t) ch + (size_t) c] =
+                    recTmpBuf_[(size_t) f * (size_t) srcCh
+                              + (recording.channelMode >= 1 ? (size_t) pick : (size_t) c)];
+        if (!eng.appendSamples (mapped.data (), frames))
+            return false;   // audio thread busy - data stays in the plugin ring
+    }
+
+    recording.framesRecorded += frames;
+    return true;
+}
+
 bool Application::startRecording (std::string* errOut)
 {
     auto fail = [errOut] (const juce::String& msg) {
@@ -770,12 +815,30 @@ bool Application::startRecording (std::string* errOut)
     if (host.findPlugin (recording.pluginId) == nullptr)
         return fail ("The selected recorder plugin is no longer available.");
 
+    // Determine the device's source channel count so a single-channel
+    // selection can be honoured host-side: the plugin always captures its
+    // full width and pullRecFrames() picks out the wanted channel.
+    int devCh = recording.channels;
+    if (const auto* p = host.findPlugin (recording.pluginId))
+        for (const auto& d : p->devices)
+            if (d.id == recording.deviceId) { devCh = std::max (1, d.maxChannels); break; }
+
+    int wantCh;
+    if (recording.channelMode >= 1 && recording.channelMode <= devCh)
+        wantCh = devCh;   // capture everything; pick one channel in pullRecFrames
+    else
+    {
+        recording.channelMode = 0;   // stale/invalid selection - record all channels
+        wantCh = std::clamp (recording.channels, 1, devCh);
+    }
+
     sc_rec_negotiated neg {};
     if (!host.configure (recording.pluginId, recording.deviceId,
-                         recording.channels, recording.rate, recording.bitDepth,
+                         wantCh, recording.rate, recording.bitDepth,
                          &neg, errOut))
         return false;   // *errOut already set by the host
-    recording.channels = neg.channels;
+    recording.srcChannels = neg.channels;
+    recording.channels = (recording.channelMode >= 1) ? 1 : neg.channels;
     recording.rate     = neg.rate;
     recording.bitDepth = neg.bitDepth;
 
@@ -830,20 +893,10 @@ void Application::stopRecording ()
     {
         FileDoc* d = recDoc_;
         auto& eng = d->engine;
-        const int ch = eng.numChannels ();
+        // Up to ~1 s of audio per pass keeps the drain quick.
         for (int guard = 0; guard < 100 && host.availableFrames () > 0; ++guard)
-        {
-            const long long avail = host.availableFrames ();
-            if (avail <= 0) break;
-            // Up to ~1 s of audio per pass keeps the drain quick.
-            const long long cap = std::min (avail, (long long) eng.sampleRate ());
-            recTmpBuf_.resize ((size_t) cap * (size_t) ch);
-            const int frames = host.read (recTmpBuf_.data (), ch, cap);
-            if (frames <= 0) break;
-            if (!eng.appendSamples (recTmpBuf_.data (), frames))
-                break;   // audio thread busy - the rest stays in the plugin ring
-            recording.framesRecorded += frames;
-        }
+            if (!pullRecFrames (d, eng.sampleRate ()))
+                break;   // nothing left or audio thread busy - rest stays in ring
         eng.rebuildMipmaps ();   // final overview refresh for the finished file
     }
 
@@ -877,19 +930,9 @@ void Application::timerCallback ()
     if (!eng.audioThreadInBuffer ())
     {
         auto& host = sc::rec::RecorderHost::instance ();
-        const long long avail = host.availableFrames ();
-        if (avail > 0)
-        {
-            // Up to ~1 s of audio per tick keeps the UI responsive.
-            const long long cap = std::min (avail, (long long) eng.sampleRate ());
-            recTmpBuf_.resize ((size_t) cap * (size_t) ch);
-            const int frames = host.read (recTmpBuf_.data (), ch, cap);
-            if (frames > 0 && eng.appendSamples (recTmpBuf_.data (), frames))
-            {
-                recording.framesRecorded += frames;
-                appended = true;
-            }
-        }
+        // Up to ~1 s of audio per tick keeps the UI responsive.
+        if (host.availableFrames () > 0)
+            appended = pullRecFrames (d, eng.sampleRate ());
     }
 
     // Follow-end logic + view updates. Only push the window while the recorded

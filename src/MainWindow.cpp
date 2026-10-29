@@ -1267,6 +1267,27 @@ void MainWindow::handleStartStopRecording ()
                                            juce::String::fromUTF8 (err.c_str ()));
 }
 
+juce::StringArray MainWindow::recChannelComboItems (const sc::rec::DeviceInfo& dev)
+{
+    juce::StringArray items;
+    if (dev.minChannels == dev.maxChannels && dev.minChannels >= 1)
+    {
+        // Fixed-width device (e.g. a WASAPI endpoint): offer explicit
+        // per-channel selection in addition to recording everything.
+        const int N = std::min (dev.maxChannels, 256);
+        items.add ("All (" + juce::String (N) + ")");
+        for (int c = 1; c <= N; ++c)
+            items.add ("Channel " + juce::String (c));
+    }
+    else
+    {
+        // Variable-width device: every count it offers.
+        for (int c = dev.minChannels; c <= std::min (dev.maxChannels, dev.minChannels + 127); ++c)
+            items.add (juce::String (c));
+    }
+    return items;
+}
+
 void MainWindow::handleRecDevicePick (int id)
 {
     auto& host = sc::rec::RecorderHost::instance ();
@@ -1285,11 +1306,10 @@ void MainWindow::handleRecDevicePick (int id)
     dlg.addButton ("Cancel", 0, {});
     dlg.addTextBlock (dev.name + "   [" + p.name + "]");
 
-    // Channels: every count the device offers (capped so a 64-ch ASIO card
-    // doesn't produce an absurd list).
-    juce::StringArray chItems;
-    for (int c = dev.minChannels; c <= std::min (dev.maxChannels, dev.minChannels + 127); ++c)
-        chItems.add (juce::String (c));
+    // Channels: per-channel options for fixed-width devices, every count the
+    // device offers otherwise.
+    const bool perChannel = (dev.minChannels == dev.maxChannels && dev.minChannels >= 1);
+    juce::StringArray chItems = recChannelComboItems (dev);
 
     // Sample rates: the device's list, or common rates inside its range.
     juce::StringArray rateItems;
@@ -1329,8 +1349,17 @@ void MainWindow::handleRecDevicePick (int id)
         return idx >= 0 ? idx + 1 : 1;
     };
     if (auto* c = dlg.getComboBoxComponent ("Channels"))
-        c->setSelectedId (pickIndex (chItems, juce::String (app.recording.channels)),
-                          juce::dontSendNotification);
+    {
+        int selId;
+        if (perChannel)
+        {
+            const int m = app.recording.channelMode;   // 0..N
+            selId = (m >= 0 && m < (int) chItems.size ()) ? m + 1 : 1;
+        }
+        else
+            selId = pickIndex (chItems, juce::String (app.recording.channels));
+        c->setSelectedId (selId, juce::dontSendNotification);
+    }
     if (auto* c = dlg.getComboBoxComponent ("Sample rate"))
         c->setSelectedId (pickIndex (rateItems,
                                      juce::String ((int) std::lround (app.recording.rate)) + " Hz"),
@@ -1349,7 +1378,18 @@ void MainWindow::handleRecDevicePick (int id)
     if (chC == nullptr || rateC == nullptr || depC == nullptr)
         return;
 
-    const int wantCh   = chItems[(size_t) std::max (0, chC->getSelectedItemIndex ())].getIntValue ();
+    const int chIdx  = std::max (0, chC->getSelectedItemIndex ());
+    int wantCh, mode;
+    if (perChannel)
+    {
+        mode   = chIdx;               // 0 = all channels, k = channel k
+        wantCh = dev.maxChannels;     // the plugin always captures its full width
+    }
+    else
+    {
+        mode   = 0;
+        wantCh = chItems[(size_t) chIdx].getIntValue ();
+    }
     const double wantRate = rateItems[(size_t) std::max (0, rateC->getSelectedItemIndex ())].getDoubleValue ();
     const int wantDepth   = depthItems[(size_t) std::max (0, depC->getSelectedItemIndex ())].getIntValue ();
 
@@ -1365,7 +1405,9 @@ void MainWindow::handleRecDevicePick (int id)
 
     app.recording.pluginId   = p.id;
     app.recording.deviceId   = dev.id;
-    app.recording.channels   = neg.channels;
+    app.recording.channelMode = mode;
+    app.recording.srcChannels = neg.channels;
+    app.recording.channels   = (mode >= 1) ? 1 : neg.channels;
     app.recording.rate       = neg.rate;
     app.recording.bitDepth   = neg.bitDepth;
     app.saveSettings ();

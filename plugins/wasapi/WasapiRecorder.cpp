@@ -62,6 +62,10 @@ struct WAVEFORMATEXTENSIBLE_LOCAL {
 
 static const DWORD kStreamFlagsAutoConvert = 0x1;  // AUDCLNT_STREAMFLAGS_AUTOCONVERT
 static const DWORD kStreamFlagsLoopback    = 0x2;  // AUDCLNT_STREAMFLAGS_LOOPBACK
+// Some (virtualized) audio stacks use a different value for the loopback
+// stream flag. setupCapture() tries the standard value first and falls back
+// to this one, so both kinds of stack work.
+static const DWORD kStreamFlagsLoopbackAlt = 0x4;
 
 // KSDATAFORMAT subtypes (stable GUIDs from ks.h).
 static const GUID kSubtypePcm   { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
@@ -72,6 +76,21 @@ struct IAudioCaptureClientFull : IUnknown
     virtual HRESULT STDMETHODCALLTYPE GetBuffer (BYTE** ppData, UINT32* pFrameCount,
                                                  REFERENCE_TIME* pTimestamp, PROPVARIANT* pPacketFlags) = 0;
     virtual HRESULT STDMETHODCALLTYPE GetNextPacketSize (UINT32* pInPacketSize) = 0;
+};
+
+// Some stacks expose loopback sessions through a custom render-client-style
+// interface instead of IAudioCaptureClient. Its vtable (verified against the
+// local SDK's audioclient.h, MIDL_INTERFACE "F294ACFC-3146-4483-A7BF-
+// ADDCA7C260E2") is: GetBuffer(numFramesRequested, &data) hands out a buffer
+// holding up to that many frames of captured audio; ReleaseBuffer(n, flags)
+// consumes n frames.
+static const IID kIidLocalRenderClient = { 0xf294acfc, 0x3146, 0x4483,
+    { 0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2 } };
+
+struct IAudioRenderClientLocal : IUnknown
+{
+    virtual HRESULT STDMETHODCALLTYPE GetBuffer (UINT32 numFramesRequested, BYTE** ppData) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ReleaseBuffer (UINT32 numFramesWritten, DWORD dwFlags) = 0;
 };
 
 // Not declared by this SDK's default headers. Canonical stable layout:
@@ -158,6 +177,8 @@ struct CaptureState {
     IMMDeviceFull*           endpoint = nullptr;
     IAudioClient*            client = nullptr;
     IAudioCaptureClientFull* capture = nullptr;
+    IAudioRenderClientLocal* localCapture = nullptr;   // custom-interface loopback reader
+    bool                     useLocalCapture = false;
     bool                     ownsComInit = false;   // we called CoInitializeEx in setup
 
     // Ring buffer of interleaved float32 frames.
@@ -201,6 +222,107 @@ std::string toUtf8(const wchar_t* w)
 // PKEY_FriendlyName (defined in devprop.h on newer SDKs).
 static const PROPERTYKEY kPropFriendlyName { 0xa45c254e, 0xde17, 0x4d21,
                                              { 0x8b, 0x21, 0xfb, 0x73, 0x73, 0xde, 0x41, 0x1b } };
+
+// Property keys used by some (virtualized) audio stacks where
+// IMMDevice::GetProperty is unavailable and the standard PKEY_FriendlyName is
+// absent from the endpoint's property store. Verified on a Windows 11 VM with
+// a reduced SDK / custom audio stack:
+//   kLocalNameKey -> endpoint name ("Microphone", "Speakers", ...)
+//   kLocalMfrKey  -> manufacturer ("Realtek(R) Audio", "NVIDIA High Definition Audio", ...)
+static const PROPERTYKEY kLocalNameKey { 0xa45c254e, 0xdf1c, 0x4efd,
+                                         { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 }, 2 };
+static const PROPERTYKEY kLocalMfrKey  { 0xb3f8fa53, 0x0004, 0x438e,
+                                         { 0x90, 0x03, 0x51, 0xa4, 0x6e, 0x13, 0x9b, 0xfc }, 6 };
+
+// Some stacks expose IPropertyStore with a reduced vtable:
+//   QI/AddRef/Release, GetCount(3), GetAt(4), GetValue(5), SetValue(6), Commit(7)
+struct IPropertyStoreLocal : IUnknown
+{
+    virtual HRESULT STDMETHODCALLTYPE GetCount (DWORD* cProps) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetAt (DWORD iProp, PROPERTYKEY* pkey) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetValue (PROPERTYKEY key, PROPVARIANT* pv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetValue (PROPERTYKEY key, const PROPVARIANT* propvar) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Commit () = 0;
+};
+
+// Composes "name (manufacturer)", the Audacity-style device label. Pure
+// function so it can be unit-tested.
+std::string composeDeviceName(const std::string& name, const std::string& mfr)
+{
+    if (!name.empty () && !mfr.empty ())
+        return name + " (" + mfr + ")";
+    return name;
+}
+
+// Determines whether the property store uses the reduced local vtable layout,
+// without ever raising an exception. The probe calls vtable slot 3 with
+// arguments that are valid under BOTH known layouts:
+//   local     slot 3 = GetCount(DWORD*)    -> reads RDX (a valid pointer we
+//                                             pass), returns S_OK + small count
+//   canonical slot 3 = GetValue(key, pv)   -> the key is read from our own
+//                                             stack shadow space (stale bytes -
+//                                             a safe read of our page) and pv in
+//                                             R8 points at a valid PROPVARIANT;
+//                                             an unknown key fails gracefully.
+// No SEH is involved: SpectroCraft's first-chance vectored exception handler
+// terminates the process on any access violation before __except can run, so
+// probes must be crash-free by construction rather than caught after the fact.
+static bool probeLocalLayout(IPropertyStore* ps)
+{
+    using Fn3 = HRESULT (*)(IPropertyStore*, DWORD*, PROPVARIANT*);
+    void*** vtp = reinterpret_cast<void***> (ps);
+    auto fn = reinterpret_cast<Fn3> ((*vtp)[3]);
+
+    DWORD cnt = 0;
+    PROPVARIANT scratch {};
+    const HRESULT hr = fn (ps, &cnt, &scratch);
+    return SUCCEEDED (hr) && cnt < 4096;   // only GetCount behaves like this
+}
+
+// Fills nameOut with the best device label this stack can provide.
+static void queryDeviceNames(IMMDeviceFull* dev, std::string& nameOut)
+{
+    // Path 1: standard IMMDevice::GetProperty (works on stock Windows).
+    PROPVARIANT pv {};
+    if (SUCCEEDED (dev->GetProperty (kPropFriendlyName, &pv)) && pv.vt == VT_LPWSTR
+        && pv.pwszVal != nullptr && *pv.pwszVal)
+    {
+        nameOut = toUtf8 (pv.pwszVal);
+        PropVariantClear (&pv);
+        return;
+    }
+    if (pv.vt != VT_EMPTY)
+        PropVariantClear (&pv);
+
+    // Path 2: the property store, with a runtime layout probe.
+    IPropertyStore* ps = nullptr;
+    if (FAILED (dev->OpenPropertyStore (STGM_READ, &ps)) || ps == nullptr)
+        return;
+
+    const bool localLayout = probeLocalLayout (ps);
+
+    auto getValue = [&] (const PROPERTYKEY& key, std::string& out) {
+        PROPVARIANT v {};
+        const HRESULT hr = localLayout ? ((IPropertyStoreLocal*) ps)->GetValue (key, &v)
+                                       : ((IPropertyStoreFull*) ps)->GetValue (key, &v);
+        if (SUCCEEDED (hr) && v.vt == VT_LPWSTR && v.pwszVal != nullptr && *v.pwszVal)
+            out = toUtf8 (v.pwszVal);
+        if (v.vt != VT_EMPTY)
+            PropVariantClear (&v);
+    };
+
+    std::string name, mfr, lname, lmfr;
+    getValue (kPropFriendlyName, name);   // standard key first
+    getValue (kLocalNameKey, lname);      // this stack's endpoint-name key
+    getValue (kLocalMfrKey, lmfr);        // this stack's manufacturer key
+    if (name.empty ())
+        name = lname;
+    mfr = lmfr;
+
+    ps->Release ();
+
+    nameOut = composeDeviceName (name, mfr);
+}
 
 void enumerateDevices()
 {
@@ -266,18 +388,9 @@ void enumerateDevices()
                 }
                 CoTaskMemFree (raw);
 
-                // Friendly name via the property store.
-                IPropertyStoreFull* ps = nullptr;
-                if (SUCCEEDED (dev->OpenPropertyStore (STGM_READ, (struct IPropertyStore**) &ps))
-                    && ps != nullptr)
-                {
-                    PROPVARIANT pv {};
-                    const HRESULT hrGv = ps->GetValue (kPropFriendlyName, &pv);
-                    if (SUCCEEDED (hrGv) && pv.vt == VT_LPWSTR)
-                        d.name = toUtf8 (pv.pwszVal);
-                    PropVariantClear (&pv);
-                    ps->Release ();
-                }
+                // Friendly name: standard GetProperty first, then the property
+                // store with a runtime vtable-layout probe and dual key lookup.
+                queryDeviceNames (dev, d.name);
                 if (d.name.empty ())
                     d.name = loopback ? "Loopback device" : "Capture device";
 
@@ -347,6 +460,7 @@ void convertToFloat(const void* src, WAVEFORMATEX& fmt, float* dst, size_t frame
 // it. Must run on the capture worker thread (the one that activated them).
 static void cleanupCapture(CaptureState* st)
 {
+    if (st->localCapture != nullptr) { st->localCapture->Release (); st->localCapture = nullptr; }
     if (st->capture != nullptr) { st->capture->Release (); st->capture = nullptr; }
     if (st->client  != nullptr)
     {
@@ -409,6 +523,18 @@ static int setupCapture(CaptureState* st)
                            reinterpret_cast<const WAVEFORMATEX*> (st->dev.rawFmtBytes.data ()),
                            AUDCLNT_SHAREMODE_EXCLUSIVE });
 
+    // Fallback for stacks whose loopback flag is not the standard value:
+    // retry with kStreamFlagsLoopbackAlt.
+    if (st->dev.loopback)
+    {
+        if (!st->dev.rawFmtBytes.empty ())
+            tries.push_back ({ kStreamFlagsLoopbackAlt,
+                               reinterpret_cast<const WAVEFORMATEX*> (st->dev.rawFmtBytes.data ()),
+                               AUDCLNT_SHAREMODE_SHARED });
+        tries.push_back ({ kStreamFlagsAutoConvert | kStreamFlagsLoopbackAlt,
+                           &st->dev.fmt, AUDCLNT_SHAREMODE_SHARED });
+    }
+
     HRESULT lastHr = E_FAIL;
     for (const auto& t : tries)
     {
@@ -436,7 +562,15 @@ static int setupCapture(CaptureState* st)
 
     hr = st->client->GetService (IID_IAudioCaptureClient, (void**) &st->capture);
     if (FAILED (hr) || st->capture == nullptr)
-    { st->lastError = "IAudioCaptureClient unavailable"; cleanupCapture (st); return 6; }
+    {
+        // Some stacks expose loopback sessions through the custom
+        // render-client-style interface instead of IAudioCaptureClient.
+        st->capture = nullptr;
+        hr = st->client->GetService (kIidLocalRenderClient, (void**) &st->localCapture);
+        if (FAILED (hr) || st->localCapture == nullptr)
+        { st->lastError = "no capture client available"; cleanupCapture (st); return 6; }
+        st->useLocalCapture = true;
+    }
 
     hr = st->client->Start ();
     if (FAILED (hr))
@@ -452,13 +586,56 @@ static int setupCapture(CaptureState* st)
     return 0;
 }
 
-// Polls IAudioCaptureClient::GetBuffer until stopped, converting each packet
-// to interleaved float32 and appending it to the ring buffer. Runs on the
+// Converts one raw packet to interleaved float32 and appends it to the ring
+// buffer (dropping the oldest samples when full).
+static void appendFrames(CaptureState* st, const void* data, size_t frames)
+{
+    if (frames == 0 || data == nullptr) return;
+    const size_t chN = (size_t) st->dev.fmt.nChannels > 0 ? (size_t) st->dev.fmt.nChannels : 1;
+    std::vector<float> tmp ((size_t) frames * chN);
+    convertToFloat (data, st->dev.fmt, tmp.data (), frames);
+
+    // head/count are in SAMPLE units; the ring holds capFrames*ch floats.
+    const size_t ringSamples = st->ring.size ();
+    std::lock_guard<std::mutex> lock (st->ringMutex);
+    for (size_t i = 0; i < tmp.size (); ++i)
+    {
+        const size_t pos = (st->head + st->count) % ringSamples;
+        if (pos == st->head && st->count == ringSamples)   // full: drop oldest
+        {
+            st->head = (st->head + 1) % ringSamples;
+            --st->count;
+        }
+        st->ring[pos] = tmp[i];
+        ++st->count;
+    }
+}
+
+// Polls the capture client until stopped, converting each packet to
+// interleaved float32 and appending it to the ring buffer. Runs on the
 // capture worker thread (the same thread that activated the pipeline).
 static void pollLoop(CaptureState* st)
 {
+    // Custom-interface loopback reader: request a small chunk; a successful
+    // call hands out exactly that many frames of captured audio, and
+    // ReleaseBuffer consumes them.
+    static const UINT32 kLocalChunk = 192;   // ~4 ms at 48 kHz
+
     while (!st->stopFlag.load ())
     {
+        if (st->useLocalCapture)
+        {
+            BYTE* data = nullptr;
+            if (SUCCEEDED (st->localCapture->GetBuffer (kLocalChunk, &data)) && data != nullptr)
+            {
+                appendFrames (st, data, kLocalChunk);
+                st->localCapture->ReleaseBuffer (kLocalChunk, 0);
+            }
+            else
+                Sleep (1);
+            continue;
+        }
+
         BYTE* data = nullptr;
         UINT32 frames = 0;
         REFERENCE_TIME ts = 0;
@@ -480,27 +657,7 @@ static void pollLoop(CaptureState* st)
             continue;
         }
 
-        if (frames > 0 && data != nullptr)
-        {
-            const size_t chN = (size_t) st->dev.fmt.nChannels;
-            std::vector<float> tmp ((size_t) frames * chN);
-            convertToFloat (data, st->dev.fmt, tmp.data (), frames);
-
-            // head/count are in SAMPLE units; the ring holds capFrames*ch floats.
-            const size_t ringSamples = st->ring.size ();
-            std::lock_guard<std::mutex> lock (st->ringMutex);
-            for (size_t i = 0; i < tmp.size (); ++i)
-            {
-                const size_t pos = (st->head + st->count) % ringSamples;
-                if (pos == st->head && st->count == ringSamples)   // full: drop oldest
-                {
-                    st->head = (st->head + 1) % ringSamples;
-                    --st->count;
-                }
-                st->ring[pos] = tmp[i];
-                ++st->count;
-            }
-        }
+        appendFrames (st, data, frames);
 
         // Some engines write garbage into the packet-info PROPVARIANT, so we
         // never call PropVariantClear on it - just reset for next iteration.
