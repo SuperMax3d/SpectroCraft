@@ -266,6 +266,11 @@ private:
     double lineEndT = 0.0, lineEndF = 0.0;   // live end point while LineDrag
     int probeX = -1, probeY = -1;   // last cursor position (status-bar probe / brush)
 
+    // Harmonic markers (Spectral Controls panel): last mouseMove position while the
+    // feature is active (-1 = mouse outside). Small white circles are drawn at the
+    // harmonics of the frequency under the cursor - no lines.
+    int harmMouseX = -1, harmMouseY = -1;
+
     // Per-pixel boolean raster of the spectral selection (1 byte per view
     // pixel), rebuilt on every paint so subtractive shapes render as holes.
     std::vector<uint8_t> selMask;

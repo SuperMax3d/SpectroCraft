@@ -967,6 +967,16 @@ public:
     bool applyDbMaxText (const juce::String& text);
     void syncLevelControls();                  // slider + editors + preview from settings
 
+    // Harmonic marker fields (Spectral Controls panel, persisted between sessions):
+    // typed values are clamped to their ranges; false when rejected.
+    bool applyHarmStartText (const juce::String& text);   // 0..1000 (0 = from the fundamental)
+    bool applyHarmMaxText (const juce::String& text);     // 1..1000
+    bool applyHarmNText (const juce::String& text);       // 1..1000
+    void syncHarmControls();                              // editors from settings
+    juce::String getHarmStartText() const { return harmStartEdit.getText(); }
+    juce::String getHarmMaxText() const { return harmMaxEdit.getText(); }
+    juce::String getHarmNText() const { return harmNEdit.getText(); }
+
     // Set by MainWindow: resets the spectral view's frequency axis.
     std::function<void()> onResetFreq;
 
@@ -999,8 +1009,10 @@ private:
     juce::ComboBox colourMapCombo, fftSizeCombo;
     juce::Slider dBRangeSlider;
     LevelEdit dbRangeEdit, dbMinEdit, dbMaxEdit;
+    LevelEdit harmStartEdit, harmMaxEdit, harmNEdit;   // harmonic marker rows
     juce::TextButton logToggle;
-    juce::Label colourMapLab, dbRangeLab;
+    juce::Label colourMapLab, dbRangeLab,
+                harmStartLab, harmMaxLab, harmNLab;
     juce::TextButton resetFreqBtn;
     juce::TextButton refreshBtn;
 
@@ -1048,6 +1060,8 @@ private:
     };
 
     MapPreview preview;
+
+    bool applyHarmInt (const juce::String& text, int& target, int lo, int hi);
 
     JUCE_DECLARE_NON_COPYABLE (SpectralControlsPanel)
 };

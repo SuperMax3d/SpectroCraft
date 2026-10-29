@@ -5146,6 +5146,161 @@ static void testFFTHarmonicDialogFields()
     wav.deleteFile();
 }
 
+// ---------------- Spectral Controls: harmonic marker fields ----------------
+static void testSpecHarmControls()
+{
+    const juce::File wav = makeTempFile ("spec_harm_ctl.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for harmonic controls test");
+
+    SpectralControlsPanel panel (app);
+    panel.setSize (340, 320);
+
+    // Defaults: start 0, max 10, N 1.
+    CHECK (panel.getHarmStartText() == "0",  "default 'Number of harmonic to display:' is 0");
+    CHECK (panel.getHarmMaxText()   == "10", "default 'Maximum harmonic to display:' is 10");
+    CHECK (panel.getHarmNText()     == "1",  "default 'Harmonic number under the mouse:' is 1");
+
+    // Typed values apply and reach the settings.
+    CHECK (panel.applyHarmStartText ("2"),   "start value accepted");
+    CHECK (panel.applyHarmMaxText ("7"),     "max value accepted");
+    CHECK (panel.applyHarmNText ("3"),       "N value accepted");
+    CHECK (app.settings.specHarmStartK == 2 && app.settings.specHarmMaxK == 7
+          && app.settings.specHarmN == 3, "settings updated from the fields");
+    CHECK (panel.getHarmStartText() == "2" && panel.getHarmMaxText() == "7"
+          && panel.getHarmNText() == "3", "editors show the applied values");
+
+    // Out-of-range values are clamped.
+    CHECK (panel.applyHarmStartText ("-5"),  "negative start accepted and clamped to 0");
+    CHECK (app.settings.specHarmStartK == 0, "start clamped at 0");
+    CHECK (panel.applyHarmMaxText ("99999"), "huge max accepted and clamped");
+    CHECK (app.settings.specHarmMaxK == 1000, "max clamped at 1000");
+    CHECK (panel.applyHarmNText ("0"),       "zero N accepted and clamped to 1");
+    CHECK (app.settings.specHarmN == 1,      "N clamped at 1");
+
+    // Non-numeric input is rejected: settings untouched, editors reverted.
+    const int startBefore = app.settings.specHarmStartK;
+    CHECK (!panel.applyHarmStartText ("abc"), "non-numeric start rejected");
+    CHECK (app.settings.specHarmStartK == startBefore, "rejected value leaves settings untouched");
+    CHECK (panel.getHarmStartText() == juce::String (startBefore), "editor reverted to canonical text");
+
+    // Blank input keeps the current value.
+    CHECK (panel.applyHarmMaxText ("   "), "blank max accepted as no-op");
+    CHECK (app.settings.specHarmMaxK == 1000, "blank leaves max unchanged");
+
+    // refresh() re-syncs the editors from the settings.
+    app.settings.specHarmStartK = 4;
+    app.settings.specHarmN = 5;
+    panel.refresh();
+    CHECK (panel.getHarmStartText() == "4" && panel.getHarmNText() == "5",
+          "refresh re-syncs the harmonic fields");
+
+    wav.deleteFile();
+}
+
+// ---------------- Spectral view: harmonic marker circles ----------------
+static void testSpecHarmMarkers()
+{
+    const juce::File wav = makeTempFile ("spec_harm_draw.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load wav for harmonic markers test");
+
+    SpectralView view (app);
+    view.setSize (320, 240);
+    view.setViewRange (0.0, 2.0);
+    view.setVisibleChannels ({ 0 });
+    view.setSettings (app.settings);
+
+    const auto pr = view.plotRect();
+    CHECK (pr.getWidth() > 50 && pr.getHeight() > 50, "plot area is non-degenerate");
+
+    // Default settings: start=0 -> from #1, max=10, N=1. Put the mouse at a
+    // position whose frequency is 880 Hz (the tone's 2nd harmonic):
+    // fundamental = 880/1 = 880, circles at 880*k for k=1..4 within [20, 4000].
+    auto yForFreq = [&] (double f) -> int { return view.freqToY (f, pr.getHeight()); };
+
+    const int mx = pr.getX() + pr.getWidth() / 2;
+    const int my = pr.getY() + yForFreq (880.0);
+    CHECK (my > pr.getY() && my < pr.getBottom(), "cursor row is inside the plot");
+
+    view.mouseMove (mkMouse (view, mx, my, {}));
+
+    auto paintView = [&] () -> juce::Image
+    {
+        juce::Image img (juce::Image::ARGB, 320, 240, true);
+        juce::Graphics g (img);
+        view.paint (g);
+        return img;
+    };
+
+    auto countWhite = [&] (const juce::Image& img, int cx, int cy) -> int
+    {
+        int n = 0;
+        for (int y = std::max (0, cy - 4); y < std::min (240, cy + 5); ++y)
+            for (int x = std::max (0, cx - 4); x < std::min (320, cx + 5); ++x)
+            {
+                const auto c = img.getPixelAt (x, y);
+                if (c.getRed () > 240 && c.getGreen () > 240 && c.getBlue () > 240) ++n;
+            }
+        return n;
+    };
+
+    {
+        const auto img = paintView ();
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (880.0)) >= 8, "circle at harmonic #1");
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (1760.0)) >= 8, "circle at harmonic #2");
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (2640.0)) >= 8, "circle at harmonic #3");
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (3520.0)) >= 8, "circle at harmonic #4");
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (440.0)) < 8,
+              "no circle off the harmonic series (440 Hz)");
+    }
+
+    // N=2: the frequency under the mouse is the 2nd harmonic -> fundamental 440;
+    // circles now include 440 Hz itself.
+    app.settings.specHarmN = 2;
+    view.setSettings (app.settings);
+    {
+        const auto img = paintView ();
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (440.0)) >= 8,
+              "circle at the fundamental with N=2");
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (1320.0)) >= 8,
+              "circle at harmonic #3 of 440 Hz");
+    }
+
+    // Start = 3: harmonics below #3 disappear.
+    app.settings.specHarmStartK = 3;
+    view.setSettings (app.settings);
+    {
+        const auto img = paintView ();
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (440.0)) < 8, "harmonic #1 hidden by start=3");
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (880.0)) < 8, "harmonic #2 hidden by start=3");
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (1320.0)) >= 8,
+              "harmonic #3 still shown with start=3");
+    }
+
+    // Mouse leaves: the circles disappear.
+    view.mouseExit (mkMouse (view, -5, -5, {}));
+    {
+        const auto img = paintView ();
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (1320.0)) < 8,
+              "circles hidden after mouse exit");
+    }
+
+    wav.deleteFile();
+}
+
 static void testRightDragZoom()
 {
     const juce::File wav = makeTempFile ("rightdrag_zoom.wav");
@@ -7171,6 +7326,37 @@ static void testSettingsPersistence()
         Application c (store);
         CHECK (c.settings.fftSize == 4096, "stored 3000 rounds up to 4096");
         CHECK (c.settings.fftLocalN == 1024, "stored 700 clamps to the minimum 1024");
+    }
+
+    // Harmonic marker fields (Spectral Controls panel) are persisted too.
+    {
+        Application e (store);
+        CHECK (e.settings.specHarmStartK == 0 && e.settings.specHarmMaxK == 10
+              && e.settings.specHarmN == 1, "harmonic marker defaults");
+        e.settings.specHarmStartK = 2;
+        e.settings.specHarmMaxK = 7;
+        e.settings.specHarmN = 3;
+        e.saveSettings();
+    }
+    {
+        Application f (store);
+        CHECK (f.settings.specHarmStartK == 2 && f.settings.specHarmMaxK == 7
+              && f.settings.specHarmN == 3, "harmonic marker settings restored");
+    }
+
+    // Out-of-range stored values are clamped on load.
+    {
+        Application g (store);
+        g.settings.specHarmStartK = -5;     // below range: stored raw, clamped on load
+        g.settings.specHarmMaxK = 0;
+        g.settings.specHarmN = 99999;
+        g.saveSettings();
+    }
+    {
+        Application h (store);
+        CHECK (h.settings.specHarmStartK == 0, "stored start -5 clamps to 0 on load");
+        CHECK (h.settings.specHarmMaxK == 1, "stored max 0 clamps to 1 on load");
+        CHECK (h.settings.specHarmN == 1000, "stored N 99999 clamps to 1000 on load");
     }
 
     store.deleteFile();
@@ -18775,6 +18961,8 @@ static int scRunUnitTestsImpl()
     progress ("fft view rate change"); testFFTAnalysisRateChange();
     progress ("fft harmonic references"); testFFTHarmonicReferences();
     progress ("fft harmonic dialog fields"); testFFTHarmonicDialogFields();
+    progress ("spec harmonic controls");  testSpecHarmControls();
+    progress ("spec harmonic markers");   testSpecHarmMarkers();
     progress ("alt scale in fft readout"); testAltScaleInFFTReadout();
     progress ("status bar sample rate"); testStatusBarSampleRate();
     progress ("sctt json");             testScttJson();

@@ -831,6 +831,18 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
     if (app.haveSelGestureRef ())
         updateSelGestureFromEvent (e);
 
+    // Harmonic markers (Spectral Controls panel): follow the cursor so the
+    // white circles track it. Only repaint when the position changed.
+    if (app.settings.specHarmMaxK >= 1 && app.settings.specHarmN >= 1)
+    {
+        if (harmMouseX != e.x || harmMouseY != e.y)
+        {
+            harmMouseX = e.x;
+            harmMouseY = e.y;
+            repaint();
+        }
+    }
+
     if (!onCursorInfo) return;
     const auto pr = plotRect();
     if (e.x < pr.getX() || e.x >= pr.getRight()
@@ -896,6 +908,14 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
 void SpectralView::mouseExit (const juce::MouseEvent&)
 {
     if (onCursorInfo) onCursorInfo ("");
+
+    // Harmonic markers: hide the circles once the cursor leaves the view.
+    if (harmMouseX >= 0 || harmMouseY >= 0)
+    {
+        harmMouseX = -1;
+        harmMouseY = -1;
+        if (app.settings.specHarmMaxK >= 1 && app.settings.specHarmN >= 1) repaint();
+    }
 }
 
 void SpectralView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -1669,6 +1689,37 @@ void SpectralView::drawOverlays (juce::Graphics& g)
             const double yBot = row.getY() + freqToY (std::max (0.0, f - app.brushRadiusHz), row.getHeight());
             g.fillRect ((float) probeX - 1.0f, (float) std::min (yTop, yBot), 2.0f,
                         (float) std::max (0.0, std::abs (yBot - yTop)));
+        }
+    }
+
+    // Harmonic markers (Spectral Controls panel): small white circles at the
+    // harmonics of the frequency under the mouse - no lines. Half the size of
+    // the orange selection-scaling reference circle (10 px -> 5 px).
+    if (app.settings.specHarmMaxK >= 1 && app.settings.specHarmN >= 1)
+    {
+        if (harmMouseX >= pr.getX() && harmMouseX < pr.getRight()
+            && harmMouseY >= pr.getY() && harmMouseY < pr.getBottom())
+        {
+            const double fMouse = freqAtY (harmMouseY);
+            const int N = std::max (1, app.settings.specHarmN);
+            const double fFund = fMouse / (double) N;
+            if (fFund > 0.0 && std::isfinite (fFund))
+            {
+                const int kLo = std::max (1, app.settings.specHarmStartK);
+                const int kHi = std::max (kLo, app.settings.specHarmMaxK);
+                g.setColour (juce::Colours::white);
+                for (int k = kLo; k <= kHi; ++k)
+                {
+                    const double f = (double) k * fFund;
+                    for (const auto& row : rowRects ())
+                    {
+                        const int y = freqToY (f, row.getHeight());
+                        if (y < 0 || y >= row.getHeight()) continue;
+                        g.fillEllipse ((float) harmMouseX - 2.5f,
+                                      (float) row.getY() + y - 2.5f, 5.0f, 5.0f);
+                    }
+                }
+            }
         }
     }
 

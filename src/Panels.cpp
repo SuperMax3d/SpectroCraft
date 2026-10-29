@@ -4922,7 +4922,25 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     dbMaxEdit.onEnter       = [this] { applyDbMaxText (dbMaxEdit.getText()); };
     dbMaxEdit.onFocusLost   = [this] { applyDbMaxText (dbMaxEdit.getText()); };
 
+    // Harmonic marker rows: small white circles over the harmonics of the
+    // frequency under the mouse in the spectrogram (no lines). Persisted.
+    styleLevelEdit (harmStartEdit);
+    harmStartEdit.setJustification (juce::Justification::centredRight);
+    harmStartEdit.onEnter       = [this] { applyHarmInt (harmStartEdit.getText(), app.settings.specHarmStartK, 0, 1000); };
+    harmStartEdit.onFocusLost   = [this] { applyHarmInt (harmStartEdit.getText(), app.settings.specHarmStartK, 0, 1000); };
+
+    styleLevelEdit (harmMaxEdit);
+    harmMaxEdit.setJustification (juce::Justification::centredRight);
+    harmMaxEdit.onEnter       = [this] { applyHarmInt (harmMaxEdit.getText(), app.settings.specHarmMaxK, 1, 1000); };
+    harmMaxEdit.onFocusLost   = [this] { applyHarmInt (harmMaxEdit.getText(), app.settings.specHarmMaxK, 1, 1000); };
+
+    styleLevelEdit (harmNEdit);
+    harmNEdit.setJustification (juce::Justification::centredRight);
+    harmNEdit.onEnter       = [this] { applyHarmInt (harmNEdit.getText(), app.settings.specHarmN, 1, 1000); };
+    harmNEdit.onFocusLost   = [this] { applyHarmInt (harmNEdit.getText(), app.settings.specHarmN, 1, 1000); };
+
     syncLevelControls();
+    syncHarmControls();
 
     logToggle.setClickingTogglesState (true);
     logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
@@ -4954,6 +4972,12 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
                           "(dB, V or g) to change it; the dB range follows.");
     dbMaxEdit.setTooltip ("Top level of the colour window: type a value in the file's unit "
                           "(dB, V or g) to change it; the dB range follows.");
+    harmStartEdit.setTooltip ("First harmonic to display relative to the fundamental. 0 = from "
+                              "the fundamental itself.");
+    harmMaxEdit.setTooltip ("Highest harmonic of the fundamental to display as white circles.");
+    harmNEdit.setTooltip ("Which harmonic sits at the frequency under the mouse: fundamental = "
+                          "f_mouse / N. Move the mouse over a tone's harmonic and set this so the "
+                          "circles land on that tone's whole harmonic series.");
     logToggle.setTooltip ("Toggle the spectrogram's frequency axis between logarithmic and linear scaling.");
     resetFreqBtn.setTooltip ("Reset the spectrogram's vertical (frequency) zoom to its default range.");
     refreshBtn.setTooltip ("Force a full recomputation of the spectrogram: discards every cached tile "
@@ -4966,11 +4990,23 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     for (auto* lab : { &colourMapLab, &dbRangeLab })
         lab->setFont (12.0f);
 
+    harmStartLab.setText ("Number of harmonic to display:", juce::dontSendNotification);
+    harmMaxLab.setText ("Maximum harmonic to display:", juce::dontSendNotification);
+    harmNLab.setText ("Harmonic number under the mouse:", juce::dontSendNotification);
+    for (auto* lab : { &harmStartLab, &harmMaxLab, &harmNLab })
+        lab->setFont (11.0f);
+
     addAndMakeVisible (&colourMapLab);
     addAndMakeVisible (&colourMapCombo);
     addAndMakeVisible (&preview);
     addAndMakeVisible (&dbMinEdit);
     addAndMakeVisible (&dbMaxEdit);
+    addAndMakeVisible (&harmStartLab);
+    addAndMakeVisible (&harmStartEdit);
+    addAndMakeVisible (&harmMaxLab);
+    addAndMakeVisible (&harmMaxEdit);
+    addAndMakeVisible (&harmNLab);
+    addAndMakeVisible (&harmNEdit);
     addAndMakeVisible (&dbRangeLab);
     addAndMakeVisible (&dBRangeSlider);
     addAndMakeVisible (&dbRangeEdit);
@@ -4985,6 +5021,7 @@ void SpectralControlsPanel::refresh()
     colourMapCombo.setSelectedId ((int) app.colourMap + 1, juce::dontSendNotification);
     fftSizeCombo.setSelectedId (app.settings.fftSize, juce::dontSendNotification);
     syncLevelControls();
+    syncHarmControls();
     logToggle.setToggleState (app.settings.logFrequency, juce::dontSendNotification);
     logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
 }
@@ -5018,6 +5055,25 @@ void SpectralControlsPanel::resized()
         logToggle.setBounds (row.removeFromLeft (104));
         resetFreqBtn.setBounds (row.removeFromRight (86));
         fftSizeCombo.setBounds (row.reduced (6, 0));
+    }
+
+    {   // Harmonic marker rows: label left, value right (persisted).
+        auto row = b.removeFromTop (24);
+        harmStartLab.setBounds (row.removeFromLeft (std::max (0, row.getWidth() - 54)));
+        row.removeFromLeft (6);
+        harmStartEdit.setBounds (row.reduced (0, 3));
+    }
+    {
+        auto row = b.removeFromTop (24);
+        harmMaxLab.setBounds (row.removeFromLeft (std::max (0, row.getWidth() - 54)));
+        row.removeFromLeft (6);
+        harmMaxEdit.setBounds (row.reduced (0, 3));
+    }
+    {
+        auto row = b.removeFromTop (24);
+        harmNLab.setBounds (row.removeFromLeft (std::max (0, row.getWidth() - 54)));
+        row.removeFromLeft (6);
+        harmNEdit.setBounds (row.reduced (0, 3));
     }
 
     {   // Refresh button at the bottom: full spectrogram recomputation
@@ -5142,6 +5198,53 @@ void SpectralControlsPanel::syncLevelControls()
     dbMinEdit.setText (ScaleCalibration::formatSpectralLevel ((double) app.settings.dbMinDb, sc));
     dbMaxEdit.setText (ScaleCalibration::formatSpectralLevel ((double) app.settings.dbMaxDb, sc));
     preview.repaint();
+}
+
+// Parses a plain integer (optional sign). Used by the harmonic marker fields.
+static bool parseHarmInt (const juce::String& text, int& out)
+{
+    const auto t = text.trim();
+    if (t.isEmpty()) return false;
+    for (char16_t c : t)
+        if ((c < '0' || c > '9') && c != '-' && c != '+') return false;
+    out = t.getIntValue();
+    return true;
+}
+
+bool SpectralControlsPanel::applyHarmInt (const juce::String& text, int& target, int lo, int hi)
+{
+    const auto t = text.trim();
+    if (!t.isEmpty())
+    {
+        int v;
+        if (!parseHarmInt (t, v)) { syncHarmControls(); return false; }
+        target = std::clamp (v, lo, hi);
+    }
+    syncHarmControls();
+    if (app.onStateChange) app.onStateChange();
+    return true;
+}
+
+bool SpectralControlsPanel::applyHarmStartText (const juce::String& text)
+{
+    return applyHarmInt (text, app.settings.specHarmStartK, 0, 1000);
+}
+
+bool SpectralControlsPanel::applyHarmMaxText (const juce::String& text)
+{
+    return applyHarmInt (text, app.settings.specHarmMaxK, 1, 1000);
+}
+
+bool SpectralControlsPanel::applyHarmNText (const juce::String& text)
+{
+    return applyHarmInt (text, app.settings.specHarmN, 1, 1000);
+}
+
+void SpectralControlsPanel::syncHarmControls()
+{
+    harmStartEdit.setText (juce::String (app.settings.specHarmStartK));
+    harmMaxEdit.setText (juce::String (app.settings.specHarmMaxK));
+    harmNEdit.setText (juce::String (app.settings.specHarmN));
 }
 
 // ---------------------------------------------------------------- Find dialog

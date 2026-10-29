@@ -307,7 +307,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     range, Log/Linear toggle, Reset Freq, FFT size — from **512**, the finest
     frequency resolution, up to 65536; a full-width **Refresh** button at the
     bottom forces a complete spectrogram recomputation by discarding every
-    cached tile and re-rendering all tracks). Above the colour-map
+    cached tile and re-rendering all tracks). Three persisted fields control
+    harmonic markers in the spectrogram: **"Number of harmonic to display:"**
+    (default 0 = from the fundamental), **"Maximum harmonic to display:"**
+    (default 10) and **"Harmonic number under the mouse:"** (default 1). While
+    the mouse is over a channel row, small white circles — half the size of
+    the orange selection-scaling circle, no lines — mark the harmonics of the
+    frequency under the cursor: fundamental = f_mouse / N, drawn for every
+    harmonic k in [start, max] that falls inside the current frequency window.
+    Move the mouse over a tone's higher harmonic and set N accordingly so the
+    circles land on that tone's whole series. All three values are remembered
+    between sessions. Above the colour-map
     gradient the panel shows the absolute level of each end of the scale in
     the active file's unit — plain `dB` when uncalibrated, or calibrated values
     after **Set Scale**: `14.0 dB-SPL … 94.0 dB-SPL` for a 1 Pa full scale,

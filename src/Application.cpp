@@ -137,6 +137,13 @@ void Application::loadSettings ()
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
     settings.showAmpGrid        = recentStore->getIntValue ("show_amp_grid", 1) != 0;
     settings.showFreqGrid       = recentStore->getIntValue ("show_freq_grid", 1) != 0;
+    // Spectrogram harmonic markers (Spectral Controls panel).
+    settings.specHarmStartK     = std::clamp (recentStore->getIntValue ("spec_harm_start",
+                                                                        settings.specHarmStartK), 0, 1000);
+    settings.specHarmMaxK       = std::clamp (recentStore->getIntValue ("spec_harm_max",
+                                                                        settings.specHarmMaxK), 1, 1000);
+    settings.specHarmN          = std::clamp (recentStore->getIntValue ("spec_harm_n",
+                                                                        settings.specHarmN), 1, 1000);
     // Spectrogram export overlays (File -> Spectrogram submenu).
     settings.exportAxes       = recentStore->getIntValue ("exp_axes", 0) != 0;
     settings.exportMarkers    = recentStore->getIntValue ("exp_markers", 0) != 0;
@@ -177,6 +184,9 @@ void Application::saveSettings ()
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);
     recentStore->setValue ("show_freq_grid", settings.showFreqGrid ? 1 : 0);
+    recentStore->setValue ("spec_harm_start", settings.specHarmStartK);
+    recentStore->setValue ("spec_harm_max", settings.specHarmMaxK);
+    recentStore->setValue ("spec_harm_n", settings.specHarmN);
     recentStore->setValue ("exp_axes", settings.exportAxes ? 1 : 0);
     recentStore->setValue ("exp_markers", settings.exportMarkers ? 1 : 0);
     recentStore->setValue ("exp_selections", settings.exportSelections ? 1 : 0);
