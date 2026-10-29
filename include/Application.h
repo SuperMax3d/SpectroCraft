@@ -545,11 +545,15 @@ public:
     // cancellation; nothing is modified in that case.
     // autoDownload = false: never download; fail with a manual-install hint
     // when the model is not already present.
+    /** copyNoise: when true, one new channel is appended per processed
+        (visible) channel holding only the estimated noise — original minus
+        enhanced — over the selection range; the enhanced signal stays in the
+        existing channels. One undoable step covers both changes. */
     bool noiseSuppress (const std::string& modelId, const std::string& device,
                         float attenLimDb = 0.f, bool df3PostFilter = false,
                         std::function<bool(float)> onProgress = nullptr,
                         std::string* errOut = nullptr,
-                        bool autoDownload = true);
+                        bool autoDownload = true, bool copyNoise = false);
 
     // BLOCKING — call from a worker thread. Transcribes the WHOLE file with
     // Whisper (modelId selects the model; language "auto" or a BCP-47 code;

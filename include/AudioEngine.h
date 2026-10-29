@@ -211,6 +211,18 @@ public:
     bool replaceWholeFileUndoable (const std::vector<std::vector<float>>& data,
                                    const juce::String& description);
 
+    /** Replaces [samples] in every channel with `filtered` (one row per
+        channel, each exactly samples.getLength() long) and appends one new
+        channel per row of `noiseTracks`, each holding that row over [samples]
+        and silence elsewhere. Used by "Suppress Noise > Copy noise on new
+        track": the enhanced signal stays in place while the estimated noise
+        (original - enhanced) goes to fresh tracks. One undoable step covers
+        both the content change and the channel-count change. */
+    bool replaceWithNoiseTracks (const juce::Range<int64_t>& samples,
+                                 const std::vector<std::vector<float>>& filtered,
+                                 const std::vector<std::vector<float>>& noiseTracks,
+                                 const juce::String& description);
+
     // Append `append` after the current content. Channels beyond the appended
     // data's own count receive silence; when it has more channels than the
     // file currently does the channel count grows to match (existing channels

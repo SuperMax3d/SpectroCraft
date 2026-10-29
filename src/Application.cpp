@@ -2594,7 +2594,7 @@ bool Application::splitSpectralSelectionTrack1To2 (std::string* errOut)
 bool Application::noiseSuppress (const std::string& modelId, const std::string& device,
                                  float attenLimDb, bool df3PostFilter,
                                  std::function<bool(float)> onProgress, std::string* errOut,
-                                 bool autoDownload)
+                                 bool autoDownload, bool copyNoise)
 {
     auto fail = [&errOut] (const juce::String& msg) -> bool
     {
@@ -2636,6 +2636,14 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
             return fail ("Failed to read the selection.");
     }
 
+    // When copying the noise to new tracks we need each processed channel's
+    // original samples: keep them before the pipeline rewrites `data` in place.
+    std::vector<std::vector<float>> origCopy ((size_t) nch);
+    if (copyNoise)
+        for (int ch : visibleChans (*this))
+            if (ch >= 0 && ch < nch)
+                origCopy[(size_t) ch] = data[(size_t) ch];
+
     // The pipeline works on this copy; it is only committed on success.
     const bool ok = (modelId == "deepfilternet2" || modelId == "deepfilternet3")
         ? sc::runDeepFilterPipeline (modelId, device, audioEngine().sampleRate (), nch,
@@ -2646,9 +2654,47 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
     if (!ok)
         return fail (err);
 
-    if (!audioEngine().replaceSamples (samples, data,
-                                       "Noise suppressed (" + juce::String (modelId) + ")", &err))
-        return fail (err);
+    // Channels the pipeline actually processed: everything else passed through
+    // unchanged, so only these have a meaningful noise estimate.
+    std::vector<int> affected;
+    for (int ch : visibleChans (*this))
+        if (ch >= 0 && ch < nch) affected.push_back (ch);
+
+    if (!copyNoise || affected.empty ())
+    {
+        if (!audioEngine().replaceSamples (samples, data,
+                                           "Noise suppressed (" + juce::String (modelId) + ")", &err))
+            return fail (err);
+        return true;
+    }
+
+    // Copy noise on new track: the enhanced signal replaces the selection in
+    // place, and one appended channel per processed channel holds only the
+    // estimated noise (original - enhanced) over that range. One undoable step
+    // covers both the content change and the channel-count change.
+    std::vector<std::vector<float>> noiseTracks;
+    noiseTracks.reserve (affected.size ());
+    for (int ch : affected)
+    {
+        auto& nt = noiseTracks.emplace_back (std::vector<float> ((size_t) samples.getLength ()));
+        const auto& orig = origCopy[(size_t) ch];
+        const auto& filt = data[(size_t) ch];
+        for (size_t i = 0; i < nt.size (); ++i)
+            nt[i] = orig[i] - filt[i];
+    }
+
+    if (!audioEngine().replaceWithNoiseTracks (samples, data, noiseTracks,
+                "Noise suppressed (" + juce::String (modelId) + ") and copied noise to new track(s)"))
+        return fail ("Could not apply the noise suppression.");
+
+    // Make the freshly added channels visible (leave other choices alone).
+    const int n = audioEngine().numChannels ();
+    for (int ch = nch; ch < n; ++ch)
+        if (!isChannelVisible (ch))
+            visibleChannels.push_back (ch);
+    std::sort (visibleChannels.begin (), visibleChannels.end());
+    syncActiveDoc ();
+
     return true;
 }
 

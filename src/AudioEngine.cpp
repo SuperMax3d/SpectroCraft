@@ -1473,6 +1473,47 @@ bool AudioEngine::replaceWholeFileUndoable (const std::vector<std::vector<float>
     return true;
 }
 
+bool AudioEngine::replaceWithNoiseTracks (const juce::Range<int64_t>& samples,
+                                          const std::vector<std::vector<float>>& filtered,
+                                          const std::vector<std::vector<float>>& noiseTracks,
+                                          const juce::String& description)
+{
+    if (!ensureEditable ())
+        return false;
+    auto r = samples.getIntersectionWith ({ 0, totalSamples });
+    const int64_t len = r.getLength ();
+    if (len <= 0 || filtered.size () != (size_t) nchans)
+        return false;
+    for (const auto& row : filtered)
+        if ((int64_t) row.size () != len)
+            return false;
+    for (const auto& row : noiseTracks)
+        if ((int64_t) row.size () != len)
+            return false;
+
+    // Assemble the new whole file: existing channels with [r] replaced by the
+    // enhanced signal, plus one appended channel per noise track.
+    const int64_t total = totalSamples;
+    std::vector<std::vector<float>> newData ((size_t) (nchans + noiseTracks.size()),
+                                             std::vector<float> ((size_t) total, 0.0f));
+    for (int ch = 0; ch < nchans; ++ch)
+        if (!readSamples (ch, 0, total, newData[(size_t) ch].data ()))
+            return false;
+
+    int ai = 0;
+    for (const auto& nt : noiseTracks)
+    {
+        std::copy (nt.begin (), nt.end(),
+                   newData[(size_t) (nchans + ai)].begin () + (size_t) r.getStart ());
+        ++ai;
+    }
+    for (int ch = 0; ch < nchans; ++ch)
+        std::copy (filtered[(size_t) ch].begin (), filtered[(size_t) ch].end(),
+                   newData[(size_t) ch].begin () + (size_t) r.getStart ());
+
+    return replaceWholeFileUndoable (newData, description);
+}
+
 bool AudioEngine::appendSamples (const juce::AudioBuffer<float>& append,
                                  const juce::String& description)
 {

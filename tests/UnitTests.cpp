@@ -9575,6 +9575,39 @@ static void testNsFailureDetails()
     CHECK (d9.find ("openvino_npu_plugin.dll") != std::string::npos, "missing NPU plugin: names the NPU DLL");
 }
 
+// The Suppress Noise dialog exposes a "Copy noise on new track" option.
+static void testNsCopyNoiseCheckbox()
+{
+    const juce::File wav = makeTempFile ("ns_checkbox.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 16384,
+            [] (int, int64_t f, double) { return 0.0f; }), "wrote silence wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened checkbox wav");
+    FileDoc* d = app.doc ();
+    if (!d) { wav.deleteFile (); return; }
+
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "ns checkbox"));
+    auto* w = win->createNoiseSuppressDialog ();
+    CHECK (w != nullptr, "dialog created");
+    if (w)
+    {
+        juce::ComboBox* combo = w->getComboBoxComponent ("copyNoise");
+        CHECK (combo != nullptr, "dialog has the copy-noise option");
+        if (combo)
+        {
+            CHECK (combo->getNumItems () == 2
+                         && combo->getItemText (0) == "No"
+                         && combo->getItemText (1) == "Yes",
+                  "copy-noise offers No/Yes");
+            CHECK (combo->getSelectedItemIndex () == 0, "option is off by default");
+        }
+        delete w;
+    }
+
+    wav.deleteFile ();
+}
+
 // Device preference resolution shared by noise suppression and transcription:
 // "auto" picks GPU over NPU over CPU; an explicit choice that is unavailable
 // falls back to CPU with a human-readable note.
@@ -14044,6 +14077,112 @@ static void testFilterEqEffect()
     }
 }
 
+// ---------------- Suppress Noise > Copy noise on new track (engine level) ----
+// replaceWithNoiseTracks replaces the selection with the enhanced signal and
+// appends one channel per processed channel holding only the estimated noise
+// (original - enhanced); one undoable step covers both changes.
+static void testNsCopyNoiseTracks()
+{
+    const juce::File wav = makeTempFile ("ns_noise_tracks.wav");
+    CHECK (writeWav (wav, 2, kToneRate, kToneFrames,
+            [] (int ch, int64_t f, double rate) {
+                return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (ch == 0 ? 300.0 : 1500.0) * (double) f / rate);
+            }), "wrote two-tone wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened ns tracks wav");
+    AudioEngine& eng = app.audioEngine ();
+    const int64_t nTotal = kToneFrames;
+
+    // Whole-file originals for later comparison.
+    std::vector<std::vector<float>> wholeOrig (2);
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        wholeOrig[ch].resize ((size_t) nTotal);
+        CHECK (eng.readSamples (ch, 0, nTotal, wholeOrig[ch].data ()), "read full original");
+    }
+
+    // Selection: the middle second [0.5, 1.0) = samples [4000, 8000).
+    const juce::Range<int64_t> sel (4000, 8000);
+    const int64_t len = sel.getLength ();
+
+    // Synthetic "enhancement": halve the amplitude inside the selection.
+    std::vector<std::vector<float>> filtered (2);
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        filtered[ch].resize ((size_t) len);
+        CHECK (eng.readSamples (ch, sel.getStart (), len, filtered[ch].data ()), "read selection");
+        for (float& v : filtered[ch]) v *= 0.5f;
+    }
+
+    // Noise estimate: original - enhanced (= half of the original).
+    std::vector<std::vector<float>> noiseTracks (2);
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        noiseTracks[ch].resize ((size_t) len);
+        for (size_t i = 0; i < (size_t) len; ++i)
+            noiseTracks[ch][i] = wholeOrig[ch][(size_t) (sel.getStart () + i)] - filtered[ch][i];
+    }
+
+    CHECK (eng.replaceWithNoiseTracks (sel, filtered, noiseTracks, "test"), "applied");
+    CHECK (eng.numChannels () == 4, "two noise tracks appended");
+
+    // Existing channels: enhanced inside the selection, original outside.
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        std::vector<float> v ((size_t) nTotal);
+        CHECK (eng.readSamples (ch, 0, nTotal, v.data ()), "read channel");
+        bool okc = true;
+        for (int64_t i = 0; i < nTotal && okc; ++i)
+        {
+            const float expect = (i >= sel.getStart () && i < sel.getEnd ())
+                ? filtered[ch][(size_t) (i - sel.getStart ())]
+                : wholeOrig[ch][(size_t) i];
+            if (std::abs ((double) v[(size_t) i] - (double) expect) > 1e-5)
+                okc = false;
+        }
+        CHECK (okc, "channel " + juce::String (ch + 1) + ": enhanced inside selection, original outside");
+    }
+
+    // New channels: the noise estimate inside the selection, silence elsewhere.
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        std::vector<float> v ((size_t) nTotal);
+        CHECK (eng.readSamples (2 + ch, 0, nTotal, v.data ()), "read noise track");
+        bool okc = true;
+        for (int64_t i = 0; i < nTotal && okc; ++i)
+        {
+            const float expect = (i >= sel.getStart () && i < sel.getEnd ())
+                ? noiseTracks[ch][(size_t) (i - sel.getStart ())]
+                : 0.0f;
+            if (std::abs ((double) v[(size_t) i] - (double) expect) > 1e-5)
+                okc = false;
+        }
+        CHECK (okc, "noise track " + juce::String (ch + 1) + ": original-enhanced inside selection, silence outside");
+    }
+
+    // One undoable step: undo removes the tracks and restores the content.
+    CHECK (app.undo ().undoSize () == 1, "one undo step");
+    app.undoStep ();
+    CHECK (eng.numChannels () == 2, "undo removes the noise tracks");
+    {
+        std::vector<float> v ((size_t) nTotal);
+        CHECK (eng.readSamples (0, 0, nTotal, v.data ()), "read undone channel");
+        bool okc = true;
+        for (int64_t i = 0; i < nTotal && okc; ++i)
+            if (std::abs ((double) v[(size_t) i] - (double) wholeOrig[0][(size_t) i]) > 1e-5)
+                okc = false;
+        CHECK (okc, "undo restores the original content");
+    }
+
+    // Redo re-adds the noise tracks.
+    app.redoStep ();
+    CHECK (eng.numChannels () == 4, "redo re-adds the noise tracks");
+
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------- Python script panel
 static void testPythonScripts()
 {
@@ -17929,6 +18068,7 @@ static int scRunUnitTestsImpl()
     progress ("sha256 (self-contained)"); testSha256();
     progress ("AI plumbing");         testAIPlumbing();
     progress ("NS failure details");  testNsFailureDetails();
+    progress ("NS copy-noise checkbox"); testNsCopyNoiseCheckbox();
     progress ("denseunet pipeline");  testDenseUnetPipeline();
     progress ("deepfilter pipeline"); testDeepFilterPipeline();
     progress ("whisper pipeline");    testWhisperPipeline();
@@ -17987,6 +18127,7 @@ static int scRunUnitTestsImpl()
     progress ("invert effect");             testInvertEffect();
     progress ("time stretch effect");       testTimeStretchEffect();
     progress ("filter eq effect");          testFilterEqEffect();
+    progress ("ns copy noise tracks");      testNsCopyNoiseTracks();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
     progress ("copy curve alt scales");    testCopyCurveAltScales();

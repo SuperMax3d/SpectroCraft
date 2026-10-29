@@ -4027,7 +4027,10 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
                                      "\n"
                                      "Attenuation limit (dB) applies to the DeepFilterNet models only:\n"
                                      "100 means no attenuation limit (full noise suppression).\n"
-                                     "For little noise reduction, set to 6 - 12. For medium, 18 - 24.",
+                                     "For little noise reduction, set to 6 - 12. For medium, 18 - 24.\n"
+                                     "\n"
+                                     "Copy noise on new track adds one extra track per processed channel\n"
+                                     "containing only the estimated noise (original minus enhanced).",
                                      juce::AlertWindow::QuestionIcon, this);
 
     const juce::StringArray modelNames { "DenseUNet (legacy)", "DeepFilterNet2", "DeepFilterNet3" };
@@ -4055,6 +4058,13 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
     if (auto* c = w->getComboBoxComponent ("autoDl"))
         c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
 
+    // "Copy noise on new track": one appended channel per processed channel
+    // holding only the estimated noise (original - enhanced).
+    w->addComboBox ("copyNoise", juce::StringArray { "No", "Yes" },
+                    "Copy noise on new track");
+    if (auto* c = w->getComboBoxComponent ("copyNoise"))
+        c->setSelectedItemIndex (0);   // off by default
+
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
     return w;
@@ -4081,6 +4091,8 @@ void MainWindow::showNoiseSuppressDialog()
     const float attenLimDb = (float) w->getTextEditorContents ("attenLim").trim().getDoubleValue();
     const bool autoDownload = w->getComboBoxComponent ("autoDl") == nullptr
                                || w->getComboBoxComponent ("autoDl")->getText() == "Yes";
+    const bool copyNoise = w->getComboBoxComponent ("copyNoise") == nullptr
+                             || w->getComboBoxComponent ("copyNoise")->getText () == "Yes";
     const std::string devicePref = sc::aiDevicePrefFromText (w->getComboBoxComponent ("device") != nullptr
                                                                ? w->getComboBoxComponent ("device")->getText ()
                                                                : juce::String ());
@@ -4097,13 +4109,14 @@ void MainWindow::showNoiseSuppressDialog()
     app.saveAiSettings();
 
     // v1: the DF3 post-filter option is not exposed in the dialog yet.
-    runNoiseSuppressAsync (modelId, devicePref, attenLimDb, false, autoDownload);
+    runNoiseSuppressAsync (modelId, devicePref, attenLimDb, false, autoDownload, copyNoise);
 }
 
 // Noise suppression on a background thread with a progress dialog. Progress:
 // model download/compile/inference 0..95%, mipmap rebuild 95..100%.
 void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::string& devicePref,
-                                        float attenLimDb, bool df3PostFilter, bool autoDownload)
+                                        float attenLimDb, bool df3PostFilter, bool autoDownload,
+                                        bool copyNoise)
 {
     auto* dlg = new WorkProgressDialog ("Noise Suppression",
                                         "Applying " + juce::String (modelId) + " ...",
@@ -4111,7 +4124,7 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
     dlg->setProgress (0.0);
     dlg->beginModal ();
 
-    std::thread ([this, modelId, devicePref, attenLimDb, df3PostFilter, autoDownload, dlg] {
+    std::thread ([this, modelId, devicePref, attenLimDb, df3PostFilter, autoDownload, copyNoise, dlg] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
@@ -4138,7 +4151,7 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
                 sendProgress (0.95 * (double) f);
                 return !dlg->cancelled.load ();
             }, &err,
-            autoDownload);
+            autoDownload, copyNoise);
         if (ok)
             app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
                 sendProgress (0.95 + 0.05 * (double) f);

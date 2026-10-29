@@ -506,7 +506,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 - **AI features** (built by default; see [AI features](#ai-features) below):
   - *Noise Suppression* — Effects → Noise Suppression… applies a neural
     speech-enhancement model (DeepFilterNet 2/3 or DenseUNet) to the current
-    selection via OpenVINO.
+    selection via OpenVINO. The optional **Copy noise on new track** setting
+    appends one extra track per processed channel containing only the
+    estimated noise (original minus enhanced).
   - *Transcription* — Effects → Transcribe… runs Whisper over the whole file;
     segments appear in the **Transcription** tab (double-click a row to jump,
     Ctrl+F / F3 search for matches). Results are stored with the file as a
@@ -909,6 +911,11 @@ for your microarchitecture at load time.
   *attenuation limit* slider (dB, default 100 = no limit) controls how hard
   the DeepFilterNet models suppress noise: 6–12 for light reduction,
   18–24 for medium. The result is committed as an undoable edit.
+  With **Copy noise on new track** enabled, one extra channel is appended per
+  processed (visible) channel holding only the estimated noise — original minus
+  enhanced — over the selection range; the enhanced signal stays in the existing
+  channels and the new tracks are made visible. The whole change (content plus
+  channel count) is a single undoable step.
 - **Transcription** (`Effects → Transcribe…`) runs Whisper over the whole file
   (visible channels mixed to mono, resampled to 16 kHz with SoXR). A VAD pass
   first detects speech regions and skips long silences entirely — files with

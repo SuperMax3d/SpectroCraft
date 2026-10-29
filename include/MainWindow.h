@@ -270,9 +270,11 @@ public:
     void showNoiseSuppressDialog();
     // devicePref: "auto" | "CPU" | "GPU" | "NPU" - resolved against the
     // available OpenVINO devices on the worker thread before processing.
+    // copyNoise: append one new track per processed channel holding only the
+    // estimated noise (original - enhanced) over the selection range.
     void runNoiseSuppressAsync (const std::string& modelId, const std::string& devicePref,
                                 float attenLimDb = 0.f, bool df3PostFilter = false,
-                                bool autoDownload = true);
+                                bool autoDownload = true, bool copyNoise = false);
 
     /** Builds (but does not run modally) the Transcription dialog. The caller
         owns and must delete it; used by showTranscribeDialog() and tests. */
