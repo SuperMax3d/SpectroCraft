@@ -508,14 +508,21 @@ public:
     void paintZoomRubberBand (juce::Graphics& g, const juce::Rectangle<int>& plot) const;
 
     // Harmonic reference mode (right-click "Set Harmonic References"): the
-    // frequency under the cursor is treated as harmonic #N of a fundamental,
-    // and harmonics 1..N get delicate vertical lines wherever they are inside
-    // the visible frequency window. The anchor follows the mouse X position.
+    // reference frequency is treated as harmonic #N of a fundamental, and
+    // harmonics 1..max(N, maxK) get delicate vertical lines wherever they are
+    // inside the visible frequency window. The anchor follows the mouse X
+    // position.
     bool harmonicRefActive() const { return harmonicRefActive_; }
     int harmonicN() const { return harmonicN_; }
     double harmonicAnchorF() const { return harmonicAnchorF_; }
-    void setHarmonicReference (int n, double anchorHz);
+    // Highest harmonic number displayed (the dialog's "Maximum harmonic
+    // number to display", default 10). Lines are drawn for 1..max(N, maxK).
+    int harmonicMaxK() const { return harmonicMaxK_; }
+    void setHarmonicReference (int n, double anchorHz, int maxK = 10);
     void resetHarmonicReference();
+    // Builds the "Set Harmonic References" dialog without running it modally
+    // (shared by showSetHarmonicDialog and the unit tests). Caller owns it.
+    juce::AlertWindow* createSetHarmonicDialog (double clickFreqHz);
     // TSV table of harmonics 1..N (header + one row each), CRLF line endings,
     // Excel-paste friendly. Empty when the mode is off or no spectrum exists.
     juce::String buildHarmonicsTable() const;
@@ -707,6 +714,7 @@ private:
     bool harmonicRefActive_ = false;
     int harmonicN_ = 1;              // which harmonic number the anchor is
     double harmonicAnchorF_ = 0.0;   // Hz, follows the mouse while active
+    int harmonicMaxK_ = 10;          // highest harmonic number to display
 
     // Bumped whenever the FFT size or window type changes: stored snapshots
     // remember the generation they were computed with and are recomputed from

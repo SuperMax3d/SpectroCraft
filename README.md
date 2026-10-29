@@ -223,14 +223,19 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       on screen), and the harmonic-reference tools below; right-clicking the
       *level* axis resets only the level window, the *frequency* axis only the
       frequency window.
-    - **Set Harmonic References** (right-click): a popup asks which harmonic
-      number the frequency under the cursor is (default 1 = fundamental). The
-      panel then draws delicate vertical lines for harmonics 1..N wherever they
-      are inside the visible frequency window, each labelled with its number.
-      The lines are dynamic — they re-anchor to the frequency under the mouse as
-      you move it. **Copy Harmonics** copies an Excel-friendly table (tab-
-      separated, CRLF line endings) with columns *Harmonic*, *Frequency* and
-      *Amplitude* (sampled from the first visible channel at each harmonic's
+    - **Set Harmonic References** (right-click): a popup with three editable
+      fields — *Reference frequency:* (initialised to the frequency under the
+      cursor, freely editable), *harmonic* (which harmonic number it is,
+      default 1 = fundamental) and *Maximum harmonic number to display:*
+      (default 10). The panel then draws delicate vertical lines for harmonics
+      1..max(N, maximum) wherever they are inside the visible frequency window,
+      each labelled with its number — so setting harmonic #3 still shows the
+      higher harmonics 4, 5, 6, ... up to the configured maximum. White dots
+      mark where each line crosses the channel curves. The lines are dynamic —
+      they re-anchor to the frequency under the mouse as you move it.
+      **Copy Harmonics** copies an Excel-friendly table (tab-separated, CRLF
+      line endings) with columns *Harmonic*, *Frequency* and *Amplitude*
+      (harmonics 1..N, sampled from the first visible channel at each harmonic's
       nearest FFT bin; empty above Nyquist). **Reset Harmonic** removes the
       reference and its lines.
     - **Left-drag on the bottom Hz strip** pans the frequency window;

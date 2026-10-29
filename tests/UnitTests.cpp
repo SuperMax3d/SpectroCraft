@@ -4979,6 +4979,7 @@ static void testFFTHarmonicReferences()
     CHECK (view.harmonicRefActive(), "reference active after set");
     CHECK (view.harmonicN() == 3, "harmonic number stored");
     CHECK (std::abs (view.harmonicAnchorF() - 1320.0) < 1e-9, "anchor stored");
+    CHECK (view.harmonicMaxK() == 10, "default maximum harmonic number is 10");
 
     const auto lines = juce::StringArray::fromLines (view.buildHarmonicsTable());
     CHECK (lines.size() == 4, "header + one row per harmonic");
@@ -5046,6 +5047,100 @@ static void testFFTHarmonicReferences()
                     if (px.getBlue() > 120 && px.getGreen() > 100 && px.getRed() < 110) ++cyan;
                 }
         CHECK (cyan >= 40, "harmonic line pixels drawn at the expected column");
+    }
+
+    // --- The display extends past the reference harmonic up to the configured
+    //     maximum: with fundamental 500 Hz and maxK = 6, harmonic #6 sits at
+    //     3000 Hz - far beyond N = 1.
+    view.setHarmonicReference (1, 500.0, 6);
+    CHECK (view.harmonicMaxK() == 6, "explicit maximum stored");
+    {
+        juce::Image img (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+        const float xLine = (float) view.freqToX (3000.0);
+        int cyan = 0;
+        for (int x = (int) xLine - 1; x <= (int) xLine + 1; ++x)
+            for (int y = plot.getY() + 2; y < plot.getBottom() - 2; ++y)
+                if (x >= 0 && x < 300 && y >= 0 && y < 200)
+                {
+                    const auto px = img.getPixelAt (x, y);
+                    if (px.getBlue() > 120 && px.getGreen() > 100 && px.getRed() < 110) ++cyan;
+                }
+        CHECK (cyan >= 40, "harmonic line drawn beyond the reference harmonic");
+    }
+
+    // --- White dots where each harmonic line crosses the channel curve: with
+    //     anchor 880 Hz as harmonic #2 of a 440 Hz fundamental, the first
+    //     harmonic sits exactly on the file's 440 Hz tone.
+    view.setHarmonicReference (2, 880.0);
+    view.mouseExit (mkMouse (view, -5, -5, {}));   // no cursor crosshair/dot
+    {
+        juce::Image img (juce::Image::ARGB, 300, 200, true);
+        { juce::Graphics g (img); view.paint (g); }
+        const auto& mags = view.getSpectrum();
+        CHECK (!mags.empty(), "spectrum available for the dot check");
+        if (!mags.empty())
+        {
+            const int n = (int) ((size_t) mags[0].size() - 1) * 2;   // cachedN
+            const double rate = app.audioEngine().sampleRate();
+            const int bin = (int) std::lround (440.0 * (double) n / rate);
+            const double dBc = -FFTAnalysisView::kNormFloorDb * (1.0 - (double) mags[0][(size_t) bin]);
+            const float xDot = (float) view.freqToX (440.0);
+            const float yDot = view.levelToY (dBc);
+            int white = 0;
+            for (int x = (int) xDot - 5; x <= (int) xDot + 5; ++x)
+                for (int y = (int) yDot - 5; y <= (int) yDot + 5; ++y)
+                    if (x >= 0 && x < 300 && y >= 0 && y < 200)
+                    {
+                        const auto px = img.getPixelAt (x, y);
+                        if (px.getRed() > 240 && px.getGreen() > 240 && px.getBlue() > 240) ++white;
+                    }
+            CHECK (white >= 15, "white dot drawn where the harmonic line crosses the curve");
+        }
+    }
+
+    // --- Reset restores the default maximum.
+    view.resetHarmonicReference();
+    CHECK (!view.harmonicRefActive(), "reset deactivates again");
+    CHECK (view.harmonicMaxK() == 10, "reset restores the default maximum");
+
+    wav.deleteFile();
+}
+
+static void testFFTHarmonicDialogFields()
+{
+    const juce::File wav = makeTempFile ("fft_harm_dlg.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for harmonic dialog test");
+    FFTAnalysisView view (app);
+    view.setSize (300, 200);
+
+    auto* w = view.createSetHarmonicDialog (432.5);
+    CHECK (w != nullptr, "dialog created");
+    if (w)
+    {
+        // The old prose line is gone; the frequency is an editable field now.
+        auto* refEd = w->getTextEditor ("Reference frequency:");
+        CHECK (refEd != nullptr, "reference frequency field exists");
+        if (refEd)
+            CHECK (std::abs (refEd->getText().getDoubleValue() - 432.5) < 1e-6,
+                   "reference frequency initialised from the cursor position");
+
+        auto* harmEd = w->getTextEditor ("harmonic");
+        CHECK (harmEd != nullptr && harmEd->getText() == "1",
+              "harmonic field defaults to 1");
+
+        auto* maxEd = w->getTextEditor ("Maximum harmonic number to display:");
+        CHECK (maxEd != nullptr && maxEd->getText() == "10",
+              "maximum harmonic number field defaults to 10");
+
+        delete w;
     }
 
     wav.deleteFile();
@@ -18679,6 +18774,7 @@ static int scRunUnitTestsImpl()
     progress ("render cancel");       testRenderToPixelsCancel();
     progress ("fft view rate change"); testFFTAnalysisRateChange();
     progress ("fft harmonic references"); testFFTHarmonicReferences();
+    progress ("fft harmonic dialog fields"); testFFTHarmonicDialogFields();
     progress ("alt scale in fft readout"); testAltScaleInFFTReadout();
     progress ("status bar sample rate"); testStatusBarSampleRate();
     progress ("sctt json");             testScttJson();

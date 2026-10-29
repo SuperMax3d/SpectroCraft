@@ -2407,13 +2407,16 @@ void FFTAnalysisView::paint (juce::Graphics& g)
         g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
                     (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
 
-    // Harmonic reference lines: while active, the frequency under the cursor
-    // is harmonic #N of a fundamental and harmonics 1..N get delicate
-    // vertical markers wherever they are inside the visible window.
+    // Harmonic reference lines: while active, the reference frequency is
+    // harmonic #N of a fundamental and harmonics 1..max(N, maxK) get delicate
+    // vertical markers wherever they are inside the visible window. White dots
+    // mark where each line crosses the channel curves.
     if (harmonicRefActive_ && haveSpectrum && harmonicAnchorF_ > 0.0)
     {
         const double fFund = harmonicAnchorF_ / std::max (1, harmonicN_);
-        for (int k = 1; k <= harmonicN_; ++k)
+        const int kMax = std::max (harmonicN_, harmonicMaxK_);
+        const double rate = app.audioEngine().sampleRate();
+        for (int k = 1; k <= kMax; ++k)
         {
             const double f = (double) k * fFund;
             if (f < fLo || f > fHi) continue;
@@ -2423,6 +2426,20 @@ void FFTAnalysisView::paint (juce::Graphics& g)
             g.setFont (9.0f);
             g.drawText (juce::String (k), x - 8, plot.getY() + 1, 16, 12,
                         juce::Justification::centred, false);
+
+            // White dots where the harmonic line crosses each channel's curve.
+            for (size_t c = 0; c < mags.size () && c < 4; ++c)
+            {
+                const auto& mag = mags[c];
+                if (mag.empty ()) continue;
+                const int maxBin = std::min ((int) (cachedN / 2), (int) mag.size () - 1);
+                if (maxBin < 1 || f > rate * 0.5) continue;   // no FFT data above Nyquist
+                const int bin = (int) std::clamp ((double) std::lround (f * cachedN / rate),
+                                                 0.0, (double) maxBin);
+                const double dBc = -kNormFloorDb * (1.0 - (double) mag[(size_t) bin]);
+                g.setColour (juce::Colours::white);
+                g.fillEllipse (x - 3.5f, levelToY (dBc) - 3.5f, 7.0f, 7.0f);
+            }
         }
     }
 
@@ -3837,12 +3854,13 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
     }
 }
 
-void FFTAnalysisView::setHarmonicReference (int n, double anchorHz)
+void FFTAnalysisView::setHarmonicReference (int n, double anchorHz, int maxK)
 {
     if (n < 1 || !(anchorHz > 0.0) || !std::isfinite (anchorHz)) return;
     harmonicRefActive_ = true;
     harmonicN_ = n;
     harmonicAnchorF_ = anchorHz;
+    harmonicMaxK_ = std::max (1, maxK);
     repaint();
 }
 
@@ -3852,6 +3870,7 @@ void FFTAnalysisView::resetHarmonicReference()
     harmonicRefActive_ = false;
     harmonicN_ = 1;
     harmonicAnchorF_ = 0.0;
+    harmonicMaxK_ = 10;
     repaint();
 }
 
@@ -3907,20 +3926,26 @@ void FFTAnalysisView::copyHarmonicsToClipboard()
         juce::SystemClipboard::copyTextToClipboard (table);
 }
 
-void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
+// Builds the "Set Harmonic References" dialog without running it modally
+// (shared by showSetHarmonicDialog and the unit tests). Caller owns the window.
+juce::AlertWindow* FFTAnalysisView::createSetHarmonicDialog (double clickFreqHz)
 {
     auto* w = new juce::AlertWindow ("Set Harmonic References",
-                                     "The frequency under the cursor is\n"
-                                     + juce::String (clickFreqHz, 1) + " Hz.\n\n"
-                                     "Which harmonic number is it? (1 = fundamental)\n"
-                                     "Harmonics 1..N will be marked with vertical lines that\n"
-                                     "follow the mouse while you move it.",
+                                     "Set the reference frequency and which harmonic number it is\n"
+                                     "(1 = fundamental). Harmonics up to the maximum are marked with\n"
+                                     "vertical lines that follow the mouse while you move it.",
                                      juce::AlertWindow::QuestionIcon, this);
+    // The reference frequency starts at the frequency under the cursor but is
+    // freely editable; so are the harmonic number and the display maximum.
+    w->addTextEditor ("Reference frequency:", juce::String (clickFreqHz, 3));
     w->addTextEditor ("harmonic", "1");
-    if (auto* editor = w->getTextEditor ("harmonic"))
-        // Let Enter/Escape reach the OK/Cancel shortcuts even while a
-        // field has keyboard focus.
-        editor->setEscapeAndReturnKeysConsumed (false);
+    w->addTextEditor ("Maximum harmonic number to display:", "10");
+    for (const char* name : { "Reference frequency:", "harmonic",
+                              "Maximum harmonic number to display:" })
+        if (auto* editor = w->getTextEditor (name))
+            // Let Enter/Escape reach the OK/Cancel shortcuts even while a
+            // field has keyboard focus.
+            editor->setEscapeAndReturnKeysConsumed (false);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -3932,6 +3957,12 @@ void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
         editor->setWantsKeyboardFocus (true);
         editor->selectAll();
     }
+    return w;
+}
+
+void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
+{
+    auto* w = createSetHarmonicDialog (clickFreqHz);
 
     // Enter modal state WITHOUT taking keyboard focus (see showNewFileDialog).
     w->enterModalState (false);
@@ -3939,10 +3970,23 @@ void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
         editor->grabKeyboardFocus();
 
     const int result = w->runModalLoop();
+    const juce::String refText = w->getTextEditorContents ("Reference frequency:").trim ();
     const juce::String text = w->getTextEditorContents ("harmonic")
                                  .trim ().removeCharacters ("., ");
+    const juce::String maxText = w->getTextEditorContents ("Maximum harmonic number to display:")
+                                     .trim ().removeCharacters ("., ");
     delete w;
     if (result != 1) return;
+
+    const double refHz = refText.getDoubleValue ();
+    if (!(refHz > 0.0) || !std::isfinite (refHz))
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Set Harmonic References",
+                                            "Please enter a positive reference frequency in Hz.",
+                                            "", this);
+        return;
+    }
 
     const int n = text.isEmpty () ? 0 : text.getIntValue ();
     if (n < 1 || n > 1000)
@@ -3954,7 +3998,18 @@ void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
         return;
     }
 
-    setHarmonicReference (n, clickFreqHz);
+    const int maxK = maxText.isEmpty () ? 10 : maxText.getIntValue ();
+    if (maxK < 1 || maxK > 1000)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Set Harmonic References",
+                                            "Please enter an integer between 1 and 1000 for the\n"
+                                            "maximum harmonic number to display.",
+                                            "", this);
+        return;
+    }
+
+    setHarmonicReference (n, refHz, maxK);
 }
 
 // ---------------------------------------------------------------------------
