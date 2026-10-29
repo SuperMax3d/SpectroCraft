@@ -13571,6 +13571,27 @@ static void testGenerateDialogs()
         CHECK (hasCombo && hasSlider, "noise dialog has a type combo and an intensity slider");
         CHECK (wn->getTextEditor ("genDuration") != nullptr,
               "noise dialog has a duration field without a target");
+
+        // Render headlessly so the layout can be visually inspected.
+        {
+            const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                .getChildFile ("sc_gen_noise_snapshot.png");
+            const juce::Image img = wn->createComponentSnapshot (wn->getLocalBounds (), true, 2.0f);
+            std::vector<uint8_t> px;
+            px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
+            for (int yy = 0; yy < img.getHeight (); ++yy)
+                for (int xx = 0; xx < img.getWidth (); ++xx)
+                {
+                    const juce::Colour c = img.getPixelAt (xx, yy);
+                    px.push_back ((uint8_t) c.getRed());
+                    px.push_back ((uint8_t) c.getGreen());
+                    px.push_back ((uint8_t) c.getBlue());
+                    px.push_back ((uint8_t) c.getAlpha());
+                }
+            CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
+                   "saved noise-dialog snapshot: " + out.getFullPathName());
+        }
+
         delete wn;
 
         auto* wt = win->createGenerateToneDialog();
@@ -13588,6 +13609,27 @@ static void testGenerateDialogs()
         }
         CHECK (wt->getTextEditor ("genDuration") != nullptr,
               "tone dialog has a duration field without a target");
+
+        // Render headlessly so the layout can be visually inspected.
+        {
+            const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                .getChildFile ("sc_gen_tone_snapshot.png");
+            const juce::Image img = wt->createComponentSnapshot (wt->getLocalBounds (), true, 2.0f);
+            std::vector<uint8_t> px;
+            px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
+            for (int yy = 0; yy < img.getHeight (); ++yy)
+                for (int xx = 0; xx < img.getWidth (); ++xx)
+                {
+                    const juce::Colour c = img.getPixelAt (xx, yy);
+                    px.push_back ((uint8_t) c.getRed());
+                    px.push_back ((uint8_t) c.getGreen());
+                    px.push_back ((uint8_t) c.getBlue());
+                    px.push_back ((uint8_t) c.getAlpha());
+                }
+            CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
+                   "saved tone-dialog snapshot: " + out.getFullPathName());
+        }
+
         delete wt;
     }
 

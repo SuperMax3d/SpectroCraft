@@ -4230,14 +4230,17 @@ juce::TextEditor* ToneListEditor::firstFreqEditor() const
 void ToneListEditor::resized()
 {
     auto b = getLocalBounds ();
+    const int rowW = kFreqW + kGap + kAmpW + kGap + kClearW;
+    int y = b.getY();
     for (const auto& row : rows)
     {
         Row& r = *row;
-        const int y = b.getY();
-        r.freq.setBounds (b.getX(), y, kFreqW, kRowH);
-        r.amp.setBounds (b.getX() + kFreqW + kGap, y, kAmpW, kRowH);
-        r.clear.setBounds (b.getX() + kFreqW + kGap + kAmpW + kGap, y,
-                           kClearW, kRowH);
+        // The Row itself must cover its children or they get clipped away.
+        r.setBounds (b.getX(), y, rowW, kRowH);
+        r.freq.setBounds (0, 0, kFreqW, kRowH);
+        r.amp.setBounds (kFreqW + kGap, 0, kAmpW, kRowH);
+        r.clear.setBounds (kFreqW + kGap + kAmpW + kGap, 0, kClearW, kRowH);
+        y += kRowH + kGap;
     }
     addBtn.setBounds (b.removeFromBottom (kAddH));
 }

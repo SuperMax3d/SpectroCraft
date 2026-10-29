@@ -3004,6 +3004,7 @@ juce::AlertWindow* MainWindow::createGenerateNoiseDialog()
     typeCombo->addItem ("White noise", 1);
     typeCombo->addItem ("Pink noise", 2);
     typeCombo->addItem ("Brown noise", 3);
+    typeCombo->setSelectedId (1, juce::dontSendNotification);   // default: white
     typeCombo->setSize (200, 28);
     w->addCustomComponent (typeCombo);
 
@@ -3072,6 +3073,7 @@ juce::AlertWindow* MainWindow::createGenerateToneDialog()
     waveCombo->addItem ("Square", 2);
     waveCombo->addItem ("Sawtooth", 3);
     waveCombo->addItem ("Triangle", 4);
+    waveCombo->setSelectedId (1, juce::dontSendNotification);   // default: sine
     waveCombo->setSize (200, 28);
     w->addCustomComponent (waveCombo);
 
