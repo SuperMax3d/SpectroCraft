@@ -321,6 +321,8 @@ public:
         ViewShowLeftPanels,   // hide/show the whole left panel column
         ViewAxisOnRight,      // vertical axis on the right of both track views
         ViewRulerAtBottom,    // time ruler at the bottom of both track views
+        ViewShowAmpGrid,      // horizontal amplitude grid lines in the waveform tracks
+        ViewShowFreqGrid,     // horizontal frequency grid lines in the spectrogram tracks
         ViewColourMap,
         SelectionToolTimeRange = 3500, SelectionToolMarquee, SelectionToolLasso,
         SelectionToolPaintbrush, SelectionClear, SelectionBrushSmaller,

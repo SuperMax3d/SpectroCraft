@@ -37,6 +37,7 @@ enum ContextMenuIDs : int
     // Alternative Scale menu (spectrogram right-click only).
     CtxAltScaleTime       = 23,   // "New" time reference: arms the ref-click flow
     CtxAltScaleFreq       = 24,   // "New" frequency reference: arms the ref-click flow
+    CtxCheckHarmonicRatio = 25,   // Frequency Analysis only (Freq vs Time mode)
     CtxAltRefTimeBase     = 100,  // + index: edit an existing time reference
     CtxAltRefFreqBase     = 200   // + index: edit an existing frequency reference
 };
@@ -91,6 +92,11 @@ struct Settings
     bool trackAxisOnRight = false;
     bool trackRulerAtBottom = false;
 
+    // Horizontal grid lines inside the data tracks (View menu), persisted:
+    // amplitude levels in the waveform, frequency ticks in the spectrogram.
+    bool showAmpGrid = true;      // "Show Amplitude Grid"
+    bool showFreqGrid = true;     // "Show Frequency Grid"
+
     // Spectrogram export overlays - which extras to bake into exported PNGs
     // (File -> Spectrogram submenu). Persisted between sessions.
     bool exportAxes = false;        // include frequency + time axes around the plot
@@ -124,6 +130,8 @@ struct Settings
             && fftTrack == o.fftTrack
             && trackAxisOnRight == o.trackAxisOnRight
             && trackRulerAtBottom == o.trackRulerAtBottom
+            && showAmpGrid == o.showAmpGrid
+            && showFreqGrid == o.showFreqGrid
             && exportAxes == o.exportAxes && exportMarkers == o.exportMarkers
             && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings;
     }

@@ -1415,9 +1415,14 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
             const float tickX0 = axisOnRight() ? 0.0f : (float) kLeftAxisWidth;
             const float tickX1 = axisOnRight() ? (float) (layoutWidth() - kLeftAxisWidth)
                                                : (float) layoutWidth();
-            g.setColour (minor ? juce::Colour::fromRGB (48, 48, 52)
-                               : juce::Colour::fromRGB (60, 60, 60));
-            g.drawLine (tickX0, y, tickX1, y, 1.0f);
+            // The grey grid line can be hidden from the View menu; the axis
+            // labels below are unaffected.
+            if (app.settings.showFreqGrid)
+            {
+                g.setColour (minor ? juce::Colour::fromRGB (48, 48, 52)
+                                   : juce::Colour::fromRGB (60, 60, 60));
+                g.drawLine (tickX0, y, tickX1, y, 1.0f);
+            }
             if (!showLabels || !withLabel) return;
             if (hasChanLabel && std::abs (y - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
                 return; // room for the channel label

@@ -355,6 +355,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     bottom. When both views are stacked, exactly one of them draws the shared
     time ruler: the waveform when it is at the top, the spectrogram (the lower
     view) when it is at the bottom — the other hides its strip and expands.
+    The same section offers **Show Amplitude Grid** and **Show Frequency
+    Grid**, which hide/show the horizontal grey grid lines inside the data
+    tracks - the dB amplitude levels in each waveform track and the frequency
+    tick lines in each spectrogram track. Both default to on, are remembered
+    between sessions, and leave the axis labels untouched when off.
   - Main area: waveform view on top, spectral view below, separated by a
     **draggable divider** — drag it up/down to resize the two views. A time
     scrollbar runs along the bottom, aligned with the data region (inset by

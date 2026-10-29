@@ -17450,7 +17450,8 @@ static void testTrackAxisPlacement()
     // --- View menu: two checkable items; clicking toggles the settings ------
     std::unique_ptr<MainWindow> win (new MainWindow (app, "track axis placement"));
     const juce::PopupMenu viewMenu = win->getMenuForIndex (3, "View");
-    CHECK (viewMenu.getNumItems() == 16, "View menu item count with stereo file");
+    // 16 -> 18: the two grid toggles were added after the axis placement.
+    CHECK (viewMenu.getNumItems() == 18, "View menu item count with stereo file");
 
     // --- Resample lives in its own section of the Edit menu -----------------
     const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
@@ -17506,6 +17507,87 @@ static void testTrackAxisPlacement()
         CHECK (sv2->showsOwnTimeRuler() && sv2->onRulerY (sv2->getHeight() - 5),
               "lone spectrogram shows bottom ruler");
     }
+
+    // --- Show Amplitude Grid / Show Frequency Grid (persisted) --------------
+    app.settings.trackAxisOnRight = false;
+    app.settings.trackRulerAtBottom = false;
+    sv.setShowOwnTimeRuler (true);   // back to the default standalone layout
+    // The standalone views were never synced with the app: give them the
+    // loaded file's visible channels so both rows are laid out.
+    wv.setVisibleChannels (app.visibleChannels);
+    sv.setVisibleChannels (app.visibleChannels);
+    CHECK (app.settings.showAmpGrid && app.settings.showFreqGrid,
+          "grid lines are ON by default");
+
+    // Toggling through the menu flips the settings and is persistent-dirty.
+    const Settings gridBase = app.settings;
+    win->menuItemSelected (MainWindow::MenuIDs::ViewShowAmpGrid, 3);
+    CHECK (!app.settings.showAmpGrid && app.settings.showFreqGrid,
+          "amp grid toggled off via the menu");
+    CHECK (!app.settings.samePersistent (gridBase),
+          "amp grid change is persistent-dirty");
+    win->menuItemSelected (MainWindow::MenuIDs::ViewShowFreqGrid, 3);
+    CHECK (!app.settings.showAmpGrid && !app.settings.showFreqGrid,
+          "freq grid toggled off via the menu");
+
+    // Waveform: with the grid on, row 0's upper 0 dB line lands exactly on
+    // (48,48,48); hidden it falls back to the plain background. Row 0 is
+    // y=24..159 (height 135): centre 91.5, ampScale 60.75 -> line at 30.75.
+    {
+        app.settings.showAmpGrid = true;   // the menu toggles left it off
+        wv.repaint ();
+        const auto imgOn = wv.createComponentSnapshot (wv.getLocalBounds());
+        app.settings.showAmpGrid = false;
+        wv.repaint ();
+        const auto imgOff = wv.createComponentSnapshot (wv.getLocalBounds());
+        CHECK (imgOn.getPixelAt (200, 30) == juce::Colour::fromRGB (48, 48, 48),
+              "amp grid line drawn");
+        CHECK (imgOff.getPixelAt (200, 30) != juce::Colour::fromRGB (48, 48, 48),
+              "amp grid line hidden");
+    }
+
+    // Spectrogram: hiding the frequency grid removes only thin lines.
+    {
+        app.settings.showFreqGrid = true;   // the menu toggles left it off
+        sv.repaint ();
+        const auto imgOn = sv.createComponentSnapshot (sv.getLocalBounds());
+        app.settings.showFreqGrid = false;
+        sv.repaint ();
+        const auto imgOff = sv.createComponentSnapshot (sv.getLocalBounds());
+        int diff = 0, total = 0;
+        for (int y = 24; y < 300; ++y)
+            for (int x = 60; x < 400; ++x)
+            {
+                ++total;
+                if (imgOn.getPixelAt (x, y) != imgOff.getPixelAt (x, y))
+                    ++diff;
+            }
+        CHECK (diff > 20, "frequency grid lines were drawn");
+        CHECK (diff * 5 < total, "only thin lines differ");
+    }
+
+    // Persistence across a simulated restart.
+    {
+        const juce::File store = makeTempFile ("grid_session.props");
+        if (store.existsAsFile()) store.deleteFile();
+        {
+            Application g (store);
+            CHECK (g.settings.showAmpGrid && g.settings.showFreqGrid,
+                  "grids ON with an empty store");
+            g.settings.showAmpGrid = false;
+            g.settings.showFreqGrid = true;
+            g.saveSettings ();
+        }
+        {
+            Application h (store);
+            CHECK (!h.settings.showAmpGrid && h.settings.showFreqGrid,
+                  "grid flags restored from the store");
+        }
+        store.deleteFile();
+    }
+
+    app.settings.showAmpGrid = true;
+    app.settings.showFreqGrid = true;
 
     wav.deleteFile();
 }

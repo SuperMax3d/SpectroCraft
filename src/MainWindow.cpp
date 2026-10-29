@@ -2136,6 +2136,21 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         return;
     }
 
+    // Horizontal grid lines: no layout change, so syncSharedState() repaints
+    // both views and persists the flags.
+    if (menuItemID == ViewShowAmpGrid)
+    {
+        app.settings.showAmpGrid = !app.settings.showAmpGrid;
+        if (app.onStateChange) app.onStateChange ();
+        return;
+    }
+    if (menuItemID == ViewShowFreqGrid)
+    {
+        app.settings.showFreqGrid = !app.settings.showFreqGrid;
+        if (app.onStateChange) app.onStateChange ();
+        return;
+    }
+
     switch (menuItemID)
     {
         case FileNew:  showNewFileDialog(); break;
@@ -4802,6 +4817,12 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       app.settings.trackAxisOnRight);
         menu.addItem (ViewRulerAtBottom, "Time Ruler at Bottom", true,
                       app.settings.trackRulerAtBottom);
+        // Horizontal grid lines inside the data tracks: amplitude levels in
+        // the waveform, frequency ticks in the spectrogram. Remembered.
+        menu.addItem (ViewShowAmpGrid, "Show Amplitude Grid", true,
+                      app.settings.showAmpGrid);
+        menu.addItem (ViewShowFreqGrid, "Show Frequency Grid", true,
+                      app.settings.showFreqGrid);
         menu.addSeparator();
         juce::PopupMenu colourMapMenu;
         colourMapMenu.addItem (ColourMapClassic, "Classic (Default)", true, app.colourMap == ColourMap::Classic);

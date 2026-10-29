@@ -854,17 +854,22 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
         const float center = pr.getY() + rr.getY() + rr.getHeight() * 0.5f;
         const float ampScale = rr.getHeight() * 0.45f * (float) vZoom;
 
-        for (double dB : levels)
+        // The grey horizontal grid lines can be hidden from the View menu;
+        // the axis labels below are unaffected.
+        if (app.settings.showAmpGrid)
         {
-            const double a = std::pow (10.0, dB / 20.0); // amplitude at this level
-            for (int sign : { -1, +1 })
+            for (double dB : levels)
             {
-                // Value +a sits above the centre line, value -a below it;
-                // both are shifted by the vertical offset.
-                const float y = center + (float) ((vOffset - sign * a) * ampScale);
-                if (y < pr.getY() || y > pr.getBottom()) continue;
-                g.setColour (juce::Colour::fromRGB (48, 48, 48));
-                g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
+                const double a = std::pow (10.0, dB / 20.0); // amplitude at this level
+                for (int sign : { -1, +1 })
+                {
+                    // Value +a sits above the centre line, value -a below it;
+                    // both are shifted by the vertical offset.
+                    const float y = center + (float) ((vOffset - sign * a) * ampScale);
+                    if (y < pr.getY() || y > pr.getBottom()) continue;
+                    g.setColour (juce::Colour::fromRGB (48, 48, 48));
+                    g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
+                }
             }
         }
 
