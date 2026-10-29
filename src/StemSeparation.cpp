@@ -54,6 +54,7 @@ public:
         edit_.setColour (juce::CaretComponent::caretColourId, juce::Colours::white);
         edit_.addListener (this);
         edit_.setText (entry.text, juce::dontSendNotification);
+        edit_.setTooltip ("Description of the stem to extract.");
 
         includeBtn_.setButtonText ("Include Selection");
         includeBtn_.onClick = [this] { owner_->addAnchorFromSelection (index_, true); };
@@ -282,7 +283,8 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     advancedBtn_.setButtonText (advanced_ ? "Simple view" : "Advanced...");
     advancedBtn_.onClick = [this] { setAdvanced (!advanced_); };
 
-    addDescBtn_.setButtonText ("Add Description...");
+    // Sits below the last description row in advanced mode (see resized()).
+    addDescBtn_.setButtonText ("Add Stem");
     addDescBtn_.onClick = [this]
     {
         descs_.push_back (StemDescEntry {});
@@ -332,6 +334,11 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
 
     refreshModelList ();
     centreWithSize (kWinW, computeHeight ());
+    // Stay above the main window while open: making include/exclude
+    // selections requires clicking into the track view, which would otherwise
+    // push this non-modal window behind it. JUCE has no per-window z-order,
+    // so use global topmost for the lifetime of the dialog.
+    setAlwaysOnTop (true);
     setVisible (true);
 }
 
@@ -460,6 +467,7 @@ struct LayoutYs
     int sourceRow = 0, modelRow = 0, backendRow = 0;
     int descAreaTop = 0;      // description editor (simple) or header row (advanced)
     int rowsTop = 0;          // top of the DescRow stack (advanced only)
+    int addDescRow = 0;       // "Add Stem" button, below the last row (advanced)
     int statusTop = 0;
     int bottomRow = 0;
     int totalH = 0;
@@ -478,10 +486,10 @@ struct LayoutYs
         {
             y.rowsTop = y.descAreaTop + 26 + 8;           // below the header buttons
             y.rowsTop += 16 + 8;                          // hint line + gap
-            y.rowsTop += rowsH;                           // the DescRow stack itself
+            y.addDescRow = y.rowsTop + rowsH + 4;         // "Add Stem" under the last row
         }
 
-        y.statusTop   = y.rowsTop + 8;
+        y.statusTop   = advanced ? y.addDescRow + 24 + 8 : y.rowsTop + 8;
         y.bottomRow   = y.statusTop + 40 + 8;
         y.totalH      = y.bottomRow + 28 + kMargin;
         return y;
@@ -543,14 +551,16 @@ void StemSeparationWindow::resized()
     }
     else
     {
-        // Header row: "Simple view" toggle + Add Description button; the hint
-        // sits on its own line below so it has the full width. The regular
-        // description editor is hidden in advanced mode (each DescRow carries
-        // its own field), which also keeps the header from overlapping it.
+        // Header row: "Simple view" toggle; the hint sits on its own line below
+        // so it has the full width. The regular description editor is hidden in
+        // advanced mode (each DescRow carries its own field), which also keeps
+        // the header from overlapping it.
         descLbl_.setBounds (0, 0, 0, 0);
         descEdit_.setBounds (0, 0, 0, 0);
         advancedBtn_.setBounds (x, y.descAreaTop + 2, 110, 24);
-        addDescBtn_.setBounds (x + 118, y.descAreaTop + 2, 130, 24);
+        // "Add Stem" follows the last description row dynamically and sits
+        // just above the status line.
+        addDescBtn_.setBounds (x, y.addDescRow, 130, 24);
         // Only meaningful with more than one description: it switches the run
         // from chained residuals back to extracting every stem from the original.
         if (descs_.size () > 1)
@@ -991,9 +1001,14 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
                 || !sc::py::readFloatWav (residualF, &rRate, &nchR, rData))
             { fail ("Could not read the tool's output files."); return; }
 
+            // Every description contributes its target; only the LAST one
+            // also keeps its residual, so a run with N descriptions yields
+            // N targets plus a single final "everything else" track instead of
+            // an intermediate residual after every step.
             for (auto& c : tData)   { tracks.push_back (std::move (c)); trackRates.push_back (tRate); }
-            for (auto& c : rData)   { tracks.push_back (std::move (c)); trackRates.push_back (rRate); }
-            prevResidual = residualF;
+            if (i + 1 == N)
+                for (auto& c : rData) { tracks.push_back (std::move (c)); trackRates.push_back (rRate); }
+            prevResidual = residualF;   // still needed as the next step's input
             setProgress ((double) (i + 1) / (double) N);
         }
 
@@ -1041,7 +1056,7 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
             {
                 statusLabel_.setText ("Created '" + app_.docs.back()->name + "' with "
                                       + juce::String (nTracks)
-                                      + " tracks - target/residual per description.",
+                                      + " tracks - one target per description plus the final residual.",
                                       juce::dontSendNotification);
                 rememberDescs ();   // keep the typed descriptions for next time
                 if (onCloseRequested) onCloseRequested ();   // close on success

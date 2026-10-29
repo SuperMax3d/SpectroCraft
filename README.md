@@ -1106,9 +1106,12 @@ dropdown (*Cpu* / *Cuda* / *Vulkan*) must match the installed binary variant.
    the progress dialog (cancellable).
 3. The tool's `target.wav` (the described element) and `residual.wav`
    (everything else) are read back, resampled to the source rate if needed and
-   padded to equal length.
+   padded to equal length. With several descriptions only the LAST residual is
+   kept — an intermediate one would just repeat what the next step already
+   removes.
 4. A new document `<name>_stems` opens with one track per output channel —
-target first, then residual — ready for further editing or saving as WAV/FLAC/AIFF.
+one target per description, then the final residual — ready for further
+editing or saving as WAV/FLAC/AIFF.
 
 When a run finishes successfully the Stem Separation window closes itself;
 on failure or cancellation it stays open so you can read the status and retry.
@@ -1116,8 +1119,9 @@ on failure or cancellation it stays open so you can read the status and retry.
 ### Advanced mode
 
 **Advanced…** expands the dialog (the single *Description* box is hidden —
-each advanced row carries its own editor), and **Add Description…** appends
-another row so you can describe several elements in one run. Each row has:
+each advanced row carries its own editor, with a tooltip explaining it), and
+the **Add Stem** button below the last description row appends another row so
+you can describe several elements in one run. Each row has:
 
 - a text field,
 - **Include Selection** / **Exclude Selection** buttons that add the current
@@ -1140,6 +1144,9 @@ first description gets the full extracted range as-is, but every later one
 works on a single mono track — either the previous run's *residual* (chained
 mode) or a downmix of the original extraction (from-original mode). Mono
 sources are unaffected since their input is already one track.
+
+The window stays above the main window while open (global topmost), so making
+include/exclude selections in the track view does not push it behind.
 
 The last model, backend and extract-from-original choice persist between
 sessions in `SpectroCraft.recent`.

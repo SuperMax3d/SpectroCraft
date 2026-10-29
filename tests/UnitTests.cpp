@@ -5551,6 +5551,10 @@ static void testStemSepWindowLayoutAndClose()
     CHECK (dlg->getNumChildComponents() >= 21 && visible == 17,
           "stem separation window lays out all its controls");
 
+    // The non-modal dialog must stay above the main window so making
+    // selections does not push it behind.
+    CHECK (dlg->isAlwaysOnTop (), "stem separation window stays on top");
+
     // X button path: userTriedToCloseWindow must release ownership.
     dlg->userTriedToCloseWindow ();
     CHECK (win->stemSepWindow () == nullptr, "closing the window releases it");
@@ -5607,8 +5611,8 @@ static void testStemSepRememberDescs()
     if (!advBtn) { dlg->userTriedToCloseWindow (); return; }
     advBtn->onClick ();   // enter advanced mode (carries the text over)
 
-    juce::TextButton* addBtn = findButton (dlg, "Add Description...");
-    CHECK (addBtn != nullptr, "add-description button found in advanced mode");
+    juce::TextButton* addBtn = findButton (dlg, "Add Stem");
+    CHECK (addBtn != nullptr, "'Add Stem' button found in advanced mode");
     if (!addBtn) { dlg->userTriedToCloseWindow (); return; }
     addBtn->onClick ();   // append a second description row
 
@@ -5623,6 +5627,23 @@ static void testStemSepRememberDescs()
     auto* row1 = rowsHost->getChildComponent (1);
     CHECK (dynamic_cast<juce::TextEditor*> (row1->getChildComponent (1)) != nullptr,
           "second description editor exists");
+
+    // Every description field carries the same explanatory tooltip.
+    for (int r = 0; r < 2; ++r)
+        if (auto* ed = dynamic_cast<juce::TextEditor*> (rowsHost->getChildComponent (r)->getChildComponent (1)))
+            CHECK (ed->getTooltip () == "Description of the stem to extract.",
+                  "description field '" + juce::String (r + 1) + "' has its tooltip");
+
+    // 'Add Stem' follows the last description row and sits above the status
+    // line (the only full-width label below it).
+    CHECK (addBtn->getY () >= rowsHost->getBottom (),
+          "'Add Stem' is below the last description row");
+    bool statusBelow = false;
+    for (int i = 0; i < dlg->getNumChildComponents (); ++i)
+        if (auto* l = dynamic_cast<juce::Label*> (dlg->getChildComponent (i)))
+            if (!l->getBounds ().isEmpty () && l->getY () >= addBtn->getBottom ()
+                && l->getWidth () > 300) statusBelow = true;
+    CHECK (statusBelow, "the status line sits below 'Add Stem'");
 
     // The live typing path (editor -> entry) goes through an async command
     // message that the test's non-pumped loop never delivers; write the stored
