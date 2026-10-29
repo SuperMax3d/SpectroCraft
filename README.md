@@ -156,8 +156,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     controls are hidden in that mode). The curve modes analyse the selection
     frame by frame with fixed 2048-point Hann frames (capped at 2048 points per
     curve) and honour a spectral-selection mask — bins outside it do not count.
-    Their options row offers **Smooth** (None / 3 / 5 / 7 / 9 / 11-frame centred
-    moving average) and **Track** (Max = strongest component per frame/bin with
+    Their options row offers **Smooth** (None / 3 / 5 / 7 / 9 / 11 / 21 / 51-
+    frame centred moving average) and **Track** (Max = strongest component per frame/bin with
     its frequency; Total = summed level with amplitude-weighted centroid
     frequency; Weighted = same as Total for the level, using the weighted mean
     frequency). The two time-based modes add a **Ref Time** option (Relative =
@@ -172,6 +172,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     curve snapshots per mode (a slot saved in Freq vs Time is empty when you
     switch to Amp vs Time); stored curves follow the current Track/Smooth
     options, exactly like classic snapshots follow the current FFT size.
+    In **Freq vs Time** only, the view's right-click menu offers **Check
+    Harmonic Ratio**: every displayed curve (the live one plus stored curves
+    1-8) is divided by the curve with the lowest average frequency - the
+    fundamental - so a signal carrying exactly the k-th harmonic of another
+    plots as a flat line at "kx". While active, the vertical axis switches
+    from Hz to ratio units (gridlines labelled "1x", "2x", ...), entering and
+    leaving the mode zoom-fits the window, the cursor readout shows ratios,
+    wheel-zoom/pan operate in ratio space, and Copy exports `chN_x` columns.
+    The snapshot buttons' right-click menu adds **Clear All**, which wipes all
+    eight stored curves of the active store type (classic snapshots in modes
+    0-2, curve snapshots in modes 3-5) at once.
     8 numbered snapshot buttons, each with its own classic DAW hold-button
     colour: red, orange, yellow, light green, dark green, teal, blue and
     magenta. Each button's background matches the colour of the curve it
@@ -190,8 +201,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     that file's engine when the FFT size or window type changes). The tooltip
     shows the stored time segment plus the source file name. **Right-clicking
     a snapshot button** offers **Convert to marker** (creates a region marker
-    spanning the snapshot's time range in its source file) and **Clear**
-    (same as Shift+click).
+    spanning the snapshot's time range in its source file), **Clear** (same as
+    Shift+click) and **Clear All** (wipes every stored curve of the active
+    store type at once).
 
     The analysis view has **display ranges fully decoupled from the FFT
     settings**: magnitudes are always normalised against a fixed −160 dB
@@ -1691,12 +1703,19 @@ delays the window from appearing.
     peaking in the correct IEC band).
   - **Curve-mode options & zooming**: Amp vs Freq hides the FFT size / window
     type row and always uses fixed 2048-point frames (bin count independent of
-    the panel's FFT setting); Smooth offers None/3/5/7/9/11 with a persisted
-    value surviving a resync; Track's Weighted option matches Total exactly;
-    time-based modes zoom horizontally via wheel, bottom-axis left-drag pan,
-    right-drag box and Zoom Out Full (all clamped to the analysed region);
+    the panel's FFT setting); Smooth offers None/3/5/7/9/11/21/51 with a
+    persisted value surviving a resync; Track's Weighted option matches Total
+    exactly; time-based modes zoom horizontally via wheel, bottom-axis left-drag
+    pan, right-drag box and Zoom Out Full (all clamped to the analysed region);
     Copy exports only the points inside the visible window in both time-based
     and Amp vs Freq modes.
+  - **Check Harmonic Ratio + Clear All**: with a stereo file whose channels are
+    exactly one octave apart, entering the mode picks the lower channel as the
+    fundamental (its average frequency), maps it to exactly 1x and the other
+    to ~2x, zoom-fits the ratio window around [1, 2], shows "Ch1=1.00x" in the
+    cursor readout with no Hz units, exports `chN_x` columns on Copy, refits to
+    Hz on exit, and resets when leaving Freq vs Time; Clear All wipes every
+    stored curve slot (curve store) and every classic snapshot slot.
   - **Independent view components**: driven directly, each view keeps its own
     time window without cross-talk and has an independent vertical zoom
     (amplitude / frequency axis); at app level `MainWindow` syncs the horizontal

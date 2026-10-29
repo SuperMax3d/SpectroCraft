@@ -10528,7 +10528,10 @@ static void testCurveAnalysisModes()
     {
         FFTAnalysisView view (app);
         view.setSize (320, 200);
-        CHECK (view.smoothComboRef().getNumItems() == 6, "smooth combo has six items");
+        CHECK (view.smoothComboRef().getNumItems() == 8, "smooth combo has eight items");
+        CHECK (view.smoothComboRef().getItemText(6) == "21 Frames"
+             && view.smoothComboRef().getItemText(7) == "51 Frames",
+              "the large smoothing windows are offered");
         CHECK (view.trackComboRef().getNumItems() == 3, "track combo has three items");
 
         // Weighted tracking is numerically identical to Total.
@@ -10548,10 +10551,17 @@ static void testCurveAnalysisModes()
             same = std::abs ((double) totalDb[i] - (double) weighted[0].ampDb[i]) < 1e-6;
         CHECK (same, "weighted track matches the total track");
 
-        // A persisted smoothing window survives a resync.
+        // A persisted smoothing window survives a resync - including the
+        // large windows.
         app.settings.fftSmooth = 9;
         view.resyncFromSettings();
         CHECK (view.smoothingWindow() == 9, "smooth=9 survives a resync");
+        app.settings.fftSmooth = 21;
+        view.resyncFromSettings();
+        CHECK (view.smoothingWindow() == 21, "smooth=21 survives a resync");
+        app.settings.fftSmooth = 51;
+        view.resyncFromSettings();
+        CHECK (view.smoothingWindow() == 51, "smooth=51 survives a resync");
     }
 
     // --- Horizontal zoom in time-based modes ------------------------------------
@@ -10690,6 +10700,147 @@ static void testCurveAnalysisModes()
         view.setSize (280, 200);
         CHECK (view.axisComboRef().getBounds().getWidth() == 90,
               "narrow panel keeps the compact combo width");
+    }
+}
+
+// ==================================================== Harmonic ratio + Clear All
+
+static void testHarmonicRatioAndClearAll()
+{
+    // One second stereo @ 8 kHz: ch0 = 400 Hz (fundamental), ch1 = 800 Hz
+    // (exactly the 2nd harmonic).
+    const juce::File wav = makeTempFile ("harmonic_ratio.wav");
+    CHECK (writeWav (wav, 2, 8000.0, 8000, [] (int ch, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (ch == 0 ? 400.0 : 800.0) * (double) f / rate); }),
+          "wrote two-tone stereo wav for harmonic ratio test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for harmonic ratio test");
+    app.settings.fftLocalN = 1024;
+    app.setSelection ({ 0.0, 1.0 });
+
+    FFTAnalysisView view (app);
+    view.setSize (320, 200);
+    view.setAxisMode (3);
+    view.recomputeIfNeeded();
+    const auto& curves = view.getLiveCurves ();
+    CHECK (curves.size() == 2 && !curves[0].freqHz.empty(),
+          "mode-3 live curves for both channels");
+
+    // --- Entering the mode: fundamental + ratio transform ------------------
+    view.setHarmonicRatioMode (true);
+    CHECK (view.harmonicRatioActive (), "harmonic ratio mode is active");
+    CHECK (std::abs (view.harmonicFundamentalAvgHz () - 400.0) < 12.0,
+          "fundamental = the lowest-average-frequency curve (the 400 Hz channel)");
+
+    // The vertical window now holds ratios: it must cover [1, 2] and be far
+    // narrower than a full Nyquist span.
+    CHECK (view.getFreqLo () <= 1.0 && view.getFreqHi () >= 2.0,
+          "ratio window covers the 1x..2x data");
+    CHECK (view.getFreqHi () - view.getFreqLo () < 4.0,
+          "ratio window is zoomed in around the data");
+
+    // Transformed live curves: ch0 -> exactly 1.0, ch1 -> ~2.0.
+    const auto& hc = view.harmonicCache ();
+    CHECK (hc.hasFundamental && hc.live.size() == 2, "transformed curves available");
+    if (hc.live.size() == 2)
+    {
+        double r0min = 1e30, r0max = -1e30, r1min = 1e30, r1max = -1e30;
+        for (float r : hc.live[0].freqHz) if (std::isfinite (r))
+            { r0min = std::min (r0min, (double) r); r0max = std::max (r0max, (double) r); }
+        for (float r : hc.live[1].freqHz) if (std::isfinite (r))
+            { r1min = std::min (r1min, (double) r); r1max = std::max (r1max, (double) r); }
+        CHECK (r0max < 1.001 && r0min > 0.999, "fundamental channel maps to exactly 1x");
+        CHECK (r1max < 2.05 && r1min > 1.95,
+              "second-harmonic channel maps to ~2x (bin-quantisation tolerance)");
+    }
+
+    // Cursor readout shows ratios instead of Hz.
+    {
+        const auto plot = view.plotBounds ();
+        bool snapped; float sx, sy;
+        const juce::String info = view.buildCurveCursorInfo ((plot.getX () + plot.getRight ()) / 2,
+                                                             plot.getY () + 10, snapped, sx, sy);
+        CHECK (info.contains ("Ch1=1.00x"), "cursor readout shows the 1x ratio");
+        CHECK (!info.contains ("Hz") && !info.contains ("kHz"),
+              "cursor readout has no frequency units in ratio mode");
+    }
+
+    // Clipboard export uses ratio columns instead of Hz.
+    {
+        juce::SystemClipboard::copyTextToClipboard ("");
+        view.copySpectrumToClipboard ();
+        const auto lines = juce::StringArray::fromLines (
+            juce::SystemClipboard::getTextFromClipboard ());
+        CHECK (lines.size() > 1 && lines[0].startsWith ("time_s,ch1_x")
+             && !lines[0].contains ("ch1_Hz"), "clipboard header has ratio columns");
+        if (lines.size() > 1)
+        {
+            juce::StringArray cols;
+            // Explicit StringRef: the bare "," literal would bind to the
+            // addTokens(StringRef, bool) overload and split on whitespace.
+            cols.addTokens (lines[1], juce::String (","), juce::String());
+            CHECK (cols.size() == 5, "five columns per row (time + x/level per channel)");
+            if (cols.size() == 5)
+            {
+                const double r1 = cols[1].getDoubleValue ();
+                const double r2 = cols[3].getDoubleValue ();
+                CHECK (std::abs (r1 - 1.0) < 0.02 && std::abs (r2 - 2.0) < 0.05,
+                      "clipboard rows hold the ratio values");
+            }
+        }
+    }
+
+    // --- Leaving the mode: refit to Hz --------------------------------------
+    view.setHarmonicRatioMode (false);
+    CHECK (!view.harmonicRatioActive (), "harmonic ratio mode off again");
+    CHECK (view.getFreqHi () > 700.0,
+          "vertical window back in Hz covers the 800 Hz tone");
+
+    // --- Switching away from Freq vs Time resets the flag -------------------
+    view.setHarmonicRatioMode (true);
+    CHECK (view.harmonicRatioActive (), "ratio mode re-enabled for the check");
+    view.setAxisMode (4);
+    CHECK (!view.harmonicRatioActive (), "leaving Freq vs Time clears the ratio mode");
+
+    // --- Clear All: curve store ---------------------------------------------
+    {
+        FFTAnalysisView v2 (app);
+        v2.setSize (320, 200);
+        v2.setAxisMode (3);
+        app.setSelection ({ 0.0, 1.0 });
+        v2.recomputeIfNeeded ();
+        v2.handleSnapshotClick (0);
+        std::this_thread::sleep_for (std::chrono::milliseconds (80));
+        app.setSelection ({ 0.5, 1.0 });
+        v2.recomputeIfNeeded ();
+        v2.handleSnapshotClick (1);
+        CHECK (v2.curveSnapMode (0) == 3 && v2.curveSnapMode (1) == 3,
+              "two curve snapshots stored");
+
+        v2.clearAllStoredCurves ();
+        bool anyLeft = false;
+        for (int i = 0; i < 8; ++i)
+            if (v2.curveSnapMode (i) >= 0) { anyLeft = true; break; }
+        CHECK (!anyLeft, "Clear All wipes every stored curve slot");
+    }
+
+    // --- Clear All: classic store -------------------------------------------
+    {
+        FFTAnalysisView v3 (app);
+        v3.setSize (320, 200);
+        v3.setAxisMode (0);
+        app.setSelection ({ 0.0, 1.0 });
+        v3.recomputeIfNeeded ();
+        v3.handleSnapshotClick (2);
+        CHECK (v3.snapshotN (2) > 0, "classic snapshot stored");
+
+        v3.clearAllStoredCurves ();
+        bool anyClassic = false;
+        for (int i = 0; i < 8; ++i)
+            if (v3.snapshotN (i) > 0 || v3.slotHasData (i)) { anyClassic = true; break; }
+        CHECK (!anyClassic, "Clear All wipes classic snapshots too");
     }
 }
 
@@ -18130,6 +18281,7 @@ static int scRunUnitTestsImpl()
     progress ("ns copy noise tracks");      testNsCopyNoiseTracks();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
+    progress ("harmonic ratio + clear all"); testHarmonicRatioAndClearAll();
     progress ("copy curve alt scales");    testCopyCurveAltScales();
     progress ("axis scale modes");        testAxisScaleModes();
     progress ("alt scale multi-ref + go-to"); testAltScaleMultiRef();

@@ -5,6 +5,7 @@
 #include "FilterEQ.h"
 #include "PythonScripts.h"
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <memory>
@@ -519,6 +520,37 @@ public:
     // Excel-paste friendly. Empty when the mode is off or no spectrum exists.
     juce::String buildHarmonicsTable() const;
 
+    // "Check Harmonic Ratio" cache: the live and stored curves divided by the
+    // fundamental (lowest average frequency). freqHz holds the ratio values;
+    // x / ampDb are unchanged. Rebuilt lazily when invalidated.
+    struct HarmonicRatioCache
+    {
+        bool computed = false;         // up to date with the current curve data
+        bool hasFundamental = false;   // a fundamental curve was found
+        double fundAvgHz = 0.0;        // average frequency of the fundamental
+        std::vector<CurveData> live;                    // per-channel ratio curves
+        std::array<std::vector<CurveData>, 8> snaps {}; // per-slot (empty when unused)
+    };
+
+    // "Check Harmonic Ratio" mode (Freq vs Time only): every displayed curve
+    // (the live one plus stored curves 1-8) is divided by the curve with the
+    // lowest average frequency - the fundamental - and the vertical axis is
+    // shown in ratio units ("1x", "2x", ...). Entering/leaving zoom-fits.
+    bool harmonicRatioActive() const { return harmonicRatioActive_ && axisMode_ == 3; }
+    // True when the ratio transformation is actually usable: a fundamental
+    // curve was found. Falls back to plain Hz display otherwise.
+    bool harmonicRatioUsable() const { refreshHarmonicCache();
+                                       return harmonicRatioActive() && harmonicCache_.hasFundamental; }
+    void setHarmonicRatioMode (bool on);
+    // Clears all eight stored curves of the active store type: classic
+    // snapshots in modes 0-2, curve snapshots in modes 3-5.
+    void clearAllStoredCurves();
+    // Average frequency of the current fundamental curve in Hz (0 = none).
+    double harmonicFundamentalAvgHz() const { refreshHarmonicCache(); return harmonicCache_.fundAvgHz; }
+    // The transformed (ratio) curves, for display and tests.
+    const HarmonicRatioCache& harmonicCache() const { refreshHarmonicCache();
+                                                      return harmonicCache_; }
+
     // Switch frequency-axis mode: 0 = "FFT Linear", 1 = "FFT Log",
     // 2 = "1/3 Octave", 3 = "Freq vs Time", 4 = "Amp vs Time",
     // 5 = "Amp vs Freq". sendNotificationSync so the change is applied
@@ -634,6 +666,9 @@ private:
     };
     CurveSnapshot curveSnaps[8];
 
+    mutable HarmonicRatioCache harmonicCache_;
+    bool harmonicRatioActive_ = false;   // the toggle itself (mode 3 only)
+
     // Cached spectrum data
     std::vector<std::vector<float>> mags;   // per channel, normalized 0..1 vs kNormFloorDb
     // Per-channel 1/3-octave band values in the view's relative-dB space (dB
@@ -663,6 +698,10 @@ private:
     // been computed (the onChange fires before recomputeIfNeeded runs).
     bool fitPending_ = false;
     int cursorX = -1, cursorY = -1;
+
+    // Rebuilds the harmonic-ratio cache from the current live/stored curves.
+    void refreshHarmonicCache() const;
+    void invalidateHarmonicCache() { harmonicCache_.computed = false; }
 
     // Harmonic reference mode state (see the public accessors above).
     bool harmonicRefActive_ = false;

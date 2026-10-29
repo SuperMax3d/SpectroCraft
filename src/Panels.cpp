@@ -1035,6 +1035,7 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         thirdOctMags.clear();   // band cache is only valid for mode 2
         liveCurves.clear();     // curve cache belongs to the previous mode
         cachedCurveMode = -1;
+        if (harmonicRatioActive_) { harmonicRatioActive_ = false; invalidateHarmonicCache(); }
         refreshSnapshotBands(); // re-derive stored snapshots' bands for the new mode
         refreshSnapshotButtonStates();   // buttons now address the other store
         fitPending_ = true;    // zoom-fit once the new mode's data is computed
@@ -1056,23 +1057,25 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         repaint();
     };
 
-    static const int kSmoothValues[6] = { 0, 3, 5, 7, 9, 11 };
+    static const int kSmoothValues[8] = { 0, 3, 5, 7, 9, 11, 21, 51 };
     smoothCombo.addItem ("None", 1);
     smoothCombo.addItem ("3 Frames", 2);
     smoothCombo.addItem ("5 Frames", 3);
     smoothCombo.addItem ("7 Frames", 4);
     smoothCombo.addItem ("9 Frames", 5);
     smoothCombo.addItem ("11 Frames", 6);
+    smoothCombo.addItem ("21 Frames", 7);
+    smoothCombo.addItem ("51 Frames", 8);
     {
         int id = 1;
-        for (int i = 0; i < 6; ++i)
+        for (int i = 0; i < 8; ++i)
             if (smooth_ == kSmoothValues[i]) { id = i + 1; break; }
         smoothCombo.setSelectedId (id, juce::dontSendNotification);
     }
     smoothCombo.onChange = [this] {
-        static const int vals[6] = { 0, 3, 5, 7, 9, 11 };
+        static const int vals[8] = { 0, 3, 5, 7, 9, 11, 21, 51 };
         const int id = smoothCombo.getSelectedId();
-        smooth_ = (id >= 1 && id <= 6) ? vals[id - 1] : 0;
+        smooth_ = (id >= 1 && id <= 8) ? vals[id - 1] : 0;
         app.settings.fftSmooth = smooth_;   // persisted between sessions
         app.pushActiveDocMeta();           // ...and with this file's metadata
         cachedCurveSmooth = -1;             // live curve must be re-smoothed
@@ -1184,6 +1187,28 @@ void FFTAnalysisView::fitVerticalRange()
 {
     if (axisMode_ == 3)
     {
+        if (harmonicRatioUsable())
+        {
+            // Fit the ratio window to every displayed transformed curve
+            // (live + shown stored), not just the live one.
+            double dmin = std::numeric_limits<double>::max();
+            double dmax = -std::numeric_limits<double>::max();
+            auto consider = [&] (const CurveData& cd)
+            {
+                for (float r : cd.freqHz)
+                    if (std::isfinite (r) && r > 0.0)
+                        { dmin = std::min (dmin, (double) r); dmax = std::max (dmax, (double) r); }
+            };
+            for (const auto& cd : harmonicCache_.live) consider (cd);
+            for (int i = 0; i < 8; ++i)
+                for (const auto& cd : harmonicCache_.snaps[i]) consider (cd);
+            if (dmax > dmin - 1e-9)
+                fitDataRange (dmin, dmax, fLo_, fHi_);
+            else
+                { fLo_ = 0.5; fHi_ = 2.5; }   // sensible default ratio window
+            return;
+        }
+
         double dmin = std::numeric_limits<double>::max();
         double dmax = -std::numeric_limits<double>::max();
         for (const auto& cd : liveCurves)
@@ -1346,7 +1371,8 @@ void FFTAnalysisView::zoomFreqAtX (int x, double factor)
 }
 
 // Zoom the frequency window around the cursor y position: the vertical axis
-// of Freq vs Time mode (frequency increases upward there).
+// of Freq vs Time mode (frequency increases upward there; a harmonic ratio in
+// "Check Harmonic Ratio" mode, which spans [0, 1024] instead of Hz).
 void FFTAnalysisView::zoomFreqAtY (float y, double factor)
 {
     const auto plot = plotBounds();
@@ -1354,13 +1380,19 @@ void FFTAnalysisView::zoomFreqAtY (float y, double factor)
 
     const double rate = app.audioEngine().sampleRate();
     const double nyq = rate * 0.5;
-    const double fCursor = std::clamp ((double) yToFreq (y), 1e-9, nyq);
+    const bool hRatio = harmonicRatioUsable();
+    const double vMax = hRatio ? 1024.0 : nyq;
+    const double fCursor = std::clamp ((double) yToFreq (y), 1e-9, vMax);
 
-    fLo_ = std::clamp (fCursor + (fLo_ - fCursor) / factor, 0.0, nyq);
-    fHi_ = std::clamp (fCursor + (fHi_ - fCursor) / factor, 0.0, nyq);
+    fLo_ = std::clamp (fCursor + (fLo_ - fCursor) / factor, 0.0, vMax);
+    fHi_ = std::clamp (fCursor + (fHi_ - fCursor) / factor, 0.0, vMax);
 
     if (fHi_ <= fLo_ * 1.0001)
-        fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);   // degenerate: mode defaults
+    {
+        // Degenerate: fall back to the mode defaults.
+        if (hRatio) { fLo_ = 0.5; fHi_ = 2.5; }
+        else fftAxisLimits (axisMode_, rate, pascalThirdOct(), fLo_, fHi_);
+    }
     repaint();
 }
 
@@ -1434,7 +1466,8 @@ static int syncThirdOctOrderLocal (int v)
 
 static int syncSmoothValue (int sm)
 {
-    return (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11)
+    return (sm == 3 || sm == 5 || sm == 7 || sm == 9 || sm == 11
+            || sm == 21 || sm == 51)
            ? sm : ((sm >= 1 && sm <= 4) ? 3 : 0);
 }
 
@@ -1550,9 +1583,9 @@ void FFTAnalysisView::resyncFromSettings ()
     axisCombo.setSelectedId (axisMode_ + 1, juce::dontSendNotification);
     refTimeCombo.setSelectedId (refTime_ + 1, juce::dontSendNotification);
     {
-        static const int kSmoothValues[6] = { 0, 3, 5, 7, 9, 11 };
+        static const int kSmoothValues[8] = { 0, 3, 5, 7, 9, 11, 21, 51 };
         int id = 1;
-        for (int i = 0; i < 6; ++i)
+        for (int i = 0; i < 8; ++i)
             if (kSmoothValues[i] == smooth_) { id = i + 1; break; }
         smoothCombo.setSelectedId (id, juce::dontSendNotification);
     }
@@ -1572,6 +1605,7 @@ void FFTAnalysisView::resyncFromSettings ()
     cachedCurveMode = -1;
     cachedCurveTrack = 0;
     cachedCurveSmooth = 0;
+    if (harmonicRatioActive_) { harmonicRatioActive_ = false; invalidateHarmonicCache(); }
     mags.clear (); cachedN = 0;
     settingsGen++;             // stored snapshots/curves must be recomputed too
     recomputeSnapshots();
@@ -1744,7 +1778,12 @@ static std::vector<int64_t> curveFrameStarts (double totalSamples,
 void FFTAnalysisView::recomputeCurve (double t0, double t1)
 {
     const auto& eng = app.audioEngine();
-    if (!eng.isFileLoaded()) { liveCurves.clear(); cachedCurveMode = -1; return; }
+    if (!eng.isFileLoaded())
+    {
+        liveCurves.clear(); cachedCurveMode = -1;
+        invalidateHarmonicCache();
+        return;
+    }
 
     const double rate = eng.sampleRate();
     const double durS = eng.duration();
@@ -1802,6 +1841,7 @@ void FFTAnalysisView::recomputeCurve (double t0, double t1)
         }
 
     liveCurves = std::move (out);
+    invalidateHarmonicCache();
     cachedCurveMode = axisMode_;
     cachedCurveTrack = track_;
     cachedCurveSmooth = smooth_;
@@ -2490,6 +2530,11 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
     const int axisB = 18;            // bottom axis height
     const auto plot = plotBounds();
 
+    // "Check Harmonic Ratio": the vertical window holds ratio values and the
+    // curves are drawn from the transformed (divided) data. Falls back to
+    // plain Hz when no fundamental curve exists yet.
+    const bool hRatio = harmonicRatioUsable();
+
     const bool haveLive = !liveCurves.empty() && !liveCurves[0].x.empty();
     bool haveSnap = false;
     for (int i = 0; i < 8; ++i)
@@ -2548,26 +2593,43 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
         for (double tv : tTicks)
             g.drawVerticalLine ((float) timeToX (rel ? tLo + tv : tv), plot.getY(), plot.getBottom());
 
-        // Vertical axis: frequency in Freq vs Time mode, level in Amp vs Time.
+        // Vertical axis: frequency in Freq vs Time mode (a harmonic ratio
+        // when "Check Harmonic Ratio" is on), level in Amp vs Time.
         if (axisMode_ == 3)
         {
             std::vector<double> fTicks;
             const double spanF = std::max (1e-9, fHi_ - fLo_);
             bool done = false;
-            for (double e = std::floor (std::log10 (spanF / 8.0));
-                 !done && e <= std::ceil (std::log10 (spanF / 3.0)) + 1.0; ++e)
-                for (double m : { 1.0, 2.0, 5.0 })
-                {
-                    const double step = m * std::pow (10.0, e);
+            if (hRatio)
+            {
+                // Ratio ticks: nice steps in x-units, labelled "1x", "2x"...
+                for (double step : { 0.05, 0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 5.0 })
                     if (spanF / step >= 3.0 && spanF / step <= 8.0)
                     {
-                        for (double f = std::ceil (fLo_ / step - 1e-9) * step;
-                             f <= fHi_ + 1e-6; f += step)
-                            fTicks.push_back (f);
+                        for (double r = std::ceil (fLo_ / step - 1e-9) * step;
+                             r <= fHi_ + 1e-6; r += step)
+                            if (r >= -1e-9) fTicks.push_back (std::max (0.0, r));
                         done = true;
                         break;
                     }
-                }
+            }
+            else
+            {
+                for (double e = std::floor (std::log10 (spanF / 8.0));
+                     !done && e <= std::ceil (std::log10 (spanF / 3.0)) + 1.0; ++e)
+                    for (double m : { 1.0, 2.0, 5.0 })
+                    {
+                        const double step = m * std::pow (10.0, e);
+                        if (spanF / step >= 3.0 && spanF / step <= 8.0)
+                        {
+                            for (double f = std::ceil (fLo_ / step - 1e-9) * step;
+                                 f <= fHi_ + 1e-6; f += step)
+                                fTicks.push_back (f);
+                            done = true;
+                            break;
+                        }
+                    }
+            }
             if (!done)
                 for (int i = 1; i <= 4; ++i)
                     fTicks.push_back (fLo_ + spanF * (double) i / 5.0);
@@ -2581,7 +2643,15 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
             for (double f : fTicks)
             {
                 juce::String label;
-                if (f >= 1000.0)
+                if (hRatio)
+                {
+                    // "1x", "2x", "0.5x" ... (trailing zeros stripped).
+                    label = juce::String (f, 3);
+                    while (label.endsWith ("0")) label = label.dropLastCharacters (1);
+                    if (label.endsWith (".")) label = label.dropLastCharacters (1);
+                    label += "x";
+                }
+                else if (f >= 1000.0)
                     label = juce::String (f / 1000.0, std::abs (f - std::round (f)) < 1e-6 ? 0 : 1) + "k";
                 else
                     label = juce::String ((int) std::lround (f));
@@ -2679,17 +2749,24 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
         g.strokePath (path, juce::PathStrokeType (w));
     };
 
-    // Stored curve snapshots first (only those saved in this mode), live on top.
+    // Stored curve snapshots first (only those saved in this mode), live on
+    // top. In harmonic-ratio mode the transformed curves are drawn instead:
+    // their freqHz values hold ratios and [fLo_, fHi_] is the ratio window,
+    // so the same freqToY mapping applies.
     for (int i = 0; i < 8; ++i)
     {
         const auto& cs = curveSnaps[i];
         if (!(cs.shown && cs.mode == axisMode_)) continue;
-        for (size_t c = 0; c < cs.data.size() && c < 4; ++c)
-            drawCurveSeries (cs.data[c], snapColours[i], 1.0f);
+        const auto& src = hRatio ? harmonicCache_.snaps[i] : cs.data;
+        for (size_t c = 0; c < src.size() && c < 4; ++c)
+            drawCurveSeries (src[c], snapColours[i], 1.0f);
     }
     if (haveLive)
-        for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
-            drawCurveSeries (liveCurves[c], fftColours[c], 1.2f);
+    {
+        const auto& lv = hRatio ? harmonicCache_.live : liveCurves;
+        for (size_t c = 0; c < lv.size() && c < 4; ++c)
+            drawCurveSeries (lv[c], fftColours[c], 1.2f);
+    }
 
     g.restoreState();
 
@@ -2913,6 +2990,8 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
         return {};
 
     const ScaleCalibration& sc = app.scale();
+    // In harmonic-ratio mode the displayed live curves are the transformed ones.
+    const std::vector<CurveData>& lv = harmonicRatioUsable() ? harmonicCache_.live : liveCurves;
     juce::String info;
     int snapCh = -1;          // channel index of a snapped curve (-1 = none)
     double bestDy = 8.0;
@@ -2926,10 +3005,10 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
     };
 
     // Nearest data point per channel by horizontal distance...
-    std::vector<size_t> nearest (liveCurves.size(), 0);
-    for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
+    std::vector<size_t> nearest (lv.size(), 0);
+    for (size_t c = 0; c < lv.size() && c < 4; ++c)
     {
-        const auto& cd = liveCurves[c];
+        const auto& cd = lv[c];
         if (cd.x.empty()) continue;
         size_t best = 0;
         double bestDx = 1e30;
@@ -2943,19 +3022,19 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
     }
 
     // ...and snap when any curve passes close to the cursor vertically.
-    for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
+    for (size_t c = 0; c < lv.size() && c < 4; ++c)
     {
-        const auto& cd = liveCurves[c];
+        const auto& cd = lv[c];
         if (cd.x.empty()) continue;
         const auto pxy = pointXY (cd, nearest[c]);
         const double d = std::abs ((double) pxy.second - y);
         if (d < bestDy) { bestDy = d; snapCh = (int) c; }
     }
 
-    if (snapCh >= 0 && liveCurves[(size_t) snapCh].x.size() > 1)
+    if (snapCh >= 0 && lv[(size_t) snapCh].x.size() > 1)
     {
         snapped = true;
-        const auto pxy = pointXY (liveCurves[(size_t) snapCh], nearest[(size_t) snapCh]);
+        const auto pxy = pointXY (lv[(size_t) snapCh], nearest[(size_t) snapCh]);
         snapDotX = pxy.first;
         snapDotY = pxy.second;
     }
@@ -2969,12 +3048,17 @@ juce::String FFTAnalysisView::buildCurveCursorInfo (int x, int y, bool& snapped,
     if (isTimeAxisMode())
     {
         info = "Cursor:  t=" + formatTimeTickLabel (xToTime ((double) x));
-        for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
+        for (size_t c = 0; c < lv.size() && c < 4; ++c)
         {
-            const auto& cd = liveCurves[c];
+            const auto& cd = lv[c];
             if (cd.x.empty()) continue;
             info += ",  Ch" + juce::String ((int) c + 1) + "=";
-            if (axisMode_ == 3)
+            if (axisMode_ == 3 && harmonicRatioUsable())
+                // Harmonic-ratio mode: the value is a ratio, not Hz.
+                info += juce::String (cd.freqHz[nearest[c]], 2) + "x"
+                      + ScaleCalibration::formatSpectralLevel (cd.ampDb[nearest[c]], sc,
+                                                              curveCh (c));
+            else if (axisMode_ == 3)
                 info += juce::String (cd.freqHz[nearest[c]] >= 1000.0
                                       ? cd.freqHz[nearest[c]] / 1000.0 : cd.freqHz[nearest[c]], 2)
                       + (cd.freqHz[nearest[c]] >= 1000.0 ? " kHz" : " Hz")
@@ -3216,6 +3300,7 @@ void FFTAnalysisView::handleCurveSnapshotClick (int i, juce::ModifierKeys mods)
         // Plain click on a stored slot: only toggle the overlay, never update.
         cs.shown = !cs.shown;
     }
+    invalidateHarmonicCache();
 
     snapBtns[i].setToggleState (cs.shown, juce::dontSendNotification);
     snapBtns[i].setStored (true);
@@ -3340,6 +3425,7 @@ void FFTAnalysisView::clearCurveSlot (int i)
 {
     auto& cs = curveSnaps[i];
     cs = CurveSnapshot{};
+    invalidateHarmonicCache();
     snapBtns[i].setToggleState (false, juce::dontSendNotification);
     snapBtns[i].setStored (false);
     updateSnapshotTooltip (i);
@@ -3380,6 +3466,7 @@ void FFTAnalysisView::recomputeCurveSlot (int i)
 
     cs.data = std::move (out);
     cs.gen = settingsGen;
+    invalidateHarmonicCache();
     snapBtns[i].setToggleState (cs.shown && !cs.data.empty(), juce::dontSendNotification);
     snapBtns[i].setStored (!cs.data.empty());
     updateSnapshotTooltip (i);
@@ -3659,12 +3746,27 @@ void FFTAnalysisView::showSnapshotMenu (int i)
                               : (snapshots[i].n > 0 || snapshots[i].shown),
                false);
 
+    // "Clear All": wipe every stored curve of the active store type at once.
+    bool anyStored = false;
+    if (axisMode_ >= 3)
+        for (int s = 0; s < 8 && !anyStored; ++s)
+            if (curveSnaps[s].mode >= 0) { anyStored = true; break; }
+    else
+        for (int s = 0; s < 8 && !anyStored; ++s)
+            if (snapshots[s].n > 0 || snapshots[s].shown) { anyStored = true; break; }
+    m.addItem (3, "Clear All", anyStored, false);
+
     const int r = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (r == 1) convertSnapshotToMarker (i);
     else if (r == 2)
     {
         if (axisMode_ >= 3) clearCurveSlot (i);
         else                clearSnapshotSlot (i);
+        repaint();
+    }
+    else if (r == 3)
+    {
+        clearAllStoredCurves();
         repaint();
     }
 }
@@ -3687,6 +3789,17 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
         m.addItem (CtxCopyHarmonics, "Copy Harmonics",
                    harmonicRefActive_ && haveSpec);
         m.addItem (CtxResetHarmonic, "Reset Harmonic", harmonicRefActive_);
+    }
+    if (axisMode_ == 3)   // "Check Harmonic Ratio" is a Freq vs Time feature
+    {
+        bool haveCurveData = (!liveCurves.empty() && !liveCurves[0].x.empty());
+        for (int i = 0; i < 8 && !haveCurveData; ++i)
+            if (curveSnaps[i].shown && curveSnaps[i].mode == axisMode_
+                && !curveSnaps[i].data.empty())
+                haveCurveData = true;
+        m.addSeparator();
+        m.addItem (CtxCheckHarmonicRatio, "Check Harmonic Ratio",
+                   haveCurveData, harmonicRatioActive_);
     }
     m.addSeparator();
     m.addItem (101, "Close Panel");
@@ -3714,6 +3827,9 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
             break;
         case CtxResetHarmonic:
             resetHarmonicReference();
+            break;
+        case CtxCheckHarmonicRatio:
+            setHarmonicRatioMode (!harmonicRatioActive_);
             break;
         case 101:
             if (onCloseRequested) onCloseRequested();
@@ -3841,6 +3957,119 @@ void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
     setHarmonicReference (n, clickFreqHz);
 }
 
+// ---------------------------------------------------------------------------
+// "Check Harmonic Ratio" mode (Freq vs Time only).
+//
+// Every displayed curve - the live one plus stored curves 1-8 - is divided by
+// the curve with the lowest average frequency (the fundamental), so a signal
+// carrying exactly the k-th harmonic of another one plots as a nearly flat
+// line at "kx". While active, the vertical window [fLo_, fHi_] holds ratio
+// values and the gridlines are labelled 1x, 2x, ...
+
+void FFTAnalysisView::refreshHarmonicCache() const
+{
+    if (harmonicCache_.computed) return;
+    harmonicCache_ = HarmonicRatioCache{};
+
+    // All candidate curves: the live per-channel curves plus every stored
+    // curve shown in this mode.
+    struct Cand { const CurveData* cd; };
+    std::vector<Cand> cands;
+    for (size_t c = 0; c < liveCurves.size() && c < 4; ++c)
+        if (!liveCurves[c].x.empty()) cands.push_back ({ &liveCurves[c] });
+    for (int i = 0; i < 8; ++i)
+        if (curveSnaps[i].shown && curveSnaps[i].mode == axisMode_)
+            for (size_t c = 0; c < curveSnaps[i].data.size() && c < 4; ++c)
+                if (!curveSnaps[i].data[c].x.empty())
+                    cands.push_back ({ &curveSnaps[i].data[c] });
+
+    // Average tracked frequency per candidate (finite positive values only).
+    auto avgFreq = [] (const CurveData& cd, double& outAvg) -> bool
+    {
+        double sum = 0.0; int n = 0;
+        for (float f : cd.freqHz)
+            if (std::isfinite (f) && f > 1e-6) { sum += f; ++n; }
+        outAvg = (n > 0) ? sum / (double) n : 0.0;
+        return n > 0;
+    };
+
+    const CurveData* fund = nullptr;
+    double fundAvg = 0.0;
+    for (const auto& c : cands)
+    {
+        double a = 0.0;
+        if (!avgFreq (*c.cd, a)) continue;
+        if (fund == nullptr || a < fundAvg) { fund = c.cd; fundAvg = a; }
+    }
+
+    harmonicCache_.computed = true;
+    if (fund == nullptr) return;   // no curve with frequency data: nothing to divide by
+
+    harmonicCache_.hasFundamental = true;
+    harmonicCache_.fundAvgHz = fundAvg;
+
+    // The fundamental's tracked frequency at an arbitrary time t: linear
+    // interpolation between neighbouring points, clamped outside its range.
+    const CurveData& F = *fund;
+    auto fundAt = [&] (double t) -> double
+    {
+        if (F.x.size() == 1) return F.freqHz[0];
+        if (t <= F.x.front()) return F.freqHz[0];
+        if (t >= F.x.back())  return F.freqHz[F.x.size() - 1];
+        size_t lo = 0, hi = F.x.size();
+        while (hi - lo > 1)
+        {
+            const size_t mid = (lo + hi) / 2;
+            if (F.x[mid] <= t) lo = mid; else hi = mid;
+        }
+        const double x0 = F.x[lo], x1 = F.x[hi];
+        const double u = (x1 - x0 > 1e-9) ? (t - x0) / (x1 - x0) : 0.0;
+        return F.freqHz[lo] + u * ((double) F.freqHz[hi] - F.freqHz[lo]);
+    };
+
+    auto transform = [&] (const CurveData& cd, CurveData& out)
+    {
+        out.x = cd.x;
+        out.ampDb = cd.ampDb;
+        out.freqHz.resize (cd.x.size());
+        for (size_t i = 0; i < cd.x.size(); ++i)
+        {
+            const double f0 = fundAt (cd.x[i]);
+            out.freqHz[i] = (f0 > 1e-6 && std::isfinite (cd.freqHz[i]))
+                            ? (float) (cd.freqHz[i] / f0) : 0.0f;
+        }
+    };
+
+    harmonicCache_.live.resize (liveCurves.size());
+    for (size_t c = 0; c < liveCurves.size(); ++c)
+        transform (liveCurves[c], harmonicCache_.live[(size_t) c]);
+    for (int i = 0; i < 8; ++i)
+        if (curveSnaps[i].shown && curveSnaps[i].mode == axisMode_)
+        {
+            harmonicCache_.snaps[i].resize (curveSnaps[i].data.size());
+            for (size_t c = 0; c < curveSnaps[i].data.size(); ++c)
+                transform (curveSnaps[i].data[c], harmonicCache_.snaps[i][(size_t) c]);
+        }
+}
+
+void FFTAnalysisView::setHarmonicRatioMode (bool on)
+{
+    if (axisMode_ != 3) on = false;   // Freq vs Time mode only
+    if (on == harmonicRatioActive_) return;
+    harmonicRatioActive_ = on;
+    refreshHarmonicCache();
+    fitVerticalRange();             // zoom-fit when entering and leaving this mode
+    repaint();
+}
+
+void FFTAnalysisView::clearAllStoredCurves()
+{
+    if (axisMode_ >= 3)
+        for (int i = 0; i < 8; ++i) clearCurveSlot (i);
+    else
+        for (int i = 0; i < 8; ++i) clearSnapshotSlot (i);
+}
+
 void FFTAnalysisView::mouseDown (const juce::MouseEvent& e)
 {
     const auto plot = plotBounds();
@@ -3899,15 +4128,17 @@ void FFTAnalysisView::mouseDrag (const juce::MouseEvent& e)
         }
         case DragMode::PanFreqV:
         {
-            // Freq vs Time: the vertical axis is frequency.
+            // Freq vs Time: the vertical axis is frequency (or a harmonic
+            // ratio in "Check Harmonic Ratio" mode).
             const double f0 = yToFreq ((float) dragStartY);
             const double f1 = yToFreq ((float) e.y);
             const double d = f0 - f1;
             fLo_ += d; fHi_ += d;
-            // Keep the window inside [0, Nyquist].
-            const double nyq = app.audioEngine().sampleRate() * 0.5;
+            // Keep the window inside [0, Nyquist] (or [0, 1024] in ratio mode).
+            const double vMax = harmonicRatioUsable() ? 1024.0
+                                                      : app.audioEngine().sampleRate() * 0.5;
             if (fLo_ < 0.0) { fHi_ -= fLo_; fLo_ = 0.0; }
-            if (fHi_ > nyq) { fLo_ -= (fHi_ - nyq); fHi_ = nyq; }
+            if (fHi_ > vMax) { fLo_ -= (fHi_ - vMax); fHi_ = vMax; }
             repaint();
             break;
         }
@@ -4112,15 +4343,24 @@ void FFTAnalysisView::copySpectrumToClipboard()
     // Amp vs Freq: frequency, per channel level.
     if (axisMode_ >= 3 && !liveCurves.empty() && !liveCurves[0].x.empty())
     {
+        // Harmonic-ratio mode exports the ratio values instead of Hz.
+        const bool hRatio = (axisMode_ == 3) && harmonicRatioUsable();
+        const std::vector<CurveData>& lv = hRatio ? harmonicCache_.live : liveCurves;
+
         juce::StringArray lines;
-        const int nCh = std::min ((int) liveCurves.size(), 4);
+        const int nCh = std::min ((int) lv.size(), 4);
         juce::String header = isTimeAxisMode() ? "time_s" : "freq_Hz";
         if (!isTimeAxisMode())
             appendAltHeaders (header, "");   // Amp vs Freq: shared frequency axis
         for (int c = 0; c < nCh; ++c)
         {
             const juce::String chName = "ch" + juce::String (c + 1) + "_";
-            if (axisMode_ == 3)
+            if (axisMode_ == 3 && hRatio)
+            {
+                header += "," + chName + "x";
+                header += "," + chName + sc.spectralUnitLabel();
+            }
+            else if (axisMode_ == 3)
             {
                 header += "," + chName + "Hz";
                 appendAltHeaders (header, chName);
@@ -4140,10 +4380,10 @@ void FFTAnalysisView::copySpectrumToClipboard()
         // window in the time-based modes, the visible frequency window in
         // Amp vs Freq.
         std::vector<size_t> idxs;
-        const size_t nPts = liveCurves[0].x.size();
+        const size_t nPts = lv[0].x.size();
         for (size_t i = 0; i < nPts; ++i)
         {
-            const double xv = liveCurves[0].x[i];
+            const double xv = lv[0].x[i];
             if (isTimeAxisMode())
             {
                 if (xv >= curveViewT0_ - 1e-9 && xv <= curveViewT1_ + 1e-9)
@@ -4156,15 +4396,20 @@ void FFTAnalysisView::copySpectrumToClipboard()
         for (size_t k = 0; k < idxs.size(); ++k)
         {
             const size_t i = idxs[k];
-            juce::String line = isTimeAxisMode() ? juce::String (liveCurves[0].x[i], 6)
-                                                 : juce::String (liveCurves[0].x[i], 3);
+            juce::String line = isTimeAxisMode() ? juce::String (lv[0].x[i], 6)
+                                                 : juce::String (lv[0].x[i], 3);
             if (!isTimeAxisMode())
-                appendAlts (line, liveCurves[0].x[i]);   // Amp vs Freq: shared axis
+                appendAlts (line, lv[0].x[i]);   // Amp vs Freq: shared axis
             for (int c = 0; c < nCh; ++c)
             {
-                const auto& cd = liveCurves[(size_t) c];
+                const auto& cd = lv[(size_t) c];
                 if (i >= cd.x.size()) continue;   // defensive: channels are equal-sized
-                if (axisMode_ == 3)
+                if (axisMode_ == 3 && hRatio)
+                {
+                    line += "," + juce::String (cd.freqHz[i], 3);
+                    line += "," + fmtLevel (cd.ampDb[i]);
+                }
+                else if (axisMode_ == 3)
                 {
                     line += "," + juce::String (cd.freqHz[i], 2);
                     appendAlts (line, cd.freqHz[i]);
