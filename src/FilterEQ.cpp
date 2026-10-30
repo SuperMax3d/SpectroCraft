@@ -235,4 +235,100 @@ const std::vector<EqPreset>& presets()
     return list;
 }
 
+namespace {
+juce::String formatNumber (double v)
+{
+    juce::String s = juce::String (v, 6).trimCharactersAtEnd ("0").trimCharactersAtEnd (".");
+    if (s.isEmpty ()) s = "0";
+    return s;
+}
+
+/** Strict plain-number parse: optional sign, digits, at most one dot. */
+bool parseNumber (const juce::String& text, double& out)
+{
+    const StringRef t = text.trim ();
+    if (t.isEmpty ()) return false;
+    bool digits = false, dot = false, sign = false;
+    for (int i = 0; i < t.length (); ++i)
+    {
+        const auto ch = t[i];
+        if (!sign && (ch == '+' || ch == '-')) { sign = true; continue; }
+        if (ch >= '0' && ch <= '9')          { digits = true;  continue; }
+        if (ch == '.' && !dot)               { dot = true;     continue; }
+        return false;
+    }
+    if (!digits) return false;
+    const String s = t;   // StringRef has no getDoubleValue in this build
+    out = s.getDoubleValue ();
+    return std::isfinite (out);
+}
+} // namespace
+
+juce::String serializePoints (const std::vector<EqPoint>& pts)
+{
+    juce::StringArray parts;
+    for (const auto& p : pts)
+        if (std::isfinite (p.freqHz) && p.freqHz > 0.0 && std::isfinite (p.gainDb))
+            parts.add (formatNumber (p.freqHz) + "," + formatNumber (p.gainDb));
+    return parts.joinIntoString (";");
+}
+
+std::vector<EqPoint> parsePoints (const juce::String& text)
+{
+    std::vector<EqPoint> out;
+    juce::StringArray pairs;
+    // 3-arg form: the 2-arg call would bind to the bool overload and split on
+    // whitespace instead of ';'.
+    pairs.addTokens (text, ";", "");
+    for (const auto& pair : pairs)
+    {
+        juce::StringArray tokens;
+        tokens.addTokens (pair, ",", "");
+        if (tokens.size () != 2) continue;
+        double f = 0.0, g = 0.0;
+        if (!parseNumber (tokens[0], f) || !parseNumber (tokens[1], g)) continue;
+        if (!(f > 0.0)) continue;
+        out.push_back ({ f, g });
+    }
+    std::sort (out.begin (), out.end (),
+               [] (const EqPoint& a, const EqPoint& b) { return a.freqHz < b.freqHz; });
+    return out;
+}
+
+juce::String serializeUserPresets (const std::vector<EqPreset>& presets)
+{
+    juce::StringArray lines;
+    for (const auto& p : presets)
+    {
+        // newLineCharsRemoved() is not in this build: strip manually. Newlines
+        // and the '|' separator become spaces so the preset survives, matching
+        // the Add-preset dialog's sanitisation.
+        juce::String name = p.name.replace ("\r\n", " ").replace ("\n", " ")
+                                   .replace ("\r", " ").replace ("|", " ")
+                                   .trim ();
+        if (name.isEmpty ()) continue;
+        lines.add (name + "|" + serializePoints (p.points));
+    }
+    return lines.joinIntoString ("\n");
+}
+
+std::vector<EqPreset> parseUserPresets (const juce::String& text)
+{
+    std::vector<EqPreset> out;
+    for (const auto& line : juce::StringArray::fromLines (text))
+    {
+        const int bar = line.indexOf ("|");
+        if (bar <= 0) continue;
+        const juce::String name = line.substring (0, bar).trim ();
+        if (name.isEmpty ()) continue;
+        auto pts = parsePoints (line.substring (bar + 1));
+        if (pts.empty ()) continue;
+        bool dup = false;
+        for (const auto& p : out)
+            if (p.name == name) { dup = true; break; }
+        if (!dup) out.push_back ({ name, std::move (pts) });
+    }
+    return out;
+}
+
 }} // namespace sc::eq

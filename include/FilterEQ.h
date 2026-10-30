@@ -47,6 +47,21 @@ struct EqPreset
     std::vector<EqPoint> points;
 };
 
+/** Serialises a point list to "freq,gain;freq,gain;..." (empty for no points).
+    Frequencies are in Hz, gains in dB. */
+juce::String serializePoints (const std::vector<EqPoint>& pts);
+
+/** Parses the format produced by serializePoints(); invalid entries are skipped.
+    The result is sorted by ascending frequency. */
+std::vector<EqPoint> parsePoints (const juce::String& text);
+
+/** Serialises user presets, one line each: "name|freq,gain;...". */
+juce::String serializeUserPresets (const std::vector<EqPreset>& presets);
+
+/** Parses the format produced by serializeUserPresets(); invalid lines are skipped.
+    Duplicate names keep their first occurrence. */
+std::vector<EqPreset> parseUserPresets (const juce::String& text);
+
 /** The built-in preset set: Audacity's default curves (EQDefaultCurves.xml)
     plus a Flat reference. */
 const std::vector<EqPreset>& presets();

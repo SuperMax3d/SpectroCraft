@@ -118,6 +118,11 @@ struct Settings
     int acppBackend = 0;                 // backend combo index: 1=Cpu 2=Cuda 3=Vulkan
     bool acppExtractOriginal = true;     // "Extract from original" toggle
 
+    // Filter EQ (Effects menu): the curve shown when the dialog opens next time,
+    // plus user-defined presets. Both are serialised point lists, see sc::eq.
+    juce::String eqLastCurve;            // "freq,gain;freq,gain;..." ("" = default flat)
+    juce::String eqUserPresets;          // one line per preset: "name|freq,gain;..."
+
     bool operator== (const Settings& o) const
     {
         return fftSize == o.fftSize && hopSize == o.hopSize && windowType == o.windowType
@@ -145,7 +150,9 @@ struct Settings
             && specHarmMaxK == o.specHarmMaxK
             && specHarmN == o.specHarmN
             && exportAxes == o.exportAxes && exportMarkers == o.exportMarkers
-            && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings;
+            && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings
+            && eqLastCurve == o.eqLastCurve
+            && eqUserPresets == o.eqUserPresets;
     }
 };
 

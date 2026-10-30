@@ -4727,6 +4727,19 @@ std::vector<sc::eq::EqPoint> EqCurveEditor::getPoints() const
     return out;
 }
 
+void EqCurveEditor::setPoint (int index, double freqHz, double gainDb)
+{
+    auto pts = getPoints();   // sorted + merged
+    if (index < 0 || index >= (int) pts.size ()) return;
+    pts[(size_t) index].freqHz = std::isfinite (freqHz) && freqHz > kFreqLo
+                                 ? jlimit (kFreqLo, freqHi_, freqHz)
+                                 : kFreqLo;
+    pts[(size_t) index].gainDb = std::isfinite (gainDb)
+                                 ? jlimit (kDbMin, kDbMax, gainDb)
+                                 : 0.0;
+    setPoints (pts);          // re-sort + merge same-frequency duplicates
+}
+
 void EqCurveEditor::setFreqHi (double nyquistHz)
 {
     if (std::isfinite (nyquistHz) && nyquistHz > kFreqLo * 1.5)
@@ -4790,7 +4803,20 @@ void EqCurveEditor::mouseDown (const juce::MouseEvent& e)
 {
     const auto p = e.getPosition ();
 
-    // Double-click on a point removes it.
+    // Right-click on a point removes it.
+    if (e.mods.isRightButtonDown ())
+    {
+        const int idx = findNearestPoint (p, kEqPointRadius + 4);
+        if (idx >= 0)
+            points_.erase (points_.begin () + idx);
+        dragIndex_ = -1;
+        pressAddedPoint_ = false;
+        lastDownTime_ = juce::Time ();
+        repaint ();
+        return;
+    }
+
+    // Double-click on a point opens the exact-coordinate dialog.
     if ((e.eventTime - lastDownTime_).inMilliseconds() < 400 && lastDownPos_ != juce::Point<int> (-1, -1))
     {
         const int dx = lastDownPos_.x - p.x;
@@ -4798,11 +4824,11 @@ void EqCurveEditor::mouseDown (const juce::MouseEvent& e)
         if (dx * dx + dy * dy <= 36)
         {
             const int idx = findNearestPoint (p, kEqPointRadius + 4);
-            if (idx >= 0)
-                points_.erase (points_.begin () + idx);
             dragIndex_ = -1;
             pressAddedPoint_ = false;
-            lastDownTime_ = juce::Time ();   // no chained deletes on triple clicks
+            lastDownTime_ = juce::Time ();   // no chained dialogs on triple clicks
+            if (idx >= 0 && onEditPoint)
+                onEditPoint (idx);
             repaint ();
             return;
         }
@@ -4897,14 +4923,21 @@ void EqCurveEditor::paint (juce::Graphics& g)
                     juce::Justification::centredRight);
 
     // The curve: straight segments between control points are exact on this
-    // (log f, dB) grid. Gains outside the visible range clamp to the edges.
+    // (log f, dB) grid; outside the point range the end values hold flat,
+    // matching curveGainDb(). Gains outside the visible range clamp to edges.
     if (!points_.empty ())
     {
         g.setColour (juce::Colours::dodgerblue.withAlpha (0.9f));
+        const int xFirst = freqToX (points_.front ().freqHz);
+        const int yFirst = dbToY (jlimit (kDbMin, kDbMax, points_.front ().gainDb));
+        g.drawLine (kLeftMargin, yFirst, xFirst, yFirst, 2.0f);   // flat before the first point
         for (size_t i = 1; i < points_.size (); ++i)
             g.drawLine (freqToX (points_[i - 1].freqHz), dbToY (jlimit (kDbMin, kDbMax, points_[i - 1].gainDb)),
                         freqToX (points_[i].freqHz),     dbToY (jlimit (kDbMin, kDbMax, points_[i].gainDb)),
                         2.0f);
+        const int xLast = freqToX (points_.back ().freqHz);
+        const int yLast = dbToY (jlimit (kDbMin, kDbMax, points_.back ().gainDb));
+        g.drawLine (xLast, yLast, kLeftMargin + w, yLast, 2.0f);   // flat after the last point
     }
 
     // Control points.

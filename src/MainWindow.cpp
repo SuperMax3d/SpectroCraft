@@ -3012,228 +3012,6 @@ void MainWindow::showChangeGainDialog()
     runDestructiveEdit ([&] (std::string* e) { return app.changeGain (db, e); });
 }
 
-// Effects > Generate Silence / Noise / Tone — each opens a small dialog. With
-// an active spectral selection only that region is replaced; with a time
-// selection it is replaced in full; otherwise the dialog asks for a duration
-// and inserts at the playhead.
-namespace {
-
-juce::String genTargetMessage (Application& app, const juce::String& what)
-{
-    if (app.hasSpectralSelection ())
-        return "Replaces the content inside the spectral selection with generated " + what + ".";
-    if (!app.selection.isEmpty())
-        return "Replaces the selected " + juce::String (app.selection.getLength (), 3)
-               + "s with generated " + what + ".";
-    return "Inserts generated " + what + " at the playhead position.";
-}
-
-} // namespace
-
-juce::AlertWindow* MainWindow::createGenerateSilenceDialog()
-{
-    auto* w = new juce::AlertWindow ("Generate Silence", genTargetMessage (app, "silence"),
-                                     juce::AlertWindow::QuestionIcon, this);
-    if (!app.hasSpectralSelection () && app.selection.isEmpty ())
-        w->addTextEditor ("genDuration", "1.0");
-
-    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
-
-    if (auto* editor = w->getTextEditor ("genDuration"))
-    {
-        editor->setWantsKeyboardFocus (true);
-        editor->selectAll();
-    }
-    return w;
-}
-
-void MainWindow::showGenerateSilenceDialog()
-{
-    if (!app.audioEngine().isFileLoaded()) return;
-
-    auto* w = createGenerateSilenceDialog();
-    w->enterModalState (false);
-    if (auto* editor = w->getTextEditor ("genDuration"))
-        editor->grabKeyboardFocus();
-
-    const int result = w->runModalLoop();
-    double dur = 1.0;
-    if (auto* editor = w->getTextEditor ("genDuration"))
-        dur = editor->getText().trim().getDoubleValue ();
-    delete w;
-    if (result != 1) return;
-
-    runDestructiveEdit ([&] (std::string* e) { return app.generateSilence (dur, e); });
-}
-
-juce::AlertWindow* MainWindow::createGenerateNoiseDialog()
-{
-    auto* w = new juce::AlertWindow ("Generate Noise", genTargetMessage (app, "noise"),
-                                     juce::AlertWindow::QuestionIcon, this);
-
-    auto* typeCombo = new juce::ComboBox();
-    typeCombo->setName ("Type");
-    typeCombo->addItem ("White noise", 1);
-    typeCombo->addItem ("Pink noise", 2);
-    typeCombo->addItem ("Brown noise", 3);
-    typeCombo->setSelectedId (1, juce::dontSendNotification);   // default: white
-    typeCombo->setSize (200, 28);
-    w->addCustomComponent (typeCombo);
-
-    auto* intensity = new juce::Slider (juce::Slider::LinearHorizontal,
-                                        juce::Slider::TextBoxLeft);
-    intensity->setName ("Intensity");
-    intensity->setRange (0.0, 1.0, 0.01);
-    intensity->setValue (0.25, juce::dontSendNotification);
-    intensity->setSize (200, 30);
-    w->addCustomComponent (intensity);
-
-    if (!app.hasSpectralSelection () && app.selection.isEmpty ())
-        w->addTextEditor ("genDuration", "1.0");
-
-    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
-
-    if (auto* editor = w->getTextEditor ("genDuration"))
-    {
-        editor->setWantsKeyboardFocus (true);
-        editor->selectAll();
-    }
-    return w;
-}
-
-void MainWindow::showGenerateNoiseDialog()
-{
-    if (!app.audioEngine().isFileLoaded()) return;
-
-    auto* w = createGenerateNoiseDialog();
-    w->enterModalState (false);
-    if (auto* editor = w->getTextEditor ("genDuration"))
-        editor->grabKeyboardFocus();
-
-    const int result = w->runModalLoop();
-    double dur = 1.0;
-    if (auto* editor = w->getTextEditor ("genDuration"))
-        dur = editor->getText().trim().getDoubleValue ();
-
-    int typeId = 1;
-    float intensity = 0.25f;
-    for (int i = 0; i < w->getNumChildComponents (); ++i)
-    {
-        auto* c = w->getChildComponent (i);
-        if (auto* combo = dynamic_cast<juce::ComboBox*> (c))
-            typeId = combo->getSelectedId ();
-        else if (auto* slider = dynamic_cast<juce::Slider*> (c))
-            intensity = (float) slider->getValue ();
-    }
-    delete w;
-    if (result != 1) return;
-
-    const sc::NoiseType type = typeId == 2 ? sc::NoiseType::Pink
-                              : (typeId == 3 ? sc::NoiseType::Brown : sc::NoiseType::White);
-    runDestructiveEdit ([&] (std::string* e) { return app.generateNoise (type, intensity, dur, e); });
-}
-
-juce::AlertWindow* MainWindow::createGenerateToneDialog()
-{
-    auto* w = new juce::AlertWindow ("Generate Tone", genTargetMessage (app, "tone"),
-                                     juce::AlertWindow::QuestionIcon, this);
-
-    auto* waveCombo = new juce::ComboBox();
-    waveCombo->setName ("Waveform");
-    waveCombo->addItem ("Sine", 1);
-    waveCombo->addItem ("Square", 2);
-    waveCombo->addItem ("Sawtooth", 3);
-    waveCombo->addItem ("Triangle", 4);
-    waveCombo->setSelectedId (1, juce::dontSendNotification);   // default: sine
-    waveCombo->setSize (200, 28);
-    w->addCustomComponent (waveCombo);
-
-    auto* tones = new ToneListEditor();
-    tones->setName ("Tones");
-    tones->addRow (440.0, 0.5f);
-    w->addCustomComponent (tones);
-
-    if (!app.hasSpectralSelection () && app.selection.isEmpty ())
-        w->addTextEditor ("genDuration", "1.0");
-
-    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
-
-    // Focus the first tone's frequency field so a new value can be typed right
-    // away; fall back to the duration field when there are no rows.
-    ToneListEditor* tonesPtr = nullptr;
-    for (int i = 0; i < w->getNumChildComponents (); ++i)
-        if (auto* tl = dynamic_cast<ToneListEditor*> (w->getChildComponent (i)))
-            tonesPtr = tl;
-    juce::TextEditor* focusTarget = nullptr;
-    if (tonesPtr != nullptr && tonesPtr->firstFreqEditor() != nullptr)
-        focusTarget = tonesPtr->firstFreqEditor();
-    else
-        focusTarget = w->getTextEditor ("genDuration");
-    if (focusTarget != nullptr)
-    {
-        focusTarget->setWantsKeyboardFocus (true);
-        focusTarget->selectAll();
-    }
-    return w;
-}
-
-void MainWindow::showGenerateToneDialog()
-{
-    if (!app.audioEngine().isFileLoaded()) return;
-
-    auto* w = createGenerateToneDialog();
-    w->enterModalState (false);
-
-    ToneListEditor* tonesPtr = nullptr;
-    for (int i = 0; i < w->getNumChildComponents (); ++i)
-        if (auto* tl = dynamic_cast<ToneListEditor*> (w->getChildComponent (i)))
-            tonesPtr = tl;
-    if (tonesPtr != nullptr && tonesPtr->firstFreqEditor() != nullptr)
-        tonesPtr->firstFreqEditor()->grabKeyboardFocus();
-    else if (auto* editor = w->getTextEditor ("genDuration"))
-        editor->grabKeyboardFocus();
-
-    const int result = w->runModalLoop();
-    double dur = 1.0;
-    if (auto* editor = w->getTextEditor ("genDuration"))
-        dur = editor->getText().trim().getDoubleValue ();
-
-    std::vector<sc::ToneSpec> tones;
-    int waveId = 1;
-    for (int i = 0; i < w->getNumChildComponents (); ++i)
-    {
-        auto* c = w->getChildComponent (i);
-        if (auto* combo = dynamic_cast<juce::ComboBox*> (c))
-            waveId = combo->getSelectedId ();
-        else if (auto* tl = dynamic_cast<ToneListEditor*> (c))
-        {
-            const auto pairs = tl->getTones ();
-            tones.reserve (pairs.size());
-            for (const auto& p : pairs)
-                tones.push_back ({ p.first, (float) p.second });
-        }
-    }
-    delete w;
-    if (result != 1) return;
-
-    if (tones.empty())
-    {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
-                                            "Invalid tone list",
-                                            "Please enter at least one tone with a positive frequency.",
-                                            "", this);
-        return;
-    }
-
-    const sc::WaveShape shape = waveId == 2 ? sc::WaveShape::Square
-                              : (waveId == 3 ? sc::WaveShape::Sawtooth
-                              : (waveId == 4 ? sc::WaveShape::Triangle : sc::WaveShape::Sine));
-    runDestructiveEdit ([&] (std::string* e) { return app.generateTone (tones, shape, dur, e); });
-}
-
 // Effects > Resample... — prompt for a new sample rate AND channel count and
 // resample/remix the whole file (SoXR, same engine as Audacity). Not undoable:
 // the dialog warns about it.
@@ -3555,54 +3333,393 @@ juce::TextEditor* findNamedEditor (juce::Component& root, const juce::String& na
 }
 } // namespace
 
-// Effects > Time Stretch... — Audacity's Change Tempo: a pitch-preserving
-// tempo change (SoundTouch WSOLA) that changes the file length. Positive
-// percent = faster/shorter, negative = slower/longer.
-juce::AlertWindow* MainWindow::createTimeStretchDialog()
+// Effects > Generate Silence / Noise / Tone — each opens a small dialog. With
+// an active spectral selection only that region is replaced; with a time
+// selection it is replaced in full; otherwise the dialog asks for a duration
+// and inserts at the playhead.
+namespace {
+
+juce::String genTargetMessage (Application& app, const juce::String& what)
 {
-    auto* w = new juce::AlertWindow ("Time Stretch",
-        "Change the tempo by a percentage - the pitch is preserved and the file "
-        "length changes accordingly. Positive values make the audio shorter and "
-        "faster, negative values longer and slower.",
-        juce::AlertWindow::QuestionIcon, this);
-    w->addTextEditor ("stretchPercent", "0");
+    if (app.hasSpectralSelection ())
+        return "Replaces the content inside the spectral selection with generated " + what + ".";
+    if (!app.selection.isEmpty())
+        return "Replaces the selected " + juce::String (app.selection.getLength (), 3)
+               + "s with generated " + what + ".";
+    return "Inserts generated " + what + " at the playhead position.";
+}
 
-    auto* slider = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::NoTextBox);
-    slider->setName ("Tempo change (%)");
-    slider->setRange (-95.0, 3000.0, 1.0);   // Audacity's range
-    slider->setValue (0.0, juce::dontSendNotification);
-    slider->setSize (280, 30);
+} // namespace
 
-    if (auto* editor = w->getTextEditor ("stretchPercent"))
-    {
-        // Let Enter/Escape reach the OK/Cancel shortcuts even while the field
-        // has keyboard focus.
-        editor->setEscapeAndReturnKeysConsumed (false);
+/** Returns nullptr when a target already exists (time or spectral selection):
+    silence has nothing to configure, so the edit runs without any popup. */
+juce::AlertWindow* MainWindow::createGenerateSilenceDialog()
+{
+    if (app.hasSpectralSelection () || !app.selection.isEmpty ())
+        return nullptr;
 
-        slider->onValueChange = [editor, slider]
-        {
-            editor->setText (juce::String ((int) std::lround (slider->getValue ())));
-        };
+    auto* w = new juce::AlertWindow ("Generate Silence", genTargetMessage (app, "silence"),
+                                     juce::AlertWindow::QuestionIcon, this);
 
-        editor->onTextChange = [slider, editor]
-        {
-            double v;
-            if (!parseGainDbText (editor->getText (), v)) return;   // mid-typing: leave the slider alone
-            slider->setValue (jlimit (-95.0, 3000.0, v), juce::dontSendNotification);
-        };
-    }
-
-    w->addCustomComponent (slider);
+    auto* durRow = new LabeledField ("Duration:", "1.0",
+        "Length of the inserted silence in seconds.");
+    durRow->editor()->setName ("genDuration");
+    durRow->setSize (kInputRowW, kInputRowH);
+    w->addCustomComponent (durRow);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
-    if (auto* editor = w->getTextEditor ("stretchPercent"))
+    if (auto* editor = findNamedEditor (*w, "genDuration"))
     {
         editor->setWantsKeyboardFocus (true);
         editor->selectAll();
     }
+    return w;
+}
 
+void MainWindow::showGenerateSilenceDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createGenerateSilenceDialog();
+    double dur = 1.0;
+    if (w != nullptr)
+    {
+        w->enterModalState (false);
+        if (auto* editor = findNamedEditor (*w, "genDuration"))
+            editor->grabKeyboardFocus();
+
+        const int result = w->runModalLoop();
+        if (auto* editor = findNamedEditor (*w, "genDuration"))
+            dur = editor->getText().trim().getDoubleValue ();
+        delete w;
+        if (result != 1) return;
+    }
+
+    runDestructiveEdit ([&] (std::string* e) { return app.generateSilence (dur, e); });
+}
+
+/** RMS of the selection, or of ±0.5 s around the playhead when nothing is
+    selected; -1 when there is no data at all. */
+static double generatorTargetRms (Application& app)
+{
+    auto& eng = app.audioEngine ();
+    if (!eng.isFileLoaded ()) return -1.0;
+    const double rate = std::max (1.0, eng.sampleRate ());
+    const int64_t total = eng.numSamples ();
+
+    juce::Range<int64_t> range;
+    if (!app.selection.isEmpty ())
+        range = { std::clamp ((int64_t) std::llround (app.selection.getStart () * rate), (int64_t) 0, total),
+                  std::clamp ((int64_t) std::llround (app.selection.getEnd ()   * rate), (int64_t) 0, total) };
+    else
+    {
+        const int64_t ph = std::clamp ((int64_t) (app.playhead * rate), (int64_t) 0, total);
+        range = { std::max<int64_t> (0, ph - (int64_t) (rate * 0.5)),
+                  std::min<int64_t> (total, ph + (int64_t) (rate * 0.5)) };
+    }
+    if (range.getLength () <= 0) return -1.0;
+
+    double sumSq = 0.0;
+    int64_t count = 0;
+    std::vector<float> buf ((size_t) range.getLength ());
+    for (int ch = 0; ch < eng.numChannels (); ++ch)
+    {
+        if (!eng.readSamples (ch, range.getStart (), (int) range.getLength (), buf.data ())) continue;
+        for (float v : buf) sumSq += (double) v * (double) v;
+        count += range.getLength ();
+    }
+    return count > 0 ? std::sqrt (sumSq / (double) count) : -1.0;
+}
+
+juce::AlertWindow* MainWindow::createGenerateNoiseDialog()
+{
+    auto* w = new juce::AlertWindow ("Generate Noise", genTargetMessage (app, "noise"),
+                                     juce::AlertWindow::QuestionIcon, this);
+
+    auto* typeCombo = new juce::ComboBox();
+    typeCombo->setName ("Type");
+    typeCombo->addItem ("White noise", 1);
+    typeCombo->addItem ("Pink noise", 2);
+    typeCombo->addItem ("Brown noise", 3);
+    typeCombo->setSelectedId (1, juce::dontSendNotification);   // default: white
+    typeCombo->setSize (200, 28);
+    w->addCustomComponent (typeCombo);
+
+    // Intensity slider + Average Level button in one row.
+    auto* noiseRow = new juce::Component ();
+    noiseRow->setSize (340, 30);
+    auto* intensity = new juce::Slider (juce::Slider::LinearHorizontal,
+                                        juce::Slider::TextBoxLeft);
+    intensity->setName ("Intensity");
+    intensity->setRange (0.0, 1.0, 0.01);
+    intensity->setValue (0.25, juce::dontSendNotification);
+    intensity->setBounds (0, 0, 214, 30);
+    auto* avgBtn = new juce::TextButton ("Average Level");
+    avgBtn->setBounds (220, 1, 118, 26);
+    avgBtn->setTooltip ("Set the intensity so the generated noise matches the "
+                        "average level of the selection (or around the playhead).");
+    noiseRow->addAndMakeVisible (intensity);
+    noiseRow->addAndMakeVisible (avgBtn);
+
+    // Average Level: scale a second of unit-intensity noise of the selected
+    // type to the target RMS, then read off the matching intensity.
+    avgBtn->onClick = [this, typeCombo, intensity]
+    {
+        const double targetRms = generatorTargetRms (app);
+        if (!(targetRms >= 0.0)) return;
+
+        const int typeId = typeCombo->getSelectedId ();
+        const sc::NoiseType type = typeId == 2 ? sc::NoiseType::Pink
+                              : (typeId == 3 ? sc::NoiseType::Brown : sc::NoiseType::White);
+        std::vector<std::vector<float>> unit;
+        sc::generateNoise (type, 1.0f, 1,
+                           std::max<int64_t> (1, (int64_t) app.audioEngine().sampleRate ()),
+                           0, unit);
+        double uSq = 0.0;
+        for (float v : unit[0]) uSq += (double) v * (double) v;
+        const double unitRms = std::sqrt (uSq / (double) std::max<size_t> (1, unit[0].size ()));
+        if (!(unitRms > 1e-9)) return;
+
+        intensity->setValue (jlimit (0.0, 1.0, targetRms / unitRms));
+    };
+    w->addCustomComponent (noiseRow);
+
+    if (!app.hasSpectralSelection () && app.selection.isEmpty ())
+    {
+        auto* durRow = new LabeledField ("Duration:", "1.0",
+            "Length of the inserted noise in seconds.");
+        durRow->editor()->setName ("genDuration");
+        durRow->setSize (kInputRowW, kInputRowH);
+        w->addCustomComponent (durRow);
+    }
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (auto* editor = findNamedEditor (*w, "genDuration"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+    }
+    return w;
+}
+
+void MainWindow::showGenerateNoiseDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createGenerateNoiseDialog();
+    w->enterModalState (false);
+    if (auto* editor = findNamedEditor (*w, "genDuration"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    double dur = 1.0;
+    if (auto* editor = findNamedEditor (*w, "genDuration"))
+        dur = editor->getText().trim().getDoubleValue ();
+
+    // The slider is nested in its row container, so search recursively.
+    std::function<juce::Slider* (juce::Component&)> findSlider =
+        [&] (juce::Component& c) -> juce::Slider*
+    {
+        for (int i = 0; i < c.getNumChildComponents (); ++i)
+        {
+            auto* ch = c.getChildComponent (i);
+            if (auto* s = dynamic_cast<juce::Slider*> (ch)) return s;
+            if (auto* s2 = findSlider (*ch)) return s2;
+        }
+        return nullptr;
+    };
+
+    int typeId = 1;
+    float intensity = 0.25f;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+    {
+        auto* c = w->getChildComponent (i);
+        if (auto* combo = dynamic_cast<juce::ComboBox*> (c))
+            typeId = combo->getSelectedId ();
+    }
+    if (auto* slider = findSlider (*w))
+        intensity = (float) slider->getValue ();
+    delete w;
+    if (result != 1) return;
+
+    const sc::NoiseType type = typeId == 2 ? sc::NoiseType::Pink
+                              : (typeId == 3 ? sc::NoiseType::Brown : sc::NoiseType::White);
+    runDestructiveEdit ([&] (std::string* e) { return app.generateNoise (type, intensity, dur, e); });
+}
+
+juce::AlertWindow* MainWindow::createGenerateToneDialog()
+{
+    auto* w = new juce::AlertWindow ("Generate Tone", genTargetMessage (app, "tone"),
+                                     juce::AlertWindow::QuestionIcon, this);
+
+    auto* waveCombo = new juce::ComboBox();
+    waveCombo->setName ("Waveform");
+    waveCombo->addItem ("Sine", 1);
+    waveCombo->addItem ("Square", 2);
+    waveCombo->addItem ("Sawtooth", 3);
+    waveCombo->addItem ("Triangle", 4);
+    waveCombo->setSelectedId (1, juce::dontSendNotification);   // default: sine
+    waveCombo->setSize (200, 28);
+    w->addCustomComponent (waveCombo);
+
+    auto* tones = new ToneListEditor();
+    tones->setName ("Tones");
+    tones->addRow (440.0, 0.5f);
+    w->addCustomComponent (tones);
+
+    if (!app.hasSpectralSelection () && app.selection.isEmpty ())
+    {
+        auto* durRow = new LabeledField ("Duration:", "1.0",
+            "Length of the inserted tone in seconds.");
+        durRow->editor()->setName ("genDuration");
+        durRow->setSize (kInputRowW, kInputRowH);
+        w->addCustomComponent (durRow);
+    }
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // Focus the first tone's frequency field so a new value can be typed right
+    // away; fall back to the duration field when there are no rows.
+    ToneListEditor* tonesPtr = nullptr;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+        if (auto* tl = dynamic_cast<ToneListEditor*> (w->getChildComponent (i)))
+            tonesPtr = tl;
+    juce::TextEditor* focusTarget = nullptr;
+    if (tonesPtr != nullptr && tonesPtr->firstFreqEditor() != nullptr)
+        focusTarget = tonesPtr->firstFreqEditor();
+    else
+        focusTarget = findNamedEditor (*w, "genDuration");
+    if (focusTarget != nullptr)
+    {
+        focusTarget->setWantsKeyboardFocus (true);
+        focusTarget->selectAll();
+    }
+    return w;
+}
+
+void MainWindow::showGenerateToneDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createGenerateToneDialog();
+    w->enterModalState (false);
+
+    ToneListEditor* tonesPtr = nullptr;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+        if (auto* tl = dynamic_cast<ToneListEditor*> (w->getChildComponent (i)))
+            tonesPtr = tl;
+    if (tonesPtr != nullptr && tonesPtr->firstFreqEditor() != nullptr)
+        tonesPtr->firstFreqEditor()->grabKeyboardFocus();
+    else if (auto* editor = findNamedEditor (*w, "genDuration"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    double dur = 1.0;
+    if (auto* editor = findNamedEditor (*w, "genDuration"))
+        dur = editor->getText().trim().getDoubleValue ();
+
+    std::vector<sc::ToneSpec> tones;
+    int waveId = 1;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+    {
+        auto* c = w->getChildComponent (i);
+        if (auto* combo = dynamic_cast<juce::ComboBox*> (c))
+            waveId = combo->getSelectedId ();
+        else if (auto* tl = dynamic_cast<ToneListEditor*> (c))
+        {
+            const auto pairs = tl->getTones ();
+            tones.reserve (pairs.size());
+            for (const auto& p : pairs)
+                tones.push_back ({ p.first, (float) p.second });
+        }
+    }
+    delete w;
+    if (result != 1) return;
+
+    if (tones.empty())
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                            "Invalid tone list",
+                                            "Please enter at least one tone with a positive frequency.",
+                                            "", this);
+        return;
+    }
+
+    const sc::WaveShape shape = waveId == 2 ? sc::WaveShape::Square
+                              : (waveId == 3 ? sc::WaveShape::Sawtooth
+                              : (waveId == 4 ? sc::WaveShape::Triangle : sc::WaveShape::Sine));
+    runDestructiveEdit ([&] (std::string* e) { return app.generateTone (tones, shape, dur, e); });
+}
+
+// Effects > Time Stretch... — Audacity's Change Tempo: a pitch-preserving
+// tempo change (SoundTouch WSOLA) that changes the file length. Positive
+// percent = faster/shorter, negative = slower/longer.
+/** The length the stretch is expressed against: the selection when there is
+    one, else the whole file (in seconds). */
+static double stretchReferenceDuration (Application& app)
+{
+    auto& eng = app.audioEngine ();
+    const double rate = std::max (1.0, eng.sampleRate ());
+    if (!app.selection.isEmpty ())
+        return app.selection.getLength ();
+    return (double) eng.numSamples () / rate;
+}
+
+juce::AlertWindow* MainWindow::createTimeStretchDialog()
+{
+    auto& eng = app.audioEngine();
+    const double rate = std::max (1.0, eng.sampleRate());
+
+    juce::String msg = "Change the tempo of ";
+    if (!app.selection.isEmpty())
+        msg += juce::String (app.selection.getLength (), 3) + "s selection";
+    else
+        msg += "the whole file (" + juce::String (eng.numSamples () / rate, 3) + "s).";
+    msg += "\nThe pitch is preserved. The two fields are linked: a speed factor of 2 makes the audio twice as fast (half the duration), 0.5 twice as slow.";
+
+    auto* w = new juce::AlertWindow ("Time Stretch", msg,
+                                     juce::AlertWindow::QuestionIcon, this);
+
+    const double refDur = std::max (1e-9, stretchReferenceDuration (app));
+    auto* durRow = new LabeledField ("Time Duration:", formatWeightText (refDur),
+        "New length of the stretched audio in seconds.");
+    durRow->editor()->setName ("stretchDuration");
+    auto* facRow = new LabeledField ("Speed Factor:", "1",
+        "How much faster (> 1) or slower (< 1) the audio plays back.");
+    facRow->editor()->setName ("stretchFactor");
+
+    // Keep the two fields in sync: duration d <-> factor refDur / d. Editing
+    // one rewrites the other; invalid input leaves it untouched.
+    durRow->editor()->setEscapeAndReturnKeysConsumed (false);
+    facRow->editor()->setEscapeAndReturnKeysConsumed (false);
+    durRow->editor()->onTextChange = [durRow, facRow, refDur]
+    {
+        double d;
+        if (parseGainDbText (durRow->editor()->getText (), d) && d > 0.0)
+            facRow->editor()->setText (formatWeightText (refDur / d));
+    };
+    facRow->editor()->onTextChange = [durRow, facRow, refDur]
+    {
+        double f;
+        if (parseGainDbText (facRow->editor()->getText (), f) && f > 0.0)
+            durRow->editor()->setText (formatWeightText (refDur / f));
+    };
+
+    durRow->setSize (kInputRowW, kInputRowH);
+    facRow->setSize (kInputRowW, kInputRowH);
+    w->addCustomComponent (durRow);
+    w->addCustomComponent (facRow);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    durRow->editor()->setWantsKeyboardFocus (true);
+    durRow->editor()->selectAll();
     return w;
 }
 
@@ -3614,29 +3731,43 @@ void MainWindow::showTimeStretchDialog()
 
     // Enter modal state WITHOUT taking keyboard focus (see showChangeGainDialog).
     w->enterModalState (false);
-    if (auto* editor = w->getTextEditor ("stretchPercent"))
+    if (auto* editor = findNamedEditor (*w, "stretchDuration"))
         editor->grabKeyboardFocus();
 
     const int result = w->runModalLoop ();
-    const juce::String text = w->getTextEditorContents ("stretchPercent");
-    delete w;
-    if (result != 1) return;
 
-    double v;
-    if (!parseGainDbText (text.trim (), v)) return;   // invalid: ignore
+    // The factor field is authoritative; fall back to the duration when it was
+    // left invalid (the two are kept in sync while typing).
+    double factor = -1.0;
+    if (auto* ed = findNamedEditor (*w, "stretchFactor"))
+        parseGainDbText (ed->getText (), factor);
+    if (!(factor > 0.0))
+    {
+        double d = -1.0;
+        if (auto* ed = findNamedEditor (*w, "stretchDuration"))
+            parseGainDbText (ed->getText (), d);
+        const double refDur = std::max (1e-9, stretchReferenceDuration (app));
+        if (d > 0.0) factor = refDur / d;
+    }
+    delete w;
+    if (result != 1 || !(factor > 0.0)) return;   // invalid: ignore
+
+    const float pct = (float) (100.0 * (factor - 1.0));
     runDestructiveEdit ([&] (std::string* e)
-        { return app.timeStretch ((float) jlimit (-95.0, 3000.0, v), e); });
+        { return app.timeStretch ((float) jlimit (-95.0f, 3000.0f, pct), e); });
 }
 
 // Effects > Filter EQ... — Audacity's classic Filter Curve: an FFT-based
-// zero-phase equaliser with an interactive control-point curve and the ten
-// built-in presets from Audacity's default curve set.
+// zero-phase equaliser with an interactive control-point curve, the ten
+// built-in presets from Audacity's default curve set plus user-defined
+// presets (Add/Delete), and a remembered last-used curve.
 juce::AlertWindow* MainWindow::createFilterEqDialog()
 {
     auto* w = new juce::AlertWindow ("Filter EQ",
-        "Drag points to shape the curve; click empty space to add a point and "
-        "double-click a point to remove it. The response passes exactly through "
-        "every control point.",
+        "Drag points to shape the curve; click empty space to add a point, "
+        "double-click a point to type its exact coordinates and right-click it "
+        "to remove it. The response passes exactly through every control "
+        "point and stays flat before the first and after the last one.",
         juce::AlertWindow::QuestionIcon, this);
 
     auto* editor = new EqCurveEditor ();
@@ -3645,24 +3776,192 @@ juce::AlertWindow* MainWindow::createFilterEqDialog()
         editor->setFreqHi (nyq);
     w->addCustomComponent (editor);
 
+    // Preset row: the combo plus Add/Delete buttons in one container, which
+    // also gives the OK button below a little more breathing room.
+    auto* presetRow = new juce::Component ();
+    presetRow->setSize (360, 34);
     auto* presetCombo = new juce::ComboBox ();
     presetCombo->setName ("Preset");
-    const auto& presets = sc::eq::presets ();
-    for (size_t i = 0; i < presets.size (); ++i)
-        presetCombo->addItem (presets[i].name, (int) i + 1);
-    presetCombo->setSize (240, 26);
-    presetCombo->onChange = [editor, presetCombo]
+    presetCombo->setBounds (0, 0, 218, 26);
+    auto* addBtn = new juce::TextButton ("Add...");
+    addBtn->setBounds (224, 0, 62, 26);
+    addBtn->setTooltip ("Save the current curve as a named preset.");
+    auto* delBtn = new juce::TextButton ("Delete");
+    delBtn->setBounds (292, 0, 64, 26);
+    delBtn->setTooltip ("Remove the selected user preset (built-ins cannot be deleted).");
+    delBtn->setEnabled (false);
+    presetRow->addAndMakeVisible (presetCombo);
+    presetRow->addAndMakeVisible (addBtn);
+    presetRow->addAndMakeVisible (delBtn);
+
+    auto rebuildPresets = [this, presetCombo]
+    {
+        const int oldId = presetCombo->getSelectedId ();
+        const juce::String oldName = oldId > 0 ? presetCombo->getItemText ((int) (oldId - 1)) : juce::String ();
+        presetCombo->clear (false);
+        const auto& builtins = sc::eq::presets ();
+        for (size_t i = 0; i < builtins.size (); ++i)
+            presetCombo->addItem (builtins[i].name, (int) i + 1);
+        const auto users = sc::eq::parseUserPresets (app.settings.eqUserPresets);
+        for (size_t i = 0; i < users.size (); ++i)
+            presetCombo->addItem (users[i].name, (int) builtins.size () + (int) i + 1);
+        // Restore the previous selection by name when it still exists.
+        if (!oldName.isEmpty ())
+            for (int i = 0; i < presetCombo->getNumItems (); ++i)
+                if (presetCombo->getItemText (i) == oldName)
+                    { presetCombo->setSelectedItemIndex (i, juce::dontSendNotification); break; }
+    };
+
+    rebuildPresets ();
+
+    auto loadSelectedPreset = [this, editor, presetCombo]
     {
         const int id = presetCombo->getSelectedId ();
-        if (id > 0)
-            editor->setPoints (sc::eq::presets()[(size_t) (id - 1)].points);
+        if (id <= 0) return;
+        std::vector<sc::eq::EqPoint> pts;
+        const auto& builtins = sc::eq::presets ();
+        if ((size_t) id <= builtins.size ())
+            pts = builtins[(size_t) (id - 1)].points;
+        else
+        {
+            const auto users = sc::eq::parseUserPresets (app.settings.eqUserPresets);
+            const size_t ui = (size_t) id - builtins.size () - 1;
+            if (ui < users.size ()) pts = users[ui].points;
+        }
+        editor->setPoints (pts);
     };
-    w->addCustomComponent (presetCombo);
+
+    presetCombo->onChange = [loadSelectedPreset, presetCombo, delBtn]
+    {
+        loadSelectedPreset ();
+        const auto& builtins = sc::eq::presets ();
+        const int id = presetCombo->getSelectedId ();
+        delBtn->setEnabled (id > 0 && (size_t) id > builtins.size ());
+    };
+
+    addBtn->onClick = [this, editor, presetCombo, rebuildPresets]
+    {
+        // Prompt for a name; default to the first free "My Preset N".
+        const auto existing = sc::eq::parseUserPresets (app.settings.eqUserPresets);
+        juce::String defaultName;
+        for (int n = 1; n < 1000; ++n)
+        {
+            defaultName = "My Preset " + juce::String (n);
+            bool taken = false;
+            for (const auto& p : existing)
+                if (p.name == defaultName) { taken = true; break; }
+            if (!taken) break;
+        };
+
+        auto* dlg = new juce::AlertWindow ("Add Preset",
+            "Name for the new preset (the current curve will be saved):",
+            juce::AlertWindow::QuestionIcon, this);
+        dlg->addTextEditor ("presetName", defaultName);
+        dlg->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        dlg->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (auto* ed = dlg->getTextEditor ("presetName"))
+            { ed->setWantsKeyboardFocus (true); ed->selectAll(); }
+
+        const int r = dlg->runModalLoop ();
+        juce::String name;
+        if (auto* ed = dlg->getTextEditor ("presetName"))
+            name = ed->getText ().trim ();
+        delete dlg;
+        if (r != 1) return;
+
+        // Sanitise: one line, no '|' separator character (same rules as
+        // sc::eq::serializeUserPresets).
+        name = name.replace ("\r\n", " ").replace ("\n", " ")
+                   .replace ("\r", " ").replace ("|", " ");
+        if (name.isEmpty ()) return;
+
+        auto users = sc::eq::parseUserPresets (app.settings.eqUserPresets);
+        bool replaced = false;
+        for (auto& p : users)
+            if (p.name == name) { p.points = editor->getPoints (); replaced = true; break; }
+        if (!replaced) users.push_back ({ name, editor->getPoints () });
+        app.settings.eqUserPresets = sc::eq::serializeUserPresets (users);
+        app.saveSettings ();
+
+        rebuildPresets ();
+        // Select the new preset so it is visible in the combo.
+        for (int i = 0; i < presetCombo->getNumItems (); ++i)
+            if (presetCombo->getItemText (i) == name)
+                { presetCombo->setSelectedItemIndex (i); break; }   // fires onChange
+    };
+
+    delBtn->onClick = [this, presetCombo, rebuildPresets]
+    {
+        const auto& builtins = sc::eq::presets ();
+        const int id = presetCombo->getSelectedId ();
+        if (id <= 0 || (size_t) id <= builtins.size ()) return;   // built-ins are protected
+        auto users = sc::eq::parseUserPresets (app.settings.eqUserPresets);
+        const size_t ui = (size_t) id - builtins.size () - 1;
+        if (ui >= users.size ()) return;
+        users.erase (users.begin () + (long) ui);
+        app.settings.eqUserPresets = sc::eq::serializeUserPresets (users);
+        app.saveSettings ();
+
+        presetCombo->setSelectedId (0, juce::dontSendNotification);
+        rebuildPresets ();
+    };
+
+    // Double-click a point: type its exact coordinates.
+    editor->onEditPoint = [this, editor] (int idx) { showEqPointDialog (editor, idx); };
+
+    w->addCustomComponent (presetRow);
+
+    // Restore the last used curve when there is one; otherwise start flat.
+    const auto lastPts = sc::eq::parsePoints (app.settings.eqLastCurve);
+    editor->setPoints (lastPts.empty () ? std::vector<sc::eq::EqPoint> { { 1000.0, 0.0 } }
+                                        : lastPts);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
     return w;
+}
+
+void MainWindow::showEqPointDialog (EqCurveEditor* editor, int idx)
+{
+    const auto pts = editor->getPoints ();
+    if (idx < 0 || idx >= (int) pts.size ()) return;
+
+    auto* w = new juce::AlertWindow ("Edit Point",
+        "Type the exact coordinates of this point:",
+        juce::AlertWindow::QuestionIcon, this);
+    auto* fRow = new LabeledField ("Frequency (Hz):", formatWeightText (pts[idx].freqHz), "");
+    fRow->editor()->setName ("ptFreq");
+    auto* gRow = new LabeledField ("Gain (dB):", formatWeightText (pts[idx].gainDb), "");
+    gRow->editor()->setName ("ptGain");
+    fRow->setSize (kInputRowW, kInputRowH);
+    gRow->setSize (kInputRowW, kInputRowH);
+    w->addCustomComponent (fRow);
+    w->addCustomComponent (gRow);
+
+    fRow->editor()->setEscapeAndReturnKeysConsumed (false);
+    gRow->editor()->setEscapeAndReturnKeysConsumed (false);
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    fRow->editor()->setWantsKeyboardFocus (true);
+    fRow->editor()->selectAll();
+
+    w->enterModalState (false);
+    fRow->editor()->grabKeyboardFocus();
+    const int result = w->runModalLoop ();
+    double f = -1.0, g = -1.0;
+    if (auto* ed = findNamedEditor (*w, "ptFreq")) parseGainDbText (ed->getText (), f);
+    if (auto* ed = findNamedEditor (*w, "ptGain")) parseGainDbText (ed->getText (), g);
+    delete w;
+    if (result != 1) return;
+
+    // Only the fields that parsed are applied; the other keeps its value.
+    const auto cur = editor->getPoints ();
+    if (idx < 0 || idx >= (int) cur.size ()) return;
+    const sc::eq::EqPoint cp = cur[(size_t) idx];
+    editor->setPoint (idx, f > 0.0 ? f : cp.freqHz,
+                          std::isfinite (g) ? g : cp.gainDb);
 }
 
 void MainWindow::showFilterEqDialog()
@@ -3682,6 +3981,11 @@ void MainWindow::showFilterEqDialog()
     if (editor != nullptr)
         pts = editor->getPoints ();
     delete w;
+
+    if (result == 1)
+        // Remember the curve for next time (a flat one is the default state).
+        app.settings.eqLastCurve = sc::eq::isFlatCurve (pts) ? juce::String ()
+                                                            : sc::eq::serializePoints (pts);
     if (result != 1 || sc::eq::isFlatCurve (pts)) return;   // flat curve: no-op
 
     runDestructiveEdit ([&] (std::string* e) { return app.applyFilterEq (pts, e); });

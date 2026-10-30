@@ -153,6 +153,9 @@ void Application::loadSettings ()
     settings.acppModel          = recentStore->getValue ("acpp_model", juce::String ());
     settings.acppBackend        = std::clamp ((int) recentStore->getIntValue ("acpp_backend", 1), 1, 3);
     settings.acppExtractOriginal = recentStore->getIntValue ("acpp_extract_orig", 1) != 0;
+    // Filter EQ: remembered curve + user presets.
+    settings.eqLastCurve        = recentStore->getValue ("eq_last_curve", juce::String ());
+    settings.eqUserPresets      = recentStore->getValue ("eq_user_presets", juce::String ());
     // Recording device selection (Transport menu).
     recording.pluginId   = recentStore->getValue ("rec_plugin", juce::String ());
     recording.deviceId   = recentStore->getValue ("rec_device", juce::String ());
@@ -194,6 +197,8 @@ void Application::saveSettings ()
     recentStore->setValue ("acpp_model", settings.acppModel);
     recentStore->setValue ("acpp_backend", settings.acppBackend);
     recentStore->setValue ("acpp_extract_orig", settings.acppExtractOriginal ? 1 : 0);
+    recentStore->setValue ("eq_last_curve", settings.eqLastCurve);
+    recentStore->setValue ("eq_user_presets", settings.eqUserPresets);
     recentStore->setValue ("rec_plugin", recording.pluginId);
     recentStore->setValue ("rec_device", recording.deviceId);
     recentStore->setValue ("rec_channels", recording.channels);

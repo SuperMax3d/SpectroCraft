@@ -911,8 +911,17 @@ public:
     /** The current control points, sorted by ascending frequency. */
     std::vector<sc::eq::EqPoint> getPoints() const;
 
+    /** Sets point `index`'s coordinates (clamped to the visible axis); the
+        list is re-sorted and same-frequency duplicates are merged. */
+    void setPoint (int index, double freqHz, double gainDb);
+
     /** Sets the right edge of the frequency axis (the file's Nyquist). */
     void setFreqHi (double nyquistHz);
+
+    /** Called when a point is double-clicked, with its index in getPoints()
+        order. The host shows a dialog to type exact coordinates; if unset,
+        double-clicking does nothing. */
+    std::function<void(int)> onEditPoint;
 
 private:
     int freqToX (double f) const;

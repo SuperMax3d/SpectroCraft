@@ -14319,6 +14319,50 @@ static void testGenerateEffectsApp()
 
 // ------------------------------------------------- generate dialogs (structure only)
 
+// Recursive child searches: AlertWindow's getTextEditor() only sees top-level
+// editors, but the generator dialogs nest their fields in LabeledField rows.
+static juce::TextEditor* findEditorRecursive (juce::Component& root, const juce::String& name)
+{
+    for (auto* c : root.getChildren())
+    {
+        if (auto* ed = dynamic_cast<juce::TextEditor*> (c))
+            if (ed->getName() == name) return ed;
+        if (auto* e2 = findEditorRecursive (*c, name)) return e2;
+    }
+    return nullptr;
+}
+
+static juce::Slider* findSliderRecursive (juce::Component& root)
+{
+    for (auto* c : root.getChildren())
+    {
+        if (auto* s = dynamic_cast<juce::Slider*> (c)) return s;
+        if (auto* s2 = findSliderRecursive (*c)) return s2;
+    }
+    return nullptr;
+}
+
+static juce::ComboBox* findComboRecursive (juce::Component& root)
+{
+    for (auto* c : root.getChildren())
+    {
+        if (auto* cb = dynamic_cast<juce::ComboBox*> (c)) return cb;
+        if (auto* cb2 = findComboRecursive (*c)) return cb2;
+    }
+    return nullptr;
+}
+
+static juce::TextButton* findButtonRecursive (juce::Component& root, const juce::String& text)
+{
+    for (auto* c : root.getChildren())
+    {
+        if (auto* b = dynamic_cast<juce::TextButton*> (c))
+            if (b->getButtonText() == text) return b;
+        if (auto* b2 = findButtonRecursive (*c, text)) return b2;
+    }
+    return nullptr;
+}
+
 static void testGenerateDialogs()
 {
     const juce::File wav = makeTempFile ("gen_dialogs.wav");
@@ -14335,19 +14379,19 @@ static void testGenerateDialogs()
     // No selection at all: every dialog asks for a duration.
     {
         auto* w = win->createGenerateSilenceDialog();
-        CHECK (w != nullptr && w->getTextEditor ("genDuration") != nullptr,
+        CHECK (w != nullptr && findEditorRecursive (*w, "genDuration") != nullptr,
               "silence dialog has a duration field without a target");
         delete w;
 
         auto* wn = win->createGenerateNoiseDialog();
-        bool hasCombo = false, hasSlider = false;
+        bool hasCombo = false;
         for (int i = 0; i < wn->getNumChildComponents (); ++i)
-        {
             if (dynamic_cast<juce::ComboBox*> (wn->getChildComponent (i)) != nullptr) hasCombo = true;
-            if (dynamic_cast<juce::Slider*> (wn->getChildComponent (i)) != nullptr) hasSlider = true;
-        }
-        CHECK (hasCombo && hasSlider, "noise dialog has a type combo and an intensity slider");
-        CHECK (wn->getTextEditor ("genDuration") != nullptr,
+        CHECK (hasCombo && findSliderRecursive (*wn) != nullptr,
+              "noise dialog has a type combo and an intensity slider");
+        CHECK (findButtonRecursive (*wn, "Average Level") != nullptr,
+              "noise dialog has an Average Level button");
+        CHECK (findEditorRecursive (*wn, "genDuration") != nullptr,
               "noise dialog has a duration field without a target");
 
         // Render headlessly so the layout can be visually inspected.
@@ -14385,7 +14429,7 @@ static void testGenerateDialogs()
                   && std::abs (t[0].second - 0.5) < 1e-6,
                   "default row is 440 Hz at amplitude 0.5");
         }
-        CHECK (wt->getTextEditor ("genDuration") != nullptr,
+        CHECK (findEditorRecursive (*wt, "genDuration") != nullptr,
               "tone dialog has a duration field without a target");
 
         // Render headlessly so the layout can be visually inspected.
@@ -14411,16 +14455,15 @@ static void testGenerateDialogs()
         delete wt;
     }
 
-    // With a time selection: no duration field needed.
+    // With a time selection: silence needs no popup at all; noise keeps its
+    // controls but drops the duration field.
     app.selection = { 0.5, 1.0 };
     {
-        auto* w = win->createGenerateSilenceDialog();
-        CHECK (w != nullptr && w->getTextEditor ("genDuration") == nullptr,
-              "silence dialog drops the duration field with a time selection");
-        delete w;
+        CHECK (win->createGenerateSilenceDialog() == nullptr,
+              "silence runs without a popup when a time selection exists");
 
         auto* wn = win->createGenerateNoiseDialog();
-        CHECK (wn->getTextEditor ("genDuration") == nullptr,
+        CHECK (findEditorRecursive (*wn, "genDuration") == nullptr,
               "noise dialog drops the duration field with a time selection");
         delete wn;
     }
@@ -14430,9 +14473,12 @@ static void testGenerateDialogs()
     d->spectralSel = lowBandSel ();
     {
         auto* wt = win->createGenerateToneDialog();
-        CHECK (wt->getTextEditor ("genDuration") == nullptr,
+        CHECK (findEditorRecursive (*wt, "genDuration") == nullptr,
               "tone dialog drops the duration field with a spectral selection");
         delete wt;
+
+        CHECK (win->createGenerateSilenceDialog() == nullptr,
+              "silence runs without a popup when a spectral selection exists");
     }
 
     // ToneListEditor row management.
@@ -14485,12 +14531,11 @@ static void testNewEffectDialogs()
     // --- Time Stretch dialog -------------------------------------------------
     {
         auto* w = win->createTimeStretchDialog ();
-        CHECK (w != nullptr && w->getTextEditor ("stretchPercent") != nullptr,
-              "time stretch dialog has a percent field");
-        bool hasSlider = false;
-        for (int i = 0; i < w->getNumChildComponents (); ++i)
-            if (dynamic_cast<juce::Slider*> (w->getChildComponent (i)) != nullptr) hasSlider = true;
-        CHECK (hasSlider, "time stretch dialog has a tempo slider");
+        CHECK (w != nullptr && findEditorRecursive (*w, "stretchDuration") != nullptr
+                       && findEditorRecursive (*w, "stretchFactor") != nullptr,
+              "time stretch dialog has linked duration and factor fields");
+        CHECK (findSliderRecursive (*w) == nullptr,
+              "time stretch dialog no longer uses a slider");
 
         const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
             .getChildFile ("sc_time_stretch_snapshot.png");
@@ -14516,16 +14561,17 @@ static void testNewEffectDialogs()
     {
         auto* w = win->createFilterEqDialog ();
         EqCurveEditor* editor = nullptr;
-        juce::ComboBox* combo = nullptr;
         for (int i = 0; i < w->getNumChildComponents (); ++i)
-        {
             if ((editor = dynamic_cast<EqCurveEditor*> (w->getChildComponent (i))) != nullptr) break;
-        }
         CHECK (editor != nullptr, "filter eq dialog has a curve editor");
-        for (int i = 0; i < w->getNumChildComponents (); ++i)
-            if ((combo = dynamic_cast<juce::ComboBox*> (w->getChildComponent (i))) != nullptr) break;
+
+        // The preset combo is nested in its row container with the buttons.
+        juce::ComboBox* combo = findComboRecursive (*w);
         CHECK (combo != nullptr && combo->getNumItems () == 11,
               "preset combo lists Flat + the ten Audacity presets");
+        CHECK (findButtonRecursive (*w, "Add...") != nullptr
+               && findButtonRecursive (*w, "Delete") != nullptr,
+              "preset row has Add and Delete buttons");
 
         // Selecting a preset loads its points into the editor.
         if (editor != nullptr && combo != nullptr)
@@ -14533,6 +14579,7 @@ static void testNewEffectDialogs()
             const int bassBoostId = [&] { for (int i = 1; i <= combo->getNumItems (); ++i) if (combo->getItemText (i - 1) == "Bass Boost") return i; return -1; }();
             CHECK (bassBoostId > 0, "Bass Boost preset is present");
             combo->setSelectedId (bassBoostId);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);   // async change
             const auto pts = editor->getPoints ();
             CHECK (!pts.empty (), "preset loaded points into the editor");
         }
@@ -14558,6 +14605,177 @@ static void testNewEffectDialogs()
     }
 
     wav.deleteFile ();
+}
+
+// ------------------------------------------------- Time Stretch dialog sync
+
+static void testTimeStretchDialogSync()
+{
+    // 4-second mono file; no selection -> reference duration is the whole file.
+    const juce::File wav = makeTempFile ("stretch_sync.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 4 * kToneRate,
+            [] (int, int64_t f, double rate) {
+                return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate);
+            }), "wrote tone wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened stretch wav");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "stretch sync"));
+
+    auto* w = win->createTimeStretchDialog ();
+    CHECK (w != nullptr, "dialog created");
+    if (w == nullptr) { wav.deleteFile (); return; }
+
+    auto* durEd = findEditorRecursive (*w, "stretchDuration");
+    auto* facEd = findEditorRecursive (*w, "stretchFactor");
+    CHECK (durEd != nullptr && facEd != nullptr, "both fields present");
+    if (durEd == nullptr || facEd == nullptr) { delete w; wav.deleteFile (); return; }
+
+    // Initial values: duration = whole file length (4 s), factor = 1.
+    CHECK (std::abs (durEd->getText ().getDoubleValue () - 4.0) < 1e-6,
+          "duration initialised to the reference length");
+    CHECK (facEd->getText ().trim () == "1", "factor initialised to 1");
+
+    // Duration -> factor: 2 s of a 4 s file is twice as fast.
+    durEd->setText ("2");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (std::abs (facEd->getText ().getDoubleValue () - 2.0) < 1e-6,
+          "factor follows the duration field");
+
+    // Factor -> duration: factor 4 of a 4 s file is 1 s.
+    facEd->setText ("4");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (std::abs (durEd->getText ().getDoubleValue () - 1.0) < 1e-6,
+          "duration follows the factor field");
+
+    // Invalid input leaves the other field untouched.
+    durEd->setText ("abc");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (std::abs (facEd->getText ().getDoubleValue () - 4.0) < 1e-6,
+          "invalid duration text is ignored");
+
+    delete w;
+    wav.deleteFile ();
+}
+
+// ------------------------------------------------- Filter EQ persistence
+
+static void testEqPresetPersistence()
+{
+    // Point serialisation round-trip.
+    std::vector<sc::eq::EqPoint> pts = { { 100.0, 3.5 }, { 2000.0, -6.0 }, { 8000.0, 0.0 } };
+    const juce::String s = sc::eq::serializePoints (pts);
+    CHECK (!s.isEmpty (), "points serialise");
+    auto back = sc::eq::parsePoints (s);
+    CHECK (back.size () == 3 && std::abs (back[1].freqHz - 2000.0) < 1e-6
+          && std::abs (back[1].gainDb + 6.0) < 1e-6, "points round-trip");
+
+    // Malformed pairs are skipped.
+    auto bad = sc::eq::parsePoints ("abc;2000,-6;;x,y;50,1");
+    CHECK (bad.size () == 2 && std::abs (bad[0].freqHz - 50.0) < 1e-9
+          && std::abs (bad[1].freqHz - 2000.0) < 1e-6, "malformed pairs are skipped");
+
+    // User preset round-trip with name sanitisation.
+    std::vector<sc::eq::EqPreset> users = {
+        { "My|Bad\nName", pts },
+        { "Clean Name", { { 440.0, 12.0 } } }
+    };
+    const juce::String us = sc::eq::serializeUserPresets (users);
+    auto backU = sc::eq::parseUserPresets (us);
+    CHECK (backU.size () == 2, "two presets survive the round-trip");
+    if (backU.size () == 2)
+    {
+        CHECK (!backU[0].name.contains ("|") && !backU[0].name.contains ("\n")
+               && backU[0].name == "My Bad Name", "bad preset name is sanitised");
+        CHECK (backU[1].points.size () == 1
+               && std::abs (backU[1].points[0].freqHz - 440.0) < 1e-9, "preset points survive");
+    }
+
+    // The dialog restores the last curve and lists user presets.
+    const juce::File wav = makeTempFile ("eq_persist.wav");
+    CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+            [] (int, int64_t f, double) { return 0.0f; }), "wrote silence wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened eq persist wav");
+    app.settings.eqLastCurve = sc::eq::serializePoints (pts);
+    app.settings.eqUserPresets = us;
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "eq persist"));
+
+    auto* w = win->createFilterEqDialog ();
+    CHECK (w != nullptr, "dialog created");
+    if (w == nullptr) { wav.deleteFile (); return; }
+
+    EqCurveEditor* editor = nullptr;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+        if ((editor = dynamic_cast<EqCurveEditor*> (w->getChildComponent (i))) != nullptr) break;
+    juce::ComboBox* combo = findComboRecursive (*w);
+    CHECK (combo != nullptr && combo->getNumItems () == 13,
+          "preset combo lists the built-ins plus both user presets");
+
+    if (editor != nullptr)
+    {
+        const auto ep = editor->getPoints ();
+        CHECK (ep.size () == 3 && std::abs (ep[0].freqHz - 100.0) < 1e-6
+              && std::abs (ep[0].gainDb - 3.5) < 1e-6,
+              "the last used curve is restored into the editor");
+    }
+
+    // Selecting a user preset loads its points.
+    if (combo != nullptr && editor != nullptr)
+    {
+        int cleanId = -1;
+        for (int i = 1; i <= combo->getNumItems (); ++i)
+            if (combo->getItemText (i - 1) == "Clean Name") { cleanId = i; break; }
+        CHECK (cleanId > 0, "user preset is listed");
+        if (cleanId > 0)
+        {
+            combo->setSelectedId (cleanId);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);   // async change
+            const auto cp = editor->getPoints ();
+            CHECK (cp.size () == 1 && std::abs (cp[0].freqHz - 440.0) < 1e-9
+                  && std::abs (cp[0].gainDb - 12.0) < 1e-6,
+                  "selecting the user preset loads its points");
+        }
+    }
+
+    delete w;
+    wav.deleteFile ();
+}
+
+// ------------------------------------------------- EqCurveEditor::setPoint
+
+static void testEqEditorSetPoint()
+{
+    EqCurveEditor ed;
+    ed.setPoints ({ { 100.0, 0.0 }, { 2000.0, -6.0 } });
+
+    // Normal update.
+    ed.setPoint (1, 3000.0, -12.0);
+    auto p = ed.getPoints ();
+    CHECK (p.size () == 2 && std::abs (p[1].freqHz - 3000.0) < 1e-9
+          && std::abs (p[1].gainDb + 12.0) < 1e-6, "point updated in place");
+
+    // Out-of-range values are clamped to the visible axis.
+    ed.setPoint (0, 5e9, 99.0);
+    p = ed.getPoints ();   // re-sorted: {3000,-12} then {20000,30}
+    CHECK (p.size () == 2 && std::abs (p[1].freqHz - 20000.0) < 1e-6
+          && std::abs (p[1].gainDb - 30.0) < 1e-6,
+          "out-of-range values are clamped");
+
+    // Moving a point onto another's frequency merges them.
+    ed.setPoints ({ { 100.0, 0.0 }, { 2000.0, -6.0 } });
+    ed.setPoint (0, 2000.0, 5.0);
+    p = ed.getPoints ();
+    CHECK (p.size () == 1 && std::abs (p[0].freqHz - 2000.0) < 1e-9,
+          "same-frequency points are merged");
+    CHECK (std::abs (p[0].gainDb - 5.0) < 1e-6 || std::abs (p[0].gainDb + 6.0) < 1e-6,
+          "merged gain is one of the two inputs");
+
+    // Invalid index is a no-op.
+    ed.setPoint (7, 500.0, 1.0);
+    CHECK (ed.getPoints ().size () == 1, "bad index is ignored");
 }
 
 static void testInvertEffect()
@@ -19233,6 +19451,9 @@ static int scRunUnitTestsImpl()
     progress ("generate effects (app)");    testGenerateEffectsApp();
     progress ("generate dialogs");          testGenerateDialogs();
     progress ("new effect dialogs");        testNewEffectDialogs();
+    progress ("time stretch dialog sync");  testTimeStretchDialogSync();
+    progress ("eq preset persistence");     testEqPresetPersistence();
+    progress ("eq editor set point");       testEqEditorSetPoint();
     progress ("invert effect");             testInvertEffect();
     progress ("time stretch effect");       testTimeStretchEffect();
     progress ("filter eq effect");          testFilterEqEffect();

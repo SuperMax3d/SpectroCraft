@@ -594,9 +594,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   *time* selection the selected range is replaced; with neither, the generated
   audio is inserted at the playhead position and everything after it shifts
   right. The dialogs:
-  - *Generate Silence…* — fills the target with digital silence.
+  - *Generate Silence…* — fills the target with digital silence. When a time
+    or spectral selection already exists there is nothing to configure, so no
+    dialog appears at all and the edit runs immediately.
   - *Generate Noise…* — white, pink (Vos six-stage filter) or brown (random
-    walk) noise; the intensity slider sets the peak amplitude from 0 to 1.
+    walk) noise; the intensity slider sets the peak amplitude from 0 to 1. The
+    **Average Level** button next to it measures the RMS of the selection (or
+    of ±0.5 s around the playhead when nothing is selected) and sets the
+    intensity so the generated noise matches that level.
   - *Generate Tone…* — any number of frequency + amplitude pairs added
     together, rendered as sine, square, sawtooth or triangle. Phase is
     continuous with absolute file time, so generated tones line up with
@@ -605,18 +610,31 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   `Filter EQ…`): three classic waveform effects added after *Reverse*:
   - *Invert* — negates every sample in the target (spectral selection if
     active, else the time selection, else the whole file). One undoable step.
-  - *Time Stretch…* — SoundTouch-based tempo change that preserves pitch;
-    positive percent makes the region shorter and faster. It changes the
-    file's length, so **all channels** are stretched (the engine holds one
+  - *Time Stretch…* — SoundTouch-based tempo change that preserves pitch.
+    The dialog has two linked fields: **Time Duration** (the new length of
+    the stretched audio) and **Speed Factor** (how much faster or slower it
+    plays); editing either rewrites the other (duration d ↔ factor ref/d,
+    where ref is the selection length, or the whole file's duration when
+    nothing is selected). A positive stretch makes the region shorter and
+    faster. It changes the file's length, so **all channels** are stretched
+    (the engine holds one
     fixed-length buffer) and markers, saved spectral selections and FFT
     snapshot/curve slots are warped through the same time-warp function —
     nothing is dropped, everything stays in sync. One undoable step that
     restores both the old content and the old length; a spectral selection,
     if present, is ignored (a stretch is a time-domain operation).
   - *Filter EQ…* — Audacity-style graphical curve equalizer: an interactive
-    log-frequency/dB editor (click to add points, drag to move them,
-    double-click to remove) with the ten built-in Audacity presets plus Flat.
-    The curve is applied as a zero-phase FFT filter (16384-point windows,
+    log-frequency/dB editor (click empty space to add a point, drag to move
+    it, **double-click** a point to type its exact frequency/gain coordinates,
+    right-click to remove it) with the ten built-in Audacity presets plus
+    Flat. The preset row also has **Add…** and **Delete** buttons for
+    user-defined presets: Add saves the current curve under a name you type
+    (replacing an existing preset of the same name), Delete removes the
+    selected user preset (built-ins are protected). Both the last used curve
+    and your custom presets persist across restarts — reopening the dialog
+    restores the previous curve. The drawn curve holds its end values flat
+    before the first point and after the last one, matching how the filter
+    itself behaves. The curve is applied as a zero-phase FFT filter (16384-point windows,
     4001-sample Blackman-windowed impulse response, overlap-add), so phase
     is preserved and no pre-/post-ringing appears. Works on the spectral
     selection if active, else the time selection, else the whole file; a flat

@@ -172,6 +172,10 @@ public:
     juce::AlertWindow* createTimeStretchDialog();
     juce::AlertWindow* createFilterEqDialog();
 
+    /** Modal dialog to type the exact coordinates of one EQ curve point.
+        Used by EqCurveEditor's onEditPoint (double-click). */
+    void showEqPointDialog (class EqCurveEditor* editor, int index);
+
     // ---- Alternative scale references + Go to Time -----------------------
 
     /** Builds (but does not run modally) the edit dialog for one alternative-
