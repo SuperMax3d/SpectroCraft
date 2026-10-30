@@ -94,8 +94,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   **Export Markers as CSV...** / **Import Markers from CSV...** — a
   `Title,Begin,End,Comment` table with times in seconds (`-` for point-marker
   ends; fields containing commas/quotes are quoted per RFC 4180; import appends
-  the parsed markers and clamps them to the file duration) — and **Remove All
-  Markers**, which clears the list after a confirmation.
+  the parsed markers and clamps them to the file duration).
   Markers are drawn identically in both views (vertical line for points,
   bracket + label for regions) and stay in sync with the playhead, selection
   and zoom.
@@ -347,7 +346,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     every selected row at once — DEL instead deletes the audio data of the active
     selection (zeros a spectral selection or trims out a time range, undoable);
     right-click a row for Copy All Markers / Paste Markers from Clipboard,
-    Export/Import CSV, Remove All Markers, Delete Selected,
+    Export/Import CSV, Delete Selected,
     Fit View to Selected or Find (Ctrl+F searches titles and comments, F3 /
     Ctrl+F3 jump to the next / previous match). A right-click only shows that
     menu — it never collapses an active multi-selection down to the clicked row
@@ -561,13 +560,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     selection via OpenVINO. The optional **Copy noise on new track** setting
     appends one extra track per processed channel containing only the
     estimated noise (original minus enhanced).
-  - *Transcription* — Effects → Transcribe… runs Whisper over the whole file;
-    segments appear in the **Transcription** tab (double-click a row to jump,
-    Ctrl+F / F3 search for matches). Results are stored with the file as a
-    custom `SCTT` RIFF chunk (embedded mode) or inside `.meta.json`
+  - *Transcription* — the **Transcribe...** button in the **Transcription** tab
+    runs Whisper over the whole file; segments appear in that tab (double-click
+    a row to jump, Ctrl+F / F3 search for matches). Results are stored with the
+    file as a custom `SCTT` RIFF chunk (embedded mode) or inside `.meta.json`
     (external mode — see [Per-file metadata](#per-file-metadata)), so they
     travel with the file.
-  - *Batch transcription* — Effects → Transcribe Folder… transcribes every
+  - *Batch transcription* — the **Transcribe Folder...** button in the same tab
+    transcribes every
     `.wav` in a folder tree headlessly (files never open in the editor) and
     writes each file's `SCTT` chunk back in place; choose which channel to
     analyse (default: channel 1, enter 0 or less to mix all channels),
@@ -1008,7 +1008,7 @@ for your microarchitecture at load time.
   enhanced — over the selection range; the enhanced signal stays in the existing
   channels and the new tracks are made visible. The whole change (content plus
   channel count) is a single undoable step.
-- **Transcription** (`Effects → Transcribe…`) runs Whisper over the whole file
+- **Transcription** (the **Transcribe...** button in the Transcription tab) runs Whisper over the whole file
   (visible channels mixed to mono, resampled to 16 kHz with SoXR). A VAD pass
   first detects speech regions and skips long silences entirely — files with
   pauses transcribe several times faster than their length would suggest.
@@ -1022,10 +1022,11 @@ for your microarchitecture at load time.
   visible with ~10% breathing room on each side (same behaviour as marker and
   stored-selection double-clicks); press Ctrl+F (or right-click > Find) to
   search, then F3 / Ctrl+F3 to cycle through matches. Right-clicking a row offers **Edit...**
-  (start/end/text), **Add as marker**, **Find...**, **Add entry** /
+  (start/end/text), **Add as marker(s)** — one marker per selected segment,
+  or just the clicked row when nothing is selected —, **Find...**, **Add entry** /
   **Remove selected**, and **Copy Selected** / **Copy All** / **Paste**;
-  right-clicking the list's empty area also offers **Add entry** plus the same
-  copy/paste items. Copy writes Excel-friendly tab-separated text with a
+  right-clicking the list's empty area also offers **Add entry**, the same
+  copy/paste items and **Find...**. Copy writes Excel-friendly tab-separated text with a
   Start / End / Text header row (times as M:SS.mmm); Paste accepts that layout —
   the header row is optional, plain seconds are accepted too, and rows are
   inserted in sorted order and selected. New entries are inserted at the selection start (or the
@@ -1034,9 +1035,10 @@ for your microarchitecture at load time.
   Results are stored as a custom top-level `SCTT` RIFF chunk (UTF-8 JSON,
   times in seconds) when the file uses embedded metadata, or inside the
   `.meta.json` sidecar otherwise — written on save, parsed on load, never shown
-  in the Markers panel. *Clear* removes them from the document without touching
-  the audio.
-- **Transcribe Folder…** (`Effects → Transcribe Folder…`) scans a folder tree
+  in the Markers panel. Selecting rows and using *Remove selected* clears them
+  from the document without touching the audio.
+- **Transcribe Folder...** (the **Transcribe Folder...** button in the
+  Transcription tab) scans a folder tree
   for `.wav` files and transcribes each one headlessly — nothing opens in the
   editor. Each file's `SCTT` chunk is replaced surgically (all other RIFF chunks
   are preserved byte-for-byte). The progress dialog has a Cancel button that

@@ -1133,10 +1133,9 @@ public:
     std::function<void()> onCloseRequested;
     void requestClose() { if (onCloseRequested) onCloseRequested(); }
 
-    // CSV export/import via file chooser, and "Remove All" with a confirm box.
+    // CSV export/import via file chooser.
     void exportMarkersCsv();
     int importMarkersCsv();   // returns how many markers were added
-    void removeAllMarkers();
 
     // Programmatic row selection (normally done via the table UI).
     void selectRow (int row);
@@ -1246,8 +1245,9 @@ private:
 
 /** Whisper transcription segments for the active file (Phase 3 of the AI plan).
     A read-only table of [start, end, text] rows plus a "Transcribe..." button
-    (which opens the model/language dialog via onRunRequested) and a "Clear"
-    button. Double-clicking a row jumps the playhead to its start and selects
+    (which opens the model/language dialog via onRunRequested) and a
+    "Transcribe Folder..." button (batch transcription via
+    onRunFolderRequested). Double-clicking a row jumps the playhead to its start and selects
     its range. Segments live in FileDoc::sctt and are saved into WAV files as
     an SCTT RIFF chunk — they never appear in the Markers panel.
 
@@ -1276,6 +1276,10 @@ public:
     // it has no length), titled with its text; the full text goes into the
     // marker comment. Persists the sidecar and refreshes all panels/views.
     void addMarkerForRow (int rowNumber);
+    // The context menu's "Add as marker(s)": one marker per selected segment,
+    // or just `fallbackRow` when nothing is selected. Returns how many were
+    // added; persists the sidecar and refreshes all panels/views once.
+    int addMarkersForSelection (int fallbackRow);
 
     // Right-click "Edit...": modal dialog editing start/end/text of the given
     // segment; commits through applySegmentEdit.
@@ -1319,6 +1323,9 @@ public:
 
     // Set by MainWindow: opens the model/language dialog and starts the run.
     std::function<void()> onRunRequested;
+    // Set by MainWindow: batch-transcribes every WAV in a chosen folder tree
+    // (folder chooser + options dialog, files updated in place).
+    std::function<void()> onRunFolderRequested;
 
     // Right-click "Close Panel": set by MainWindow. requestClose() is the
     // testable entry point.
@@ -1349,7 +1356,9 @@ private:
     Model model { this };
     juce::TableListBox table { "", &model };
 
-    juce::TextButton runBtn, clearBtn;
+    juce::TextButton runBtn, folderBtn;
+
+    void createMarkerForSegment (const ScttSegment& s);
 
     bool findInDirection (int dir);
 

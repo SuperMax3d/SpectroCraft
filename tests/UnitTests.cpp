@@ -12967,7 +12967,7 @@ static void testSplitSpectralSelectionApp()
         std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
         const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 19, "Effects menu lists the invert/stretch/eq + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 17, "Effects menu lists the invert/stretch/eq + split + generate + super-res items");
 #else
         CHECK (fxMenu.getNumItems() == 16, "Effects menu lists the invert/stretch/eq + split + generate + super-res items");
 #endif
@@ -13835,10 +13835,10 @@ static void testTranscriptionPanelLayout()
     CHECK (app.openFile (wav), "open wav for transcription layout test");
 
     TranscriptionPanel panel (app);
-    panel.setSize (300, 420);
+    panel.setSize (320, 420);
 
     juce::TextButton* runBtn = nullptr;
-    juce::TextButton* clearBtn = nullptr;
+    juce::TextButton* folderBtn = nullptr;
     juce::TableListBox* table = nullptr;
     for (int i = 0; i < panel.getNumChildComponents (); ++i)
     {
@@ -13846,14 +13846,14 @@ static void testTranscriptionPanelLayout()
         if (auto* tb = dynamic_cast<juce::TextButton*> (c))
         {
             if (tb->getButtonText () == "Transcribe...") runBtn = tb;
-            else if (tb->getButtonText () == "Clear") clearBtn = tb;
+            else if (tb->getButtonText () == "Transcribe Folder...") folderBtn = tb;
         }
         else if (auto* tl = dynamic_cast<juce::TableListBox*> (c)) table = tl;
     }
 
-    CHECK (runBtn != nullptr && clearBtn != nullptr && table != nullptr,
+    CHECK (runBtn != nullptr && folderBtn != nullptr && table != nullptr,
            "transcription panel children found");
-    if (! runBtn || ! clearBtn || ! table)
+    if (! runBtn || ! folderBtn || ! table)
     {
         wav.deleteFile ();
         return;
@@ -13863,7 +13863,7 @@ static void testTranscriptionPanelLayout()
     // offset inside a 30px row).
     const int expectedBottom = panel.getHeight () - 6;
     CHECK (runBtn->getBottom () == expectedBottom, "Transcribe button at panel bottom");
-    CHECK (clearBtn->getBottom () == expectedBottom, "Clear button at panel bottom");
+    CHECK (folderBtn->getBottom () == expectedBottom, "Transcribe Folder button at panel bottom");
 
     // The segment list takes all the space above the buttons.
     CHECK (table->getBottom () < runBtn->getY (), "list ends above the button row");
@@ -14031,6 +14031,95 @@ static void testTranscriptionEditAddRemove()
     wav.deleteFile ();
     { const juce::File side = sc::fileMetaSidecarPath (wav);
       if (side.existsAsFile()) side.deleteFile(); }
+}
+
+// ---------------- Transcription "Add as marker(s)" multi-selection --------
+// The context menu's Add-as-marker acts on EVERY selected segment (falling
+// back to the clicked row when nothing is selected): each becomes a region
+// marker titled with its text, full text kept in the comment.
+static void testTranscriptionAddMarkersMulti()
+{
+    const juce::File wav = makeTempFile ("tr_mk.wav");
+    writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for add-markers test");
+    auto* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    std::vector<ScttSegment> segs;
+    ScttSegment a; a.startSec = 1.0; a.endSec = 2.0; a.text = "alpha";
+    ScttSegment b; b.startSec = 3.0; b.endSec = 4.0; b.text = "beta";
+    ScttSegment c; c.startSec = 5.0; c.endSec = 6.0; c.text = "gamma";
+    segs.push_back (a); segs.push_back (b); segs.push_back (c);
+    d->setTranscription (std::move (segs));
+
+    TranscriptionPanel panel (app);
+    panel.setSize (320, 420);
+
+    // --- Nothing selected: the fallback row becomes a single marker.
+    CHECK (panel.addMarkersForSelection (1) == 1, "fallback row adds one marker");
+    CHECK (app.markers().count() == 1, "one marker in the list");
+    {
+        const auto& ms = app.markers().markers();
+        CHECK (ms.size () == 1 && ms [0].name == "beta", "fallback marker titled with text");
+        CHECK (std::abs (ms [0].start - 3.0) < 1e-9 && std::abs (ms [0].end - 4.0) < 1e-9,
+              "fallback marker spans the segment");
+    }
+
+    // --- Two rows selected: both become markers.
+    juce::SparseSet<int> sel;
+    sel.addRange ({ 0, 2 });   // rows 0 and 1 (alpha, beta)
+    panel.listTable ().setSelectedRows (sel, juce::sendNotification);
+    CHECK (panel.addMarkersForSelection (2) == 2, "two selected rows add two markers");
+    CHECK (app.markers().count() == 3, "marker list grew by two");
+    {
+        const auto& ms = app.markers().markers();
+        bool alphaOk = false, betaOk = false;
+        for (const auto& m : ms)
+        {
+            if (m.name == "alpha" && std::abs (m.start - 1.0) < 1e-9
+                && std::abs (m.end - 2.0) < 1e-9 && m.comment == "alpha")
+                alphaOk = true;
+            if (m.name == "beta" && std::abs (m.start - 3.0) < 1e-9
+                && std::abs (m.end - 4.0) < 1e-9 && m.comment == "beta")
+                betaOk = true;
+        }
+        CHECK (alphaOk, "selected row 0 became a marker with its comment");
+        CHECK (betaOk, "selected row 1 became a marker with its comment");
+    }
+
+    // --- All three selected: the third one is added as well.
+    sel.clear();
+    sel.addRange ({ 0, 3 });
+    panel.listTable ().setSelectedRows (sel, juce::sendNotification);
+    CHECK (panel.addMarkersForSelection (-1) == 3, "all selected rows add markers");
+    CHECK (app.markers().count() == 6, "marker list grew by three");
+
+    // --- Point segments become point markers.
+    ScttSegment p; p.startSec = 7.0; p.endSec = 7.0; p.text = "tick";
+    d->sctt.segments.push_back (p);
+    panel.refresh();
+    sel.clear();
+    sel.addRange ({ 3, 4 });   // the new point segment
+    panel.listTable ().setSelectedRows (sel, juce::sendNotification);
+    CHECK (panel.addMarkersForSelection (-1) == 1, "point segment adds one marker");
+    {
+        const auto& ms = app.markers().markers();
+        bool tickOk = false;
+        for (const auto& m : ms)
+            if (m.name == "tick" && std::abs (m.start - 7.0) < 1e-9 && m.end < 0.0)
+                tickOk = true;
+        CHECK (tickOk, "point segment became a point marker");
+    }
+
+    // --- No document: nothing happens.
+    { Application emptyApp; TranscriptionPanel p (emptyApp);
+      CHECK (p.addMarkersForSelection (0) == 0, "no document adds no markers"); }
+
+    wav.deleteFile ();
 }
 
 // ---------------- Transcription clipboard: Excel-friendly TSV --------------
@@ -19178,7 +19267,7 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/eq + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 17, "Effects menu includes the invert/stretch/eq + split + generate + super-res items");
 #else
     CHECK (fxMenu.getNumItems() == 16, "Effects menu includes the invert/stretch/eq + split + generate + super-res items");
 #endif
@@ -20325,6 +20414,7 @@ static int scRunUnitTestsImpl()
     progress ("transcription panel layout"); testTranscriptionPanelLayout();
     progress ("transcription dclick zoom"); testTranscriptionDoubleClickZoom();
     progress ("transcription edit/add/remove"); testTranscriptionEditAddRemove();
+    progress ("transcription add markers multi"); testTranscriptionAddMarkersMulti();
     progress ("transcription clipboard");       testTranscriptionClipboard();
 #endif
     progress ("ensure time range visible"); testEnsureTimeRangeVisible();

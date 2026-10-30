@@ -174,7 +174,10 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     bottomTabs.addTab ("Transcription", kDarkTabBg, transcriptionPanel.get(), false);
     if (transcriptionPanel)
+    {
         transcriptionPanel->onRunRequested = [this] { showTranscribeDialog (); };
+        transcriptionPanel->onRunFolderRequested = [this] { showTranscribeFolderDialog (); };
+    }
 #endif
     pythonPanel->onRunRequested = [this] (const juce::File& f, const juce::String& t)
                                   { runPythonScriptAsync (f, t); };
@@ -2336,8 +2339,6 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsGenTone:    showGenerateToneDialog(); break;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         case ToolsNoiseSuppress: showNoiseSuppressDialog(); break;
-        case ToolsTranscribe: showTranscribeDialog(); break;
-        case ToolsTranscribeFolder: showTranscribeFolderDialog(); break;
 #endif
         case ToolsReverse: runDestructiveEdit ([&] (std::string* e) { return app.reverse (e); }); break;
         case ToolsInvert:      runDestructiveEdit ([&] (std::string* e) { return app.invertSelection (e); }); break;
@@ -5407,13 +5408,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsTimeStretch, "Time Stretch...", app.audioEngine().isFileLoaded(), false);
         menu.addItem (ToolsFilterEq,    "Filter EQ...",    app.audioEngine().isFileLoaded(), false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        // AI effects: first use downloads the model weights.
+        // AI effects: first use downloads the model weights. Transcription is
+        // launched from the buttons in the Transcription tab instead.
         menu.addSeparator();
         menu.addItem (ToolsNoiseSuppress, "Noise Suppression...", hasSel, false);
-        // Whole-file operation (no selection needed).
-        menu.addItem (ToolsTranscribe, "Transcribe...", app.audioEngine().isFileLoaded(), false);
-        // Folder batch: no file needs to be open at all.
-        menu.addItem (ToolsTranscribeFolder, "Transcribe Folder...", true, false);
 #endif
         menu.addSeparator();
         // AI stem separation via an external CLI tool; first use downloads

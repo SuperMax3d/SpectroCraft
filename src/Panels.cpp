@@ -6009,7 +6009,6 @@ void MarkerListPanel::showMarkerContextMenu()
     m.addItem (4, "Export Markers as CSV...", app.markers().count() > 0);
     m.addItem (5, "Import Markers from CSV...", app.audioEngine().isFileLoaded());
     m.addSeparator();
-    m.addItem (6, "Remove All Markers", app.markers().count() > 0);
     m.addItem (9, "Delete Selected", table.getNumSelectedRows () > 0);
     m.addItem (8, "Fit View to Selected", table.getNumSelectedRows () > 0);
     m.addItem (3, "Find...\tCtrl+F");
@@ -6025,8 +6024,6 @@ void MarkerListPanel::showMarkerContextMenu()
         exportMarkersCsv();
     else if (id == 5)
         importMarkersCsv();
-    else if (id == 6)
-        removeAllMarkers();
     else if (id == 9)
         deleteSelected ();
     else if (id == 8)
@@ -6091,26 +6088,6 @@ int MarkerListPanel::importMarkersCsv()
     }
 
     return added;
-}
-
-void MarkerListPanel::removeAllMarkers()
-{
-    const int n = (int) app.markers().count();
-    if (n == 0)
-        return;
-
-    juce::AlertWindow w ("Remove all markers?",
-                         "This removes all " + juce::String (n) + " marker(s) from this file.",
-                         juce::AlertWindow::WarningIcon, this);
-    w.addButton ("Remove", 1);
-    w.addButton ("Cancel", 0);
-
-    if (w.runModalLoop() != 1)
-        return;
-
-    app.markers().clear();
-    refresh();
-    if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
 }
 
 // ---------------------------------------------------------------- Find (Ctrl+F / F3 / Ctrl+F3)
@@ -6656,9 +6633,12 @@ void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::Mou
     auto* d = owner->app.doc ();
     if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
 
+    // With a multi-selection the menu acts on every selected segment.
+    const int selCount = (int) owner->selectedRowIndices ().size ();
+
     juce::PopupMenu menu;
     menu.addItem (1, "Edit...");
-    menu.addItem (2, "Add as marker");
+    menu.addItem (2, selCount > 1 ? "Add as markers" : "Add as marker");
     menu.addItem (3, "Find...\tCtrl+F");
     menu.addSeparator();
     menu.addItem (4, "Add entry");
@@ -6672,7 +6652,7 @@ void TranscriptionPanel::Model::cellClicked (int rowNumber, int, const juce::Mou
     if (id == 1)
         owner->showEditDialog (rowNumber);
     else if (id == 2)
-        owner->addMarkerForRow (rowNumber);
+        owner->addMarkersForSelection (rowNumber);
     else if (id == 3)
         owner->showFindDialog ();
     else if (id == 4)
@@ -6754,8 +6734,38 @@ void TranscriptionPanel::addMarkerForRow (int rowNumber)
     auto* d = app.doc ();
     if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->sctt.segments.size ()) return;
 
-    const ScttSegment& s = d->sctt.segments [(size_t) rowNumber];
+    createMarkerForSegment (d->sctt.segments [(size_t) rowNumber]);
+    refresh ();
+    if (app.onStateChange) app.onStateChange ();   // views + markers panel
+}
 
+int TranscriptionPanel::addMarkersForSelection (int fallbackRow)
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return 0;
+
+    std::vector<int> rows = selectedRowIndices ();
+    if (rows.empty ())
+        rows.push_back (fallbackRow);
+
+    int added = 0;
+    for (int r : rows)
+    {
+        if (r < 0 || r >= (int) d->sctt.segments.size ()) continue;
+        createMarkerForSegment (d->sctt.segments [(size_t) r]);
+        ++added;
+    }
+
+    if (added > 0)
+    {
+        refresh ();
+        if (app.onStateChange) app.onStateChange ();   // views + markers panel
+    }
+    return added;
+}
+
+void TranscriptionPanel::createMarkerForSegment (const ScttSegment& s)
+{
     juce::String full = juce::String::fromUTF8 (s.text.c_str(), (int) s.text.size()).trim ();
     juce::String title = full;
     if (title.length () > 80)
@@ -6768,9 +6778,6 @@ void TranscriptionPanel::addMarkerForRow (int rowNumber)
         : app.markers ().addPointMarker (s.startSec, title);
     if (!full.isEmpty ())
         app.markers ().setComment (id, full);   // keep the full text
-
-    refresh ();
-    if (app.onStateChange) app.onStateChange ();   // views + markers panel
 }
 
 void TranscriptionPanel::showEditDialog (int rowNumber)
@@ -7091,7 +7098,7 @@ void TranscriptionPanel::pasteFromClipboard()
 }
 
 TranscriptionPanel::TranscriptionPanel (Application& appIn)
-    : app (appIn), runBtn ("Transcribe..."), clearBtn ("Clear")
+    : app (appIn), runBtn ("Transcribe..."), folderBtn ("Transcribe Folder...")
 {
     auto& header = table.getHeader();
     // JUCE TableHeaderComponent column IDs must be non-zero.
@@ -7102,18 +7109,10 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
 
     addAndMakeVisible (&table);
     addAndMakeVisible (&runBtn);
-    addAndMakeVisible (&clearBtn);
+    addAndMakeVisible (&folderBtn);
 
     runBtn.onClick = [this] { if (onRunRequested) onRunRequested (); };
-    clearBtn.onClick = [this] {
-        auto* d = app.doc ();
-        if (d != nullptr && !d->sctt.empty ())
-        {
-            d->setTranscription ({});
-            refresh();
-            if (app.onStateChange) app.onStateChange ();
-        }
-    };
+    folderBtn.onClick = [this] { if (onRunFolderRequested) onRunFolderRequested (); };
 
     // Multi-line selection like the marker / selection / drawing lists:
     // plain click = one row, Ctrl/Cmd+click = toggle a row, Shift+click =
@@ -7123,7 +7122,8 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
 
     runBtn.setTooltip ("Run Whisper transcription on the whole file. The first use downloads "
                        "the model weights to %APPDATA%/SpectroCraft/models.");
-    clearBtn.setTooltip ("Remove all transcription segments from this file (the audio is not modified).");
+    folderBtn.setTooltip ("Batch-transcribe every .wav in a chosen folder tree with Whisper. "
+                          "Files are updated in place and never opened in the editor.");
     table.setTooltip ("Click a row to select it; Ctrl/Cmd+click toggles rows, Shift+click\n"
                       "selects the exact range from the anchor. Double-click jumps to the\n"
                       "segment and selects its range. Right-click edits / adds markers /\n"
@@ -7140,9 +7140,9 @@ TranscriptionPanel::TranscriptionPanel (Application& appIn)
 }
 
 // Right-click on empty panel area or the table's empty background: offer to
-// add an entry, copy / paste rows and close the panel. Row right-clicks are
-// handled by the table's own context menu in Model::cellClicked; header
-// clicks keep JUCE's built-in column menu.
+// add an entry, copy / paste rows, search and close the panel. Row right-
+// clicks are handled by the table's own context menu in Model::cellClicked;
+// header clicks keep JUCE's built-in column menu.
 void TranscriptionPanel::mouseDown (const juce::MouseEvent& e)
 {
     if (!e.mods.isRightButtonDown() || e.mods.isLeftButtonDown()) return;
@@ -7160,6 +7160,7 @@ void TranscriptionPanel::mouseDown (const juce::MouseEvent& e)
     m.addItem (2, "Copy Selected");
     m.addItem (3, "Copy All");
     m.addItem (4, "Paste");
+    m.addItem (6, "Find...\tCtrl+F");
     m.addSeparator();
     m.addItem (5, "Close Panel");
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
@@ -7171,6 +7172,8 @@ void TranscriptionPanel::mouseDown (const juce::MouseEvent& e)
         copyAllRows();
     else if (id == 4)
         pasteFromClipboard();
+    else if (id == 6)
+        showFindDialog ();
     else if (id == 5 && onCloseRequested)
         onCloseRequested();
 }
@@ -7193,8 +7196,8 @@ void TranscriptionPanel::resized()
     // The button strip is pinned to the bottom of the panel; the segment
     // list takes all of the space above it.
     auto btnRow = b.removeFromBottom (30);
-    runBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, 130, 26);
-    clearBtn.setBounds (runBtn.getRight () + 8, btnRow.getY () + 2, 90, 26);
+    runBtn.setBounds (btnRow.getX (), btnRow.getY () + 2, 120, 26);
+    folderBtn.setBounds (runBtn.getRight () + 8, btnRow.getY () + 2, 165, 26);
 
     table.setBounds (b.reduced (0, 4));   // small gap between list and buttons
 }

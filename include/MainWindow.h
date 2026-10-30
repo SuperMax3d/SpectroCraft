@@ -367,8 +367,6 @@ public:
         ToolsGenTone,              // Effects > Generate Tone...
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         ToolsNoiseSuppress,   // AI noise suppression (built with -DSPECTRO_ENABLE_AI=ON)
-        ToolsTranscribe,      // AI Whisper transcription (whole file)
-        ToolsTranscribeFolder,// AI batch transcription of a folder of WAV files
 #endif
         WindowPanelBase = 6500,   // Window menu: per-panel open/close toggles
         HelpAbout = 6000,
