@@ -51,6 +51,10 @@ public:
     const std::vector<StemDescEntry>& descriptions() const { return descs_; }
     std::vector<StemDescEntry>& descriptionsForTest() { return descs_; }
     juce::Component* rowsHostForTest() { return &rowsHost_; }
+    juce::ComboBox* modeComboForTest() { return &modeCombo_; }
+    juce::ComboBox* outputComboForTest() { return &outputCombo_; }
+    int selectedModeId() const { return modeCombo_.getSelectedItemIndex () + 1; }   // 1=Sam Audio 2/3=htdemucs
+    bool demucsMode() const { return modeCombo_.getSelectedItemIndex () >= 1; }
 
     // Called by the DescRow buttons (a separate class), so these are public.
     void addAnchorFromSelection(int descIndex, bool include);
@@ -86,6 +90,8 @@ private:
     juce::Label startLbl_, endLbl_, durLbl_;
     juce::TextEditor startEdit_, endEdit_;
     juce::TextButton selectAllBtn_;
+    juce::Label modeLbl_;
+    juce::ComboBox modeCombo_;           // 1=Sam Audio 2=htdemucs_6stems 3=htdemucs_ft
     juce::Label modelLbl_, backendLbl_, descLbl_;
     juce::ComboBox modelCombo_;
     juce::ComboBox backendCombo_;
@@ -101,6 +107,7 @@ private:
     juce::Label advancedHint_;
 
     juce::Label statusLabel_;
+    juce::ComboBox outputCombo_;         // 1=new file 2=overwrite current 3=append to current
     juce::TextButton cancelBtn_;         // closes the window without running
     juce::TextButton downloadBtn_;
     juce::TextButton runBtn_;

@@ -1114,6 +1114,16 @@ from the whole file when nothing is selected. It runs the prebuilt
 `audiocpp_cli.exe` tool as a child process; no part of it is compiled into
 SpectroCraft.
 
+The **Mode** dropdown selects the separation family:
+
+- **Sam Audio** (default) — text-prompted extraction with anchors, as described below.
+- **htdemucs_6stems** / **htdemucs_ft** — plain source separation with no
+description or anchors: the tool writes one named `.wav` per stem into its output
+folder and every file becomes a track. These families require a 44.1 kHz input,
+so the extracted range is resampled to 44.1 kHz first when the source rate differs
+(the stems are resampled back afterwards). In these modes the description area of
+the dialog is hidden entirely.
+
 ### Getting the binary and models
 
 The dialog's **Download…** button fetches what is missing (with progress and
@@ -1127,6 +1137,12 @@ cancel):
   [audio-cpp/SAM-Audio-GGUF](https://huggingface.co/audio-cpp/SAM-Audio-GGUF/tree/main)
   (small/base/large in q8_0/bf16/f32). The model dropdown lists every `.gguf`
   found, so you can install more manually and they appear automatically.
+- **htdemucs models** — for the two htdemucs modes: `htdemucs_6stems` uses any
+  `.gguf` file placed in `%APPDATA%\SpectroCraft\models\audiocpp\HTDemucs-6stems-GGUF\`
+  (the model dropdown lists them), and `htdemucs_ft` uses the folder
+  `%APPDATA%\SpectroCraft\models\audiocpp\htdemucs_ft\`, which must contain at
+  least one `.gguf` file. These are not offered by the downloader — install them
+  manually (e.g. from [huggingface.co/htdemucs](https://huggingface.co)).
 
 Everything lives in `%APPDATA%\SpectroCraft\models\audiocpp\` — put
 `audiocpp_cli.exe` (plus its runtime DLLs) and one or more `sam-audio-*.gguf`
@@ -1142,15 +1158,31 @@ dropdown (*Cpu* / *Cuda* / *Vulkan*) must match the installed binary variant.
 2. For each description, `audiocpp_cli.exe` runs with
    `--task s2s --family sam_audio`, the chosen model and backend, the text,
    optional anchor ranges and an output directory; its log lines stream into
-   the progress dialog (cancellable).
+   the progress dialog (cancellable). In htdemucs modes a single
+   `--task sep --family htdemucs[_6stems]` run is made instead — no text or
+   anchors.
 3. The tool's `target.wav` (the described element) and `residual.wav`
    (everything else) are read back, resampled to the source rate if needed and
    padded to equal length. With several descriptions only the LAST residual is
    kept — an intermediate one would just repeat what the next step already
    removes.
-4. A new document `<name>_stems` opens with one track per output channel —
-one target per description, then the final residual — ready for further
-editing or saving as WAV/FLAC/AIFF.
+4. The result is applied according to the **Output** dropdown at the bottom of
+   the dialog (persisted between sessions):
+   - **Copy stems to new file** (default) — a new document `<name>_stems` opens
+     with one track per output channel, ready for further editing or saving as
+     WAV/FLAC/AIFF. In Sam Audio mode that is one target per description plus the
+     final residual; in htdemucs modes it is the tool's named stems.
+   - **Overwrite current file** — the open file's content is replaced by the
+     stems (one undoable step). Markers inside the extracted range keep their
+     relative position, everything else is dropped with the old timeline, and the
+     playhead/selection follow suit.
+   - **Append to current file** — every original track stays untouched and each
+     stem becomes a new track holding its data over the extracted time range
+     (silence elsewhere), so the stems line up in time with what was separated
+     from them. One undoable step covers all of it.
+
+   If you switch documents while a run is in flight, overwrite/append falls back
+   to creating a new file rather than writing into the wrong document.
 
 When a run finishes successfully the Stem Separation window closes itself;
 on failure or cancellation it stays open so you can read the status and retry.
@@ -1187,8 +1219,8 @@ sources are unaffected since their input is already one track.
 The window stays above the main window while open (global topmost), so making
 include/exclude selections in the track view does not push it behind.
 
-The last model, backend and extract-from-original choice persist between
-sessions in `SpectroCraft.recent`.
+The last mode, model (per mode), backend, extract-from-original and output mode
+choices persist between sessions in `SpectroCraft.recent`.
 
 ### Remembered descriptions
 

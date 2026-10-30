@@ -117,6 +117,9 @@ struct Settings
     juce::String acppModel;              // selected GGUF model file name ("" = none)
     int acppBackend = 0;                 // backend combo index: 1=Cpu 2=Cuda 3=Vulkan
     bool acppExtractOriginal = true;     // "Extract from original" toggle
+    int stemSepMode = 1;                 // separation mode: 1=Sam Audio 2=htdemucs_6stems 3=htdemucs_ft
+    juce::String acppModel6;             // selected GGUF file name in htdemucs_6stems mode ("" = none)
+    int stemSepOutputMode = 1;           // result handling: 1=new file 2=overwrite current 3=append to current
 
     // Filter EQ (Effects menu): the curve shown when the dialog opens next time,
     // plus user-defined presets. Both are serialised point lists, see sc::eq.
@@ -151,6 +154,8 @@ struct Settings
             && specHarmN == o.specHarmN
             && exportAxes == o.exportAxes && exportMarkers == o.exportMarkers
             && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings
+            && stemSepMode == o.stemSepMode && acppModel6 == o.acppModel6
+            && stemSepOutputMode == o.stemSepOutputMode
             && eqLastCurve == o.eqLastCurve
             && eqUserPresets == o.eqUserPresets;
     }

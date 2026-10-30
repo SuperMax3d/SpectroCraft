@@ -153,6 +153,9 @@ void Application::loadSettings ()
     settings.acppModel          = recentStore->getValue ("acpp_model", juce::String ());
     settings.acppBackend        = std::clamp ((int) recentStore->getIntValue ("acpp_backend", 1), 1, 3);
     settings.acppExtractOriginal = recentStore->getIntValue ("acpp_extract_orig", 1) != 0;
+    settings.stemSepMode        = std::clamp ((int) recentStore->getIntValue ("stem_sep_mode", 1), 1, 3);
+    settings.acppModel6         = recentStore->getValue ("acpp_model_6", juce::String ());
+    settings.stemSepOutputMode  = std::clamp ((int) recentStore->getIntValue ("stem_sep_output", 1), 1, 3);
     // Filter EQ: remembered curve + user presets.
     settings.eqLastCurve        = recentStore->getValue ("eq_last_curve", juce::String ());
     settings.eqUserPresets      = recentStore->getValue ("eq_user_presets", juce::String ());
@@ -197,6 +200,9 @@ void Application::saveSettings ()
     recentStore->setValue ("acpp_model", settings.acppModel);
     recentStore->setValue ("acpp_backend", settings.acppBackend);
     recentStore->setValue ("acpp_extract_orig", settings.acppExtractOriginal ? 1 : 0);
+    recentStore->setValue ("stem_sep_mode", settings.stemSepMode);
+    recentStore->setValue ("acpp_model_6", settings.acppModel6);
+    recentStore->setValue ("stem_sep_output", settings.stemSepOutputMode);
     recentStore->setValue ("eq_last_curve", settings.eqLastCurve);
     recentStore->setValue ("eq_user_presets", settings.eqUserPresets);
     recentStore->setValue ("rec_plugin", recording.pluginId);
@@ -1930,6 +1936,131 @@ bool Application::createDocFromMerged (sc::MergeResult& r, std::string* errOut,
 
     docs.push_back (std::move (d));
     activate ((int) docs.size () - 1);   // fires onActiveDocChanged -> UI sync
+    return true;
+}
+
+// Message-thread only. Applies a stem-separation result to the active document
+// according to outputMode: 1 = create a new document from it (the historical
+// behaviour), 2 = replace the current file's content with it (one undoable
+// step; markers inside the extracted range keep their relative position,
+// everything else is dropped with the old timeline), 3 = append its tracks
+// after the existing channels (one undoable step).
+bool Application::applyStemSeparationResult (sc::MergeResult& r, int outputMode,
+                                             double extStartSecs,
+                                             const juce::String& suggestedName,
+                                             std::string* errOut)
+{
+    auto fail = [errOut] (const char* msg) { if (errOut != nullptr) *errOut = msg; return false; };
+
+    if (r.channels <= 0 || !std::isfinite (r.rate) || r.rate <= 0.0
+        || r.data.empty () || r.data.size () != (size_t) r.channels)
+        return fail ("Invalid stem separation result.");
+
+    // Mode 1: a brand-new document (the historical behaviour).
+    if (outputMode == 1)
+        return createDocFromMerged (r, errOut, suggestedName);
+
+    auto* d = doc ();
+    if (!d || !d->engine.isFileLoaded ())
+        return fail ("No file is open.");
+    auto& eng = d->engine;
+
+    // The worker normalises every track to the source document's rate.
+    if (std::abs (r.rate - eng.sampleRate ()) > 1e-6 * r.rate)
+        return fail ("The result sample rate does not match the open file.");
+
+    const int nTracks = (int) r.data.size ();
+    std::vector<Marker> oldMarkers = d->markers.markers ();
+    auto oldSavedSel = d->savedSelections;
+
+    if (outputMode == 2)
+    {
+        // Overwrite: one undoable patch replaces the whole content. Markers inside
+        // the extracted range keep their relative position; everything else is
+        // dropped with the old timeline.
+        const double newDur = (double) r.data[0].size () / eng.sampleRate ();
+
+        std::vector<Marker> shifted;
+        for (const auto& m : d->markers.markers ())
+        {
+            const double s = m.start - extStartSecs;
+            if (s < -1e-9 || s > newDur + 1e-9) continue;   // outside the extracted range
+            Marker c = m;
+            c.start = std::clamp (s, 0.0, newDur);
+            if (c.end >= 0.0)
+                c.end = std::clamp (m.end - extStartSecs, c.start, newDur);
+            shifted.push_back (std::move (c));
+        }
+
+        if (!eng.replaceWholeFileUndoable (r.data, "Stem separation"))
+            return fail ("Could not replace the file content.");
+
+        d->markers.restore (shifted);
+
+        // Keep playhead/selection at their relative position inside the extracted range.
+        const double dur = eng.duration ();
+        playhead = std::clamp (playhead - extStartSecs, 0.0, dur);
+        selection = { std::clamp (selection.getStart () - extStartSecs, 0.0, dur),
+                      std::clamp (selection.getEnd () - extStartSecs, 0.0, dur) };
+
+        // The new file has exactly the stem tracks; show all of them.
+        visibleChannels.clear ();
+        for (int ch = 0; ch < nTracks; ++ch)
+            visibleChannels.push_back (ch);
+    }
+    else if (outputMode == 3)
+    {
+        // Append: existing channels stay untouched and each stem becomes a new
+        // track holding its data over the extracted range [extStart, extEnd] -
+        // so the stems line up in time with what was separated from them. One
+        // undoable step via replaceWithNoiseTracks with an unchanged copy of
+        // every current channel as the "filtered" data.
+        const int64_t total = eng.numSamples ();
+        const int64_t startSample = jlimit ((int64_t) 0, total,
+            (int64_t) std::llround (extStartSecs * eng.sampleRate ()));
+        const int64_t len = jmin ((int64_t) r.data[0].size (), total - startSample);
+        if (len <= 0)
+            return fail ("The extracted range no longer fits in the file.");
+
+        std::vector<std::vector<float>> filtered ((size_t) eng.numChannels ());
+        for (int ch = 0; ch < eng.numChannels (); ++ch)
+        {
+            filtered[(size_t) ch].resize ((size_t) len);
+            if (!eng.readSamples (ch, startSample, len, filtered[(size_t) ch].data ()))
+                return fail ("Could not read the current file content.");
+        }
+
+        std::vector<std::vector<float>> stems;
+        for (auto& t : r.data)
+        {
+            auto v = std::move (t);
+            v.resize ((size_t) len, 0.0f);   // truncate if the tool ran long, pad if short
+            stems.push_back (std::move (v));
+        }
+
+        if (!eng.replaceWithNoiseTracks ({ startSample, startSample + len }, filtered, stems,
+                    "Stem separation (" + juce::String (nTracks) + " tracks appended)"))
+            return fail ("Could not append the stem tracks.");
+
+        // Make the freshly added channels visible.
+        const int n = eng.numChannels ();
+        for (int ch = n - nTracks; ch < n; ++ch)
+            if (!isChannelVisible (ch))
+                visibleChannels.push_back (ch);
+        std::sort (visibleChannels.begin (), visibleChannels.end ());
+    }
+    else
+        return fail ("Unknown stem separation output mode.");
+
+    // Side state: record the marker/saved-selection change so undo/redo restores it.
+    Patch& p = d->undo.lastRecorded ();
+    p.hasSideState = true;
+    p.oldMarkers = std::move (oldMarkers);
+    p.newMarkers = d->markers.markers ();
+    p.oldSavedSel = std::move (oldSavedSel);
+    p.newSavedSel = d->savedSelections;
+
+    syncActiveDoc ();
     return true;
 }
 

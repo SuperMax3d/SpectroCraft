@@ -279,6 +279,13 @@ public:
     bool createDocFromMerged (sc::MergeResult& r, std::string* errOut = nullptr,
                               const juce::String& suggestedName = {});
 
+    /** Message-thread only. Applies a stem-separation result to the active document according to outputMode:
+        1 = create a new document from it (the historical behaviour),
+        2 = replace the current file's content with it (one undoable step; markers inside the extracted range keep their relative position, everything else is dropped with the old timeline),
+        3 = append its tracks after the existing channels (one undoable step). */
+    bool applyStemSeparationResult (sc::MergeResult& r, int outputMode, double extStartSecs,
+                                    const juce::String& suggestedName, std::string* errOut);
+
     bool openFile (const juce::File& file);
 
     /** For a freshly loaded doc that carried no stored display state, copy

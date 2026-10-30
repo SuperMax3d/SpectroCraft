@@ -162,6 +162,9 @@ struct StemSeparationWindow::RunJob
     double extStopSecs = 0.0;
     double rate = 48000.0;
     juce::String resultName;          // suggested name for the new document
+    int mode = 1;                     // 1=Sam Audio 2=htdemucs_6stems 3=htdemucs_ft
+    int outputMode = 1;               // 1=new file 2=overwrite current 3=append to current
+    FileDoc* docAtStart = nullptr;    // the active document when Run was clicked
 };
 
 StemSeparationWindow::StemSeparationWindow(Application& app)
@@ -247,10 +250,42 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     selectAllBtn_.setButtonText ("Select All");
     selectAllBtn_.onClick = [this] { doSelectAll (); };
 
+    // Mode row: which separation family to run. Sam Audio keeps the full
+    // description UI; the htdemucs modes only need model + backend.
+    modeLbl_.setFont (juce::FontOptions (13.0f));
+    modeLbl_.setText ("Mode:", juce::dontSendNotification);
+    modeCombo_.addItem ("Sam Audio", 1);
+    modeCombo_.addItem ("htdemucs_6stems", 2);
+    modeCombo_.addItem ("htdemucs_ft", 3);
+    modeCombo_.setSelectedItemIndex (std::clamp (app_.settings.stemSepMode, 1, 3) - 1,
+                                     juce::dontSendNotification);
+    modeCombo_.onChange = [this]
+    {
+        app_.settings.stemSepMode = modeCombo_.getSelectedItemIndex () + 1;
+        app_.saveSettings ();
+        refreshModelList ();   // the model list depends on the mode
+        setSize (kWinW, computeHeight ());   // show/hide the description area
+    };
+
+    // Output handling for every mode: where do the separated stems go?
+    outputCombo_.addItem ("Copy stems to new file", 1);
+    outputCombo_.addItem ("Overwrite current file", 2);
+    outputCombo_.addItem ("Append to current file", 3);
+    outputCombo_.setSelectedItemIndex (std::clamp (app_.settings.stemSepOutputMode, 1, 3) - 1,
+                                       juce::dontSendNotification);
+    outputCombo_.onChange = [this]
+    {
+        app_.settings.stemSepOutputMode = outputCombo_.getSelectedItemIndex () + 1;
+        app_.saveSettings ();
+    };
+
     modelCombo_.onChange = [this]
     {
         const juce::String t = modelCombo_.getText ();
-        app_.settings.acppModel = (t == "(no models installed)") ? juce::String () : t;
+        if (!demucsMode ())
+            app_.settings.acppModel = (t == "(no models installed)") ? juce::String () : t;
+        else if (selectedModeId () == 2)
+            app_.settings.acppModel6 = (t == "(no models installed)") ? juce::String () : t;
         app_.saveSettings ();
         refreshStatusIdle ();
     };
@@ -316,6 +351,8 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     juce::Component::addAndMakeVisible (&endEdit_);
     juce::Component::addAndMakeVisible (&durLbl_);
     juce::Component::addAndMakeVisible (&selectAllBtn_);
+    juce::Component::addAndMakeVisible (&modeLbl_);
+    juce::Component::addAndMakeVisible (&modeCombo_);
     juce::Component::addAndMakeVisible (&modelLbl_);
     juce::Component::addAndMakeVisible (&modelCombo_);
     juce::Component::addAndMakeVisible (&backendLbl_);
@@ -328,6 +365,7 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     juce::Component::addAndMakeVisible (&rowsHost_);
     juce::Component::addAndMakeVisible (&advancedHint_);
     juce::Component::addAndMakeVisible (&statusLabel_);
+    juce::Component::addAndMakeVisible (&outputCombo_);
     juce::Component::addAndMakeVisible (&cancelBtn_);
     juce::Component::addAndMakeVisible (&downloadBtn_);
     juce::Component::addAndMakeVisible (&runBtn_);
@@ -365,25 +403,53 @@ void StemSeparationWindow::closeButtonPressed()
 
 void StemSeparationWindow::refreshModelList()
 {
-    const auto models = sc::acpp::listModels ();
+    // This JUCE build uses 0-based combo positions.
+    auto addPlaceholder = [this] { modelCombo_.addItem ("(no models installed)", 1); };
+
     modelCombo_.clear ();
-    if (models.empty ())
+    if (!demucsMode ())
     {
-        modelCombo_.addItem ("(no models installed)", 1);
-        // This JUCE build uses 0-based combo positions.
+        const auto models = sc::acpp::listModels ();
+        if (models.empty ())
+            addPlaceholder ();
+        else
+        {
+            for (size_t i = 0; i < models.size (); ++i)
+                modelCombo_.addItem (models[i].getFileName (), (int) i + 1);
+            // Restore the last used model when it is still installed.
+            int pos = 0;
+            const juce::String saved = app_.settings.acppModel;
+            for (size_t i = 0; i < models.size (); ++i)
+                if (models[i].getFileName() == saved) { pos = (int) i; break; }
+            modelCombo_.setSelectedItemIndex (pos, juce::dontSendNotification);
+        }
+    }
+    else if (selectedModeId () == 2)
+    {
+        const auto models = sc::acpp::listDemucs6Models ();
+        if (models.empty ())
+            addPlaceholder ();
+        else
+        {
+            for (size_t i = 0; i < models.size (); ++i)
+                modelCombo_.addItem (models[i].getFileName (), (int) i + 1);
+            int pos = 0;
+            const juce::String saved = app_.settings.acppModel6;
+            for (size_t i = 0; i < models.size (); ++i)
+                if (models[i].getFileName() == saved) { pos = (int) i; break; }
+            modelCombo_.setSelectedItemIndex (pos, juce::dontSendNotification);
+        }
+    }
+    else   // htdemucs_ft: the whole folder is one "model".
+    {
+        if (sc::acpp::demucsFtModelDir () == juce::File ())
+            addPlaceholder ();
+        else
+            modelCombo_.addItem ("htdemucs_ft", 1);
+    }
+
+    if (modelCombo_.getSelectedItemIndex () < 0)
         modelCombo_.setSelectedItemIndex (0, juce::dontSendNotification);
-    }
-    else
-    {
-        for (size_t i = 0; i < models.size (); ++i)
-            modelCombo_.addItem (models[i].getFileName (), (int) i + 1);
-        // Restore the last used model when it is still installed.
-        int pos = 0;
-        const juce::String saved = app_.settings.acppModel;
-        for (size_t i = 0; i < models.size (); ++i)
-            if (models[i].getFileName() == saved) { pos = (int) i; break; }
-        modelCombo_.setSelectedItemIndex (pos, juce::dontSendNotification);
-    }
     refreshStatusIdle ();
 }
 
@@ -393,12 +459,17 @@ void StemSeparationWindow::refreshStatusIdle()
 
     const bool hasBin = sc::acpp::hasBinary ();
     const int modelIdx = modelCombo_.getSelectedItemIndex ();   // 0-based position
-    const bool hasModel = !sc::acpp::listModels ().empty () && modelIdx >= 0;
+    const bool demucs = demucsMode ();
+    const bool hasModel = modelIdx >= 0 && modelCombo_.getText () != "(no models installed)";
 
     juce::String s;
     if (!hasBin)
         s = "The audiocpp_cli.exe binary is not installed yet - use Download...";
-    else if (!hasModel)
+    else if (demucs && !hasModel)
+        s = (selectedModeId () == 2
+             ? "No htdemucs_6stems model found - place a .gguf file in the HTDemucs-6stems-GGUF folder."
+             : "The htdemucs_ft model folder is not installed - create it with at least one .gguf file.");
+    else if (!demucs && !hasModel)
         s = "No SAM-Audio model found in the models folder - use Download...";
     else
     {
@@ -464,7 +535,7 @@ namespace {
 // Vertical layout shared by metrics() and resized().
 struct LayoutYs
 {
-    int sourceRow = 0, modelRow = 0, backendRow = 0;
+    int sourceRow = 0, modeRow = 0, modelRow = 0, backendRow = 0;
     int descAreaTop = 0;      // description editor (simple) or header row (advanced)
     int rowsTop = 0;          // top of the DescRow stack (advanced only)
     int addDescRow = 0;       // "Add Stem" button, below the last row (advanced)
@@ -472,24 +543,33 @@ struct LayoutYs
     int bottomRow = 0;
     int totalH = 0;
 
-    static LayoutYs compute (bool advanced, int rowsH)
+    static LayoutYs compute (bool advanced, int rowsH, bool demucs)
     {
         LayoutYs y;
         y.sourceRow   = kMargin;
-        y.modelRow    = y.sourceRow + 24 + 8;
+        y.modeRow     = y.sourceRow + 24 + 8;             // mode dropdown row
+        y.modelRow    = y.modeRow + 28 + 8;
         y.backendRow  = y.modelRow + 28 + 8;
-        y.descAreaTop = y.backendRow + 28 + 8;
 
-        if (!advanced)
-            y.rowsTop = y.descAreaTop + 28 + 8 + 24 + 8;   // editor row + advanced button
+        if (demucs)
+            // No description area at all in the htdemucs modes.
+            y.statusTop = y.backendRow + 28 + 8;
         else
         {
-            y.rowsTop = y.descAreaTop + 26 + 8;           // below the header buttons
-            y.rowsTop += 16 + 8;                          // hint line + gap
-            y.addDescRow = y.rowsTop + rowsH + 4;         // "Add Stem" under the last row
+            y.descAreaTop = y.backendRow + 28 + 8;
+
+            if (!advanced)
+                y.rowsTop = y.descAreaTop + 28 + 8 + 24 + 8;   // editor row + advanced button
+            else
+            {
+                y.rowsTop = y.descAreaTop + 26 + 8;           // below the header buttons
+                y.rowsTop += 16 + 8;                          // hint line + gap
+                y.addDescRow = y.rowsTop + rowsH + 4;         // "Add Stem" under the last row
+            }
+
+            y.statusTop   = advanced ? y.addDescRow + 24 + 8 : y.rowsTop + 8;
         }
 
-        y.statusTop   = advanced ? y.addDescRow + 24 + 8 : y.rowsTop + 8;
         y.bottomRow   = y.statusTop + 40 + 8;
         y.totalH      = y.bottomRow + 28 + kMargin;
         return y;
@@ -500,25 +580,26 @@ struct LayoutYs
 int StemSeparationWindow::computeHeight() const
 {
     int rowsH = 0;
-    if (advanced_)
+    if (advanced_ && !demucsMode ())
     {
         const int w = kWinW - 2 * kMargin;
         for (const auto& d : descs_)
             rowsH += DescRow::heightFor ((int) d.anchors.size (), w) + 4;
     }
-    return LayoutYs::compute (advanced_, rowsH).totalH;
+    return LayoutYs::compute (advanced_, rowsH, demucsMode ()).totalH;
 }
 
 void StemSeparationWindow::resized()
 {
+    const bool demucs = demucsMode ();
     int rowsH = 0;
-    if (advanced_)
+    if (advanced_ && !demucs)
     {
         const int w = kWinW - 2 * kMargin;
         for (const auto& d : descs_)
             rowsH += DescRow::heightFor ((int) d.anchors.size (), w) + 4;
     }
-    const auto y = LayoutYs::compute (advanced_, rowsH);
+    const auto y = LayoutYs::compute (advanced_, rowsH, demucs);
     const int x = kMargin, w = getWidth () - 2 * kMargin;
 
     // Range row: editable start/end seconds + duration + Select All.
@@ -529,6 +610,10 @@ void StemSeparationWindow::resized()
     durLbl_.setBounds (x + 264, y.sourceRow + 3, 150, 18);
     selectAllBtn_.setBounds (getWidth () - kMargin - 96, y.sourceRow, 96, 24);
 
+    // Mode row: which separation family to run.
+    modeLbl_.setBounds (x, y.modeRow + 5, 92, 18);
+    modeCombo_.setBounds (x + 96, y.modeRow, 170, 28);
+
     // Model / backend rows: the labels share one column and every field starts
     // at the same left coordinate.
     modelLbl_.setBounds (x, y.modelRow + 5, 92, 18);
@@ -537,7 +622,18 @@ void StemSeparationWindow::resized()
     backendLbl_.setBounds (x, y.backendRow + 5, 92, 18);
     backendCombo_.setBounds (x + 96, y.backendRow, 110, 28);
 
-    if (!advanced_)
+    if (demucs)
+    {
+        // The htdemucs modes have no description area at all.
+        descLbl_.setBounds (0, 0, 0, 0);
+        descEdit_.setBounds (0, 0, 0, 0);
+        advancedBtn_.setBounds (0, 0, 0, 0);
+        addDescBtn_.setBounds (0, 0, 0, 0);
+        extractOrigToggle_.setBounds (0, 0, 0, 0);
+        advancedHint_.setBounds (0, 0, 0, 0);
+        rowsHost_.setBounds (0, 0, 0, 0);
+    }
+    else if (!advanced_)
     {
         descLbl_.setBounds (x, y.descAreaTop + 5, 92, 18);
         descEdit_.setBounds (x + 96, y.descAreaTop, std::max (80, w - 96), 28);
@@ -572,11 +668,12 @@ void StemSeparationWindow::resized()
     }
 
     statusLabel_.setBounds (x, y.statusTop, w, 40);
+    outputCombo_.setBounds (x, y.bottomRow, 210, 28);   // bottom-left, clear of Cancel/Download/Run
     runBtn_.setBounds (getWidth () - kMargin - 90, y.bottomRow, 90, 28);
     downloadBtn_.setBounds (runBtn_.getX () - 110, y.bottomRow, 104, 28);
     cancelBtn_.setBounds (downloadBtn_.getX () - 96, y.bottomRow, 88, 28);
 
-    if (advanced_) rebuildRows ();   // re-lay out rows for the current width
+    if (advanced_ && !demucs) rebuildRows ();   // re-lay out rows for the current width
 }
 
 void StemSeparationWindow::doSelectAll()
@@ -811,30 +908,57 @@ void StemSeparationWindow::startRun()
     if (!eng.isFileLoaded())
     { statusLabel_.setText ("Load a file first.", juce::dontSendNotification); return; }
 
-    // Collect the descriptions to run.
+    const int modeId = selectedModeId ();   // 1=Sam Audio, 2/3=htdemucs
+    const bool demucs = modeId >= 2;
+
+    // Collect the descriptions to run (Sam Audio only - the htdemucs modes
+    // need no description).
     std::vector<StemDescEntry> descs;
-    if (advanced_)
+    if (!demucs)
     {
-        for (auto& d : descs_)
-            if (!d.text.trim().isEmpty()) descs.push_back (d);
+        if (advanced_)
+            for (auto& d : descs_)
+                if (!d.text.trim().isEmpty()) descs.push_back (d);
+        else
+        {
+            StemDescEntry e;
+            e.text = descEdit_.getText ();
+            if (!e.text.trim().isEmpty()) descs.push_back (e);
+        }
+
+        if (descs.empty ())
+        { statusLabel_.setText ("Enter a description first.", juce::dontSendNotification); return; }
+    }
+
+    if (!sc::acpp::hasBinary ())
+    { openDownloadDialog (); return; }
+
+    // Resolve the model for the selected mode.
+    juce::File model;
+    if (demucs && modeId == 2)
+    {
+        const auto models = sc::acpp::listDemucs6Models ();
+        const int mi = modelCombo_.getSelectedItemIndex ();   // 0-based position
+        if (models.empty () || mi < 0 || mi >= (int) models.size ())
+        { statusLabel_.setText ("The htdemucs_6stems model is not installed - place a .gguf file in the HTDemucs-6stems-GGUF folder.", juce::dontSendNotification); return; }
+        model = models[(size_t) mi];
+    }
+    else if (demucs && modeId == 3)
+    {
+        model = sc::acpp::demucsFtModelDir ();
+        if (model == juce::File ())
+        { statusLabel_.setText ("The htdemucs_ft model folder is not installed - create it with at least one .gguf file.", juce::dontSendNotification); return; }
     }
     else
     {
-        StemDescEntry e;
-        e.text = descEdit_.getText ();
-        if (!e.text.trim().isEmpty()) descs.push_back (e);
+        const auto models = sc::acpp::listModels ();
+        if (models.empty ())
+        { openDownloadDialog (); return; }
+        const int mi = modelCombo_.getSelectedItemIndex ();   // 0-based position
+        if (mi < 0)
+        { statusLabel_.setText ("Pick a model first.", juce::dontSendNotification); return; }
+        model = models[(size_t) mi];
     }
-
-    if (descs.empty ())
-    { statusLabel_.setText ("Enter a description first.", juce::dontSendNotification); return; }
-
-    const auto models = sc::acpp::listModels ();
-    if (!sc::acpp::hasBinary () || models.empty ())
-    { openDownloadDialog (); return; }
-
-    const int mi = modelCombo_.getSelectedItemIndex ();   // 0-based position
-    if (mi < 0)
-    { statusLabel_.setText ("Pick a model first.", juce::dontSendNotification); return; }
 
     // Capture the extraction range from the editable fields on the message
     // thread (they were seeded from the track selection when the window
@@ -847,7 +971,7 @@ void StemSeparationWindow::startRun()
 
     RunJob job;
     job.descs = std::move (descs);
-    job.model = models[(size_t) mi];
+    job.model = model;
     // Convert the 0-based position back to the stored 1-based id.
     const int bi = backendCombo_.getSelectedItemIndex () + 1;
     job.backendCli = (bi == 2 ? "cuda" : bi == 3 ? "vulkan" : "cpu");
@@ -856,6 +980,9 @@ void StemSeparationWindow::startRun()
     job.extStopSecs  = s1;
     job.rate         = eng.sampleRate ();
     job.resultName   = (app_.doc () != nullptr ? app_.doc()->name : juce::String ("stem")) + "_stems";
+    job.mode         = modeId;
+    job.outputMode   = outputCombo_.getSelectedItemIndex () + 1;   // 0-based position -> 1-based id
+    job.docAtStart   = app_.doc ();
 
     running_ = true;
     statusLabel_.setText ("Starting...", juce::dontSendNotification);
@@ -913,15 +1040,39 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
         std::vector<std::vector<float>> inData;
         if (!eng.readRange (startFrame, nFrames, inData) || inData.empty () || inData[0].empty ())
         { fail ("Could not read the selected range."); return; }
-        if (!sc::py::writeFloatWav (tmpIn, inData, j.rate))
+
+        // The htdemucs families require a 44.1 kHz input: resample the
+        // extraction when the source rate differs.
+        double writeRate = j.rate;
+        if (j.mode >= 2 && std::abs (writeRate - 44100.0) > 1e-6 * 44100.0)
+        {
+            setStatus ("Resampling the input to 44.1 kHz...");
+            std::vector<std::vector<float>> rs;
+            for (auto& c : inData)
+            {
+                juce::AudioBuffer<float> in (1, (int) c.size ());
+                std::copy (c.begin (), c.end (), in.getWritePointer (0));
+                juce::AudioBuffer<float> out (1, (int) sc::Resampler::estimateOutputFrames (
+                    (int64_t) c.size (), writeRate, 44100.0));
+                if (!sc::Resampler::resample (in, writeRate, 44100.0, out))
+                { fail ("Could not resample the input to 44.1 kHz."); return; }
+                rs.push_back (std::vector<float> (out.getReadPointer (0),
+                                                  out.getReadPointer (0) + out.getNumSamples ()));
+            }
+            inData = std::move (rs);
+            writeRate = 44100.0;
+        }
+
+        if (!sc::py::writeFloatWav (tmpIn, inData, writeRate))
         { fail ("Could not write the temporary input file."); return; }
 
         // Subsequent descriptions must work on a single mono track rather than
         // the whole multichannel extraction. Write a downmixed copy once when
-        // the source has more than one channel (mono sources need none).
+        // the source has more than one channel (mono sources need none). Not
+        // needed for the htdemucs modes: they run a single plain separation.
         const juce::File tmpInMono = cleaner.dir_.getChildFile ("input_mono.wav");
         bool haveMonoCopy = false;
-        if (inData.size () > 1)
+        if (j.mode == 1 && inData.size () > 1)
         {
             std::vector<std::vector<float>> mono;
             mono.push_back (sc::acpp::downmixToMono (inData));
@@ -931,15 +1082,75 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
         }
 
         const double inputDur = (double) nFrames / j.rate;
-        const int N = (int) j.descs.size ();
 
-        // 2. Run each description through the CLI.
+        // 2. Run the separation through the CLI.
         std::vector<std::vector<float>> tracks;      // one per output track
         std::vector<double> trackRates;
         juce::File prevResidual;
 
-        for (int i = 0; i < N; ++i)
+        if (j.mode >= 2)
         {
+            // Plain separation task: a single CLI call with no description or
+            // anchors. The tool writes one named .wav file per stem into outDir.
+            const juce::String family = (j.mode == 2 ? "htdemucs_6stems" : "htdemucs");
+            setStatus ("Running " + family + "...");
+            setProgress (0.0);
+
+            const juce::File outDir = cleaner.dir_.getChildFile ("sep");
+            sc::acpp::RunResult rr;
+            std::string err;
+            auto lastUi = std::chrono::steady_clock::now () - std::chrono::milliseconds (500);
+            const bool ok = sc::acpp::runSepTask (
+                sc::acpp::binaryPath (), family, j.model, j.backendCli, tmpIn, outDir,
+                [&] { return !prog->cancelled.load (); },
+                [&] (const juce::String& line) {
+                    const auto now = std::chrono::steady_clock::now ();
+                    if (now - lastUi < std::chrono::milliseconds (300)) return;
+                    lastUi = now;
+                    setStatus ("Running " + family + "  |  " + line);
+                },
+                &rr, &err);
+
+            if (!ok)
+            {
+                if (rr.cancelled)
+                { fail ("Run cancelled."); return; }
+                const juce::String detail = rr.stderrText.isNotEmpty () ? tail (rr.stderrText)
+                                : rr.stdoutText.isNotEmpty ()          ? tail (rr.stdoutText)
+                                                                        : juce::String (err);
+                fail ("Stem separation failed.", detail);
+                return;
+            }
+
+            // Collect every stem wav in the output folder, sorted by name so
+            // the track order is stable across runs.
+            std::vector<juce::File> stems;
+            for (auto entry : juce::RangedDirectoryIterator (outDir, false))
+                if (entry.getFile().hasFileExtension ("wav"))
+                    stems.push_back (entry.getFile());
+            std::sort (stems.begin (), stems.end (),
+                       [] (const juce::File& a, const juce::File& b) {
+                           return a.getFileName().toLowerCase() < b.getFileName().toLowerCase (); });
+            if (stems.empty ())
+            { fail ("The tool produced no stem files in " + outDir.getFullPathName ()); return; }
+
+            for (const auto& f : stems)
+            {
+                double tRate = 0.0;
+                int nchT = 0;
+                std::vector<std::vector<float>> tData;
+                if (!sc::py::readFloatWav (f, &tRate, &nchT, tData))
+                { fail ("Could not read the tool's output file " + f.getFileName () + "."); return; }
+                for (auto& c : tData)   { tracks.push_back (std::move (c)); trackRates.push_back (tRate); }
+            }
+            setProgress (1.0);
+        }
+        else
+        {
+            const int N = (int) j.descs.size ();
+
+            for (int i = 0; i < N; ++i)
+            {
             if (prog->cancelled.load ())
             { fail ("Run cancelled."); return; }
 
@@ -1010,6 +1221,7 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
                 for (auto& c : rData) { tracks.push_back (std::move (c)); trackRates.push_back (rRate); }
             prevResidual = residualF;   // still needed as the next step's input
             setProgress ((double) (i + 1) / (double) N);
+            }
         }
 
         // 3. Normalise every track to the source rate and pad to equal length.
@@ -1043,20 +1255,47 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
         // heap-held because this MSVC build rejects `mutable` lambdas with
         // init-captures, and createDocFromMerged takes a non-const reference.
         auto* resPtr = new sc::MergeResult (std::move (result));
+        const juce::String kindMsg = (j.mode >= 2)
+            ? "named stem tracks."
+            : "tracks - one target per description plus the final residual.";
         juce::MessageManager::callAsync ([this, guard, prog, resPtr,
-                                          name = j.resultName, nTracks] {
+                                          name = j.resultName, nTracks,
+                                          outMode = j.outputMode, extStart = j.extStartSecs,
+                                          docAtStart = j.docAtStart, kindMsg] {
             delete prog;
             if (!guard || !guard->load ()) { delete resPtr; return; }
             running_ = false;
             std::string err;
-            if (!app_.createDocFromMerged (*resPtr, &err, name))
-                statusLabel_.setText ("Could not create the result document: " + juce::String (err),
+
+            // If the user switched documents while the run was in flight, an
+            // overwrite/append would hit the wrong file: fall back to creating
+            // a new document instead of losing the result.
+            const bool sourceStillActive = (docAtStart != nullptr && app_.doc () == docAtStart);
+
+            if (outMode == 1 || !sourceStillActive)
+            {
+                if (!app_.createDocFromMerged (*resPtr, &err, name))
+                    statusLabel_.setText ("Could not create the result document: " + juce::String (err),
+                                          juce::dontSendNotification);
+                else
+                {
+                    statusLabel_.setText ((sourceStillActive ? "Created '" : "The source document changed - created '")
+                        + app_.docs.back()->name + "' with "
+                        + juce::String (nTracks) + " " + kindMsg,
+                                          juce::dontSendNotification);
+                    rememberDescs ();   // keep the typed descriptions for next time
+                    if (onCloseRequested) onCloseRequested ();   // close on success
+                }
+            }
+            else if (!app_.applyStemSeparationResult (*resPtr, outMode, extStart, name, &err))
+            {
+                statusLabel_.setText ("Could not apply the result to the current file: " + juce::String (err),
                                       juce::dontSendNotification);
+            }
             else
             {
-                statusLabel_.setText ("Created '" + app_.docs.back()->name + "' with "
-                                      + juce::String (nTracks)
-                                      + " tracks - one target per description plus the final residual.",
+                statusLabel_.setText ((outMode == 2 ? "Replaced the current file with " : "Appended ")
+                    + juce::String (nTracks) + " stem track(s).",
                                       juce::dontSendNotification);
                 rememberDescs ();   // keep the typed descriptions for next time
                 if (onCloseRequested) onCloseRequested ();   // close on success

@@ -31,6 +31,12 @@ bool hasBinary(const juce::File& d = {});
 /** All sam-audio-*.gguf model files in d, sorted by name. */
 std::vector<juce::File> listModels(const juce::File& d = {});
 
+/** All *.gguf model files in d/HTDemucs-6stems-GGUF (the htdemucs_6stems family), sorted by name. */
+std::vector<juce::File> listDemucs6Models(const juce::File& d = {});
+
+/** The htdemucs_ft model directory (d/htdemucs_ft) when it exists and holds at least one .gguf file; an empty File otherwise. */
+juce::File demucsFtModelDir(const juce::File& d = {});
+
 // ---------------------------------------------------------------------------
 // Download catalogue (v0.9.2-drama3-base-small release).
 // ---------------------------------------------------------------------------
@@ -120,6 +126,12 @@ juce::StringArray buildCliArgs(const juce::File& model, const juce::String& back
                                const std::vector<Anchor>& anchors,
                                const juce::File& outDir);
 
+/** Full argument vector (exe path excluded) in the documented order for the plain separation task used by the htdemucs families:
+    --task sep --family <f> --model <m> --backend <b> --audio <a> --out-dir <d> --log */
+juce::StringArray buildSepCliArgs(const juce::String& family, const juce::File& model,
+                                  const juce::String& backend, const juce::File& audioIn,
+                                  const juce::File& outDir);
+
 /** Result of one CLI run. */
 struct RunResult
 {
@@ -140,5 +152,12 @@ bool runStemSeparation(const juce::File& binary, const juce::File& model,
                        const std::function<bool()>& shouldContinue,
                        const std::function<void(const juce::String&)>& onLogLine,
                        RunResult* resOut, std::string* errOut);
+
+/** Blocking run of the plain separation task (call from a worker thread). Same polling/cancellation contract as runStemSeparation; on success outDir holds one named .wav file per stem. */
+bool runSepTask(const juce::File& binary, const juce::String& family, const juce::File& model,
+                const juce::String& backend, const juce::File& audioIn, const juce::File& outDir,
+                const std::function<bool()>& shouldContinue,
+                const std::function<void(const juce::String&)>& onLogLine,
+                RunResult* resOut, std::string* errOut);
 
 }} // namespace sc::acpp

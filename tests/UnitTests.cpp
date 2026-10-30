@@ -5845,14 +5845,14 @@ static void testStemSepWindowLayoutAndClose()
     // Every control must be laid out with a visible size. In simple mode the
     // advanced-only addDescBtn_, rowsHost_ and advancedHint_ stay at zero
     // bounds, as does extractOrigToggle_ (it only appears in advanced mode
-    // with more than one description), so of the 21 content children exactly
-    // 17 are visible (a non-native test peer adds two more internal
+    // with more than one description), so of the 24 content children exactly
+    // 20 are visible (a non-native test peer adds two more internal
     // minimise/close buttons, which we ignore).
     int visible = 0;
     for (int i = 0; i < dlg->getNumChildComponents(); ++i)
         if (!dlg->getChildComponent (i)->getBounds().isEmpty())
             ++visible;
-    CHECK (dlg->getNumChildComponents() >= 21 && visible == 17,
+    CHECK (dlg->getNumChildComponents() >= 24 && visible == 20,
           "stem separation window lays out all its controls");
 
     // The non-modal dialog must stay above the main window so making
@@ -5867,6 +5867,248 @@ static void testStemSepWindowLayoutAndClose()
     win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
     CHECK (win->stemSepWindow () != nullptr,
           "re-open works after close");
+}
+
+// ---------------- Stem Separation mode + output dropdowns --------------------
+// The Mode combo switches between the Sam Audio description pipeline and the
+// plain htdemucs separations; the Output combo decides where the stems go.
+static void testStemSepModeOutputCombos()
+{
+    const juce::File wav = makeTempFile ("stemsep_modes.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 2000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote wav for stem-sep mode test");
+    // Dedicated store: the shared per-run test store must not be polluted by
+    // the mode/output changes this test makes.
+    const juce::File store = makeTempFile ("stemsep_modes.props");
+    if (store.existsAsFile()) store.deleteFile ();
+
+    Application app (store);
+    CHECK (app.openFile (wav), "open wav for stem-sep mode test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "stem sep modes"));
+
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    StemSeparationWindow* dlg = win->stemSepWindow();
+    CHECK (dlg != nullptr, "stem separation window opened for mode test");
+    if (dlg == nullptr) return;
+
+    // Mode combo: three families with Sam Audio as the default.
+    juce::ComboBox* mode = dlg->modeComboForTest ();
+    CHECK (mode != nullptr && mode->getNumItems () == 3, "mode combo has three items");
+    if (mode == nullptr) return;
+    CHECK (mode->getItemText (0) == "Sam Audio", "mode item 1 is Sam Audio");
+    CHECK (mode->getItemText (1) == "htdemucs_6stems", "mode item 2 is htdemucs_6stems");
+    CHECK (mode->getItemText (2) == "htdemucs_ft", "mode item 3 is htdemucs_ft");
+    CHECK (dlg->selectedModeId () == 1, "Sam Audio mode by default");
+
+    // Output combo: three destinations with copy-to-new-file as the default.
+    juce::ComboBox* out = dlg->outputComboForTest ();
+    CHECK (out != nullptr && out->getNumItems () == 3, "output combo has three items");
+    if (out == nullptr) return;
+    CHECK (out->getItemText (0) == "Copy stems to new file", "output item 1 is copy");
+    CHECK (out->getItemText (1) == "Overwrite current file", "output item 2 is overwrite");
+    CHECK (out->getItemText (2) == "Append to current file", "output item 3 is append");
+
+    // No two visible controls may overlap.
+    auto noOverlap = [] (StemSeparationWindow* w) -> bool
+    {
+        std::vector<juce::Rectangle<int>> rects;
+        for (int i = 0; i < w->getNumChildComponents (); ++i)
+        {
+            const juce::Rectangle<int> b = w->getChildComponent (i)->getBounds ();
+            if (!b.isEmpty ()) rects.push_back (b);
+        }
+        for (size_t a = 0; a < rects.size (); ++a)
+            for (size_t b = a + 1; b < rects.size (); ++b)
+                if (rects[a].intersects (rects[b])) return false;
+        return true;
+    };
+
+    CHECK (noOverlap (dlg), "no overlapping controls in Sam Audio mode");
+
+    // Switch to each htdemucs mode: the description area disappears and the
+    // window shrinks, but nothing overlaps.
+    for (int m = 2; m <= 3; ++m)
+    {
+        mode->setSelectedItemIndex (m - 1);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+        CHECK (dlg->selectedModeId () == m, "mode switch to " + juce::String (m));
+        CHECK (noOverlap (dlg), "no overlapping controls in mode " + juce::String (m));
+    }
+
+    // Back to Sam Audio: the description area is back and nothing overlaps.
+    mode->setSelectedItemIndex (0);
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (dlg->selectedModeId () == 1, "back to Sam Audio");
+    CHECK (noOverlap (dlg), "no overlapping controls after switching back");
+
+    // The mode choice persists in the settings.
+    CHECK (app.settings.stemSepMode == 1, "mode persisted to settings");
+
+    dlg->userTriedToCloseWindow ();
+}
+
+// ---------------- Stem Separation output-mode persistence --------------------
+static void testStemSepOutputModePersistence()
+{
+    const juce::File wav = makeTempFile ("stemsep_outmode.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 2000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote wav for output-mode persistence test");
+    // Dedicated store: this test deliberately writes non-default values.
+    const juce::File store = makeTempFile ("stemsep_outmode.props");
+    if (store.existsAsFile()) store.deleteFile ();
+
+    Application app (store);
+    CHECK (app.openFile (wav), "open wav for output-mode persistence test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "stem sep outmode"));
+
+    // Simulate previously saved choices.
+    app.settings.stemSepOutputMode = 2;
+    app.settings.stemSepMode = 3;
+
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    StemSeparationWindow* dlg = win->stemSepWindow();
+    CHECK (dlg != nullptr, "window opened for output-mode persistence test");
+    if (dlg == nullptr) return;
+
+    juce::ComboBox* out = dlg->outputComboForTest ();
+    CHECK (out != nullptr && out->getSelectedItemIndex () == 1,
+          "saved output mode restored (overwrite)");
+    CHECK (dlg->selectedModeId () == 3, "saved mode restored (htdemucs_ft)");
+
+    // Changing the combo updates the settings immediately.
+    if (out != nullptr)
+    {
+        out->setSelectedItemIndex (2);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+        CHECK (app.settings.stemSepOutputMode == 3, "output mode change persisted");
+    }
+
+    dlg->userTriedToCloseWindow ();
+}
+
+// ---------------- Stem Separation output modes: overwrite / append -----------
+// Application::applyStemSeparationResult feeds the worker's result into the
+// active document. Overwrite replaces the whole file (markers shift/drop);
+// append keeps every original track and adds the stems as new ones.
+static void testStemSepApplyOutputModes()
+{
+    const juce::File wav = makeTempFile ("stemsep_apply.wav");   // 1 s @ 8 kHz mono
+    CHECK (writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t, double) { return 0.4f; }),
+          "wrote constant wav for apply-output-modes test");
+
+    // A synthetic separation result: two stem tracks of 0.5 s each.
+    auto makeResult = [] () -> sc::MergeResult
+    {
+        sc::MergeResult r;
+        r.rate = 8000.0;
+        r.channels = 2;
+        r.data.assign (2, std::vector<float> (4000, 0.0f));
+        for (int i = 0; i < 4000; ++i) { r.data[0][i] = 0.25f; r.data[1][i] = -0.75f; }
+        return r;
+    };
+
+    // --- Overwrite: the file is replaced by the stems -------------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for overwrite test");
+        auto& eng = app.audioEngine ();
+        app.doc ()->markers.addPointMarker (0.1, "before");   // before ext start
+        app.doc ()->markers.addRegionMarker (0.7, 0.9, "inside");   // inside range
+
+        std::string err;
+        sc::MergeResult resOv = makeResult ();
+        CHECK (app.applyStemSeparationResult (resOv, 2, /*extStartSecs=*/0.5,
+                                              "stems", &err),
+              "overwrite apply ok" + juce::String (err.c_str ()));
+        auto& e2 = app.audioEngine ();
+        CHECK (e2.numChannels () == 2 && std::abs (e2.sampleRate () - 8000.0) < 1e-9,
+              "overwrite: two stem channels at the source rate");
+        CHECK ((int) e2.numSamples () == 4000, "overwrite: file length is the stems' length");
+        std::vector<std::vector<float>> ov;
+        CHECK (e2.readRange (100, 1, ov) && ov.size () == 2,
+              "overwrite: read back the two stem channels");
+        if (ov.size () == 2)
+            CHECK (std::abs ((double) ov[0][0] - 0.25) < 1e-9
+                  && std::abs ((double) ov[1][0] + 0.75) < 1e-9,
+                  "overwrite: stem content in place");
+
+        // The marker before the extraction start is dropped; the one inside
+        // it shifts back by extStartSecs.
+        const auto mks = app.doc ()->markers.markers ();
+        CHECK (mks.size () == 1 && mks[0].name == "inside"
+              && std::abs (mks[0].start - 0.2) < 1e-9
+              && std::abs (mks[0].end - 0.4) < 1e-9,
+              "overwrite: markers shifted by the extraction start");
+
+        // Undo restores the original file, its length and both markers.
+        CHECK (app.undo ().canUndo (), "overwrite is undoable");
+        app.undoStep ();
+        auto& e3 = app.audioEngine ();
+        CHECK (e3.numChannels () == 1 && (int) e3.numSamples () == 8000,
+              "undo restores the original mono file");
+        const auto mks2 = app.doc ()->markers.markers ();
+        CHECK (mks2.size () == 2, "undo restores both markers");
+    }
+
+    // --- Append: stems are added as new tracks --------------------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for append test");
+        auto& eng = app.audioEngine ();
+
+        std::string err;
+        sc::MergeResult resAp = makeResult ();
+        CHECK (app.applyStemSeparationResult (resAp, 3, /*extStartSecs=*/0.5,
+                                              "stems", &err),
+              "append apply ok" + juce::String (err.c_str ()));
+        auto& e2 = app.audioEngine ();
+        CHECK (e2.numChannels () == 3 && (int) e2.numSamples () == 8000,
+              "append: original track plus two stems, same length");
+
+        // Original content untouched on channel 1; each stem sits over the
+        // extracted range [0.5 s .. 1.0 s] (= samples 4000..7999) and is
+        // silent elsewhere.
+        std::vector<std::vector<float>> all;
+        CHECK (eng.readRange (0, 8000, all) && all.size () == 3,
+              "append: read back the three channels");
+        if (all.size () == 3)
+        {
+            bool origOk = true, stemsOk = true;
+            for (int i = 0; i < 8000; ++i)
+            {
+                if (std::abs ((double) all[0][i] - (double) 0.4f) > 1e-9) origOk = false;
+                const bool inRange = (i >= 4000);
+                if (inRange && std::abs ((double) all[1][i] - 0.25f) > 1e-9) stemsOk = false;
+                if (!inRange && std::abs ((double) all[1][i]) > 1e-9) stemsOk = false;
+                if (inRange && std::abs ((double) all[2][i] + 0.75f) > 1e-9) stemsOk = false;
+                if (!inRange && std::abs ((double) all[2][i]) > 1e-9) stemsOk = false;
+            }
+            CHECK (origOk, "append: original channel unchanged");
+            CHECK (stemsOk, "append: stem channels aligned to the extracted range");
+        }
+
+        // Undo restores the single original track.
+        CHECK (app.undo ().canUndo (), "append is undoable");
+        app.undoStep ();
+        auto& e3 = app.audioEngine ();
+        CHECK (e3.numChannels () == 1 && (int) e3.numSamples () == 8000,
+              "undo restores the original mono file after append");
+    }
+
+    // --- Rate mismatch is rejected --------------------------------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for rate-mismatch test");
+        sc::MergeResult bad = makeResult ();
+        bad.rate = 44100.0;   // != the file's 8 kHz
+        std::string err;
+        CHECK (!app.applyStemSeparationResult (bad, 2, /*extStartSecs=*/0.5, "stems", &err),
+              "overwrite rejects a mismatched rate");
+    }
 }
 
 // ---------------- Stem Separation remembers typed descriptions --------------
@@ -19351,6 +19593,9 @@ static int scRunUnitTestsImpl()
     progress ("zoom-out-full fits data"); testZoomOutFullFitsData();
     progress ("axis-mode change triggers zoom fit"); testAxisModeChangeTriggersFit ();
     progress ("stem-sep window layout + close"); testStemSepWindowLayoutAndClose ();
+    progress ("stem-sep mode/output combos"); testStemSepModeOutputCombos ();
+    progress ("stem-sep output-mode persistence"); testStemSepOutputModePersistence ();
+    progress ("stem-sep apply output modes"); testStemSepApplyOutputModes ();
     progress ("stem-sep remember descriptions"); testStemSepRememberDescs ();
     progress ("acpp downmix to mono"); testAcppDownmixToMono ();
     progress ("stem-sep anchor list"); testStemSepAnchorList ();

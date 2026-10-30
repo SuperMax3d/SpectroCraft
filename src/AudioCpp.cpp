@@ -48,6 +48,30 @@ std::vector<juce::File> listModels(const juce::File& d)
     return out;
 }
 
+std::vector<juce::File> listDemucs6Models(const juce::File& d)
+{
+    std::vector<juce::File> out;
+    const juce::File root = (d.getFullPathName().isEmpty() ? dir().getChildFile ("HTDemucs-6stems-GGUF") : d);
+    if (!root.isDirectory()) return out;
+    for (auto entry : juce::RangedDirectoryIterator (root, false))
+        if (entry.getFile().hasFileExtension ("gguf"))
+            out.push_back (entry.getFile());
+    std::sort (out.begin (), out.end (),
+               [] (const juce::File& a, const juce::File& b) {
+                   return a.getFileName().toLowerCase() < b.getFileName().toLowerCase(); });
+    return out;
+}
+
+juce::File demucsFtModelDir(const juce::File& d)
+{
+    const juce::File root = (d.getFullPathName().isEmpty() ? dir().getChildFile ("htdemucs_ft") : d);
+    if (!root.isDirectory()) return {};
+    for (auto entry : juce::RangedDirectoryIterator (root, false))
+        if (entry.getFile().hasFileExtension ("gguf"))
+            return root;
+    return {};
+}
+
 std::vector<BinarySpec> binaryChoices()
 {
     // Windows x64 assets of the v0.9.2-drama3-base-small release.
@@ -294,6 +318,21 @@ juce::StringArray buildCliArgs(const juce::File& model, const juce::String& back
     return args;
 }
 
+juce::StringArray buildSepCliArgs(const juce::String& family, const juce::File& model,
+                                  const juce::String& backend, const juce::File& audioIn,
+                                  const juce::File& outDir)
+{
+    juce::StringArray args;
+    args.add ("--task");            args.add ("sep");
+    args.add ("--family");          args.add (family);
+    args.add ("--model");           args.add (model.getFullPathName());
+    args.add ("--backend");         args.add (backend);
+    args.add ("--audio");           args.add (audioIn.getFullPathName());
+    args.add ("--out-dir");         args.add (outDir.getFullPathName());
+    args.add ("--log");
+    return args;
+}
+
 #if JUCE_WINDOWS
 
 // Quote one argument for a CreateProcessW command line. Backslashes are only
@@ -329,13 +368,12 @@ static std::wstring acppQuote(const juce::String& arg)
     return q + L"\"";
 }
 
-bool runStemSeparation(const juce::File& binary, const juce::File& model,
-                       const juce::String& backend, const juce::File& audioIn,
-                       const juce::String& text, const std::vector<Anchor>& anchors,
-                       const juce::File& outDir,
-                       const std::function<bool()>& shouldContinue,
-                       const std::function<void(const juce::String&)>& onLogLine,
-                       RunResult* resOut, std::string* errOut)
+// Creates and polls one audiocpp_cli.exe process with piped stdout/stderr.
+static bool runProcessWithPipes(const juce::File& binary, const juce::StringArray& args,
+                                const juce::File& outDirToCreate,
+                                const std::function<bool()>& shouldContinue,
+                                const std::function<void(const juce::String&)>& onLogLine,
+                                RunResult* resOut, std::string* errOut)
 {
     if (!binary.existsAsFile ())
     {
@@ -343,10 +381,10 @@ bool runStemSeparation(const juce::File& binary, const juce::File& model,
         return false;
     }
 
-    outDir.createDirectory ();
+    outDirToCreate.createDirectory ();
 
     juce::String cmdLine (acppQuote (binary.getFullPathName()).c_str ());
-    for (const auto& a : buildCliArgs (model, backend, audioIn, text, anchors, outDir))
+    for (const auto& a : args)
         cmdLine << ' ' << acppQuote (a).c_str ();
 
     SECURITY_ATTRIBUTES sa;
@@ -453,6 +491,30 @@ bool runStemSeparation(const juce::File& binary, const juce::File& model,
     return rc == 0;
 }
 
+bool runStemSeparation(const juce::File& binary, const juce::File& model,
+                       const juce::String& backend, const juce::File& audioIn,
+                       const juce::String& text, const std::vector<Anchor>& anchors,
+                       const juce::File& outDir,
+                       const std::function<bool()>& shouldContinue,
+                       const std::function<void(const juce::String&)>& onLogLine,
+                       RunResult* resOut, std::string* errOut)
+{
+    return runProcessWithPipes (binary,
+                                buildCliArgs (model, backend, audioIn, text, anchors, outDir),
+                                outDir, shouldContinue, onLogLine, resOut, errOut);
+}
+
+bool runSepTask(const juce::File& binary, const juce::String& family, const juce::File& model,
+                const juce::String& backend, const juce::File& audioIn, const juce::File& outDir,
+                const std::function<bool()>& shouldContinue,
+                const std::function<void(const juce::String&)>& onLogLine,
+                RunResult* resOut, std::string* errOut)
+{
+    return runProcessWithPipes (binary,
+                                buildSepCliArgs (family, model, backend, audioIn, outDir),
+                                outDir, shouldContinue, onLogLine, resOut, errOut);
+}
+
 #else   // POSIX: not supported in v1.
 
 bool runStemSeparation(const juce::File&, const juce::File&, const juce::String&,
@@ -460,6 +522,15 @@ bool runStemSeparation(const juce::File&, const juce::File&, const juce::String&
                        const juce::File&, const std::function<bool()>&,
                        const std::function<void(const juce::String&)>&,
                        RunResult*, std::string* errOut)
+{
+    if (errOut) *errOut = "Stem Separation requires the Windows CLI binary.";
+    return false;
+}
+
+bool runSepTask(const juce::File&, const juce::String&, const juce::File&,
+                const juce::String&, const juce::File&, const juce::File&,
+                const std::function<bool()>&, const std::function<void(const juce::String&)>&,
+                RunResult*, std::string* errOut)
 {
     if (errOut) *errOut = "Stem Separation requires the Windows CLI binary.";
     return false;
