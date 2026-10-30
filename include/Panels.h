@@ -434,13 +434,24 @@ public:
     double getDbTop() const { return dbTop_; }
     double getDbBottom() const { return dbBottom_; }
 
+    // "Zoom Fit" auto mode: while on, a new or changed time selection zoom-fits
+    // both display ranges automatically (including every displayed stored
+    // curve). Any manual range change turns it off; switching axis modes resets
+    // it to on.
+    bool zoomFitAuto() const { return zoomFitAuto_; }
+    void setZoomFitAuto (bool on) { zoomFitAuto_ = on; }
+    // Called by the pan / box-zoom / wheel handlers: user-driven range changes
+    // disable auto zoom-fit.
+    void userChangedDisplayRange() { zoomFitAuto_ = false; }
+
     // Horizontal view window of the time-based curve modes (absolute seconds,
     // always inside the analysed region [cachedT0, cachedT1]).
     double getCurveViewT0() const { return curveViewT0_; }
     double getCurveViewT1() const { return curveViewT1_; }
 
-    // "Zoom Out Full": fit the vertical axis to the displayed data (+10% margin)
-    // and the horizontal axis to the full extent of the data.
+    // "Zoom Fit": fit the vertical axis to every displayed curve (live + shown
+    // stored, +10% margin) and the horizontal axis to the full extent of the
+    // data.
     void resetDisplayRanges();
     // Fit only the vertical axis (dB level, or frequency in Freq vs Time mode).
     void fitVerticalRange();
@@ -704,6 +715,8 @@ private:
     // Set by the axis-mode combo: fit both axes once the new mode's data has
     // been computed (the onChange fires before recomputeIfNeeded runs).
     bool fitPending_ = false;
+    bool zoomFitAuto_ = true;                 // "Zoom Fit" check state
+    double autoFitT0_ = -1.0, autoFitT1_ = -1.0;   // last auto-fitted region
     int cursorX = -1, cursorY = -1;
 
     // Rebuilds the harmonic-ratio cache from the current live/stored curves.

@@ -167,8 +167,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     becomes the time window and its y span the frequency/level window — in
     Freq vs Time the vertical axis is frequency), dragging that starts on an
     axis zooms only that axis, left-dragging the bottom axis pans the time
-    window, and **Zoom Out Full** resets everything to defaults. The 8
-    snapshot buttons keep working in these modes but store a *separate* set of
+    window, and the right-click menu's checkable **Zoom Fit** fits both windows
+    to every displayed curve (live + shown stored curves) — while checked,
+    each new time selection zoom-fits automatically; any manual zoom (pan,
+    box or wheel) turns auto-fit off, and switching axis modes resets it to on.
+    The 8 snapshot buttons keep working in these modes but store a *separate* set of
     curve snapshots per mode (a slot saved in Freq vs Time is empty when you
     switch to Amp vs Time); stored curves follow the current Track/Smooth
     options, exactly like classic snapshots follow the current FFT size.
@@ -218,7 +221,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     - **Right-drag a box** (a rubber-band rectangle is shown while dragging):
       horizontal span sets the frequency window, vertical span sets the level
       window (both at once if you drag in both directions). A plain right-click
-      shows a context menu with **Zoom Out Full**, **Copy** (in the curve modes
+      shows a context menu with checkable **Zoom Fit** (fits both windows to
+      every displayed curve and toggles auto-fit on new selections), **Copy**
+      (in the curve modes
       it copies the currently displayed points of the live curve — only what is
       on screen), and the harmonic-reference tools below; right-clicking the
       *level* axis resets only the level window, the *frequency* axis only the

@@ -2619,6 +2619,60 @@ static void testSnapshotOverlayPaint()
     }
 }
 
+// TEMP PROBE: stored snapshot overlays in 1/3-octave mode.
+// Regression test: a stored FFT snapshot must be drawn as a 1/3-octave band
+// plot when the axis is switched to 1/3 Octave. The slot's bands are derived
+// from its stored magnitude curves by refreshSnapshotBands(); if that step
+// silently produces no bands (as an old MSVC build did for one code shape of
+// this function), the overlay disappears in mode 2 while still showing in the
+// linear/log modes.
+static void testSnapshotThirdOctaveOverlay()
+{
+    const juce::File wav = makeTempFile ("snap_thirdoct.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+    {
+        // Two distinct tones so the stored region and the live region differ.
+        const bool secondHalf = f >= 16000;
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (secondHalf ? 880.0 : 440.0) * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for third-octave snapshot test");
+
+    FFTAnalysisView view (app);
+    view.setSize (320, 300);
+
+    // Store a snapshot of the first half (440 Hz) while in log-FFT mode.
+    app.setSelection ({ 0.0, 2.0 });
+    view.recomputeIfNeeded();
+    view.handleSnapshotClick (0);
+    CHECK (view.snapshotShown (0), "snapshot stored");
+
+    // Move to a different region and switch to 1/3 Octave: the live curve is
+    // now 880 Hz while the stored overlay must still render its band plot.
+    app.setSelection ({ 2.0, 4.0 });
+    view.setAxisMode (2);
+    // The mode change clears the band cache; the recompute below would be
+    // throttled if run within 60 ms of the first one (both regions are wider
+    // than a single FFT window), so wait out the throttle before forcing it.
+    juce::Thread::sleep (70);
+    view.recomputeIfNeeded();
+
+    juce::Image img (juce::Image::ARGB, 320, 300, true);
+    { juce::Graphics g (img); view.paint (g); }
+
+    // The slot-1 overlay colour is red; count clearly-red pixels inside the
+    // plot area (the live curve is pink with a high blue component and the
+    // grid/axes are grey, so only the snapshot overlay can match).
+    int red = 0;
+    for (int y = 54; y < 262; ++y)
+        for (int x = 2; x < 282; ++x)
+            if (img.getPixelAt (x, y).getRed() > 60
+                && img.getPixelAt (x, y).getBlue() < 30) ++red;
+    CHECK (red > 10, "stored snapshot painted in 1/3 octave mode");
+}
+
 // ------------------------------------------------------------------ status bar
 // The bottom status bar shows the mouse probe on the left and the selection +
 // playhead times on the right.
@@ -18863,6 +18917,93 @@ static void testTransportRecordingMenu()
     CHECK (tickedFirst && !anyOtherTicked, "the selected device is the only ticked entry");
 }
 
+// ==================================================== Zoom Fit auto mode
+//
+// The right-click menu's "Zoom Fit" item is checkable: while checked, every
+// new or changed time selection zoom-fits both display ranges (including all
+// displayed stored curves). Any manual range change (pan / box zoom / wheel)
+// turns the auto-fit off; switching axis modes resets it to on.
+static void testZoomFitAutoMode()
+{
+    // 2 s mono @ 8 kHz: first half a quiet 400 Hz tone, second half loud.
+    const juce::File wav = makeTempFile ("zoomfit_auto.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        {
+            const double amp = (f < 8000) ? 0.05 : 0.9;
+            return (float) (amp * std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 400.0 * (double) f / rate));
+        }), "wrote two-level tone wav for zoom-fit test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open zoom-fit wav");
+
+    // --- Default state: on --------------------------------------------------
+    FFTAnalysisView v (app);
+    v.setSize (320, 200);
+    v.setAxisMode (0);
+    CHECK (v.zoomFitAuto (), "auto zoom-fit is on by default");
+
+    // --- Auto fit follows a new selection ------------------------------------
+    app.setSelection ({ 0.0, 1.0 });          // quiet half
+    v.recomputeIfNeeded ();
+    // The FFT pipeline normalises |X|/N without coherent-gain correction, so a
+    // full-scale sine reads about -12 dB; the 0.05-amplitude tone peaks near -39.
+    const double topQuiet = v.getDbTop();
+    CHECK (topQuiet < -25.0 && topQuiet > -50.0, "quiet region fitted low");
+
+    juce::Thread::sleep (70);                 // defeat the expensive-recompute throttle
+    app.setSelection ({ 1.0, 2.0 });          // loud half: new selection auto-fits
+    v.recomputeIfNeeded ();
+    const double topLoud = v.getDbTop();
+    CHECK (topLoud > -15.0 && topLoud < 5.0,
+          "loud region auto-fitted after the new selection");
+    CHECK (topLoud > topQuiet + 10.0, "auto fit followed the level change");
+
+    // --- Manual zoom disables it ----------------------------------------------
+    v.userChangedDisplayRange ();
+    CHECK (!v.zoomFitAuto (), "manual range change disables auto zoom-fit");
+    juce::Thread::sleep (70);
+    app.setSelection ({ 0.0, 1.0 });          // back to the quiet half
+    v.recomputeIfNeeded ();                   // fresh data is computed...
+    CHECK (std::abs (v.getDbTop() - topLoud) < 0.01,
+          "...but no auto fit happens once disabled");
+
+    // --- Mode switch resets it to on ------------------------------------------
+    v.setAxisMode (1);                        // FFT Log
+    v.recomputeIfNeeded ();
+    CHECK (v.zoomFitAuto (), "mode switch resets auto zoom-fit to on");
+
+    // --- Fit includes displayed stored curves ----------------------------------
+    {
+        FFTAnalysisView w (app);
+        w.setSize (320, 200);
+        w.setAxisMode (0);
+        app.setSelection ({ 1.0, 2.0 });      // loud half live
+        w.recomputeIfNeeded ();
+        const double topLive = w.getDbTop();
+
+        juce::Thread::sleep (70);
+        app.setSelection ({ 0.0, 1.0 });      // quiet half live (auto-fits down)
+        w.recomputeIfNeeded ();
+        const double topQuiet2 = w.getDbTop();
+        CHECK (topQuiet2 < topLive - 15.0, "fit followed the quieter live region");
+
+        juce::Thread::sleep (70);
+        app.setSelection ({ 1.0, 2.0 });      // loud half again: store + show it
+        w.recomputeIfNeeded ();
+        w.handleSnapshotClick (0);
+        CHECK (w.snapshotShown (0), "loud snapshot stored and shown");
+
+        juce::Thread::sleep (70);
+        app.setSelection ({ 0.0, 1.0 });      // quiet live data + loud stored curve
+        w.recomputeIfNeeded ();               // auto-fit must include the stored curve
+        CHECK (w.getDbTop() > topQuiet2 + 15.0,
+              "zoom fit includes displayed stored curves");
+        CHECK (std::abs (w.getDbTop() - topLive) < 8.0,
+              "fit matches the loud curve's own range");
+    }
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -18905,6 +19046,7 @@ static int scRunUnitTestsImpl()
     progress ("playback chain");      testPlaybackChain();
     progress ("snapshot store/recompute"); testSnapshotStoreAndRecompute();
     progress ("snapshot overlay paint");  testSnapshotOverlayPaint();
+    progress ("snapshot third-octave overlay");   testSnapshotThirdOctaveOverlay();
     progress ("status bar");          testStatusBar();
     progress ("footer selection editing"); testStatusBarEditing();
     progress ("footer file name");    testStatusBarFileName();
@@ -19067,6 +19209,7 @@ static int scRunUnitTestsImpl()
     progress ("track axis placement"); testTrackAxisPlacement();
     progress ("spectrogram export options"); testSpectrogramExportOptions();
     progress ("audio.cpp cli wrapper");  testAudioCppCli();
+    progress ("zoom fit auto mode");     testZoomFitAutoMode();
 
 
 

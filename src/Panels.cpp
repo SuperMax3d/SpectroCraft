@@ -1038,6 +1038,9 @@ FFTAnalysisView::FFTAnalysisView (Application& appIn)
         if (harmonicRatioActive_) { harmonicRatioActive_ = false; invalidateHarmonicCache(); }
         refreshSnapshotBands(); // re-derive stored snapshots' bands for the new mode
         refreshSnapshotButtonStates();   // buttons now address the other store
+        // Auto zoom-fit resets to on for every new mode.
+        zoomFitAuto_ = true;
+        autoFitT0_ = -1.0, autoFitT1_ = -1.0;
         fitPending_ = true;    // zoom-fit once the new mode's data is computed
                                // (paint() runs resetDisplayRanges then)
         resized();              // row 1/row 3 contents differ per mode
@@ -1214,7 +1217,13 @@ void FFTAnalysisView::fitVerticalRange()
         for (const auto& cd : liveCurves)
             for (float f : cd.freqHz)
                 { dmin = std::min (dmin, (double) f); dmax = std::max (dmax, (double) f); }
-        if (curveCacheValid() && dmax > dmin - 1e-9)
+        // Include every displayed stored curve as well.
+        for (int i = 0; i < 8; ++i)
+            if (curveSnaps[i].shown && curveSnaps[i].mode == axisMode_)
+                for (const auto& cd : curveSnaps[i].data)
+                    for (float f : cd.freqHz)
+                        { dmin = std::min (dmin, (double) f); dmax = std::max (dmax, (double) f); }
+        if (dmax > dmin - 1e-9)
             fitDataRange (dmin, dmax, fLo_, fHi_);
         else
         {
@@ -1231,6 +1240,12 @@ void FFTAnalysisView::fitVerticalRange()
             for (const auto& bands : thirdOctMags)
                 for (float v : bands)
                     { dmin = std::min (dmin, (double) v); dmax = std::max (dmax, (double) v); }
+            // Include every displayed stored snapshot's band curves.
+            for (int i = 0; i < 8; ++i)
+                if (snapshots[i].shown && !snapshots[i].bands.empty())
+                    for (const auto& bands : snapshots[i].bands)
+                        for (float v : bands)
+                            { dmin = std::min (dmin, (double) v); dmax = std::max (dmax, (double) v); }
             have = !thirdOctMags.empty();
         }
         else if (axisMode_ >= 4)
@@ -1239,6 +1254,12 @@ void FFTAnalysisView::fitVerticalRange()
             for (const auto& cd : liveCurves)
                 for (float v : cd.ampDb)
                     { dmin = std::min (dmin, (double) v); dmax = std::max (dmax, (double) v); }
+            // Include every displayed stored curve as well.
+            for (int i = 0; i < 8; ++i)
+                if (curveSnaps[i].shown && curveSnaps[i].mode == axisMode_)
+                    for (const auto& cd : curveSnaps[i].data)
+                        for (float v : cd.ampDb)
+                            { dmin = std::min (dmin, (double) v); dmax = std::max (dmax, (double) v); }
             have = curveCacheValid();
         }
         else if (!mags.empty() && cachedN > 1)
@@ -1250,6 +1271,16 @@ void FFTAnalysisView::fitVerticalRange()
                     dmin = std::min (dmin, dB);
                     dmax = std::max (dmax, dB);
                 }
+            // Include every displayed stored snapshot as well.
+            for (int i = 0; i < 8; ++i)
+                if (snapshots[i].shown && snapshots[i].n > 1 && !snapshots[i].mags.empty())
+                    for (const auto& mag : snapshots[i].mags)
+                        for (int k = 1; k < (int) mag.size(); ++k)
+                        {
+                            const double dB = -kNormFloorDb * (1.0 - (double) mag[k]);
+                            dmin = std::min (dmin, dB);
+                            dmax = std::max (dmax, dB);
+                        }
             have = true;
         }
         if (have) fitDataRange (dmin, dmax, dbBottom_, dbTop_);
@@ -1299,7 +1330,8 @@ void FFTAnalysisView::fitHorizontalRange()
     }
 }
 
-// "Zoom Out Full": fit both display ranges to the data.
+// "Zoom Fit": fit both display ranges to every displayed curve (live + shown
+// stored).
 void FFTAnalysisView::resetDisplayRanges()
 {
     fitVerticalRange();
@@ -1631,6 +1663,17 @@ void FFTAnalysisView::recomputeIfNeeded()
     if (fitPending_ && fitDataReady ())
     {
         fitPending_ = false;
+        if (!app.selection.isEmpty())
+            autoFitT0_ = cachedT0, autoFitT1_ = cachedT1;
+        resetDisplayRanges ();
+    }
+    else if (zoomFitAuto_ && fitDataReady () && !app.selection.isEmpty()
+             && (cachedT0 != autoFitT0_ || cachedT1 != autoFitT1_))
+    {
+        // Auto zoom-fit: a new or changed time selection refits both display
+        // ranges to every displayed curve. Manual range changes disable it.
+        autoFitT0_ = cachedT0;
+        autoFitT1_ = cachedT1;
         resetDisplayRanges ();
     }
 }
@@ -2053,13 +2096,13 @@ void FFTAnalysisView::refreshSnapshotBands()
             ? s.source->engine.sampleRate() : app.audioEngine().sampleRate();
         s.bands.clear();
         s.dbSpl = pascalSrc;
-        if (pascalSrc)
+        if (!pascalSrc)
+            for (auto& m : s.mags)
+                s.bands.push_back (bandsNormalizedToDb (toThirdOctBands (m, s.n, rate)));
+        else
             for (int ch : s.chans)
                 if (ch >= 0 && ch < s.source->engine.numChannels())
                     s.bands.push_back (thirdOctBandsRef (s.source->engine, ch, s.t0, s.t1, thirdOctOrder_));
-        else
-            for (auto& m : s.mags)
-                s.bands.push_back (bandsNormalizedToDb (toThirdOctBands (m, s.n, rate)));
     }
 }
 
@@ -3796,7 +3839,9 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
                           && cachedN > 1 && !mags.empty();
 
     juce::PopupMenu m;
-    m.addItem (CtxZoomOutFull, "Zoom Out Full");
+    // Checkable: the tick shows whether new selections auto zoom-fit. Clicking
+    // performs an immediate fit and toggles the auto mode.
+    m.addItem (CtxZoomOutFull, "Zoom Fit", true, zoomFitAuto_);
     m.addSeparator();
     m.addItem (100, "Copy");
     if (axisMode_ < 3)   // harmonic references are a classic-mode feature
@@ -3825,9 +3870,12 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
     switch (sel)
     {
         case CtxZoomOutFull:
-            // The right strip is always the vertical axis and the bottom strip
-            // the horizontal one (in Freq vs Time the vertical happens to be
-            // frequency). A click on the plot or a corner resets both.
+            // Toggles auto zoom-fit, then performs an immediate fit (the old
+            // one-shot "Zoom Out Full" behaviour). The right strip is always the
+            // vertical axis and the bottom strip the horizontal one (in Freq vs
+            // Time the vertical happens to be frequency); a click on the plot or
+            // a corner resets both.
+            setZoomFitAuto (!zoomFitAuto_);
             if (onLevelAxis && !onFreqAxis)      fitVerticalRange();
             else if (onFreqAxis && !onLevelAxis) fitHorizontalRange();
             else { fitVerticalRange(); fitHorizontalRange(); }
@@ -4178,6 +4226,7 @@ void FFTAnalysisView::mouseDrag (const juce::MouseEvent& e)
             const double nyq = app.audioEngine().sampleRate() * 0.5;
             if (fLo_ < 0.0) { fHi_ -= fLo_; fLo_ = 0.0; }
             if (fHi_ > nyq) { fLo_ -= (fHi_ - nyq); fHi_ = nyq; }
+            userChangedDisplayRange ();
             repaint();
             break;
         }
@@ -4194,6 +4243,7 @@ void FFTAnalysisView::mouseDrag (const juce::MouseEvent& e)
                                                       : app.audioEngine().sampleRate() * 0.5;
             if (fLo_ < 0.0) { fHi_ -= fLo_; fLo_ = 0.0; }
             if (fHi_ > vMax) { fLo_ -= (fHi_ - vMax); fHi_ = vMax; }
+            userChangedDisplayRange ();
             repaint();
             break;
         }
@@ -4203,6 +4253,7 @@ void FFTAnalysisView::mouseDrag (const juce::MouseEvent& e)
             const double db1 = yToLevel ((float) e.y);
             const double d = db0 - db1;
             dbTop_ += d; dbBottom_ += d;
+            userChangedDisplayRange ();
             // Keep the window inside absolute limits.
             if (dbTop_ > 40.0) { dbBottom_ -= (dbTop_ - 40.0); dbTop_ = 40.0; }
             if (dbBottom_ < -240.0) { dbTop_ += (-240.0 - dbBottom_); dbBottom_ = -240.0; }
@@ -4215,6 +4266,7 @@ void FFTAnalysisView::mouseDrag (const juce::MouseEvent& e)
             const double d = xToTime (dragStartX) - xToTime ((int) e.x);
             curveViewT0_ += d;
             curveViewT1_ += d;
+            userChangedDisplayRange ();
             if (curveViewT0_ < cachedT0) { curveViewT1_ -= curveViewT0_; curveViewT0_ = cachedT0; }
             if (curveViewT1_ > cachedT1) { curveViewT0_ -= (curveViewT1_ - cachedT1); curveViewT1_ = cachedT1; }
             repaint();
@@ -4320,6 +4372,9 @@ void FFTAnalysisView::mouseUp (const juce::MouseEvent& e)
                         }
                     }
                 }
+
+            // A manual box zoom disables auto zoom-fit.
+            userChangedDisplayRange ();
         }
     }
 
@@ -4351,6 +4406,9 @@ void FFTAnalysisView::mouseWheelMove (const juce::MouseEvent& e, const juce::Mou
         zoomLevelAtY ((float) e.y, factor);
     else
         zoomFreqAtX (e.x, factor);
+
+    // A manual wheel zoom disables auto zoom-fit.
+    userChangedDisplayRange ();
 }
 
 void FFTAnalysisView::copySpectrumToClipboard()
