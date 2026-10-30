@@ -23,6 +23,36 @@
 #include <mutex>
 #include <unordered_map>
 
+int SpectralEngine::chooseFftSize (double visibleSeconds, double sampleRate,
+                                   int heightPixels, double minFreqHz, double maxFreqHz,
+                                   double targetTimeSlices, double binsPerPixel)
+{
+    // Time constraint (X zoom): keep about `targetTimeSlices` FFT frames across
+    // the visible range; with hop ~ FFT/4 that bounds the largest useful size.
+    const double maxHopSeconds = std::max (1e-9,
+                                           visibleSeconds / std::max (1e-9, targetTimeSlices));
+    int maxFftFromTime = (int) std::round (maxHopSeconds * sampleRate * 4.0);
+
+    // Frequency constraint (Y zoom): keep about `binsPerPixel` spectral bins per
+    // pixel of the frequency axis; that sets the smallest size that resolves it.
+    int minFftFromFreq = 256;
+    const double visibleFreqRange = maxFreqHz - minFreqHz;
+    if (visibleFreqRange > 0.0 && heightPixels > 0 && binsPerPixel > 0.0)
+        minFftFromFreq = (int) std::ceil (sampleRate
+                                          / (visibleFreqRange / ((double) heightPixels * binsPerPixel)));
+
+    // Combine: the frequency zoom sets a floor, the time zoom a ceiling.
+    int ideal = std::max (minFftFromFreq, 256);
+    ideal = std::min (ideal, maxFftFromTime);
+
+    // Snap to power of two and clamp.
+    int fft = 256;
+    while (fft < ideal && fft < 16384)
+        fft <<= 1;
+
+    return juce::jlimit (256, 16384, fft);
+}
+
 namespace
 {
     // Precomputed window functions, shared across threads.

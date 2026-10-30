@@ -310,10 +310,16 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     processing is slow on long selections — select shorter ranges for big jobs.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
     range, Log/Linear toggle, Reset Freq, FFT size — from **512**, the finest
-    frequency resolution, up to 65536; a full-width **Refresh** button at the
-    bottom — also bound to global shortcut **F5**, which works from any focus —
-    forces a complete spectrogram recomputation by discarding every cached tile
-    and re-rendering all tracks). Three persisted fields control
+    frequency resolution, up to 65536; an **Auto** option at the end of that
+    combo recomputes the size on every render from the current zoom levels:
+    about "Target time slices:" (default 80) FFT frames across the visible time
+    range sets a ceiling and "Bins per pixel:" (default 1.25) spectral bins per
+    pixel of the frequency axis sets a floor, snapped to a power of two in
+    256..16384 — both fields appear below the combo while Auto is selected);
+    a full-width **Refresh** button at the bottom — also bound to global
+    shortcut **F5**, which works from any focus — forces a complete spectrogram
+    recomputation by discarding every cached tile and re-rendering all tracks).
+    Three persisted fields control
     harmonic markers in the spectrogram: **"Number of harmonic to display:"**
     (default 0 = from the fundamental), **"Maximum harmonic to display:"**
     (default 10) and **"Harmonic number under the mouse:"** (default 1). While
@@ -1993,7 +1999,8 @@ delays the window from appearing.
     and shifts/trims/clears stored FFT snapshots *and* curve-mode snapshot
     slots of that file — all verified end-to-end through `del()` with undo and
     redo restoring every piece.
-  - **Settings persistence**: spectrogram log/linear + FFT size, frequency-
+  - **Settings persistence**: spectrogram log/linear + FFT size (+ auto mode
+    with its target time slices / bins-per-pixel parameters), frequency-
     analysis axis mode (all six modes) + its independent FFT size, the
     curve-mode options (Ref Time / Smooth / Track), and the zero-crossing snap
     toggle all survive an app restart via the properties file; stored

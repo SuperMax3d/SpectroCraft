@@ -7868,6 +7868,152 @@ static void testSpectralControlsAndAsyncLoad()
     }
 }
 
+// ---------------- Auto FFT-size mode (Spectral Controls) ----------------
+
+static void testAutoFftSizeAlgorithm()
+{
+    // Default zoom: 10 s visible, full frequency range on a 300 px row. The
+    // frequency floor dominates -> 1024.
+    CHECK (SpectralEngine::chooseFftSize (10.0, 48000.0, 300, 20.0, 20000.0) == 1024,
+           "default zoom picks 1024");
+
+    // Deep frequency zoom forces a larger FFT (capped at 16384).
+    CHECK (SpectralEngine::chooseFftSize (10.0, 48000.0, 300, 100.0, 1000.0) == 16384,
+           "deep frequency zoom caps at 16384");
+
+    // Deep time zoom caps the size even when the frequency axis wants more.
+    CHECK (SpectralEngine::chooseFftSize (0.1, 48000.0, 300, 20.0, 20000.0) == 256,
+           "deep time zoom caps at 256");
+
+    // More bins per pixel demands a larger FFT.
+    CHECK (SpectralEngine::chooseFftSize (10.0, 48000.0, 300, 20.0, 20000.0, 80.0, 4.0) == 4096,
+           "more bins per pixel raises the FFT size");
+
+    // A shorter row needs coarser frequency resolution -> smaller FFT.
+    CHECK (SpectralEngine::chooseFftSize (10.0, 48000.0, 150, 20.0, 20000.0) == 512,
+           "shorter row lowers the FFT size");
+
+    // More target time slices raise the time ceiling (here it still binds).
+    CHECK (SpectralEngine::chooseFftSize (1.0, 48000.0, 300, 1000.0, 10000.0) == 2048,
+           "mid zoom with default slices picks 2048");
+    CHECK (SpectralEngine::chooseFftSize (1.0, 48000.0, 300, 1000.0, 10000.0, 200.0) == 1024,
+           "more target slices lower the time ceiling");
+
+    // Degenerate inputs stay inside the valid range.
+    CHECK (SpectralEngine::chooseFftSize (0.0, 48000.0, 300, 20.0, 20000.0) == 256,
+           "zero visible time clamps to the minimum");
+    CHECK (SpectralEngine::chooseFftSize (10.0, 48000.0, 300, 20000.0, 20.0) >= 256,
+           "inverted frequency range stays valid");
+}
+
+static void testSpectralControlsAutoFft()
+{
+    const juce::File store = makeTempFile ("auto_fft.props");
+    if (store.existsAsFile()) store.deleteFile();
+
+    {
+        Application app (store);
+        SpectralControlsPanel panel (app);
+        CHECK (panel.hasFftSizeOption ("Auto"), "FFT size combo offers an Auto option");
+        CHECK (!app.settings.fftAuto, "auto mode is off by default");
+
+        // Selecting Auto enables the mode and shows the parameter rows.
+        panel.fftSizeComboRef().setSelectedItemIndex (panel.fftSizeComboRef().getNumItems() - 1,
+                                                      juce::sendNotificationSync);
+        CHECK (app.settings.fftAuto, "selecting Auto turns auto mode on");
+        CHECK (panel.autoSlicesEditRef().isVisible(), "time-slices row visible in auto mode");
+        CHECK (panel.autoBinsEditRef().isVisible(), "bins-per-pixel row visible in auto mode");
+
+        // Leaving Auto restores a fixed size.
+        panel.fftSizeComboRef().setSelectedId (4096, juce::sendNotificationSync);
+        CHECK (!app.settings.fftAuto, "selecting a fixed size turns auto mode off");
+        CHECK (app.settings.fftSize == 4096, "fixed size applied when leaving Auto");
+        CHECK (!panel.autoSlicesEditRef().isVisible(), "auto rows hidden in fixed-size mode");
+
+        // The parameter fields apply and clamp.
+        panel.fftSizeComboRef().setSelectedId (SpectralControlsPanel::kFftAutoId,
+                                               juce::sendNotificationSync);
+        CHECK (panel.applyAutoSlicesText ("120"), "valid time-slices value accepted");
+        CHECK (std::abs (app.settings.autoTargetTimeSlices - 120.0) < 1e-9, "time slices stored");
+        CHECK (panel.getAutoSlicesText() == "120", "whole number shown without decimals");
+
+        CHECK (panel.applyAutoBinsText ("3.5"), "valid bins-per-pixel value accepted");
+        CHECK (std::abs (app.settings.autoBinsPerPixel - 3.5) < 1e-9, "bins per pixel stored");
+        CHECK (panel.getAutoBinsText() == "3.500", "fractional value shown with three decimals");
+
+        CHECK (!panel.applyAutoSlicesText ("abc"), "non-numeric time-slices rejected");
+        CHECK (std::abs (app.settings.autoTargetTimeSlices - 120.0) < 1e-9,
+               "rejected value not stored");
+        CHECK (panel.getAutoSlicesText() == "120", "editor reverted to canonical text");
+
+        // Out-of-range values are clamped.
+        CHECK (panel.applyAutoSlicesText ("5000"), "large time-slices accepted and clamped");
+        CHECK (app.settings.autoTargetTimeSlices == 1000.0, "time slices clamped to 1000");
+        CHECK (panel.applyAutoBinsText ("99"), "large bins-per-pixel accepted and clamped");
+        CHECK (app.settings.autoBinsPerPixel == 16.0, "bins per pixel clamped to 16");
+
+        app.saveSettings();
+    }
+
+    {
+        Application b (store);
+        CHECK (b.settings.fftAuto, "auto mode restored after restart");
+        CHECK (std::abs (b.settings.autoTargetTimeSlices - 1000.0) < 1e-9,
+               "time slices restored after restart");
+        CHECK (std::abs (b.settings.autoBinsPerPixel - 16.0) < 1e-9,
+               "bins per pixel restored after restart");
+
+        SpectralControlsPanel panel2 (b);
+        panel2.refresh();
+        CHECK (panel2.fftSizeComboRef().getItemText (panel2.fftSizeComboRef().getSelectedItemIndex())
+              == "Auto", "combo shows Auto after restart");
+    }
+
+    store.deleteFile();
+}
+
+static void testSpectralViewAutoFft()
+{
+    const juce::File wav = makeTempFile ("auto_fft_view.wav");
+    writeWav (wav, 1, 8000.0, 48000, [] (int, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load wav for auto fft view test");
+
+    SpectralView view (app);
+    view.setSize (800, 300);
+    view.setViewRange (0.0, 10.0);   // wider than the file: setWindow does not clamp
+    view.setVisibleChannels ({ 0 });
+
+    const int rowH = 300 - SpectralView::kRulerH;   // one visible channel row
+    const double rate = app.audioEngine().sampleRate();
+
+    // Fixed mode: the effective size is just settings_.fftSize.
+    app.settings.fftAuto = false;
+    app.settings.fftSize = 2048;
+    view.setSettings (app.settings);
+    CHECK (view.effectiveFftSizeForRender (rowH) == 2048, "fixed mode keeps the manual size");
+
+    // Auto mode: recomputed from the current zoom levels.
+    app.settings.fftAuto = true;
+    view.setSettings (app.settings);
+    const int expected = SpectralEngine::chooseFftSize (view.getViewEnd() - view.getViewStart(),
+                                                        rate, rowH,
+                                                        view.getFreqMin(), view.getFreqMax());
+    CHECK (view.effectiveFftSizeForRender (rowH) == expected, "auto mode matches chooseFftSize");
+
+    // Zooming the time axis changes the effective size.
+    view.setViewRange (0.0, 1.0);
+    const int zoomed = SpectralEngine::chooseFftSize (1.0, rate, rowH,
+                                                     view.getFreqMin(), view.getFreqMax());
+    CHECK (view.effectiveFftSizeForRender (rowH) == zoomed, "auto size follows the time zoom");
+    CHECK (zoomed != expected, "the zoom actually changed the effective size");
+
+    wav.deleteFile();
+}
+
 // ---------------- History tab + batched undo/redo ----------------
 
 static bool vecClose (const std::vector<float>& a, const std::vector<float>& b)
@@ -20000,6 +20146,9 @@ static int scRunUnitTestsImpl()
     progress ("FFT view interactions"); testFFTViewInteractions();
     progress ("FFT extreme zoom axis + rubber band"); testFFTViewExtremeZoom();
     progress ("spectral controls + async load"); testSpectralControlsAndAsyncLoad();
+    progress ("auto fft size algorithm");  testAutoFftSizeAlgorithm();
+    progress ("spectral controls auto fft"); testSpectralControlsAutoFft();
+    progress ("spectral view auto fft");   testSpectralViewAutoFft();
     progress ("history tab");             testHistoryPanel();
     progress ("settings persistence");    testSettingsPersistence();
     progress ("zero-crossing snap sel");  testZeroCrossingSnapSelection();

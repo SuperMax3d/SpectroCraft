@@ -48,6 +48,12 @@ enum class TimeAxisMode : int { Time = 0, TimeOffset = 1, Sample = 2 };
 struct Settings
 {
     int fftSize = 2048;
+    // Auto FFT-size mode (Spectral Controls): when true the effective FFT size
+    // is recomputed from the current zoom levels on every render - see
+    // SpectralEngine::chooseFftSize(). The two parameters below are persisted.
+    bool fftAuto = false;
+    double autoTargetTimeSlices = 80.0;   // target time slices across the visible range
+    double autoBinsPerPixel = 1.25;       // spectral bins per pixel on the frequency axis
     int hopSize = 512;
     int windowType = 1;   // 0=rect 1=hann 2=hamming
     bool logFrequency = true;
@@ -131,7 +137,10 @@ struct Settings
 
     bool operator== (const Settings& o) const
     {
-        return fftSize == o.fftSize && hopSize == o.hopSize && windowType == o.windowType
+        return fftSize == o.fftSize && fftAuto == o.fftAuto
+            && autoTargetTimeSlices == o.autoTargetTimeSlices
+            && autoBinsPerPixel == o.autoBinsPerPixel
+            && hopSize == o.hopSize && windowType == o.windowType
             && logFrequency == o.logFrequency && minFrequency == o.minFrequency
             && maxFrequency == o.maxFrequency
             && dbMinDb == o.dbMinDb && dbMaxDb == o.dbMaxDb
@@ -142,7 +151,10 @@ struct Settings
     // MainWindow to trigger a settings save when any of them changes.
     bool samePersistent (const Settings& o) const
     {
-        return fftSize == o.fftSize && logFrequency == o.logFrequency
+        return fftSize == o.fftSize && fftAuto == o.fftAuto
+            && autoTargetTimeSlices == o.autoTargetTimeSlices
+            && autoBinsPerPixel == o.autoBinsPerPixel
+            && logFrequency == o.logFrequency
             && snapToZeroCrossings == o.snapToZeroCrossings
             && fftAxisMode == o.fftAxisMode && fftLocalN == o.fftLocalN
             && fftThirdOctOrder == o.fftThirdOctOrder

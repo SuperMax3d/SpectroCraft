@@ -4973,12 +4973,23 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     };
 
     // 512 gives the finest frequency resolution; larger sizes give a finer
-    // time resolution of the spectrogram tiles.
+    // time resolution of the spectrogram tiles. "Auto" recomputes the size from
+    // the current zoom levels on every render (see SpectralEngine::chooseFftSize).
     fftSizeCombo.addItem ("512", 512);
     for (int n = 1024; n <= 65536; n *= 2)
         fftSizeCombo.addItem (juce::String (n), n);
+    fftSizeCombo.addItem ("Auto", kFftAutoId);
     fftSizeCombo.onChange = [this] {
-        app.settings.fftSize = fftSizeCombo.getSelectedId();
+        const int id = fftSizeCombo.getSelectedId();
+        if (id == kFftAutoId)
+            app.settings.fftAuto = true;
+        else
+        {
+            app.settings.fftAuto = false;
+            app.settings.fftSize = id;   // the last manual size is kept for when Auto is left
+        }
+        syncAutoControls();
+        resized();   // the auto parameter rows only exist while "Auto" is selected
         if (app.onStateChange) app.onStateChange();
     };
 
@@ -5030,8 +5041,20 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     harmNEdit.onEnter       = [this] { applyHarmInt (harmNEdit.getText(), app.settings.specHarmN, 1, 1000); };
     harmNEdit.onFocusLost   = [this] { applyHarmInt (harmNEdit.getText(), app.settings.specHarmN, 1, 1000); };
 
+    // Auto FFT-size parameters: only visible while "Auto" is selected.
+    styleLevelEdit (autoSlicesEdit);
+    autoSlicesEdit.setJustification (juce::Justification::centredRight);
+    autoSlicesEdit.onEnter       = [this] { applyAutoSlicesText (autoSlicesEdit.getText()); };
+    autoSlicesEdit.onFocusLost   = [this] { applyAutoSlicesText (autoSlicesEdit.getText()); };
+
+    styleLevelEdit (autoBinsEdit);
+    autoBinsEdit.setJustification (juce::Justification::centredRight);
+    autoBinsEdit.onEnter       = [this] { applyAutoBinsText (autoBinsEdit.getText()); };
+    autoBinsEdit.onFocusLost   = [this] { applyAutoBinsText (autoBinsEdit.getText()); };
+
     syncLevelControls();
     syncHarmControls();
+    syncAutoControls();
 
     logToggle.setClickingTogglesState (true);
     logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
@@ -5076,7 +5099,14 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     refreshBtn.setTooltip ("Force a full recomputation of the spectrogram: discards every cached tile "
                             "and re-renders all tracks from the audio.");
     fftSizeCombo.setTooltip ("FFT size used by the spectrogram tiles. Larger values give finer "
-                             "frequency resolution but render more slowly.");
+                             "frequency resolution but render more slowly. 'Auto' picks the size "
+                             "from the current time/frequency zoom levels on every render.");
+    autoSlicesEdit.setTooltip ("Auto FFT size - target time slices: how many FFT frames to fit across "
+                               "the visible time range. Higher values give finer time resolution but "
+                               "render more slowly.");
+    autoBinsEdit.setTooltip ("Auto FFT size - bins per pixel: spectral frequency bins per pixel of the "
+                             "frequency axis. Higher values force larger FFT sizes for finer frequency "
+                             "resolution, which renders more slowly.");
 
     colourMapLab.setText ("Colour Map:", juce::dontSendNotification);
     dbRangeLab.setText ("dB Range:", juce::dontSendNotification);
@@ -5087,6 +5117,11 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     harmMaxLab.setText ("Maximum harmonic to display:", juce::dontSendNotification);
     harmNLab.setText ("Harmonic number under the mouse:", juce::dontSendNotification);
     for (auto* lab : { &harmStartLab, &harmMaxLab, &harmNLab })
+        lab->setFont (11.0f);
+
+    autoSlicesLab.setText ("Target time slices:", juce::dontSendNotification);
+    autoBinsLab.setText ("Bins per pixel:", juce::dontSendNotification);
+    for (auto* lab : { &autoSlicesLab, &autoBinsLab })
         lab->setFont (11.0f);
 
     addAndMakeVisible (&colourMapLab);
@@ -5100,6 +5135,14 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     addAndMakeVisible (&harmMaxEdit);
     addAndMakeVisible (&harmNLab);
     addAndMakeVisible (&harmNEdit);
+    addAndMakeVisible (&autoSlicesLab);
+    addAndMakeVisible (&autoSlicesEdit);
+    addAndMakeVisible (&autoBinsLab);
+    addAndMakeVisible (&autoBinsEdit);
+    autoSlicesLab.setVisible (app.settings.fftAuto);
+    autoSlicesEdit.setVisible (app.settings.fftAuto);
+    autoBinsLab.setVisible (app.settings.fftAuto);
+    autoBinsEdit.setVisible (app.settings.fftAuto);
     addAndMakeVisible (&dbRangeLab);
     addAndMakeVisible (&dBRangeSlider);
     addAndMakeVisible (&dbRangeEdit);
@@ -5112,9 +5155,11 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
 void SpectralControlsPanel::refresh()
 {
     colourMapCombo.setSelectedId ((int) app.colourMap + 1, juce::dontSendNotification);
-    fftSizeCombo.setSelectedId (app.settings.fftSize, juce::dontSendNotification);
+    fftSizeCombo.setSelectedId (app.settings.fftAuto ? kFftAutoId : app.settings.fftSize,
+                                juce::dontSendNotification);
     syncLevelControls();
     syncHarmControls();
+    syncAutoControls();
     logToggle.setToggleState (app.settings.logFrequency, juce::dontSendNotification);
     logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
 }
@@ -5148,6 +5193,28 @@ void SpectralControlsPanel::resized()
         logToggle.setBounds (row.removeFromLeft (104));
         resetFreqBtn.setBounds (row.removeFromRight (86));
         fftSizeCombo.setBounds (row.reduced (6, 0));
+    }
+
+    {   // Auto FFT-size parameter rows: only present while "Auto" is selected.
+        const bool showAuto = app.settings.fftAuto;
+        autoSlicesLab.setVisible (showAuto);
+        autoSlicesEdit.setVisible (showAuto);
+        autoBinsLab.setVisible (showAuto);
+        autoBinsEdit.setVisible (showAuto);
+        if (showAuto)
+        {
+            auto row = b.removeFromTop (24);
+            autoSlicesLab.setBounds (row.removeFromLeft (std::max (0, row.getWidth() - 54)));
+            row.removeFromLeft (6);
+            autoSlicesEdit.setBounds (row.reduced (0, 3));
+        }
+        if (showAuto)
+        {
+            auto row = b.removeFromTop (24);
+            autoBinsLab.setBounds (row.removeFromLeft (std::max (0, row.getWidth() - 54)));
+            row.removeFromLeft (6);
+            autoBinsEdit.setBounds (row.reduced (0, 3));
+        }
     }
 
     {   // Harmonic marker rows: label left, value right (persisted).
@@ -5338,6 +5405,57 @@ void SpectralControlsPanel::syncHarmControls()
     harmStartEdit.setText (juce::String (app.settings.specHarmStartK));
     harmMaxEdit.setText (juce::String (app.settings.specHarmMaxK));
     harmNEdit.setText (juce::String (app.settings.specHarmN));
+}
+
+// Parses a plain decimal number (optional sign, one dot). Used by the auto
+// FFT-size fields.
+static bool parseAutoDouble (const juce::String& text, double& out)
+{
+    const auto t = text.trim();
+    if (t.isEmpty()) return false;
+    for (char16_t c : t)
+        if ((c < '0' || c > '9') && c != '-' && c != '+' && c != '.') return false;
+    out = t.getDoubleValue();
+    return std::isfinite (out);
+}
+
+// Whole numbers print without decimals, everything else with three places.
+static juce::String formatAutoDouble (double v)
+{
+    if (std::abs (v - std::round (v)) < 1e-9)
+        return juce::String ((int) std::lround (v));
+    return juce::String (v, 3);
+}
+
+bool SpectralControlsPanel::applyAutoDouble (const juce::String& text, double& target,
+                                             double lo, double hi)
+{
+    const auto t = text.trim();
+    if (!t.isEmpty())
+    {
+        double v;
+        if (!parseAutoDouble (t, v)) { syncAutoControls(); return false; }
+        target = std::clamp (v, lo, hi);
+    }
+    syncAutoControls();
+    if (app.onStateChange) app.onStateChange();
+    return true;
+}
+
+bool SpectralControlsPanel::applyAutoSlicesText (const juce::String& text)
+{
+    return applyAutoDouble (text, app.settings.autoTargetTimeSlices, 1.0, 1000.0);
+}
+
+bool SpectralControlsPanel::applyAutoBinsText (const juce::String& text)
+{
+    return applyAutoDouble (text, app.settings.autoBinsPerPixel, 0.1, 16.0);
+}
+
+void SpectralControlsPanel::syncAutoControls()
+{
+    autoSlicesEdit.setText (formatAutoDouble (app.settings.autoTargetTimeSlices));
+    autoBinsEdit.setText (formatAutoDouble (app.settings.autoBinsPerPixel));
 }
 
 // ---------------------------------------------------------------- Find dialog

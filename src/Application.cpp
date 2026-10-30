@@ -112,6 +112,15 @@ static int syncThirdOctOrder (int v)
 void Application::loadSettings ()
 {
     settings.fftSize       = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_size", settings.fftSize), 512, 65536);
+    settings.fftAuto       = recentStore->getIntValue ("fft_auto", settings.fftAuto ? 1 : 0) != 0;
+    {
+        const double ts = recentStore->getValue ("auto_time_slices",
+                                                 juce::String (settings.autoTargetTimeSlices)).getDoubleValue();
+        settings.autoTargetTimeSlices = std::isfinite (ts) ? std::clamp (ts, 1.0, 1000.0) : 80.0;
+        const double bp = recentStore->getValue ("auto_bins_per_pixel",
+                                                 juce::String (settings.autoBinsPerPixel)).getDoubleValue();
+        settings.autoBinsPerPixel = std::isfinite (bp) ? std::clamp (bp, 0.1, 16.0) : 1.25;
+    }
     settings.logFrequency  = recentStore->getIntValue ("log_freq", settings.logFrequency ? 1 : 0) != 0;
     settings.snapToZeroCrossings = recentStore->getIntValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0) != 0;
     settings.fftAxisMode   = std::clamp ((int) recentStore->getIntValue ("fft_axis_mode", settings.fftAxisMode), 0, 5);
@@ -179,6 +188,9 @@ void Application::loadSettings ()
 void Application::saveSettings ()
 {
     recentStore->setValue ("fft_size", settings.fftSize);
+    recentStore->setValue ("fft_auto", settings.fftAuto ? 1 : 0);
+    recentStore->setValue ("auto_time_slices", settings.autoTargetTimeSlices);
+    recentStore->setValue ("auto_bins_per_pixel", settings.autoBinsPerPixel);
     recentStore->setValue ("log_freq", settings.logFrequency ? 1 : 0);
     recentStore->setValue ("snap_zero", settings.snapToZeroCrossings ? 1 : 0);
     recentStore->setValue ("fft_axis_mode", settings.fftAxisMode);

@@ -92,6 +92,12 @@ public:
     // Current local frequency-axis limits (for the vertical scrollbar).
     double getFreqMin() const { return freqMin; }
     double getFreqMax() const { return freqMax; }
+
+    // Effective FFT size for the current zoom levels: in auto mode this is
+    // recomputed from the time window + frequency axis + row height, otherwise
+    // it is just settings_.fftSize. (Also used by unit tests.)
+    int effectiveFftSizeForRender (int rowHeightPx) const
+    { return effectiveSettingsForRender (rowHeightPx).fftSize; }
     // Set the frequency axis directly (called by the vertical scrollbar).
     void setFrequencyRange (double lo, double hi);
 
@@ -293,6 +299,11 @@ private:
     // Returns false if cancelled mid-render.
     bool renderSpectralContent (juce::Image& img, const Settings& rs,
                                 const std::atomic<bool>* cancel = nullptr);
+
+    // Settings with the EFFECTIVE FFT size for rendering/probing: in auto mode
+    // it is recomputed from the current zoom levels (time window + frequency
+    // axis + row height), otherwise unchanged.
+    Settings effectiveSettingsForRender (int rowHeightPx) const;
 
     void drawTimeRuler (juce::Graphics& g);
     void drawFrequencyRuler (juce::Graphics& g);

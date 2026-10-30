@@ -999,6 +999,15 @@ public:
     juce::String getHarmMaxText() const { return harmMaxEdit.getText(); }
     juce::String getHarmNText() const { return harmNEdit.getText(); }
 
+    // Auto FFT-size fields (shown only while "Auto" is selected in the FFT size
+    // combo; persisted between sessions). Typed values are clamped to their
+    // ranges; false when rejected.
+    bool applyAutoSlicesText (const juce::String& text);   // 1..1000 target time slices
+    bool applyAutoBinsText (const juce::String& text);     // 0.1..16 bins per pixel
+    void syncAutoControls();                               // editors from settings
+    juce::String getAutoSlicesText() const { return autoSlicesEdit.getText(); }
+    juce::String getAutoBinsText() const { return autoBinsEdit.getText(); }
+
     // Set by MainWindow: resets the spectral view's frequency axis.
     std::function<void()> onResetFreq;
 
@@ -1024,6 +1033,12 @@ public:
         return false;
     }
 
+    // FFT-size combo + auto-mode widgets (unit tests).
+    static constexpr int kFftAutoId = -1;   // combo item id of the "Auto" entry
+    juce::ComboBox& fftSizeComboRef() { return fftSizeCombo; }
+    LevelEdit& autoSlicesEditRef() { return autoSlicesEdit; }
+    LevelEdit& autoBinsEditRef() { return autoBinsEdit; }
+
 private:
     void mouseDown (const juce::MouseEvent&) override;   // right-click = Close Panel
 
@@ -1032,9 +1047,11 @@ private:
     juce::Slider dBRangeSlider;
     LevelEdit dbRangeEdit, dbMinEdit, dbMaxEdit;
     LevelEdit harmStartEdit, harmMaxEdit, harmNEdit;   // harmonic marker rows
+    LevelEdit autoSlicesEdit, autoBinsEdit;            // Auto FFT-size parameters (auto mode only)
     juce::TextButton logToggle;
     juce::Label colourMapLab, dbRangeLab,
-                harmStartLab, harmMaxLab, harmNLab;
+                harmStartLab, harmMaxLab, harmNLab,
+                autoSlicesLab, autoBinsLab;
     juce::TextButton resetFreqBtn;
     juce::TextButton refreshBtn;
 
@@ -1084,6 +1101,7 @@ private:
     MapPreview preview;
 
     bool applyHarmInt (const juce::String& text, int& target, int lo, int hi);
+    bool applyAutoDouble (const juce::String& text, double& target, double lo, double hi);
 
     JUCE_DECLARE_NON_COPYABLE (SpectralControlsPanel)
 };

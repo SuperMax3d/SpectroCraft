@@ -872,7 +872,10 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
         ? ((double) (s1 - s0) / std::max (1, pr.getWidth())) : 0.0;
     const int level = SpectralEngine::pickMipLevel (spp, settings_.hopSize);
 
-    const float dB = spectral.probeMagnitude (app.audioEngine(), ch, t, freq, settings_, level);
+    // Auto FFT-size mode: probe with the same effective size the image used,
+    // so the tiles are already cached and the bin mapping matches.
+    const float dB = spectral.probeMagnitude (app.audioEngine(), ch, t, freq,
+                                              effectiveSettingsForRender (row.getHeight()), level);
 
     // With a scale calibration the probe shows absolute levels
     // (dB-SPL for Pascal files; linear V/g values for volts/grams files)
@@ -1243,6 +1246,19 @@ void SpectralView::paint (juce::Graphics& g)
 
 // Renders the spectral content (one row per visible channel with dark gaps)
 // into an ARGB image of size w×h. Used by paint() and saveAsPng().
+Settings SpectralView::effectiveSettingsForRender (int rowHeightPx) const
+{
+    Settings rs = settings_;
+    if (rs.fftAuto)
+        rs.fftSize = SpectralEngine::chooseFftSize (viewEnd - viewStart,
+                                                    app.audioEngine().sampleRate(),
+                                                    std::max (1, rowHeightPx),
+                                                    freqMin, freqMax,
+                                                    rs.autoTargetTimeSlices,
+                                                    rs.autoBinsPerPixel);
+    return rs;
+}
+
 bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
                                           const std::atomic<bool>* cancel)
 {
@@ -1265,8 +1281,11 @@ bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
         const auto rr = rows[r];
         if (rr.getHeight() <= 0) continue;
 
+        // Auto FFT-size mode: the effective size depends on this row's height
+        // and the current zoom levels, so it is resolved per row.
+        const Settings rsRow = effectiveSettingsForRender (rr.getHeight());
         std::vector<uint8_t> pixels;
-        spectral.renderToPixels (app.audioEngine(), rs, w, rr.getHeight(), viewStart, viewEnd, { ch }, pixels, cancel);
+        spectral.renderToPixels (app.audioEngine(), rsRow, w, rr.getHeight(), viewStart, viewEnd, { ch }, pixels, cancel);
         if (cancelled()) return false;
 
         for (int y = 0; y < rr.getHeight(); ++y)

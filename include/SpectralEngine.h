@@ -87,6 +87,21 @@ public:
         return level;
     }
 
+    /** Auto FFT-size mode: balances time resolution against frequency
+        resolution from the current zoom levels.
+
+        The TIME constraint caps the size: about `targetTimeSlices` FFT frames
+        should fit across the visible range, and with hop ~ FFT/4 that bounds
+        the largest useful window. The FREQUENCY constraint sets a floor:
+        keeping about `binsPerPixel` spectral bins per pixel of the frequency
+        axis needs deltaF = (maxFreq - minFreq) / (heightPixels * binsPerPixel),
+        i.e. an FFT of at least sampleRate / deltaF samples.
+
+        The result is snapped up to a power of two and clamped to 256..16384. */
+    static int chooseFftSize (double visibleSeconds, double sampleRate,
+                              int heightPixels, double minFreqHz, double maxFreqHz,
+                              double targetTimeSlices = 80.0, double binsPerPixel = 1.25);
+
     // Probe the magnitude (dB, e.g. -120..0) at an exact time/frequency point.
     // Pass the mipmap level the view is currently displaying so the tiles are
     // already cached; missing tiles fall back to a synchronous compute.
