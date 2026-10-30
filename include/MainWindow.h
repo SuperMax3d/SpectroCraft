@@ -13,6 +13,7 @@
 #include "WorkProgress.h"
 
 class StemSeparationWindow;   // defined in StemSeparation.h
+class SuperResolutionWindow;  // defined in SuperResolution.h
 
 class MainWindow : public juce::DocumentWindow,
                    private juce::KeyListener,
@@ -51,6 +52,9 @@ public:
 
     // The open Stem Separation window, if any (null when closed).
     StemSeparationWindow* stemSepWindow() const { return stemWin_.get (); }
+
+    // The open Super Resolution window, if any (null when closed).
+    SuperResolutionWindow* superResWindow() const { return superResWin_.get (); }
 
     void openFile (const juce::File& file);   // routes large files to the async path
     void openFileWithProgress (const juce::File& file);  // background load + progress dialog
@@ -236,6 +240,9 @@ public:
     /** Effects > Stem Separation... - opens (or brings to front) the
         non-modal window that drives the external stem-separation CLI. */
     void showStemSeparationWindow();
+    /** Effects > Super Resolution... - opens (or brings to front) the
+        non-modal window that drives the external super-resolution CLI. */
+    void showSuperResolutionWindow();
     /** Background resample (+ optional channel remix) with a progress
         dialog. Empty remixWeights keeps the current channels. */
     void runResampleAsync (double newRate,
@@ -352,6 +359,7 @@ public:
         ToolsFilterEq,         // Effects > Filter EQ... (FFT curve equaliser)
         ToolsResample,
         ToolsStemSeparate,   // AI stem separation via the audio.cpp CLI tool
+        ToolsSuperResolve,   // AI super resolution (FlashSR / AudioSR) via the audio.cpp CLI tool
         ToolsSplitSpectralSel,     // split active spectral selection into new channel(s) (F12)
         ToolsSplitSpectralSelT12,  // move track 1's selected band to track 2 (Shift+F12)
         ToolsGenSilence,           // Effects > Generate Silence...
@@ -407,6 +415,9 @@ private:
 
     // Effects > Stem Separation window (at most one open at a time).
     std::unique_ptr<StemSeparationWindow> stemWin_;
+
+    // Effects > Super Resolution window (at most one open at a time).
+    std::unique_ptr<SuperResolutionWindow> superResWin_;
 
 
     // Zoom/pan scrollbars: time bar at the bottom, one vertical

@@ -72,6 +72,56 @@ juce::File demucsFtModelDir(const juce::File& d)
     return {};
 }
 
+juce::File flashSrModelFile(const juce::File& d)
+{
+    const juce::File f = (d.getFullPathName().isEmpty() ? dir() : d)
+                             .getChildFile ("flashsr")
+                             .getChildFile ("flashsr.safetensors");
+    return f.existsAsFile () ? f : juce::File ();
+}
+
+std::vector<juce::File> listAudioSRModels(const juce::File& d)
+{
+    std::vector<juce::File> out;
+    // `d` is the models root (like flashSrModelFile), not the GGUF folder.
+    const juce::File root = (d.getFullPathName().isEmpty() ? dir() : d)
+                                .getChildFile ("AudioSR-GGUF");
+    if (!root.isDirectory()) return out;
+    for (auto entry : juce::RangedDirectoryIterator (root, false))
+        if (entry.getFile().hasFileExtension ("gguf"))
+            out.push_back (entry.getFile());
+    std::sort (out.begin (), out.end (),
+               [] (const juce::File& a, const juce::File& b) {
+                   return a.getFileName().toLowerCase() < b.getFileName().toLowerCase(); });
+    return out;
+}
+
+std::vector<SuperResModelSpec> flashSrChoices()
+{
+    // The FlashSR weights ship as an asset of the audio.cpp repository itself.
+    std::vector<SuperResModelSpec> v;
+    v.push_back ({ "flashsr/flashsr.safetensors", 356008 });
+    return v;
+}
+
+juce::String flashSrUrl(const juce::String& fileName)
+{
+    return "https://github.com/0xShug0/audio.cpp/raw/main/assets/framework/audio_utilities/" + fileName;
+}
+
+std::vector<SuperResModelSpec> audioSRChoices()
+{
+    // AudioSR GGUF package on Hugging Face (audio-cpp/audio.cpp-gguf).
+    std::vector<SuperResModelSpec> v;
+    v.push_back ({ "AudioSR-GGUF/audiosr-basic-f32.gguf", 6177855616 });
+    return v;
+}
+
+juce::String audioSRUrl(const juce::String& fileName)
+{
+    return "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/" + fileName;
+}
+
 std::vector<BinarySpec> binaryChoices()
 {
     // Windows x64 assets of the v0.9.2-drama3-base-small release.
@@ -515,6 +565,45 @@ bool runSepTask(const juce::File& binary, const juce::String& family, const juce
                                 outDir, shouldContinue, onLogLine, resOut, errOut);
 }
 
+juce::StringArray buildSuperResCliArgs(int mode, const juce::File& model,
+                                       const juce::String& backend,
+                                       const juce::File& audioIn, const juce::File& outWav)
+{
+    juce::StringArray args;
+    args.add ("--task");            args.add ("s2s");
+    if (mode == 1)   // FlashSR: a builtin_audio_utils utility
+    {
+        args.add ("--family");          args.add ("builtin_audio_utils");
+        args.add ("--model");           args.add (model.getFullPathName());
+        args.add ("--load-option");     args.add ("utility=flashsr");
+    }
+    else   // AudioSR
+    {
+        args.add ("--family");          args.add ("audiosr");
+        args.add ("--model");           args.add (model.getFullPathName());
+    }
+    args.add ("--backend");         args.add (backend);
+    args.add ("--audio");           args.add (audioIn.getFullPathName());
+    args.add ("--out");             args.add (outWav.getFullPathName());
+    args.add ("--log");
+    return args;
+}
+
+bool runSuperResTask(const juce::File& binary, int mode, const juce::File& model,
+                     const juce::String& backend, const juce::File& audioIn,
+                     const juce::File& outWav,
+                     const std::function<bool()>& shouldContinue,
+                     const std::function<void(const juce::String&)>& onLogLine,
+                     RunResult* resOut, std::string* errOut)
+{
+    // The tool writes the result straight to --out (no output directory), so
+    // hand it the existing parent folder as the "directory to ensure".
+    return runProcessWithPipes (binary,
+                                buildSuperResCliArgs (mode, model, backend, audioIn, outWav),
+                                outWav.getParentDirectory (), shouldContinue, onLogLine,
+                                resOut, errOut);
+}
+
 #else   // POSIX: not supported in v1.
 
 bool runStemSeparation(const juce::File&, const juce::File&, const juce::String&,
@@ -533,6 +622,21 @@ bool runSepTask(const juce::File&, const juce::String&, const juce::File&,
                 RunResult*, std::string* errOut)
 {
     if (errOut) *errOut = "Stem Separation requires the Windows CLI binary.";
+    return false;
+}
+
+juce::StringArray buildSuperResCliArgs(int, const juce::File&, const juce::String&,
+                                       const juce::File&, const juce::File&)
+{
+    return {};
+}
+
+bool runSuperResTask(const juce::File&, int, const juce::File&, const juce::String&,
+                     const juce::File&, const juce::File&,
+                     const std::function<bool()>&, const std::function<void(const juce::String&)>&,
+                     RunResult*, std::string* errOut)
+{
+    if (errOut) *errOut = "Super Resolution requires the Windows CLI binary.";
     return false;
 }
 

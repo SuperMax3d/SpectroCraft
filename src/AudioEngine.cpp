@@ -634,7 +634,7 @@ void AudioEngine::clearMipmaps() { mips.clear(); baseFactor = 1; mipBaseTotal = 
 void recordReplace (AudioEngine& eng, const juce::Range<int64_t>& region,
                            const std::vector<std::vector<float>>& newData,
                            const juce::String& description,
-                           int newChans = 0)
+                           int newChans = 0, double newRate = 0.0)
 {
     Patch p;
     p.oldStart = region.getStart();
@@ -644,6 +644,11 @@ void recordReplace (AudioEngine& eng, const juce::Range<int64_t>& region,
     {
         p.oldChans = eng.numChannels();
         p.newChans = newChans;
+    }
+    if (newRate > 0.0 && std::abs (newRate - eng.sampleRate ()) > 1e-9 * std::max (newRate, eng.sampleRate ()))
+    {
+        p.oldRate = eng.sampleRate ();
+        p.newRate = newRate;
     }
     p.oldData.resize (eng.numChannels());
     for (int ch = 0; ch < eng.numChannels(); ++ch)
@@ -1444,7 +1449,7 @@ bool AudioEngine::replaceWholeFile (const juce::AudioBuffer<float>& data, double
 }
 
 bool AudioEngine::replaceWholeFileUndoable (const std::vector<std::vector<float>>& data,
-                                            const juce::String& description)
+                                            const juce::String& description, double newRate)
 {
     if (!ensureEditable ())
         return false;
@@ -1455,9 +1460,9 @@ bool AudioEngine::replaceWholeFileUndoable (const std::vector<std::vector<float>
         if ((int64_t) row.size () != len)
             return false;
 
-    // One undoable patch: old whole file + new whole file (+ channel change).
+    // One undoable patch: old whole file + new whole file (+ channel/rate change).
     recordReplace (*this, { 0, totalSamples }, data, description,
-                   (int) data.size ());
+                   (int) data.size (), newRate);
 
     auto nb = std::make_unique<juce::AudioBuffer<float>> ((int) data.size (),
                                                          (int) len);
@@ -1467,6 +1472,8 @@ bool AudioEngine::replaceWholeFileUndoable (const std::vector<std::vector<float>
     buffer = std::move (nb);
     nchans = (int) data.size ();
     totalSamples = len;
+    if (newRate > 0.0 && std::abs (newRate - rate) > 1e-9 * std::max (newRate, rate))
+        rate = newRate;
     durationSecs = (double) len / rate;
     unsaved = true;
     rebuildMipmaps();
@@ -1594,6 +1601,7 @@ bool AudioEngine::applyPatch (const Patch& p, bool forward, bool rebuild)
         buffer = std::move (nb);
         nchans = targetChans;
         totalSamples = newTotal;
+        if (p.newRate > 0.0) rate = p.newRate;   // whole-file replacement at a new rate
     }
     else
     {
@@ -1624,6 +1632,7 @@ bool AudioEngine::applyPatch (const Patch& p, bool forward, bool rebuild)
         buffer = std::move (nb);
         nchans = targetChans;
         totalSamples = newTotal;
+        if (p.oldRate > 0.0) rate = p.oldRate;   // restore the pre-edit rate
     }
 
     durationSecs = (double) totalSamples / rate;

@@ -572,6 +572,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   mode runs several descriptions in one pass with optional include/exclude time
   anchors. Runs an external prebuilt CLI — binary and model weights are
   downloaded on demand or installed manually.
+- **Super resolution** (`Effects → Super Resolution…`, see [below](#super-resolution)):
+  enhances a time range into a single mono 48 kHz track using the same external
+  `audiocpp_cli.exe` tool — either the FlashSR utility (small, fast) or an
+  AudioSR GGUF model. The result can open as a new file, replace the current
+  file (one undoable step, including any sample-rate change), or be appended as
+  a new track aligned to the enhanced range.
 - **Split spectral selection** (`Effects → Split Spectral Selection (All Tracks)`, F12; enabled
   only while a spectral selection is active): moves the selected band content
   out of each visible source channel into one new appended channel per source
@@ -1230,6 +1236,71 @@ multiple descriptions, or any description with anchors, reopen straight into
 advanced mode. Anchor ranges are absolute document times, so on restore an
 anchor is kept only if it still fits inside the current file's duration;
 anchors that no longer fit are dropped while their text is kept.
+
+---
+
+## Super resolution
+
+**Effects → Super Resolution…** enhances a time range of the current file into
+a single *mono 48 kHz* track — both model families downmix and resample to
+their native pipeline internally, regardless of the source's rate or channel
+count. Like Stem Separation it drives the prebuilt `audiocpp_cli.exe` as a
+child process; nothing is compiled into SpectroCraft.
+
+The **Mode** dropdown selects the family:
+
+- **FlashSR** (default) — the small, fast super-resolution utility that ships
+  inside audio.cpp itself (`--family builtin_audio_utils` with
+  `--load-option utility=flashsr`).
+- **AudioSR** — a GGUF model from the [audio-cpp/audio.cpp-gguf](https://huggingface.co/audio-cpp/audio.cpp-gguf)
+  repository; any `.gguf` placed in the `AudioSR-GGUF` folder is listed.
+
+### Getting the binary and models
+
+The dialog's **Download…** button fetches what is missing (with progress and
+cancel), using the same CLI-binary variants as Stem Separation:
+
+- **FlashSR model** — `flashsr.safetensors` (~0.3 MB) from the audio.cpp
+  repository assets, installed to
+  `%APPDATA%\SpectroCraft\models\audiocpp\flashsr\flashsr.safetensors`.
+- **AudioSR models** — e.g. `audiosr-basic-f32.gguf` (~5.8 GB) from the
+  Hugging Face repository above, installed to
+  `%APPDATA%\SpectroCraft\models\audiocpp\AudioSR-GGUF\`. Install any other
+  `.gguf` there by hand and it appears in the model dropdown automatically.
+
+The *Backend* dropdown (*Cpu* / *Cuda* / *Vulkan*) must match the installed
+binary variant (shared with Stem Separation).
+
+### How a run works
+
+1. The time range comes from the dialog's editable **Start**/**End** fields
+   (seeded once from the current selection when the window opens; **Select All**
+   resets them to the full duration), with the resulting length shown in the
+   **Duration** label next to them. That range is extracted to a temporary WAV.
+2. `audiocpp_cli.exe` runs with `--task s2s`, the chosen family/model/backend,
+   the input WAV and an output path; its log lines stream into the progress
+dialog (cancellable). The tool writes one enhanced WAV straight to that path.
+3. The result is applied according to the **Output** dropdown at the bottom of
+   the dialog (persisted between sessions):
+   - **Copy result to new file** (default) — a new document `<name>_superres`
+     opens with the enhanced mono track at its native rate (48 kHz).
+   - **Overwrite current file** — the open file is replaced by the enhanced
+     track, including any sample-rate change (one undoable step; undo restores
+     the old content *and* the old rate). Markers inside the extracted range
+     keep their relative position, everything else is dropped with the old
+     timeline, and the playhead/selection follow suit.
+   - **Append to current file** — every original track stays untouched and the
+     enhanced track becomes one new channel holding its data over the extracted
+     time range (silence elsewhere), so it lines up in time with what was
+     enhanced. The result is resampled back to the document's rate first.
+
+   If you switch documents while a run is in flight, overwrite/append falls
+   back to creating a new file rather than writing into the wrong document.
+
+When a run finishes successfully the Super Resolution window closes itself;
+on failure or cancellation it stays open so you can read the status and retry.
+The mode, model (per mode), backend and output-mode choices persist between
+sessions in `SpectroCraft.recent`.
 
 ---
 

@@ -29,6 +29,7 @@
 #include "VideoAudio.h"  // video-container audio extraction (FFmpeg, Windows)
 #include "AudioCpp.h"     // stem-separation CLI argument building + file discovery
 #include "StemSeparation.h"   // the Effects > Stem Separation window
+#include "SuperResolution.h"  // the Effects > Super Resolution window
 #include "Recorder.h"         // recorder plugin host (Transport > Record)
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
@@ -6419,6 +6420,392 @@ static void testStemSepAnchorList()
     dlg->userTriedToCloseWindow ();
 }
 
+// ---------------- Super Resolution CLI arguments --------------------------
+// The two families share the s2s task; FlashSR is a builtin_audio_utils
+// utility (extra --load-option), AudioSR is its own family. Both write one
+// enhanced WAV straight to --out.
+static void testSuperResCliArgs()
+{
+    const juce::File model = juce::File ("C:/models/audiocpp/AudioSR-GGUF/audiosr-basic-f32.gguf");
+    const juce::File inWav  = juce::File ("C:/tmp/sr_in.wav");
+    const juce::File outWav = juce::File ("C:/tmp/sr_out/enhanced.wav");
+
+    // FlashSR: --task s2s --family builtin_audio_utils --model <m>
+    //          --load-option utility=flashsr --backend <b> --audio <a> --out <o> --log
+    auto a1 = sc::acpp::buildSuperResCliArgs (1, model, "cuda", inWav, outWav);
+    CHECK (a1.size () == 15, "flashsr: 15 argument tokens");
+    if (a1.size () == 15)
+    {
+        CHECK (a1[0] == "--task" && a1[1] == "s2s",
+              "flashsr: --task s2s");
+        CHECK (a1[2] == "--family" && a1[3] == "builtin_audio_utils",
+              "flashsr: family builtin_audio_utils");
+        CHECK (a1[4] == "--model" && a1[5] == model.getFullPathName (),
+              "flashsr: --model path");
+        CHECK (a1[6] == "--load-option" && a1[7] == "utility=flashsr",
+              "flashsr: --load-option utility=flashsr");
+        CHECK (a1[8] == "--backend" && a1[9] == "cuda", "flashsr: --backend cuda");
+        CHECK (a1[10] == "--audio" && a1[11] == inWav.getFullPathName (),
+              "flashsr: --audio input wav");
+        CHECK (a1[12] == "--out" && a1[13] == outWav.getFullPathName (),
+              "flashsr: --out output wav");
+        CHECK (a1[14] == "--log", "flashsr: trailing --log flag");
+    }
+
+    // AudioSR: --task s2s --family audiosr --model <m> --backend <b>
+    //          --audio <a> --out <o> --log
+    auto a2 = sc::acpp::buildSuperResCliArgs (2, model, "cpu", inWav, outWav);
+    CHECK (a2.size () == 13, "audiosr: 13 argument tokens");
+    if (a2.size () == 13)
+    {
+        CHECK (a2[0] == "--task" && a2[1] == "s2s", "audiosr: --task s2s");
+        CHECK (a2[2] == "--family" && a2[3] == "audiosr", "audiosr: family audiosr");
+        CHECK (a2[4] == "--model" && a2[5] == model.getFullPathName (),
+              "audiosr: --model path");
+        CHECK (a2[6] == "--backend" && a2[7] == "cpu", "audiosr: --backend cpu");
+        CHECK (a2[8] == "--audio" && a2[9] == inWav.getFullPathName (),
+              "audiosr: --audio input wav");
+        CHECK (a2[10] == "--out" && a2[11] == outWav.getFullPathName (),
+              "audiosr: --out output wav");
+        CHECK (a2[12] == "--log", "audiosr: trailing --log flag");
+    }
+}
+
+// ---------------- Super Resolution model discovery + downloads -------------
+static void testSuperResModelDiscovery()
+{
+    // Isolated root so the real %APPDATA% models are never touched.
+    const juce::File root = makeTempFile ("sr_models_root.wav")
+        .getParentDirectory ().getChildFile ("sc_sr_models_" + juce::String ((int) std::time (nullptr)));
+    if (root.exists ()) root.deleteRecursively ();
+
+    // Empty root: nothing found for either family.
+    CHECK (sc::acpp::flashSrModelFile (root) == juce::File (),
+          "no flashsr model in an empty root");
+    CHECK (sc::acpp::listAudioSRModels (root).empty (),
+          "no audiosr models in an empty root");
+
+    // Install both: flashsr/flashsr.safetensors and AudioSR-GGUF/*.gguf.
+    const juce::File flashDir = root.getChildFile ("flashsr");
+    flashDir.createDirectory ();
+    const juce::File flashModel = flashDir.getChildFile ("flashsr.safetensors");
+    { std::ofstream f (flashModel.getFullPathName ().toRawUTF8 ()); f << "x"; }
+
+    const juce::File asrDir = root.getChildFile ("AudioSR-GGUF");
+    asrDir.createDirectory ();
+    const juce::File m1 = asrDir.getChildFile ("audiosr-basic-f32.gguf");
+    const juce::File m2 = asrDir.getChildFile ("audiosr-large-q8_0.gguf");
+    { std::ofstream f (m1.getFullPathName ().toRawUTF8 ()); f << "x"; }
+    { std::ofstream f (m2.getFullPathName ().toRawUTF8 ()); f << "x"; }
+
+    CHECK (sc::acpp::flashSrModelFile (root) == flashModel, "flashsr model found");
+    const auto list = sc::acpp::listAudioSRModels (root);
+    CHECK (list.size () == 2, "two audiosr models listed");
+    if (list.size () == 2)
+        CHECK (list[0].getFileName () == "audiosr-basic-f32.gguf"
+              && list[1].getFileName () == "audiosr-large-q8_0.gguf",
+              "audiosr models sorted by name");
+
+    // Download metadata: one choice per family with a URL and byte size.
+    const auto fChoices = sc::acpp::flashSrChoices ();
+    CHECK (fChoices.size () == 1 && fChoices[0].file == "flashsr/flashsr.safetensors"
+          && fChoices[0].sizeBytes > 300000,
+          "one flashsr download choice with a plausible size");
+    if (!fChoices.empty ())
+        CHECK (sc::acpp::flashSrUrl (fChoices[0].file).contains ("flashsr.safetensors")
+              && sc::acpp::flashSrUrl (fChoices[0].file).startsWith ("https://"),
+              "flashsr url points at the safetensors asset");
+
+    const auto aChoices = sc::acpp::audioSRChoices ();
+    CHECK (!aChoices.empty () && aChoices[0].sizeBytes > 1000000000,
+          "audiosr download choice with a multi-GB size");
+    for (const auto& c : aChoices)
+        CHECK (sc::acpp::audioSRUrl (c.file).contains ("AudioSR-GGUF")
+              && sc::acpp::audioSRUrl (c.file).startsWith ("https://huggingface.co/"),
+              "audiosr url points at the GGUF repo");
+
+    root.deleteRecursively ();
+}
+
+// ---------------- Super Resolution window layout + close --------------------
+static void testSuperResWindowLayoutAndClose()
+{
+    const juce::File wav = makeTempFile ("superres_win.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 2000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote wav for super-res window test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for super-res window test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "super res window"));
+
+    // Open the dialog through the menu action.
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsSuperResolve, 5);
+    SuperResolutionWindow* dlg = win->superResWindow ();
+    CHECK (dlg != nullptr, "super resolution window opened from the menu");
+    if (dlg == nullptr) return;
+
+    // The range fields are seeded from the whole file when nothing is
+    // selected: 0 .. 0.25 s for this 1/4-second wav (3 decimal places).
+    CHECK (dlg->startTextForTest () == "0.000", "start field seeded at zero");
+    CHECK (dlg->endTextForTest ().startsWith ("0.25"), "end field seeded at the file end");
+
+    // 17 content children; a non-native test peer adds two internal
+    // minimise/close buttons, which we ignore.
+    int visible = 0;
+    for (int i = 0; i < dlg->getNumChildComponents (); ++i)
+        if (!dlg->getChildComponent (i)->getBounds ().isEmpty ())
+            ++visible;
+    CHECK (dlg->getNumChildComponents () >= 17 && visible == 17,
+          "super resolution window lays out all its controls");
+
+    // No two visible controls may overlap.
+    std::vector<juce::Rectangle<int>> rects;
+    for (int i = 0; i < dlg->getNumChildComponents (); ++i)
+    {
+        const juce::Rectangle<int> b = dlg->getChildComponent (i)->getBounds ();
+        if (!b.isEmpty ()) rects.push_back (b);
+    }
+    bool overlap = false;
+    for (size_t a = 0; a < rects.size () && !overlap; ++a)
+        for (size_t b = a + 1; b < rects.size (); ++b)
+            if (rects[a].intersects (rects[b])) { overlap = true; break; }
+    CHECK (!overlap, "no overlapping controls in the super resolution window");
+
+    // X button path: userTriedToCloseWindow must release ownership.
+    dlg->userTriedToCloseWindow ();
+    CHECK (win->superResWindow () == nullptr, "closing the window releases it");
+
+    // Re-opening creates a fresh instance.
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsSuperResolve, 5);
+    CHECK (win->superResWindow () != nullptr, "re-open works after close");
+}
+
+// ---------------- Super Resolution mode/output combos + persistence ---------
+static void testSuperResModeOutputCombos()
+{
+    const juce::File wav = makeTempFile ("superres_modes.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 2000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote wav for super-res mode test");
+    // Dedicated store: the shared per-run test store must not be polluted by
+    // the mode/output changes this test makes.
+    const juce::File store = makeTempFile ("superres_modes.props");
+    if (store.existsAsFile ()) store.deleteFile ();
+
+    Application app (store);
+    CHECK (app.openFile (wav), "open wav for super-res mode test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "super res modes"));
+
+    // Isolated models root with one model per family.
+    const juce::File root = makeTempFile ("sr_modes_root.wav")
+        .getParentDirectory ().getChildFile ("sc_sr_modes_" + juce::String ((int) std::time (nullptr)));
+    if (root.exists ()) root.deleteRecursively ();
+    const juce::File flashDir = root.getChildFile ("flashsr");
+    flashDir.createDirectory ();
+    { std::ofstream f (flashDir.getChildFile ("flashsr.safetensors").getFullPathName ().toRawUTF8 ()); f << "x"; }
+    const juce::File asrDir = root.getChildFile ("AudioSR-GGUF");
+    asrDir.createDirectory ();
+    { std::ofstream f (asrDir.getChildFile ("audiosr-basic-f32.gguf").getFullPathName ().toRawUTF8 ()); f << "x"; }
+
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsSuperResolve, 5);
+    SuperResolutionWindow* dlg = win->superResWindow ();
+    CHECK (dlg != nullptr, "super resolution window opened for mode test");
+    if (dlg == nullptr) return;
+    dlg->setModelsRootForTest (root);
+
+    // Mode combo: FlashSR is the default.
+    juce::ComboBox* mode = dlg->modeComboForTest ();
+    CHECK (mode != nullptr && mode->getNumItems () == 2, "mode combo has two items");
+    if (mode == nullptr) return;
+    CHECK (mode->getItemText (0) == "FlashSR", "mode item 1 is FlashSR");
+    CHECK (mode->getItemText (1) == "AudioSR", "mode item 2 is AudioSR");
+    CHECK (dlg->selectedModeId () == 1, "FlashSR mode by default");
+
+    // Output combo: three destinations with copy-to-new-file as the default.
+    juce::ComboBox* out = dlg->outputComboForTest ();
+    CHECK (out != nullptr && out->getNumItems () == 3, "output combo has three items");
+    if (out == nullptr) return;
+    CHECK (out->getItemText (0) == "Copy result to new file", "output item 1 is copy");
+    CHECK (out->getItemText (1) == "Overwrite current file", "output item 2 is overwrite");
+    CHECK (out->getItemText (2) == "Append to current file", "output item 3 is append");
+
+    // FlashSR model list: the single installed safetensors.
+    juce::ComboBox* models = dlg->modelComboForTest ();
+    CHECK (models != nullptr && models->getNumItems () == 1,
+          "flashsr model combo lists one model");
+    if (models != nullptr && models->getNumItems () == 1)
+        CHECK (models->getItemText (0) == "flashsr.safetensors",
+              "flashsr model name shown");
+
+    // Switch to AudioSR: the list updates to its GGUF folder.
+    mode->setSelectedItemIndex (1);
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (dlg->selectedModeId () == 2, "mode switch to AudioSR");
+    if (models != nullptr)
+        CHECK (models->getNumItems () == 1 && models->getItemText (0) == "audiosr-basic-f32.gguf",
+              "audiosr model list after the mode switch");
+
+    // The choices persist in the settings.
+    CHECK (app.settings.superResMode == 2, "mode persisted to settings");
+    out->setSelectedItemIndex (2);
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (app.settings.superResOutputMode == 3,
+          "output mode persisted to settings");
+
+    // Back to FlashSR: the model selection is restored from the saved name.
+    app.settings.superResModel = "flashsr.safetensors";
+    mode->setSelectedItemIndex (0);
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (models != nullptr && models->getNumItems () == 1
+          && models->getSelectedItemIndex () == 0,
+          "flashsr model restored after switching back");
+
+    root.deleteRecursively ();
+    dlg->userTriedToCloseWindow ();
+}
+
+// ---------------- Super Resolution apply output modes -----------------------
+static void testSuperResApplyOutputModes()
+{
+    const juce::File wav = makeTempFile ("superres_apply.wav");   // 1 s @ 8 kHz mono
+    CHECK (writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t, double) { return 0.4f; }),
+          "wrote constant wav for super-res apply test");
+
+    // A synthetic enhanced result: mono at 48 kHz (both families output that),
+    // covering the extracted range [0.5 s .. 0.55 s] of the source.
+    auto makeResult = [] () -> sc::MergeResult
+    {
+        sc::MergeResult r;
+        r.rate = 48000.0;
+        r.channels = 1;
+        r.data.assign (1, std::vector<float> (2400, 0.0f));
+        for (int i = 0; i < 2400; ++i) r.data[0][i] = 0.9f;
+        return r;
+    };
+
+    // --- New file: the result becomes its own document ------------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for new-file test");
+        const int before = (int) app.docs.size ();
+        std::string err;
+        sc::MergeResult resNew = makeResult ();
+        CHECK (app.applySuperResolutionResult (resNew, 1, /*extStartSecs=*/0.5,
+                                               "enhanced", &err),
+              "new-file apply ok" + juce::String (err.c_str ()));
+        CHECK ((int) app.docs.size () == before + 1, "a new document was created");
+    }
+
+    // --- Overwrite: the file is replaced at the result's rate -----------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for overwrite test");
+        auto& eng = app.audioEngine ();
+        app.doc ()->markers.addPointMarker (0.1, "before");      // before ext start
+        app.doc ()->markers.addPointMarker (0.52, "inside");     // inside the range
+        app.doc ()->markers.addRegionMarker (0.51, 0.54, "span");
+
+        std::string err;
+        sc::MergeResult resOv = makeResult ();
+        CHECK (app.applySuperResolutionResult (resOv, 2, /*extStartSecs=*/0.5,
+                                               "enhanced", &err),
+              "overwrite apply ok" + juce::String (err.c_str ()));
+        auto& e2 = app.audioEngine ();
+        CHECK (e2.numChannels () == 1 && std::abs (e2.sampleRate () - 48000.0) < 1e-9,
+              "overwrite: mono track at the result rate");
+        CHECK ((int) e2.numSamples () == 2400, "overwrite: file length is the result's length");
+
+        std::vector<std::vector<float>> ov;
+        CHECK (e2.readRange (100, 1, ov) && ov.size () == 1,
+              "overwrite: read back the enhanced channel");
+        if (!ov.empty ())
+            CHECK (std::abs ((double) ov[0][0] - 0.9f) < 1e-9,
+                  "overwrite: enhanced content in place");
+
+        // The marker before the extraction start is dropped; the two inside
+        // it shift back by extStartSecs.
+        const auto mks = app.doc ()->markers.markers ();
+        CHECK (mks.size () == 2, "overwrite: only markers inside the range survive");
+        bool pointOk = false, spanOk = false;
+        for (const auto& m : mks)
+        {
+            if (m.name == "inside" && std::abs (m.start - 0.02) < 1e-9) pointOk = true;
+            if (m.name == "span" && std::abs (m.start - 0.01) < 1e-9
+                && std::abs (m.end - 0.04) < 1e-9) spanOk = true;
+        }
+        CHECK (pointOk, "overwrite: point marker shifted by the extraction start");
+        CHECK (spanOk, "overwrite: region marker shifted by the extraction start");
+
+        // Undo restores the original file, its rate and all three markers.
+        CHECK (app.undo ().canUndo (), "overwrite is undoable");
+        app.undoStep ();
+        auto& e3 = app.audioEngine ();
+        CHECK (e3.numChannels () == 1 && std::abs (e3.sampleRate () - 8000.0) < 1e-9
+              && (int) e3.numSamples () == 8000,
+              "undo restores the original mono file at its old rate");
+        const auto mks2 = app.doc ()->markers.markers ();
+        CHECK (mks2.size () == 3, "undo restores all three markers");
+    }
+
+    // --- Append: the enhanced track is added over the extracted range ----
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for append test");
+        auto& eng = app.audioEngine ();
+
+        std::string err;
+        sc::MergeResult resAp = makeResult ();
+        // The worker resamples to the document rate before appending, so the
+        // result handed in here is already at 8 kHz (400 samples = 0.05 s).
+        resAp.rate = 8000.0;
+        resAp.data[0].resize (400);
+        CHECK (app.applySuperResolutionResult (resAp, 3, /*extStartSecs=*/0.5,
+                                               "enhanced", &err),
+              "append apply ok" + juce::String (err.c_str ()));
+        auto& e2 = app.audioEngine ();
+        CHECK (e2.numChannels () == 2 && (int) e2.numSamples () == 8000,
+              "append: original track plus the enhanced one, same length");
+
+        std::vector<std::vector<float>> all;
+        CHECK (eng.readRange (0, 8000, all) && all.size () == 2,
+              "append: read back both channels");
+        if (all.size () == 2)
+        {
+            bool origOk = true, enhOk = true;
+            for (int i = 0; i < 8000; ++i)
+            {
+                if (std::abs ((double) all[0][i] - (double) 0.4f) > 1e-9) origOk = false;
+                const bool inRange = (i >= 4000 && i < 4400);
+                if (inRange && std::abs ((double) all[1][i] - 0.9f) > 1e-9) enhOk = false;
+                if (!inRange && std::abs ((double) all[1][i]) > 1e-9) enhOk = false;
+            }
+            CHECK (origOk, "append: original channel unchanged");
+            CHECK (enhOk, "append: enhanced track aligned to the extracted range");
+        }
+
+        // Undo restores the single original track.
+        CHECK (app.undo ().canUndo (), "append is undoable");
+        app.undoStep ();
+        auto& e3 = app.audioEngine ();
+        CHECK (e3.numChannels () == 1 && (int) e3.numSamples () == 8000,
+              "undo restores the original mono file after append");
+    }
+
+    // --- Append rejects a mismatched rate ---------------------------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for rate-mismatch test");
+        sc::MergeResult bad = makeResult ();   // 48 kHz != the file's 8 kHz
+        std::string err;
+        CHECK (!app.applySuperResolutionResult (bad, 3, /*extStartSecs=*/0.5,
+                                                "enhanced", &err),
+              "append rejects a mismatched rate");
+    }
+}
+
 // ---------------- Axis-mode change triggers a zoom fit --------------------
 // Changing the analysis method used to reset the axes to their defaults
 // BEFORE the new mode's data existed, so the user saw default ranges. The
@@ -12301,9 +12688,9 @@ static void testSplitSpectralSelectionApp()
         std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
         const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 18, "Effects menu lists the invert/stretch/eq + split + generate items");
+        CHECK (fxMenu.getNumItems() == 19, "Effects menu lists the invert/stretch/eq + split + generate + super-res items");
 #else
-        CHECK (fxMenu.getNumItems() == 15, "Effects menu lists the invert/stretch/eq + split + generate items");
+        CHECK (fxMenu.getNumItems() == 16, "Effects menu lists the invert/stretch/eq + split + generate + super-res items");
 #endif
     }
     std::string err;
@@ -18512,9 +18899,9 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 18, "Effects menu includes the invert/stretch/eq + split + generate items");
+    CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/eq + split + generate + super-res items");
 #else
-    CHECK (fxMenu.getNumItems() == 15, "Effects menu includes the invert/stretch/eq + split + generate items");
+    CHECK (fxMenu.getNumItems() == 16, "Effects menu includes the invert/stretch/eq + split + generate + super-res items");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -19599,6 +19986,11 @@ static int scRunUnitTestsImpl()
     progress ("stem-sep remember descriptions"); testStemSepRememberDescs ();
     progress ("acpp downmix to mono"); testAcppDownmixToMono ();
     progress ("stem-sep anchor list"); testStemSepAnchorList ();
+    progress ("super-res cli args"); testSuperResCliArgs ();
+    progress ("super-res model discovery"); testSuperResModelDiscovery ();
+    progress ("super-res window layout + close"); testSuperResWindowLayoutAndClose ();
+    progress ("super-res mode/output combos"); testSuperResModeOutputCombos ();
+    progress ("super-res apply output modes"); testSuperResApplyOutputModes ();
     progress ("time-pan speed + reversal"); testTimePanSpeedAndReversal();
     progress ("axis pan + log ticks"); testAxisPanAndLogTicks();
     progress ("time axis ticks");     testTimeAxisTicks();

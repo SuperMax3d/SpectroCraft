@@ -207,9 +207,10 @@ public:
         Selection"). The file must be editable first; playback is stopped and
         in-flight blocks awaited, and the mipmap pyramid is rebuilt afterwards.
         Returns false when `data` is empty or its rows have inconsistent
-        lengths. */
+        lengths. When newRate > 0 the file's sample rate becomes newRate as
+        part of the same patch (undo restores the old one). */
     bool replaceWholeFileUndoable (const std::vector<std::vector<float>>& data,
-                                   const juce::String& description);
+                                   const juce::String& description, double newRate = 0.0);
 
     /** Replaces [samples] in every channel with `filtered` (one row per
         channel, each exactly samples.getLength() long) and appends one new
@@ -363,7 +364,8 @@ private:
 
     // friends: static edit helpers in AudioEngine.cpp
     friend void recordReplace (AudioEngine&, const juce::Range<int64_t>&,
-                               const std::vector<std::vector<float>>&, const juce::String&, int);
+                               const std::vector<std::vector<float>>&, const juce::String&,
+                               int, double);
     friend void applyPerSample (AudioEngine&, juce::Range<int64_t>,
                                 std::function<float (float, int, int)>, const std::vector<int>*,
                                 const juce::String&);

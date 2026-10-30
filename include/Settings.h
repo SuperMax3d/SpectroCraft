@@ -120,6 +120,9 @@ struct Settings
     int stemSepMode = 1;                 // separation mode: 1=Sam Audio 2=htdemucs_6stems 3=htdemucs_ft
     juce::String acppModel6;             // selected GGUF file name in htdemucs_6stems mode ("" = none)
     int stemSepOutputMode = 1;           // result handling: 1=new file 2=overwrite current 3=append to current
+    int superResMode = 1;                // super-resolution family: 1=FlashSR 2=AudioSR
+    juce::String superResModel;          // selected model file name ("" = none)
+    int superResOutputMode = 1;          // result handling: 1=new file 2=overwrite current 3=append to current
 
     // Filter EQ (Effects menu): the curve shown when the dialog opens next time,
     // plus user-defined presets. Both are serialised point lists, see sc::eq.
@@ -156,6 +159,8 @@ struct Settings
             && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings
             && stemSepMode == o.stemSepMode && acppModel6 == o.acppModel6
             && stemSepOutputMode == o.stemSepOutputMode
+            && superResMode == o.superResMode && superResModel == o.superResModel
+            && superResOutputMode == o.superResOutputMode
             && eqLastCurve == o.eqLastCurve
             && eqUserPresets == o.eqUserPresets;
     }

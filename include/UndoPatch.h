@@ -59,6 +59,12 @@ struct Patch
     // per channel of the NEW count and oldData covers only the OLD ones.
     int oldChans = 0;
     int newChans = 0;
+    // Sample-rate change carried by this patch (both zero => unchanged).
+    // Used by edits that replace the whole file at a different rate, e.g.
+    // Super Resolution's "overwrite current file" output mode: newData is
+    // stored at the NEW rate and oldData at the OLD one.
+    double oldRate = 0.0;
+    double newRate = 0.0;
 
     // Human-readable action name shown in the History tab, e.g. "Deleted samples".
     juce::String description;

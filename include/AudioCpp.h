@@ -38,6 +38,36 @@ std::vector<juce::File> listDemucs6Models(const juce::File& d = {});
 juce::File demucsFtModelDir(const juce::File& d = {});
 
 // ---------------------------------------------------------------------------
+// Super Resolution (FlashSR / AudioSR) support.
+// ---------------------------------------------------------------------------
+
+/** The FlashSR model file (d/flashsr/flashsr.safetensors) when it exists;
+    an empty File otherwise. */
+juce::File flashSrModelFile(const juce::File& d = {});
+
+/** All *.gguf files in d/AudioSR-GGUF, sorted by name. */
+std::vector<juce::File> listAudioSRModels(const juce::File& d = {});
+
+/** One downloadable super-resolution model file (path relative to dir()). */
+struct SuperResModelSpec
+{
+    std::string file;        // e.g. "flashsr/flashsr.safetensors"
+    int64_t sizeBytes = 0;   // advertised download size (for display)
+};
+
+/** The FlashSR model files offered for download. */
+std::vector<SuperResModelSpec> flashSrChoices();
+
+/** Download URL for one FlashSR model file (audio.cpp repo asset). */
+juce::String flashSrUrl(const juce::String& fileName);
+
+/** The AudioSR GGUF models offered for download. */
+std::vector<SuperResModelSpec> audioSRChoices();
+
+/** Hugging Face resolve URL for one AudioSR model file. */
+juce::String audioSRUrl(const juce::String& fileName);
+
+// ---------------------------------------------------------------------------
 // Download catalogue (v0.9.2-drama3-base-small release).
 // ---------------------------------------------------------------------------
 
@@ -159,5 +189,25 @@ bool runSepTask(const juce::File& binary, const juce::String& family, const juce
                 const std::function<bool()>& shouldContinue,
                 const std::function<void(const juce::String&)>& onLogLine,
                 RunResult* resOut, std::string* errOut);
+
+/** Full argument vector (exe path excluded) for one super-resolution run:
+    FlashSR (mode 1): --task s2s --family builtin_audio_utils --model <m>
+        --load-option utility=flashsr --backend <b> --audio <a> --out <o> --log
+    AudioSR (mode 2): --task s2s --family audiosr --model <m>
+        --backend <b> --audio <a> --out <o> --log */
+juce::StringArray buildSuperResCliArgs(int mode, const juce::File& model,
+                                       const juce::String& backend,
+                                       const juce::File& audioIn, const juce::File& outWav);
+
+/** Blocking super-resolution run (call from a worker thread). Same polling/
+    cancellation contract as runStemSeparation; on success outWav holds the
+    enhanced result (mono 48 kHz for both families - they downmix and
+    resample internally, so the input may be any rate/channel count). */
+bool runSuperResTask(const juce::File& binary, int mode, const juce::File& model,
+                     const juce::String& backend, const juce::File& audioIn,
+                     const juce::File& outWav,
+                     const std::function<bool()>& shouldContinue,
+                     const std::function<void(const juce::String&)>& onLogLine,
+                     RunResult* resOut, std::string* errOut);
 
 }} // namespace sc::acpp

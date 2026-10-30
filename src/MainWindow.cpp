@@ -17,6 +17,7 @@
 #include "VideoAudio.h"
 #include "WorkProgress.h"
 #include "StemSeparation.h"
+#include "SuperResolution.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "AI/ModelManager.h"
     #include "AI/OvRuntime.h"
@@ -2323,6 +2324,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsChangeGain: showChangeGainDialog(); break;
         case ToolsResample: showResampleDialog(); break;
         case ToolsStemSeparate: showStemSeparationWindow(); break;
+        case ToolsSuperResolve: showSuperResolutionWindow(); break;
         case ToolsSplitSpectralSel:
             runDestructiveEdit ([&] (std::string* e) { return app.splitSpectralSelection (e); });
             break;
@@ -4063,6 +4065,22 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     return w;
 }
 
+// Effects > Super Resolution... - non-modal window driving the external
+// super-resolution CLI (FlashSR / AudioSR). Same ownership pattern as the
+// stem-separation window: at most one open, released via onCloseRequested.
+void MainWindow::showSuperResolutionWindow()
+{
+    if (superResWin_ != nullptr)
+    {
+        superResWin_->toFront (true);
+        return;
+    }
+    superResWin_ = std::make_unique<SuperResolutionWindow> (app);
+    // The X button routes to userTriedToCloseWindow(); let the window ask us
+    // to release ownership so it can be destroyed safely.
+    superResWin_->onCloseRequested = [this] { superResWin_.reset (); };
+}
+
 // Effects > Stem Separation... - non-modal window driving the external
 // audio.cpp CLI tool. At most one instance is kept open; re-opening brings
 // it to front.
@@ -5402,6 +5420,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         // the binary + model weights. A selection is optional - without one
         // the whole file becomes the input.
         menu.addItem (ToolsStemSeparate, "Stem Separation...",
+                      app.audioEngine().isFileLoaded(), false);
+        // AI super resolution via the same external CLI tool: enhances a range
+        // into a single mono 48 kHz track (FlashSR or AudioSR).
+        menu.addItem (ToolsSuperResolve, "Super Resolution...",
                       app.audioEngine().isFileLoaded(), false);
         // Splits the active spectral selection into new channel(s): the band
         // content goes to the added track(s) with a soft 25%/50%/25% frequency

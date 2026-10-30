@@ -286,6 +286,17 @@ public:
     bool applyStemSeparationResult (sc::MergeResult& r, int outputMode, double extStartSecs,
                                     const juce::String& suggestedName, std::string* errOut);
 
+    /** Message-thread only. Applies a super-resolution result to the active
+        document according to outputMode: 1 = create a new document from it,
+        2 = replace the current file's content with it (one undoable step;
+        the document takes on the result's sample rate and channel count -
+        both SR families emit mono 48 kHz - and markers inside the extracted
+        range keep their relative position), 3 = append its track after the
+        existing channels over the extracted range (one undoable step; the
+        caller must have resampled it to the document's rate first). */
+    bool applySuperResolutionResult (sc::MergeResult& r, int outputMode, double extStartSecs,
+                                     const juce::String& suggestedName, std::string* errOut);
+
     bool openFile (const juce::File& file);
 
     /** For a freshly loaded doc that carried no stored display state, copy

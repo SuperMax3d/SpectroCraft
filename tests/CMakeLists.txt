@@ -32,6 +32,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/VideoAudio.cpp  # FFmpeg video-container audio extraction
         ${CMAKE_SOURCE_DIR}/src/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_SOURCE_DIR}/src/StemSeparation.cpp
+        ${CMAKE_SOURCE_DIR}/src/SuperResolution.cpp   # audio.cpp super-resolution (FlashSR/AudioSR)
         ${CMAKE_SOURCE_DIR}/src/Recorder.cpp    # recorder plugin host (Transport > Record)
         ${CMAKE_SOURCE_DIR}/src/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
 )
