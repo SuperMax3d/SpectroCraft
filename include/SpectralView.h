@@ -97,7 +97,11 @@ public:
     // recomputed from the time window + frequency axis + row height, otherwise
     // it is just settings_.fftSize. (Also used by unit tests.)
     int effectiveFftSizeForRender (int rowHeightPx) const
-    { return effectiveSettingsForRender (rowHeightPx).fftSize; }
+    { return effectiveSettingsForRender (settings_, rowHeightPx).fftSize; }
+
+    // Renders one frame into `img` using the view's current state (unit tests).
+    bool renderSpectralContentForTest (juce::Image& img, const Settings& rs)
+    { return renderSpectralContent (img, rs); }
     // Set the frequency axis directly (called by the vertical scrollbar).
     void setFrequencyRange (double lo, double hi);
 
@@ -300,10 +304,11 @@ private:
     bool renderSpectralContent (juce::Image& img, const Settings& rs,
                                 const std::atomic<bool>* cancel = nullptr);
 
-    // Settings with the EFFECTIVE FFT size for rendering/probing: in auto mode
-    // it is recomputed from the current zoom levels (time window + frequency
-    // axis + row height), otherwise unchanged.
-    Settings effectiveSettingsForRender (int rowHeightPx) const;
+    // Resolves the settings to use when rendering one channel row: starts from
+    // `base`, applies this view's live frequency-axis limits (which may have
+    // been zoomed/panned since the panel last sent its settings), and in auto
+    // mode replaces fftSize with chooseFftSize() for the current zoom levels.
+    Settings effectiveSettingsForRender (const Settings& base, int rowHeightPx) const;
 
     void drawTimeRuler (juce::Graphics& g);
     void drawFrequencyRuler (juce::Graphics& g);

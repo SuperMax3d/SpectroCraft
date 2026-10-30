@@ -8014,6 +8014,65 @@ static void testSpectralViewAutoFft()
     wav.deleteFile();
 }
 
+// Regression: frequency-axis zoom/pan must change the rendered image.
+// effectiveSettingsForRender() once copied settings_ directly, whose
+// minFrequency/maxFrequency are only updated when the panel sends new
+// settings - so after a frequency zoom every re-render used stale limits and
+// the spectrogram never changed again (introduced with auto FFT-size mode).
+static void testSpectralViewFreqZoomRerender()
+{
+    const juce::File wav = makeTempFile ("freq_zoom_rerender.wav");
+    writeWav (wav, 1, 8000.0, 48000, [] (int, int64_t f, double rate)
+    { return 0.9f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 3000.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load wav for freq-zoom rerender test");
+
+    SpectralView view (app);
+    view.setSize (400, 200);
+    view.setViewRange (0.0, 8.0);
+    view.setVisibleChannels ({ 0 });
+    app.settings.fftAuto = false;
+    app.settings.fftSize = 1024;
+    view.setSettings (app.settings);
+
+    auto renderPixels = [&] () {
+        juce::Image img (juce::Image::ARGB, 400, 200, true);
+        view.renderSpectralContentForTest (img, app.settings);
+        return img;
+    };
+
+    const auto imgA = renderPixels();
+
+    // Zoom the frequency axis to a narrower window around the 3 kHz tone.
+    view.setFrequencyRange (1500.0, 4500.0);
+    CHECK (view.isImageDirty(), "frequency zoom marks the image dirty");
+
+    const auto imgB = renderPixels();
+
+    // The rendered pixels must reflect the new frequency window: with the old
+    // bug both renders used settings_'s stale limits and came out identical.
+    bool differ = false;
+    for (int y = 0; y < 200 && !differ; ++y)
+        for (int x = 0; x < 400 && !differ; ++x)
+            if (imgA.getPixelAt (x, y) != imgB.getPixelAt (x, y))
+                differ = true;
+    CHECK (differ, "re-render after frequency zoom uses the live frequency limits");
+
+    // Restoring the original range restores the original image.
+    view.resetFrequencyRange();
+    const auto imgC = renderPixels();
+    bool sameAsA = true;
+    for (int y = 0; y < 200 && sameAsA; ++y)
+        for (int x = 0; x < 400 && sameAsA; ++x)
+            if (imgA.getPixelAt (x, y) != imgC.getPixelAt (x, y))
+                sameAsA = false;
+    CHECK (sameAsA, "restoring the original range restores the original image");
+
+    wav.deleteFile();
+}
+
 // ---------------- History tab + batched undo/redo ----------------
 
 static bool vecClose (const std::vector<float>& a, const std::vector<float>& b)
@@ -20149,6 +20208,7 @@ static int scRunUnitTestsImpl()
     progress ("auto fft size algorithm");  testAutoFftSizeAlgorithm();
     progress ("spectral controls auto fft"); testSpectralControlsAutoFft();
     progress ("spectral view auto fft");   testSpectralViewAutoFft();
+    progress ("freq zoom rerender");       testSpectralViewFreqZoomRerender();
     progress ("history tab");             testHistoryPanel();
     progress ("settings persistence");    testSettingsPersistence();
     progress ("zero-crossing snap sel");  testZeroCrossingSnapSelection();
