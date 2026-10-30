@@ -666,17 +666,17 @@ void WaveformView::paint (juce::Graphics& g)
         const int pxI = (int) std::lround (px);
         g.setColour (juce::Colour::fromRGB (255, 60, 60));
         g.drawVerticalLine (pxI, 0.0f, (float) bounds.getHeight());
-        // The arrow sits on the ruler edge and points into the plot: down
-        // from the top ruler by default, up from the bottom ruler when it is
-        // moved there. With no ruler in this view (stacked dual view with a
-        // bottom ruler) only the plain line is drawn.
+        // The arrow sits in the ruler strip on the playhead column: base on
+        // the ruler/plot boundary, apex at the window's outer edge - pointing
+        // up with a top ruler, down with a bottom ruler. With no ruler in this
+        // view (stacked dual view) only the plain line is drawn.
         if (showTimeRuler)
         {
             juce::Path tri;
             if (rulerAtBottom())
                 tri.addTriangle ((float) pxI - 4.5f, (float) pr.getBottom(),
                                  (float) pxI + 5.5f, (float) pr.getBottom(),
-                                 (float) pxI + 0.5f, (float) pr.getY());
+                                 (float) pxI + 0.5f, (float) bounds.getHeight());
             else
                 tri.addTriangle ((float) pxI - 4.5f, (float) kRulerH,
                                  (float) pxI + 5.5f, (float) kRulerH,

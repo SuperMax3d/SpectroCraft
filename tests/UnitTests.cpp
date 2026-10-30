@@ -764,6 +764,80 @@ static void testPlayheadArrowSymmetry()
     wav.deleteFile();
 }
 
+// ---------------- Playhead arrow with bottom time ruler ----------------
+// With View > Time Ruler At Bottom, the playhead arrow must sit in the
+// bottom ruler strip (base on the ruler/plot boundary, apex at the window's
+// outer edge) - not span the whole plot as a giant triangle over the data.
+static void testPlayheadArrowBottomRuler()
+{
+    const juce::File wav = makeTempFile ("ph_bot.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "bottom-ruler playhead: load wav");
+    app.settings.trackRulerAtBottom = true;
+
+    // View [0,2] in a 300x128 view: plot x = 60..300, timeToX(t) = 60 + 120 t.
+    WaveformView view (app);
+    view.setSize (300, 128);
+    view.setViewRange (0.0, 2.0);
+    view.setVisibleChannels ({ 0 });
+    const double t = (144.5 - 60.0) / 120.0;   // snapped line column pxI = 144
+    view.setPlayhead (t);
+
+    juce::Image img (juce::Image::ARGB, 300, 128, true);
+    {
+        juce::Graphics bg (img);
+        bg.fillAll (juce::Colours::black);
+    }
+    {
+        juce::Graphics g (img);
+        view.paint (g);
+    }
+
+    // Red-dominant pixels: the playhead is (255,60,60); the grey channel
+    // centreline and ruler ticks are neutral so they never qualify.
+    auto redSpanAt = [&] (int y) -> int
+    {
+        int lo = -1, hi = -1;
+        for (int x = std::max (0, 144 - 8); x < std::min (300, 144 + 9); ++x)
+        {
+            const auto p = img.getPixelAt (x, y);
+            if ((int) p.getRed() > 40 && (int) p.getRed() - (int) p.getGreen() > 80)
+            {
+                if (lo < 0) lo = x;
+                hi = x;
+            }
+        }
+        return hi - lo + 1;   // 0 when no playhead pixels in the window
+    };
+
+    const int rulerTop = 128 - WaveformView::kRulerH;   // plot/ruler boundary
+
+    // The whole plot area must contain only the 1px playhead line.
+    bool plotClean = true;
+    for (int y = 1; y < rulerTop - 1 && plotClean; ++y)
+        if (redSpanAt (y) > 2) { plotClean = false; }
+    CHECK (plotClean, "no playhead triangle over the waveform data");
+
+    // The arrow sits in the bottom strip: wide at its base on the boundary...
+    const int baseSpan = redSpanAt (rulerTop + 2);
+    CHECK (baseSpan >= 6, "arrow base in the bottom ruler strip: span=" + juce::String (baseSpan));
+
+    // ...and narrows continuously to a point at the window's outer edge.
+    bool continuous = true;
+    for (int y = rulerTop; y < 128 && continuous; ++y)
+        if (redSpanAt (y) <= 0) { continuous = false; }
+    CHECK (continuous, "arrow fills the strip down to the window edge");
+    CHECK (redSpanAt (127) <= 4, "arrow apex at the outer edge: span=" + juce::String (redSpanAt (127)));
+
+    app.settings.trackRulerAtBottom = false;
+    wav.deleteFile();
+}
+
 // ---------------- Spectral view top time ruler ----------------
 // The spectral view carries its own top time ruler so the time axis stays
 // visible in spectrogram-only (F9) mode.
@@ -20127,6 +20201,7 @@ static int scRunUnitTestsImpl()
     progress ("zero-crossing");  testZeroCrossing();
     progress ("spectral engine");testSpectral();
     progress ("playhead arrow symmetry"); testPlayheadArrowSymmetry();
+    progress ("playhead arrow bottom ruler"); testPlayheadArrowBottomRuler();
     progress ("spectral view paint"); testSpectralViewPaint();
     progress ("marker axis clipping"); testMarkerAxisClipping();
     progress ("spectral time ruler");  testSpectralTimeRuler();
