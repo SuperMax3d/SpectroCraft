@@ -60,6 +60,7 @@ public:
                                                           // background PNG render + dialog
     void handleExportSpectral();                            // File > Spectrogram > Save As... / Ctrl+Shift+E
     void takeSpectrogramSnapshot();                         // File > Spectrogram > Take snapshot (Ctrl+Shift+F)
+    void refreshSpectrogram();                              // Spectral Controls > Refresh / F5: clear the tile cache and force a full re-render
     /** Timestamped snapshot path next to the WAV: <name>_snapshot_<yyyy-mm-dd>_<hh-mm-ss>.png,
         with a numeric suffix if that exact file already exists. `when` is
         injectable for unit tests (defaults to now). */

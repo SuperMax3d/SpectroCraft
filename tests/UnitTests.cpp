@@ -19004,6 +19004,65 @@ static void testZoomFitAutoMode()
     }
 }
 
+// ------------------------------------------------- F5 global refresh shortcut
+// Spectral Controls > Refresh is also bound to F5 and must work from any focus,
+// like the other global shortcuts: it clears the shared tile cache and forces
+// a full re-render of the spectrogram.
+static void testF5RefreshShortcut()
+{
+    const juce::File wav = makeTempFile ("f5_refresh.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) f / rate); });
+
+    Application app;
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "f5 refresh test"));
+
+    win->openFile (wav);
+    CHECK (app.audioEngine().isFileLoaded(), "tone wav loaded for F5 test");
+
+    // Populate the shared spectral tile cache through a full render.
+    const juce::File png = makeTempFile ("f5_refresh.png");
+    CHECK (app.spectralEngine.renderToPng (app.audioEngine(), app.settings, wav,
+                                           png, 256, 128, 0.0, 0.5),
+          "render populated the tile cache");
+    CHECK (app.spectralEngine.cacheSize() > 0, "tile cache populated");
+
+    SpectralView* sv = win->spectralViewComp();
+    CHECK (sv != nullptr, "spectral view exists");
+
+    if (sv != nullptr)
+    {
+        // Paint once so the view has a fresh image and is no longer dirty.
+        auto paintView = [&] { juce::Image img (juce::Image::ARGB,
+                                                sv->getWidth(), sv->getHeight(), true);
+                               juce::Graphics g (img); sv->paint (g); };
+        paintView ();
+        CHECK (!sv->isImageDirty (), "view painted and no longer dirty");
+
+        // F5 clears the cache and invalidates the spectral image...
+        CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F5Key), nullptr),
+              "F5 is handled as a global shortcut");
+        CHECK (app.spectralEngine.cacheSize() == 0, "F5 cleared the tile cache");
+        CHECK (sv->isImageDirty (), "F5 invalidated the spectral image");
+
+        // ...and it still works while a text editor has keyboard focus.
+        paintView ();   // recompute tiles into the fresh cache
+        juce::TextEditor ed;
+        ed.grabKeyboardFocus ();
+        CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F5Key), &ed),
+              "F5 works with an editor focused");
+        CHECK (app.spectralEngine.cacheSize() == 0,
+              "cache still cleared with editor focus");
+    }
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile();
+    png.deleteFile();
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -19210,6 +19269,7 @@ static int scRunUnitTestsImpl()
     progress ("spectrogram export options"); testSpectrogramExportOptions();
     progress ("audio.cpp cli wrapper");  testAudioCppCli();
     progress ("zoom fit auto mode");     testZoomFitAutoMode();
+    progress ("F5 refresh shortcut");    testF5RefreshShortcut();
 
 
 

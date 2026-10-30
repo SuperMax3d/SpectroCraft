@@ -506,12 +506,9 @@ void MainWindow::setupViews()
         if (spectralView) { spectralView->resetFrequencyRange(); spectralView->repaint(); }
     };
 
-    // Spectral Controls > Refresh: discard every cached tile and force a full
-    // re-render of the spectrogram from the audio.
-    controlsPanel->onRefresh = [this] {
-        app.spectralEngine.clearCache ();
-        if (spectralView) spectralView->invalidateImage ();
-    };
+    // Spectral Controls > Refresh button (also F5): discard every cached tile
+    // and force a full re-render of the spectrogram from the audio.
+    controlsPanel->onRefresh = [this] { refreshSpectrogram (); };
 
     // Reset both views to the whole file with default zoom levels.
     const double dur = app.audioEngine().duration();
@@ -1931,6 +1928,14 @@ void MainWindow::takeSpectrogramSnapshot()
     else
         target = makeSnapshotPath (f);
     exportSpectralAsync (target, spectralExportOptionsFromSettings (app.settings));
+}
+
+// Spectral Controls > Refresh (also F5): discard every cached tile and force a
+// full re-render of the spectrogram from the audio.
+void MainWindow::refreshSpectrogram()
+{
+    app.spectralEngine.clearCache ();
+    if (spectralView) spectralView->invalidateImage ();
 }
 
 juce::File MainWindow::makeSnapshotPath (const juce::File& wav, const juce::Time* when)
@@ -5224,6 +5229,9 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
                               : app.splitSpectralSelection (e); });
         return true;
     }
+    // F5 refreshes the spectrogram (Spectral Controls > Refresh): clears the
+    // tile cache and forces a full re-render. Global, like the other shortcuts.
+    if (key.getKeyCode() == juce::KeyPress::F5Key) { refreshSpectrogram (); return true; }
     // Ctrl+Shift+Enter toggles the left panel column.
     if (key == juce::KeyPress (juce::KeyPress::returnKey, juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { setLeftPanelsVisible (!leftPanelsVisible); return true; }
     if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }

@@ -5020,6 +5020,8 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
 
     refreshBtn.setButtonText ("Refresh");
     refreshBtn.onClick = [this] { if (onRefresh) onRefresh (); };
+    refreshBtn.setTooltip ("Discard every cached tile and force a complete spectrogram "
+                           "recomputation. Shortcut: F5 (works from any focus).");
 
     colourMapCombo.setTooltip ("Colour map used by the spectrogram. 'Classic (Default)' is the "
                                 "traditional DAW spectral palette.");

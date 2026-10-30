@@ -77,6 +77,9 @@ public:
     // Force a full spectral re-render (e.g. after the colour map changed,
     // which is not part of Settings).
     void invalidateImage() { imageDirty = true; repaint(); }
+    // True while the spectral image needs a full re-render (vs overlay-only
+    // repaint); cleared by paint() once fresh tiles have been computed.
+    bool isImageDirty() const { return imageDirty; }
 
     // Keyboard-shortcut helpers (applied by MainWindow to both views).
     void zoomHorizontalAtCenter (double factor);   // <1 zoom in, >1 zoom out

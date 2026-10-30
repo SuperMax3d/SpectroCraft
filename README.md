@@ -311,8 +311,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
     range, Log/Linear toggle, Reset Freq, FFT size — from **512**, the finest
     frequency resolution, up to 65536; a full-width **Refresh** button at the
-    bottom forces a complete spectrogram recomputation by discarding every
-    cached tile and re-rendering all tracks). Three persisted fields control
+    bottom — also bound to global shortcut **F5**, which works from any focus —
+    forces a complete spectrogram recomputation by discarding every cached tile
+    and re-rendering all tracks). Three persisted fields control
     harmonic markers in the spectrogram: **"Number of harmonic to display:"**
     (default 0 = from the fundamental), **"Maximum harmonic to display:"**
     (default 10) and **"Harmonic number under the mouse:"** (default 1). While
@@ -1286,6 +1287,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Resample... (Edit menu, own section: new sample rate + optional channel remix) | F11 |
 | Split Spectral Selection (All Tracks) — needs an active spectral selection | F12 |
 | Split Spectral Selection (Track 1->2) — track 1's band mixed into track 2; needs an active spectral selection | Shift+F12 |
+| Refresh spectrogram (Spectral Controls > Refresh: discard every cached tile and re-render all tracks) | F5 |
 | Toggle the left panels column (View > Left Panels) | Ctrl+Shift+Enter |
 
 Keyboard focus follows the mouse: clicking either view puts keyboard focus on
