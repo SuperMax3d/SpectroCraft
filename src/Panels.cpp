@@ -3976,20 +3976,18 @@ void FFTAnalysisView::copyHarmonicsToClipboard()
 
 // Builds the "Set Harmonic References" dialog without running it modally
 // (shared by showSetHarmonicDialog and the unit tests). Caller owns the window.
-juce::AlertWindow* FFTAnalysisView::createSetHarmonicDialog (double clickFreqHz)
+juce::AlertWindow* FFTAnalysisView::createSetHarmonicDialog ()
 {
     auto* w = new juce::AlertWindow ("Set Harmonic References",
-                                     "Set the reference frequency and which harmonic number it is\n"
-                                     "(1 = fundamental). Harmonics up to the maximum are marked with\n"
-                                     "vertical lines that follow the mouse while you move it.",
+                                     "Set the harmonic number indicated by the mouse (1 = fundamental)\n"
+                                     "and how many harmonics to mark with vertical lines.",
                                      juce::AlertWindow::QuestionIcon, this);
-    // The reference frequency starts at the frequency under the cursor but is
-    // freely editable; so are the harmonic number and the display maximum.
-    w->addTextEditor ("Reference frequency:", juce::String (clickFreqHz, 3));
-    w->addTextEditor ("harmonic", "1");
-    w->addTextEditor ("Maximum harmonic number to display:", "10");
-    for (const char* name : { "Reference frequency:", "harmonic",
-                              "Maximum harmonic number to display:" })
+    // The reference frequency itself is not a field: it starts at the
+    // frequency under the cursor and follows the mouse while active.
+    w->addTextEditor ("Harmonic number of the mouse:", "1");
+    w->addTextEditor ("Number of harmonics to show:", "10");
+    for (const char* name : { "Harmonic number of the mouse:",
+                              "Number of harmonics to show:" })
         if (auto* editor = w->getTextEditor (name))
             // Let Enter/Escape reach the OK/Cancel shortcuts even while a
             // field has keyboard focus.
@@ -4000,7 +3998,7 @@ juce::AlertWindow* FFTAnalysisView::createSetHarmonicDialog (double clickFreqHz)
 
     // AlertWindow disables keyboard focus on its editors; re-enable it and
     // pre-select the default so a plain Enter accepts harmonic #1.
-    if (auto* editor = w->getTextEditor ("harmonic"))
+    if (auto* editor = w->getTextEditor ("Harmonic number of the mouse:"))
     {
         editor->setWantsKeyboardFocus (true);
         editor->selectAll();
@@ -4010,31 +4008,28 @@ juce::AlertWindow* FFTAnalysisView::createSetHarmonicDialog (double clickFreqHz)
 
 void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
 {
-    auto* w = createSetHarmonicDialog (clickFreqHz);
+    auto* w = createSetHarmonicDialog ();
 
     // Enter modal state WITHOUT taking keyboard focus (see showNewFileDialog).
     w->enterModalState (false);
-    if (auto* editor = w->getTextEditor ("harmonic"))
+    if (auto* editor = w->getTextEditor ("Harmonic number of the mouse:"))
         editor->grabKeyboardFocus();
 
     const int result = w->runModalLoop();
-    const juce::String refText = w->getTextEditorContents ("Reference frequency:").trim ();
-    const juce::String text = w->getTextEditorContents ("harmonic")
+    const juce::String text = w->getTextEditorContents ("Harmonic number of the mouse:")
                                  .trim ().removeCharacters ("., ");
-    const juce::String maxText = w->getTextEditorContents ("Maximum harmonic number to display:")
+    const juce::String maxText = w->getTextEditorContents ("Number of harmonics to show:")
                                      .trim ().removeCharacters ("., ");
     delete w;
     if (result != 1) return;
 
-    const double refHz = refText.getDoubleValue ();
+    // The reference frequency is the one under the cursor when the menu was
+    // opened, falling back to the current anchor; it then follows the mouse.
+    double refHz = clickFreqHz;
     if (!(refHz > 0.0) || !std::isfinite (refHz))
-    {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
-                                            "Set Harmonic References",
-                                            "Please enter a positive reference frequency in Hz.",
-                                            "", this);
-        return;
-    }
+        refHz = harmonicAnchorF_;
+    if (!(refHz > 0.0) || !std::isfinite (refHz))
+        return;   // no usable reference frequency: nothing to anchor to
 
     const int n = text.isEmpty () ? 0 : text.getIntValue ();
     if (n < 1 || n > 1000)
@@ -4052,7 +4047,7 @@ void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
         juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Set Harmonic References",
                                             "Please enter an integer between 1 and 1000 for the\n"
-                                            "maximum harmonic number to display.",
+                                            "number of harmonics to show.",
                                             "", this);
         return;
     }

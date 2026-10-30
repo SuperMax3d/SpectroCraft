@@ -534,7 +534,7 @@ public:
     void resetHarmonicReference();
     // Builds the "Set Harmonic References" dialog without running it modally
     // (shared by showSetHarmonicDialog and the unit tests). Caller owns it.
-    juce::AlertWindow* createSetHarmonicDialog (double clickFreqHz);
+    juce::AlertWindow* createSetHarmonicDialog ();
     // TSV table of harmonics 1..N (header + one row each), CRLF line endings,
     // Excel-paste friendly. Empty when the mode is off or no spectrum exists.
     juce::String buildHarmonicsTable() const;

@@ -5279,24 +5279,22 @@ static void testFFTHarmonicDialogFields()
     FFTAnalysisView view (app);
     view.setSize (300, 200);
 
-    auto* w = view.createSetHarmonicDialog (432.5);
+    auto* w = view.createSetHarmonicDialog ();
     CHECK (w != nullptr, "dialog created");
     if (w)
     {
-        // The old prose line is gone; the frequency is an editable field now.
-        auto* refEd = w->getTextEditor ("Reference frequency:");
-        CHECK (refEd != nullptr, "reference frequency field exists");
-        if (refEd)
-            CHECK (std::abs (refEd->getText().getDoubleValue() - 432.5) < 1e-6,
-                   "reference frequency initialised from the cursor position");
+        // The reference frequency is no longer a field: it starts at the
+        // cursor position and follows the mouse while active.
+        CHECK (w->getTextEditor ("Reference frequency:") == nullptr,
+               "reference frequency field removed");
 
-        auto* harmEd = w->getTextEditor ("harmonic");
+        auto* harmEd = w->getTextEditor ("Harmonic number of the mouse:");
         CHECK (harmEd != nullptr && harmEd->getText() == "1",
-              "harmonic field defaults to 1");
+              "harmonic-number-of-the-mouse field defaults to 1");
 
-        auto* maxEd = w->getTextEditor ("Maximum harmonic number to display:");
+        auto* maxEd = w->getTextEditor ("Number of harmonics to show:");
         CHECK (maxEd != nullptr && maxEd->getText() == "10",
-              "maximum harmonic number field defaults to 10");
+              "number-of-harmonics-to-show field defaults to 10");
 
         delete w;
     }

@@ -227,11 +227,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       on screen), and the harmonic-reference tools below; right-clicking the
       *level* axis resets only the level window, the *frequency* axis only the
       frequency window.
-    - **Set Harmonic References** (right-click): a popup with three editable
-      fields — *Reference frequency:* (initialised to the frequency under the
-      cursor, freely editable), *harmonic* (which harmonic number it is,
-      default 1 = fundamental) and *Maximum harmonic number to display:*
-      (default 10). The panel then draws delicate vertical lines for harmonics
+    - **Set Harmonic References** (right-click): a popup with two labelled
+      fields — *Harmonic number of the mouse:* (which harmonic number the
+      frequency under the cursor is, default 1 = fundamental) and *Number of
+      harmonics to show:* (default 10). The reference frequency itself has no
+      field: it starts at the frequency under the cursor. The panel then draws
+      delicate vertical lines for harmonics
       1..max(N, maximum) wherever they are inside the visible frequency window,
       each labelled with its number — so setting harmonic #3 still shows the
       higher harmonics 4, 5, 6, ... up to the configured maximum. White dots
