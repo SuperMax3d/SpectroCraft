@@ -1979,13 +1979,6 @@ void MainWindow::updateTitle()
     setName (title);
 }
 
-void MainWindow::applyColourMap (ColourMap m)
-{
-    app.colourMap = m;
-    app.spectralEngine.setColourMap (m);
-    syncSharedState();
-}
-
 juce::String MainWindow::buildAboutText()
 {
     juce::String about =
@@ -2293,15 +2286,6 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ViewVerticalZoomIn: zoomVerticalBoth (1.5); break;
         case ViewVerticalZoomOut: zoomVerticalBoth (1.0 / 1.5); break;
 
-        case ColourMapClassic: applyColourMap (ColourMap::Classic); break;
-        case ColourMapViridis: applyColourMap (ColourMap::Viridis); break;
-        case ColourMapPlasma: applyColourMap (ColourMap::Plasma); break;
-        case ColourMapInferno: applyColourMap (ColourMap::Inferno); break;
-        case ColourMapMagma: applyColourMap (ColourMap::Magma); break;
-        case ColourMapHot: applyColourMap (ColourMap::Hot); break;
-        case ColourMapCool: applyColourMap (ColourMap::Cool); break;
-        case ColourMapGrayscale: applyColourMap (ColourMap::Grayscale); break;
-
         case TransportPlay: playWithAudioInit(); break;
         case TransportStop: app.stop(); break;
         case TransportPause: app.pause(); break;
@@ -2344,6 +2328,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsInvert:      runDestructiveEdit ([&] (std::string* e) { return app.invertSelection (e); }); break;
         case ToolsTimeStretch: showTimeStretchDialog(); break;
         case ToolsFilterEq:    showFilterEqDialog(); break;
+        case ToolsEnvelope:    showEnvelopeDialog(); break;
 
         case HelpAbout:
             showAboutDialog (this);
@@ -3994,6 +3979,245 @@ void MainWindow::showFilterEqDialog()
     runDestructiveEdit ([&] (std::string* e) { return app.applyFilterEq (pts, e); });
 }
 
+/** Duration in seconds of the range the envelope will be drawn for:
+    the time selection if there is one, else the whole file. */
+static double envelopeTargetSeconds (Application& app)
+{
+    auto& eng = app.audioEngine ();
+    const double dur = (double) eng.numSamples () / eng.sampleRate ();
+    juce::Range<double> sel { 0.0, dur };
+    if (!app.selection.isEmpty ())
+        sel = app.selection.getIntersectionWith ({ 0.0, dur });
+    return std::max ((double) sel.getLength (), 1e-3);
+}
+
+juce::AlertWindow* MainWindow::createEnvelopeDialog()
+{
+    auto* w = new juce::AlertWindow ("Enveloppe",
+        "Drag points to shape the amplitude over time; click empty space to add a point, "
+        "double-click a point to type its exact coordinates and right-click it to remove it. "
+        "The curve is applied as a per-sample gain: to the active spectral selection if there "
+        "is one, else to the time selection, or over the whole file when nothing is selected.",
+        juce::AlertWindow::QuestionIcon, this);
+
+    auto* editor = new EnvCurveEditor ();
+    const double targetSecs = envelopeTargetSeconds (app);
+    editor->setTimeHi (targetSecs);
+    w->addCustomComponent (editor);
+
+    // Preset row: the combo plus Add/Delete buttons in one container, which
+    // also gives the OK button below a little more breathing room.
+    auto* presetRow = new juce::Component ();
+    presetRow->setSize (360, 34);
+    auto* presetCombo = new juce::ComboBox ();
+    presetCombo->setName ("Preset");
+    presetCombo->setBounds (0, 0, 218, 26);
+    auto* addBtn = new juce::TextButton ("Add...");
+    addBtn->setBounds (224, 0, 62, 26);
+    addBtn->setTooltip ("Save the current curve as a named preset.");
+    auto* delBtn = new juce::TextButton ("Delete");
+    delBtn->setBounds (292, 0, 64, 26);
+    delBtn->setTooltip ("Remove the selected user preset (built-ins cannot be deleted).");
+    delBtn->setEnabled (false);
+    presetRow->addAndMakeVisible (presetCombo);
+    presetRow->addAndMakeVisible (addBtn);
+    presetRow->addAndMakeVisible (delBtn);
+
+    auto rebuildPresets = [this, presetCombo]
+    {
+        const int oldId = presetCombo->getSelectedId ();
+        const juce::String oldName = oldId > 0 ? presetCombo->getItemText ((int) (oldId - 1)) : juce::String ();
+        presetCombo->clear (false);
+        const auto& builtins = sc::env::presets ();
+        for (size_t i = 0; i < builtins.size (); ++i)
+            presetCombo->addItem (builtins[i].name, (int) i + 1);
+        const auto users = sc::env::parseUserPresets (app.settings.envUserPresets);
+        for (size_t i = 0; i < users.size (); ++i)
+            presetCombo->addItem (users[i].name, (int) builtins.size () + (int) i + 1);
+        // Restore the previous selection by name when it still exists.
+        if (!oldName.isEmpty ())
+            for (int i = 0; i < presetCombo->getNumItems (); ++i)
+                if (presetCombo->getItemText (i) == oldName)
+                    { presetCombo->setSelectedItemIndex (i, juce::dontSendNotification); break; }
+    };
+
+    rebuildPresets ();
+
+    auto loadSelectedPreset = [this, editor, presetCombo]
+    {
+        const int id = presetCombo->getSelectedId ();
+        if (id <= 0) return;
+        std::vector<sc::env::EnvPoint> pts;
+        const auto& builtins = sc::env::presets ();
+        if ((size_t) id <= builtins.size ())
+            pts = builtins[(size_t) (id - 1)].points;
+        else
+        {
+            const auto users = sc::env::parseUserPresets (app.settings.envUserPresets);
+            const size_t ui = (size_t) id - builtins.size () - 1;
+            if (ui < users.size ()) pts = users[ui].points;
+        }
+        // Preset times are absolute: stretch them to the current target range.
+        editor->setPoints (sc::env::scaleToDuration (pts, envelopeTargetSeconds (app)));
+    };
+
+    presetCombo->onChange = [loadSelectedPreset, presetCombo, delBtn]
+    {
+        loadSelectedPreset ();
+        const auto& builtins = sc::env::presets ();
+        const int id = presetCombo->getSelectedId ();
+        delBtn->setEnabled (id > 0 && (size_t) id > builtins.size ());
+    };
+
+    addBtn->onClick = [this, editor, presetCombo, rebuildPresets]
+    {
+        // Prompt for a name; default to the first free "My Preset N".
+        const auto existing = sc::env::parseUserPresets (app.settings.envUserPresets);
+        juce::String defaultName;
+        for (int n = 1; n < 1000; ++n)
+        {
+            defaultName = "My Preset " + juce::String (n);
+            bool taken = false;
+            for (const auto& p : existing)
+                if (p.name == defaultName) { taken = true; break; }
+            if (!taken) break;
+        };
+
+        auto* dlg = new juce::AlertWindow ("Add Preset",
+            "Name for the new preset (the current curve will be saved):",
+            juce::AlertWindow::QuestionIcon, this);
+        dlg->addTextEditor ("presetName", defaultName);
+        dlg->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        dlg->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (auto* ed = dlg->getTextEditor ("presetName"))
+            { ed->setWantsKeyboardFocus (true); ed->selectAll(); }
+
+        const int r = dlg->runModalLoop ();
+        juce::String name;
+        if (auto* ed = dlg->getTextEditor ("presetName"))
+            name = ed->getText ().trim ();
+        delete dlg;
+        if (r != 1) return;
+
+        // Sanitise: one line, no '|' separator character (same rules as
+        // sc::env::serializeUserPresets).
+        name = name.replace ("\r\n", " ").replace ("\n", " ")
+                   .replace ("\r", " ").replace ("|", " ");
+        if (name.isEmpty ()) return;
+
+        auto users = sc::env::parseUserPresets (app.settings.envUserPresets);
+        bool replaced = false;
+        for (auto& p : users)
+            if (p.name == name) { p.points = editor->getPoints (); replaced = true; break; }
+        if (!replaced) users.push_back ({ name, editor->getPoints () });
+        app.settings.envUserPresets = sc::env::serializeUserPresets (users);
+        app.saveSettings ();
+
+        rebuildPresets ();
+        // Select the new preset so it is visible in the combo.
+        for (int i = 0; i < presetCombo->getNumItems (); ++i)
+            if (presetCombo->getItemText (i) == name)
+                { presetCombo->setSelectedItemIndex (i); break; }   // fires onChange
+    };
+
+    delBtn->onClick = [this, presetCombo, rebuildPresets]
+    {
+        const auto& builtins = sc::env::presets ();
+        const int id = presetCombo->getSelectedId ();
+        if (id <= 0 || (size_t) id <= builtins.size ()) return;   // built-ins are protected
+        auto users = sc::env::parseUserPresets (app.settings.envUserPresets);
+        const size_t ui = (size_t) id - builtins.size () - 1;
+        if (ui >= users.size ()) return;
+        users.erase (users.begin () + (long) ui);
+        app.settings.envUserPresets = sc::env::serializeUserPresets (users);
+        app.saveSettings ();
+
+        presetCombo->setSelectedId (0, juce::dontSendNotification);
+        rebuildPresets ();
+    };
+
+    // Double-click a point: type its exact coordinates.
+    editor->onEditPoint = [this, editor] (int idx) { showEnvPointDialog (editor, idx); };
+
+    w->addCustomComponent (presetRow);
+
+    // Restore the last used curve when there is one; otherwise start flat.
+    const auto lastPts = sc::env::parsePoints (app.settings.envLastCurve);
+    editor->setPoints (lastPts.empty () ? std::vector<sc::env::EnvPoint> { { 0.0, 0.0 } }
+                                        : sc::env::scaleToDuration (lastPts, targetSecs));
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    return w;
+}
+
+void MainWindow::showEnvPointDialog (EnvCurveEditor* editor, int idx)
+{
+    const auto pts = editor->getPoints ();
+    if (idx < 0 || idx >= (int) pts.size ()) return;
+
+    auto* w = new juce::AlertWindow ("Edit Point",
+        "Type the exact coordinates of this point:",
+        juce::AlertWindow::QuestionIcon, this);
+    auto* tRow = new LabeledField ("Time (s):", formatWeightText (pts[idx].tSec), "");
+    tRow->editor()->setName ("ptTime");
+    auto* gRow = new LabeledField ("Gain (dB):", formatWeightText (pts[idx].gainDb), "");
+    gRow->editor()->setName ("ptGain");
+    tRow->setSize (kInputRowW, kInputRowH);
+    gRow->setSize (kInputRowW, kInputRowH);
+    w->addCustomComponent (tRow);
+    w->addCustomComponent (gRow);
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    tRow->editor()->setWantsKeyboardFocus (true);
+    tRow->editor()->selectAll ();
+
+    w->enterModalState (false);
+    tRow->editor()->grabKeyboardFocus();
+    const int result = w->runModalLoop ();
+    double t = -1.0, g = -1.0;
+    if (auto* ed = findNamedEditor (*w, "ptTime")) parseGainDbText (ed->getText (), t);
+    if (auto* ed = findNamedEditor (*w, "ptGain")) parseGainDbText (ed->getText (), g);
+    delete w;
+    if (result != 1) return;
+
+    // Only the fields that parsed are applied; the other keeps its value.
+    const auto cur = editor->getPoints ();
+    if (idx < 0 || idx >= (int) cur.size ()) return;
+    const sc::env::EnvPoint cp = cur[(size_t) idx];
+    editor->setPoint (idx, t >= 0.0 ? t : cp.tSec,
+                          std::isfinite (g) ? g : cp.gainDb);
+}
+
+void MainWindow::showEnvelopeDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createEnvelopeDialog ();
+
+    // Locate the curve editor so its points can be read after the modal loop.
+    EnvCurveEditor* editor = nullptr;
+    for (auto* c : w->getChildren ())
+        if (auto* e = dynamic_cast<EnvCurveEditor*> (c)) { editor = e; break; }
+
+    w->enterModalState (false);
+    const int result = w->runModalLoop ();
+    std::vector<sc::env::EnvPoint> pts;
+    if (editor != nullptr)
+        pts = editor->getPoints ();
+    delete w;
+
+    if (result == 1)
+        // Remember the curve for next time (a flat one is the default state).
+        app.settings.envLastCurve = sc::env::isFlatCurve (pts) ? juce::String ()
+                                                              : sc::env::serializePoints (pts);
+    if (result != 1 || sc::env::isFlatCurve (pts)) return;   // flat curve: no-op
+
+    runDestructiveEdit ([&] (std::string* e) { return app.applyEnvelope (pts, e); });
+}
+
 juce::AlertWindow* MainWindow::createResampleDialog()
 {
     auto& eng = app.audioEngine();
@@ -5348,27 +5572,22 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       app.settings.showAmpGrid);
         menu.addItem (ViewShowFreqGrid, "Show Frequency Grid", true,
                       app.settings.showFreqGrid);
-        menu.addSeparator();
-        juce::PopupMenu colourMapMenu;
-        colourMapMenu.addItem (ColourMapClassic, "Classic (Default)", true, app.colourMap == ColourMap::Classic);
-        colourMapMenu.addItem (ColourMapViridis, "Viridis", true, app.colourMap == ColourMap::Viridis);
-        colourMapMenu.addItem (ColourMapPlasma, "Plasma", true, app.colourMap == ColourMap::Plasma);
-        colourMapMenu.addItem (ColourMapInferno, "Inferno", true, app.colourMap == ColourMap::Inferno);
-        colourMapMenu.addItem (ColourMapMagma, "Magma", true, app.colourMap == ColourMap::Magma);
-        colourMapMenu.addItem (ColourMapHot, "Hot", true, app.colourMap == ColourMap::Hot);
-        colourMapMenu.addItem (ColourMapCool, "Cool", true, app.colourMap == ColourMap::Cool);
-        colourMapMenu.addItem (ColourMapGrayscale, "Grayscale", true, app.colourMap == ColourMap::Grayscale);
-        menu.addSubMenu ("Colour Map", colourMapMenu);
 
         // Per-channel visibility toggles (applies to both views).
-        // Ctrl/Shift+click shows only that channel.
+        // Ctrl/Shift+click shows only that channel; the same is available from
+        // the keyboard: Ctrl+1..9 toggles a channel, Ctrl+Shift+1..9 solos it.
         const int nch = app.audioEngine().numChannels();
         if (nch > 0)
         {
             menu.addSeparator();
             for (int i = 0; i < nch; ++i)
-                menu.addItem (ChannelBase + i, "Channel " + juce::String (i + 1), true,
+            {
+                juce::String label = "Channel " + juce::String (i + 1);
+                if (i < 9)
+                    label += "\tCtrl+(Shift)+" + juce::String (i + 1);
+                menu.addItem (ChannelBase + i, label, true,
                               app.isChannelVisible (i));
+            }
         }
     }
     else if (menuName == "Transport")
@@ -5407,6 +5626,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsInvert,      "Invert",          app.audioEngine().isFileLoaded(), false);
         menu.addItem (ToolsTimeStretch, "Time Stretch...", app.audioEngine().isFileLoaded(), false);
         menu.addItem (ToolsFilterEq,    "Filter EQ...",    app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ToolsEnvelope,    "Enveloppe...",    app.audioEngine().isFileLoaded(), false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         // AI effects: first use downloads the model weights. Transcription is
         // launched from the buttons in the Transcription tab instead.

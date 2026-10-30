@@ -113,7 +113,6 @@ public:
     // completed; shows a short progress dialog if it still needs to run.
     void playWithAudioInit();
     void refreshPanels();
-    void applyColourMap (ColourMap m);
     void zoomHorizontal (double factor);   // both views
     void updateScrollBars();               // keep scrollbars in sync with the views
     void zoomVerticalBoth (double factor); // waveform amplitude + spectral frequency
@@ -167,18 +166,24 @@ public:
     juce::AlertWindow* createGenerateNoiseDialog();
     juce::AlertWindow* createGenerateToneDialog();
 
-    // ---- Effects > Invert / Time Stretch... / Filter EQ... ---------------
+    // ---- Effects > Invert / Time Stretch... / Filter EQ... / Enveloppe... ---
     void showTimeStretchDialog();
     void showFilterEqDialog();
-    /** Build (but do not run modally) the Time Stretch and Filter EQ dialogs.
-        The caller owns and must delete them; used by the show* functions and
-        tests. */
+    void showEnvelopeDialog();
+    /** Build (but do not run modally) the Time Stretch, Filter EQ and
+        Enveloppe dialogs. The caller owns and must delete them; used by the
+        show* functions and tests. */
     juce::AlertWindow* createTimeStretchDialog();
     juce::AlertWindow* createFilterEqDialog();
+    juce::AlertWindow* createEnvelopeDialog();
 
     /** Modal dialog to type the exact coordinates of one EQ curve point.
         Used by EqCurveEditor's onEditPoint (double-click). */
     void showEqPointDialog (class EqCurveEditor* editor, int index);
+
+    /** Modal dialog to type the exact coordinates of one envelope curve point.
+        Used by EnvCurveEditor's onEditPoint (double-click). */
+    void showEnvPointDialog (class EnvCurveEditor* editor, int index);
 
     // ---- Alternative scale references + Go to Time -----------------------
 
@@ -357,6 +362,7 @@ public:
         ToolsInvert,           // Effects > Invert (spectral sel / time sel / whole file)
         ToolsTimeStretch,      // Effects > Time Stretch... (SoundTouch tempo change)
         ToolsFilterEq,         // Effects > Filter EQ... (FFT curve equaliser)
+        ToolsEnvelope,         // Effects > Enveloppe... (amplitude-over-time curve)
         ToolsResample,
         ToolsStemSeparate,   // AI stem separation via the audio.cpp CLI tool
         ToolsSuperResolve,   // AI super resolution (FlashSR / AudioSR) via the audio.cpp CLI tool
@@ -371,8 +377,6 @@ public:
         WindowPanelBase = 6500,   // Window menu: per-panel open/close toggles
         HelpAbout = 6000,
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
-        ColourMapClassic = 7000, ColourMapViridis, ColourMapPlasma, ColourMapInferno,
-        ColourMapMagma, ColourMapHot, ColourMapCool, ColourMapGrayscale,
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
         RecentBase = 9000,     // File > Open Recent items: RecentBase + index
         ClearRecent = 9100     // File > Open Recent > Clear Recent Files

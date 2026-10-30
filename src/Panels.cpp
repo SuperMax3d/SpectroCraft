@@ -4952,6 +4952,273 @@ void EqCurveEditor::paint (juce::Graphics& g)
     }
 }
 
+// ============================================================ EnvCurveEditor
+
+namespace {
+constexpr int kEnvPointRadius = 3;
+juce::Colour envGridMinor() { return juce::Colour::fromRGB (40, 40, 46); }
+juce::Colour envGridMajor() { return juce::Colour::fromRGB (58, 58, 66); }
+
+/** A "nice" time step (1/2/5 x 10^k seconds) giving at most `maxDiv`
+    divisions across the whole axis. */
+double niceTimeStep (double spanSecs, int maxDiv)
+{
+    const double raw = std::max (spanSecs / maxDiv, 1e-9);
+    for (int k = -6; k <= 8; ++k)
+        for (double m : { 1.0, 2.0, 5.0 })
+        {
+            const double cand = m * std::pow (10.0, k);
+            if (cand >= raw) return cand;
+        }
+    return 1e8;
+}
+
+/** Time-axis label with just enough decimals for the grid step. */
+juce::String formatTimeLabel (double t, double step)
+{
+    int decimals = 0;
+    while (step * std::pow (10.0, decimals) < 0.95 && decimals < 6) ++decimals;
+    return juce::String (t, decimals);
+}
+} // namespace
+
+EnvCurveEditor::EnvCurveEditor()
+{
+    setPoints ({ sc::env::EnvPoint { 0.0, 0.0 } });
+    setSize (560, 340);
+}
+
+void EnvCurveEditor::setPoints (std::vector<sc::env::EnvPoint> pts)
+{
+    std::sort (pts.begin (), pts.end (),
+               [] (const sc::env::EnvPoint& a, const sc::env::EnvPoint& b) { return a.tSec < b.tSec; });
+    points_ = std::move (pts);
+    dragIndex_ = -1;
+    pressAddedPoint_ = false;
+    repaint ();
+}
+
+std::vector<sc::env::EnvPoint> EnvCurveEditor::getPoints() const
+{
+    // Normalise: sort by time and merge points that ended up on the same
+    // instant (keep the first).
+    auto out = points_;
+    std::sort (out.begin (), out.end (),
+               [] (const sc::env::EnvPoint& a, const sc::env::EnvPoint& b) { return a.tSec < b.tSec; });
+    std::vector<sc::env::EnvPoint> merged;
+    for (const auto& p : out)
+        if (merged.empty () || std::abs (p.tSec - merged.back ().tSec) > 1e-9)
+            merged.push_back (p);
+    return merged;
+}
+
+void EnvCurveEditor::setPoint (int index, double tSec, double gainDb)
+{
+    auto pts = getPoints ();
+    if (index < 0 || index >= (int) pts.size ()) return;
+    tSec = std::clamp (std::isfinite (tSec) ? tSec : 0.0, 0.0, timeHi_);
+    gainDb = std::clamp (std::isfinite (gainDb) ? gainDb : 0.0, kDbMin, kDbMax);
+    pts[(size_t) index] = { tSec, gainDb };
+    setPoints (std::move (pts));
+}
+
+void EnvCurveEditor::setTimeHi (double secs)
+{
+    if (!std::isfinite (secs) || secs <= 1e-6) return;
+    timeHi_ = secs;
+    repaint ();
+}
+
+int EnvCurveEditor::tToX (double t) const
+{
+    const int w = getWidth () - kLeftMargin - kRightMargin;
+    if (w <= 0 || timeHi_ <= 0.0) return kLeftMargin;
+    return kLeftMargin + (int) std::lround ((t / timeHi_) * w);
+}
+
+double EnvCurveEditor::xToT (int x) const
+{
+    const int w = getWidth () - kLeftMargin - kRightMargin;
+    if (w <= 0 || timeHi_ <= 0.0) return 0.0;
+    return std::clamp ((double) (x - kLeftMargin) / (double) w, 0.0, 1.0) * timeHi_;
+}
+
+int EnvCurveEditor::dbToY (double db) const
+{
+    const int h = getHeight () - kTopMargin - kBottomMargin;
+    if (h <= 0) return kTopMargin;
+    const double t = jlimit (0.0, 1.0, (kDbMax - db) / (kDbMax - kDbMin));
+    return (int) std::lround (kTopMargin + h * t);
+}
+
+double EnvCurveEditor::yToDb (int y) const
+{
+    const int h = getHeight () - kTopMargin - kBottomMargin;
+    if (h <= 0) return 0.0;
+    const double t = jlimit (0.0, 1.0, (double) (y - kTopMargin) / (double) h);
+    return kDbMax - t * (kDbMax - kDbMin);
+}
+
+int EnvCurveEditor::findNearestPoint (const juce::Point<int>& p, int maxDistPx) const
+{
+    double bestD2 = (double) maxDistPx * (double) maxDistPx;
+    int best = -1;
+    for (size_t i = 0; i < points_.size (); ++i)
+    {
+        const int dx = tToX (points_[i].tSec) - p.x;
+        const int dy = dbToY (points_[i].gainDb) - p.y;
+        const double d2 = (double) dx * dx + (double) dy * dy;
+        if (d2 <= bestD2)
+        {
+            bestD2 = d2;
+            best = (int) i;
+        }
+    }
+    return best;
+}
+
+void EnvCurveEditor::mouseDown (const juce::MouseEvent& e)
+{
+    const auto p = e.getPosition ();
+
+    // Right-click on a point removes it.
+    if (e.mods.isRightButtonDown ())
+    {
+        const int idx = findNearestPoint (p, kEnvPointRadius + 4);
+        if (idx >= 0)
+            points_.erase (points_.begin () + idx);
+        dragIndex_ = -1;
+        pressAddedPoint_ = false;
+        lastDownTime_ = juce::Time ();
+        repaint ();
+        return;
+    }
+
+    // Double-click on a point opens the exact-coordinate dialog.
+    if ((e.eventTime - lastDownTime_).inMilliseconds() < 400 && lastDownPos_ != juce::Point<int> (-1, -1))
+    {
+        const int dx = lastDownPos_.x - p.x;
+        const int dy = lastDownPos_.y - p.y;
+        if (dx * dx + dy * dy <= 36)
+        {
+            const int idx = findNearestPoint (p, kEnvPointRadius + 4);
+            dragIndex_ = -1;
+            pressAddedPoint_ = false;
+            lastDownTime_ = juce::Time ();   // no chained dialogs on triple clicks
+            if (idx >= 0 && onEditPoint)
+                onEditPoint (idx);
+            repaint ();
+            return;
+        }
+    }
+    lastDownTime_ = juce::Time ();
+    lastDownPos_ = p;
+
+    const int idx = findNearestPoint (p, kEnvPointRadius + 4);
+    if (idx >= 0)
+    {
+        dragIndex_ = idx;
+        pressAddedPoint_ = false;
+    }
+    else
+    {
+        // Clicking empty space adds a new point at the cursor.
+        points_.push_back ({ xToT (p.x), yToDb (p.y) });
+        std::sort (points_.begin (), points_.end (),
+                   [] (const sc::env::EnvPoint& a, const sc::env::EnvPoint& b) { return a.tSec < b.tSec; });
+        dragIndex_ = -1;
+        pressAddedPoint_ = true;
+    }
+    repaint ();
+}
+
+void EnvCurveEditor::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragIndex_ >= 0 && dragIndex_ < (int) points_.size ())
+    {
+        points_[(size_t) dragIndex_] = { xToT (e.x), yToDb (e.y) };
+        repaint ();
+    }
+}
+
+void EnvCurveEditor::mouseUp (const juce::MouseEvent&)
+{
+    dragIndex_ = -1;
+    pressAddedPoint_ = false;
+}
+
+void EnvCurveEditor::paint (juce::Graphics& g)
+{
+    const auto bounds = getLocalBounds ();
+    g.fillAll (juce::Colour::fromRGB (24, 24, 28));
+    g.setFont (10.0f);
+
+    const int w = getWidth () - kLeftMargin - kRightMargin;
+    const int h = getHeight () - kTopMargin - kBottomMargin;
+    if (w <= 10 || h <= 10) return;
+
+    // Horizontal grid: every 10 dB, labelled.
+    for (double db = kDbMin; db <= kDbMax + 0.5; db += 10.0)
+    {
+        const int y = dbToY (db);
+        g.setColour (std::abs (db) < 0.5 ? envGridMajor () : envGridMinor ());
+        g.drawLine (kLeftMargin, y, kLeftMargin + w, y, 1.0f);
+        if (std::abs (db) < 0.5)
+            g.drawText (juce::String ((int) db), 4, y - 8, kLeftMargin - 8, 16,
+                        juce::Justification::centredRight);
+    }
+
+    // Vertical grid: nice time steps, labelled in seconds.
+    const double step = niceTimeStep (timeHi_, 8);
+    for (double t = 0.0; t <= timeHi_ + step * 0.5; t += step)
+    {
+        const int x = tToX (t);
+        g.setColour (envGridMinor ());
+        g.drawLine (x, kTopMargin, x, kTopMargin + h, 1.0f);
+        if (x >= kLeftMargin && x <= bounds.getRight () - 2)
+            g.drawText (formatTimeLabel (t, step), x - 16, kTopMargin + h + 2,
+                        32, 14, juce::Justification::centred);
+    }
+
+    // Axis frame.
+    g.setColour (juce::Colour::fromRGB (90, 90, 100));
+    g.drawRect (kLeftMargin, kTopMargin, w, h);
+
+    if (points_.empty ()) return;
+
+    // The curve: straight segments between control points are exact on this
+    // (time, dB) grid; outside the point range the end values hold flat,
+    // matching curveGainDb(). Gains outside the visible range clamp to edges.
+    if (!points_.empty ())
+    {
+        g.setColour (juce::Colour::fromRGB (0, 212, 170));
+        const int xFirst = tToX (points_.front ().tSec);
+        const int yFirst = dbToY (jlimit (kDbMin, kDbMax, points_.front ().gainDb));
+        if (xFirst > kLeftMargin)
+            g.drawLine (kLeftMargin, yFirst, xFirst, yFirst, 2.0f);   // flat before the first point
+        for (size_t i = 1; i < points_.size (); ++i)
+            g.drawLine (tToX (points_[i - 1].tSec), dbToY (jlimit (kDbMin, kDbMax, points_[i - 1].gainDb)),
+                        tToX (points_[i].tSec),     dbToY (jlimit (kDbMin, kDbMax, points_[i].gainDb)),
+                        2.0f);
+        const int xLast = tToX (points_.back ().tSec);
+        const int yLast = dbToY (jlimit (kDbMin, kDbMax, points_.back ().gainDb));
+        if (xLast < kLeftMargin + w)
+            g.drawLine (xLast, yLast, kLeftMargin + w, yLast, 2.0f);   // flat after the last point
+    }
+
+    // Control points.
+    const bool dragging = dragIndex_ >= 0;
+    for (size_t i = 0; i < points_.size (); ++i)
+    {
+        const int x = tToX (points_[i].tSec);
+        const int y = dbToY (points_[i].gainDb);
+        g.setColour ((int) i == dragIndex_ ? juce::Colours::white
+                                           : juce::Colour::fromRGB (0, 212, 170));
+        g.fillEllipse (x - kEnvPointRadius - (dragging ? 1 : 0), y - kEnvPointRadius - (dragging ? 1 : 0),
+                       2 * (kEnvPointRadius + (dragging ? 1 : 0)), 2 * (kEnvPointRadius + (dragging ? 1 : 0)));
+    }
+}
+
 // ============================================================ SpectralControlsPanel
 
 SpectralControlsPanel::SpectralControlsPanel (Application& appIn)

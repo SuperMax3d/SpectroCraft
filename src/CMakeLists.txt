@@ -19,6 +19,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/SignalGenerator.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/TimeStretch.cpp   # SoundTouch tempo-change wrapper
         ${CMAKE_CURRENT_SOURCE_DIR}/FilterEQ.cpp      # FFT zero-phase curve equaliser
+        ${CMAKE_CURRENT_SOURCE_DIR}/Envelope.cpp      # amplitude-over-time envelope effect
         ${CMAKE_CURRENT_SOURCE_DIR}/SpectralView.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/WaveformView.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/MarkerManager.cpp

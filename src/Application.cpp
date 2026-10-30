@@ -172,6 +172,9 @@ void Application::loadSettings ()
     // Filter EQ: remembered curve + user presets.
     settings.eqLastCurve        = recentStore->getValue ("eq_last_curve", juce::String ());
     settings.eqUserPresets      = recentStore->getValue ("eq_user_presets", juce::String ());
+    // Enveloppe: remembered curve + user presets.
+    settings.envLastCurve       = recentStore->getValue ("env_last_curve", juce::String ());
+    settings.envUserPresets     = recentStore->getValue ("env_user_presets", juce::String ());
     // Recording device selection (Transport menu).
     recording.pluginId   = recentStore->getValue ("rec_plugin", juce::String ());
     recording.deviceId   = recentStore->getValue ("rec_device", juce::String ());
@@ -224,6 +227,8 @@ void Application::saveSettings ()
     recentStore->setValue ("super_res_output", settings.superResOutputMode);
     recentStore->setValue ("eq_last_curve", settings.eqLastCurve);
     recentStore->setValue ("eq_user_presets", settings.eqUserPresets);
+    recentStore->setValue ("env_last_curve", settings.envLastCurve);
+    recentStore->setValue ("env_user_presets", settings.envUserPresets);
     recentStore->setValue ("rec_plugin", recording.pluginId);
     recentStore->setValue ("rec_device", recording.deviceId);
     recentStore->setValue ("rec_channels", recording.channels);
@@ -2594,6 +2599,26 @@ bool Application::applyFilterEq (const std::vector<sc::eq::EqPoint>& pts,
     const auto range = effectTargetRange (*this);
     if (range.getLength () <= 0) return true;
     return eng.eqFilterRange (range, pts, &visibleChans (*this), errOut);
+}
+
+bool Application::applyEnvelope (const std::vector<sc::env::EnvPoint>& pts,
+                                 std::string* errOut)
+{
+    auto& eng = audioEngine ();
+    if (!eng.isFileLoaded ())
+        return true;   // nothing to envelope - not an error
+    if (sc::env::isFlatCurve (pts))
+        return true;   // flat curve: bit-exact no-op, no undo entry
+
+    if (hasSpectralSelection ())
+        return applyMaskedEffect (*this, "Envelope on spectral selection",
+            [rate = eng.sampleRate (), &pts] (float* d, int len) {
+                sc::env::applyEnvelope (d, len, rate, pts);
+            }, errOut);
+
+    const auto range = effectTargetRange (*this);
+    if (range.getLength () <= 0) return true;
+    return eng.envelopeRange (range, pts, &visibleChans (*this), errOut);
 }
 
 // ------------------------------------------------- signal generation (Effects > Generate ...)

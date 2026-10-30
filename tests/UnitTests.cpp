@@ -62,6 +62,28 @@ static int total = 0;
 #define CHECK(cond, name) \
     do { ++total; if (!(cond)) { ++failures; std::cout << "FAIL: " << name << "\n"; } } while (0)
 
+// ---------------- Clipboard retry helpers ----------------
+// In this VM the Windows clipboard can lag behind copyTextToClipboard() or be
+// briefly held by another process, in which case a write silently does nothing
+// and the next read returns stale content. These helpers re-run a clipboard
+// exchange up to 5 times: as soon as one attempt validates what it reads back,
+// the test continues; if all five attempts fail, the surrounding CHECK fails.
+static bool clipboardWriteVerified (const juce::String& text)
+{
+    juce::SystemClipboard::copyTextToClipboard (text);
+    return juce::SystemClipboard::getTextFromClipboard () == text;
+}
+
+static bool clipboardRetry (const std::function<bool ()>& attempt)
+{
+    for (int i = 1; i <= 5; ++i)
+    {
+        if (attempt()) return true;
+        juce::Thread::sleep (20);
+    }
+    return false;
+}
+
 static void progress (const char* name)
 {
     std::cerr << "[test] " << name << "\n";
@@ -1082,16 +1104,23 @@ static void testMarkerPanelDetails()
     app.markers().addPointMarker (3.0, "Beta");
     panel.refresh();
 
-    panel.copyAllMarkers();
-    const juce::String clip = juce::SystemClipboard::getTextFromClipboard();
-    CHECK (clip == "Alpha\t0:00.500\t0:02.500\tfirst line second line\r\n"
-                  "Beta\t0:03.000\t-\t",
+    // copyAllMarkers() is idempotent, so the whole exchange can be retried.
+    juce::String clip;
+    CHECK (clipboardRetry ([&] {
+              panel.copyAllMarkers();
+              clip = juce::SystemClipboard::getTextFromClipboard();
+              return clip == "Alpha\t0:00.500\t0:02.500\tfirst line second line\r\n"
+                             "Beta\t0:03.000\t-\t";
+          }),
            "copy produces tab/CRLF separated rows");
 
     // --- Paste markers from the clipboard ---
+    // The paste mutates state, so only the write is retried (verified), then a
+    // single paste runs against known-good content.
     const int before = (int) app.markers().count();
-    juce::SystemClipboard::copyTextToClipboard (
-        "Gamma\t0:01.250\t0:02.750\tpasted comment\r\nDelta\t0:03.500\t-\t");
+    CHECK (clipboardRetry ([&] { return clipboardWriteVerified (
+              "Gamma\t0:01.250\t0:02.750\tpasted comment\r\nDelta\t0:03.500\t-\t"); }),
+           "clipboard holds the paste payload");
 
     const int added = panel.pasteMarkersFromClipboard();
     CHECK (added == 2, "paste adds two markers");
@@ -12136,46 +12165,62 @@ static void testCurveAnalysisModes()
         view.recomputeIfNeeded();
         const auto plot = view.plotBounds();
 
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard();
-        int fullLines = (int) juce::StringArray::fromLines (
-            juce::SystemClipboard::getTextFromClipboard()).size() - 1;
-        CHECK (fullLines >= 8, "full-region copy has many points");
+        // Each exchange is retried up to 5 times: verified-empty start, then
+        // copy from the view, then validate what reads back.
+        int fullLines = -1;
+        CHECK (clipboardRetry ([&] {
+                  if (!clipboardWriteVerified ("")) return false;
+                  view.copySpectrumToClipboard();
+                  fullLines = std::max (0, (int) juce::StringArray::fromLines (
+                      juce::SystemClipboard::getTextFromClipboard()).size() - 1);
+                  return fullLines >= 8;
+              }), "full-region copy has many points");
 
         // Zoom to the first half of the region: every exported time must lie
         // inside the visible window [0, 0.5].
         view.zoomTimeAtX ((int) plot.getX(), 2.0);
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard();
         {
-            const auto lines = juce::StringArray::fromLines (
-                juce::SystemClipboard::getTextFromClipboard());
-            int dataLines = std::max (0, (int) lines.size() - 1);
+            juce::StringArray lines;
+            int dataLines = -1;
             double tMax = -1e30;
-            for (int i = 1; i < (int) lines.size(); ++i)
-                tMax = std::max (tMax, lines[i].substring (0,
-                        lines[i].indexOf (",")).getDoubleValue());
+            CHECK (clipboardRetry ([&] {
+                      if (!clipboardWriteVerified ("")) return false;
+                      view.copySpectrumToClipboard();
+                      lines = juce::StringArray::fromLines (
+                          juce::SystemClipboard::getTextFromClipboard());
+                      dataLines = std::max (0, (int) lines.size() - 1);
+                      tMax = -1e30;
+                      for (int i = 1; i < (int) lines.size(); ++i)
+                          tMax = std::max (tMax, lines[i].substring (0,
+                                  lines[i].indexOf (",")).getDoubleValue());
+                      return dataLines >= 2 && dataLines < fullLines
+                             && tMax <= 0.5 + 1e-6;
+                  }), "zoomed copy stays inside the visible time window");
             CHECK (dataLines >= 2 && dataLines < fullLines,
                   "copy exports fewer points when zoomed in");
-            CHECK (tMax <= 0.5 + 1e-6,
-                  "no exported point lies outside the visible time window");
         }
 
         // Amp vs Freq: frequency-window filtering.
         view.setAxisMode (5);
         view.recomputeIfNeeded();
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard();
-        int m5full = (int) juce::StringArray::fromLines (
-            juce::SystemClipboard::getTextFromClipboard()).size() - 1;
-        CHECK (m5full > 900, "mode-5 copy covers the default frequency window");
+        int m5full = -1;
+        CHECK (clipboardRetry ([&] {
+                  if (!clipboardWriteVerified ("")) return false;
+                  view.copySpectrumToClipboard();
+                  m5full = std::max (0, (int) juce::StringArray::fromLines (
+                      juce::SystemClipboard::getTextFromClipboard()).size() - 1);
+                  return m5full > 900;
+              }), "mode-5 copy covers the default frequency window");
 
         view.zoomFreqAtX ((int) plot.getX(), 4.0);   // zoom in at the left edge
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard();
-        int m5zoom = (int) juce::StringArray::fromLines (
-            juce::SystemClipboard::getTextFromClipboard()).size() - 1;
-        CHECK (m5zoom * 2 < m5full, "mode-5 copy follows the frequency window");
+        int m5zoom = -1;
+        CHECK (clipboardRetry ([&] {
+                  if (!clipboardWriteVerified ("")) return false;
+                  view.copySpectrumToClipboard();
+                  m5zoom = std::max (0, (int) juce::StringArray::fromLines (
+                      juce::SystemClipboard::getTextFromClipboard()).size() - 1);
+                  return m5zoom * 2 < m5full;
+              }), "mode-5 copy follows the frequency window");
     }
 
     // --- Row-2 layout: axis combo grows with panel width ------------------
@@ -12271,12 +12316,15 @@ static void testHarmonicRatioAndClearAll()
 
     // Clipboard export uses ratio columns instead of Hz.
     {
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard ();
-        const auto lines = juce::StringArray::fromLines (
-            juce::SystemClipboard::getTextFromClipboard ());
-        CHECK (lines.size() > 1 && lines[0].startsWith ("time_s,ch1_x")
-             && !lines[0].contains ("ch1_Hz"), "clipboard header has ratio columns");
+        juce::StringArray lines;
+        CHECK (clipboardRetry ([&] {
+                  if (!clipboardWriteVerified ("")) return false;
+                  view.copySpectrumToClipboard ();
+                  lines = juce::StringArray::fromLines (
+                      juce::SystemClipboard::getTextFromClipboard ());
+                  return lines.size() > 1 && lines[0].startsWith ("time_s,ch1_x")
+                         && !lines[0].contains ("ch1_Hz");
+              }), "clipboard header has ratio columns");
         if (lines.size() > 1)
         {
             juce::StringArray cols;
@@ -12376,11 +12424,16 @@ static void testCopyCurveAltScales()
         view.setSize (320, 200);
         view.setAxisMode (5);
         view.recomputeIfNeeded();
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard();
-        const auto cols = clipCols();
-        CHECK (cols.size() == 2 && cols[0] == "freq_Hz",
-              "no alt columns when no alternative scale is set");
+        juce::StringArray cols;
+        CHECK (clipboardRetry ([&] {
+                  if (!clipboardWriteVerified ("")) return false;
+                  view.copySpectrumToClipboard();
+                  const auto lines = juce::StringArray::fromLines (
+                      juce::SystemClipboard::getTextFromClipboard());
+                  cols = lines.isEmpty() ? juce::StringArray {}
+                                         : juce::StringArray::fromTokens (lines[0], ",", "");
+                  return cols.size() == 2 && cols[0] == "freq_Hz";
+              }), "no alt columns when no alternative scale is set");
     }
 
     // --- One reference: f / 1000 -> kHz in every export path --------------
@@ -12398,77 +12451,86 @@ static void testCopyCurveAltScales()
         // Amp vs Freq: shared frequency axis gets one alt column after it.
         view.setAxisMode (5);
         view.recomputeIfNeeded();
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard();
         {
-            const auto lines = juce::StringArray::fromLines (
-                juce::SystemClipboard::getTextFromClipboard());
-            const auto cols = clipCols();
-            CHECK (cols.size() == 3 && cols[1] == "Alt 1",
-                  "mode-5 header gains the alt column after freq_Hz");
+            juce::StringArray lines;
             int checked = 0;
-            bool ok = true;
-            for (int i = 1; i < lines.size(); ++i)
-            {
-                const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
-                if (rc.size() != 3) { ok = false; break; }
-                // Both columns are rounded to 3 decimals: allow the sum.
-                if (std::abs (rc[1].getDoubleValue()
-                             - rc[0].getDoubleValue() / 1000.0) > 1.5e-3)
-                    { ok = false; break; }
-                ++checked;
-            }
-            CHECK (ok && checked >= 10, "every mode-5 row carries the scaled value");
+            bool ok = false;
+            CHECK (clipboardRetry ([&] {
+                      if (!clipboardWriteVerified ("")) return false;
+                      view.copySpectrumToClipboard();
+                      lines = juce::StringArray::fromLines (
+                          juce::SystemClipboard::getTextFromClipboard());
+                      const auto cols = clipCols ();
+                      if (!(cols.size() == 3 && cols[1] == "Alt 1")) return false;
+                      checked = 0; ok = true;
+                      for (int i = 1; i < lines.size(); ++i)
+                      {
+                          const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                          if (rc.size() != 3) { ok = false; break; }
+                          // Both columns are rounded to 3 decimals: allow the sum.
+                          if (std::abs (rc[1].getDoubleValue()
+                                       - rc[0].getDoubleValue() / 1000.0) > 1.5e-3)
+                              { ok = false; break; }
+                          ++checked;
+                      }
+                      return ok && checked >= 10;
+                  }), "mode-5 header and every row carry the alt column");
         }
 
         // Amp vs Time: per-channel alt column after that channel's Hz.
         view.setAxisMode (4);
         view.recomputeIfNeeded();
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard();
         {
-            const auto lines = juce::StringArray::fromLines (
-                juce::SystemClipboard::getTextFromClipboard());
-            const auto cols = clipCols();
-            CHECK (cols.size() == 4 && cols[3] == "ch1_Alt 1",
-                  "mode-4 header gains ch1 alt column after ch1_Hz");
+            juce::StringArray lines;
             int checked = 0;
-            bool ok = true;
-            for (int i = 1; i < lines.size(); ++i)
-            {
-                const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
-                if (rc.size() != 4) { ok = false; break; }
-                if (std::abs (rc[3].getDoubleValue()
-                             - rc[2].getDoubleValue() / 1000.0) > 1.5e-3)
-                    { ok = false; break; }
-                ++checked;
-            }
-            CHECK (ok && checked >= 8, "every mode-4 row carries the scaled value");
+            bool ok = false;
+            CHECK (clipboardRetry ([&] {
+                      if (!clipboardWriteVerified ("")) return false;
+                      view.copySpectrumToClipboard();
+                      lines = juce::StringArray::fromLines (
+                          juce::SystemClipboard::getTextFromClipboard());
+                      const auto cols = clipCols ();
+                      if (!(cols.size() == 4 && cols[3] == "ch1_Alt 1")) return false;
+                      checked = 0; ok = true;
+                      for (int i = 1; i < lines.size(); ++i)
+                      {
+                          const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                          if (rc.size() != 4) { ok = false; break; }
+                          if (std::abs (rc[3].getDoubleValue()
+                                       - rc[2].getDoubleValue() / 1000.0) > 1.5e-3)
+                              { ok = false; break; }
+                          ++checked;
+                      }
+                      return ok && checked >= 8;
+                  }), "mode-4 header and every row carry the ch1 alt column");
         }
 
         // Classic FFT bin table: alt column after freq_Hz.
         view.setAxisMode (0);
         view.recomputeIfNeeded();
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard();
         {
-            const auto lines = juce::StringArray::fromLines (
-                juce::SystemClipboard::getTextFromClipboard());
-            const auto cols = clipCols();
-            CHECK (cols.size() == 3 && cols[1] == "Alt 1",
-                  "classic header gains the alt column after freq_Hz");
+            juce::StringArray lines;
             int checked = 0;
-            bool ok = true;
-            for (int i = 1; i < lines.size(); ++i)
-            {
-                const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
-                if (rc.size() != 3) { ok = false; break; }
-                if (std::abs (rc[1].getDoubleValue()
-                             - rc[0].getDoubleValue() / 1000.0) > 1.5e-3)
-                    { ok = false; break; }
-                ++checked;
-            }
-            CHECK (ok && checked >= 10, "every classic row carries the scaled value");
+            bool ok = false;
+            CHECK (clipboardRetry ([&] {
+                      if (!clipboardWriteVerified ("")) return false;
+                      view.copySpectrumToClipboard();
+                      lines = juce::StringArray::fromLines (
+                          juce::SystemClipboard::getTextFromClipboard());
+                      const auto cols = clipCols ();
+                      if (!(cols.size() == 3 && cols[1] == "Alt 1")) return false;
+                      checked = 0; ok = true;
+                      for (int i = 1; i < lines.size(); ++i)
+                      {
+                          const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                          if (rc.size() != 3) { ok = false; break; }
+                          if (std::abs (rc[1].getDoubleValue()
+                                       - rc[0].getDoubleValue() / 1000.0) > 1.5e-3)
+                              { ok = false; break; }
+                          ++checked;
+                      }
+                      return ok && checked >= 10;
+                  }), "classic header and every row carry the alt column");
         }
     }
 
@@ -12490,27 +12552,33 @@ static void testCopyCurveAltScales()
         view.setSize (320, 200);
         view.setAxisMode (5);
         view.recomputeIfNeeded();
-        juce::SystemClipboard::copyTextToClipboard ("");
-        view.copySpectrumToClipboard();
-        const auto lines = juce::StringArray::fromLines (
-            juce::SystemClipboard::getTextFromClipboard());
-        const auto cols = clipCols();
-        CHECK (cols.size() == 4 && cols[1] == "Alt 1" && cols[2] == "Alt 2",
-              "both enabled refs appear in order; disabled one is skipped");
-        int checked = 0;
-        bool ok = true;
-        for (int i = 1; i < lines.size(); ++i)
         {
-            const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
-            if (rc.size() != 4) { ok = false; break; }
-            if (std::abs (rc[1].getDoubleValue()
-                         - rc[0].getDoubleValue() / 1000.0) > 1.5e-3
-                || std::abs (rc[2].getDoubleValue()
-                            - rc[0].getDoubleValue() / 4000.0) > 1.5e-3)
-                { ok = false; break; }
-            ++checked;
+            juce::StringArray lines;
+            int checked = 0;
+            bool ok = false;
+            CHECK (clipboardRetry ([&] {
+                      if (!clipboardWriteVerified ("")) return false;
+                      view.copySpectrumToClipboard();
+                      lines = juce::StringArray::fromLines (
+                          juce::SystemClipboard::getTextFromClipboard());
+                      const auto cols = clipCols ();
+                      if (!(cols.size() == 4 && cols[1] == "Alt 1" && cols[2] == "Alt 2"))
+                          return false;
+                      checked = 0; ok = true;
+                      for (int i = 1; i < lines.size(); ++i)
+                      {
+                          const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                          if (rc.size() != 4) { ok = false; break; }
+                          if (std::abs (rc[1].getDoubleValue()
+                                       - rc[0].getDoubleValue() / 1000.0) > 1.5e-3
+                              || std::abs (rc[2].getDoubleValue()
+                                          - rc[0].getDoubleValue() / 4000.0) > 1.5e-3)
+                              { ok = false; break; }
+                          ++checked;
+                      }
+                      return ok && checked >= 10;
+                  }), "both enabled refs appear in order and every row is scaled");
         }
-        CHECK (ok && checked >= 10, "both scaled columns are correct per row");
     }
 
     app.altFreqRefs.clear();
@@ -12967,9 +13035,9 @@ static void testSplitSpectralSelectionApp()
         std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
         const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 17, "Effects menu lists the invert/stretch/eq + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 18, "Effects menu lists the invert/stretch/eq/enveloppe + split + generate + super-res items");
 #else
-        CHECK (fxMenu.getNumItems() == 16, "Effects menu lists the invert/stretch/eq + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 17, "Effects menu lists the invert/stretch/eq/enveloppe + split + generate + super-res items");
 #endif
     }
     std::string err;
@@ -14176,22 +14244,24 @@ static void testTranscriptionClipboard()
     }
 
     // --- Copy All: exact Excel-friendly TSV round trip.
-    panel.copyAllRows ();
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-    CHECK (juce::SystemClipboard::getTextFromClipboard () ==
-           "Start\tEnd\tText\n0:01.500\t0:03.250\thello world\n"
-           "2:00.000\t2:04.000\tsecond line",
-           "copy all produces the Excel-friendly TSV");
+    CHECK (clipboardRetry ([&] {
+              panel.copyAllRows ();
+              juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+              return juce::SystemClipboard::getTextFromClipboard () ==
+                     "Start\tEnd\tText\n0:01.500\t0:03.250\thello world\n"
+                     "2:00.000\t2:04.000\tsecond line";
+          }), "copy all produces the Excel-friendly TSV");
 
     // --- Copy Selected: only the selected rows, in row order.
     juce::SparseSet<int> sel;
     sel.addRange ({ 1, 2 });   // just the second segment
     table->setSelectedRows (sel, juce::sendNotification);
-    panel.copySelectedRows ();
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-    CHECK (juce::SystemClipboard::getTextFromClipboard () ==
-           "Start\tEnd\tText\n2:00.000\t2:04.000\tsecond line",
-           "copy selected copies only the selected rows");
+    CHECK (clipboardRetry ([&] {
+              panel.copySelectedRows ();
+              juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+              return juce::SystemClipboard::getTextFromClipboard () ==
+                     "Start\tEnd\tText\n2:00.000\t2:04.000\tsecond line";
+          }), "copy selected copies only the selected rows");
 
     // --- Paste without a header: plain seconds and an empty end column.
     setClipboardText (
@@ -16035,6 +16105,299 @@ static void testFilterEqEffect()
 
         wav.deleteFile ();
     }
+}
+
+// ------------------------------------------------- Enveloppe curve math
+
+static void testEnvelopeCurveMath()
+{
+    // --- Interpolation: linear in time, clamped at the ends -----------------
+    {
+        const std::vector<sc::env::EnvPoint> pts { { 0.0, -6.0 }, { 2.0, 6.0 } };
+        CHECK (std::abs (sc::env::curveGainDb (pts, 0.0) + 6.0) < 1e-9,
+              "gain is exact at the first control point");
+        CHECK (std::abs (sc::env::curveGainDb (pts, 2.0) - 6.0) < 1e-9,
+              "gain is exact at the second control point");
+        CHECK (std::abs (sc::env::curveGainDb (pts, 1.0)) < 1e-9,
+              "midpoint of a symmetric ramp is 0 dB");
+        CHECK (std::abs (sc::env::curveGainDb (pts, 0.5) + 3.0) < 1e-9,
+              "linear interpolation in time");
+        CHECK (std::abs (sc::env::curveGainDb (pts, -5.0) + 6.0) < 1e-9,
+              "before the first point: clamped to its gain");
+        CHECK (std::abs (sc::env::curveGainDb (pts, 99.0) - 6.0) < 1e-9,
+              "after the last point: clamped to its gain");
+        CHECK (!sc::env::isFlatCurve (pts), "non-flat curve detected");
+        CHECK (sc::env::isFlatCurve ({ { 0.0, 0.0 }, { 1.0, 0.0 } }), "flat curve detected");
+        CHECK (sc::env::curveGainDb ({}, 3.0) == 0.0, "empty list is flat");
+
+        const auto& presets = sc::env::presets ();
+        CHECK (presets.size () == 4, "Flat + Fade In + Fade Out + Dip in Middle");
+    }
+
+    // --- Serialisation round-trip ------------------------------------------
+    {
+        const std::vector<sc::env::EnvPoint> pts { { 0.25, -3.5 }, { 1.75, 4.25 } };
+        const auto back = sc::env::parsePoints (sc::env::serializePoints (pts));
+        CHECK (back.size () == 2 && std::abs (back[0].tSec - 0.25) < 1e-9
+              && std::abs (back[0].gainDb + 3.5) < 1e-9
+              && std::abs (back[1].tSec - 1.75) < 1e-9
+              && std::abs (back[1].gainDb - 4.25) < 1e-9,
+              "point list survives serialisation");
+        CHECK (sc::env::parsePoints ("garbage; 1,2 ; x,y").size () == 1
+              && std::abs (sc::env::parsePoints ("garbage; 1,2 ; x,y")[0].tSec - 1.0) < 1e-9,
+              "invalid entries are skipped");
+    }
+
+    // --- User presets -------------------------------------------------------
+    {
+        std::vector<sc::env::EnvPreset> users;
+        users.push_back ({ "My Env", { { 0.0, 0.0 }, { 1.0, -6.0 } } });
+        users.push_back ({ "Second One", { { 0.5, 3.0 } } });
+        const auto back = sc::env::parseUserPresets (sc::env::serializeUserPresets (users));
+        CHECK (back.size () == 2 && back[0].name == "My Env" && back[1].name == "Second One",
+              "user presets survive serialisation");
+    }
+
+    // --- scaleToDuration ----------------------------------------------------
+    {
+        const std::vector<sc::env::EnvPoint> pts { { 0.0, -30.0 }, { 1.0, 0.0 } };
+        auto scaled = sc::env::scaleToDuration (pts, 4.0);
+        CHECK (scaled.size () == 2 && std::abs (scaled[0].tSec) < 1e-9
+              && std::abs (scaled[1].tSec - 4.0) < 1e-9
+              && std::abs (scaled[1].gainDb) < 1e-9,
+              "preset stretched to the target duration");
+        auto flat = sc::env::scaleToDuration ({ { 0.5, 2.0 } }, 3.0);
+        CHECK (flat.size () == 1 && std::abs (flat[0].tSec - 0.5) < 1e-9,
+              "zero-span curve is not stretched");
+    }
+}
+
+// ------------------------------------------------- EnvCurveEditor::setPoint
+
+static void testEnvelopeEditorSetPoint()
+{
+    EnvCurveEditor ed;
+    ed.setTimeHi (4.0);
+    ed.setPoints ({ { 0.0, 0.0 }, { 1.0, -6.0 } });
+
+    // Normal update.
+    ed.setPoint (1, 2.5, -12.0);
+    auto p = ed.getPoints ();
+    CHECK (p.size () == 2 && std::abs (p[1].tSec - 2.5) < 1e-9
+          && std::abs (p[1].gainDb + 12.0) < 1e-6, "point updated in place");
+
+    // Out-of-range values are clamped to the visible axis.
+    ed.setPoint (0, 5e9, 99.0);
+    p = ed.getPoints ();   // re-sorted: {2.5,-12} then {4,30}
+    CHECK (p.size () == 2 && std::abs (p[1].tSec - 4.0) < 1e-6
+          && std::abs (p[1].gainDb - 30.0) < 1e-6,
+          "out-of-range values are clamped");
+
+    // Moving a point onto another's time merges them.
+    ed.setPoints ({ { 0.0, 0.0 }, { 1.0, -6.0 } });
+    ed.setPoint (0, 1.0, 5.0);
+    p = ed.getPoints ();
+    CHECK (p.size () == 1 && std::abs (p[0].tSec - 1.0) < 1e-9,
+          "same-time points are merged");
+    CHECK (std::abs (p[0].gainDb - 5.0) < 1e-6 || std::abs (p[0].gainDb + 6.0) < 1e-6,
+          "merged gain is one of the two inputs");
+
+    // Invalid index is a no-op.
+    ed.setPoint (7, 5.0, 1.0);
+    CHECK (ed.getPoints ().size () == 1, "bad index is ignored");
+}
+
+// ------------------------------------------------- Enveloppe effect
+
+static void testEnvelopeEffect()
+{
+    // --- Flat curve is a bit-exact no-op -------------------------------------
+    {
+        const juce::File wav = makeTempFile ("env_flat.wav");
+        CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+                [] (int, int64_t, double) { return 0.5f; }), "wrote DC wav");
+
+        Application app;
+        CHECK (app.openFile (wav), "opened env wav");
+        AudioEngine& eng = app.audioEngine ();
+
+        std::vector<float> before ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, before.data()), "read before");
+
+        std::string err;
+        CHECK (app.applyEnvelope ({ { 0.0, 0.0 }, { 1.0, 0.0 } }, &err),
+              "flat curve accepted: " + err);
+
+        std::vector<float> after ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, after.data()), "read after");
+        bool identical = true;
+        for (size_t i = 0; i < before.size (); ++i)
+            if (before[i] != after[i]) { identical = false; break; }
+        CHECK (identical, "flat curve leaves the audio bit-exact");
+        CHECK (app.undo ().undoSize () == 0, "flat curve records no undo step");
+
+        wav.deleteFile ();
+    }
+
+    // --- Ramp over the whole file: exact per-sample gains --------------------
+    {
+        const juce::File wav = makeTempFile ("env_ramp.wav");
+        CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+                [] (int, int64_t, double) { return 0.5f; }), "wrote DC wav");
+
+        Application app;
+        CHECK (app.openFile (wav), "opened ramp wav");
+        AudioEngine& eng = app.audioEngine ();
+
+        // -6 dB at t=0 rising to +6 dB at the end of the file.
+        const double dur = (double) kToneFrames / kToneRate;   // 2.048 s
+        std::string err;
+        CHECK (app.applyEnvelope ({ { 0.0, -6.0 }, { dur, 6.0 } }, &err),
+              "ramp ran: " + err);
+
+        std::vector<float> after ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, after.data()), "read after");
+        auto expectAt = [&] (float v, double tSecs) {
+            const double g = std::min (-6.0 + 12.0 * (tSecs / dur), 6.0);
+            return 0.5f * (float) std::pow (10.0, g * 0.05);
+        };
+        CHECK (std::abs ((double) after[0] - expectAt (after[0], 0.0)) < 1e-6,
+              "first sample at -6 dB");
+        const int mid = (int) kToneFrames / 2;   // t = dur/2 -> exactly 0 dB
+        CHECK (std::abs ((double) after[(size_t) mid] - expectAt (after[(size_t) mid], (double) mid / kToneRate)) < 1e-6,
+              "middle sample at 0 dB");
+        const int last = (int) kToneFrames - 1;
+        CHECK (std::abs ((double) after[(size_t) last] - expectAt (after[(size_t) last], (double) last / kToneRate)) < 1e-6,
+              "last sample near +6 dB");
+
+        // One undoable step; undo restores bit-exactly.
+        CHECK (app.undo ().undoSize () == 1, "envelope recorded one undo step");
+        app.undoStep ();
+        std::vector<float> undone ((size_t) kToneFrames);
+        CHECK (eng.readSamples (0, 0, (int) kToneFrames, undone.data()), "read after undo");
+        bool identical = true;
+        for (size_t i = 0; i < undone.size (); ++i)
+            if (undone[i] != 0.5f) { identical = false; break; }
+        CHECK (identical, "undo restores the original level");
+
+        wav.deleteFile ();
+    }
+
+    // --- Active spectral selection: only the masked content is scaled -------
+    {
+        const juce::File wav = makeTempFile ("env_spec.wav");
+        // 500 Hz is exactly bin 128 at 8 kHz and sits well inside the
+        // 300-700 Hz band, so the hard mask keeps all of its energy.
+        CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+                [] (int, int64_t f, double rate) {
+                    return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 500.0 * (double) f / rate);
+                }), "wrote in-band tone wav");
+
+        Application app;
+        CHECK (app.openFile (wav), "opened spec env wav");
+        AudioEngine& eng = app.audioEngine ();
+        FileDoc* d = app.doc();
+        if (!d) { wav.deleteFile (); return; }
+
+        auto peakOf = [&] (int64_t a, int64_t b) {
+            std::vector<float> v ((size_t) (b - a));
+            if (!eng.readSamples (0, a, b - a, v.data())) return 0.0f;
+            float p = 0.0f;
+            for (float s : v) p = std::max (p, std::abs (s));
+            return p;
+        };
+
+        d->spectralSel = lowBandSel ();   // 300-700 Hz over the whole file
+        CHECK (app.hasSpectralSelection (), "spectral selection active");
+
+        const double dur = (double) kToneFrames / kToneRate;   // 2.048 s
+        // Start window [1024, 2048): past the first-hop mask ramp at t=0, where
+        // every covering frame is masked and the gain runs -5.2..-4.5 dB.
+        // Middle window: centred on t = dur/2 where the ramp is exactly 0 dB.
+        const float startPeakBefore = peakOf (1024, 2048);
+        const float midPeakBefore = peakOf (7680, 8704);
+
+        std::string err;
+        CHECK (app.applyEnvelope ({ { 0.0, -6.0 }, { dur, 6.0 } }, &err),
+              "spectral envelope ran: " + err);
+
+        const float startPeakAfter = peakOf (1024, 2048);
+        const float midPeakAfter = peakOf (7680, 8704);
+        CHECK (startPeakBefore > 0.1f && midPeakBefore > 0.1f, "baseline peaks present");
+        // The masked tone sits inside the band: start ~-5 dB (x~0.6), middle ~0 dB.
+        CHECK (std::abs ((double) startPeakAfter / startPeakBefore - 0.6) < 0.1,
+              "start of the file attenuated by ~-5 dB");
+        CHECK (std::abs ((double) midPeakAfter / midPeakBefore - 1.0) < 0.15,
+              "middle of the file unchanged (~0 dB)");
+
+        d->spectralSel.clear ();
+        wav.deleteFile ();
+    }
+}
+
+// ------------------------------------------------- Enveloppe dialog + presets
+
+static void testEnvelopeDialog()
+{
+    // The dialog restores the last curve (scaled to the target duration) and
+    // lists user presets; selecting one loads its scaled points.
+    const juce::File wav = makeTempFile ("env_persist.wav");
+    CHECK (writeWav (wav, 1, kToneRate, kToneFrames,
+            [] (int, int64_t, double) { return 0.0f; }), "wrote silence wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened env persist wav");
+    const double dur = (double) kToneFrames / kToneRate;   // 2.048 s
+    // Last curve drawn for a 1 s range: stretched to the file length on restore.
+    app.settings.envLastCurve = sc::env::serializePoints ({ { 0.0, -3.0 }, { 1.0, 0.0 } });
+    app.settings.envUserPresets = sc::env::serializeUserPresets (
+        { { "My Env", { { 0.0, 0.0 }, { 1.0, -6.0 } } } });
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "env persist"));
+
+    auto* w = win->createEnvelopeDialog ();
+    CHECK (w != nullptr, "dialog created");
+    if (w == nullptr) { wav.deleteFile (); return; }
+
+    EnvCurveEditor* editor = nullptr;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+        if ((editor = dynamic_cast<EnvCurveEditor*> (w->getChildComponent (i))) != nullptr) break;
+    juce::ComboBox* combo = findComboRecursive (*w);
+    CHECK (combo != nullptr && combo->getNumItems () == 5,
+          "preset combo lists the four built-ins plus the user preset");
+
+    if (editor != nullptr)
+    {
+        const auto ep = editor->getPoints ();
+        CHECK (ep.size () == 2 && std::abs (ep[0].tSec) < 1e-9
+              && std::abs (ep[0].gainDb + 3.0) < 1e-6
+              && std::abs (ep[1].tSec - dur) < 1e-6
+              && std::abs (ep[1].gainDb) < 1e-6,
+              "the last used curve is restored scaled to the file length");
+    }
+
+    // Selecting a user preset loads its points, also scaled.
+    if (combo != nullptr && editor != nullptr)
+    {
+        int myId = -1;
+        for (int i = 1; i <= combo->getNumItems (); ++i)
+            if (combo->getItemText (i - 1) == "My Env") { myId = i; break; }
+        CHECK (myId > 0, "user preset is listed");
+        if (myId > 0)
+        {
+            combo->setSelectedId (myId);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);   // async change
+            const auto cp = editor->getPoints ();
+            CHECK (cp.size () == 2 && std::abs (cp[0].tSec) < 1e-9
+                  && std::abs (cp[0].gainDb) < 1e-6
+                  && std::abs (cp[1].tSec - dur) < 1e-6
+                  && std::abs (cp[1].gainDb + 6.0) < 1e-6,
+                  "selecting the user preset loads its scaled points");
+        }
+    }
+
+    delete w;
+    wav.deleteFile ();
 }
 
 // ---------------- Suppress Noise > Copy noise on new track (engine level) ----
@@ -19259,17 +19622,18 @@ static void testTrackAxisPlacement()
     // --- View menu: two checkable items; clicking toggles the settings ------
     std::unique_ptr<MainWindow> win (new MainWindow (app, "track axis placement"));
     const juce::PopupMenu viewMenu = win->getMenuForIndex (3, "View");
-    // 16 -> 18: the two grid toggles were added after the axis placement.
-    CHECK (viewMenu.getNumItems() == 18, "View menu item count with stereo file");
+    // 17 items for a stereo file (the Colour Map submenu moved out of this
+    // menu; channel visibility is still listed per channel).
+    CHECK (viewMenu.getNumItems() == 17, "View menu item count with stereo file");
 
     // --- Resample lives in its own section of the Edit menu -----------------
     const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 17, "Effects menu includes the invert/stretch/eq + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 18, "Effects menu includes the invert/stretch/eq/enveloppe + split + generate + super-res items");
 #else
-    CHECK (fxMenu.getNumItems() == 16, "Effects menu includes the invert/stretch/eq + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 17, "Effects menu includes the invert/stretch/eq/enveloppe + split + generate + super-res items");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -20468,6 +20832,10 @@ static int scRunUnitTestsImpl()
     progress ("invert effect");             testInvertEffect();
     progress ("time stretch effect");       testTimeStretchEffect();
     progress ("filter eq effect");          testFilterEqEffect();
+    progress ("enveloppe curve math");      testEnvelopeCurveMath();
+    progress ("env editor set point");      testEnvelopeEditorSetPoint();
+    progress ("enveloppe effect");          testEnvelopeEffect();
+    progress ("enveloppe dialog");          testEnvelopeDialog();
     progress ("ns copy noise tracks");      testNsCopyNoiseTracks();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();

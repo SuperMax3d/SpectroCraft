@@ -246,7 +246,9 @@ juce::String formatNumber (double v)
 /** Strict plain-number parse: optional sign, digits, at most one dot. */
 bool parseNumber (const juce::String& text, double& out)
 {
-    const StringRef t = text.trim ();
+    // A named String: binding a StringRef to the trim() temporary would
+    // dangle once the statement ends (undefined behaviour).
+    const juce::String t = text.trim ();
     if (t.isEmpty ()) return false;
     bool digits = false, dot = false, sign = false;
     for (int i = 0; i < t.length (); ++i)
@@ -258,8 +260,7 @@ bool parseNumber (const juce::String& text, double& out)
         return false;
     }
     if (!digits) return false;
-    const String s = t;   // StringRef has no getDoubleValue in this build
-    out = s.getDoubleValue ();
+    out = t.getDoubleValue ();
     return std::isfinite (out);
 }
 } // namespace

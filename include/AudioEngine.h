@@ -2,6 +2,7 @@
 // SpectroCraft - Audio Engine: streaming file access, playback, waveform mipmaps, edits
 #include <JuceHeader.h>
 #include "FilterEQ.h"
+#include "Envelope.h"
 #include "UndoPatch.h"
 #include "SpectralSelection.h"
 #include "SpectralMaskProcessor.h"
@@ -168,6 +169,13 @@ public:
     /** FFT-based zero-phase EQ of the given channels inside the range.
         pts must be sorted by ascending frequency; a flat curve is a no-op. */
     bool eqFilterRange (juce::Range<int64_t> samples, const std::vector<sc::eq::EqPoint>& pts,
+                        const std::vector<int>* channels = nullptr,
+                        std::string* errOut = nullptr);
+
+    /** Per-sample amplitude envelope of the given channels inside the range.
+        The curve's time axis starts at 0 seconds at the range start; pts must
+        be sorted by ascending time and a flat curve is a no-op. */
+    bool envelopeRange (juce::Range<int64_t> samples, const std::vector<sc::env::EnvPoint>& pts,
                         const std::vector<int>* channels = nullptr,
                         std::string* errOut = nullptr);
 

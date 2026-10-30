@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "Application.h"
 #include "FilterEQ.h"
+#include "Envelope.h"
 #include "PythonScripts.h"
 
 #include <array>
@@ -948,6 +949,66 @@ private:
     juce::Point<int> lastDownPos_{ -1, -1 };
 
     JUCE_DECLARE_NON_COPYABLE (EqCurveEditor)
+};
+
+/** Graphical editor for the Enveloppe effect: control points on a linear
+    time axis (seconds, relative to the start of the target range) with a
+    gain in dB. Same interaction model as EqCurveEditor; the horizontal axis
+    is linear time instead of log frequency and its right edge follows the
+    target duration via setTimeHi(). */
+class EnvCurveEditor : public juce::Component
+{
+public:
+    static constexpr double kDbMin = -30.0;
+    static constexpr double kDbMax = 30.0;
+
+    EnvCurveEditor();
+
+    /** Replaces the control points (kept sorted by ascending time). */
+    void setPoints (std::vector<sc::env::EnvPoint> pts);
+
+    /** The current control points, sorted by ascending time. */
+    std::vector<sc::env::EnvPoint> getPoints() const;
+
+    /** Sets point `index`'s coordinates (clamped to the visible axis); the
+        list is re-sorted and same-time duplicates are merged. */
+    void setPoint (int index, double tSec, double gainDb);
+
+    /** Sets the right edge of the time axis in seconds (the target range's
+        duration). Points beyond it stay stored but draw off-axis until
+        clamped by a later edit. */
+    void setTimeHi (double secs);
+
+    /** Called when a point is double-clicked, with its index in getPoints()
+        order. The host shows a dialog to type exact coordinates; if unset,
+        double-clicking does nothing. */
+    std::function<void(int)> onEditPoint;
+
+private:
+    int tToX (double t) const;
+    double xToT (int x) const;
+    int dbToY (double db) const;
+    double yToDb (int y) const;
+
+    /** Index of the control point within `maxDistPx` of p, else -1. */
+    int findNearestPoint (const juce::Point<int>& p, int maxDistPx) const;
+
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void paint (juce::Graphics&) override;
+
+    static constexpr int kLeftMargin = 42, kBottomMargin = 20, kTopMargin = 8,
+                        kRightMargin = 8;
+
+    std::vector<sc::env::EnvPoint> points_;   // sorted by ascending time
+    double timeHi_ = 1.0;                     // right edge of the axis, seconds
+    int dragIndex_ = -1;                      // point being dragged, else -1
+    bool pressAddedPoint_ = false;            // this mouse-down created a new point
+    juce::Time lastDownTime_ {};
+    juce::Point<int> lastDownPos_{ -1, -1 };
+
+    JUCE_DECLARE_NON_COPYABLE (EnvCurveEditor)
 };
 
 // ---------------------------------------------------- Spectral Controls panel

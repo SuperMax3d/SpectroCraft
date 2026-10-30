@@ -60,7 +60,12 @@ namespace SpectralMask
         // Output sample s receives contributions from frames starting at
         // s_k in (s-N, s].  So the earliest frame that can touch r.start is
         // ceil((r0-N+1)/H)*H and the latest one starts before r.end.
-        const int64_t kFirst = std::max<int64_t> (0, ceilDiv (r.getStart() - N + 1, H));
+        // kFirst may be negative: frames starting before sample 0 read virtual
+        // silence. Without them the first ~N samples would be covered by a
+        // single frame whose window is near zero there, so the w^2
+        // normalisation amplifies any out-of-band residual by ~1/w (a huge
+        // spike at the file head whenever bins are hard-masked).
+        const int64_t kFirst = ceilDiv (r.getStart() - N + 1, H);
         const int64_t kLast  = (r.getEnd() - 1) / H;
         if (kLast < kFirst) return true;
 
@@ -151,7 +156,14 @@ namespace SpectralMask
         auto r = range.getIntersectionWith ({ 0, eng.numSamples() });
         if (r.getLength() <= 0) return true;   // nothing to do
         return stftPassReader ([&eng] (int ch, int64_t pos, int64_t len, float* dest) {
-            return eng.readSamples (ch, pos, len, dest);
+            // Virtual silence outside [0, totalSamples): zero-fill first, then
+            // read only the overlapping part at its correct offset.
+            std::fill_n (dest, (size_t) len, 0.0f);
+            const int64_t p = std::max<int64_t> (pos, 0);
+            if (p >= eng.numSamples ()) return true;
+            const int64_t n = std::min<int64_t> (len - (p - pos),
+                                                 eng.numSamples () - p);
+            return eng.readSamples (ch, p, n, dest + (size_t) (p - pos));
         }, eng.numSamples (), eng.sampleRate (), eng.numChannels (), r,
                           binGain, chans, out);
     }
@@ -573,9 +585,12 @@ namespace SpectralMask
         // caller supplies fftSize()-1 samples before outStart in that case,
         // so every analysis window is complete and the zeroed accumulator is
         // exact (at file start there simply is no earlier audio).
+        // nextFrame may be negative at the file head: those frames read
+        // virtual silence (the data check below zeros them), restoring full
+        // overlap coverage - matching the offline stftPassReader.
         if (!primed || lastEnd != outStart)
         {
-            nextFrame = std::max<int64_t> (0, ceilDiv (outStart - N + 1, H));
+            nextFrame = ceilDiv (outStart - N + 1, H);
             for (auto& cs : chans)
             {
                 cs.acc.assign ((size_t) N, 0.0f);

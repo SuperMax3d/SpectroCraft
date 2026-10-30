@@ -1337,6 +1337,40 @@ bool AudioEngine::eqFilterRange (juce::Range<int64_t> samples,
     return true;
 }
 
+bool AudioEngine::envelopeRange (juce::Range<int64_t> samples,
+                                 const std::vector<sc::env::EnvPoint>& pts,
+                                 const std::vector<int>* chans, std::string* errOut)
+{
+    if (!ensureEditable (errOut)) return false;
+    samples = samples.getIntersectionWith ({ 0, totalSamples });
+    const int64_t len = samples.getLength ();
+    if (len <= 0 || sc::env::isFlatCurve (pts))
+        return true;   // nothing to envelope
+
+    std::vector<std::vector<float>> newData ((size_t) nchans);
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        const float* d = buffer->getReadPointer (ch, (int) samples.getStart ());
+        newData[(size_t) ch].resize ((size_t) len);
+        if (channelAffected (chans, ch))
+        {
+            std::copy (d, d + len, newData[(size_t) ch].data ());
+            sc::env::applyEnvelope (newData[(size_t) ch].data (), (int) len, rate, pts);
+        }
+        else
+            std::copy (d, d + len, newData[(size_t) ch].begin ());   // unchanged copy
+    }
+
+    recordReplace (*this, samples, newData, "Envelope applied");
+    for (int ch = 0; ch < nchans; ++ch)
+        if (channelAffected (chans, ch))
+            std::copy (newData[(size_t) ch].data (), newData[(size_t) ch].data () + len,
+                      buffer->getWritePointer (ch, (int) samples.getStart ()));
+    unsaved = true;
+    rebuildMipmaps ();
+    return true;
+}
+
 bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgress,
                               const std::atomic<bool>* cancel, std::string* errOut,
                               const std::vector<std::vector<double>>* remixWeights)

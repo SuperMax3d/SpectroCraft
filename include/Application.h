@@ -533,6 +533,14 @@ public:
     bool applyFilterEq (const std::vector<sc::eq::EqPoint>& pts,
                         std::string* errOut = nullptr);
 
+    /** Enveloppe: per-sample amplitude curve over time on the active spectral
+        selection region, or on the time selection if there is one, or over
+        the whole file when nothing is selected. The curve's time axis starts
+        at 0 seconds at the target range start; pts must be sorted by
+        ascending time and a flat curve is a no-op. One undoable step. */
+    bool applyEnvelope (const std::vector<sc::env::EnvPoint>& pts,
+                        std::string* errOut = nullptr);
+
     /** Effects > Generate ...: replaces the active spectral selection region,
         or the time selection if there is one; with neither present it inserts
         durationSecs of generated signal at the playhead. Each call is a

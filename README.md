@@ -367,8 +367,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     so the other tab bar fills the whole column. Closed panels stay closed
     between sessions (reopening inserts them back at their default position).
   - Per-channel display selection lives in the **View menu**: one checkable item
-    per channel ("Channel 1", "Channel 2", …) that toggles each channel
-    independently for any number of channels and applies to both views.
+    per channel ("Channel 1", "Channel 2", …, with a **Ctrl+(Shift)+N** shortcut
+    hint on items 1–9) that toggles each channel independently for any number of
+    channels and applies to both views.
     **Ctrl/Shift+click** on a channel item shows *only* that channel (solo);
     repeating the same solo click restores every channel, and solo-clicking a
     different channel switches the solo to it. The keyboard shortcuts
@@ -618,8 +619,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     together, rendered as sine, square, sawtooth or triangle. Phase is
     continuous with absolute file time, so generated tones line up with
     surrounding audio instead of clicking at the boundary.
-- **Invert / Time Stretch / Filter EQ** (`Effects → Invert`, `Time Stretch…`,
-  `Filter EQ…`): three classic waveform effects added after *Reverse*:
+- **Invert / Time Stretch / Filter EQ / Enveloppe** (`Effects → Invert`,
+  `Time Stretch…`, `Filter EQ…`, `Enveloppe…`): four classic waveform
+  effects added after *Reverse*:
   - *Invert* — negates every sample in the target (spectral selection if
     active, else the time selection, else the whole file). One undoable step.
   - *Time Stretch…* — SoundTouch-based tempo change that preserves pitch.
@@ -651,6 +653,21 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     is preserved and no pre-/post-ringing appears. Works on the spectral
     selection if active, else the time selection, else the whole file; a flat
     curve is a bit-exact no-op that records nothing.
+  - *Enveloppe…* — Audacity-style amplitude-over-time envelope: an interactive
+    time/dB graph (click empty space to add a point, drag to move it,
+    **double-click** a point to type its exact time/gain coordinates,
+    right-click to remove it) with the built-in presets Flat, Fade In, Fade
+    Out and Dip in Middle. The preset row also has **Add…** and **Delete**
+    buttons for user-defined presets (built-ins are protected); both the last
+    used curve and your custom presets persist across restarts — reopening
+    the dialog restores the previous curve. Presets and the remembered curve
+    are proportionally rescaled to fit the current target length, so a Fade In
+    always fades over the whole selection regardless of its duration. The
+    drawn curve holds its end values flat before the first point and after the
+    last one; gains are applied per sample as 10^(dB/20). Works on the spectral
+    selection if active (through the same STFT masking path as the other
+    effects), else the time selection, else the whole file; a flat curve is a
+    bit-exact no-op that records nothing. One undoable step.
 - **Cancelling long operations**: every progress dialog — loading large files,
   resampling, noise suppression, transcription (single and batch), spectrogram
   export — has a Cancel button, and ESC works as well. The operation stops at
@@ -1444,17 +1461,21 @@ Fade In/Out, Normalize, Reverse, **Invert**, **Time Stretch…** (SoundTouch
 tempo change that preserves pitch; changes the file length and warps markers,
 saved selections and FFT snapshots through the same time-warp) and
 **Filter EQ…** (graphical curve equalizer applied as a zero-phase FFT filter;
-see [above](#features)) — plus **Change Gain...** (a dB dialog whose
+see [above](#features)), **Enveloppe…** (amplitude-over-time envelope drawn on
+a time/dB graph, applied per sample; spectral-selection aware) — plus
+**Change Gain...** (a dB dialog whose
 field opens focused with its value pre-selected so a new one can be typed in
 right away; it also has a -60..+24 dB slider kept two-way synced with the box —
 dragging rewrites the field, typing moves the slider clamped to its range,
 and OK applies whatever is in the field; it multiplies the selection by
 10^(dB/20)) — all applied only to
-the currently visible channels. The View menu has **Zoom to Selection** / **Zoom Out Full**,
-a **Colour Map** submenu
-(Classic default), checkable **Waveform View / Spectrogram View** items (at
-least one always stays visible) and one checkable item per channel; plain click
-toggles that channel, **Ctrl/Shift+click shows only it**.
+the currently visible channels. The View menu has **Zoom to Selection** / **Zoom Out Full**, checkable
+**Waveform View / Spectrogram View** items (at least one always stays visible)
+and one checkable item per channel with its keyboard shortcut shown as a hint
+(**Ctrl+(Shift)+1..9**: Ctrl+N toggles the channel, Ctrl+Shift+N shows only it);
+plain click also toggles that channel. The spectrogram colour map is chosen in
+the Spectral Controls panel (Classic default) rather than from a View-menu
+submenu.
 
 **Remembered between sessions**: the spectrogram's Log/Linear state and FFT
 size, the Frequency Analysis axis mode (FFT Linear / FFT Log / 1/3 Octave /

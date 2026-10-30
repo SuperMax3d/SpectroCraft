@@ -135,6 +135,10 @@ struct Settings
     juce::String eqLastCurve;            // "freq,gain;freq,gain;..." ("" = default flat)
     juce::String eqUserPresets;          // one line per preset: "name|freq,gain;..."
 
+    // Enveloppe (Effects menu): same idea on a linear time axis, see sc::env.
+    juce::String envLastCurve;           // "timeSecs,gainDb;timeSecs,gainDb;..." ("" = flat)
+    juce::String envUserPresets;         // one line per preset: "name|t,gain;..."
+
     bool operator== (const Settings& o) const
     {
         return fftSize == o.fftSize && fftAuto == o.fftAuto
@@ -174,7 +178,9 @@ struct Settings
             && superResMode == o.superResMode && superResModel == o.superResModel
             && superResOutputMode == o.superResOutputMode
             && eqLastCurve == o.eqLastCurve
-            && eqUserPresets == o.eqUserPresets;
+            && eqUserPresets == o.eqUserPresets
+            && envLastCurve == o.envLastCurve
+            && envUserPresets == o.envUserPresets;
     }
 };
 
