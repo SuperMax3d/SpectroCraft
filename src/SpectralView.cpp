@@ -833,7 +833,8 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
 
     // Harmonic markers (Spectral Controls panel): follow the cursor so the
     // white circles track it. Only repaint when the position changed.
-    if (app.settings.specHarmMaxK >= 1 && app.settings.specHarmN >= 1)
+    if (app.settings.specHarmVisible && app.settings.specHarmMaxK >= 1
+        && app.settings.specHarmN >= 1)
     {
         if (harmMouseX != e.x || harmMouseY != e.y)
         {
@@ -917,7 +918,8 @@ void SpectralView::mouseExit (const juce::MouseEvent&)
     {
         harmMouseX = -1;
         harmMouseY = -1;
-        if (app.settings.specHarmMaxK >= 1 && app.settings.specHarmN >= 1) repaint();
+        if (app.settings.specHarmVisible && app.settings.specHarmMaxK >= 1
+            && app.settings.specHarmN >= 1) repaint();
     }
 }
 
@@ -1719,8 +1721,10 @@ void SpectralView::drawOverlays (juce::Graphics& g)
 
     // Harmonic markers (Spectral Controls panel): small white circles at the
     // harmonics of the frequency under the mouse - no lines. Half the size of
-    // the orange selection-scaling reference circle (10 px -> 5 px).
-    if (app.settings.specHarmMaxK >= 1 && app.settings.specHarmN >= 1)
+    // the orange selection-scaling reference circle (10 px -> 5 px). With
+    // "Show harmonic numbers" on, a small white number sits next to each dot.
+    if (app.settings.specHarmVisible && app.settings.specHarmMaxK >= 1
+        && app.settings.specHarmN >= 1)
     {
         if (harmMouseX >= pr.getX() && harmMouseX < pr.getRight()
             && harmMouseY >= pr.getY() && harmMouseY < pr.getBottom())
@@ -1730,10 +1734,9 @@ void SpectralView::drawOverlays (juce::Graphics& g)
             const double fFund = fMouse / (double) N;
             if (fFund > 0.0 && std::isfinite (fFund))
             {
-                const int kLo = std::max (1, app.settings.specHarmStartK);
-                const int kHi = std::max (kLo, app.settings.specHarmMaxK);
+                const int kHi = app.settings.specHarmMaxK;
                 g.setColour (juce::Colours::white);
-                for (int k = kLo; k <= kHi; ++k)
+                for (int k = 1; k <= kHi; ++k)
                 {
                     const double f = (double) k * fFund;
                     for (const auto& row : rowRects ())
@@ -1742,6 +1745,21 @@ void SpectralView::drawOverlays (juce::Graphics& g)
                         if (y < 0 || y >= row.getHeight()) continue;
                         g.fillEllipse ((float) harmMouseX - 2.5f,
                                       (float) row.getY() + y - 2.5f, 5.0f, 5.0f);
+                        if (app.settings.specHarmNumbers)
+                        {
+                            // Small number next to the dot; flip to the left side
+                            // when the cursor is close to the right edge.
+                            g.setFont (12.0f);
+                            const bool onLeft = harmMouseX + 38 > pr.getRight();
+                            if (onLeft)
+                                g.drawText (juce::String (k), harmMouseX - 36,
+                                            row.getY() + y - 7, 29, 14,
+                                            juce::Justification::centredRight);
+                            else
+                                g.drawText (juce::String (k), harmMouseX + 7,
+                                            row.getY() + y - 7, 29, 14,
+                                            juce::Justification::centredLeft);
+                        }
                     }
                 }
             }

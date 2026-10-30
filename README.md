@@ -319,16 +319,18 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     a full-width **Refresh** button at the bottom — also bound to global
     shortcut **F5**, which works from any focus — forces a complete spectrogram
     recomputation by discarding every cached tile and re-rendering all tracks).
-    Three persisted fields control
-    harmonic markers in the spectrogram: **"Number of harmonic to display:"**
-    (default 0 = from the fundamental), **"Maximum harmonic to display:"**
+    Two persisted toggle buttons plus two persisted fields control
+    harmonic markers in the spectrogram: **"Show harmonics CTRL+H"**
+    (default on; also bound to global shortcut **Ctrl+H**, which works from any
+    focus) and **"Show harmonic numbers"** (default off — adds a small white
+    number next to each circle), then **"Number of harmonics to display:"**
     (default 10) and **"Harmonic number under the mouse:"** (default 1). While
     the mouse is over a channel row, small white circles — half the size of
     the orange selection-scaling circle, no lines — mark the harmonics of the
     frequency under the cursor: fundamental = f_mouse / N, drawn for every
-    harmonic k in [start, max] that falls inside the current frequency window.
+    harmonic k in [1, max] that falls inside the current frequency window.
     Move the mouse over a tone's higher harmonic and set N accordingly so the
-    circles land on that tone's whole series. All three values are remembered
+    circles land on that tone's whole series. All values are remembered
     between sessions. Above the colour-map
     gradient the panel shows the absolute level of each end of the scale in
     the active file's unit — plain `dB` when uncalibrated, or calibrated values
@@ -1435,6 +1437,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Split Spectral Selection (All Tracks) — needs an active spectral selection | F12 |
 | Split Spectral Selection (Track 1->2) — track 1's band mixed into track 2; needs an active spectral selection | Shift+F12 |
 | Refresh spectrogram (Spectral Controls > Refresh: discard every cached tile and re-render all tracks) | F5 |
+| Toggle spectrogram harmonic markers (Spectral Controls > "Show harmonics") | Ctrl+H |
 | Toggle the left panels column (View > Left Panels) | Ctrl+Shift+Enter |
 
 Keyboard focus follows the mouse: clicking either view puts keyboard focus on

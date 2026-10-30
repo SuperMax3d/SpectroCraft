@@ -5302,7 +5302,7 @@ static void testFFTHarmonicDialogFields()
     wav.deleteFile();
 }
 
-// ---------------- Spectral Controls: harmonic marker fields ----------------
+// ---------------- Spectral Controls: harmonic marker controls ----------------
 static void testSpecHarmControls()
 {
     const juce::File wav = makeTempFile ("spec_harm_ctl.wav");
@@ -5318,43 +5318,58 @@ static void testSpecHarmControls()
     SpectralControlsPanel panel (app);
     panel.setSize (340, 320);
 
-    // Defaults: start 0, max 10, N 1.
-    CHECK (panel.getHarmStartText() == "0",  "default 'Number of harmonic to display:' is 0");
-    CHECK (panel.getHarmMaxText()   == "10", "default 'Maximum harmonic to display:' is 10");
-    CHECK (panel.getHarmNText()     == "1",  "default 'Harmonic number under the mouse:' is 1");
+    // Defaults: harmonics shown, numbers hidden, max 10, N 1.
+    CHECK (panel.isShowHarmonicsOn(), "default 'Show harmonics' is on");
+    CHECK (!panel.isShowNumbersOn(),   "default 'Show harmonic numbers' is off");
+    CHECK (panel.getHarmMaxText() == "10", "default 'Number of harmonics to display:' is 10");
+    CHECK (panel.getHarmNText()   == "1",  "default 'Harmonic number under the mouse:' is 1");
+
+    // The toggles flip state and reach the settings. A real click flips the
+    // toggle first, then fires the listener - simulate that exactly.
+    auto* shBtn = &panel.showHarmonicsBtnRef ();
+    shBtn->setToggleState (!shBtn->getToggleState(), juce::dontSendNotification);
+    shBtn->onClick ();
+    CHECK (!panel.isShowHarmonicsOn() && !app.settings.specHarmVisible,
+          "'Show harmonics' toggle off reaches the settings");
+    auto* snBtn = &panel.showNumbersBtnRef ();
+    snBtn->setToggleState (!snBtn->getToggleState(), juce::dontSendNotification);
+    snBtn->onClick ();
+    CHECK (panel.isShowNumbersOn() && app.settings.specHarmNumbers,
+          "'Show harmonic numbers' toggle on reaches the settings");
 
     // Typed values apply and reach the settings.
-    CHECK (panel.applyHarmStartText ("2"),   "start value accepted");
     CHECK (panel.applyHarmMaxText ("7"),     "max value accepted");
     CHECK (panel.applyHarmNText ("3"),       "N value accepted");
-    CHECK (app.settings.specHarmStartK == 2 && app.settings.specHarmMaxK == 7
-          && app.settings.specHarmN == 3, "settings updated from the fields");
-    CHECK (panel.getHarmStartText() == "2" && panel.getHarmMaxText() == "7"
-          && panel.getHarmNText() == "3", "editors show the applied values");
+    CHECK (app.settings.specHarmMaxK == 7 && app.settings.specHarmN == 3,
+          "settings updated from the fields");
+    CHECK (panel.getHarmMaxText() == "7" && panel.getHarmNText() == "3",
+          "editors show the applied values");
 
     // Out-of-range values are clamped.
-    CHECK (panel.applyHarmStartText ("-5"),  "negative start accepted and clamped to 0");
-    CHECK (app.settings.specHarmStartK == 0, "start clamped at 0");
     CHECK (panel.applyHarmMaxText ("99999"), "huge max accepted and clamped");
     CHECK (app.settings.specHarmMaxK == 1000, "max clamped at 1000");
     CHECK (panel.applyHarmNText ("0"),       "zero N accepted and clamped to 1");
     CHECK (app.settings.specHarmN == 1,      "N clamped at 1");
 
     // Non-numeric input is rejected: settings untouched, editors reverted.
-    const int startBefore = app.settings.specHarmStartK;
-    CHECK (!panel.applyHarmStartText ("abc"), "non-numeric start rejected");
-    CHECK (app.settings.specHarmStartK == startBefore, "rejected value leaves settings untouched");
-    CHECK (panel.getHarmStartText() == juce::String (startBefore), "editor reverted to canonical text");
+    const int maxBefore = app.settings.specHarmMaxK;
+    CHECK (!panel.applyHarmMaxText ("abc"), "non-numeric max rejected");
+    CHECK (app.settings.specHarmMaxK == maxBefore, "rejected value leaves settings untouched");
+    CHECK (panel.getHarmMaxText() == juce::String (maxBefore), "editor reverted to canonical text");
 
     // Blank input keeps the current value.
-    CHECK (panel.applyHarmMaxText ("   "), "blank max accepted as no-op");
-    CHECK (app.settings.specHarmMaxK == 1000, "blank leaves max unchanged");
+    CHECK (panel.applyHarmNText ("   "), "blank N accepted as no-op");
+    CHECK (app.settings.specHarmN == 1, "blank leaves N unchanged");
 
-    // refresh() re-syncs the editors from the settings.
-    app.settings.specHarmStartK = 4;
+    // refresh() re-syncs the toggles + editors from the settings.
+    app.settings.specHarmVisible = true;
+    app.settings.specHarmNumbers = false;
+    app.settings.specHarmMaxK = 4;
     app.settings.specHarmN = 5;
     panel.refresh();
-    CHECK (panel.getHarmStartText() == "4" && panel.getHarmNText() == "5",
+    CHECK (panel.isShowHarmonicsOn() && !panel.isShowNumbersOn(),
+          "refresh re-syncs the harmonic toggles");
+    CHECK (panel.getHarmMaxText() == "4" && panel.getHarmNText() == "5",
           "refresh re-syncs the harmonic fields");
 
     wav.deleteFile();
@@ -5435,15 +5450,60 @@ static void testSpecHarmMarkers()
               "circle at harmonic #3 of 440 Hz");
     }
 
-    // Start = 3: harmonics below #3 disappear.
-    app.settings.specHarmStartK = 3;
+    // "Show harmonic numbers": a small white number appears next to each dot.
+    // Probe for bright, near-neutral pixels (small anti-aliased text rarely
+    // reaches pure 255 on every channel).
+    auto countWhiteRight = [&] (const juce::Image& img, int cx, int cy) -> int
+    {
+        int n = 0;
+        for (int y = std::max (0, cy - 7); y < std::min (240, cy + 8); ++y)
+            for (int x = std::max (0, cx + 7); x < std::min (320, cx + 35); ++x)
+            {
+                const auto c = img.getPixelAt (x, y);
+                if (c.getRed () > 180 && c.getGreen () > 180 && c.getBlue () > 180
+                    && std::max ({ c.getRed (), c.getGreen (), c.getBlue () })
+                       - std::min ({ c.getRed (), c.getGreen (), c.getBlue () }) < 60) ++n;
+            }
+        return n;
+    };
+
+    app.settings.specHarmNumbers = true;
     view.setSettings (app.settings);
     {
         const auto img = paintView ();
-        CHECK (countWhite (img, mx, pr.getY() + yForFreq (440.0)) < 8, "harmonic #1 hidden by start=3");
-        CHECK (countWhite (img, mx, pr.getY() + yForFreq (880.0)) < 8, "harmonic #2 hidden by start=3");
-        CHECK (countWhite (img, mx, pr.getY() + yForFreq (1320.0)) >= 8,
-              "harmonic #3 still shown with start=3");
+        CHECK (countWhiteRight (img, mx, pr.getY() + yForFreq (880.0)) >= 3,
+              "number next to the dot at 880 Hz");
+        CHECK (countWhiteRight (img, mx, pr.getY() + yForFreq (1760.0)) >= 3,
+              "number next to the dot at 1760 Hz");
+    }
+
+    // Numbers off again: the region right of the dots is clean.
+    app.settings.specHarmNumbers = false;
+    view.setSettings (app.settings);
+    {
+        const auto img = paintView ();
+        CHECK (countWhiteRight (img, mx, pr.getY() + yForFreq (880.0)) < 3,
+              "no number with 'Show harmonic numbers' off");
+    }
+
+    // "Show harmonics" off: every circle disappears.
+    app.settings.specHarmVisible = false;
+    view.setSettings (app.settings);
+    {
+        const auto img = paintView ();
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (880.0)) < 8,
+              "no circles with 'Show harmonics' off");
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (1760.0)) < 8,
+              "no circles at #2 either");
+    }
+
+    // Back on: the circles return.
+    app.settings.specHarmVisible = true;
+    view.setSettings (app.settings);
+    {
+        const auto img = paintView ();
+        CHECK (countWhite (img, mx, pr.getY() + yForFreq (880.0)) >= 8,
+              "circles back with 'Show harmonics' on");
     }
 
     // Mouse leaves: the circles disappear.
@@ -8320,30 +8380,31 @@ static void testSettingsPersistence()
     // Harmonic marker fields (Spectral Controls panel) are persisted too.
     {
         Application e (store);
-        CHECK (e.settings.specHarmStartK == 0 && e.settings.specHarmMaxK == 10
-              && e.settings.specHarmN == 1, "harmonic marker defaults");
-        e.settings.specHarmStartK = 2;
+        CHECK (e.settings.specHarmVisible && !e.settings.specHarmNumbers
+              && e.settings.specHarmMaxK == 10 && e.settings.specHarmN == 1,
+              "harmonic marker defaults");
+        e.settings.specHarmVisible = false;
+        e.settings.specHarmNumbers = true;
         e.settings.specHarmMaxK = 7;
         e.settings.specHarmN = 3;
         e.saveSettings();
     }
     {
         Application f (store);
-        CHECK (f.settings.specHarmStartK == 2 && f.settings.specHarmMaxK == 7
-              && f.settings.specHarmN == 3, "harmonic marker settings restored");
+        CHECK (!f.settings.specHarmVisible && f.settings.specHarmNumbers
+              && f.settings.specHarmMaxK == 7 && f.settings.specHarmN == 3,
+              "harmonic marker settings restored");
     }
 
     // Out-of-range stored values are clamped on load.
     {
         Application g (store);
-        g.settings.specHarmStartK = -5;     // below range: stored raw, clamped on load
-        g.settings.specHarmMaxK = 0;
+        g.settings.specHarmMaxK = 0;        // below range: stored raw, clamped on load
         g.settings.specHarmN = 99999;
         g.saveSettings();
     }
     {
         Application h (store);
-        CHECK (h.settings.specHarmStartK == 0, "stored start -5 clamps to 0 on load");
         CHECK (h.settings.specHarmMaxK == 1, "stored max 0 clamps to 1 on load");
         CHECK (h.settings.specHarmN == 1000, "stored N 99999 clamps to 1000 on load");
     }

@@ -1942,6 +1942,15 @@ void MainWindow::refreshSpectrogram()
     if (spectralView) spectralView->invalidateImage ();
 }
 
+// Spectral Controls > "Show harmonics" (also Ctrl+H): toggle the spectrogram's
+// harmonic markers. syncSharedState repaints both views and persists the flag.
+void MainWindow::toggleHarmonicMarkers()
+{
+    app.settings.specHarmVisible = !app.settings.specHarmVisible;
+    if (controlsPanel) controlsPanel->syncHarmControls ();
+    if (app.onStateChange) app.onStateChange ();
+}
+
 juce::File MainWindow::makeSnapshotPath (const juce::File& wav, const juce::Time* when)
 {
     const juce::Time now = (when != nullptr) ? *when : juce::Time::getCurrentTime ();
@@ -5776,6 +5785,9 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     // F5 refreshes the spectrogram (Spectral Controls > Refresh): clears the
     // tile cache and forces a full re-render. Global, like the other shortcuts.
     if (key.getKeyCode() == juce::KeyPress::F5Key) { refreshSpectrogram (); return true; }
+    // Ctrl+H toggles the spectrogram's harmonic markers (Spectral Controls >
+    // "Show harmonics CTRL+H"). Global, like the other shortcuts.
+    if (key == juce::KeyPress ('h', juce::ModifierKeys::commandModifier, 0)) { toggleHarmonicMarkers (); return true; }
     // Ctrl+Shift+Enter toggles the left panel column.
     if (key == juce::KeyPress (juce::KeyPress::returnKey, juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { setLeftPanelsVisible (!leftPanelsVisible); return true; }
     if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }

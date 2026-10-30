@@ -106,11 +106,11 @@ struct Settings
     // Spectrogram harmonic markers (Spectral Controls panel), persisted between
     // sessions: while the mouse is over a channel row, small white circles mark
     // the harmonics of the frequency under the cursor - fundamental =
-    // f_cursor / specHarmN, drawn for k in [max(1, specHarmStartK), max(specHarmStartK,
-    // specHarmMaxK)] (no lines).
-    int specHarmStartK = 0;       // "Number of harmonic to display:" (0 = from the fundamental)
-    int specHarmMaxK   = 10;      // "Maximum harmonic to display:"
-    int specHarmN      = 1;       // "Harmonic number under the mouse:"
+    // f_cursor / specHarmN, drawn for k in [1, specHarmMaxK] (no lines).
+    bool specHarmVisible  = true;   // "Show harmonics" toggle (Ctrl+H)
+    int  specHarmMaxK     = 10;     // "Number of harmonics to display:"
+    int  specHarmN        = 1;      // "Harmonic number under the mouse:"
+    bool specHarmNumbers  = false;  // "Show harmonic numbers": small white k next to each dot
 
     // Spectrogram export overlays - which extras to bake into exported PNGs
     // (File -> Spectrogram submenu). Persisted between sessions.
@@ -168,9 +168,10 @@ struct Settings
             && trackRulerAtBottom == o.trackRulerAtBottom
             && showAmpGrid == o.showAmpGrid
             && showFreqGrid == o.showFreqGrid
-            && specHarmStartK == o.specHarmStartK
+            && specHarmVisible == o.specHarmVisible
             && specHarmMaxK == o.specHarmMaxK
             && specHarmN == o.specHarmN
+            && specHarmNumbers == o.specHarmNumbers
             && exportAxes == o.exportAxes && exportMarkers == o.exportMarkers
             && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings
             && stemSepMode == o.stemSepMode && acppModel6 == o.acppModel6

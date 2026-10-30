@@ -5288,10 +5288,24 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
 
     // Harmonic marker rows: small white circles over the harmonics of the
     // frequency under the mouse in the spectrogram (no lines). Persisted.
-    styleLevelEdit (harmStartEdit);
-    harmStartEdit.setJustification (juce::Justification::centredRight);
-    harmStartEdit.onEnter       = [this] { applyHarmInt (harmStartEdit.getText(), app.settings.specHarmStartK, 0, 1000); };
-    harmStartEdit.onFocusLost   = [this] { applyHarmInt (harmStartEdit.getText(), app.settings.specHarmStartK, 0, 1000); };
+    // Harmonic marker toggles: "Show harmonics" (Ctrl+H) enables/disables the
+    // white harmonic circles; "Show harmonic numbers" adds a small number next
+    // to each circle. Both are persisted between sessions.
+    showHarmonicsBtn.setClickingTogglesState (true);
+    showHarmonicsBtn.setButtonText ("Show harmonics CTRL+H");
+    showHarmonicsBtn.setToggleState (app.settings.specHarmVisible, juce::dontSendNotification);
+    showHarmonicsBtn.onClick = [this] {
+        app.settings.specHarmVisible = showHarmonicsBtn.getToggleState();
+        if (app.onStateChange) app.onStateChange();
+    };
+
+    showNumbersBtn.setClickingTogglesState (true);
+    showNumbersBtn.setButtonText ("Show harmonic numbers");
+    showNumbersBtn.setToggleState (app.settings.specHarmNumbers, juce::dontSendNotification);
+    showNumbersBtn.onClick = [this] {
+        app.settings.specHarmNumbers = showNumbersBtn.getToggleState();
+        if (app.onStateChange) app.onStateChange();
+    };
 
     styleLevelEdit (harmMaxEdit);
     harmMaxEdit.setJustification (juce::Justification::centredRight);
@@ -5350,9 +5364,11 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
                           "(dB, V or g) to change it; the dB range follows.");
     dbMaxEdit.setTooltip ("Top level of the colour window: type a value in the file's unit "
                           "(dB, V or g) to change it; the dB range follows.");
-    harmStartEdit.setTooltip ("First harmonic to display relative to the fundamental. 0 = from "
-                              "the fundamental itself.");
-    harmMaxEdit.setTooltip ("Highest harmonic of the fundamental to display as white circles.");
+    showHarmonicsBtn.setTooltip ("Toggle the spectrogram's harmonic markers on/off. Shortcut: "
+                                 "Ctrl+H (works from any focus).");
+    showNumbersBtn.setTooltip ("Show a small white number next to each harmonic circle with its "
+                               "harmonic number.");
+    harmMaxEdit.setTooltip ("How many harmonics of the fundamental to display as white circles.");
     harmNEdit.setTooltip ("Which harmonic sits at the frequency under the mouse: fundamental = "
                           "f_mouse / N. Move the mouse over a tone's harmonic and set this so the "
                           "circles land on that tone's whole harmonic series.");
@@ -5375,10 +5391,9 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     for (auto* lab : { &colourMapLab, &dbRangeLab })
         lab->setFont (12.0f);
 
-    harmStartLab.setText ("Number of harmonic to display:", juce::dontSendNotification);
-    harmMaxLab.setText ("Maximum harmonic to display:", juce::dontSendNotification);
+    harmMaxLab.setText ("Number of harmonics to display:", juce::dontSendNotification);
     harmNLab.setText ("Harmonic number under the mouse:", juce::dontSendNotification);
-    for (auto* lab : { &harmStartLab, &harmMaxLab, &harmNLab })
+    for (auto* lab : { &harmMaxLab, &harmNLab })
         lab->setFont (11.0f);
 
     autoSlicesLab.setText ("Target time slices:", juce::dontSendNotification);
@@ -5391,8 +5406,8 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
     addAndMakeVisible (&preview);
     addAndMakeVisible (&dbMinEdit);
     addAndMakeVisible (&dbMaxEdit);
-    addAndMakeVisible (&harmStartLab);
-    addAndMakeVisible (&harmStartEdit);
+    addAndMakeVisible (&showHarmonicsBtn);
+    addAndMakeVisible (&showNumbersBtn);
     addAndMakeVisible (&harmMaxLab);
     addAndMakeVisible (&harmMaxEdit);
     addAndMakeVisible (&harmNLab);
@@ -5479,11 +5494,11 @@ void SpectralControlsPanel::resized()
         }
     }
 
-    {   // Harmonic marker rows: label left, value right (persisted).
+    {   // Harmonic marker toggles: "Show harmonics CTRL+H" + "Show harmonic numbers".
         auto row = b.removeFromTop (24);
-        harmStartLab.setBounds (row.removeFromLeft (std::max (0, row.getWidth() - 54)));
+        showHarmonicsBtn.setBounds (row.removeFromLeft (150));
         row.removeFromLeft (6);
-        harmStartEdit.setBounds (row.reduced (0, 3));
+        showNumbersBtn.setBounds (row.removeFromLeft (150));
     }
     {
         auto row = b.removeFromTop (24);
@@ -5647,11 +5662,6 @@ bool SpectralControlsPanel::applyHarmInt (const juce::String& text, int& target,
     return true;
 }
 
-bool SpectralControlsPanel::applyHarmStartText (const juce::String& text)
-{
-    return applyHarmInt (text, app.settings.specHarmStartK, 0, 1000);
-}
-
 bool SpectralControlsPanel::applyHarmMaxText (const juce::String& text)
 {
     return applyHarmInt (text, app.settings.specHarmMaxK, 1, 1000);
@@ -5664,7 +5674,8 @@ bool SpectralControlsPanel::applyHarmNText (const juce::String& text)
 
 void SpectralControlsPanel::syncHarmControls()
 {
-    harmStartEdit.setText (juce::String (app.settings.specHarmStartK));
+    showHarmonicsBtn.setToggleState (app.settings.specHarmVisible, juce::dontSendNotification);
+    showNumbersBtn.setToggleState (app.settings.specHarmNumbers, juce::dontSendNotification);
     harmMaxEdit.setText (juce::String (app.settings.specHarmMaxK));
     harmNEdit.setText (juce::String (app.settings.specHarmN));
 }

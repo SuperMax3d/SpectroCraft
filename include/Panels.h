@@ -1050,15 +1050,16 @@ public:
     bool applyDbMaxText (const juce::String& text);
     void syncLevelControls();                  // slider + editors + preview from settings
 
-    // Harmonic marker fields (Spectral Controls panel, persisted between sessions):
-    // typed values are clamped to their ranges; false when rejected.
-    bool applyHarmStartText (const juce::String& text);   // 0..1000 (0 = from the fundamental)
+    // Harmonic marker controls (Spectral Controls panel, persisted between
+    // sessions): two toggles plus typed fields whose values are clamped to
+    // their ranges; false when rejected.
     bool applyHarmMaxText (const juce::String& text);     // 1..1000
     bool applyHarmNText (const juce::String& text);       // 1..1000
-    void syncHarmControls();                              // editors from settings
-    juce::String getHarmStartText() const { return harmStartEdit.getText(); }
+    void syncHarmControls();                              // toggles + editors from settings
     juce::String getHarmMaxText() const { return harmMaxEdit.getText(); }
     juce::String getHarmNText() const { return harmNEdit.getText(); }
+    bool isShowHarmonicsOn() const { return showHarmonicsBtn.getToggleState(); }
+    bool isShowNumbersOn()   const { return showNumbersBtn.getToggleState(); }
 
     // Auto FFT-size fields (shown only while "Auto" is selected in the FFT size
     // combo; persisted between sessions). Typed values are clamped to their
@@ -1100,6 +1101,10 @@ public:
     LevelEdit& autoSlicesEditRef() { return autoSlicesEdit; }
     LevelEdit& autoBinsEditRef() { return autoBinsEdit; }
 
+    // Harmonic marker toggle buttons (unit tests).
+    juce::TextButton& showHarmonicsBtnRef() { return showHarmonicsBtn; }
+    juce::TextButton& showNumbersBtnRef()   { return showNumbersBtn; }
+
 private:
     void mouseDown (const juce::MouseEvent&) override;   // right-click = Close Panel
 
@@ -1107,11 +1112,12 @@ private:
     juce::ComboBox colourMapCombo, fftSizeCombo;
     juce::Slider dBRangeSlider;
     LevelEdit dbRangeEdit, dbMinEdit, dbMaxEdit;
-    LevelEdit harmStartEdit, harmMaxEdit, harmNEdit;   // harmonic marker rows
+    LevelEdit harmMaxEdit, harmNEdit;                  // harmonic marker rows
     LevelEdit autoSlicesEdit, autoBinsEdit;            // Auto FFT-size parameters (auto mode only)
     juce::TextButton logToggle;
+    juce::TextButton showHarmonicsBtn, showNumbersBtn; // harmonic marker toggles
     juce::Label colourMapLab, dbRangeLab,
-                harmStartLab, harmMaxLab, harmNLab,
+                harmMaxLab, harmNLab,
                 autoSlicesLab, autoBinsLab;
     juce::TextButton resetFreqBtn;
     juce::TextButton refreshBtn;
