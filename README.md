@@ -588,21 +588,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   AudioSR GGUF model. The result can open as a new file, replace the current
   file (one undoable step, including any sample-rate change), or be appended as
   a new track aligned to the enhanced range.
-- **Split spectral selection** (`Effects → Split Spectral Selection (All Tracks)`, F12; enabled
-  only while a spectral selection is active): moves the selected band content
-  out of each visible source channel into one new appended channel per source
-  channel. The `Split Spectral Selection (Track 1->2)` item (Shift+F12) does
-  the same for track 1 only and mixes the result into track 2 instead of
-  appending a channel. The blend is trapezoidal (25% linear ramp at each band edge, full
-  weight across the middle), and where energy is removed the original channels
-  are refilled with synthetic noise at the per-frame estimated floor level —
-  so *original + new track* reconstructs the pre-edit signal with no hard
-  spectral edge; at both time ends of the selection the extracted content
-  fades in/out smoothly and the originals crossfade back, so there is no
-  spike or hard cut either. One undoable step (content change plus
-  channel-count change); undo/redo keeps track visibility in sync with the
-  file's channel count, so reverting a mono→stereo split returns to a single
-  visible track instead of leaving a phantom silent one.
+- **Split spectral selection** (`Effects → Split Spectral Selection Configuration`, Shift+F12,
+  and `Effects → Split Spectral Selection Execute`, F12): moves the selected band content out of
+  chosen source channels into destination channels you pick per channel. The configuration window has one checkbox row per channel plus a destination-channel field for each; an existing destination mixes in place, while a number above the current count creates that channel on first use. Presets: **All Tracks** (every channel extracts into its own new track), **Last channel into new**, and **Second last into last**. Closing the window saves the configuration without performing any split — Execute then applies it as one undoable step, and the first time per file open it opens the configuration instead of executing. The blend is trapezoidal (25% linear ramp at each band edge, full weight across the middle), and where energy is removed the original channels are refilled with synthetic noise at the per-frame estimated floor level — so *original + destination* reconstructs the pre-edit signal with no hard spectral edge; at both time ends of the selection the extracted content fades in/out smoothly and the originals crossfade back, so there is no spike or hard cut either. One undoable step (content change plus channel-count change); undo/redo keeps track visibility in sync with the file's channel count, so reverting a mono→stereo split returns to a single visible track instead of leaving a phantom silent one.
 - **Generate Silence / Noise / Tone** (`Effects → Generate …`): inserts or
   replaces generated audio, each as one undoable step. The target depends on
   the active selection state: with a *spectral* selection only the content
@@ -1434,8 +1422,8 @@ The test executable accepts the same flags (useful for CI without a display).
 | Save Spectrogram As... (PNG of the current spectrogram content) | Ctrl+Shift+E |
 | Take Snapshot (timestamped PNG saved next to the WAV file) | Ctrl+Shift+F |
 | Resample... (Edit menu, own section: new sample rate + optional channel remix) | F11 |
-| Split Spectral Selection (All Tracks) — needs an active spectral selection | F12 |
-| Split Spectral Selection (Track 1->2) — track 1's band mixed into track 2; needs an active spectral selection | Shift+F12 |
+| Split Spectral Selection Configuration — per-channel input → destination setup; closing saves without splitting | Shift+F12 |
+| Split Spectral Selection Execute — runs the configured split (needs an active spectral selection); first time per file open opens the configuration instead | F12 |
 | Refresh spectrogram (Spectral Controls > Refresh: discard every cached tile and re-render all tracks) | F5 |
 | Toggle spectrogram harmonic markers (Spectral Controls > "Show harmonics") | Ctrl+H |
 | Toggle the left panels column (View > Left Panels) | Ctrl+Shift+Enter |
@@ -1609,8 +1597,9 @@ the edit, and undo/redo works as usual. **Play Spectral Selection**
 without modifying the file.
 
 **Split Spectral Selection** (Effects menu) goes one step further: instead of
-just zeroing the band, it *moves* the band content into new channels — one per
-affected visible source channel, appended at the end. Each FFT frame inside
+just zeroing the band, it *moves* the band content from chosen source channels
+into destination channels you configure per file open.
+**Split Spectral Selection Configuration** (Shift+F12) opens a window with one checkbox row per channel and a destination-channel field for each checked row: an existing destination mixes the extracted content into that channel in place, while a number above the current count creates that channel on first use. The preset buttons fill the grid quickly — **All Tracks** (every current channel extracts into its own new track), **Last channel into new**, and **Second last into last**. Closing the window saves the configuration without performing any split; **Split Spectral Selection Execute** (F12) then runs it as one undoable step, and the first time after opening a file it opens the configuration window instead of executing. Each FFT frame inside
 the selection's time extent gets a trapezoidal vertical profile (linear ramps
 over the bottom and top 25% of every contiguous selected band, full weight in
 the middle); the extracted part is the band content with its amplitude reduced
@@ -1637,13 +1626,8 @@ re-syncs track visibility to the file — reverting a mono→stereo split return
 to a single visible track (no phantom silent track), re-applying it shows all
 tracks again.
 
-**Split Spectral Selection (Track 1->2)** (Shift+F12) applies the same
-processing to track 1 only, regardless of visibility, and writes the
-extracted band into track 2 instead of appending a channel: if the file has
-fewer than two channels it grows to exactly two; if track 2 already exists,
-the extracted content is mixed with what is already there. Track 1 receives
-the same noise-floor fill as in the all-tracks variant, and the operation is
-again a single undoable step.
+The old one-shot variants are now presets of this configuration: **All Tracks**
+reproduces the former *Split Spectral Selection (All Tracks)* behaviour (one new appended channel per source), while **Last channel into new** and **Second last into last** cover the common single-channel cases — including the old *Track 1→2* flow, which is just "second last into last" on a stereo file. Sources that are not ticked in the configuration are left completely untouched, and every configured split is again a single undoable step.
 
 ### Selection panel (named selections + harmonic cloning)
 

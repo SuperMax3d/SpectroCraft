@@ -13065,8 +13065,9 @@ static void testSplitSpectralSelectionExtentBounds()
     CHECK (aeng.readSamples (0, 0, (int) nSamples, before.data()), "read before");
 
     d->spectralSel = sel;
+    app.settings.splitConfig = { { 0, 1 } };   // ch1 -> new ch2
     std::string err;
-    CHECK (app.splitSpectralSelection (&err), "bounds split applied: " + err);
+    CHECK (app.splitSpectralSelectionConfigured (&err), "bounds split applied: " + err);
 
     const int64_t eEnd = extent.getEnd ();
     std::vector<float> after0 ((size_t) nSamples);
@@ -13099,17 +13100,18 @@ static void testSplitSpectralSelectionApp()
         CHECK (fxMenu.getNumItems() == 17, "Effects menu lists the invert/stretch/eq/enveloppe + split + generate + super-res items");
 #endif
     }
+    app.settings.splitConfig = { { 0, 1 } };   // ch1 -> new ch2 (the old F12 behaviour)
     std::string err;
-    CHECK (!app.splitSpectralSelection (&err) && !err.empty (),
+    CHECK (!app.splitSpectralSelectionConfigured (&err) && !err.empty (),
           "split without a selection fails with a message");
     CHECK (eng.numChannels () == 1, "failed split leaves the file untouched");
 
-    // With an active spectral selection: one new channel per visible source.
+    // With an active spectral selection: the configured destination is created.
     d->spectralSel = lowBandSel ();
     std::vector<float> before ((size_t) kToneFrames);
     CHECK (eng.readSamples (0, 0, (int) kToneFrames, before.data()), "read before");
 
-    CHECK (app.splitSpectralSelection (&err), "split applied: " + err);
+    CHECK (app.splitSpectralSelectionConfigured (&err), "split applied: " + err);
     CHECK (eng.numChannels () == 2, "file grew from 1 to 2 channels");
     CHECK ((int) eng.numSamples () == (int) kToneFrames, "length unchanged");
 
@@ -13185,8 +13187,9 @@ static void testSplitSpectralSelectionViewRefresh()
     CHECK (pr.getWidth () > 0 && pr.getHeight () > 0, "the plot has a size");
 
     d->spectralSel = lowBandSel ();
+    app.settings.splitConfig = { { 0, 1 } };   // ch1 -> new ch2
     std::string err;
-    CHECK (app.splitSpectralSelection (&err), "split applied: " + err);
+    CHECK (app.splitSpectralSelectionConfigured (&err), "split applied: " + err);
     win->refreshAfterEdit();
 
     // (1) The tile data must be fresh for every channel.
@@ -13249,8 +13252,9 @@ static void testSplitSpectralSelectionTrack1To2App()
     if (!d) return;
     AudioEngine& eng = app.audioEngine ();
 
+    app.settings.splitConfig = { { 0, 1 } };   // ch1 -> ch2 (the old Shift+F12 behaviour)
     std::string err;
-    CHECK (!app.splitSpectralSelectionTrack1To2 (&err) && !err.empty (),
+    CHECK (!app.splitSpectralSelectionConfigured (&err) && !err.empty (),
           "t1->t2 split without a selection fails with a message");
     CHECK (eng.numChannels () == 1, "failed split leaves the file untouched");
 
@@ -13259,7 +13263,7 @@ static void testSplitSpectralSelectionTrack1To2App()
     std::vector<float> before ((size_t) kToneFrames);
     CHECK (eng.readSamples (0, 0, (int) kToneFrames, before.data()), "read before");
 
-    CHECK (app.splitSpectralSelectionTrack1To2 (&err), "t1->t2 split applied: " + err);
+    CHECK (app.splitSpectralSelectionConfigured (&err), "t1->t2 split applied: " + err);
     CHECK (eng.numChannels () == 2, "file grew from 1 to 2 channels");
     CHECK ((int) eng.numSamples () == (int) kToneFrames, "length unchanged");
 
@@ -13320,8 +13324,9 @@ static void testSplitSpectralSelectionTrack1To2MixesIntoExisting()
     AudioEngine& eng = app.audioEngine ();
 
     d->spectralSel = lowBandSel ();
+    app.settings.splitConfig = { { 0, 1 } };   // ch1 -> existing ch2 (mix)
     std::string err;
-    CHECK (app.splitSpectralSelectionTrack1To2 (&err), "t1->t2 mix applied: " + err);
+    CHECK (app.splitSpectralSelectionConfigured (&err), "t1->t2 mix applied: " + err);
     CHECK (eng.numChannels () == 2, "channel count unchanged");
 
     std::vector<float> ch0 ((size_t) kToneFrames), ch1 ((size_t) kToneFrames);
@@ -13335,6 +13340,195 @@ static void testSplitSpectralSelectionTrack1To2MixesIntoExisting()
     const float c1_1000 = toneAmp (ch1, 2048, (size_t) kToneFrames - 2048, 1000.0, kToneRate);
     CHECK (std::abs (c1_500 - 0.5f) < 0.01f, "track 2 gained the selected tone");
     CHECK (std::abs (c1_1000 - 0.3f) < 0.01f, "track 2 kept its original content");
+}
+
+// Collects the split-config grid's widgets (recursively): every "Channel N"
+// toggle button, every TextEditor (the per-row destination fields) and the
+// three preset buttons by their text.
+static void collectSplitConfigWidgets (juce::Component& root,
+                                       std::vector<juce::TextButton*>& checks,
+                                       std::vector<juce::TextEditor*>& dests,
+                                       juce::TextButton*& allBtn,
+                                       juce::TextButton*& lastBtn,
+                                       juce::TextButton*& secondBtn)
+{
+    for (int i = 0; i < root.getNumChildComponents (); ++i)
+    {
+        auto* c = root.getChildComponent (i);
+        if (auto* b = dynamic_cast<juce::TextButton*> (c))
+        {
+            const juce::String t = b->getButtonText();
+            if (t.startsWith ("Channel ")) checks.push_back (b);
+            else if (t == "All Tracks") allBtn = b;
+            else if (t == "Last channel into new") lastBtn = b;
+            else if (t == "Second last into last") secondBtn = b;
+        }
+        else if (dynamic_cast<juce::TextEditor*> (c)) dests.push_back ((juce::TextEditor*) c);
+        else collectSplitConfigWidgets (*c, checks, dests, allBtn, lastBtn, secondBtn);
+    }
+}
+
+// ------------------------------------------------- split configuration dialog
+// The "Split Spectral Selection Configuration" window has one checkbox row per
+// channel, a destination field for each row and three preset buttons. Closing
+// it saves the configuration without performing any split.
+static void testSplitConfigDialog()
+{
+    const juce::File wav = makeTempFile ("split_cfg.wav");
+    writeWav (wav, 2, kToneRate, kToneFrames, [] (int ch, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * (ch == 0 ? 500.0 : 1000.0) * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open stereo wav for split config test");
+
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "split config test"));
+
+    auto* w = win->createSplitConfigDialog ();
+    CHECK (w != nullptr, "config dialog created");
+    if (!w) { win.reset (); delete mm; wav.deleteFile (); return; }
+
+    std::vector<juce::TextButton*> checks;
+    std::vector<juce::TextEditor*> dests;
+    juce::TextButton* allBtn = nullptr, *lastBtn = nullptr, *secondBtn = nullptr;
+    collectSplitConfigWidgets (*w, checks, dests, allBtn, lastBtn, secondBtn);
+
+    CHECK (checks.size () == 2, "one checkbox row per channel");
+    CHECK (dests.size () == 2, "one destination field per channel");
+    CHECK (allBtn != nullptr && lastBtn != nullptr && secondBtn != nullptr,
+          "the three preset buttons exist");
+    if (checks.size () != 2 || dests.size () != 2
+        || allBtn == nullptr || lastBtn == nullptr || secondBtn == nullptr)
+    { delete w; win.reset (); delete mm; wav.deleteFile (); return; }
+
+    // No saved configuration: the default is "last channel into new".
+    CHECK (!checks[0]->getToggleState (), "channel 1 unchecked by default");
+    CHECK (checks[1]->getToggleState (), "channel 2 checked by default");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (dests[1]->getText().trim() == "3", "default destination is the new channel 3");
+
+    // All Tracks: every channel extracts into its own new track.
+    allBtn->onClick ();
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (checks[0]->getToggleState () && checks[1]->getToggleState (),
+          "All Tracks ticks both channels");
+    CHECK (dests[0]->getText().trim() == "3" && dests[1]->getText().trim() == "4",
+          "All Tracks destinations are the new tracks 3 and 4");
+
+    // Second last into last: only channel N-1, destination N.
+    secondBtn->onClick ();
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (checks[0]->getToggleState () && !checks[1]->getToggleState (),
+          "Second last ticks only channel 1");
+    CHECK (dests[0]->getText().trim() == "2",
+          "Second last destination is the existing channel 2");
+
+    // Last channel into new again.
+    lastBtn->onClick ();
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (!checks[0]->getToggleState () && checks[1]->getToggleState (),
+          "Last into new ticks only channel 2");
+    CHECK (dests[1]->getText().trim() == "3",
+          "Last into new destination is the new channel 3");
+
+    delete w;
+
+    // Prefill from a saved configuration: ch1 -> ch3.
+    app.settings.splitConfig = { { 0, 2 } };
+    auto* w2 = win->createSplitConfigDialog ();
+    CHECK (w2 != nullptr, "second dialog created");
+    if (!w2) { win.reset (); delete mm; wav.deleteFile (); return; }
+    std::vector<juce::TextButton*> checks2;
+    std::vector<juce::TextEditor*> dests2;
+    juce::TextButton* allBtn2 = nullptr, *lastBtn2 = nullptr, *secondBtn2 = nullptr;
+    collectSplitConfigWidgets (*w2, checks2, dests2, allBtn2, lastBtn2, secondBtn2);
+    CHECK (checks2.size () == 2 && dests2.size () == 2, "second dialog has the grid");
+    if (checks2.size () == 2 && dests2.size () == 2)
+    {
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+        CHECK (checks2[0]->getToggleState () && !checks2[1]->getToggleState (),
+               "saved configuration prefills channel 1 only");
+        CHECK (dests2[0]->getText().trim() == "3", "saved destination is ch3");
+    }
+    delete w2;
+
+    win.reset ();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile();
+}
+
+// ------------------------------------------------- configured split (multi-pair) + undo
+// Each input channel's selected band is extracted and mixed into its
+// destination: existing destinations mix in place, numbers above the current
+// count create new channels on first use.
+static void testSplitSpectralSelectionConfiguredMulti()
+{
+    const juce::File wav = makeTempFile ("split_multi.wav");
+    // ch1: 500 Hz + 3500 Hz; ch2: 400 Hz (inside the band) + 2000 Hz.
+    writeWav (wav, 2, kToneRate, kToneFrames, [] (int ch, int64_t f, double rate)
+             { const double t = (double) f / rate;
+               if (ch == 0)
+                   return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 500.0 * t)
+                        + 0.3f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 3500.0 * t);
+               return 0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * t)
+                    + 0.3f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 2000.0 * t); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open stereo wav for multi split test");
+    FileDoc* d = app.doc();
+    if (!d) { wav.deleteFile (); return; }
+    AudioEngine& eng = app.audioEngine ();
+
+    CHECK (!d->splitConfigured, "a freshly opened file is not configured yet");
+
+    std::vector<float> orig0 ((size_t) kToneFrames), orig1 ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, orig0.data()), "read ch1 before");
+    CHECK (eng.readSamples (1, 0, (int) kToneFrames, orig1.data()), "read ch2 before");
+
+    // ch1's band -> new track 3; ch2's band -> mix into existing track 1.
+    d->spectralSel = lowBandSel ();
+    app.settings.splitConfig = { { 0, 2 }, { 1, 0 } };
+    std::string err;
+    CHECK (app.splitSpectralSelectionConfigured (&err), "multi split applied: " + err);
+
+    CHECK (eng.numChannels () == 3, "a new track was created");
+    CHECK ((int) eng.numSamples () == (int) kToneFrames, "length unchanged");
+
+    std::vector<float> c0 ((size_t) kToneFrames), c1 ((size_t) kToneFrames), c2 ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, c0.data()), "read ch1 after");
+    CHECK (eng.readSamples (1, 0, (int) kToneFrames, c1.data()), "read ch2 after");
+    CHECK (eng.readSamples (2, 0, (int) kToneFrames, c2.data()), "read ch3 after");
+
+    const size_t from = 2048, to = (size_t) kToneFrames - 2048;
+    // Track 1 lost its in-band tone and gained track 2's.
+    CHECK (toneAmp (c0, from, to, 500.0, kToneRate) < 0.05f,
+          "track 1 lost the 500 Hz tone");
+    CHECK (std::abs (toneAmp (c0, from, to, 3500.0, kToneRate) - 0.3f) < 0.02f,
+          "track 1 kept its out-of-band content");
+    CHECK (std::abs (toneAmp (c0, from, to, 400.0, kToneRate) - 0.4f) < 0.05f,
+          "track 1 gained track 2's tone");
+    // Track 2 lost its in-band tone and kept the rest.
+    CHECK (toneAmp (c1, from, to, 400.0, kToneRate) < 0.05f,
+          "track 2 lost the 400 Hz tone");
+    CHECK (std::abs (toneAmp (c1, from, to, 2000.0, kToneRate) - 0.3f) < 0.02f,
+          "track 2 kept its out-of-band content");
+    // Track 3 holds track 1's extracted tone.
+    CHECK (std::abs (toneAmp (c2, from, to, 500.0, kToneRate) - 0.5f) < 0.05f,
+          "track 3 holds the extracted tone");
+
+    // Undo restores the original stereo file exactly.
+    app.undoStep ();
+    CHECK (eng.numChannels () == 2, "undo back to two channels");
+    std::vector<float> u0 ((size_t) kToneFrames), u1 ((size_t) kToneFrames);
+    CHECK (eng.readSamples (0, 0, (int) kToneFrames, u0.data()), "read ch1 after undo");
+    CHECK (eng.readSamples (1, 0, (int) kToneFrames, u1.data()), "read ch2 after undo");
+    bool exact = true;
+    for (size_t i = 0; i < (size_t) kToneFrames; ++i)
+        if (u0[i] != orig0[i] || u1[i] != orig1[i]) { exact = false; break; }
+    CHECK (exact, "undo restores the original channels bit-exactly");
+
+    wav.deleteFile ();
 }
 
 // ------------------------------------------------- playback mask (streaming OLA)
@@ -20870,6 +21064,9 @@ static int scRunUnitTestsImpl()
     progress ("split spectral selection (processor)");
     testSplitSpectralSelectionTrack1To2App();
     testSplitSpectralSelectionTrack1To2MixesIntoExisting();
+    progress ("split configuration dialog");  testSplitConfigDialog();
+    progress ("configured split multi-pair + undo");
+    testSplitSpectralSelectionConfiguredMulti();
     testSplitSpectralSelectionProcessor();
     testSplitSpectralSelectionEdgeFade();
     testSplitSpectralSelectionExtentBounds();

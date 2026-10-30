@@ -177,6 +177,25 @@ void Application::loadSettings ()
     // Enveloppe: remembered curve + user presets.
     settings.envLastCurve       = recentStore->getValue ("env_last_curve", juce::String ());
     settings.envUserPresets     = recentStore->getValue ("env_user_presets", juce::String ());
+
+    // Split spectral selection configuration: "in->dest;in->dest" with 1-based
+    // channel numbers.
+    {
+        juce::StringArray toks;
+        toks.addTokens (recentStore->getValue ("split_config", juce::String ()), ";", "");
+        settings.splitConfig.clear ();
+        for (const auto& t : toks)
+        {
+            juce::StringArray kv;
+            kv.addTokens (t, "->");
+            if (kv.size () == 2)
+            {
+                const int in  = kv[0].getIntValue () - 1;
+                const int dst = kv[1].getIntValue () - 1;
+                if (in >= 0 && dst >= 0) settings.splitConfig.push_back ({ in, dst });
+            }
+        }
+    }
     // Recording device selection (Transport menu).
     recording.pluginId   = recentStore->getValue ("rec_plugin", juce::String ());
     recording.deviceId   = recentStore->getValue ("rec_device", juce::String ());
@@ -232,6 +251,11 @@ void Application::saveSettings ()
     recentStore->setValue ("eq_user_presets", settings.eqUserPresets);
     recentStore->setValue ("env_last_curve", settings.envLastCurve);
     recentStore->setValue ("env_user_presets", settings.envUserPresets);
+
+    juce::String splitCfg;
+    for (const auto& p : settings.splitConfig)
+        splitCfg += juce::String (p.first + 1) + "->" + juce::String (p.second + 1) + ";";
+    recentStore->setValue ("split_config", splitCfg);
     recentStore->setValue ("rec_plugin", recording.pluginId);
     recentStore->setValue ("rec_device", recording.deviceId);
     recentStore->setValue ("rec_channels", recording.channels);
@@ -2834,72 +2858,7 @@ bool Application::generateTone (const std::vector<sc::ToneSpec>& tones, sc::Wave
     return replaceRangeWithGen (*this, plan, data, "Generated tone", errOut);
 }
 
-bool Application::splitSpectralSelection (std::string* errOut)
-{
-    auto fail = [errOut] (const juce::String& msg) {
-        if (errOut != nullptr) *errOut = msg.toStdString ();
-        return false;
-    };
-
-    auto* d = doc();
-    if (!d || d->spectralSel.empty ())
-        return fail ("No spectral selection is active.");
-
-    AudioEngine& eng = audioEngine ();
-    const juce::Range<int64_t> range = spectralSelSamples (*this);
-    if (range.getLength () <= 0) return true;   // nothing to do
-
-    std::vector<std::vector<float>> ext, res;
-    juce::Range<int64_t> extent;
-    if (!SpectralMask::splitSpectralSelection (eng, range, d->spectralSel,
-                                               &visibleChannels, ext, res, extent))
-        return fail ("Splitting the spectral selection failed.");
-    if (extent.getLength () <= 0) return true;   // no frames inside the selection
-
-    const int nch = eng.numChannels ();
-    std::vector<int> affected;
-    for (int ch : visibleChannels)
-        if (ch >= 0 && ch < nch) affected.push_back (ch);
-    if (affected.empty ()) return true;         // nothing visible: no-op
-
-    // Assemble the new whole file: existing channels with their selected band
-    // replaced by noise-floor fill, plus one new channel per affected channel
-    // holding the extracted band content.
-    const int64_t total = eng.numSamples ();
-    std::vector<std::vector<float>> newData ((size_t) (nch + affected.size()),
-                                             std::vector<float> ((size_t) total, 0.0f));
-    for (int ch = 0; ch < nch; ++ch)
-        if (!eng.readSamples (ch, 0, total, newData[(size_t) ch].data ()))
-            return fail ("Failed to read audio.");
-
-    int ai = 0;
-    for (int ch : affected)
-    {
-        const auto& r = res[(size_t) ch];
-        std::copy (r.begin (), r.end(),
-                   newData[(size_t) ch].begin () + (size_t) extent.getStart());
-        const auto& e = ext[(size_t) ch];
-        std::copy (e.begin (), e.end(),
-                   newData[(size_t) (nch + ai)].begin () + (size_t) extent.getStart());
-        ++ai;
-    }
-
-    if (!eng.replaceWholeFileUndoable (newData,
-                                       "Split spectral selection to new channel(s)"))
-        return fail ("Could not apply the split.");
-
-    // Make the freshly added channels visible (leave other choices alone).
-    const int n = eng.numChannels ();
-    for (int ch = nch; ch < n; ++ch)
-        if (!isChannelVisible (ch))
-            visibleChannels.push_back (ch);
-    std::sort (visibleChannels.begin (), visibleChannels.end());
-    syncActiveDoc ();
-
-    return true;
-}
-
-bool Application::splitSpectralSelectionTrack1To2 (std::string* errOut)
+bool Application::splitSpectralSelectionConfigured (std::string* errOut)
 {
     auto fail = [errOut] (const juce::String& msg) {
         if (errOut != nullptr) *errOut = msg.toStdString ();
@@ -2914,46 +2873,65 @@ bool Application::splitSpectralSelectionTrack1To2 (std::string* errOut)
     const int nch0 = eng.numChannels ();
     if (nch0 < 1) return fail ("No audio loaded.");
 
+    // Validate the configuration against the current channel count; pairs are
+    // applied in configured order, duplicates of a source are collapsed.
+    std::vector<std::pair<int,int>> pairs;
+    for (const auto& p : settings.splitConfig)
+        if (p.first >= 0 && p.first < nch0 && p.second >= 0 && p.second <= 1023)
+            pairs.push_back (p);
+    if (pairs.empty ())
+        return fail ("No usable channels in the split configuration - open "
+                     "Split Spectral Selection Configuration first.");
+
     const juce::Range<int64_t> range = spectralSelSamples (*this);
     if (range.getLength () <= 0) return true;   // nothing to do
 
-    // The source is always channel 0 (track 1), regardless of visibility.
-    std::vector<int> srcChans { 0 };
+    std::vector<int> srcs;
+    for (const auto& p : pairs)
+        if (std::find (srcs.begin (), srcs.end (), p.first) == srcs.end ())
+            srcs.push_back (p.first);
+
     std::vector<std::vector<float>> ext, res;
     juce::Range<int64_t> extent;
     if (!SpectralMask::splitSpectralSelection (eng, range, d->spectralSel,
-                                               &srcChans, ext, res, extent))
+                                               &srcs, ext, res, extent))
         return fail ("Splitting the spectral selection failed.");
     if (extent.getLength () <= 0) return true;   // no frames inside the selection
 
-    // The destination is channel 1 (track 2); grow to two channels if needed.
-    const int nch = std::max (nch0, 2);
+    // Grow to cover every destination channel (new ones start silent).
+    int maxDest = nch0 - 1;
+    for (const auto& p : pairs)
+        maxDest = std::max (maxDest, p.second);
+    const int nOut = std::max (nch0, maxDest + 1);
+
     const int64_t total = eng.numSamples ();
-    std::vector<std::vector<float>> newData ((size_t) nch,
+    std::vector<std::vector<float>> newData ((size_t) nOut,
                                              std::vector<float> ((size_t) total, 0.0f));
     for (int ch = 0; ch < nch0; ++ch)
         if (!eng.readSamples (ch, 0, total, newData[(size_t) ch].data ()))
             return fail ("Failed to read audio.");
 
-    // Track 1: replace the selected band with noise-floor fill.
-    const auto& r = res[(size_t) 0];
-    std::copy (r.begin (), r.end(),
-               newData[(size_t) 0].begin () + (size_t) extent.getStart());
-    // Track 2: mix in the extracted band content.
-    const auto& e = ext[(size_t) 0];
-    for (size_t i = 0; i < e.size (); ++i)
-        newData[(size_t) 1][(size_t) extent.getStart() + i] += e[i];
+    // Apply the pairs in configured order: each input's selected band becomes
+    // noise-floor fill and its extracted content is mixed into the destination.
+    for (const auto& p : pairs)
+    {
+        const auto& r = res[(size_t) p.first];
+        std::copy (r.begin (), r.end(),
+                   newData[(size_t) p.first].begin () + (size_t) extent.getStart());
+        const auto& e = ext[(size_t) p.first];
+        for (size_t i = 0; i < e.size (); ++i)
+            newData[(size_t) p.second][(size_t) extent.getStart() + i] += e[i];
+    }
 
     if (!eng.replaceWholeFileUndoable (newData,
-                                       "Split spectral selection track 1 to track 2"))
+                                       "Split spectral selection (configured)"))
         return fail ("Could not apply the split.");
 
-    // Make sure track 2 is visible (leave other choices alone).
-    if (!isChannelVisible (1))
-    {
-        visibleChannels.push_back (1);
-        std::sort (visibleChannels.begin (), visibleChannels.end());
-    }
+    // Make any freshly created channels visible (leave other choices alone).
+    for (int ch = nch0; ch < eng.numChannels (); ++ch)
+        if (!isChannelVisible (ch))
+            visibleChannels.push_back (ch);
+    std::sort (visibleChannels.begin (), visibleChannels.end());
     syncActiveDoc ();
 
     return true;

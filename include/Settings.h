@@ -139,6 +139,12 @@ struct Settings
     juce::String envLastCurve;           // "timeSecs,gainDb;timeSecs,gainDb;..." ("" = flat)
     juce::String envUserPresets;         // one line per preset: "name|t,gain;..."
 
+    // Split spectral selection configuration (Effects menu): input channel ->
+    // destination channel pairs, both 0-based. The destination may be an
+    // existing channel (the extracted band is mixed into it) or a number above
+    // the current channel count (a new channel is created on first use).
+    std::vector<std::pair<int,int>> splitConfig;
+
     bool operator== (const Settings& o) const
     {
         return fftSize == o.fftSize && fftAuto == o.fftAuto
@@ -181,7 +187,8 @@ struct Settings
             && eqLastCurve == o.eqLastCurve
             && eqUserPresets == o.eqUserPresets
             && envLastCurve == o.envLastCurve
-            && envUserPresets == o.envUserPresets;
+            && envUserPresets == o.envUserPresets
+            && splitConfig == o.splitConfig;
     }
 };
 

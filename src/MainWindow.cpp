@@ -2321,11 +2321,11 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsResample: showResampleDialog(); break;
         case ToolsStemSeparate: showStemSeparationWindow(); break;
         case ToolsSuperResolve: showSuperResolutionWindow(); break;
-        case ToolsSplitSpectralSel:
-            runDestructiveEdit ([&] (std::string* e) { return app.splitSpectralSelection (e); });
+        case ToolsSplitSpectralSelCfg:
+            showSplitConfigDialog ();
             break;
-        case ToolsSplitSpectralSelT12:
-            runDestructiveEdit ([&] (std::string* e) { return app.splitSpectralSelectionTrack1To2 (e); });
+        case ToolsSplitSpectralSelExec:
+            runSplitExecute ();
             break;
         case ToolsGenSilence: showGenerateSilenceDialog(); break;
         case ToolsGenNoise:   showGenerateNoiseDialog(); break;
@@ -3275,6 +3275,138 @@ private:
     juce::Label* label_ = nullptr;
     juce::TextEditor* editor_ = nullptr;
     static constexpr int kLabelW = 132;
+};
+
+/** Configuration grid for "Split Spectral Selection": one row per channel -
+    a checkbox ("Channel N") selects it as an extraction source and a text
+    field holds its destination channel number; preset buttons sit to the side.
+    Channel numbers are 1-based in the UI; getPairs() returns 0-based pairs. */
+class SplitConfigGrid : public juce::Component
+{
+public:
+    explicit SplitConfigGrid (int nChans)
+    {
+        nChans_ = std::max (1, nChans);
+        for (int i = 0; i < nChans_; ++i)
+        {
+            const juce::String chName = "Channel " + juce::String (i + 1);
+            auto* chk = new juce::TextButton (chName);
+            chk->setButtonText (chName);
+            chk->setClickingTogglesState (true);
+            chk->onClick = [this] { refreshDestStates (); };
+            auto* dst = new juce::TextEditor();
+            dst->setMultiLine (false);
+            dst->setTooltip ("Destination channel number: an existing "
+                             "channel mixes in the extracted content; a "
+                             "number above the current count creates a new "
+                             "channel on first use.");
+            addAndMakeVisible (chk);
+            addAndMakeVisible (dst);
+            checks_.push_back (chk);
+            dests_.push_back (dst);
+        }
+
+        const char* presetTexts[3] = { "All Tracks", "Last channel into new",
+                                       "Second last into last" };
+        for (int i = 0; i < 3; ++i)
+        {
+            auto* b = new juce::TextButton (presetTexts[i]);
+            b->setButtonText (presetTexts[i]);
+            const int preset = i;
+            b->onClick = [this, preset] { applyPreset (preset); };
+            addAndMakeVisible (b);
+            presets_.push_back (b);
+        }
+        if (nChans_ < 2) presets_[2]->setEnabled (false);   // no second-last channel
+
+        setSize (kGridW, std::max ((size_t) nChans_ * kRowH + 8, (size_t) 96));
+    }
+
+    /** Prefills one row: checked state and destination text (1-based). */
+    void setRow (int idx0, bool checked, int destOneBased)
+    {
+        if (idx0 < 0 || idx0 >= nChans_) return;
+        checks_[(size_t) idx0]->setToggleState (checked, juce::dontSendNotification);
+        dests_[(size_t) idx0]->setText (destOneBased > 0 ? juce::String (destOneBased)
+                                                         : juce::String ());
+        refreshDestStates ();
+    }
+
+    void applyPresetAllTracks()       { applyPreset (0); }
+    void applyPresetLastIntoNew()     { applyPreset (1); }
+    void applyPresetSecondLastToLast(){ applyPreset (2); }
+
+    /** Pairs for checked rows with a valid destination, in row order.
+        Returned as 0-based (input, destination) indices. */
+    std::vector<std::pair<int,int>> getPairs() const
+    {
+        std::vector<std::pair<int,int>> out;
+        for (int i = 0; i < nChans_; ++i)
+        {
+            if (!checks_[(size_t) i]->getToggleState()) continue;
+            const int d1 = dests_[(size_t) i]->getText().trim().getIntValue();
+            if (d1 >= 1 && d1 <= kMaxDest) out.push_back ({ i, d1 - 1 });
+        }
+        return out;
+    }
+
+    void resized() override
+    {
+        for (int i = 0; i < nChans_; ++i)
+        {
+            const int y = 4 + i * kRowH;
+            checks_[(size_t) i]->setBounds (kCheckX, y, kCheckW, 24);
+            dests_[(size_t) i]->setBounds (kDestX, y + 1, kDestW, 22);
+        }
+        for (int i = 0; i < 3 && i < (int) presets_.size (); ++i)
+            presets_[(size_t) i]->setBounds (kPresetX, 4 + i * 30, kPresetW, 26);
+    }
+
+private:
+    void applyPreset (int which)
+    {
+        const int N = nChans_;
+        for (int i = 0; i < N; ++i)
+        {
+            bool checked = false;
+            int dest1 = 0;
+            switch (which)
+            {
+                case 0:   // All Tracks: every channel -> its own new track.
+                    checked = true;
+                    dest1 = N + 1 + i;
+                    break;
+                case 1:   // Last channel into new: only the last, to N+1.
+                    if (i == N - 1) { checked = true; dest1 = N + 1; }
+                    break;
+                default:  // Second last into last: only N-1 -> N.
+                    if (N >= 2 && i == N - 2) { checked = true; dest1 = N; }
+                    break;
+            }
+            checks_[(size_t) i]->setToggleState (checked, juce::dontSendNotification);
+            dests_[(size_t) i]->setText (dest1 > 0 ? juce::String (dest1)
+                                                  : juce::String ());
+        }
+        refreshDestStates ();
+    }
+
+    void refreshDestStates()
+    {
+        for (int i = 0; i < nChans_; ++i)
+            dests_[(size_t) i]->setEnabled (checks_[(size_t) i]->getToggleState());
+    }
+
+    int nChans_ = 1;
+    std::vector<juce::TextButton*> checks_;
+    std::vector<juce::TextEditor*> dests_;
+    std::vector<juce::TextButton*> presets_;
+
+    static constexpr int kCheckX = 4, kCheckW = 150;
+    static constexpr int kDestX = 168, kDestW = 64;
+    static constexpr int kPresetX = 248, kPresetW = 150;
+    static constexpr int kRowH = 26;
+    static constexpr int kGridW = 402;
+    static constexpr int kMaxDest = 256;
 };
 
 /** One row of buttons that fill the remix matrix with preset patterns. */
@@ -4404,6 +4536,86 @@ void MainWindow::showResampleDialog()
         return;   // nothing to do
 
     runResampleAsync (newRate, weights);
+}
+
+// Effects > Split Spectral Selection Configuration / Shift+F12 - modal
+// window editing settings.splitConfig. Closing it (OK or X) saves the
+// configuration without performing any split and marks the active document
+// as configured for this file open.
+juce::AlertWindow* MainWindow::createSplitConfigDialog()
+{
+    auto& eng = app.audioEngine();
+    const int nChans = std::max (1, eng.numChannels());
+
+    auto* w = new juce::AlertWindow ("Split Spectral Selection Configuration",
+                                     "Tick the channels to extract the selected band from. "
+                                     "Each destination is a channel number: an existing "
+                                     "channel mixes in the extracted content; a number above "
+                                     "the current count creates a new channel on first use.\n\n"
+                                     "Closing saves the configuration without performing any split.",
+                                     juce::AlertWindow::InfoIcon, this);
+
+    auto* grid = new SplitConfigGrid (nChans);
+    // Prefill from the saved configuration; fall back to "last channel into
+    // new" when nothing usable was stored for this file's channel count.
+    bool prefilled = false;
+    for (const auto& p : app.settings.splitConfig)
+        if (p.first >= 0 && p.first < nChans)
+        {
+            grid->setRow (p.first, true, p.second + 1);
+            prefilled = true;
+        }
+    if (!prefilled) grid->applyPresetLastIntoNew();
+
+    w->addCustomComponent (grid);
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    return w;
+}
+
+void MainWindow::showSplitConfigDialog()
+{
+    auto& eng = app.audioEngine();
+    if (!eng.isFileLoaded()) return;
+    FileDoc* d = app.doc();
+    if (d == nullptr) return;
+
+    auto* w = createSplitConfigDialog();
+    // Enter modal state WITHOUT taking keyboard focus (see showResampleDialog).
+    w->enterModalState (false);
+    w->runModalLoop ();
+    std::vector<std::pair<int,int>> pairs;
+    for (int i = 0; i < w->getNumChildComponents (); ++i)
+        if (auto* g = dynamic_cast<SplitConfigGrid*> (w->getChildComponent (i)))
+        {
+            pairs = g->getPairs ();
+            break;
+        }
+    delete w;
+
+    // Closing the window saves the configuration without performing any split.
+    app.settings.splitConfig = std::move (pairs);
+    d->splitConfigured = true;
+    syncSharedState ();   // persists settings via samePersistent()
+}
+
+// Effects > Split Spectral Selection Execute / F12 - runs the configured
+// split of the active spectral selection. The first time per file open it
+// opens the configuration window instead (no split until a configuration
+// exists).
+void MainWindow::runSplitExecute()
+{
+    auto& eng = app.audioEngine();
+    if (!eng.isFileLoaded()) return;
+    FileDoc* d = app.doc();
+    if (d == nullptr) return;
+
+    if (!d->splitConfigured)
+    {
+        showSplitConfigDialog ();   // configure first, then run again
+        return;
+    }
+    runDestructiveEdit ([&] (std::string* e)
+        { return app.splitSpectralSelectionConfigured (e); });
 }
 
 void MainWindow::showNewFileDialog()
@@ -5652,16 +5864,18 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         // into a single mono 48 kHz track (FlashSR or AudioSR).
         menu.addItem (ToolsSuperResolve, "Super Resolution...",
                       app.audioEngine().isFileLoaded(), false);
-        // Splits the active spectral selection into new channel(s): the band
-        // content goes to the added track(s) with a soft 25%/50%/25% frequency
-        // blend and noise-floor subtraction; the originals get noise fill at
-        // the estimated floor level so nothing is hard-cut.
-        menu.addItem (ToolsSplitSpectralSel, "Split Spectral Selection (All Tracks)\tF12",
-                      app.hasSpectralSelection(), false);
-        // Track 1 -> track 2 variant: only channel 0's band content is
-        // extracted and mixed into channel 1 (created if missing); track 1
-        // gets the noise-floor fill.
-        menu.addItem (ToolsSplitSpectralSelT12, "Split Spectral Selection (Track 1->2)\tShift+F12",
+        // Configure which channels the spectral selection is extracted from
+        // and where each extraction goes. Closing saves the configuration
+        // without performing any split.
+        menu.addItem (ToolsSplitSpectralSelCfg, "Split Spectral Selection Configuration\tShift+F12",
+                      app.audioEngine().isFileLoaded(), false);
+        // Executes the configured split: each input channel's selected band is
+        // extracted with a soft 25%/50%/25% frequency blend and noise-floor
+        // subtraction, then mixed into its destination channel (existing ones
+        // mix in place; numbers above the current count create new channels on
+        // first use). The first time per file open it opens the configuration
+        // window instead.
+        menu.addItem (ToolsSplitSpectralSelExec, "Split Spectral Selection Execute\tF12",
                       app.hasSpectralSelection(), false);
 
         // Generation: replaces the spectral selection region if one is active,
@@ -5772,14 +5986,16 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { takeSpectrogramSnapshot(); return true; }
     // F11 opens Edit > Resample... (no-op when no file is loaded).
     if (key.getKeyCode() == juce::KeyPress::F11Key) { showResampleDialog(); return true; }
-    // F12 splits the active spectral selection into new channel(s);
-    // Shift+F12 moves track 1's band content to track 2 instead.
+    // Shift+F12 opens the split-configuration window (no split is performed).
+    if (key.getKeyCode() == juce::KeyPress::F12Key && key.getModifiers().isShiftDown ())
+    {
+        if (app.audioEngine ().isFileLoaded ()) showSplitConfigDialog ();
+        return true;
+    }
+    // F12 executes the configured split of the active spectral selection.
     if (key.getKeyCode() == juce::KeyPress::F12Key && app.hasSpectralSelection ())
     {
-        const bool toTrack2 = key.getModifiers().isShiftDown ();
-        runDestructiveEdit ([&] (std::string* e)
-            { return toTrack2 ? app.splitSpectralSelectionTrack1To2 (e)
-                              : app.splitSpectralSelection (e); });
+        runSplitExecute ();
         return true;
     }
     // F5 refreshes the spectrogram (Spectral Controls > Refresh): clears the

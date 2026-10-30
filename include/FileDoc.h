@@ -28,6 +28,12 @@ public:
     juce::Range<double> selection { 0, 0 };   // time-range selection (mirrors the spectral one's extent)
     SpectralSelection spectralSel;     // per-file spectral (time x frequency) selection
     std::vector<int> visibleChannels;  // sorted channel indices to display
+
+    /** True once the user has opened "Split Spectral Selection Configuration"
+        for this file. Per-file-open state: Execute uses the saved split
+        configuration only after it was configured at least once per open;
+        otherwise it opens the configuration window first (no split). */
+    bool splitConfigured = false;
     ScaleCalibration scale;            // physical-unit calibration (Set Unit and Scale menu)
 
     /** Raw payload of the source file's "bkdk" RIFF chunk, kept so WAV

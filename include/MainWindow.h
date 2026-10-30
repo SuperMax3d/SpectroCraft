@@ -236,6 +236,22 @@ public:
     /** Shows every channel in both views (View > All Channels; also the
         solo-off half of the Ctrl/Shift+click and Ctrl+Shift+N toggles). */
     void showEveryChannel();
+    /** Effects > Split Spectral Selection Configuration / Shift+F12: modal
+        window editing settings.splitConfig. Closing it saves the
+        configuration without performing any split and marks the active
+        document as configured (per-file-open state). */
+    void showSplitConfigDialog();
+
+    /** Builds the split-configuration dialog; caller owns and must delete it;
+        used by showSplitConfigDialog() and tests. */
+    juce::AlertWindow* createSplitConfigDialog();
+
+    /** Effects > Split Spectral Selection Execute / F12: runs the configured
+        split of the active spectral selection. The first time per file open
+        it opens the configuration window instead (no split until a
+        configuration exists). */
+    void runSplitExecute();
+
     void showResampleDialog();
     /** Builds (but does not run modally) the Resample dialog. The caller owns
         and must delete it; used by showResampleDialog() and tests. */
@@ -367,8 +383,8 @@ public:
         ToolsResample,
         ToolsStemSeparate,   // AI stem separation via the audio.cpp CLI tool
         ToolsSuperResolve,   // AI super resolution (FlashSR / AudioSR) via the audio.cpp CLI tool
-        ToolsSplitSpectralSel,     // split active spectral selection into new channel(s) (F12)
-        ToolsSplitSpectralSelT12,  // move track 1's selected band to track 2 (Shift+F12)
+        ToolsSplitSpectralSelCfg,   // configure the split: input -> destination channels (Shift+F12)
+        ToolsSplitSpectralSelExec,  // execute the configured split of the active spectral selection (F12)
         ToolsGenSilence,           // Effects > Generate Silence...
         ToolsGenNoise,             // Effects > Generate Noise...
         ToolsGenTone,              // Effects > Generate Tone...

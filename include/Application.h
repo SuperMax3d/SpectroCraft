@@ -551,25 +551,20 @@ public:
     bool generateTone (const std::vector<sc::ToneSpec>& tones, sc::WaveShape shape,
                        double durationSecs, std::string* errOut = nullptr);
 
-    /** Splits the active spectral selection: the selected band content is
-        copied into one new channel per affected (visible) source channel,
-        with a trapezoidal frequency blend (25% ramps top and bottom, 50%
-        intact middle) and the estimated per-frame noise floor subtracted;
-        the original channels keep everything outside the selection and get
-        synthetic noise at the estimated floor level inside it, so that
-        original + extracted ~= the pre-edit signal with no sharp spectral
-        edge. One undoable step (adds the new channel(s) and rewrites the
-        originals together). Returns false with *errOut set on failure. */
-    bool splitSpectralSelection (std::string* errOut = nullptr);
-
-    /** Track 1 -> track 2 variant of splitSpectralSelection(): only channel 0
-        (track 1) is processed, regardless of visibility. Its selected band
-        content (same trapezoidal blend + noise-floor subtraction) is mixed
-        into channel 1 (track 2), which is created if the file has fewer than
-        two channels; track 1 gets the same noise-floor fill as in
-        splitSpectralSelection(). One undoable step. Returns false with *errOut
-        set on failure. */
-    bool splitSpectralSelectionTrack1To2 (std::string* errOut = nullptr);
+    /** Executes the configured "Split Spectral Selection" (F12): for every
+        input -> destination pair in settings.splitConfig, the selected band
+        content is extracted from the input channel with a trapezoidal
+        frequency blend (25% ramps top and bottom, 50% intact middle) and the
+        estimated per-frame noise floor subtracted; it is then mixed into the
+        destination channel - an existing channel mixes in place, a number
+        above the current count creates a new channel on first use. The input
+        channels keep everything outside the selection and get synthetic noise
+        at the estimated floor level inside it, so that original + extracted ~=
+        the pre-edit signal with no sharp spectral edge. Pairs are applied in
+        configured order; one undoable step (new channels and rewritten
+        originals together). Returns false with *errOut set when there is no
+        selection or no usable configuration. */
+    bool splitSpectralSelectionConfigured (std::string* errOut = nullptr);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     // BLOCKING — call from a worker thread. Applies AI noise suppression
     // (denseunet or DeepFilterNet2/3, selected by modelId) to the current
