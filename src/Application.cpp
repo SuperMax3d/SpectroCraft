@@ -17,6 +17,30 @@
 #include <algorithm>
 #include <thread>
 
+// Monotonic time warps for edits that insert / delete / stretch timeline
+// data. The live playhead and selection are warped with the same functions
+// FileDoc's remapFor* methods use for markers, spectral selections, drawings
+// and SCTT segments.
+static double warpInsertion (double t, double a, double len)
+{
+    return t < a ? t : t + len;
+}
+
+static double warpDeletion (double t, double a, double b)
+{
+    if (t < a) return t;
+    if (t >= b) return t - (b - a);
+    return a;   // inside the deleted range: collapses to its start
+}
+
+static double warpStretch (double t, double a, double bOld, double bNew)
+{
+    if (t <= a) return t;
+    if (t >= bOld) return t + (bNew - bOld);
+    const double k = (bNew - a) / (bOld - a);
+    return a + (t - a) * k;
+}
+
 Application::Application (const juce::File& recentStorePath)
 {
     emptyEngine.setUndoManager (&emptyUndo);
@@ -1697,9 +1721,37 @@ bool Application::paste(std::string* errOut)
     // Paste at the start of the selection, or at the cursor when nothing is
     // selected.
     const double t = !selection.isEmpty() ? selection.getStart() : playhead;
+    FileDoc* d = doc ();
+    const size_t depthBefore = d->undo.depth ();
+    std::vector<Marker> oldMarkers = d->markers.markers ();
+    auto oldSavedSel = d->savedSelections;
+    TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
+
     if (!audioEngine().pasteAt ((int64_t) (t * audioEngine().sampleRate()),
                                 *clipboard, errOut))
         return false;
+
+    const double lenSecs = (double) clipboard->getNumSamples () / audioEngine ().sampleRate ();
+    d->remapForInsertion (t, lenSecs);   // markers/savedSel/spectralSel/drawings/SCTT
+
+    // Content from t on shifted right by lenSecs; the live cursor/selection follow.
+    playhead = playhead < t ? playhead : playhead + lenSecs;
+    selection = { warpInsertion (selection.getStart (), t, lenSecs),
+                  warpInsertion (selection.getEnd (),   t, lenSecs) };
+
+    if (d->undo.depth () > depthBefore)   // a patch was actually recorded
+    {
+        Patch& p = d->undo.lastRecorded ();
+        p.hasSideState = true;
+        p.oldMarkers  = std::move (oldMarkers);
+        p.newMarkers  = d->markers.markers ();
+        p.oldSavedSel = std::move (oldSavedSel);
+        p.newSavedSel = d->savedSelections;
+        commitTimeAnchoredToPatch (oldTA, p);
+        if (onTimeRangeInserted)
+            onTimeRangeInserted (d, t, lenSecs, p);   // records + adjusts FFT snapshots
+    }
+
     syncActiveDoc ();
     return true;
 }
@@ -2023,36 +2075,35 @@ bool Application::applyStemSeparationResult (sc::MergeResult& r, int outputMode,
     const int nTracks = (int) r.data.size ();
     std::vector<Marker> oldMarkers = d->markers.markers ();
     auto oldSavedSel = d->savedSelections;
+    TimeAnchoredState oldTA = captureTimeAnchored ();   // overwrite mode remaps it
 
     if (outputMode == 2)
     {
-        // Overwrite: one undoable patch replaces the whole content. Markers inside
-        // the extracted range keep their relative position; everything else is
-        // dropped with the old timeline.
-        const double newDur = (double) r.data[0].size () / eng.sampleRate ();
+        // Overwrite: one undoable patch replaces the whole content. State anchored
+        // inside the extracted range keeps its relative position; everything else
+        // is dropped with the old timeline - modelled as two deletions, [0,
+        // extStart) and [extStart+newDur, totalOld).
+        const double newDur   = (double) r.data[0].size () / eng.sampleRate ();
+        const double totalOld = eng.duration ();
 
-        std::vector<Marker> shifted;
-        for (const auto& m : d->markers.markers ())
-        {
-            const double s = m.start - extStartSecs;
-            if (s < -1e-9 || s > newDur + 1e-9) continue;   // outside the extracted range
-            Marker c = m;
-            c.start = std::clamp (s, 0.0, newDur);
-            if (c.end >= 0.0)
-                c.end = std::clamp (m.end - extStartSecs, c.start, newDur);
-            shifted.push_back (std::move (c));
-        }
+        d->remapForDeletion (0.0, extStartSecs);
+        d->remapForDeletion (newDur, totalOld - extStartSecs);
 
         if (!eng.replaceWholeFileUndoable (r.data, "Stem separation"))
             return fail ("Could not replace the file content.");
 
-        d->markers.restore (shifted);
-
         // Keep playhead/selection at their relative position inside the extracted range.
         const double dur = eng.duration ();
-        playhead = std::clamp (playhead - extStartSecs, 0.0, dur);
-        selection = { std::clamp (selection.getStart () - extStartSecs, 0.0, dur),
-                      std::clamp (selection.getEnd () - extStartSecs, 0.0, dur) };
+        auto W = [&](double t) {
+            double u = (t < extStartSecs) ? 0.0 : t - extStartSecs;   // after first deletion
+            if (totalOld > extStartSecs && u >= newDur && u <= totalOld - extStartSecs)
+                u = newDur;                                          // inside the second deleted range
+            else if (u > totalOld - extStartSecs)
+                u -= (totalOld - extStartSecs) - newDur;             // after it: shift left
+            return std::clamp (u, 0.0, dur);
+        };
+        playhead  = W (playhead);
+        selection = { W (selection.getStart ()), W (selection.getEnd ()) };
 
         // The new file has exactly the stem tracks; show all of them.
         visibleChannels.clear ();
@@ -2110,6 +2161,8 @@ bool Application::applyStemSeparationResult (sc::MergeResult& r, int outputMode,
     p.newMarkers = d->markers.markers ();
     p.oldSavedSel = std::move (oldSavedSel);
     p.newSavedSel = d->savedSelections;
+    if (outputMode == 2)
+        commitTimeAnchoredToPatch (oldTA, p);   // overwrite remapped the time-anchored state
 
     syncActiveDoc ();
     return true;
@@ -2145,39 +2198,38 @@ bool Application::applySuperResolutionResult (sc::MergeResult& r, int outputMode
 
     std::vector<Marker> oldMarkers = d->markers.markers ();
     auto oldSavedSel = d->savedSelections;
+    TimeAnchoredState oldTA = captureTimeAnchored ();   // overwrite mode remaps it
 
     if (outputMode == 2)
     {
         // Overwrite: one undoable patch replaces the whole content, including
-        // a possible sample-rate change. Markers inside the extracted range
-        // keep their relative position; everything else is dropped with the
-        // old timeline.
-        const double newDur = (double) r.data[0].size () / r.rate;
+        // a possible sample-rate change. State anchored inside the extracted
+        // range keeps its relative position; everything else is dropped with
+        // the old timeline - modelled as two deletions, [0, extStart) and
+        // [extStart+newDur, totalOld).
+        const double newDur   = (double) r.data[0].size () / r.rate;
+        const double totalOld = eng.duration ();
 
-        std::vector<Marker> shifted;
-        for (const auto& m : d->markers.markers ())
-        {
-            const double s = m.start - extStartSecs;
-            if (s < -1e-9 || s > newDur + 1e-9) continue;   // outside the extracted range
-            Marker c = m;
-            c.start = std::clamp (s, 0.0, newDur);
-            if (c.end >= 0.0)
-                c.end = std::clamp (m.end - extStartSecs, c.start, newDur);
-            shifted.push_back (std::move (c));
-        }
+        d->remapForDeletion (0.0, extStartSecs);
+        d->remapForDeletion (newDur, totalOld - extStartSecs);
 
         // r.rate may differ from the document's rate: recordReplace stores it
         // in the patch and undo restores the old one.
         if (!eng.replaceWholeFileUndoable (r.data, "Super resolution", r.rate))
             return fail ("Could not replace the file content.");
 
-        d->markers.restore (shifted);
-
         // Keep playhead/selection at their relative position inside the extracted range.
         const double dur = eng.duration ();
-        playhead = std::clamp (playhead - extStartSecs, 0.0, dur);
-        selection = { std::clamp (selection.getStart () - extStartSecs, 0.0, dur),
-                      std::clamp (selection.getEnd () - extStartSecs, 0.0, dur) };
+        auto W = [&](double t) {
+            double u = (t < extStartSecs) ? 0.0 : t - extStartSecs;   // after first deletion
+            if (totalOld > extStartSecs && u >= newDur && u <= totalOld - extStartSecs)
+                u = newDur;                                          // inside the second deleted range
+            else if (u > totalOld - extStartSecs)
+                u -= (totalOld - extStartSecs) - newDur;             // after it: shift left
+            return std::clamp (u, 0.0, dur);
+        };
+        playhead  = W (playhead);
+        selection = { W (selection.getStart ()), W (selection.getEnd ()) };
 
         // The new file has exactly the enhanced track; show it.
         visibleChannels.clear ();
@@ -2238,6 +2290,8 @@ bool Application::applySuperResolutionResult (sc::MergeResult& r, int outputMode
     p.newMarkers = d->markers.markers ();
     p.oldSavedSel = std::move (oldSavedSel);
     p.newSavedSel = d->savedSelections;
+    if (outputMode == 2)
+        commitTimeAnchoredToPatch (oldTA, p);   // overwrite remapped the time-anchored state
 
     syncActiveDoc ();
     if (onStateChange) onStateChange ();   // refresh the main window immediately
@@ -2346,17 +2400,16 @@ bool Application::del(std::string* errOut)
     // before the edit so undo/redo can restore it (Patch::hasSideState).
     std::vector<Marker> oldMarkers = d->markers.markers();
     auto oldSavedSel = d->savedSelections;
+    TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
 
     if (!audioEngine().deleteSamples (selectionSamples (*this), errOut))
         return false;
     selection = { 0, 0 };
+    playhead = warpDeletion (playhead, a, b);   // the cursor follows its anchored position
 
     if (d->undo.depth() > depthBefore)   // a patch was actually recorded
     {
-        d->markers.adjustForDeletion (a, b);
-        for (auto& ss : d->savedSelections)
-            ss.data.adjustForDeletion (a, b);
-        d->metaDirty = true;   // the adjusted list no longer matches disk
+        d->remapForDeletion (a, b);      // markers/savedSel/spectralSel/drawings/SCTT
 
         Patch& p = d->undo.lastRecorded ();
         p.hasSideState = true;
@@ -2364,6 +2417,7 @@ bool Application::del(std::string* errOut)
         p.newMarkers = d->markers.markers();
         p.oldSavedSel = std::move (oldSavedSel);
         p.newSavedSel = d->savedSelections;
+        commitTimeAnchoredToPatch (oldTA, p);
         if (onTimeRangeDeleted)
             onTimeRangeDeleted (d, a, b, p, false);   // records + adjusts FFT snapshots
     }
@@ -2392,21 +2446,20 @@ bool Application::trimSelection (std::string* errOut)
     const size_t depthBefore = d->undo.depth();
     std::vector<Marker> oldMarkers = d->markers.markers ();
     auto oldSavedSel = d->savedSelections;
+    TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
 
     if (!eng.trimToRange (range, errOut))
         return false;
 
     // Two deletions: [0, aSec) and [bSec, totalSecs). Adjust in that order so
     // the second range is expressed in post-first-deletion coordinates.
-    d->markers.adjustForDeletion (0.0, aSec);
-    for (auto& ss : d->savedSelections)
-        ss.data.adjustForDeletion (0.0, aSec);
     const double bNew = bSec - aSec;
     const double totalNew = totalSecs - aSec;
-    d->markers.adjustForDeletion (bNew, totalNew);
-    for (auto& ss : d->savedSelections)
-        ss.data.adjustForDeletion (bNew, totalNew);
-    d->metaDirty = true;   // the adjusted list no longer matches disk
+    d->remapForDeletion (0.0, aSec);
+    d->remapForDeletion (bNew, totalNew);
+
+    selection = { 0.0, eng.duration() };   // the whole trimmed track is now selected
+    playhead = warpDeletion (warpDeletion (playhead, 0.0, aSec), bNew, totalNew);
 
     if (d->undo.depth() > depthBefore)   // a patch was actually recorded
     {
@@ -2416,6 +2469,7 @@ bool Application::trimSelection (std::string* errOut)
         p.newMarkers = d->markers.markers();
         p.oldSavedSel = std::move (oldSavedSel);
         p.newSavedSel = d->savedSelections;
+        commitTimeAnchoredToPatch (oldTA, p);
         if (onTimeRangeDeleted)
         {
             onTimeRangeDeleted (d, 0.0, aSec, p, false);
@@ -2424,8 +2478,6 @@ bool Application::trimSelection (std::string* errOut)
             onTimeRangeDeleted (d, bNew, totalNew, p, true);
         }
     }
-
-    selection = { 0.0, eng.duration() };   // the whole trimmed track is now selected
     syncActiveDoc ();
     return true;
 }
@@ -2574,9 +2626,11 @@ bool Application::timeStretch (float percentChange, std::string* errOut)
     if (range.getLength () <= 0) return true;
 
     const double aSec = (double) range.getStart () / rate;
+    const double oldEndSecs = (double) range.getEnd () / rate;
     const size_t depthBefore = d->undo.depth ();
     std::vector<Marker> oldMarkers = d->markers.markers ();
     auto oldSavedSel = d->savedSelections;
+    TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
 
     if (!eng.stretchRange (range, percentChange, errOut))
         return false;
@@ -2586,24 +2640,23 @@ bool Application::timeStretch (float percentChange, std::string* errOut)
     const double bNew = ((double) range.getStart () + (double) range.getLength ()
                          + (double) delta) / rate;
 
+    d->remapForStretch (aSec, oldEndSecs, bNew);   // markers/savedSel/spectralSel/drawings/SCTT
+    selection = { aSec, bNew };   // the stretched region stays selected
+    playhead = warpStretch (playhead, aSec, oldEndSecs, bNew);
+
     if (d->undo.depth () > depthBefore)   // a patch was actually recorded
     {
-        d->markers.adjustForStretch (aSec, (double) range.getEnd () / rate, bNew);
-        for (auto& ss : d->savedSelections)
-            ss.data.adjustForStretch (aSec, (double) range.getEnd () / rate, bNew);
-        d->metaDirty = true;   // the adjusted lists no longer match disk
-
         Patch& p = d->undo.lastRecorded ();
         p.hasSideState = true;
         p.oldMarkers = std::move (oldMarkers);
         p.newMarkers = d->markers.markers ();
         p.oldSavedSel = std::move (oldSavedSel);
         p.newSavedSel = d->savedSelections;
+        commitTimeAnchoredToPatch (oldTA, p);
         if (onTimeRangeStretched)
-            onTimeRangeStretched (d, aSec, (double) range.getEnd () / rate, bNew, p);
+            onTimeRangeStretched (d, aSec, oldEndSecs, bNew, p);
     }
 
-    selection = { aSec, bNew };   // the stretched region stays selected
     syncActiveDoc ();
     return true;
 }
@@ -2729,6 +2782,47 @@ static bool replaceRangeWithGen (Application& app, const GenPlan& plan,
     return true;
 }
 
+/** Inserts generated data at the playhead (InsertAtPlayhead mode) and remaps
+    every time-anchored state for the insertion; one undoable patch. */
+static bool applyGenInsert (Application& app, const GenPlan& plan,
+                            std::vector<std::vector<float>>& data,
+                            const juce::String& desc, std::string* errOut)
+{
+    AudioEngine& eng = app.audioEngine ();
+    FileDoc* d = app.doc ();
+    const size_t depthBefore = d->undo.depth ();
+    std::vector<Marker> oldMarkers = d->markers.markers ();
+    auto oldSavedSel = d->savedSelections;
+    Application::TimeAnchoredState oldTA = app.captureTimeAnchored ();
+
+    if (!eng.insertSamples (plan.insertPos, data, desc, errOut))
+        return false;
+
+    const double aSec    = (double) plan.insertPos / eng.sampleRate ();
+    const double lenSecs = (double) data[0].size () / eng.sampleRate ();
+    d->remapForInsertion (aSec, lenSecs);   // markers/savedSel/spectralSel/drawings/SCTT
+
+    // Content from aSec on shifted right by lenSecs; the live cursor/selection follow.
+    app.playhead = warpInsertion (app.playhead, aSec, lenSecs);
+    app.selection = { warpInsertion (app.selection.getStart (), aSec, lenSecs),
+                      warpInsertion (app.selection.getEnd (),   aSec, lenSecs) };
+
+    if (d->undo.depth () > depthBefore)   // a patch was actually recorded
+    {
+        Patch& p = d->undo.lastRecorded ();
+        p.hasSideState = true;
+        p.oldMarkers  = std::move (oldMarkers);
+        p.newMarkers  = d->markers.markers ();
+        p.oldSavedSel = std::move (oldSavedSel);
+        p.newSavedSel = d->savedSelections;
+        app.commitTimeAnchoredToPatch (oldTA, p);
+        if (app.onTimeRangeInserted)
+            app.onTimeRangeInserted (d, aSec, lenSecs, p);   // records + adjusts FFT snapshots
+    }
+
+    return true;
+}
+
 /** Band-limits the generated data to the spectral selection region and mixes
     it back: inside the band the original content is replaced by the generated
     signal, outside it everything passes through bit-exact. */
@@ -2778,7 +2872,7 @@ bool Application::generateSilence (double durationSecs, std::string* errOut)
                                           std::vector<float> ((size_t) len, 0.0f));
 
     if (plan.mode == GenPlan::Mode::InsertAtPlayhead)
-        return eng.insertSamples (plan.insertPos, data, "Generated silence", errOut);
+        return applyGenInsert (*this, plan, data, "Generated silence", errOut);
     return replaceRangeWithGen (*this, plan, data, "Generated silence", errOut);
 }
 
@@ -2811,8 +2905,8 @@ bool Application::generateNoise (sc::NoiseType type, float intensity,
     sc::generateNoise (type, intensity, eng.numChannels (), len, 0, data);
 
     if (plan.mode == GenPlan::Mode::InsertAtPlayhead)
-        return eng.insertSamples (plan.insertPos, data,
-                                  "Generated " + typeName + " noise", errOut);
+        return applyGenInsert (*this, plan, data,
+                               "Generated " + typeName + " noise", errOut);
     return replaceRangeWithGen (*this, plan, data, "Generated " + typeName + " noise", errOut);
 }
 
@@ -2854,7 +2948,7 @@ bool Application::generateTone (const std::vector<sc::ToneSpec>& tones, sc::Wave
                       eng.numChannels (), len, data);
 
     if (plan.mode == GenPlan::Mode::InsertAtPlayhead)
-        return eng.insertSamples (plan.insertPos, data, "Generated tone", errOut);
+        return applyGenInsert (*this, plan, data, "Generated tone", errOut);
     return replaceRangeWithGen (*this, plan, data, "Generated tone", errOut);
 }
 
@@ -3216,18 +3310,24 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
         const size_t depthBefore = d->undo.depth ();
         std::vector<Marker> oldMarkers = d->markers.markers ();
         auto oldSavedSel = d->savedSelections;
+        TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
 
         ok = audioEngine ().replaceRangeWithDifferentLength (samples, newData, desc, &err);
-        if (ok && got < want && d->undo.depth () > depthBefore)
+        if (!ok || d->undo.depth () <= depthBefore)
+            ;
+        else if (got < want)
         {
             // The tail of the processed range is gone: drop / clip anything that
             // referred to it.
             const double aSec = (double) (samples.getStart () + got) / rate;
             const double bSec = (double) samples.getEnd () / rate;
-            d->markers.adjustForDeletion (aSec, bSec);
-            for (auto& ss : d->savedSelections)
-                ss.data.adjustForDeletion (aSec, bSec);
-            d->metaDirty = true;
+            d->remapForDeletion (aSec, bSec);
+
+            // The cursor/selection follow their anchored positions; the old
+            // selection [start, end) now covers exactly the shortened range.
+            playhead  = warpDeletion (playhead, aSec, bSec);
+            selection = { warpDeletion (selection.getStart (), aSec, bSec),
+                          warpDeletion (selection.getEnd (),   aSec, bSec) };
 
             Patch& p = d->undo.lastRecorded ();
             p.hasSideState = true;
@@ -3235,8 +3335,31 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
             p.newMarkers  = d->markers.markers ();
             p.oldSavedSel = std::move (oldSavedSel);
             p.newSavedSel = d->savedSelections;
+            commitTimeAnchoredToPatch (oldTA, p);
             if (onTimeRangeDeleted)
                 onTimeRangeDeleted (d, aSec, bSec, p, false);
+        }
+        else
+        {
+            // The processed range grew: content from its old end on shifted
+            // right by the delta.
+            const double aSec    = (double) samples.getEnd () / rate;
+            const double lenSecs = (double) (got - want) / rate;
+            d->remapForInsertion (aSec, lenSecs);
+
+            playhead  = warpInsertion (playhead, aSec, lenSecs);
+            selection = { warpInsertion (selection.getStart (), aSec, lenSecs),
+                          warpInsertion (selection.getEnd (),   aSec, lenSecs) };
+
+            Patch& p = d->undo.lastRecorded ();
+            p.hasSideState = true;
+            p.oldMarkers  = std::move (oldMarkers);
+            p.newMarkers  = d->markers.markers ();
+            p.oldSavedSel = std::move (oldSavedSel);
+            p.newSavedSel = d->savedSelections;
+            commitTimeAnchoredToPatch (oldTA, p);
+            if (onTimeRangeInserted)
+                onTimeRangeInserted (d, aSec, lenSecs, p);
         }
     }
 
@@ -3587,10 +3710,61 @@ void Application::restorePatchSideState (FileDoc* d, const Patch& p, bool isRedo
 {
     d->markers.restore (isRedo ? p.newMarkers : p.oldMarkers);
     d->savedSelections = isRedo ? p.newSavedSel : p.oldSavedSel;
+
+    if (p.hasTimeAnchored)
+    {
+        // Playhead and selection are Application members: restore them here so
+        // the subsequent syncActiveDoc() pushes the restored values into the
+        // document instead of clobbering them.
+        playhead  = isRedo ? p.newPlayhead : p.oldPlayhead;
+        selection = isRedo ? p.newSel : p.oldSel;
+
+        d->spectralSel   = isRedo ? p.newSpecSel : p.oldSpecSel;
+        d->drawings      = isRedo ? p.newDrawings : p.oldDrawings;
+        d->sctt.segments = isRedo ? p.newScttSegs : p.oldScttSegs;
+    }
+
     d->metaDirty = true;   // restored state differs from what was last saved
     // Markers/selections persist with the unified metadata on Save - no live sidecar.
     if (onPatchSideStateRestored)
         onPatchSideStateRestored (d, p, isRedo);
+}
+
+Application::TimeAnchoredState Application::captureTimeAnchored () const
+{
+    TimeAnchoredState t;
+    t.playhead  = playhead;
+    t.selection = selection;
+
+    FileDoc* d = doc ();
+    if (d != nullptr)
+    {
+        t.spectralSel   = d->spectralSel;
+        t.drawings      = d->drawings;
+        t.scttSegments  = d->sctt.segments;
+    }
+    return t;
+}
+
+void Application::commitTimeAnchoredToPatch (const TimeAnchoredState& before, Patch& p)
+{
+    FileDoc* d = doc ();
+
+    p.hasTimeAnchored = true;
+    p.oldPlayhead  = before.playhead;
+    p.oldSel       = before.selection;
+    p.oldSpecSel   = before.spectralSel;
+    p.oldDrawings  = before.drawings;
+    p.oldScttSegs  = before.scttSegments;
+
+    p.newPlayhead  = playhead;
+    p.newSel       = selection;
+    if (d != nullptr)
+    {
+        p.newSpecSel   = d->spectralSel;
+        p.newDrawings  = d->drawings;
+        p.newScttSegs  = d->sctt.segments;
+    }
 }
 
 void Application::undoStep() { undoSteps (1); }

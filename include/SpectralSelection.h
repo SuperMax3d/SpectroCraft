@@ -170,6 +170,19 @@ public:
         The frequency axis is untouched. Returns true when anything changed. */
     bool adjustForStretch (double a, double bOld, double bNew);
 
+    /** Adjust this selection after len seconds have been inserted at time a:
+        shapes entirely before are unchanged; those entirely after shift right
+        by len; shapes straddling the insertion point are split into up to two
+        pieces (rects) or clipped and shifted (polygons/strokes). The frequency
+        axis is untouched. Returns true when anything changed. */
+    bool adjustForInsertion (double a, double len);
+
+    /** Drops every shape entirely outside [lo, hi] and trims the remaining
+        shapes to that range (the frequency axis is untouched). Used after a
+        whole-file replacement keeps only part of the old timeline. Returns
+        true when anything changed. */
+    bool clampToTimeRange (double lo, double hi);
+
     // True if the point (tSecs, fHz) lies inside the final boolean result.
     bool contains (double tSecs, double fHz) const;
 

@@ -47,6 +47,14 @@ public:
     // Returns true when any marker changed.
     bool adjustForStretch (double a, double bOld, double bNew);
 
+    // Adjust the markers after lenSecs seconds has been inserted at position t:
+    // point markers at/after t shift right by lenSecs; region markers entirely
+    // before t are unchanged, entirely at/after it shift right, and regions
+    // straddling t keep their start while their end follows its content to
+    // e + lenSecs. No markers are dropped.
+    // Returns true when any marker changed.
+    bool adjustForInsertion (double t, double lenSecs);
+
     // Replace the whole list with `m` (undo/redo restoration of side state).
     void restore (const std::vector<Marker>& m);
 

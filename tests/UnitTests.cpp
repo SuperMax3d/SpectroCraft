@@ -5,6 +5,7 @@
  */
 
 #include <JuceHeader.h>
+#include <array>
 #include <cstring>
 #include <ctime>
 #include "Application.h"
@@ -11796,6 +11797,411 @@ static void testTrimSelection()
           "redo drops the head and tail markers again");
 }
 
+// ---------------- Time-anchored state follows insert/delete/stretch edits ---
+// Markers, selection, playhead, spectral selections, drawings and SCTT
+// segments must follow their anchored positions when an edit inserts or
+// removes timeline data; undo/redo restores every one of them.
+namespace
+{
+struct TAState
+{
+    double playhead = -1.0;
+    juce::Range<double> sel;
+    std::vector<std::pair<double, double>> markerPts;   // point markers: (start)
+    std::vector<std::pair<double, double>> markerRegs;  // region markers: (s, e)
+    std::vector<std::array<double, 4>> rectBoxes;       // spectral rects (t0,f0,w,h)
+    int nPolys = 0, nStrokes = 0;
+    std::vector<std::pair<double, double>> drawT;       // drawings: (t0, t1)
+    std::vector<std::pair<double, double>> sctt;        // segments: (start, end)
+};
+
+TAState captureTA (Application& app, FileDoc* d)
+{
+    TAState s;
+    s.playhead = app.playhead;
+    s.sel = app.selection;
+    for (const auto& m : app.markers().markers())
+        if (m.end < 0.0) s.markerPts.emplace_back (m.start, -1.0);
+        else             s.markerRegs.emplace_back (m.start, m.end);
+    std::sort (s.markerPts.begin (), s.markerPts.end());
+    std::sort (s.markerRegs.begin (), s.markerRegs.end());
+
+    for (const auto& sh : d->spectralSel.shapes())
+    {
+        if (sh.kind == SpectralShape::Kind::Rect)
+            s.rectBoxes.push_back ({ sh.t0, sh.f0, sh.t1 - sh.t0, sh.f1 - sh.f0 });
+
+        else if (sh.kind == SpectralShape::Kind::Polygon) ++s.nPolys;
+        else                                              ++s.nStrokes;
+    }
+    std::sort (s.rectBoxes.begin (), s.rectBoxes.end());
+
+    for (const auto& dr : d->drawings)
+        s.drawT.emplace_back (dr.t0, dr.t1);
+    std::sort (s.drawT.begin (), s.drawT.end());
+
+    for (const auto& sg : d->sctt.segments)
+        s.sctt.emplace_back (sg.startSec, sg.endSec);
+    return s;
+}
+
+bool taClose (double a, double b) { return std::abs (a - b) < 1e-9; }
+
+static void taDump (const char* tag, const TAState& s)
+{
+    auto pv = [] (const std::vector<std::pair<double, double>>& v)
+    {
+        juce::String out;
+        for (const auto& p : v) out << "[" << p.first << "," << p.second << "] ";
+        return out;
+    };
+    auto pv4 = [] (const std::vector<std::array<double, 4>>& v)
+    {
+        juce::String out;
+        for (const auto& r : v) out << "[" << r[0] << "," << r[1] << "," << r[2] << "," << r[3] << "] ";
+        return out;
+    };
+    std::cerr << tag
+              << " ph=" << s.playhead
+              << " sel=[" << s.sel.getStart () << "," << s.sel.getEnd () << "]"
+              << " pts=" << pv (s.markerPts).toRawUTF8()
+              << " regs=" << pv (s.markerRegs).toRawUTF8()
+              << " rects=" << pv4 (s.rectBoxes).toRawUTF8()
+              << " polys=" << s.nPolys << " strokes=" << s.nStrokes
+              << " drawT=" << pv (s.drawT).toRawUTF8()
+              << " sctt=" << pv (s.sctt).toRawUTF8() << std::endl;
+}
+
+bool taEqual (const TAState& x, const TAState& y)
+{
+    auto fail = [&] () -> bool
+    {
+        taDump ("  [actual] ", x);
+        taDump ("  [expect] ", y);
+        return false;
+    };
+
+    if (!taClose (x.playhead, y.playhead)) return fail ();
+    if (!taClose (x.sel.getStart (), y.sel.getStart ())
+         || !taClose (x.sel.getEnd (), y.sel.getEnd ())) return fail ();
+
+    auto pairsEq = [] (const std::vector<std::pair<double, double>>& a,
+                       const std::vector<std::pair<double, double>>& b)
+    {
+        if (a.size () != b.size()) return false;
+        for (size_t i = 0; i < a.size (); ++i)
+            if (!taClose (a[i].first, b[i].first) || !taClose (a[i].second, b[i].second))
+                return false;
+        return true;
+    };
+
+    auto pairsEq4 = [] (const std::vector<std::array<double, 4>>& a,
+                        const std::vector<std::array<double, 4>>& b)
+    {
+        if (a.size () != b.size()) return false;
+        for (size_t i = 0; i < a.size (); ++i)
+            for (int j = 0; j < 4; ++j)
+                if (!taClose (a[i][(size_t) j], b[i][(size_t) j]))
+                    return false;
+        return true;
+    };
+
+    if (!pairsEq (x.markerPts, y.markerPts))  return fail ();
+    if (!pairsEq (x.markerRegs, y.markerRegs)) return fail ();
+    if (!pairsEq (x.drawT, y.drawT))          return fail ();
+    if (!pairsEq (x.sctt, y.sctt))            return fail ();
+    if (x.nPolys != y.nPolys || x.nStrokes != y.nStrokes) return fail ();
+
+    if (!pairsEq4 (x.rectBoxes, y.rectBoxes)) return fail ();
+    return true;
+}
+
+// Seeds an 8 s document with markers, a spectral selection (middle rect at
+// [r0, r1] when r1 > r0), two drawings and five SCTT segments covering every
+// side of the edit range. playhead ends up at 6 s. withSpectralSel = false
+// seeds no spectral shapes at all (DEL/Generate need none to take their
+// sample-editing paths).
+void seedTAState (Application& app, FileDoc* d, double r0, double r1,
+                  bool withSpectralSel)
+{
+    app.markers().addPointMarker (1.0, "before");
+    app.markers().addRegionMarker (1.5, 2.5, "straddle");
+    app.markers().addPointMarker (3.0, "inside");
+    app.markers().addPointMarker (5.0, "after");
+
+    if (withSpectralSel)
+    {
+        d->spectralSel.addRect (0.5, 1.2, 100.0, 900.0, false, true);
+        if (r1 > r0)
+            d->spectralSel.addRect (r0, r1, 100.0, 900.0, false, false);
+        d->spectralSel.addRect (4.5, 5.5, 100.0, 900.0, false, false);
+    }
+
+    DrawingItem rect;
+    rect.kind = DrawingItem::Kind::Rectangle;
+    rect.t0 = 1.5; rect.f0 = 200.0; rect.t1 = 3.5; rect.f1 = 800.0;
+    d->drawings.push_back (rect);
+
+    DrawingItem free;
+    free.kind = DrawingItem::Kind::Freehand;
+    free.points = { {4.2, 300.0}, {4.6, 500.0}, {5.0, 700.0} };
+    free.normaliseBounds ();
+    d->drawings.push_back (free);
+
+    std::vector<ScttSegment> segs;
+    segs.push_back ({ 0.5, 1.4, "hello" });
+    segs.push_back ({ 1.6, 2.6, "straddleA" });
+    segs.push_back ({ 2.2, 3.8, "inside" });
+    segs.push_back ({ 3.5, 5.0, "straddleB" });
+    segs.push_back ({ 6.0, 7.0, "after" });
+    d->setTranscription (std::move (segs));
+
+    app.playhead = 6.0;
+}
+} // namespace
+
+static void testTimeAnchoredRemap()
+{
+    const juce::File wav = makeTempFile ("timeanchor_remap.wav");   // 8 s @ 8 kHz mono
+    CHECK (writeWav (wav, 1, 8000.0, 64000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate); }),
+          "wrote test wav for time-anchored remap");
+    std::string err;
+
+    // --- A: plain deletion of [2, 4] -------------------------------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for delete remap");
+        FileDoc* d = app.doc();
+        seedTAState (app, d, 0.0, 0.0, false);   // no spectral sel: DEL deletes samples
+        const TAState before = captureTA (app, d);
+
+        app.setSelection ({ 2.0, 4.0 });
+        CHECK (app.del (&err), "delete succeeds");
+        CHECK (std::abs (app.audioEngine().duration () - 6.0) < 1e-9,
+              "duration after delete is 6 s");
+
+        TAState exp = before;
+        exp.playhead = 4.0;                       // 6 s shifted left by 2 s
+        exp.sel = { 0.0, 0.0 };                   // selection cleared
+        exp.markerPts = { {1.0, -1.0}, {3.0, -1.0} };   // "inside" dropped; "after" 5->3
+        exp.markerRegs = { {1.5, 2.0} };          // straddle trimmed to [1.5, 2]
+        exp.drawT = { {1.5, 2.0}, {2.2, 3.0} };
+        exp.sctt = { {0.5, 1.4}, {1.6, 2.0}, {2.0, 3.0}, {4.0, 5.0} };   // "inside" dropped
+
+        CHECK (taEqual (captureTA (app, d), exp),
+              "delete remaps markers/drawings/SCTT/playhead/selection");
+
+        app.undoStep ();
+        TAState expUndo = before;
+        expUndo.sel = { 2.0, 4.0 };   // the pre-delete selection is restored too
+        CHECK (taEqual (captureTA (app, d), expUndo), "undo restores all time-anchored state");
+        app.redoStep ();
+        CHECK (taEqual (captureTA (app, d), exp), "redo re-applies the delete remap");
+    }
+
+    // --- B: trim to [4, 6] with a spectral selection ---------------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for trim remap");
+        FileDoc* d = app.doc();
+        seedTAState (app, d, 3.5, 5.0, true);   // middle rect straddles the kept range's start
+        const TAState before = captureTA (app, d);
+
+        app.setSelection ({ 4.0, 6.0 });
+        CHECK (app.trimSelection (), "trim succeeds");
+        CHECK (std::abs (app.audioEngine().duration () - 2.0) < 1e-9,
+              "duration after trim is 2 s");
+
+        TAState exp = before;
+        exp.playhead = 2.0;                       // old 6 s -> kept-range start edge
+        exp.sel = { 0.0, 2.0 };                   // whole trimmed track selected
+        exp.markerPts = { {1.0, -1.0} };          // only "after" survives: 5-4=1
+        exp.markerRegs.clear ();
+        exp.rectBoxes = { {0.0, 100.0, 1.0, 800.0},   // [3.5,5] -> left part deleted -> [0,1]
+                          {0.5, 100.0, 1.0, 800.0} }; // [4.5,5.5] -> shifted to [0.5,1.5]
+        exp.drawT = { {0.0, 0.0}, {0.2, 1.0} };
+        exp.sctt = { {0.0, 1.0} };               // only straddleB's tail survives
+
+        CHECK (taEqual (captureTA (app, d), exp),
+              "trim remaps markers/spectral sel/drawings/SCTT/playhead/selection");
+
+        app.undoStep ();
+        TAState expUndo = before;
+        expUndo.sel = { 4.0, 6.0 };   // the pre-trim selection is restored too
+        CHECK (taEqual (captureTA (app, d), expUndo), "undo restores the pre-trim state");
+        app.redoStep ();
+        CHECK (taEqual (captureTA (app, d), exp), "redo re-applies the trim remap");
+    }
+
+    // --- C: stretch [2, 4] by -50 % tempo (doubles the range) -------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for stretch remap");
+        FileDoc* d = app.doc();
+        seedTAState (app, d, 1.8, 3.0, true);   // middle rect straddles the stretched range
+        const TAState before = captureTA (app, d);
+
+        app.setSelection ({ 2.0, 4.0 });
+        CHECK (app.timeStretch (-50.0f, &err), "stretch succeeds");
+
+        // SoundTouch's output is within a few samples of exactly double the
+        // range; derive bNew with the same formula timeStretch() uses so all
+        // expectations below are bit-exact against the app's own warp.
+        const int64_t totalNew = app.audioEngine().numSamples ();
+        CHECK (std::abs ((double) totalNew - 80000.0) <= 100.0,
+              "duration after stretch is ~10 s");
+        const double aSec = 2.0, bOld = 4.0;
+        const double bNew = (32000.0 + (double) totalNew - 64000.0) / kToneRate;
+
+        auto W = [&] (double t)
+        {
+            if (t <= aSec) return t;
+            if (t >= bOld) return t + (bNew - bOld);
+            const double k = (bNew - aSec) / (bOld - aSec);
+            return aSec + (t - aSec) * k;
+        };
+
+        TAState exp = before;
+        exp.playhead = W (6.0);                   // old 6 s shifted right by ~2 s
+        exp.sel = { aSec, bNew };                 // stretched region stays selected
+        for (auto& m : exp.markerPts)  m.first = W (m.first);
+        for (auto& m : exp.markerRegs) { m.first = W (m.first); m.second = W (m.second); }
+        std::sort (exp.markerPts.begin (), exp.markerPts.end());
+        std::sort (exp.markerRegs.begin (), exp.markerRegs.end());
+        // rects: [0.5,1.2] unchanged; [1.8,3] stretched to W(3); [4.5,5.5] shifted
+        exp.rectBoxes = { { 0.5,     100.0, 0.7,          800.0 },
+                          { 1.8,     100.0, W (3.0) - 1.8, 800.0 },
+                          { W (4.5), 100.0, 1.0,          800.0 } };
+        for (auto& p : exp.drawT) { p.first = W (p.first); p.second = W (p.second); }
+        std::sort (exp.drawT.begin (), exp.drawT.end());
+        for (auto& s : exp.sctt)  { s.first = W (s.first); s.second = W (s.second); }
+
+        CHECK (taEqual (captureTA (app, d), exp),
+              "stretch remaps markers/spectral sel/drawings/SCTT/playhead/selection");
+
+        app.undoStep ();
+        TAState expUndo = before;
+        expUndo.sel = { aSec, bOld };   // the pre-stretch selection is restored too
+        CHECK (taEqual (captureTA (app, d), expUndo), "undo restores the pre-stretch state");
+        app.redoStep ();
+        CHECK (taEqual (captureTA (app, d), exp), "redo re-applies the stretch remap");
+    }
+
+    // --- D: paste inserts at the playhead ----------------------------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for paste remap");
+        FileDoc* d = app.doc();
+        seedTAState (app, d, 2.5, 3.5, true);   // middle rect straddles the insertion point
+        const TAState before = captureTA (app, d);
+
+        app.setSelection ({ 0.0, 1.0 });
+        app.copy ();
+        app.setSelection ({ 0.0, 0.0 });
+        app.playhead = 3.0;
+        CHECK (app.paste (&err), "paste succeeds");
+        CHECK (std::abs (app.audioEngine().duration () - 9.0) < 1e-9,
+              "duration after paste is 9 s");
+
+        TAState exp = before;
+        exp.playhead = 4.0;                       // cursor at the insertion point moves right
+        exp.sel = { 0.0, 0.0 };
+        exp.markerPts = { {1.0, -1.0}, {4.0, -1.0}, {6.0, -1.0} };   // "inside" at t=3 shifts
+        exp.markerRegs = { {1.5, 2.5} };
+        exp.rectBoxes = { {0.5, 100.0, 0.7, 800.0},   // before: unchanged
+                          {2.5, 100.0, 0.5, 800.0},   // straddle split: [2.5, 3]
+                          {4.0, 100.0, 0.5, 800.0},   //          and [4, 4.5]
+                          {5.5, 100.0, 1.0, 800.0} }; // after: shifted +1
+        exp.drawT = { {1.5, 4.5}, {5.2, 6.0} };
+        exp.sctt = { {0.5, 1.4}, {1.6, 2.6}, {2.2, 4.8}, {4.5, 6.0}, {7.0, 8.0} };
+
+        CHECK (taEqual (captureTA (app, d), exp),
+              "paste remaps markers/spectral sel/drawings/SCTT/playhead/selection");
+
+        app.undoStep ();
+        TAState expUndo = before;
+        expUndo.playhead = 3.0;   // the pre-paste cursor position is restored too
+        CHECK (taEqual (captureTA (app, d), expUndo), "undo restores the pre-paste state");
+        app.redoStep ();
+        CHECK (taEqual (captureTA (app, d), exp), "redo re-applies the paste remap");
+    }
+
+    // --- E: generate silence inserts at the playhead ----------------------
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for generate-insert remap");
+        FileDoc* d = app.doc();
+        seedTAState (app, d, 0.0, 0.0, false);   // no spectral sel: insert at playhead
+        const TAState before = captureTA (app, d);
+
+        app.playhead = 1.0;
+        CHECK (app.generateSilence (0.5, &err), "generate silence succeeds");
+        CHECK (std::abs (app.audioEngine().duration () - 8.5) < 1e-9,
+              "duration after insert is 8.5 s");
+
+        TAState exp = before;
+        exp.playhead = 1.5;                       // cursor at the insertion point moves right
+        exp.sel = { 0.0, 0.0 };
+        exp.markerPts = { {1.5, -1.0}, {3.5, -1.0}, {5.5, -1.0} };   // "before" at t=1 shifts
+        exp.markerRegs = { {2.0, 3.0} };
+        exp.drawT = { {2.0, 4.0}, {4.7, 5.5} };
+        exp.sctt = { {0.5, 1.9}, {2.1, 3.1}, {2.7, 4.3}, {4.0, 5.5}, {6.5, 7.5} };
+
+        CHECK (taEqual (captureTA (app, d), exp),
+              "generate-insert remaps markers/drawings/SCTT/playhead/selection");
+
+        app.undoStep ();
+        TAState expUndo = before;
+        expUndo.playhead = 1.0;   // the pre-insert cursor position is restored too
+        CHECK (taEqual (captureTA (app, d), expUndo), "undo restores the pre-insert state");
+        app.redoStep ();
+        CHECK (taEqual (captureTA (app, d), exp), "redo re-applies the insert remap");
+    }
+
+    // --- F: stem separation overwrite replaces [2, 4] with a 3 s result ---
+    {
+        Application app;
+        CHECK (app.openFile (wav), "open wav for stem-overwrite remap");
+        FileDoc* d = app.doc();
+        seedTAState (app, d, 2.5, 3.5, true);   // middle rect inside the extracted range
+        const TAState before = captureTA (app, d);
+
+        sc::MergeResult r;
+        r.rate = 8000.0;
+        r.channels = 1;
+        r.data.assign (1, std::vector<float> (24000, 0.25f));   // 3 s @ 8 kHz
+
+        app.setSelection ({ 2.0, 4.0 });   // the extracted window is selected
+        CHECK (app.applyStemSeparationResult (r, 2 /*overwrite*/, 2.0,
+                                              juce::String (), &err),
+              "stem overwrite succeeds");
+        CHECK (std::abs (app.audioEngine().duration () - 3.0) < 1e-9,
+              "duration after stem overwrite is the result length");
+
+        TAState exp = before;
+        exp.playhead = 3.0;                       // old 6 s: inside the dropped tail -> end of file
+        exp.sel = { 0.0, 2.0 };                   // extracted window [2,4] -> [0,2]
+        exp.markerPts = { {1.0, -1.0} };          // "inside" at 3 s -> 1 s; others dropped
+        exp.markerRegs = { {0.0, 0.5} };          // straddle: kept part [2,2.5] -> [0,0.5]
+        exp.rectBoxes = { {0.5, 100.0, 1.0, 800.0},   // middle rect [2.5,3.5] -> [0.5,1.5]
+                          {2.5, 100.0, 0.5, 800.0} }; // after rect [4.5,5.5] -> [2.5,3]
+        exp.drawT = { {0.0, 1.5}, {2.2, 3.0} };
+        exp.sctt = { {0.0, 0.6}, {0.2, 1.8}, {1.5, 3.0} };   // hello/after dropped
+
+        CHECK (taEqual (captureTA (app, d), exp),
+              "stem overwrite remaps markers/spectral sel/drawings/SCTT/playhead/selection");
+
+        app.undoStep ();
+        TAState expUndo = before;
+        expUndo.sel = { 2.0, 4.0 };   // the pre-overwrite selection is restored too
+        CHECK (taEqual (captureTA (app, d), expUndo), "undo restores the pre-overwrite state");
+        app.redoStep ();
+        CHECK (taEqual (captureTA (app, d), exp), "redo re-applies the overwrite remap");
+    }
+}
+
 static void testDeleteAdjustsSnapshots()
 {
     const juce::File wav = makeTempFile ("snap_del.wav");
@@ -21078,6 +21484,7 @@ static int scRunUnitTestsImpl()
     progress ("spectral sel deletion adjust"); testSpectralSelectionAdjustForDeletion();
     progress ("delete shifts markers/saved sel"); testDeleteShiftsMarkersAndSavedSelections();
     progress ("trim selection");            testTrimSelection();
+    progress ("time-anchored remap");       testTimeAnchoredRemap();
     progress ("signal generators");         testSignalGenerators();
     progress ("generate effects (app)");    testGenerateEffectsApp();
     progress ("generate dialogs");          testGenerateDialogs();

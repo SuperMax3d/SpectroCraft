@@ -534,16 +534,31 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   channels** — e.g. with only Channel 2 visible, a fade never touches the
   other tracks; undo restores every channel exactly (patches capture the old
   data *before* the in-place modification).
-- **Deleting a time range adjusts related state**: everything that references
-  file time follows the cut inside the same undo step. Markers shift left,
-  trim, or drop depending on where they sit relative to the deleted range;
-  named saved spectral selections (Selection panel) follow the same rules —
-  rectangles trim/shift/drop, while polygons and strokes that straddle the
-  cut are split into two contiguous pieces; stored FFT snapshots of that file
-  shift/trim/clear accordingly. Undo and redo restore all of it together with
-  the audio patch (snapshot curves are recomputed from the restored audio), so
-  a single Ctrl+Z brings back both the samples and every marker, selection and
-  snapshot exactly as before.
+- **Time-anchored state follows every length-changing edit**: everything that
+  references file time is remapped inside the same undo step as the audio —
+  markers, named saved spectral selections (Selection panel), the active
+  spectral selection, drawings (Drawing panel) and SCTT transcription segments,
+  plus the live playhead and time selection. The rules per operation:
+    - **Delete / Trim**: anchors inside the removed range drop; anchors that
+      straddle an edge trim to it; everything after shifts left by the removed
+      length.
+    - **Paste / Generate (Insert at Playhead) / Python scripts that extend a
+      file**: anchors at or after the insertion point shift right by the
+      inserted length; shapes straddling the point split into two pieces
+      (rectangles and polygons; strokes crop their column grid).
+    - **Time Stretch**: anchors inside the stretched range scale with it,
+      everything after shifts by the length delta.
+    - **Stem Separation / Super Resolution in Overwrite mode** (the result
+      replaces an extracted window): equivalent to deleting everything before
+      and after the new content — anchors keep their position relative to the
+      replaced window, anything outside it is dropped or clamped to the new
+      end.
+  Stored FFT snapshots of that file shift/trim/clear accordingly (snapshots
+  straddling an insertion point are truncated at it). Undo and redo restore
+  all of it together with the audio patch (snapshot curves are recomputed from
+  the restored audio), so a single Ctrl+Z brings back both the samples and
+  every marker, selection, drawing, transcription segment and snapshot exactly
+  as before.
 - **Resample**: Edit → Resample… converts the whole file to any sample rate
   using SoXR's very-high-quality (`SOXR_VHQ`) resampler — and can change the
   channel count in the same operation. The dialog has captioned *Sample Rate*

@@ -526,6 +526,24 @@ public:
         time-domain edit). */
     bool timeStretch (float percentChange, std::string* errOut = nullptr);
 
+    // Snapshot of the time-anchored state taken before an edit that inserts /
+    // deletes / shortens / stretches timeline data: playhead and selection
+    // (Application members) plus the active document's spectral selection,
+    // user drawings and SCTT transcription segments. commitTimeAnchoredToPatch
+    // stores both this snapshot and the post-edit state into p so undo/redo
+    // can restore them together with the audio.
+    struct TimeAnchoredState
+    {
+        double playhead = 0.0;
+        juce::Range<double> selection { 0, 0 };
+        SpectralSelection spectralSel;
+        std::vector<DrawingItem> drawings;
+        std::vector<ScttSegment> scttSegments;
+    };
+
+    TimeAnchoredState captureTimeAnchored () const;
+    void commitTimeAnchoredToPatch (const TimeAnchoredState& before, Patch& p);
+
     /** Filter EQ: FFT-based zero-phase curve equaliser on the active spectral
         selection region, or on the time selection if there is one, or over
         the whole file when nothing is selected. pts must be sorted by
@@ -715,6 +733,11 @@ public:
     // Set by MainWindow: called after timeStretch() stretched [a, bOld] of d
     // to [a, bNew], so FFT snapshot slots can be warped and re-recorded.
     std::function<void(FileDoc*, double, double, double, Patch&)> onTimeRangeStretched;
+
+    // Set by MainWindow: called after len seconds were inserted at time a in d
+    // (paste, generate-insert, length-changing Python scripts), so FFT
+    // snapshot slots can be shifted and re-recorded.
+    std::function<void(FileDoc*, double, double, Patch&)> onTimeRangeInserted;
 
     // Set by MainWindow: called after an undo (!isRedo) or redo (isRedo)
     // applied a patch with side state to d, so shared UI state is restored too.

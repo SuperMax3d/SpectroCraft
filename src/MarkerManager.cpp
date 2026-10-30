@@ -185,6 +185,35 @@ bool MarkerManager::adjustForStretch (double a, double bOld, double bNew)
     return changed;
 }
 
+bool MarkerManager::adjustForInsertion (double t, double lenSecs)
+{
+    if (!(lenSecs > 0.0))
+        return false;
+
+    bool changed = false;
+    for (auto& m : list)
+    {
+        if (m.end < 0.0)   // point marker at time m.start
+        {
+            if (m.start >= t)
+            { m.start += lenSecs; changed = true; }
+        }
+        else                // region marker [m.start, m.end]
+        {
+            const double s = m.start, e = m.end;
+            if (e <= t)
+                continue;                                                          // entirely before
+            else if (s >= t)
+            { m.start = s + lenSecs; m.end = e + lenSecs; changed = true; }        // shift right
+            else
+            { m.end = e + lenSecs; changed = true; }                               // straddles t:
+                                                                                   // end follows its content
+        }
+    }
+    if (changed && onChange) onChange();
+    return changed;
+}
+
 void MarkerManager::restore (const std::vector<Marker>& m)
 {
     list = m;

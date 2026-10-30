@@ -3697,6 +3697,90 @@ void FFTAnalysisView::recordAndAdjustSnapshotsForStretch (FileDoc* d, double a,
     }
 }
 
+void FFTAnalysisView::recordAndAdjustSnapshotsForInsertion (FileDoc* d, double a,
+                                                            double lenSecs, Patch& p)
+{
+    if (d == nullptr || !(lenSecs > 0.0))
+        return;
+
+    for (int i = 0; i < 8; ++i)
+    {
+        auto& s = snapshots[i];
+        if (s.source != d)   // slots are shared across files: only adjust this one's
+            continue;
+
+        bool touched = false;
+        double nt0 = s.t0, nt1 = s.t1;
+        if (s.t1 <= a)
+            ;                                   // entirely before: unchanged
+        else if (s.t0 >= a)
+        { nt0 += lenSecs; nt1 += lenSecs; touched = true; }   // entirely after: shift right
+        else
+        {
+            // Straddles the insertion point: keep the part before it - that audio
+            // is unchanged, so the stored curve still matches [t0, a].
+            nt1 = a;
+            touched = (a > s.t0);
+        }
+
+        if (!touched)
+            continue;
+
+        SnapshotSlotChange ch;
+        ch.before.t0 = s.t0;  ch.before.t1 = s.t1;
+        ch.before.n = s.n;    ch.before.shown = s.shown;
+        ch.before.chans = s.chans;
+        ch.changed = true;
+
+        s.t0 = nt0;
+        s.t1 = nt1;
+        ch.after.n = s.n;  ch.after.t0 = s.t0;  ch.after.t1 = s.t1;
+        ch.after.shown = s.shown;  ch.after.chans = s.chans;
+        p.snapshotSlots[(size_t) i] = ch;
+
+        if (app.isDocLoaded (d))
+            recomputeSnapshotSlot (i);   // rebuild from the post-insertion source data
+    }
+
+    for (int i = 0; i < 8; ++i)
+    {
+        auto& cs = curveSnaps[i];
+        if (cs.source != d || cs.mode < 3)   // slots are shared across files
+            continue;
+
+        bool touched = false;
+        double nt0 = cs.t0, nt1 = cs.t1;
+        if (cs.t1 <= a)
+            ;                                   // entirely before: unchanged
+        else if (cs.t0 >= a)
+        { nt0 += lenSecs; nt1 += lenSecs; touched = true; }   // entirely after: shift right
+        else
+        {
+            nt1 = a;
+            touched = (a > cs.t0);
+        }
+
+        if (!touched)
+            continue;
+
+        CurveSlotChange ch;
+        ch.before.t0 = cs.t0;  ch.before.t1 = cs.t1;
+        ch.before.mode = cs.mode;  ch.before.track = track_;  ch.before.smooth = smooth_;
+        ch.before.shown = cs.shown;  ch.before.chans = cs.chans;
+        ch.changed = true;
+
+        cs.t0 = nt0;
+        cs.t1 = nt1;
+        ch.after.mode = cs.mode;  ch.after.t0 = cs.t0;  ch.after.t1 = cs.t1;
+        ch.after.track = track_;  ch.after.smooth = smooth_;
+        ch.after.shown = cs.shown;  ch.after.chans = cs.chans;
+        p.curveSlots[(size_t) i] = ch;
+
+        if (app.isDocLoaded (d))
+            recomputeCurveSlot (i);   // rebuild from the post-insertion source data
+    }
+}
+
 void FFTAnalysisView::restoreSnapshotSlots (FileDoc* d, const Patch& p, bool isRedo)
 {
     if (d == nullptr)

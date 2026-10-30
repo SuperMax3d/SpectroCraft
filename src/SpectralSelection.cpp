@@ -646,6 +646,128 @@ bool shapesEqualForDeletionCheck (const SpectralShape& s, const SpectralShape& r
     }
 }
 
+// Time-range insertion adjustment: content before `a` is unchanged and from
+// `a` on it shifts right by `len`; shapes straddling the insertion point are
+// split into up to two pieces.
+std::vector<SpectralShape> adjustShapeForInsertion (const SpectralShape& sIn, double a, double len)
+{
+    std::vector<SpectralShape> out;
+
+    switch (sIn.kind)
+    {
+        case SpectralShape::Kind::Rect:
+        {
+            if (sIn.t1 <= a)
+                out.push_back (sIn);                 // entirely before: unchanged
+            else if (sIn.t0 >= a)
+            {
+                SpectralShape r = sIn;
+                r.t0 += len; r.t1 += len;            // entirely after: shift right
+                out.push_back (std::move (r));
+            }
+            else                                    // straddles the insertion point:
+                                                   // split into two rects
+            {
+                SpectralShape left = sIn, right = sIn;
+                left.t1 = a;                 // left piece:  [t0, a]
+                right.t0 = a + len;          // right piece: [a, t1] -> [a+len, t1+len]
+                right.t1 += len;
+                if (a - left.t0 > 1e-9)
+                    out.push_back (std::move (left));
+                if (right.t1 - right.t0 > 1e-9)
+                    out.push_back (std::move (right));
+            }
+            break;
+        }
+
+        case SpectralShape::Kind::Polygon:
+        {
+            double minT = 1e300, maxT = -1e300;
+            for (const auto& p : sIn.pts)
+            {
+                if (p.first < minT) minT = p.first;
+                if (p.first > maxT) maxT = p.first;
+            }
+
+            if (sIn.pts.size() < 3 || maxT <= a)   // degenerate or entirely before: unchanged
+            { out.push_back (sIn); break; }
+
+            if (minT >= a)                         // entirely after: shift right
+            {
+                SpectralShape r = sIn;
+                for (auto& p : r.pts) p.first += len;
+                out.push_back (std::move (r));
+                break;
+            }
+
+            // Straddles the insertion point: keep the part before `a` as-is and
+            // shift the rest right by len.
+            const auto left = clipPolyToTimeAtMost (sIn.pts, a);
+            if (left.size() >= 3)
+            {
+                SpectralShape r = sIn;
+                r.pts = std::move (left);
+                out.push_back (std::move (r));
+            }
+
+            const auto right = clipPolyToTimeAtLeast (sIn.pts, a);
+            if (right.size() >= 3)
+            {
+                SpectralShape r = sIn;
+                r.pts = std::move (right);
+                for (auto& p : r.pts) p.first += len;
+                out.push_back (std::move (r));
+            }
+            break;
+        }
+
+        case SpectralShape::Kind::Stroke:
+        {
+            if (sIn.cols <= 0 || sIn.rows <= 0)    // degenerate grid: unchanged
+            { out.push_back (sIn); break; }
+
+            const double dt = std::max (1e-9, (sIn.t1 - sIn.t0) / (double) sIn.cols);
+
+            if (sIn.t1 <= a)                       // entirely before: unchanged
+            { out.push_back (sIn); break; }
+
+            if (sIn.t0 >= a)                       // entirely after: shift right
+            {
+                SpectralShape r = sIn;
+                r.t0 += len; r.t1 += len;
+                out.push_back (std::move (r));
+                break;
+            }
+
+            // Left piece [t0, a].
+            {
+                int cA = (int) std::lround ((a - sIn.t0) / dt);
+                cA = std::clamp (cA, 1, sIn.cols);
+                SpectralShape r = sIn;
+                r.grid = cropStrokeColumns (sIn, 0, cA);
+                r.cols = cA;
+                r.t1 = a;
+                out.push_back (std::move (r));
+            }
+
+            // Right piece: old [a, t1] -> new [a+len, t1+len].
+            {
+                int cB = (int) std::lround ((a - sIn.t0) / dt);
+                cB = std::clamp (cB, 0, sIn.cols - 1);
+                SpectralShape r = sIn;
+                r.grid = cropStrokeColumns (sIn, cB, sIn.cols);
+                r.cols = sIn.cols - cB;
+                r.t0 = a + len;
+                r.t1 += len;
+                if (r.t1 - r.t0 > 1e-9)
+                    out.push_back (std::move (r));
+            }
+            break;
+        }
+    }
+    return out;
+}
+
 } // anonymous namespace
 
 bool SpectralSelection::adjustForDeletion (double a, double b)
@@ -768,5 +890,114 @@ bool SpectralSelection::adjustForStretch (double a, double bOld, double bNew)
             }
         }
     }
+    return changed;
+}
+
+bool SpectralSelection::adjustForInsertion (double a, double len)
+{
+    if (!(len > 0.0))
+        return false;
+
+    std::vector<SpectralShape> newList;
+    bool changed = false;
+
+    for (const auto& s : shapeList)
+    {
+        const std::vector<SpectralShape> repl = adjustShapeForInsertion (s, a, len);
+        if (repl.size () != 1 || !shapesEqualForDeletionCheck (s, repl[0]))
+            changed = true;
+
+        for (auto& r : repl)
+            newList.push_back (std::move (r));
+    }
+
+    if (changed)
+        shapeList = std::move (newList);
+    return changed;
+}
+
+bool SpectralSelection::clampToTimeRange (double lo, double hi)
+{
+    if (!(hi > lo))
+        return false;   // empty range: nothing can survive - leave as-is
+
+    auto timeExtentOf = [] (const SpectralShape& s) -> std::pair<double, double>
+    {
+        double mn = 1e300, mx = -1e300;
+        switch (s.kind)
+        {
+            case SpectralShape::Kind::Rect:
+                mn = std::min (s.t0, s.t1);
+                mx = std::max (s.t0, s.t1);
+                break;
+            case SpectralShape::Kind::Polygon:
+                for (const auto& p : s.pts)
+                {
+                    if (p.first < mn) mn = p.first;
+                    if (p.first > mx) mx = p.first;
+                }
+                break;
+            default:   // Stroke
+                mn = std::min (s.t0, s.t1);
+                mx = std::max (s.t0, s.t1);
+                break;
+        }
+        return { mn, mx };
+    };
+
+    std::vector<SpectralShape> newList;
+    bool changed = false;
+
+    for (const auto& s : shapeList)
+    {
+        const auto [mnT, mxT] = timeExtentOf (s);
+        if (mxT <= lo || mnT >= hi)
+        { changed = true; continue; }             // entirely outside: dropped
+
+        SpectralShape r = s;
+        switch (r.kind)
+        {
+            case SpectralShape::Kind::Rect:
+                r.t0 = std::clamp (std::min (s.t0, s.t1), lo, hi);
+                r.t1 = std::clamp (std::max (s.t0, s.t1), lo, hi);
+                if (r.t1 - r.t0 <= 1e-9)
+                    { changed = true; continue; } // degenerate after the trim
+                break;
+
+            case SpectralShape::Kind::Polygon:
+            {
+                auto pts = clipPolyToTimeAtMost (s.pts, hi);
+                if (pts.size() >= 3)
+                    pts = clipPolyToTimeAtLeast (pts, lo);
+                if (pts.size() < 3)
+                    { changed = true; continue; }
+                r.pts = std::move (pts);
+                break;
+            }
+
+            case SpectralShape::Kind::Stroke:
+            {
+                const double dt = std::max (1e-9, (s.t1 - s.t0) / (double) s.cols);
+                int cLo = (int) std::lround ((lo - s.t0) / dt);
+                int cHi = (int) std::lround ((hi - s.t0) / dt);
+                cLo = std::clamp (cLo, 0, s.cols);
+                cHi = std::clamp (cHi, cLo, s.cols);
+                if (cHi <= cLo)
+                    { changed = true; continue; }
+                r.grid = cropStrokeColumns (s, cLo, cHi);
+                r.cols = cHi - cLo;
+                r.t0 = std::max (std::min (s.t0, s.t1), lo);
+                r.t1 = std::min (std::max (s.t0, s.t1), hi);
+                break;
+            }
+        }
+
+        if (!shapesEqualForDeletionCheck (s, r))
+            changed = true;
+        newList.push_back (std::move (r));
+    }
+
+    if (changed)
+        shapeList = std::move (newList);
     return changed;
 }

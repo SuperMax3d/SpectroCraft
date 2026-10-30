@@ -206,3 +206,124 @@ bool FileDoc::writeMetaSidecar (const juce::File& target) const
         return false;
     return out.write (json.data (), json.size());
 }
+
+// ---------------------------------------------------------------------------
+// Time-anchored state remapping (insertion / deletion / stretch)
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    // Monotonic time warp for a deletion of [a, b].
+    double warpDeletion (double t, double a, double b)
+    {
+        if (t < a) return t;
+        if (t >= b) return t - (b - a);
+        return a;
+    }
+
+    // Monotonic time warp for an insertion of len seconds at time a.
+    double warpInsertion (double t, double a, double len)
+    {
+        return t < a ? t : t + len;
+    }
+
+    // Monotonic time warp for stretching [a, bOld] to [a, bNew].
+    double warpStretch (double t, double a, double bOld, double bNew)
+    {
+        if (t <= a) return t;
+        if (t >= bOld) return t + (bNew - bOld);
+        const double k = (bNew - a) / (bOld - a);
+        return a + (t - a) * k;
+    }
+
+    template <typename WarpFn>
+    void warpDrawings (std::vector<DrawingItem>& drawings, WarpFn&& W)
+    {
+        for (auto& dr : drawings)
+        {
+            dr.t0 = W (dr.t0);
+            dr.t1 = W (dr.t1);
+            for (auto& p : dr.points)
+                p.first = W (p.first);
+        }
+    }
+
+    template <typename WarpFn>
+    void warpScttSegments (std::vector<ScttSegment>& segs, WarpFn&& W)
+    {
+        for (size_t i = 0; i < segs.size();)
+        {
+            const double s = segs[i].startSec, e = segs[i].endSec;
+            if (W (e) <= W (s))   // collapsed to zero length: dropped
+                segs.erase (segs.begin() + (long long) i);
+            else
+            {
+                segs[i].startSec = W (s);
+                segs[i].endSec = W (e);
+                ++i;
+            }
+        }
+    }
+
+    template <typename AdjustFn>
+    void remapSpectralState (FileDoc& d, AdjustFn&& adjust)
+    {
+        for (auto& ss : d.savedSelections)
+            adjust (ss.data);
+        adjust (d.spectralSel);
+    }
+} // anonymous namespace
+
+void FileDoc::remapForDeletion (double a, double b)
+{
+    if (!(b > a))
+        return;
+
+    markers.adjustForDeletion (a, b);
+    remapSpectralState (*this, [&] (auto& sel) { sel.adjustForDeletion (a, b); });
+    warpDrawings (drawings, [&](double t) { return warpDeletion (t, a, b); });
+
+    // SCTT segments fully inside the deleted range are dropped; the rest are
+    // warped (a segment straddling an edge is trimmed to it).
+    auto W = [a, b] (double t) { return warpDeletion (t, a, b); };
+    for (size_t i = 0; i < sctt.segments.size();)
+    {
+        const double s = sctt.segments[i].startSec, e = sctt.segments[i].endSec;
+        if (s >= a && e <= b)   // fully contained: dropped
+            sctt.segments.erase (sctt.segments.begin() + (long long) i);
+        else
+        {
+            sctt.segments[i].startSec = W (s);
+            sctt.segments[i].endSec = W (e);
+            ++i;
+        }
+    }
+
+    metaDirty = true;   // markers / selections / drawings / SCTT changed on disk
+}
+
+void FileDoc::remapForInsertion (double a, double lenSecs)
+{
+    if (!(lenSecs > 0.0))
+        return;
+
+    markers.adjustForInsertion (a, lenSecs);
+    remapSpectralState (*this, [&] (auto& sel) { sel.adjustForInsertion (a, lenSecs); });
+    warpDrawings (drawings, [&](double t) { return warpInsertion (t, a, lenSecs); });
+    warpScttSegments (sctt.segments, [&](double t) { return warpInsertion (t, a, lenSecs); });
+
+    metaDirty = true;
+}
+
+void FileDoc::remapForStretch (double a, double bOld, double bNew)
+{
+    if (!(bOld > a))
+        return;
+
+    markers.adjustForStretch (a, bOld, bNew);
+    remapSpectralState (*this, [&] (auto& sel) { sel.adjustForStretch (a, bOld, bNew); });
+    warpDrawings (drawings, [&](double t) { return warpStretch (t, a, bOld, bNew); });
+    warpScttSegments (sctt.segments, [&](double t) { return warpStretch (t, a, bOld, bNew); });
+
+    metaDirty = true;
+}

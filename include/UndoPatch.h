@@ -1,8 +1,11 @@
 #pragma once
 // SpectroCraft - Undo/redo patch record
 #include <JuceHeader.h>   // juce::String (action name shown in the History tab)
-#include "MarkerManager.h"     // Marker (side state for time-range deletions)
-#include "SavedSelections.h"   // SavedSpectralSelection (same)
+#include "MarkerManager.h"       // Marker (side state for time-changing edits)
+#include "SavedSelections.h"     // SavedSpectralSelection (same)
+#include "SpectralSelection.h"   // SpectralSelection (active spectral selection)
+#include "DrawingItem.h"         // DrawingItem (user drawings on the spectrogram)
+#include "ScttChunk.h"           // ScttSegment (transcription segments)
 #include <vector>
 #include <array>
 #include <cstdint>
@@ -77,6 +80,20 @@ struct Patch
     bool hasSideState = false;
     std::vector<Marker> oldMarkers, newMarkers;
     std::vector<SavedSpectralSelection> oldSavedSel, newSavedSel;
+
+    // Time-anchored state for edits that insert / delete / shorten / stretch
+    // timeline data (del, trim, paste, generate-insert, length-changing
+    // Python scripts, overwrite-mode stem separation / super resolution):
+    // playhead, selection, the active spectral selection, user drawings and
+    // SCTT transcription segments. hasTimeAnchored is false for edits that do
+    // not shift existing timeline content (appends at the end, same-length
+    // effects, ...).
+    bool hasTimeAnchored = false;
+    double oldPlayhead = 0.0, newPlayhead = 0.0;
+    juce::Range<double> oldSel { 0, 0 }, newSel { 0, 0 };
+    SpectralSelection oldSpecSel, newSpecSel;
+    std::vector<DrawingItem> oldDrawings, newDrawings;
+    std::vector<ScttSegment> oldScttSegs, newScttSegs;
     static constexpr int kSnapshotSlots = 8;
     std::array<SnapshotSlotChange, kSnapshotSlots> snapshotSlots {};
     // Same for the curve snapshots stored in the Freq/Amp analysis modes.

@@ -70,6 +70,25 @@ public:
         metaDirty = true;   // transcription is per-file metadata
     }
 
+    /** Remap every time-anchored piece of this document's state after the
+        range [a, b] seconds has been removed from the audio: markers,
+        saved spectral selections and the active spectral selection are
+        adjusted with their own adjustForDeletion; user drawings and SCTT
+        segments are warped through W(t) = t (t<a), a (a<=t<b),
+        t-(b-a) (t>=b); SCTT segments fully inside [a, b] are dropped.
+        Called after the audio edit has been applied. */
+    void remapForDeletion (double a, double b);
+
+    /** Same for an insertion of len seconds at time a: W(t) = t (t<a),
+        t+len (t>=a). Shapes straddling the insertion point are split.
+        Called after the audio edit has been applied. */
+    void remapForInsertion (double a, double lenSecs);
+
+    /** Same for stretching [a, bOld] seconds to [a, bNew]: W(t) = t (t<a),
+        a+(t-a)*(bNew-a)/(bOld-a) inside the range, t+(bNew-bOld) after it.
+        Called after the audio edit has been applied. */
+    void remapForStretch (double a, double bOld, double bNew);
+
     // ---- Unified metadata storage -----------------------------------------
     // Where this file's metadata bundle lives. Detected on load: an existing
     // .meta.json (or legacy sidecar) means external, embedded RIFF chunks mean

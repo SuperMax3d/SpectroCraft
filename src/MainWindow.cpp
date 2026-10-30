@@ -357,6 +357,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (fftPanel) fftPanel->recordAndAdjustSnapshotsForStretch (d, a, bOld, bNew, p);
     };
 
+    app.onTimeRangeInserted = [this] (FileDoc* d, double a, double lenSecs, Patch& p)
+    {
+        if (fftPanel) fftPanel->recordAndAdjustSnapshotsForInsertion (d, a, lenSecs, p);
+    };
+
     // Undo/redo of such a patch restores the snapshot slots too.
     app.onPatchSideStateRestored = [this] (FileDoc* d, const Patch& p, bool isRedo)
     {

@@ -390,6 +390,14 @@ public:
     void recordAndAdjustSnapshotsForStretch (FileDoc* d, double a, double bOld,
                                              double bNew, Patch& p);
 
+    // Called after len seconds were inserted at time a in file d: shifts every
+    // stored snapshot's time segment right by len when it starts at/after a;
+    // segments straddling the insertion point are trimmed to [t0, a]. Records
+    // before/after state into p.snapshotSlots / p.curveSlots; curves are
+    // recomputed from the post-insertion source data.
+    void recordAndAdjustSnapshotsForInsertion (FileDoc* d, double a, double lenSecs,
+                                               Patch& p);
+
     // Restores the snapshot slots recorded in patch p after an undo (!isRedo)
     // or redo (isRedo). Curves are recomputed from each slot's source file.
     void restoreSnapshotSlots (FileDoc* d, const Patch& p, bool isRedo);
