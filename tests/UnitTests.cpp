@@ -13884,9 +13884,9 @@ static void testSplitSpectralSelectionApp()
         std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
         const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 18, "Effects menu lists the invert/stretch/eq/enveloppe + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 19, "Effects menu lists the invert/stretch/cat-time-scale/eq/enveloppe + split + generate + super-res items");
 #else
-        CHECK (fxMenu.getNumItems() == 17, "Effects menu lists the invert/stretch/eq/enveloppe + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 18, "Effects menu lists the invert/stretch/cat-time-scale/eq/enveloppe + split + generate + super-res items");
 #endif
     }
     app.settings.splitConfig = { { 0, 1 } };   // ch1 -> new ch2 (the old F12 behaviour)
@@ -17043,6 +17043,385 @@ static void testTimeStretchEffect()
     app.redoStep ();
     CHECK (eng.numSamples () == stretchedTotal, "redo re-stretches the file");
 
+    wav.deleteFile ();
+}
+
+// ---------------------------------------------------------------------------
+// Content Aware Time Scale
+// ---------------------------------------------------------------------------
+
+namespace {
+/** 2 s mono @ 8 kHz: silence [0,0.5), a 300 Hz tone [0.5,1.5), silence [1.5,2).
+    The silent and steady-tone gaps are stable; the onsets at 0.5/1.5 s must
+    be protected. */
+std::vector<std::vector<float>> makeCatBuffer (double rate)
+{
+    const int64_t n = (int64_t) (2.0 * rate);
+    std::vector<std::vector<float>> chans (1, std::vector<float> ((size_t) n));
+    for (int64_t i = 0; i < n; ++i)
+        if (i >= rate / 2 && i < rate * 3 / 2)
+            chans[0][(size_t) i] = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                               * 300.0 * (double) i / rate);
+    return chans;
+}
+
+/** Mirrors sc::cat::applyEdits' length accounting exactly (no audio): each
+    removal also consumes its right crossfade zone, each duplication adds L - xf1. */
+int64_t catExpectedOutputLen (const std::vector<std::vector<float>>& buf, double rate,
+                              const std::vector<sc::cat::Edit>& editsIn)
+{
+    const int64_t span = (int64_t) buf[0].size();
+    const int xfMax = (int) std::min<int64_t> (
+        std::max<int64_t> (16, (int64_t) std::llround (rate * 0.005)), span / 8);
+    auto sorted = editsIn;
+    std::sort (sorted.begin (), sorted.end (),
+               [] (const sc::cat::Edit& x, const sc::cat::Edit& y) { return x.start < y.start; });
+
+    int64_t pos = 0, outLen = 0;
+    for (size_t ei = 0; ei < sorted.size (); ++ei)
+    {
+        const auto e = sorted[ei];
+        if (e.len <= 0 || span <= 0) continue;
+        const int64_t s = std::max<int64_t> (std::min<int64_t> (e.start, span), pos);
+        const int64_t L = std::min<int64_t> (e.len, span - s);
+        if (L <= 0) continue;
+        const int64_t nextStart = (ei + 1 < sorted.size ()) ? std::max<int64_t> (sorted[ei + 1].start, pos) : span;
+        const int64_t roomAfter = std::max<int64_t> (0, nextStart - (s + L));
+        if (!e.duplicate)
+        {
+            const int xf = (int) std::min<int64_t> ({ (int64_t) xfMax, s - pos, roomAfter });
+            outLen += (s - xf - pos) + xf;
+            pos = s + L + xf;
+        }
+        else
+        {
+            const int xf1 = (int) std::min<int64_t> ({ (int64_t) xfMax, L / 2 });
+            const int xf2 = (int) std::min<int64_t> ({ (int64_t) xfMax, span - (s + L), roomAfter });
+            outLen += (s - pos) + (L - xf1) + xf1 + (L - xf1) + xf2;
+            pos = s + L + xf2;
+        }
+    }
+    outLen += span - pos;
+    return outLen;
+}
+} // namespace
+
+static void testCatAnalyze()
+{
+    const double rate = kToneRate;   // 8 kHz -> N=1024, H=256 (32 ms per gap)
+    auto buf = makeCatBuffer (rate);
+    sc::cat::Analysis a;
+    CHECK (sc::cat::analyze (buf, 1, rate, a), "analysis succeeded");
+
+    const int nGaps = a.numGaps ();
+    CHECK (a.fftSize == 1024 && a.hop == 256, "fft size / hop as designed");
+    CHECK (nGaps > 10, "enough gaps for statistics");
+
+    // Gap i sits between frames i and i+1; frame windows start at i*H samples
+    // but extend N ahead, so the transition around sample S shows up a few
+    // gaps BEFORE round(S/H). Scan a window instead of one exact gap.
+    const int onsetGap = (int) std::lround ((rate / 2) / a.hop);   // ~16
+    const int offGap   = (int) std::lround ((3 * rate / 2) / a.hop); // ~47
+
+    auto windowMax = [&] (int center) -> double
+        { double m = 0.0;
+          for (int g = center - 4; g <= center + 1; ++g)
+              if (g >= 0 && g < nGaps) m = std::max (m, a.diff[(size_t) g]);
+          return m; };
+
+    // Steady regions: tiny frame-to-frame change. Gap 4 is deep in the first
+    // silence; gap (onset+off)/2 sits in the middle of the steady tone.
+    const int midToneGap = (onsetGap + offGap) / 2;
+    CHECK (a.diff[(size_t) 4] < 1e-6, "silent gaps have ~zero change");
+    CHECK (a.diff[(size_t) midToneGap] < windowMax (onsetGap) * 0.1,
+          "steady tone is far more stable than the transition");
+
+    // The transitions must be among the largest changes.
+    double maxDiff = 0.0;
+    for (double v : a.diff) maxDiff = std::max (maxDiff, v);
+    CHECK (windowMax (onsetGap) > 0.5 * maxDiff, "the onset shows up as a large change");
+    CHECK (windowMax (offGap)   > 0.5 * maxDiff, "the offset shows up as a large change");
+
+    // Transients are protected: at least one of the gaps around each transition.
+    bool protOn = false, protOff = false;
+    for (int d = -2; d <= 2; ++d)
+    {
+        if (a.protectedGap[(size_t) (onsetGap + d)]) protOn = true;
+        if (a.protectedGap[(size_t) (offGap + d)])   protOff = true;
+    }
+    CHECK (protOn, "the onset gap is protected");
+    CHECK (protOff, "the offset gap is protected");
+
+    // Stability: silent gaps ~1, transition gaps well below.
+    int peakGap = 0;
+    for (int g = 1; g < nGaps; ++g)
+        if (a.diff[(size_t) g] > a.diff[(size_t) peakGap]) peakGap = g;
+    CHECK (a.stability[(size_t) 4] > 0.95, "silent stability near 1");
+    CHECK (a.stability[(size_t) peakGap] < a.stability[(size_t) 4],
+          "transition less stable than silence");
+
+    // Too-short input is rejected (needs N + 4*H = ~0.25 s at 8 kHz).
+    std::vector<std::vector<float>> tiny (1, std::vector<float> ((size_t) (rate / 8)));
+    sc::cat::Analysis a2;
+    CHECK (!sc::cat::analyze (tiny, 1, rate, a2), "too-short range rejected");
+}
+
+static void testCatPlanAndApply()
+{
+    const double rate = kToneRate;
+    auto buf = makeCatBuffer (rate);
+    sc::cat::Analysis a;
+    CHECK (sc::cat::analyze (buf, 1, rate, a), "analysis succeeded");
+
+    // Shorten by ~0.5 s: the planner must remove stable material only.
+    juce::Random rng (42);   // deterministic for this test
+    auto edits = sc::cat::planTimeScaleEdits (a, -(int64_t) (rate / 2), rng);
+    CHECK (!edits.empty (), "removals were planned");
+
+    int64_t totalRemoved = 0;
+    bool touchesProtected = false;
+    for (const sc::cat::Edit& e : edits)
+    {
+        CHECK (!e.duplicate, "shortening only removes");
+        const int g0 = (int) (e.start / a.hop);
+        const int g1 = (int) ((e.start + e.len - 1) / a.hop);
+        for (int g = g0; g <= g1 && g < a.numGaps (); ++g)
+            if (a.protectedGap[(size_t) g]) touchesProtected = true;
+        totalRemoved += e.len;
+    }
+    CHECK (!touchesProtected, "no edit covers an onset-protected gap");
+    CHECK (std::abs ((double) totalRemoved - rate / 2.0) <= a.hop,
+          "total removal is within one hop of the requested delta");
+
+    auto out = sc::cat::applyEdits (buf, 1, rate, edits);
+    CHECK (out.size () == 1 && !out[0].empty (), "output produced");
+    if (!out.empty ())
+    {
+        // Length accounting is exact: each removal also consumes its right
+        // crossfade zone (see catExpectedOutputLen).
+        CHECK ((int64_t) out[0].size () == catExpectedOutputLen (buf, rate, edits),
+              "output length matches the edit plan exactly");
+        bool finite = true;
+        for (float v : out[0]) if (!std::isfinite (v)) { finite = false; break; }
+        CHECK (finite, "no NaN/Inf in the output");
+
+        // The prefix up to the first edit's crossfade zone is bit-exact.
+        const int xfMax = (int) std::min<int64_t> (
+            std::max<int64_t> (16, (int64_t) std::llround (rate * 0.005)),
+            (int64_t) buf[0].size () / 8);
+        const int64_t verbatimEnd = edits.front ().start - xfMax;
+        bool prefixOk = true;
+        for (int64_t i = 0; i < verbatimEnd && i < (int64_t) out[0].size (); ++i)
+            if (out[0][(size_t) i] != buf[0][(size_t) i]) { prefixOk = false; break; }
+        CHECK (prefixOk, "prefix before the first edit's crossfade is untouched");
+    }
+
+    // Lengthening duplicates instead.
+    juce::Random rng2 (7);
+    auto dupEdits = sc::cat::planTimeScaleEdits (a, +(int64_t) (rate / 2), rng2);
+    CHECK (!dupEdits.empty (), "duplications were planned");
+    bool allDup = true;
+    for (const sc::cat::Edit& e : dupEdits) if (!e.duplicate) { allDup = false; break; }
+    CHECK (allDup, "lengthening only duplicates");
+    auto out2 = sc::cat::applyEdits (buf, 1, rate, dupEdits);
+    CHECK (!out2.empty () && (int64_t) out2[0].size () == catExpectedOutputLen (buf, rate, dupEdits),
+          "output length matches the duplication plan exactly");
+}
+
+static void testCatReduceGaps()
+{
+    const double rate = kToneRate;
+    auto buf = makeCatBuffer (rate);
+    sc::cat::Analysis a;
+    CHECK (sc::cat::analyze (buf, 1, rate, a), "analysis succeeded");
+
+    // Monotonic in the percentile.
+    const int64_t r10 = sc::cat::removableSamplesAtPercentile (a, 10.0, 3);
+    const int64_t r50 = sc::cat::removableSamplesAtPercentile (a, 50.0, 3);
+    const int64_t r99 = sc::cat::removableSamplesAtPercentile (a, 99.0, 3);
+    CHECK (r10 <= r50 && r50 <= r99, "removable amount is monotonic in percentile");
+    CHECK (r50 > 0, "half of the gaps qualify for removal");
+
+    auto edits = sc::cat::reduceGapsEdits (a, 50.0, 3);
+    bool touchesProtected = false;
+    // NB: must not be named "total" - the CHECK macro increments a global of that name.
+    int64_t sumLen = 0;
+    for (const sc::cat::Edit& e : edits)
+    {
+        const int g0 = (int) (e.start / a.hop);
+        const int g1 = (int) ((e.start + e.len - 1) / a.hop);
+        for (int g = g0; g <= g1 && g < a.numGaps (); ++g)
+            if (a.protectedGap[(size_t) g]) touchesProtected = true;
+        sumLen += e.len;
+    }
+    CHECK (!touchesProtected, "reduce-gaps edits avoid protected gaps");
+    CHECK (sumLen == r50, "edit lengths match the previewed amount");
+
+    auto out = sc::cat::applyEdits (buf, 1, rate, edits);
+    CHECK (!out.empty () && (int64_t) out[0].size () == catExpectedOutputLen (buf, rate, edits),
+          "reducing gaps shortens the buffer by exactly the planned amount");
+
+    // Zero percentile removes nothing.
+    CHECK (sc::cat::removableSamplesAtPercentile (a, 0.0, 3) == 0,
+          "percentile 0 removes nothing");
+}
+
+static void testCatEffectApp()
+{
+    const juce::File wav = makeTempFile ("cat_effect.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate,
+            [] (int, int64_t f, double rate) {
+                return (f >= rate / 2 && f < rate * 3 / 2)
+                    ? 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                           * 300.0 * (double) f / rate)
+                    : 0.0f;
+            }), "wrote cat wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened cat wav");
+    AudioEngine& eng = app.audioEngine ();
+    const int64_t origTotal = eng.numSamples ();
+
+    // --- Reduce Gaps on a selection -------------------------------------
+    std::vector<float> before ((size_t) origTotal);
+    CHECK (eng.readSamples (0, 0, (int) origTotal, before.data()), "read before");
+
+    app.selection = { 0.25, 1.75 };   // silence + tone + silence
+    std::string err;
+    CHECK (app.contentAwareTimeScale (true, 50.0, 0.0, &err), "reduce gaps ran: " + err);
+    const int64_t afterReduce = eng.numSamples ();
+    CHECK (afterReduce < origTotal * 3 / 4, "reducing gaps shortened the file");
+
+    // The edited range stays selected.
+    CHECK (app.selection.getStart () > 0.25 - 1e-9 && app.selection.getEnd () < 1.75 + 1e-9,
+          "edited selection shrank in place");
+
+    // One undoable step: undo restores length AND content exactly.
+    CHECK (app.undo ().undoSize () == 1, "reduce gaps recorded one undo step");
+    app.undoStep ();
+    CHECK (eng.numSamples () == origTotal, "undo restores the original length");
+    std::vector<float> undone ((size_t) origTotal);
+    CHECK (eng.readSamples (0, 0, (int) origTotal, undone.data()), "read after undo");
+    bool restored = true;
+    for (int64_t i = 0; i < origTotal && restored; ++i)
+        if (undone[(size_t) i] != before[(size_t) i]) restored = false;
+    CHECK (restored, "undo restores the original content");
+
+    // --- Time Stretch mode: factor 2 halves the whole file ---------------
+    app.selection = {};
+    CHECK (app.contentAwareTimeScale (false, 0.0, 2.0, &err), "stretch ran: " + err);
+    const int64_t afterStretch = eng.numSamples ();
+    CHECK (std::abs ((double) afterStretch - origTotal / 2.0) <= 512.0,
+          "factor 2 roughly halves the file (hop-quantised)");
+
+    // No NaN/Inf anywhere.
+    std::vector<float> all ((size_t) afterStretch);
+    CHECK (eng.readSamples (0, 0, (int) afterStretch, all.data()), "read stretched file");
+    bool finite = true;
+    for (float v : all) if (!std::isfinite (v)) { finite = false; break; }
+    CHECK (finite, "no NaN/Inf after the stretch");
+
+    // Redo of the reduce-gaps step is not possible after a newer edit: just
+    // verify undo brings back the stretched state.
+    app.undoStep ();
+    CHECK (eng.numSamples () == origTotal, "undo restores the pre-stretch length");
+
+    wav.deleteFile ();
+}
+
+static void testCatDialog()
+{
+    const juce::File wav = makeTempFile ("cat_dialog.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate,
+            [] (int, int64_t f, double rate) {
+                return (f >= rate / 2 && f < rate * 3 / 2)
+                    ? 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                           * 300.0 * (double) f / rate)
+                    : 0.0f;
+            }), "wrote cat wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened cat wav");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "cat dialog"));
+
+    auto* w = win->createContentAwareTimeScaleDialog ();
+    CHECK (w != nullptr, "dialog created");
+    if (w == nullptr) { wav.deleteFile (); return; }
+
+    auto* panel = dynamic_cast<CatTimeScalePanel*> (w->getCustomComponent (0));
+    CHECK (panel != nullptr, "the dialog hosts a CatTimeScalePanel");
+    if (panel == nullptr) { delete w; wav.deleteFile (); return; }
+
+    // Mode drop-down: exactly the two required choices.
+    auto* combo = panel->modeCombo ();
+    CHECK (combo != nullptr && combo->getNumItems () == 2, "two modes in the drop-down");
+    if (combo != nullptr && combo->getNumItems () == 2)
+        CHECK (combo->getItemText (0) == "Time Stretch" && combo->getItemText (1) == "Reduce Gaps",
+              "mode names as specified");
+
+    // Default mode: Time Stretch -> duration + factor rows visible, percentile hidden.
+    auto* durEd = findEditorRecursive (*w, "catDuration");
+    auto* facEd = findEditorRecursive (*w, "catFactor");
+    auto* pctEd = findEditorRecursive (*w, "catPercentile");
+    CHECK (durEd != nullptr && facEd != nullptr && pctEd != nullptr, "all fields present");
+    if (durEd == nullptr || facEd == nullptr || pctEd == nullptr) { delete w; wav.deleteFile (); return; }
+
+    CHECK (panel->getMode () == CatTimeScalePanel::Mode::TimeStretch, "default mode is Time Stretch");
+    // Per-mode visibility is tracked on the LabeledField rows.
+    CHECK (panel->durationRowVisible () && panel->factorRowVisible ()
+              && !panel->percentileRowVisible (),
+          "time-stretch rows visible in the default mode");
+
+    // Duration initialised to the reference length (whole file: 2 s).
+    CHECK (std::abs (durEd->getText ().getDoubleValue () - 2.0) < 1e-6,
+          "duration initialised to the reference length");
+
+    // Linked fields, like Time Stretch.
+    durEd->setText ("1");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (std::abs (panel->getSpeedFactor () - 2.0) < 1e-6,
+          "halving the duration doubles the speed factor");
+
+    // Wait for the background analysis to deliver its result.
+    bool analysed = false;
+    for (int i = 0; i < 200 && !analysed; ++i)
+    {
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        const juce::String t = panel->getResultText ();
+        if (!t.startsWith ("Analysing") && !t.isEmpty ()) analysed = true;
+    }
+    CHECK (analysed, "background analysis delivered a result");
+    if (analysed)
+        CHECK (panel->getResultText ().startsWith ("Target duration"),
+              "time-stretch mode shows the target duration");
+
+    // Switch to Reduce Gaps: percentile row appears and the preview switches.
+    combo->setSelectedId (2);   // async change message in this JUCE build
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+    CHECK (panel->getMode () == CatTimeScalePanel::Mode::ReduceGaps, "mode switched to Reduce Gaps");
+    CHECK (!panel->durationRowVisible () && !panel->factorRowVisible ()
+              && panel->percentileRowVisible (),
+          "percentile row visible in reduce-gaps mode");
+
+    // The preview shows the resulting duration for the current percentile.
+    bool hasPreview = false;
+    for (int i = 0; i < 200 && !hasPreview; ++i)
+    {
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+        if (panel->getResultText ().startsWith ("Resulting duration")) hasPreview = true;
+    }
+    CHECK (hasPreview, "reduce-gaps mode shows the resulting duration");
+
+    // Percentile parsing + clamping.
+    pctEd->setText ("75");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (std::abs (panel->getPercentile () - 75.0) < 1e-9, "percentile parsed");
+    pctEd->setText ("250");
+    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (std::abs (panel->getPercentile () - 100.0) < 1e-9, "percentile clamped to 100");
+
+    delete w;
+    win.reset ();
     wav.deleteFile ();
 }
 
@@ -20676,9 +21055,9 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 18, "Effects menu includes the invert/stretch/eq/enveloppe + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/cat-time-scale/eq/enveloppe + split + generate + super-res items");
 #else
-    CHECK (fxMenu.getNumItems() == 17, "Effects menu includes the invert/stretch/eq/enveloppe + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 18, "Effects menu includes the invert/stretch/cat-time-scale/eq/enveloppe + split + generate + super-res items");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -21884,6 +22263,11 @@ static int scRunUnitTestsImpl()
     progress ("eq editor set point");       testEqEditorSetPoint();
     progress ("invert effect");             testInvertEffect();
     progress ("time stretch effect");       testTimeStretchEffect();
+    progress ("cat analyze");               testCatAnalyze();
+    progress ("cat plan + apply");          testCatPlanAndApply();
+    progress ("cat reduce gaps");           testCatReduceGaps();
+    progress ("cat effect (app)");          testCatEffectApp();
+    progress ("cat dialog");                testCatDialog();
     progress ("filter eq effect");          testFilterEqEffect();
     progress ("enveloppe curve math");      testEnvelopeCurveMath();
     progress ("env editor set point");      testEnvelopeEditorSetPoint();

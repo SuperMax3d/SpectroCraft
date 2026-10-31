@@ -3,6 +3,7 @@
  */
 
 #include "Application.h"
+#include "ContentAwareTimeScale.h"
 #include "Recorder.h"
 #include "StartupTrace.h"
 #include "SpectralMaskProcessor.h"
@@ -2655,6 +2656,119 @@ bool Application::timeStretch (float percentChange, std::string* errOut)
         commitTimeAnchoredToPatch (oldTA, p);
         if (onTimeRangeStretched)
             onTimeRangeStretched (d, aSec, oldEndSecs, bNew, p);
+    }
+
+    syncActiveDoc ();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Content Aware Time Scale
+// ---------------------------------------------------------------------------
+
+namespace {
+// In-memory analysis cap: nch * span floats must fit comfortably (~1.2 GB).
+constexpr size_t kCatMaxBytes = (size_t) 1200 * 1024 * 1024;
+} // namespace
+
+bool Application::catAnalyzeActiveRange (sc::cat::Analysis& out)
+{
+    auto& eng = audioEngine ();
+    if (!eng.isFileLoaded ()) return false;
+
+    const double rate = eng.sampleRate ();
+    const int nch = eng.numChannels ();
+    const int64_t total = eng.numSamples ();
+    juce::Range<int64_t> range = selection.isEmpty ()
+        ? juce::Range<int64_t> { 0, total }
+        : selectionSamples (*this).getIntersectionWith ({ 0, total });
+    if (range.getLength () <= 0) return false;
+
+    const size_t bytes = (size_t) nch * (size_t) range.getLength () * sizeof (float);
+    if (bytes > kCatMaxBytes) return false;   // too large for in-memory analysis
+
+    std::vector<std::vector<float>> data;
+    if (!eng.readRange (range.getStart (), range.getLength (), data))
+        return false;
+
+    return sc::cat::analyze (data, nch, rate, out);   // false when too short
+}
+
+bool Application::contentAwareTimeScale (bool reduceGaps, double percentile,
+                                        double speedFactor, std::string* errOut)
+{
+    auto& eng = audioEngine ();
+    if (!eng.isFileLoaded ()) { *errOut = "No file loaded."; return false; }
+
+    FileDoc* d = doc ();
+    const double rate = eng.sampleRate ();
+    const int nch = eng.numChannels ();
+    const int64_t total = eng.numSamples ();
+
+    juce::Range<int64_t> range = selection.isEmpty ()
+        ? juce::Range<int64_t> { 0, total }
+        : selectionSamples (*this).getIntersectionWith ({ 0, total });
+    if (range.getLength () <= 0) return true;   // nothing to do - not an error
+
+    const size_t bytes = (size_t) nch * (size_t) range.getLength () * sizeof (float);
+    if (bytes > kCatMaxBytes)
+    { *errOut = "The selection is too large for content-aware analysis."; return false; }
+
+    std::vector<std::vector<float>> data;
+    if (!eng.readRange (range.getStart (), range.getLength (), data))
+    { *errOut = "Could not read the audio data."; return false; }
+
+    sc::cat::Analysis a;
+    if (!sc::cat::analyze (data, nch, rate, a))
+    { *errOut = "The selection is too short for content-aware time scaling."; return false; }
+
+    std::vector<sc::cat::Edit> edits;
+    if (reduceGaps)
+    {
+        edits = sc::cat::reduceGapsEdits (a, percentile, 3);
+        if (edits.empty ())
+            return true;   // no gap qualifies - bit-exact no-op
+    }
+    else
+    {
+        if (!(speedFactor > 0.0)) { *errOut = "Invalid speed factor."; return false; }
+        const double refDur = (double) range.getLength () / rate;
+        const int64_t delta = (int64_t) std::llround ((refDur / speedFactor - refDur) * rate);
+        if (delta == 0)
+            return true;   // factor ~1: bit-exact no-op
+        juce::Random rng;   // fresh seed per run: the same region is not always reused
+        edits = sc::cat::planTimeScaleEdits (a, delta, rng);
+        if (edits.empty ())
+            return true;   // no stable material found - bit-exact no-op
+    }
+
+    auto newData = sc::cat::applyEdits (data, nch, rate, edits);
+
+    const double aSec = (double) range.getStart () / rate;
+    const double oldEndSecs = (double) range.getEnd () / rate;
+    const size_t depthBefore = d->undo.depth ();
+    std::vector<Marker> oldMarkers = d->markers.markers ();
+    auto oldSavedSel = d->savedSelections;
+    TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
+
+    if (!eng.replaceRangeWithDifferentLength (range, newData, "Content-aware time scale"))
+        return false;   // errOut set by the engine when non-null
+
+    const double bNew = ((double) range.getStart () + (double) newData[0].size ()) / rate;
+
+    d->remapForStretch (aSec, oldEndSecs, bNew);   // markers/savedSel/spectralSel/drawings/SCTT
+    selection = { aSec, bNew };                    // the edited range stays selected
+    playhead = warpStretch (playhead, aSec, oldEndSecs, bNew);
+
+    if (d->undo.depth () > depthBefore)   // a patch was actually recorded
+    {
+        Patch& p = d->undo.lastRecorded ();
+        p.hasSideState = true;
+        p.oldMarkers = std::move (oldMarkers);
+        p.newMarkers = d->markers.markers ();
+        p.oldSavedSel = std::move (oldSavedSel);
+        p.newSavedSel = d->savedSelections;
+        commitTimeAnchoredToPatch (oldTA, p);
     }
 
     syncActiveDoc ();

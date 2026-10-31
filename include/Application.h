@@ -1,6 +1,7 @@
 #pragma once
 // SpectroCraft - Application state (owns documents, views, markers, undo)
 #include <JuceHeader.h>
+#include "ContentAwareTimeScale.h"
 #include "Settings.h"
 #include "AudioEngine.h"
 #include "SpectralEngine.h"
@@ -525,6 +526,22 @@ public:
         both content and length. A spectral selection is ignored (this is a
         time-domain edit). */
     bool timeStretch (float percentChange, std::string* errOut = nullptr);
+
+    /** Content Aware Time Scale - analysis pass only: runs the STFT gap
+        analysis over the active range (time selection or whole file).
+        Used by the dialog's live "resulting duration" preview. Returns false
+        when the range is too short or too large to analyse in memory. */
+    bool catAnalyzeActiveRange (sc::cat::Analysis& out);
+
+    /** Content Aware Time Scale - the effect itself: changes the duration of
+        the time selection (or whole file) by removing/duplicating stable
+        segments found from STFT frame-to-frame magnitude differences.
+        reduceGaps: delete every gap whose change is below `percentile` (0-100)
+        of all gaps. Otherwise stretch by `speedFactor` (> 1 = shorter/faster,
+        < 1 = longer/slower). One undoable step; timeline state is warped.
+        A spectral selection is ignored (this is a time-domain edit). */
+    bool contentAwareTimeScale (bool reduceGaps, double percentile, double speedFactor,
+                                std::string* errOut = nullptr);
 
     // Snapshot of the time-anchored state taken before an edit that inserts /
     // deletes / shortens / stretches timeline data: playhead and selection

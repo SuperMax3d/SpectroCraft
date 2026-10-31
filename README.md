@@ -559,8 +559,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       file**: anchors at or after the insertion point shift right by the
       inserted length; shapes straddling the point split into two pieces
       (rectangles and polygons; strokes crop their column grid).
-    - **Time Stretch**: anchors inside the stretched range scale with it,
-      everything after shifts by the length delta.
+    - **Time Stretch / Content Aware Time Scale**: anchors inside the
+      edited range scale with it, everything after shifts by the length
+      delta.
     - **Stem Separation / Super Resolution in Overwrite mode** (the result
       replaces an extracted window): equivalent to deleting everything before
       and after the new content — anchors keep their position relative to the
@@ -638,9 +639,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     together, rendered as sine, square, sawtooth or triangle. Phase is
     continuous with absolute file time, so generated tones line up with
     surrounding audio instead of clicking at the boundary.
-- **Invert / Time Stretch / Filter EQ / Enveloppe** (`Effects → Invert`,
-  `Time Stretch…`, `Filter EQ…`, `Enveloppe…`): four classic waveform
-  effects added after *Reverse*:
+- **Invert / Time Stretch / Content Aware Time Scale / Filter EQ /
+  Enveloppe** (`Effects → Invert`, `Time Stretch…`,
+  `Content Aware Time Scale…`, `Filter EQ…`, `Enveloppe…`): five classic
+  waveform effects added after *Reverse*:
   - *Invert* — negates every sample in the target (spectral selection if
     active, else the time selection, else the whole file). One undoable step.
   - *Time Stretch…* — SoundTouch-based tempo change that preserves pitch.
@@ -656,6 +658,32 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     nothing is dropped, everything stays in sync. One undoable step that
     restores both the old content and the old length; a spectral selection,
     if present, is ignored (a stretch is a time-domain operation).
+  - *Content Aware Time Scale…* — a content-aware alternative to Time
+    Stretch with two modes in a drop-down:
+    - **Time Stretch** — the same linked duration/speed-factor fields as
+      Time Stretch, but instead of SoundTouch it removes (to shorten) or
+      duplicates (to lengthen) short time-domain segments chosen by spectral
+      stability. The analysis computes STFT magnitude differences between
+      consecutive frames (Hann window, size ≈ rate/48 clamped to 1024–4096,
+      hop N/4), normalises them over the range and derives a per-gap
+      stability `exp(-3·normDiff)`. Onsets and offsets — local maxima of the
+      frame-to-frame change reaching 30% of the maximum — protect themselves
+      plus their neighbouring gaps, so transients are almost never cut or
+      duplicated. Stable runs (≥3 consecutive qualifying gaps) become regions
+      at a P40 stability threshold, falling back to P25/P10 when the selection
+      has less stable material than requested; segments are then picked with
+      an exponential preference for the most stable region plus a light length
+      bonus until the requested amount is reached. Every edit joins its sides
+      with a short (~5 ms) crossfade, so no clicks appear at the seams.
+    - **Reduce Gaps** — a percentile field (0–100): every region whose
+      frame-to-frame change sits at or below that percentile of all gaps is
+      deleted. The resulting duration is shown live in the dialog before you
+      apply, so you can dial the amount in.
+    Both modes work on the time selection (or the whole file when nothing is
+    selected), change the file length like Time Stretch — markers, saved
+    selections and FFT snapshots are warped through the same time-warp — and
+    record one undoable step. A factor of ~1 or a 0% percentile is a bit-exact
+    no-op that records nothing.
   - *Filter EQ…* — Audacity-style graphical curve equalizer: an interactive
     log-frequency/dB editor (click empty space to add a point, drag to move
     it, **double-click** a point to type its exact frequency/gain coordinates,
@@ -1453,7 +1481,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Fade In / Fade Out (on the time selection, or whole file when none) | Ctrl+Shift+I / Ctrl+Shift+O |
 | Filter EQ... (graphical curve equalizer dialog) | Ctrl+Shift+E |
 | Time Stretch... (SoundTouch tempo change dialog) | Ctrl+Shift+T |
-| Repeat last effect (re-applies the most recent Effects-menu edit; re-opens its dialog for dialog-based effects like Change Gain / Filter EQ / Time Stretch / Enveloppe) | Ctrl+Shift+F |
+| Repeat last effect (re-applies the most recent Effects-menu edit; re-opens its dialog for dialog-based effects like Change Gain / Filter EQ / Time Stretch / Content Aware Time Scale / Enveloppe) | Ctrl+Shift+F |
 | Resample... (Edit menu, own section: new sample rate + optional channel remix) | F11 |
 | Split Spectral Selection Configuration — per-channel input → destination setup; closing saves without splitting | Shift+F12 |
 | Split Spectral Selection Execute — runs the configured split (needs an active spectral selection); first time per file open opens the configuration instead | F12 |
@@ -1484,7 +1512,10 @@ shared across all open files — you can copy from one file and paste into
 another. **Copy to New File** and **Paste Mix** are described above. Effects offers Silence,
 Fade In/Out, Normalize, Reverse, **Invert**, **Time Stretch…** (SoundTouch
 tempo change that preserves pitch; changes the file length and warps markers,
-saved selections and FFT snapshots through the same time-warp) and
+saved selections and FFT snapshots through the same time-warp),
+**Content Aware Time Scale…** (content-aware stretch with a Time Stretch /
+Reduce Gaps mode drop-down: stable segments are removed or duplicated based
+on STFT frame-to-frame differences, transients protected; see above) and
 **Filter EQ…** (graphical curve equalizer applied as a zero-phase FFT filter;
 see [above](#features)), **Enveloppe…** (amplitude-over-time envelope drawn on
 a time/dB graph, applied per sample; spectral-selection aware) — plus
@@ -1832,7 +1863,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~2770 checks), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~3715 checks in Release), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -2082,6 +2113,20 @@ delays the window from appearing.
     document with exactly that channel's content; stale saved modes fall back
     to `All`), and the Transport menu structure itself is verified (Record +
     Recording Device present with correct item counts).
+  - **Content Aware Time Scale**: on a silence/tone/silence buffer the onset
+    and offset show up as large frame-to-frame changes and their gaps are
+    protected, while stable regions score stability ≈1; reduce-gaps edits
+    avoid protected gaps, match the previewed sample amount exactly and
+    shorten the buffer by exactly that amount (percentile 0 removes nothing);
+    time-scale planning only removes when shortening / only duplicates when
+    lengthening with the total within one hop of the requested delta, the
+    output length matches the plan exactly, no NaN/Inf appears and the prefix
+    before the first edit's crossfade is bit-exact; end-to-end through
+    `Application::contentAwareTimeScale` — reduce-gaps on a selection shortens
+    the file with the edited range staying selected in place, undo restores the
+    original length *and* content exactly, and a factor-2 stretch halves the
+    whole file (hop-quantised); the dialog's row visibility switches with the
+    mode drop-down.
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,

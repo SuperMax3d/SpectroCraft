@@ -11,9 +11,61 @@
 #include <algorithm>
 
 #include "WorkProgress.h"
+#include "ContentAwareTimeScale.h"
 
 class StemSeparationWindow;   // defined in StemSeparation.h
 class SuperResolutionWindow;  // defined in SuperResolution.h
+
+/** Content of the "Content Aware Time Scale" dialog: a mode drop-down
+    (Time Stretch / Reduce Gaps) plus the fields for the selected mode. The
+    whole block is one custom component so rows can be shown/hidden per mode.
+    A background analysis thread feeds setAnalysis() for the live preview. */
+class CatTimeScalePanel : public juce::Component
+{
+public:
+    enum class Mode { TimeStretch, ReduceGaps };
+
+    explicit CatTimeScalePanel (double refDurationSecs);
+
+    /** Starts a detached worker that runs fn() off the UI thread and then
+        delivers its result via setAnalysis(). Safe to call once; if the panel
+        is destroyed before fn() finishes, the delivery is skipped. */
+    void startAnalysis (std::function<void(sc::cat::Analysis&, bool&, juce::String&)> fn);
+
+    /** Delivers a finished analysis (call on the message thread). ok=false
+        shows err in the status line instead of a preview. */
+    void setAnalysis (sc::cat::Analysis a, bool ok, const juce::String& err = {});
+
+    Mode getMode() const { return mode_; }
+    double getSpeedFactor () const;   // parsed from the visible fields (> 0)
+    double getPercentile () const;    // clamped to [0, 100]
+
+    juce::ComboBox* modeCombo() const { return modeCombo_; }   // unit tests
+    // Row visibility (unit tests): per-mode visibility is tracked on the rows.
+    bool durationRowVisible()   const;
+    bool factorRowVisible()     const;
+    bool percentileRowVisible() const;
+    juce::String getResultText() const { return resultLabel_->getText(); }   // unit tests
+
+private:
+    void setMode (Mode m);
+    void syncFromDuration ();
+    void syncFromFactor ();
+    void refreshResult ();
+
+    Mode mode_ = Mode::TimeStretch;
+    double refDur_ = 1.0;
+    sc::cat::Analysis analysis_;
+    bool analysisOk_ = false;
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>> (true);
+
+    juce::Label* modeLabel_ = nullptr;
+    juce::ComboBox* modeCombo_ = nullptr;
+    class LabeledField* durRow_ = nullptr;   // defined in MainWindow.cpp
+    class LabeledField* facRow_ = nullptr;
+    class LabeledField* pctRow_ = nullptr;
+    juce::Label* resultLabel_ = nullptr;
+};
 
 class MainWindow : public juce::DocumentWindow,
                    private juce::KeyListener,
@@ -171,8 +223,10 @@ public:
     juce::AlertWindow* createGenerateNoiseDialog();
     juce::AlertWindow* createGenerateToneDialog();
 
-    // ---- Effects > Invert / Time Stretch... / Filter EQ... / Enveloppe... ---
+    // ---- Effects > Invert / Time Stretch... / Content Aware Time Scale... /
+    //          Filter EQ... / Enveloppe... ---
     void showTimeStretchDialog();
+    void showContentAwareTimeScaleDialog();
     void showFilterEqDialog();
     void showEnvelopeDialog();
 
@@ -189,6 +243,7 @@ public:
         Enveloppe dialogs. The caller owns and must delete them; used by the
         show* functions and tests. */
     juce::AlertWindow* createTimeStretchDialog();
+    juce::AlertWindow* createContentAwareTimeScaleDialog();
     juce::AlertWindow* createFilterEqDialog();
     juce::AlertWindow* createEnvelopeDialog();
 
@@ -393,6 +448,7 @@ public:
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsInvert,           // Effects > Invert (spectral sel / time sel / whole file)
         ToolsTimeStretch,      // Effects > Time Stretch... (SoundTouch tempo change)
+        ToolsCatTimeScale,     // Effects > Content Aware Time Scale... (STFT gap analysis)
         ToolsFilterEq,         // Effects > Filter EQ... (FFT curve equaliser)
         ToolsEnvelope,         // Effects > Enveloppe... (amplitude-over-time curve)
         ToolsResample,

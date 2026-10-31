@@ -2430,6 +2430,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ToolsReverse: runDestructiveEdit ([&] (std::string* e) { const bool ok = app.reverse (e); if (ok) lastEffectId = ToolsReverse; return ok; }); break;
         case ToolsInvert:      runDestructiveEdit ([&] (std::string* e) { const bool ok = app.invertSelection (e); if (ok) lastEffectId = ToolsInvert; return ok; }); break;
         case ToolsTimeStretch: showTimeStretchDialog(); break;
+        case ToolsCatTimeScale: showContentAwareTimeScaleDialog(); break;
         case ToolsFilterEq:    showFilterEqDialog(); break;
         case ToolsEnvelope:    showEnvelopeDialog(); break;
 
@@ -3104,6 +3105,41 @@ void MainWindow::showChangeGainDialog()
         { const bool ok = app.changeGain (db, e); if (ok) lastEffectId = ToolsChangeGain; return ok; });
 }
 
+/** A caption and a text editor laid out side by side on one row, so the
+    label sits in front of (left of) its field instead of above it. Global
+    scope (not file-local): CatTimeScalePanel in MainWindow.h holds pointers
+    to these rows. */
+class LabeledField : public juce::Component
+{
+public:
+    LabeledField (const juce::String& labelText, const juce::String& initialText,
+                  const juce::String& fieldTooltip)
+    {
+        label_ = new juce::Label ("", labelText);
+        editor_ = new juce::TextEditor();
+        editor_->setMultiLine (false);
+        editor_->setText (initialText);
+        if (!fieldTooltip.isEmpty())
+            editor_->setTooltip (fieldTooltip);
+        addAndMakeVisible (label_);
+        addAndMakeVisible (editor_);
+    }
+
+    juce::TextEditor* editor() const { return editor_; }
+
+    void resized() override
+    {
+        label_->setBounds (0, 3, kLabelW, 18);
+        editor_->setBounds (kLabelW + 6, 0,
+                           std::max (40, getWidth() - kLabelW - 6), 24);
+    }
+
+private:
+    juce::Label* label_ = nullptr;
+    juce::TextEditor* editor_ = nullptr;
+    static constexpr int kLabelW = 132;
+};
+
 // Effects > Resample... — prompt for a new sample rate AND channel count and
 // resample/remix the whole file (SoXR, same engine as Audacity). Not undoable:
 // the dialog warns about it.
@@ -3334,43 +3370,10 @@ public:
     }
 };
 
-/** A caption and a text editor laid out side by side on one row, so the
-    label sits in front of (left of) its field instead of above it. */
 // Fixed sizes for the dialog's custom rows. AlertWindow stacks custom
 // components by their height at layout time and never resizes them itself.
 static constexpr int kInputRowW = 300, kInputRowH = 24;
 static constexpr int kFillRowW = 360, kFillRowH = 26;
-
-class LabeledField : public juce::Component
-{
-public:
-    LabeledField (const juce::String& labelText, const juce::String& initialText,
-                  const juce::String& fieldTooltip)
-    {
-        label_ = new juce::Label ("", labelText);
-        editor_ = new juce::TextEditor();
-        editor_->setMultiLine (false);
-        editor_->setText (initialText);
-        if (!fieldTooltip.isEmpty())
-            editor_->setTooltip (fieldTooltip);
-        addAndMakeVisible (label_);
-        addAndMakeVisible (editor_);
-    }
-
-    juce::TextEditor* editor() const { return editor_; }
-
-    void resized() override
-    {
-        label_->setBounds (0, 3, kLabelW, 18);
-        editor_->setBounds (kLabelW + 6, 0,
-                           std::max (40, getWidth() - kLabelW - 6), 24);
-    }
-
-private:
-    juce::Label* label_ = nullptr;
-    juce::TextEditor* editor_ = nullptr;
-    static constexpr int kLabelW = 132;
-};
 
 /** Configuration grid for "Split Spectral Selection": one row per channel -
     a checkbox ("Channel N") selects it as an extraction source and a text
@@ -3980,6 +3983,214 @@ void MainWindow::showTimeStretchDialog()
     runDestructiveEdit ([&] (std::string* e)
         { const bool ok = app.timeStretch ((float) jlimit (-95.0f, 3000.0f, pct), e);
           if (ok) lastEffectId = ToolsTimeStretch;
+          return ok; });
+}
+
+// ---------------------------------------------------------------------------
+// Content Aware Time Scale (Effects menu, next to Time Stretch)
+// ---------------------------------------------------------------------------
+
+CatTimeScalePanel::CatTimeScalePanel (double refDurationSecs)
+    : refDur_ (std::max (1e-9, refDurationSecs))
+{
+    modeLabel_ = new juce::Label ("", "Mode:");
+    modeCombo_ = new juce::ComboBox ("catMode");
+    modeCombo_->addItem ("Time Stretch", 1);
+    modeCombo_->addItem ("Reduce Gaps", 2);
+
+    durRow_ = new LabeledField ("Time Duration:", formatWeightText (refDur_),
+        "New length of the audio in seconds.");
+    durRow_->editor()->setName ("catDuration");
+    facRow_ = new LabeledField ("Speed Factor:", "1.0",
+        "> 1 shortens (faster), < 1 lengthens (slower). The two fields are linked.");
+    facRow_->editor()->setName ("catFactor");
+    pctRow_ = new LabeledField ("Percentile:", "40",
+        "Remove every gap whose spectral change is below this percentile (0-100) of all gaps in the range.");
+    pctRow_->editor()->setName ("catPercentile");
+    resultLabel_ = new juce::Label ("", "Analysing ...");
+
+    addAndMakeVisible (modeLabel_);
+    addAndMakeVisible (modeCombo_);
+    addAndMakeVisible (durRow_);
+    addAndMakeVisible (facRow_);
+    addAndMakeVisible (pctRow_);
+    addAndMakeVisible (resultLabel_);
+
+    modeLabel_->setBounds (0, 5, 132, 18);
+    modeCombo_->setBounds (138, 0, getWidth() - 138, 28);
+    durRow_->setBounds (0, 34, kInputRowW, kInputRowH);
+    facRow_->setBounds (0, 62, kInputRowW, kInputRowH);
+    pctRow_->setBounds (0, 34, kInputRowW, kInputRowH);   // same slot as the duration row
+    resultLabel_->setBounds (0, 92, kInputRowW, 18);
+
+    modeCombo_->setSelectedItemIndex (0, juce::dontSendNotification);
+    modeCombo_->onChange = [this] { setMode (modeCombo_->getSelectedItemIndex() == 1 ? Mode::ReduceGaps : Mode::TimeStretch); };
+    durRow_->editor()->onTextChange = [this] { syncFromDuration (); };
+    facRow_->editor()->onTextChange = [this] { syncFromFactor (); };
+    pctRow_->editor()->onTextChange = [this] { refreshResult (); };
+
+    setMode (Mode::TimeStretch);
+}
+
+void CatTimeScalePanel::startAnalysis (std::function<void(sc::cat::Analysis&, bool&, juce::String&)> fn)
+{
+    std::thread ([this, fn]
+    {
+        sc::cat::Analysis a;
+        bool ok = false;
+        juce::String err;
+        fn (a, ok, err);
+
+        // The dialog is modal: it can only be closed from the message thread,
+        // where the destructor clears alive_ before deleting this panel. A
+        // callback that still sees true therefore always finds a live panel.
+        if (!alive_->load ()) return;
+        juce::MessageManager::callAsync ([this, a = std::move (a), ok, err]
+            { if (alive_->load ()) setAnalysis (std::move (a), ok, err); });
+    }).detach ();
+}
+
+void CatTimeScalePanel::setAnalysis (sc::cat::Analysis a, bool ok, const juce::String& err)
+{
+    analysis_ = std::move (a);
+    analysisOk_ = ok;
+    if (!ok)
+        resultLabel_->setText (err.isEmpty () ? "Analysis unavailable." : err,
+                               juce::dontSendNotification);
+    else
+        refreshResult ();
+}
+
+void CatTimeScalePanel::setMode (Mode m)
+{
+    mode_ = m;
+    const bool reduce = (m == Mode::ReduceGaps);
+    durRow_->setVisible (!reduce);
+    facRow_->setVisible (!reduce);
+    pctRow_->setVisible (reduce);
+    refreshResult ();
+}
+
+void CatTimeScalePanel::syncFromDuration ()
+{
+    double d;
+    if (parseGainDbText (durRow_->editor()->getText (), d) && d > 0.0)
+        facRow_->editor()->setText (formatWeightText (refDur_ / d));
+}
+
+void CatTimeScalePanel::syncFromFactor ()
+{
+    double f;
+    if (parseGainDbText (facRow_->editor()->getText (), f) && f > 0.0)
+        durRow_->editor()->setText (formatWeightText (refDur_ / f));
+}
+
+void CatTimeScalePanel::refreshResult ()
+{
+    if (!analysisOk_)
+        return;   // keep the "Analysing ..." / error text as-is
+
+    if (mode_ != Mode::ReduceGaps)
+    {
+        double d = refDur_;
+        parseGainDbText (durRow_->editor()->getText (), d);
+        resultLabel_->setText ("Target duration: " + formatWeightText (std::max (1e-9, d)) + " s",
+                               juce::dontSendNotification);
+        return;
+    }
+
+    double p = 40.0;
+    parseGainDbText (pctRow_->editor()->getText (), p);
+    const int64_t removed = sc::cat::removableSamplesAtPercentile (analysis_, p, 3);
+    const double newDur = std::max (0.0, refDur_ - (double) removed / analysis_.rate);
+    resultLabel_->setText ("Resulting duration: " + formatWeightText (newDur)
+                           + " s  (removes " + formatWeightText ((double) removed / analysis_.rate) + " s)",
+                           juce::dontSendNotification);
+}
+
+double CatTimeScalePanel::getSpeedFactor () const
+{
+    double f = -1.0;
+    if (parseGainDbText (facRow_->editor()->getText (), f) && f > 0.0)
+        return f;
+    double d = -1.0;
+    if (parseGainDbText (durRow_->editor()->getText (), d) && d > 0.0)
+        return refDur_ / d;
+    return 1.0;   // invalid input: no change
+}
+
+double CatTimeScalePanel::getPercentile () const
+{
+    double p = -1.0;
+    if (parseGainDbText (pctRow_->editor()->getText (), p))
+        return jlimit (0.0, 100.0, p);
+    return 40.0;   // invalid input: default
+}
+
+bool CatTimeScalePanel::durationRowVisible()   const { return durRow_ != nullptr && durRow_->isVisible(); }
+bool CatTimeScalePanel::factorRowVisible()     const { return facRow_ != nullptr && facRow_->isVisible(); }
+bool CatTimeScalePanel::percentileRowVisible() const { return pctRow_ != nullptr && pctRow_->isVisible(); }
+
+juce::AlertWindow* MainWindow::createContentAwareTimeScaleDialog()
+{
+    auto& eng = app.audioEngine();
+    const double rate = std::max (1.0, eng.sampleRate());
+
+    juce::String msg = "Content-aware time scaling of ";
+    if (!app.selection.isEmpty())
+        msg += juce::String (app.selection.getLength (), 3) + "s selection";
+    else
+        msg += "the whole file (" + juce::String (eng.numSamples () / rate, 3) + "s).";
+    msg += "\nThe audio is analysed with an STFT: the most stable gaps (least change between consecutive frames) are removed or duplicated in the time domain with short crossfades. Onsets and transients are protected.";
+
+    auto* w = new juce::AlertWindow ("Content Aware Time Scale", msg,
+                                     juce::AlertWindow::QuestionIcon, this);
+
+    const double refDur = std::max (1e-9, stretchReferenceDuration (app));
+    auto* panel = new CatTimeScalePanel (refDur);
+    w->addCustomComponent (panel);
+
+    // Live preview: analyse the active range off the UI thread.
+    panel->startAnalysis ([this] (sc::cat::Analysis& a, bool& ok, juce::String& err)
+        {
+            if (!app.catAnalyzeActiveRange (a))
+                { ok = false; err = "Analysis unavailable for this range."; return; }
+            ok = true;
+        });
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    return w;
+}
+
+void MainWindow::showContentAwareTimeScaleDialog()
+{
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    auto* w = createContentAwareTimeScaleDialog ();
+
+    // Enter modal state WITHOUT taking keyboard focus (see showChangeGainDialog).
+    w->enterModalState (false);
+    if (auto* ed = findNamedEditor (*w, "catDuration"))
+        ed->grabKeyboardFocus();
+
+    const int result = w->runModalLoop ();
+
+    bool reduce = false;
+    double factor = 1.0, pct = 40.0;
+    if (auto* p = dynamic_cast<CatTimeScalePanel*> (w->getCustomComponent (0)))
+    {
+        reduce = (p->getMode() == CatTimeScalePanel::Mode::ReduceGaps);
+        factor = p->getSpeedFactor ();
+        pct = p->getPercentile ();
+    }
+    delete w;
+    if (result != 1) return;   // cancelled
+
+    runDestructiveEdit ([&] (std::string* e)
+        { const bool ok = app.contentAwareTimeScale (reduce, pct, factor, e);
+          if (ok) lastEffectId = ToolsCatTimeScale;
           return ok; });
 }
 
@@ -5947,6 +6158,8 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSeparator();
         menu.addItem (ToolsInvert,      "Invert",          app.audioEngine().isFileLoaded(), false);
         menu.addItem (ToolsTimeStretch, "Time Stretch...\tCtrl+Shift+T",
+                      app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ToolsCatTimeScale, "Content Aware Time Scale...",
                       app.audioEngine().isFileLoaded(), false);
         menu.addItem (ToolsFilterEq,    "Filter EQ...\tCtrl+Shift+E",
                       app.audioEngine().isFileLoaded(), false);
