@@ -164,11 +164,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     frequency; Weighted = same as Total for the level, using the weighted mean
     frequency). The two time-based modes add a **Ref Time** option (Relative =
     ticks counted from the selection start, Absolute = file time) and have a
-    horizontal view window over the analysed region: the mouse wheel zooms both
-    axes at the cursor, a right-drag box sets both windows (the box's x span
-    becomes the time window and its y span the frequency/level window — in
-    Freq vs Time the vertical axis is frequency), dragging that starts on an
-    axis zooms only that axis, left-dragging the bottom axis pans the time
+    horizontal view window over the analysed region: the mouse wheel zooms
+    only the axis under the cursor — the time window when over the plot or
+    the bottom time ruler, the frequency/level window when over the vertical
+    axis strip (or with Shift held), like the other graphs; a right-drag box
+    sets both windows (the box's x span becomes the time window and its y span
+    the frequency/level window — in Freq vs Time the vertical axis is
+    frequency), dragging that starts on an axis zooms only that axis,
+    left-dragging the bottom axis pans the time
     window, and the right-click menu's checkable **Zoom Fit** fits both windows
     to every displayed curve (live + shown stored curves) — while checked,
     each new time selection zoom-fits automatically; any manual zoom (pan,
@@ -419,9 +422,11 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     view) when it is at the bottom — the other hides its strip and expands.
     The same section offers **Show Amplitude Grid** and **Show Frequency
     Grid**, which hide/show the horizontal grey grid lines inside the data
-    tracks - the dB amplitude levels in each waveform track and the frequency
-    tick lines in each spectrogram track. Both default to on, are remembered
-    between sessions, and leave the axis labels untouched when off.
+    tracks - the dB amplitude levels in each waveform track (plus a line at
+    amplitude 0, labelled **-inf** in dB mode, **0.000** in Normalized and
+    **0** in Wav Units) and the frequency tick lines in each spectrogram
+    track. Both default to on, are remembered between sessions, and leave the
+    axis labels untouched when off.
   - Main area: waveform view on top, spectral view below, separated by a
     **draggable divider** — drag it up/down to resize the two views. A time
     scrollbar runs along the bottom, aligned with the data region (inset by
@@ -1975,7 +1980,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~3874 checks in Release), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~3894 checks in Release), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -2245,6 +2250,14 @@ delays the window from appearing.
     one with spaces), an empty list is acknowledged, and forwarding fails
     cleanly when no server listens; the Window menu item exists, is checked by
     default, and toggling it persists to disk immediately.
+  - **Waveform zero line**: the per-mode zero-line labels ("0" / "-inf" /
+    "0.000") and a headless paint check that with the amplitude grid on the row
+    centre carries the grey zero line while with it off only the fixed
+    row-centre divider shows.
+  - **FFT axis wheel zoom**: in Amp vs Time / Freq vs Time a wheel over the
+    plot or bottom time ruler shrinks only the time window, one over the right
+    vertical axis strip (or Shift+wheel) shrinks only the level/frequency
+    window — each leaving the other axis untouched.
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,

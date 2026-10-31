@@ -172,6 +172,11 @@ public:
         return rulerAtBottom() ? y >= getHeight() - kRulerH : y < kRulerH;
     }
 
+    /** Label for the zero line (amplitude 0) per vertical scale mode:
+        "-inf" in dB, "0.000" in Normalized, "0" in Wav Units / sample mode.
+        Exposed for unit tests. */
+    static juce::String zeroLineLabel (int waveVScaleMode);
+
     juce::Rectangle<int> plotRect() const
     {
         // The axis strip always takes kLeftAxisWidth of horizontal space and

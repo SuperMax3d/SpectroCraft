@@ -22883,6 +22883,167 @@ static void testSingleInstance()
     // No server listening: the forward must fail after its short timeout.
     CHECK (!sc::singleinstance::forwardFiles (send, pipeName), "no instance -> no forward");
 }
+
+// ------------------------------------------------------- waveform zero line
+// With the amplitude grid enabled a grid line must appear at amplitude 0,
+// labelled "-inf" (dB) / "0.000" (Normalized) / "0" (Wav Units).
+static void testWaveformZeroLine()
+{
+    CHECK (WaveformView::zeroLineLabel (0) == "0",     "Wav Units zero label is 0");
+    CHECK (WaveformView::zeroLineLabel (1) == "-inf",  "dB zero label is -inf");
+    CHECK (WaveformView::zeroLineLabel (2) == "0.000", "normalized zero label is 0.000");
+
+    // Constant +0.5 file: the envelope band sits entirely above the row
+    // centre, so the centre pixel shows exactly what the axis draws there.
+    const juce::File wav = makeTempFile ("wave_zero.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t, double) { return 0.5f; });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load dc file for zero-line test");
+
+    WaveformView view (app);
+    view.setSize (256, 128);
+    view.setViewRange (0.0, 2.0);
+    view.setVisibleChannels ({ 0 });
+
+    const auto pr = view.plotRect();
+    // Single visible channel row spans the whole plot; sample mid-plot x so
+    // the pixel stays clear of the axis-strip label text.
+    const int cy = (int) (pr.getY() + pr.getHeight() * 0.5);
+    const int cx = (int) (pr.getX() + pr.getWidth() * 0.6);
+
+    auto centrePixel = [&] () -> juce::Colour
+    {
+        juce::Image img (juce::Image::ARGB, 256, 128, true);
+        { juce::Graphics g (img); view.paint (g); }
+        return img.getPixelAt (cx, cy);
+    };
+
+    app.settings.showAmpGrid = false;
+    const auto pOff = centrePixel();
+    CHECK (std::abs ((int) pOff.getRed() - 60) <= 2 && std::abs ((int) pOff.getGreen() - 60) <= 2,
+          "without grid the fixed row-centre line (60,60,60) shows");
+
+    app.settings.showAmpGrid = true;
+    const auto pOn = centrePixel();
+    CHECK (std::abs ((int) pOn.getRed() - 48) <= 2 && std::abs ((int) pOn.getGreen() - 48) <= 2,
+          "with grid the zero line (48,48,48) is drawn at amplitude 0");
+
+    wav.deleteFile();
+}
+
+// ------------------------------------------------------- fft axis wheel zoom
+// In Freq vs Time / Amp vs Time a scroll-wheel over an axis must zoom only
+// that axis (like the waveform/spectral views), not both axes at once.
+static void testFFTAxisWheelZoom()
+{
+    // Exponentially decaying tone: the analysed region spans ~30 dB of level,
+    // wide enough that a wheel zoom actually shrinks the fitted level window
+    // (a flat tone fits to <10 dB, which is the zoom's minimum span).
+    const juce::File wav = makeTempFile ("fft_wheel.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+             { const double t = (double) f / rate;
+               return 0.5f * (float) std::exp (-3.0 * t)
+                      * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                          * 400.0 * t); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for fft wheel test");
+    app.setSelection ({ 0.5, 1.5 });   // analysed region = 1 s
+
+    auto wheelAt = [] (FFTAnalysisView& view, int x, int y, float dy, juce::ModifierKeys mods)
+    {
+        juce::MouseWheelDetails wd; wd.deltaY = dy;
+        view.mouseWheelMove (mkMouse (view, x, y, mods), wd);
+    };
+
+    // --- Amp vs Time: plot wheel = time only; right-axis wheel = level only.
+    {
+        FFTAnalysisView view (app);
+        view.setSize (300, 200);
+        view.setAxisMode (4);   // Amp vs Time
+        view.recomputeIfNeeded();
+
+        const auto plot = view.plotBounds();
+        CHECK (plot.getWidth() > 50 && plot.getHeight() > 50, "fft plot area is sane");
+
+        const double tLo0 = view.getCurveViewT0(), tHi0 = view.getCurveViewT1();
+        const double dbTop0 = view.getDbTop(), dbBot0 = view.getDbBottom();
+
+        // Wheel over the middle of the plot: time window shrinks, level range untouched.
+        wheelAt (view, plot.getX() + plot.getWidth() / 2,
+                 plot.getY() + plot.getHeight() / 2, +1.0f, {});
+        const double tLo1 = view.getCurveViewT0(), tHi1 = view.getCurveViewT1();
+        CHECK (tHi1 - tLo1 < tHi0 - tLo0 && tLo1 >= tLo0 - 1e-9 && tHi1 <= tHi0 + 1e-9,
+               "plot wheel zooms the time window in");
+        CHECK (std::abs (view.getDbTop() - dbTop0) < 1e-9
+              && std::abs (view.getDbBottom() - dbBot0) < 1e-9,
+               "plot wheel leaves the level range alone");
+
+        // Wheel over the right level axis: level window shrinks, time untouched.
+        const double dbTop1 = view.getDbTop(), dbBot1 = view.getDbBottom();
+        wheelAt (view, plot.getRight() + 8,
+                 plot.getY() + plot.getHeight() / 2, +1.0f, {});
+        CHECK (view.getDbTop() - view.getDbBottom() < dbTop1 - dbBot1,
+               "right-axis wheel zooms the level window in");
+        CHECK (std::abs (view.getCurveViewT0() - tLo1) < 1e-9
+              && std::abs (view.getCurveViewT1() - tHi1) < 1e-9,
+               "right-axis wheel leaves the time window alone");
+
+        // Shift+wheel over the plot also zooms only the level axis.
+        const double dbTop2 = view.getDbTop(), dbBot2 = view.getDbBottom();
+        wheelAt (view, plot.getX() + plot.getWidth() / 2,
+                 plot.getY() + plot.getHeight() / 2, +1.0f,
+                 juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
+        CHECK (view.getDbTop() - view.getDbBottom() < dbTop2 - dbBot2,
+               "shift+wheel zooms the level window in");
+        CHECK (std::abs (view.getCurveViewT0() - tLo1) < 1e-9
+              && std::abs (view.getCurveViewT1() - tHi1) < 1e-9,
+               "shift+wheel leaves the time window alone");
+
+        // Wheel over the bottom time ruler zooms only time.
+        const double dbTop3 = view.getDbTop(), dbBot3 = view.getDbBottom();
+        wheelAt (view, plot.getX() + plot.getWidth() / 2,
+                 plot.getBottom() + 8, +1.0f, {});
+        CHECK (view.getCurveViewT1() - view.getCurveViewT0() < tHi1 - tLo1,
+               "bottom-ruler wheel zooms the time window in");
+        CHECK (std::abs (view.getDbTop() - dbTop3) < 1e-9
+              && std::abs (view.getDbBottom() - dbBot3) < 1e-9,
+               "bottom-ruler wheel leaves the level range alone");
+    }
+
+    // --- Freq vs Time: right-axis wheel = frequency only.
+    {
+        FFTAnalysisView view (app);
+        view.setSize (300, 200);
+        view.setAxisMode (3);   // Freq vs Time
+        view.recomputeIfNeeded();
+
+        const auto plot = view.plotBounds();
+        const double tLo0 = view.getCurveViewT0(), tHi0 = view.getCurveViewT1();
+        const double fLo0 = view.getFreqLo(), fHi0 = view.getFreqHi();
+
+        wheelAt (view, plot.getRight() + 8,
+                 plot.getY() + plot.getHeight() / 2, +1.0f, {});
+        CHECK (view.getFreqHi() - view.getFreqLo() < fHi0 - fLo0,
+               "right-axis wheel zooms the frequency window in");
+        CHECK (std::abs (view.getCurveViewT0() - tLo0) < 1e-9
+              && std::abs (view.getCurveViewT1() - tHi0) < 1e-9,
+               "freq-mode right-axis wheel leaves the time window alone");
+
+        // Plot wheel: time only.
+        const double fLo1 = view.getFreqLo(), fHi1 = view.getFreqHi();
+        wheelAt (view, plot.getX() + plot.getWidth() / 2,
+                 plot.getY() + plot.getHeight() / 2, +1.0f, {});
+        CHECK (view.getCurveViewT1() - view.getCurveViewT0() < tHi0 - tLo0,
+               "freq-mode plot wheel zooms the time window in");
+        CHECK (std::abs (view.getFreqLo() - fLo1) < 1e-9
+              && std::abs (view.getFreqHi() - fHi1) < 1e-9,
+               "freq-mode plot wheel leaves the frequency range alone");
+    }
+
+    wav.deleteFile();
+}
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -23134,6 +23295,8 @@ static int scRunUnitTestsImpl()
     progress ("tables serialise/parse"); testTablesSerialiseParse();
     progress ("tables panel");           testTablesPanel();
     progress ("single instance mode");   testSingleInstance();
+    progress ("waveform zero line");     testWaveformZeroLine();
+    progress ("fft axis wheel zoom");    testFFTAxisWheelZoom();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

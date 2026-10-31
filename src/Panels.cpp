@@ -4465,21 +4465,23 @@ void FFTAnalysisView::mouseUp (const juce::MouseEvent& e)
 void FFTAnalysisView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
     const auto plot = plotBounds();
-    if (!plot.contains (e.x, e.y) && e.x <= plot.getRight() && e.y <= plot.getBottom())
-        return;   // ignore the control strip
+    if (e.y < plot.getY())
+        return;   // ignore the control strip above the plot
 
     // Same direction as the waveform view: wheel up zooms in, down zooms out.
     const double factor = std::pow (1.25, wheel.deltaY);
     if (isTimeAxisMode())
     {
-        // Time-based modes: the wheel zooms both axes at the cursor - the
-        // horizontal time window inside the analysed region, plus frequency
-        // (Freq vs Time) or level (Amp vs Time).
-        zoomTimeAtX (e.x, factor);
-        if (axisMode_ == 3)
-            zoomFreqAtY ((float) e.y, factor);
+        // Wheel over the vertical axis strip (right side) or Shift+wheel
+        // anywhere zooms only that axis - frequency in Freq vs Time, level in
+        // Amp vs Time; everywhere else (plot and bottom time ruler) it zooms
+        // only the horizontal time window around the cursor, like the other
+        // graphs.
+        if (e.mods.isShiftDown() || e.x > plot.getRight())
+            (axisMode_ == 3) ? zoomFreqAtY ((float) e.y, factor)
+                             : zoomLevelAtY ((float) e.y, factor);
         else
-            zoomLevelAtY ((float) e.y, factor);
+            zoomTimeAtX (e.x, factor);
     }
     else if (e.mods.isShiftDown() || e.x > plot.getRight())
         zoomLevelAtY ((float) e.y, factor);

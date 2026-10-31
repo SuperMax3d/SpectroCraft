@@ -917,6 +917,17 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
                     g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
                 }
             }
+
+            // The zero line (-inf dB): amplitude 0 sits at centre + vOffset,
+            // so it follows the vertical pan unlike the fixed row-centre line.
+            {
+                const float y = center + (float) (vOffset * ampScale);
+                if (y >= pr.getY() && y <= pr.getBottom())
+                {
+                    g.setColour (juce::Colour::fromRGB (48, 48, 48));
+                    g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
+                }
+            }
         }
 
         // Labels only when rows are tall enough to fit them. The scale is
@@ -951,6 +962,19 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
                     g.drawText (formatWaveVScaleLabel (dB, app.waveVScaleMode, sc, false, chDn),
                                labX, (int) yDown - 7,
                                kLeftAxisWidth - 4, 14, labJ, false);
+                }
+            }
+
+            // Zero-line label. It is aligned to the outer edge of the axis
+            // strip because at zero vertical offset it would otherwise sit on
+            // top of the channel name ("L"/"R") that hugs the plot edge.
+            {
+                const float yZero = center + (float) (vOffset * ampScale);
+                if (yZero >= pr.getY() && yZero <= pr.getBottom())
+                {
+                    g.setColour (juce::Colour::fromRGB (170, 170, 170));
+                    g.drawText (zeroLineLabel (app.waveVScaleMode), labX, (int) yZero - 7,
+                               kLeftAxisWidth - 4, 14, juce::Justification::centredLeft, false);
                 }
             }
         }
@@ -1217,6 +1241,16 @@ double niceSampleStep (double samplesPerPixel)
             if (step >= target) return std::max (1.0, step);
         }
     return std::max (1.0, std::pow (10.0, e + 5));
+}
+
+juce::String WaveformView::zeroLineLabel (int waveVScaleMode)
+{
+    switch (waveVScaleMode)
+    {
+        case 1: return "-inf";   // dB
+        case 2: return "0.000";  // Normalized
+        default: return "0";     // Wav Units / sample mode
+    }
 }
 
 juce::String formatWaveVScaleLabel (double gridDb, int mode, const ScaleCalibration& sc,
