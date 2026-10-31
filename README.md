@@ -649,7 +649,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   a new track aligned to the enhanced range.
 - **Split spectral selection** (`Effects → Split Spectral Selection Configuration`, Shift+F12,
   and `Effects → Split Spectral Selection Execute`, F12): moves the selected band content out of
-  chosen source channels into destination channels you pick per channel. The configuration window has one checkbox row per channel plus a destination-channel field for each; an existing destination mixes in place, while a number above the current count creates that channel on first use. Presets: **All Tracks** (every channel extracts into its own new track), **Last channel into new**, and **Second last into last**. Closing the window saves the configuration without performing any split — Execute then applies it as one undoable step, and the first time per file open it opens the configuration instead of executing. The blend is trapezoidal (25% linear ramp at each band edge, full weight across the middle), and where energy is removed the original channels are refilled with synthetic noise at the per-frame estimated floor level — so *original + destination* reconstructs the pre-edit signal with no hard spectral edge; at both time ends of the selection the extracted content fades in/out smoothly and the originals crossfade back, so there is no spike or hard cut either. One undoable step (content change plus channel-count change); undo/redo keeps track visibility in sync with the file's channel count, so reverting a mono→stereo split returns to a single visible track instead of leaving a phantom silent one.
+  chosen source channels into destination channels you pick per channel. The configuration window has one checkbox row per channel plus a destination-channel field for each; an existing destination mixes in place, while a number above the current count creates that channel on first use. Presets: **All Tracks** (every channel extracts into its own new track), **Last channel into new**, and **Second last into last**. Closing the window saves the configuration without performing any split — Execute then applies it as one undoable step; the first time per file open it opens the configuration, and closing that window then executes the split on the current selection. The blend is trapezoidal (25% linear ramp at each band edge, full weight across the middle), and where energy is removed the original channels are refilled with synthetic noise at the per-frame estimated floor level — so *original + destination* reconstructs the pre-edit signal with no hard spectral edge; at both time ends of the selection the extracted content fades in/out smoothly and the originals crossfade back, so there is no spike or hard cut either. One undoable step (content change plus channel-count change); undo/redo keeps track visibility in sync with the file's channel count, so reverting a mono→stereo split returns to a single visible track instead of leaving a phantom silent one.
 - **Generate Silence / Noise / Tone** (`Effects → Generate …`): inserts or
   replaces generated audio, each as one undoable step. The target depends on
   the active selection state: with a *spectral* selection only the content
@@ -1731,7 +1731,7 @@ without modifying the file.
 **Split Spectral Selection** (Effects menu) goes one step further: instead of
 just zeroing the band, it *moves* the band content from chosen source channels
 into destination channels you configure per file open.
-**Split Spectral Selection Configuration** (Shift+F12) opens a window with one checkbox row per channel and a destination-channel field for each checked row: an existing destination mixes the extracted content into that channel in place, while a number above the current count creates that channel on first use. The preset buttons fill the grid quickly — **All Tracks** (every current channel extracts into its own new track), **Last channel into new**, and **Second last into last**. Closing the window saves the configuration without performing any split; **Split Spectral Selection Execute** (F12) then runs it as one undoable step, and the first time after opening a file it opens the configuration window instead of executing. Each FFT frame inside
+**Split Spectral Selection Configuration** (Shift+F12) opens a window with one checkbox row per channel and a destination-channel field for each checked row: an existing destination mixes the extracted content into that channel in place, while a number above the current count creates that channel on first use. The preset buttons fill the grid quickly — **All Tracks** (every current channel extracts into its own new track), **Last channel into new**, and **Second last into last**. Closing the window saves the configuration without performing any split. **Split Spectral Selection Execute** (F12) runs it as one undoable step; the first time after opening a file it opens the configuration window, and closing that window then executes the split on the current selection. Each FFT frame inside
 the selection's time extent gets a trapezoidal vertical profile (linear ramps
 over the bottom and top 25% of every contiguous selected band, full weight in
 the middle); the extracted part is the band content with its amplitude reduced
@@ -1980,7 +1980,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~3894 checks in Release), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~3916 checks in Release), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -2258,6 +2258,14 @@ delays the window from appearing.
     plot or bottom time ruler shrinks only the time window, one over the right
     vertical axis strip (or Shift+wheel) shrinks only the level/frequency
     window — each leaving the other axis untouched.
+  - **Split execute first run**: pressing F12 on an unconfigured file opens the
+    configuration dialog; closing it saves the default preset and then executes
+    the split, creating the destination track with the extracted tone while the
+    source channel loses its in-band content.
+  - **Stem separation advanced layout**: adding stems up to five rows no longer
+    crashes (the old forward-iteration child delete double-freed the last row);
+    the description rows stack downward below the hint line, nothing at window
+    level overlaps, and the window expands downward with each new stem.
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,

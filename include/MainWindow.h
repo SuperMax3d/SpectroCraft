@@ -309,17 +309,20 @@ public:
     /** Effects > Split Spectral Selection Configuration / Shift+F12: modal
         window editing settings.splitConfig. Closing it saves the
         configuration without performing any split and marks the active
-        document as configured (per-file-open state). */
-    void showSplitConfigDialog();
+        document as configured (per-file-open state). @param willExecuteAfter
+        true when closing the window is immediately followed by executing the
+        split (the F12 flow), so the message can say so. */
+    void showSplitConfigDialog (bool willExecuteAfter = false);
 
     /** Builds the split-configuration dialog; caller owns and must delete it;
-        used by showSplitConfigDialog() and tests. */
-    juce::AlertWindow* createSplitConfigDialog();
+        used by showSplitConfigDialog() and tests. @param willExecuteAfter as
+        for showSplitConfigDialog(). */
+    juce::AlertWindow* createSplitConfigDialog (bool willExecuteAfter = false);
 
     /** Effects > Split Spectral Selection Execute / F12: runs the configured
         split of the active spectral selection. The first time per file open
-        it opens the configuration window instead (no split until a
-        configuration exists). */
+        it opens the configuration window; closing that window saves the
+        configuration and then executes the split on the current selection. */
     void runSplitExecute();
 
     void showResampleDialog();

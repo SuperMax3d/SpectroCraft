@@ -514,7 +514,11 @@ void StemSeparationWindow::setAdvanced(bool on)
 
 void StemSeparationWindow::rebuildRows()
 {
-    for (auto* c : rowsHost_.getChildren()) delete c;
+    // Delete from the back: deleting a child removes it from rowsHost_'s
+    // internal array, which invalidates forward pointer iteration and would
+    // double-free the last row once three or more exist.
+    for (int i = rowsHost_.getNumChildComponents () - 1; i >= 0; --i)
+        delete rowsHost_.getChildComponent (i);
 
     if (!advanced_) return;
 
@@ -524,8 +528,8 @@ void StemSeparationWindow::rebuildRows()
     {
         auto* row = new DescRow ((int) i, descs_[i], this);
         const int h = DescRow::heightFor ((int) descs_[i].anchors.size (), w);
-        row->setBounds (0, y, kWinW, h);
-        row->layoutChildren (kWinW);
+        row->setBounds (0, y, w, h);
+        row->layoutChildren (w);
         rowsHost_.addAndMakeVisible (row);
         y += h + 4;
     }
@@ -644,6 +648,7 @@ void StemSeparationWindow::resized()
         addDescBtn_.setBounds (0, 0, 0, 0);
         extractOrigToggle_.setBounds (0, 0, 0, 0);
         advancedHint_.setBounds (0, 0, 0, 0);
+        rowsHost_.setBounds (0, 0, 0, 0);   // no rows in simple mode
     }
     else
     {
@@ -664,7 +669,9 @@ void StemSeparationWindow::resized()
         else
             extractOrigToggle_.setBounds (0, 0, 0, 0);
         advancedHint_.setBounds (x, y.descAreaTop + 34, w, 16);
-        rowsHost_.setBounds (x, y.rowsTop - rowsH, kWinW, std::max (0, rowsH));
+        // The row stack grows DOWNWARD from rowsTop: the "Add Stem" button and
+        // the status line below it are positioned relative to its bottom.
+        rowsHost_.setBounds (x, y.rowsTop, w, std::max (0, rowsH));
     }
 
     statusLabel_.setBounds (x, y.statusTop, w, 40);

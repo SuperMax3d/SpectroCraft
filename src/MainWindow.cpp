@@ -5066,9 +5066,10 @@ void MainWindow::showResampleDialog()
 
 // Effects > Split Spectral Selection Configuration / Shift+F12 - modal
 // window editing settings.splitConfig. Closing it (OK or X) saves the
-// configuration without performing any split and marks the active document
-// as configured for this file open.
-juce::AlertWindow* MainWindow::createSplitConfigDialog()
+// configuration and marks the active document as configured for this file
+// open; when opened from F12 the split is then executed on the current
+// selection.
+juce::AlertWindow* MainWindow::createSplitConfigDialog (bool willExecuteAfter)
 {
     auto& eng = app.audioEngine();
     const int nChans = std::max (1, eng.numChannels());
@@ -5078,7 +5079,13 @@ juce::AlertWindow* MainWindow::createSplitConfigDialog()
                                      "Each destination is a channel number: an existing "
                                      "channel mixes in the extracted content; a number above "
                                      "the current count creates a new channel on first use.\n\n"
-                                     "Closing saves the configuration without performing any split.",
+                                     + (willExecuteAfter
+                                        ? juce::String (
+                                            "Closing saves the configuration and then runs "
+                                            "the split on the current selection.")
+                                        : juce::String (
+                                            "Closing saves the configuration without "
+                                            "performing any split.")),
                                      juce::AlertWindow::InfoIcon, this);
 
     auto* grid = new SplitConfigGrid (nChans);
@@ -5098,14 +5105,14 @@ juce::AlertWindow* MainWindow::createSplitConfigDialog()
     return w;
 }
 
-void MainWindow::showSplitConfigDialog()
+void MainWindow::showSplitConfigDialog (bool willExecuteAfter)
 {
     auto& eng = app.audioEngine();
     if (!eng.isFileLoaded()) return;
     FileDoc* d = app.doc();
     if (d == nullptr) return;
 
-    auto* w = createSplitConfigDialog();
+    auto* w = createSplitConfigDialog (willExecuteAfter);
     // Enter modal state WITHOUT taking keyboard focus (see showResampleDialog).
     w->enterModalState (false);
     w->runModalLoop ();
@@ -5126,8 +5133,8 @@ void MainWindow::showSplitConfigDialog()
 
 // Effects > Split Spectral Selection Execute / F12 - runs the configured
 // split of the active spectral selection. The first time per file open it
-// opens the configuration window instead (no split until a configuration
-// exists).
+// opens the configuration window; closing that window saves the
+// configuration and then executes the split below on the current selection.
 void MainWindow::runSplitExecute()
 {
     auto& eng = app.audioEngine();
@@ -5136,10 +5143,8 @@ void MainWindow::runSplitExecute()
     if (d == nullptr) return;
 
     if (!d->splitConfigured)
-    {
-        showSplitConfigDialog ();   // configure first, then run again
-        return;
-    }
+        showSplitConfigDialog (true);   // closing it saves the configuration
+
     runDestructiveEdit ([&] (std::string* e)
         { return app.splitSpectralSelectionConfigured (e); });
 }

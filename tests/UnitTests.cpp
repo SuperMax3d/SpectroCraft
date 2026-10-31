@@ -23044,6 +23044,173 @@ static void testFFTAxisWheelZoom()
 
     wav.deleteFile();
 }
+
+// ------------------------------------------------- F12 first run: configure then execute
+// The first F12 per file open opens the configuration dialog; closing it
+// saves the configuration AND executes the split on the current selection.
+static void testSplitExecuteFirstRun()
+{
+    const juce::File wav = makeTempFile ("split_f12.wav");
+    // ch1: 500 Hz (in band) + 3500 Hz; ch2: 400 Hz (in band).
+    writeWav (wav, 2, kToneRate, kToneFrames, [] (int ch, int64_t f, double rate)
+             { const double t = (double) f / rate;
+               if (ch == 0)
+                   return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 500.0 * t)
+                        + 0.3f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 3500.0 * t);
+               return 0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * t); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open stereo wav for F12 first-run test");
+    FileDoc* d = app.doc();
+    if (!d) { wav.deleteFile (); return; }
+    AudioEngine& eng = app.audioEngine ();
+
+    // A MessageManager is required before constructing the top-level window;
+    // it must still be alive when the window is destroyed.
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "split f12 test"));
+
+    // Active spectral selection: the low band carrying both tones.
+    d->spectralSel = lowBandSel ();
+    CHECK (!d->splitConfigured, "not configured yet");
+
+    // The first F12 opens the configuration dialog; a helper thread closes it
+    // (exits the modal loop with result 1, like clicking OK) so that closing
+    // saves the default preset and then executes the split.
+    std::atomic<bool> okClicked { false };
+    std::thread helper ([&okClicked]
+    {
+        for (int i = 0; i < 500 && !okClicked.load (); ++i)
+        {
+            juce::MessageManager::callAsync ([&okClicked]
+            {
+                if (auto* m = juce::Component::getCurrentlyModalComponent ())
+                    if (dynamic_cast<juce::AlertWindow*> (m) != nullptr)
+                    {
+                        m->exitModalState (1);   // same as clicking OK
+                        okClicked.store (true);
+                    }
+            });
+            std::this_thread::sleep_for (std::chrono::milliseconds (20));
+        }
+    });
+
+    win->runSplitExecute ();
+    helper.join ();
+
+    CHECK (okClicked.load (), "configuration dialog was shown and closed");
+    CHECK (d->splitConfigured, "document marked configured after closing");
+    // Default preset: last channel into new -> ch2 to ch3.
+    CHECK (app.settings.splitConfig.size () == 1
+          && app.settings.splitConfig[0].first == 1
+          && app.settings.splitConfig[0].second == 2,
+          "default configuration saved (ch2 -> ch3)");
+
+    // The split executed on the current selection: a new track holds ch2's
+    // in-band tone and ch2 lost it.
+    CHECK (eng.numChannels () == 3, "a new track was created by the F12 run");
+    if (eng.numChannels () == 3)
+    {
+        std::vector<float> c1 ((size_t) kToneFrames), c2 ((size_t) kToneFrames);
+        CHECK (eng.readSamples (1, 0, (int) kToneFrames, c1.data()), "read ch2 after");
+        CHECK (eng.readSamples (2, 0, (int) kToneFrames, c2.data()), "read ch3 after");
+        const size_t from = 2048, to = (size_t) kToneFrames - 2048;
+        CHECK (toneAmp (c1, from, to, 400.0, kToneRate) < 0.05f,
+              "track 2 lost its in-band tone");
+        CHECK (std::abs (toneAmp (c2, from, to, 400.0, kToneRate) - 0.4f) < 0.05f,
+              "track 3 holds the extracted tone");
+    }
+
+    win.reset ();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile ();
+}
+
+// ---------------- Stem Separation advanced layout grows downward -----------
+// The description rows must stack below the hint line and expand the window
+// downward; rebuilding with three or more existing rows must not crash (the
+// old forward-iteration delete double-freed the last row).
+static void testStemSepAdvancedLayout()
+{
+    const juce::File wav = makeTempFile ("stemsep_layout.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote wav for stem-sep layout test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for stem-sep layout test");
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "stem sep layout"));
+
+    auto findButton = [] (StemSeparationWindow* w, const juce::String& text)
+        -> juce::TextButton*
+    {
+        for (int i = 0; i < w->getNumChildComponents (); ++i)
+            if (auto* b = dynamic_cast<juce::TextButton*> (w->getChildComponent (i)))
+                if (b->getButtonText() == text) return b;
+        return nullptr;
+    };
+
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    StemSeparationWindow* dlg = win->stemSepWindow();
+    CHECK (dlg != nullptr, "window opened for layout test");
+    if (!dlg) { delete mm; wav.deleteFile (); return; }
+
+    juce::TextButton* advBtn = findButton (dlg, "Advanced...");
+    CHECK (advBtn != nullptr, "advanced button found in simple mode");
+    auto cleanup = [&] { dlg->userTriedToCloseWindow (); win.reset (); delete mm; wav.deleteFile (); };
+    if (!advBtn) { cleanup (); return; }
+    advBtn->onClick ();   // enter advanced mode (one row)
+
+    juce::TextButton* addBtn = findButton (dlg, "Add Stem");
+    CHECK (addBtn != nullptr, "'Add Stem' button found in advanced mode");
+    if (!addBtn) { cleanup (); return; }
+
+    // Add stems until there are five rows: every rebuild after the third used
+    // to double-free the last row when deleting children forward.
+    for (int i = 0; i < 4; ++i) addBtn->onClick ();
+
+    auto* rowsHost = dlg->rowsHostForTest();
+    CHECK (rowsHost != nullptr && rowsHost->getNumChildComponents () == 5,
+          "one DescRow per description after adding four stems");
+    if (!rowsHost || rowsHost->getNumChildComponents () != 5) { cleanup (); return; }
+    CHECK (dlg->descriptions().size () == 5, "five descriptions stored");
+
+    // No two window-level controls may overlap: the row host must sit below
+    // the hint line and the Simple-view button, not over them.
+    std::vector<juce::Rectangle<int>> rects;
+    for (int i = 0; i < dlg->getNumChildComponents (); ++i)
+    {
+        const juce::Rectangle<int> b = dlg->getChildComponent (i)->getBounds ();
+        if (!b.isEmpty ()) rects.push_back (b);
+    }
+    bool overlap = false;
+    for (size_t a = 0; a < rects.size () && !overlap; ++a)
+        for (size_t b = a + 1; b < rects.size (); ++b)
+            if (rects[a].intersects (rects[b])) { overlap = true; break; }
+    CHECK (!overlap, "no overlapping window-level controls with five rows");
+
+    // The rows stack downward from the host's top edge and fit inside it.
+    bool stacked = true;
+    int prevBottom = 0;
+    for (int i = 0; i < rowsHost->getNumChildComponents (); ++i)
+    {
+        const auto b = rowsHost->getChildComponent (i)->getBounds ();
+        if (b.getX() != 0 || b.getY() < prevBottom) { stacked = false; break; }
+        prevBottom = b.getBottom();
+    }
+    CHECK (stacked, "rows stack downward from the host top");
+    CHECK (prevBottom <= rowsHost->getHeight () + 4, "last row fits inside the host");
+
+    // 'Add Stem' follows the last row and the window grew to fit everything.
+    CHECK (addBtn->getY() >= rowsHost->getBottom(),
+          "'Add Stem' is below the last description row");
+    CHECK (dlg->getHeight () > addBtn->getBottom (),
+          "the window expanded downward to contain the new rows");
+
+    cleanup ();
+}
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -23297,6 +23464,8 @@ static int scRunUnitTestsImpl()
     progress ("single instance mode");   testSingleInstance();
     progress ("waveform zero line");     testWaveformZeroLine();
     progress ("fft axis wheel zoom");    testFFTAxisWheelZoom();
+    progress ("split execute first run"); testSplitExecuteFirstRun();
+    progress ("stem sep advanced layout"); testStemSepAdvancedLayout();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
