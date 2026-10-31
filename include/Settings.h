@@ -93,6 +93,11 @@ struct Settings
     int drawColourARGB = 0xFF00FF00;     // ink colour, AARRGGBB (bright green)
     float drawTextSize = 14.0f;          // font size for Text drawings
 
+    // Single-instance mode (Window menu), persisted between sessions: when
+    // unchecked, launching SpectroCraft again hands its command-line files to
+    // the running instance and quits the second one. Checked by default.
+    bool allowMultipleInstances = true;
+
     // Track axis placement (View menu), persisted between sessions:
     // the vertical axis can sit on the right and the time ruler at the
     // bottom of both track views instead of their default left/top spots.
@@ -171,6 +176,7 @@ struct Settings
             && fftThirdOctOrder == o.fftThirdOctOrder
             && fftRefTime == o.fftRefTime && fftSmooth == o.fftSmooth
             && fftTrack == o.fftTrack
+            && allowMultipleInstances == o.allowMultipleInstances
             && trackAxisOnRight == o.trackAxisOnRight
             && trackRulerAtBottom == o.trackRulerAtBottom
             && showAmpGrid == o.showAmpGrid

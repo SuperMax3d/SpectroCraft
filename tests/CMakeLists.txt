@@ -32,6 +32,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/FileMeta.cpp    # unified metadata bundle + RIFF patching
         ${CMAKE_SOURCE_DIR}/src/Tables.cpp      # CSV tables: import, transforms, alignment
         ${CMAKE_SOURCE_DIR}/src/TablesTrack.cpp # dedicated table track view
+        ${CMAKE_SOURCE_DIR}/src/SingleInstance.cpp   # single-instance mode + file forwarding pipe
         ${CMAKE_SOURCE_DIR}/src/MergeFiles.cpp  # multi-file merge (Shift + drag & drop)
         ${CMAKE_SOURCE_DIR}/src/VideoAudio.cpp  # FFmpeg video-container audio extraction
         ${CMAKE_SOURCE_DIR}/src/AudioCpp.cpp    # audio.cpp stem-separation CLI support

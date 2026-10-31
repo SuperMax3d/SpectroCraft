@@ -9,6 +9,7 @@ juce_add_gui_app (SpectroCraft
 target_sources (SpectroCraft
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Main.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/SingleInstance.cpp   # single-instance mode + file forwarding pipe
         ${CMAKE_CURRENT_SOURCE_DIR}/Application.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FileDoc.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioEngine.cpp

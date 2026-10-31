@@ -2336,6 +2336,15 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         return;
     }
 
+    // Window menu: "Allow multiple instances" toggle. Persisted immediately;
+    // it is read by the next launch before its Application object exists.
+    if (menuItemID == WindowAllowMultiple)
+    {
+        app.settings.allowMultipleInstances = !app.settings.allowMultipleInstances;
+        app.saveSettings ();
+        return;
+    }
+
     // File > Open Recent items.
     if (menuItemID >= RecentBase && menuItemID < RecentBase + Application::kMaxRecentFiles)
     {
@@ -6434,6 +6443,13 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         for (size_t i = 0; i < entries.size (); ++i)
             menu.addItem ((int) (WindowPanelBase + i), entries[i].name, true,
                           isPanelOpen (entries[i].id));
+
+        // Instance behaviour: when unchecked, launching SpectroCraft again
+        // hands its command-line files to this running instance and quits the
+        // second one. Takes effect from the next launch.
+        menu.addSeparator ();
+        menu.addItem (WindowAllowMultiple, "Allow multiple instances", true,
+                      app.settings.allowMultipleInstances);
     }
     else if (menuName == "Help")
     {

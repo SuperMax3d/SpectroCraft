@@ -27,6 +27,7 @@
 #include <JuceHeader.h>
 #include "Application.h"
 #include "CrashTrace.h"
+#include "SingleInstance.h"
 #include "StartupTrace.h"
 #include "MainWindow.h"
 #include "SpectralEngine.h"
@@ -172,6 +173,11 @@ public:
                              log.getFullPathName().toRawUTF8());
                 std::fflush (stdout);
             }
+
+        // Audio files passed on the command line are collected here and
+        // opened after the app is up - single-instance handling below may hand
+        // them to a running instance instead.
+        std::vector<juce::File> cliFiles;
 
         for (int i = 0; i < args.size(); ++i)
         {
@@ -671,26 +677,45 @@ public:
             }
             else if (args[i].length() > 0 && !args[i].startsWith ("--"))
             {
-                // Open audio file passed on the command line. Routing through
-                // MainWindow::openFile gives large files their async load with
-                // a progress dialog, exactly like File > Open.
                 const juce::File f = resolvePath (args[i]);
-                if (f.existsAsFile())
-                {
-                    app = std::make_unique<Application>();
-                    mainWindow = std::make_unique<MainWindow> (*app, getApplicationName());
-                    mainWindow->openFile (f);
-                    return;
-                }
+                if (f.existsAsFile()) cliFiles.push_back (f);
+            }
+        }
+
+        // Single-instance mode: when "Allow multiple instances" is off, hand
+        // the command-line files to a running instance and quit this one.
+        {
+            juce::StringArray names;
+            for (const auto& f : cliFiles) names.add (f.getFullPathName());
+            if (sc::singleinstance::handleStartup (names))
+            {
+                quit ();
+                return;
             }
         }
 
         app = std::make_unique<Application>();
         mainWindow = std::make_unique<MainWindow> (*app, getApplicationName());
+
+        // Every instance hosts the file-forwarding server so a later
+        // single-instance launch can hand its command-line files over to it.
+        forwarder = std::make_unique<sc::singleinstance::Coordinator> (
+            [mw = mainWindow.get ()] (const juce::StringArray& paths) {
+                for (auto& p : paths)
+                    if (juce::File (p).existsAsFile ()) mw->openFile (juce::File (p));
+            });
+        forwarder->startServer ();
+
+        // Open the command-line files. Routing through MainWindow::openFile
+        // gives large files their async load with a progress dialog, exactly
+        // like File > Open.
+        for (const auto& f : cliFiles)
+            mainWindow->openFile (f);
     }
 
     void shutdown() override
     {
+        if (forwarder != nullptr) forwarder->stopServer ();
         mainWindow.reset();
         app.reset();
     }
@@ -728,6 +753,7 @@ public:
 private:
     std::unique_ptr<Application> app;
     std::unique_ptr<MainWindow> mainWindow;
+    std::unique_ptr<sc::singleinstance::Coordinator> forwarder;   // file-forwarding server
 };
 
 START_JUCE_APPLICATION (SpectroCraftApplication)

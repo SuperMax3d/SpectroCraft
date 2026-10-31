@@ -473,6 +473,7 @@ public:
         ToolsNoiseSuppress,   // AI noise suppression (built with -DSPECTRO_ENABLE_AI=ON)
 #endif
         WindowPanelBase = 6500,   // Window menu: per-panel open/close toggles
+        WindowAllowMultiple = 6700,   // Window menu: "Allow multiple instances" toggle
         HelpAbout = 6000,
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index

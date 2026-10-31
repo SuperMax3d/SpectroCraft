@@ -502,6 +502,15 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   was stored from (shown in its tooltip), so curves from different files can be
   compared side by side. Closing a file clears only the snapshots that came
   from it.
+- **Single-instance mode**: the Window menu has an **Allow multiple instances**
+  toggle (**checked by default**, remembered across restarts). When unchecked,
+  launching SpectroCraft again — e.g. double-clicking a WAV file in Explorer —
+  forwards that file to the already-running instance and quits the second
+  process; the running instance opens it like any other File > Open (large
+  files get their async load with progress dialog). Every running instance
+  hosts a small named-pipe forwarding server, so this works no matter how the
+  first instance was started — even one that launched while multiple instances
+  were still allowed.
 - **Scale calibration (Set Unit and Scale)**: right-clicking a file in the Files list
   offers **Set Unit and Scale...**, which asks for physical units (**Volts, Pascal, g or
   None**) — one shared unit for all channels — plus **one full-scale value per
@@ -1551,7 +1560,8 @@ the standard Windows behaviour for arrow keys while focused; click back into a
 view to return playhead control.
 
 Menus: **File, Edit, Selection, View, Transport, Effects, Window, Help** (the
-Window menu opens/closes the individual left-column panels). The Edit menu has a
+Window menu opens/closes the individual left-column panels and carries the
+**Allow multiple instances** toggle — see above). The Edit menu has a
 checkable **Snap to Zero Crossings** toggle (**off by default**): when on,
 dragging out a new time selection snaps both edges to the nearest zero
 crossing of the first visible channel (within ±50 ms), so cuts and effects
@@ -1945,6 +1955,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, data tables, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`) | Video-container audio extraction (Windows + FFmpeg only): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
+| `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
 
@@ -1964,7 +1975,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~3860 checks in Release), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~3874 checks in Release), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -2228,6 +2239,12 @@ delays the window from appearing.
     original length *and* content exactly, and a factor-2 stretch halves the
     whole file (hop-quantised); the dialog's row visibility switches with the
     mode drop-down.
+  - **Single-instance mode**: the persisted setting round-trips through a real
+    properties file (checked by default; stored 0/1 read back); a full wire-
+    protocol round trip over a named pipe delivers both paths intact (including
+    one with spaces), an empty list is acknowledged, and forwarding fails
+    cleanly when no server listens; the Window menu item exists, is checked by
+    default, and toggling it persists to disk immediately.
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,

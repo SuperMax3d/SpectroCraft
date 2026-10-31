@@ -166,6 +166,8 @@ void Application::loadSettings ()
     settings.drawTextSize   = std::clamp (recentStore->getValue ("draw_text_size",
                                                                 juce::String (settings.drawTextSize)).getFloatValue(),
                                           6.0f, 72.0f);
+    // Single-instance mode (Window menu): checked by default.
+    settings.allowMultipleInstances = recentStore->getIntValue ("multi_instance", 1) != 0;
     // Track axis placement + grid lines (View menu).
     settings.trackAxisOnRight   = recentStore->getIntValue ("track_axis_right", 0) != 0;
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
@@ -262,6 +264,7 @@ void Application::saveSettings ()
     recentStore->setValue ("draw_width", settings.drawWidth);
     recentStore->setValue ("draw_colour", settings.drawColourARGB);
     recentStore->setValue ("draw_text_size", settings.drawTextSize);
+    recentStore->setValue ("multi_instance", settings.allowMultipleInstances ? 1 : 0);
     recentStore->setValue ("track_axis_right", settings.trackAxisOnRight ? 1 : 0);
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);

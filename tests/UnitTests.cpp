@@ -32,6 +32,7 @@
 #include "StemSeparation.h"   // the Effects > Stem Separation window
 #include "SuperResolution.h"  // the Effects > Super Resolution window
 #include "Recorder.h"         // recorder plugin host (Transport > Record)
+#include "SingleInstance.h"   // single-instance mode + file forwarding pipe
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
 #include "AI/ModelManager.h"
@@ -3565,7 +3566,21 @@ static void testClosePanelsAndWindowMenu()
         const int wIdx = windowMenuIndex (*win);
         CHECK (wIdx >= 0, "Window menu exists in the menu bar");
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == kNumPanels, "Window menu lists every panel");
+        // +1: the "Allow multiple instances" toggle below the panels
+        // (the separator between them is not counted by getNumItems).
+        CHECK (wm.getNumItems () == kNumPanels + 1, "Window menu lists every panel");
+
+        // The toggle is checked by default; clicking it flips the setting and
+        // persists it to the store file immediately.
+        CHECK (app.settings.allowMultipleInstances, "allow-multiple checked by default");
+        win->menuItemSelected (MainWindow::MenuIDs::WindowAllowMultiple, wIdx);
+        CHECK (!app.settings.allowMultipleInstances, "toggle turns allow-multiple off");
+        {
+            juce::PropertiesFile s2 (store, juce::PropertiesFile::Options());
+            CHECK (s2.getIntValue ("multi_instance", 1) == 0, "off state persisted to disk");
+        }
+        win->menuItemSelected (MainWindow::MenuIDs::WindowAllowMultiple, wIdx);
+        CHECK (app.settings.allowMultipleInstances, "toggle turns allow-multiple back on");
 
         // Each Window menu entry toggles its own panel (dispatch + action).
         // Toggle back immediately so later steps see the original state.
@@ -3673,7 +3688,7 @@ static void testClosePanelsAndWindowMenu()
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == kNumPanels, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == kNumPanels + 1, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 0, wIdx);   // files
@@ -22803,6 +22818,71 @@ static void testTablesPanel()
 
     wav.deleteFile();
 }
+
+//==============================================================================
+// Single-instance mode: persisted setting + file-forwarding pipe protocol.
+static void testSingleInstance()
+{
+    // --- The persisted setting reader -------------------------------------
+    const juce::File tmpStore = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                   .getChildFile ("SpectroCraftSI_test.recent");
+    if (tmpStore.existsAsFile()) tmpStore.deleteFile();
+
+    // No file yet: checked by default.
+    CHECK (sc::singleinstance::allowMultipleInstances (tmpStore), "default is allow-multiple");
+
+    {
+        juce::PropertiesFile store (tmpStore, juce::PropertiesFile::Options());
+        store.setValue ("multi_instance", 0);
+        store.save();
+    }
+    CHECK (!sc::singleinstance::allowMultipleInstances (tmpStore), "stored 0 is read back");
+
+    {
+        juce::PropertiesFile store (tmpStore, juce::PropertiesFile::Options());
+        store.setValue ("multi_instance", 1);
+        store.save();
+    }
+    CHECK (sc::singleinstance::allowMultipleInstances (tmpStore), "stored 1 is read back");
+    tmpStore.deleteFile ();
+
+    // --- Wire protocol round-trip over an in-process named pipe -----------
+    const juce::String pipeName = "SpectroCraft.UnitTest";
+
+    std::atomic<bool> got { false };
+    juce::StringArray received;
+    sc::singleinstance::Coordinator coord (
+        [&] (const juce::StringArray& p) { received = p; got.store (true); }, pipeName);
+    coord.startServer ();
+
+    // The client's write waits for the server thread to create the pipe, so
+    // there is no start-up race to guard against here.
+    juce::StringArray send;
+    send.add ("C:/Temp/SpectroCraft/tests/data/mix_20s_stereo.wav");
+    send.add (juce::File::getCurrentWorkingDirectory ().getFullPathName () + "/some file with spaces.txt");
+
+    CHECK (sc::singleinstance::forwardFiles (send, pipeName), "forward acknowledged by server");
+
+    // The callback is dispatched on the message thread: pump until it fires.
+    for (int i = 0; i < 100 && !got.load (); ++i)
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+    CHECK (got.load (), "server delivered the file list");
+    CHECK (received.size () == 2, "both paths received");
+    if (received.size () == 2)
+    {
+        CHECK (received[0] == send[0], "first path intact");
+        CHECK (received[1] == send[1], "second path (with spaces) intact");
+    }
+
+    // An empty list is forwarded and acknowledged without a callback.
+    const juce::StringArray none;
+    CHECK (sc::singleinstance::forwardFiles (none, pipeName), "empty list acknowledged");
+
+    coord.stopServer ();
+
+    // No server listening: the forward must fail after its short timeout.
+    CHECK (!sc::singleinstance::forwardFiles (send, pipeName), "no instance -> no forward");
+}
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -23053,6 +23133,7 @@ static int scRunUnitTestsImpl()
     progress ("tables auto align lag");  testTablesAutoAlignLag();
     progress ("tables serialise/parse"); testTablesSerialiseParse();
     progress ("tables panel");           testTablesPanel();
+    progress ("single instance mode");   testSingleInstance();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
