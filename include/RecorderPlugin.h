@@ -19,6 +19,8 @@
 //   * The plugin must be thread-safe for the pull calls: sc_rec_read() and
 //     sc_rec_available_frames() may be called from any thread while a capture
 //     thread is producing data.
+//   * sc_rec_read() is a CONSUMING read: every sample is handed out exactly
+//     once, so sc_rec_available_frames() drops by the number of frames read.
 // ============================================================================
 
 #ifdef _WIN32

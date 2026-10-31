@@ -794,7 +794,8 @@ the waveform and spectrogram update live, and when your view range is at the end
 of the file it follows the recording edge (keeping your current zoom width — it
 never auto-zooms out to show everything). If you pan away from the end during a
 recording the view stays exactly where you left it; once you come back within
-~1.5 s of the end, following resumes automatically.
+~1.5 s of the end, following resumes automatically. While recording, the status
+bar shows a red dot followed by `REC <seconds> s` counting up in real time.
 
 ### Using it
 
@@ -860,7 +861,7 @@ gives a human-readable message):
 | `sc_rec_count_devices`, `sc_rec_get_device` | enumerate devices with their capabilities: min/max channels, supported sample rates and bit depths (16/24/32) — arbitrary channel counts are fine (e.g. a 16-channel ASIO card) |
 | `sc_rec_configure(deviceId, wantChans, wantRate, wantDepth, actual)` | select device + desired format; the plugin clamps to what the hardware supports and reports the real values back in `actual` |
 | `sc_rec_start` / `sc_rec_stop` / `sc_rec_is_running` | begin/end capture (stop joins the capture thread) |
-| `sc_rec_available_frames`, `sc_rec_read(dest, channels, maxFrames)` | **pull model**: the host polls these at 25 Hz; data is always interleaved float32 in [-1, 1] in device channel order. The plugin must keep a bounded internal buffer (drop-oldest when full) so a stalled host never blocks the capture thread |
+| `sc_rec_available_frames`, `sc_rec_read(dest, channels, maxFrames)` | **pull model**: the host polls these at 25 Hz; data is always interleaved float32 in [-1, 1] in device channel order. Reads are *consuming* — each frame is delivered exactly once (the plugin's ring buffer advances on read). The plugin must keep a bounded internal buffer (drop-oldest when full) so a stalled host never blocks the capture thread |
 | `sc_rec_last_error` | last error message (`""` if none) |
 
 Strings are UTF-8 NUL-terminated; pointers returned by the plugin stay valid only
@@ -876,11 +877,13 @@ automatically. It enumerates:
   `AUDCLNT_STREAMFLAGS_LOOPBACK` flag;
 - **Capture devices** — every capture endpoint.
 
-It opens endpoints in shared mode and negotiates the format: it tries the
+It opens endpoints in shared mode only and negotiates the format: it tries the
 endpoint's native mix format first, then falls back to auto-conversion (native,
-then PCM16) so unusual device formats still work; exclusive mode is a last-resort
-fallback for non-loopback devices. All WASAPI calls run on one dedicated worker
-thread inside the DLL.
+then PCM16) so unusual device formats still work. Exclusive-mode attempts are
+deliberately avoided — a few drivers crash inside an exclusive `Initialize`
+even though shared mode works fine on the same endpoint (shared is what
+Audacity uses). All WASAPI calls run on one dedicated worker thread inside the
+DLL.
 
 Notes:
 - Loopback capture requires Windows 8+ and works best when something is actually
@@ -1982,7 +1985,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~3936 checks in Release), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~3956 checks in Release), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -2231,7 +2234,10 @@ delays the window from appearing.
     (a stereo fake device recording only its second channel yields a mono
     document with exactly that channel's content; stale saved modes fall back
     to `All`), and the Transport menu structure itself is verified (Record +
-    Recording Device present with correct item counts).
+    Recording Device present with correct item counts). The thread-safe
+    recorder ring buffer (`sc::rec::FloatRing`) is tested directly: consuming
+    read order, partial reads, wrap-around with drop-oldest when full, and
+    stride reads into wider channel layouts.
   - **Content Aware Time Scale**: on a silence/tone/silence buffer the onset
     and offset show up as large frame-to-frame changes and their gaps are
     protected, while stable regions score stability ≈1; reduce-gaps edits

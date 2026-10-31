@@ -1973,6 +1973,16 @@ public:
         if (s != modeText) { modeText = s; repaint(); }
     }
 
+    // Live recording indicator: while true, a solid red dot is drawn just
+    // before the mode text. The dot is graphics, not a "\u25CF" character,
+    // because that glyph is missing from some system fonts and corrupted
+    // the footer layout on affected machines.
+    void setRecording (bool on)
+    {
+        if (on != recActive_) { recActive_ = on; repaint(); }
+    }
+    bool recordingIndicator() const { return recActive_; }
+
     // TextEditor::Listener: normalise a field when it loses focus.
     void textEditorFocusLost (juce::TextEditor& ed) override;
 
@@ -1993,6 +2003,7 @@ private:
     RightLayout computeRightLayout (int width) const;
 
     juce::String mouseText, playPart, fileName, ratePart, modeText;
+    bool recActive_ = false;   // red dot before the mode text while recording
     bool selVisible_ = false, posVisible_ = false, rightFits_ = true;
     double curStart = 0.0, curStop = 0.0, curPos = 0.0;
 

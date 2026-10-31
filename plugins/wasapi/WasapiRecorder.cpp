@@ -27,6 +27,7 @@
 extern "C" HRESULT PropVariantClear(PROPVARIANT* p);   // ole32.dll
 
 #include "RecorderPlugin.h"
+#include "RecorderRing.h"
 
 // This SDK only declares the WASAPI GUIDs (EXTERN_C const, no definitions -
 // modern SDKs fill them in via initguid.h). Provide the definitions here with
@@ -181,10 +182,9 @@ struct CaptureState {
     bool                     useLocalCapture = false;
     bool                     ownsComInit = false;   // we called CoInitializeEx in setup
 
-    // Ring buffer of interleaved float32 frames.
-    std::vector<float> ring;
-    size_t             head = 0, count = 0;   // [head, head+count) mod capacity
-    std::mutex         ringMutex;
+    // Ring buffer of interleaved float32 frames (thread-safe FIFO; reads
+    // consume). See RecorderRing.h.
+    sc::rec::FloatRing ring;
 
     std::string lastError;
 };
@@ -568,10 +568,10 @@ static int setupCapture(CaptureState* st)
                            AUDCLNT_SHAREMODE_SHARED });
     tries.push_back ({ flags, &st->dev.fmt, AUDCLNT_SHAREMODE_SHARED });
     tries.push_back ({ flags, &pcm16, AUDCLNT_SHAREMODE_SHARED });
-    if (!st->dev.loopback && !st->dev.rawFmtBytes.empty ())
-        tries.push_back ({ 0,
-                           reinterpret_cast<const WAVEFORMATEX*> (st->dev.rawFmtBytes.data ()),
-                           AUDCLNT_SHAREMODE_EXCLUSIVE });
+    // NOTE: no exclusive-mode attempt. Some drivers crash inside the audio
+    // engine when a session is opened exclusively (the process dies before
+    // any error can be reported); shared mode - what Audacity uses by
+    // default - works on every endpoint that supports WASAPI at all.
 
     // Fallback for stacks whose loopback flag is not the standard value:
     // retry with kStreamFlagsLoopbackAlt.
@@ -632,7 +632,8 @@ static int setupCapture(CaptureState* st)
     UINT32 bufFrames = 0;
     st->client->GetBufferSize (&bufFrames);
     const size_t capFrames = (size_t) std::max<UINT32> (1u, bufFrames * 4);   // ~4s of headroom
-    st->ring.assign ((size_t) st->dev.fmt.nChannels * capFrames, 0.0f);
+    const size_t chN = (size_t) st->dev.fmt.nChannels > 0 ? (size_t) st->dev.fmt.nChannels : 1;
+    st->ring.init (chN * capFrames, chN);
     return 0;
 }
 
@@ -644,21 +645,7 @@ static void appendFrames(CaptureState* st, const void* data, size_t frames)
     const size_t chN = (size_t) st->dev.fmt.nChannels > 0 ? (size_t) st->dev.fmt.nChannels : 1;
     std::vector<float> tmp ((size_t) frames * chN);
     convertToFloat (data, st->dev.fmt, tmp.data (), frames);
-
-    // head/count are in SAMPLE units; the ring holds capFrames*ch floats.
-    const size_t ringSamples = st->ring.size ();
-    std::lock_guard<std::mutex> lock (st->ringMutex);
-    for (size_t i = 0; i < tmp.size (); ++i)
-    {
-        const size_t pos = (st->head + st->count) % ringSamples;
-        if (pos == st->head && st->count == ringSamples)   // full: drop oldest
-        {
-            st->head = (st->head + 1) % ringSamples;
-            --st->count;
-        }
-        st->ring[pos] = tmp[i];
-        ++st->count;
-    }
+    st->ring.append (tmp.data (), tmp.size ());
 }
 
 // Polls the capture client until stopped, converting each packet to
@@ -915,7 +902,6 @@ SC_REC_EXPORT int sc_rec_start()
     CaptureState* st = g_state;
 
     st->stopFlag.store (false);
-    st->head = st->count = 0;
     st->ring.clear ();
     st->lastError.clear ();
     g_lastError.clear ();
@@ -963,9 +949,7 @@ SC_REC_EXPORT long long sc_rec_available_frames()
 {
     CaptureState* st = g_state;
     if (st == nullptr) return 0;
-    std::lock_guard<std::mutex> lock (st->ringMutex);
-    const size_t ch = (size_t) st->dev.fmt.nChannels > 0 ? (size_t) st->dev.fmt.nChannels : 1;
-    return (long long) (st->count / ch);
+    return st->ring.availableFrames ();
 }
 
 SC_REC_EXPORT int sc_rec_read(float* dest, int channels, long long maxFrames)
@@ -973,16 +957,9 @@ SC_REC_EXPORT int sc_rec_read(float* dest, int channels, long long maxFrames)
     CaptureState* st = g_state;
     if (dest == nullptr || st == nullptr || maxFrames <= 0) return 0;
 
-    std::lock_guard<std::mutex> lock (st->ringMutex);
-    const size_t ch = (size_t) st->dev.fmt.nChannels > 0 ? (size_t) st->dev.fmt.nChannels : 1;
-    long long frames = st->count / ch;
-    if (frames > maxFrames) frames = maxFrames;
-
-    for (long long f = 0; f < frames; ++f)
-        for (size_t c = 0; c < ch && c < (size_t) channels; ++c)
-            dest[(f * channels + (long long) c)] = st->ring[(st->head + (size_t) f * ch + c) % st->ring.size ()];
-
-    return (int) frames;
+    // Consuming read: the ring hands each captured sample out exactly once,
+    // so the host's pull loop sees real-time audio without duplication.
+    return (int) st->ring.readFrames (dest, channels, maxFrames);
 }
 
 SC_REC_EXPORT const char* sc_rec_last_error()

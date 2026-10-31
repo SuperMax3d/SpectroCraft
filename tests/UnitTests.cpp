@@ -32,6 +32,7 @@
 #include "StemSeparation.h"   // the Effects > Stem Separation window
 #include "SuperResolution.h"  // the Effects > Super Resolution window
 #include "Recorder.h"         // recorder plugin host (Transport > Record)
+#include "RecorderRing.h"      // the WASAPI plugin's thread-safe capture ring
 #include "SingleInstance.h"   // single-instance mode + file forwarding pipe
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
@@ -21694,6 +21695,90 @@ static void testRecorderPluginApi()
     CHECK (!host.running (), "plugin reports stopped after stop");
 }
 
+/** FloatRing (the WASAPI plugin's capture buffer): reads must CONSUME -
+    every sample is handed out exactly once in order; a full ring drops the
+    oldest samples instead of overflowing. Regression test for recordings
+    that came back as duplicated/empty audio because sc_rec_read() used to
+    re-serve the same prefix on every pull. */
+static void testRecorderRing()
+{
+    using sc::rec::FloatRing;
+
+    // Uninitialised ring: everything is a safe no-op.
+    FloatRing empty;
+    std::vector<float> buf (8);
+    CHECK (empty.availableFrames () == 0, "uninit ring has no frames");
+    CHECK (empty.readFrames (buf.data (), 2, 10) == 0, "read from uninit ring returns 0");
+    const float one = 1.0f;
+    empty.append (&one, 4);   // must not crash
+    CHECK (empty.availableFrames () == 0, "append to uninit ring is ignored");
+
+    FloatRing r;
+    r.init (8 * 2, 2);   // capacity for 8 frames of stereo
+    CHECK (r.capacitySamples () == 16 && r.channels () == 2, "ring init reports geometry");
+
+    // Fill with a ramp: frame f = {f, -f} so order is verifiable.
+    std::vector<float> in;
+    for (int f = 0; f < 5; ++f)
+        in.push_back ((float) f), in.push_back (-in.back ());
+    r.append (in.data (), in.size ());
+    CHECK (r.availableFrames () == 5, "five frames queued after append");
+
+    // First read: capped at two frames even though five are queued.
+    std::vector<float> out (4);
+    CHECK (r.readFrames (out.data (), 2, 2) == 2, "read honours the frame cap");
+    CHECK (out[0] == 0.0f && out[1] == -0.0f && out[2] == 1.0f && out[3] == -1.0f,
+          "first read serves the oldest frames in order");
+    CHECK (r.availableFrames () == 3, "read consumed two frames");
+
+    // Second read: the NEXT frames - not a repeat of the first ones.
+    out.assign (4, 99.0f);
+    CHECK (r.readFrames (out.data (), 2, 1) == 1, "partial read returns one frame");
+    CHECK (out[0] == 2.0f && out[1] == -2.0f, "second read continues where the first stopped");
+
+    // Drain completely.
+    out.assign (8, 99.0f);
+    CHECK (r.readFrames (out.data (), 2, 10) == 2, "drain returns the remainder");
+    CHECK (out[0] == 3.0f && out[2] == 4.0f, "drained frames are in order");
+    CHECK (r.availableFrames () == 0, "ring is empty after full drain");
+    CHECK (r.readFrames (out.data (), 2, 1) == 0, "read from drained ring returns 0");
+
+    // Wrap-around: fill to capacity, push more (drop-oldest), verify contents.
+    r.clear ();
+    std::vector<float> full;
+    for (int f = 0; f < 8; ++f)
+        full.push_back ((float) f), full.push_back (-full.back ());
+    r.append (full.data (), full.size ());
+    CHECK (r.availableFrames () == 8, "ring holds exactly its capacity");
+
+    std::vector<float> extra;
+    for (int f = 8; f < 12; ++f)
+        extra.push_back ((float) f), extra.push_back (-extra.back ());
+    r.append (extra.data (), extra.size ());   // overflows by 4 frames
+    CHECK (r.availableFrames () == 8, "full ring stays at capacity after overflow");
+
+    out.assign (16, 99.0f);
+    CHECK (r.readFrames (out.data (), 2, 10) == 8, "overflowed ring serves its window");
+    // Frames 0..3 were dropped; the window now holds 4..11.
+    bool orderOk = true;
+    for (int i = 0; i < 8; ++i)
+        if (out[(size_t) 2 * i] != (float) (4 + i)) { orderOk = false; break; }
+    CHECK (orderOk, "drop-oldest keeps the newest window in order");
+
+    // Stride read: host requests more channels than the ring stores - only
+    // the stored channels are written, with the wider stride.
+    r.clear ();
+    std::vector<float> mono;
+    for (int f = 0; f < 3; ++f) mono.push_back ((float) f);
+    FloatRing m;
+    m.init (6 * 1, 1);
+    m.append (mono.data (), mono.size ());
+    std::vector<float> wide (3 * 2, -7.0f);
+    CHECK (m.readFrames (wide.data (), 2, 10) == 3, "stride read returns all frames");
+    CHECK (wide[0] == 0.0f && wide[2] == 1.0f && wide[4] == 2.0f,
+          "stride read writes channel 0 at the wider stride");
+}
+
 /** The follow-end state machine: ramp up from an empty document, slide,
     freeze when the user pans away, re-engage when they return to the end. */
 static void testRecordingFollowWindow()
@@ -23620,6 +23705,7 @@ static int scRunUnitTestsImpl()
     progress ("startup trace");           testStartupTrace();
     progress ("lazy audio init");         testLazyAudioInit();
     progress ("recorder plugin API");     testRecorderPluginApi();
+    progress ("recorder ring buffer");    testRecorderRing();
     progress ("recording follow window"); testRecordingFollowWindow();
     progress ("recording session");       testRecordingSession();
     progress ("rec channel combo items"); testRecChannelComboItems();

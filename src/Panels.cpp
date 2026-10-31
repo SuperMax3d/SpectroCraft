@@ -6889,6 +6889,18 @@ void StatusBar::paint (juce::Graphics& g)
     }
     if (!modeText.isEmpty() && leftX < b.getWidth() - 8)
     {
+        // Live recording indicator: a solid red dot drawn as graphics so it
+        // never depends on font glyph coverage (a "\u25CF" character in the text
+        // was missing from some system fonts and corrupted the footer layout).
+        if (recActive_)
+        {
+            g.setColour (juce::Colour::fromRGB (255, 70, 70));
+            g.fillEllipse (juce::Rectangle<float> ((float) leftX,
+                                                   b.getHeight() * 0.5f - 4.0f,
+                                                   8.0f, 8.0f));
+            leftX += 14;
+        }
+
         // The active spectral tool name, in a distinct colour so it reads as
         // a mode indicator rather than probe data.
         g.setColour (juce::Colour::fromRGB (120, 170, 255));

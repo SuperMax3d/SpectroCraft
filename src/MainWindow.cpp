@@ -1226,12 +1226,16 @@ void MainWindow::timerCallback()
     if (statusBar)
     {
         juce::String mode = currentModeText ();
-        if (app.recording.active && app.recDoc () != nullptr)
+        const bool recNow = app.recording.active && app.recDoc () != nullptr;
+        if (recNow)
         {
+            // The red dot is drawn by the status bar itself (setRecording);
+            // keeping this string pure ASCII avoids font-glyph issues.
             const double secs = app.recDoc ()->engine.duration ();
-            mode = "● REC " + juce::String (secs, 2) + " s"
+            mode = "REC " + juce::String (secs, 2) + " s"
                    + (mode.isEmpty () ? juce::String () : "   " + mode);
         }
+        statusBar->setRecording (recNow);
         statusBar->setModeText (mode);
     }
 
