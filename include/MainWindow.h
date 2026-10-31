@@ -99,6 +99,10 @@ public:
     double spectralFreqMax()   const { return spectralView->getFreqMax(); }
     SpectralView* spectralViewComp() { return spectralView.get (); }
     WaveformView* waveformViewComp() { return waveformView.get (); }
+    juce::Component* waveVScrollBarComp() { return waveVScroll.get (); }   // unit tests
+    juce::Component* specVScrollBarComp() { return specVScroll.get (); }   // unit tests
+    /** Top/bottom insets (px) that keep a view's vertical scrollbar clear of its own time ruler strip. */
+    static void vScrollInsetsForView (juce::Component* view, int& topInset, int& botInset);
     void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
     void refreshAfterEdit();   // clamp ranges, repaint waveform, re-render spectral image
     /** Applies a destructive edit (`edit` returns false and fills errOut on

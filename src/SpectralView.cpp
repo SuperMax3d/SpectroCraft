@@ -1847,12 +1847,16 @@ void SpectralView::drawOverlays (juce::Graphics& g)
         }
     }
 
-    // Playhead
+    // Playhead: a plain red line spanning the plot and continuing into this
+    // view's own time ruler strip when one is shown.
     const double px = timeToX (playhead);
     if (px >= pr.getX() && px <= pr.getRight())
     {
         g.setColour (juce::Colour::fromRGB (255, 60, 60));
-        g.drawVerticalLine ((int) px, (float) pr.getY(), (float) pr.getBottom());
+        const float yTop = (showOwnTimeRuler && !rulerAtBottom()) ? 0.0f : (float) pr.getY();
+        const float yBot = (showOwnTimeRuler && rulerAtBottom()) ? (float) getLocalBounds().getHeight()
+                                                                 : (float) pr.getBottom();
+        g.drawVerticalLine ((int) px, yTop, yBot);
     }
 }
 

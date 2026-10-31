@@ -657,35 +657,14 @@ void WaveformView::paint (juce::Graphics& g)
         }
     }
 
-    // Playhead
+    // Playhead: a plain red line spanning the whole view height - it
+    // continues into this view's own time ruler strip when one is shown.
     const double px = timeToX (playhead);
     if (px >= pr.getX() && px <= pr.getRight())
     {
-        // Snap the line and the arrow to a common pixel centre. The line is a
-        // 1px column [x, x+1); centring the triangle on that same column keeps
-        // both slanted edges at mirror-image sub-pixel phases, so the arrow
-        // rasterises symmetrically (a fractional apex would otherwise make one
-        // wing visibly heavier than the other).
         const int pxI = (int) std::lround (px);
         g.setColour (juce::Colour::fromRGB (255, 60, 60));
         g.drawVerticalLine (pxI, 0.0f, (float) bounds.getHeight());
-        // The arrow sits in the ruler strip on the playhead column: base on
-        // the ruler/plot boundary, apex at the window's outer edge - pointing
-        // up with a top ruler, down with a bottom ruler. With no ruler in this
-        // view (stacked dual view) only the plain line is drawn.
-        if (showTimeRuler)
-        {
-            juce::Path tri;
-            if (rulerAtBottom())
-                tri.addTriangle ((float) pxI - 4.5f, (float) pr.getBottom(),
-                                 (float) pxI + 5.5f, (float) pr.getBottom(),
-                                 (float) pxI + 0.5f, (float) bounds.getHeight());
-            else
-                tri.addTriangle ((float) pxI - 4.5f, (float) kRulerH,
-                                 (float) pxI + 5.5f, (float) kRulerH,
-                                 (float) pxI + 0.5f, 0.0f);
-            g.fillPath (tri);
-        }
     }
 
     // Right-drag box-zoom rubber band: the same translucent blue as the

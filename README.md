@@ -26,8 +26,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   in memory for fast editing. Edits require the in-memory buffer.
 - **Waveform view**: mipmap pyramid overview, own time window + horizontal zoom,
   own vertical amplitude axis with dB gridlines and its own vertical zoom level,
-  selection with optional zero-crossing snapping, persistent playhead (click to
-  move it), loop playback. When several channels are displayed each gets its
+  selection with optional zero-crossing snapping, persistent playhead — a thin
+  red line that continues into the time axis strip (click to move it) — and
+  loop playback. When several channels are displayed each gets its
   own row separated by a thin dark gap, and every row shows its channel label
   ("L"/"R" for stereo, numbers otherwise) — even when only one channel is
   visible. When zoomed in to ~4 samples per pixel or fewer the
@@ -50,8 +51,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 - **Scrollbars**: a horizontal time scrollbar along the bottom shows the current
   view range relative to the whole file; each view has a vertical scrollbar on
   its right edge (amplitude for the waveform, frequency for the spectrogram).
-  Dragging the thumb centre pans, dragging an edge zooms in/out in that
-  direction, clicking outside jumps.
+  Each vertical bar spans only the track data area — when that view draws its
+  own time ruler strip (top or bottom) the bar stops at the actual data height
+  instead of running into the axis. Dragging the thumb centre pans, dragging an
+  edge zooms in/out in that direction, clicking outside jumps.
 - **Spectral view**:
   - Tiled FFT: fixed 256 frames/tile, multi-resolution levels (hop doubles per
     level), computed in parallel on a `juce::ThreadPool`, LRU tile cache.

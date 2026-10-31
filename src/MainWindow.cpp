@@ -680,13 +680,20 @@ void MainWindow::resized()
     auto placeViewWithScrollBar = [&](juce::Rectangle<int> full, juce::Component* view,
                                       juce::Component* vbar) -> void
     {
-        const juce::Rectangle<int> barRect (full.getRight() - vScrollW, full.getY(),
-                                            vScrollW, full.getHeight());
-        // removeFromRight() returns the REMOVED strip; we want the view to take
-        // the remaining area, so shrink `full` first and then use it.
+        // Shrink `full` by the scrollbar strip first so the view takes the rest.
+        const int barX = full.getRight() - vScrollW;
         full = full.withSize (std::max (0, full.getWidth() - vScrollW), full.getHeight());
         view->setBounds (full);
-        if (vbar) vbar->setBounds (barRect);
+
+        // The vertical scrollbar spans only the track data area: when this view
+        // draws its own time ruler strip (top or bottom) that strip is excluded
+        // so the bar stops at the actual data height.
+        int topInset = 0, botInset = 0;
+        vScrollInsetsForView (view, topInset, botInset);
+
+        if (vbar) vbar->setBounds (juce::Rectangle<int> (barX, full.getY() + topInset,
+                                                        vScrollW,
+                                                        std::max (0, full.getHeight() - topInset - botInset)));
     };
 
     if (showWave && showSpec)
@@ -2009,6 +2016,30 @@ void MainWindow::updateAutoFftLabel()
     if (label == autoFftLabel_) return;
     autoFftLabel_ = label;
     controlsPanel->rebuildFftSizeItems (n);
+}
+
+void MainWindow::vScrollInsetsForView (juce::Component* view, int& topInset, int& botInset)
+{
+    // The vertical scrollbar spans only the track data area: when a view draws
+    // its own time ruler strip (top or bottom) that strip is excluded so the
+    // bar stops at the actual data height.
+    topInset = botInset = 0;
+    if (auto* wv = dynamic_cast<WaveformView*> (view))
+    {
+        if (wv->showsTimeRuler())
+        {
+            if (wv->rulerAtBottom()) botInset = WaveformView::kRulerH;
+            else                     topInset = WaveformView::kRulerH;
+        }
+    }
+    else if (auto* sv = dynamic_cast<SpectralView*> (view))
+    {
+        if (sv->showsOwnTimeRuler())
+        {
+            if (sv->rulerAtBottom()) botInset = SpectralView::kRulerH;
+            else                     topInset = SpectralView::kRulerH;
+        }
+    }
 }
 
 juce::File MainWindow::makeSnapshotPath (const juce::File& wav, const juce::Time* when)

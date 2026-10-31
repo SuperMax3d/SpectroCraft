@@ -686,17 +686,15 @@ static void testMarkerAxisClipping()
     wav.deleteFile();
 }
 
-// ---------------- Playhead arrow symmetry ----------------
-// The playhead is a 1px vertical line plus an upward triangle in the ruler.
-// Both must be centred on the same pixel column: if the triangle's apex sat
-// at a fractional x while the line occupied [floor(px), floor(px)+1), one
-// wing would rasterise visibly heavier than the other (the arrow looked
-// skewed). This test renders the real view headlessly and checks that every
-// ruler row is balanced about the snapped centre, at both 100% and 150%
-// DPI scale.
-static void testPlayheadArrowSymmetry()
+// ---------------- Playhead: plain line into the time axis ----------------
+// The playhead is now just a 1px vertical red line spanning the whole view
+// height - it continues into this view's own time ruler strip (no triangle).
+// This test renders the real view headlessly and checks that every row from
+// the window top to its outer edge carries the narrow, centred line, at both
+// 100% and 150% DPI scale.
+static void testPlayheadLineFullHeight()
 {
-    const juce::File wav = makeTempFile ("ph_sym.wav");
+    const juce::File wav = makeTempFile ("ph_line.wav");
     writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
     {
         return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
@@ -733,70 +731,60 @@ static void testPlayheadArrowSymmetry()
             const int pxI = (int) std::lround (px);
             const double centreDev = ((double) pxI + 0.5) * scale;   // snapped line centre
             const int cxw = (int) std::lround ((double) pxI * scale);
-            const int lastRow = (int) std::lround ((WaveformView::kRulerH - 1) * scale);  // above ruler border
 
-            bool rowsSeen = false, comOk = true, edgeOk = true;
-            int maxSpan = 0;
-            for (int y = 0; y < lastRow && y < H; ++y)
+            bool rowsSeen = true, comOk = true, narrowOk = true;
+            for (int y = 0; y < H; ++y)
             {
                 int lo = -1, hi = -1;
                 double sum = 0.0, wsum = 0.0;
                 for (int x = std::max (0, cxw - 8); x < std::min (W, cxw + 9); ++x)
                 {
-                    const int r = (int) img.getPixelAt (x, y).getRed();
-                    if (r > 40)
+                    const auto p = img.getPixelAt (x, y);
+                    // Red-dominant: the playhead is (255,60,60); the grey
+                    // waveform/ticks/labels are neutral and never qualify.
+                    if ((int) p.getRed() > 40 && (int) p.getRed() - (int) p.getGreen() > 80)
                     {
                         if (lo < 0) lo = x;
                         hi = x;
-                        sum += (double) r * ((double) x + 0.5);
-                        wsum += (double) r;
+                        sum += (double) p.getRed() * ((double) x + 0.5);
+                        wsum += (double) p.getRed();
                     }
                 }
+                // The line must be present in EVERY row - including the ruler strip.
                 if (lo < 0)
-                    continue;
-
-                rowsSeen = true;
-                maxSpan = std::max (maxSpan, hi - lo + 1);
+                {
+                    rowsSeen = false;
+                    break;
+                }
+                if (hi - lo + 1 > 3 * (int) std::lround (scale))
+                {
+                    narrowOk = false;   // a triangle would be much wider
+                    break;
+                }
                 const double comOffset = sum / wsum - centreDev;
-                if (std::abs (comOffset) > 0.3)
+                if (std::abs (comOffset) > 0.4)
                 {
                     comOk = false;
-                    std::cerr << "[phsym] px=" << px << " scale=" << scale
+                    std::cerr << "[phline] px=" << px << " scale=" << scale
                               << " row " << y << " comOffset=" << comOffset << '\n';
-                }
-                // At 100% scale the two slanted edges must land at mirror-image
-                // sub-pixel phases: equal coverage on both outer pixels.
-                if (scale == 1.0f && hi - lo >= 2)
-                {
-                    const int vL = (int) img.getPixelAt (lo, y).getRed();
-                    const int vR = (int) img.getPixelAt (hi, y).getRed();
-                    if (std::abs (vL - vR) > 8)
-                    {
-                        edgeOk = false;
-                        std::cerr << "[phsym] px=" << px << " row " << y
-                                  << " edges " << vL << "/" << vR << '\n';
-                    }
                 }
             }
 
             const juce::String tag = "px=" + juce::String (px) + " scale=" + juce::String (scale);
-            CHECK (rowsSeen, "playhead arrow visible (" + tag + ")");
-            CHECK (maxSpan >= 8 * (int) std::lround (scale) - 2,
-                  "playhead arrow reaches full width (" + tag + "): span=" + juce::String (maxSpan));
-            CHECK (comOk, "playhead arrow centred on its line (" + tag + ")");
-            if (scale == 1.0f)
-                CHECK (edgeOk, "playhead arrow wings equally covered (" + tag + ")");
+            CHECK (rowsSeen, "playhead line spans the full view height incl. ruler (" + tag + ")");
+            CHECK (narrowOk, "no playhead triangle: line stays narrow (" + tag + ")");
+            CHECK (comOk, "playhead line centred on its snapped column (" + tag + ")");
         }
     }
 
     wav.deleteFile();
 }
 
-// ---------------- Playhead arrow with bottom time ruler ----------------
-// With View > Time Ruler At Bottom, the playhead arrow must sit in the
-// bottom ruler strip (base on the ruler/plot boundary, apex at the window's
-// outer edge) - not span the whole plot as a giant triangle over the data.
-static void testPlayheadArrowBottomRuler()
+// ---------------- Playhead line with bottom time ruler ----------------
+// With View > Time Ruler At Bottom there is no triangle anywhere: the plot
+// holds only the 1px red line and it continues through the bottom ruler
+// strip down to the window's outer edge.
+static void testPlayheadLineBottomRuler()
 {
     const juce::File wav = makeTempFile ("ph_bot.wav");
     writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
@@ -845,24 +833,207 @@ static void testPlayheadArrowBottomRuler()
 
     const int rulerTop = 128 - WaveformView::kRulerH;   // plot/ruler boundary
 
-    // The whole plot area must contain only the 1px playhead line.
-    bool plotClean = true;
-    for (int y = 1; y < rulerTop - 1 && plotClean; ++y)
-        if (redSpanAt (y) > 2) { plotClean = false; }
-    CHECK (plotClean, "no playhead triangle over the waveform data");
-
-    // The arrow sits in the bottom strip: wide at its base on the boundary...
-    const int baseSpan = redSpanAt (rulerTop + 2);
-    CHECK (baseSpan >= 6, "arrow base in the bottom ruler strip: span=" + juce::String (baseSpan));
-
-    // ...and narrows continuously to a point at the window's outer edge.
+    // The line must run from the window top to its outer edge without a gap...
     bool continuous = true;
-    for (int y = rulerTop; y < 128 && continuous; ++y)
+    for (int y = 0; y < 128 && continuous; ++y)
         if (redSpanAt (y) <= 0) { continuous = false; }
-    CHECK (continuous, "arrow fills the strip down to the window edge");
-    CHECK (redSpanAt (127) <= 4, "arrow apex at the outer edge: span=" + juce::String (redSpanAt (127)));
+    CHECK (continuous, "playhead line runs from the top to the window edge");
+
+    // ...and stay narrow everywhere - no triangle over the data or in the strip.
+    bool narrowOk = true;
+    for (int y = 0; y < 128 && narrowOk; ++y)
+        if (redSpanAt (y) > 3) { narrowOk = false; }
+    CHECK (narrowOk, "no playhead triangle: line stays narrow in plot and ruler");
 
     app.settings.trackRulerAtBottom = false;
+    wav.deleteFile();
+}
+
+// ---------------- Spectral playhead line into its own time axis ----------------
+// When the time ruler sits at the bottom it is drawn by the spectrogram
+// itself; the red playhead line must continue from the plot down through that
+// strip (previously it stopped at the plot boundary).
+static void testSpectralPlayheadIntoRuler()
+{
+    const juce::File wav = makeTempFile ("spec_ph.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t, double) { return 0.0f; });   // silence: no tone band
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "spectral playhead: load wav");
+    app.settings.trackRulerAtBottom = true;
+    app.settings.specHarmVisible = false;   // keep the overlay free of other marks
+
+    SpectralView view (app);
+    view.setSize (300, 128);
+    view.setViewRange (0.0, 2.0);
+    view.setVisibleChannels ({ 0 });
+    view.setSettings (app.settings);
+    const double t = (144.5 - 60.0) / 120.0;   // snapped line column pxI = 144
+    view.setPlayhead (t);
+
+    juce::Image img (juce::Image::ARGB, 300, 128, true);
+    { juce::Graphics g (img); view.paint (g); }
+
+    auto redSpanAt = [&] (int y) -> int
+    {
+        int lo = -1, hi = -1;
+        for (int x = std::max (0, 144 - 8); x < std::min (300, 144 + 9); ++x)
+        {
+            const auto p = img.getPixelAt (x, y);
+            if ((int) p.getRed() > 40 && (int) p.getRed() - (int) p.getGreen() > 80)
+            {
+                if (lo < 0) lo = x;
+                hi = x;
+            }
+        }
+        return hi - lo + 1;   // 0 when no playhead pixels in the window
+    };
+
+    const int rulerTop = 128 - SpectralView::kRulerH;   // plot/ruler boundary
+
+    // The line must be present (and narrow) in every row of the bottom strip...
+    bool stripOk = true;
+    for (int y = rulerTop + 1; y < 128; ++y)
+        if (redSpanAt (y) <= 0 || redSpanAt (y) > 3) { stripOk = false; }
+    CHECK (stripOk, "playhead line continues into the bottom time axis");
+
+    // ...and stay a narrow line in the plot area too.
+    bool plotNarrow = true;
+    for (int y = 1; y < rulerTop - 1 && plotNarrow; ++y)
+        if (redSpanAt (y) > 3) { plotNarrow = false; }
+    CHECK (plotNarrow, "no playhead triangle over the spectral data");
+
+    app.settings.trackRulerAtBottom = false;
+    app.settings.specHarmVisible = true;
+    wav.deleteFile();
+}
+
+// ---------------- Vertical scrollbars stop at the track data height --------
+// Each view's vertical scrollbar must span only the plot area: when that view
+// draws its own time ruler strip (top or bottom) the bar is inset so it stops
+// at the actual track data height. Checked via the pure helper for every
+// combination, then on a live MainWindow walking all three layouts with the
+// ruler at both positions.
+static void testVScrollInsets()
+{
+    // Pure helper: every view / ruler combination.
+    {
+        Application app;
+        int t = -1, b = -1;
+
+        WaveformView wv (app);   // default: own top ruler shown
+        MainWindow::vScrollInsetsForView (&wv, t, b);
+        CHECK (t == WaveformView::kRulerH && b == 0, "waveform + top ruler: inset at top");
+
+        app.settings.trackRulerAtBottom = true;
+        wv.setShowTimeRuler (true);
+        MainWindow::vScrollInsetsForView (&wv, t, b);
+        CHECK (t == 0 && b == WaveformView::kRulerH, "waveform + bottom ruler: inset at bottom");
+
+        wv.setShowTimeRuler (false);   // stacked dual view: no own strip
+        MainWindow::vScrollInsetsForView (&wv, t, b);
+        CHECK (t == 0 && b == 0, "waveform without ruler: no inset");
+
+        SpectralView sv (app);
+        app.settings.trackRulerAtBottom = false;
+        sv.setShowOwnTimeRuler (true);
+        MainWindow::vScrollInsetsForView (&sv, t, b);
+        CHECK (t == SpectralView::kRulerH && b == 0, "spectral + top ruler: inset at top");
+
+        app.settings.trackRulerAtBottom = true;
+        MainWindow::vScrollInsetsForView (&sv, t, b);
+        CHECK (t == 0 && b == SpectralView::kRulerH, "spectral + bottom ruler: inset at bottom");
+
+        sv.setShowOwnTimeRuler (false);
+        MainWindow::vScrollInsetsForView (&sv, t, b);
+        CHECK (t == 0 && b == 0, "spectral without ruler: no inset");
+    }
+
+    // Live window: the real bars stop at the track data height.
+    const juce::File wav = makeTempFile ("vscroll.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "vscroll: load wav");
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "vscroll insets test"));
+
+    // Layout 0 - both views stacked, ruler at the top: the waveform owns the
+    // strip so its bar starts below it; the spectral view has none.
+    {
+        auto* wbar = win->waveVScrollBarComp();
+        auto* sbar = win->specVScrollBarComp();
+        auto* wave = win->waveformViewComp();
+        auto* spec = win->spectralViewComp();
+        CHECK (wbar != nullptr && sbar != nullptr, "vertical scrollbars exist");
+        if (wbar && sbar && wave && spec)
+        {
+            const auto wb = wbar->getBounds(), sb = sbar->getBounds();
+            CHECK (wb.getY() == wave->getY() + WaveformView::kRulerH,
+                  "both/top: waveform bar starts below its top time axis");
+            CHECK (wb.getBottom() == wave->getBottom(),
+                  "both/top: waveform bar ends at the data bottom");
+            CHECK (sb.getY() == spec->getY() && sb.getBottom() == spec->getBottom(),
+                  "both/top: spectral bar spans its full height (no own ruler)");
+        }
+    }
+
+    // Layout 1 - waveform only, ruler moved to the bottom: the single view
+    // owns the strip at its bottom edge.
+    app.settings.trackRulerAtBottom = true;
+    win->cycleViewVisibility (true);
+    CHECK (win->waveformVisible() && !win->spectrogramVisible(), "cycled to waveform only");
+    {
+        auto* wbar = win->waveVScrollBarComp();
+        auto* wave = win->waveformViewComp();
+        if (wbar && wave)
+        {
+            const auto wb = wbar->getBounds();
+            CHECK (wb.getY() == wave->getY(), "wave-only/bottom: bar starts at the data top");
+            CHECK (wb.getBottom() == wave->getBottom() - WaveformView::kRulerH,
+                  "wave-only/bottom: bar stops above its bottom time axis");
+        }
+    }
+
+    // Layout 2 - spectrogram only, ruler still at the bottom.
+    win->cycleViewVisibility (true);
+    CHECK (!win->waveformVisible() && win->spectrogramVisible(), "cycled to spectrogram only");
+    {
+        auto* sbar = win->specVScrollBarComp();
+        auto* spec = win->spectralViewComp();
+        if (sbar && spec)
+        {
+            const auto sb = sbar->getBounds();
+            CHECK (sb.getY() == spec->getY(), "spec-only/bottom: bar starts at the data top");
+            CHECK (sb.getBottom() == spec->getBottom() - SpectralView::kRulerH,
+                  "spec-only/bottom: bar stops above its bottom time axis");
+        }
+    }
+
+    // Back to both views with the ruler at the top again.
+    app.settings.trackRulerAtBottom = false;
+    win->cycleViewVisibility (true);
+    CHECK (win->waveformVisible() && win->spectrogramVisible(), "cycled back to both");
+    {
+        auto* wbar = win->waveVScrollBarComp();
+        auto* sbar = win->specVScrollBarComp();
+        auto* wave = win->waveformViewComp();
+        auto* spec = win->spectralViewComp();
+        if (wbar && sbar && wave && spec)
+        {
+            const auto wb = wbar->getBounds(), sb = sbar->getBounds();
+            CHECK (wb.getY() == wave->getY() + WaveformView::kRulerH,
+                  "both/top again: waveform bar starts below its top time axis");
+            CHECK (sb.getBottom() == spec->getBottom(),
+                  "both/top again: spectral bar spans its full height");
+        }
+    }
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
     wav.deleteFile();
 }
 
@@ -21527,11 +21698,13 @@ static int scRunUnitTestsImpl()
     progress ("undo/redo");      testUndo();
     progress ("zero-crossing");  testZeroCrossing();
     progress ("spectral engine");testSpectral();
-    progress ("playhead arrow symmetry"); testPlayheadArrowSymmetry();
-    progress ("playhead arrow bottom ruler"); testPlayheadArrowBottomRuler();
+    progress ("playhead line full height"); testPlayheadLineFullHeight();
+    progress ("playhead line bottom ruler"); testPlayheadLineBottomRuler();
     progress ("spectral view paint"); testSpectralViewPaint();
     progress ("marker axis clipping"); testMarkerAxisClipping();
     progress ("spectral time ruler");  testSpectralTimeRuler();
+    progress ("spectral playhead into ruler"); testSpectralPlayheadIntoRuler();
+    progress ("vscroll insets"); testVScrollInsets();
     progress ("waveform view paint"); testWaveformViewPaint();
     progress ("per-sample zoom");     testWaveformPerSampleZoom();
     progress ("FFT panel paint");testFFTAnalysisViewPaint();
