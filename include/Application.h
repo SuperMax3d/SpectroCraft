@@ -115,6 +115,14 @@ public:
         int bitDepth = 32;                 // negotiated at start
         int64_t framesRecorded = 0;
         bool followEnd = true;             // view follows the recording edge
+
+        // Transport > Recording Options (persisted between sessions).
+        enum class Mode { Unlimited, Loop, Timed };
+        Mode mode = Mode::Unlimited;
+        double durationSecs = 0.0;         // configured length for Loop/Timed (>0)
+        int64_t loopCapFrames = 0;         // set at start: max doc length in frames (Loop)
+        int64_t timedTargetFrames = 0;     // set at start: auto-stop after this many frames
+        juce::Time startTime;              // session start (zero-data watchdog)
     };
     RecordingState recording;
 
@@ -122,6 +130,13 @@ public:
         recording document, honouring a single-channel selection. Returns
         false when nothing was appended (ring empty or audio thread busy). */
     bool pullRecFrames (FileDoc* d, long long cap);
+
+    /** Sets the recording mode (Transport > Recording Options). secs is only
+        used for Loop/Timed and must be > 0 to take effect. Persisted. */
+    void setRecordingMode (RecordingState::Mode m, double secs = 0.0);
+
+    /** "10s" / "1:30" style menu label for a duration in seconds. */
+    static juce::String formatRecDurationSecs (double secs);
 
     /** Creates a fresh in-memory document and starts capturing from the
         selected recorder plugin/device (Transport > Recording Device). */

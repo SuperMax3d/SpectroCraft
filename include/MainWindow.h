@@ -346,6 +346,11 @@ public:
         can check the menu contents). */
     static juce::PopupMenu buildMergeMenu (bool haveActiveDoc);
 
+    /** Transport > Recording Options menu items (Unlimited / Loop Mode /
+        Timed). Public static so headless tests can check them. */
+    struct RecOptionMenuItem { int id = 0; juce::String text; bool checked = false; };
+    static std::vector<RecOptionMenuItem> recordingOptionItems (const Application& app);
+
     /** Transport > Recording Device menu: one sub-menu per recorder plugin.
         Public static so headless tests can check it. */
     static juce::PopupMenu buildRecordingDeviceMenu (const Application& app);
@@ -443,7 +448,10 @@ public:
         SelectionBrushLarger,
         TransportPlay = 4000, TransportStop, TransportPause, TransportLoop,
         TransportPlaySpectralSel,
-        TransportRecord,          // start/stop recording (plugin-based capture)
+        TransportRecord,          // start/stop recording (plugin-based capture; F10)
+        RecOptUnlimited = 4100,   // Recording Options submenu
+        RecOptLoop,
+        RecOptTimed,
         RecDeviceBase = 4500,     // Recording Device submenu: + pluginIndex*1000 + deviceIndex
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsInvert,           // Effects > Invert (spectral sel / time sel / whole file)

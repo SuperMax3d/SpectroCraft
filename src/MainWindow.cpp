@@ -1252,6 +1252,43 @@ juce::PopupMenu MainWindow::buildRecordingDeviceItems (const Application& app, i
     return m;
 }
 
+std::vector<MainWindow::RecOptionMenuItem> MainWindow::recordingOptionItems (
+        const Application& app)
+{
+    std::vector<RecOptionMenuItem> out;
+    const auto& r = app.recording;
+
+    RecOptionMenuItem unlim;
+    unlim.id      = RecOptUnlimited;
+    unlim.text    = "Unlimited";
+    unlim.checked = (r.mode == Application::RecordingState::Mode::Unlimited);
+    out.push_back (unlim);
+
+    juce::String loopText = "Loop Mode";
+    if (r.durationSecs > 0.0)
+        loopText += " (" + app.formatRecDurationSecs (r.durationSecs) + ")";
+    else
+        loopText += "...";
+    RecOptionMenuItem loop;
+    loop.id      = RecOptLoop;
+    loop.text    = loopText;
+    loop.checked = (r.mode == Application::RecordingState::Mode::Loop);
+    out.push_back (loop);
+
+    juce::String timedText = "Timed";
+    if (r.durationSecs > 0.0)
+        timedText += " (" + app.formatRecDurationSecs (r.durationSecs) + ")";
+    else
+        timedText += "...";
+    RecOptionMenuItem timed;
+    timed.id      = RecOptTimed;
+    timed.text    = timedText;
+    timed.checked = (r.mode == Application::RecordingState::Mode::Timed);
+    out.push_back (timed);
+
+    return out;
+}
+
 juce::PopupMenu MainWindow::buildRecordingDeviceMenu (const Application& app)
 {
     // Scan on every menu build so plugins dropped into a recorders/ folder
@@ -2139,6 +2176,12 @@ static void showAboutDialog (Component* parent)
 
 // ------------------------------------------------------------------- menus
 
+// Forward declaration: the Recording Options cases below prompt for a
+// duration with this helper, which is defined further down in this file.
+static bool promptNumberValue (juce::Component* parent, const juce::String& title,
+                               const juce::String& message, const juce::String& initial,
+                               double& out, bool clockStyle);
+
 void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 {
     using enum MenuIDs;
@@ -2403,6 +2446,37 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case TransportRecord:
             handleStartStopRecording ();
             break;
+
+        // Recording Options: Unlimited keeps the current behaviour; Loop and
+        // Timed prompt for a duration first (the menu then shows it, e.g.
+        // "Loop Mode (10s)").
+        case RecOptUnlimited:
+            app.setRecordingMode (Application::RecordingState::Mode::Unlimited);
+            break;
+        case RecOptLoop:
+        {
+            double secs = 0.0;
+            if (promptNumberValue (this, "Loop Mode",
+                                   "Loop duration in seconds (e.g. 10 or 1:30):",
+                                   juce::String (app.recording.durationSecs > 0.0
+                                                  ? app.recording.durationSecs : 10),
+                                   secs, true)
+                && secs > 0.0)
+                app.setRecordingMode (Application::RecordingState::Mode::Loop, secs);
+            break;
+        }
+        case RecOptTimed:
+        {
+            double secs = 0.0;
+            if (promptNumberValue (this, "Timed Recording",
+                                   "Recording duration in seconds (e.g. 10 or 1:30):",
+                                   juce::String (app.recording.durationSecs > 0.0
+                                                  ? app.recording.durationSecs : 10),
+                                   secs, true)
+                && secs > 0.0)
+                app.setRecordingMode (Application::RecordingState::Mode::Timed, secs);
+            break;
+        }
 
         // Immediate effects record themselves as the "last effect" so that
         // Ctrl+Shift+F can repeat them; dialog-based effects do the same at
@@ -6135,11 +6209,18 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       app.hasSpectralSelection (),
                       app.playSpectralSel && app.hasSpectralSelection ());
 
-        // Recording: start/stop toggle + device selection via plugins.
+        // Recording: start/stop toggle (F10) + mode options + device selection
+        // via plugins.
         menu.addSeparator ();
         menu.addItem (TransportRecord,
-                      app.recording.active ? "Stop Recording" : "Record",
+                      app.recording.active ? "Stop Recording\tF10" : "Record\tF10",
                       true, false);
+        {
+            juce::PopupMenu opts;
+            for (const auto& item : recordingOptionItems (app))
+                opts.addItem (item.id, item.text, true, item.checked);
+            menu.addSubMenu ("Recording Options", opts);
+        }
         menu.addSubMenu ("Recording Device", buildRecordingDeviceMenu (app));
     }
     else if (menuName == "Effects")
@@ -6333,6 +6414,8 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         if (kc == '=' || kc == '+') { stepFftSize (true);  return true; }
         if (kc == '-')              { stepFftSize (false); return true; }
     }
+    // F10 starts/stops recording (Transport > Record).
+    if (key.getKeyCode() == juce::KeyPress::F10Key) { handleStartStopRecording (); return true; }
     // F11 opens Edit > Resample... (no-op when no file is loaded).
     if (key.getKeyCode() == juce::KeyPress::F11Key) { showResampleDialog(); return true; }
     // Shift+F12 opens the split-configuration window (no split is performed).

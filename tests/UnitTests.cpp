@@ -21864,7 +21864,191 @@ static void testRecChannelSelection()
     }
 }
 
-/** Transport menu: Record toggle + Recording Device submenu structure. */
+/** AudioEngine::overwriteSamples: in-place write with no length change and
+    clamped bounds (loop-mode recording uses this). */
+static void testOverwriteSamples()
+{
+    Application app;
+    CHECK (app.newFile (2, 8000.0), "created a fresh document");
+
+    auto& eng = app.audioEngine ();
+    const int64_t N = 100;   // frames
+    std::vector<float> data ((size_t) N * 2);
+    for (int64_t f = 0; f < N; ++f)
+    {
+        data[(size_t) f * 2 + 0] = (float) f;
+        data[(size_t) f * 2 + 1] = -(float) f;
+    }
+    CHECK (eng.appendSamples (data.data (), N), "appended initial frames");
+
+    // Overwrite frames [50, 80): new values must land exactly there.
+    std::vector<float> patch ((size_t) 30 * 2);
+    for (int64_t f = 0; f < 30; ++f)
+    {
+        patch[(size_t) f * 2 + 0] = 1000.0f + (float) f;
+        patch[(size_t) f * 2 + 1] = -1000.0f - (float) f;
+    }
+    CHECK (eng.overwriteSamples (patch.data (), 50, 30), "overwrite in range");
+
+    std::vector<float> ch0 ((size_t) N);
+    CHECK (eng.readSamples (0, 0, N, ch0.data ()), "read back channel 0");
+    bool exact = true;
+    for (int64_t f = 0; f < N; ++f)
+    {
+        const float expect = (f >= 50 && f < 80) ? 1000.0f + (float) (f - 50) : (float) f;
+        if (ch0[(size_t) f] != expect) { exact = false; break; }
+    }
+    CHECK (exact, "overwrite touched exactly frames [50, 80)");
+    // numSamples() is the per-channel length, i.e. the frame count.
+    CHECK (eng.numSamples () == N, "length unchanged after overwrite");
+
+    // Clamped bounds: starting near the end writes only what fits.
+    std::vector<float> tail ((size_t) 30 * 2);
+    for (int64_t f = 0; f < 30; ++f)
+        tail[(size_t) f * 2] = tail[(size_t) f * 2 + 1] = 7.5f;
+    CHECK (eng.overwriteSamples (tail.data (), N - 5, 30), "overwrite clamped at end");
+    std::vector<float> ch1 ((size_t) N);
+    CHECK (eng.readSamples (1, 0, N, ch1.data ()), "read back channel 1");
+    bool tailOk = true;
+    for (int64_t f = 0; f < N; ++f)
+        if ((f >= N - 5 ? ch1[(size_t) f] : -(float) f) != (f >= N - 5 ? 7.5f : -(float) f))
+            { tailOk = false; break; }
+    CHECK (tailOk, "only the last five frames were overwritten");
+
+    // Degenerate requests are rejected without touching the buffer.
+    CHECK (!eng.overwriteSamples (tail.data (), N, 10), "start at end is a no-op failure");
+    CHECK (!eng.overwriteSamples (tail.data (), -3, 10), "negative start is a no-op failure");
+    CHECK (!eng.overwriteSamples (tail.data (), 5, 0), "zero length is a no-op failure");
+    CHECK (eng.numSamples () == N, "length still unchanged");
+}
+
+/** Recording Options: mode state + persistence, duration labels, Timed
+    auto-stop and Loop wrap-around against the deterministic fake plugin. */
+static void testRecModes()
+{
+    // --- Mode state ---------------------------------------------------------
+    Application app;
+    CHECK (app.recording.mode == Application::RecordingState::Mode::Unlimited,
+          "default mode is Unlimited");
+    app.setRecordingMode (Application::RecordingState::Mode::Loop, 12.5);
+    CHECK (app.recording.mode == Application::RecordingState::Mode::Loop
+           && std::abs (app.recording.durationSecs - 12.5) < 1e-9,
+          "loop mode stores its duration");
+    app.setRecordingMode (Application::RecordingState::Mode::Timed);   // no secs
+    CHECK (app.recording.mode == Application::RecordingState::Mode::Timed
+           && app.recording.durationSecs == 0.0,
+          "missing duration is dropped to zero");
+    app.setRecordingMode (Application::RecordingState::Mode::Unlimited, 5.0);
+    CHECK (app.recording.mode == Application::RecordingState::Mode::Unlimited
+           && app.recording.durationSecs == 0.0,
+          "unlimited ignores the duration");
+
+    // Persistence round trip through an explicit store file.
+    const juce::File store = makeTempFile ("rec_modes.recent");
+    {
+        Application saver (store);
+        saver.setRecordingMode (Application::RecordingState::Mode::Timed, 90.0);
+    }
+    {
+        Application loader (store);
+        CHECK (loader.recording.mode == Application::RecordingState::Mode::Timed
+               && std::abs (loader.recording.durationSecs - 90.0) < 1e-9,
+              "mode + duration survive a save/load round trip");
+    }
+
+    // --- Duration labels -----------------------------------------------------
+    CHECK (Application::formatRecDurationSecs (10.0) == "10s", "whole seconds label");
+    CHECK (Application::formatRecDurationSecs (90.5) == "90.5s", "fractional seconds label");
+    CHECK (Application::formatRecDurationSecs (3671.0) == "1:01:11", "hours label");
+
+    auto& host = sc::rec::RecorderHost::instance ();
+    CHECK (host.findPlugin ("fake") != nullptr, "fake plugin available for the mode tests");
+    if (host.findPlugin ("fake") == nullptr) return;
+
+    // --- Timed: automatic stop after the requested duration -------------------
+    {
+        Application t;
+        t.recording.pluginId = "fake";
+        t.recording.deviceId = "dev2ch";
+        t.recording.channels = 2;
+        t.recording.rate     = 8000.0;
+        t.recording.bitDepth = 32;
+        t.setRecordingMode (Application::RecordingState::Mode::Timed, 0.5);
+
+        std::string err;
+        CHECK (t.startRecording (&err), "timed session starts: " + err);
+        if (!t.recording.active) return;
+        CHECK (t.recording.timedTargetFrames == 4000,
+              "target frames computed from duration");
+
+        // Drive ticks until the auto-stop fires (the fake plugin produces as
+        // fast as possible, so this is a handful of ticks).
+        int ticks = 0;
+        while (t.recording.active && ticks < 200)
+        {
+            juce::Thread::sleep (10);
+            t.timerCallback ();
+            ++ticks;
+        }
+        CHECK (!t.recording.active, "timed session stopped itself");
+        CHECK (t.recording.framesRecorded >= t.recording.timedTargetFrames,
+              "the target amount was recorded before stopping");
+        CHECK (t.audioEngine ().duration () >= 0.5,
+              "document holds at least the requested duration");
+        CHECK (t.doc () != nullptr && t.recDoc () == nullptr,
+              "the finished document stays open");
+    }
+
+    // --- Loop: fixed-length buffer that overwrites from the start -------------
+    {
+        Application l;
+        l.recording.pluginId = "fake";
+        l.recording.deviceId = "dev2ch";
+        l.recording.channels = 2;
+        l.recording.rate     = 8000.0;
+        l.recording.bitDepth = 32;
+        l.setRecordingMode (Application::RecordingState::Mode::Loop, 0.5);
+
+        std::string err;
+        CHECK (l.startRecording (&err), "loop session starts: " + err);
+        if (!l.recording.active) return;
+        CHECK (l.recording.loopCapFrames == 4000,
+              "loop capacity computed from duration");
+
+        // Drive well past the capacity so several wraps happen.
+        for (int i = 0; i < 30 && l.recording.active; ++i)
+        {
+            juce::Thread::sleep (10);
+            l.timerCallback ();
+        }
+        CHECK (l.recording.framesRecorded > 4 * 4000, "several wraps of data captured");
+
+        const int64_t capFrames = 4000;   // per-channel length == frame count
+        CHECK (l.audioEngine ().numSamples () == capFrames,
+              "document length is pinned to the loop capacity");
+
+        // The buffer must hold one contiguous stretch of the generated stream:
+        // a phase-continuous 440 Hz sine across the whole window.
+        std::vector<float> buf ((size_t) capFrames);
+        CHECK (l.audioEngine ().readSamples (0, 0, capFrames, buf.data ()),
+              "read back the loop buffer");
+        const double pi = juce::MathConstants<double>::pi;
+        const double theta = 2.0 * pi * 440.0 / 8000.0;
+        double cosA0 = (buf[1] - std::cos (theta) * buf[0]) / std::sin (theta);
+        cosA0 = std::max (-1.0, std::min (1.0, cosA0));
+        const double a0 = std::atan2 ((double) buf[0], cosA0);
+        double maxErr = 0.0;
+        for (int64_t k = 0; k < capFrames; ++k)
+            maxErr = std::max (maxErr, std::abs (buf[k] - std::sin (a0 + theta * (double) k)));
+        CHECK (maxErr < 5e-3, "loop buffer is a contiguous stretch of the stream");
+
+        l.stopRecording ();
+        CHECK (!l.recording.active && l.audioEngine ().numSamples () == capFrames,
+              "stop keeps the fixed-length loop document");
+    }
+}
+
+/** Transport menu: Record toggle + Recording Options + device submenu. */
 static void testTransportRecordingMenu()
 {
     auto& host = sc::rec::RecorderHost::instance ();
@@ -21876,6 +22060,11 @@ static void testTransportRecordingMenu()
     CHECK (piFake >= 0, "the fake plugin is loaded");
 
     Application app;
+    // Isolate from settings persisted by earlier tests (the test build shares
+    // one recent-store file).
+    app.recording.pluginId.clear ();
+    app.recording.deviceId.clear ();
+    app.setRecordingMode (Application::RecordingState::Mode::Unlimited);
     std::unique_ptr<MainWindow> win (new MainWindow (app, "recording menu test"));
 
     const juce::StringArray names = win->getMenuBarNames ();
@@ -21885,9 +22074,32 @@ static void testTransportRecordingMenu()
     CHECK (tIdx >= 0, "Transport menu exists in the menu bar");
 
     // Play, Stop, Pause, separator, Loop, Play Spectral Selection,
-    // separator, Record, Recording Device. getNumItems() excludes separators.
+    // separator, Record, Recording Options, Recording Device.
+    // getNumItems() excludes separators.
     const juce::PopupMenu tm = win->getMenuForIndex (tIdx, "Transport");
-    CHECK (tm.getNumItems () == 7, "Record + Recording Device added to Transport");
+    CHECK (tm.getNumItems () == 8, "Record + Recording Options + device added to Transport");
+
+    // The Recording Options submenu items: Unlimited is the default and
+    // ticked; Loop/Timed show their configured duration once set.
+    const auto opts = MainWindow::recordingOptionItems (app);
+    CHECK (opts.size () == 3, "three recording options");
+    if (opts.size () == 3)
+    {
+        CHECK (opts[0].id == MainWindow::RecOptUnlimited && opts[0].text == "Unlimited"
+               && opts[0].checked,
+              "unlimited is the default and ticked");
+        CHECK (opts[1].id == MainWindow::RecOptLoop
+               && opts[1].text.startsWith ("Loop Mode"),
+              "loop option present");
+        CHECK (opts[2].id == MainWindow::RecOptTimed
+               && opts[2].text.startsWith ("Timed"),
+              "timed option present");
+    }
+    app.setRecordingMode (Application::RecordingState::Mode::Loop, 10.0);
+    const auto opts2 = MainWindow::recordingOptionItems (app);
+    CHECK (opts2.size () == 3 && opts2[1].text == "Loop Mode (10s)" && opts2[1].checked
+           && !opts2[0].checked,
+          "loop mode ticked with its duration label");
 
     // The device menu has one entry per loaded plugin.
     const juce::PopupMenu dm = MainWindow::buildRecordingDeviceMenu (app);
@@ -21918,6 +22130,16 @@ static void testTransportRecordingMenu()
         else if (items2[i].checked) anyOtherTicked = true;
     }
     CHECK (tickedFirst && !anyOtherTicked, "the selected device is the only ticked entry");
+
+    // F10 starts/stops recording from the main window's key handler.
+    app.recording.channels = 2;
+    app.recording.rate     = 8000.0;   // match the fake device
+    CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key), nullptr),
+          "F10 is handled by the main window");
+    CHECK (app.recording.active, "F10 started a recording session");
+    CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key), nullptr),
+          "second F10 press is handled");
+    CHECK (!app.recording.active, "F10 stopped the session");
 }
 
 // ==================================================== Zoom Fit auto mode
@@ -22296,6 +22518,8 @@ static int scRunUnitTestsImpl()
     progress ("recording session");       testRecordingSession();
     progress ("rec channel combo items"); testRecChannelComboItems();
     progress ("rec channel selection");   testRecChannelSelection();
+    progress ("overwrite samples");       testOverwriteSamples();
+    progress ("recording modes");         testRecModes();
     progress ("transport recording menu");testTransportRecordingMenu();
     progress ("arrow head geometry");     testArrowHeadGeometry();
     progress ("drawing panel");           testDrawingPanel();

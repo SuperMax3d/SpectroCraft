@@ -72,6 +72,8 @@ public:
     bool start(std::string* errOut);
     void stop();
     bool running() const;
+    /** The active plugin's last error string (empty when none). */
+    juce::String lastError() const;
     long long availableFrames() const;
     /** Pulls up to maxFrames frames (interleaved float32) into dest. */
     int read(float* dest, int channels, long long maxFrames);

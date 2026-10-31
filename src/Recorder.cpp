@@ -263,6 +263,13 @@ bool RecorderHost::running() const
     return active_ != nullptr && active_->isRunning != nullptr && active_->isRunning () != 0;
 }
 
+juce::String RecorderHost::lastError() const
+{
+    if (active_ == nullptr || !active_->lastError)
+        return juce::String ();
+    return fromUtf8Ptr (active_->lastError ());
+}
+
 long long RecorderHost::availableFrames() const
 {
     if (active_ == nullptr || !active_->availableFrames)

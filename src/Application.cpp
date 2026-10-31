@@ -232,6 +232,17 @@ void Application::loadSettings ()
         recording.rate = r > 100.0 ? r : 48000.0;
     }
     recording.bitDepth   = std::clamp (recentStore->getIntValue ("rec_depth", recording.bitDepth), 8, 64);
+    {
+        const int m = recentStore->getIntValue ("rec_mode", 0);
+        recording.mode = (m == 1) ? RecordingState::Mode::Loop
+                       : (m == 2) ? RecordingState::Mode::Timed
+                                 : RecordingState::Mode::Unlimited;
+    }
+    {
+        const double d = recentStore->getValue ("rec_duration", juce::String ())
+                             .getDoubleValue ();
+        recording.durationSecs = (d > 0.0 && std::isfinite (d)) ? d : 0.0;
+    }
 }
 
 void Application::saveSettings ()
@@ -288,6 +299,8 @@ void Application::saveSettings ()
     recentStore->setValue ("rec_src_channels", recording.srcChannels);
     recentStore->setValue ("rec_rate", juce::String (recording.rate));
     recentStore->setValue ("rec_depth", recording.bitDepth);
+    recentStore->setValue ("rec_mode", (int) recording.mode);
+    recentStore->setValue ("rec_duration", juce::String (recording.durationSecs));
     recentStore->save ();
 }
 
@@ -852,16 +865,62 @@ static juce::String recordingDocName()
     return s;
 }
 
+void Application::setRecordingMode (RecordingState::Mode m, double secs)
+{
+    if (m == RecordingState::Mode::Unlimited || !(secs > 0.0))
+        secs = 0.0;
+    recording.mode = m;
+    recording.durationSecs = secs;
+    saveSettings ();
+}
+
+juce::String Application::formatRecDurationSecs (double secs)
+{
+    const int64_t ms = (int64_t) std::llround (secs * 1000.0);
+    if (ms < 3600000)
+    {
+        if (ms % 1000 == 0)
+            return juce::String (ms / 1000) + "s";
+        const int whole = (int) (ms / 1000);
+        const int tenth = (int) ((ms % 1000) / 100);
+        return juce::String (whole) + "." + juce::String (tenth) + "s";
+    }
+    const int totalSecs = (int) std::min<int64_t> (ms / 1000, INT_MAX);
+    const int h = totalSecs / 3600;
+    return juce::String (h) + ":"
+           + juce::String ((totalSecs % 3600) / 60).paddedLeft ('0', 2) + ":"
+           + juce::String (totalSecs % 60).paddedLeft ('0', 2);
+}
+
 bool Application::pullRecFrames (FileDoc* d, long long cap)
 {
     auto& eng = d->engine;
     const int ch = eng.numChannels ();
     if (ch <= 0 || cap <= 0) return false;
 
+    // Loop mode: once the document reaches its configured length it stops
+    // growing and progressively overwrites from the start instead. The write
+    // position is where the running capture stream currently sits inside the
+    // fixed-size window, so the buffer always holds one contiguous stretch of
+    // the stream (a sliding window). While still filling, pulls are clamped
+    // so the document lands exactly on its capacity.
+    const bool loopMode = recording.mode == RecordingState::Mode::Loop
+                          && recording.loopCapFrames > 0;
+    // numSamples() is the per-channel length, i.e. the frame count.
+    const bool loopFull = loopMode
+                          && eng.numSamples () >= recording.loopCapFrames;
+
     auto& host = sc::rec::RecorderHost::instance ();
     const long long avail = host.availableFrames ();
     if (avail <= 0) return false;
-    const long long n = std::min (avail, cap);
+    long long n = std::min (avail, cap);
+    int64_t writePosFrame = 0;   // only used in loop mode
+    if (loopMode)
+    {
+        const int64_t pos = recording.framesRecorded % recording.loopCapFrames;
+        writePosFrame = pos;
+        n = std::min (n, (long long) (recording.loopCapFrames - pos));   // stop at the wrap edge
+    }
 
     // The plugin delivers in its own source layout. When a single channel is
     // selected we read the full source width and pick that channel out.
@@ -870,24 +929,24 @@ bool Application::pullRecFrames (FileDoc* d, long long cap)
     const int frames = host.read (recTmpBuf_.data (), srcCh, n);
     if (frames <= 0) return false;
 
-    if (srcCh == ch && recording.channelMode == 0)
-    {
-        // Fast path: layout already matches the document.
-        if (!eng.appendSamples (recTmpBuf_.data (), frames))
-            return false;   // audio thread busy - data stays in the plugin ring
-    }
-    else
+    float* docData = recTmpBuf_.data ();
+    std::vector<float> mapped;   // only used when a channel pick is needed
+    if (!(srcCh == ch && recording.channelMode == 0))
     {
         const int pick = recording.channelMode >= 1 ? recording.channelMode - 1 : 0;
-        std::vector<float> mapped ((size_t) frames * (size_t) ch);
+        mapped.resize ((size_t) frames * (size_t) ch);
         for (long long f = 0; f < frames; ++f)
             for (int c = 0; c < ch; ++c)
                 mapped[(size_t) f * (size_t) ch + (size_t) c] =
                     recTmpBuf_[(size_t) f * (size_t) srcCh
                               + (recording.channelMode >= 1 ? (size_t) pick : (size_t) c)];
-        if (!eng.appendSamples (mapped.data (), frames))
-            return false;   // audio thread busy - data stays in the plugin ring
+        docData = mapped.data ();
     }
+
+    const bool ok = loopFull ? eng.overwriteSamples (docData, writePosFrame * ch, frames)
+                             : eng.appendSamples (docData, frames);
+    if (!ok)
+        return false;   // audio thread busy - data stays in the plugin ring
 
     recording.framesRecorded += frames;
     return true;
@@ -939,6 +998,17 @@ bool Application::startRecording (std::string* errOut)
     recording.rate     = neg.rate;
     recording.bitDepth = neg.bitDepth;
 
+    // Mode-specific limits (Transport > Recording Options).
+    recording.startTime = juce::Time::getCurrentTime ();
+    if (recording.mode == RecordingState::Mode::Timed && recording.durationSecs > 0.0)
+        recording.timedTargetFrames = (int64_t) std::llround (recording.durationSecs * neg.rate);
+    else
+        recording.timedTargetFrames = 0;
+    if (recording.mode == RecordingState::Mode::Loop && recording.durationSecs > 0.0)
+        recording.loopCapFrames = (int64_t) std::llround (recording.durationSecs * neg.rate);
+    else
+        recording.loopCapFrames = 0;
+
     if (!newFile (recording.channels, recording.rate))
         return fail ("Could not create a new document for the recording.");
     FileDoc* d = doc ();
@@ -985,21 +1055,55 @@ void Application::stopRecording ()
     auto& host = sc::rec::RecorderHost::instance ();
     host.stop ();
 
+    FileDoc* d = recDoc_;
+
     // Drain whatever the plugin still has buffered.
-    if (recDoc_ != nullptr)
+    if (d != nullptr)
     {
-        FileDoc* d = recDoc_;
         auto& eng = d->engine;
         // Up to ~1 s of audio per pass keeps the drain quick.
         for (int guard = 0; guard < 100 && host.availableFrames () > 0; ++guard)
             if (!pullRecFrames (d, eng.sampleRate ()))
                 break;   // nothing left or audio thread busy - rest stays in ring
-        eng.rebuildMipmaps ();   // final overview refresh for the finished file
     }
+
+    // A session that ran for at least a second without receiving a single
+    // frame is a broken capture (the device's audio engine rejected our
+    // session, the endpoint died, ...): report it instead of leaving an empty
+    // document behind. Stopping within the first second keeps the document -
+    // the ring may simply not have filled yet.
+    const double elapsedSecs = (juce::Time::getCurrentTime ().getMilliseconds ()
+                                - recording.startTime.getMilliseconds ()) / 1000.0;
+    const bool zeroData = recording.framesRecorded == 0 && elapsedSecs >= 1.0;
+    juce::String lastErr;
+    if (zeroData)
+        lastErr = host.lastError ();
 
     recording.active = false;
     recDoc_ = nullptr;
     stopTimer ();
+
+    if (d != nullptr)
+    {
+        if (zeroData)
+        {
+            int idx = -1;
+            for (int i = 0; i < (int) docs.size (); ++i)
+                if (docs[(size_t) i].get () == d) { idx = i; break; }
+            if (idx >= 0)
+                closeDoc (idx);   // safe: recording.active is false now
+
+            juce::String msg = "No audio data was received from the device.";
+            const juce::String le = lastErr.trim ();
+            if (!le.isEmpty () && le != "no error")
+                msg += "\n\n" + le;
+            juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                               "Recording", msg);
+        }
+        else
+            d->engine.rebuildMipmaps ();   // final overview refresh for the finished file
+    }
+
     if (onStateChange) onStateChange ();
 }
 
@@ -1030,6 +1134,26 @@ void Application::timerCallback ()
         // Up to ~1 s of audio per tick keeps the UI responsive.
         if (host.availableFrames () > 0)
             appended = pullRecFrames (d, eng.sampleRate ());
+    }
+
+    // Timed mode: stop automatically once the requested amount is recorded.
+    if (recording.mode == RecordingState::Mode::Timed
+        && recording.timedTargetFrames > 0
+        && recording.framesRecorded >= recording.timedTargetFrames)
+    {
+        stopRecording ();   // drains the ring and keeps the finished document
+        return;
+    }
+
+    // Zero-data watchdog: a capture that delivers nothing for ~3 s is almost
+    // certainly broken. Stop and report instead of leaving an empty document
+    // behind (stopRecording() shows the failure itself).
+    if (recording.framesRecorded == 0 &&
+        (juce::Time::getCurrentTime ().getMilliseconds ()
+         - recording.startTime.getMilliseconds ()) / 1000.0 > 3.0)
+    {
+        stopRecording ();
+        return;
     }
 
     // Follow-end logic + view updates. Only push the window while the recorded

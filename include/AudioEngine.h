@@ -60,6 +60,16 @@ public:
         final rebuild when recording stops. */
     bool appendSamples (const float* interleaved, int64_t numFrames);
 
+    /** Overwrites numFrames frames of interleaved float32 data starting at
+        startFrame inside an existing in-memory document - the length never
+        changes. Used by loop-mode recording to progressively overwrite the
+        oldest data once the buffer is full. Returns false for streaming
+        documents or bad arguments; both bounds are clamped into the current
+        buffer (a write fully past the end does nothing). Mipmaps are
+        refreshed on a time throttle so long loops stay responsive. */
+    bool overwriteSamples (const float* interleaved, int64_t startFrame,
+                           int64_t numFrames);
+
     /** True while the audio thread is reading from the in-memory buffer.
         Callers that mutate `buffer` must wait for this to be false. */
     bool audioThreadInBuffer() const { return audioInBufferSection.load () > 0; }
@@ -334,6 +344,7 @@ private:
     std::vector<MipLevel> mips;
     int64_t baseFactor = 1;
     int64_t mipBaseTotal = 0;   // totalSamples at the last mipmap rebuild (append throttle)
+    int64_t overwriteMipMs = 0; // ms counter of the last overwrite-driven rebuild
     int64_t inMemoryLimit = 64ll * 1024 * 1024; // sample-channels
 
     int nchans = 0;

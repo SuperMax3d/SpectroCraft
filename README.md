@@ -779,12 +779,35 @@ recording the view stays exactly where you left it; once you come back within
      host, so any plugin works with it.
    - Devices whose width varies (e.g. loopback endpoints) show a plain count
      list instead.
-2. **Transport > Record** — starts recording into a new document named
-   `rec_YYYYMMDD_HHMMSS.wav` (made unique against other open documents). The menu
-   item becomes **Stop**; stopping drains whatever is still buffered in the
-   plugin and rebuilds the mipmap pyramid so the overview shows the whole take.
+2. **Transport > Record** (or press **F10**) — starts recording into a new
+   document named `rec_YYYYMMDD_HHMMSS.wav` (made unique against other open
+documents). The menu item becomes **Stop Recording**; stopping drains whatever is
+still buffered in the plugin and rebuilds the mipmap pyramid so the overview
+shows the whole take. Pressing F10 again stops it.
 3. Save the document as usual (File > Save) to keep it on disk — until then it
    lives only in memory like any other unsaved file.
+
+### Recording options (Unlimited / Loop Mode / Timed)
+
+**Transport > Recording Options** selects how a take is bounded:
+
+- **Unlimited** (default, ticked) — record until you stop; the document grows
+  as long as needed. This is the classic behaviour.
+- **Loop Mode** — clicking it asks for a loop duration (plain seconds or
+  `m:ss`, e.g. `10` or `1:30`). The menu then shows the configured value, e.g.
+  *"Loop Mode (10s)"*. Recording fills a buffer of exactly that length and,
+  once full, keeps capturing by progressively overwriting from the start —
+  like a tape loop. The document never grows past the duration; at any moment
+  it holds one contiguous sliding window of the captured stream (the newest
+  `duration` seconds), so you can stop whenever you want and keep whatever was
+  on the "loop" at that instant.
+- **Timed** — clicking it asks for a recording duration and updates the menu to
+  e.g. *"Timed (10s)"*. Recording starts as usual and stops automatically when
+  the requested amount has been captured; the finished document stays open.
+
+The mode and its duration are remembered between sessions (like the device
+selection). If a mode is selected without a usable duration it falls back to
+Unlimited behaviour for that take.
 
 ### Recorder plugins
 
@@ -837,6 +860,14 @@ Notes:
   recording starts cleanly but no data arrives. This is an environmental
   limitation of the VM's audio service, not a plugin bug — regular Windows
   machines deliver data normally.
+- **Failures are visible.** A zero-data watchdog in the host stops a session that
+  has delivered nothing for ~3 s and shows a message box with the plugin's last
+  error (`sc_rec_last_error`); stopping such a session manually does the same
+  instead of leaving an empty document behind. The WASAPI plugin reports its own
+  failures: `configure` explains unsupported channel counts / sample rates (with
+  what the endpoint actually offers), and a hard capture failure (e.g.
+  `AUDCLNT_E_DEVICE_INVALIDATED`) is recorded as "capture stopped: GetBuffer
+  failed (hr=0x…)" so the host can surface it.
 - Device labels are composed Audacity-style as `"name (manufacturer)"`:
   first from `IMMDevice::GetProperty(PKEY_FriendlyName)` on standard Windows,
   otherwise from the endpoint property store. Some reduced/virtualized stacks
@@ -844,7 +875,9 @@ Notes:
   `GetProperty`; the plugin detects that at runtime with crash-free ABI probes
   (no SEH — SpectroCraft's first-chance vectored exception handler would
   terminate the process on any deliberate access violation) and reads the
-  name/manufacturer keys it finds there. Fallbacks: "Loopback device",
+  name/manufacturer keys it finds there, and as a last resort scans every
+  string property in the store for the first value that looks like a human-
+  readable name (short, no GUID/path syntax). Fallbacks: "Loopback device",
   "Capture device".
 - Loopback stream flags are probed (`AUDCLNT_STREAMFLAGS_LOOPBACK` first, then a
   reduced-stack alternative) so both standard and virtualized stacks start.
@@ -856,8 +889,11 @@ plugin's device list, and forwards configure/start/stop. While recording,
 a 25 Hz `juce::Timer` in `Application` pulls up to one second of audio per tick
 through `AudioEngine::appendSamples()` (which resizes the in-memory buffer under
 a race guard against the playback thread) and steps the follow-end window
-(`stepRecordingWindow`). Mipmaps are rebuilt throttled during recording (only
-while the file is small enough that it matters) and once more on stop.
+(`stepRecordingWindow`). In **Loop Mode** the pull switches to
+`AudioEngine::overwriteSamples()` once the document reaches its configured
+length — writing in place at a wrapping position without ever growing the
+buffer. Mipmaps are rebuilt throttled during recording (only while the file is
+small enough that it matters) and once more on stop.
 
 ---
 
@@ -1476,6 +1512,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Spectrogram FFT size one step up / down the 512..65536 ladder; from Auto, switches to manual one step away | Alt+Shift+= / Alt+Shift+- |
 | Toggle a channel's visibility (like the View menu items); show ONLY that channel with Shift held — pressing again while solo restores every channel | Ctrl+1..9 / Ctrl+Shift+1..9 |
 | Cycle view layout: both → waveform only → spectrogram only (reverse direction with Shift) | F9 / Shift+F9 |
+| Start/stop recording (Transport > Record; mode via Transport > Recording Options) | F10 |
 | Change Gain... (dB dialog on the selection or whole file) | Ctrl+Shift+G |
 | Normalize (selection peak to full scale) | Ctrl+Shift+N |
 | Fade In / Fade Out (on the time selection, or whole file when none) | Ctrl+Shift+I / Ctrl+Shift+O |

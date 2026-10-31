@@ -165,6 +165,44 @@ bool AudioEngine::appendSamples (const float* interleaved, int64_t numFrames)
     return true;
 }
 
+bool AudioEngine::overwriteSamples (const float* interleaved, int64_t startFrame,
+                                    int64_t numFrames)
+{
+    if (!hasFile || buffer == nullptr || reader != nullptr
+            || interleaved == nullptr || numFrames <= 0 || nchans <= 0 || startFrame < 0)
+        return false;
+    // The audio thread must not be inside `buffer` while we write to it.
+    if (audioInBufferSection.load () > 0)
+        return false;
+
+    const int64_t old = totalSamples;
+    const int64_t s = std::min (startFrame, old);   // clamp into the buffer
+    const int64_t n = std::min (numFrames, old - s);
+    if (n <= 0)
+        return false;   // fully past the end: nothing to overwrite
+
+    for (int ch = 0; ch < nchans; ++ch)
+    {
+        float* dst = buffer->getWritePointer (ch, (int) s);
+        const float* src = interleaved + (size_t) ch;
+        for (int64_t i = 0; i < n; ++i)
+            dst[i] = src[(size_t) i * (size_t) nchans];
+    }
+
+    unsaved = true;
+
+    // The length never changes, so the growth-based append throttle can't
+    // fire here: refresh on a time throttle instead (~4x per second).
+    const int64_t nowMs = juce::Time::getMillisecondCounter ();
+    if (totalSamples <= 8000000 && (overwriteMipMs == 0 || nowMs - overwriteMipMs >= 250))
+    {
+        rebuildMipmaps ();
+        mipBaseTotal = totalSamples;
+        overwriteMipMs = nowMs;
+    }
+    return true;
+}
+
 void AudioEngine::play()
 {
     if (hasFile) { playing = true; paused = false; }
@@ -621,7 +659,7 @@ bool AudioEngine::rebuildMipmaps(std::function<void(float)> onProgress,
     return true;
 }
 
-void AudioEngine::clearMipmaps() { mips.clear(); baseFactor = 1; mipBaseTotal = 0; }
+void AudioEngine::clearMipmaps() { mips.clear(); baseFactor = 1; mipBaseTotal = 0; overwriteMipMs = 0; }
 
 // ---- Editing ----
 

@@ -101,8 +101,8 @@ struct IPropertyStoreFull : IUnknown
     virtual HRESULT STDMETHODCALLTYPE GetValue (PROPERTYKEY key, PROPVARIANT* pv) = 0;
     virtual HRESULT STDMETHODCALLTYPE SetValue (PROPERTYKEY key, const PROPVARIANT* pv) = 0;
     virtual HRESULT STDMETHODCALLTYPE ContainsKey (PROPERTYKEY key, BOOL* hasValue) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetCount (UINT* count) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetAt (UINT index, PROPERTYKEY* key) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetCount (DWORD* count) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetAt (DWORD index, PROPERTYKEY* key) = 0;
     virtual HRESULT STDMETHODCALLTYPE GetKeyName (UINT index, LPWSTR* name) = 0;
 };
 
@@ -193,8 +193,13 @@ CaptureState* g_state = nullptr;
 std::vector<WasapiDevice> g_devices;
 std::mutex g_mutex;
 
+// Module-level last error: survives sessions (configure() failures happen
+// before a CaptureState exists, so the host can still read them afterwards).
+static std::string g_lastError;
+
 void setError(const std::string& msg)
 {
+    g_lastError = msg;
     if (g_state != nullptr)
         g_state->lastError = msg;
 }
@@ -279,20 +284,38 @@ static bool probeLocalLayout(IPropertyStore* ps)
     return SUCCEEDED (hr) && cnt < 4096;   // only GetCount behaves like this
 }
 
+// Heuristic for the last-resort property scan: a human-readable device name
+// is short and free of id/path/GUID syntax.
+static bool looksLikeDeviceName(const std::string& s)
+{
+    if (s.empty () || s.size () > 128) return false;
+    bool anyAlpha = false;
+    for (char c : s)
+    {
+        if (c == '{' || c == '}' || c == '\\' || c == ':')
+            return false;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+            anyAlpha = true;
+    }
+    return anyAlpha;   // digits are fine ("Microphone Array 2")
+}
+
 // Fills nameOut with the best device label this stack can provide.
 static void queryDeviceNames(IMMDeviceFull* dev, std::string& nameOut)
 {
     // Path 1: standard IMMDevice::GetProperty (works on stock Windows).
     PROPVARIANT pv {};
-    if (SUCCEEDED (dev->GetProperty (kPropFriendlyName, &pv)) && pv.vt == VT_LPWSTR
-        && pv.pwszVal != nullptr && *pv.pwszVal)
+    if (SUCCEEDED (dev->GetProperty (kPropFriendlyName, &pv)))
     {
-        nameOut = toUtf8 (pv.pwszVal);
-        PropVariantClear (&pv);
-        return;
+        if (pv.vt == VT_LPWSTR && pv.pwszVal != nullptr && *pv.pwszVal)
+            nameOut = toUtf8 (pv.pwszVal);
+        else if (pv.vt == VT_BSTR && pv.bstrVal != nullptr && *pv.bstrVal)
+            nameOut = toUtf8 ((const wchar_t*) pv.bstrVal);
     }
     if (pv.vt != VT_EMPTY)
         PropVariantClear (&pv);
+    if (!nameOut.empty ())
+        return;
 
     // Path 2: the property store, with a runtime layout probe.
     IPropertyStore* ps = nullptr;
@@ -305,8 +328,13 @@ static void queryDeviceNames(IMMDeviceFull* dev, std::string& nameOut)
         PROPVARIANT v {};
         const HRESULT hr = localLayout ? ((IPropertyStoreLocal*) ps)->GetValue (key, &v)
                                        : ((IPropertyStoreFull*) ps)->GetValue (key, &v);
-        if (SUCCEEDED (hr) && v.vt == VT_LPWSTR && v.pwszVal != nullptr && *v.pwszVal)
-            out = toUtf8 (v.pwszVal);
+        if (SUCCEEDED (hr))
+        {
+            if (v.vt == VT_LPWSTR && v.pwszVal != nullptr && *v.pwszVal)
+                out = toUtf8 (v.pwszVal);
+            else if (v.vt == VT_BSTR && v.bstrVal != nullptr && *v.bstrVal)
+                out = toUtf8 ((const wchar_t*) v.bstrVal);
+        }
         if (v.vt != VT_EMPTY)
             PropVariantClear (&v);
     };
@@ -318,6 +346,28 @@ static void queryDeviceNames(IMMDeviceFull* dev, std::string& nameOut)
     if (name.empty ())
         name = lname;
     mfr = lmfr;
+
+    // Path 3: last resort - scan every string property and take the first
+    // value that looks like a human-readable device name rather than an id,
+    // path or GUID.
+    if (name.empty ())
+    {
+        DWORD cnt = 0;
+        const HRESULT hrC = localLayout ? ((IPropertyStoreLocal*) ps)->GetCount (&cnt)
+                                        : ((IPropertyStoreFull*) ps)->GetCount (&cnt);
+        if (SUCCEEDED (hrC))
+            for (DWORD i = 0; i < cnt && name.empty (); ++i)
+            {
+                PROPERTYKEY key {};
+                const HRESULT hrK = localLayout ? ((IPropertyStoreLocal*) ps)->GetAt (i, &key)
+                                                : ((IPropertyStoreFull*) ps)->GetAt (i, &key);
+                if (FAILED (hrK)) continue;
+                std::string v;
+                getValue (key, v);
+                if (!v.empty () && looksLikeDeviceName (v))
+                    name = v;
+            }
+    }
 
     ps->Release ();
 
@@ -653,7 +703,16 @@ static void pollLoop(CaptureState* st)
             if (hrGb == kBufferOverflow)
                 Sleep (5);
             else
-                break;   // AUDCLNT_E_DEVICE_INVALIDATED etc. - stop the session
+            {
+                // AUDCLNT_E_DEVICE_INVALIDATED etc. - stop the session and
+                // leave a message so the host can report it instead of
+                // silently recording nothing.
+                char buf[96];
+                sprintf_s (buf, "capture stopped: GetBuffer failed (hr=0x%08lX)",
+                           (unsigned long) hrGb);
+                st->lastError = buf;
+                break;
+            }
             continue;
         }
 
@@ -803,7 +862,7 @@ SC_REC_EXPORT int sc_rec_configure(const char* deviceId, int wantChannels, doubl
         g_state = nullptr;
     }
 
-    if (deviceId == nullptr) return 1;
+    if (deviceId == nullptr) { setError ("no device id given"); return 1; }
 
     // Strip the "cap:"/"loopback:" prefix - GetDevice wants the raw MMDevice id.
     std::string pub(deviceId);
@@ -817,13 +876,22 @@ SC_REC_EXPORT int sc_rec_configure(const char* deviceId, int wantChannels, doubl
         for (const auto& d : g_devices)
             if (d.id == rawId) { chosen = d; break; }
     }
-    if (chosen.id.empty ()) return 2;   // unknown device
+    if (chosen.id.empty ()) { setError ("unknown device"); return 2; }
 
     const int ch = chosen.fmt.nChannels;
     if (wantChannels < ch || wantChannels > ch)
-        return 3;                       // unsupported channel count
+    {
+        char buf[96];
+        sprintf_s (buf, "unsupported channel count: this endpoint delivers %d channel(s)", ch);
+        setError (buf); return 3;
+    }
     if (wantRate <= 0.0 || std::abs (wantRate - (double) chosen.fmt.nSamplesPerSec) > 1.0)
-        return 3;                       // unsupported sample rate
+    {
+        char buf[96];
+        sprintf_s (buf, "unsupported sample rate: this endpoint runs at %lu Hz",
+                   (unsigned long) chosen.fmt.nSamplesPerSec);
+        setError (buf); return 3;
+    }
 
     auto* st = new CaptureState ();
     st->dev = chosen;
@@ -843,13 +911,14 @@ SC_REC_EXPORT int sc_rec_configure(const char* deviceId, int wantChannels, doubl
 
 SC_REC_EXPORT int sc_rec_start()
 {
-    if (g_state == nullptr) return 1;
+    if (g_state == nullptr) { setError ("no device configured"); return 1; }
     CaptureState* st = g_state;
 
     st->stopFlag.store (false);
     st->head = st->count = 0;
     st->ring.clear ();
     st->lastError.clear ();
+    g_lastError.clear ();
     st->setupResult = -1;
 
     if (st->setupEvent == nullptr)
@@ -921,6 +990,8 @@ SC_REC_EXPORT const char* sc_rec_last_error()
     static thread_local std::string msg = "no error";
     if (g_state != nullptr && !g_state->lastError.empty ())
         msg = g_state->lastError;
+    else if (!g_lastError.empty ())
+        msg = g_lastError;
     else
         msg = "no error";
     return msg.c_str ();
