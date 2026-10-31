@@ -4892,30 +4892,24 @@ void EqCurveEditor::mouseDown (const juce::MouseEvent& e)
             points_.erase (points_.begin () + idx);
         dragIndex_ = -1;
         pressAddedPoint_ = false;
-        lastDownTime_ = juce::Time ();
         repaint ();
         return;
     }
 
-    // Double-click on a point opens the exact-coordinate dialog.
-    if ((e.eventTime - lastDownTime_).inMilliseconds() < 400 && lastDownPos_ != juce::Point<int> (-1, -1))
+    // Double-click on a point opens the exact-coordinate dialog. JUCE's
+    // click-count tracking uses consistent message timestamps, so it is
+    // more reliable than comparing against wall-clock time captured on
+    // the previous down event.
+    if (e.getNumberOfClicks() >= 2)
     {
-        const int dx = lastDownPos_.x - p.x;
-        const int dy = lastDownPos_.y - p.y;
-        if (dx * dx + dy * dy <= 36)
-        {
-            const int idx = findNearestPoint (p, kEqPointRadius + 4);
-            dragIndex_ = -1;
-            pressAddedPoint_ = false;
-            lastDownTime_ = juce::Time ();   // no chained dialogs on triple clicks
-            if (idx >= 0 && onEditPoint)
-                onEditPoint (idx);
-            repaint ();
-            return;
-        }
+        const int idx = findNearestPoint (p, kEqPointRadius + 4);
+        dragIndex_ = -1;
+        pressAddedPoint_ = false;
+        if (idx >= 0 && onEditPoint)
+            onEditPoint (idx);
+        repaint ();
+        return;
     }
-    lastDownTime_ = juce::Time ();
-    lastDownPos_ = p;
 
     const int idx = findNearestPoint (p, kEqPointRadius + 4);
     if (idx >= 0)
@@ -5170,30 +5164,24 @@ void EnvCurveEditor::mouseDown (const juce::MouseEvent& e)
             points_.erase (points_.begin () + idx);
         dragIndex_ = -1;
         pressAddedPoint_ = false;
-        lastDownTime_ = juce::Time ();
         repaint ();
         return;
     }
 
-    // Double-click on a point opens the exact-coordinate dialog.
-    if ((e.eventTime - lastDownTime_).inMilliseconds() < 400 && lastDownPos_ != juce::Point<int> (-1, -1))
+    // Double-click on a point opens the exact-coordinate dialog. JUCE's
+    // click-count tracking uses consistent message timestamps, so it is
+    // more reliable than comparing against wall-clock time captured on
+    // the previous down event.
+    if (e.getNumberOfClicks() >= 2)
     {
-        const int dx = lastDownPos_.x - p.x;
-        const int dy = lastDownPos_.y - p.y;
-        if (dx * dx + dy * dy <= 36)
-        {
-            const int idx = findNearestPoint (p, kEnvPointRadius + 4);
-            dragIndex_ = -1;
-            pressAddedPoint_ = false;
-            lastDownTime_ = juce::Time ();   // no chained dialogs on triple clicks
-            if (idx >= 0 && onEditPoint)
-                onEditPoint (idx);
-            repaint ();
-            return;
-        }
+        const int idx = findNearestPoint (p, kEnvPointRadius + 4);
+        dragIndex_ = -1;
+        pressAddedPoint_ = false;
+        if (idx >= 0 && onEditPoint)
+            onEditPoint (idx);
+        repaint ();
+        return;
     }
-    lastDownTime_ = juce::Time ();
-    lastDownPos_ = p;
 
     const int idx = findNearestPoint (p, kEnvPointRadius + 4);
     if (idx >= 0)

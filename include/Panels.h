@@ -957,8 +957,6 @@ private:
     double freqHi_ = 20000.0;
     int dragIndex_ = -1;                    // point being dragged, else -1
     bool pressAddedPoint_ = false;          // this mouse-down created a new point
-    juce::Time lastDownTime_ {};
-    juce::Point<int> lastDownPos_{ -1, -1 };
 
     JUCE_DECLARE_NON_COPYABLE (EqCurveEditor)
 };
@@ -1018,8 +1016,6 @@ private:
     double timeHi_ = 1.0;                     // right edge of the axis, seconds
     int dragIndex_ = -1;                      // point being dragged, else -1
     bool pressAddedPoint_ = false;            // this mouse-down created a new point
-    juce::Time lastDownTime_ {};
-    juce::Point<int> lastDownPos_{ -1, -1 };
 
     static constexpr int kLeftMargin = 42, kBottomMargin = 34, kTopMargin = 20,
                         kRightMargin = 8;   // top/bottom margins hold the unit captions

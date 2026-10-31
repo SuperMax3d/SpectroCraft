@@ -3327,7 +3327,8 @@ static void testLeftPanelLayout()
     store.deleteFile ();
 }
 
-static juce::MouseEvent mkMouse (juce::Component& c, int x, int y, juce::ModifierKeys mods);   // defined below
+static juce::MouseEvent mkMouse (juce::Component& c, int x, int y, juce::ModifierKeys mods,
+                                 int clicks = 1);   // defined below
 
 // ------------------------------------------- Cross-bar tab move (drag regression)
 // Dragging a panel tab from one row to the other used to crash: removeTab()
@@ -5277,13 +5278,14 @@ static void testSpectralDbWindow()
 // is attached).
 // The view handlers only read e.x/e.y/e.mods; the Desktop's default mouse
 // source is valid headlessly (MouseInputSourceList adds one at construction).
-static juce::MouseEvent mkMouse (juce::Component& c, int x, int y, juce::ModifierKeys mods)
+static juce::MouseEvent mkMouse (juce::Component& c, int x, int y, juce::ModifierKeys mods,
+                                 int clicks)
 {
     return juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(),
                              { (float) x, (float) y }, mods,
                              0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
                              &c, &c, juce::Time(), { (float) x, (float) y },
-                             juce::Time(), 1, false);
+                             juce::Time(), clicks, false);
 }
 
 // Simulates a full click on the row component of a table list box: it goes
@@ -16928,7 +16930,7 @@ static void testCurveEditorDoubleClick()
         ed.mouseUp   (mkMouse (ed, x, y, {}));
         CHECK (edited == -1, "single click on a point does not open the edit dialog");
 
-        ed.mouseDown (mkMouse (ed, x, y, {}));
+        ed.mouseDown (mkMouse (ed, x, y, {}, 2));
         CHECK (edited == 1, "double-click fires onEditPoint with the point's index");
 
         // Empty space: the first click adds a point there...
@@ -16940,7 +16942,7 @@ static void testCurveEditorDoubleClick()
         CHECK ((int) ed.getPoints ().size () == before + 1, "first empty click added a point");
 
         // ...and the second offers to edit it.
-        ed.mouseDown (mkMouse (ed, ex, ey, {}));
+        ed.mouseDown (mkMouse (ed, ex, ey, {}, 2));
         CHECK (edited == before, "second empty click offers to edit the new point");
     }
 
@@ -16958,7 +16960,7 @@ static void testCurveEditorDoubleClick()
         ed.mouseUp   (mkMouse (ed, x, y, {}));
         CHECK (edited == -1, "single click on a point does not open the edit dialog");
 
-        ed.mouseDown (mkMouse (ed, x, y, {}));
+        ed.mouseDown (mkMouse (ed, x, y, {}, 2));
         CHECK (edited == 1, "double-click fires onEditPoint with the point's index");
     }
 }
