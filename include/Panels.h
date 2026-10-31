@@ -1103,6 +1103,15 @@ public:
         return false;
     }
 
+    /** Rebuilds the FFT-size combo's items, labelling the Auto entry with its
+        currently resolved size (e.g. "Auto (4096)"); pass 0 for a plain
+        "Auto" label. The current selection is preserved and no change
+        messages are sent. */
+    void rebuildFftSizeItems (int autoSize);
+
+    // Selects an FFT-size combo item without sending change messages.
+    void setFftSizeSelection (int id);
+
     // FFT-size combo + auto-mode widgets (unit tests).
     static constexpr int kFftAutoId = -1;   // combo item id of the "Auto" entry
     juce::ComboBox& fftSizeComboRef() { return fftSizeCombo; }

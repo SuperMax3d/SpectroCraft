@@ -5320,11 +5320,9 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
 
     // 512 gives the finest frequency resolution; larger sizes give a finer
     // time resolution of the spectrogram tiles. "Auto" recomputes the size from
-    // the current zoom levels on every render (see SpectralEngine::chooseFftSize).
-    fftSizeCombo.addItem ("512", 512);
-    for (int n = 1024; n <= 65536; n *= 2)
-        fftSizeCombo.addItem (juce::String (n), n);
-    fftSizeCombo.addItem ("Auto", kFftAutoId);
+    // the current zoom levels on every render (see SpectralEngine::chooseFftSize);
+    // its label shows the resolved size, e.g. "Auto (4096)".
+    rebuildFftSizeItems (0);
     fftSizeCombo.onChange = [this] {
         const int id = fftSizeCombo.getSelectedId();
         if (id == kFftAutoId)
@@ -5425,16 +5423,43 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         if (app.onStateChange) app.onStateChange();
     };
 
-    resetFreqBtn.setButtonText ("Reset Freq");
+    resetFreqBtn.setName ("resetFreqBtn");
+    resetFreqBtn.setButtonText ("Reset");
     resetFreqBtn.onClick = [this] {
-        // Reset the spectral view's local frequency axis to the defaults.
+        // Reset every Spectral Controls setting to its default.
+        app.settings.fftAuto = true;
+        app.settings.fftSize = 2048;
+        app.settings.autoTargetTimeSlices = 80.0;
+        app.settings.autoBinsPerPixel = 1.25;
+        app.settings.logFrequency = true;
         app.settings.minFrequency = 20.0f;
         app.settings.maxFrequency = 20000.0f;
+        app.settings.dbMinDb = -120.0f;
+        app.settings.dbMaxDb = 0.0f;
+        app.settings.specHarmVisible = true;
+        app.settings.specHarmMaxK = 10;
+        app.settings.specHarmN = 1;
+        app.settings.specHarmNumbers = false;
+        app.colourMap = ColourMap::Classic;
+        app.spectralEngine.setColourMap (app.colourMap);
+
+        // Sync every control back to the defaults.
+        colourMapCombo.setSelectedId (1, juce::dontSendNotification);
+        logToggle.setToggleState (true, juce::dontSendNotification);
+        logToggle.setButtonText ("Logarithmic");
+        fftSizeCombo.setSelectedId (kFftAutoId, juce::dontSendNotification);
+        syncLevelControls();
+        syncHarmControls();
+        syncAutoControls();
+        preview.repaint();
+
+        // Reset the spectral view's local frequency axis to the defaults.
         if (onResetFreq) onResetFreq();
+        resized();   // the auto parameter rows reappear with Auto selected
         if (app.onStateChange) app.onStateChange();
     };
 
-    refreshBtn.setButtonText ("Refresh");
+    refreshBtn.setButtonText ("Refresh F5");
     refreshBtn.onClick = [this] { if (onRefresh) onRefresh (); };
     refreshBtn.setTooltip ("Discard every cached tile and force a complete spectrogram "
                            "recomputation. Shortcut: F5 (works from any focus).");
@@ -5457,7 +5482,9 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
                           "f_mouse / N. Move the mouse over a tone's harmonic and set this so the "
                           "circles land on that tone's whole harmonic series.");
     logToggle.setTooltip ("Toggle the spectrogram's frequency axis between logarithmic and linear scaling.");
-    resetFreqBtn.setTooltip ("Reset the spectrogram's vertical (frequency) zoom to its default range.");
+    resetFreqBtn.setTooltip ("Reset every Spectral Controls setting to its defaults: colour map, "
+                             "dB window, harmonic markers, Auto FFT-size parameters, log/linear axis, "
+                             "frequency range and FFT size.");
     refreshBtn.setTooltip ("Force a full recomputation of the spectrogram: discards every cached tile "
                             "and re-renders all tracks from the audio.");
     fftSizeCombo.setTooltip ("FFT size used by the spectrogram tiles. Larger values give finer "
@@ -5523,6 +5550,29 @@ void SpectralControlsPanel::refresh()
     syncAutoControls();
     logToggle.setToggleState (app.settings.logFrequency, juce::dontSendNotification);
     logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
+}
+
+void SpectralControlsPanel::rebuildFftSizeItems (int autoSize)
+{
+    // This JUCE build has no setItemText(), so the Auto label is refreshed by
+    // rebuilding the small item list. The current selection is preserved and
+    // no change messages are sent.
+    const int selId = fftSizeCombo.getSelectedId();   // 0 = nothing selected yet
+    fftSizeCombo.clear (juce::dontSendNotification);
+    fftSizeCombo.addItem ("512", 512);
+    for (int n = 1024; n <= 65536; n *= 2)
+        fftSizeCombo.addItem (juce::String (n), n);
+    juce::String autoLabel = "Auto";
+    if (autoSize > 0)
+        autoLabel = juce::String ("Auto (") + juce::String (autoSize) + ")";
+    fftSizeCombo.addItem (autoLabel, kFftAutoId);
+    if (selId != 0)
+        fftSizeCombo.setSelectedId (selId, juce::dontSendNotification);
+}
+
+void SpectralControlsPanel::setFftSizeSelection (int id)
+{
+    fftSizeCombo.setSelectedId (id, juce::dontSendNotification);
 }
 
 void SpectralControlsPanel::resized()

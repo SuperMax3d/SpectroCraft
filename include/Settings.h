@@ -51,7 +51,8 @@ struct Settings
     // Auto FFT-size mode (Spectral Controls): when true the effective FFT size
     // is recomputed from the current zoom levels on every render - see
     // SpectralEngine::chooseFftSize(). The two parameters below are persisted.
-    bool fftAuto = false;
+    // On by default: the combo shows "Auto (N)" with N = resolved size.
+    bool fftAuto = true;
     double autoTargetTimeSlices = 80.0;   // target time slices across the visible range
     double autoBinsPerPixel = 1.25;       // spectral bins per pixel on the frequency axis
     int hopSize = 512;

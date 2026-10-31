@@ -481,7 +481,11 @@ void MainWindow::setupViews()
 
     // Keep the vertical scrollbars in sync with each view's zoom level.
     waveformView->onVerticalZoomChanged = [this] { updateScrollBars(); };
-    spectralView->onFrequencyRangeChanged = [this] (double, double) { updateScrollBars(); };
+    spectralView->onFrequencyRangeChanged = [this] (double, double)
+    {
+        updateScrollBars ();
+        updateAutoFftLabel ();   // the resolved Auto size depends on the freq axis
+    };
 
     // Right-click context menus in either view route to the same actions.
     waveformView->onContextAction = [this] (int id) { handleContextMenuAction (id); };
@@ -722,6 +726,11 @@ void MainWindow::resized()
     // Now that the bars have real sizes, sync their thumbs with the views.
     updateScrollBars();
 
+    // The views only get their final row heights here, so this is where the
+    // resolved Auto FFT size (and thus the combo's "Auto (N)" label) can
+    // first become meaningful - and it changes again whenever the window or
+    // the view split is resized.
+    updateAutoFftLabel();
 }
 
 void MainWindow::handleLeftSplitterDrag (const juce::MouseEvent& e)
@@ -1574,6 +1583,7 @@ void MainWindow::refreshPanels()
     if (drawingPanel)     drawingPanel->refresh();
     if (historyPanel)   historyPanel->refresh();
     if (fftPanel)       fftPanel->repaint();
+    updateAutoFftLabel ();   // keep the "Auto (N)" combo label in sync
 }
 
 // Files bigger than this are loaded on a background thread with a progress
@@ -1907,7 +1917,8 @@ void MainWindow::exportSpectralAsync (const juce::File& file,
     }).detach();
 }
 
-// File > Spectrogram > Save Spectrogram As... (also Ctrl+Shift+E).
+// File > Spectrogram > Save Spectrogram As...
+// (Ctrl+Shift+E is now the Filter EQ effect shortcut).
 void MainWindow::handleExportSpectral()
 {
     if (!spectralView || !app.audioEngine().isFileLoaded()) return;
@@ -1919,8 +1930,9 @@ void MainWindow::handleExportSpectral()
                              spectralExportOptionsFromSettings (app.settings));
 }
 
-// File > Spectrogram > Take snapshot (also Ctrl+Shift+F): writes a PNG
-// next to the WAV file with a date/time stamp in its name. If the audio has
+// File > Spectrogram > Take snapshot:
+// writes a PNG next to the WAV file with a date/time stamp in its name.
+// (Ctrl+Shift+F is now the repeat-last-effect shortcut.) If the audio has
 // no file location yet, falls back to the normal save dialog.
 void MainWindow::takeSpectrogramSnapshot()
 {
@@ -1954,6 +1966,49 @@ void MainWindow::toggleHarmonicMarkers()
     app.settings.specHarmVisible = !app.settings.specHarmVisible;
     if (controlsPanel) controlsPanel->syncHarmControls ();
     if (app.onStateChange) app.onStateChange ();
+}
+
+// Ctrl+Shift+F: re-dispatch the previously run effect. Dialog-based effects
+// reopen their dialog (pre-filled with the last-used values where supported);
+// immediate effects are applied directly.
+void MainWindow::repeatLastEffect()
+{
+    if (lastEffectId == 0) return;   // no effect has been run yet this session
+    handleContextMenuAction (lastEffectId);
+}
+
+// Alt+Shift+= / '+' and Alt+Shift+-: step the spectrogram's FFT size one power
+// of two along the combo's 512..65536 ladder. In Auto mode the current resolved
+// size is used as the starting point and the mode switches to manual.
+void MainWindow::stepFftSize (bool up)
+{
+    if (!spectralView) return;
+    const int cur = app.settings.fftAuto ? spectralView->autoFftSizeForCurrentZoom ()
+                                         : app.settings.fftSize;
+    const int next = up ? std::min (cur * 2, 65536) : cur / 2;
+    if (!up && next < 512) return;   // already at/below the ladder minimum
+    if (next == cur) return;         // already at the top of the ladder
+    app.settings.fftAuto = false;
+    app.settings.fftSize = next;
+    if (controlsPanel) controlsPanel->setFftSizeSelection (next);
+    updateAutoFftLabel ();
+    if (app.onStateChange) app.onStateChange ();
+}
+
+// Keeps the Spectral Controls combo's "Auto (N)" label in sync with the size
+// Auto mode would resolve to at the current zoom levels. Called from
+// refreshPanels() and after frequency-axis changes; cheap no-op when N is
+// unchanged.
+void MainWindow::updateAutoFftLabel()
+{
+    if (!controlsPanel || !spectralView) return;
+    const int n = spectralView->autoFftSizeForCurrentZoom ();
+    juce::String label = "Auto";   // no file / un-laid-out view: plain "Auto"
+    if (n > 0)
+        label = "Auto (" + juce::String (n) + ")";
+    if (label == autoFftLabel_) return;
+    autoFftLabel_ = label;
+    controlsPanel->rebuildFftSizeItems (n);
 }
 
 juce::File MainWindow::makeSnapshotPath (const juce::File& wav, const juce::Time* when)
@@ -2318,10 +2373,13 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             handleStartStopRecording ();
             break;
 
-        case ToolsSilence:   runDestructiveEdit ([&] (std::string* e) { return app.silence (e); }); break;
-        case ToolsFadeIn:    runDestructiveEdit ([&] (std::string* e) { return app.fadeIn (e); }); break;
-        case ToolsFadeOut:   runDestructiveEdit ([&] (std::string* e) { return app.fadeOut (e); }); break;
-        case ToolsNormalize: runDestructiveEdit ([&] (std::string* e) { return app.normalize (e); }); break;
+        // Immediate effects record themselves as the "last effect" so that
+        // Ctrl+Shift+F can repeat them; dialog-based effects do the same at
+        // their apply points.
+        case ToolsSilence:   runDestructiveEdit ([&] (std::string* e) { const bool ok = app.silence (e); if (ok) lastEffectId = ToolsSilence; return ok; }); break;
+        case ToolsFadeIn:    runDestructiveEdit ([&] (std::string* e) { const bool ok = app.fadeIn (e); if (ok) lastEffectId = ToolsFadeIn; return ok; }); break;
+        case ToolsFadeOut:   runDestructiveEdit ([&] (std::string* e) { const bool ok = app.fadeOut (e); if (ok) lastEffectId = ToolsFadeOut; return ok; }); break;
+        case ToolsNormalize: runDestructiveEdit ([&] (std::string* e) { const bool ok = app.normalize (e); if (ok) lastEffectId = ToolsNormalize; return ok; }); break;
         case ToolsChangeGain: showChangeGainDialog(); break;
         case ToolsResample: showResampleDialog(); break;
         case ToolsStemSeparate: showStemSeparationWindow(); break;
@@ -2338,8 +2396,8 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         case ToolsNoiseSuppress: showNoiseSuppressDialog(); break;
 #endif
-        case ToolsReverse: runDestructiveEdit ([&] (std::string* e) { return app.reverse (e); }); break;
-        case ToolsInvert:      runDestructiveEdit ([&] (std::string* e) { return app.invertSelection (e); }); break;
+        case ToolsReverse: runDestructiveEdit ([&] (std::string* e) { const bool ok = app.reverse (e); if (ok) lastEffectId = ToolsReverse; return ok; }); break;
+        case ToolsInvert:      runDestructiveEdit ([&] (std::string* e) { const bool ok = app.invertSelection (e); if (ok) lastEffectId = ToolsInvert; return ok; }); break;
         case ToolsTimeStretch: showTimeStretchDialog(); break;
         case ToolsFilterEq:    showFilterEqDialog(); break;
         case ToolsEnvelope:    showEnvelopeDialog(); break;
@@ -3011,7 +3069,8 @@ void MainWindow::showChangeGainDialog()
     if (result != 1) return;
 
     const float db = (float) text.trim().getDoubleValue();
-    runDestructiveEdit ([&] (std::string* e) { return app.changeGain (db, e); });
+    runDestructiveEdit ([&] (std::string* e)
+        { const bool ok = app.changeGain (db, e); if (ok) lastEffectId = ToolsChangeGain; return ok; });
 }
 
 // Effects > Resample... — prompt for a new sample rate AND channel count and
@@ -3888,7 +3947,9 @@ void MainWindow::showTimeStretchDialog()
 
     const float pct = (float) (100.0 * (factor - 1.0));
     runDestructiveEdit ([&] (std::string* e)
-        { return app.timeStretch ((float) jlimit (-95.0f, 3000.0f, pct), e); });
+        { const bool ok = app.timeStretch ((float) jlimit (-95.0f, 3000.0f, pct), e);
+          if (ok) lastEffectId = ToolsTimeStretch;
+          return ok; });
 }
 
 // Effects > Filter EQ... — Audacity's classic Filter Curve: an FFT-based
@@ -4122,7 +4183,8 @@ void MainWindow::showFilterEqDialog()
                                                             : sc::eq::serializePoints (pts);
     if (result != 1 || sc::eq::isFlatCurve (pts)) return;   // flat curve: no-op
 
-    runDestructiveEdit ([&] (std::string* e) { return app.applyFilterEq (pts, e); });
+    runDestructiveEdit ([&] (std::string* e)
+        { const bool ok = app.applyFilterEq (pts, e); if (ok) lastEffectId = ToolsFilterEq; return ok; });
 }
 
 /** Duration in seconds of the range the envelope will be drawn for:
@@ -4361,7 +4423,8 @@ void MainWindow::showEnvelopeDialog()
                                                               : sc::env::serializePoints (pts);
     if (result != 1 || sc::env::isFlatCurve (pts)) return;   // flat curve: no-op
 
-    runDestructiveEdit ([&] (std::string* e) { return app.applyEnvelope (pts, e); });
+    runDestructiveEdit ([&] (std::string* e)
+        { const bool ok = app.applyEnvelope (pts, e); if (ok) lastEffectId = ToolsEnvelope; return ok; });
 }
 
 juce::AlertWindow* MainWindow::createResampleDialog()
@@ -5652,7 +5715,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
 
     if (menuName == "File")
     {
-        menu.addItem (FileNew, "New...\tCtrl+Shift+N", true, false);
+        menu.addItem (FileNew, "New...", true, false);
         menu.addItem (FileOpen, "Open...\tCtrl+O", true, false); // always available
 
         // Open Recent: up to 10 most recently opened files, most recent first.
@@ -5704,8 +5767,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         {
             const bool canExport = app.audioEngine().isFileLoaded() && showSpectralView;
             juce::PopupMenu specMenu;
-            specMenu.addItem (FileExportSpectral, "Save Spectrogram As...\tCtrl+Shift+E", canExport);
-            specMenu.addItem (FileSnapshot, "Take Snapshot\tCtrl+Shift+F", canExport);
+            // Ctrl+Shift+E / Ctrl+Shift+F now belong to the effect shortcuts
+            // (Filter EQ / repeat last effect), so no hints here.
+            specMenu.addItem (FileExportSpectral, "Save Spectrogram As...", canExport);
+            specMenu.addItem (FileSnapshot, "Take Snapshot", canExport);
             specMenu.addSeparator ();
             specMenu.addItem (ExpAxes, "Save Axes", true, app.settings.exportAxes);
             specMenu.addItem (ExpMarkers, "Save Markers", true, app.settings.exportMarkers);
@@ -5839,10 +5904,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     {
         const bool hasSel = !app.selection.isEmpty();
         menu.addItem (ToolsSilence, "Silence Selection", hasSel, false);
-        menu.addItem (ToolsFadeIn, "Fade In", hasSel, false);
-        menu.addItem (ToolsFadeOut, "Fade Out", hasSel, false);
-        menu.addItem (ToolsNormalize, "Normalize", hasSel, false);
-        menu.addItem (ToolsChangeGain, "Change Gain...", hasSel, false);
+        menu.addItem (ToolsFadeIn, "Fade In\tCtrl+Shift+I", hasSel, false);
+        menu.addItem (ToolsFadeOut, "Fade Out\tCtrl+Shift+O", hasSel, false);
+        menu.addItem (ToolsNormalize, "Normalize\tCtrl+Shift+N", hasSel, false);
+        menu.addItem (ToolsChangeGain, "Change Gain...\tCtrl+Shift+G", hasSel, false);
         menu.addItem (ToolsReverse, "Reverse", hasSel, false);
 
         // Whole-file-capable effects: they act on the active spectral
@@ -5850,8 +5915,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         // whole file - so only a loaded file is required.
         menu.addSeparator();
         menu.addItem (ToolsInvert,      "Invert",          app.audioEngine().isFileLoaded(), false);
-        menu.addItem (ToolsTimeStretch, "Time Stretch...", app.audioEngine().isFileLoaded(), false);
-        menu.addItem (ToolsFilterEq,    "Filter EQ...",    app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ToolsTimeStretch, "Time Stretch...\tCtrl+Shift+T",
+                      app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ToolsFilterEq,    "Filter EQ...\tCtrl+Shift+E",
+                      app.audioEngine().isFileLoaded(), false);
         menu.addItem (ToolsEnvelope,    "Enveloppe...",    app.audioEngine().isFileLoaded(), false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         // AI effects: first use downloads the model weights. Transcription is
@@ -5859,15 +5926,16 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSeparator();
         menu.addItem (ToolsNoiseSuppress, "Noise Suppression...", hasSel, false);
 #endif
+        // AI super resolution via an external CLI tool: enhances a range
+        // into a single mono 48 kHz track (FlashSR or AudioSR). Sits under
+        // Noise Suppression in the menu.
+        menu.addItem (ToolsSuperResolve, "Super Resolution...",
+                      app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         // AI stem separation via an external CLI tool; first use downloads
         // the binary + model weights. A selection is optional - without one
         // the whole file becomes the input.
         menu.addItem (ToolsStemSeparate, "Stem Separation...",
-                      app.audioEngine().isFileLoaded(), false);
-        // AI super resolution via the same external CLI tool: enhances a range
-        // into a single mono 48 kHz track (FlashSR or AudioSR).
-        menu.addItem (ToolsSuperResolve, "Super Resolution...",
                       app.audioEngine().isFileLoaded(), false);
         // Configure which channels the spectral selection is extracted from
         // and where each extraction goes. Closing saves the configuration
@@ -5981,14 +6049,46 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         app.cycleActiveDoc (!key.getModifiers().isShiftDown());
         return true;
     }
-    if (key == juce::KeyPress ('n', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { showNewFileDialog(); return true; }
+    // Ctrl+Shift+N is the Normalize effect shortcut (see below); File > New...
+    // no longer has a keyboard shortcut.
     if (key == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0)) { handleFileOpen(); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier, 0)) { handleFileSave(); return true; }
     if (key == juce::KeyPress ('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleFileSaveAs(); return true; }
-    // Ctrl+Shift+E exports the spectrogram (the shortcut shown in the menu).
-    if (key == juce::KeyPress ('e', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { handleExportSpectral(); return true; }
-    // Ctrl+Shift+F takes a timestamped snapshot next to the WAV file.
-    if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { takeSpectrogramSnapshot(); return true; }
+    // Effect shortcuts (Effects menu): G = Change Gain..., N = Normalize,
+    // I/O = Fade In / Fade Out, E = Filter EQ..., T = Time Stretch... and
+    // F repeats the previously run effect.
+    if (key == juce::KeyPress ('g', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { showChangeGainDialog(); return true; }
+    if (key == juce::KeyPress ('n', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0))
+    {
+        runDestructiveEdit ([&] (std::string* e)
+        { const bool ok = app.normalize (e); if (ok) lastEffectId = ToolsNormalize; return ok; });
+        return true;
+    }
+    if (key == juce::KeyPress ('i', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0))
+    {
+        runDestructiveEdit ([&] (std::string* e)
+        { const bool ok = app.fadeIn (e); if (ok) lastEffectId = ToolsFadeIn; return ok; });
+        return true;
+    }
+    if (key == juce::KeyPress ('o', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0))
+    {
+        runDestructiveEdit ([&] (std::string* e)
+        { const bool ok = app.fadeOut (e); if (ok) lastEffectId = ToolsFadeOut; return ok; });
+        return true;
+    }
+    if (key == juce::KeyPress ('e', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { showFilterEqDialog(); return true; }
+    if (key == juce::KeyPress ('t', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { showTimeStretchDialog(); return true; }
+    // Ctrl+Shift+F repeats the previously run effect.
+    if (key == juce::KeyPress ('f', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { repeatLastEffect(); return true; }
+
+    // Alt+Shift+= / '+' increases the spectrogram's FFT size (Auto mode
+    // switches to manual at one step up); Alt+Shift+- decreases it.
+    if (key.getModifiers().isAltDown() && key.getModifiers().isShiftDown())
+    {
+        const int kc = key.getKeyCode();
+        if (kc == '=' || kc == '+') { stepFftSize (true);  return true; }
+        if (kc == '-')              { stepFftSize (false); return true; }
+    }
     // F11 opens Edit > Resample... (no-op when no file is loaded).
     if (key.getKeyCode() == juce::KeyPress::F11Key) { showResampleDialog(); return true; }
     // Shift+F12 opens the split-configuration window (no split is performed).

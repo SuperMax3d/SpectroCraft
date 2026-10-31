@@ -171,6 +171,16 @@ public:
     void showTimeStretchDialog();
     void showFilterEqDialog();
     void showEnvelopeDialog();
+
+    /** Ctrl+Shift+F: re-dispatches the previously run effect (one of the
+        classic Effects-menu items). No-op until an effect has been run. */
+    void repeatLastEffect();
+    int getLastEffectId() const { return lastEffectId; }   // unit tests
+
+    /** Alt+Shift+= / '+' and Alt+Shift+-: step the spectrogram's FFT size one
+        power of two along the 512..65536 ladder. Auto mode switches to manual
+        at one step away from its currently resolved size. */
+    void stepFftSize (bool up);
     /** Build (but do not run modally) the Time Stretch, Filter EQ and
         Enveloppe dialogs. The caller owns and must delete them; used by the
         show* functions and tests. */
@@ -350,6 +360,7 @@ public:
     struct LeftPanelEntry { const char* id; juce::String name; bool defaultTop; };
     std::vector<LeftPanelEntry> leftPanelEntries() const;     // canonical order, AI-conditional
     void syncSharedState();   // push app state into views + panels
+    void updateAutoFftLabel();   // keep the "Auto (N)" FFT-size combo label in sync
 
     enum MenuIDs
     {
@@ -415,6 +426,8 @@ private:
     ColourMap lastSyncedColourMap;            // to detect colour-map changes
     Settings lastSyncedSettings;              // baseline for the settings-save trigger
     double shiftAnchorTime = -1.0;           // Shift+arrow selection anchor (-1 = inactive)
+    int lastEffectId = 0;                    // last run classic effect (Ctrl+Shift+F repeat); 0 = none yet
+    juce::String autoFftLabel_;              // cached "Auto (N)" combo label text
     bool iconApplied = false;                 // window icon set once HWND is available
     bool audioInitKickedOff = false;          // lazy device init started (timer-driven)
     sc::WorkProgressDialog* audioInitDialog = nullptr;   // open while waiting for init

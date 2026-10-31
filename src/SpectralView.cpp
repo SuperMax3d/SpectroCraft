@@ -1020,6 +1020,8 @@ void SpectralView::resetFrequencyRange()
     freqMin = lo;
     freqMax = hi;
     imageDirty = true;
+    repaint();   // e.g. Ctrl+0 with the time window already full: no other setter
+                 // fires, so this must schedule the re-render itself.
     if (onFrequencyRangeChanged) onFrequencyRangeChanged (freqMin, freqMax);
 }
 
@@ -1264,6 +1266,25 @@ Settings SpectralView::effectiveSettingsForRender (const Settings& base, int row
                                                     rs.autoTargetTimeSlices,
                                                     rs.autoBinsPerPixel);
     return rs;
+}
+
+int SpectralView::autoFftSizeForCurrentZoom() const
+{
+    if (!app.audioEngine().isFileLoaded())
+        return 2048;   // no file: fall back to the default manual size
+    int h = std::max (1, plotRect().getHeight());
+    if (!channels.empty ())
+    {
+        const auto rows = WaveformView::channelRowRects (layoutWidth(),
+                                                         plotRect().getHeight(),
+                                                         (int) channels.size());
+        if (!rows.empty()) h = std::max (1, rows[0].getHeight());
+    }
+    return SpectralEngine::chooseFftSize (viewEnd - viewStart,
+                                          app.audioEngine().sampleRate(),
+                                          h, freqMin, freqMax,
+                                          settings_.autoTargetTimeSlices,
+                                          settings_.autoBinsPerPixel);
 }
 
 bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,

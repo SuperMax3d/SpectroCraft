@@ -514,7 +514,10 @@ void WaveformView::resetVerticalZoom()
     vZoom = 1.0;
     vOffset = 0.0;
     dirty = true;
-    if (changed && onVerticalZoomChanged) onVerticalZoomChanged();
+    if (!changed) return;
+    repaint();   // e.g. Ctrl+0 with the time window already full: no other setter
+                 // fires, so this must schedule the re-render itself.
+    if (onVerticalZoomChanged) onVerticalZoomChanged ();
 }
 
 void WaveformView::panByTime (double dt)

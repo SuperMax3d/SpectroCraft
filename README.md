@@ -309,16 +309,26 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     `python --version` in a terminal, then press Run again. Note that pure-Python
     processing is slow on long selections — select shorter ranges for big jobs.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
-    range, Log/Linear toggle, Reset Freq, FFT size — from **512**, the finest
+    range, Log/Linear toggle, Reset, FFT size — from **512**, the finest
     frequency resolution, up to 65536; an **Auto** option at the end of that
     combo recomputes the size on every render from the current zoom levels:
     about "Target time slices:" (default 80) FFT frames across the visible time
     range sets a ceiling and "Bins per pixel:" (default 1.25) spectral bins per
     pixel of the frequency axis sets a floor, snapped to a power of two in
-    256..16384 — both fields appear below the combo while Auto is selected);
-    a full-width **Refresh** button at the bottom — also bound to global
-    shortcut **F5**, which works from any focus — forces a complete spectrogram
-    recomputation by discarding every cached tile and re-rendering all tracks).
+    256..16384 — both fields appear below the combo while Auto is selected).
+    **Auto is on by default**, and its combo entry shows the size currently
+    resolved for the zoom levels (e.g. `Auto (4096)`); picking a fixed size
+    switches auto mode off, and **Alt+Shift+= / Alt+Shift+-** step the FFT size
+    up/down the 512..65536 ladder (from Auto, one step away in manual mode).
+    The full-width **Reset** button restores every Spectral Controls setting to
+    its defaults at once — Classic colour map, -120..0 dB window, log axis on,
+    harmonic markers on with 10 harmonics and N=1 without numbers, Auto FFT size
+    on with the default parameters (80 time slices / 1.25 bins per pixel),
+    frequency range 20 Hz..20 kHz — and resets the spectral view's frequency
+    axis to match. The full-width **Refresh F5** button below it forces a
+    complete spectrogram recomputation by discarding every cached tile and
+    re-rendering all tracks; the same action is bound to global shortcut
+    **F5**, which works from any focus).
     Two persisted toggle buttons plus two persisted fields control
     harmonic markers in the spectrogram: **"Show harmonics CTRL+H"**
     (default on; also bound to global shortcut **Ctrl+H**, which works from any
@@ -416,9 +426,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     should go (clamped to the file) — it tracks playback at 30 Hz whenever you
     are not editing it.
   - The File menu's **Spectrogram** submenu offers:
-    - **Save Spectrogram As...** (Ctrl+Shift+E) — writes the current spectrogram
+    - **Save Spectrogram As...** — writes the current spectrogram
       content (per-channel rows included) to a PNG file.
-    - **Take Snapshot** (Ctrl+Shift+F) — saves a PNG right next to the WAV file with
+    - **Take Snapshot** — saves a PNG right next to the WAV file with
       a timestamped name (`<name>_snapshot_<yyyy-mm-dd>_<hh-mm-ss>.png`, numeric
       suffix on collision); falls back to a save dialog when no file is loaded.
     - Four checkable options, persisted across restarts, that add overlays to
@@ -427,7 +437,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       (marker lines and titles), **Save Selections** (time selection band plus
       spectral selection shapes) and **Save Drawing** (your committed drawings —
       text, arrows, rectangles, freehand).
-- **New files**: File → **New...** (Ctrl+Shift+N) creates an empty document with
+- **New files**: File → **New...** creates an empty document with
   the chosen channel count and sample rate (defaults: 2 channels / 44100 Hz,
   or the active file's values). New documents are named *Untitled*,
   *Untitled 2*, ... in creation order, have no path until you Save As, and can
@@ -1405,7 +1415,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Cycle through loaded files (forward / backwards) | Ctrl+Tab / Ctrl+Shift+Tab |
 | Save / Save As | Ctrl+S / Ctrl+Shift+S |
 | Undo / Redo | Ctrl+Z / Ctrl+Y |
-| New file (empty document, choose channels + rate) | Ctrl+Shift+N |
+| New file (empty document, choose channels + rate) | File menu |
 | Cut / Copy / Paste | Ctrl+X / Ctrl+C / Ctrl+V |
 | Paste Mix (add the clipboard at the selection start instead of replacing; appends past end-of-file if it extends that far) | Ctrl+Shift+V |
 | Paste to New Channel(s) (appends one new channel per clipboard channel; existing channels untouched, length unchanged) | Edit menu |
@@ -1432,10 +1442,15 @@ The test executable accepts the same flags (useful for CI without a display).
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
 | Zoom Out Full — reset the time window and both vertical ranges (Zoom Fit is menu-only now) | Ctrl+0 |
 | Vertical zoom in / out (waveform amplitude + spectral frequency) | Ctrl+Shift+= / Ctrl+Shift+- |
+| Spectrogram FFT size one step up / down the 512..65536 ladder; from Auto, switches to manual one step away | Alt+Shift+= / Alt+Shift+- |
 | Toggle a channel's visibility (like the View menu items); show ONLY that channel with Shift held — pressing again while solo restores every channel | Ctrl+1..9 / Ctrl+Shift+1..9 |
 | Cycle view layout: both → waveform only → spectrogram only (reverse direction with Shift) | F9 / Shift+F9 |
-| Save Spectrogram As... (PNG of the current spectrogram content) | Ctrl+Shift+E |
-| Take Snapshot (timestamped PNG saved next to the WAV file) | Ctrl+Shift+F |
+| Change Gain... (dB dialog on the selection or whole file) | Ctrl+Shift+G |
+| Normalize (selection peak to full scale) | Ctrl+Shift+N |
+| Fade In / Fade Out (on the time selection, or whole file when none) | Ctrl+Shift+I / Ctrl+Shift+O |
+| Filter EQ... (graphical curve equalizer dialog) | Ctrl+Shift+E |
+| Time Stretch... (SoundTouch tempo change dialog) | Ctrl+Shift+T |
+| Repeat last effect (re-applies the most recent Effects-menu edit; re-opens its dialog for dialog-based effects like Change Gain / Filter EQ / Time Stretch / Enveloppe) | Ctrl+Shift+F |
 | Resample... (Edit menu, own section: new sample rate + optional channel remix) | F11 |
 | Split Spectral Selection Configuration — per-channel input → destination setup; closing saves without splitting | Shift+F12 |
 | Split Spectral Selection Execute — runs the configured split (needs an active spectral selection); first time per file open opens the configuration instead | F12 |

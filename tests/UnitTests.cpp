@@ -615,6 +615,11 @@ static void testMarkerAxisClipping()
 
     Application app;
     CHECK (app.audioEngine().loadFile (wav), "load wav for marker clip test");
+    // Pin manual FFT size: the whole-image yellow count below assumes the 400 Hz
+    // tone does not itself render as a palette-yellow band, which only holds at
+    // the default 2048 (auto mode resolves to a coarser size here whose wider
+    // bins do reach the yellow part of the Classic map).
+    app.settings.fftAuto = false;
 
     MarkerManager mm;
     const int id = mm.addPointMarker (0.0, "M-zero");   // yellow by default
@@ -5835,6 +5840,18 @@ static void testCtxZoomOutFull()
           && std::abs (win->spectralFreqMax() - 4000.0) < 1e-9,
            "track zoom-out-full resets the frequency range");
 
+    // Frequency-only zoom + Ctrl+0: with the time window already full, setWindow()
+    // is a no-op and only resetFrequencyRange() changes state - it must schedule
+    // the spectral re-render itself (regression for the stale spectrogram).
+    win->applyTimeWindow (0.0, dur);
+    win->spectralViewComp()->zoomFrequencyBy (4.0);
+    CHECK (win->spectralFreqMin() > 20.0, "setup: frequency zoomed in again");
+    CHECK (win->keyPressed (juce::KeyPress ('0', juce::ModifierKeys::commandModifier, 0), nullptr),
+           "Ctrl+0 consumed with the time window already full");
+    CHECK (std::abs (win->spectralFreqMin() - 20.0) < 1e-9
+          && std::abs (win->spectralFreqMax() - 4000.0) < 1e-9,
+           "Ctrl+0 resets the frequency range even when only it was zoomed");
+
     win.reset();
     delete mm;
     wav.deleteFile();
@@ -8077,9 +8094,9 @@ static void testSpectralControlsAutoFft()
         Application app (store);
         SpectralControlsPanel panel (app);
         CHECK (panel.hasFftSizeOption ("Auto"), "FFT size combo offers an Auto option");
-        CHECK (!app.settings.fftAuto, "auto mode is off by default");
+        CHECK (app.settings.fftAuto, "auto mode is on by default");
 
-        // Selecting Auto enables the mode and shows the parameter rows.
+        // Selecting Auto keeps the mode on and shows the parameter rows.
         panel.fftSizeComboRef().setSelectedItemIndex (panel.fftSizeComboRef().getNumItems() - 1,
                                                       juce::sendNotificationSync);
         CHECK (app.settings.fftAuto, "selecting Auto turns auto mode on");
@@ -8174,6 +8191,201 @@ static void testSpectralViewAutoFft()
     CHECK (zoomed != expected, "the zoom actually changed the effective size");
 
     wav.deleteFile();
+}
+
+// ---------------- Effect shortcuts + repeat-last-effect + FFT-size stepping ----------------
+
+static void testEffectShortcutsAndRepeat()
+{
+    const juce::File wav = makeTempFile ("fx_shortcuts.wav");
+    writeWav (wav, 1, 48000.0, 4 * 48000, [] (int, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for effect shortcut test");
+    const auto& eng = app.audioEngine();
+
+    // A MessageManager is required before constructing the top-level window.
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "fx shortcut test"));
+
+    const auto ctrlShift = juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier;
+    const auto press = [&] (char c)
+        { return win->keyPressed (juce::KeyPress (c, ctrlShift, 0), nullptr); };
+
+    // No effect has been run yet: Ctrl+Shift+F is a no-op.
+    CHECK (press ('f'), "Ctrl+Shift+F consumed before any effect ran");
+    CHECK (win->getLastEffectId() == 0, "no last effect recorded yet");
+
+    app.setSelection ({ 0.5, 1.5 });
+
+    // Ctrl+Shift+N: normalize the selection and record it as the last effect.
+    {
+        float peak = 0.0f;
+        for (int64_t p = 24000; p < 72000; p += 17)
+            peak = std::max (peak, std::abs (readOneSample (eng, 0, p)));
+        CHECK (std::abs (peak - 0.5f) < 0.02f, "setup: pre-normalize peak ~0.5");
+
+        CHECK (press ('n'), "Ctrl+Shift+N consumed");
+        float nPeak = 0.0f;
+        for (int64_t p = 24000; p < 72000; p += 17)
+            nPeak = std::max (nPeak, std::abs (readOneSample (eng, 0, p)));
+        CHECK (std::abs (nPeak - 1.0f) < 0.02f, "normalize scaled the selection to full scale");
+        CHECK (win->getLastEffectId() == MainWindow::MenuIDs::ToolsNormalize,
+               "normalize recorded as the last effect");
+
+        // Ctrl+Shift+F repeats it: re-normalizing an already-full-scale range
+        // is a no-op on the audio but must still be dispatched.
+        CHECK (press ('f'), "Ctrl+Shift+F consumed after an effect ran");
+    }
+
+    // Ctrl+Shift+I / O: fade in/out over the selection.
+    {
+        app.setSelection ({ 0.5, 1.5 });
+        CHECK (press ('i'), "Ctrl+Shift+I consumed");
+        CHECK (win->getLastEffectId() == MainWindow::MenuIDs::ToolsFadeIn, "fade-in recorded");
+        CHECK (std::abs (readOneSample (eng, 0, 24001)) < 0.05f,
+               "fade-in zeroed the selection start");
+
+        app.setSelection ({ 0.5, 1.5 });
+        CHECK (press ('o'), "Ctrl+Shift+O consumed");
+        CHECK (win->getLastEffectId() == MainWindow::MenuIDs::ToolsFadeOut, "fade-out recorded");
+        CHECK (std::abs (readOneSample (eng, 0, 71999)) < 0.05f,
+               "fade-out zeroed the selection end");
+    }
+
+    // Alt+Shift+= / - : step the FFT size along the combo's 512..65536 ladder.
+    {
+        const auto altShift = juce::ModifierKeys::altModifier | juce::ModifierKeys::shiftModifier;
+        app.settings.fftAuto = false;
+        app.settings.fftSize = 2048;
+
+        CHECK (win->keyPressed (juce::KeyPress ('=', altShift, 0), nullptr), "Alt+Shift+= consumed");
+        CHECK (!app.settings.fftAuto && app.settings.fftSize == 4096,
+               "step up doubles the manual size");
+
+        CHECK (win->keyPressed (juce::KeyPress ('-', altShift, 0), nullptr), "Alt+Shift+- consumed");
+        CHECK (!app.settings.fftAuto && app.settings.fftSize == 2048,
+               "step down halves the manual size");
+
+        // From Auto mode, stepping up switches to manual one step above the
+        // currently resolved size.
+        app.settings.fftAuto = true;
+        const int autoN = win->spectralViewComp()->autoFftSizeForCurrentZoom ();
+        CHECK (win->keyPressed (juce::KeyPress ('=', altShift, 0), nullptr),
+               "Alt+Shift+= consumed in auto mode");
+        CHECK (!app.settings.fftAuto && app.settings.fftSize == std::min (autoN * 2, 65536),
+               "stepping up from Auto switches to manual one step higher");
+
+        // At the top of the ladder nothing happens.
+        app.settings.fftSize = 65536;
+        CHECK (win->keyPressed (juce::KeyPress ('=', altShift, 0), nullptr),
+               "Alt+Shift+= consumed at the top");
+        CHECK (app.settings.fftSize == 65536, "top of the ladder is a no-op");
+
+        // At the bottom of the ladder nothing happens.
+        app.settings.fftAuto = false;
+        app.settings.fftSize = 512;
+        CHECK (win->keyPressed (juce::KeyPress ('-', altShift, 0), nullptr),
+               "Alt+Shift+- consumed at the bottom");
+        CHECK (app.settings.fftSize == 512, "bottom of the ladder is a no-op");
+    }
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile ();
+}
+
+// ---------------- Spectral Controls reset button + "Auto (N)" FFT-size label ----------------
+
+static void testSpectralControlsResetAndAutoLabel()
+{
+    const juce::File wav = makeTempFile ("sc_reset_label.wav");
+    writeWav (wav, 1, 48000.0, 4 * 48000, [] (int, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for reset/auto-label test");
+
+    // A MessageManager is required before constructing the top-level window.
+    juce::MessageManager* mm = juce::MessageManager::getInstance();
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "sc reset label test"));
+
+    auto* panelComp = win->panelForId ("controls");
+    CHECK (panelComp != nullptr, "spectral controls panel present");
+    auto* panel = dynamic_cast<SpectralControlsPanel*> (panelComp);
+    CHECK (panel != nullptr, "spectral controls panel type");
+
+    // The combo must show the resolved Auto size for the current zoom. The
+    // window's initial layout happens during/after construction, so the label
+    // is only correct once resized() has run with real view bounds.
+    const int autoN = win->spectralViewComp()->autoFftSizeForCurrentZoom ();
+    CHECK (autoN >= 512 && autoN <= 65536, "resolved auto size is on the ladder");
+    CHECK (panel != nullptr
+          && panel->hasFftSizeOption ("Auto (" + juce::String (autoN) + ")"),
+           "combo shows the resolved Auto size in its label");
+
+    // Find the Reset button by name.
+    juce::TextButton* resetBtn = nullptr;
+    if (panel != nullptr)
+    {
+        std::vector<juce::Component*> stack { panel };
+        while (!stack.empty ())
+        {
+            auto* c = stack.back (); stack.pop_back ();
+            if (auto* b = dynamic_cast<juce::TextButton*> (c))
+                if (b->getName () == "resetFreqBtn") resetBtn = b;
+            const int nch = c->getNumChildComponents ();
+            for (int i = 0; i < nch; ++i)
+                stack.push_back (c->getChildComponent (i));
+        }
+    }
+    CHECK (resetBtn != nullptr, "Reset button found");
+
+    if (!panel || !resetBtn) { win.reset (); delete mm; wav.deleteFile (); return; }
+
+    // Dirty every setting the Reset button is supposed to restore.
+    app.settings.fftAuto = false;
+    app.settings.fftSize = 1024;
+    app.settings.autoTargetTimeSlices = 33.0;
+    app.settings.autoBinsPerPixel = 2.5;
+    app.settings.logFrequency = false;
+    app.settings.minFrequency = 50.0;
+    app.settings.maxFrequency = 8000.0;
+    app.settings.dbMinDb = -90.0;
+    app.settings.dbMaxDb = -10.0;
+    app.settings.specHarmVisible = false;
+    app.settings.specHarmMaxK = 4;
+    app.settings.specHarmN = 3;
+    app.settings.specHarmNumbers = true;
+    app.colourMap = ColourMap::Hot;   // the colour map lives on Application, not Settings
+
+    // triggerClick() posts an async message, so call onClick directly.
+    resetBtn->onClick ();
+
+    CHECK (app.settings.fftAuto, "reset restores auto mode");
+    CHECK (app.settings.fftSize == 2048, "reset restores the default FFT size");
+    CHECK (std::abs (app.settings.autoTargetTimeSlices - 80.0) < 1e-9,
+           "reset restores target time slices");
+    CHECK (std::abs (app.settings.autoBinsPerPixel - 1.25) < 1e-9, "reset restores bins per pixel");
+    CHECK (app.settings.logFrequency, "reset restores the log frequency axis");
+    CHECK (std::abs (app.settings.minFrequency - 20.0) < 1e-9
+          && std::abs (app.settings.maxFrequency - 20000.0) < 1e-9,
+           "reset restores the default frequency range");
+    CHECK (std::abs (app.settings.dbMinDb + 120.0) < 1e-9 && std::abs (app.settings.dbMaxDb) < 1e-9,
+           "reset restores the default dB range");
+    CHECK (app.settings.specHarmVisible && app.settings.specHarmMaxK == 10
+          && app.settings.specHarmN == 1 && !app.settings.specHarmNumbers,
+           "reset restores the harmonic overlay defaults");
+    CHECK (app.colourMap == ColourMap::Classic, "reset restores the Classic colour map");
+    CHECK (panel->fftSizeComboRef().getSelectedId() == SpectralControlsPanel::kFftAutoId,
+           "combo selection back on the Auto item");
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    delete mm;
+    wav.deleteFile ();
 }
 
 // Regression: frequency-axis zoom/pan must change the rendered image.
@@ -13575,6 +13787,9 @@ static void testSplitSpectralSelectionViewRefresh()
 
     Application app;
     CHECK (app.openFile (wav), "opened two-tone wav");
+    // The ground-truth render below uses a fixed FFT size, so pin the view to
+    // manual mode too (auto is on by default and would pick its own size).
+    app.settings.fftAuto = false;
     FileDoc* d = app.doc();
     if (!d) return;
     AudioEngine& eng = app.audioEngine ();
@@ -21395,6 +21610,8 @@ static int scRunUnitTestsImpl()
     progress ("auto fft size algorithm");  testAutoFftSizeAlgorithm();
     progress ("spectral controls auto fft"); testSpectralControlsAutoFft();
     progress ("spectral view auto fft");   testSpectralViewAutoFft();
+    progress ("effect shortcuts + repeat"); testEffectShortcutsAndRepeat();
+    progress ("sc reset + auto label");   testSpectralControlsResetAndAutoLabel();
     progress ("freq zoom rerender");       testSpectralViewFreqZoomRerender();
     progress ("history tab");             testHistoryPanel();
     progress ("settings persistence");    testSettingsPersistence();

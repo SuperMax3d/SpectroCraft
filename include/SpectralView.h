@@ -99,6 +99,11 @@ public:
     int effectiveFftSizeForRender (int rowHeightPx) const
     { return effectiveSettingsForRender (settings_, rowHeightPx).fftSize; }
 
+    /** The FFT size Auto mode would resolve to at the current zoom levels,
+        using the first channel row's height. Used by the Spectral Controls
+        panel's "Auto (N)" combo label and the Alt+Shift +/- shortcuts. */
+    int autoFftSizeForCurrentZoom() const;
+
     // Renders one frame into `img` using the view's current state (unit tests).
     bool renderSpectralContentForTest (juce::Image& img, const Settings& rs)
     { return renderSpectralContent (img, rs); }
