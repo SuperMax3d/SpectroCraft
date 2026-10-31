@@ -433,6 +433,15 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
         else
         {
             dragMode = DragMode::Select;
+            // The selection belongs to the channel row it started on: both
+            // views clip their rectangle to that row so dragging over another
+            // channel does not paint over it.
+            int selRow = -1;
+            const auto rows0 = rowRects ();
+            for (size_t r = 0; r < rows0.size (); ++r)
+                if (e.y >= rows0[(size_t) r].getY()) selRow = (int) r;   // last match wins
+            app.selectionRow = selRow;
+            if (app.onStateChange) app.onStateChange ();   // repaint both views
             app.setSelection ({ dragStartTime, dragStartTime });
             selection = app.selection;
         }
@@ -621,8 +630,22 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
                 haveZoomRect = true;
             if (haveZoomRect)
             {
-                zoomRect = juce::Rectangle<int> (std::min (dragStartX, x), std::min (dragStartY, y),
-                                                 std::abs (x - dragStartX), std::abs (y - dragStartY));
+                auto zr = juce::Rectangle<int> (std::min (dragStartX, x), std::min (dragStartY, y),
+                                                std::abs (x - dragStartX), std::abs (y - dragStartY));
+                // The vertical extent is clipped to the channel row the drag
+                // started on: a box-zoom never spans more than one channel's
+                // data area. Ruler drags are time-only and keep full height.
+                const bool startOnRuler = !onAxisX (dragStartX) && onRulerY (dragStartY);
+                if (!startOnRuler)
+                {
+                    auto rows = rowRects ();
+                    int rowIdx = -1;
+                    for (size_t r = 0; r < rows.size (); ++r)
+                        if (dragStartY >= rows[(size_t) r].getY()) rowIdx = (int) r;
+                    if (rowIdx >= 0)
+                        zr = zr.getIntersection (rows[(size_t) rowIdx]);
+                }
+                zoomRect = zr;
                 repaint();
             }
             break;
@@ -975,6 +998,7 @@ void SpectralView::mouseDoubleClick (const juce::MouseEvent& e)
                 || (x2 > x1 && e.x >= x1 - 3.0 && e.x <= x2 + 3.0))
             {
                 const double end = (m.end > m.start) ? m.end : m.start;
+                app.selectionRow = -1;   // marker selections span all rows
                 app.setSelection ({ m.start, end });
                 setSelection (app.selection); // local copy for immediate repaint
                 if (onChange) onChange (viewStart, viewEnd); // sync both views via MainWindow
@@ -1626,13 +1650,25 @@ void SpectralView::drawTimeSelectionOverlay (juce::Graphics& g)
     if (selection.isEmpty()) return;
     const double x1 = timeToX (selection.getStart());
     const double x2 = timeToX (selection.getEnd());
+    // Vertical extent: the channel row a drag-selection started on, or all
+    // rows when it came from elsewhere (Select All, markers, ...).
+    int selTop = pr.getY(), selBot = pr.getBottom();
+    {
+        const auto rows = rowRects ();   // absolute coordinates
+        if (app.selectionRow >= 0 && app.selectionRow < (int) rows.size ())
+        {
+            const auto& rrSel = rows[(size_t) app.selectionRow];
+            selTop = rrSel.getY();
+            selBot = rrSel.getBottom();
+        }
+    }
     const juce::Graphics::ScopedSaveState save (g);
     g.reduceClipRegion (pr);
     g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
-    g.fillRect ((float) x1, (float) pr.getY(), (float) std::max (0.0, x2 - x1), (float) pr.getHeight());
+    g.fillRect ((float) x1, (float) selTop, (float) std::max (0.0, x2 - x1), (float) (selBot - selTop));
     g.setColour (juce::Colour::fromRGB (96, 150, 255));
-    g.drawVerticalLine ((float) x1, (float) pr.getY(), (float) pr.getBottom());
-    g.drawVerticalLine ((float) x2, (float) pr.getY(), (float) pr.getBottom());
+    g.drawVerticalLine ((float) x1, (float) selTop, (float) selBot);
+    g.drawVerticalLine ((float) x2, (float) selTop, (float) selBot);
 }
 
 // Committed spectral selection shapes from the active doc plus (optionally)
@@ -2155,6 +2191,9 @@ double SpectralView::freqAtY (int y) const
 
 void SpectralView::syncToolTimeExtent (juce::Range<double> ext)
 {
+    // Tool drags create a new time selection that spans every channel row.
+    app.selectionRow = -1;
+
     // When adding to an existing selection, keep the union of extents so both
     // views track everything that will be affected.
     auto* d = app.doc();

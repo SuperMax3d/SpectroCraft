@@ -23045,6 +23045,186 @@ static void testFFTAxisWheelZoom()
     wav.deleteFile();
 }
 
+// ------------------------------------------- selection/zoom channel-row clip
+// With several visible channels, a left-drag time selection and a right-drag
+// box-zoom must stay inside the channel row they started on; an axis drag may
+// not span more than one channel's data area (its zoom factor is measured
+// against that single row's height, like a single-channel file).
+static void testSelectionChannelClip()
+{
+    const juce::File wav = makeTempFile ("sel_clip.wav");
+    writeWav (wav, 2, kToneRate, kToneFrames, [] (int ch, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                              * (ch == 0 ? 300.0 : 600.0)
+                                              * (double) f / rate); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open stereo wav for channel-clip test");
+    const double dur = app.audioEngine().duration();
+
+    const juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+
+    // Geometry: 400x300 view, ruler on top -> plot y[24..300] h=276; two rows
+    // of 135 px with a 5 px gap: row0 [24..159], row1 [164..300]. The tone
+    // bands sit ~30 px around each row centre, so y+8 from a row top is clear.
+    const int W = 400, H = 300;
+    const int yRow0Top = 24 + 8;      // inside row 0
+    const int yRow1Top = 164 + 8;     // inside row 1
+
+    auto makeWaveView = [&] () -> WaveformView*
+    {
+        auto* v = new WaveformView (app);
+        v->setSize (W, H);
+        v->setViewRange (0.0, dur);
+        v->setVisibleChannels ({ 0, 1 });
+        return v;
+    };
+
+    // --- Waveform: selection dragged from row 0 into row 1 stays on row 0 ---
+    {
+        auto* view = makeWaveView ();
+        view->mouseDown (mkMouse (*view, 100, yRow0Top, lmb));
+        CHECK (app.selectionRow == 0, "selection drag starts on the first channel row");
+        view->mouseDrag (mkMouse (*view, 300, H - 20, lmb));   // dragged over row 1
+        view->mouseUp   (mkMouse (*view, 300, H - 20, lmb));
+
+        CHECK (!app.selection.isEmpty(), "the drag produced a time selection");
+        CHECK (app.selectionRow == 0, "selection stays clipped to its start row");
+
+        // Probe the blue fill inside the selection x-range near each row top.
+        const int sx = (int) view->timeToX ((app.selection.getStart()
+                                             + app.selection.getEnd()) * 0.5);
+        auto probeBlue = [view] (int px, int py) -> bool
+        {
+            juce::Image img (juce::Image::ARGB, W, H, true);
+            { juce::Graphics g (img); view->paint (g); }
+            const auto c = img.getPixelAt (px, py);
+            return (int) c.getBlue() > (int) c.getRed() + 30
+                   && (int) c.getBlue() > (int) c.getGreen() + 25;
+        };
+        CHECK (probeBlue (sx, yRow0Top), "selection fill is drawn inside the start row");
+        CHECK (!probeBlue (sx, yRow1Top), "selection fill does not spill into the other row");
+
+        // Select All spans every row again.
+        app.selectAll();
+        CHECK (app.selectionRow == -1, "select-all resets to all rows");
+        CHECK (probeBlue (sx, yRow0Top) && probeBlue (sx, yRow1Top),
+               "after select-all the fill covers both rows");
+
+        delete view;
+    }
+
+    // --- Waveform: box-zoom from row 0 into row 1 clips to one data area ---
+    {
+        auto* view = makeWaveView ();
+        const double ampBefore = view->getVisibleAmpHalf();
+        const double e0 = view->xToTime (100), e1 = view->xToTime (300);
+
+        // Raw box y[32..280] spans both rows; the clipped box is y[32..159].
+        view->mouseDown (mkMouse (*view, 100, yRow0Top, rmb));
+        view->mouseDrag (mkMouse (*view, 300, H - 20, rmb));
+        view->mouseUp   (mkMouse (*view, 300, H - 20, rmb));
+
+        CHECK (std::abs (view->getViewStart() - e0) < 1e-9
+              && std::abs (view->getViewEnd() - e1) < 1e-9,
+               "box-zoom still zooms the time axis to the x span");
+        // Zoom factor is measured against one row's height (135), not the plot:
+        // new half-span = old * clippedBoxH / rowH = old * 127/135.
+        CHECK (std::abs (view->getVisibleAmpHalf() - ampBefore * 127.0 / 135.0) < 1e-9,
+               "box-zoom scales the amplitude axis against one row's data height");
+        delete view;
+    }
+
+    // --- Waveform: axis drag from row 0 into row 1 clips to one data area ---
+    {
+        auto* view = makeWaveView ();
+        const double ampBefore = view->getVisibleAmpHalf();
+
+        // Box x[10..50] on the left axis strip; y span 32..280 clipped to row 0.
+        view->mouseDown (mkMouse (*view, 10, yRow0Top, rmb));
+        view->mouseDrag (mkMouse (*view, 50, H - 20, rmb));
+        view->mouseUp   (mkMouse (*view, 50, H - 20, rmb));
+
+        CHECK (std::abs (view->getVisibleAmpHalf() - ampBefore * 127.0 / 135.0) < 1e-9,
+               "axis drag scales the amplitude axis against one row's data height");
+        CHECK (view->getViewStart() == 0.0 && view->getViewEnd() == dur,
+               "axis drag leaves the time window unchanged");
+        delete view;
+    }
+
+    // --- Waveform: ruler drag is time-only even with multiple rows ---
+    {
+        auto* view = makeWaveView ();
+        const double ampBefore = view->getVisibleAmpHalf();
+        const double e0 = view->xToTime (100), e1 = view->xToTime (300);
+
+        view->mouseDown (mkMouse (*view, 100, 8, rmb));
+        view->mouseDrag (mkMouse (*view, 300, 18, rmb));
+        view->mouseUp   (mkMouse (*view, 300, 18, rmb));
+
+        CHECK (std::abs (view->getViewStart() - e0) < 1e-9
+              && std::abs (view->getViewEnd() - e1) < 1e-9,
+               "ruler drag zooms the time axis to the x span");
+        CHECK (std::abs (view->getVisibleAmpHalf() - ampBefore) < 1e-9,
+               "ruler drag leaves the amplitude axis unchanged");
+        delete view;
+    }
+
+    // --- Spectral: selection + box-zoom clip to the start row too ---
+    {
+        auto* view = new SpectralView (app);
+        view->setSize (W, H);
+        view->setViewRange (0.0, dur);
+        view->setVisibleChannels ({ 0, 1 });
+
+        view->mouseDown (mkMouse (*view, 100, yRow0Top, lmb));
+        CHECK (app.selectionRow == 0, "spectral selection drag starts on the first row");
+        view->mouseDrag (mkMouse (*view, 300, H - 20, lmb));   // dragged over row 1
+        view->mouseUp   (mkMouse (*view, 300, H - 20, lmb));
+
+        CHECK (!app.selection.isEmpty() && app.selectionRow == 0,
+               "spectral selection stays clipped to its start row");
+
+        const int sx = (int) view->timeToX ((app.selection.getStart()
+                                             + app.selection.getEnd()) * 0.5);
+        auto probeBlue = [view] (int px, int py) -> bool
+        {
+            juce::Image img (juce::Image::ARGB, W, H, true);
+            { juce::Graphics g (img); view->paint (g); }
+            const auto c = img.getPixelAt (px, py);
+            return (int) c.getBlue() > (int) c.getRed() + 30
+                   && (int) c.getBlue() > (int) c.getGreen() + 25;
+        };
+        CHECK (probeBlue (sx, yRow0Top), "spectral selection fill is drawn inside the start row");
+        CHECK (!probeBlue (sx, yRow1Top), "spectral selection fill does not spill into the other row");
+
+        // Box-zoom: the frequency range comes from the clipped box mapped
+        // through the drag-start row (row 0 spans y[24..159]).
+        const double fmin = 20.0, fmax = std::min (20000.0,
+                                                   app.audioEngine().sampleRate() * 0.5);
+        const double lmin = std::log (fmin), lmax = std::log (fmax);
+        auto freqAtRow0 = [lmin, lmax] (double yAbs)
+            { return std::exp (lmin + (1.0 - (yAbs - 24.0) / 135.0) * (lmax - lmin)); };
+
+        const double e0 = view->xToTime (100), e1 = view->xToTime (300);
+        view->mouseDown (mkMouse (*view, 100, yRow0Top, rmb));
+        view->mouseDrag (mkMouse (*view, 300, H - 20, rmb));
+        view->mouseUp   (mkMouse (*view, 300, H - 20, rmb));
+
+        CHECK (std::abs (view->getViewStart() - e0) < 1e-9
+              && std::abs (view->getViewEnd() - e1) < 1e-9,
+               "spectral box-zoom zooms the time axis to the x span");
+        CHECK (std::abs (view->getFreqMin() - freqAtRow0 (159.0)) / freqAtRow0 (159.0) < 1e-9
+              && std::abs (view->getFreqMax() - freqAtRow0 (32.0)) / freqAtRow0 (32.0) < 1e-9,
+               "spectral box-zoom maps the clipped span through the start row");
+
+        delete view;
+    }
+
+    wav.deleteFile();
+}
+
 // ------------------------------------------------- F12 first run: configure then execute
 // The first F12 per file open opens the configuration dialog; closing it
 // saves the configuration AND executes the split on the current selection.
@@ -23464,6 +23644,7 @@ static int scRunUnitTestsImpl()
     progress ("single instance mode");   testSingleInstance();
     progress ("waveform zero line");     testWaveformZeroLine();
     progress ("fft axis wheel zoom");    testFFTAxisWheelZoom();
+    progress ("selection channel clip"); testSelectionChannelClip();
     progress ("split execute first run"); testSplitExecuteFirstRun();
     progress ("stem sep advanced layout"); testStemSepAdvancedLayout();
 

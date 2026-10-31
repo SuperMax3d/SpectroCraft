@@ -208,6 +208,13 @@ public:
     static constexpr int kRulerH = 24;  // top time ruler height
 
 private:
+    // Absolute-coordinate row rectangles for the visible channels, spanning
+    // the full component width so drags starting on the axis strip hit-test.
+    std::vector<juce::Rectangle<int>> absRowRects() const;
+    // Visible row index containing absolute y (-1 outside the plot); gaps map
+    // to the row below, like the cursor probe.
+    int rowAtY (int y) const;
+
     Application& app;   // audio data read live via app.audioEngine() (active doc)
     bool showTimeRuler = true;   // stacked dual view: only one view draws it
     bool showMarkerTitles = true;   // suppressed while the spectrogram is stacked below

@@ -1613,11 +1613,11 @@ Mouse (waveform *and* spectral views):
 | Gesture | Action |
 |---|---|
 | Click | Move the playhead to that position in **both** views (selection drags start from it) |
-| Left-drag | Select a time range |
+| Left-drag | Select a time range. With several visible channels the selection rectangle is clipped to the **channel row it started on** — dragging over another channel does not paint over it (Select All, marker double-clicks and typed footer ranges span all rows) |
 | Left-drag on the amplitude/frequency axis strip (left or right) | **Vertical pan**: drag up/down to shift the amplitude window (waveform) or frequency window (spectral, log-aware). The content follows the cursor at half speed; panning against a range limit pins that edge and keeps the span. Does not move the playhead |
 | Left-drag on the time ruler (top or bottom) | Pan the shared time window at half cursor speed (same as middle-drag); does not create a selection |
 | Middle-drag | Pan the shared time window (both views stay in sync). The content follows the cursor at half speed; panning against a file edge pins that edge, and reversing direction responds immediately (no dead zone) |
-| Right-drag a region | **Box zoom**: dragging on the track zooms **both** axes at once — time from the box's horizontal span, amplitude (waveform) or frequency (spectral) from its vertical span. Dragging that starts on an axis zooms only that axis: the amplitude/frequency axis strip (left or right) → vertical range, the time ruler strip (top or bottom of whichever view draws it) → time range. A rubber-band rectangle is shown while dragging |
+| Right-drag a region | **Box zoom**: dragging on the track zooms **both** axes at once — time from the box's horizontal span, amplitude (waveform) or frequency (spectral) from its vertical span. With several visible channels the box's vertical extent is clipped to the **channel row it started on**, and the vertical zoom factor is measured against that single row's data height (so a multi-channel file zooms exactly like a single channel would). Dragging that starts on an axis zooms only that axis: the amplitude/frequency axis strip (left or right) → vertical range, the time ruler strip (top or bottom of whichever view draws it) → time range. A rubber-band rectangle is shown while dragging |
 | Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete, plus a **Scale** submenu (time axis Time/Time Offset.../Sample; vertical axis Wav Units/dB/Normalized in the waveform, Hz/Custom... in the spectrogram; and Alternative Scale Time/Frequency submenus with named reference entries in both views). On the **amplitude/frequency axis strip** (on either side), "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
 | Mouse wheel over the plot / time ruler | Horizontal zoom around the cursor (both views) |
 | Mouse wheel over the amplitude/frequency axis strip (left or right; or Shift + wheel anywhere) | Vertical amplitude zoom (waveform) / frequency-range zoom around the cursor (spectral) — independent per view |
@@ -1626,7 +1626,9 @@ Mouse (waveform *and* spectral views):
 | Double-click elsewhere | **Select the whole file** and fit it in both views |
 
 Selecting a time range in *either* view applies the selection to **both**
-views at once.
+views at once. A drag-selection remembers the channel row it started on and
+is drawn clipped to that row in both views; selections created elsewhere
+(Select All, marker double-clicks, footer fields, keyboard) span every row.
 
 ### Axis scales (right-click → Scale)
 
@@ -1980,7 +1982,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~3916 checks in Release), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~3936 checks in Release), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
@@ -2258,6 +2260,15 @@ delays the window from appearing.
     plot or bottom time ruler shrinks only the time window, one over the right
     vertical axis strip (or Shift+wheel) shrinks only the level/frequency
     window — each leaving the other axis untouched.
+  - **Selection channel clip**: with two visible channels a left-drag selection
+    started on row 0 and dragged into row 1 stays clipped to row 0 in both
+    views (headless paint probe: blue fill inside the start row, none in the
+    other), Select All resets it to all rows; right-drag box-zoom from row 0
+    into row 1 clips the box to one data area and scales the amplitude axis by
+    the single-row factor (not the whole-plot factor); an axis drag behaves the
+    same while leaving the time window alone, a ruler drag stays time-only;
+    the spectral view clips its selection rectangle and maps a clipped box-zoom
+    through the drag-start row's frequency scale.
   - **Split execute first run**: pressing F12 on an unconfigured file opens the
     configuration dialog; closing it saves the default preset and then executes
     the split, creating the destination track with the extracted tone while the

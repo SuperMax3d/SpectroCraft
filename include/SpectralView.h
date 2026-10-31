@@ -51,7 +51,15 @@ public:
     void setViewRange (double t0, double t1) { setWindow (t0, t1); }
     void setVisibleChannels (const std::vector<int>& ch)
     {
-        if (ch != channels) { channels = ch; imageDirty = true; repaint(); }
+        if (ch != channels)
+        {
+            // Row indices of a drag-selection no longer refer to the same
+            // channels: fall back to an all-rows rectangle.
+            app.selectionRow = -1;
+            channels = ch;
+            imageDirty = true;
+            repaint();
+        }
     }
     void setSelection (juce::Range<double> s)
     {

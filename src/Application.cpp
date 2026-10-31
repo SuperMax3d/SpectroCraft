@@ -451,6 +451,7 @@ void Application::activate (int index)
     }
 
     activeDocIndex = index;
+    selectionRow = -1;   // the restored selection spans all rows of this doc
     selection = d->selection;
     playhead = d->playhead;
     visibleChannels = d->visibleChannels;
@@ -808,6 +809,7 @@ void Application::closeDoc (int index)
     else
     {
         activeDocIndex = -1;
+        selectionRow = -1;
         selection = { 0, 0 };
         playhead = 0.0;
         visibleChannels.clear();
@@ -1179,9 +1181,12 @@ void Application::timerCallback ()
 void Application::selectAll()
 {
     // Go through setSelection() so the UI (both views + status bar) is
-    // notified of the new range.
+    // notified of the new range. A select-all spans every channel row.
     if (audioEngine().isFileLoaded())
+    {
+        selectionRow = -1;
         setSelection ({ 0, audioEngine().duration() });
+    }
 }
 
 void Application::setSelection (juce::Range<double> s, bool snapEdges)
@@ -1229,7 +1234,8 @@ void Application::clearSpectralSelection ()
     if (d && !d->spectralSel.empty ())
     {
         d->spectralSel.clear ();
-        selection = { 0, 0 };   // the mirrored time range goes with it
+        selectionRow = -1;      // the mirrored time range goes with it
+        selection = { 0, 0 };
         changed = true;
     }
     if (playSpectralSel)

@@ -301,7 +301,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // into the shared selection (Application clamps them to the file).
     if (statusBar)
         statusBar->onSelectionEdited = [this] (double a, double b)
-        { app.setSelection (juce::Range<double> (a, b)); };
+        {
+            // A typed range is not tied to any channel row.
+            app.selectionRow = -1;
+            app.setSelection (juce::Range<double> (a, b));
+        };
 
     // The footer's playhead field pushes the typed position back into the
     // shared state (Application clamps it to the file and notifies the views).
@@ -620,6 +624,7 @@ void MainWindow::refreshAfterEdit()
     } (app.viewStart, app.viewEnd);
 
     applyTimeWindow (r.first, r.second);
+    app.selectionRow = -1;            // a freshly loaded file spans all rows
     app.setSelection (app.selection); // re-clamp to the new duration
 
     syncSharedState();
@@ -6713,6 +6718,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
 
             const double newPlayhead = app.playhead + (right ? step : -step);
             app.setPlayhead (newPlayhead);
+            app.selectionRow = -1;   // keyboard selection spans all rows
             app.setSelection ({ std::min (shiftAnchorTime, app.playhead),
                                 std::max (shiftAnchorTime, app.playhead) });
         }

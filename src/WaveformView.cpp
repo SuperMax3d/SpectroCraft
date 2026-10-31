@@ -48,7 +48,15 @@ void WaveformView::setVisibleChannels (const std::vector<int>& chs)
     for (int c : chs)
         if (c >= 0 && c < (int) newVis.size())
             newVis[c] = 1;
-    if (newVis != chanVis) { chanVis = std::move (newVis); dirty = true; repaint(); }
+    if (newVis != chanVis)
+    {
+        // Row indices of a drag-selection no longer refer to the same
+        // channels: fall back to an all-rows rectangle.
+        app.selectionRow = -1;
+        chanVis = std::move (newVis);
+        dirty = true;
+        repaint();
+    }
 }
 
 void WaveformView::resized() { dirty = true; }
@@ -106,6 +114,30 @@ static void showViewContextMenu (Application& app,
     if (const int sel = m.showMenu (juce::PopupMenu::Options().withMousePosition());
         sel != 0)
         onAction (sel);
+}
+
+std::vector<juce::Rectangle<int>> WaveformView::absRowRects() const
+{
+    const auto pr = plotRect();
+    int visCount = 0;
+    for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
+        if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
+    // Full component width so drags starting on the axis strip hit-test too.
+    auto rows = channelRowRects (getWidth(), pr.getHeight(), visCount);
+    for (auto& r : rows) r.setY (r.getY() + pr.getY());
+    return rows;
+}
+
+int WaveformView::rowAtY (int y) const
+{
+    const auto pr = plotRect();
+    if (y < pr.getY()) return -1;
+    const auto rows = absRowRects ();
+    if (rows.empty ()) return -1;
+    int row = 0;   // gaps map to the row below, like the cursor probe
+    for (size_t r = 0; r < rows.size (); ++r)
+        if (y >= rows[(size_t) r].getY()) row = (int) r;
+    return row;
 }
 
 void WaveformView::mouseDown (const juce::MouseEvent& e)
@@ -166,6 +198,11 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
         else
         {
             dragMode = DragMode::Select;
+            // The selection belongs to the channel row it started on: both
+            // views clip their rectangle to that row so dragging over another
+            // channel does not paint over it.
+            app.selectionRow = rowAtY (e.y);
+            if (app.onStateChange) app.onStateChange ();   // repaint both views
             app.setSelection ({ dragStartTime, dragStartTime });
             selection = app.selection;
         }
@@ -235,8 +272,19 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
                 haveZoomRect = true;
             if (haveZoomRect)
             {
-                zoomRect = juce::Rectangle<int> (std::min (dragStartX, x), std::min (dragStartY, y),
-                                                 std::abs (x - dragStartX), std::abs (y - dragStartY));
+                auto zr = juce::Rectangle<int> (std::min (dragStartX, x), std::min (dragStartY, y),
+                                                std::abs (x - dragStartX), std::abs (y - dragStartY));
+                // The vertical extent is clipped to the channel row the drag
+                // started on: a box-zoom never spans more than one channel's
+                // data area. Ruler drags are time-only and keep full height.
+                const bool startOnRuler = !onAxisX (dragStartX) && onRulerY (dragStartY);
+                if (!startOnRuler)
+                {
+                    const int row = rowAtY (dragStartY);
+                    if (row >= 0)
+                        zr = zr.getIntersection (absRowRects ()[(size_t) row]);
+                }
+                zoomRect = zr;
                 repaint();
             }
             break;
@@ -286,9 +334,12 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
 
             auto zoomAmp = [this] ()
             {
-                // Scale the amplitude axis so the dragged span fills the whole
-                // plot, keeping the value under the box centre at its row's
-                // centre line.
+                // Scale the amplitude axis so the dragged span fills the
+                // channel row it started in, keeping the value under the box
+                // centre at that row's centre line. The span is measured
+                // against one row's data height (not the whole plot) so a
+                // multi-channel file zooms by the same factor as a single
+                // channel would.
                 const auto pr = plotRect();
                 int visCount = 0;
                 for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
@@ -297,9 +348,9 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
                 {
                     const double oldAmpPx = rowAmpPx();
                     const auto rows = channelRowRects (pr.getWidth(), pr.getHeight(), visCount);
-                    int rowIdx = 0;
+                    int rowIdx = 0;   // the drag start's row (gaps map below)
                     for (int r = 0; r < visCount; ++r)
-                        if (zoomRect.getCentreY() >= pr.getY() + rows[(size_t) r].getY())
+                        if (dragStartY >= pr.getY() + rows[(size_t) r].getY())
                             rowIdx = r;
                     const auto& rrR = rows[(size_t) rowIdx];
                     const float centerR = (float) (pr.getY() + rrR.getY()
@@ -307,7 +358,7 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
 
                     vOffset = std::clamp (vOffset + (centerR - zoomRect.getCentreY()) / oldAmpPx,
                                          -2.0, 2.0);
-                    const double nz = std::clamp (vZoom * ((double) pr.getHeight()
+                    const double nz = std::clamp (vZoom * ((double) rrR.getHeight()
                                                           / (double) zoomRect.getHeight()),
                                                   0.05, 64.0);
                     if (nz != vZoom) { vZoom = nz; dirty = true; }
@@ -463,6 +514,7 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
                 || (x2 > x1 && e.x >= x1 - 3.0 && e.x <= x2 + 3.0))
             {
                 const double end = (m.end > m.start) ? m.end : m.start;
+                app.selectionRow = -1;   // marker selections span all rows
                 app.setSelection ({ m.start, end });
                 setSelection (app.selection); // local copy for immediate repaint
                 if (onChange) onChange (viewStart, viewEnd); // sync both views via MainWindow
@@ -609,14 +661,23 @@ void WaveformView::paint (juce::Graphics& g)
     {
         const double x1 = timeToX (selection.getStart());
         const double x2 = timeToX (selection.getEnd());
+        // Vertical extent: the channel row a drag-selection started on, or
+        // all rows when it came from elsewhere (Select All, markers, ...).
+        int selTop = pr.getY(), selBot = pr.getBottom();
+        if (app.selectionRow >= 0 && app.selectionRow < (int) rows.size ())
+        {
+            const auto& rrSel = rows[(size_t) app.selectionRow];
+            selTop = pr.getY() + rrSel.getY();
+            selBot = selTop + rrSel.getHeight();
+        }
         const juce::Graphics::ScopedSaveState save (g);
         g.reduceClipRegion (pr);
         g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
-        g.fillRect ((float) x1, (float) pr.getY(),
-                   (float) std::max (0.0, x2 - x1), (float) waveH);
+        g.fillRect ((float) x1, (float) selTop,
+                   (float) std::max (0.0, x2 - x1), (float) (selBot - selTop));
         g.setColour (juce::Colour::fromRGB (96, 150, 255));
-        g.drawVerticalLine ((float) x1, (float) pr.getY(), (float) pr.getBottom());
-        g.drawVerticalLine ((float) x2, (float) pr.getY(), (float) pr.getBottom());
+        g.drawVerticalLine ((float) x1, (float) selTop, (float) selBot);
+        g.drawVerticalLine ((float) x2, (float) selTop, (float) selBot);
     }
 
     // Markers (same rendering as the spectral view). Clipped to the plot so

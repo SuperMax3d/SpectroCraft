@@ -101,6 +101,10 @@ public:
     // Current UI state - mirrors the active document (kept in sync on switch
     // and through setSelection()/setPlayhead()/toggleChannelVisible()).
     juce::Range<double> selection{ 0, 0 };
+    // Visible row index where a drag-selection started (-1 = all rows): both
+    // views clip their time-selection rectangle to that channel so dragging a
+    // selection from one channel over another does not paint over the others.
+    int selectionRow { -1 };
     double viewStart = 0, viewEnd = 10;   // canonical time window (follows the waveform view)
 
     // ---- Recording (plugin-based capture, see include/RecorderPlugin.h) ----
