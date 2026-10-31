@@ -112,6 +112,15 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
+    // Tables panel alignment flow: a left click is consumed as the reference
+    // point in this view and reported to the panel.
+    if (onAlignClick && e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
+        && !e.mods.isMiddleButtonDown())
+    {
+        onAlignClick (xToTime ((double) e.x));
+        return;
+    }
+
     // Right button: box-zoom drag. A plain right-click (no significant
     // movement) still shows the context menu, deferred to mouseUp.
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
@@ -662,6 +671,10 @@ void WaveformView::paint (juce::Graphics& g)
         }
     }
 
+    // Tables overlay (Overlay on Waveform mode): parameter curves mapped to
+    // amplitude, drawn above the waveform but below the playhead line.
+    drawTablesOverlay (g);
+
     // Playhead: a plain red line spanning the whole view height - it
     // continues into this view's own time ruler strip when one is shown.
     const double px = timeToX (playhead);
@@ -693,6 +706,52 @@ void WaveformView::paint (juce::Graphics& g)
         g.fillRect (zr);
         g.setColour (juce::Colour::fromRGB (96, 150, 255).withAlpha (0.9f));
         g.drawRect (zr, 1);
+    }
+}
+
+// Tables overlay (Overlay on Waveform mode): one curve per visible parameter
+// whose alignment target is the waveform. The raw value goes through the
+// parameter's transforms + value offset/scale and lands in amplitude units,
+// mapped with the same centre/zoom as a single full-height channel row.
+void WaveformView::drawTablesOverlay (juce::Graphics& g)
+{
+    if (!app.showAllTables || app.tablesMode() != 0) return;
+    const auto& tables = app.activeTables();
+    if (tables.empty()) return;
+
+    const auto pr = plotRect();
+    if (pr.getWidth() <= 1 || pr.getHeight() <= 1) return;
+    const float ampPx = pr.getHeight() * 0.45f * (float) vZoom;
+    const float center = pr.getY() + pr.getHeight() * 0.5f;
+
+    for (const auto& t : tables)
+    {
+        if (!t.visible) continue;
+        for (const auto& p : t.params)
+        {
+            if (!p.visible || p.alignTarget != 0 || p.values.size() < 2) continue;
+
+            double mn = p.values[0], mx = p.values[0];
+            for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
+            const auto [off, sc] = t.effectiveTimeMap (p);
+
+            juce::Path path;
+            bool started = false;
+            for (int i = 0; i < pr.getWidth(); ++i)
+            {
+                const double tDoc = xToTime ((double) (pr.getX() + i));
+                const double tTab = (tDoc - off) / sc;
+                if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
+                const double v = sc::tables::transformValue (
+                    sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
+                const float y = center + (float) ((vOffset - v) * ampPx);
+                const float x = (float) (pr.getX() + i) + 0.5f;
+                if (!started) { path.startNewSubPath (x, y); started = true; }
+                else          path.lineTo (x, y);
+            }
+            g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
+            g.strokePath (path, juce::PathStrokeType (2.0f));
+        }
     }
 }
 

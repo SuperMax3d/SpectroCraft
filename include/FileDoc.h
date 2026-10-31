@@ -59,6 +59,21 @@ public:
     // metadata bundle like the saved selections.
     std::vector<DrawingItem> drawings;
 
+    // Tables panel: imported CSV tables with per-parameter alignment plus the
+    // display mode (0=Overlay on Waveform 1=Overlay on Spectrogram
+    // 2=Dedicated track). Persisted with the file's metadata bundle.
+    std::vector<sc::tables::TableData> tables;
+    int tablesMode = 0;
+
+    /** Replaces the table list (and optionally the display mode) and marks
+        the document metadata-dirty. */
+    void setTables (std::vector<sc::tables::TableData> t, int* newMode = nullptr)
+    {
+        tables = std::move (t);
+        if (newMode != nullptr) tablesMode = *newMode;
+        metaDirty = true;
+    }
+
     // Whisper transcription segments. Embedded mode: RIFF "SCTT" chunk inside
     // the WAV; external mode: the "transcription" key of .meta.json. Shown in
     // the Transcription panel, never in the Markers panel.

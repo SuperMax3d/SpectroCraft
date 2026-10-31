@@ -3266,7 +3266,7 @@ static void testLeftPanelLayout()
                                             "Selection", "Drawing" };
 #endif
     const juce::StringArray defaultTop { "Files", "Frequency Analysis", "History",
-                                          "Python" };
+                                          "Python", "Tables" };
     juce::StringArray expectBottom = defaultBottom;
     for (int i = 0; i < expectBottom.size (); ++i)
         if (expectBottom[i] == "Markers") { expectBottom.remove (i); break; }
@@ -3284,7 +3284,7 @@ static void testLeftPanelLayout()
         win->moveLeftPanelTab (win->bottomPanelTabs (), 1, win->topPanelTabs (), 1);
         const juce::StringArray expectTopAfterMove { "Files", "Markers",
                                                      "Frequency Analysis", "History",
-                                                     "Python" };
+                                                     "Python", "Tables" };
         CHECK (win->topPanelTabNames () == expectTopAfterMove, "tab moved across groups");
         CHECK (win->bottomPanelTabNames () == expectBottom, "source group lost the tab");
 
@@ -3292,7 +3292,7 @@ static void testLeftPanelLayout()
         win->moveLeftPanelTab (win->topPanelTabs (), 0, win->topPanelTabs (), 2);
         const juce::StringArray expectTopFinal { "Markers", "Files",
                                                  "Frequency Analysis", "History",
-                                                 "Python" };
+                                                 "Python", "Tables" };
         CHECK (win->topPanelTabNames () == expectTopFinal, "same-bar move");
 
         // 4) View > Left Panels toggle hides/shows the whole column.
@@ -3310,7 +3310,7 @@ static void testLeftPanelLayout()
     {
         const juce::StringArray expectTopFinal { "Markers", "Files",
                                                  "Frequency Analysis", "History",
-                                                 "Python" };
+                                                 "Python", "Tables" };
         Application app (store);
         juce::MessageManager* mm = juce::MessageManager::getInstance();
         std::unique_ptr<MainWindow> win (new MainWindow (app, "left layout test 2"));
@@ -3339,9 +3339,9 @@ static void testCrossBarTabMove()
     store.deleteFile ();
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    const int kNumPanels = 9;
+    const int kNumPanels = 10;
 #else
-    const int kNumPanels = 8;
+    const int kNumPanels = 9;
 #endif
 
     {
@@ -3533,9 +3533,9 @@ static void testClosePanelsAndWindowMenu()
     store.deleteFile ();   // deterministic per-run name: never trust leftovers
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    const int kNumPanels = 9;
+    const int kNumPanels = 10;
 #else
-    const int kNumPanels = 8;
+    const int kNumPanels = 9;
 #endif
 
     auto windowMenuIndex = [] (MainWindow& win) -> int
@@ -3554,6 +3554,7 @@ static void testClosePanelsAndWindowMenu()
 
         const bool allOpen = win->isPanelOpen ("files") && win->isPanelOpen ("fft")
             && win->isPanelOpen ("history") && win->isPanelOpen ("python")
+            && win->isPanelOpen ("tables")
             && win->isPanelOpen ("controls") && win->isPanelOpen ("markers")
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
             && win->isPanelOpen ("transcription")
@@ -3570,7 +3571,8 @@ static void testClosePanelsAndWindowMenu()
         // Toggle back immediately so later steps see the original state.
         juce::StringArray ids;
         ids.add ("files");   ids.add ("fft");     ids.add ("history");
-        ids.add ("python");  ids.add ("controls"); ids.add ("markers");
+        ids.add ("python");  ids.add ("tables");  ids.add ("controls");
+        ids.add ("markers");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         ids.add ("transcription");
 #endif
@@ -3604,20 +3606,20 @@ static void testClosePanelsAndWindowMenu()
         win->setPanelVisible ("history", false);
         win->setPanelVisible ("fft", false);
         {
-            const juce::StringArray expectTop1 { "Files", "Python" };
+            const juce::StringArray expectTop1 { "Files", "Python", "Tables" };
             CHECK (win->topPanelTabNames () == expectTop1,
                   "two panels closed from the top group");
         }
         win->setPanelVisible ("history", true);   // before fft canonically
         {
-            const juce::StringArray expectTop2 { "Files", "History", "Python" };
+            const juce::StringArray expectTop2 { "Files", "History", "Python", "Tables" };
             CHECK (win->topPanelTabNames () == expectTop2,
                   "History reinserted at its canonical position");
         }
         win->setPanelVisible ("fft", true);
         {
             const juce::StringArray expectTop3 { "Files", "Frequency Analysis",
-                                                 "History", "Python" };
+                                                 "History", "Python", "Tables" };
             CHECK (win->topPanelTabNames () == expectTop3,
                   "canonical top order fully restored");
         }
@@ -3643,6 +3645,7 @@ static void testClosePanelsAndWindowMenu()
         win->setPanelVisible ("fft", false);
         win->setPanelVisible ("history", false);
         win->setPanelVisible ("python", false);
+        win->setPanelVisible ("tables", false);
         CHECK (!win->topPanelTabs ()->isVisible (), "empty top group is hidden");
         CHECK (win->bottomPanelTabs ()->isVisible (), "bottom group still visible");
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 1, wIdx);   // fft
@@ -22375,6 +22378,431 @@ static void testF5RefreshShortcut()
     png.deleteFile();
 }
 
+
+// ---------------- Tables panel: import / transforms / alignment --------------
+
+static void testTablesImport()
+{
+    using namespace sc::tables;
+
+    // --- Basic header + numeric columns ------------------------------------
+    {
+        TableData t;
+        std::string err;
+        CHECK (importTable ("basic", "A,B\n1,2.5\n3,4.5\n", t, &err), "basic csv imports");
+        CHECK (t.name == "basic", "table name kept");
+        CHECK (t.params.size() == 2, "two parameters imported");
+        if (t.params.size() == 2)
+        {
+            CHECK (t.params[0].name == "A" && t.params[1].name == "B", "header names used");
+            CHECK (t.params[0].values.size() == 2, "two data rows per parameter");
+            CHECK (std::abs (t.params[0].values[0] - 1.0) < 1e-9
+                  && std::abs (t.params[1].values[1] - 4.5) < 1e-9, "cell values parsed");
+        }
+    }
+
+    // --- Quoted fields: embedded commas and escaped quotes ------------------
+    {
+        TableData t;
+        CHECK (importTable ("q", "\"X, with comma\",\"Y\"\"Z\"\n1.5,2\n", t), "quoted csv imports");
+        CHECK (t.params.size() == 2 && t.params[0].name == "X, with comma"
+              && t.params[1].name == "Y\"Z", "quoted headers parsed correctly");
+    }
+
+    // --- true/false become 1.0/0.0 -------------------------------------------
+    {
+        TableData t;
+        CHECK (importTable ("b", "flag\ntrue\nfalse\ntrue\n", t), "boolean column imports");
+        CHECK (t.params.size() == 1 && t.params[0].values.size() == 3, "three boolean rows");
+        if (t.params.size() == 1)
+            CHECK (t.params[0].values[0] == 1.0 && t.params[0].values[1] == 0.0
+                  && t.params[0].values[2] == 1.0, "true/false mapped to 1/0");
+    }
+
+    // --- First column all text -> grid is transposed before import -----------
+    {
+        TableData t;
+        CHECK (importTable ("tr", "label,v1,v2\nrA,1,2\nrB,3,4\n", t), "transposed import ok");
+        CHECK (t.params.size() == 2 && t.params[0].name == "rA" && t.params[1].name == "rB",
+              "rows became parameters after transpose");
+        if (t.params.size() == 2)
+            CHECK (t.params[0].values.size() == 2 && std::abs (t.params[0].values[1] - 2.0) < 1e-9,
+                  "transposed values land in the right column");
+    }
+
+    // --- Scattered missing values are interpolated ---------------------------
+    {
+        TableData t;
+        CHECK (importTable ("gap", "v\n1\n\n5\n9\n", t), "gapped column imports");
+        if (t.params.size() == 1)
+        {
+            const auto& v = t.params[0].values;
+            CHECK (v.size() == 4 && std::abs (v[1] - 3.0) < 1e-9, "middle gap interpolated");
+        }
+    }
+
+    // --- A column with no data at all is ignored ------------------------------
+    {
+        TableData t;
+        CHECK (importTable ("txt", "num,text\n1,hello\n2,world\n", t), "mixed import ok");
+        CHECK (t.params.size() == 1 && t.params[0].name == "num", "text-only column dropped");
+    }
+
+    // --- Empty header titles become ParamN -------------------------------------
+    {
+        TableData t;
+        CHECK (importTable ("e", ",\n1,2\n3,4\n", t), "empty headers import ok");
+        if (t.params.size() == 2)
+            CHECK (t.params[0].name == "Param1" && t.params[1].name == "Param2", "auto names assigned");
+    }
+
+    // --- CRLF line endings ------------------------------------------------------
+    {
+        TableData t;
+        CHECK (importTable ("crlf", "a,b\r\n1,2\r\n3,4\r\n", t), "CRLF csv imports");
+        CHECK (t.params.size() == 2 && t.params[0].values.size() == 2, "CRLF rows split correctly");
+    }
+
+    // --- Garbage input fails cleanly ---------------------------------------------
+    {
+        TableData t;
+        std::string err;
+        CHECK (!importTable ("bad", "", t, &err), "empty csv rejected");
+        CHECK (!importTable ("bad2", "hello\nworld\nfoo\n", t, &err), "all-text grid rejected");
+    }
+}
+
+static void testTablesDownsampleAndTransforms()
+{
+    using namespace sc::tables;
+
+    // --- Downsample: length scales with the rate, endpoints preserved ---------
+    {
+        TableData t;
+        std::string err;
+        CHECK (importTable ("ds", "v\n0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", t, &err), "ramp imports");
+        const double oldRate = t.sampleRate;   // 1000 rows/s by default
+        downsampleTable (t, 500.0);
+        CHECK (std::abs (t.sampleRate - 500.0) < 1e-9, "rate updated");
+        if (!t.params.empty())
+        {
+            const auto& v = t.params[0].values;
+            // N=10 at 1000 Hz -> round(10 * 500/1000) = 5 samples.
+            CHECK (v.size() == 5, "downsampled to half the rows");
+            CHECK (std::abs (v.front()) < 1e-9 && std::abs (v.back() - 9.0) < 1e-9,
+                  "endpoints preserved by downsample");
+            CHECK (std::abs (v[2] - 4.5) < 1e-9, "midpoint linearly interpolated");
+        }
+
+        // Upsampling keeps the endpoints too.
+        downsampleTable (t, 2000.0);
+        if (!t.params.empty())
+            CHECK (t.params[0].values.size() == 20 && std::abs (t.params[0].values.back() - 9.0) < 1e-9,
+                  "upsampled length and endpoint");
+    }
+
+    // --- transformValue: normalized -> inverted -> absolute -> scale+offset --
+    {
+        ParamData p;
+        const double minV = 0.0, maxV = 10.0;
+
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV) - 5.0) < 1e-9, "identity by default");
+
+        p.normalized = true;
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV) - 0.5) < 1e-9, "normalized to [0,1]");
+
+        p.inverted = true;
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV) + 0.5) < 1e-9, "inversion after normalize");
+
+        p.absolute = true;
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV) - 0.5) < 1e-9, "absolute after inversion");
+
+        p.valueScale = 2.0; p.valueOffset = 1.0;
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV) - 2.0) < 1e-9, "scale+offset last");
+
+        // Degenerate range: normalized with min==max maps to 0.
+        ParamData q;
+        q.normalized = true;
+        CHECK (transformValue (3.0, q, 7.0, 7.0) == 0.0, "flat range normalizes to zero");
+    }
+
+    // --- paramValueAt: linear interpolation in table time ----------------------
+    {
+        TableData t;
+        std::string err;
+        CHECK (importTable ("pv", "v\n0\n10\n20\n30\n", t, &err), "ramp for value-at imports");
+        if (!t.params.empty())
+        {
+            const auto& p = t.params[0];
+            const double dt = 1.0 / t.sampleRate;   // one row period
+            CHECK (std::abs (paramValueAt (t, p, 0.0)) < 1e-9, "value at start");
+            CHECK (std::abs (paramValueAt (t, p, dt) - 10.0) < 1e-9, "value at first row");
+            CHECK (std::abs (paramValueAt (t, p, dt / 2.0) - 5.0) < 1e-9, "midpoint interpolated");
+            CHECK (std::abs (paramValueAt (t, p, 3.0 * dt) - 30.0) < 1e-9, "value at end");
+            CHECK (paramValueAt (t, p, -dt) == 0.0 && paramValueAt (t, p, 4.0 * dt) == 0.0,
+                  "zero outside the duration");
+        }
+    }
+
+    // --- effectiveTimeMap composes table and parameter settings -----------------
+    {
+        TableData t;
+        t.offsetSecs = 1.0; t.scaleTime = 2.0;
+        ParamData p;
+        p.offsetSecs = 0.5; p.scaleTime = 3.0;
+        const auto [off, sc] = t.effectiveTimeMap (p);
+        CHECK (std::abs (off - 1.5) < 1e-9 && std::abs (sc - 6.0) < 1e-9, "maps compose");
+    }
+}
+
+static void testTablesAutoAlignLag()
+{
+    using namespace sc::tables;
+
+    // Reference: a chirp over [0, dur] (its autocorrelation has one sharp
+    // peak, unlike integer-cycle sines whose periodicity creates side lobes).
+    // Aligned copy: the same signal delayed by exactly L seconds (evaluated
+    // at t - L for all rows). The cross-correlation must return approximately
+    // -L so that adding it to offsetSecs shifts the aligned curve back onto
+    // the reference.
+    const double rate = 1000.0, dur = 2.0, L = 0.5;
+    TableData refT, aliT;
+    refT.sampleRate = aliT.sampleRate = rate;
+
+    auto sigAt = [] (double tSecs) { return std::sin (2.0 * juce::MathConstants<double>::pi
+                                                      * (tSecs + 1.75 * tSecs * tSecs)); };
+
+    ParamData refP, aliP;
+    refP.name = "ref"; aliP.name = "ali";
+    const int N = (int) std::lround (dur * rate);   // 2001 rows incl. endpoint
+    for (int i = 0; i <= N; ++i)
+    {
+        const double tSecs = (double) i / rate;
+        refP.values.push_back (sigAt (tSecs));
+        aliP.values.push_back (sigAt (tSecs - L));
+    }
+    refT.params.push_back (refP);
+    aliT.params.push_back (aliP);
+
+    const double lag = autoAlignLag (refT, refT.params[0], aliT, aliT.params[0]);
+    CHECK (std::abs (lag + L) < 0.02, "auto align recovers the known delay");
+
+    // Identical curves -> zero lag.
+    const double lag0 = autoAlignLag (refT, refT.params[0], refT, refT.params[0]);
+    CHECK (std::abs (lag0) < 1e-6, "identical curves give zero lag");
+}
+
+static void testTablesSerialiseParse()
+{
+    using namespace sc::tables;
+
+    std::vector<TableData> tables;
+    TableData t;
+    t.name = "RoundTrip";
+    t.visible = false;
+    t.colorIndex = 5;
+    t.sampleRate = 250.0;
+    t.offsetSecs = 1.25;
+    t.scaleTime = 0.5;
+
+    ParamData p;
+    p.name = "P1";
+    p.visible = true;
+    p.colorIndex = 9;
+    p.alignTarget = 1;
+    p.offsetSecs = -0.25;
+    p.scaleTime = 4.0;
+    p.valueOffset = 2.0;
+    p.valueScale = 3.0;
+    p.normalized = true;
+    p.inverted = false;
+    p.absolute = true;
+    for (int i = 0; i < 16; ++i) p.values.push_back ((double) i * 0.5);
+    t.params.push_back (p);
+
+    ParamData p2;
+    p2.name = "P2";
+    p2.values = { 1.0, -2.0, 3.0 };
+    t.params.push_back (p2);
+    tables.push_back (std::move (t));
+
+    const juce::var v = serialiseTables (tables, 2);
+    std::vector<TableData> back;
+    int mode = -1;
+    CHECK (parseTables (v, back, &mode), "serialised tables parse back");
+    CHECK (mode == 2, "display mode survives the round trip");
+    CHECK (back.size() == 1 && back[0].params.size() == 2, "table and parameter counts survive");
+
+    if (back.size() == 1)
+    {
+        const auto& bt = back[0];
+        CHECK (bt.name == "RoundTrip" && !bt.visible && bt.colorIndex == 5, "table fields survive");
+        CHECK (std::abs (bt.sampleRate - 250.0) < 1e-9 && std::abs (bt.offsetSecs - 1.25) < 1e-9
+              && std::abs (bt.scaleTime - 0.5) < 1e-9, "table alignment survives");
+
+        if (bt.params.size() == 2)
+        {
+            const auto& bp = bt.params[0];
+            CHECK (bp.name == "P1" && bp.alignTarget == 1 && bp.colorIndex == 9, "param fields survive");
+            CHECK (std::abs (bp.offsetSecs + 0.25) < 1e-9 && std::abs (bp.scaleTime - 4.0) < 1e-9
+                  && std::abs (bp.valueOffset - 2.0) < 1e-9 && std::abs (bp.valueScale - 3.0) < 1e-9,
+                  "param alignment survives");
+            CHECK (bp.normalized && !bp.inverted && bp.absolute, "transform flags survive");
+            CHECK (bp.values.size() == 16 && std::abs (bp.values[7] - 3.5) < 1e-9, "values survive");
+
+            const auto& b2 = bt.params[1];
+            CHECK (b2.name == "P2" && b2.values.size() == 3 && std::abs (b2.values[1] + 2.0) < 1e-9,
+                  "second parameter survives");
+        }
+    }
+
+    // Malformed input is rejected without touching the output.
+    std::vector<TableData> untouched;
+    CHECK (!parseTables (juce::var(), untouched), "empty var rejected");
+    CHECK (untouched.empty(), "rejected parse leaves output empty");
+}
+
+static void testTablesPanel()
+{
+    const juce::File wav = makeTempFile ("tables_panel.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) f / rate); });
+
+    Application app;
+    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    FileDoc* d = app.doc ();
+    CHECK (d != nullptr, "tables: doc created");
+    if (d == nullptr) return;
+
+    // Standalone panel (same pattern as the other list-panel tests): it only
+    // talks to the Application, so no window is needed.
+    TablesPanel panel (app);
+    panel.setSize (320, 420);
+
+    // --- Import through the application -------------------------------------
+    std::string err;
+    const juce::String csv = "alpha,beta\n1,2.5\n3,4.5\n5,6.5\n";
+    CHECK (app.addTableFromCsv ("PanelTest", csv, &err), "csv import via app");
+    CHECK (app.activeTables().size() == 1, "one table in the doc");
+
+    panel.refresh();
+    CHECK (panel.isTableRow (0), "row 0 is the table row");
+    CHECK (!panel.isTableRow (1) && !panel.isTableRow (2), "rows 1-2 are parameter rows");
+    const auto r1 = panel.rowRef (1);
+    CHECK (r1.tableIdx == 0 && r1.paramIdx == 0, "row 1 maps to table 0 / param 0");
+
+    // --- Eye icon toggles visibility ------------------------------------------
+    {
+        const juce::MouseEvent eyeEvent = mkMouse (panel, 10, 10, {});
+        panel.simulateCellClick (1, 1, eyeEvent);
+        CHECK (!d->tables[0].params[0].visible, "eye click hides the parameter");
+        panel.simulateCellClick (1, 1, eyeEvent);
+        CHECK (d->tables[0].params[0].visible, "second eye click shows it again");
+
+        // Table-level eye on row 0.
+        panel.simulateCellClick (0, 1, eyeEvent);
+        CHECK (!d->tables[0].visible, "table eye hides the whole table");
+        panel.simulateCellClick (0, 1, eyeEvent);
+        CHECK (d->tables[0].visible, "table eye restored");
+    }
+
+    // --- Colour square cycles through the palette -----------------------------
+    {
+        const juce::MouseEvent colEvent = mkMouse (panel, 10, 10, {});
+        const int c0 = d->tables[0].params[0].colorIndex;
+        panel.simulateCellClick (1, 2, colEvent);
+        CHECK (d->tables[0].params[0].colorIndex == (c0 + 1) % 12, "colour click advances the palette");
+    }
+
+    // --- Selection and removal --------------------------------------------------
+    {
+        clickTableRow (panel.listTable (), 1, {});
+        CHECK (panel.numSelectedRows() == 1 && panel.primaryRow() == 1, "plain click selects one row");
+
+        // Ctrl-click adds a second row.
+        clickTableRow (panel.listTable (), 2, juce::ModifierKeys (juce::ModifierKeys::commandModifier));
+        CHECK (panel.numSelectedRows() == 2, "ctrl click extends the selection");
+
+        // Shift-click range-selects from the anchor (row 2) back to row 0.
+        clickTableRow (panel.listTable (), 0, juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
+        CHECK (panel.numSelectedRows() == 3, "shift click selects the whole range");
+
+        // Remove everything selected: both params and the table.
+        panel.removeSelected();
+        CHECK (app.activeTables().empty(), "remove selected drops the table and its parameters");
+    }
+
+    // --- Copy / paste round trip ---------------------------------------------------
+    {
+        CHECK (app.addTableFromCsv ("CopySrc", csv, &err), "second import for copy test");
+        panel.refresh();
+
+        // Select the table row itself -> copying it takes the whole table.
+        clickTableRow (panel.listTable (), 0, {});
+        CHECK (panel.numSelectedRows() == 1 && panel.isTableRow (panel.primaryRow()),
+              "copy: the table row is selected");
+
+        panel.copySelection();
+        juce::String csvOut;
+        for (int i = 0; i < 5 && csvOut.isEmpty(); ++i)
+        {
+            csvOut = juce::SystemClipboard::getTextFromClipboard ();
+            if (csvOut.isEmpty()) juce::Thread::sleep (20);
+        }
+        CHECK (!csvOut.isEmpty() && csvOut.contains ("alpha") && csvOut.contains ("beta"),
+              "copied table text carries the parameter names");
+
+        // Paste into a new table named after the clipboard.
+        panel.pasteToNewTable();
+        CHECK (app.activeTables().size() == 2, "paste created a second table");
+        if (app.activeTables().size() == 2)
+            CHECK (app.activeTables()[1].name == "Clipboard", "pasted table named Clipboard");
+    }
+
+    // --- Display mode + dedicated-track predicate -------------------------------------
+    {
+        app.setTablesMode (2);
+        CHECK (app.tablesMode() == 2, "mode switched to Dedicated");
+        CHECK (app.anyVisibleTableParam(), "visible parameters exist in dedicated mode");
+
+        // Hide every parameter -> the track has nothing to show.
+        for (auto& t : app.activeTables())
+            for (auto& p : t.params) p.visible = false;
+        d->metaDirty = true;
+        CHECK (!app.anyVisibleTableParam(), "no visible parameters left");
+
+        app.setTablesMode (0);
+        CHECK (app.tablesMode() == 0, "mode back to Overlay on Waveform");
+    }
+
+    // --- Persistence: save embedded, reopen, tables survive ---------------------------
+    {
+        const juce::File emb = makeTempFile ("tables_panel_emb.wav");
+        app.setTablesMode (1);
+        CHECK (app.audioEngine().saveFileAs (emb), "embedded save with tables");
+
+        Application app2;
+        if (app2.openFile (emb))
+        {
+            FileDoc* d2 = app2.doc ();
+            CHECK (d2 != nullptr && d2->tables.size() == 2, "tables restored on reopen");
+            if (d2 != nullptr && d2->tables.size() == 2)
+            {
+                const auto& t0 = d2->tables[0];
+                CHECK (t0.name == "CopySrc" && t0.params.size() == 2, "first table restored intact");
+                if (t0.params.size() == 2)
+                    CHECK (std::abs (t0.params[1].values[2] - 6.5) < 1e-9, "restored values match");
+                CHECK (d2->tablesMode == 1, "display mode restored");
+            }
+        }
+        else
+            CHECK (false, "reopened the embedded file");
+        emb.deleteFile();
+    }
+
+    wav.deleteFile();
+}
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -22620,7 +23048,11 @@ static int scRunUnitTestsImpl()
     progress ("audio.cpp cli wrapper");  testAudioCppCli();
     progress ("zoom fit auto mode");     testZoomFitAutoMode();
     progress ("F5 refresh shortcut");    testF5RefreshShortcut();
-
+    progress ("tables import rules");    testTablesImport();
+    progress ("tables downsample + transforms"); testTablesDownsampleAndTransforms();
+    progress ("tables auto align lag");  testTablesAutoAlignLag();
+    progress ("tables serialise/parse"); testTablesSerialiseParse();
+    progress ("tables panel");           testTablesPanel();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";

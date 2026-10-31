@@ -25,10 +25,13 @@ juce::Rectangle<int> SpectralView::plotRect() const
     // The axis strip always takes kLeftAxisWidth of horizontal space; only
     // its side changes with the View menu choice.
     const int x0 = axisOnRight() ? 0 : kLeftAxisWidth;
-    const int ruY = (showOwnTimeRuler && rulerAtBottom()) ? 0 : rulerH();
+    // When the ruler is at the top and a dedicated tables track sits below it,
+    // that strip's height is reserved inside this view.
+    const int inset = (showOwnTimeRuler && !rulerAtBottom()) ? tablesTopInset : 0;
+    const int ruY = (showOwnTimeRuler && rulerAtBottom()) ? 0 : rulerH() + inset;
     return { x0, ruY,
              std::max (1, getWidth() - kLeftAxisWidth),
-             std::max (1, getHeight() - rulerH()) };
+             std::max (1, getHeight() - rulerH() - inset) };
 }
 
 void SpectralView::setShowOwnTimeRuler (bool show)
@@ -238,6 +241,15 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
 void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
+
+    // Tables panel alignment flow: a left click is consumed as the reference
+    // point in this view and reported to the panel.
+    if (onAlignClick && e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
+        && !e.mods.isMiddleButtonDown())
+    {
+        onAlignClick (xToTime ((double) e.x));
+        return;
+    }
 
     // Armed scale calibration (Scale / Alternative Scale menu): a left click
     // inside the plot places the reference point - a circle is drawn and
@@ -1223,6 +1235,7 @@ void SpectralView::paint (juce::Graphics& g)
 
     drawOverlays (g);
     drawDrawings (g);
+    drawTablesOverlay (g);
 
     // Right-drag box-zoom rubber band: the same translucent blue as the
     // time selection in the tracks, so it reads as "this region" rather
@@ -2074,6 +2087,50 @@ void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
                 drawOne (it, false);
         if (haveLive)
             drawOne (live, true);
+    }
+}
+
+// Tables overlay (Overlay on Spectrogram mode): one curve per visible
+// parameter whose alignment target is the spectrogram. The transformed value
+// is a frequency in Hz mapped through this view's own frequency axis.
+void SpectralView::drawTablesOverlay (juce::Graphics& g)
+{
+    if (!app.showAllTables || app.tablesMode() != 1) return;
+    const auto& tables = app.activeTables();
+    if (tables.empty()) return;
+
+    const auto pr = plotRect();
+    if (pr.getWidth() <= 1 || pr.getHeight() <= 1) return;
+
+    for (const auto& t : tables)
+    {
+        if (!t.visible) continue;
+        for (const auto& p : t.params)
+        {
+            if (!p.visible || p.alignTarget != 1 || p.values.size() < 2) continue;
+
+            double mn = p.values[0], mx = p.values[0];
+            for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
+            const auto [off, sc] = t.effectiveTimeMap (p);
+
+            juce::Path path;
+            bool started = false;
+            for (int i = 0; i < pr.getWidth(); ++i)
+            {
+                const double tDoc = xToTime ((double) (pr.getX() + i));
+                const double tTab = (tDoc - off) / sc;
+                if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
+                const double fHz = sc::tables::transformValue (
+                    sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
+                if (!(fHz >= 0.0) || !(std::isfinite ((float) fHz))) { started = false; continue; }
+                const float y = pr.getY() + freqToY (fHz, pr.getHeight());
+                const float x = (float) (pr.getX() + i) + 0.5f;
+                if (!started) { path.startNewSubPath (x, y); started = true; }
+                else          path.lineTo (x, y);
+            }
+            g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
+            g.strokePath (path, juce::PathStrokeType (2.0f));
+        }
     }
 }
 

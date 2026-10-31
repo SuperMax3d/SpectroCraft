@@ -311,6 +311,22 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     (on Windows keep "Add python.exe to PATH" checked), verify with
     `python --version` in a terminal, then press Run again. Note that pure-Python
     processing is slow on long selections — select shorter ranges for big jobs.
+  - **Tables**: imported CSV data tables shown as an indented list of table
+    rows and their parameter rows, each with a visibility eye icon and a
+    palette colour square. Tables are created by dragging CSV files onto the
+    window or via right-click **Paste to new table**; right-click also offers
+    **Remove Selected**, **Copy** (CSV) and **Downsample...** (rows/second).
+    The top dropdown chooses where visible parameters are drawn: overlay on
+    the waveform, overlay on the spectrogram, or a dedicated resizable track
+    with its own vertical zoom/pan scrollbar. Tables and individual
+    parameters can be time-aligned manually, by picking one/two points on the
+    panel's preview plot plus the waveform/spectrogram (two points also
+    stretch), or automatically via cross-correlation when two parameters from
+    different tables are selected (**Auto Align**). Parameter alignment adds
+    value offset/scale and Normalized/Inverted/Absolute transforms. Import
+    rules: `true`/`false` → 1/0, first-column-text grids are transposed,
+    scattered gaps are interpolated, all-text columns are ignored. Everything
+    persists with the file via per-file metadata.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
     range, Log/Linear toggle, Reset, FFT size — from **512**, the finest
     frequency resolution, up to 65536; an **Auto** option at the end of that
@@ -1807,10 +1823,56 @@ the spectrogram: **Text**, **Arrow**, **Rectangle** and **Free Drawing**.
   via [per-file metadata](#per-file-metadata) — embedded in the WAV's `SCMD`
   chunk or in the `.meta.json` sidecar, exactly like selections.
 
+### Tables panel (CSV data tables)
+
+The **Tables** tab in the left panel manages any number of imported CSV data
+tables. Each table holds one or more parameters (columns), shown as an indented
+list: a table row followed by its parameter rows.
+
+- Every row has an eye icon that toggles *that* table's/parameter's visibility
+  and a colour square that cycles through the 12-colour palette. The **Show**
+  button at the top of the panel is the master switch for everything.
+- Tables are created by **dragging CSV files onto the window** (the table name
+  comes from the file name) or via right-click → **Paste to new table** (named
+  *Clipboard*; parameter names come from the first row's column titles).
+- Right-clicking a selection offers **Remove Selected**, **Copy** (CSV with a
+  header row of parameter names), **Downsample...** (prompts for the desired
+  rows/second) and **Close Panel**. Excel-style multi-selection applies:
+  plain click, Ctrl/Cmd+click toggle, Shift+click range.
+- The dropdown at the top picks where visible parameters are drawn:
+  - **Overlay on Waveform** — parameters whose alignment target is *Waveform*
+    are mapped to amplitude units and drawn over the waveform view;
+  - **Overlay on Spectrogram** — same for parameters targeted at *Spectrogram*
+    (mapped through the frequency axis);
+  - **Dedicated track** — a resizable strip above/below the data views (next
+    to the time ruler) shows every visible parameter auto-scaled, with its own
+    vertical zoom/pan scrollbar and the red playhead over it. Hovering near a
+    curve lists each parameter's *unscaled* value at that time.
+- **Align** (table row): Manual / 1 Point / 2 Points. Manual prompts for a time
+  offset + scale; 1/2 Points arm click-picking — first on the panel's preview
+  plot, then on the waveform/spectrogram (two points also stretch the table's
+  time axis).
+- **Align** (parameter row): Waveform / Spectrogram / Dedicated submenus with
+  the same Manual / 1 Point / 2 Points options. A parameter's *Manual* dialog
+  additionally offers value offset/scale plus **Normalized**, **Inverted** and
+  **Absolute** transforms applied before them.
+- With two parameters from different tables selected, right-clicking shows
+  **Auto Align <table> <param> with <table> <param>**: a mean-subtracted
+  cross-correlation finds the delay between the curves (the parameter under the
+  mouse is shifted onto the other one).
+- Import rules: `true`/`false` cells become `1.0`/`0.0`; if the first column is
+  entirely text the grid is transposed before import (rows become parameters);
+  scattered missing numeric values are interpolated from their neighbours;
+  columns that contain only text are ignored.
+- Like drawings and selections, tables persist with the file via
+  [per-file metadata](#per-file-metadata) — names, colours, visibility,
+  sample rates and every alignment/transform setting round-trip through the
+  `SCMD` chunk or `.meta.json` sidecar.
+
 ### Per-file metadata (File → Metadata)
 
 Everything that belongs to a file — **markers**, **user drawings**,
-**named spectral selections**,
+**data tables**, **named spectral selections**,
 the **scale calibration** (Set Unit and Scale), the **axis calibrations**
 (custom frequency units + alternative scales) and the **Frequency Analysis**
 settings (axis mode, FFT size, Ref Time, Smooth, Track) — is stored together
@@ -1871,14 +1933,16 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
-| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `DrawingPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Activate Harmonics** / **Copy Harmonics** / **Clear Harmonics**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with comments + harmonic cloning, user drawings over the spectrogram (text/arrow/rectangle/freehand with per-item comments, visibility toggles and fit-to-view; Excel-style multi-selection in all three list panels; persisted automatically with per-file metadata), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `DrawingPanel`, `TablesPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Activate Harmonics** / **Copy Harmonics** / **Clear Harmonics**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with comments + harmonic cloning, user drawings over the spectrogram (text/arrow/rectangle/freehand with per-item comments, visibility toggles and fit-to-view; Excel-style multi-selection in all three list panels; persisted automatically with per-file metadata), imported CSV **data tables** (`TablesPanel`: indented table/parameter rows with visibility + palette colour, CSV drag-and-drop / clipboard import with transpose & gap-interpolation rules, downsample, copy, overlay-on-waveform/spectrogram or dedicated-track display modes, and manual/click-picked/correlation-based time alignment per table and per parameter), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
 | `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with eight example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near; persisted via per-file metadata (embedded RIFF chunks or `.meta.json`). |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
-| `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`, including optional per-channel full-scale values), saved spectral selections, axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Also keeps the raw `bkdk` payload of the source file (when present) so WAV saves preserve it byte-for-byte. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
+| `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`, including optional per-channel full-scale values), saved spectral selections, data tables (with their alignment/transform state), axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Also keeps the raw `bkdk` payload of the source file (when present) so WAV saves preserve it byte-for-byte. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
 | `BkdkChunk` (`src/BkdkChunk.cpp`) | Parser for the custom `bkdk` RIFF chunk found in some legacy measurement WAV files: NUL-separated ASCII fields, one 11-field group per channel whose Calibration field (sample × gain = pascals) drives the automatic Pascal calibration on load. A single defined group applies to every channel; missing/unparseable values fall back to no scaling. |
-| `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
+| `Tables` (`src/Tables.cpp`) | Data-table model + CSV import (quoted fields, CRLF, boolean cells, first-column-text transpose, scattered-gap interpolation, text-only column drop), per-parameter downsample, value transforms (normalized/inverted/absolute + offset/scale), composed table+parameter time maps, mean-subtracted cross-correlation auto-align lag, and the JSON serialise/parse used by `FileMeta`. |
+| `TablesTrackView` (`src/TablesTrack.cpp`) | The dedicated-tables strip: draws every visible table parameter auto-scaled into its own plot area (same width as the data views, same left-axis width), with vertical zoom/pan driven by a `ValueScrollBar`, the red playhead over it and hover readout of each curve's unscaled value at the cursor time. |
+| `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, data tables, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`) | Video-container audio extraction (Windows + FFmpeg only): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
@@ -1900,13 +1964,13 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~3715 checks in Release), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~3860 checks in Release), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.
   - **Per-file metadata**: bundle JSON round-trip (markers with colours,
-    rect/polygon selections, scale calibration, axis calibrations, Frequency
-    Analysis settings, transcription); RIFF chunk scanner + surgical patching
+    rect/polygon selections, data tables, scale calibration, axis calibrations,
+    Frequency Analysis settings, transcription); RIFF chunk scanner + surgical patching
     (add/replace/remove while preserving every other byte of the audio);
     embedded save/load round-trip through `FileDoc` — including named spectral
     selections surviving an embedded WAV save/reopen; switching between

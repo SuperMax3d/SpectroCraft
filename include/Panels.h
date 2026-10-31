@@ -1744,6 +1744,150 @@ private:
     JUCE_DECLARE_NON_COPYABLE (DrawingPanel)
 };
 
+/** Preview plot at the bottom of the Tables panel: shows one focused table's
+    parameters on its own time axis. A left click reports the clicked table
+    time in seconds (used by the 1/2-point alignment flow). */
+class TablesPlotView : public juce::Component
+{
+public:
+    explicit TablesPlotView (Application& appIn);
+
+    std::function<void(double tTableSecs)> onPointClicked;
+
+    void setFocusTableIndex (int idx);   // -1 = nothing to show
+    int focusTableIndex() const { return focusIdx_; }
+    double xToTableTime (int x) const;
+    /** Duration of the focused table in seconds (0 when none). */
+    double tableDuration() const;
+
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    Application& app;
+    int focusIdx_ = -1;
+};
+
+/** Left-column tab managing imported CSV tables. Each table is an indented
+    list of its parameter columns; every row carries a visibility eye icon
+    and a colour square (click to cycle). Tables are created by dropping CSV
+    files on the app or via right-click "Paste to new table". The top row has
+    a master visibility switch and the display-mode dropdown (Overlay on
+    Waveform / Overlay on Spectrogram / Dedicated track).
+
+    Alignment: tables and parameters can be aligned in time against the
+    waveform/spectrogram timeline - manually (offset + scale prompt) or by
+    clicking reference points (1 point = shift, 2 points = shift + stretch).
+    Parameters additionally carry value transforms (normalized/inverted/
+    absolute before offset/scale). Everything persists with the file's
+    metadata bundle. */
+class TablesPanel : public juce::Component
+{
+public:
+    explicit TablesPanel (Application& app);
+    ~TablesPanel();
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+    /** Re-reads the active doc's table list into rows and syncs the header.
+        Called after any change (import, removal, alignment, mode switch). */
+    void refresh();
+
+    // Excel-style multi-selection over mixed table/parameter rows: plain click
+    // selects one row, Ctrl/Cmd toggles, Shift range-selects from the anchor.
+    void onRowClicked (int row, const juce::MouseEvent& e);
+
+    struct RowRef { int tableIdx = -1; int paramIdx = -1; };   // paramIdx<0 = the table itself
+    RowRef rowRef (int row) const;
+    bool isTableRow (int row) const;
+
+    int primaryRow() const;
+    std::vector<int> selectedRowIndices() const;
+    int numSelectedRows() const { return table.getNumSelectedRows (); }
+
+    // Context menu actions.
+    void removeSelected();
+    void downsamplePrimaryTable();
+    void copySelection();
+    void pasteToNewTable();
+    /** Manual alignment prompt. scopeParam < 0 = table-level (time only);
+        >= 0 also offers the value transforms + offset/scale fields. */
+    void showManualAlignDialog (int scopeTable, int scopeParam);
+    /** Starts a click-based alignment: `numPoints` clicks on the preview plot
+        followed by the same number in the target view (0=waveform,
+        1=spectrogram). Two points also stretch. */
+    void startPointAlign (int numPoints, int scopeTable, int scopeParam, int targetView);
+
+    bool hasPendingAlignment() const { return havePending_; }
+    void cancelPendingAlignment();
+    /** Clicks arriving from the preview plot / waveform / spectrogram while a
+        click-based alignment is pending. */
+    void handlePlotClick (double tTableSecs);
+    void handleDocClick (double tDocSecs);
+
+    // Right-click context menu on rows.
+    void mouseDown (const juce::MouseEvent&) override;
+
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
+
+    // Accessors for headless unit tests.
+    juce::TableListBox& listTable() { return table; }
+    TablesPlotView& plotView() { return plot; }
+    void simulateCellClick (int row, int columnId, const juce::MouseEvent& e)
+    {
+        model.cellClicked (row, columnId, e);
+    }
+
+private:
+    Application& app;
+
+    class Model : public juce::TableListBoxModel
+    {
+    public:
+        explicit Model (TablesPanel* owner);
+        int getNumRows() override;
+        void paintRowBackground (juce::Graphics& g, int rowNumber, int width, int height,
+                                 bool selected) override;
+        // Column 1 = visibility eye icon, column 2 = colour square, column 3
+        // = name (parameters indented).
+        void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
+                        bool selected) override;
+        void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+
+    private:
+        TablesPanel* owner;
+    };
+
+    Model model { this };
+    juce::TableListBox table { "", &model };
+
+    EyeButton masterShowBtn { "Show" };   // top-row master visibility switch
+    juce::ComboBox modeCombo;            // Overlay on Waveform / Spectrogram / Dedicated track
+    juce::Label statusLabel;             // pending-alignment hints + import errors
+    TablesPlotView plot;
+
+    std::vector<RowRef> rows_;           // row index -> (table, param)
+    FileDoc* listDoc = nullptr;          // doc whose tables the current rows belong to
+    int anchorRow = -1;                  // last plain-clicked row: Shift+click origin
+
+    struct PendingAlign
+    {
+        int numPoints = 0;
+        int scopeTable = -1, scopeParam = -1;   // scopeParam<0 = table level
+        int targetView = 0;                     // 0=waveform 1=spectrogram
+        std::vector<double> tablePts, docPts;
+    };
+    PendingAlign pending_;
+    bool havePending_ = false;
+
+    void showContextMenu (int row);
+    void updateStatus();
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TablesPanel)
+};
+
 // ---------------------------------------------------------------- Status bar
 
 // Thin strip at the bottom of the window: active file name + mouse probe info

@@ -6,6 +6,7 @@
 #include "WaveformView.h"
 #include "SpectralView.h"
 #include "ScrollBars.h"
+#include "TablesTrack.h"
 #include "Panels.h"
 #include <memory>
 #include <algorithm>
@@ -420,6 +421,7 @@ public:
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
     void handleTopSplitterDrag (const juce::MouseEvent& e);   // top tabs / bottom tabs
+    void handleTablesSepDrag (const juce::MouseEvent& e);     // dedicated tables track divider
     const char* panelIdFor (juce::Component*) const;          // stable id for a panel component
     struct LeftPanelEntry { const char* id; juce::String name; bool defaultTop; };
     std::vector<LeftPanelEntry> leftPanelEntries() const;     // canonical order, AI-conditional
@@ -486,6 +488,8 @@ private:
     std::unique_ptr<SpectralView> spectralView;
     std::unique_ptr<ViewSplitter> splitter;   // draggable divider between the views
     double splitRatio = 0.55;                 // fraction of main area used by waveform
+    int tablesSepAnchorY = 0;                 // strip top (window coords) for the drag handler
+    double tablesSepRefH = 1.0;               // reference height for tablesTrackRatio
     std::unique_ptr<ViewSplitter> leftSplitter;  // vertical divider: left column | main area
     int leftPanelW = 340;                     // width of the left panel column (px)
     std::unique_ptr<ViewSplitter> topSplitter;   // horizontal divider between tab groups
@@ -510,6 +514,7 @@ private:
 #endif
     std::unique_ptr<SelectionPanel> selectionPanel;           // named selections + clone & multiply
     std::unique_ptr<DrawingPanel> drawingPanel;               // spectrogram drawings (bottom group)
+    std::unique_ptr<TablesPanel> tablesPanel;                 // imported CSV tables (top group)
     std::unique_ptr<HistoryPanel> historyPanel;
     std::unique_ptr<PythonPanel> pythonPanel;                 // user Python scripts (top group)
 
@@ -524,6 +529,14 @@ private:
     // scrollbar per view on its right edge.
     std::unique_ptr<TimeScrollBar> timeBar;
     std::unique_ptr<ValueScrollBar> waveVScroll, specVScroll;
+
+    // Dedicated tables track (Tables panel mode 2): a strip above the data
+    // views with its own separator + vertical scrollbar.
+    std::unique_ptr<TablesTrackView> tablesTrack;
+    std::unique_ptr<ViewSplitter> tablesSep;
+    std::unique_ptr<ValueScrollBar> tablesVScroll;
+    double tablesTrackRatio = 0.18;   // fraction of the main area height
+    juce::Component* tablesTrackComp() { return tablesTrack.get (); }   // unit tests
 
     // Status bar at the very bottom: mouse probe + selection/playhead times.
     std::unique_ptr<StatusBar> statusBar;

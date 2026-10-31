@@ -130,6 +130,10 @@ public:
     // Status-bar probe: cursor time + amplitude under the mouse (empty clears).
     std::function<void(const juce::String&)> onCursorInfo;
 
+    // Tables panel alignment flow: while set, a left click inside this view is
+    // consumed as an alignment reference point and reported with its time.
+    std::function<void(double tSecs)> onAlignClick;
+
     double getViewStart() const { return viewStart; }
     double getViewEnd() const { return viewEnd; }
     double xToTime (int x) const;
@@ -179,10 +183,21 @@ public:
             return { x0, 0,
                      std::max (1, getWidth() - kLeftAxisWidth),
                      std::max (1, getHeight()) };
-        const int ruY = rulerAtBottom() ? 0 : kRulerH;
+        // When the ruler is at the top and a dedicated tables track sits
+        // below it, that strip's height is reserved inside this view.
+        const int inset = (!rulerAtBottom() && showTimeRuler) ? tablesTopInset : 0;
+        const int ruY = rulerAtBottom() ? 0 : kRulerH + inset;
         return { x0, ruY,
                  std::max (1, getWidth() - kLeftAxisWidth),
-                 std::max (1, getHeight() - kRulerH) };
+                 std::max (1, getHeight() - kRulerH - inset) };
+    }
+
+    /** Reserves `px` pixels below the top time ruler for the dedicated tables
+        track (MainWindow places it there when the ruler is at the top). */
+    void setTablesTopInset (int px)
+    {
+        const int v = std::max (0, px);
+        if (v != tablesTopInset) { tablesTopInset = v; dirty = true; repaint(); }
     }
 
     static constexpr int kRulerH = 24;  // top time ruler height
@@ -193,6 +208,7 @@ private:
     bool showMarkerTitles = true;   // suppressed while the spectrogram is stacked below
     double viewStart = 0, viewEnd = 10, vZoom = 1;
     double vOffset = 0;   // amplitude value at each row's centre (vertical pan)
+    int tablesTopInset = 0;   // reserved strip below the top ruler (tables track)
     juce::Range<double> selection{ 0, 0 };
     double playhead = 0;
     const std::vector<Marker>* markerList = nullptr;   // same overlay as the spectral view
@@ -224,6 +240,7 @@ private:
     }
 
     void paintChannel (juce::Graphics& g, int ch, int chanY, int chanH, float center, float amp);
+    void drawTablesOverlay (juce::Graphics& g);
     void drawRuler (juce::Graphics& g);
     /** rowChans[r] = channel index displayed in row r (per-channel scales). */
     void drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce::Rectangle<int>>& rows,

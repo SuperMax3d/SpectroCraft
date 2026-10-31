@@ -305,6 +305,8 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
         }
         root->setProperty ("drawings", arr);
     }
+    if (!b.tables.empty())
+        root->setProperty ("tables", sc::tables::serialiseTables (b.tables, b.tablesMode));
 
     auto scale = new juce::DynamicObject();
     scale->setProperty ("unit", static_cast<int> (b.scale.unit));
@@ -466,6 +468,14 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
             }
             out.drawings = std::move (list);
         }
+    }
+
+    out.haveTables = p.contains ("tables");
+    if (out.haveTables)
+    {
+        const juce::var tv = p.getWithDefault ("tables", juce::var());
+        if (!sc::tables::parseTables (tv, out.tables, &out.tablesMode))
+            return false;
     }
 
     out.haveScale = p.contains ("scale");

@@ -13,6 +13,7 @@
 #include "SavedSelections.h"   // SavedSpectralSelection
 #include "ScaleCalibration.h"  // ScaleCalibration
 #include "ScttChunk.h"         // ScttData
+#include "Tables.h"            // sc::tables::TableData
 
 namespace sc
 {
@@ -81,18 +82,24 @@ struct MetaBundle
     FreqAnalysisState freqAnalysis;
     ScttData transcription;   // only serialised in external mode
 
+    // Tables panel: imported CSV tables with per-parameter alignment, plus
+    // the display mode (0=Overlay on Waveform 1=Overlay on Spectrogram
+    // 2=Dedicated track).
+    std::vector<sc::tables::TableData> tables;
+    int tablesMode = 0;
+
     /** Set by parseBundle() when the corresponding key was present in the
         document (used to merge bundles from several sources). */
     bool haveMarkers = false, haveSelections = false, haveDrawings = false,
          haveScale = false, haveAltRef = false, haveFreqAnalysis = false,
-         haveTranscription = false;
+         haveTranscription = false, haveTables = false;
 
     /** True when the bundle holds anything worth persisting. */
     bool hasContent() const
     {
         return !markers.empty() || !selections.empty() || !drawings.empty()
             || scale.isCalibrated() || !altRef.isDefault()
-            || !freqAnalysis.isDefault();
+            || !freqAnalysis.isDefault() || !tables.empty();
     }
 };
 

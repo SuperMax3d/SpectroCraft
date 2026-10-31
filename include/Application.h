@@ -469,9 +469,28 @@ public:
     bool showAllDrawings = true;
     void setShowAllDrawings (bool on);
 
+    /** Master switch for table rendering (session state): when off, no table
+        overlays or dedicated track are drawn at all. */
+    bool showAllTables = true;
+    void setShowAllTables (bool on);
+
     /** Toggles one item's per-element visibility (the eye icon in the
         Drawing panel list). The state persists with the file metadata. */
     void toggleDrawingHidden (int row);
+
+    // ---- Tables (Tables panel) --------------------------------------------
+    /** Imports CSV text as a new table on the active document (name = file
+        name or "Clipboard") and notifies listeners. Returns false with an
+        error message when the import fails. */
+    bool addTableFromCsv (const juce::String& name, const juce::String& csvText,
+                          std::string* errOut = nullptr);
+    /** The active document's tables (empty vector when no file is open). */
+    std::vector<sc::tables::TableData>& activeTables();
+    int  tablesMode() const;
+    void setTablesMode (int mode);   // 0=Overlay on Waveform 1=Spectral 2=Dedicated
+    /** True when the dedicated track should be shown: mode == Dedicated and at
+        least one parameter of a visible table is itself visible. */
+    bool anyVisibleTableParam() const;
 
     // Interactive clone picking: first click = reference frequency, each later
     // click adds clones at (clicked freq / ref freq). Esc or the panel button
@@ -745,6 +764,15 @@ public:
 
     // Set by MainWindow: refreshes the Drawing panel after its list changed.
     std::function<void()> onDrawingsChanged;
+
+    // Set by MainWindow: refreshes the Tables panel and re-lays out the main
+    // area (the dedicated track appears/disappears with mode + visibility).
+    std::function<void()> onTablesChanged;
+
+    // Set by MainWindow: arms/disarms the click capture used by the Tables
+    // panel's 1/2-point alignment. targetView 0 = waveform, 1 = spectrogram,
+    // negative disarms both views.
+    std::function<void(int)> onArmTableAlignClick;
 
     // Set by MainWindow: called whenever setPlayhead() moves the cursor, so both
     // views always show the same playhead position.

@@ -162,10 +162,22 @@ public:
     // user places the reference point in the plot.
     std::function<void(double, double)> onRefClickPlaced;
 
+    // Tables panel alignment flow: while set, a left click inside this view is
+    // consumed as an alignment reference point and reported with its time.
+    std::function<void(double tSecs)> onAlignClick;
+
     /** When both views are stacked the spectrogram hides its own time ruler
         (the waveform's top ruler covers it). */
     void setShowOwnTimeRuler (bool show);
     bool showsOwnTimeRuler() const { return showOwnTimeRuler; }
+
+    /** Reserves `px` pixels below the top time ruler for the dedicated tables
+        track (MainWindow places it there when the ruler is at the top). */
+    void setTablesTopInset (int px)
+    {
+        const int v = std::max (0, px);
+        if (v != tablesTopInset) { tablesTopInset = v; dirty = true; imageDirty = true; repaint(); }
+    }
     // While an export is composing its offscreen image, rulerH()/plotRect()
     // address the EXPORT layout instead of the live component bounds.
     int rulerH() const
@@ -226,6 +238,7 @@ public:
     void drawSpectralShapesOverlay (juce::Graphics& g, bool includeLivePreview);
     void drawMarkersOverlay (juce::Graphics& g);
     void drawChannelLabels (juce::Graphics& g);
+    void drawTablesOverlay (juce::Graphics& g);
 
 private:
     Application& app;   // audio data read live via app.audioEngine() (active doc)
@@ -241,6 +254,7 @@ private:
     std::vector<std::pair<double, double>> freePts_;   // (tSecs, fHz) path
 
     bool showOwnTimeRuler = true;
+    int tablesTopInset = 0;   // reserved strip below the top ruler (tables track)
     // Offscreen export layout: when set, plotRect()/rulerH()/layoutWidth() /
     // layoutHeight() address this rectangle instead of the component bounds.
     bool haveExportLayout_ = false;

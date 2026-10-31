@@ -1429,6 +1429,14 @@ void Application::setShowAllDrawings (bool on)
     if (onStateChange) onStateChange ();   // repaints the views + refreshes panels
 }
 
+void Application::setShowAllTables (bool on)
+{
+    if (showAllTables == on) return;
+    showAllTables = on;
+    if (onTablesChanged)
+        onTablesChanged ();
+}
+
 void Application::toggleDrawingHidden (int row)
 {
     FileDoc* d = doc ();
@@ -1437,6 +1445,72 @@ void Application::toggleDrawingHidden (int row)
     d->metaDirty = true;   // the visibility state persists with the metadata
     if (onDrawingsChanged)
         onDrawingsChanged ();
+}
+
+// ---- Tables (Tables panel) -----------------------------------------------
+
+bool Application::addTableFromCsv (const juce::String& name, const juce::String& csvText,
+                                   std::string* errOut)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr)
+    {
+        if (errOut) *errOut = "no file is open";
+        return false;
+    }
+
+    sc::tables::TableData t;
+    if (!sc::tables::importTable (name, csvText, t, errOut))
+        return false;
+
+    // Give the new table a colour not used by its earlier siblings.
+    std::vector<int> used;
+    for (const auto& other : d->tables)
+        used.push_back (other.colorIndex);
+    int ci = 0;
+    while (ci < 12 && std::find (used.begin(), used.end(), ci) != used.end()) ++ci;
+    t.colorIndex = ci % 12;
+
+    d->tables.push_back (std::move (t));
+    d->metaDirty = true;   // the tables persist with the file metadata
+    if (onTablesChanged)
+        onTablesChanged ();
+    return true;
+}
+
+std::vector<sc::tables::TableData>& Application::activeTables()
+{
+    static std::vector<sc::tables::TableData> empty;
+    FileDoc* d = doc ();
+    return (d != nullptr) ? d->tables : empty;
+}
+
+int Application::tablesMode() const
+{
+    const FileDoc* d = doc ();
+    return (d != nullptr) ? d->tablesMode : 0;
+}
+
+void Application::setTablesMode (int mode)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr || d->tablesMode == std::clamp (mode, 0, 2)) return;
+    d->tablesMode = std::clamp (mode, 0, 2);
+    d->metaDirty = true;   // the display mode persists with the file metadata
+    if (onTablesChanged)
+        onTablesChanged ();
+}
+
+bool Application::anyVisibleTableParam() const
+{
+    const FileDoc* d = doc ();
+    if (!showAllTables || d == nullptr || d->tablesMode != 2) return false;
+    for (const auto& t : d->tables)
+        if (!t.visible) continue;
+        else
+            for (const auto& p : t.params)
+                if (p.visible) return true;
+    return false;
 }
 
 void Application::ensureDrawingVisible (double t0, double f0, double t1, double f1)

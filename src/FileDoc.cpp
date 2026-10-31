@@ -91,6 +91,20 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
     else if (scmdB.haveDrawings)
         drawings = scmdB.drawings;
 
+    // Tables: unified > SCMD (same precedence as the drawings).
+    tables.clear ();
+    tablesMode = 0;
+    if (unifiedB.haveTables)
+    {
+        tables     = unifiedB.tables;
+        tablesMode = unifiedB.tablesMode;
+    }
+    else if (scmdB.haveTables)
+    {
+        tables     = scmdB.tables;
+        tablesMode = scmdB.tablesMode;
+    }
+
     // Scale / reference calibrations / analysis settings: unified > SCMD.
     scale        = unifiedB.haveScale        ? unifiedB.scale
                    : (scmdB.haveScale        ? scmdB.scale        : ScaleCalibration {});
@@ -159,6 +173,8 @@ std::string FileDoc::buildScmdJson () const
     b.markers      = markers.markers ();
     b.selections   = savedSelections;
     b.drawings     = drawings;
+    b.tables       = tables;
+    b.tablesMode   = tablesMode;
     b.scale        = scale;
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
@@ -174,6 +190,8 @@ std::string FileDoc::buildMetaJson () const
     b.markers      = markers.markers ();
     b.selections   = savedSelections;
     b.drawings     = drawings;
+    b.tables       = tables;
+    b.tablesMode   = tablesMode;
     b.scale        = scale;
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
@@ -187,6 +205,8 @@ void FileDoc::applyBundle (const sc::MetaBundle& b)
     markers.restore (b.markers);
     savedSelections = b.selections;
     drawings        = b.drawings;
+    tables          = b.tables;
+    tablesMode      = b.tablesMode;
     scale           = b.scale;
     altRef          = b.altRef;
     freqAnalysis    = b.freqAnalysis;

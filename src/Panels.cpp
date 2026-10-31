@@ -9050,3 +9050,904 @@ void DrawingPanel::resized()
     table.setBounds (6, 34, r.getWidth () - 12, r.getHeight () - 34 - 30);
     deleteBtn.setBounds (6, r.getHeight () - 28, 110, 24);
 }
+
+// ============================================================================
+// Tables panel: imported CSV tables with per-parameter alignment, overlays
+// and a dedicated track.
+// ============================================================================
+
+static bool tablesParseDouble (const juce::String& s, double& out)
+{
+    const auto t = s.trim();
+    if (t.isEmpty()) return false;
+    // This JUCE build has no createFloatFromString(): validate the characters
+    // first, then parse with getDoubleValue().
+    bool haveDigit = false;
+    for (char16_t c : t)
+    {
+        if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')
+        {
+            haveDigit = haveDigit || (c >= '0' && c <= '9');
+            continue;
+        }
+        break;
+    }
+    if (!haveDigit) return false;
+    const double v = t.getDoubleValue();
+    if (!std::isfinite ((float) v)) return false;
+    out = v;
+    return true;
+}
+
+// ------------------------------------------------------------------ Clipboard --
+// This JUCE build has no juce::Clipboard singleton: use the static
+// SystemClipboard methods instead.
+static void tablesSetClipboardText (const juce::String& text)
+{
+    juce::SystemClipboard::copyTextToClipboard (text);
+}
+
+static juce::String tablesGetClipboardText()
+{
+    return juce::SystemClipboard::getTextFromClipboard ();
+}
+
+/** AlertWindow numeric prompt: one labelled field, OK/Cancel. */
+static bool tablesPromptNumber (juce::Component* parent, const juce::String& title,
+                                const juce::String& message, const juce::String& initial,
+                                double& out)
+{
+    auto* w = new juce::AlertWindow (title, message, juce::AlertWindow::QuestionIcon, parent);
+    w->addTextEditor ("value", initial);
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (auto* editor = w->getTextEditor ("value"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+        editor->setEscapeAndReturnKeysConsumed (false);
+    }
+    w->enterModalState (false);
+    if (auto* editor = w->getTextEditor ("value"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    const juce::String text = w->getTextEditorContents ("value");
+    delete w;
+    if (result != 1) return false;
+    double v = 0.0;
+    if (!tablesParseDouble (text, v))
+    {
+        juce::AlertWindow bad ("Invalid value",
+                               "The entered text could not be read as a number.",
+                               juce::AlertWindow::WarningIcon, parent);
+        bad.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        bad.enterModalState (false);
+        bad.runModalLoop ();
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+/** CSV-quotes a field when needed (commas, quotes, newlines). */
+static juce::String csvQuoteField (const juce::String& s)
+{
+    if (s.containsAnyOf (",\"\n\r"))
+        return "\"" + s.replace ("\"", "\"\"") + "\"";
+    return s;
+}
+
+// ------------------------------------------------------------------ Plot --
+
+TablesPlotView::TablesPlotView (Application& appIn) : app (appIn) {}
+
+void TablesPlotView::setFocusTableIndex (int idx)
+{
+    if (idx == focusIdx_) return;
+    focusIdx_ = idx;
+    repaint();
+}
+
+double TablesPlotView::tableDuration() const
+{
+    auto* d = app.doc ();
+    if (d == nullptr || focusIdx_ < 0 || focusIdx_ >= (int) d->tables.size ()) return 0.0;
+    return d->tables[(size_t) focusIdx_].duration();
+}
+
+double TablesPlotView::xToTableTime (int x) const
+{
+    const double dur = tableDuration();
+    if (dur <= 0.0 || getWidth() <= 1) return 0.0;
+    return std::clamp ((double) x / (double) getWidth(), 0.0, 1.0) * dur;
+}
+
+void TablesPlotView::paint (juce::Graphics& g)
+{
+    const auto bounds = getLocalBounds();
+    g.fillAll (juce::Colour::fromRGB (24, 24, 28));
+    g.setColour (juce::Colour::fromRGB (70, 70, 80));
+    g.drawRect (bounds.reduced (0.5f), 1);
+
+    auto* d = app.doc ();
+    if (d == nullptr || focusIdx_ < 0 || focusIdx_ >= (int) d->tables.size ())
+    {
+        g.setColour (juce::Colours::grey);
+        g.setFont (12.0f);
+        g.drawText ("Select a table or parameter to preview it here.", bounds,
+                    juce::Justification::centred, true);
+        return;
+    }
+
+    const auto& t = d->tables[(size_t) focusIdx_];
+    const double dur = t.duration();
+    if (dur <= 0.0 || getWidth() < 10) return;
+
+    // Auto-scale the value axis over all visible parameters of this table.
+    double mn = 0.0, mx = 0.0;
+    bool have = false;
+    for (const auto& p : t.params)
+    {
+        if (!p.visible || p.values.empty()) continue;
+        double lo = p.values[0], hi = p.values[0];
+        for (double v : p.values) { lo = std::min (lo, v); hi = std::max (hi, v); }
+        if (!have) { mn = mx = lo; have = true; }
+        mn = std::min (mn, lo);
+        mx = std::max (mx, hi);
+    }
+    if (!have) return;
+    const double pad = std::max ((mx - mn) * 0.1, 1e-9);
+    mn -= pad; mx += pad;
+
+    const int axisH = 14;   // time labels at the bottom
+    const auto pr = juce::Rectangle<int> (2, 2, getWidth() - 4, getHeight() - 4 - axisH);
+
+    for (const auto& p : t.params)
+    {
+        if (!p.visible || p.values.size() < 2) continue;
+        juce::Path path;
+        bool started = false;
+        for (int i = 0; i < pr.getWidth(); ++i)
+        {
+            const double tt = ((double) i / (pr.getWidth() - 1)) * dur;
+            const double v = sc::tables::paramValueAt (t, p, tt);
+            const float y = pr.getY() + (float) ((mx - v) / (mx - mn)) * (float) pr.getHeight();
+            if (!started) { path.startNewSubPath ((float) i + 0.5f, y); started = true; }
+            else          path.lineTo ((float) i + 0.5f, y);
+        }
+        g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
+        g.strokePath (path, juce::PathStrokeType (1.6f));
+    }
+
+    // Time axis: a few labels in seconds.
+    g.setFont (9.0f);
+    g.setColour (juce::Colours::grey);
+    const int nLab = 4;
+    for (int i = 0; i <= nLab; ++i)
+        g.drawText (juce::String (dur * ((double) i / nLab), 2),
+                    juce::Rectangle<int> (pr.getX() + pr.getWidth() * i / nLab - 18,
+                                          getHeight() - axisH + 1, 36, 12),
+                    juce::Justification::centred, true);
+}
+
+void TablesPlotView::mouseDown (const juce::MouseEvent& e)
+{
+    if (!e.mods.isLeftButtonDown() || e.mods.isRightButtonDown()) return;
+    if (onPointClicked && tableDuration() > 0.0)
+        onPointClicked (xToTableTime (e.x));
+}
+
+// ----------------------------------------------------------------- Panel --
+
+TablesPanel::Model::Model (TablesPanel* o) : owner (o) {}
+
+int TablesPanel::Model::getNumRows()
+{
+    return (int) owner->rows_.size();
+}
+
+void TablesPanel::Model::paintRowBackground (juce::Graphics& g, int, int width, int height,
+                                             bool selected)
+{
+    if (selected)
+    {
+        g.setColour (juce::Colour::fromRGB (60, 80, 120));
+        g.fillRect (0, 0, width, height);
+    }
+}
+
+void TablesPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int columnId,
+                                   int width, int height, bool)
+{
+    if (rowNumber < 0 || rowNumber >= (int) owner->rows_.size ()) return;
+    const auto ref = owner->rows_[(size_t) rowNumber];
+    auto* d = owner->app.doc ();
+    if (d == nullptr || ref.tableIdx < 0 || ref.tableIdx >= (int) d->tables.size ()) return;
+
+    const auto& t = d->tables[(size_t) ref.tableIdx];
+    const bool isTable = ref.paramIdx < 0;
+    const bool visible = isTable ? t.visible
+                                 : (ref.paramIdx < (int) t.params.size()
+                                    && t.params[(size_t) ref.paramIdx].visible);
+    const int colour = isTable ? t.colorIndex
+                               : (ref.paramIdx < (int) t.params.size()
+                                  ? t.params[(size_t) ref.paramIdx].colorIndex : 0);
+
+    g.setFont (11.0f);
+    if (columnId == 1)   // visibility eye icon
+        drawEyeIcon (g, juce::Rectangle<float> ((float) width / 2.0f - 8.0f,
+                                                (float) height / 2.0f - 6.0f,
+                                                16.0f, 12.0f), visible);
+    else if (columnId == 2)   // colour square
+    {
+        g.setColour (sc::tables::kPalette[colour % 12]);
+        g.fillRoundedRectangle (juce::Rectangle<float> ((float) width / 2.0f - 7.0f,
+                                                        (float) height / 2.0f - 6.0f,
+                                                        14.0f, 12.0f),
+                                2.0f);
+    }
+    else   // name; parameters are indented under their table
+    {
+        const juce::String name = isTable ? t.name
+                                          : (ref.paramIdx < (int) t.params.size()
+                                             ? t.params[(size_t) ref.paramIdx].name : "");
+        g.setColour (isTable ? juce::Colours::white : juce::Colours::lightgrey);
+        g.drawText (name, isTable ? 4 : 20, 0, width - (isTable ? 8 : 24), height,
+                    juce::Justification::centredLeft, false);
+    }
+}
+
+void TablesPanel::Model::cellClicked (int rowNumber, int columnId, const juce::MouseEvent& e)
+{
+    if (rowNumber < 0 || rowNumber >= getNumRows ()) return;
+    auto* d = owner->app.doc ();
+    if (d == nullptr) return;
+
+    // Left clicks on the eye icon / colour square change that property only.
+    if (!e.mods.isRightButtonDown() && columnId <= 2)
+    {
+        const auto ref = owner->rows_[(size_t) rowNumber];
+        if (ref.tableIdx >= 0 && ref.tableIdx < (int) d->tables.size())
+        {
+            auto& t = d->tables[(size_t) ref.tableIdx];
+            if (columnId == 1)
+            {
+                if (ref.paramIdx < 0) t.visible = !t.visible;
+                else if (ref.paramIdx < (int) t.params.size())
+                    t.params[(size_t) ref.paramIdx].visible = !t.params[(size_t) ref.paramIdx].visible;
+            }
+            else   // columnId == 2: cycle the colour square through the palette
+            {
+                if (ref.paramIdx < 0) t.colorIndex = (t.colorIndex + 1) % 12;
+                else if (ref.paramIdx < (int) t.params.size())
+                    t.params[(size_t) ref.paramIdx].colorIndex =
+                        (t.params[(size_t) ref.paramIdx].colorIndex + 1) % 12;
+            }
+            d->metaDirty = true;   // visibility/colour persist with the metadata
+            if (owner->app.onTablesChanged) owner->app.onTablesChanged ();
+            return;
+        }
+    }
+    owner->onRowClicked (rowNumber, e);
+}
+
+TablesPanel::TablesPanel (Application& appIn)
+    : app (appIn), listDoc (appIn.doc()), plot (appIn)
+{
+    masterShowBtn.setComponentID ("tables-showall-btn");
+
+    auto& header = table.getHeader ();
+    const int fixedFlags = juce::TableHeaderComponent::notResizableOrSortable;
+    header.addColumn ("Show", 1, 40, 30, -1, fixedFlags);
+    header.addColumn ("Colour", 2, 56, 30, -1, fixedFlags);
+    header.addColumn ("Name", 3, 120, 40, -1, fixedFlags);
+
+    modeCombo.addItem ("Overlay on Waveform", 1);
+    modeCombo.addItem ("Overlay on Spectrogram", 2);
+    modeCombo.addItem ("Dedicated track", 3);
+    modeCombo.setSelectedItemIndex (app.tablesMode(), juce::dontSendNotification);
+    modeCombo.onChange = [this] { app.setTablesMode (modeCombo.getSelectedItemIndex ()); };
+
+    masterShowBtn.onClick = [this] { app.setShowAllTables (!app.showAllTables); };
+
+    plot.onPointClicked = [this] (double tTab) { handlePlotClick (tTab); };
+
+    addAndMakeVisible (&masterShowBtn);
+    addAndMakeVisible (&modeCombo);
+    addAndMakeVisible (&statusLabel);
+    addAndMakeVisible (&table);
+    addAndMakeVisible (&plot);
+
+    table.setMultipleSelectionEnabled (true);
+    table.setSuppressShiftRangeSelection (true);   // we do the exact-range shift select ourselves
+
+    // Right-clicking a row shows the panel context menu (deep registration:
+    // clicks on rows are delivered to the row's own component).
+    table.addMouseListener (this, true);
+
+    refresh ();
+}
+
+TablesPanel::~TablesPanel() = default;
+
+void TablesPanel::refresh()
+{
+    auto* d = app.doc ();
+
+    rows_.clear();
+    if (d != nullptr)
+        for (int ti = 0; ti < (int) d->tables.size(); ++ti)
+        {
+            rows_.push_back ({ ti, -1 });
+            for (int pi = 0; pi < (int) d->tables[(size_t) ti].params.size(); ++pi)
+                rows_.push_back ({ ti, pi });
+        }
+
+    // The row selection belongs to the document whose tables are shown.
+    if (d != listDoc)
+    {
+        listDoc = d;
+        anchorRow = -1;
+        juce::SparseSet<int> none;
+        table.setSelectedRows (none, juce::sendNotification);
+    }
+
+    masterShowBtn.shown = app.showAllTables;
+    masterShowBtn.repaint ();
+    modeCombo.setSelectedItemIndex (app.tablesMode(), juce::dontSendNotification);
+
+    // The preview follows the primary selected row's table.
+    const int pr = primaryRow();
+    plot.setFocusTableIndex (pr >= 0 ? rows_[(size_t) pr].tableIdx : -1);
+
+    updateStatus ();
+    table.updateContent ();
+    table.repaint ();
+}
+
+void TablesPanel::onRowClicked (int row, const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu ()) return;   // right-click: keep any multi-selection
+
+    table.setWantsKeyboardFocus (true);
+    table.grabKeyboardFocus ();
+
+    if (e.mods.isShiftDown ())
+    {
+        const int n = (int) rows_.size();
+        const int a = (anchorRow >= 0 && anchorRow < n) ? anchorRow : row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ std::min (a, row), std::max (a, row) + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+    }
+    else if (e.mods.isCommandDown () || e.mods.isCtrlDown ())
+    {
+        anchorRow = row;   // JUCE already toggled this row before cellClicked fired
+    }
+    else
+    {
+        anchorRow = row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+    }
+
+    // Keep the preview on the newly primary row's table.
+    plot.setFocusTableIndex (rows_[(size_t) std::clamp (row, 0, (int) rows_.size() - 1)].tableIdx);
+}
+
+TablesPanel::RowRef TablesPanel::rowRef (int row) const
+{
+    return (row >= 0 && row < (int) rows_.size()) ? rows_[(size_t) row] : RowRef {};
+}
+
+bool TablesPanel::isTableRow (int row) const
+{
+    const auto ref = rowRef (row);
+    return ref.tableIdx >= 0 && ref.paramIdx < 0;
+}
+
+int TablesPanel::primaryRow() const
+{
+    int r = table.getNumSelectedRows () > 0 ? table.getSelectedRow (0) : -1;
+    if (r < 0 || r >= (int) rows_.size()) return -1;   // stale selection guard
+    return r;
+}
+
+std::vector<int> TablesPanel::selectedRowIndices() const
+{
+    std::vector<int> out;
+    for (int r : sparseRows (table.getSelectedRows ()))
+        if (r >= 0 && r < (int) rows_.size())
+            out.push_back (r);
+    return out;
+}
+
+void TablesPanel::removeSelected()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+
+    // Remove selected parameters first, then whole tables.
+    std::vector<std::pair<int, int>> params;   // (tableIdx, paramIdx)
+    std::vector<int> tableRows;
+    for (int r : sparseRows (table.getSelectedRows ()))
+    {
+        if (r < 0 || r >= (int) rows_.size()) continue;
+        const auto ref = rows_[(size_t) r];
+        if (ref.paramIdx >= 0) params.push_back ({ ref.tableIdx, ref.paramIdx });
+        else                   tableRows.push_back (ref.tableIdx);
+    }
+
+    std::sort (params.begin(), params.end (),
+               [] (const auto& a, const auto& b) { return a.second > b.second; });
+    for (const auto& [ti, pi] : params)
+        if (ti >= 0 && ti < (int) d->tables.size() && pi >= 0 && pi < (int) d->tables[(size_t) ti].params.size())
+            d->tables[(size_t) ti].params.erase (d->tables[(size_t) ti].params.begin () + pi);
+
+    std::sort (tableRows.rbegin(), tableRows.rend());
+    for (int ti : tableRows)
+        if (ti >= 0 && ti < (int) d->tables.size())
+            d->tables.erase (d->tables.begin () + ti);
+
+    // Drop tables that lost every parameter.
+    while (!d->tables.empty() && d->tables.back().params.empty())
+        d->tables.pop_back ();
+
+    if (params.empty() && tableRows.empty()) return;
+    d->metaDirty = true;   // the table list persists with the file metadata
+    juce::SparseSet<int> none;
+    table.setSelectedRows (none, juce::sendNotification);
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
+void TablesPanel::downsamplePrimaryTable()
+{
+    auto* d = app.doc ();
+    const int pr = primaryRow();
+    if (d == nullptr || pr < 0) return;
+    const auto ref = rowRef (pr);
+    if (ref.tableIdx < 0 || ref.tableIdx >= (int) d->tables.size()) return;
+
+    auto& t = d->tables[(size_t) ref.tableIdx];
+    double rate = t.sampleRate;
+    if (!tablesPromptNumber (this, "Downsample Table",
+                             "New sample rate in Hz for \"" + t.name + "\"\n"
+                             "(current: " + juce::String (t.sampleRate, 1) + " Hz):",
+                             juce::String (t.sampleRate, 1), rate))
+        return;
+    if (!(rate > 0.0)) return;
+
+    sc::tables::downsampleTable (t, rate);
+    d->metaDirty = true;
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
+void TablesPanel::copySelection()
+{
+    auto* d = app.doc ();
+    const int pr = primaryRow();
+    if (d == nullptr || pr < 0) return;
+
+    juce::String csv;
+    if (isTableRow (pr))
+    {
+        // Whole table: header row of parameter names + one row per sample.
+        const auto& t = d->tables[(size_t) rows_[(size_t) pr].tableIdx];
+        for (size_t i = 0; i < t.params.size(); ++i)
+            csv += (i ? "," : "") + csvQuoteField (t.params[i].name);
+        int nRows = 0;
+        if (!t.params.empty())
+            nRows = (int) t.params[0].values.size();
+        for (int r = 0; r < nRows && !t.params.empty(); ++r)
+        {
+            csv += "\n";
+            for (size_t i = 0; i < t.params.size(); ++i)
+                if ((size_t) r < t.params[i].values.size())
+                    csv += (i ? "," : "") + juce::String (t.params[i].values[(size_t) r], 6);
+        }
+    }
+    else
+    {
+        // Selected parameters: one column each, from their own tables.
+        std::vector<const sc::tables::ParamData*> cols;
+        for (int r : selectedRowIndices())
+        {
+            const auto ref = rowRef (r);
+            if (ref.paramIdx < 0) continue;
+            if (ref.tableIdx >= 0 && ref.tableIdx < (int) d->tables.size()
+                && ref.paramIdx < (int) d->tables[(size_t) ref.tableIdx].params.size())
+                cols.push_back (&d->tables[(size_t) ref.tableIdx].params[(size_t) ref.paramIdx]);
+        }
+        if (cols.empty()) return;
+
+        for (size_t i = 0; i < cols.size(); ++i)
+            csv += (i ? "," : "") + csvQuoteField (cols[i]->name);
+        int nRows = INT_MAX;
+        for (const auto* p : cols) nRows = std::min (nRows, (int) p->values.size());
+        for (int r = 0; r < nRows; ++r)
+        {
+            csv += "\n";
+            for (size_t i = 0; i < cols.size(); ++i)
+                csv += (i ? "," : "") + juce::String (cols[i]->values[(size_t) r], 6);
+        }
+    }
+
+    tablesSetClipboardText (csv);
+}
+
+void TablesPanel::pasteToNewTable()
+{
+    const juce::String text = tablesGetClipboardText ();
+    std::string err;
+    if (!app.addTableFromCsv ("Clipboard", text, &err))
+        statusLabel.setText ("Import failed: " + juce::String (err), juce::dontSendNotification);
+}
+
+void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || scopeTable < 0 || scopeTable >= (int) d->tables.size ()) return;
+    const bool paramLevel = scopeParam >= 0;
+
+    auto* w = new juce::AlertWindow (juce::String ("Align ") + (paramLevel ? "Parameter" : "Table"),
+                                     juce::String ("Time mapping: doc time = offset + scale x table time.\n")
+                                     + (paramLevel
+                                        ? "The value fields are applied after the transforms\n(normalized / inverted / absolute take 0 or 1)."
+                                        : ""),
+                                     juce::AlertWindow::QuestionIcon, this);
+
+    auto& t = d->tables[(size_t) scopeTable];
+    sc::tables::ParamData* p = paramLevel && scopeParam < (int) t.params.size()
+                               ? &t.params[(size_t) scopeParam] : nullptr;
+
+    w->addTextEditor ("Time offset (seconds):", juce::String ((p ? p->offsetSecs : t.offsetSecs), 4));
+    w->addTextEditor ("Time scale:", juce::String ((p ? p->scaleTime : t.scaleTime), 4));
+    if (paramLevel && p != nullptr)
+    {
+        w->addTextEditor ("Normalized (0/1):", p->normalized ? "1" : "0");
+        w->addTextEditor ("Inverted (0/1):", p->inverted ? "1" : "0");
+        w->addTextEditor ("Absolute (0/1):", p->absolute ? "1" : "0");
+        w->addTextEditor ("Value offset:", juce::String (p->valueOffset, 4));
+        w->addTextEditor ("Value scale:", juce::String (p->valueScale, 4));
+    }
+
+    const char* names[7] = { "Time offset (seconds):", "Time scale:", nullptr, nullptr,
+                             nullptr, nullptr, nullptr };
+    if (paramLevel && p != nullptr)
+    {
+        static const char* extra[] = { "Normalized (0/1):", "Inverted (0/1):",
+                                       "Absolute (0/1):", "Value offset:", "Value scale:" };
+        for (int i = 0; i < 5; ++i) names[2 + i] = extra[i];
+    }
+    for (size_t i = 0; i < (paramLevel && p != nullptr ? 7 : 2); ++i)
+        if (auto* ed = w->getTextEditor (names[i]))
+            ed->setEscapeAndReturnKeysConsumed (false);
+
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    const int result = w->runModalLoop();
+    if (result == 1)
+    {
+        double off = 0.0, sc = 1.0;
+        tablesParseDouble (w->getTextEditorContents ("Time offset (seconds):"), off);
+        tablesParseDouble (w->getTextEditorContents ("Time scale:"), sc);
+        if (!(sc > 0.0)) sc = 1.0;
+
+        if (!paramLevel)
+        {
+            t.offsetSecs = off;
+            t.scaleTime = sc;
+        }
+        else if (p != nullptr)
+        {
+            p->offsetSecs = off;
+            p->scaleTime = sc;
+            double v = 0.0;
+            tablesParseDouble (w->getTextEditorContents ("Normalized (0/1):"), v); p->normalized = v != 0.0;
+            tablesParseDouble (w->getTextEditorContents ("Inverted (0/1):"), v);     p->inverted    = v != 0.0;
+            tablesParseDouble (w->getTextEditorContents ("Absolute (0/1):"), v);     p->absolute    = v != 0.0;
+            tablesParseDouble (w->getTextEditorContents ("Value offset:"), v);       p->valueOffset = v;
+            double vs = 1.0;
+            if (tablesParseDouble (w->getTextEditorContents ("Value scale:"), vs)) p->valueScale = vs;
+        }
+    }
+    delete w;
+
+    d->metaDirty = true;   // alignment settings persist with the file metadata
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
+void TablesPanel::startPointAlign (int numPoints, int scopeTable, int scopeParam, int targetView)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || scopeTable < 0 || scopeTable >= (int) d->tables.size ()) return;
+    if (numPoints != 1 && numPoints != 2) return;
+
+    pending_ = PendingAlign {};
+    pending_.numPoints = numPoints;
+    pending_.scopeTable = scopeTable;
+    pending_.scopeParam = scopeParam;
+    pending_.targetView = targetView == 1 ? 1 : 0;
+    havePending_ = true;
+
+    plot.setFocusTableIndex (scopeTable);
+    updateStatus ();
+}
+
+void TablesPanel::updateStatus()
+{
+    if (!havePending_)
+    {
+        statusLabel.setText ("", juce::dontSendNotification);
+        return;
+    }
+    const char* viewName = pending_.targetView == 0 ? "waveform" : "spectrogram";
+    if ((int) pending_.tablePts.size() < pending_.numPoints)
+        statusLabel.setText ("Click " + juce::String (pending_.numPoints)
+                             + " point(s) on the table plot below...",
+                             juce::dontSendNotification);
+    else
+        statusLabel.setText ("Now click " + juce::String ((size_t) pending_.numPoints - pending_.docPts.size())
+                             + " in the " + viewName + "...",
+                             juce::dontSendNotification);
+}
+
+void TablesPanel::handlePlotClick (double tTableSecs)
+{
+    if (!havePending_) return;
+    pending_.tablePts.push_back (tTableSecs);
+    if ((int) pending_.tablePts.size() < pending_.numPoints)
+    {
+        updateStatus ();
+        return;
+    }
+
+    // All plot points collected: arm the target view for the doc-side clicks.
+    if (app.onArmTableAlignClick) app.onArmTableAlignClick (pending_.targetView);
+    updateStatus ();
+}
+
+void TablesPanel::handleDocClick (double tDocSecs)
+{
+    if (!havePending_ || pending_.tablePts.size() < (size_t) pending_.numPoints) return;
+    pending_.docPts.push_back (tDocSecs);
+    if ((int) pending_.docPts.size() < pending_.numPoints)
+    {
+        updateStatus ();
+        return;
+    }
+
+    // Complete: compute the mapping and apply it to the scope.
+    auto* d = app.doc ();
+    const int ti = pending_.scopeTable, pi = pending_.scopeParam;
+    if (d != nullptr && ti >= 0 && ti < (int) d->tables.size())
+    {
+        auto& t = d->tables[(size_t) ti];
+        double off = 0.0, sc = 1.0;
+        const double a1 = pending_.tablePts[0], b1 = pending_.docPts[0];
+        if (pending_.numPoints == 2)
+        {
+            const double a2 = pending_.tablePts[1], b2 = pending_.docPts[1];
+            sc = std::abs (a2 - a1) > 1e-9 ? (b2 - b1) / (a2 - a1) : 1.0;
+            if (!(sc > 0.0)) sc = 1.0;
+        }
+        off = b1 - sc * a1;
+
+        if (pi < 0 || pi >= (int) t.params.size())
+        {
+            // Table level: the table's own map is applied directly.
+            t.offsetSecs = off;
+            t.scaleTime = sc;
+        }
+        else
+        {
+            // Parameter level: solve for the parameter's own contribution on
+            // top of the (fixed) table map so the effective mapping matches.
+            auto& p = t.params[(size_t) pi];
+            if (pending_.numPoints == 2)
+                p.scaleTime = sc / std::max (1e-9, t.scaleTime);
+            p.offsetSecs = off - t.offsetSecs - t.scaleTime * p.scaleTime * a1;
+        }
+    }
+
+    havePending_ = false;
+    pending_ = PendingAlign {};
+    if (app.onArmTableAlignClick) app.onArmTableAlignClick (-1);   // disarm the views
+    if (d != nullptr) d->metaDirty = true;   // alignment persists with the metadata
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
+void TablesPanel::cancelPendingAlignment()
+{
+    havePending_ = false;
+    pending_ = PendingAlign {};
+    if (app.onArmTableAlignClick) app.onArmTableAlignClick (-1);   // disarm the views
+    updateStatus ();
+}
+
+void TablesPanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (!e.mods.isRightButtonDown () || e.mods.isLeftButtonDown ()) return;
+
+    // The event position is relative to the component that was actually hit
+    // (a row child of the table); walk up the parent chain to get it in
+    // table coordinates.
+    float px = e.getPosition ().x;
+    float py = e.getPosition ().y;
+    for (auto* c = e.eventComponent; c != nullptr && c != &table;
+         c = c->getParentComponent ())
+    {
+        px += static_cast<float> (c->getX ());
+        py += static_cast<float> (c->getY ());
+    }
+    const auto pInTable = juce::Point<float> (px, py);
+
+    int row = -1;
+    for (int r = 0; r < table.getNumRows (); ++r)
+        if (table.getCellPosition (1, r, true).contains ((int) pInTable.x, (int) pInTable.y))
+        {
+            row = r;
+            break;
+        }
+
+    if (row >= 0 && table.getNumSelectedRows () == 0)
+    {
+        anchorRow = row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ row, row + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+    }
+
+    showContextMenu (row);
+}
+
+void TablesPanel::showContextMenu (int row)
+{
+    const int nSel = table.getNumSelectedRows ();
+    const auto prRef = rowRef (primaryRow());
+    const bool haveTableScope  = prRef.tableIdx >= 0 && prRef.paramIdx < 0;
+    const bool haveParamScope  = prRef.tableIdx >= 0 && prRef.paramIdx >= 0;
+
+    juce::PopupMenu m;
+    m.addItem (1, "Paste to new table");
+    m.addSeparator ();
+    m.addItem (2, "Remove Selected", nSel > 0);
+    if (nSel > 0)
+        m.addItem (3, "Copy", true);
+
+    // Auto align: exactly two parameters from different tables selected. The
+    // parameter under the mouse is aligned onto the other by correlation.
+    {
+        const auto sel = selectedRowIndices();
+        if (sel.size() == 2)
+        {
+            const auto a = rowRef (sel[0]), b = rowRef (sel[1]);
+            if (a.paramIdx >= 0 && b.paramIdx >= 0 && a.tableIdx != b.tableIdx)
+            {
+                auto* d = app.doc ();
+                if (d != nullptr
+                    && a.tableIdx < (int) d->tables.size() && b.tableIdx < (int) d->tables.size())
+                {
+                    const juce::String label = "Auto Align " + d->tables[(size_t) a.tableIdx].name
+                                              + " / " + d->tables[(size_t) a.tableIdx].params[(size_t) a.paramIdx].name
+                                              + " with " + d->tables[(size_t) b.tableIdx].name
+                                              + " / " + d->tables[(size_t) b.tableIdx].params[(size_t) b.paramIdx].name;
+                    m.addItem (4, label);
+                }
+            }
+        }
+    }
+
+    if (haveTableScope)
+    {
+        juce::PopupMenu align;
+        align.addItem (10, "Manual");
+        align.addItem (11, "1 Point");
+        align.addItem (12, "2 Points");
+        m.addSubMenu ("Align", align);
+    }
+    else if (haveParamScope)
+    {
+        juce::PopupMenu align;
+        auto makeTarget = [] (int baseId) -> juce::PopupMenu
+        {
+            juce::PopupMenu s;
+            s.addItem (baseId + 0, "Manual");
+            s.addItem (baseId + 1, "1 Point");
+            s.addItem (baseId + 2, "2 Points");
+            return s;
+        };
+        align.addSubMenu ("Waveform", makeTarget (21));
+        align.addSubMenu ("Spectrogram", makeTarget (24));
+        juce::PopupMenu ded;
+        ded.addItem (27, "Manual");   // dedicated track: value mapping only
+        align.addSubMenu ("Dedicated", ded);
+        m.addSubMenu ("Align", align);
+    }
+
+    m.addSeparator ();
+    m.addItem (5, "Close Panel");
+
+    const int id = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
+    switch (id)
+    {
+        case 1: pasteToNewTable (); break;
+        case 2: removeSelected (); break;
+        case 3: copySelection (); break;
+        case 4:
+        {
+            // Correlate the two selected parameters and shift the one under
+            // the mouse (primary) onto the other.
+            const auto sel = selectedRowIndices();
+            if (sel.size() == 2)
+            {
+                const auto a = rowRef (sel[0]), b = rowRef (sel[1]);
+                auto* d = app.doc ();
+                if (d != nullptr && a.paramIdx >= 0 && b.paramIdx >= 0
+                    && a.tableIdx < (int) d->tables.size() && b.tableIdx < (int) d->tables.size())
+                {
+                    const auto& refT = d->tables[(size_t) b.tableIdx];
+                    auto& aliT = d->tables[(size_t) a.tableIdx];
+                    if (b.paramIdx < (int) refT.params.size() && a.paramIdx < (int) aliT.params.size())
+                    {
+                        const double lag = sc::tables::autoAlignLag (refT, refT.params[(size_t) b.paramIdx],
+                                                                    aliT, aliT.params[(size_t) a.paramIdx]);
+                        auto& p = aliT.params[(size_t) a.paramIdx];
+                        p.offsetSecs += lag;   // shift the parameter under the mouse
+                        d->metaDirty = true;
+                        refresh ();
+                        if (app.onTablesChanged) app.onTablesChanged ();
+                    }
+                }
+            }
+            break;
+        }
+        case 5: requestClose (); break;
+
+        // Table-level Align submenu.
+        case 10: showManualAlignDialog (prRef.tableIdx, -1); break;
+        case 11: startPointAlign (1, prRef.tableIdx, -1, app.tablesMode() == 1 ? 1 : 0); break;
+        case 12: startPointAlign (2, prRef.tableIdx, -1, app.tablesMode() == 1 ? 1 : 0); break;
+
+        // Parameter-level Align submenu: Waveform = 21..23, Spectrogram = 24..26.
+        case 21: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx); break;
+        case 22: startPointAlign (1, prRef.tableIdx, prRef.paramIdx, 0); break;
+        case 23: startPointAlign (2, prRef.tableIdx, prRef.paramIdx, 0); break;
+        case 24: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx); break;
+        case 25: startPointAlign (1, prRef.tableIdx, prRef.paramIdx, 1); break;
+        case 26: startPointAlign (2, prRef.tableIdx, prRef.paramIdx, 1); break;
+
+        // Dedicated > Manual: value mapping only.
+        case 27: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx); break;
+
+        default: break;
+    }
+}
+
+void TablesPanel::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colours::black);
+}
+
+void TablesPanel::resized()
+{
+    const auto r = getLocalBounds ();
+
+    // Top row: master visibility switch + display-mode dropdown.
+    masterShowBtn.setBounds (6, 4, 26, 22);
+    modeCombo.setBounds (38, 5, r.getWidth () - 44, 20);
+
+    statusLabel.setBounds (6, 28, r.getWidth () - 12, 16);
+
+    const int plotH = std::max (70, r.getHeight () / 4);
+    table.setBounds (6, 46, r.getWidth () - 12, r.getHeight () - 46 - plotH - 8);
+    plot.setBounds (6, r.getHeight () - plotH - 2, r.getWidth () - 12, plotH);
+}

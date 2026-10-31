@@ -149,6 +149,13 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     drawingPanel   = std::make_unique<DrawingPanel> (app);
     historyPanel  = std::make_unique<HistoryPanel> (app);
     pythonPanel   = std::make_unique<PythonPanel> (app);
+    tablesPanel   = std::make_unique<TablesPanel> (app);
+
+    // Dedicated tables track + its separator and vertical scrollbar.
+    tablesTrack   = std::make_unique<TablesTrackView> (app);
+    tablesSep     = std::make_unique<ViewSplitter>();
+    tablesSep->onDrag = [this] (const juce::MouseEvent& e) { handleTablesSepDrag (e); };
+    tablesVScroll = std::make_unique<ValueScrollBar>();
 
     fileListPanel->onOpenRequested = [this] { handleFileOpen(); };
 
@@ -169,6 +176,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     topTabs.addTab ("Frequency Analysis", kDarkTabBg, fftPanel.get(), false);
     topTabs.addTab ("History", kDarkTabBg, historyPanel.get(), false);
     topTabs.addTab ("Python", kDarkTabBg, pythonPanel.get(), false);
+    topTabs.addTab ("Tables", kDarkTabBg, tablesPanel.get(), false);
     bottomTabs.addTab ("Spectral Controls", kDarkTabBg, controlsPanel.get(), false);
     bottomTabs.addTab ("Markers", kDarkTabBg, markersPanel.get(), false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -209,6 +217,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 #endif
     selectionPanel->onCloseRequested  = [this] { setPanelVisible ("selection", false); };
     drawingPanel->onCloseRequested    = [this] { setPanelVisible ("drawing", false); };
+    tablesPanel->onCloseRequested     = [this] { setPanelVisible ("tables", false); };
 
     // Restore the user's saved arrangement + column geometry.
     applySavedLeftLayout();
@@ -313,6 +322,35 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (drawingPanel) drawingPanel->refresh();
         if (spectralView) spectralView->repaint();
     };
+
+    // Tables panel <-> views wiring: refresh the list, repaint overlays and
+    // relayout when the dedicated track appears/disappears.
+    app.onTablesChanged = [this]
+    {
+        if (tablesPanel) tablesPanel->refresh();
+        if (waveformView) waveformView->repaint();
+        if (spectralView) spectralView->repaint();
+        if (tablesTrack)
+        {
+            tablesTrack->refit();
+            tablesTrack->setTimeRange (app.viewStart, app.viewEnd);
+        }
+        resized();   // the dedicated track may appear or disappear
+    };
+
+    // The Tables panel's 1/2-point alignment arms click capture on one of the
+    // data views; negative disarms both.
+    app.onArmTableAlignClick = [this] (int view)
+    {
+        if (waveformView) waveformView->onAlignClick =
+            (view == 0 && tablesPanel != nullptr)
+                ? std::function<void(double)> ([this] (double t) { tablesPanel->handleDocClick (t); })
+                : std::function<void(double)> (nullptr);
+        if (spectralView) spectralView->onAlignClick =
+            (view == 1 && tablesPanel != nullptr)
+                ? std::function<void(double)> ([this] (double t) { tablesPanel->handleDocClick (t); })
+                : std::function<void(double)> (nullptr);
+    };
     app.onSetSpectralFreqRange = [this] (double lo, double hi)
     { if (spectralView) spectralView->setFrequencyRange (lo, hi); };
 
@@ -328,6 +366,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     {
         if (waveformView) waveformView->setPlayhead (t);
         if (spectralView) spectralView->setPlayhead (t);
+        if (tablesTrack) tablesTrack->setPlayhead (t);
         // A single click in either view re-analyses the spectrum: centred on
         // the cursor when there is no selection, averaged over the whole
         // selection when one exists.
@@ -559,6 +598,7 @@ void MainWindow::applyTimeWindow (double t0, double t1)
     // Selection sync: whichever view the user selected in, BOTH views show it.
     if (waveformView) waveformView->setSelection (app.selection);
     if (spectralView) spectralView->setSelection (app.selection);
+    if (tablesTrack) tablesTrack->setTimeRange (t0, t1);
 
     refreshPanels();
     updateScrollBars();
@@ -679,6 +719,63 @@ void MainWindow::resized()
     if (waveVScroll) waveVScroll->setVisible (showWave && haveFile);
     if (specVScroll) specVScroll->setVisible (showSpec && haveFile);
 
+    // Dedicated tables track (Tables panel mode "Dedicated track"): a strip
+    // above the data views. When a view owns the top time ruler the strip sits
+    // just below that ruler inside the owning view's bounds; otherwise it
+    // takes space from the top of the main area.
+    const bool showTablesTrack = haveFile && app.tablesMode() == 2 && app.anyVisibleTableParam();
+    if (tablesTrack)   tablesTrack->setVisible (showTablesTrack);
+    if (tablesSep)     tablesSep->setVisible (showTablesTrack);
+    if (tablesVScroll) tablesVScroll->setVisible (showTablesTrack);
+
+    const int axL = app.settings.trackAxisOnRight ? 0 : kLeftAxisWidth;
+    const int axR = app.settings.trackAxisOnRight ? kLeftAxisWidth : 0;
+
+    juce::Component* topRulerOwner = nullptr;   // view that draws the top ruler
+    if (!rulerBottom && showWave)                    topRulerOwner = waveformView.get ();
+    else if (!rulerBottom && !showWave && showSpec)  topRulerOwner = spectralView.get ();
+
+    const int sepH = 6;
+    const int tablesRefH = mainArea.getHeight();   // before the strip is removed
+    int trackH = 0;
+    juce::Rectangle<int> tablesRect;
+    if (showTablesTrack)
+        trackH = std::max (30, (int) std::lround ((double) tablesRefH * tablesTrackRatio));
+
+    // Reserve the strip: inside the owning view via its top inset, or from the
+    // top of the main area when no view owns a top ruler.
+    if (waveformView)
+        waveformView->setTablesTopInset (showTablesTrack && topRulerOwner == waveformView.get ()
+                                          ? trackH + sepH : 0);
+    if (spectralView)
+        spectralView->setTablesTopInset (showTablesTrack && topRulerOwner == spectralView.get ()
+                                          ? trackH + sepH : 0);
+    if (showTablesTrack && topRulerOwner == nullptr)
+        mainArea.removeFromTop (trackH + sepH);
+
+    auto placeTablesStrip = [&] (juce::Rectangle<int> area) -> void
+    {
+        if (!showTablesTrack || !tablesTrack) return;
+        tablesRect = juce::Rectangle<int> (area.getX() + axL, area.getY(),
+                                           std::max (0, area.getWidth() - vScrollW - axL - axR),
+                                           trackH);
+        if (topRulerOwner != nullptr)
+            tablesRect.setY (area.getY() + WaveformView::kRulerH);   // below the top ruler
+        else
+            tablesRect.setY (area.getY() - trackH - sepH);          // in the removed strip above
+        tablesTrack->setBounds (tablesRect);
+        if (tablesSep)
+            tablesSep->setBounds (tablesRect.getX(), tablesRect.getBottom (),
+                                  tablesRect.getWidth (), sepH);
+        if (tablesVScroll)
+            tablesVScroll->setBounds (area.getRight () - vScrollW, tablesRect.getY (),
+                                      vScrollW, trackH);
+
+        // Anchor for the separator drag: strip top + reference area height.
+        tablesSepAnchorY = tablesRect.getY ();
+        tablesSepRefH    = std::max (1.0, (double) tablesRefH);
+    };
+
     if (splitter)
         splitter->setVisible (showWave && showSpec);
 
@@ -714,26 +811,26 @@ void MainWindow::resized()
                                                       mainArea.getWidth(),
                                                       std::max (0, mainArea.getHeight() - waveH - barH)),
                                 spectralView.get(), specVScroll.get());
+        placeTablesStrip (juce::Rectangle<int> (mainArea.getX(), mainArea.getY(),
+                                                mainArea.getWidth(), waveH));
     }
     else if (showWave)
     {
         placeViewWithScrollBar (mainArea, waveformView.get(), waveVScroll.get());
+        placeTablesStrip (mainArea);
     }
     else if (showSpec)
     {
         placeViewWithScrollBar (mainArea, spectralView.get(), specVScroll.get());
+        placeTablesStrip (mainArea);
     }
 
     // Aligned with the views' plot area: inset by the axis strip on whichever
     // side it is placed and stopping where their vertical scrollbars begin,
     // so the thumb tracks exactly the visible data.
     if (haveFile && timeBar)
-    {
-        const int axL = app.settings.trackAxisOnRight ? 0 : kLeftAxisWidth;
-        const int axR = app.settings.trackAxisOnRight ? kLeftAxisWidth : 0;
-        timeBar->setBounds (mainArea.getX() + axL, mainArea.getBottom() + 2,
-                            std::max (0, mainArea.getWidth() - vScrollW - axL - axR), 16);
-    }
+        timeBar->setBounds (mainArea.getX() + axL, mainArea.getBottom () + 2,
+                            std::max (0, mainArea.getWidth () - vScrollW - axL - axR), 16);
 
     // Now that the bars have real sizes, sync their thumbs with the views.
     updateScrollBars();
@@ -769,6 +866,19 @@ void MainWindow::handleTopSplitterDrag (const juce::MouseEvent& e)
     resized();
 }
 
+void MainWindow::handleTablesSepDrag (const juce::MouseEvent& e)
+{
+    if (!e.eventComponent || !tablesTrack) return;
+    const auto winTL = localPointToGlobal (juce::Point<int> (0, 0));
+    const auto g = e.eventComponent->localPointToGlobal (
+        juce::Point<int> ((int) e.position.x, (int) e.position.y));
+    const double yInWindow = (double) g.y - (double) winTL.y;
+    const double h = std::clamp (yInWindow - tablesSepAnchorY, 30.0,
+                                 tablesSepRefH * 0.8);
+    tablesTrackRatio = std::clamp (h / tablesSepRefH, 0.05, 0.6);
+    resized();
+}
+
 // ------------------------------------------------- Left panel layout
 
 const char* MainWindow::panelIdFor (juce::Component* c) const
@@ -777,6 +887,7 @@ const char* MainWindow::panelIdFor (juce::Component* c) const
     if (c == fftPanel.get())            return "fft";
     if (c == historyPanel.get())        return "history";
     if (c == pythonPanel.get())         return "python";
+    if (c == tablesPanel.get())         return "tables";
     if (c == controlsPanel.get())       return "controls";
     if (c == markersPanel.get())        return "markers";
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -836,6 +947,7 @@ std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
         { "fft",         "Frequency Analysis", true  },
         { "history",     "History",            true  },
         { "python",      "Python",             true  },
+        { "tables",      "Tables",             true  },
         { "controls",    "Spectral Controls",  false },
         { "markers",     "Markers",            false },
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -852,6 +964,7 @@ juce::Component* MainWindow::panelForId (const juce::String& id) const
     if (id == "fft")         return fftPanel.get ();
     if (id == "history")     return historyPanel.get ();
     if (id == "python")      return pythonPanel.get ();
+    if (id == "tables")      return tablesPanel.get ();
     if (id == "controls")    return controlsPanel.get ();
     if (id == "markers")     return markersPanel.get ();
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -956,6 +1069,7 @@ void MainWindow::applySavedLeftLayout()
         { "fft",         "Frequency Analysis", fftPanel.get(),       true  },
         { "history",     "History",            historyPanel.get(),   true  },
         { "python",      "Python",             pythonPanel.get(),    true  },
+        { "tables",      "Tables",             tablesPanel.get(),    true  },
         { "controls",    "Spectral Controls",  controlsPanel.get(),  false },
         { "markers",     "Markers",            markersPanel.get(),   false },
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -1201,7 +1315,20 @@ void MainWindow::filesDropped (const juce::StringArray& files, int, int)
     }
 
     for (const auto& f : valid)
+    {
+        // CSV files become tables in the Tables panel instead of audio docs.
+        if (f.getFileExtension ().equalsIgnoreCase (".csv"))
+        {
+            std::string err;
+            const juce::String text = f.loadFileAsString ();
+            if (!app.addTableFromCsv (f.getFileNameWithoutExtension (), text, &err))
+                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                    "Could not import table \"" + f.getFileName () + "\":\n"
+                    + juce::String (err), "Tables");
+            continue;
+        }
         openFile (f);   // multi-file editor: every valid drop becomes a document
+    }
 }
 
 juce::PopupMenu MainWindow::buildMergeMenu (bool haveActiveDoc)
@@ -1630,6 +1757,7 @@ void MainWindow::refreshPanels()
 #endif
     if (selectionPanel)   selectionPanel->refresh();
     if (drawingPanel)     drawingPanel->refresh();
+    if (tablesPanel)      tablesPanel->refresh();
     if (historyPanel)   historyPanel->refresh();
     if (fftPanel)       fftPanel->repaint();
     updateAutoFftLabel ();   // keep the "Auto (N)" combo label in sync
@@ -6027,6 +6155,15 @@ void MainWindow::updateScrollBars()
         specVScroll->setRange (1.0, nyq);
         specVScroll->setWindow (spectralView->getFreqMin(), spectralView->getFreqMax());
     }
+
+    // Dedicated tables track: the thumb shows its visible value window.
+    if (tablesVScroll && tablesTrack && app.audioEngine().isFileLoaded())
+    {
+        const auto full = tablesTrack->fullRange();
+        const auto win  = tablesTrack->visibleRange();
+        tablesVScroll->setRange (full.first, full.second);
+        tablesVScroll->setWindow (win.first, win.second);
+    }
 }
 
 juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& menuName)
@@ -6373,6 +6510,13 @@ void MainWindow::handleFindPrevious ()
 
 bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
 {
+    // Esc cancels a pending Tables-panel click alignment.
+    if (key.getKeyCode() == juce::KeyPress::escapeKey
+        && tablesPanel != nullptr && tablesPanel->hasPendingAlignment())
+    {
+        tablesPanel->cancelPendingAlignment();
+        return true;
+    }
     // Ctrl+Tab / Ctrl+Shift+Tab cycles through the loaded files.
     if (key.getKeyCode() == juce::KeyPress::tabKey && key.getModifiers().isCommandDown())
     {
