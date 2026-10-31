@@ -3931,10 +3931,10 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
     if (axisMode_ < 3)   // harmonic references are a classic-mode feature
     {
         m.addSeparator();
-        m.addItem (CtxSetHarmonicRefs, "Set Harmonic References", haveSpec);
+        m.addItem (CtxSetHarmonicRefs, "Activate Harmonics", haveSpec);
         m.addItem (CtxCopyHarmonics, "Copy Harmonics",
                    harmonicRefActive_ && haveSpec);
-        m.addItem (CtxResetHarmonic, "Reset Harmonic", harmonicRefActive_);
+        m.addItem (CtxResetHarmonic, "Clear Harmonics", harmonicRefActive_);
     }
     if (axisMode_ == 3)   // "Check Harmonic Ratio" is a Freq vs Time feature
     {
@@ -5236,28 +5236,39 @@ void EnvCurveEditor::paint (juce::Graphics& g)
     const int h = getHeight () - kTopMargin - kBottomMargin;
     if (w <= 10 || h <= 10) return;
 
-    // Horizontal grid: every 10 dB, labelled.
+    // Horizontal grid: every 10 dB.
     for (double db = kDbMin; db <= kDbMax + 0.5; db += 10.0)
     {
         const int y = dbToY (db);
         g.setColour (std::abs (db) < 0.5 ? envGridMajor () : envGridMinor ());
         g.drawLine (kLeftMargin, y, kLeftMargin + w, y, 1.0f);
-        if (std::abs (db) < 0.5)
-            g.drawText (juce::String ((int) db), 4, y - 8, kLeftMargin - 8, 16,
-                        juce::Justification::centredRight);
     }
 
-    // Vertical grid: nice time steps, labelled in seconds.
+    // Vertical grid: nice time steps.
     const double step = niceTimeStep (timeHi_, 8);
     for (double t = 0.0; t <= timeHi_ + step * 0.5; t += step)
     {
         const int x = tToX (t);
         g.setColour (envGridMinor ());
         g.drawLine (x, kTopMargin, x, kTopMargin + h, 1.0f);
+    }
+
+    // Axis labels: every grid line carries its value, and each axis has a
+    // unit caption (dB on the left, seconds below).
+    g.setColour (juce::Colour::fromRGB (140, 140, 150));
+    for (double db = kDbMin; db <= kDbMax + 0.5; db += 10.0)
+        g.drawText (juce::String ((int) db), 2, dbToY (db) - 8, kLeftMargin - 6, 16,
+                    juce::Justification::centredRight);
+    g.drawText ("dB", 2, 0, kLeftMargin - 6, 14, juce::Justification::centredRight);
+    for (double t = 0.0; t <= timeHi_ + step * 0.5; t += step)
+    {
+        const int x = tToX (t);
         if (x >= kLeftMargin && x <= bounds.getRight () - 2)
             g.drawText (formatTimeLabel (t, step), x - 16, kTopMargin + h + 2,
                         32, 14, juce::Justification::centred);
     }
+    g.drawText ("Time (s)", kLeftMargin, kTopMargin + h + 17, w, 14,
+                juce::Justification::centred);
 
     // Axis frame.
     g.setColour (juce::Colour::fromRGB (90, 90, 100));

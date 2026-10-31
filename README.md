@@ -230,7 +230,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       on screen), and the harmonic-reference tools below; right-clicking the
       *level* axis resets only the level window, the *frequency* axis only the
       frequency window.
-    - **Set Harmonic References** (right-click): a popup with two labelled
+    - **Activate Harmonics** (right-click): a popup with two labelled
       fields — *Harmonic number of the mouse:* (which harmonic number the
       frequency under the cursor is, default 1 = fundamental) and *Number of
       harmonics to show:* (default 10). The reference frequency itself has no
@@ -244,7 +244,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       **Copy Harmonics** copies an Excel-friendly table (tab-separated, CRLF
       line endings) with columns *Harmonic*, *Frequency* and *Amplitude*
       (harmonics 1..N, sampled from the first visible channel at each harmonic's
-      nearest FFT bin; empty above Nyquist). **Reset Harmonic** removes the
+      nearest FFT bin; empty above Nyquist). **Clear Harmonics** removes the
       reference and its lines.
     - **Left-drag on the bottom Hz strip** pans the frequency window;
       **left-drag on the right dB strip** pans the level window (log-aware in
@@ -640,8 +640,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     continuous with absolute file time, so generated tones line up with
     surrounding audio instead of clicking at the boundary.
 - **Invert / Time Stretch / Content Aware Time Scale / Filter EQ /
-  Enveloppe** (`Effects → Invert`, `Time Stretch…`,
-  `Content Aware Time Scale…`, `Filter EQ…`, `Enveloppe…`): five classic
+  Envelope** (`Effects → Invert`, `Time Stretch…`,
+  `Content Aware Time Scale…`, `Filter EQ…`, `Envelope…`): five classic
   waveform effects added after *Reverse*:
   - *Invert* — negates every sample in the target (spectral selection if
     active, else the time selection, else the whole file). One undoable step.
@@ -700,7 +700,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     is preserved and no pre-/post-ringing appears. Works on the spectral
     selection if active, else the time selection, else the whole file; a flat
     curve is a bit-exact no-op that records nothing.
-  - *Enveloppe…* — Audacity-style amplitude-over-time envelope: an interactive
+  - *Envelope…* — Audacity-style amplitude-over-time envelope: an interactive
     time/dB graph (click empty space to add a point, drag to move it,
     **double-click** a point to type its exact time/gain coordinates,
     right-click to remove it) with the built-in presets Flat, Fade In, Fade
@@ -1518,7 +1518,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Fade In / Fade Out (on the time selection, or whole file when none) | Ctrl+Shift+I / Ctrl+Shift+O |
 | Filter EQ... (graphical curve equalizer dialog) | Ctrl+Shift+E |
 | Time Stretch... (SoundTouch tempo change dialog) | Ctrl+Shift+T |
-| Repeat last effect (re-applies the most recent Effects-menu edit; re-opens its dialog for dialog-based effects like Change Gain / Filter EQ / Time Stretch / Content Aware Time Scale / Enveloppe) | Ctrl+Shift+F |
+| Repeat last effect (re-applies the most recent Effects-menu edit; re-opens its dialog for dialog-based effects like Change Gain / Filter EQ / Time Stretch / Content Aware Time Scale / Envelope) | Ctrl+Shift+F |
 | Resample... (Edit menu, own section: new sample rate + optional channel remix) | F11 |
 | Split Spectral Selection Configuration — per-channel input → destination setup; closing saves without splitting | Shift+F12 |
 | Split Spectral Selection Execute — runs the configured split (needs an active spectral selection); first time per file open opens the configuration instead | F12 |
@@ -1554,7 +1554,7 @@ saved selections and FFT snapshots through the same time-warp),
 Reduce Gaps mode drop-down: stable segments are removed or duplicated based
 on STFT frame-to-frame differences, transients protected; see above) and
 **Filter EQ…** (graphical curve equalizer applied as a zero-phase FFT filter;
-see [above](#features)), **Enveloppe…** (amplitude-over-time envelope drawn on
+see [above](#features)), **Envelope…** (amplitude-over-time envelope drawn on
 a time/dB graph, applied per sample; spectral-selection aware) — plus
 **Change Gain...** (a dB dialog whose
 field opens focused with its value pre-selected so a new one can be typed in
@@ -1871,7 +1871,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
-| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `DrawingPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Set Harmonic References** / **Copy Harmonics** / **Reset Harmonic**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with comments + harmonic cloning, user drawings over the spectrogram (text/arrow/rectangle/freehand with per-item comments, visibility toggles and fit-to-view; Excel-style multi-selection in all three list panels; persisted automatically with per-file metadata), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
+| `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `DrawingPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Activate Harmonics** / **Copy Harmonics** / **Clear Harmonics**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with comments + harmonic cloning, user drawings over the spectrogram (text/arrow/rectangle/freehand with per-item comments, visibility toggles and fit-to-view; Excel-style multi-selection in all three list panels; persisted automatically with per-file metadata), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
 | `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with eight example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near; persisted via per-file metadata (embedded RIFF chunks or `.meta.json`). |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |

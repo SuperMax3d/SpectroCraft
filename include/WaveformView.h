@@ -149,6 +149,14 @@ public:
         if (show != showTimeRuler) { showTimeRuler = show; repaint(); }
     }
     bool showsTimeRuler() const { return showTimeRuler; }
+    // When both views are stacked, marker titles only appear on the
+    // spectrogram; a lone waveform view keeps its own. The delimiter lines
+    // stay in both.
+    void setShowMarkerTitles (bool show)
+    {
+        if (show != showMarkerTitles) { showMarkerTitles = show; repaint(); }
+    }
+    bool showsMarkerTitles() const { return showMarkerTitles; }
     // Hit tests for the two chrome strips (full component height/width).
     bool onAxisX (int x) const
     {
@@ -182,6 +190,7 @@ public:
 private:
     Application& app;   // audio data read live via app.audioEngine() (active doc)
     bool showTimeRuler = true;   // stacked dual view: only one view draws it
+    bool showMarkerTitles = true;   // suppressed while the spectrogram is stacked below
     double viewStart = 0, viewEnd = 10, vZoom = 1;
     double vOffset = 0;   // amplitude value at each row's centre (vertical pan)
     juce::Range<double> selection{ 0, 0 };

@@ -1,4 +1,4 @@
-// SpectroCraft - Enveloppe (graphical amplitude-over-time effect).
+// SpectroCraft - Envelope (graphical amplitude-over-time effect).
 #include "Envelope.h"
 
 #include <cmath>

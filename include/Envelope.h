@@ -1,5 +1,5 @@
 #pragma once
-// SpectroCraft - Enveloppe (graphical amplitude-over-time effect).
+// SpectroCraft - Envelope (graphical amplitude-over-time effect).
 //
 // The user draws control points on a linear time axis (seconds, relative to
 // the start of the target range) with a gain in dB. The interpolated curve is

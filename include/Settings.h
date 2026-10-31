@@ -136,7 +136,7 @@ struct Settings
     juce::String eqLastCurve;            // "freq,gain;freq,gain;..." ("" = default flat)
     juce::String eqUserPresets;          // one line per preset: "name|freq,gain;..."
 
-    // Enveloppe (Effects menu): same idea on a linear time axis, see sc::env.
+    // Envelope (Effects menu): same idea on a linear time axis, see sc::env.
     juce::String envLastCurve;           // "timeSecs,gainDb;timeSecs,gainDb;..." ("" = flat)
     juce::String envUserPresets;         // one line per preset: "name|t,gain;..."
 

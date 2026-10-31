@@ -643,17 +643,22 @@ void WaveformView::paint (juce::Graphics& g)
             }
             // Title: may run past this marker's own range, but must stop
             // before the next marker starts so that marker's title has room.
-            g.setFont (10.0f);
-            g.setColour (m.colour);
-            const double textX = x + 4;
-            const double rightEdge = (i + 1 < ms.size())
-                ? timeToX (ms[i + 1].start) - 2.0
-                : (double) getWidth() + 50.0;
-            const double w = std::max (0.0, rightEdge - textX);
-            const int titleY = rulerAtBottom() ? pr.getBottom() - 20 : pr.getY() + 8;
-            if (w > 0.0)
-                g.drawText (m.name, (int) textX, titleY, (int) w, 14,
-                            juce::Justification::topLeft, true);
+            // Suppressed while the spectrogram is stacked below (its copy of
+            // the titles is shown there instead); the lines stay in both.
+            if (showMarkerTitles)
+            {
+                g.setFont (10.0f);
+                g.setColour (m.colour);
+                const double textX = x + 4;
+                const double rightEdge = (i + 1 < ms.size())
+                    ? timeToX (ms[i + 1].start) - 2.0
+                    : (double) getWidth() + 50.0;
+                const double w = std::max (0.0, rightEdge - textX);
+                const int titleY = rulerAtBottom() ? pr.getBottom() - 20 : pr.getY() + 8;
+                if (w > 0.0)
+                    g.drawText (m.name, (int) textX, titleY, (int) w, 14,
+                                juce::Justification::topLeft, true);
+            }
         }
     }
 

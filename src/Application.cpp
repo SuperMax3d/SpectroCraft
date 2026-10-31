@@ -199,7 +199,7 @@ void Application::loadSettings ()
     // Filter EQ: remembered curve + user presets.
     settings.eqLastCurve        = recentStore->getValue ("eq_last_curve", juce::String ());
     settings.eqUserPresets      = recentStore->getValue ("eq_user_presets", juce::String ());
-    // Enveloppe: remembered curve + user presets.
+    // Envelope: remembered curve + user presets.
     settings.envLastCurve       = recentStore->getValue ("env_last_curve", juce::String ());
     settings.envUserPresets     = recentStore->getValue ("env_user_presets", juce::String ());
 

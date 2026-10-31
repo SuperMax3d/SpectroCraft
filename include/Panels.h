@@ -932,18 +932,22 @@ public:
         double-clicking does nothing. */
     std::function<void(int)> onEditPoint;
 
-private:
+    // Axis mapping and mouse entry points (public so tests can drive the
+    // editor headlessly: compute a point's pixel position, click it).
     int freqToX (double f) const;
     double xToFreq (int x) const;
     int dbToY (double db) const;
     double yToDb (int y) const;
 
-    /** Index of the control point within `maxDistPx` of p, else -1. */
-    int findNearestPoint (const juce::Point<int>& p, int maxDistPx) const;
-
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
+
+private:
+
+    /** Index of the control point within `maxDistPx` of p, else -1. */
+    int findNearestPoint (const juce::Point<int>& p, int maxDistPx) const;
+
     void paint (juce::Graphics&) override;
 
     static constexpr int kLeftMargin = 42, kBottomMargin = 20, kTopMargin = 8,
@@ -959,7 +963,7 @@ private:
     JUCE_DECLARE_NON_COPYABLE (EqCurveEditor)
 };
 
-/** Graphical editor for the Enveloppe effect: control points on a linear
+/** Graphical editor for the Envelope effect: control points on a linear
     time axis (seconds, relative to the start of the target range) with a
     gain in dB. Same interaction model as EqCurveEditor; the horizontal axis
     is linear time instead of log frequency and its right edge follows the
@@ -992,22 +996,23 @@ public:
         double-clicking does nothing. */
     std::function<void(int)> onEditPoint;
 
-private:
+    // Axis mapping and mouse entry points (public so tests can drive the
+    // editor headlessly: compute a point's pixel position, click it).
     int tToX (double t) const;
     double xToT (int x) const;
     int dbToY (double db) const;
     double yToDb (int y) const;
 
-    /** Index of the control point within `maxDistPx` of p, else -1. */
-    int findNearestPoint (const juce::Point<int>& p, int maxDistPx) const;
-
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
-    void paint (juce::Graphics&) override;
 
-    static constexpr int kLeftMargin = 42, kBottomMargin = 20, kTopMargin = 8,
-                        kRightMargin = 8;
+private:
+
+    /** Index of the control point within `maxDistPx` of p, else -1. */
+    int findNearestPoint (const juce::Point<int>& p, int maxDistPx) const;
+
+    void paint (juce::Graphics&) override;
 
     std::vector<sc::env::EnvPoint> points_;   // sorted by ascending time
     double timeHi_ = 1.0;                     // right edge of the axis, seconds
@@ -1015,6 +1020,9 @@ private:
     bool pressAddedPoint_ = false;            // this mouse-down created a new point
     juce::Time lastDownTime_ {};
     juce::Point<int> lastDownPos_{ -1, -1 };
+
+    static constexpr int kLeftMargin = 42, kBottomMargin = 34, kTopMargin = 20,
+                        kRightMargin = 8;   // top/bottom margins hold the unit captions
 
     JUCE_DECLARE_NON_COPYABLE (EnvCurveEditor)
 };

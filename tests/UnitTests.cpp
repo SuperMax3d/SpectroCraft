@@ -5286,11 +5286,11 @@ static void clickTableRow (juce::TableListBox& t, int rowIndex, juce::ModifierKe
 }
 
 // ---------------- Harmonic reference lines (FFT panel) ----------------
-// Right-click "Set Harmonic References" treats the frequency under the cursor
+// Right-click "Activate Harmonics" treats the frequency under the cursor
 // as harmonic #N of a fundamental: delicate vertical lines mark harmonics
 // 1..N wherever they are inside the visible window and follow the mouse.
 // "Copy Harmonics" exports an Excel-friendly TSV table (Harmonic/Frequency/
-// Amplitude, CRLF line endings); "Reset Harmonic" clears everything again.
+// Amplitude, CRLF line endings); "Clear Harmonics" clears everything again.
 static void testFFTHarmonicReferences()
 {
     const juce::File wav = makeTempFile ("fft_harm.wav");
@@ -13884,9 +13884,9 @@ static void testSplitSpectralSelectionApp()
         std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
         const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        CHECK (fxMenu.getNumItems() == 19, "Effects menu lists the invert/stretch/cat-time-scale/eq/enveloppe + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 19, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #else
-        CHECK (fxMenu.getNumItems() == 18, "Effects menu lists the invert/stretch/cat-time-scale/eq/enveloppe + split + generate + super-res items");
+        CHECK (fxMenu.getNumItems() == 18, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #endif
     }
     app.settings.splitConfig = { { 0, 1 } };   // ch1 -> new ch2 (the old F12 behaviour)
@@ -16890,6 +16890,61 @@ static void testEqEditorSetPoint()
     CHECK (ed.getPoints ().size () == 1, "bad index is ignored");
 }
 
+// ------------------------------------------------- Curve editor double-click
+// Double-clicking a control point fires onEditPoint with the point's index;
+// the host shows the exact-coordinate dialog from that callback. The first
+// click of an empty-space pair adds a point there, and the second offers to
+// edit it.
+static void testCurveEditorDoubleClick()
+{
+    // --- Filter EQ editor (log-frequency axis).
+    {
+        EqCurveEditor ed;
+        ed.setSize (560, 340);
+        ed.setPoints ({ { 100.0, -6.0 }, { 2000.0, 8.0 } });
+        int edited = -1;
+        ed.onEditPoint = [&] (int i) { edited = i; };
+
+        const int x = ed.freqToX (2000.0), y = ed.dbToY (8.0);
+        ed.mouseDown (mkMouse (ed, x, y, {}));
+        ed.mouseUp   (mkMouse (ed, x, y, {}));
+        CHECK (edited == -1, "single click on a point does not open the edit dialog");
+
+        ed.mouseDown (mkMouse (ed, x, y, {}));
+        CHECK (edited == 1, "double-click fires onEditPoint with the point's index");
+
+        // Empty space: the first click adds a point there...
+        const int before = (int) ed.getPoints ().size ();
+        const int ex = ed.freqToX (8000.0), ey = ed.dbToY (-20.0);
+        edited = -1;
+        ed.mouseDown (mkMouse (ed, ex, ey, {}));
+        ed.mouseUp   (mkMouse (ed, ex, ey, {}));
+        CHECK ((int) ed.getPoints ().size () == before + 1, "first empty click added a point");
+
+        // ...and the second offers to edit it.
+        ed.mouseDown (mkMouse (ed, ex, ey, {}));
+        CHECK (edited == before, "second empty click offers to edit the new point");
+    }
+
+    // --- Envelope editor (linear time axis): same interaction model.
+    {
+        EnvCurveEditor ed;
+        ed.setSize (560, 340);
+        ed.setTimeHi (2.0);
+        ed.setPoints ({ { 0.0, -12.0 }, { 1.5, 6.0 } });
+        int edited = -1;
+        ed.onEditPoint = [&] (int i) { edited = i; };
+
+        const int x = ed.tToX (1.5), y = ed.dbToY (6.0);
+        ed.mouseDown (mkMouse (ed, x, y, {}));
+        ed.mouseUp   (mkMouse (ed, x, y, {}));
+        CHECK (edited == -1, "single click on a point does not open the edit dialog");
+
+        ed.mouseDown (mkMouse (ed, x, y, {}));
+        CHECK (edited == 1, "double-click fires onEditPoint with the point's index");
+    }
+}
+
 static void testInvertEffect()
 {
     const juce::File wav = makeTempFile ("invert_test.wav");
@@ -17531,7 +17586,7 @@ static void testFilterEqEffect()
     }
 }
 
-// ------------------------------------------------- Enveloppe curve math
+// ------------------------------------------------- Envelope curve math
 
 static void testEnvelopeCurveMath()
 {
@@ -17631,7 +17686,7 @@ static void testEnvelopeEditorSetPoint()
     CHECK (ed.getPoints ().size () == 1, "bad index is ignored");
 }
 
-// ------------------------------------------------- Enveloppe effect
+// ------------------------------------------------- Envelope effect
 
 static void testEnvelopeEffect()
 {
@@ -17760,7 +17815,7 @@ static void testEnvelopeEffect()
     }
 }
 
-// ------------------------------------------------- Enveloppe dialog + presets
+// ------------------------------------------------- Envelope dialog + presets
 
 static void testEnvelopeDialog()
 {
@@ -20989,6 +21044,38 @@ static void testCtrl0ZoomOutFull()
     wav.deleteFile();
 }
 
+// ---------------- Marker titles in the stacked dual view ----------------
+// With both views visible the marker titles only appear on the spectrogram;
+// a lone waveform view keeps its own. The delimiter lines stay in both.
+static void testMarkerTitleVisibility()
+{
+    Application app;
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "marker title visibility"));
+
+    // Default layout: both views stacked -> the waveform suppresses titles.
+    CHECK (win->waveformVisible() && win->spectrogramVisible(), "both views shown by default");
+    CHECK (!win->waveformViewComp()->showsMarkerTitles (),
+          "stacked: marker titles suppressed on the waveform");
+
+    // Hide the spectrogram -> the lone waveform keeps its own titles.
+    win->menuItemSelected (MainWindow::MenuIDs::ViewShowSpectral, 3);
+    CHECK (win->waveformVisible() && !win->spectrogramVisible(), "cycled to waveform only");
+    CHECK (win->waveformViewComp()->showsMarkerTitles (),
+          "lone waveform view keeps its marker titles");
+
+    // Back to both, then hide the waveform -> lone spectrogram.
+    win->menuItemSelected (MainWindow::MenuIDs::ViewShowSpectral, 3);
+    CHECK (win->waveformVisible() && win->spectrogramVisible(), "both views again");
+    win->menuItemSelected (MainWindow::MenuIDs::ViewShowWaveform, 3);
+    CHECK (!win->waveformVisible() && win->spectrogramVisible(), "cycled to spectrogram only");
+
+    // Back to both -> suppressed on the waveform again.
+    win->menuItemSelected (MainWindow::MenuIDs::ViewShowWaveform, 3);
+    CHECK (win->waveformVisible() && win->spectrogramVisible(), "back to both views");
+    CHECK (!win->waveformViewComp()->showsMarkerTitles (),
+          "stacked again: marker titles suppressed on the waveform");
+}
+
 // ---------------- View menu: axis on right / ruler at bottom (persisted) -----
 
 static void testTrackAxisPlacement()
@@ -21055,9 +21142,9 @@ static void testTrackAxisPlacement()
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/cat-time-scale/eq/enveloppe + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #else
-    CHECK (fxMenu.getNumItems() == 18, "Effects menu includes the invert/stretch/cat-time-scale/eq/enveloppe + split + generate + super-res items");
+    CHECK (fxMenu.getNumItems() == 18, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #endif
 
     app.settings.trackAxisOnRight = false;
@@ -22483,6 +22570,7 @@ static int scRunUnitTestsImpl()
     progress ("time stretch dialog sync");  testTimeStretchDialogSync();
     progress ("eq preset persistence");     testEqPresetPersistence();
     progress ("eq editor set point");       testEqEditorSetPoint();
+    progress ("curve editor double-click"); testCurveEditorDoubleClick();
     progress ("invert effect");             testInvertEffect();
     progress ("time stretch effect");       testTimeStretchEffect();
     progress ("cat analyze");               testCatAnalyze();
@@ -22491,10 +22579,10 @@ static int scRunUnitTestsImpl()
     progress ("cat effect (app)");          testCatEffectApp();
     progress ("cat dialog");                testCatDialog();
     progress ("filter eq effect");          testFilterEqEffect();
-    progress ("enveloppe curve math");      testEnvelopeCurveMath();
+    progress ("envelope curve math");      testEnvelopeCurveMath();
     progress ("env editor set point");      testEnvelopeEditorSetPoint();
-    progress ("enveloppe effect");          testEnvelopeEffect();
-    progress ("enveloppe dialog");          testEnvelopeDialog();
+    progress ("envelope effect");          testEnvelopeEffect();
+    progress ("envelope dialog");          testEnvelopeDialog();
     progress ("ns copy noise tracks");      testNsCopyNoiseTracks();
     progress ("snapshot deletion adjust");  testDeleteAdjustsSnapshots();
     progress ("curve analysis modes");     testCurveAnalysisModes();
@@ -22526,6 +22614,7 @@ static int scRunUnitTestsImpl()
     progress ("drawing key shortcuts");   testDrawingKeyShortcuts();
     progress ("left panels toggle shortcut"); testLeftPanelsToggleShortcut();
     progress ("ctrl+0 zoom out full"); testCtrl0ZoomOutFull();
+    progress ("marker title visibility"); testMarkerTitleVisibility();
     progress ("track axis placement"); testTrackAxisPlacement();
     progress ("spectrogram export options"); testSpectrogramExportOptions();
     progress ("audio.cpp cli wrapper");  testAudioCppCli();

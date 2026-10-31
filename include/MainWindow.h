@@ -224,7 +224,7 @@ public:
     juce::AlertWindow* createGenerateToneDialog();
 
     // ---- Effects > Invert / Time Stretch... / Content Aware Time Scale... /
-    //          Filter EQ... / Enveloppe... ---
+    //          Filter EQ... / Envelope... ---
     void showTimeStretchDialog();
     void showContentAwareTimeScaleDialog();
     void showFilterEqDialog();
@@ -240,7 +240,7 @@ public:
         at one step away from its currently resolved size. */
     void stepFftSize (bool up);
     /** Build (but do not run modally) the Time Stretch, Filter EQ and
-        Enveloppe dialogs. The caller owns and must delete them; used by the
+        Envelope dialogs. The caller owns and must delete them; used by the
         show* functions and tests. */
     juce::AlertWindow* createTimeStretchDialog();
     juce::AlertWindow* createContentAwareTimeScaleDialog();
@@ -458,7 +458,7 @@ public:
         ToolsTimeStretch,      // Effects > Time Stretch... (SoundTouch tempo change)
         ToolsCatTimeScale,     // Effects > Content Aware Time Scale... (STFT gap analysis)
         ToolsFilterEq,         // Effects > Filter EQ... (FFT curve equaliser)
-        ToolsEnvelope,         // Effects > Enveloppe... (amplitude-over-time curve)
+        ToolsEnvelope,         // Effects > Envelope... (amplitude-over-time curve)
         ToolsResample,
         ToolsStemSeparate,   // AI stem separation via the audio.cpp CLI tool
         ToolsSuperResolve,   // AI super resolution (FlashSR / AudioSR) via the audio.cpp CLI tool

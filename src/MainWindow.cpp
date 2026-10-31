@@ -664,6 +664,11 @@ void MainWindow::resized()
     if (waveformView) waveformView->setShowTimeRuler (!showSpec || !rulerBottom);
     if (spectralView) spectralView->setShowOwnTimeRuler (!showWave || rulerBottom);
 
+    // When both views are stacked, the marker titles only appear on the
+    // spectrogram; a lone waveform view keeps its own. The delimiter lines
+    // stay in both.
+    if (waveformView) waveformView->setShowMarkerTitles (!showSpec);
+
     // Time scrollbar at the bottom of the main area.
     if (timeBar) timeBar->setVisible (haveFile);
     auto mainArea = rest;
@@ -4517,7 +4522,7 @@ static double envelopeTargetSeconds (Application& app)
 
 juce::AlertWindow* MainWindow::createEnvelopeDialog()
 {
-    auto* w = new juce::AlertWindow ("Enveloppe",
+    auto* w = new juce::AlertWindow ("Envelope",
         "Drag points to shape the amplitude over time; click empty space to add a point, "
         "double-click a point to type its exact coordinates and right-click it to remove it. "
         "The curve is applied as a per-sample gain: to the active spectral selection if there "
@@ -6244,7 +6249,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       app.audioEngine().isFileLoaded(), false);
         menu.addItem (ToolsFilterEq,    "Filter EQ...\tCtrl+Shift+E",
                       app.audioEngine().isFileLoaded(), false);
-        menu.addItem (ToolsEnvelope,    "Enveloppe...",    app.audioEngine().isFileLoaded(), false);
+        menu.addItem (ToolsEnvelope,    "Envelope...",     app.audioEngine().isFileLoaded(), false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         // AI effects: first use downloads the model weights. Transcription is
         // launched from the buttons in the Transcription tab instead.

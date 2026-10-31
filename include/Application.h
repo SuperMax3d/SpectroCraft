@@ -583,7 +583,7 @@ public:
     bool applyFilterEq (const std::vector<sc::eq::EqPoint>& pts,
                         std::string* errOut = nullptr);
 
-    /** Enveloppe: per-sample amplitude curve over time on the active spectral
+    /** Envelope: per-sample amplitude curve over time on the active spectral
         selection region, or on the time selection if there is one, or over
         the whole file when nothing is selected. The curve's time axis starts
         at 0 seconds at the target range start; pts must be sorted by
