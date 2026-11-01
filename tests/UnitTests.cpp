@@ -22707,8 +22707,7 @@ static void testTablesSerialiseParse()
     std::vector<TableData> tables;
     TableData t;
     t.name = "RoundTrip";
-    t.visible = false;
-    t.colorIndex = 5;
+    t.visible = false;   // tables carry no colour of their own
     t.sampleRate = 250.0;
     t.offsetSecs = 1.25;
     t.scaleTime = 0.5;
@@ -22744,7 +22743,7 @@ static void testTablesSerialiseParse()
     if (back.size() == 1)
     {
         const auto& bt = back[0];
-        CHECK (bt.name == "RoundTrip" && !bt.visible && bt.colorIndex == 5, "table fields survive");
+        CHECK (bt.name == "RoundTrip" && !bt.visible, "table fields survive");
         CHECK (std::abs (bt.sampleRate - 250.0) < 1e-9 && std::abs (bt.offsetSecs - 1.25) < 1e-9
               && std::abs (bt.scaleTime - 0.5) < 1e-9, "table alignment survives");
 
@@ -22907,6 +22906,256 @@ static void testTablesPanel()
         else
             CHECK (false, "reopened the embedded file");
         emb.deleteFile();
+    }
+
+    wav.deleteFile();
+}
+
+//==============================================================================
+// Overlay value mapping, unique parameter colours, the preset colour picker
+// and the dedicated track's selection band / playhead.
+static void testTablesOverlayAndPicker()
+{
+    using namespace sc::tables;
+
+    // --- overlayValue: fit to [-1,+1], then inverted/absolute/scale+offset --
+    {
+        ParamData p;
+        CHECK (std::abs (overlayValue (5.0, p, 0.0, 10.0)) < 1e-9, "midpoint fits to zero");
+        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0) - 1.0) < 1e-9, "max fits to +1");
+        CHECK (std::abs (overlayValue (0.0, p, 0.0, 10.0) + 1.0) < 1e-9, "min fits to -1");
+
+        p.inverted = true;
+        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0) + 1.0) < 1e-9, "inversion flips the fit");
+
+        p.inverted = false;
+        p.absolute = true;
+        CHECK (std::abs (overlayValue (0.0, p, 0.0, 10.0) - 1.0) < 1e-9, "absolute folds the negative side");
+
+        p.absolute = false;
+        p.valueScale = 2.0;
+        p.valueOffset = 0.5;
+        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0) - 2.5) < 1e-9, "scale+offset applied last");
+
+        ParamData flat;
+        CHECK (overlayValue (3.0, flat, 7.0, 7.0) == 0.0, "flat range fits to zero");
+    }
+
+    // --- Unique parameter colours within one table ---------------------------
+    {
+        TableData t;
+        CHECK (importTable ("cols", "a,b,c\n1,2,3\n4,5,6\n", t), "three-column csv imports");
+        if (t.params.size() == 3)
+            CHECK (t.params[0].colorIndex != t.params[1].colorIndex
+                  && t.params[1].colorIndex != t.params[2].colorIndex
+                  && t.params[0].colorIndex != t.params[2].colorIndex,
+                  "unique colours within the table");
+    }
+
+    const juce::File wav = makeTempFile ("tables_pick.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) f / rate); });
+    Application app;
+    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    FileDoc* d = app.doc ();
+    CHECK (d != nullptr, "overlay/picker: doc created");
+    if (d == nullptr) { wav.deleteFile(); return; }
+
+    std::string err;
+    const juce::String csv = "alpha,beta\n1,2.5\n3,4.5\n5,6.5\n";
+    CHECK (app.addTableFromCsv ("T1", csv, &err), "first table imported");
+    CHECK (app.addTableFromCsv ("T2", csv, &err), "second table imported");
+
+    // --- Global colour uniqueness across tables -------------------------------
+    {
+        std::vector<int> used;
+        for (const auto& t : d->tables)
+            for (const auto& p : t.params) used.push_back (p.colorIndex);
+        std::sort (used.begin(), used.end());
+        bool unique = true;
+        for (size_t i = 1; i < used.size(); ++i)
+            if (used[i] == used[i - 1]) { unique = false; break; }
+        CHECK (unique && used.size() == 4, "every parameter in the doc has its own colour");
+    }
+
+    // --- Double-click on a parameter's square opens the preset picker ---------
+    {
+        juce::MessageManager* mm = juce::MessageManager::getInstance();
+        TablesPanel panel (app);
+        panel.setSize (320, 420);
+        panel.refresh();
+
+        std::atomic<bool> picked { false };
+        std::thread helper ([&picked]
+        {
+            for (int i = 0; i < 500 && !picked.load (); ++i)
+            {
+                juce::MessageManager::callAsync ([&picked]
+                {
+                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
+                        if (auto* aw = dynamic_cast<juce::AlertWindow*> (m))
+                            if (aw->getNumCustomComponents () > 0)
+                                if (auto* picker = dynamic_cast<TablesColourPicker*> (aw->getCustomComponent (0)))
+                                    { picker->onPick (7); picked.store (true); }
+                });
+                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+            }
+        });
+
+        const juce::MouseEvent dbl = mkMouse (panel, 10, 10, {}, 2);
+        panel.simulateCellClick (1, 2, dbl);   // double-click on the colour square
+        helper.join ();
+
+        CHECK (picked.load (), "picker dialog was shown and a swatch applied");
+        CHECK (d->tables[0].params[0].colorIndex == 7, "chosen preset colour stored");
+    }
+
+    // --- Dedicated track: blue selection band + red playhead -------------------
+    {
+        juce::String bigCsv = "v\n";
+        for (int i = 0; i < 600; ++i) bigCsv += juce::String (i) + "\n";
+        CHECK (app.addTableFromCsv ("Track", bigCsv, &err), "long table imported");
+        d->tables[2].params[0].colorIndex = 2;   // yellow: distinct from the red playhead
+
+        TablesTrackView track (app);
+        track.setSize (300, 120);
+        track.setTimeRange (0.0, 0.5);
+        track.refit();
+        app.setSelection ({ 0.1, 0.3 });
+        track.setPlayhead (0.25);
+
+        juce::Image img (juce::Image::ARGB, 300, 120, true);
+        juce::Graphics g (img);
+        track.paint (g);
+
+        // Selection band at t=0.2 -> x = 60 + 0.4*240 = 156: translucent blue
+        // (blended with whatever is underneath, e.g. a grid line).
+        const auto selPix = img.getPixelAt (156, 60);
+        CHECK (selPix.getBlue () > 90 && selPix.getBlue () - selPix.getRed () > 40,
+              "blue selection band drawn over the track");
+
+        // Playhead at t=0.25 -> x = 60 + 0.5*240 = 180: a red line.
+        bool foundPlayhead = false;
+        for (int x = 178; x <= 182 && !foundPlayhead; ++x)
+            if (img.getPixelAt (x, 60).getRed () > 200
+                && img.getPixelAt (x, 60).getGreen () < 120)
+                foundPlayhead = true;
+        CHECK (foundPlayhead, "red playhead drawn over the track");
+
+        // The yellow parameter curve is visible somewhere in the plot area.
+        bool foundCurve = false;
+        for (int y = 0; y < 120 && !foundCurve; ++y)
+            for (int x = 61; x < 300; ++x)
+                if (img.getPixelAt (x, y).getRed () > 200
+                    && img.getPixelAt (x, y).getGreen () > 190
+                    && img.getPixelAt (x, y).getBlue () < 140)
+                    { foundCurve = true; break; }
+        CHECK (foundCurve, "parameter curve drawn on the dedicated track");
+    }
+
+    wav.deleteFile();
+}
+
+//==============================================================================
+// Parameter Align targets: the chosen view (waveform / spectrogram /
+// dedicated) is recorded on the parameter and gates which overlay draws it.
+static void testTablesAlignTarget()
+{
+    const juce::File wav = makeTempFile ("tables_align.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) f / rate); });
+    Application app;
+    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    FileDoc* d = app.doc ();
+    CHECK (d != nullptr, "alignTarget: doc created");
+    if (d == nullptr) { wav.deleteFile(); return; }
+
+    std::string err;
+    juce::String csv = "alpha,beta\n";   // 200 rows @ 1000 Hz -> 0.2 s of table time
+    for (int i = 0; i < 200; ++i)
+        csv += juce::String ((double) i / 199.0, 4) + ","
+             + juce::String (1.0 + (double) i / 199.0, 4) + "\n";
+    CHECK (app.addTableFromCsv ("T1", csv, &err), "table imported");
+    auto& p0 = d->tables[0].params[0];
+    p0.colorIndex = 3;   // green: absent from the classic spectral map
+    CHECK (p0.alignTarget == 0, "new parameter defaults to the waveform overlay");
+
+    TablesPanel panel (app);
+    panel.setSize (320, 420);
+    panel.refresh();
+
+    // --- One-point alignment onto the spectrogram -------------------------
+    panel.startPointAlign (1, 0, 0, 1);
+    CHECK (panel.hasPendingAlignment(), "pending after startPointAlign");
+    panel.handlePlotClick (0.1);     // table time of the plot click
+    panel.handleDocClick (0.3);      // doc time in the spectrogram
+    CHECK (!panel.hasPendingAlignment(), "alignment completed");
+    CHECK (p0.alignTarget == 1, "spectrogram alignment records alignTarget=1");
+    const auto [effOff, effSc] = d->tables[0].effectiveTimeMap (p0);
+    CHECK (std::abs ((effOff + effSc * 0.1) - 0.3) < 1e-9,
+          "effective map hits the clicked doc time");
+
+    // kPalette[3] is (110,220,110); match it tightly so anti-aliased edges of
+    // the teal waveform fill / grid lines cannot false-positive.
+    auto countGreen = [] (const juce::Image& img)
+    {
+        int n = 0;
+        for (int y = 0; y < img.getHeight (); ++y)
+            for (int x = 0; x < img.getWidth (); ++x)
+            {
+                const auto px = img.getPixelAt (x, y);
+                if (px.getRed () > 85 && px.getRed () < 140
+                    && px.getGreen () > 195
+                    && px.getBlue () > 85 && px.getBlue () < 140) ++n;
+            }
+        return n;
+    };
+
+    // --- SpectralView draws it in spectrogram-overlay mode -----------------
+    app.setTablesMode (1);
+    {
+        SpectralView sv (app);
+        sv.setSize (256, 128);
+        sv.setViewRange (0.0, 0.5);
+        sv.setVisibleChannels ({ 0 });
+        sv.setSettings (app.settings);
+        juce::Image img (juce::Image::ARGB, 256, 128, true);
+        { juce::Graphics g (img); sv.paint (g); }
+        CHECK (countGreen (img) > 0,
+              "spectrogram overlay draws the spectrogram-aligned parameter");
+    }
+
+    // --- Re-align to the waveform: it must leave the spectrogram overlay ----
+    panel.startPointAlign (1, 0, 0, 0);
+    panel.handlePlotClick (0.05);
+    panel.handleDocClick (0.1);
+    CHECK (p0.alignTarget == 0, "waveform alignment records alignTarget=0");
+
+    {
+        SpectralView sv (app);   // still in mode 1
+        sv.setSize (256, 128);
+        sv.setViewRange (0.0, 0.5);
+        sv.setVisibleChannels ({ 0 });
+        sv.setSettings (app.settings);
+        juce::Image img (juce::Image::ARGB, 256, 128, true);
+        { juce::Graphics g (img); sv.paint (g); }
+        CHECK (countGreen (img) == 0,
+              "waveform-aligned parameter is not drawn by the spectrogram overlay");
+    }
+
+    // --- WaveformView draws it in waveform-overlay mode ---------------------
+    app.setTablesMode (0);
+    {
+        WaveformView wv (app);
+        wv.setSize (256, 128);
+        wv.setViewRange (0.0, 0.5);
+        wv.setVisibleChannels ({ 0 });
+        juce::Image img (juce::Image::ARGB, 256, 128, true);
+        { juce::Graphics g (img); wv.paint (g); }
+        CHECK (countGreen (img) > 0,
+              "waveform overlay draws the waveform-aligned parameter");
     }
 
     wav.deleteFile();
@@ -23735,6 +23984,8 @@ static int scRunUnitTestsImpl()
     progress ("tables auto align lag");  testTablesAutoAlignLag();
     progress ("tables serialise/parse"); testTablesSerialiseParse();
     progress ("tables panel");           testTablesPanel();
+    progress ("tables overlay + picker"); testTablesOverlayAndPicker();
+    progress ("tables align targets");   testTablesAlignTarget();
     progress ("single instance mode");   testSingleInstance();
     progress ("waveform zero line");     testWaveformZeroLine();
     progress ("fft axis wheel zoom");    testFFTAxisWheelZoom();

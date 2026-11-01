@@ -26,9 +26,11 @@ void TablesTrackView::setPlayhead (double tSecs)
 
 juce::Rectangle<int> TablesTrackView::plotRect() const
 {
-    // Same horizontal layout as the data tracks: axis strip on the left, plot
-    // filling the rest (the scrollbar sits outside this component).
-    return { kAxisW, 0, std::max (1, getWidth() - kAxisW), std::max (1, getHeight()) };
+    // Same horizontal layout as the data tracks: a value-axis strip of width
+    // kLeftAxisWidth on whichever side the View menu puts it; the plot fills
+    // the rest (the scrollbar sits outside this component).
+    const int x0 = app.settings.trackAxisOnRight ? 0 : kAxisW;
+    return { x0, 0, std::max (1, getWidth() - kAxisW), std::max (1, getHeight()) };
 }
 
 double TablesTrackView::valueAtY (int y) const
@@ -86,10 +88,13 @@ void TablesTrackView::paint (juce::Graphics& g)
     if (!app.audioEngine().isFileLoaded()) return;
 
     const auto pr = plotRect();
+    const bool axRight = app.settings.trackAxisOnRight;
+    const juce::Rectangle<int> axisStrip (axRight ? getWidth() - kAxisW : 0, 0,
+                                           kAxisW, getHeight());
 
-    // Value axis: gridlines with labels in the left strip, like the other tracks.
+    // Value axis: gridlines with labels in the value-axis strip, like the other tracks.
     g.setColour (juce::Colour::fromRGB (32, 32, 36));
-    g.fillRect (0, 0, kAxisW, getHeight());
+    g.fillRect (axisStrip);
     const int nLines = std::max (2, std::min (8, getHeight() / 18));
     g.setFont (11.0f);
     for (int i = 0; i <= nLines; ++i)
@@ -97,10 +102,11 @@ void TablesTrackView::paint (juce::Graphics& g)
         const double v = vMax + (vMin - vMax) * ((double) i / nLines);
         const int y = yForValue (v);
         g.setColour (juce::Colour::fromRGB (60, 60, 68));
-        g.drawHorizontalLine (kAxisW, (float) y, (float) getWidth());
+        g.drawHorizontalLine (pr.getX(), (float) y, (float) pr.getRight());
         g.setColour (juce::Colours::lightgrey);
-        g.drawText (juce::String (v, 4), juce::Rectangle<int> (2, y - 8, kAxisW - 6, 15),
-                    juce::Justification::left, true);
+        g.drawText (juce::String (v, 4), juce::Rectangle<int> (axisStrip.getX() + 2, y - 8,
+                    kAxisW - 6, 15), axRight ? juce::Justification::right
+                                             : juce::Justification::left, true);
     }
 
     // One curve per visible parameter (raw values through the effective time
@@ -117,7 +123,7 @@ void TablesTrackView::paint (juce::Graphics& g)
             bool started = false;
             for (int i = 0; i < pr.getWidth(); ++i)
             {
-                const double tDoc = t0 + ((double) (pr.getX() + i) / (double) pr.getWidth()) * (t1 - t0);
+                const double tDoc = t0 + ((double) i / (double) pr.getWidth()) * (t1 - t0);
                 const double tTab = (tDoc - off) / sc;
                 if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
                 const double v = sc::tables::paramValueAt (t, p, tTab);
@@ -128,6 +134,21 @@ void TablesTrackView::paint (juce::Graphics& g)
             }
             g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
             g.strokePath (path, juce::PathStrokeType (2.0f));
+        }
+    }
+
+    // Blue time-selection band: the same translucent blue as the waveform and
+    // spectral views, spanning the whole strip height.
+    if (!app.selection.isEmpty() && t1 > t0)
+    {
+        const double x1 = pr.getX() + (app.selection.getStart () - t0) / (t1 - t0) * pr.getWidth();
+        const double x2 = pr.getX() + (app.selection.getEnd () - t0) / (t1 - t0) * pr.getWidth();
+        const float lo = std::max ((float) pr.getX(), (float) x1);
+        const float hi = std::min ((float) pr.getRight(), (float) x2);
+        if (hi > lo)
+        {
+            g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
+            g.fillRect (lo, 0.0f, hi - lo, (float) getHeight());
         }
     }
 
@@ -218,10 +239,10 @@ void TablesTrackView::mouseWheelMove (const juce::MouseEvent& e, const juce::Mou
 void TablesTrackView::collectHoverLabels (int mouseX, int mouseY)
 {
     hoverLabels.clear();
-    if (!app.audioEngine().isFileLoaded() || mouseX < kAxisW) return;
+    if (!app.audioEngine().isFileLoaded()) return;
 
     const auto pr = plotRect();
-    if (mouseX >= pr.getRight()) return;
+    if (mouseX < pr.getX() || mouseX >= pr.getRight()) return;
     const double tDoc = t0 + ((double) (mouseX - pr.getX()) / (double) pr.getWidth()) * (t1 - t0);
 
     struct Hit { float y; juce::String text; juce::Colour colour; };

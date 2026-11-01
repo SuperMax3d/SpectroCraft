@@ -514,6 +514,12 @@ void MainWindow::setupViews()
     juce::Component::addAndMakeVisible (waveformView.get());
     juce::Component::addAndMakeVisible (spectralView.get());
 
+    // Dedicated tables track strip + its separator and vertical scrollbar.
+    // Hidden unless the Tables panel is in "Dedicated track" mode.
+    juce::Component::addAndMakeVisible (tablesTrack.get());
+    juce::Component::addAndMakeVisible (tablesSep.get());
+    juce::Component::addAndMakeVisible (tablesVScroll.get());
+
     // Both views always show the SAME time window: when either one changes its
     // range (zoom/pan/fit), applyTimeWindow() pushes it to both views and keeps
     // the canonical app.viewStart/viewEnd in sync (used by the Frequency
@@ -761,8 +767,11 @@ void MainWindow::resized()
     auto placeTablesStrip = [&] (juce::Rectangle<int> area) -> void
     {
         if (!showTablesTrack || !tablesTrack) return;
-        tablesRect = juce::Rectangle<int> (area.getX() + axL, area.getY(),
-                                           std::max (0, area.getWidth() - vScrollW - axL - axR),
+        // Same horizontal span as the data views: full width minus the
+        // scrollbar strip. The view draws its own value-axis strip (left or
+        // right, per the View menu) inside these bounds.
+        tablesRect = juce::Rectangle<int> (area.getX(), area.getY(),
+                                           std::max (0, area.getWidth() - vScrollW),
                                            trackH);
         if (topRulerOwner != nullptr)
             tablesRect.setY (area.getY() + WaveformView::kRulerH);   // below the top ruler

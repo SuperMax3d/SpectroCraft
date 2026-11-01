@@ -1472,13 +1472,16 @@ bool Application::addTableFromCsv (const juce::String& name, const juce::String&
     if (!sc::tables::importTable (name, csvText, t, errOut))
         return false;
 
-    // Give the new table a colour not used by its earlier siblings.
+    // Give every new parameter a colour not used by any existing parameter in
+    // the document, so overlapping curves stay distinguishable.
     std::vector<int> used;
     for (const auto& other : d->tables)
-        used.push_back (other.colorIndex);
+        for (const auto& p : other.params)
+            used.push_back (p.colorIndex);
     int ci = 0;
     while (ci < 12 && std::find (used.begin(), used.end(), ci) != used.end()) ++ci;
-    t.colorIndex = ci % 12;
+    for (size_t i = 0; i < t.params.size(); ++i)
+        t.params[i].colorIndex = (ci + (int) i) % 12;
 
     d->tables.push_back (std::move (t));
     d->metaDirty = true;   // the tables persist with the file metadata

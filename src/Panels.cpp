@@ -9243,6 +9243,79 @@ void TablesPlotView::mouseDown (const juce::MouseEvent& e)
 
 // ----------------------------------------------------------------- Panel --
 
+// ------------------------------------------------- parameter colour picker --
+
+static juce::Rectangle<int> tablesSwatchRect (int idx)
+{
+    const int col = idx % 4, row = idx / 4;
+    return { 8 + col * 38, 8 + row * 30, 30, 22 };
+}
+
+TablesColourPicker::TablesColourPicker (int current)
+    : current_ (std::max (0, current % 12))
+{
+    setSize (160, 98);
+}
+
+int TablesColourPicker::swatchAt (juce::Point<int> p) const
+{
+    for (int i = 0; i < 12; ++i)
+        if (tablesSwatchRect (i).contains (p)) return i;
+    return -1;
+}
+
+void TablesColourPicker::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colours::black);
+    for (int i = 0; i < 12; ++i)
+    {
+        const auto r = tablesSwatchRect (i).toFloat();
+        g.setColour (sc::tables::kPalette[i]);
+        g.fillRoundedRectangle (r, 3.0f);
+        if (i == current_)
+        {
+            g.setColour (juce::Colours::white);
+            g.drawRoundedRectangle (r.reduced (1.5f), 2.0f, 2);
+        }
+    }
+}
+
+void TablesColourPicker::mouseDown (const juce::MouseEvent& e)
+{
+    const int idx = swatchAt ({ e.x, e.y });
+    if (idx >= 0 && onPick) onPick (idx);
+}
+
+void TablesPanel::showColourPicker (int tableIdx, int paramIdx)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || tableIdx < 0 || tableIdx >= (int) d->tables.size ()) return;
+    const auto& t = d->tables[(size_t) tableIdx];
+    if (paramIdx < 0 || paramIdx >= (int) t.params.size()) return;
+
+    juce::AlertWindow w ("Parameter Colour",
+                        "Choose a colour for \"" + t.params[(size_t) paramIdx].name + "\":",
+                        juce::AlertWindow::NoIcon, this);
+    auto* picker = new TablesColourPicker (t.params[(size_t) paramIdx].colorIndex);
+    w.addCustomComponent (picker);
+
+    // Clicking a swatch applies it and closes the window.
+    picker->onPick = [&w, this, tableIdx, paramIdx] (int idx)
+    {
+        auto* dd = app.doc ();
+        if (dd == nullptr || tableIdx < 0 || tableIdx >= (int) dd->tables.size ()) return;
+        auto& tt = dd->tables[(size_t) tableIdx];
+        if (paramIdx < 0 || paramIdx >= (int) tt.params.size()) return;
+        tt.params[(size_t) paramIdx].colorIndex = idx % 12;
+        dd->metaDirty = true;   // the colour persists with the metadata
+        if (app.onTablesChanged) app.onTablesChanged ();
+        w.exitModalState (-1);
+    };
+
+    w.addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+    w.runModalLoop ();
+}
+
 TablesPanel::Model::Model (TablesPanel* o) : owner (o) {}
 
 int TablesPanel::Model::getNumRows()
@@ -9273,18 +9346,16 @@ void TablesPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int column
     const bool visible = isTable ? t.visible
                                  : (ref.paramIdx < (int) t.params.size()
                                     && t.params[(size_t) ref.paramIdx].visible);
-    const int colour = isTable ? t.colorIndex
-                               : (ref.paramIdx < (int) t.params.size()
-                                  ? t.params[(size_t) ref.paramIdx].colorIndex : 0);
 
     g.setFont (11.0f);
     if (columnId == 1)   // visibility eye icon
         drawEyeIcon (g, juce::Rectangle<float> ((float) width / 2.0f - 8.0f,
                                                 (float) height / 2.0f - 6.0f,
                                                 16.0f, 12.0f), visible);
-    else if (columnId == 2)   // colour square
+    else if (columnId == 2 && !isTable
+             && ref.paramIdx < (int) t.params.size())   // colour square: parameters only
     {
-        g.setColour (sc::tables::kPalette[colour % 12]);
+        g.setColour (sc::tables::kPalette[t.params[(size_t) ref.paramIdx].colorIndex % 12]);
         g.fillRoundedRectangle (juce::Rectangle<float> ((float) width / 2.0f - 7.0f,
                                                         (float) height / 2.0f - 6.0f,
                                                         14.0f, 12.0f),
@@ -9314,18 +9385,29 @@ void TablesPanel::Model::cellClicked (int rowNumber, int columnId, const juce::M
         if (ref.tableIdx >= 0 && ref.tableIdx < (int) d->tables.size())
         {
             auto& t = d->tables[(size_t) ref.tableIdx];
+            bool handled = false;
             if (columnId == 1)
             {
                 if (ref.paramIdx < 0) t.visible = !t.visible;
                 else if (ref.paramIdx < (int) t.params.size())
                     t.params[(size_t) ref.paramIdx].visible = !t.params[(size_t) ref.paramIdx].visible;
+                handled = true;
             }
-            else   // columnId == 2: cycle the colour square through the palette
+            else if (columnId == 2 && ref.paramIdx >= 0
+                     && ref.paramIdx < (int) t.params.size())
             {
-                if (ref.paramIdx < 0) t.colorIndex = (t.colorIndex + 1) % 12;
-                else if (ref.paramIdx < (int) t.params.size())
-                    t.params[(size_t) ref.paramIdx].colorIndex =
-                        (t.params[(size_t) ref.paramIdx].colorIndex + 1) % 12;
+                // Tables carry no colour: only parameter squares react here.
+                auto& p = t.params[(size_t) ref.paramIdx];
+                if (e.getNumberOfClicks () >= 2)
+                    owner->showColourPicker (ref.tableIdx, ref.paramIdx);
+                else
+                    p.colorIndex = (p.colorIndex + 1) % 12;
+                handled = true;
+            }
+            if (!handled)
+            {
+                owner->onRowClicked (rowNumber, e);   // table-row colour cell selects the row
+                return;
             }
             d->metaDirty = true;   // visibility/colour persist with the metadata
             if (owner->app.onTablesChanged) owner->app.onTablesChanged ();
@@ -9407,6 +9489,7 @@ void TablesPanel::refresh()
     updateStatus ();
     table.updateContent ();
     table.repaint ();
+    plot.repaint ();   // colours / visibility may have changed under the preview
 }
 
 void TablesPanel::onRowClicked (int row, const juce::MouseEvent& e)
@@ -9590,7 +9673,7 @@ void TablesPanel::pasteToNewTable()
         statusLabel.setText ("Import failed: " + juce::String (err), juce::dontSendNotification);
 }
 
-void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam)
+void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam, int targetView)
 {
     auto* d = app.doc ();
     if (d == nullptr || scopeTable < 0 || scopeTable >= (int) d->tables.size ()) return;
@@ -9648,6 +9731,9 @@ void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam)
         }
         else if (p != nullptr)
         {
+            // The chosen Align target decides which overlay view shows this
+            // parameter (waveform / spectrogram) or only the dedicated track.
+            p->alignTarget = std::clamp (targetView, 0, 2);
             p->offsetSecs = off;
             p->scaleTime = sc;
             double v = 0.0;
@@ -9750,12 +9836,14 @@ void TablesPanel::handleDocClick (double tDocSecs)
         }
         else
         {
-            // Parameter level: solve for the parameter's own contribution on
-            // top of the (fixed) table map so the effective mapping matches.
+            // Parameter level: the effective map composes additively in offset
+            // and multiplicatively in scale (see TableData::effectiveTimeMap),
+            // so the parameter's own contribution is simply the remainder.
             auto& p = t.params[(size_t) pi];
             if (pending_.numPoints == 2)
                 p.scaleTime = sc / std::max (1e-9, t.scaleTime);
-            p.offsetSecs = off - t.offsetSecs - t.scaleTime * p.scaleTime * a1;
+            p.offsetSecs = off - t.offsetSecs;
+            p.alignTarget = pending_.targetView;
         }
     }
 
@@ -9920,15 +10008,16 @@ void TablesPanel::showContextMenu (int row)
         case 12: startPointAlign (2, prRef.tableIdx, -1, app.tablesMode() == 1 ? 1 : 0); break;
 
         // Parameter-level Align submenu: Waveform = 21..23, Spectrogram = 24..26.
-        case 21: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx); break;
+        case 21: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx, 0); break;
         case 22: startPointAlign (1, prRef.tableIdx, prRef.paramIdx, 0); break;
         case 23: startPointAlign (2, prRef.tableIdx, prRef.paramIdx, 0); break;
-        case 24: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx); break;
+        case 24: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx, 1); break;
         case 25: startPointAlign (1, prRef.tableIdx, prRef.paramIdx, 1); break;
         case 26: startPointAlign (2, prRef.tableIdx, prRef.paramIdx, 1); break;
 
-        // Dedicated > Manual: value mapping only.
-        case 27: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx); break;
+        // Dedicated > Manual: value mapping; routes the parameter to the
+        // dedicated track only (hidden from both overlays).
+        case 27: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx, 2); break;
 
         default: break;
     }

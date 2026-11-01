@@ -205,6 +205,10 @@ bool importTable (const juce::String& name, const juce::String& csvText,
         const auto title = hasHeader ? grid[0][(size_t) c].trim() : juce::String();
         p.name = title.isEmpty () ? "Param" + juce::String (c + 1) : title;
         p.values = std::move (vals);
+        // Every parameter gets its own colour within the table; the host
+        // (Application::addTableFromCsv) offsets these so that parameters of
+        // different tables stay distinct as well.
+        p.colorIndex = ((int) out.params.size()) % 12;
         out.params.push_back (std::move (p));
     }
 
@@ -247,6 +251,18 @@ double transformValue (double v, const ParamData& p, double minV, double maxV)
         v = (v - minV) / (maxV - minV);
     else if (p.normalized)
         v = 0.0;
+    if (p.inverted) v = -v;
+    if (p.absolute) v = std::abs (v);
+    return p.valueScale * v + p.valueOffset;
+}
+
+double overlayValue (double v, const ParamData& p, double minV, double maxV)
+{
+    // Fit the raw range into [-1,+1] so every parameter is visible on the
+    // waveform/spectrogram regardless of its units; then apply the user's
+    // adjustments on top of the fitted curve.
+    if (maxV > minV) v = 2.0 * (v - minV) / (maxV - minV) - 1.0;
+    else             v = 0.0;
     if (p.inverted) v = -v;
     if (p.absolute) v = std::abs (v);
     return p.valueScale * v + p.valueOffset;
@@ -324,7 +340,7 @@ juce::var serialiseTables (const std::vector<TableData>& tables, int mode)
         auto to = new juce::DynamicObject();
         to->setProperty ("name", t.name);
         if (!t.visible)      to->setProperty ("hidden", 1);
-        to->setProperty ("colour", t.colorIndex % 12);
+        // Tables carry no colour of their own - only the parameters do.
         to->setProperty ("rate", t.sampleRate);
         to->setProperty ("offset", t.offsetSecs);
         to->setProperty ("scale", t.scaleTime);
@@ -380,7 +396,7 @@ bool parseTables (const juce::var& v, std::vector<TableData>& out, int* mode)
         // implicit conversion operators instead.
         t.name       = tp.getWithDefault ("name", "").toString();
         t.visible    = static_cast<int> (tp.getWithDefault ("hidden", 0)) == 0;
-        t.colorIndex = std::max (0, static_cast<int> (tp.getWithDefault ("colour", 0))) % 12;
+        // Older metadata may carry a table-level "colour": it is ignored now.
         t.sampleRate = std::max (1e-9, static_cast<double> (tp.getWithDefault ("rate", 1000.0)));
         t.offsetSecs = static_cast<double> (tp.getWithDefault ("offset", 0.0));
         t.scaleTime  = std::max (1e-9, static_cast<double> (tp.getWithDefault ("scale", 1.0)));

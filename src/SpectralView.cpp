@@ -2127,8 +2127,10 @@ void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
 }
 
 // Tables overlay (Overlay on Spectrogram mode): one curve per visible
-// parameter whose alignment target is the spectrogram. The transformed value
-// is a frequency in Hz mapped through this view's own frequency axis.
+// parameter whose alignment target is the spectrogram. Each parameter's raw
+// range is fitted into [-1,+1] (visible regardless of units), then mapped
+// linearly onto this view's current frequency range and drawn through its own
+// frequency axis.
 void SpectralView::drawTablesOverlay (juce::Graphics& g)
 {
     if (!app.showAllTables || app.tablesMode() != 1) return;
@@ -2156,9 +2158,11 @@ void SpectralView::drawTablesOverlay (juce::Graphics& g)
                 const double tDoc = xToTime ((double) (pr.getX() + i));
                 const double tTab = (tDoc - off) / sc;
                 if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
-                const double fHz = sc::tables::transformValue (
+                const double v = sc::tables::overlayValue (
                     sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
-                if (!(fHz >= 0.0) || !(std::isfinite ((float) fHz))) { started = false; continue; }
+                if (!std::isfinite ((float) v)) { started = false; continue; }
+                const double fHz = getFreqMin () + 0.5 * (v + 1.0) * (getFreqMax () - getFreqMin ());
+                if (!(fHz >= 0.0)) { started = false; continue; }
                 const float y = pr.getY() + freqToY (fHz, pr.getHeight());
                 const float x = (float) (pr.getX() + i) + 0.5f;
                 if (!started) { path.startNewSubPath (x, y); started = true; }

@@ -771,9 +771,10 @@ void WaveformView::paint (juce::Graphics& g)
 }
 
 // Tables overlay (Overlay on Waveform mode): one curve per visible parameter
-// whose alignment target is the waveform. The raw value goes through the
-// parameter's transforms + value offset/scale and lands in amplitude units,
-// mapped with the same centre/zoom as a single full-height channel row.
+// whose alignment target is the waveform. Each parameter's raw range is first
+// fitted into [-1,+1] (so it is visible regardless of the data's units) and
+// then inverted/absolute/valueScale/valueOffset are applied; the result lands
+// in amplitude units mapped with the same centre/zoom as a channel row.
 void WaveformView::drawTablesOverlay (juce::Graphics& g)
 {
     if (!app.showAllTables || app.tablesMode() != 0) return;
@@ -803,7 +804,7 @@ void WaveformView::drawTablesOverlay (juce::Graphics& g)
                 const double tDoc = xToTime ((double) (pr.getX() + i));
                 const double tTab = (tDoc - off) / sc;
                 if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
-                const double v = sc::tables::transformValue (
+                const double v = sc::tables::overlayValue (
                     sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
                 const float y = center + (float) ((vOffset - v) * ampPx);
                 const float x = (float) (pr.getX() + i) + 0.5f;

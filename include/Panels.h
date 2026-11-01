@@ -1764,12 +1764,32 @@ private:
     int focusIdx_ = -1;
 };
 
+/** Grid of the 12 preset colours shown by the parameter colour picker.
+    Clicking a swatch reports its palette index through `onPick`. */
+class TablesColourPicker : public juce::Component
+{
+public:
+    explicit TablesColourPicker (int current);
+
+    std::function<void(int)> onPick;   // called with the clicked palette index
+
+    /** Palette index of the swatch under p, or -1 when none. */
+    int swatchAt (juce::Point<int> p) const;
+
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    int current_;
+};
+
 /** Left-column tab managing imported CSV tables. Each table is an indented
-    list of its parameter columns; every row carries a visibility eye icon
-    and a colour square (click to cycle). Tables are created by dropping CSV
-    files on the app or via right-click "Paste to new table". The top row has
-    a master visibility switch and the display-mode dropdown (Overlay on
-    Waveform / Overlay on Spectrogram / Dedicated track).
+    list of its parameter columns; every row carries a visibility eye icon and
+    each parameter row a colour square (click to cycle, double-click for the
+    preset picker). Tables themselves carry no colour. Tables are created by
+    dropping CSV files on the app or via right-click "Paste to new table".
+    The top row has a master visibility switch and the display-mode dropdown
+    (Overlay on Waveform / Overlay on Spectrogram / Dedicated track).
 
     Alignment: tables and parameters can be aligned in time against the
     waveform/spectrogram timeline - manually (offset + scale prompt) or by
@@ -1807,9 +1827,13 @@ public:
     void downsamplePrimaryTable();
     void copySelection();
     void pasteToNewTable();
+    /** Preset colour picker for one parameter (double-click on its square). */
+    void showColourPicker (int tableIdx, int paramIdx);
     /** Manual alignment prompt. scopeParam < 0 = table-level (time only);
         >= 0 also offers the value transforms + offset/scale fields. */
-    void showManualAlignDialog (int scopeTable, int scopeParam);
+    void showManualAlignDialog (int scopeTable, int scopeParam, int targetView = -1);
+    // targetView: 0=Waveform overlay, 1=Spectrogram overlay, 2=Dedicated only
+    // (-1 leaves the parameter's alignTarget unchanged; table-level calls).
     /** Starts a click-based alignment: `numPoints` clicks on the preview plot
         followed by the same number in the target view (0=waveform,
         1=spectrogram). Two points also stretch. */

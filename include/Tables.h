@@ -34,12 +34,12 @@ struct ParamData
 };
 
 /** One imported CSV file: a name, an implicit sample rate (rows per second),
-    its own time alignment and the parsed parameter columns. */
+    its own time alignment and the parsed parameter columns. Tables carry no
+    colour of their own - only their parameters do. */
 struct TableData
 {
     juce::String name;           // file name or "Clipboard"
     bool visible = true;         // master eye icon for the whole table
-    int colorIndex = 0;
 
     double sampleRate = 1000.0;  // rows per second (changed by Downsample)
     double offsetSecs = 0.0;     // table-level time alignment
@@ -105,6 +105,12 @@ void downsampleTable (TableData& t, double newRateHz);
     -> absolute, then valueScale*v + valueOffset. `minV`/`maxV` are the raw
     range of the whole parameter (for normalization). */
 double transformValue (double v, const ParamData& p, double minV, double maxV);
+
+/** Value used by the waveform/spectrogram overlays: the raw value is first
+    fitted into [-1,+1] over its own range (so a curve is visible regardless
+    of the data's units), then inverted/absolute/valueScale/valueOffset are
+    applied. The normalized flag is ignored - fitting already happened. */
+double overlayValue (double v, const ParamData& p, double minV, double maxV);
 
 /** Raw (unscaled) value of a parameter at table time tSecs by linear
     interpolation; 0 outside [0, duration]. */
