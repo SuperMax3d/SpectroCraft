@@ -81,16 +81,25 @@ void TablesTrackView::refit()
 
 // ------------------------------------------------------------------ Paint --
 
+juce::Rectangle<int> TablesTrackView::axisStripRect() const
+{
+    return { app.settings.trackAxisOnRight ? getWidth() - kAxisW : 0, 0, kAxisW, getHeight() };
+}
+
+bool TablesTrackView::onAxisX (int x) const
+{
+    return app.settings.trackAxisOnRight ? x >= getWidth() - kAxisW : x < kAxisW;
+}
+
 void TablesTrackView::paint (juce::Graphics& g)
 {
-    const auto bounds = getLocalBounds();
-    g.fillAll (juce::Colours::black);
+    // Same background as the waveform/spectral data tracks.
+    g.fillAll (juce::Colour::fromRGB (30, 30, 30));
     if (!app.audioEngine().isFileLoaded()) return;
 
     const auto pr = plotRect();
     const bool axRight = app.settings.trackAxisOnRight;
-    const juce::Rectangle<int> axisStrip (axRight ? getWidth() - kAxisW : 0, 0,
-                                           kAxisW, getHeight());
+    const juce::Rectangle<int> axisStrip = axisStripRect ();
 
     // Value axis: gridlines with labels in the value-axis strip, like the other tracks.
     g.setColour (juce::Colour::fromRGB (32, 32, 36));
@@ -163,6 +172,16 @@ void TablesTrackView::paint (juce::Graphics& g)
         }
     }
 
+    // Right-drag rubber band: the same translucent blue as the time selection,
+    // so it reads as "this region" rather than a generic white marquee.
+    if (haveRubberBand && dragMode != DragMode::None)
+    {
+        g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
+        g.fillRect (rubberRect);
+        g.setColour (juce::Colour::fromRGB (96, 150, 255).withAlpha (0.9f));
+        g.drawRect (rubberRect, 1);
+    }
+
     // Hover labels: unscaled values of the curves near the cursor, stacked
     // from the top with a fixed spacing so they never overlap.
     if (!hoverLabels.empty())
@@ -188,26 +207,174 @@ void TablesTrackView::paint (juce::Graphics& g)
 void TablesTrackView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
-    dragging = true;
+    haveRubberBand = false;
+    dragStartX = e.x;
     dragStartY = e.y;
-    dragVMin = vMin;
-    dragVMax = vMax;
+
+    // Right button: box-zoom drag. A plain right-click (no significant
+    // movement) still shows the context menu, deferred to mouseUp.
+    if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
+    {
+        dragMode = onAxisX (e.x) ? DragMode::ZoomAxis : DragMode::ZoomBox;
+        return;   // right-button never pans
+    }
+
+    // Left button: vertical pan (middle/right do nothing here).
+    if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown())
+    {
+        dragMode = DragMode::VPan;
+        dragVMin = vMin;
+        dragVMax = vMax;
+        return;
+    }
+
+    dragMode = DragMode::None;
 }
 
 void TablesTrackView::mouseDrag (const juce::MouseEvent& e)
 {
-    if (!dragging || vMax <= vMin) return;
-    // Vertical pan: dragging down moves the window up in value space.
-    const auto pr = plotRect();
-    const double dv = ((double) dragStartY - (double) e.y) * (vMax - vMin) / pr.getHeight();
-    vMin = dragVMin + dv;
-    vMax = dragVMax + dv;
-    repaint();
+    if (!app.audioEngine().isFileLoaded()) return;
+
+    switch (dragMode)
+    {
+        case DragMode::VPan:
+        {
+            if (vMax <= vMin) break;
+            // Vertical pan: dragging down moves the window up in value space.
+            const auto pr = plotRect();
+            const double dv = ((double) dragStartY - (double) e.y) * (vMax - vMin) / pr.getHeight();
+            vMin = dragVMin + dv;
+            vMax = dragVMax + dv;
+            repaint();
+            break;
+        }
+
+        case DragMode::ZoomAxis:
+        {
+            // Vertical-zoom rubber band, constrained to the axis strip.
+            if (!haveRubberBand && (std::abs (e.x - dragStartX) >= 4 || std::abs (e.y - dragStartY) >= 4))
+                haveRubberBand = true;
+            if (haveRubberBand)
+            {
+                const auto strip = axisStripRect ();
+                rubberRect = juce::Rectangle<int> (strip.getX(),
+                                                   std::min (dragStartY, e.y),
+                                                   strip.getWidth(),
+                                                   std::max (2, std::abs (e.y - dragStartY)));
+                repaint();
+            }
+            break;
+        }
+
+        case DragMode::ZoomBox:
+        {
+            // x/y box-zoom rubber band over the plot area.
+            if (!haveRubberBand && (std::abs (e.x - dragStartX) >= 4 || std::abs (e.y - dragStartY) >= 4))
+                haveRubberBand = true;
+            if (haveRubberBand)
+            {
+                const auto pr = plotRect();
+                const int x1 = std::max (pr.getX(), std::min (dragStartX, e.x));
+                const int y1 = std::max (pr.getY(), std::min (dragStartY, e.y));
+                const int x2 = std::min (pr.getRight() - 1, std::max (dragStartX, e.x));
+                const int y2 = std::min (pr.getBottom() - 1, std::max (dragStartY, e.y));
+                rubberRect = juce::Rectangle<int> (x1, y1,
+                                                   std::max (2, x2 - x1),
+                                                   std::max (2, y2 - y1));
+                repaint();
+            }
+            break;
+        }
+
+        default: break;
+    }
 }
 
 void TablesTrackView::mouseUp (const juce::MouseEvent&)
 {
-    dragging = false;
+    if (!app.audioEngine().isFileLoaded())
+    {
+        dragMode = DragMode::None;
+        haveRubberBand = false;
+        return;
+    }
+
+    switch (dragMode)
+    {
+        case DragMode::ZoomAxis:
+        {
+            if (!haveRubberBand)
+                showTrackContextMenu (true);   // plain right-click on the axis
+            else if (rubberRect.getHeight() >= 2 && vMax > vMin)
+            {
+                // The dragged span becomes the new full value range.
+                const double top = valueAtY (rubberRect.getY());
+                const double bot = valueAtY (rubberRect.getBottom());
+                if (top - bot > 1e-12)
+                {
+                    vMax = top;
+                    vMin = bot;
+                    repaint();
+                }
+            }
+            break;
+        }
+
+        case DragMode::ZoomBox:
+        {
+            if (!haveRubberBand)
+                showTrackContextMenu (false);  // plain right-click on the data area
+            else
+            {
+                const auto pr = plotRect();
+                // Time part: the shared window, routed through MainWindow.
+                const double tA = t0 + ((double) rubberRect.getX() - (double) pr.getX())
+                                        / (double) pr.getWidth() * (t1 - t0);
+                const double tB = t0 + ((double) (rubberRect.getRight() - 1) - (double) pr.getX())
+                                        / (double) pr.getWidth() * (t1 - t0);
+                if (onTimeWindow && std::abs (tB - tA) > 1e-9)
+                    onTimeWindow (std::min (tA, tB), std::max (tA, tB));
+                // Value part: local to this strip.
+                const double top = valueAtY (rubberRect.getY());
+                const double bot = valueAtY (rubberRect.getBottom());
+                if (top - bot > 1e-12)
+                {
+                    vMax = top;
+                    vMin = bot;
+                }
+                repaint();
+            }
+            break;
+        }
+
+        default: break;   // VPan ends silently
+    }
+
+    dragMode = DragMode::None;
+    haveRubberBand = false;
+    rubberRect = {};
+}
+
+void TablesTrackView::showTrackContextMenu (bool onAxis)
+{
+    juce::PopupMenu m;
+    m.addItem (1, "Zoom to Selection");
+    // On the data area this resets time + value; on the vertical axis it
+    // resets only the value range.
+    m.addItem (2, "Zoom Out Full");
+    m.addSeparator ();
+    m.addItem (3, "Select All");
+    m.addItem (4, "Copy Curve Data");
+
+    const int id = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
+    switch (id)
+    {
+        case 1: if (onZoomToSelection) onZoomToSelection (); break;
+        case 2: if (onZoomOutFull) onZoomOutFull (onAxis); break;
+        case 3: app.selectAll (); break;   // notifies via setSelection()
+        case 4: copyCurveData (); break;
+        default: break;
+    }
 }
 
 void TablesTrackView::mouseMove (const juce::MouseEvent& e)
@@ -227,13 +394,34 @@ void TablesTrackView::mouseExit (const juce::MouseEvent&)
 void TablesTrackView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
     if (!app.audioEngine().isFileLoaded() || vMax <= vMin) return;
-    // Vertical zoom centred on the cursor position.
-    const double pivot = valueAtY (e.y);
+
+    // Wheel over the value axis zooms vertically; anywhere else in the strip
+    // it zooms horizontally around the cursor, like the other tracks.
+    if (onAxisX (e.x))
+    {
+        const double pivot = valueAtY (e.y);
+        const double factor = std::pow (1.2, -wheel.deltaY);
+        vMin = pivot + (vMin - pivot) * factor;
+        vMax = pivot + (vMax - pivot) * factor;
+        if (vMax - vMin < 1e-12 || !(std::isfinite ((float) (vMax - vMin)))) refit();
+        repaint();
+        return;
+    }
+
+    if (!onTimeWindow || t1 <= t0) return;
+    const auto pr = plotRect();
     const double factor = std::pow (1.2, -wheel.deltaY);
-    vMin = pivot + (vMin - pivot) * factor;
-    vMax = pivot + (vMax - pivot) * factor;
-    if (vMax - vMin < 1e-12 || !(std::isfinite ((float) (vMax - vMin)))) refit();
-    repaint();
+    const double tCur = t0 + ((double) e.x - (double) pr.getX()) / (double) pr.getWidth() * (t1 - t0);
+    const double newHalf = (t1 - t0) * 0.5 / factor;
+    const double ratio = std::clamp (((double) e.x - (double) pr.getX()) / (double) pr.getWidth(), 0.0, 1.0);
+
+    double ns = tCur - newHalf * (2.0 * ratio);
+    double ne = tCur + newHalf * (2.0 - 2.0 * ratio);
+    const double w = ne - ns;
+    if (ns < 0.0) { ns = 0.0; ne = std::min (w, app.audioEngine().duration()); }
+    if (ne > app.audioEngine().duration()) { ne = app.audioEngine().duration(); ns = std::max (0.0, ne - w); }
+    if (ne <= ns) return;   // zoomed past the limits
+    onTimeWindow (ns, ne);
 }
 
 void TablesTrackView::collectHoverLabels (int mouseX, int mouseY)
@@ -269,4 +457,69 @@ void TablesTrackView::collectHoverLabels (int mouseX, int mouseY)
                [] (const Hit& a, const Hit& b) { return a.y < b.y; });
     for (const auto& h : hits)
         hoverLabels.push_back ({ h.text, 4.0f, h.colour });   // y fixed in paint()
+}
+
+// ------------------------------------------------------------------ Copy --
+
+bool TablesTrackView::copyCurveData()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return false;
+
+    const bool haveSel = !app.selection.isEmpty();
+    const double s0 = haveSel ? app.selection.getStart () : 0.0;
+    const double s1 = haveSel ? app.selection.getEnd ()
+                              : std::numeric_limits<double>::max ();
+
+    // One column per visible parameter, in draw order.
+    struct Col { const sc::tables::TableData* t; const sc::tables::ParamData* p; };
+    std::vector<Col> cols;
+    for (const auto& tb : d->tables)
+        if (tb.visible)
+            for (const auto& p : tb.params)
+                if (p.visible && !p.values.empty ())
+                    cols.push_back ({ &tb, &p });
+    if (cols.empty ()) return false;
+
+    // Per column: the contiguous sample range inside the time selection.
+    std::vector<int> first ((size_t) cols.size (), -1), last ((size_t) cols.size (), -1);
+    int nRows = 0;
+    for (size_t c = 0; c < cols.size (); ++c)
+    {
+        const auto& t = *cols[c].t;
+        const auto& p = *cols[c].p;
+        int lo = -1, hi = -1;
+        for (int i = 0; i < (int) p.values.size (); ++i)
+        {
+            const double u = t.docTimeOfSample (p, i);
+            if (u >= s0 && u <= s1)
+            {
+                if (lo < 0) lo = i;
+                hi = i;
+            }
+        }
+        first[c] = lo;
+        last[c] = hi;
+        if (lo >= 0) nRows = std::max (nRows, hi - lo + 1);
+    }
+
+    // Excel-friendly grid: tab-separated columns, CR line endings.
+    juce::String out;
+    for (size_t i = 0; i < cols.size (); ++i)
+        out += (i ? "\t" : "") + cols[i].p->name;
+    for (int r = 0; r < nRows; ++r)
+    {
+        out += "\r\n";
+        for (size_t c = 0; c < cols.size (); ++c)
+        {
+            const int i = first[c] + r;
+            if (first[c] >= 0 && i <= last[c])
+                out += (c ? "\t" : "") + juce::String (cols[c].p->values[(size_t) i], 6);
+            else
+                out += (c ? "\t" : "");
+        }
+    }
+
+    juce::SystemClipboard::copyTextToClipboard (out);
+    return true;
 }

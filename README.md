@@ -348,7 +348,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     up/down the 512..65536 ladder (from Auto, one step away in manual mode).
     The full-width **Reset** button restores every Spectral Controls setting to
     its defaults at once — Classic colour map, -120..0 dB window, log axis on,
-    harmonic markers on with 10 harmonics and N=1 without numbers, Auto FFT size
+    harmonic markers off (with 10 harmonics and N=1 configured, no numbers),
+    Auto FFT size
     on with the default parameters (80 time slices / 1.25 bins per pixel),
     frequency range 20 Hz..20 kHz — and resets the spectral view's frequency
     axis to match. The full-width **Refresh F5** button below it forces a
@@ -357,7 +358,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     **F5**, which works from any focus).
     Two persisted toggle buttons plus two persisted fields control
     harmonic markers in the spectrogram: **"Show harmonics CTRL+H"**
-    (default on; also bound to global shortcut **Ctrl+H**, which works from any
+    (default off; also bound to global shortcut **Ctrl+H**, which works from any
     focus) and **"Show harmonic numbers"** (default off — adds a small white
     number next to each circle), then **"Number of harmonics to display:"**
     (default 10) and **"Harmonic number under the mouse:"** (default 1). While
@@ -1883,26 +1884,49 @@ list: a table row followed by its parameter rows.
     the fitted [-1,+1] value is mapped linearly onto the view's current
     frequency range and drawn through its own frequency axis;
   - **Dedicated track** — a resizable strip above/below the data views (next
-    to the time ruler) shows every visible parameter auto-scaled, with its own
-    vertical zoom/pan scrollbar, the blue time-selection band and the red
-    playhead over it. Hovering near a curve lists each parameter's *unscaled*
-    value at that time. The strip is separated from the data views by a
-    draggable splitter (like the waveform/spectrogram one): dragging it up or
-    down resizes the track.
-- **Align** (table row): Manual / 1 Point / 2 Points. Manual prompts for a time
-  offset + scale; 1/2 Points arm click-picking — first on the panel's preview
-  plot, then on the waveform/spectrogram (two points also stretch the table's
-  time axis).
+    to the time ruler) shows every visible parameter auto-scaled on the same
+    dark background as the waveform/spectral tracks, with its own vertical
+    zoom/pan scrollbar, the blue time-selection band and the red playhead over
+    it. Hovering near a curve lists each parameter's *unscaled* value at that
+    time. The strip is separated from the data views by a draggable splitter
+    (like the waveform/spectrogram one): dragging it up or down resizes the
+    track.
+    - **Left-drag** pans vertically; the **wheel over the value axis** zooms
+      vertically around the cursor, while the **wheel anywhere else in the
+      strip** zooms *horizontally* around the cursor (the shared time window —
+      exactly like the other tracks).
+    - **Right-drag from the data area** box-zooms both axes at once: a
+      translucent blue rubber band is drawn while dragging, and on release the
+      dragged span becomes the new time window *and* value range. **Right-drag
+      from the value axis** zooms vertically only (the band stays inside the
+      strip).
+    - A plain **right-click** opens the track's context menu: **Zoom to
+      Selection**, **Zoom Out Full** (time + value on the data area, vertical
+      only on the axis), **Select All** and **Copy Curve Data** — an
+      Excel-friendly tab/CR grid with one column per visible parameter; with a
+      time selection active only the samples inside it are copied.
+    - **Ctrl+0 / Zoom Out Full** also vertically fits this strip when it is
+      shown.
+- The panel's preview plot shows hover values too: moving the mouse over it
+  lists every visible parameter of the focused table at that table time, in
+  each one's colour (unscaled values).
 - **Align** (parameter row): Waveform / Spectrogram / Dedicated submenus with
-  the same Manual / 1 Point / 2 Points options. A parameter's *Manual* dialog
-  additionally offers value offset/scale plus **Normalized**, **Inverted** and
-  **Absolute** transforms applied before them. Completing an alignment records
-  the chosen view as the parameter's *alignment target*: a Waveform-targeted
-  parameter is drawn by the waveform overlay, a Spectrogram-targeted one by
-  the spectrogram overlay, and Dedicated-targeted parameters only appear in
-  the dedicated track (which always shows every visible parameter).
-  Table-level alignment composes with the per-parameter map additively in
-  offset and multiplicatively in scale.
+  Manual / 1 Point / 2 Points options. *Manual* opens a dialog whose fields are
+  described by explanatory labels above them: the time offset/scale of the
+  parameter's *effective* map, plus value offset/scale and **Normalized**,
+  **Inverted**, **Absolute** transforms applied before them. 1/2 Points arm
+  click-picking — first on the panel's preview plot, then on the waveform/
+  spectrogram (two points also stretch the table's time axis).
+- Time alignment is **shared at the table level**: aligning any parameter of a
+  table re-aligns *every* parameter of that table to the same map (the
+  per-parameter time fields are zeroed and the table carries the offset/scale).
+  Only the value transforms and the *alignment target* stay per-parameter:
+  completing an alignment records the chosen view as the parameter's target —
+  a Waveform-targeted parameter is drawn by the waveform overlay, a
+  Spectrogram-targeted one by the spectrogram overlay, and Dedicated-targeted
+  parameters only appear in the dedicated track (which always shows every
+  visible parameter). Auto Align shifts the whole table of the aligned
+  parameter by the correlated lag.
 - With two parameters from different tables selected, right-clicking shows
   **Auto Align <table> <param> with <table> <param>**: a mean-subtracted
   cross-correlation finds the delay between the curves (the parameter under the
@@ -1911,6 +1935,11 @@ list: a table row followed by its parameter rows.
   entirely text the grid is transposed before import (rows become parameters);
   scattered missing numeric values are interpolated from their neighbours;
   columns that contain only text are ignored.
+- Tables **follow timeline edits**: deleting, inserting or stretching audio
+  (including Content Aware Time Scale) warps every table's rows — each row
+  stays anchored to its document time, values are re-interpolated through the
+  inverse warp and the row count adjusts so the rows-per-second density is
+  preserved.
 - Like drawings and selections, tables persist with the file via
   [per-file metadata](#per-file-metadata) — names, colours, visibility,
   sample rates and every alignment/transform setting round-trip through the

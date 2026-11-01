@@ -43,6 +43,9 @@ std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
             row.push_back (juce::String());
         fieldBuf.clear();
     };
+    // NOTE: a blank line yields one empty cell and is kept as a data gap
+    // (importTable interpolates across it). Ragged rows are tolerated by the
+    // importer, which treats missing cells as empty.
     auto pushRow   = [&] () { if (!row.empty ()) grid.push_back (std::move (row)); row.clear(); };
 
     for (size_t i = 0; i < text.length(); ++i)
@@ -188,7 +191,12 @@ bool importTable (const juce::String& name, const juce::String& csvText,
         int nValid = 0;
         for (int r = 0; r < dataRows; ++r)
         {
-            const auto& cell = grid[(size_t) (hasHeader ? r + 1 : r)][(size_t) c];
+            const auto& rowRef = grid[(size_t) (hasHeader ? r + 1 : r)];
+            // Ragged rows (fewer cells than the first row): treat missing
+            // cells as empty instead of reading out of range.
+            if ((int) rowRef.size() <= c)
+                continue;
+            const auto& cell = rowRef[(size_t) c];
             double v = 0.0;
             if (cellIsData (cell, &v))
             {
@@ -241,6 +249,104 @@ void downsampleTable (TableData& t, double newRateHz)
         p.values = std::move (out);
     }
     t.sampleRate = newRateHz;
+}
+
+// ------------------------------------------------- Timeline anchoring --
+
+namespace
+{
+    // Linear interpolation of a parameter's raw values at table time ttSecs.
+    double interpParamValues (const std::vector<double>& v, double sr, double ttSecs)
+    {
+        if (v.empty ()) return 0.0;
+        const double x = std::clamp (ttSecs * sr, 0.0, (double) (v.size() - 1));
+        const int i0 = (int) std::floor (x);
+        if (i0 >= (int) v.size() - 1) return v.back ();
+        const double f = x - i0;
+        return v[(size_t) i0] * (1.0 - f) + v[(size_t) (i0 + 1)] * f;
+    }
+
+    // Generic warp of one parameter: W maps old doc time -> new doc time,
+    // invW the other way (for inserted gaps it returns the bridging old
+    // time). The row density in doc seconds is preserved, so the new row
+    // count follows the warped domain length.
+    template <typename ForwardFn, typename InverseFn>
+    void warpParamGeneric (TableData& t, ParamData& p,
+                           ForwardFn&& W, InverseFn&& invW)
+    {
+        if (p.values.size () < 2) return;
+        const double sr = t.sampleRate;
+        const auto [off0, sc0] = t.effectiveTimeMap (p);
+        const double s = off0;
+        const double e = off0 + sc0 * p.duration (sr);
+
+        const double ns = W (s), ne = W (e);
+        if (!(ne > ns))
+        {
+            // The whole domain collapsed onto one point: keep two identical
+            // rows so the parameter stays drawable.
+            const double v = interpParamValues (p.values, sr,
+                                                std::clamp ((ns - off0) / sc0, 0.0,
+                                                            p.duration (sr)));
+            p.values.assign (2, v);
+            p.offsetSecs += ns - s;
+            return;
+        }
+
+        const double spacing = sc0 / sr;   // doc seconds per row
+        int nNew = std::max (2, (int) std::lround ((ne - ns) / spacing) + 1);
+        std::vector<double> nv;
+        nv.reserve ((size_t) nNew);
+        for (int j = 0; j < nNew; ++j)
+        {
+            const double u = ns + spacing * j;          // new doc time of row j
+            const double oldT = invW (u);               // old doc time there now
+            nv.push_back (interpParamValues (p.values, sr,
+                                             std::clamp ((oldT - off0) / sc0, 0.0,
+                                                         p.duration (sr))));
+        }
+        p.values.swap (nv);
+        p.offsetSecs += ns - s;   // effective domain now starts at W(s)
+    }
+}
+
+void warpTableForDeletion (TableData& t, double a, double b)
+{
+    if (!(b > a)) return;
+    for (auto& p : t.params)
+        warpParamGeneric (t, p,
+            [a, b] (double x) { return x < a ? x : (x >= b ? x - (b - a) : a); },
+            [a, b] (double u)  { return u < a ? u : u + (b - a); });
+}
+
+void warpTableForInsertion (TableData& t, double a, double lenSecs)
+{
+    if (!(lenSecs > 0.0)) return;
+    for (auto& p : t.params)
+        warpParamGeneric (t, p,
+            [a, lenSecs] (double x) { return x < a ? x : x + lenSecs; },
+            [a, lenSecs] (double u)  { return u < a ? u
+                                                   : (u >= a + lenSecs ? u - lenSecs : a); });
+}
+
+void warpTableForStretch   (TableData& t, double a, double bOld, double bNew)
+{
+    if (!(bOld > a)) return;
+    const double k = (bNew - a) / (bOld - a);
+    for (auto& p : t.params)
+        warpParamGeneric (t, p,
+            [a, bOld, bNew, k] (double x)
+            {
+                if (x <= a) return x;
+                if (x >= bOld) return x + (bNew - bOld);
+                return a + (x - a) * k;
+            },
+            [a, bOld, bNew, k] (double u)
+            {
+                if (u <= a) return u;
+                if (u < bNew) return a + (u - a) / std::max (1e-30, k);
+                return u - (bNew - bOld);
+            });
 }
 
 // ------------------------------------------------------------- Value maps --

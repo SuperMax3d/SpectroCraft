@@ -19,6 +19,12 @@ public:
     void mouseExit (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
+    /** Copies the visible parameters' curve data to the clipboard in an
+        Excel-friendly tab/CR grid. With an active time selection only the
+        samples inside it are copied; otherwise every sample is copied.
+        Returns false when there was nothing to copy. */
+    bool copyCurveData();
+
     /** Shared time window (kept in sync with the waveform/spectral views). */
     void setTimeRange (double t0, double t1);
     void setPlayhead (double tSecs);
@@ -35,10 +41,19 @@ public:
     /** Full auto-fit range (what refit() computed): the scrollbar track. */
     std::pair<double, double> fullRange() const { return { fitMin, fitMax }; }
 
+public:
+    // Shared-state actions wired by MainWindow.
+    std::function<void(double t0, double t1)> onTimeWindow;   // horizontal zoom / box-zoom time part
+    std::function<void()> onZoomToSelection;
+    std::function<void(bool axisOnly)> onZoomOutFull;
+
 private:
     juce::Rectangle<int> plotRect() const;
+    juce::Rectangle<int> axisStripRect() const;
     struct HoverLabel { juce::String text; float y; juce::Colour colour; };
     void collectHoverLabels (int mouseX, int mouseY);
+    bool onAxisX (int x) const;
+    void showTrackContextMenu (bool onAxis);
 
     Application& app;
     double t0 = 0.0, t1 = 1.0;      // shared time window
@@ -46,9 +61,12 @@ private:
     double vMin = -1.0, vMax = 1.0; // visible value window (max at top)
     double fitMin = -1.0, fitMax = 1.0;   // full auto-fit range
 
-    bool dragging = false;
-    int dragStartY = 0;
+    enum class DragMode { None, VPan, ZoomAxis, ZoomBox };
+    DragMode dragMode = DragMode::None;
+    int dragStartX = 0, dragStartY = 0;
     double dragVMin = 0.0, dragVMax = 0.0;
+    bool haveRubberBand = false;
+    juce::Rectangle<int> rubberRect;
 
     juce::Point<int> hoverPos {-1, -1};
     std::vector<HoverLabel> hoverLabels;

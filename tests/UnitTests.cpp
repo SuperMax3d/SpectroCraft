@@ -5516,8 +5516,8 @@ static void testSpecHarmControls()
     SpectralControlsPanel panel (app);
     panel.setSize (340, 320);
 
-    // Defaults: harmonics shown, numbers hidden, max 10, N 1.
-    CHECK (panel.isShowHarmonicsOn(), "default 'Show harmonics' is on");
+    // Defaults: harmonics hidden, numbers hidden, max 10, N 1.
+    CHECK (!panel.isShowHarmonicsOn(), "default 'Show harmonics' is off");
     CHECK (!panel.isShowNumbersOn(),   "default 'Show harmonic numbers' is off");
     CHECK (panel.getHarmMaxText() == "10", "default 'Number of harmonics to display:' is 10");
     CHECK (panel.getHarmNText()   == "1",  "default 'Harmonic number under the mouse:' is 1");
@@ -5527,8 +5527,8 @@ static void testSpecHarmControls()
     auto* shBtn = &panel.showHarmonicsBtnRef ();
     shBtn->setToggleState (!shBtn->getToggleState(), juce::dontSendNotification);
     shBtn->onClick ();
-    CHECK (!panel.isShowHarmonicsOn() && !app.settings.specHarmVisible,
-          "'Show harmonics' toggle off reaches the settings");
+    CHECK (panel.isShowHarmonicsOn() && app.settings.specHarmVisible,
+          "'Show harmonics' toggle on reaches the settings");
     auto* snBtn = &panel.showNumbersBtnRef ();
     snBtn->setToggleState (!snBtn->getToggleState(), juce::dontSendNotification);
     snBtn->onClick ();
@@ -5595,7 +5595,11 @@ static void testSpecHarmMarkers()
     const auto pr = view.plotRect();
     CHECK (pr.getWidth() > 50 && pr.getHeight() > 50, "plot area is non-degenerate");
 
-    // Default settings: start=0 -> from #1, max=10, N=1. Put the mouse at a
+    // The harmonic overlay is off by default: turn it on for these draw checks.
+    app.settings.specHarmVisible = true;
+    view.setSettings (app.settings);
+
+    // start=0 -> from #1, max=10, N=1. Put the mouse at a
     // position whose frequency is 880 Hz (the tone's 2nd harmonic):
     // fundamental = 880/1 = 880, circles at 880*k for k=1..4 within [20, 4000].
     auto yForFreq = [&] (double f) -> int { return view.freqToY (f, pr.getHeight()); };
@@ -8568,7 +8572,7 @@ static void testSpectralControlsResetAndAutoLabel()
            "reset restores the default frequency range");
     CHECK (std::abs (app.settings.dbMinDb + 120.0) < 1e-9 && std::abs (app.settings.dbMaxDb) < 1e-9,
            "reset restores the default dB range");
-    CHECK (app.settings.specHarmVisible && app.settings.specHarmMaxK == 10
+    CHECK (!app.settings.specHarmVisible && app.settings.specHarmMaxK == 10
           && app.settings.specHarmN == 1 && !app.settings.specHarmNumbers,
            "reset restores the harmonic overlay defaults");
     CHECK (app.colourMap == ColourMap::Classic, "reset restores the Classic colour map");
@@ -8785,7 +8789,7 @@ static void testSettingsPersistence()
     // Harmonic marker fields (Spectral Controls panel) are persisted too.
     {
         Application e (store);
-        CHECK (e.settings.specHarmVisible && !e.settings.specHarmNumbers
+        CHECK (!e.settings.specHarmVisible && !e.settings.specHarmNumbers
               && e.settings.specHarmMaxK == 10 && e.settings.specHarmN == 1,
               "harmonic marker defaults");
         e.settings.specHarmVisible = false;
@@ -17405,6 +17409,147 @@ static void testCatEffectApp()
     wav.deleteFile ();
 }
 
+// CAT must warp every time-anchored state: markers, drawings, SCTT
+// segments and saved selections follow the new timeline exactly like the
+// plain Time Stretch effect does.
+static void testCatStateRemap()
+{
+    const juce::File wav = makeTempFile ("cat_remap.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate,
+            [] (int, int64_t f, double rate) {
+                return (f >= rate / 2 && f < rate * 3 / 2)
+                    ? 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                           * 300.0 * (double) f / rate)
+                    : 0.0f;
+            }), "wrote cat remap wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened cat remap wav");
+    auto* d = app.doc ();
+
+    // Time-anchored state spread over the edit range [0.25, 1.75] and after it.
+    d->markers.addPointMarker (0.5, "inside");   // inside range
+    d->markers.addPointMarker (1.9, "after");    // after the range
+    d->markers.addRegionMarker (0.4, 0.6, "region-in");          // inside range
+    DrawingItem dr;
+    dr.kind = DrawingItem::Kind::Freehand;
+    dr.points = { { 0.5, 100.0 }, { 0.8, 200.0 } };
+    dr.normaliseBounds ();
+    d->drawings.push_back (dr);
+    d->sctt.segments.push_back ({ 0.3, 0.9, std::string ("hello") });   // inside
+    SpectralSelection ss;
+    ss.addRect (0.4, 1.2, 50.0, 1500.0, false);                        // inside
+    d->savedSelections.push_back ({ "sel A", ss });
+
+    // A table whose values encode doc time: v(t) = 50 t. After the edit every
+    // row must still satisfy v(u) = 50 * invW(u).
+    {
+        juce::String csv = "sig\r\n";
+        for (int i = 0; i < 200; ++i)
+            csv += juce::String ((double) i * 0.5, 3) + "\r\n";
+        std::string cerr;
+        CHECK (app.addTableFromCsv ("anchored", csv, &cerr),
+               "added anchored table: " + cerr);
+        // 200 rows at 100 rows/s cover [0, 1.99] s - across the whole edit range.
+        d->tables[0].sampleRate = 100.0;
+    }
+
+    app.selection = { 0.25, 1.75 };
+    std::string err;
+    CHECK (app.contentAwareTimeScale (true, 50.0, 0.0, &err), "reduce gaps ran: " + err);
+
+    const double aSec = 0.25, bOld = 1.75;
+    const double durNew = app.audioEngine().duration();
+    CHECK (durNew < 1.99, "file got shorter");
+    // The untouched tail is the last 0.25 s of the original file.
+    const double bNew = durNew - 0.25;
+    const double k = (bNew - aSec) / (bOld - aSec);
+    auto W = [aSec, k, bOld, bNew] (double t) {
+        if (t <= aSec) return t;
+        if (t >= bOld) return t + (bNew - bOld);
+        return aSec + (t - aSec) * k;
+    };
+
+    const auto& ms = d->markers.markers ();
+    const Marker* mInP = nullptr, *mOutP = nullptr;
+    for (const Marker& m : ms)
+    {
+        if (m.name == "inside") mInP = &m;
+        if (m.name == "after")  mOutP = &m;
+    }
+    CHECK (mInP != nullptr && std::abs (mInP->start - W (0.5)) < 1e-9,
+          "marker inside the range is warped by the stretch factor");
+    CHECK (mOutP != nullptr && std::abs (mOutP->start - (durNew - 0.1)) < 1e-9,
+          "marker after the range keeps its offset from the end");
+    bool regionWarped = false;
+    for (const Marker& m : ms)
+        if (m.end >= 0.0 && std::abs (m.start - W (0.4)) < 1e-9
+            && std::abs (m.end - W (0.6)) < 1e-9) regionWarped = true;
+    CHECK (regionWarped, "region marker inside the range is warped");
+
+    const DrawingItem& dr2 = d->drawings[0];
+    CHECK (std::abs (dr2.t0 - W (0.5)) < 1e-9 && std::abs (dr2.t1 - W (0.8)) < 1e-9,
+          "drawing bounds follow the new timeline");
+    CHECK (dr2.points.size () == 2
+          && std::abs (dr2.points[0].first - W (0.5)) < 1e-9
+          && std::abs (dr2.points[1].first - W (0.8)) < 1e-9,
+          "drawing stroke points follow the new timeline");
+
+    CHECK (d->sctt.segments.size () == 1, "SCTT segment survives the trim");
+    if (!d->sctt.segments.empty ())
+        CHECK (std::abs (d->sctt.segments[0].startSec - W (0.3)) < 1e-9
+              && std::abs (d->sctt.segments[0].endSec - W (0.9)) < 1e-9,
+              "SCTT segment times follow the new timeline");
+
+    CHECK (d->savedSelections.size () == 1, "saved selection survives the trim");
+    if (!d->savedSelections.empty ())
+    {
+        const auto& sh = d->savedSelections[0].data.shapes ();
+        CHECK (!sh.empty () && std::abs (sh[0].t0 - W (0.4)) < 1e-9
+              && std::abs (sh[0].t1 - W (1.2)) < 1e-9,
+              "saved selection times follow the new timeline");
+    }
+
+    // The table's rows follow the same warp: value(u) = 50 * invW(u).
+    CHECK (!d->tables.empty (), "anchored table survived the edit");
+    if (!d->tables.empty ())
+    {
+        const auto& tb = d->tables[0];
+        CHECK (tb.params.size () == 1, "anchored table kept its parameter");
+        const auto& p = tb.params[0];
+        bool allMatch = true;
+        for (int i = 0; i < (int) p.values.size (); ++i)
+        {
+            const double u = tb.docTimeOfSample (p, i);
+            double oldT = u;
+            if (u > aSec && u < bNew)      oldT = aSec + (u - aSec) / k;   // stretched middle
+            else if (u >= bNew)            oldT = u + (bOld - bNew);       // shifted tail
+            if (std::abs (p.values[(size_t) i] - 50.0 * oldT) > 0.4)
+            {
+                allMatch = false;
+                break;
+            }
+        }
+        CHECK (allMatch, "table rows follow the CAT warp");
+    }
+
+    // The edited range stays selected: [aSec, bNew).
+    CHECK (std::abs (app.selection.getStart () - aSec) < 1e-9
+          && std::abs (app.selection.getEnd () - bNew) < 1e-9,
+          "selection now spans the shrunken edited range");
+
+    // Undo restores every piece of state exactly.
+    app.undoStep ();
+    const Marker* mInU = nullptr;
+    for (const Marker& m : d->markers.markers ())
+        if (m.name == "inside") mInU = &m;
+    CHECK (mInU != nullptr && std::abs (mInU->start - 0.5) < 1e-9,
+          "undo restores the marker position");
+    CHECK (std::abs (app.audioEngine().duration () - 2.0) < 1e-9, "undo restores the duration");
+
+    wav.deleteFile ();
+}
+
 static void testCatDialog()
 {
     const juce::File wav = makeTempFile ("cat_dialog.wav");
@@ -22571,6 +22716,30 @@ static void testTablesImport()
         CHECK (t.params.size() == 2 && t.params[0].values.size() == 2, "CRLF rows split correctly");
     }
 
+    // --- Double-CR line endings ("\r\r\n") must not read out of range -----------
+    // Each "\r\r\n" yields a data row plus a one-cell blank gap row; the
+    // importer has to tolerate those ragged rows (this was a live crash).
+    {
+        TableData t;
+        CHECK (importTable ("dcr", "a,b\r\r\n1,2\r\r\n3,4\r\r\n", t),
+              "double-CR csv imports without OOB access");
+        if (t.params.size() == 2)
+            CHECK (t.params[0].values.size() >= 2 && t.params[1].values.size() >= 2,
+                  "both columns imported despite ragged gap rows");
+    }
+
+    // --- Ragged rows: short rows are treated as missing cells -------------------
+    {
+        TableData t;
+        CHECK (importTable ("rag", "a,b\n1,2\n3\n4,5\n", t), "ragged csv imports");
+        if (t.params.size() == 2)
+        {
+            const auto& b = t.params[1].values;
+            CHECK (b.size() == 3 && std::abs (b[1] - 3.5) < 1e-9,
+                  "missing cell interpolated from neighbours");
+        }
+    }
+
     // --- Garbage input fails cleanly ---------------------------------------------
     {
         TableData t;
@@ -23295,6 +23464,236 @@ static void testTablesSoloAndRename()
 // Dedicated track strip: in "Dedicated track" mode the layout must reserve a
 // visible strip above the data views with a draggable separator, and dragging
 // that separator must resize the strip.
+// Tables follow timeline edits: the library warp functions must keep every
+// row anchored to its doc time (values re-interpolated through the inverse
+// warp, row count adjusted to preserve rows-per-second).
+static void testTablesTimelineWarp()
+{
+    using namespace sc::tables;
+
+    // Table covering [0, 2) s at 100 rows/s with value = 50 * docTime.
+    auto makeTable = [] () {
+        TableData t;
+        t.name = "t";
+        t.sampleRate = 100.0;
+        ParamData p;
+        p.name = "sig";
+        for (int i = 0; i < 200; ++i)
+            p.values.push_back ((double) i * 0.5);
+        t.params.push_back (p);
+        return t;
+    };
+
+    // --- Deletion of [0.2, 0.4] ---
+    {
+        TableData t = makeTable ();
+        warpTableForDeletion (t, 0.2, 0.4);
+        CHECK (std::abs (t.offsetSecs) < 1e-12 && std::abs (t.scaleTime - 1.0) < 1e-12,
+              "deletion before the domain start keeps the map");
+        // Domain [0,2] -> [0,1.8]: ~181 rows.
+        CHECK (t.params[0].values.size () >= 179 && t.params[0].values.size () <= 183,
+              "row count follows the warped domain");
+        const auto& p = t.params[0];
+        int i19 = -1, i20 = -1;
+        for (int i = 0; i < (int) p.values.size (); ++i)
+        {
+            if (std::abs (t.docTimeOfSample (p, i) - 0.19) < 5e-4) i19 = i;
+            if (std::abs (t.docTimeOfSample (p, i) - 0.20) < 5e-4) i20 = i;
+        }
+        CHECK (i19 >= 0 && std::abs (p.values[(size_t) i19] - 9.5) < 0.3,
+              "row before the cut is unchanged");
+        CHECK (i20 >= 0 && std::abs (p.values[(size_t) i20] - 20.0) < 0.3,
+              "row at the cut jumps over the deleted span");
+    }
+
+    // --- Insertion of 0.3 s at t = 0.5 ---
+    {
+        TableData t = makeTable ();
+        warpTableForInsertion (t, 0.5, 0.3);
+        CHECK (std::abs (t.offsetSecs) < 1e-12 && std::abs (t.scaleTime - 1.0) < 1e-12,
+              "insertion keeps the map");
+        const auto& p = t.params[0];
+        // Rows inside the gap hold the value at u=0.5 -> v=25.
+        bool gapFlat = true;
+        int inGap = 0;
+        for (int i = 0; i < (int) p.values.size (); ++i)
+        {
+            const double u = t.docTimeOfSample (p, i);
+            if (u > 0.5 && u < 0.8)
+            {
+                inGap++;
+                if (std::abs (p.values[(size_t) i] - 25.0) > 0.3) gapFlat = false;
+            }
+        }
+        CHECK (inGap >= 10 && gapFlat, "gap rows hold the pre-insertion value");
+    }
+
+    // --- Stretch [0.2, 0.6] -> [0.2, 1.0] (k = 2) ---
+    {
+        TableData t = makeTable ();
+        warpTableForStretch (t, 0.2, 0.6, 1.0);
+        const auto& p = t.params[0];
+        // Row at u=0.3 maps back to oldT=0.25 -> v=12.5.
+        int i30 = -1;
+        for (int i = 0; i < (int) p.values.size (); ++i)
+            if (std::abs (t.docTimeOfSample (p, i) - 0.3) < 5e-4) i30 = i;
+        CHECK (i30 >= 0 && std::abs (p.values[(size_t) i30] - 12.5) < 0.3,
+              "stretched row re-interpolates through the inverse warp");
+    }
+
+    // --- Deletion before a shifted domain moves its effective offset ---
+    {
+        TableData t = makeTable ();
+        t.offsetSecs = 1.0;   // domain [1, 2]
+        warpTableForDeletion (t, 0.0, 0.5);
+        CHECK (std::abs ((t.offsetSecs + t.params[0].offsetSecs) - 0.5) < 1e-9,
+              "domain start follows the deletion");
+    }
+}
+
+// Time alignment is shared at the table level: aligning one parameter of a
+// multi-parameter table re-aligns every parameter of that table together.
+static void testTablesSharedAlignment()
+{
+    const juce::File wav = makeTempFile ("tbl_shared_align.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate,
+            [] (int, int64_t f, double rate) { return 0.5f; }), "wrote shared align wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened shared align wav");
+    auto* d = app.doc ();
+
+    juce::String csv = "alpha,beta\r\n";
+    for (int i = 0; i < 200; ++i)
+        csv += juce::String ((double) i, 1) + "," + juce::String ((double) i * 2.0, 1) + "\r\n";
+    std::string cerr;
+    CHECK (app.addTableFromCsv ("shared", csv, &cerr), "added two-parameter table: " + cerr);
+
+    TablesPanel panel (app);
+    panel.refresh ();
+
+    // 1-point align of parameter alpha to doc time 0.3 via plot click at 0.1:
+    // effective offset = 0.3 - 1 * 0.1 = 0.2.
+    panel.startPointAlign (1, 0, 0, 0);
+    panel.handlePlotClick (0.1);
+    panel.handleDocClick (0.3);
+
+    const auto& t = d->tables[0];
+    CHECK (std::abs (t.offsetSecs - 0.2) < 1e-9, "alignment lands on the table's shared offset");
+    CHECK (std::abs (t.scaleTime - 1.0) < 1e-9, "table scale stays 1 for a 1-point align");
+    CHECK (std::abs (t.params[0].offsetSecs) < 1e-12 && std::abs (t.params[0].scaleTime - 1.0) < 1e-12,
+          "aligned parameter's own time fields are zeroed");
+    CHECK (std::abs (t.params[1].offsetSecs) < 1e-12 && std::abs (t.params[1].scaleTime - 1.0) < 1e-12,
+          "the other parameter adopts the shared map too");
+
+    // Both parameters are now anchored to exactly the same doc times.
+    bool sameTimes = t.params[0].values.size () == t.params[1].values.size ();
+    for (size_t i = 0; sameTimes && i < t.params[0].values.size (); ++i)
+        if (std::abs (t.docTimeOfSample (t.params[0], (int) i)
+                     - t.docTimeOfSample (t.params[1], (int) i)) > 1e-9)
+            sameTimes = false;
+    CHECK (sameTimes, "both parameters share identical doc times after alignment");
+
+    // The aligned parameter's target view is still per-parameter.
+    CHECK (t.params[0].alignTarget == 0, "aligned parameter keeps its own align target");
+}
+
+// ---------------- Live paste crash repro ----------------
+// Mirrors the exact live sequence that crashed the app: open
+// mix_20s_stereo.wav, import a two-parameter CSV (the clipboard fixture),
+// refresh the Tables panel and paint every view in overlay-on-waveform mode.
+static void testPasteLiveRepro()
+{
+    const juce::File wav = findTestDataFile ("mix_20s_stereo.wav");
+    if (!wav.existsAsFile()) { CHECK (false, "fixture mix_20s_stereo.wav missing"); return; }
+
+    // Exact CSV from the live clipboard fixture: header + 200 rows.
+    std::string csv = "alpha,beta\r\n";
+    for (int i = 0; i < 200; ++i)
+    {
+        char buf[64];
+        std::snprintf (buf, sizeof (buf), "%.3f,%.3f\r\n",
+                       std::sin (2.0 * juce::MathConstants<double>::pi * i / 40.0),
+                       (double) i / 199.0);
+        csv += buf;
+    }
+
+    Application app;
+    CHECK (app.openFile (wav), "open fixture");
+
+    std::string err;
+    CHECK (app.addTableFromCsv ("Clipboard", juce::String (csv), &err),
+          "import: " + err);
+
+    // Mirror MainWindow's onTablesChanged callback.
+    TablesPanel panel (app);
+    panel.setSize (400, 520);
+    panel.refresh();
+
+    WaveformView view (app);
+    view.setSize (900, 300);
+    juce::Image img (juce::Image::ARGB, 900, 300, true);
+    { juce::Graphics g (img); view.paint (g); }
+
+    SpectralView sv (app);
+    sv.setSize (900, 300);
+    juce::Image img2 (juce::Image::ARGB, 900, 300, true);
+    { juce::Graphics g (img2); sv.paint (g); }
+
+    CHECK (true, "headless paste sequence completed");
+
+    // Full MainWindow path: real views with live state; import happens while
+    // the window exists so onTablesChanged fires exactly as in the live app.
+    // Match the live app's persisted settings (the crash only happens with
+    // these: harmonics on, axis right, ruler bottom).
+    Application app2;
+    CHECK (app2.openFile (wav), "open fixture in main window");
+    app2.settings.specHarmVisible    = true;
+    app2.settings.trackAxisOnRight   = true;
+    app2.settings.trackRulerAtBottom = true;
+    std::unique_ptr<MainWindow> win (new MainWindow (app2, "paste repro"));
+    win->setSize (1400, 900);
+    // Force a real native peer so the message loop drives genuine paints.
+    win->addToDesktop();
+    win->setBounds (300, 100, 1400, 900);
+
+    // The live user had clicked the Tables tab before pasting: make it
+    // current so the panel is visible and its list box gets laid out.
+    {
+        auto* tt = win->topPanelTabs ();
+        const juce::Component* tp = win->panelForId ("tables");
+        for (int i = 0; i < tt->getNumTabs (); ++i)
+            if (tt->getTabContentComponent (i) == tp)
+                tt->setCurrentTabIndex (i, true);
+    }
+    for (int i = 0; i < 50; ++i)
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+
+    std::string err2;
+    CHECK (app2.addTableFromCsv ("Clipboard", juce::String (csv), &err2),
+          "import into main window doc: " + err2);
+
+    // Pump the message loop so pending repaints actually run.
+    for (int i = 0; i < 50; ++i)
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+
+    CHECK (true, "main window paste sequence completed");
+
+    // The one live-only element: the real OLE system clipboard read.
+    const juce::String clip = juce::SystemClipboard::getTextFromClipboard ();
+    std::cerr << "[repro] clipboard length = " << clip.length() << "\n";
+    if (clip.contains ("alpha,beta"))
+    {
+        std::string err3;
+        CHECK (app2.addTableFromCsv ("ClipReal", clip, &err3),
+              "import from real clipboard: " + err3);
+        for (int i = 0; i < 50; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+    }
+
+    CHECK (true, "real clipboard paste sequence completed");
+}
+
 static void testTablesDedicatedStrip()
 {
     const juce::File wav = makeTempFile ("dedstrip.wav");
@@ -24144,6 +24543,7 @@ static int scRunUnitTestsImpl()
     progress ("cat plan + apply");          testCatPlanAndApply();
     progress ("cat reduce gaps");           testCatReduceGaps();
     progress ("cat effect (app)");          testCatEffectApp();
+    progress ("cat state remap");           testCatStateRemap();
     progress ("cat dialog");                testCatDialog();
     progress ("filter eq effect");          testFilterEqEffect();
     progress ("envelope curve math");      testEnvelopeCurveMath();
@@ -24196,6 +24596,9 @@ static int scRunUnitTestsImpl()
     progress ("tables overlay + picker"); testTablesOverlayAndPicker();
     progress ("tables align targets");   testTablesAlignTarget();
     progress ("tables solo + rename");   testTablesSoloAndRename();
+    progress ("tables timeline warp");   testTablesTimelineWarp();
+    progress ("tables shared alignment");testTablesSharedAlignment();
+    progress ("paste live repro");       testPasteLiveRepro();
     progress ("tables dedicated strip"); testTablesDedicatedStrip();
     progress ("single instance mode");   testSingleInstance();
     progress ("waveform zero line");     testWaveformZeroLine();

@@ -113,7 +113,8 @@ struct Settings
     // sessions: while the mouse is over a channel row, small white circles mark
     // the harmonics of the frequency under the cursor - fundamental =
     // f_cursor / specHarmN, drawn for k in [1, specHarmMaxK] (no lines).
-    bool specHarmVisible  = true;   // "Show harmonics" toggle (Ctrl+H)
+    bool specHarmVisible  = false;  // "Show harmonics" toggle (Ctrl+H): off on
+                                    // first launch, remembered afterwards
     int  specHarmMaxK     = 10;     // "Number of harmonics to display:"
     int  specHarmN        = 1;      // "Harmonic number under the mouse:"
     bool specHarmNumbers  = false;  // "Show harmonic numbers": small white k next to each dot

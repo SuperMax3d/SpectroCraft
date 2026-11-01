@@ -302,6 +302,8 @@ void FileDoc::remapForDeletion (double a, double b)
     markers.adjustForDeletion (a, b);
     remapSpectralState (*this, [&] (auto& sel) { sel.adjustForDeletion (a, b); });
     warpDrawings (drawings, [&](double t) { return warpDeletion (t, a, b); });
+    for (auto& tb : tables)
+        sc::tables::warpTableForDeletion (tb, a, b);   // table curves follow the timeline
 
     // SCTT segments fully inside the deleted range are dropped; the rest are
     // warped (a segment straddling an edge is trimmed to it).
@@ -330,6 +332,8 @@ void FileDoc::remapForInsertion (double a, double lenSecs)
     markers.adjustForInsertion (a, lenSecs);
     remapSpectralState (*this, [&] (auto& sel) { sel.adjustForInsertion (a, lenSecs); });
     warpDrawings (drawings, [&](double t) { return warpInsertion (t, a, lenSecs); });
+    for (auto& tb : tables)
+        sc::tables::warpTableForInsertion (tb, a, lenSecs);   // table curves follow the timeline
     warpScttSegments (sctt.segments, [&](double t) { return warpInsertion (t, a, lenSecs); });
 
     metaDirty = true;
@@ -343,6 +347,8 @@ void FileDoc::remapForStretch (double a, double bOld, double bNew)
     markers.adjustForStretch (a, bOld, bNew);
     remapSpectralState (*this, [&] (auto& sel) { sel.adjustForStretch (a, bOld, bNew); });
     warpDrawings (drawings, [&](double t) { return warpStretch (t, a, bOld, bNew); });
+    for (auto& tb : tables)
+        sc::tables::warpTableForStretch (tb, a, bOld, bNew);   // table curves follow the timeline
     warpScttSegments (sctt.segments, [&](double t) { return warpStretch (t, a, bOld, bNew); });
 
     metaDirty = true;

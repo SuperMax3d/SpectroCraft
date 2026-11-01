@@ -1770,10 +1770,15 @@ public:
 
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;   // hover value readout
+    void mouseExit (const juce::MouseEvent&) override;
 
 private:
     Application& app;
     int focusIdx_ = -1;
+    juce::Point<int> hoverPos_ {-1, -1};
+    std::vector<std::pair<juce::String, juce::Colour>> hoverLabels_;
+    void collectHoverLabels (int x, int y);
 };
 
 /** Grid of the 12 preset colours shown by the parameter colour picker.

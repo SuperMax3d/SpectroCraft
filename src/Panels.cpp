@@ -5437,7 +5437,7 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         app.settings.maxFrequency = 20000.0f;
         app.settings.dbMinDb = -120.0f;
         app.settings.dbMaxDb = 0.0f;
-        app.settings.specHarmVisible = true;
+        app.settings.specHarmVisible = false;
         app.settings.specHarmMaxK = 10;
         app.settings.specHarmN = 1;
         app.settings.specHarmNumbers = false;
@@ -8707,6 +8707,10 @@ DrawingPanel::DrawingPanel (Application& appIn)
     textSizeSlider.setRange (6.0, 72.0, 1.0);
     textSizeSlider.setValue (app.settings.drawTextSize);
 
+    // Initial label text (the slider handlers only update on real changes).
+    widthLab.setText (juce::String (app.settings.drawWidth, 1), juce::dontSendNotification);
+    sizeLab.setText (juce::String ((int) std::lround (app.settings.drawTextSize)), juce::dontSendNotification);
+
     showAllBtn.onClick = [this] { toggleShowAll (); };
     deleteBtn.onClick = [this] { doDelete (); };
     colourBtn.onClick = [this]
@@ -8723,13 +8727,19 @@ DrawingPanel::DrawingPanel (Application& appIn)
 
     widthSlider.onValueChange = [this] ()
     {
-        app.settings.drawWidth = (float) widthSlider.getValue ();
+        const float v = (float) widthSlider.getValue ();
+        if (v == app.settings.drawWidth)
+            return;   // spurious peer notification: nothing changed
+        app.settings.drawWidth = v;
         widthLab.setText (juce::String (app.settings.drawWidth, 1), juce::dontSendNotification);
         app.saveSettings ();
     };
     textSizeSlider.onValueChange = [this] ()
     {
-        app.settings.drawTextSize = (float) textSizeSlider.getValue ();
+        const float v = (float) textSizeSlider.getValue ();
+        if (v == app.settings.drawTextSize)
+            return;   // spurious peer notification: nothing changed
+        app.settings.drawTextSize = v;
         sizeLab.setText (juce::String ((int) std::lround (app.settings.drawTextSize)), juce::dontSendNotification);
         app.saveSettings ();
     };
@@ -9269,6 +9279,26 @@ void TablesPlotView::paint (juce::Graphics& g)
                     juce::Rectangle<int> (pr.getX() + pr.getWidth() * i / nLab - 18,
                                           getHeight() - axisH + 1, 36, 12),
                     juce::Justification::centred, true);
+
+    // Hover readout: the unscaled value of every visible parameter at the
+    // hovered table time, stacked from the top like the dedicated track's
+    // labels.
+    if (!hoverLabels_.empty() && hoverPos_.x >= 0)
+    {
+        g.setFont (12.0f);
+        const juce::Font f (12.0f);
+        int y = pr.getY() + 4;
+        for (const auto& [txt, col] : hoverLabels_)
+        {
+            const auto sz = (int) juce::GlyphArrangement::getStringWidth (f, txt);
+            juce::Rectangle<int> box ((int) hoverPos_.x + 12, y, sz + 8, 15);
+            g.setColour (juce::Colour::fromRGBA (20, 20, 24, 200));
+            g.fillRoundedRectangle (box.toFloat(), 3.0f);
+            g.setColour (col);
+            g.drawText (txt, box, juce::Justification::centredLeft, true);
+            y += 17;
+        }
+    }
 }
 
 void TablesPlotView::mouseDown (const juce::MouseEvent& e)
@@ -9276,6 +9306,38 @@ void TablesPlotView::mouseDown (const juce::MouseEvent& e)
     if (!e.mods.isLeftButtonDown() || e.mods.isRightButtonDown()) return;
     if (onPointClicked && tableDuration() > 0.0)
         onPointClicked (xToTableTime (e.x));
+}
+
+void TablesPlotView::mouseMove (const juce::MouseEvent& e)
+{
+    hoverPos_ = { e.x, e.y };
+    collectHoverLabels (e.x, e.y);
+    repaint();
+}
+
+void TablesPlotView::mouseExit (const juce::MouseEvent&)
+{
+    hoverPos_ = { -1, -1 };
+    hoverLabels_.clear ();
+    repaint();
+}
+
+void TablesPlotView::collectHoverLabels (int x, int y)
+{
+    hoverLabels_.clear ();
+    auto* d = app.doc ();
+    if (d == nullptr || focusIdx_ < 0 || focusIdx_ >= (int) d->tables.size ()) return;
+    const auto& t = d->tables[(size_t) focusIdx_];
+    if (t.duration() <= 0.0) return;
+
+    const double tt = xToTableTime (x);
+    for (const auto& p : t.params)
+    {
+        if (!p.visible || p.values.size() < 2) continue;
+        const double v = sc::tables::paramValueAt (t, p, tt);   // unscaled value
+        hoverLabels_.push_back ({ p.name + "  " + juce::String (v, 4),
+                                  sc::tables::kPalette[p.colorIndex % 12] });
+    }
 }
 
 // ----------------------------------------------------------------- Panel --
@@ -9736,23 +9798,36 @@ void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam, int tar
     sc::tables::ParamData* p = paramLevel && scopeParam < (int) t.params.size()
                                ? &t.params[(size_t) scopeParam] : nullptr;
 
-    w->addTextEditor ("Time offset (seconds):", juce::String ((p ? p->offsetSecs : t.offsetSecs), 4));
-    w->addTextEditor ("Time scale:", juce::String ((p ? p->scaleTime : t.scaleTime), 4));
+    // Explanatory labels: each text box is described by the label above it.
+    static const juce::String lblOff   = "Time offset (seconds): shift along the timeline (+ = later)";
+    static const juce::String lblScale = "Time scale: stretch factor of table time relative to doc time";
+    static const juce::String lblNorm  = "Normalized 0/1: map values into their own 0..1 range";
+    static const juce::String lblInv   = "Inverted 0/1: flip the values around zero";
+    static const juce::String lblAbs   = "Absolute 0/1: use the absolute value of every sample";
+    static const juce::String lblVOff  = "Value offset: added to every value after the transforms";
+    static const juce::String lblVScl  = "Value scale: multiplied with every value after the transforms";
+
+    // Time alignment is shared at the table level, so a parameter dialog shows
+    // (and edits) its effective map - the one actually used for drawing.
+    const double showOff = p != nullptr ? t.offsetSecs + p->offsetSecs : t.offsetSecs;
+    const double showSc  = p != nullptr ? t.scaleTime * p->scaleTime   : t.scaleTime;
+
+    w->addTextEditor (lblOff, juce::String (showOff, 4));
+    w->addTextEditor (lblScale, juce::String (showSc, 4));
     if (paramLevel && p != nullptr)
     {
-        w->addTextEditor ("Normalized (0/1):", p->normalized ? "1" : "0");
-        w->addTextEditor ("Inverted (0/1):", p->inverted ? "1" : "0");
-        w->addTextEditor ("Absolute (0/1):", p->absolute ? "1" : "0");
-        w->addTextEditor ("Value offset:", juce::String (p->valueOffset, 4));
-        w->addTextEditor ("Value scale:", juce::String (p->valueScale, 4));
+        w->addTextEditor (lblNorm, p->normalized ? "1" : "0");
+        w->addTextEditor (lblInv, p->inverted ? "1" : "0");
+        w->addTextEditor (lblAbs, p->absolute ? "1" : "0");
+        w->addTextEditor (lblVOff, juce::String (p->valueOffset, 4));
+        w->addTextEditor (lblVScl, juce::String (p->valueScale, 4));
     }
 
-    const char* names[7] = { "Time offset (seconds):", "Time scale:", nullptr, nullptr,
-                             nullptr, nullptr, nullptr };
+    juce::String names[7] = { lblOff, lblScale, "", "",
+                              "", "", "" };
     if (paramLevel && p != nullptr)
     {
-        static const char* extra[] = { "Normalized (0/1):", "Inverted (0/1):",
-                                       "Absolute (0/1):", "Value offset:", "Value scale:" };
+        static const juce::String extra[] = { lblNorm, lblInv, lblAbs, lblVOff, lblVScl };
         for (int i = 0; i < 5; ++i) names[2 + i] = extra[i];
     }
     for (size_t i = 0; i < (paramLevel && p != nullptr ? 7 : 2); ++i)
@@ -9766,29 +9841,32 @@ void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam, int tar
     if (result == 1)
     {
         double off = 0.0, sc = 1.0;
-        tablesParseDouble (w->getTextEditorContents ("Time offset (seconds):"), off);
-        tablesParseDouble (w->getTextEditorContents ("Time scale:"), sc);
+        tablesParseDouble (w->getTextEditorContents (lblOff), off);
+        tablesParseDouble (w->getTextEditorContents (lblScale), sc);
         if (!(sc > 0.0)) sc = 1.0;
 
-        if (!paramLevel)
+        // Time alignment is shared at the table level: applying it to any row
+        // re-aligns every parameter of that table together.
+        t.offsetSecs = off;
+        t.scaleTime = sc;
+        for (auto& q : t.params)
         {
-            t.offsetSecs = off;
-            t.scaleTime = sc;
+            q.offsetSecs = 0.0;
+            q.scaleTime = 1.0;
         }
-        else if (p != nullptr)
+
+        if (paramLevel && p != nullptr)
         {
             // The chosen Align target decides which overlay view shows this
             // parameter (waveform / spectrogram) or only the dedicated track.
             p->alignTarget = std::clamp (targetView, 0, 2);
-            p->offsetSecs = off;
-            p->scaleTime = sc;
             double v = 0.0;
-            tablesParseDouble (w->getTextEditorContents ("Normalized (0/1):"), v); p->normalized = v != 0.0;
-            tablesParseDouble (w->getTextEditorContents ("Inverted (0/1):"), v);     p->inverted    = v != 0.0;
-            tablesParseDouble (w->getTextEditorContents ("Absolute (0/1):"), v);     p->absolute    = v != 0.0;
-            tablesParseDouble (w->getTextEditorContents ("Value offset:"), v);       p->valueOffset = v;
+            tablesParseDouble (w->getTextEditorContents (lblNorm), v); p->normalized = v != 0.0;
+            tablesParseDouble (w->getTextEditorContents (lblInv), v);     p->inverted    = v != 0.0;
+            tablesParseDouble (w->getTextEditorContents (lblAbs), v);     p->absolute    = v != 0.0;
+            tablesParseDouble (w->getTextEditorContents (lblVOff), v);       p->valueOffset = v;
             double vs = 1.0;
-            if (tablesParseDouble (w->getTextEditorContents ("Value scale:"), vs)) p->valueScale = vs;
+            if (tablesParseDouble (w->getTextEditorContents (lblVScl), vs)) p->valueScale = vs;
         }
     }
     delete w;
@@ -9874,23 +9952,17 @@ void TablesPanel::handleDocClick (double tDocSecs)
         }
         off = b1 - sc * a1;
 
-        if (pi < 0 || pi >= (int) t.params.size())
+        // Time alignment is shared at the table level: aligning any parameter
+        // (or the table itself) re-aligns every parameter of that table.
+        t.offsetSecs = off;
+        t.scaleTime = sc;
+        for (auto& q : t.params)
         {
-            // Table level: the table's own map is applied directly.
-            t.offsetSecs = off;
-            t.scaleTime = sc;
+            q.offsetSecs = 0.0;
+            q.scaleTime = 1.0;
         }
-        else
-        {
-            // Parameter level: the effective map composes additively in offset
-            // and multiplicatively in scale (see TableData::effectiveTimeMap),
-            // so the parameter's own contribution is simply the remainder.
-            auto& p = t.params[(size_t) pi];
-            if (pending_.numPoints == 2)
-                p.scaleTime = sc / std::max (1e-9, t.scaleTime);
-            p.offsetSecs = off - t.offsetSecs;
-            p.alignTarget = pending_.targetView;
-        }
+        if (pi >= 0 && pi < (int) t.params.size())
+            t.params[(size_t) pi].alignTarget = pending_.targetView;
     }
 
     havePending_ = false;
@@ -10150,15 +10222,10 @@ void TablesPanel::showContextMenu (int row)
         }
     }
 
-    if (haveTableScope)
-    {
-        juce::PopupMenu align;
-        align.addItem (10, "Manual");
-        align.addItem (11, "1 Point");
-        align.addItem (12, "2 Points");
-        m.addSubMenu ("Align", align);
-    }
-    else if (haveParamScope)
+    // Time alignment is shared at the table level: right-clicking a parameter
+    // row offers it (and re-aligns the whole table). Table rows themselves no
+    // longer carry an Align menu.
+    if (haveParamScope)
     {
         juce::PopupMenu align;
         auto makeTarget = [] (int baseId) -> juce::PopupMenu
@@ -10204,8 +10271,20 @@ void TablesPanel::showContextMenu (int row)
                     {
                         const double lag = sc::tables::autoAlignLag (refT, refT.params[(size_t) b.paramIdx],
                                                                     aliT, aliT.params[(size_t) a.paramIdx]);
+                        // Time alignment is shared at the table level: the
+                        // parameter under the mouse lands on its effective map
+                        // shifted by the lag, and every other parameter of its
+                        // table adopts that same map.
                         auto& p = aliT.params[(size_t) a.paramIdx];
-                        p.offsetSecs += lag;   // shift the parameter under the mouse
+                        const double effOff = aliT.offsetSecs + p.offsetSecs;
+                        const double effSc  = aliT.scaleTime * p.scaleTime;
+                        aliT.offsetSecs = effOff + lag;
+                        aliT.scaleTime = effSc;
+                        for (auto& q : aliT.params)
+                        {
+                            q.offsetSecs = 0.0;
+                            q.scaleTime = 1.0;
+                        }
                         d->metaDirty = true;
                         refresh ();
                         if (app.onTablesChanged) app.onTablesChanged ();
@@ -10217,11 +10296,6 @@ void TablesPanel::showContextMenu (int row)
         case 5: requestClose (); break;
         case 6: renamePrimaryTable (); break;
         case 7: renamePrimaryParameter (); break;
-
-        // Table-level Align submenu.
-        case 10: showManualAlignDialog (prRef.tableIdx, -1); break;
-        case 11: startPointAlign (1, prRef.tableIdx, -1, app.tablesMode() == 1 ? 1 : 0); break;
-        case 12: startPointAlign (2, prRef.tableIdx, -1, app.tablesMode() == 1 ? 1 : 0); break;
 
         // Parameter-level Align submenu: Waveform = 21..23, Spectrogram = 24..26.
         case 21: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx, 0); break;

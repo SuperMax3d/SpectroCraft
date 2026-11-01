@@ -153,6 +153,15 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 
     // Dedicated tables track + its separator and vertical scrollbar.
     tablesTrack   = std::make_unique<TablesTrackView> (app);
+    tablesTrack->onTimeWindow      = [this] (double a, double b) { applyTimeWindow (a, b); };
+    tablesTrack->onZoomToSelection = [this] () { zoomToSelection (); };
+    tablesTrack->onZoomOutFull     = [this] (bool axisOnly)
+    {
+        if (axisOnly)   // vertical-axis right-click: value range only
+            tablesTrack->refit();
+        else            // track data: time window + every vertical range
+            zoomOutFull ();
+    };
     tablesSep     = std::make_unique<ViewSplitter>();
     tablesSep->onDrag = [this] (const juce::MouseEvent& e) { handleTablesSepDrag (e); };
     tablesVScroll = std::make_unique<ValueScrollBar>();
@@ -1307,8 +1316,13 @@ bool MainWindow::isInterestedInFileDrag (const juce::StringArray& files)
 {
     static const juce::String supported = allOpenableExtensions();
     for (const auto& f : files)
-        if (supported.contains (juce::File (f).getFileExtension().toLowerCase()))
+    {
+        // CSV files are not audio: they import as tables in the Tables panel
+        // (filesDropped routes them to addTableFromCsv).
+        const auto ext = juce::File (f).getFileExtension().toLowerCase();
+        if (ext == ".csv" || supported.contains (ext))
             return true;
+    }
     return false;
 }
 
@@ -2719,6 +2733,10 @@ void MainWindow::zoomOutFull()
     applyTimeWindow (0.0, app.audioEngine().duration());
     if (waveformView) waveformView->resetVerticalZoom();
     if (spectralView) spectralView->resetFrequencyRange();
+    // Ctrl+0 / Zoom Out Full also vertically fits the dedicated track when it
+    // is visible.
+    if (tablesTrack && tablesTrack->isVisible())
+        tablesTrack->refit();
 }
 
 // F9 cycles the view layout: both -> waveform only -> spectrogram only -> both.

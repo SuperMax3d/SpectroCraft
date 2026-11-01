@@ -99,6 +99,19 @@ bool importTable (const juce::String& name, const juce::String& csvText,
     length is max(2, round(N * newRate / oldRate)); endpoints are preserved. */
 void downsampleTable (TableData& t, double newRateHz);
 
+// ------------------------------------------------- Timeline anchoring --
+
+/** Resamples every parameter of `t` so its curves follow the audio timeline
+    after a warp: each parameter's effective domain [s, e] moves to
+    [W(s), W(e)], its own time offset is shifted by W(s)-s (its scale is
+    untouched) and its values are re-interpolated through the inverse warp.
+    Content inside deleted ranges disappears; inserted gaps are bridged with
+    a constant value. Called after destructive audio edits, exactly like the
+    marker/drawing/SCTT remaps. */
+void warpTableForDeletion (TableData& t, double a, double b);
+void warpTableForInsertion (TableData& t, double a, double lenSecs);
+void warpTableForStretch   (TableData& t, double a, double bOld, double bNew);
+
 // ------------------------------------------------------------- Value maps --
 
 /** Applies the parameter's value transforms in order: normalized -> inverted

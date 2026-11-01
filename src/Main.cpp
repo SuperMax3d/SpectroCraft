@@ -27,6 +27,7 @@
 #include <JuceHeader.h>
 #include "Application.h"
 #include "CrashTrace.h"
+#include "InvalidParamTrace.h"
 #include "SingleInstance.h"
 #include "StartupTrace.h"
 #include "MainWindow.h"
@@ -112,6 +113,9 @@ public:
     {
 #if defined (_WIN32)
         scCrash::install(); // trace real crashes; pass through driver FATAL_APP_EXIT events
+#if JUCE_DEBUG
+        scInvalidParam::install();  // symbolize CRT/_STL_VERIFY failures (debug only)
+#endif
 #endif
     }
 
