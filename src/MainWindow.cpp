@@ -4218,6 +4218,11 @@ void MainWindow::showTimeStretchDialog()
 CatTimeScalePanel::CatTimeScalePanel (double refDurationSecs)
     : refDur_ (std::max (1e-9, refDurationSecs))
 {
+    // An explicit size is required: AlertWindow sizes the dialog from
+    // getHeight() and JUCE clips children to their parent's bounds, so a
+    // 0x0 panel would be invisible even though its rows exist.
+    setSize (360, 115);
+
     modeLabel_ = new juce::Label ("", "Mode:");
     modeCombo_ = new juce::ComboBox ("catMode");
     modeCombo_->addItem ("Time Stretch", 1);

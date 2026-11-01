@@ -17428,6 +17428,12 @@ static void testCatDialog()
     CHECK (panel != nullptr, "the dialog hosts a CatTimeScalePanel");
     if (panel == nullptr) { delete w; wav.deleteFile (); return; }
 
+    // Regression: the panel must carry an explicit size. Without it AlertWindow
+    // allocates no space for it and JUCE clips its children to 0x0, leaving a
+    // dialog with only the message text visible.
+    CHECK (panel->getWidth () > 100 && panel->getHeight () >= 100,
+          "the panel has an explicit size so its rows are visible");
+
     // Mode drop-down: exactly the two required choices.
     auto* combo = panel->modeCombo ();
     CHECK (combo != nullptr && combo->getNumItems () == 2, "two modes in the drop-down");
