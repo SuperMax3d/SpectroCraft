@@ -11,6 +11,7 @@
 #include "FileDoc.h"
 #include "StemSeparation.h"
 #include "SignalGenerator.h"
+#include "Actions.h"
 #include <vector>
 #include <memory>
 #include <functional>
@@ -344,6 +345,23 @@ public:
     // frequency-analysis axis mode + FFT size, zero-crossing snap) into the
     // same PropertiesFile as the recent-files list.
     void saveSettings();
+
+    /** Recorded actions (Photoshop-style record/replay). Persisted in the
+        recent-files store under the key "actions_json" so they survive a
+        restart. */
+    sc::ActionStore actions;
+
+    /** Action-recorder state: while active, every recorded operation that is
+        executed appends its step to actions[actionIndex]. */
+    struct ActionRecorder { bool active = false; int actionIndex = -1; };
+    ActionRecorder actionRec;
+
+    /** Appends one step when recording is active (no-op otherwise). The step
+        is persisted immediately. */
+    void recordActionStep (const juce::String& type, const juce::var& params = {});
+
+    /** Persists the action store to disk. */
+    void saveActions();
 
     // AI feature preferences, persisted in the same store (keys ai_*).
     bool aiAutoDownload = true;          // download missing models on first use

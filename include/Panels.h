@@ -2114,3 +2114,154 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE (PythonPanel)
 };
+
+// ------------------------------------------------- Actions panel
+// Photoshop-style recorded actions, next to the History tab.
+//
+//   [New] [Record] [Run] [Batch]
+//   action list (multi-select; right-click = Remove Selected / Rename / Edit)
+//
+// Recording: while active, every effect/edit that is executed appends its
+// step to the selected action (or a freshly named one when nothing is
+// selected). Actions persist across restarts in the recent-files store.
+class ActionsPanel : public juce::Component
+{
+public:
+    explicit ActionsPanel (Application& app);
+
+    void paint (juce::Graphics& g) override;
+    void resized() override;
+
+    // Selection state (indices into app.actions).
+    std::vector<int> selection() const { return selected_; }
+    int primaryIndex() const { return selected_.empty () ? -1 : selected_[(size_t) 0]; }
+    bool isSelected (int i) const;
+    void clearSelection();
+
+    // Button handlers (also reachable from unit tests).
+    void handleNew();      // prompt for a name, create an empty action
+    void handleRecord();   // toggle recording on/off
+    void handleRun();      // run the selected action via onRunRequested
+    void handleBatch();    // open the batch window via onBatchRequested
+
+    /** Set by MainWindow: called with the index of the action to replay. */
+    std::function<void(int)> onRunRequested;
+    /** Set by MainWindow: opens the batch window for `index`. */
+    std::function<void(int)> onBatchRequested;
+    // Right-click "Close Panel": set by MainWindow. requestClose() is the
+    // testable entry point.
+    std::function<void()> onCloseRequested;
+    void requestClose() { if (onCloseRequested) onCloseRequested(); }
+
+    bool isRecording() const { return app.actionRec.active; }
+    int recordingIndex() const { return app.actionRec.actionIndex; }
+    int numActions() const { return app.actions.size (); }
+
+private:
+    Application& app;
+    std::vector<int> selected_;   // selected action indices (multi-select)
+    int anchor_ = -1;             // shift-click range anchor
+    int scroll_ = 0;              // first visible row
+
+    juce::TextButton newBtn, recordBtn, runBtn, batchBtn;
+
+    static constexpr int kHeaderH = 28;   // button row height
+    static constexpr int kRowH = 20;
+
+    juce::Rectangle<int> listArea() const;
+    juce::Rectangle<int> rowRect (int i) const;
+    int rowAt (juce::Point<int>) const;   // -1 when no row is under the point
+
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void showContextMenu (juce::Point<int> at);
+
+    JUCE_DECLARE_NON_COPYABLE (ActionsPanel)
+};
+
+// ------------------------------------------------- Action JSON edit window
+// Large multi-line editor for the raw action JSON. OK validates the whole
+// document (JSON syntax + known step types + per-type parameters) and reports
+// every problem in an error area before closing; Cancel discards changes.
+class ActionEditWindow : public juce::DocumentWindow
+{
+public:
+    /** Edits actions[index] of the live store. */
+    explicit ActionEditWindow (Application& app, int index);
+
+    /** Called after a successful save so MainWindow can refresh the panel.
+        Set by the creator; defaults to no-op. */
+    std::function<void()> onSaved;
+    /** Destructor hook: set by the creator to release ownership safely. */
+    std::function<void()> onCloseRequested;
+
+    void paint (juce::Graphics& g) override;
+    void resized() override;
+
+    // Unit-test accessors.
+    juce::TextEditor* editorComp() { return &editor; }
+    juce::Label* errorLabelComp() { return &errorLabel; }
+    int actionIndex() const { return index_; }
+
+private:
+    void okClicked();
+    void userTriedToCloseWindow() override;
+
+    Application& app;
+    int index_ = -1;
+    juce::TextEditor editor;
+    juce::Label errorLabel;
+    juce::TextButton okBtn, cancelBtn;
+
+    JUCE_DECLARE_NON_COPYABLE (ActionEditWindow)
+};
+
+// ------------------------------------------------- Action batch window
+// Runs one action over a whole folder tree:
+//   Input Folder:  [path] [...]
+//   [x] Same output folder        (greys out the output field, mirrors input)
+//   Output Folder: [path] [...]
+//   [ ] Include subfolders
+//   Input Formats: [*.wav; *.mp3]
+//   Rename:        [%Filename%.wav]
+//   [Run]  [Close]
+class ActionBatchWindow : public juce::DocumentWindow
+{
+public:
+    explicit ActionBatchWindow (Application& app, int actionIndex);
+
+    /** Destructor hook: set by the creator to release ownership safely. */
+    std::function<void()> onCloseRequested;
+
+    void paint (juce::Graphics& g) override;
+    void resized() override;
+
+    // Unit-test accessors.
+    juce::TextEditor* inputFieldComp() { return &inputField; }
+    juce::TextEditor* outputFieldComp() { return &outputField; }
+    juce::ToggleButton* sameOutBoxComp() { return &sameOutBox; }
+    juce::ToggleButton* subfoldersBoxComp() { return &subfoldersBox; }
+    juce::TextEditor* formatsFieldComp() { return &formatsField; }
+    juce::TextEditor* renameFieldComp() { return &renameField; }
+    juce::Label* statusLabelComp() { return &statusLabel; }
+
+private:
+    void sameOutToggled();
+    void browseInput();
+    void browseOutput();
+    void runClicked();
+    void tryClose();
+    void userTriedToCloseWindow() override;
+
+    Application& app;
+    int actionIndex_ = -1;
+
+    juce::Label inputLbl, outputLbl, formatsLbl, renameLbl, statusLabel;
+    juce::TextEditor inputField, outputField, formatsField, renameField;
+    juce::TextButton browseInBtn, browseOutBtn, runBtn, closeBtn;
+    juce::ToggleButton sameOutBox, subfoldersBox;
+
+    std::atomic<bool> running_ { false };   // guards the detached batch thread
+
+    JUCE_DECLARE_NON_COPYABLE (ActionBatchWindow)
+};

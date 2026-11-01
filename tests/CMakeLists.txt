@@ -18,6 +18,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/Envelope.cpp      # amplitude-over-time envelope effect
         ${CMAKE_SOURCE_DIR}/src/MarkerManager.cpp
         ${CMAKE_SOURCE_DIR}/src/PythonScripts.cpp
+        ${CMAKE_SOURCE_DIR}/src/Actions.cpp     # recorded actions (record/replay/batch)
         ${CMAKE_SOURCE_DIR}/src/WaveformView.cpp
         ${CMAKE_SOURCE_DIR}/src/SpectralView.cpp
         ${CMAKE_SOURCE_DIR}/src/Panels.cpp

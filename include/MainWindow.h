@@ -166,7 +166,11 @@ public:
         so in that case the whole thing runs on a worker thread behind a
         progress dialog. On success refreshAfterEdit() is called; on failure an
         error message box is shown (unless the user cancelled). */
-    void runDestructiveEdit(std::function<bool(std::string*)> edit);
+    /** onDone (optional) is called on the message thread with the success
+        flag once the edit has finished - used by action replay to chain
+        steps. */
+    void runDestructiveEdit(std::function<bool(std::string*)> edit,
+                            std::function<void(bool)> onDone = nullptr);
     void showEditError (const std::string& err);
 
     // Play request that first guarantees the lazy audio device init has
@@ -211,15 +215,17 @@ public:
     void setPanelVisible (const juce::String& id, bool visible);
     juce::Component* panelForId (const juce::String& id) const;   // unit tests
 
-    void showChangeGainDialog();
+    /** onApplied (optional) is called with the success flag once the effect
+        has been applied - used by action replay to chain steps. */
+    void showChangeGainDialog(std::function<void(bool)> onApplied = nullptr);
     /** Builds (but does not run modally) the Change Gain dialog. The caller
         owns and must delete it; used by showChangeGainDialog() and tests. */
     juce::AlertWindow* createGainDialog();
 
     // ---- Effects > Generate ... dialogs ----------------------------------
-    void showGenerateSilenceDialog();
-    void showGenerateNoiseDialog();
-    void showGenerateToneDialog();
+    void showGenerateSilenceDialog(std::function<void(bool)> onApplied = nullptr);
+    void showGenerateNoiseDialog(std::function<void(bool)> onApplied = nullptr);
+    void showGenerateToneDialog(std::function<void(bool)> onApplied = nullptr);
     /** Build (but do not run modally) the generation dialogs. The caller owns
         and must delete them; used by the show* functions and tests. */
     juce::AlertWindow* createGenerateSilenceDialog();
@@ -228,15 +234,29 @@ public:
 
     // ---- Effects > Invert / Time Stretch... / Content Aware Time Scale... /
     //          Filter EQ... / Envelope... ---
-    void showTimeStretchDialog();
-    void showContentAwareTimeScaleDialog();
-    void showFilterEqDialog();
-    void showEnvelopeDialog();
+    void showTimeStretchDialog(std::function<void(bool)> onApplied = nullptr);
+    void showContentAwareTimeScaleDialog(std::function<void(bool)> onApplied = nullptr);
+    void showFilterEqDialog(std::function<void(bool)> onApplied = nullptr);
+    void showEnvelopeDialog(std::function<void(bool)> onApplied = nullptr);
 
     /** Ctrl+Shift+F: re-dispatches the previously run effect (one of the
         classic Effects-menu items). No-op until an effect has been run. */
     void repeatLastEffect();
     int getLastEffectId() const { return lastEffectId; }   // unit tests
+
+    /** Actions panel: interactive replay of a recorded action on the current
+        document. Steps run in order; prompt steps open their normal dialog,
+        non-prompt steps apply the recorded values directly. */
+    void runAction (int index);
+    void continueReplay();                       // advance to the next step
+    void stopReplay (const juce::String& why);  // abort with a status message
+    bool isReplaying() const { return !replaySteps_.empty (); }
+    /** Batch button: opens the batch-processing window for an action. */
+    void showActionBatchWindow (int index);
+
+    std::vector<sc::ActionStep> replaySteps_;   // active replay queue
+    int replayPos_ = 0;
+    juce::String replayName_;
 
     /** Alt+Shift+= / '+' and Alt+Shift+-: step the spectrogram's FFT size one
         power of two along the 512..65536 ladder. Auto mode switches to manual
@@ -327,7 +347,7 @@ public:
         configuration and then executes the split on the current selection. */
     void runSplitExecute();
 
-    void showResampleDialog();
+    void showResampleDialog(std::function<void(bool)> onApplied = nullptr);
     /** Builds (but does not run modally) the Resample dialog. The caller owns
         and must delete it; used by showResampleDialog() and tests. */
     juce::AlertWindow* createResampleDialog();
@@ -342,8 +362,11 @@ public:
     void showSuperResolutionWindow();
     /** Background resample (+ optional channel remix) with a progress
         dialog. Empty remixWeights keeps the current channels. */
+    /** onDone (optional) is called with the success flag when the resample
+        finishes - used by action replay to chain steps. */
     void runResampleAsync (double newRate,
-                           const std::vector<std::vector<double>>& remixWeights);
+                           const std::vector<std::vector<double>>& remixWeights,
+                           std::function<void(bool)> onDone = nullptr);
 
     /** Shift + drag & drop: popup offering how to merge the dropped files.
         Item ids: 1 = plain open, 2/3 = sequence into current/new file,
@@ -391,21 +414,25 @@ public:
     /** Builds (but does not run modally) the Noise Suppression dialog. The caller
         owns and must delete it; used by showNoiseSuppressDialog() and tests. */
     juce::AlertWindow* createNoiseSuppressDialog();
-    void showNoiseSuppressDialog();
+    void showNoiseSuppressDialog(std::function<void(bool)> onApplied = nullptr);
     // devicePref: "auto" | "CPU" | "GPU" | "NPU" - resolved against the
     // available OpenVINO devices on the worker thread before processing.
     // copyNoise: append one new track per processed channel holding only the
     // estimated noise (original - enhanced) over the selection range.
+    /** onDone (optional) is called with the success flag when the run
+        finishes - used by action replay to chain steps. */
     void runNoiseSuppressAsync (const std::string& modelId, const std::string& devicePref,
                                 float attenLimDb = 0.f, bool df3PostFilter = false,
-                                bool autoDownload = true, bool copyNoise = false);
+                                bool autoDownload = true, bool copyNoise = false,
+                                std::function<void(bool)> onDone = nullptr);
 
     /** Builds (but does not run modally) the Transcription dialog. The caller
         owns and must delete it; used by showTranscribeDialog() and tests. */
     juce::AlertWindow* createTranscribeDialog();
-    void showTranscribeDialog();
+    void showTranscribeDialog(std::function<void(bool)> onApplied = nullptr);
     void runTranscriptionAsync (const std::string& modelId, const std::string& language,
-                                bool translate, bool fast, bool autoDownload = true);
+                                bool translate, bool fast, bool autoDownload = true,
+                                std::function<void(bool)> onDone = nullptr);
 
     /** Builds (but does not run modally) the Transcribe Folder options dialog.
         The caller owns and must delete it; used by showTranscribeFolderDialog(). */
@@ -421,7 +448,10 @@ public:
         background thread with a progress dialog. The selection is processed,
         or the whole file when nothing is selected; the result replaces that
         range in place (undoable). */
-    void runPythonScriptAsync (const juce::File& script, const juce::String& scriptText);
+    /** onDone (optional) is called with the success flag when the script
+        finishes - used by action replay to chain steps. */
+    void runPythonScriptAsync (const juce::File& script, const juce::String& scriptText,
+                               std::function<void(bool)> onDone = nullptr);
 
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
     void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
@@ -474,6 +504,8 @@ public:
         ToolsGenSilence,           // Effects > Generate Silence...
         ToolsGenNoise,             // Effects > Generate Noise...
         ToolsGenTone,              // Effects > Generate Tone...
+        ActionsRunSelected = 6800, // Actions > Run Selected Action (Ctrl+Shift+P)
+        ActionsBatch = 6801,       // Actions > Batch...
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         ToolsNoiseSuppress,   // AI noise suppression (built with -DSPECTRO_ENABLE_AI=ON)
 #endif
@@ -522,6 +554,7 @@ private:
     std::unique_ptr<DrawingPanel> drawingPanel;               // spectrogram drawings (bottom group)
     std::unique_ptr<TablesPanel> tablesPanel;                 // imported CSV tables (top group)
     std::unique_ptr<HistoryPanel> historyPanel;
+    std::unique_ptr<ActionsPanel> actionsPanel;              // recorded actions (top group)
     std::unique_ptr<PythonPanel> pythonPanel;                 // user Python scripts (top group)
 
     // Effects > Stem Separation window (at most one open at a time).

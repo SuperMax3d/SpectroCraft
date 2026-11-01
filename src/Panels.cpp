@@ -5,6 +5,7 @@
 #include "Panels.h"
 #include "WaveformView.h"   // formatFooterTime / parseTimeText (shared time text)
 #include "FFTHelpers.h"
+#include "WorkProgress.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -10331,4 +10332,718 @@ void TablesPanel::resized()
     const int plotH = std::max (70, r.getHeight () / 4);
     table.setBounds (6, 46, r.getWidth () - 12, r.getHeight () - 46 - plotH - 8);
     plot.setBounds (6, r.getHeight () - plotH - 2, r.getWidth () - 12, plotH);
+}
+
+
+// ============================================================= Actions panel
+
+ActionsPanel::ActionsPanel (Application& a) : app (a)
+{
+    newBtn.setButtonText ("New");
+    recordBtn.setButtonText ("Record");
+    runBtn.setButtonText ("Run");
+    batchBtn.setButtonText ("Batch");
+
+    for (auto* b : { &newBtn, &recordBtn, &runBtn, &batchBtn })
+        addAndMakeVisible (*b);
+
+    newBtn.onClick = [this] { handleNew (); };
+    recordBtn.onClick = [this] { handleRecord (); };
+    runBtn.onClick = [this] { handleRun (); };
+    batchBtn.onClick = [this] { handleBatch (); };
+}
+
+juce::Rectangle<int> ActionsPanel::listArea() const
+{
+    return getLocalBounds().removeFromTop (kHeaderH);
+}
+
+juce::Rectangle<int> ActionsPanel::rowRect (int i) const
+{
+    auto list = listArea();
+    return juce::Rectangle<int> (0, list.getY() + scroll_ * kRowH + i * kRowH,
+                                getWidth(), kRowH);
+}
+
+int ActionsPanel::rowAt (juce::Point<int> p) const
+{
+    auto list = listArea();
+    if (!list.contains (p)) return -1;
+    for (int i = 0; i < app.actions.size (); ++i)
+        if (rowRect (i).contains (p)) return i;
+    return -1;
+}
+
+bool ActionsPanel::isSelected (int i) const
+{
+    for (int j : selected_)
+        if (j == i) return true;
+    return false;
+}
+
+void ActionsPanel::clearSelection()
+{
+    selected_.clear ();
+    anchor_ = -1;
+}
+
+void ActionsPanel::resized()
+{
+    const int gap = 4;
+    const int bw = (std::max (80, getWidth()) - 8 - 3 * gap) / 4;
+    newBtn.setBounds (4, 2, bw, kHeaderH - 6);
+    recordBtn.setBounds (newBtn.getRight() + gap, 2, bw, kHeaderH - 6);
+    runBtn.setBounds (recordBtn.getRight() + gap, 2, bw, kHeaderH - 6);
+    batchBtn.setBounds (runBtn.getRight() + gap, 2, bw, kHeaderH - 6);
+}
+
+void ActionsPanel::paint (juce::Graphics& g)
+{
+    auto b = getLocalBounds();
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+
+    const auto list = listArea();
+    const int n = app.actions.size ();
+    if (n == 0)
+    {
+        g.setColour (juce::Colours::grey);
+        g.setFont (11.0f);
+        g.drawText ("No actions yet.\nUse New or Record to create one.",
+                    list, juce::Justification::centred);
+        return;
+    }
+
+    const int visibleRows = std::max (1, list.getHeight() / kRowH);
+    scroll_ = std::clamp (scroll_, 0, std::max (0, n - visibleRows));
+
+    g.setFont (11.0f);
+    for (int i = 0; i < n; ++i)
+    {
+        auto r = rowRect (i).getIntersection (list);
+        if (r.isEmpty()) continue;
+
+        const bool sel = isSelected (i);
+        if (sel)
+        {
+            g.setColour (juce::Colour::fromRGB (64, 92, 158));
+            g.fillRoundedRectangle (r.toFloat(), 3.0f);   // 2-arg form in this JUCE
+        }
+
+        const bool rec = app.actionRec.active && app.actionRec.actionIndex == i;
+
+        auto textRect = r.withTrimmedLeft (8);
+        if (rec)
+        {
+            g.setColour (juce::Colours::red);
+            g.fillEllipse (textRect.removeFromLeft (12).toFloat());
+        }
+
+        const auto* act = app.actions.get (i);
+        g.setColour (sel ? juce::Colours::white : juce::Colour::fromRGB (205, 205, 215));
+        g.drawText (act->name, textRect.removeFromRight (64),
+                    juce::Justification::left, false);
+
+        if (!act->steps.empty())
+        {
+            g.setColour (juce::Colours::grey);
+            g.drawText (juce::String ((int) act->steps.size()) + " step"
+                        + (act->steps.size () == 1 ? "" : "s"),
+                        r.withTrimmedLeft (r.getWidth() - 64),
+                        juce::Justification::right, false);
+        }
+    }
+}
+
+void ActionsPanel::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.mods.isRightButtonDown())
+    {
+        showContextMenu (e.getPosition());
+        return;
+    }
+
+    const int idx = rowAt (e.getPosition());
+    if (idx < 0)
+    {
+        clearSelection();
+        repaint();
+        return;
+    }
+
+    if (e.mods.isShiftDown())
+    {
+        const int lo = anchor_ >= 0 ? std::min (anchor_, idx) : 0;
+        const int hi = anchor_ >= 0 ? std::max (anchor_, idx) : idx;
+        selected_.clear ();
+        for (int i = lo; i <= hi && i < app.actions.size (); ++i)
+            selected_.push_back (i);
+    }
+    else if (e.mods.isCtrlDown())
+    {
+        anchor_ = idx;
+        auto it = std::find (selected_.begin (), selected_.end (), idx);
+        if (it == selected_.end ()) selected_.push_back (idx);
+        else                        selected_.erase (it);
+    }
+    else
+    {
+        selected_ = { idx };
+        anchor_ = idx;
+    }
+
+    repaint();
+}
+
+void ActionsPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+{
+    if (juce::approximatelyEqual (wheel.deltaY, 0.0f)) return;
+    scroll_ += (wheel.deltaY < 0.0f ? 1 : -1) * std::max (1, std::abs ((int) wheel.deltaY));
+    repaint();
+}
+
+void ActionsPanel::showContextMenu (juce::Point<int> at)
+{
+    const int idx = rowAt (at);
+    if (idx >= 0 && !isSelected (idx))
+    {
+        selected_ = { idx };
+        anchor_ = idx;
+        repaint();
+    }
+
+    juce::PopupMenu m;
+    const bool hasSel = !selected_.empty ();
+    m.addItem (1, "Remove Selected", hasSel, true);
+    m.addItem (2, "Rename",          hasSel, false);
+    m.addItem (3, "Edit",            hasSel, false);
+    m.addSeparator ();
+    m.addItem (4, "Close Panel");
+
+    switch (m.showMenu (juce::PopupMenu::Options().withMousePosition()))
+    {
+        case 1:
+            app.actions.removeSelected (selected_);
+            clearSelection();
+            repaint();
+            break;
+
+        case 2:
+        {
+            const int p = primaryIndex();
+            if (p < 0) return;
+            auto* w = new juce::AlertWindow ("Rename Action", "New name:",
+                                             juce::AlertWindow::QuestionIcon, this);
+            w->addTextEditor ("name", app.actions.get (p)->name);
+            w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+            w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+            if (auto* ed = w->getTextEditor ("name"))
+                ed->setWantsKeyboardFocus (true);
+            w->enterModalState (false);
+            const int r = w->runModalLoop();
+            const juce::String name = w->getTextEditorContents ("name");
+            delete w;
+            if (r != 1) return;
+
+            if (!app.actions.rename (p, name))
+                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                                   "Rename Action",
+                                                   "That name is empty or already in use.", "", this);
+            repaint();
+            break;
+        }
+
+        case 3:
+        {
+            const int p = primaryIndex();
+            if (p < 0) return;
+            auto* w = new ActionEditWindow (app, p);
+            w->onSaved = [this] { repaint (); };
+            w->onCloseRequested = [w] { juce::MessageManager::callAsync ([w] { delete w; }); };
+            w->centreWithSize (680, 540);
+            w->setVisible (true);
+            break;
+        }
+
+        case 4:
+            requestClose();
+            break;
+
+        default:
+            break;
+    }
+}
+
+void ActionsPanel::handleNew()
+{
+    auto* w = new juce::AlertWindow ("New Action", "Name of the new action:",
+                                     juce::AlertWindow::QuestionIcon, this);
+    w->addTextEditor ("name", "");
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+    if (auto* ed = w->getTextEditor ("name"))
+        ed->setWantsKeyboardFocus (true);
+    w->enterModalState (false);
+    const int r = w->runModalLoop();
+    const juce::String name = w->getTextEditorContents ("name");
+    delete w;
+    if (r != 1) return;
+
+    const int idx = app.actions.add (name);
+    if (idx < 0)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                           "New Action",
+                                           "That name is empty or already in use.", "", this);
+        return;
+    }
+
+    selected_ = { idx };
+    anchor_ = idx;
+    repaint();
+}
+
+void ActionsPanel::handleRecord()
+{
+    if (app.actionRec.active)
+    {
+        app.actionRec.active = false;
+        recordBtn.setButtonText ("Record");
+        repaint();
+        return;
+    }
+
+    int idx = primaryIndex();
+    if (idx < 0)
+    {
+        auto* w = new juce::AlertWindow ("Record Action",
+                                         "No action is selected - name the NEW action to record into:",
+                                         juce::AlertWindow::QuestionIcon, this);
+        w->addTextEditor ("name", "");
+        w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (auto* ed = w->getTextEditor ("name"))
+            ed->setWantsKeyboardFocus (true);
+        w->enterModalState (false);
+        const int r = w->runModalLoop();
+        const juce::String name = w->getTextEditorContents ("name");
+        delete w;
+        if (r != 1) return;
+
+        idx = app.actions.add (name);
+        if (idx < 0)
+        {
+            juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                               "Record Action",
+                                               "That name is empty or already in use.", "", this);
+            return;
+        }
+        selected_ = { idx };
+        anchor_ = idx;
+    }
+
+    app.actionRec.active = true;
+    app.actionRec.actionIndex = idx;
+    recordBtn.setButtonText ("Stop Rec");
+    repaint();
+}
+
+void ActionsPanel::handleRun()
+{
+    const int idx = primaryIndex();
+    if (idx < 0)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                           "Run Action",
+                                           "Select an action in the list first.", "", this);
+        return;
+    }
+    if (app.actions.get (idx)->steps.empty ())
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                           "Run Action",
+                                           "The selected action has no recorded steps.", "", this);
+        return;
+    }
+    if (onRunRequested) onRunRequested (idx);
+}
+
+void ActionsPanel::handleBatch()
+{
+    const int idx = primaryIndex();
+    if (idx < 0)
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                           "Action Batch",
+                                           "Select an action in the list first.", "", this);
+        return;
+    }
+    if (app.actions.get (idx)->steps.empty ())
+    {
+        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                                           "Action Batch",
+                                           "The selected action has no recorded steps.", "", this);
+        return;
+    }
+    if (onBatchRequested) onBatchRequested (idx);
+}
+
+// ============================================================= Action JSON edit window
+
+ActionEditWindow::ActionEditWindow (Application& a, int index)
+    : app (a), index_ (index),
+      DocumentWindow ("Edit Action", juce::Colour::fromRGB (45, 45, 48),
+                      juce::DocumentWindow::allButtons)
+{
+    const auto* act = app.actions.get (index);
+
+    editor.setMultiLine (true);
+    editor.setFont (juce::Font ("Consolas", 12.0f, juce::Font::plain));
+    editor.setColour (juce::TextEditor::backgroundColourId, juce::Colour::fromRGB (38, 38, 42));
+    editor.setColour (juce::TextEditor::textColourId, juce::Colours::lightgrey);
+    editor.setText (act != nullptr ? sc::jsonPrettyPrint (act->toJson()) : "{}", juce::NotificationType::dontSendNotification);
+
+    errorLabel.setFont (11.0f);
+    errorLabel.setJustificationType (juce::Justification::left);
+    errorLabel.setColour (juce::Label::textColourId, juce::Colours::orange);
+
+    okBtn.setButtonText ("OK");
+    cancelBtn.setButtonText ("Cancel");
+    okBtn.onClick = [this] { okClicked (); };
+    cancelBtn.onClick = [this] { if (onCloseRequested) onCloseRequested (); };
+
+    juce::Component::addAndMakeVisible (&editor);
+    juce::Component::addAndMakeVisible (&errorLabel);
+    juce::Component::addAndMakeVisible (&okBtn);
+    juce::Component::addAndMakeVisible (&cancelBtn);
+
+    setResizable (true, true);
+}
+
+void ActionEditWindow::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+}
+
+void ActionEditWindow::resized()
+{
+    auto r = getLocalBounds();
+    const int btnH = 28;
+    auto bot = r.removeFromBottom (btnH + 6);
+    okBtn.setBounds (bot.getRight () - 150, 4, 68, btnH);
+    cancelBtn.setBounds (okBtn.getX () - 8 - 78, 4, 78, btnH);
+
+    const int errH = 34;
+    errorLabel.setBounds (r.removeFromBottom (errH).withTrimmedLeft (10)
+                         .withTrimmedRight (10));
+
+    editor.setBounds (r.withTrimmedLeft (6).withTrimmedTop (6).withTrimmedRight (6));
+}
+
+void ActionEditWindow::userTriedToCloseWindow()
+{
+    if (onCloseRequested) onCloseRequested ();
+}
+
+void ActionEditWindow::okClicked()
+{
+    const juce::String text = editor.getText ();
+    const juce::var root = juce::JSON::parse (text);
+    if (!root.isObject())
+    {
+        errorLabel.setText ("Invalid JSON: the document must be a single object.", juce::NotificationType::dontSendNotification);
+        return;
+    }
+
+    const auto nameVar = root.getProperty ("name", juce::var());
+    if (!nameVar.isString () || nameVar.toString().trim().isEmpty ())
+    {
+        errorLabel.setText ("\"name\" must be a non-empty string.", juce::NotificationType::dontSendNotification);
+        return;
+    }
+    const juce::String newName = nameVar.toString().trim ();
+
+    for (int i = 0; i < app.actions.size (); ++i)
+        if (i != index_ && app.actions.get (i)->name == newName)
+        {
+            errorLabel.setText ("An action named \"" + newName + "\" already exists.", juce::NotificationType::dontSendNotification);
+            return;
+        }
+
+    const auto stepsVar = root.getProperty ("steps", juce::var());
+    if (!stepsVar.isVoid () && !stepsVar.isArray ())
+    {
+        errorLabel.setText ("\"steps\" must be an array of step objects.", juce::NotificationType::dontSendNotification);
+        return;
+    }
+
+    std::vector<sc::ActionStep> newSteps;
+    for (int i = 0; i < stepsVar.size (); ++i)
+    {
+        std::string err;
+        const auto s = sc::ActionStep::fromJson (stepsVar[(size_t) i], &err);
+        if (s.type.isEmpty ())
+        {
+            errorLabel.setText ("step #" + juce::String (i + 1) + ": "
+                                + juce::String::fromUTF8 (err.c_str()), juce::NotificationType::dontSendNotification);
+            return;
+        }
+
+        std::string verr;
+        if (!sc::validateStepParams (s, &verr))
+        {
+            errorLabel.setText ("step #" + juce::String (i + 1) + " (" + s.type + "): "
+                                + juce::String::fromUTF8 (verr.c_str()), juce::NotificationType::dontSendNotification);
+            return;
+        }
+        newSteps.push_back (std::move (s));
+    }
+
+    auto* act = app.actions.get (index_);
+    if (act == nullptr)
+    {
+        errorLabel.setText ("The action no longer exists.", juce::NotificationType::dontSendNotification);
+        return;
+    }
+    act->name = newName;
+    act->steps = std::move (newSteps);
+    app.saveActions ();
+
+    if (onSaved) onSaved ();
+    if (onCloseRequested) onCloseRequested ();
+}
+
+// ============================================================= Action batch window
+
+ActionBatchWindow::ActionBatchWindow (Application& a, int actionIndex)
+    : app (a), actionIndex_ (actionIndex),
+      DocumentWindow ("Action Batch", juce::Colour::fromRGB (45, 45, 48),
+                      juce::DocumentWindow::allButtons)
+{
+    const auto* act = app.actions.get (actionIndex);
+
+    inputLbl.setText ("Input Folder:", juce::NotificationType::dontSendNotification);
+    outputLbl.setText ("Output Folder:", juce::NotificationType::dontSendNotification);
+    formatsLbl.setText ("Input Formats:", juce::NotificationType::dontSendNotification);
+    renameLbl.setText ("Rename:", juce::NotificationType::dontSendNotification);
+    statusLabel.setFont (11.0f);
+    statusLabel.setJustificationType (juce::Justification::left);
+
+    for (auto* f : { &inputField, &outputField, &formatsField, &renameField })
+        f->setColour (juce::TextEditor::backgroundColourId, juce::Colour::fromRGB (38, 38, 42));
+
+    formatsField.setText ("*.wav; *.mp3", false);
+    renameField.setText ("%Filename%.wav", juce::NotificationType::dontSendNotification);
+
+    sameOutBox.setButtonText ("Same output folder");
+    subfoldersBox.setButtonText ("Include subfolders");
+    sameOutBox.onClick = [this] { sameOutToggled (); };
+
+    browseInBtn.setButtonText ("...");
+    browseOutBtn.setButtonText ("...");
+    runBtn.setButtonText ("Run");
+    closeBtn.setButtonText ("Close");
+    browseInBtn.onClick = [this] { browseInput (); };
+    browseOutBtn.onClick = [this] { browseOutput (); };
+    runBtn.onClick = [this] { runClicked (); };
+    closeBtn.onClick = [this] { tryClose (); };
+
+    juce::Component::addAndMakeVisible (&inputLbl);
+    juce::Component::addAndMakeVisible (&inputField);
+    juce::Component::addAndMakeVisible (&browseInBtn);
+    juce::Component::addAndMakeVisible (&sameOutBox);
+    juce::Component::addAndMakeVisible (&outputLbl);
+    juce::Component::addAndMakeVisible (&outputField);
+    juce::Component::addAndMakeVisible (&browseOutBtn);
+    juce::Component::addAndMakeVisible (&subfoldersBox);
+    juce::Component::addAndMakeVisible (&formatsLbl);
+    juce::Component::addAndMakeVisible (&formatsField);
+    juce::Component::addAndMakeVisible (&renameLbl);
+    juce::Component::addAndMakeVisible (&renameField);
+    juce::Component::addAndMakeVisible (&statusLabel);
+    juce::Component::addAndMakeVisible (&runBtn);
+    juce::Component::addAndMakeVisible (&closeBtn);
+
+    sameOutToggled ();   // initial state: output enabled, not mirrored
+
+    setResizable (true, true);
+}
+
+void ActionBatchWindow::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+}
+
+void ActionBatchWindow::resized()
+{
+    auto r = getLocalBounds().withTrimmedLeft (12).withTrimmedTop (10);
+    const int rowH = 30;
+    const int lblW = 96;
+    const int btnW = 40;
+
+    // Input folder row.
+    {
+        auto row = r.removeFromTop (rowH);
+        inputLbl.setBounds (row.removeFromLeft (lblW));
+        browseInBtn.setBounds (row.removeFromRight (btnW + 8).withTrimmedBottom (4));
+        inputField.setBounds (row.withTrimmedBottom (4));
+    }
+
+    // "Same output folder" checkbox row.
+    sameOutBox.setBounds (r.removeFromTop (rowH).withX (lblW));
+
+    // Output folder row.
+    {
+        auto row = r.removeFromTop (rowH);
+        outputLbl.setBounds (row.removeFromLeft (lblW));
+        browseOutBtn.setBounds (row.removeFromRight (btnW + 8).withTrimmedBottom (4));
+        outputField.setBounds (row.withTrimmedBottom (4));
+    }
+
+    // Include subfolders checkbox row.
+    subfoldersBox.setBounds (r.removeFromTop (rowH).withX (lblW));
+
+    // Input formats row.
+    {
+        auto row = r.removeFromTop (rowH);
+        formatsLbl.setBounds (row.removeFromLeft (lblW));
+        formatsField.setBounds (row.withTrimmedBottom (4));
+    }
+
+    // Rename row.
+    {
+        auto row = r.removeFromTop (rowH);
+        renameLbl.setBounds (row.removeFromLeft (lblW));
+        renameField.setBounds (row.withTrimmedBottom (4));
+    }
+
+    // Status row.
+    statusLabel.setBounds (r.removeFromTop (rowH));
+
+    // Bottom buttons: Run left of Close, both right-aligned.
+    const auto btnRow = r.removeFromBottom (38);
+    closeBtn.setBounds (btnRow.getRight () - 90, btnRow.getY () + 4, 82, 30);
+    runBtn.setBounds (closeBtn.getX () - 10 - 82, closeBtn.getY (), 82, 30);
+}
+
+void ActionBatchWindow::sameOutToggled()
+{
+    const bool same = sameOutBox.getToggleState ();
+    outputField.setEnabled (!same);
+    if (same)
+        outputField.setText (inputField.getText (), juce::NotificationType::dontSendNotification);
+}
+
+void ActionBatchWindow::browseInput()
+{
+    juce::FileChooser fc ("Choose the input folder...",
+                          inputField.getText ().isEmpty () ? juce::File ()
+                                                           : juce::File (inputField.getText()));
+    if (fc.browseForDirectory ())
+        inputField.setText (fc.getResult().getFullPathName (), juce::NotificationType::dontSendNotification);
+}
+
+void ActionBatchWindow::browseOutput()
+{
+    if (sameOutBox.getToggleState ()) return;   // mirrored - nothing to browse for
+    juce::FileChooser fc ("Choose the output folder...",
+                          outputField.getText ().isEmpty () ? juce::File ()
+                                                           : juce::File (outputField.getText()));
+    if (fc.browseForDirectory ())
+        outputField.setText (fc.getResult().getFullPathName (), juce::NotificationType::dontSendNotification);
+}
+
+void ActionBatchWindow::tryClose()
+{
+    if (running_.load ())
+    {
+        statusLabel.setText ("A batch is still running - wait for it to finish.", juce::NotificationType::dontSendNotification);
+        return;
+    }
+    if (onCloseRequested) onCloseRequested ();
+}
+
+void ActionBatchWindow::userTriedToCloseWindow()
+{
+    tryClose ();
+}
+
+void ActionBatchWindow::runClicked()
+{
+    if (running_.load ()) return;
+
+    const auto in = juce::File (inputField.getText ().trim ());
+    const bool sameOut = sameOutBox.getToggleState ();
+    const auto outDir = sameOut ? in : juce::File (outputField.getText ().trim ());
+    const auto formats = sc::parseFormatList (formatsField.getText ());
+    const auto renamePattern = renameField.getText ().trim ();
+
+    if (!in.isDirectory ())
+    {
+        statusLabel.setText ("The input folder does not exist.", juce::NotificationType::dontSendNotification);
+        return;
+    }
+    if (!sameOut && !outDir.isDirectory ())
+    {
+        statusLabel.setText ("The output folder does not exist.", juce::NotificationType::dontSendNotification);
+        return;
+    }
+    if (formats.empty ())
+    {
+        statusLabel.setText ("Enter at least one input format, e.g. *.wav", juce::NotificationType::dontSendNotification);
+        return;
+    }
+
+    const auto* act = app.actions.get (actionIndex_);
+    if (act == nullptr || act->steps.empty ())
+    {
+        statusLabel.setText ("The action has no steps to run.", juce::NotificationType::dontSendNotification);
+        return;
+    }
+
+    // Isolated recent-store for the headless per-file applications so the
+    // user's settings are never touched.
+    const auto tempStore = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                               .getChildFile ("SpectroCraftBatch.recent");
+    tempStore.deleteFile ();
+
+    running_.store (true);
+    runBtn.setEnabled (false);
+    statusLabel.setText ("Starting batch...", juce::NotificationType::dontSendNotification);
+
+    auto* prog = new sc::WorkProgressDialog ("Action Batch",
+                                             "Running action \"" + act->name + "\" ...",
+                                             true, this);
+    prog->setProgress (0.0);
+    prog->beginModal ();
+
+    // Copy the action: the user can delete/rename it from the panel while
+    // this batch is running; the worker must not touch app.actions.
+    const sc::Action actionCopy = *act;
+
+    std::thread ([this, prog, in, outDir, formats, renamePattern,
+                  subfolders = subfoldersBox.getToggleState (), tempStore, actionCopy] {
+        std::string summary;
+        const bool ok = sc::runActionBatch (actionCopy,
+                                            in, outDir, formats, renamePattern, subfolders,
+                                            tempStore,
+                                            [prog] (float f) -> bool {
+                                                juce::MessageManager::callAsync ([prog, f] {
+                                                    prog->setProgress ((double) f);
+                                                });
+                                                return !prog->cancelled.load ();
+                                            },
+                                            [prog] (const juce::String& s) {
+                                                juce::MessageManager::callAsync ([prog, s] {
+                                                    prog->setStatusText (s);
+                                                });
+                                            },
+                                            &prog->cancelled, &summary);
+
+        juce::MessageManager::callAsync ([this, prog, ok, summary] {
+            delete prog;
+            running_.store (false);
+            runBtn.setEnabled (true);
+            statusLabel.setText (juce::String::fromUTF8 (summary.c_str()), juce::NotificationType::dontSendNotification);
+        });
+    }).detach ();
 }

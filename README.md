@@ -750,6 +750,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     selection if active (through the same STFT masking path as the other
     effects), else the time selection, else the whole file; a flat curve is a
     bit-exact no-op that records nothing. One undoable step.
+- **Actions panel** (Photoshop-style record/replay/batch): record a sequence of
+  edits as an *action*, replay it on the current document, or batch-run it over
+  a whole folder tree. Recorded steps include gain, time stretch, content-aware
+  time scale, filter EQ, envelope, generators (silence/noise/tones), resample,
+  transcribe, noise suppression, Python scripts and the immediate effects
+  (silence/fade/normalize/reverse/invert/delete/trim). Steps can be marked
+  *prompt* so replay re-opens their dialog for fresh parameters. Actions persist
+  across restarts; see **Actions panel** below.
 - **Cancelling long operations**: every progress dialog — loading large files,
   resampling, noise suppression, transcription (single and batch), spectrogram
   export — has a Cancel button, and ESC works as well. The operation stops at
@@ -1475,6 +1483,22 @@ SpectroCraft.exe --measure_load_time        :: launch the GUI normally, but reco
                                            :: writable); each run adds one block with a
                                            :: timestamp, version and per-phase T+ms lines,
                                            :: ending in "total launch->window".
+SpectroCraft.exe --run-action <actionName> <inputFile> <outputFile>
+                                           :: runs a recorded action (see the Actions panel)
+                                              on one file headlessly and saves the
+                                              result to outputFile. The action is
+                                              looked up in the user's recent store.
+SpectroCraft.exe --batch <actionName> <inFolder> <outFolder> [formats] [rename]
+      [--subfolders]
+                                           :: batch-runs a recorded action over every file
+                                              matching `formats` (a ';'-separated list
+                                              like "*.wav; *.mp3", default "*.wav") in
+                                              the folder tree. Output files are written
+                                              to outFolder with the rename pattern
+                                              applied (%Filename% = original name without
+                                              extension, default "%Filename%.wav");
+                                              --subfolders scans recursively and mirrors
+                                              the subfolder structure into outFolder.
 ```
 
 AI builds additionally accept (see [AI features](#ai-features)):
@@ -1558,6 +1582,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Time Stretch... (SoundTouch tempo change dialog) | Ctrl+Shift+T |
 | Repeat last effect (re-applies the most recent Effects-menu edit; re-opens its dialog for dialog-based effects like Change Gain / Filter EQ / Time Stretch / Content Aware Time Scale / Envelope) | Ctrl+Shift+F |
 | Resample... (Edit menu, own section: new sample rate + optional channel remix) | F11 |
+| Run selected action (Actions panel; opens the prompt dialogs for *prompt* steps) | Ctrl+Shift+P |
 | Split Spectral Selection Configuration — per-channel input → destination setup; closing saves without splitting | Shift+F12 |
 | Split Spectral Selection Execute — runs the configured split (needs an active spectral selection); first time per file open opens the configuration instead | F12 |
 | Refresh spectrogram (Spectral Controls > Refresh: discard every cached tile and re-render all tracks) | F5 |
@@ -1944,6 +1969,33 @@ list: a table row followed by its parameter rows.
   [per-file metadata](#per-file-metadata) — names, colours, visibility,
   sample rates and every alignment/transform setting round-trip through the
   `SCMD` chunk or `.meta.json` sidecar.
+
+### Actions panel (record / replay / batch)
+
+The **Actions** tab in the left column works like Photoshop's Actions palette:
+
+- **New** creates an empty action; **Record** starts capturing edits into the
+  selected action (or prompts for a new name when nothing is selected). While
+  recording, every supported edit you perform — menu effects, dialog-based
+  effects, generators, resample, transcribe, noise suppression, Python scripts,
+  delete/trim and the immediate tools — appends one *step* to the action.
+- **Run** replays the selected action on the current document. Steps marked
+  *prompt* (right-click a step → Prompt) re-open their normal dialog so you can
+  confirm or change parameters before each step runs; un-prompted steps run with
+  the recorded values. Ctrl+Shift+P runs the selected action from anywhere.
+- **Batch...** opens a batch dialog: pick an input folder, an output folder
+  (or tick *Same output folder* to write next to the sources), optionally scan
+  subfolders, choose the file formats (`*.wav; *.mp3`) and a rename pattern
+  (`%Filename%.wav`). Each matching file is processed headlessly in its own
+  isolated session — your open documents and settings are never touched.
+- Right-click an action for **Rename**, **Edit** (a JSON text editor with
+  validation — the step list is plain data, so you can hand-write actions) and
+  **Remove Selected**. Multi-select works; Remove applies to every selection.
+
+Actions persist in the recent store (`actions_json`) across restarts. The same
+engine is available headlessly: `--run-action <name> <in.wav> <out.wav>` runs one
+file, `--batch <name> <inFolder> <outFolder> [formats] [rename] [--subfolders]`
+runs a whole tree (see **Running & CLI flags**).
 
 ### Per-file metadata (File → Metadata)
 

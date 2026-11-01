@@ -245,6 +245,9 @@ void Application::loadSettings ()
                              .getDoubleValue ();
         recording.durationSecs = (d > 0.0 && std::isfinite (d)) ? d : 0.0;
     }
+
+    // Recorded actions survive restarts via the same store.
+    actions.loadFromJson (recentStore->getValue ("actions_json"));
 }
 
 void Application::saveSettings ()
@@ -304,6 +307,23 @@ void Application::saveSettings ()
     recentStore->setValue ("rec_depth", recording.bitDepth);
     recentStore->setValue ("rec_mode", (int) recording.mode);
     recentStore->setValue ("rec_duration", juce::String (recording.durationSecs));
+    recentStore->save ();
+}
+
+void Application::recordActionStep (const juce::String& type, const juce::var& params)
+{
+    if (!actionRec.active || !actions.validIndex (actionRec.actionIndex)) return;
+
+    sc::ActionStep s;
+    s.type = type;
+    s.params = params;
+    actions.get (actionRec.actionIndex)->steps.push_back (std::move (s));
+    saveActions ();
+}
+
+void Application::saveActions ()
+{
+    recentStore->setValue ("actions_json", actions.toJson());
     recentStore->save ();
 }
 

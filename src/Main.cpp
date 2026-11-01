@@ -5,6 +5,14 @@
  *   --test-load <in.wav>                       (load timing + mipmap stats)
  *   --test-noise-suppression <in.wav> <out.wav> [modelId]   (AI builds only)
  *       modelId: denseunet (default) | deepfilternet2 | deepfilternet3
+ *   --run-action <actionName> <inputFile> <outputFile>
+ *       Runs a recorded action (see the Actions panel) on one file headlessly
+ *       and saves the result to outputFile.
+ *   --batch <actionName> <inFolder> <outFolder> [formats] [rename] [--subfolders]
+ *       Batch-runs a recorded action over every matching file in the folder
+ *       tree. formats is a ';'-separated list like "*.wav; *.mp3" (default
+ *       "*.wav"); rename uses %Filename% for the original name without its
+ *       extension (default "%Filename%.wav"). --subfolders scans recursively.
  *   --test-transcribe <in.wav> [modelId] [language] [fast 0|1]   (AI builds only)
  *       modelId: whisper-base (default) | whisper-small | ... ; language: auto|en|...
  *   --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1]
@@ -230,6 +238,107 @@ public:
                 spectral.renderToPixels (engine, s, w, h, tt0, tt1, allChans, rgba);
                 const bool ok = PngWriter::writePng (out, w, h, rgba);
                 std::cout << (ok ? "wrote " : "failed to write ") << out.getFullPathName() << "\n";
+                quit();
+                return;
+            }
+
+            else if (args[i] == "--run-action" || args[i] == "--batch")
+            {
+                const bool isBatch = (args[i] == "--batch");
+
+                // --run-action <actionName> <inputFile> <outputFile>
+                // --batch    <actionName> <inputFolder> <outputFolder>
+                //             [formatsCsv] [renamePattern] [--subfolders]
+                if (i + 3 >= args.size())
+                {
+                    std::cout << (isBatch
+                        ? "usage: --batch <actionName> <inFolder> <outFolder> [formats] [rename] [--subfolders]\n"
+                        : "usage: --run-action <actionName> <inputFile> <outputFile>\n");
+                    quit();
+                    return;
+                }
+
+                const juce::String name = args[++i];
+                const juce::File a  = resolvePath (args[++i]);
+                const juce::File b  = resolvePath (args[++i]);
+
+                // Load the recorded actions from the user's recent store.
+                juce::PropertiesFile::Options opts;
+                opts.applicationName = "SpectroCraft";
+                opts.filenameSuffix = ".recent";
+                const juce::PropertiesFile store (opts.getDefaultFile(), opts);
+                sc::ActionStore actions;
+                if (!actions.loadFromJson (store.getValue ("actions_json")))
+                {
+                    std::cout << "could not load the recorded actions\n";
+                    quit();
+                    return;
+                }
+
+                const sc::Action* action = nullptr;
+                for (int k = 0; k < actions.size (); ++k)
+                    if (actions.get (k)->name == name) { action = actions.get (k); break; }
+                if (action == nullptr || action->steps.empty())
+                {
+                    std::cout << "no recorded action named \"" << name.toRawUTF8()
+                              << "\" with steps\n";
+                    quit();
+                    return;
+                }
+
+                // Isolated store: the headless application must never touch
+                // (or save into) the user's real settings file.
+                const juce::File tempStore = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                                 .getChildFile (isBatch ? "SpectroCraft_batch.recent"
+                                                                         : "SpectroCraft_run_action.recent");
+
+                if (!isBatch)
+                {
+                    Application app (tempStore);
+                    if (!app.openFile (a))
+                    {
+                        std::cout << "failed to open " << a.getFullPathName() << "\n";
+                        quit();
+                        return;
+                    }
+                    app.selectAll();   // selection-based steps act on the whole file
+
+                    for (const auto& step : action->steps)
+                    {
+                        std::string err;
+                        if (!sc::applyActionStep (app, step, &err))
+                        {
+                            std::cout << "step \"" << step.type.toRawUTF8()
+                                      << "\" failed: " << err << "\n";
+                            quit();
+                            return;
+                        }
+                    }
+
+                    const bool ok = app.audioEngine().saveFileAs (b);
+                    std::cout << (ok ? "wrote " : "failed to write ") << b.getFullPathName() << "\n";
+                    quit();
+                    return;
+                }
+
+                // Batch: optional [formats] [rename] tokens, then flags.
+                juce::String formatsText = "*.wav", rename = "%Filename%.wav";
+                bool subfolders = false;
+                int optSeen = 0;
+                while (i + 1 < args.size())
+                {
+                    const auto t = args[i + 1];
+                    if (t == "--subfolders") { subfolders = true; ++i; }
+                    else if (optSeen == 0)   { formatsText = t; ++i; ++optSeen; }
+                    else if (optSeen == 1)   { rename = t;      ++i; ++optSeen; }
+                    else break;
+                }
+
+                const auto formats = sc::parseFormatList (formatsText);
+                std::string summary;
+                sc::runActionBatch (*action, a, b, formats, rename, subfolders,
+                                    tempStore, nullptr, nullptr, nullptr, &summary);
+                std::cout << summary << "\n";
                 quit();
                 return;
             }

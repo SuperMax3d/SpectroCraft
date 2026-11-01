@@ -3268,7 +3268,7 @@ static void testLeftPanelLayout()
                                             "Selection", "Drawing" };
 #endif
     const juce::StringArray defaultTop { "Files", "Frequency Analysis", "History",
-                                          "Python", "Tables" };
+                                          "Actions", "Python", "Tables" };
     juce::StringArray expectBottom = defaultBottom;
     for (int i = 0; i < expectBottom.size (); ++i)
         if (expectBottom[i] == "Markers") { expectBottom.remove (i); break; }
@@ -3286,7 +3286,7 @@ static void testLeftPanelLayout()
         win->moveLeftPanelTab (win->bottomPanelTabs (), 1, win->topPanelTabs (), 1);
         const juce::StringArray expectTopAfterMove { "Files", "Markers",
                                                      "Frequency Analysis", "History",
-                                                     "Python", "Tables" };
+                                                     "Actions", "Python", "Tables" };
         CHECK (win->topPanelTabNames () == expectTopAfterMove, "tab moved across groups");
         CHECK (win->bottomPanelTabNames () == expectBottom, "source group lost the tab");
 
@@ -3294,7 +3294,7 @@ static void testLeftPanelLayout()
         win->moveLeftPanelTab (win->topPanelTabs (), 0, win->topPanelTabs (), 2);
         const juce::StringArray expectTopFinal { "Markers", "Files",
                                                  "Frequency Analysis", "History",
-                                                 "Python", "Tables" };
+                                                 "Actions", "Python", "Tables" };
         CHECK (win->topPanelTabNames () == expectTopFinal, "same-bar move");
 
         // 4) View > Left Panels toggle hides/shows the whole column.
@@ -3312,7 +3312,7 @@ static void testLeftPanelLayout()
     {
         const juce::StringArray expectTopFinal { "Markers", "Files",
                                                  "Frequency Analysis", "History",
-                                                 "Python", "Tables" };
+                                                 "Actions", "Python", "Tables" };
         Application app (store);
         juce::MessageManager* mm = juce::MessageManager::getInstance();
         std::unique_ptr<MainWindow> win (new MainWindow (app, "left layout test 2"));
@@ -3342,9 +3342,9 @@ static void testCrossBarTabMove()
     store.deleteFile ();
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    const int kNumPanels = 10;
+    const int kNumPanels = 11;
 #else
-    const int kNumPanels = 9;
+    const int kNumPanels = 10;
 #endif
 
     {
@@ -3536,9 +3536,9 @@ static void testClosePanelsAndWindowMenu()
     store.deleteFile ();   // deterministic per-run name: never trust leftovers
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    const int kNumPanels = 10;
+    const int kNumPanels = 11;
 #else
-    const int kNumPanels = 9;
+    const int kNumPanels = 10;
 #endif
 
     auto windowMenuIndex = [] (MainWindow& win) -> int
@@ -3588,7 +3588,8 @@ static void testClosePanelsAndWindowMenu()
         // Toggle back immediately so later steps see the original state.
         juce::StringArray ids;
         ids.add ("files");   ids.add ("fft");     ids.add ("history");
-        ids.add ("python");  ids.add ("tables");  ids.add ("controls");
+        ids.add ("actions"); ids.add ("python");  ids.add ("tables");
+        ids.add ("controls");
         ids.add ("markers");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         ids.add ("transcription");
@@ -3623,20 +3624,22 @@ static void testClosePanelsAndWindowMenu()
         win->setPanelVisible ("history", false);
         win->setPanelVisible ("fft", false);
         {
-            const juce::StringArray expectTop1 { "Files", "Python", "Tables" };
+            const juce::StringArray expectTop1 { "Files", "Actions", "Python", "Tables" };
             CHECK (win->topPanelTabNames () == expectTop1,
                   "two panels closed from the top group");
         }
         win->setPanelVisible ("history", true);   // before fft canonically
         {
-            const juce::StringArray expectTop2 { "Files", "History", "Python", "Tables" };
+            const juce::StringArray expectTop2 { "Files", "History", "Actions",
+                                                 "Python", "Tables" };
             CHECK (win->topPanelTabNames () == expectTop2,
                   "History reinserted at its canonical position");
         }
         win->setPanelVisible ("fft", true);
         {
             const juce::StringArray expectTop3 { "Files", "Frequency Analysis",
-                                                 "History", "Python", "Tables" };
+                                                 "History", "Actions", "Python",
+                                                 "Tables" };
             CHECK (win->topPanelTabNames () == expectTop3,
                   "canonical top order fully restored");
         }
@@ -3661,6 +3664,7 @@ static void testClosePanelsAndWindowMenu()
         win->setPanelVisible ("files", false);
         win->setPanelVisible ("fft", false);
         win->setPanelVisible ("history", false);
+        win->setPanelVisible ("actions", false);
         win->setPanelVisible ("python", false);
         win->setPanelVisible ("tables", false);
         CHECK (!win->topPanelTabs ()->isVisible (), "empty top group is hidden");
@@ -24341,6 +24345,262 @@ static void testStemSepAdvancedLayout()
 
     cleanup ();
 }
+// ------------------------------------------------------------------ Actions
+// Record/replay store: JSON round-trip, validation and headless apply.
+static void testActionStoreJson()
+{
+    sc::ActionStore store;
+    CHECK (store.add ("Alpha") == 0, "actions: first index is 0");
+    CHECK (store.add ("Beta") == 1, "actions: second index is 1");
+    CHECK (store.add ("Alpha") < 0, "actions: duplicate name rejected");
+    CHECK (store.add ("") < 0, "actions: empty name rejected");
+
+    sc::ActionStep s;
+    s.type = "changeGain";
+    s.params = sc::makeVarObject ({ { "db", -6.5 } });
+    store.get (0)->steps.push_back (s);
+
+    const auto json = store.toJson();
+    sc::ActionStore store2;
+    std::string err;
+    CHECK (store2.loadFromJson (json, &err), "actions: round-trip load ok");
+    CHECK (store2.size () == 2, "actions: count preserved");
+    CHECK (store2.get (0)->name == "Alpha", "actions: name preserved");
+    CHECK (store2.get (0)->steps.size () == 1, "actions: step count preserved");
+    CHECK (store2.get (0)->steps[0].type == "changeGain", "actions: step type preserved");
+    const auto db = store2.get (0)->steps[0].params.getProperty ("db", juce::var());
+    CHECK (sc::isNumericVar (db) && std::abs ((double) db + 6.5) < 1e-9,
+           "actions: param value preserved");
+
+    // Invalid JSON is rejected and the current contents are kept.
+    sc::ActionStore store3;
+    store3.add ("Keep");
+    CHECK (!store3.loadFromJson ("{not json", &err), "actions: invalid json rejected");
+    CHECK (store3.size () == 1, "actions: contents kept on invalid load");
+
+    // Empty input clears the store.
+    sc::ActionStore store4;
+    store4.add ("X");
+    CHECK (store4.loadFromJson ("", &err), "actions: empty json accepted");
+    CHECK (store4.empty (), "actions: empty json clears store");
+
+    // rename + removeSelected.
+    CHECK (store.rename (0, "Gamma"), "actions: rename ok");
+    CHECK (!store.rename (1, "Gamma"), "actions: rename to taken name fails");
+    store.removeSelected ({ 1 });
+    CHECK (store.size () == 1 && store.get (0)->name == "Gamma", "actions: remove selected works");
+}
+
+static void testActionValidation()
+{
+    auto step = [] (const juce::String& type, const juce::var& p) {
+        sc::ActionStep s; s.type = type; s.params = p; return s;
+    };
+    std::string err;
+
+    CHECK (sc::isKnownActionType ("silence"), "actions: known type recognised");
+    CHECK (!sc::isKnownActionType ("bogus"), "actions: unknown type rejected");
+
+    const auto p1 = sc::makeVarObject ({ { "db", 3.0 } });
+    CHECK (sc::validateStepParams (step ("changeGain", p1), &err), "actions: valid changeGain passes");
+    CHECK (!sc::validateStepParams (step ("changeGain", juce::var()), &err), "actions: missing db fails");
+    CHECK (!err.empty (), "actions: failure message filled");
+
+    const auto p2 = sc::makeVarObject ({ { "pct", 10.0 } });
+    CHECK (sc::validateStepParams (step ("timeStretch", p2), &err), "actions: valid timeStretch passes");
+
+    const auto p3 = sc::makeVarObject ({ { "rate", 48000.0 } });
+    CHECK (sc::validateStepParams (step ("resample", p3), &err), "actions: valid resample passes");
+    const auto p4 = sc::makeVarObject ({ { "rate", -1.0 } });
+    CHECK (!sc::validateStepParams (step ("resample", p4), &err), "actions: negative rate fails");
+
+    // EQ points: both the compact string and the object-array encoding.
+    const auto p5 = sc::makeVarObject ({ { "points", "100,3;200,-6" } });
+    CHECK (sc::validateStepParams (step ("filterEq", p5), &err), "actions: eq string points pass");
+    {
+        juce::Array<juce::var> arr;
+        arr.add (sc::makeVarObject ({ { "f", 100.0 }, { "g", 3.0 } }));
+        const auto p6 = sc::makeVarObject ({ { "points", juce::var (arr) } });
+        CHECK (sc::validateStepParams (step ("filterEq", p6), &err), "actions: eq object points pass");
+    }
+
+    const auto p7 = sc::makeVarObject ({ { "dur", 2.0 } });
+    CHECK (sc::validateStepParams (step ("genSilence", p7), &err), "actions: genSilence dur passes");
+
+    // genTone with [freq, amp] pairs and a string shape.
+    {
+        juce::Array<juce::var> tones;
+        juce::Array<juce::var> pair;
+        pair.add (440.0);
+        pair.add (0.5);
+        tones.add (pair);
+        const auto p8 = sc::makeVarObject ({
+            { "tones", juce::var (tones) },
+            { "shape", "sine" },
+            { "dur", 1.0 } });
+        CHECK (sc::validateStepParams (step ("genTone", p8), &err), "actions: genTone pairs pass");
+    }
+
+    // noiseSuppress needs a model id.
+    const auto p9 = sc::makeVarObject ({ { "modelId", "denseunet" } });
+    CHECK (sc::validateStepParams (step ("noiseSuppress", p9), &err), "actions: ns modelId passes");
+    CHECK (!sc::validateStepParams (step ("noiseSuppress", juce::var()), &err), "actions: ns without modelId fails");
+
+    // prompt flag survives a JSON round-trip.
+    sc::ActionStep ps;
+    ps.type = "silence"; ps.prompt = true;
+    const auto back = sc::ActionStep::fromJson (ps.toJson());
+    CHECK (back.prompt, "actions: prompt flag survives json");
+}
+
+static void testApplyActionSteps()
+{
+    const juce::File wav = makeTempFile ("actions_src.wav");
+    writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t f, double rate)
+             { return (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * f / rate); });
+
+    Application app;   // isolated store under SC_TESTS_EXE
+    if (!app.openFile (wav)) { CHECK (false, "actions: open generated wav"); return; }
+    auto& eng = app.audioEngine();
+    std::string err;
+
+    auto mkStep = [] (const juce::String& type, const juce::var& p) {
+        sc::ActionStep s; s.type = type; s.params = p; return s;
+    };
+
+    // changeGain -6 dB halves the amplitude.
+    const auto p1 = sc::makeVarObject ({ { "db", -6.0 } });
+    CHECK (sc::applyActionStep (app, mkStep ("changeGain", p1), &err), "actions: changeGain applies");
+
+    // silence with a selection zeros that range.
+    app.setSelection ({ 0.25, 0.75 });
+    CHECK (sc::applyActionStep (app, mkStep ("silence", juce::var()), &err), "actions: silence applies");
+    float mid = readOneSample (eng, 0, 4000);   // t=0.5s inside the silenced range
+    CHECK (mid == 0.0f, "actions: silenced samples are zero");
+
+    // genSilence inserts at the playhead with no selection.
+    app.setSelection ({ 0.0, 0.0 });
+    app.setPlayhead (0.5);
+    const int64_t before = eng.numSamples();
+    const auto p2 = sc::makeVarObject ({ { "dur", 1.0 } });
+    CHECK (sc::applyActionStep (app, mkStep ("genSilence", p2), &err), "actions: genSilence applies");
+    CHECK (eng.numSamples() == before + 8000, "actions: genSilence inserted one second");
+
+    // genTone with string shape + [freq, amp] pairs replaces the selection
+    // (file is now 2 s: original 1 s + inserted silence).
+    app.setSelection ({ 1.5, 2.0 });
+    {
+        juce::Array<juce::var> tones;
+        juce::Array<juce::var> pair;
+        pair.add (880.0);
+        pair.add (0.5);
+        tones.add (pair);
+        const auto p3 = sc::makeVarObject ({
+            { "tones", juce::var (tones) },
+            { "shape", "square" },
+            { "dur", 1.0 } });
+        CHECK (sc::applyActionStep (app, mkStep ("genTone", p3), &err), "actions: genTone applies");
+    }
+
+    // genNoise with a string type replaces the selection.
+    const auto p4 = sc::makeVarObject ({
+        { "type", "pink" },
+        { "intensity", 0.5 },
+        { "dur", 1.0 } });
+    CHECK (sc::applyActionStep (app, mkStep ("genNoise", p4), &err), "actions: genNoise applies");
+
+    // delete removes the selected range.
+    app.setSelection ({ 0.25, 0.75 });
+    const int64_t beforeDel = eng.numSamples();
+    CHECK (sc::applyActionStep (app, mkStep ("delete", juce::var()), &err), "actions: delete applies");
+    CHECK (eng.numSamples() == beforeDel - 4000, "actions: delete removed the selection");
+
+    // trim keeps only the selected range (file is now 1.5 s after the delete).
+    app.selectAll();
+    const int64_t full = eng.numSamples();
+    app.setSelection ({ 0.5, 1.0 });
+    CHECK (sc::applyActionStep (app, mkStep ("trim", juce::var()), &err), "actions: trim applies");
+    CHECK (eng.numSamples() == full - 8000, "actions: trim kept only the selection");
+
+    // Unknown types fail cleanly.
+    CHECK (!sc::applyActionStep (app, mkStep ("bogus", juce::var()), &err), "actions: unknown type fails");
+    CHECK (!err.empty (), "actions: failure message filled");
+}
+
+static void testActionBatch()
+{
+    const juce::File root = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                .getChildFile ("sc_actions_batch_"
+                                    + juce::String ((int) juce::Time::getCurrentTime().getMilliseconds()));
+    root.deleteRecursively();
+    CHECK (root.createDirectory(), "batch: input dir created");
+
+    const auto writeTone = [] (const juce::File& f)
+    {
+        return writeWav (f, 1, 8000.0, 4000, [] (int, int64_t s, double rate)
+                         { return (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * s / rate); });
+    };
+
+    const auto a = root.getChildFile ("a.wav");
+    const auto sub = root.getChildFile ("sub");
+    CHECK (sub.createDirectory(), "batch: subfolder created");
+    const auto b = sub.getChildFile ("b.wav");
+    CHECK (writeTone (a) && writeTone (b), "batch: input wavs written");
+
+    sc::Action action;
+    action.name = "GainDown";
+    sc::ActionStep s;
+    s.type = "changeGain";
+    s.params = sc::makeVarObject ({ { "db", -6.0 } });
+    action.steps.push_back (s);
+
+    const auto outDir = root.getSiblingFile (root.getFileName() + "_out");
+    CHECK (outDir.createDirectory(), "batch: output dir created");
+
+    std::string summary;
+    const bool ok = sc::runActionBatch (action, root, outDir,
+                                        { ".wav" }, "%Filename%.wav",
+                                        true,
+                                        makeTempFile ("actions_batch_store.recent"),
+                                        nullptr, nullptr, nullptr, &summary);
+    CHECK (ok, "batch: run completed");
+
+    const auto outA = outDir.getChildFile ("a.wav");
+    const auto outB = outDir.getChildFile ("sub").getChildFile ("b.wav");
+    CHECK (outA.existsAsFile (), "batch: top-level output written");
+    CHECK (outB.existsAsFile (), "batch: subfolder mirrored in output");
+
+    // The action actually ran: the output is quieter than the input.
+    AudioEngine inEng, outEng;
+    if (inEng.loadFile (a) && outEng.loadFile (outA))
+    {
+        float maxIn = 0.0f, maxOut = 0.0f;
+        for (int64_t i = 0; i < inEng.numSamples(); ++i)
+            maxIn = std::max (maxIn, std::abs (readOneSample (inEng, 0, i)));
+        for (int64_t i = 0; i < outEng.numSamples(); ++i)
+            maxOut = std::max (maxOut, std::abs (readOneSample (outEng, 0, i)));
+        CHECK (maxIn > 0.1f && maxOut < maxIn * 0.6f,
+               "batch: gain step applied to the output");
+    }
+    else
+        CHECK (false, "batch: outputs readable back");
+
+    // No matching files -> clean setup failure.
+    const auto emptyDir = root.getSiblingFile (root.getFileName() + "_empty");
+    CHECK (emptyDir.createDirectory(), "batch: empty dir created");
+    std::string summary2;
+    CHECK (!sc::runActionBatch (action, emptyDir, outDir,
+                                { ".wav" }, "%Filename%.wav", false,
+                                makeTempFile ("actions_batch_store2.recent"),
+                                nullptr, nullptr, nullptr, &summary2),
+          "batch: no matching files fails cleanly");
+    CHECK (!summary2.empty (), "batch: failure summary filled");
+
+    root.deleteRecursively();
+    outDir.deleteRecursively();
+    emptyDir.deleteRecursively();
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -24606,6 +24866,10 @@ static int scRunUnitTestsImpl()
     progress ("selection channel clip"); testSelectionChannelClip();
     progress ("split execute first run"); testSplitExecuteFirstRun();
     progress ("stem sep advanced layout"); testStemSepAdvancedLayout();
+    progress ("actions store json");       testActionStoreJson();
+    progress ("actions validation");       testActionValidation();
+    progress ("apply action steps");       testApplyActionSteps();
+    progress ("action batch");             testActionBatch();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
