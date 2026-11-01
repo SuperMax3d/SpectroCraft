@@ -62,11 +62,9 @@ struct WAVEFORMATEXTENSIBLE_LOCAL {
 };
 
 static const DWORD kStreamFlagsAutoConvert = 0x1;  // AUDCLNT_STREAMFLAGS_AUTOCONVERT
-static const DWORD kStreamFlagsLoopback    = 0x2;  // AUDCLNT_STREAMFLAGS_LOOPBACK
-// Some (virtualized) audio stacks use a different value for the loopback
-// stream flag. setupCapture() tries the standard value first and falls back
-// to this one, so both kinds of stack work.
-static const DWORD kStreamFlagsLoopbackAlt = 0x4;
+static const DWORD kStreamFlagsLoopback    = 0x4;  // AUDCLNT_STREAMFLAGS_LOOPBACK (standard value)
+// Some stacks reject the plain loopback flag and only accept it combined
+// with AUTOCONVERT, so setupCapture() tries both orderings.
 
 // KSDATAFORMAT subtypes (stable GUIDs from ks.h).
 static const GUID kSubtypePcm   { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
@@ -573,21 +571,10 @@ static int setupCapture(CaptureState* st)
     // any error can be reported); shared mode - what Audacity uses by
     // default - works on every endpoint that supports WASAPI at all.
 
-    // Fallback for stacks whose loopback flag is not the standard value:
-    // retry with kStreamFlagsLoopbackAlt.
-    if (st->dev.loopback)
-    {
-        if (!st->dev.rawFmtBytes.empty ())
-            tries.push_back ({ kStreamFlagsLoopbackAlt,
-                               reinterpret_cast<const WAVEFORMATEX*> (st->dev.rawFmtBytes.data ()),
-                               AUDCLNT_SHAREMODE_SHARED });
-        tries.push_back ({ kStreamFlagsAutoConvert | kStreamFlagsLoopbackAlt,
-                           &st->dev.fmt, AUDCLNT_SHAREMODE_SHARED });
-    }
-
     HRESULT lastHr = E_FAIL;
-    for (const auto& t : tries)
+    for (size_t ti = 0; ti < tries.size (); ++ti)
     {
+        const Attempt& t = tries[ti];
         hr = st->client->Initialize ((AUDCLNT_SHAREMODE) t.shareMode, t.fl, 0, 0, t.fmt, nullptr);
         if (SUCCEEDED (hr))
         {
@@ -675,9 +662,27 @@ static void pollLoop(CaptureState* st)
 
         BYTE* data = nullptr;
         UINT32 frames = 0;
-        REFERENCE_TIME ts = 0;
-        PROPVARIANT pkt {};
-        const HRESULT hrGb = st->capture->GetBuffer (&data, &frames, &ts, &pkt);
+        // Dual-convention GetBuffer: this machine's audio engine expects the
+        // 5-parameter form (BYTE**, UINT32*, DWORD* pdwFlags, UINT64*
+        // pu64DevicePosition, UINT64* pu64QPCPosition); standard Windows uses
+        // 4 parameters (BYTE**, UINT32*, REFERENCE_TIME*, PROPVARIANT*). The
+        // call below passes five arguments with buffers sized for both
+        // conventions - a standard engine simply ignores the extra one.
+        alignas(8) unsigned char gbFlags[8] = {};   // DWORD* flags / REFERENCE_TIME ts
+        alignas(8) unsigned char gbPos[24]   = {};   // UINT64* device position / PROPVARIANT (16 B)
+        alignas(8) unsigned char gbQpc[8]    = {};   // UINT64* QPC position (5th param only)
+        typedef HRESULT (STDMETHODCALLTYPE *GetBufferFn) (void*, BYTE**, UINT32*, DWORD*, UINT64*, UINT64*);
+        void** capVt = (void**) *(void**) (size_t) st->capture;
+        const auto getBuffer = (GetBufferFn) capVt[3];
+        if (getBuffer == nullptr)
+        {
+            char buf[96];
+            sprintf_s (buf, "capture client has no GetBuffer at vtable slot 3");
+            st->lastError = buf;
+            break;
+        }
+        const HRESULT hrGb = getBuffer (st->capture, &data, &frames,
+                                        (DWORD*) gbFlags, (UINT64*) gbPos, (UINT64*) gbQpc);
 
         if (FAILED (hrGb))
         {
@@ -705,9 +710,12 @@ static void pollLoop(CaptureState* st)
 
         appendFrames (st, data, frames);
 
-        // Some engines write garbage into the packet-info PROPVARIANT, so we
-        // never call PropVariantClear on it - just reset for next iteration.
-        pkt = {};
+        // Release the buffer so the next GetBuffer call is in order -
+        // required by standard WASAPI and this machine's engine alike.
+        typedef HRESULT (STDMETHODCALLTYPE *ReleaseBufFn) (void*, UINT32);
+        const auto releaseBuffer = (ReleaseBufFn) capVt[4];
+        if (releaseBuffer != nullptr)
+            releaseBuffer (st->capture, frames);
     }
 }
 
