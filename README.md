@@ -1886,7 +1886,9 @@ list: a table row followed by its parameter rows.
     to the time ruler) shows every visible parameter auto-scaled, with its own
     vertical zoom/pan scrollbar, the blue time-selection band and the red
     playhead over it. Hovering near a curve lists each parameter's *unscaled*
-    value at that time.
+    value at that time. The strip is separated from the data views by a
+    draggable splitter (like the waveform/spectrogram one): dragging it up or
+    down resizes the track.
 - **Align** (table row): Manual / 1 Point / 2 Points. Manual prompts for a time
   offset + scale; 1/2 Points arm click-picking — first on the panel's preview
   plot, then on the waveform/spectrogram (two points also stretch the table's
@@ -2010,7 +2012,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~4003 checks in Release), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~4024 checks in Release), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.

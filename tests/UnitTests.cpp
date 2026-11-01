@@ -23292,6 +23292,85 @@ static void testTablesSoloAndRename()
 }
 
 //==============================================================================
+// Dedicated track strip: in "Dedicated track" mode the layout must reserve a
+// visible strip above the data views with a draggable separator, and dragging
+// that separator must resize the strip.
+static void testTablesDedicatedStrip()
+{
+    const juce::File wav = makeTempFile ("dedstrip.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "dedstrip: open wav");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "dedicated strip test"));
+
+    std::string err;
+    const juce::String csv = "alpha,beta\n1.0,2.0\n3.0,4.0\n5.0,6.0\n7.0,8.0\n";
+    CHECK (app.addTableFromCsv ("T", csv, &err), "dedstrip: import table");
+
+    auto* track = win->tablesTrackComp();
+    auto* sep   = win->tablesSepComp();
+    auto* wave  = win->waveformViewComp();
+    CHECK (track != nullptr && sep != nullptr && wave != nullptr,
+          "dedstrip: strip, separator and waveform exist");
+
+    for (int rulerBottom = 0; rulerBottom <= 1; ++rulerBottom)
+    {
+        app.settings.trackRulerAtBottom = (rulerBottom != 0);
+        CHECK (win->waveformVisible() && win->spectrogramVisible(),
+              "dedstrip: both views visible");
+
+        app.setTablesMode (2);
+        win->resized();
+
+        CHECK (track->isVisible(), "dedstrip: strip is visible in dedicated mode");
+        CHECK (sep->isVisible(), "dedstrip: separator is visible in dedicated mode");
+        const auto tb = track->getBounds();
+        CHECK (tb.getHeight() >= 30, "dedstrip: strip has a real height");
+        const auto sb = sep->getBounds();
+        CHECK (sb.getHeight() == 6 && sb.getY() == tb.getBottom(),
+              "dedstrip: separator sits directly below the strip");
+
+        // The strip must sit exactly where the layout reserves it: right below
+        // the top ruler inside the waveform view, or in the removed band above
+        // the main area (ending exactly where the waveform begins) when the
+        // ruler is on the bottom.
+        if (app.settings.trackRulerAtBottom)
+            CHECK (tb.getBottom() + sb.getHeight() == wave->getY(),
+                  "dedstrip: strip ends exactly where the waveform begins");
+        else
+            CHECK (tb.getY() == wave->getY() + WaveformView::kRulerH,
+                  "dedstrip: strip starts right below the top ruler");
+
+        // Drag the separator down by 40px -> the track grows.
+        const int hBefore = tb.getHeight();
+        sep->mouseDown (mkMouse (*sep, sb.getWidth() / 2, sb.getHeight() / 2, {}));
+        sep->mouseDrag (mkMouse (*sep, sb.getWidth() / 2, sb.getHeight() / 2 + 40, {}));
+        const int hAfter = track->getBounds().getHeight();
+        CHECK (hAfter > hBefore, "dedstrip: dragging the separator down grows the strip");
+
+        // Drag it back up by 60px -> the track shrinks again.
+        const auto sb2 = sep->getBounds();
+        sep->mouseDrag (mkMouse (*sep, sb2.getWidth() / 2, sb2.getHeight() / 2 - 60, {}));
+        const int hBack = track->getBounds().getHeight();
+        CHECK (hBack < hAfter && hBack >= 30,
+              "dedstrip: dragging the separator up shrinks the strip");
+
+        // Leaving dedicated mode hides the strip again.
+        app.setTablesMode (0);
+        win->resized();
+        CHECK (!track->isVisible() && !sep->isVisible(),
+              "dedstrip: leaving dedicated mode hides the strip and separator");
+    }
+
+    wav.deleteFile();
+}
+
+//==============================================================================
 // Single-instance mode: persisted setting + file-forwarding pipe protocol.
 static void testSingleInstance()
 {
@@ -24117,6 +24196,7 @@ static int scRunUnitTestsImpl()
     progress ("tables overlay + picker"); testTablesOverlayAndPicker();
     progress ("tables align targets");   testTablesAlignTarget();
     progress ("tables solo + rename");   testTablesSoloAndRename();
+    progress ("tables dedicated strip"); testTablesDedicatedStrip();
     progress ("single instance mode");   testSingleInstance();
     progress ("waveform zero line");     testWaveformZeroLine();
     progress ("fft axis wheel zoom");    testFFTAxisWheelZoom();

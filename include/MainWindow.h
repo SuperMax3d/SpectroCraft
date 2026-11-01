@@ -154,6 +154,8 @@ public:
     WaveformView* waveformViewComp() { return waveformView.get (); }
     juce::Component* waveVScrollBarComp() { return waveVScroll.get (); }   // unit tests
     juce::Component* specVScrollBarComp() { return specVScroll.get (); }   // unit tests
+    juce::Component* tablesTrackComp() { return tablesTrack.get (); }      // unit tests
+    juce::Component* tablesSepComp()   { return tablesSep.get (); }        // unit tests
     /** Top/bottom insets (px) that keep a view's vertical scrollbar clear of its own time ruler strip. */
     static void vScrollInsetsForView (juce::Component* view, int& topInset, int& botInset);
     void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
@@ -540,7 +542,6 @@ private:
     std::unique_ptr<ViewSplitter> tablesSep;
     std::unique_ptr<ValueScrollBar> tablesVScroll;
     double tablesTrackRatio = 0.18;   // fraction of the main area height
-    juce::Component* tablesTrackComp() { return tablesTrack.get (); }   // unit tests
 
     // Status bar at the very bottom: mouse probe + selection/playhead times.
     std::unique_ptr<StatusBar> statusBar;
