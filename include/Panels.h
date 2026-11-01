@@ -1626,6 +1626,18 @@ public:
     explicit EyeButton (const juce::String& name) : juce::Button (name) {}
 
     bool shown = true;   // what the icon depicts: are drawings currently visible?
+    /** Optional Shift+left-click handler. When set, a shift-click is consumed
+        here and does not trigger the normal button click. */
+    std::function<void(const juce::MouseEvent&)> onShiftClick;
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (onShiftClick && e.mods.isLeftButtonDown() && e.mods.isShiftDown())
+            onShiftClick (e);
+        else
+            juce::Button::mouseDown (e);
+    }
+
     void paintButton (juce::Graphics& g, bool over, bool down) override;
 };
 
@@ -1829,6 +1841,17 @@ public:
     void pasteToNewTable();
     /** Preset colour picker for one parameter (double-click on its square). */
     void showColourPicker (int tableIdx, int paramIdx);
+
+    // Shift+click visibility operations ("solo" semantics): showing only the
+    // clicked parameter / table - or turning all visibility off again when that
+    // state was already active. The master eye shows everything (or hides it).
+    void soloParameter (int tableIdx, int paramIdx);
+    void soloTable (int tableIdx);
+    void toggleAllVisibility ();
+
+    /** Rename the primary row's table / parameter via a prompt dialog. */
+    void renamePrimaryTable ();
+    void renamePrimaryParameter ();
     /** Manual alignment prompt. scopeParam < 0 = table-level (time only);
         >= 0 also offers the value transforms + offset/scale fields. */
     void showManualAlignDialog (int scopeTable, int scopeParam, int targetView = -1);
@@ -1855,6 +1878,7 @@ public:
     // Accessors for headless unit tests.
     juce::TableListBox& listTable() { return table; }
     TablesPlotView& plotView() { return plot; }
+    EyeButton& masterShowButton() { return masterShowBtn; }
     void simulateCellClick (int row, int columnId, const juce::MouseEvent& e)
     {
         model.cellClicked (row, columnId, e);
@@ -1862,6 +1886,7 @@ public:
 
 private:
     Application& app;
+    void hideEverything ();
 
     class Model : public juce::TableListBoxModel
     {

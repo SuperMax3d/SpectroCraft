@@ -23161,6 +23161,136 @@ static void testTablesAlignTarget()
     wav.deleteFile();
 }
 
+//=============================================================================
+// Tables panel: shift+click "solo" visibility operations + rename dialogs.
+static void testTablesSoloAndRename()
+{
+    const juce::File wav = makeTempFile ("tables_solo.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) f / rate); });
+    Application app;
+    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    FileDoc* d = app.doc ();
+    CHECK (d != nullptr, "solo/rename: doc created");
+    if (d == nullptr) { wav.deleteFile(); return; }
+
+    std::string err;
+    const juce::String csv = "alpha,beta\n1,2.5\n3,4.5\n5,6.5\n";
+    CHECK (app.addTableFromCsv ("T1", csv, &err), "first table imported");
+    CHECK (app.addTableFromCsv ("T2", csv, &err), "second table imported");
+
+    TablesPanel panel (app);
+    panel.setSize (320, 420);
+    panel.refresh();
+
+    // Rows: 0=T1, 1=alpha(T1), 2=beta(T1), 3=T2, 4=alpha(T2), 5=beta(T2).
+    auto effVisible = [&] (int ti, int pi)
+    { return app.showAllTables && d->tables[(size_t) ti].visible
+             && d->tables[(size_t) ti].params[(size_t) pi].visible; };
+    auto countEff = [&] ()
+    {
+        int n = 0;
+        for (int i = 0; i < 2; ++i)
+            for (int j = 0; j < 2; ++j)
+                if (effVisible (i, j)) ++n;
+        return n;
+    };
+
+    const juce::MouseEvent shiftClick = mkMouse (panel, 10, 10,
+                                                 juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
+
+    // --- Shift+click on a parameter eye solos that parameter --------------
+    panel.simulateCellClick (2, 1, shiftClick);   // T1/beta row
+    CHECK (effVisible (0, 1) && countEff () == 1, "shift-click solos the parameter");
+    CHECK (d->tables[0].visible && !d->tables[1].visible,
+          "parent table on, other tables off");
+
+    // --- Shift+click again turns everything off ----------------------------
+    panel.simulateCellClick (2, 1, shiftClick);
+    CHECK (!app.showAllTables && countEff () == 0, "second shift-click hides everything");
+
+    // --- Shift+click on a table eye solos the whole table -------------------
+    panel.simulateCellClick (3, 1, shiftClick);   // T2 row
+    CHECK (d->tables[1].visible && !d->tables[0].visible, "table solo: only that table");
+    CHECK (effVisible (1, 0) && effVisible (1, 1), "all of its parameters visible");
+    CHECK (countEff () == 2, "nothing else visible");
+
+    // --- Shift+click again turns everything off ----------------------------
+    panel.simulateCellClick (3, 1, shiftClick);
+    CHECK (!app.showAllTables && countEff () == 0, "table solo toggles off");
+
+    // --- Master eye: show all / hide all -------------------------------------
+    panel.toggleAllVisibility ();
+    CHECK (app.showAllTables && countEff () == 4, "master shift-click shows everything");
+    panel.toggleAllVisibility ();
+    CHECK (!app.showAllTables && countEff () == 0, "second master shift-click hides everything");
+
+    // --- Rename a parameter through the prompt dialog -----------------------
+    {
+        std::atomic<bool> done { false };
+        std::thread helper ([&done]
+        {
+            for (int i = 0; i < 500 && !done.load (); ++i)
+            {
+                juce::MessageManager::callAsync ([&done]
+                {
+                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
+                        if (auto* aw = dynamic_cast<juce::AlertWindow*> (m))
+                            if (aw->getTitle () == "Rename Parameter")
+                                if (auto* ed = aw->getTextEditor ("name"))
+                                {
+                                    ed->setText ("beta2");
+                                    done.store (true);
+                                    aw->exitModalState (1);   // OK
+                                }
+                });
+                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+            }
+        });
+
+        panel.simulateCellClick (1, 3, mkMouse (panel, 10, 10, {}));   // select T1/alpha row
+        panel.renamePrimaryParameter ();
+        helper.join ();
+
+        CHECK (done.load (), "rename dialog was shown");
+        CHECK (d->tables[0].params[0].name == "beta2", "parameter renamed");
+    }
+
+    // --- Rename a table through the prompt dialog ---------------------------
+    {
+        std::atomic<bool> done { false };
+        std::thread helper ([&done]
+        {
+            for (int i = 0; i < 500 && !done.load (); ++i)
+            {
+                juce::MessageManager::callAsync ([&done]
+                {
+                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
+                        if (auto* aw = dynamic_cast<juce::AlertWindow*> (m))
+                            if (aw->getTitle () == "Rename Table")
+                                if (auto* ed = aw->getTextEditor ("name"))
+                                {
+                                    ed->setText ("T1x");
+                                    done.store (true);
+                                    aw->exitModalState (1);   // OK
+                                }
+                });
+                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+            }
+        });
+
+        panel.simulateCellClick (0, 3, mkMouse (panel, 10, 10, {}));   // select T1 row
+        panel.renamePrimaryTable ();
+        helper.join ();
+
+        CHECK (done.load (), "table rename dialog was shown");
+        CHECK (d->tables[0].name == "T1x", "table renamed");
+    }
+
+    wav.deleteFile();
+}
+
 //==============================================================================
 // Single-instance mode: persisted setting + file-forwarding pipe protocol.
 static void testSingleInstance()
@@ -23986,6 +24116,7 @@ static int scRunUnitTestsImpl()
     progress ("tables panel");           testTablesPanel();
     progress ("tables overlay + picker"); testTablesOverlayAndPicker();
     progress ("tables align targets");   testTablesAlignTarget();
+    progress ("tables solo + rename");   testTablesSoloAndRename();
     progress ("single instance mode");   testSingleInstance();
     progress ("waveform zero line");     testWaveformZeroLine();
     progress ("fft axis wheel zoom");    testFFTAxisWheelZoom();

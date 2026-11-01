@@ -1860,13 +1860,19 @@ list: a table row followed by its parameter rows.
   through the 12-colour palette; **double-clicking opens a preset picker**
   dialog with all twelve swatches. The **Show** button at the top of the panel
   is the master switch for everything.
+- **Shift+clicking an eye *solos* it**: a parameter's eye shows only that
+  parameter (and its parent table), a table's eye shows only that table with
+  all of its parameters, and shift-clicking the master **Show** button makes
+  everything visible. Shift-clicking again while in any of those states turns
+  *all* visibility off.
 - Tables are created by **dragging CSV files onto the window** (the table name
   comes from the file name) or via right-click → **Paste to new table** (named
   *Clipboard*; parameter names come from the first row's column titles).
 - Right-clicking a selection offers **Remove Selected**, **Copy** (CSV with a
-  header row of parameter names), **Downsample...** (prompts for the desired
-  rows/second) and **Close Panel**. Excel-style multi-selection applies:
-  plain click, Ctrl/Cmd+click toggle, Shift+click range.
+  header row of parameter names), **Rename Table...** / **Rename Parameter...**
+  (prompts for the new name of the item under the mouse), **Downsample...**
+  (prompts for the desired rows/second) and **Close Panel**. Excel-style
+  multi-selection applies: plain click, Ctrl/Cmd+click toggle, Shift+click range.
 - The dropdown at the top picks where visible parameters are drawn:
   - **Overlay on Waveform** — parameters whose alignment target is *Waveform*
     are drawn over the waveform view. Each parameter's raw range is first
@@ -2004,7 +2010,7 @@ delays the window from appearing.
 
 ## Tests (`tests/`)
 
-- `UnitTests.cpp` — lightweight CHECK-based suite (~3987 checks in Release), run via
+- `UnitTests.cpp` — lightweight CHECK-based suite (~4003 checks in Release), run via
   `SpectroCraftTests.exe` or `SpectroCraft.exe --run-unit-tests`:
   - **FFT**: peak bin of a known sine matches the expected frequency; buffer
     layout and normalization verified.

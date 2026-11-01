@@ -9133,6 +9133,43 @@ static bool tablesPromptNumber (juce::Component* parent, const juce::String& tit
     return true;
 }
 
+/** Prompts for a text value (rename dialogs). `name` is pre-filled and
+    updated on success. Returns false when cancelled or the name is empty. */
+static bool tablesPromptString (juce::Component* parent, const juce::String& title,
+                                const juce::String& message, juce::String& name)
+{
+    auto* w = new juce::AlertWindow (title, message, juce::AlertWindow::QuestionIcon, parent);
+    w->addTextEditor ("name", name);
+    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    if (auto* editor = w->getTextEditor ("name"))
+    {
+        editor->setWantsKeyboardFocus (true);
+        editor->selectAll();
+        editor->setEscapeAndReturnKeysConsumed (false);
+    }
+    w->enterModalState (false);
+    if (auto* editor = w->getTextEditor ("name"))
+        editor->grabKeyboardFocus();
+
+    const int result = w->runModalLoop();
+    const juce::String text = w->getTextEditorContents ("name").trim ();
+    delete w;
+    if (result != 1) return false;
+    if (text.isEmpty())
+    {
+        juce::AlertWindow bad ("Invalid name", "The name cannot be empty.",
+                               juce::AlertWindow::WarningIcon, parent);
+        bad.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        bad.enterModalState (false);
+        bad.runModalLoop ();
+        return false;
+    }
+    name = text;
+    return true;
+}
+
 /** CSV-quotes a field when needed (commas, quotes, newlines). */
 static juce::String csvQuoteField (const juce::String& s)
 {
@@ -9388,6 +9425,14 @@ void TablesPanel::Model::cellClicked (int rowNumber, int columnId, const juce::M
             bool handled = false;
             if (columnId == 1)
             {
+                // Shift+click = "solo": only this eye's item stays visible - or
+                // everything turns off when that state was already active.
+                if (e.mods.isShiftDown())
+                {
+                    if (ref.paramIdx < 0) owner->soloTable (ref.tableIdx);
+                    else owner->soloParameter (ref.tableIdx, ref.paramIdx);
+                    return;   // the solo* methods handle dirty/refresh/callback
+                }
                 if (ref.paramIdx < 0) t.visible = !t.visible;
                 else if (ref.paramIdx < (int) t.params.size())
                     t.params[(size_t) ref.paramIdx].visible = !t.params[(size_t) ref.paramIdx].visible;
@@ -9435,6 +9480,7 @@ TablesPanel::TablesPanel (Application& appIn)
     modeCombo.onChange = [this] { app.setTablesMode (modeCombo.getSelectedItemIndex ()); };
 
     masterShowBtn.onClick = [this] { app.setShowAllTables (!app.showAllTables); };
+    masterShowBtn.onShiftClick = [this] (const juce::MouseEvent&) { toggleAllVisibility (); };
 
     plot.onPointClicked = [this] (double tTab) { handlePlotClick (tTab); };
 
@@ -9899,6 +9945,168 @@ void TablesPanel::mouseDown (const juce::MouseEvent& e)
     showContextMenu (row);
 }
 
+// ---- Shift+click visibility ("solo") operations --------------------------
+
+/** Number of parameters currently visible on screen (their table's eye and
+    their own eye are both on), optionally skipping one parameter. */
+static int countVisibleParams (const FileDoc& d, int skipTable = -1, int skipParam = -1)
+{
+    int n = 0;
+    for (int i = 0; i < (int) d.tables.size(); ++i)
+    {
+        if (!d.tables[(size_t) i].visible) continue;
+        for (int j = 0; j < (int) d.tables[(size_t) i].params.size(); ++j)
+        {
+            // skipParam < 0 skips the whole table, otherwise just that parameter
+            if (i == skipTable && (skipParam < 0 || j == skipParam)) continue;
+            if (d.tables[(size_t) i].params[(size_t) j].visible) ++n;
+        }
+    }
+    return n;
+}
+
+static bool everythingVisible (const Application& app, const FileDoc& d)
+{
+    if (!app.showAllTables) return false;
+    for (const auto& t : d.tables)
+    {
+        if (!t.visible) return false;
+        for (const auto& p : t.params)
+            if (!p.visible) return false;
+    }
+    return true;
+}
+
+void TablesPanel::hideEverything ()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+    app.setShowAllTables (false);
+    for (auto& t : d->tables)
+    {
+        t.visible = false;
+        for (auto& p : t.params) p.visible = false;
+    }
+    d->metaDirty = true;
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
+void TablesPanel::soloParameter (int ti, int pi)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || ti < 0 || ti >= (int) d->tables.size()) return;
+    auto& t = d->tables[(size_t) ti];
+    if (pi < 0 || pi >= (int) t.params.size()) return;
+    auto& p = t.params[(size_t) pi];
+
+    // Already the only visible parameter? Then turn everything off.
+    if (app.showAllTables && t.visible && p.visible
+        && countVisibleParams (*d, ti, pi) == 0)
+    {
+        hideEverything ();
+        return;
+    }
+
+    app.setShowAllTables (true);
+    for (auto& t2 : d->tables)
+    {
+        const bool isTarget = (&t2 == &t);
+        t2.visible = isTarget;
+        if (!isTarget) continue;   // keep the other tables' inner states intact
+        for (auto& q : t2.params)
+            q.visible = (&q == &p);
+    }
+    d->metaDirty = true;
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
+void TablesPanel::soloTable (int ti)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || ti < 0 || ti >= (int) d->tables.size()) return;
+    auto& t = d->tables[(size_t) ti];
+
+    // Already "this table with all its parameters, and nothing else"? Off.
+    bool thisTableFullyOn = app.showAllTables && t.visible;
+    for (const auto& q : t.params)
+        if (!q.visible) { thisTableFullyOn = false; break; }
+    if (thisTableFullyOn && countVisibleParams (*d, ti, -1) == 0)
+    {
+        hideEverything ();
+        return;
+    }
+
+    app.setShowAllTables (true);
+    for (auto& t2 : d->tables)
+        t2.visible = (&t2 == &t);
+    for (auto& q : t.params)
+        q.visible = true;
+    d->metaDirty = true;
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
+void TablesPanel::toggleAllVisibility ()
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return;
+
+    if (everythingVisible (app, *d)) { hideEverything (); return; }
+
+    app.setShowAllTables (true);
+    for (auto& t : d->tables)
+    {
+        t.visible = true;
+        for (auto& q : t.params) q.visible = true;
+    }
+    d->metaDirty = true;
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
+void TablesPanel::renamePrimaryTable ()
+{
+    auto* d = app.doc ();
+    const int pr = primaryRow();
+    if (d == nullptr || pr < 0) return;
+    const auto ref = rowRef (pr);
+    if (ref.tableIdx < 0 || ref.tableIdx >= (int) d->tables.size()) return;
+
+    auto& t = d->tables[(size_t) ref.tableIdx];
+    juce::String name = t.name;
+    if (!tablesPromptString (this, "Rename Table",
+                             "New name for the table:", name))
+        return;
+    t.name = name;
+    d->metaDirty = true;
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
+void TablesPanel::renamePrimaryParameter ()
+{
+    auto* d = app.doc ();
+    const int pr = primaryRow();
+    if (d == nullptr || pr < 0) return;
+    const auto ref = rowRef (pr);
+    if (ref.tableIdx < 0 || ref.paramIdx < 0
+        || ref.tableIdx >= (int) d->tables.size()) return;
+    auto& t = d->tables[(size_t) ref.tableIdx];
+    if (ref.paramIdx >= (int) t.params.size()) return;
+
+    auto& p = t.params[(size_t) ref.paramIdx];
+    juce::String name = p.name;
+    if (!tablesPromptString (this, "Rename Parameter",
+                             "New name for the parameter:", name))
+        return;
+    p.name = name;
+    d->metaDirty = true;
+    refresh ();
+    if (app.onTablesChanged) app.onTablesChanged ();
+}
+
 void TablesPanel::showContextMenu (int row)
 {
     const int nSel = table.getNumSelectedRows ();
@@ -9912,6 +10120,12 @@ void TablesPanel::showContextMenu (int row)
     m.addItem (2, "Remove Selected", nSel > 0);
     if (nSel > 0)
         m.addItem (3, "Copy", true);
+
+    // Rename the item under the mouse (primary row).
+    if (haveTableScope)
+        m.addItem (6, "Rename Table...");
+    else if (haveParamScope)
+        m.addItem (7, "Rename Parameter...");
 
     // Auto align: exactly two parameters from different tables selected. The
     // parameter under the mouse is aligned onto the other by correlation.
@@ -10001,6 +10215,8 @@ void TablesPanel::showContextMenu (int row)
             break;
         }
         case 5: requestClose (); break;
+        case 6: renamePrimaryTable (); break;
+        case 7: renamePrimaryParameter (); break;
 
         // Table-level Align submenu.
         case 10: showManualAlignDialog (prRef.tableIdx, -1); break;
