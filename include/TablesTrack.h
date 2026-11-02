@@ -2,7 +2,8 @@
 // SpectroCraft - Dedicated tables track (Tables panel, "Dedicated track" mode):
 // a strip above the waveform/spectrogram that plots every visible parameter
 // on its own auto-scaled value axis. Vertical zoom/pan like the other tracks,
-// red playhead, and hover labels showing unscaled values near the curves.
+// red playhead, hover labels showing unscaled values near the curves, left-drag
+// time selection (like the waveform) and middle-drag horizontal panning.
 #include <JuceHeader.h>
 #include "Application.h"
 
@@ -59,6 +60,9 @@ public:
     // thumb in sync.
     std::function<void(double lo, double hi)> onValueWindowChanged;
 
+    /** Shared-window time under a pixel column of the plot area. */
+    double timeAtX (int x) const;
+
 private:
     juce::Rectangle<int> plotRect() const;
     juce::Rectangle<int> axisStripRect() const;
@@ -75,10 +79,11 @@ private:
     double fitMin = -1.0, fitMax = 1.0;   // full auto-fit range
     juce::Range<double> selShown { 0.0, 0.0 };
 
-    enum class DragMode { None, VPan, ZoomAxis, ZoomBox };
+    enum class DragMode { None, VPan, ZoomAxis, ZoomBox, Select, HPan };
     DragMode dragMode = DragMode::None;
     int dragStartX = 0, dragStartY = 0;
     double dragVMin = 0.0, dragVMax = 0.0;
+    double dragT0 = 0.0, dragT1 = 1.0;   // time window at the start of an HPan
     bool haveRubberBand = false;
     juce::Rectangle<int> rubberRect;
 

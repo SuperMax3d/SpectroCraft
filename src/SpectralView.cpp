@@ -243,11 +243,18 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     if (!app.audioEngine().isFileLoaded()) return;
 
     // Tables panel alignment flow: a left click is consumed as the reference
-    // point in this view and reported to the panel.
+    // point in this view and reported to the panel. The second value is the
+    // fitted [-1,+1] position of the clicked frequency - the same domain
+    // drawTablesOverlay() maps into, so two-point alignments can solve the
+    // vertical mapping.
     if (onAlignClick && e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
         && !e.mods.isMiddleButtonDown())
     {
-        onAlignClick (xToTime ((double) e.x));
+        double val = 0.0;
+        const double fHz = freqAtY ((int) e.y);
+        if (getFreqMax () > getFreqMin ())
+            val = 2.0 * (fHz - getFreqMin ()) / (getFreqMax () - getFreqMin ()) - 1.0;
+        onAlignClick (xToTime ((double) e.x), val);
         return;
     }
 
@@ -874,6 +881,14 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
         }
     }
 
+    // Table overlay hover values (spectrogram mode): show the raw parameter
+    // value of curves near the cursor - like the dedicated track's readout.
+    if (app.showAllTables && app.tablesMode () == 1)
+    {
+        collectTableHoverLabels (e.x, e.y);
+        repaint();
+    }
+
     if (!onCursorInfo) return;
     const auto pr = plotRect();
     if (e.x < pr.getX() || e.x >= pr.getRight()
@@ -950,6 +965,14 @@ void SpectralView::mouseExit (const juce::MouseEvent&)
         harmMouseY = -1;
         if (app.settings.specHarmVisible && app.settings.specHarmMaxK >= 1
             && app.settings.specHarmN >= 1) repaint();
+    }
+
+    // Table overlay hover values: hide them once the cursor leaves the view.
+    if (!tblHoverLabels.empty ())
+    {
+        tblHoverLabels.clear ();
+        tblHoverPos = { -1.0f, -1.0f };
+        repaint();
     }
 }
 
@@ -1255,6 +1278,7 @@ void SpectralView::paint (juce::Graphics& g)
     drawOverlays (g);
     drawDrawings (g);
     drawTablesOverlay (g);
+    drawTableHoverLabels (g);
 
     // Right-drag box-zoom rubber band: the same translucent blue as the
     // time selection in the tracks, so it reads as "this region" rather
@@ -2160,7 +2184,7 @@ void SpectralView::drawTablesOverlay (juce::Graphics& g)
                     const double tTab = (tDoc - off) / sc;
                     if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
                     const double v = sc::tables::overlayValue (
-                        sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
+                        sc::tables::paramValueAt (t, p, tTab), p, mn, mx, 1);
                     if (!std::isfinite ((float) v)) { started = false; continue; }
                     const double fHz = getFreqMin () + 0.5 * (v + 1.0) * (getFreqMax () - getFreqMin ());
                     if (!(fHz >= 0.0)) { started = false; continue; }
@@ -2173,6 +2197,71 @@ void SpectralView::drawTablesOverlay (juce::Graphics& g)
                 g.strokePath (path, juce::PathStrokeType (2.0f));
             }
         }
+    }
+}
+
+// Hover value labels for the table overlay curves: the raw parameter values
+// of curves near the cursor, stacked from the top so they never overlap -
+// like the dedicated track's hover readout.
+void SpectralView::collectTableHoverLabels (int mouseX, int mouseY)
+{
+    tblHoverPos = { (float) mouseX, (float) mouseY };
+    tblHoverLabels.clear ();
+
+    const auto pr = plotRect();
+    if (mouseX < pr.getX () || mouseX >= pr.getRight ()) return;
+    const double tDoc = xToTime ((int) mouseX);
+
+    struct Hit { float y; juce::String text; juce::Colour colour; };
+    std::vector<Hit> hits;
+    for (const auto& t : app.activeTables())
+    {
+        if (!t.visible) continue;
+        for (const auto& p : t.params)
+        {
+            if (!p.visible || p.alignTarget != 1 || p.values.size() < 2) continue;
+            double mn = p.values[0], mx = p.values[0];
+            for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
+            const auto [off, sc] = t.effectiveTimeMap (p);
+            const double tTab = (tDoc - off) / sc;
+            if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) continue;
+            const double vRaw = sc::tables::paramValueAt (t, p, tTab);
+            const double vMap = sc::tables::overlayValue (vRaw, p, mn, mx, 1);
+            if (!std::isfinite ((float) vMap)) continue;
+            const double fHz = getFreqMin () + 0.5 * (vMap + 1.0) * (getFreqMax () - getFreqMin ());
+            // The curve is drawn on every visible channel row: hit-test each.
+            for (const auto& rr : rowRects ())
+            {
+                const float y = rr.getY() + freqToY (fHz, rr.getHeight());
+                if (std::abs (y - (float) mouseY) <= 8.0f)
+                    hits.push_back ({ y, p.name + "  " + juce::String (vRaw, 4),
+                                     sc::tables::kPalette[p.colorIndex % 12] });
+            }
+        }
+    }
+
+    std::sort (hits.begin(), hits.end (),
+               [] (const Hit& a, const Hit& b) { return a.y < b.y; });
+    for (const auto& h : hits)
+        tblHoverLabels.push_back ({ h.text, 4.0f, h.colour });   // y fixed in paint()
+}
+
+void SpectralView::drawTableHoverLabels (juce::Graphics& g)
+{
+    if (tblHoverLabels.empty ()) return;
+    const auto pr = plotRect();
+    g.setFont (12.0f);
+    const juce::Font f (12.0f);
+    int y = std::max (pr.getY () + 4, 4);
+    for (const auto& hl : tblHoverLabels)
+    {
+        const auto sz = (int) juce::GlyphArrangement::getStringWidth (f, hl.text);
+        juce::Rectangle<int> box ((int) tblHoverPos.x + 12, y, sz + 8, 15);
+        g.setColour (juce::Colour::fromRGBA (20, 20, 24, 200));
+        g.fillRoundedRectangle (box.toFloat (), 3.0f);
+        g.setColour (hl.colour);
+        g.drawText (hl.text, box, juce::Justification::centredLeft, true);
+        y += 17;   // fixed spacing keeps the labels from overlapping
     }
 }
 

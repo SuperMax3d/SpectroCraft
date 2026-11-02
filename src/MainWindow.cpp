@@ -380,12 +380,12 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     {
         if (waveformView) waveformView->onAlignClick =
             (view == 0 && tablesPanel != nullptr)
-                ? std::function<void(double)> ([this] (double t) { tablesPanel->handleDocClick (t); })
-                : std::function<void(double)> (nullptr);
+                ? std::function<void(double, double)> ([this] (double t, double v) { tablesPanel->handleDocClick (t, v); })
+                : std::function<void(double, double)> (nullptr);
         if (spectralView) spectralView->onAlignClick =
             (view == 1 && tablesPanel != nullptr)
-                ? std::function<void(double)> ([this] (double t) { tablesPanel->handleDocClick (t); })
-                : std::function<void(double)> (nullptr);
+                ? std::function<void(double, double)> ([this] (double t, double v) { tablesPanel->handleDocClick (t, v); })
+                : std::function<void(double, double)> (nullptr);
     };
     app.onSetSpectralFreqRange = [this] (double lo, double hi)
     { if (spectralView) spectralView->setFrequencyRange (lo, hi); };
@@ -6708,11 +6708,11 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       app.hasSpectralSelection (),
                       app.playSpectralSel && app.hasSpectralSelection ());
 
-        // Recording: start/stop toggle (F10) + mode options + device selection
-        // via plugins.
+        // Recording: start/stop toggle (Shift+F10) + mode options + device
+        // selection via plugins.
         menu.addSeparator ();
         menu.addItem (TransportRecord,
-                      app.recording.active ? "Stop Recording\tF10" : "Record\tF10",
+                      app.recording.active ? "Stop Recording\tShift+F10" : "Record\tShift+F10",
                       true, false);
         {
             juce::PopupMenu opts;
@@ -6939,8 +6939,9 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         if (kc == '=' || kc == '+') { stepFftSize (true);  return true; }
         if (kc == '-')              { stepFftSize (false); return true; }
     }
-    // F10 starts/stops recording (Transport > Record).
-    if (key.getKeyCode() == juce::KeyPress::F10Key) { handleStartStopRecording (); return true; }
+    // Shift+F10 starts/stops recording (Transport > Record). Plain F10 is
+    // left free for the OS / other tools.
+    if (key.getKeyCode() == juce::KeyPress::F10Key && key.getModifiers().isShiftDown ()) { handleStartStopRecording (); return true; }
     // F11 opens Edit > Resample... (no-op when no file is loaded).
     if (key.getKeyCode() == juce::KeyPress::F11Key) { showResampleDialog(); return true; }
     // Shift+F12 opens the split-configuration window (no split is performed).

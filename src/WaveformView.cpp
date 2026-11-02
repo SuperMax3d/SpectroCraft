@@ -145,11 +145,33 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     if (!app.audioEngine().isFileLoaded()) return;
 
     // Tables panel alignment flow: a left click is consumed as the reference
-    // point in this view and reported to the panel.
+    // point in this view and reported to the panel. The second value is the
+    // clicked amplitude in the channel row under the cursor - the same units
+    // drawTablesOverlay() maps into, so two-point alignments can solve the
+    // vertical mapping.
     if (onAlignClick && e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown()
         && !e.mods.isMiddleButtonDown())
     {
-        onAlignClick (xToTime ((double) e.x));
+        double val = 0.0;
+        const auto pr = plotRect();
+        const int chans = app.audioEngine().numChannels();
+        int visCount = 0;
+        for (int ch = 0; ch < chans; ++ch)
+            if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
+        if (visCount > 0)
+        {
+            const auto rows = channelRowRects (pr.getWidth(), pr.getHeight(), visCount);
+            int row = 0;
+            for (int r = 0; r < visCount; ++r)
+                if (e.y >= pr.getY() + rows[(size_t) r].getY())
+                    row = r;
+            const auto& rr = rows[(size_t) std::clamp (row, 0, visCount - 1)];
+            const float center = pr.getY() + rr.getY() + rr.getHeight() * 0.5f;
+            const float ampPx = rr.getHeight() * 0.45f * (float) vZoom;
+            if (ampPx > 1e-6)
+                val = vOffset + ((double) center - e.y) / ampPx;
+        }
+        onAlignClick (xToTime ((double) e.x), val);
         return;
     }
 
@@ -817,7 +839,7 @@ void WaveformView::drawTablesOverlay (juce::Graphics& g)
                     const double tTab = (tDoc - off) / sc;
                     if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
                     const double v = sc::tables::overlayValue (
-                        sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
+                        sc::tables::paramValueAt (t, p, tTab), p, mn, mx, 0);
                     const float y = center + (float) ((vOffset - v) * ampPx);
                     const float x = (float) (pr.getX() + i) + 0.5f;
                     if (!started) { path.startNewSubPath (x, y); started = true; }

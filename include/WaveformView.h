@@ -131,8 +131,9 @@ public:
     std::function<void(const juce::String&)> onCursorInfo;
 
     // Tables panel alignment flow: while set, a left click inside this view is
-    // consumed as an alignment reference point and reported with its time.
-    std::function<void(double tSecs)> onAlignClick;
+    // consumed as an alignment reference point and reported with its time and
+    // the clicked amplitude (overlay value units) for vertical mapping.
+    std::function<void(double tSecs, double value)> onAlignClick;
 
     double getViewStart() const { return viewStart; }
     double getViewEnd() const { return viewEnd; }

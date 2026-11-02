@@ -62,8 +62,9 @@ public:
     // Tables panel: imported CSV tables with per-parameter alignment plus the
     // display mode (0=Overlay on Waveform 1=Overlay on Spectrogram
     // 2=Dedicated track). Persisted with the file's metadata bundle.
+    // The default is the dedicated track.
     std::vector<sc::tables::TableData> tables;
-    int tablesMode = 0;
+    int tablesMode = 2;
 
     /** Replaces the table list (and optionally the display mode) and marks
         the document metadata-dirty. */

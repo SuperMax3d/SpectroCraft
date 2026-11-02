@@ -171,8 +171,9 @@ public:
     std::function<void(double, double)> onRefClickPlaced;
 
     // Tables panel alignment flow: while set, a left click inside this view is
-    // consumed as an alignment reference point and reported with its time.
-    std::function<void(double tSecs)> onAlignClick;
+    // consumed as an alignment reference point and reported with its time and
+    // the clicked fitted value ([-1,+1] frequency domain) for vertical mapping.
+    std::function<void(double tSecs, double value)> onAlignClick;
 
     /** When both views are stacked the spectrogram hides its own time ruler
         (the waveform's top ruler covers it). */
@@ -248,6 +249,13 @@ public:
     void drawChannelLabels (juce::Graphics& g);
     void drawTablesOverlay (juce::Graphics& g);
 
+    // Hover value labels for the table overlay curves (spectrogram mode):
+    // raw parameter values of curves near the cursor, like the dedicated
+    // track's hover readout.
+    struct TableHoverLabel { juce::String text; float y; juce::Colour colour; };
+    void collectTableHoverLabels (int mouseX, int mouseY);
+    void drawTableHoverLabels (juce::Graphics& g);
+
 private:
     Application& app;   // audio data read live via app.audioEngine() (active doc)
 
@@ -310,6 +318,11 @@ private:
     // feature is active (-1 = mouse outside). Small white circles are drawn at the
     // harmonics of the frequency under the cursor - no lines.
     int harmMouseX = -1, harmMouseY = -1;
+
+    // Table overlay hover labels (spectrogram mode): collected on mouseMove,
+    // cleared on mouseExit. tblHoverPos is the cursor position in view coords.
+    juce::Point<float> tblHoverPos { -1.0f, -1.0f };
+    std::vector<TableHoverLabel> tblHoverLabels;
 
     // Per-pixel boolean raster of the spectral selection (1 byte per view
     // pixel), rebuilt on every paint so subtractive shapes render as holes.

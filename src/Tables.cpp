@@ -386,7 +386,8 @@ void warpTableForStretch   (TableData& t, double a, double bOld, double bNew)
 
 // ------------------------------------------------------------- Value maps --
 
-double transformValue (double v, const ParamData& p, double minV, double maxV)
+double transformValue (double v, const ParamData& p, double minV, double maxV,
+                       int target)
 {
     if (p.normalized && maxV > minV)
         v = (v - minV) / (maxV - minV);
@@ -394,19 +395,51 @@ double transformValue (double v, const ParamData& p, double minV, double maxV)
         v = 0.0;
     if (p.inverted) v = -v;
     if (p.absolute) v = std::abs (v);
-    return p.valueScale * v + p.valueOffset;
+    const int t = std::clamp (target, 0, 2);
+    return p.valueScale[t] * v + p.valueOffset[t];
 }
 
-double overlayValue (double v, const ParamData& p, double minV, double maxV)
+double fittedOverlayValue (double v, const ParamData& p, double minV, double maxV)
 {
     // Fit the raw range into [-1,+1] so every parameter is visible on the
     // waveform/spectrogram regardless of its units; then apply the user's
-    // adjustments on top of the fitted curve.
+    // transforms. The per-target scale/offset are NOT applied here.
     if (maxV > minV) v = 2.0 * (v - minV) / (maxV - minV) - 1.0;
     else             v = 0.0;
     if (p.inverted) v = -v;
     if (p.absolute) v = std::abs (v);
-    return p.valueScale * v + p.valueOffset;
+    return v;
+}
+
+double overlayValue (double v, const ParamData& p, double minV, double maxV,
+                     int target)
+{
+    const int t = std::clamp (target, 0, 2);
+    return p.valueScale[t] * fittedOverlayValue (v, p, minV, maxV) + p.valueOffset[t];
+}
+
+double dedicatedValue (double v, const ParamData& p)
+{
+    // The dedicated track plots raw values on its own auto-scaled axis; the
+    // user's per-mode vertical map is a plain linear transform of them.
+    return p.valueScale[2] * v + p.valueOffset[2];
+}
+
+bool solveValueMap (double f1, double f2, double v1, double v2,
+                    double& scale, double& offset)
+{
+    // Two fitted values f1/f2 must land on doc-side values v1/v2:
+    //   v1 = scale*f1 + offset
+    //   v2 = scale*f2 + offset
+    if (std::abs (f1 - f2) <= 1e-9)
+        return false;   // degenerate: no unique scale exists
+    const double s = (v1 - v2) / (f1 - f2);
+    const double o = v1 - s * f1;
+    if (!std::isfinite ((float) s) || !std::isfinite ((float) o))
+        return false;
+    scale  = s;
+    offset = o;
+    return true;
 }
 
 double paramValueAt (const TableData& t, const ParamData& p, double tTableSecs)
@@ -496,8 +529,13 @@ juce::var serialiseTables (const std::vector<TableData>& tables, int mode)
             po->setProperty ("target", p.alignTarget);
             po->setProperty ("offset", p.offsetSecs);
             po->setProperty ("scale", p.scaleTime);
-            po->setProperty ("voff", p.valueOffset);
-            po->setProperty ("vscale", p.valueScale);
+            // Per-display-mode vertical maps: 0=Waveform, 1=Spectrogram,
+            // 2=Dedicated track.
+            for (int i = 0; i < 3; ++i)
+            {
+                po->setProperty ("voff" + juce::String (i), p.valueOffset[i]);
+                po->setProperty ("vscl" + juce::String (i), p.valueScale[i]);
+            }
             if (p.normalized)    po->setProperty ("norm", 1);
             if (p.inverted)      po->setProperty ("inv", 1);
             if (p.absolute)      po->setProperty ("abs", 1);
@@ -559,8 +597,22 @@ bool parseTables (const juce::var& v, std::vector<TableData>& out, int* mode)
             p.alignTarget = std::clamp (static_cast<int> (pp.getWithDefault ("target", 0)), 0, 2);
             p.offsetSecs  = static_cast<double> (pp.getWithDefault ("offset", 0.0));
             p.scaleTime   = std::max (1e-9, static_cast<double> (pp.getWithDefault ("scale", 1.0)));
-            p.valueOffset = static_cast<double> (pp.getWithDefault ("voff", 0.0));
-            p.valueScale  = static_cast<double> (pp.getWithDefault ("vscale", 1.0));
+            // Per-display-mode vertical maps; older metadata carries a single
+            // shared pair under "voff"/"vscale" - apply it to every mode.
+            const bool havePerTarget = pp.contains ("voff0") || pp.contains ("vscl0");
+            for (int i = 0; i < 3; ++i)
+            {
+                if (havePerTarget)
+                {
+                    p.valueOffset[i] = static_cast<double> (pp.getWithDefault ("voff" + juce::String (i), 0.0));
+                    p.valueScale[i]  = std::max (1e-9, static_cast<double> (pp.getWithDefault ("vscl" + juce::String (i), 1.0)));
+                }
+                else
+                {
+                    p.valueOffset[i] = static_cast<double> (pp.getWithDefault ("voff", 0.0));
+                    p.valueScale[i]  = std::max (1e-9, static_cast<double> (pp.getWithDefault ("vscale", 1.0)));
+                }
+            }
             p.normalized  = static_cast<int> (pp.getWithDefault ("norm", 0)) != 0;
             p.inverted    = static_cast<int> (pp.getWithDefault ("inv", 0)) != 0;
             p.absolute    = static_cast<int> (pp.getWithDefault ("abs", 0)) != 0;

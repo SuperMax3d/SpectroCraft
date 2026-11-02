@@ -823,11 +823,11 @@ bar shows a red dot followed by `REC <seconds> s` counting up in real time.
      host, so any plugin works with it.
    - Devices whose width varies (e.g. loopback endpoints) show a plain count
      list instead.
-2. **Transport > Record** (or press **F10**) — starts recording into a new
+2. **Transport > Record** (or press **Shift+F10**) — starts recording into a new
    document named `rec_YYYYMMDD_HHMMSS.wav` (made unique against other open
 documents). The menu item becomes **Stop Recording**; stopping drains whatever is
 still buffered in the plugin and rebuilds the mipmap pyramid so the overview
-shows the whole take. Pressing F10 again stops it.
+shows the whole take. Pressing Shift+F10 again stops it.
 3. Save the document as usual (File > Save) to keep it on disk — until then it
    lives only in memory like any other unsaved file.
 
@@ -1574,7 +1574,7 @@ The test executable accepts the same flags (useful for CI without a display).
 | Spectrogram FFT size one step up / down the 512..65536 ladder; from Auto, switches to manual one step away | Alt+Shift+= / Alt+Shift+- |
 | Toggle a channel's visibility (like the View menu items); show ONLY that channel with Shift held — pressing again while solo restores every channel | Ctrl+1..9 / Ctrl+Shift+1..9 |
 | Cycle view layout: both → waveform only → spectrogram only (reverse direction with Shift) | F9 / Shift+F9 |
-| Start/stop recording (Transport > Record; mode via Transport > Recording Options) | F10 |
+| Start/stop recording (Transport > Record; mode via Transport > Recording Options) | Shift+F10 |
 | Change Gain... (dB dialog on the selection or whole file) | Ctrl+Shift+G |
 | Normalize (selection peak to full scale) | Ctrl+Shift+N |
 | Fade In / Fade Out (on the time selection, or whole file when none) | Ctrl+Shift+I / Ctrl+Shift+O |

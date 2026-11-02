@@ -9788,68 +9788,203 @@ void TablesPanel::pasteToNewTable()
         statusLabel.setText ("Import failed: " + juce::String (err), juce::dontSendNotification);
 }
 
+// ================================================== Manual alignment window
+
+ManualAlignWindow::ManualAlignWindow (const juce::String& title, const juce::String& message)
+    : DocumentWindow (title, juce::Colour::fromRGB (45, 45, 48),
+                      DocumentWindow::allButtons)
+{
+    msgLabel.setFont (12.0f);
+    msgLabel.setJustificationType (juce::Justification::centredLeft);
+    msgLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+    msgLabel.setText (message, juce::dontSendNotification);
+
+    okBtn.setButtonText ("OK");
+    cancelBtn.setButtonText ("Cancel");
+    okBtn.onClick = [this] { if (onOk) onOk (); exitModalState (1); };
+    cancelBtn.onClick = [this] { exitModalState (-1); };
+
+    juce::Component::addAndMakeVisible (&msgLabel);
+    juce::Component::addAndMakeVisible (&okBtn);
+    juce::Component::addAndMakeVisible (&cancelBtn);
+}
+
+juce::TextEditor* ManualAlignWindow::addRow (const juce::String& label,
+                                             const juce::String& tooltip,
+                                             const juce::String& initial)
+{
+    auto* lbl = new juce::Label ();
+    lbl->setFont (12.0f);
+    lbl->setJustificationType (juce::Justification::centredLeft);
+    lbl->setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+    lbl->setText (label, juce::dontSendNotification);
+
+    auto* ed = new juce::TextEditor ();
+    ed->setFont (12.0f);
+    ed->setColour (juce::TextEditor::backgroundColourId, juce::Colour::fromRGB (38, 38, 42));
+    ed->setColour (juce::TextEditor::textColourId, juce::Colours::lightgrey);
+    ed->setText (initial, juce::dontSendNotification);
+    // Let Enter/Escape reach the OK/Cancel shortcuts even while a field has
+    // keyboard focus.
+    ed->setEscapeAndReturnKeysConsumed (false);
+
+    if (!tooltip.isEmpty ())
+    {
+        lbl->setTooltip (tooltip);
+        ed->setTooltip (tooltip);
+    }
+
+    juce::Component::addAndMakeVisible (lbl);
+    juce::Component::addAndMakeVisible (ed);
+    rows_.push_back ({ lbl, ed });
+    return ed;
+}
+
+juce::String ManualAlignWindow::rowText (int i) const
+{
+    if (i < 0 || i >= (int) rows_.size () || rows_[(size_t) i].editor == nullptr)
+        return juce::String ();
+    return rows_[(size_t) i].editor->getText ();
+}
+
+void ManualAlignWindow::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+}
+
+void ManualAlignWindow::resized()
+{
+    auto r = getLocalBounds ();
+
+    // Bottom button row.
+    const int btnH = 26;
+    auto bot = r.removeFromBottom (btnH + 10);
+    okBtn.setBounds (bot.getRight () - 74, 0, 68, btnH);
+    cancelBtn.setBounds (okBtn.getX () - 8 - 78, 0, 78, btnH);
+
+    // Message area at the top.
+    auto msgArea = r.removeFromTop (34);
+    msgLabel.setBounds (msgArea.withTrimmedLeft (10).withTrimmedRight (10));
+
+    // Labeled field rows: label on the left, editor on the right.
+    const int rowPitch = 27;
+    const int lblW = 158;
+    auto area = r.withTrimmedLeft (10).withTrimmedRight (10);
+    for (size_t i = 0; i < rows_.size (); ++i)
+    {
+        auto rowRect = juce::Rectangle<int> (area.getX(),
+                                             area.getY() + (int) i * rowPitch,
+                                             area.getWidth(), 22);
+        if (rows_[(size_t) i].label != nullptr)
+            rows_[(size_t) i].label->setBounds (rowRect.removeFromLeft (lblW));
+        if (rows_[(size_t) i].editor != nullptr)
+            rows_[(size_t) i].editor->setBounds (rowRect);
+    }
+}
+
+bool ManualAlignWindow::keyPressed (const juce::KeyPress& k)
+{
+    // Enter accepts, Escape cancels - even while a field has focus (the
+    // editors do not consume those keys).
+    if (k.isKeyCode (juce::KeyPress::returnKey))
+    {
+        if (onOk) onOk ();
+        exitModalState (1);
+        return true;
+    }
+    if (k.getKeyCode () == juce::KeyPress::escapeKey)
+    {
+        exitModalState (-1);
+        return true;
+    }
+    return DocumentWindow::keyPressed (k);
+}
+
+void ManualAlignWindow::userTriedToCloseWindow()
+{
+    exitModalState (-1);
+}
+
 void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam, int targetView)
 {
     auto* d = app.doc ();
     if (d == nullptr || scopeTable < 0 || scopeTable >= (int) d->tables.size ()) return;
     const bool paramLevel = scopeParam >= 0;
 
-    auto* w = new juce::AlertWindow (juce::String ("Align ") + (paramLevel ? "Parameter" : "Table"),
-                                     juce::String ("Time mapping: doc time = offset + scale x table time.\n")
-                                     + (paramLevel
-                                        ? "The value fields are applied after the transforms\n(normalized / inverted / absolute take 0 or 1)."
-                                        : ""),
-                                     juce::AlertWindow::QuestionIcon, this);
-
     auto& t = d->tables[(size_t) scopeTable];
     sc::tables::ParamData* p = paramLevel && scopeParam < (int) t.params.size()
                                ? &t.params[(size_t) scopeParam] : nullptr;
-
-    // Explanatory labels: each text box is described by the label above it.
-    static const juce::String lblOff   = "Time offset (seconds): shift along the timeline (+ = later)";
-    static const juce::String lblScale = "Time scale: stretch factor of table time relative to doc time";
-    static const juce::String lblNorm  = "Normalized 0/1: map values into their own 0..1 range";
-    static const juce::String lblInv   = "Inverted 0/1: flip the values around zero";
-    static const juce::String lblAbs   = "Absolute 0/1: use the absolute value of every sample";
-    static const juce::String lblVOff  = "Value offset: added to every value after the transforms";
-    static const juce::String lblVScl  = "Value scale: multiplied with every value after the transforms";
 
     // Time alignment is shared at the table level, so a parameter dialog shows
     // (and edits) its effective map - the one actually used for drawing.
     const double showOff = p != nullptr ? t.offsetSecs + p->offsetSecs : t.offsetSecs;
     const double showSc  = p != nullptr ? t.scaleTime * p->scaleTime   : t.scaleTime;
 
-    w->addTextEditor (lblOff, juce::String (showOff, 4));
-    w->addTextEditor (lblScale, juce::String (showSc, 4));
+    auto* w = new ManualAlignWindow (
+        juce::String ("Align ") + (paramLevel ? "Parameter" : "Table"),
+        paramLevel
+            ? "Time mapping is shared by all three display modes of this table.\n"
+              "Each mode has its own vertical value offset/scale.\n"
+              "(normalized / inverted / absolute take 0 or 1)"
+            : "doc time = offset + scale x table time.\n"
+              "Time alignment is shared by every parameter of this table.");
+
+    w->addRow ("Time offset (s)",
+               "Shift along the timeline: doc time = offset + scale x table time (+ = later). Shared by all three display modes.",
+               juce::String (showOff, 4));
+    w->addRow ("Time scale",
+               "Stretch factor of table time relative to doc time (must be > 0). Shared by all three display modes.",
+               juce::String (showSc, 4));
+
     if (paramLevel && p != nullptr)
     {
-        w->addTextEditor (lblNorm, p->normalized ? "1" : "0");
-        w->addTextEditor (lblInv, p->inverted ? "1" : "0");
-        w->addTextEditor (lblAbs, p->absolute ? "1" : "0");
-        w->addTextEditor (lblVOff, juce::String (p->valueOffset, 4));
-        w->addTextEditor (lblVScl, juce::String (p->valueScale, 4));
+        w->addRow ("Normalized (0/1)",
+                   "Map the parameter into its own 0..1 range before scaling.",
+                   p->normalized ? "1" : "0");
+        w->addRow ("Inverted (0/1)",
+                   "Flip the values around zero.",
+                   p->inverted ? "1" : "0");
+        w->addRow ("Absolute (0/1)",
+                   "Use the absolute value of every sample.",
+                   p->absolute ? "1" : "0");
+
+        struct ModeInfo { const char* name; int target; };
+        static const ModeInfo modes[3] = {
+            { "Waveform", 0 }, { "Spectrogram", 1 }, { "Dedicated track", 2 }
+        };
+        for (const auto& mi : modes)
+        {
+            w->addRow (juce::String (mi.name) + ": value offset",
+                       juce::String (mi.name) + ": added to every fitted value after the transforms.",
+                       juce::String (p->valueOffset[mi.target], 4));
+            w->addRow (juce::String (mi.name) + ": value scale",
+                       juce::String (mi.name) + ": multiplied with every fitted value after the transforms.",
+                       juce::String (p->valueScale[mi.target], 4));
+        }
     }
 
-    juce::String names[7] = { lblOff, lblScale, "", "",
-                              "", "", "" };
-    if (paramLevel && p != nullptr)
+    // Size the window from its rows: message area + row pitch per field + buttons.
+    const int contentH = 34 + w->numRows () * 27 + 10 + 26;
+    w->setSize (356, contentH);
+    w->setResizable (false, false);
+
+    bool okPressed = false;
+    w->onOk = [&okPressed] { okPressed = true; };
+    w->enterModalState (false);
+    // Child order: message, OK, Cancel, then label/editor pairs per row -
+    // focus the first editor so a plain Enter accepts the defaults.
+    if (w->getNumChildComponents () > 4)
     {
-        static const juce::String extra[] = { lblNorm, lblInv, lblAbs, lblVOff, lblVScl };
-        for (int i = 0; i < 5; ++i) names[2 + i] = extra[i];
+        auto* first = dynamic_cast<juce::TextEditor*> (w->getChildComponent (4));
+        if (first != nullptr) first->grabKeyboardFocus();
     }
-    for (size_t i = 0; i < (paramLevel && p != nullptr ? 7 : 2); ++i)
-        if (auto* ed = w->getTextEditor (names[i]))
-            ed->setEscapeAndReturnKeysConsumed (false);
+    const int result = w->runModalLoop ();
 
-    w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
-    w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
-
-    const int result = w->runModalLoop();
     if (result == 1)
     {
         double off = 0.0, sc = 1.0;
-        tablesParseDouble (w->getTextEditorContents (lblOff), off);
-        tablesParseDouble (w->getTextEditorContents (lblScale), sc);
+        tablesParseDouble (w->rowText (0), off);
+        tablesParseDouble (w->rowText (1), sc);
         if (!(sc > 0.0)) sc = 1.0;
 
         // Time alignment is shared at the table level: applying it to any row
@@ -9868,12 +10003,21 @@ void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam, int tar
             // parameter (waveform / spectrogram) or only the dedicated track.
             p->alignTarget = std::clamp (targetView, 0, 2);
             double v = 0.0;
-            tablesParseDouble (w->getTextEditorContents (lblNorm), v); p->normalized = v != 0.0;
-            tablesParseDouble (w->getTextEditorContents (lblInv), v);     p->inverted    = v != 0.0;
-            tablesParseDouble (w->getTextEditorContents (lblAbs), v);     p->absolute    = v != 0.0;
-            tablesParseDouble (w->getTextEditorContents (lblVOff), v);       p->valueOffset = v;
-            double vs = 1.0;
-            if (tablesParseDouble (w->getTextEditorContents (lblVScl), vs)) p->valueScale = vs;
+            tablesParseDouble (w->rowText (2), v); p->normalized = v != 0.0;
+            tablesParseDouble (w->rowText (3), v); p->inverted   = v != 0.0;
+            tablesParseDouble (w->rowText (4), v); p->absolute   = v != 0.0;
+
+            // Per-display-mode vertical maps: rows 5..10 are the offset/scale
+            // pairs for Waveform, Spectrogram and Dedicated track in order.
+            for (int i = 0; i < 3; ++i)
+            {
+                double vo = 0.0;
+                tablesParseDouble (w->rowText (5 + i * 2), vo);
+                p->valueOffset[i] = vo;
+                double vs = 1.0;
+                if (tablesParseDouble (w->rowText (6 + i * 2), vs))
+                    p->valueScale[i] = vs;
+            }
         }
     }
     delete w;
@@ -9933,10 +10077,11 @@ void TablesPanel::handlePlotClick (double tTableSecs)
     updateStatus ();
 }
 
-void TablesPanel::handleDocClick (double tDocSecs)
+void TablesPanel::handleDocClick (double tDocSecs, double docValue)
 {
     if (!havePending_ || pending_.tablePts.size() < (size_t) pending_.numPoints) return;
     pending_.docPts.push_back (tDocSecs);
+    pending_.docVals.push_back (docValue);
     if ((int) pending_.docPts.size() < pending_.numPoints)
     {
         updateStatus ();
@@ -9968,6 +10113,28 @@ void TablesPanel::handleDocClick (double tDocSecs)
             q.offsetSecs = 0.0;
             q.scaleTime = 1.0;
         }
+
+        // Vertical part (two points only): solve the target mode's value
+        // scale/offset so the fitted values at the two table points land on
+        // the clicked doc-side positions - instead of staying full-scale.
+        if (pending_.numPoints == 2 && pi >= 0 && pi < (int) t.params.size())
+        {
+            auto& pp = t.params[(size_t) pi];
+            double mn = pp.values[0], mx = pp.values[0];
+            for (double v : pp.values)
+            { mn = std::min (mn, v); mx = std::max (mx, v); }
+            const double f1 = sc::tables::fittedOverlayValue (
+                sc::tables::paramValueAt (t, pp, pending_.tablePts[0]), pp, mn, mx);
+            const double f2 = sc::tables::fittedOverlayValue (
+                sc::tables::paramValueAt (t, pp, pending_.tablePts[1]), pp, mn, mx);
+            const int tgt = std::clamp (pending_.targetView, 0, 1);
+            if (!sc::tables::solveValueMap (f1, f2,
+                                            pending_.docVals[0], pending_.docVals[1],
+                                            pp.valueScale[tgt], pp.valueOffset[tgt]))
+                // Degenerate: keep the current scale and land point one exactly.
+                pp.valueOffset[tgt] = pending_.docVals[0] - pp.valueScale[tgt] * f1;
+        }
+
         if (pi >= 0 && pi < (int) t.params.size())
             t.params[(size_t) pi].alignTarget = pending_.targetView;
     }

@@ -71,10 +71,18 @@ int TablesTrackView::yForValue (double v) const
     return (int) std::lround ((double) pr.getY() + frac * (double) pr.getHeight());
 }
 
+double TablesTrackView::timeAtX (int x) const
+{
+    const auto pr = plotRect();
+    if (t1 <= t0 || pr.getWidth () <= 0) return t0;
+    return t0 + ((double) x - (double) pr.getX ()) / (double) pr.getWidth () * (t1 - t0);
+}
+
 void TablesTrackView::refit()
 {
-    // Auto-scale: the visible window spans all raw values of every visible
-    // parameter, padded by 10% on each side.
+    // Auto-scale: the visible window spans all values of every visible
+    // parameter after its dedicated-track mapping (valueScale[2]/valueOffset[2]),
+    // padded by 10% on each side.
     double mn = 0.0, mx = 0.0;
     bool have = false;
     for (const auto& t : app.activeTables())
@@ -83,8 +91,13 @@ void TablesTrackView::refit()
         for (const auto& p : t.params)
         {
             if (!p.visible || p.values.empty()) continue;
-            double lo = p.values[0], hi = p.values[0];
-            for (double v : p.values) { lo = std::min (lo, v); hi = std::max (hi, v); }
+            double lo = sc::tables::dedicatedValue (p.values[0], p), hi = lo;
+            for (double v : p.values)
+            {
+                const double m = sc::tables::dedicatedValue (v, p);
+                lo = std::min (lo, m);
+                hi = std::max (hi, m);
+            }
             if (!have) { mn = mx = lo; have = true; }
             mn = std::min (mn, lo);
             mx = std::max (mx, hi);
@@ -136,8 +149,10 @@ void TablesTrackView::paint (juce::Graphics& g)
                                              : juce::Justification::left, true);
     }
 
-    // One curve per visible parameter (raw values through the effective time
-    // map; value transforms are NOT applied here - this is the unscaled view).
+    // One curve per visible parameter: raw values through the effective time
+    // map and the dedicated-track value mapping (valueScale[2]/valueOffset[2]).
+    // The overlay transforms (normalized/inverted/absolute) are NOT applied -
+    // this is the unscaled view.
     for (const auto& t : app.activeTables())
     {
         if (!t.visible) continue;
@@ -153,7 +168,8 @@ void TablesTrackView::paint (juce::Graphics& g)
                 const double tDoc = t0 + ((double) i / (double) pr.getWidth()) * (t1 - t0);
                 const double tTab = (tDoc - off) / sc;
                 if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
-                const double v = sc::tables::paramValueAt (t, p, tTab);
+                const double v = sc::tables::dedicatedValue (
+                    sc::tables::paramValueAt (t, p, tTab), p);
                 const int y = yForValue (v);
                 const float x = (float) (pr.getX() + i) + 0.5f;
                 if (!started) { path.startNewSubPath (x, (float) y); started = true; }
@@ -165,7 +181,8 @@ void TablesTrackView::paint (juce::Graphics& g)
     }
 
     // Blue time-selection band: the same translucent blue as the waveform and
-    // spectral views, spanning the whole strip height.
+    // spectral views, spanning the whole strip height, with light-blue edge
+    // lines like those views.
     if (!app.selection.isEmpty() && t1 > t0)
     {
         const double x1 = pr.getX() + (app.selection.getStart () - t0) / (t1 - t0) * pr.getWidth();
@@ -176,6 +193,13 @@ void TablesTrackView::paint (juce::Graphics& g)
         {
             g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
             g.fillRect (lo, 0.0f, hi - lo, (float) getHeight());
+            // Edge lines clipped to the plot so edges before the visible
+            // window don't paint over the value axis.
+            const juce::Graphics::ScopedSaveState save (g);
+            g.reduceClipRegion (pr);
+            g.setColour (juce::Colour::fromRGB (96, 150, 255));
+            g.drawVerticalLine ((float) x1, 0.0f, (float) getHeight());
+            g.drawVerticalLine ((float) x2, 0.0f, (float) getHeight());
         }
     }
 
@@ -237,12 +261,23 @@ void TablesTrackView::mouseDown (const juce::MouseEvent& e)
         return;   // right-button never pans
     }
 
-    // Left button: vertical pan (middle/right do nothing here).
+    // Left button: time selection in the data area (like the waveform),
+    // vertical pan on the value-axis strip.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown())
     {
-        dragMode = DragMode::VPan;
+        dragMode = onAxisX (e.x) ? DragMode::VPan : DragMode::Select;
         dragVMin = vMin;
         dragVMax = vMax;
+        return;
+    }
+
+    // Middle button: horizontal time pan of the shared window.
+    if (e.mods.isMiddleButtonDown() && !e.mods.isLeftButtonDown()
+        && !e.mods.isRightButtonDown())
+    {
+        dragMode = DragMode::HPan;
+        dragT0 = t0;
+        dragT1 = t1;
         return;
     }
 
@@ -262,6 +297,28 @@ void TablesTrackView::mouseDrag (const juce::MouseEvent& e)
             const auto pr = plotRect();
             const double dv = ((double) dragStartY - (double) e.y) * (vMax - vMin) / pr.getHeight();
             applyValueWindow (dragVMin + dv, dragVMax + dv);
+            break;
+        }
+
+        case DragMode::Select:
+        {
+            // Live time selection while dragging; setSelection() notifies the
+            // UI so every view shows the band.
+            if (t1 > t0)
+                app.setSelection ({ std::min (timeAtX (dragStartX), timeAtX (e.x)),
+                                    std::max (timeAtX (dragStartX), timeAtX (e.x)) });
+            break;
+        }
+
+        case DragMode::HPan:
+        {
+            // Horizontal pan: dragging left moves the window forward in time.
+            const auto pr = plotRect();
+            if (onTimeWindow && t1 > t0)
+            {
+                const double dt = ((double) dragStartX - (double) e.x) * (t1 - t0) / pr.getWidth ();
+                onTimeWindow (dragT0 + dt, dragT1 + dt);
+            }
             break;
         }
 
@@ -306,7 +363,7 @@ void TablesTrackView::mouseDrag (const juce::MouseEvent& e)
     }
 }
 
-void TablesTrackView::mouseUp (const juce::MouseEvent&)
+void TablesTrackView::mouseUp (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded())
     {
@@ -353,6 +410,31 @@ void TablesTrackView::mouseUp (const juce::MouseEvent&)
                     applyValueWindow (bot, top);
                 else
                     repaint();
+            }
+            break;
+        }
+
+        case DragMode::Select:
+        {
+            if (t1 > t0)
+            {
+                const double a = timeAtX (dragStartX);
+                const double b = timeAtX (e.x);
+                if (std::abs (b - a) <= 1e-9 || std::abs (e.x - dragStartX) < 4)
+                    app.setSelection ({ 0, 0 });   // plain click clears it
+                else
+                    app.setSelection ({ std::min (a, b), std::max (a, b) });
+            }
+            break;
+        }
+
+        case DragMode::HPan:
+        {
+            const auto pr = plotRect();
+            if (onTimeWindow && t1 > t0)
+            {
+                const double dt = ((double) dragStartX - (double) e.x) * (t1 - t0) / pr.getWidth ();
+                onTimeWindow (dragT0 + dt, dragT1 + dt);
             }
             break;
         }
@@ -455,7 +537,7 @@ void TablesTrackView::collectHoverLabels (int mouseX, int mouseY)
             const double tTab = (tDoc - off) / sc;
             if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) continue;
             const double vRaw = sc::tables::paramValueAt (t, p, tTab);   // unscaled value
-            const int y = yForValue (vRaw);
+            const int y = yForValue (sc::tables::dedicatedValue (vRaw, p));
             if (std::abs ((float) y - (float) mouseY) <= 8.0f)
                 hits.push_back ({ (float) y, p.name + "  " + juce::String (vRaw, 4),
                                   sc::tables::kPalette[p.colorIndex % 12] });

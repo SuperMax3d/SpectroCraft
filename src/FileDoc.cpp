@@ -91,9 +91,10 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
     else if (scmdB.haveDrawings)
         drawings = scmdB.drawings;
 
-    // Tables: unified > SCMD (same precedence as the drawings).
+    // Tables: unified > SCMD (same precedence as the drawings). The default
+    // display mode is the dedicated track.
     tables.clear ();
-    tablesMode = 0;
+    tablesMode = 2;
     if (unifiedB.haveTables)
     {
         tables     = unifiedB.tables;

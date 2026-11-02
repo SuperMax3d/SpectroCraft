@@ -1870,9 +1870,12 @@ public:
     bool hasPendingAlignment() const { return havePending_; }
     void cancelPendingAlignment();
     /** Clicks arriving from the preview plot / waveform / spectrogram while a
-        click-based alignment is pending. */
+        click-based alignment is pending. docValue is the clicked position in
+        the target view's value domain (amplitude units for the waveform,
+        fitted [-1,+1] units for the spectrogram) and drives the vertical
+        mapping of two-point alignments. */
     void handlePlotClick (double tTableSecs);
-    void handleDocClick (double tDocSecs);
+    void handleDocClick (double tDocSecs, double docValue);
 
     // Right-click context menu on rows.
     void mouseDown (const juce::MouseEvent&) override;
@@ -1927,7 +1930,7 @@ private:
         int numPoints = 0;
         int scopeTable = -1, scopeParam = -1;   // scopeParam<0 = table level
         int targetView = 0;                     // 0=waveform 1=spectrogram
-        std::vector<double> tablePts, docPts;
+        std::vector<double> tablePts, docPts, docVals;
     };
     PendingAlign pending_;
     bool havePending_ = false;
@@ -2202,6 +2205,38 @@ private:
     void showContextMenu ();
 
     JUCE_DECLARE_NON_COPYABLE (ActionsPanel)
+};
+
+// ------------------------------------------- Manual alignment dialog window
+// Labeled rows (label left, text editor right) with a tooltip on every field
+// explaining its purpose. Time fields are shared by all three display modes;
+// the value offset/scale pairs are independent per mode.
+class ManualAlignWindow : public juce::DocumentWindow
+{
+public:
+    explicit ManualAlignWindow (const juce::String& title, const juce::String& message);
+
+    /** Adds a labeled field row; returns its text editor. */
+    juce::TextEditor* addRow (const juce::String& label,
+                              const juce::String& tooltip,
+                              const juce::String& initial);
+
+    int numRows() const { return (int) rows_.size(); }
+    juce::String rowText (int i) const;
+
+    std::function<void()> onOk;             // fires before the modal loop exits
+    std::function<void()> onCloseRequested; // window button / Escape
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    bool keyPressed (const juce::KeyPress&) override;   // this JUCE build spells it with a D
+    void userTriedToCloseWindow() override;
+
+private:
+    struct Row { juce::Label* label = nullptr; juce::TextEditor* editor = nullptr; };
+    juce::Label msgLabel;
+    juce::TextButton okBtn, cancelBtn;
+    std::vector<Row> rows_;
 };
 
 // ------------------------------------------------- Action JSON edit window

@@ -20,8 +20,11 @@ struct ParamData
     int alignTarget = 0;         // 0=Waveform 1=Spectrogram 2=Dedicated
     double offsetSecs = 0.0;     // time alignment: docTime = off + scale*tTable
     double scaleTime = 1.0;      //   (composed with the table's own values)
-    double valueOffset = 0.0;    // value mapping applied after the transforms
-    double valueScale = 1.0;
+    // Vertical value mapping, independent per display mode:
+    // [0]=Waveform overlay, [1]=Spectrogram overlay, [2]=Dedicated track.
+    // Horizontal (time) alignment stays shared across all three modes.
+    double valueOffset [3] = { 0.0, 0.0, 0.0 };
+    double valueScale  [3] = { 1.0, 1.0, 1.0 };
     bool normalized = false;     // map to [0,1] over the parameter's range
     bool inverted = false;       // negate
     bool absolute = false;       // absolute value
@@ -128,15 +131,35 @@ void warpTableForStretch   (TableData& t, double a, double bOld, double bNew);
 // ------------------------------------------------------------- Value maps --
 
 /** Applies the parameter's value transforms in order: normalized -> inverted
-    -> absolute, then valueScale*v + valueOffset. `minV`/`maxV` are the raw
-    range of the whole parameter (for normalization). */
-double transformValue (double v, const ParamData& p, double minV, double maxV);
+    -> absolute, then valueScale[target]*v + valueOffset[target]. `minV`/
+    `maxV` are the raw range of the whole parameter (for normalization).
+    target: 0=Waveform overlay, 1=Spectrogram overlay, 2=Dedicated track. */
+double transformValue (double v, const ParamData& p, double minV, double maxV,
+                       int target);
 
 /** Value used by the waveform/spectrogram overlays: the raw value is first
     fitted into [-1,+1] over its own range (so a curve is visible regardless
-    of the data's units), then inverted/absolute/valueScale/valueOffset are
-    applied. The normalized flag is ignored - fitting already happened. */
-double overlayValue (double v, const ParamData& p, double minV, double maxV);
+    of the data's units), then inverted/absolute are applied and finally the
+    per-target valueScale[target]/valueOffset[target]. The normalized flag is
+    ignored - fitting already happened. */
+double overlayValue (double v, const ParamData& p, double minV, double maxV,
+                     int target);
+
+/** The fitted value before the user's per-target scale/offset: what
+    overlayValue() returns with scale=1 and offset=0 for `target`. Used by
+    two-point alignment to solve the vertical mapping. */
+double fittedOverlayValue (double v, const ParamData& p, double minV, double maxV);
+
+/** Value plotted on the dedicated track: the raw value through that mode's
+    own linear map (valueScale[2]*v + valueOffset[2]). No fitting - the track
+    has its own auto-scaled axis. */
+double dedicatedValue (double v, const ParamData& p);
+
+/** Solves scale/offset so that fitted values f1/f2 land on doc-side values
+    v1/v2:  v = scale*f + offset. Returns false when the two fitted values are
+    indistinguishable (then only an offset could be solved). */
+bool solveValueMap (double f1, double f2, double v1, double v2,
+                    double& scale, double& offset);
 
 /** Raw (unscaled) value of a parameter at table time tSecs by linear
     interpolation; 0 outside [0, duration]. */

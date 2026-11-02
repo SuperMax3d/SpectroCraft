@@ -22513,15 +22513,19 @@ static void testTransportRecordingMenu()
     }
     CHECK (tickedFirst && !anyOtherTicked, "the selected device is the only ticked entry");
 
-    // F10 starts/stops recording from the main window's key handler.
+    // Shift+F10 starts/stops recording from the main window's key handler;
+    // plain F10 must be ignored.
     app.recording.channels = 2;
     app.recording.rate     = 8000.0;   // match the fake device
-    CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key), nullptr),
-          "F10 is handled by the main window");
-    CHECK (app.recording.active, "F10 started a recording session");
-    CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key), nullptr),
-          "second F10 press is handled");
-    CHECK (!app.recording.active, "F10 stopped the session");
+    CHECK (!win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key), nullptr),
+          "plain F10 is not handled by the main window");
+    CHECK (!app.recording.active, "plain F10 did not start a recording session");
+    CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key, juce::ModifierKeys::shiftModifier, 0), nullptr),
+          "Shift+F10 is handled by the main window");
+    CHECK (app.recording.active, "Shift+F10 started a recording session");
+    CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key, juce::ModifierKeys::shiftModifier, 0), nullptr),
+          "second Shift+F10 press is handled");
+    CHECK (!app.recording.active, "Shift+F10 stopped the session");
 }
 
 // ==================================================== Zoom Fit auto mode
@@ -22887,24 +22891,27 @@ static void testTablesDownsampleAndTransforms()
         ParamData p;
         const double minV = 0.0, maxV = 10.0;
 
-        CHECK (std::abs (transformValue (5.0, p, minV, maxV) - 5.0) < 1e-9, "identity by default");
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV, 0) - 5.0) < 1e-9, "identity by default");
 
         p.normalized = true;
-        CHECK (std::abs (transformValue (5.0, p, minV, maxV) - 0.5) < 1e-9, "normalized to [0,1]");
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV, 0) - 0.5) < 1e-9, "normalized to [0,1]");
 
         p.inverted = true;
-        CHECK (std::abs (transformValue (5.0, p, minV, maxV) + 0.5) < 1e-9, "inversion after normalize");
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV, 0) + 0.5) < 1e-9, "inversion after normalize");
 
         p.absolute = true;
-        CHECK (std::abs (transformValue (5.0, p, minV, maxV) - 0.5) < 1e-9, "absolute after inversion");
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV, 0) - 0.5) < 1e-9, "absolute after inversion");
 
-        p.valueScale = 2.0; p.valueOffset = 1.0;
-        CHECK (std::abs (transformValue (5.0, p, minV, maxV) - 2.0) < 1e-9, "scale+offset last");
+        // Per-target maps: only the waveform target is scaled here.
+        p.valueScale[0] = 2.0; p.valueOffset[0] = 1.0;
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV, 0) - 2.0) < 1e-9, "scale+offset last");
+        CHECK (std::abs (transformValue (5.0, p, minV, maxV, 1) - 0.5) < 1e-9,
+              "other targets keep their own (default) map");
 
         // Degenerate range: normalized with min==max maps to 0.
         ParamData q;
         q.normalized = true;
-        CHECK (transformValue (3.0, q, 7.0, 7.0) == 0.0, "flat range normalizes to zero");
+        CHECK (transformValue (3.0, q, 7.0, 7.0, 2) == 0.0, "flat range normalizes to zero");
     }
 
     // --- paramValueAt: linear interpolation in table time ----------------------
@@ -22992,8 +22999,10 @@ static void testTablesSerialiseParse()
     p.alignTarget = 1;
     p.offsetSecs = -0.25;
     p.scaleTime = 4.0;
-    p.valueOffset = 2.0;
-    p.valueScale = 3.0;
+    // Per-target vertical maps: distinct values per display mode.
+    p.valueOffset[0] = 2.0;  p.valueScale[0] = 3.0;   // waveform
+    p.valueOffset[1] = -1.5; p.valueScale[1] = 0.5;   // spectrogram
+    p.valueOffset[2] = 7.0;  p.valueScale[2] = 4.0;   // dedicated track
     p.normalized = true;
     p.inverted = false;
     p.absolute = true;
@@ -23025,8 +23034,11 @@ static void testTablesSerialiseParse()
             const auto& bp = bt.params[0];
             CHECK (bp.name == "P1" && bp.alignTarget == 1 && bp.colorIndex == 9, "param fields survive");
             CHECK (std::abs (bp.offsetSecs + 0.25) < 1e-9 && std::abs (bp.scaleTime - 4.0) < 1e-9
-                  && std::abs (bp.valueOffset - 2.0) < 1e-9 && std::abs (bp.valueScale - 3.0) < 1e-9,
+                  && std::abs (bp.valueOffset[0] - 2.0) < 1e-9 && std::abs (bp.valueScale[0] - 3.0) < 1e-9,
                   "param alignment survives");
+            CHECK (std::abs (bp.valueOffset[1] + 1.5) < 1e-9 && std::abs (bp.valueScale[1] - 0.5) < 1e-9
+                  && std::abs (bp.valueOffset[2] - 7.0) < 1e-9 && std::abs (bp.valueScale[2] - 4.0) < 1e-9,
+                  "per-target value maps survive independently");
             CHECK (bp.normalized && !bp.inverted && bp.absolute, "transform flags survive");
             CHECK (bp.values.size() == 16 && std::abs (bp.values[7] - 3.5) < 1e-9, "values survive");
 
@@ -23194,24 +23206,51 @@ static void testTablesOverlayAndPicker()
     // --- overlayValue: fit to [-1,+1], then inverted/absolute/scale+offset --
     {
         ParamData p;
-        CHECK (std::abs (overlayValue (5.0, p, 0.0, 10.0)) < 1e-9, "midpoint fits to zero");
-        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0) - 1.0) < 1e-9, "max fits to +1");
-        CHECK (std::abs (overlayValue (0.0, p, 0.0, 10.0) + 1.0) < 1e-9, "min fits to -1");
+        CHECK (std::abs (overlayValue (5.0, p, 0.0, 10.0, 0)) < 1e-9, "midpoint fits to zero");
+        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0, 0) - 1.0) < 1e-9, "max fits to +1");
+        CHECK (std::abs (overlayValue (0.0, p, 0.0, 10.0, 0) + 1.0) < 1e-9, "min fits to -1");
 
         p.inverted = true;
-        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0) + 1.0) < 1e-9, "inversion flips the fit");
+        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0, 0) + 1.0) < 1e-9, "inversion flips the fit");
 
         p.inverted = false;
         p.absolute = true;
-        CHECK (std::abs (overlayValue (0.0, p, 0.0, 10.0) - 1.0) < 1e-9, "absolute folds the negative side");
+        CHECK (std::abs (overlayValue (0.0, p, 0.0, 10.0, 0) - 1.0) < 1e-9, "absolute folds the negative side");
 
         p.absolute = false;
-        p.valueScale = 2.0;
-        p.valueOffset = 0.5;
-        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0) - 2.5) < 1e-9, "scale+offset applied last");
+        // Per-target maps: waveform scaled, spectrogram untouched.
+        p.valueScale[0] = 2.0;
+        p.valueOffset[0] = 0.5;
+        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0, 0) - 2.5) < 1e-9, "scale+offset applied last");
+        CHECK (std::abs (overlayValue (10.0, p, 0.0, 10.0, 1) - 1.0) < 1e-9,
+              "spectrogram target keeps its own map");
 
         ParamData flat;
-        CHECK (overlayValue (3.0, flat, 7.0, 7.0) == 0.0, "flat range fits to zero");
+        CHECK (overlayValue (3.0, flat, 7.0, 7.0, 2) == 0.0, "flat range fits to zero");
+    }
+
+    // --- fittedOverlayValue / dedicatedValue / solveValueMap ------------------
+    {
+        ParamData p;
+        p.inverted = true;   // fit(10)=+1 -> inverted -1
+        CHECK (std::abs (fittedOverlayValue (10.0, p, 0.0, 10.0) + 1.0) < 1e-9,
+              "fitted value applies the transforms without scale/offset");
+        CHECK (std::abs (fittedOverlayValue (5.0, p, 0.0, 10.0)) < 1e-9,
+              "midpoint fits to zero before inversion");
+
+        // dedicatedValue: raw value through the dedicated-track map only.
+        ParamData q;
+        CHECK (dedicatedValue (3.0, q) == 3.0, "identity by default");
+        q.valueScale[2] = 2.0; q.valueOffset[2] = -1.0;
+        CHECK (std::abs (dedicatedValue (3.0, q) - 5.0) < 1e-9, "scale+offset on raw value");
+
+        // solveValueMap: v' = scale*f + offset through two points.
+        double s = 0.0, o = 0.0;
+        CHECK (solveValueMap (1.0, -1.0, 2.5, -1.5, s, o), "two distinct fitted values solve");
+        // v' = scale*f + offset:  f=+1 -> 2.5 and f=-1 -> -1.5 give scale=2, offset=+0.5
+        CHECK (std::abs (s - 2.0) < 1e-9 && std::abs (o - 0.5) < 1e-9,
+              "solved map lands both clicked points exactly");
+        CHECK (!solveValueMap (0.5, 0.5, 1.0, 2.0, s, o), "degenerate pair is rejected");
     }
 
     // --- Unique parameter colours within one table ---------------------------
@@ -23363,7 +23402,7 @@ static void testTablesAlignTarget()
     panel.startPointAlign (1, 0, 0, 1);
     CHECK (panel.hasPendingAlignment(), "pending after startPointAlign");
     panel.handlePlotClick (0.1);     // table time of the plot click
-    panel.handleDocClick (0.3);      // doc time in the spectrogram
+    panel.handleDocClick (0.3, 0.5); // doc time + clicked value in the spectrogram
     CHECK (!panel.hasPendingAlignment(), "alignment completed");
     CHECK (p0.alignTarget == 1, "spectrogram alignment records alignTarget=1");
     const auto [effOff, effSc] = d->tables[0].effectiveTimeMap (p0);
@@ -23403,7 +23442,7 @@ static void testTablesAlignTarget()
     // --- Re-align to the waveform: it must leave the spectrogram overlay ----
     panel.startPointAlign (1, 0, 0, 0);
     panel.handlePlotClick (0.05);
-    panel.handleDocClick (0.1);
+    panel.handleDocClick (0.1, 0.0);
     CHECK (p0.alignTarget == 0, "waveform alignment records alignTarget=0");
 
     {
@@ -23800,7 +23839,7 @@ static void testTablesSharedAlignment()
     // effective offset = 0.3 - 1 * 0.1 = 0.2.
     panel.startPointAlign (1, 0, 0, 0);
     panel.handlePlotClick (0.1);
-    panel.handleDocClick (0.3);
+    panel.handleDocClick (0.3, 0.0);
 
     const auto& t = d->tables[0];
     CHECK (std::abs (t.offsetSecs - 0.2) < 1e-9, "alignment lands on the table's shared offset");
@@ -23820,6 +23859,110 @@ static void testTablesSharedAlignment()
 
     // The aligned parameter's target view is still per-parameter.
     CHECK (t.params[0].alignTarget == 0, "aligned parameter keeps its own align target");
+}
+
+// ---------------- Two-point vertical alignment + dedicated track mouse -----
+// The 2-point flow solves BOTH the shared time map and the target mode's
+// value scale/offset from the clicked doc-side positions. Also covers the
+// dedicated track's left-drag time selection, plain-click clear and
+// middle-drag horizontal pan.
+static void testTablesTwoPointVerticalAlign()
+{
+    const juce::File wav = makeTempFile ("tbl_2pt_v.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate,
+            [] (int, int64_t f, double rate) { return 0.5f; }), "wrote 2pt wav");
+
+    Application app;
+    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    auto* d = app.doc ();
+    CHECK (d != nullptr, "2pt: doc created");
+    if (d == nullptr) { wav.deleteFile(); return; }
+
+    // The default display mode is the dedicated track.
+    CHECK (d->tablesMode == 2, "default tables mode is Dedicated Track");
+
+    std::string err;
+    juce::String csv = "alpha\n";   // ramp 0..10 over 200 rows @ 1000 Hz
+    for (int i = 0; i < 200; ++i)
+        csv += juce::String ((double) i / 199.0 * 10.0, 6) + "\n";
+    CHECK (app.addTableFromCsv ("T2", csv, &err), "ramp imported");
+    auto& p = d->tables[0].params[0];
+
+    TablesPanel panel (app);
+    panel.refresh ();
+
+    // Two-point alignment to the spectrogram: plot clicks at table times
+    // 0.05/0.15, doc clicks at 0.3/0.6 with fitted values 0.2/0.8.
+    // Flow: collect all plot points first, then the matching doc clicks.
+    panel.startPointAlign (2, 0, 0, 1);
+    CHECK (panel.hasPendingAlignment(), "pending after startPointAlign(2)");
+    panel.handlePlotClick (0.05);
+    panel.handlePlotClick (0.15);
+    CHECK (panel.hasPendingAlignment(), "still pending after both plot clicks");
+    panel.handleDocClick (0.3, 0.2);
+    CHECK (panel.hasPendingAlignment(), "still pending after the first doc click");
+    panel.handleDocClick (0.6, 0.8);
+    CHECK (!panel.hasPendingAlignment(), "alignment completed");
+
+    // Time part: shared table map sc=3, off=0.15.
+    const auto [effOff, effSc] = d->tables[0].effectiveTimeMap (p);
+    CHECK (std::abs (effSc - 3.0) < 1e-9 && std::abs (effOff - 0.15) < 1e-9,
+          "two-point time map solved");
+
+    // Vertical part: the spectrogram target's scale/offset land both clicked
+    // points exactly; the other targets stay untouched.
+    double mn = p.values[0], mx = p.values[0];
+    for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
+    const auto& t = d->tables[0];
+    const double r1 = sc::tables::paramValueAt (t, p, 0.05);
+    const double f1 = sc::tables::fittedOverlayValue (r1, p, mn, mx);
+    const double r2 = sc::tables::paramValueAt (t, p, 0.15);
+    const double f2 = sc::tables::fittedOverlayValue (r2, p, mn, mx);
+    double s = 0.0, o = 0.0;
+    CHECK (sc::tables::solveValueMap (f1, f2, 0.2, 0.8, s, o), "solver accepts the pair");
+    CHECK (std::abs (p.valueScale[1] - s) < 1e-9 && std::abs (p.valueOffset[1] - o) < 1e-9,
+          "spectrogram target solved from the two clicks");
+    CHECK (std::abs (sc::tables::overlayValue (r1, p, mn, mx, 1) - 0.2) < 1e-9
+          && std::abs (sc::tables::overlayValue (r2, p, mn, mx, 1) - 0.8) < 1e-9,
+          "solved map reproduces both clicked values");
+    CHECK (std::abs (p.valueScale[0] - 1.0) < 1e-12 && std::abs (p.valueOffset[0]) < 1e-12
+          && std::abs (p.valueScale[2] - 1.0) < 1e-12 && std::abs (p.valueOffset[2]) < 1e-12,
+          "waveform and dedicated targets stay at their defaults");
+
+    // --- Dedicated track: left-drag time selection -------------------------
+    TablesTrackView track (app);
+    track.setSize (300, 80);
+    track.setTimeRange (0.0, 2.0);
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    const int x1 = 60, x2 = 150;
+
+    track.mouseDown (mkMouse (track, x1, 30, lmb));
+    track.mouseDrag (mkMouse (track, x2, 34, lmb));
+    track.mouseUp   (mkMouse (track, x2, 34, lmb));
+    CHECK (!app.selection.isEmpty(), "left-drag created a time selection");
+    const double tSel0 = track.timeAtX (x1), tSel1 = track.timeAtX (x2);
+    CHECK (std::abs (app.selection.getStart () - tSel0) < 1e-9
+          && std::abs (app.selection.getEnd () - tSel1) < 1e-9,
+          "selection spans the dragged time range");
+
+    // A plain click clears it.
+    track.mouseDown (mkMouse (track, x2, 30, lmb));
+    track.mouseUp   (mkMouse (track, x2, 30, lmb));
+    CHECK (app.selection.isEmpty(), "plain click clears the selection");
+
+    // Middle-drag pans the shared time window.
+    const juce::ModifierKeys mmb (juce::ModifierKeys::middleButtonModifier);
+    double winT0 = -1.0, winT1 = -1.0;
+    track.onTimeWindow = [&] (double a, double b) { winT0 = a; winT1 = b; };
+    track.mouseDown (mkMouse (track, 150, 30, mmb));
+    track.mouseDrag (mkMouse (track, 120, 30, mmb));
+    track.mouseUp   (mkMouse (track, 120, 30, mmb));
+    CHECK (std::abs ((winT1 - winT0) - 2.0) < 1e-9, "pan keeps the window width");
+    const double expectShift = track.timeAtX (150) - track.timeAtX (120);
+    CHECK (winT0 > 0.0 && std::abs (winT0 - expectShift) < 1e-9,
+          "dragging left moves the window forward in time");
+
+    wav.deleteFile ();
 }
 
 // ---------------- Live paste crash repro ----------------
@@ -25222,6 +25365,7 @@ static int scRunUnitTestsImpl()
     progress ("tables solo + rename");   testTablesSoloAndRename();
     progress ("tables timeline warp");   testTablesTimelineWarp();
     progress ("tables shared alignment");testTablesSharedAlignment();
+    progress ("tables 2pt vertical align"); testTablesTwoPointVerticalAlign();
     progress ("paste live repro");       testPasteLiveRepro();
     progress ("tables dedicated strip"); testTablesDedicatedStrip();
     progress ("single instance mode");   testSingleInstance();
