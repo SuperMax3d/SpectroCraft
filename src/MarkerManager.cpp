@@ -195,7 +195,17 @@ bool MarkerManager::adjustForInsertion (double t, double lenSecs)
     {
         if (m.end < 0.0)   // point marker at time m.start
         {
-            if (m.start >= t)
+            // A marker sitting on the insertion position stays there: it marks
+            // the start of the inserted data, not its end. The tiny tolerance
+            // absorbs sample-boundary rounding when an edit position is derived
+            // from a sample count (insertPos / rate) rather than the same
+            // seconds double the marker was created with; such markers are
+            // snapped exactly onto t so they stay aligned with the playhead.
+            if (std::abs (m.start - t) <= 1e-4)
+            {
+                if (m.start != t) { m.start = t; changed = true; }
+            }
+            else if (m.start > t)
             { m.start += lenSecs; changed = true; }
         }
         else                // region marker [m.start, m.end]

@@ -129,8 +129,11 @@ bool WhisperTranscriber::transcribe(const float* samples, int nSamples, const Op
     for (int i = 0; i < n; ++i)
     {
         WhisperSegment seg;
-        seg.startSec = (double) rt.segmentT0 (_ctx, i) / 1000.0;
-        seg.endSec   = (double) rt.segmentT1 (_ctx, i) / 1000.0;
+        // b5454 returns segment times in CENTISECONDS (units of 10 ms):
+        // internally seek = offset_ms/10 and each timestamp token step is
+        // 2 units (20 ms). Verified empirically against ground-truth speech.
+        seg.startSec = (double) rt.segmentT0 (_ctx, i) / 100.0;
+        seg.endSec   = (double) rt.segmentT1 (_ctx, i) / 100.0;
         const char* text = rt.segmentText (_ctx, i);
         if (text != nullptr)
             seg.text = trimWhitespace (text);
@@ -196,8 +199,9 @@ bool WhisperTranscriber::transcribeRegion(const float* samples, int nSamples, co
     for (int i = 0; i < n; ++i)
     {
         WhisperSegment seg;
-        seg.startSec = offsetSec + (double) rt.segmentT0 (_ctx, i) / 1000.0;
-        seg.endSec   = offsetSec + (double) rt.segmentT1 (_ctx, i) / 1000.0;
+        // b5454 returns segment times in CENTISECONDS; see the note above.
+        seg.startSec = offsetSec + (double) rt.segmentT0 (_ctx, i) / 100.0;
+        seg.endSec   = offsetSec + (double) rt.segmentT1 (_ctx, i) / 100.0;
         const char* text = rt.segmentText (_ctx, i);
         if (text != nullptr)
             seg.text = trimWhitespace (text);

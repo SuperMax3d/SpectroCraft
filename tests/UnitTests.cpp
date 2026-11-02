@@ -348,6 +348,64 @@ static void testMarkerCsvRoundTrip()
     f2.deleteFile();
 }
 
+// ---------------- Marker insertion adjustment ----------------
+static void testMarkerInsertionAdjust()
+{
+    // A point marker sitting exactly on the insertion position must stay at
+    // its original time (it marks the start of the inserted data, not its
+    // end); markers strictly after it shift by the inserted length.
+    MarkerManager mm;
+    const int atPos   = mm.addPointMarker (10.0, "At");
+    const int before  = mm.addPointMarker (5.0, "Before");
+    const int after   = mm.addPointMarker (12.0, "After");
+    const int regionS = mm.addRegionMarker (8.0, 14.0, "Straddle");
+
+    CHECK (mm.adjustForInsertion (10.0, 3.0), "insertion adjusts markers");
+    const auto& ms = mm.markers();   // sorted by start: Before(5), At(10), Straddle(8)...
+    for (const auto& m : ms)
+    {
+        if (m.id == before)
+            CHECK (std::abs (m.start - 5.0) < 1e-9, "marker before insertion unchanged");
+        else if (m.id == atPos)
+            CHECK (std::abs (m.start - 10.0) < 1e-9,
+                  "marker on the insertion position stays there");
+        else if (m.id == after)
+            CHECK (std::abs (m.start - 15.0) < 1e-9, "marker after insertion shifts by len");
+        else if (m.id == regionS)
+        {
+            CHECK (std::abs (m.start - 8.0) < 1e-9, "straddling region start unchanged");
+            CHECK (std::abs (m.end - 17.0) < 1e-9, "straddling region end shifts by len");
+        }
+    }
+
+    // Sample-boundary rounding: an edit position derived from a sample count
+    // can differ from the marker's seconds value by less than one sample in
+    // either direction; such markers must still be treated as sitting on the
+    // insertion point.
+    MarkerManager mm2;
+    const int p = mm2.addPointMarker (10.0, "Rounded");
+    CHECK (mm2.adjustForInsertion (10.0 + 1e-5, 3.0), "rounded insertion adjusts");
+    const auto* mp = mm2.findNear (10.0, 0.5);
+    CHECK (mp && std::abs (mp->start - 10.0) < 1e-4,
+          "marker within sample rounding of the edit position stays put");
+
+    MarkerManager mm4;
+    const int q = mm4.addPointMarker (10.0, "Rounded2");
+    CHECK (mm4.adjustForInsertion (10.0 - 1e-5, 3.0), "rounded insertion adjusts (early)");
+    const auto* mq = mm4.findNear (10.0, 0.5);
+    CHECK (mq && std::abs (mq->start - 10.0) < 1e-4,
+          "marker just after an early-rounded edit position stays put");
+
+    // A region starting exactly at the insertion position still shifts with
+    // its content (it describes samples from t on, which move to t+len).
+    MarkerManager mm3;
+    const int r = mm3.addRegionMarker (10.0, 12.0, "AtStart");
+    CHECK (mm3.adjustForInsertion (10.0, 3.0), "region at insertion adjusts");
+    const auto* mr = mm3.findNear (13.0, 0.5);
+    CHECK (mr && std::abs (mr->start - 13.0) < 1e-9 && std::abs (mr->end - 15.0) < 1e-9,
+          "region starting at the insertion position shifts with its content");
+}
+
 // ---------------- Undo/redo ----------------
 static void testUndo()
 {
@@ -12520,7 +12578,7 @@ static void testTimeAnchoredRemap()
         TAState exp = before;
         exp.playhead = 4.0;                       // cursor at the insertion point moves right
         exp.sel = { 0.0, 0.0 };
-        exp.markerPts = { {1.0, -1.0}, {4.0, -1.0}, {6.0, -1.0} };   // "inside" at t=3 shifts
+        exp.markerPts = { {1.0, -1.0}, {3.0, -1.0}, {6.0, -1.0} };   // "inside" at the insertion point stays put
         exp.markerRegs = { {1.5, 2.5} };
         exp.rectBoxes = { {0.5, 100.0, 0.7, 800.0},   // before: unchanged
                           {2.5, 100.0, 0.5, 800.0},   // straddle split: [2.5, 3]
@@ -12556,7 +12614,7 @@ static void testTimeAnchoredRemap()
         TAState exp = before;
         exp.playhead = 1.5;                       // cursor at the insertion point moves right
         exp.sel = { 0.0, 0.0 };
-        exp.markerPts = { {1.5, -1.0}, {3.5, -1.0}, {5.5, -1.0} };   // "before" at t=1 shifts
+        exp.markerPts = { {1.0, -1.0}, {3.5, -1.0}, {5.5, -1.0} };   // "before" at the insertion point stays put
         exp.markerRegs = { {2.0, 3.0} };
         exp.drawT = { {2.0, 4.0}, {4.7, 5.5} };
         exp.sctt = { {0.5, 1.9}, {2.1, 3.1}, {2.7, 4.3}, {4.0, 5.5}, {6.5, 7.5} };
@@ -25284,6 +25342,7 @@ static int scRunUnitTestsImpl()
     progress ("FFT");            testFFT();
     progress ("scfft vs juce");  testScFftVsJuce();
     progress ("markers");        testMarkers();
+    progress ("marker insert adj"); testMarkerInsertionAdjust();
     progress ("marker csv");     testMarkerCsvRoundTrip();
     progress ("undo/redo");      testUndo();
     progress ("zero-crossing");  testZeroCrossing();

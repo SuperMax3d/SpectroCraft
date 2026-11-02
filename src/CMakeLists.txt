@@ -72,7 +72,7 @@ if (TARGET sc_ffmpeg)
     sc_enable_ffmpeg (SpectroCraft)
 endif()
 
-# Application icon: icon.ico is embedded into the exe as a proper PE resource
+# Application icon: icon4.ico is embedded into the exe as a proper PE resource
 # (RT_ICON + RT_GROUP_ICON) by appending an ICON statement to JUCE's generated
 # resources.rc in sc_patch_generated below. This makes Windows Explorer and the
 # taskbar show the app icon without any runtime help. MainWindow additionally
@@ -98,9 +98,9 @@ add_custom_command (
             -DHEADER_FILE=${SC_HEADER_FILE}
             -DVERSION_FILE=${CMAKE_BINARY_DIR}/generated/SC_VERSION.txt
             -DSTAMP_FILE=${CMAKE_BINARY_DIR}/generated/generated_patched.stamp
-            -DICON_FILE=${CMAKE_SOURCE_DIR}/icon.ico
+            -DICON_FILE=${CMAKE_SOURCE_DIR}/icon4.ico
             -P ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake
-    DEPENDS ${SC_RC_FILE} ${SC_HEADER_FILE} ${CMAKE_SOURCE_DIR}/icon.ico
+    DEPENDS ${SC_RC_FILE} ${SC_HEADER_FILE} ${CMAKE_SOURCE_DIR}/icon4.ico
     COMMENT "Applying bumped version to generated resources.rc / JuceHeader.h")
 add_custom_target (sc_patch_generated
     DEPENDS ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp)

@@ -491,7 +491,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 - **Save / Save As / Export Spectral** also run on background threads behind a
   modal dialog with an indeterminate spinning bar, so multi-second writes never
   freeze the window (and no stale wait cursor is left behind afterwards).
-- **Application icon**: `icon.ico` (project root) is embedded into the exe as
+- **Application icon**: `icon4.ico` (project root; candidates `icon1.ico`
+  …`icon4.ico` are kept in the repo) is embedded into the exe as
   a proper PE resource (`RT_ICON` + `RT_GROUP_ICON`) — an `ICON` statement is
   appended to JUCE's generated `.rc` at build time by
   `cmake/patch_generated.cmake` — so Windows Explorer and the taskbar show it.
@@ -2449,7 +2450,8 @@ should agree.
 bin/Release             self-contained runtime folder: SpectroCraft.exe plus all
                         external DLLs (FFmpeg, OpenVINO, whisper) — download this
                         folder alone for a working install
-icon.ico                application icon (PE resource + runtime WM_SETICON)
+icon1..4.ico            application icon candidates; icon4.ico is the active one
+                        (PE resource + runtime WM_SETICON)
 CMakeLists.txt            root build (JUCE vendored in extern/)
 include/                  component headers (incl. RecorderPlugin.h plugin ABI)
 plugins/wasapi/           WASAPI recorder DLL source (deployed to <exe>/recorders/)
