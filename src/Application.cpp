@@ -1002,7 +1002,24 @@ bool Application::startRecording (std::string* errOut)
     int devCh = recording.channels;
     if (const auto* p = host.findPlugin (recording.pluginId))
         for (const auto& d : p->devices)
-            if (d.id == recording.deviceId) { devCh = std::max (1, d.maxChannels); break; }
+        {
+            if (d.id != recording.deviceId) continue;
+            devCh = std::max (1, d.maxChannels);
+
+            // Shared-mode WASAPI can only capture at the endpoint's engine rate.
+            // If the persisted/selected rate isn't supported by this device,
+            // fall back to its default instead of failing the whole session
+            // (e.g. a 44100 Hz mic setting carried over to a 48000 Hz loopback).
+            bool rateOk = false;
+            if (!d.rates.empty ())
+                for (double r : d.rates)
+                    if (std::abs (r - recording.rate) <= 1.0) { rateOk = true; break; }
+            else if (recording.rate >= d.minRate && recording.rate <= d.maxRate)
+                rateOk = true;
+            if (!rateOk && d.defaultRate > 0.0)
+                recording.rate = d.defaultRate;
+            break;
+        }
 
     int wantCh;
     if (recording.channelMode >= 1 && recording.channelMode <= devCh)
@@ -1119,6 +1136,10 @@ void Application::stopRecording ()
                 closeDoc (idx);   // safe: recording.active is false now
 
             juce::String msg = "No audio data was received from the device.";
+            if (recording.deviceId.startsWith ("loopback:"))
+                msg += "\n\nLoopback records what is playing on that output device."
+                       " Make sure something is actually playing through it, and"
+                       " that no other application has exclusive access to it.";
             const juce::String le = lastErr.trim ();
             if (!le.isEmpty () && le != "no error")
                 msg += "\n\n" + le;

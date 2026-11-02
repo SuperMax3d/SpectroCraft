@@ -178,6 +178,18 @@ struct CaptureState {
     IAudioCaptureClientFull* capture = nullptr;
     IAudioRenderClientLocal* localCapture = nullptr;   // custom-interface loopback reader
     bool                     useLocalCapture = false;
+
+    // Loopback keep-alive: our own silent shared-mode render stream on the
+    // same endpoint. WASAPI loopback only delivers packets while the
+    // endpoint's audio engine is actively rendering - on stock Windows an
+    // idle endpoint yields zero frames and the host watchdog kills the
+    // session ("No audio data was received"). This stream keeps the engine
+    // running at all times, so loopback always produces a continuous capture
+    // (silence when nothing else plays). Audacity uses the same trick.
+    IAudioClient*            keepAlive = nullptr;
+    IAudioRenderClientLocal* keepAliveRc = nullptr;
+    UINT32                   keepAliveBufFrames = 0;
+    UINT32                   keepAliveBlockAlign = 0;
     bool                     ownsComInit = false;   // we called CoInitializeEx in setup
 
     // Ring buffer of interleaved float32 frames (thread-safe FIFO; reads
@@ -508,6 +520,13 @@ void convertToFloat(const void* src, WAVEFORMATEX& fmt, float* dst, size_t frame
 // it. Must run on the capture worker thread (the one that activated them).
 static void cleanupCapture(CaptureState* st)
 {
+    if (st->keepAliveRc != nullptr) { st->keepAliveRc->Release (); st->keepAliveRc = nullptr; }
+    if (st->keepAlive != nullptr)
+    {
+        st->keepAlive->Stop ();
+        st->keepAlive->Release ();
+        st->keepAlive = nullptr;
+    }
     if (st->localCapture != nullptr) { st->localCapture->Release (); st->localCapture = nullptr; }
     if (st->capture != nullptr) { st->capture->Release (); st->capture = nullptr; }
     if (st->client  != nullptr)
@@ -528,6 +547,47 @@ static void cleanupCapture(CaptureState* st)
     if (st->ownsComInit)
         CoUninitialize ();
     st->ownsComInit = false;
+}
+
+// Opens a silent shared-mode render stream on the loopback endpoint so its
+// audio engine keeps running even when no other app is playing. Non-fatal:
+// if it cannot be opened (e.g. an exclusive session owns the endpoint) the
+// capture still proceeds - data simply only flows while something renders.
+static void startKeepAlive(CaptureState* st)
+{
+    HRESULT hr = st->endpoint->Activate (IID_IAudioClient, CLSCTX_ALL, nullptr,
+                                         (void**) &st->keepAlive);
+    if (FAILED (hr)) return;
+
+    WAVEFORMATEX* mix = nullptr;
+    if (FAILED (st->keepAlive->GetMixFormat (&mix)) || mix == nullptr)
+    { st->keepAlive->Release (); st->keepAlive = nullptr; return; }
+    st->keepAliveBlockAlign = mix->nBlockAlign;
+
+    hr = st->keepAlive->Initialize (AUDCLNT_SHAREMODE_SHARED, 0, 0, 0, mix, nullptr);
+    CoTaskMemFree (mix);
+    if (FAILED (hr)) { st->keepAlive->Release (); st->keepAlive = nullptr; return; }
+
+    hr = st->keepAlive->GetService (kIidLocalRenderClient, (void**) &st->keepAliveRc);
+    if (FAILED (hr) || st->keepAliveRc == nullptr)
+    {
+        st->keepAliveRc = nullptr;
+        st->keepAlive->Release ();
+        st->keepAlive = nullptr;
+        return;
+    }
+
+    hr = st->keepAlive->Start ();
+    if (FAILED (hr))
+    {
+        st->keepAliveRc->Release ();
+        st->keepAliveRc = nullptr;
+        st->keepAlive->Release ();
+        st->keepAlive = nullptr;
+        return;
+    }
+
+    st->keepAlive->GetBufferSize (&st->keepAliveBufFrames);
 }
 
 // Activates the whole capture pipeline synchronously on the calling thread.
@@ -597,6 +657,11 @@ static int setupCapture(CaptureState* st)
         cleanupCapture (st); return 5;
     }
 
+    // Loopback: start the silent keep-alive stream BEFORE starting capture so
+    // the engine is already running when the first GetBuffer happens.
+    if (st->dev.loopback)
+        startKeepAlive (st);
+
     hr = st->client->GetService (IID_IAudioCaptureClient, (void**) &st->capture);
     if (FAILED (hr) || st->capture == nullptr)
     {
@@ -647,6 +712,21 @@ static void pollLoop(CaptureState* st)
 
     while (!st->stopFlag.load ())
     {
+        // Keep the endpoint's audio engine alive so loopback delivers a
+        // continuous stream even when nothing else is playing on it: fill one
+        // chunk of our silent render stream and hand it back.
+        if (st->keepAliveRc != nullptr && st->keepAliveBufFrames > 0)
+        {
+            BYTE* ka = nullptr;
+            if (SUCCEEDED (st->keepAliveRc->GetBuffer (st->keepAliveBufFrames, &ka))
+                && ka != nullptr)
+            {
+                std::memset (ka, 0,
+                             (size_t) st->keepAliveBufFrames * st->keepAliveBlockAlign);
+                st->keepAliveRc->ReleaseBuffer (st->keepAliveBufFrames, 0);
+            }
+        }
+
         if (st->useLocalCapture)
         {
             BYTE* data = nullptr;

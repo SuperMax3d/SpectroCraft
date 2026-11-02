@@ -22079,6 +22079,41 @@ static void testRecordingSession()
     CHECK (!app.recording.active, "closing the recording doc stops the session");
 }
 
+/** A persisted sample rate that the selected endpoint doesn't support must not
+    fail the session: fall back to the device's default rate instead (e.g. a
+    44100 Hz mic setting carried over to a 48000 Hz loopback). */
+static void testRecordingRateFallback()
+{
+    auto& host = sc::rec::RecorderHost::instance ();
+    if (host.findPlugin ("fake") == nullptr) return;
+
+    Application app;   // SC_TESTS_EXE builds use an isolated temp recent-store
+    app.recording.pluginId = "fake";
+    app.recording.deviceId = "dev2ch";      // 8 kHz endpoint
+    app.recording.channels = 2;
+    app.recording.rate     = 44100.0;       // not supported by this device
+    app.recording.bitDepth = 32;
+
+    std::string err;
+    CHECK (app.startRecording (&err),
+           "unsupported rate falls back instead of failing: " + err);
+    if (!app.recording.active) return;
+    CHECK (std::abs (app.recording.rate - 8000.0) < 1e-9,
+          "rate fell back to the device default");
+    CHECK (std::abs (app.audioEngine ().sampleRate () - 8000.0) < 1e-9,
+          "document created at the fallback rate");
+    app.stopRecording ();   // within the first second: no watchdog dialog
+
+    // A supported rate must be left untouched.
+    app.recording.rate = 8000.0;
+    err.clear ();
+    CHECK (app.startRecording (&err), "supported rate starts: " + err);
+    if (!app.recording.active) return;
+    CHECK (std::abs (app.recording.rate - 8000.0) < 1e-9,
+          "supported rate unchanged");
+    app.stopRecording ();
+}
+
 /** Channel combo items: per-channel options for fixed-width devices, a count
     list for variable-width ones. */
 static void testRecChannelComboItems()
@@ -25159,6 +25194,7 @@ static int scRunUnitTestsImpl()
     progress ("recorder ring buffer");    testRecorderRing();
     progress ("recording follow window"); testRecordingFollowWindow();
     progress ("recording session");       testRecordingSession();
+    progress ("recording rate fallback"); testRecordingRateFallback();
     progress ("rec channel combo items"); testRecChannelComboItems();
     progress ("rec channel selection");   testRecChannelSelection();
     progress ("overwrite samples");       testOverwriteSamples();

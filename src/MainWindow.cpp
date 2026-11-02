@@ -1277,7 +1277,11 @@ void MainWindow::timerCallback()
             // The red dot is drawn by the status bar itself (setRecording);
             // keeping this string pure ASCII avoids font-glyph issues.
             const double secs = app.recDoc ()->engine.duration ();
-            mode = "REC " + juce::String (secs, 2) + " s"
+            // Tag loopback sessions so it's obvious what is being captured
+            // (audio playing on that output device, not a microphone).
+            const juce::String lbTag = app.recording.deviceId.startsWith ("loopback:")
+                                       ? " [loopback]" : juce::String ();
+            mode = "REC " + juce::String (secs, 2) + " s" + lbTag
                    + (mode.isEmpty () ? juce::String () : "   " + mode);
         }
         statusBar->setRecording (recNow);
