@@ -23104,6 +23104,9 @@ static void testTablesPanel()
         const juce::MouseEvent colEvent = mkMouse (panel, 10, 10, {});
         const int c0 = d->tables[0].params[0].colorIndex;
         panel.simulateCellClick (1, 2, colEvent);
+        CHECK (d->tables[0].params[0].colorIndex == c0,
+              "single click defers the cycle until the double-click window passes");
+        panel.flushPendingColourCycle ();   // what the timer does after 450 ms
         CHECK (d->tables[0].params[0].colorIndex == (c0 + 1) % 12, "colour click advances the palette");
     }
 
@@ -23291,7 +23294,7 @@ static void testTablesOverlayAndPicker()
         CHECK (unique && used.size() == 4, "every parameter in the doc has its own colour");
     }
 
-    // --- Double-click on a parameter's square opens the preset picker ---------
+    // --- Double-click on a parameter's square opens the colour picker ---------
     {
         juce::MessageManager* mm = juce::MessageManager::getInstance();
         TablesPanel panel (app);
@@ -23306,10 +23309,8 @@ static void testTablesOverlayAndPicker()
                 juce::MessageManager::callAsync ([&picked]
                 {
                     if (auto* m = juce::Component::getCurrentlyModalComponent ())
-                        if (auto* aw = dynamic_cast<juce::AlertWindow*> (m))
-                            if (aw->getNumCustomComponents () > 0)
-                                if (auto* picker = dynamic_cast<TablesColourPicker*> (aw->getCustomComponent (0)))
-                                    { picker->onPick (7); picked.store (true); }
+                        if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
+                            { dlg->selectForTest (7); dlg->okForTest (); picked.store (true); }
                 });
                 std::this_thread::sleep_for (std::chrono::milliseconds (20));
             }
@@ -23963,6 +23964,176 @@ static void testTablesTwoPointVerticalAlign()
           "dragging left moves the window forward in time");
 
     wav.deleteFile ();
+}
+
+//==============================================================================
+// Parameter colour picker dialog: custom swatches, RGB editing,
+// New/Delete/Reset, OK/Cancel semantics and palette persistence.
+static void testTablesColourPickerDialog()
+{
+    using namespace sc::tables;
+
+    // --- tableColourAt: defaults, customs, stale fallback ---------------------
+    {
+        std::vector<juce::Colour> customs = { juce::Colour::fromRGB (1, 2, 3),
+                                              juce::Colour::fromRGB (4, 5, 6) };
+        CHECK (tableColourAt (0, customs) == kPalette[0], "index 0 is the first default");
+        CHECK (tableColourAt (11, customs) == kPalette[11], "index 11 is the last default");
+        CHECK (tableColourAt (12, customs) == juce::Colour::fromRGB (1, 2, 3), "index 12 = first custom");
+        CHECK (tableColourAt (13, customs) == juce::Colour::fromRGB (4, 5, 6), "index 13 = second custom");
+        CHECK (tableColourAt (99, customs) == kPalette[99 % 12], "stale index wraps into the defaults");
+    }
+
+    // --- format/parse round trip ----------------------------------------------
+    {
+        std::vector<juce::Colour> in = { juce::Colour::fromRGB (0, 0, 0),
+                                         juce::Colour::fromRGB (255, 128, 7) };
+        std::vector<juce::Colour> out;
+        parseCustomColours (formatCustomColours (in), out);
+        CHECK (out.size () == 2 && out[0] == in[0] && out[1] == in[1], "round trip");
+
+        // Malformed entries are skipped silently: non-numeric bytes, wrong
+        // field counts and extra fields all reject the whole entry.
+        std::vector<juce::Colour> bad;
+        parseCustomColours ("1,2,3;xx,4,5;7,8;9,10,11,-1", bad);
+        CHECK (bad.size () == 1 && bad[0] == juce::Colour::fromRGB (1, 2, 3),
+              "malformed entries skipped");
+
+        std::vector<juce::Colour> none;
+        parseCustomColours ("", none);
+        CHECK (none.empty (), "empty text -> no colours");
+    }
+
+    const juce::File wav = makeTempFile ("tables_colourdlg.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                            * 300.0 * (double) f / rate); });
+    Application app;
+    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    FileDoc* d = app.doc ();
+    CHECK (d != nullptr, "colour dialog: doc created");
+    if (d == nullptr) { wav.deleteFile(); return; }
+
+    std::string err;
+    const juce::String csv = "alpha,beta\n1,2.5\n3,4.5\n5,6.5\n";
+    CHECK (app.addTableFromCsv ("T1", csv, &err), "table imported");
+
+    TablesPanel panel (app);
+    panel.setSize (320, 420);
+    panel.refresh();
+
+    // --- Double-click opens the picker and does NOT cycle the colour ----------
+    {
+        const int c0 = d->tables[0].params[0].colorIndex;
+        std::atomic<bool> shown { false };
+        std::thread helper ([&shown]
+        {
+            for (int i = 0; i < 500 && !shown.load (); ++i)
+            {
+                juce::MessageManager::callAsync ([&shown]
+                {
+                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
+                        if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
+                            { shown.store (true); dlg->cancelForTest (); }
+                });
+                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+            }
+        });
+
+        const juce::MouseEvent dbl = mkMouse (panel, 10, 10, {}, 2);
+        panel.simulateCellClick (1, 2, dbl);   // double-click on the colour square
+        helper.join ();
+
+        CHECK (shown.load (), "double-click opened the colour dialog");
+        CHECK (d->tables[0].params[0].colorIndex == c0,
+              "cancelling leaves the parameter colour untouched");
+    }
+
+    // --- New + RGB edit + OK: custom swatch applied and persisted --------------
+    {
+        app.settings.tableCustomColours = { juce::Colour::fromRGB (10, 20, 30) };
+        std::atomic<bool> done { false };
+        std::thread helper ([&done]
+        {
+            for (int i = 0; i < 500 && !done.load (); ++i)
+            {
+                juce::MessageManager::callAsync ([&done]
+                {
+                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
+                        if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
+                        {
+                            CHECK (dlg->selectedSwatch () == 0, "opens on the current colour");
+                            // Pick the custom swatch and edit its RGB in place...
+                            dlg->selectForTest (12);
+                            CHECK (dlg->swatchColourAt (12) == juce::Colour::fromRGB (10, 20, 30),
+                                  "custom swatch seeded from settings");
+                            dlg->setRgbForTest (50, 60, 70);
+                            // ...New copies it, Delete removes the copy again.
+                            dlg->newForTest ();
+                            CHECK (dlg->selectedSwatch () == 13
+                                  && dlg->swatchColourAt (13) == juce::Colour::fromRGB (50, 60, 70),
+                                  "New copies the selected swatch");
+                            dlg->deleteForTest ();
+                            CHECK (dlg->selectedSwatch () == 12,
+                                  "Delete falls back to the previous swatch");
+                            dlg->okForTest ();
+                            done.store (true);
+                        }
+                });
+                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+            }
+        });
+
+        const juce::MouseEvent dbl = mkMouse (panel, 10, 10, {}, 2);
+        panel.simulateCellClick (1, 2, dbl);
+        helper.join ();
+
+        CHECK (done.load (), "picker dialog was shown");
+        CHECK (d->tables[0].params[0].colorIndex == 12, "OK applied the custom swatch index");
+        CHECK (app.settings.tableCustomColours.size () == 1
+              && app.settings.tableCustomColours[0] == juce::Colour::fromRGB (50, 60, 70),
+              "edited custom colour persisted in settings");
+        CHECK (app.recentStore->getValue ("table_custom_colours") == "50,60,70",
+              "custom palette saved to disk");
+    }
+
+    // --- Reset + Cancel: working-copy edits are discarded ----------------------
+    {
+        app.settings.tableCustomColours = { juce::Colour::fromRGB (1, 2, 3),
+                                            juce::Colour::fromRGB (4, 5, 6) };
+        std::atomic<bool> done { false };
+        std::thread helper ([&done]
+        {
+            for (int i = 0; i < 500 && !done.load (); ++i)
+            {
+                juce::MessageManager::callAsync ([&done]
+                {
+                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
+                        if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
+                        {
+                            dlg->selectForTest (13);
+                            CHECK (dlg->swatchColourAt (13) == juce::Colour::fromRGB (4, 5, 6),
+                                  "second custom visible");
+                            dlg->resetForTest ();
+                            CHECK (dlg->selectedSwatch () < 12,
+                                  "Reset drops all customs and selects a default");
+                            dlg->cancelForTest ();
+                            done.store (true);
+                        }
+                });
+                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+            }
+        });
+
+        const juce::MouseEvent dbl = mkMouse (panel, 10, 10, {}, 2);
+        panel.simulateCellClick (1, 2, dbl);
+        helper.join ();
+
+        CHECK (done.load (), "picker dialog was shown");
+        CHECK (app.settings.tableCustomColours.size () == 2, "cancel discards the Reset edit");
+    }
+
+    wav.deleteFile();
 }
 
 // ---------------- Live paste crash repro ----------------
@@ -25366,6 +25537,7 @@ static int scRunUnitTestsImpl()
     progress ("tables timeline warp");   testTablesTimelineWarp();
     progress ("tables shared alignment");testTablesSharedAlignment();
     progress ("tables 2pt vertical align"); testTablesTwoPointVerticalAlign();
+    progress ("tables colour picker dialog"); testTablesColourPickerDialog();
     progress ("paste live repro");       testPasteLiveRepro();
     progress ("tables dedicated strip"); testTablesDedicatedStrip();
     progress ("single instance mode");   testSingleInstance();

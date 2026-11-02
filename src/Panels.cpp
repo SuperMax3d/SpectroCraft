@@ -9272,7 +9272,7 @@ void TablesPlotView::paint (juce::Graphics& g)
             if (!started) { path.startNewSubPath ((float) i + 0.5f, y); started = true; }
             else          path.lineTo ((float) i + 0.5f, y);
         }
-        g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
+        g.setColour (sc::tables::tableColourAt (p.colorIndex, app.settings.tableCustomColours));
         g.strokePath (path, juce::PathStrokeType (1.6f));
     }
 
@@ -9342,7 +9342,8 @@ void TablesPlotView::collectHoverLabels (int x, int y)
         if (!p.visible || p.values.size() < 2) continue;
         const double v = sc::tables::paramValueAt (t, p, tt);   // unscaled value
         hoverLabels_.push_back ({ p.name + "  " + juce::String (v, 4),
-                                  sc::tables::kPalette[p.colorIndex % 12] });
+                                  sc::tables::tableColourAt (p.colorIndex,
+                                                             app.settings.tableCustomColours) });
     }
 }
 
@@ -9350,34 +9351,108 @@ void TablesPlotView::collectHoverLabels (int x, int y)
 
 // ------------------------------------------------- parameter colour picker --
 
-static juce::Rectangle<int> tablesSwatchRect (int idx)
+namespace
 {
-    const int col = idx % 4, row = idx / 4;
-    return { 8 + col * 38, 8 + row * 30, 30, 22 };
+// Validates a 0..255 byte field: digits only (optional leading minus), then
+// clamps. Returns -1 for anything else.
+int tablesParseColourByte (const juce::String& s)
+{
+    if (s.isEmpty () || s.length () > 4) return -1;
+    for (int i = 0; i < s.length (); ++i)
+    {
+        const auto ch = s[i];
+        if (!(juce::CharacterFunctions::isDigit (ch) || (i == 0 && ch == L'-'))) return -1;
+    }
+    return std::clamp (s.getIntValue (), 0, 255);
+}
+} // namespace
+
+TablesColourDialog::TablesColourDialog (const juce::String& title, int currentIdx,
+                                        std::vector<juce::Colour> customs)
+    : DocumentWindow (title, juce::Colour::fromRGB (45, 45, 48),
+                      DocumentWindow::allButtons),
+      colours_ (sc::tables::kPalette, sc::tables::kPalette + 12)
+{
+    for (const auto& c : customs) colours_.push_back (c);
+
+    grid_.onSelect = [this] (int idx) { selectSwatch (idx); };
+
+    newBtn_.setButtonText ("New");
+    deleteBtn_.setButtonText ("Delete");
+    resetBtn_.setButtonText ("Reset");
+    newBtn_.onClick = [this] { doNew (); };
+    deleteBtn_.onClick = [this] { doDelete (); };
+    resetBtn_.onClick = [this] { doReset (); };
+
+    rLbl_.setText ("R", juce::dontSendNotification);
+    gLbl_.setText ("G", juce::dontSendNotification);
+    bLbl_.setText ("B", juce::dontSendNotification);
+    for (auto* l : { &rLbl_, &gLbl_, &bLbl_ })
+    {
+        l->setFont (12.0f);
+        l->setJustificationType (juce::Justification::centredLeft);
+        l->setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+    }
+
+    for (auto* ed : { &rEd_, &gEd_, &bEd_ })
+    {
+        ed->setFont (12.0f);
+        ed->setColour (juce::TextEditor::backgroundColourId, juce::Colour::fromRGB (38, 38, 42));
+        ed->setColour (juce::TextEditor::textColourId, juce::Colours::lightgrey);
+        // Let Enter/Escape reach the OK/cancel handling even while a field
+        // has keyboard focus.
+        ed->setEscapeAndReturnKeysConsumed (false);
+        ed->onTextChange = [this] { rgbFieldChanged (); };
+    }
+
+    okBtn_.setButtonText ("OK");
+    cancelBtn_.setButtonText ("Cancel");
+    okBtn_.onClick = [this] { doOk (); };
+    cancelBtn_.onClick = [this] { doCancel (); };
+
+    juce::Component::addAndMakeVisible (&grid_);
+    juce::Component::addAndMakeVisible (&newBtn_);
+    juce::Component::addAndMakeVisible (&deleteBtn_);
+    juce::Component::addAndMakeVisible (&resetBtn_);
+    juce::Component::addAndMakeVisible (&rLbl_);
+    juce::Component::addAndMakeVisible (&gLbl_);
+    juce::Component::addAndMakeVisible (&bLbl_);
+    juce::Component::addAndMakeVisible (&rEd_);
+    juce::Component::addAndMakeVisible (&gEd_);
+    juce::Component::addAndMakeVisible (&bEd_);
+    juce::Component::addAndMakeVisible (&okBtn_);
+    juce::Component::addAndMakeVisible (&cancelBtn_);
+
+    selected_ = std::clamp (currentIdx, 0, (int) colours_.size () - 1);
+    layout();
+    selectSwatch (selected_);
 }
 
-TablesColourPicker::TablesColourPicker (int current)
-    : current_ (std::max (0, current % 12))
+TablesColourDialog::SwatchGrid::SwatchGrid (TablesColourDialog* ownerIn)
+    : owner_ (ownerIn)
 {
-    setSize (160, 98);
 }
 
-int TablesColourPicker::swatchAt (juce::Point<int> p) const
+int TablesColourDialog::SwatchGrid::swatchAt (juce::Point<int> p) const
 {
-    for (int i = 0; i < 12; ++i)
-        if (tablesSwatchRect (i).contains (p)) return i;
+    for (int i = 0; i < (int) owner_->colours_.size (); ++i)
+        if (juce::Rectangle<int> (8 + (i % kCols) * kPitchX,
+                                  4 + (i / kCols) * kPitchY, kSwW, kSwH).contains (p))
+            return i;
     return -1;
 }
 
-void TablesColourPicker::paint (juce::Graphics& g)
+void TablesColourDialog::SwatchGrid::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::black);
-    for (int i = 0; i < 12; ++i)
+    const auto& cols = owner_->colours_;
+    for (int i = 0; i < (int) cols.size (); ++i)
     {
-        const auto r = tablesSwatchRect (i).toFloat();
-        g.setColour (sc::tables::kPalette[i]);
+        const auto r = juce::Rectangle<float> ((float) (8 + (i % kCols) * kPitchX),
+                                               (float) (4 + (i / kCols) * kPitchY),
+                                               (float) kSwW, (float) kSwH);
+        g.setColour (cols[(size_t) i]);
         g.fillRoundedRectangle (r, 3.0f);
-        if (i == current_)
+        if (i == owner_->selected_)
         {
             g.setColour (juce::Colours::white);
             g.drawRoundedRectangle (r.reduced (1.5f), 2.0f, 2);
@@ -9385,10 +9460,159 @@ void TablesColourPicker::paint (juce::Graphics& g)
     }
 }
 
-void TablesColourPicker::mouseDown (const juce::MouseEvent& e)
+void TablesColourDialog::SwatchGrid::mouseDown (const juce::MouseEvent& e)
 {
     const int idx = swatchAt ({ e.x, e.y });
-    if (idx >= 0 && onPick) onPick (idx);
+    if (idx >= 0 && onSelect) onSelect (idx);
+}
+
+juce::Colour TablesColourDialog::swatchColourAt (int i) const
+{
+    return (i >= 0 && i < (int) colours_.size ()) ? colours_[(size_t) i] : juce::Colours::black;
+}
+
+void TablesColourDialog::selectForTest (int idx) { selectSwatch (idx); }
+void TablesColourDialog::newForTest ()           { doNew (); }
+void TablesColourDialog::deleteForTest ()        { doDelete (); }
+void TablesColourDialog::resetForTest ()         { doReset (); }
+void TablesColourDialog::okForTest ()            { doOk (); }
+void TablesColourDialog::cancelForTest ()        { doCancel (); }
+
+void TablesColourDialog::setRgbForTest (int r, int g, int b)
+{
+    if (selected_ < 12 || selected_ >= (int) colours_.size ()) return;
+    rEd_.setText (juce::String (std::clamp (r, 0, 255)), juce::dontSendNotification);
+    gEd_.setText (juce::String (std::clamp (g, 0, 255)), juce::dontSendNotification);
+    bEd_.setText (juce::String (std::clamp (b, 0, 255)), juce::dontSendNotification);
+    rgbFieldChanged ();
+}
+
+void TablesColourDialog::layout()
+{
+    const int rows = ((int) colours_.size () + kCols - 1) / kCols;
+    const int gridW = kCols * kPitchX;
+    const int sideW = 74;   // right-hand New/Delete/Reset column
+    setSize (12 + gridW + 10 + sideW + 12,
+             12 + rows * kPitchY + 8 + 24 + 8 + 26 + 10);
+}
+
+void TablesColourDialog::selectSwatch (int idx)
+{
+    if (idx < 0 || idx >= (int) colours_.size ()) return;
+    selected_ = idx;
+    const auto c = colours_[(size_t) idx];
+    rEd_.setText (juce::String ((int) c.getRed()), juce::dontSendNotification);
+    gEd_.setText (juce::String ((int) c.getGreen()), juce::dontSendNotification);
+    bEd_.setText (juce::String ((int) c.getBlue()), juce::dontSendNotification);
+    // Only custom swatches are RGB-editable; the built-in palette is fixed.
+    const bool editable = idx >= 12;
+    rEd_.setEnabled (editable);
+    gEd_.setEnabled (editable);
+    bEd_.setEnabled (editable);
+    deleteBtn_.setEnabled (idx >= 12 && colours_.size () > 12);
+    resetBtn_.setEnabled (colours_.size () > 12);
+    newBtn_.setEnabled ((int) colours_.size () < 12 + kMaxCustoms);
+    grid_.repaint ();
+}
+
+void TablesColourDialog::rgbFieldChanged ()
+{
+    if (selected_ < 12 || selected_ >= (int) colours_.size ()) return;
+    const int r = tablesParseColourByte (rEd_.getText ());
+    const int g = tablesParseColourByte (gEd_.getText ());
+    const int b = tablesParseColourByte (bEd_.getText ());
+    if (r < 0 || g < 0 || b < 0) return;   // invalid text: leave the swatch alone
+    colours_[(size_t) selected_] = juce::Colour::fromRGB ((juce::uint8) r, (juce::uint8) g,
+                                                         (juce::uint8) b);
+    grid_.repaint ();
+}
+
+void TablesColourDialog::doNew ()
+{
+    if ((int) colours_.size () >= 12 + kMaxCustoms) return;
+    // Start the new swatch from the current selection so it can be tweaked.
+    colours_.push_back (colours_[(size_t) selected_]);
+    selectSwatch ((int) colours_.size () - 1);
+    layout();   // may add a grid row: resize the window
+}
+
+void TablesColourDialog::doDelete ()
+{
+    if (selected_ < 12 || selected_ >= (int) colours_.size ()) return;
+    colours_.erase (colours_.begin () + selected_);
+    selectSwatch (std::min (selected_, (int) colours_.size () - 1));
+    layout();
+}
+
+void TablesColourDialog::doReset ()
+{
+    if (colours_.size () <= 12) return;
+    colours_.resize (12);
+    selectSwatch (std::min (selected_, 11));
+    layout();
+}
+
+void TablesColourDialog::doOk ()
+{
+    result_ = selected_;
+    customsResult_.assign (colours_.begin () + 12, colours_.end ());
+    exitModalState (1);
+}
+
+void TablesColourDialog::doCancel ()
+{
+    result_ = -1;
+    customsResult_.clear ();
+    exitModalState (-1);
+}
+
+bool TablesColourDialog::keyPressed (const juce::KeyPress& k)
+{
+    // Enter accepts, Escape cancels - even while a field has focus (the
+    // editors do not consume those keys).
+    if (k.isKeyCode (juce::KeyPress::returnKey))
+    {
+        doOk ();
+        return true;
+    }
+    if (k.getKeyCode () == juce::KeyPress::escapeKey)
+    {
+        doCancel ();
+        return true;
+    }
+    return DocumentWindow::keyPressed (k);
+}
+
+void TablesColourDialog::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+}
+
+void TablesColourDialog::resized()
+{
+    auto r = getLocalBounds ();
+    const int rows = ((int) colours_.size () + kCols - 1) / kCols;
+    grid_.setBounds (12, 12, kCols * kPitchX, rows * kPitchY);
+
+    // Right-hand management column.
+    const int sideX = r.getWidth () - 12 - 74;
+    newBtn_.setBounds (sideX, 12, 74, 26);
+    deleteBtn_.setBounds (sideX, 44, 74, 26);
+    resetBtn_.setBounds (sideX, 76, 74, 26);
+
+    // RGB row under the grid.
+    const int rgbTop = 12 + rows * kPitchY + 8;
+    rLbl_.setBounds (12, rgbTop, 14, 22);
+    rEd_.setBounds (28, rgbTop, 52, 22);
+    gLbl_.setBounds (90, rgbTop, 14, 22);
+    gEd_.setBounds (106, rgbTop, 52, 22);
+    bLbl_.setBounds (168, rgbTop, 14, 22);
+    bEd_.setBounds (184, rgbTop, 52, 22);
+
+    // Bottom buttons.
+    const int btnsTop = r.getHeight () - 36;
+    okBtn_.setBounds (r.getWidth () - 82, btnsTop, 70, 26);
+    cancelBtn_.setBounds (r.getWidth () - 164, btnsTop, 70, 26);
 }
 
 void TablesPanel::showColourPicker (int tableIdx, int paramIdx)
@@ -9398,27 +9622,40 @@ void TablesPanel::showColourPicker (int tableIdx, int paramIdx)
     const auto& t = d->tables[(size_t) tableIdx];
     if (paramIdx < 0 || paramIdx >= (int) t.params.size()) return;
 
-    juce::AlertWindow w ("Parameter Colour",
-                        "Choose a colour for \"" + t.params[(size_t) paramIdx].name + "\":",
-                        juce::AlertWindow::NoIcon, this);
-    auto* picker = new TablesColourPicker (t.params[(size_t) paramIdx].colorIndex);
-    w.addCustomComponent (picker);
-
-    // Clicking a swatch applies it and closes the window.
-    picker->onPick = [&w, this, tableIdx, paramIdx] (int idx)
+    TablesColourDialog dlg ("Parameter Colour",
+                            t.params[(size_t) paramIdx].colorIndex,
+                            app.settings.tableCustomColours);
+    if (dlg.runModalLoop () == 1 && dlg.resultIndex () >= 0)
     {
-        auto* dd = app.doc ();
-        if (dd == nullptr || tableIdx < 0 || tableIdx >= (int) dd->tables.size ()) return;
-        auto& tt = dd->tables[(size_t) tableIdx];
-        if (paramIdx < 0 || paramIdx >= (int) tt.params.size()) return;
-        tt.params[(size_t) paramIdx].colorIndex = idx % 12;
-        dd->metaDirty = true;   // the colour persists with the metadata
+        d->tables[(size_t) tableIdx].params[(size_t) paramIdx].colorIndex = dlg.resultIndex ();
+        d->metaDirty = true;   // the colour persists with the metadata
         if (app.onTablesChanged) app.onTablesChanged ();
-        w.exitModalState (-1);
-    };
+        if (app.settings.tableCustomColours != dlg.resultCustoms ())
+        {
+            app.settings.tableCustomColours = dlg.resultCustoms ();
+            app.saveSettings ();   // custom palette persists between sessions
+        }
+    }
+}
 
-    w.addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
-    w.runModalLoop ();
+void TablesPanel::timerCallback()
+{
+    flushPendingColourCycle ();
+}
+
+void TablesPanel::flushPendingColourCycle()
+{
+    if (pendingColourTable_ < 0) return;
+    const int ti = pendingColourTable_, pi = pendingColourParam_;
+    pendingColourTable_ = -1;
+    auto* d = app.doc ();
+    if (d == nullptr || ti < 0 || ti >= (int) d->tables.size ()) return;
+    auto& t = d->tables[(size_t) ti];
+    if (pi < 0 || pi >= (int) t.params.size()) return;
+    const int total = 12 + (int) app.settings.tableCustomColours.size ();
+    t.params[(size_t) pi].colorIndex = (t.params[(size_t) pi].colorIndex + 1) % total;
+    d->metaDirty = true;   // the colour persists with the metadata
+    if (app.onTablesChanged) app.onTablesChanged ();
 }
 
 TablesPanel::Model::Model (TablesPanel* o) : owner (o) {}
@@ -9460,7 +9697,8 @@ void TablesPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int column
     else if (columnId == 2 && !isTable
              && ref.paramIdx < (int) t.params.size())   // colour square: parameters only
     {
-        g.setColour (sc::tables::kPalette[t.params[(size_t) ref.paramIdx].colorIndex % 12]);
+        g.setColour (sc::tables::tableColourAt (t.params[(size_t) ref.paramIdx].colorIndex,
+                                                owner->app.settings.tableCustomColours));
         g.fillRoundedRectangle (juce::Rectangle<float> ((float) width / 2.0f - 7.0f,
                                                         (float) height / 2.0f - 6.0f,
                                                         14.0f, 12.0f),
@@ -9510,12 +9748,27 @@ void TablesPanel::Model::cellClicked (int rowNumber, int columnId, const juce::M
                      && ref.paramIdx < (int) t.params.size())
             {
                 // Tables carry no colour: only parameter squares react here.
-                auto& p = t.params[(size_t) ref.paramIdx];
+                // A single click cycles the palette - deferred until JUCE's
+                // double-click window has passed; a double-click opens the
+                // picker WITHOUT cycling (the pending cycle is cancelled).
                 if (e.getNumberOfClicks () >= 2)
+                {
+                    // Cancel any pending single-click cycle: a double-click must
+                    // not change the colour, it only opens the picker.
+                    owner->stopTimer();
+                    owner->pendingColourTable_ = -1;
                     owner->showColourPicker (ref.tableIdx, ref.paramIdx);
+                }
                 else
-                    p.colorIndex = (p.colorIndex + 1) % 12;
-                handled = true;
+                {
+                    owner->pendingColourTable_ = ref.tableIdx;
+                    owner->pendingColourParam_ = ref.paramIdx;
+                    // Apply the cycle once JUCE's 400 ms double-click window has
+                    // passed; a second click inside that window stops the timer.
+                    owner->startTimer (450);
+                }
+                return;   // no immediate dirty/refresh: the picker's OK or the
+                          // deferred timer applies the change
             }
             if (!handled)
             {
@@ -9568,7 +9821,10 @@ TablesPanel::TablesPanel (Application& appIn)
     refresh ();
 }
 
-TablesPanel::~TablesPanel() = default;
+TablesPanel::~TablesPanel()
+{
+    stopTimer();   // never let the colour-cycle callback outlive the panel
+}
 
 void TablesPanel::refresh()
 {

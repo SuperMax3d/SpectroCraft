@@ -2193,7 +2193,8 @@ void SpectralView::drawTablesOverlay (juce::Graphics& g)
                     if (!started) { path.startNewSubPath (x, y); started = true; }
                     else          path.lineTo (x, y);
                 }
-                g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
+                g.setColour (sc::tables::tableColourAt (p.colorIndex,
+                                                       app.settings.tableCustomColours));
                 g.strokePath (path, juce::PathStrokeType (2.0f));
             }
         }
@@ -2235,7 +2236,8 @@ void SpectralView::collectTableHoverLabels (int mouseX, int mouseY)
                 const float y = rr.getY() + freqToY (fHz, rr.getHeight());
                 if (std::abs (y - (float) mouseY) <= 8.0f)
                     hits.push_back ({ y, p.name + "  " + juce::String (vRaw, 4),
-                                     sc::tables::kPalette[p.colorIndex % 12] });
+                                     sc::tables::tableColourAt (p.colorIndex,
+                                                                app.settings.tableCustomColours) });
             }
         }
     }

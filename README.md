@@ -1883,10 +1883,15 @@ list: a table row followed by its parameter rows.
 - Every row has an eye icon that toggles *that* table's/parameter's
   visibility. Table rows carry no colour of their own; each **parameter** gets
   a unique palette colour when it is imported (colours stay distinct across
-  all tables in the document). Clicking a parameter's colour square cycles it
-  through the 12-colour palette; **double-clicking opens a preset picker**
-  dialog with all twelve swatches. The **Show** button at the top of the panel
-  is the master switch for everything.
+  all tables in the document). A single click on a parameter's colour square
+  cycles it through the palette (the cycle is deferred until JUCE's
+  double-click window has passed, so a double-click never changes the colour);
+  **double-clicking opens the colour picker** — the built-in twelve swatches
+  plus any user-defined ones. In the dialog you can add custom colours with
+  **New**, edit their RGB values in place, remove one with **Delete**, restore
+  just the defaults with **Reset**, and apply or discard everything with
+  **OK/Cancel**. Custom colours persist between sessions. The **Show** button
+  at the top of the panel is the master switch for everything.
 - **Shift+clicking an eye *solos* it**: a parameter's eye shows only that
   parameter (and its parent table), a table's eye shows only that table with
   all of its parameters, and shift-clicking the master **Show** button makes

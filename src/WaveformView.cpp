@@ -845,7 +845,8 @@ void WaveformView::drawTablesOverlay (juce::Graphics& g)
                     if (!started) { path.startNewSubPath (x, y); started = true; }
                     else          path.lineTo (x, y);
                 }
-                g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
+                g.setColour (sc::tables::tableColourAt (p.colorIndex,
+                                                       app.settings.tableCustomColours));
                 g.strokePath (path, juce::PathStrokeType (2.0f));
             }
         }

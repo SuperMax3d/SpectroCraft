@@ -1781,29 +1781,88 @@ private:
     void collectHoverLabels (int x, int y);
 };
 
-/** Grid of the 12 preset colours shown by the parameter colour picker.
-    Clicking a swatch reports its palette index through `onPick`. */
-class TablesColourPicker : public juce::Component
+/** Modal colour picker for one table parameter's colour square. Shows the
+    12 built-in swatches plus any user-defined custom colours: clicking a
+    swatch selects it and reveals its RGB values (custom swatches are editable
+    in place), New/Delete/Reset manage the custom list on the right, and OK
+    applies the selection while Cancel discards everything - including palette
+    edits made while the dialog was open. */
+class TablesColourDialog : public juce::DocumentWindow
 {
 public:
-    explicit TablesColourPicker (int current);
+    /** currentIdx = the parameter's colour index before opening; customs is
+        seeded from the persisted user palette (settings.tableCustomColours). */
+    explicit TablesColourDialog (const juce::String& title, int currentIdx,
+                                 std::vector<juce::Colour> customs);
 
-    std::function<void(int)> onPick;   // called with the clicked palette index
+    /** Selected palette index when OK was pressed (-1 = cancelled). */
+    int resultIndex() const { return result_; }
+    /** The edited custom colour list to persist on OK (empty if none left). */
+    const std::vector<juce::Colour>& resultCustoms() const { return customsResult_; }
 
-    /** Palette index of the swatch under p, or -1 when none. */
-    int swatchAt (juce::Point<int> p) const;
-
-    void paint (juce::Graphics&) override;
-    void mouseDown (const juce::MouseEvent&) override;
+    // Accessors for headless unit tests.
+    int selectedSwatch() const { return selected_; }
+    juce::Colour swatchColourAt (int i) const;
+    void selectForTest (int idx);
+    void newForTest ();
+    void deleteForTest ();
+    void resetForTest ();
+    void setRgbForTest (int r, int g, int b);
+    void okForTest ();      // same as clicking OK
+    void cancelForTest ();  // same as clicking Cancel
 
 private:
-    int current_;
+    class SwatchGrid : public juce::Component
+    {
+    public:
+        explicit SwatchGrid (TablesColourDialog* ownerIn);
+        std::function<void(int)> onSelect;   // clicked palette index
+        int swatchAt (juce::Point<int> p) const;
+        void paint (juce::Graphics&) override;
+        void mouseDown (const juce::MouseEvent&) override;
+    private:
+        TablesColourDialog* owner_;
+    };
+
+    static constexpr int kCols   = 7;   // swatches per row
+    static constexpr int kSwW    = 32, kSwH = 24;
+    static constexpr int kPitchX = 36, kPitchY = 28;
+    static constexpr int kMaxCustoms = 64;            // cap on user swatches
+
+    std::vector<juce::Colour> colours_;   // working copy: defaults + customs
+    int selected_ = 0;
+    int result_ = -1;
+    std::vector<juce::Colour> customsResult_;
+
+    SwatchGrid grid_ { this };
+    juce::TextButton newBtn_, deleteBtn_, resetBtn_;   // right-hand column
+    juce::Label rLbl_, gLbl_, bLbl_;
+    juce::TextEditor rEd_, gEd_, bEd_;   // RGB of the selected swatch (onTextChange -> rgbFieldChanged)
+    juce::TextButton okBtn_, cancelBtn_;              // bottom row
+
+    void layout();                       // recompute window size from swatch count
+    void selectSwatch (int idx);         // syncs RGB fields + grid highlight
+    void rgbFieldChanged ();             // parses the editors into the working colour
+    void doNew();
+    void doDelete();
+    void doReset();
+    void doOk();
+    void doCancel();
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    bool keyPressed (const juce::KeyPress&) override;   // Enter=OK, Escape=cancel
+    void userTriedToCloseWindow() override { doCancel (); }
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TablesColourDialog)
 };
 
 /** Left-column tab managing imported CSV tables. Each table is an indented
     list of its parameter columns; every row carries a visibility eye icon and
-    each parameter row a colour square (click to cycle, double-click for the
-    preset picker). Tables themselves carry no colour. Tables are created by
+    each parameter row a colour square (single click cycles the palette -
+    deferred until the double-click window passes; double-click opens the
+    colour picker dialog with custom swatches, RGB editing and OK/Cancel).
+    Tables themselves carry no colour. Tables are created by
     dropping CSV files on the app or via right-click "Paste to new table".
     The top row has a master visibility switch and the display-mode dropdown
     (Overlay on Waveform / Overlay on Spectrogram / Dedicated track).
@@ -1814,7 +1873,8 @@ private:
     Parameters additionally carry value transforms (normalized/inverted/
     absolute before offset/scale). Everything persists with the file's
     metadata bundle. */
-class TablesPanel : public juce::Component
+class TablesPanel : public juce::Component,
+                   public juce::Timer   // single-click colour-cycle delay (see timerCallback)
 {
 public:
     explicit TablesPanel (Application& app);
@@ -1844,8 +1904,14 @@ public:
     void downsamplePrimaryTable();
     void copySelection();
     void pasteToNewTable();
-    /** Preset colour picker for one parameter (double-click on its square). */
+    /** Colour picker dialog for one parameter (double-click on its square).
+        Single clicks only cycle the palette - never open this. */
     void showColourPicker (int tableIdx, int paramIdx);
+
+    /** Applies the pending single-click colour cycle now: the timer does this
+        after JUCE's 400 ms double-click window has passed; unit tests call it
+        directly instead of waiting for the timer. */
+    void flushPendingColourCycle();
 
     // Shift+click visibility operations ("solo" semantics): showing only the
     // clicked parameter / table - or turning all visibility off again when that
@@ -1934,6 +2000,14 @@ private:
     };
     PendingAlign pending_;
     bool havePending_ = false;
+
+    // Colour-square single/double-click disambiguation: a single click arms
+    // this timer; if a second click lands inside JUCE's double-click window
+    // the pending cycle is cancelled and the picker opens instead. The Timer
+    // base cancels itself on destruction, so no callback can outlive the panel.
+    int pendingColourTable_ = -1;
+    int pendingColourParam_ = -1;
+    void timerCallback() override;
 
     void showContextMenu (int row);
     void updateStatus();

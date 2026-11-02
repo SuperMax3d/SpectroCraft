@@ -20,6 +20,66 @@ const juce::Colour kPalette[12] = {
     juce::Colour::fromRGB (140, 110, 90)     // brown
 };
 
+juce::Colour tableColourAt (int colorIndex, const std::vector<juce::Colour>& customs)
+{
+    if (colorIndex >= 0 && colorIndex < 12) return kPalette[colorIndex];
+    const int ci = colorIndex - 12;
+    if (ci >= 0 && ci < (int) customs.size()) return customs[(size_t) ci];
+    // Stale index (customs were removed): wrap into the built-in palette.
+    return kPalette[std::max (0, colorIndex % 12)];
+}
+
+juce::String formatCustomColours (const std::vector<juce::Colour>& customs)
+{
+    juce::String s;
+    for (const auto& c : customs)
+    {
+        if (!s.isEmpty ()) s += ";";
+        s += juce::String ((int) c.getRed()) + ","
+           + juce::String ((int) c.getGreen()) + ","
+           + juce::String ((int) c.getBlue());
+    }
+    return s;
+}
+
+namespace
+{
+// Validates a 0..255 byte field: digits only (optional leading minus), then
+// clamps. Returns false for anything else.
+bool parseByteField (const juce::String& s, int* out)
+{
+    if (s.isEmpty () || s.length () > 4) return false;
+    for (int i = 0; i < s.length (); ++i)
+    {
+        const auto ch = s[i];
+        if (!(juce::CharacterFunctions::isDigit (ch)
+              || (i == 0 && ch == L'-'))) return false;
+    }
+    *out = std::clamp (s.getIntValue (), 0, 255);
+    return true;
+}
+} // namespace
+
+void parseCustomColours (const juce::String& text, std::vector<juce::Colour>& out)
+{
+    out.clear ();
+    if (text.isEmpty ()) return;
+    juce::StringArray entries;
+    entries.addTokens (text, ";", "");
+    for (const auto& e : entries)
+    {
+        juce::StringArray rgb;
+        rgb.addTokens (e.trim (), ",", "");
+        if (rgb.size () != 3) continue;
+        int r = 0, g = 0, b = 0;
+        if (!parseByteField (rgb[0].trim (), &r)) continue;
+        if (!parseByteField (rgb[1].trim (), &g)) continue;
+        if (!parseByteField (rgb[2].trim (), &b)) continue;
+        out.push_back (juce::Colour::fromRGB ((juce::uint8) r, (juce::uint8) g,
+                                              (juce::uint8) b));
+    }
+}
+
 // ------------------------------------------------------------------ Import --
 
 // NOTE: this JUCE build has no String::operator+=(char16_t) - on MSVC a

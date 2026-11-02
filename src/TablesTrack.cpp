@@ -175,7 +175,8 @@ void TablesTrackView::paint (juce::Graphics& g)
                 if (!started) { path.startNewSubPath (x, (float) y); started = true; }
                 else          path.lineTo (x, (float) y);
             }
-            g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
+            g.setColour (sc::tables::tableColourAt (p.colorIndex,
+                                                   app.settings.tableCustomColours));
             g.strokePath (path, juce::PathStrokeType (2.0f));
         }
     }
@@ -540,7 +541,8 @@ void TablesTrackView::collectHoverLabels (int mouseX, int mouseY)
             const int y = yForValue (sc::tables::dedicatedValue (vRaw, p));
             if (std::abs ((float) y - (float) mouseY) <= 8.0f)
                 hits.push_back ({ (float) y, p.name + "  " + juce::String (vRaw, 4),
-                                  sc::tables::kPalette[p.colorIndex % 12] });
+                                  sc::tables::tableColourAt (p.colorIndex,
+                                                             app.settings.tableCustomColours) });
         }
     }
 

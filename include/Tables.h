@@ -14,7 +14,7 @@ struct ParamData
     std::vector<double> values;   // one entry per sample row, in file order
 
     bool visible = true;          // eye icon on the panel row
-    int colorIndex = 0;           // index into kPalette (colour square)
+    int colorIndex = 0;           // index into kPalette + custom colours (tableColourAt)
 
     // Alignment configuration (per parameter, independent of its table).
     int alignTarget = 0;         // 0=Waveform 1=Spectrogram 2=Dedicated
@@ -75,8 +75,21 @@ struct TableData
     }
 };
 
-/** The 12 colour-square colours (index == colorIndex). */
+/** The 12 built-in colour-square colours (indices 0..11 of the palette). */
 extern const juce::Colour kPalette[12];
+
+/** Resolves a parameter colour index against the full palette: indices 0..11
+    are the built-in kPalette entries, higher indices address user-defined
+    custom colours (in order). Out-of-range values fall back into the built-
+    in palette so stale metadata never breaks drawing. */
+juce::Colour tableColourAt (int colorIndex, const std::vector<juce::Colour>& customs);
+
+/** Serialises a custom colour list as "r,g,b;r,g,b;..." for persistence. */
+juce::String formatCustomColours (const std::vector<juce::Colour>& customs);
+
+/** Parses the format produced by formatCustomColours into `out` (replaces it).
+    Malformed entries are skipped silently. */
+void parseCustomColours (const juce::String& text, std::vector<juce::Colour>& out);
 
 // ------------------------------------------------------------------ Import --
 

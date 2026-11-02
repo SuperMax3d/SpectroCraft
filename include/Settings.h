@@ -152,6 +152,12 @@ struct Settings
     // the current channel count (a new channel is created on first use).
     std::vector<std::pair<int,int>> splitConfig;
 
+    // User-defined extra swatches for the table parameter colour picker,
+    // persisted between sessions ("table_custom_colours"). The effective
+    // palette is sc::tables::kPalette[0..11] followed by these colours in
+    // order; see sc::tables::tableColourAt().
+    std::vector<juce::Colour> tableCustomColours;
+
     bool operator== (const Settings& o) const
     {
         return fftSize == o.fftSize && fftAuto == o.fftAuto
@@ -196,7 +202,8 @@ struct Settings
             && eqUserPresets == o.eqUserPresets
             && envLastCurve == o.envLastCurve
             && envUserPresets == o.envUserPresets
-            && splitConfig == o.splitConfig;
+            && splitConfig == o.splitConfig
+            && tableCustomColours == o.tableCustomColours;
     }
 };
 

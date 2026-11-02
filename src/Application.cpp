@@ -204,6 +204,10 @@ void Application::loadSettings ()
     // Envelope: remembered curve + user presets.
     settings.envLastCurve       = recentStore->getValue ("env_last_curve", juce::String ());
     settings.envUserPresets     = recentStore->getValue ("env_user_presets", juce::String ());
+    // Table parameter custom colours (picker palette extensions).
+    sc::tables::parseCustomColours (recentStore->getValue ("table_custom_colours",
+                                                           juce::String ()),
+                                     settings.tableCustomColours);
 
     // Split spectral selection configuration: "in->dest;in->dest" with 1-based
     // channel numbers.
@@ -293,6 +297,8 @@ void Application::saveSettings ()
     recentStore->setValue ("eq_user_presets", settings.eqUserPresets);
     recentStore->setValue ("env_last_curve", settings.envLastCurve);
     recentStore->setValue ("env_user_presets", settings.envUserPresets);
+    recentStore->setValue ("table_custom_colours",
+                          sc::tables::formatCustomColours (settings.tableCustomColours));
 
     juce::String splitCfg;
     for (const auto& p : settings.splitConfig)
