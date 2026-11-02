@@ -10355,7 +10355,11 @@ ActionsPanel::ActionsPanel (Application& a) : app (a)
 
 juce::Rectangle<int> ActionsPanel::listArea() const
 {
-    return getLocalBounds().removeFromTop (kHeaderH);
+    // NOTE: in this JUCE build removeFromTop() returns the REMOVED strip and
+    // modifies the rectangle in place - so discard the return value.
+    auto b = getLocalBounds();
+    b.removeFromTop (kHeaderH);
+    return b;
 }
 
 juce::Rectangle<int> ActionsPanel::rowRect (int i) const
@@ -10439,8 +10443,10 @@ void ActionsPanel::paint (juce::Graphics& g)
         }
 
         const auto* act = app.actions.get (i);
+        // removeFromRight() returns the removed strip; we want the remainder.
+        textRect.removeFromRight (64);
         g.setColour (sel ? juce::Colours::white : juce::Colour::fromRGB (205, 205, 215));
-        g.drawText (act->name, textRect.removeFromRight (64),
+        g.drawText (act->name, textRect,
                     juce::Justification::left, false);
 
         if (!act->steps.empty())
@@ -10524,6 +10530,7 @@ void ActionsPanel::showContextMenu (juce::Point<int> at)
         case 1:
             app.actions.removeSelected (selected_);
             clearSelection();
+            app.saveActions ();
             repaint();
             break;
 
@@ -10548,6 +10555,8 @@ void ActionsPanel::showContextMenu (juce::Point<int> at)
                 juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
                                                    "Rename Action",
                                                    "That name is empty or already in use.", "", this);
+            else
+                app.saveActions ();
             repaint();
             break;
         }
@@ -10599,6 +10608,7 @@ void ActionsPanel::handleNew()
 
     selected_ = { idx };
     anchor_ = idx;
+    app.saveActions ();
     repaint();
 }
 
@@ -10639,6 +10649,7 @@ void ActionsPanel::handleRecord()
         }
         selected_ = { idx };
         anchor_ = idx;
+        app.saveActions ();
     }
 
     app.actionRec.active = true;

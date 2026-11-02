@@ -24601,6 +24601,59 @@ static void testActionBatch()
     emptyDir.deleteRecursively();
 }
 
+// ---------------- Actions panel rendering (regression for listArea) ----------------
+static void testActionsPanelPaint()
+{
+    Application app;   // isolated store under SC_TESTS_EXE
+
+    // Empty state: the "No actions yet." text must be drawn in the LIST area,
+    // i.e. below the 28 px button row. Regression: listArea() used to return
+    // the removed top strip (this JUCE build's removeFromTop returns the
+    // REMOVED portion), so nothing was ever visible.
+    {
+        ActionsPanel panel (app);
+        panel.setSize (300, 200);
+        const juce::Image img = panel.createComponentSnapshot (panel.getLocalBounds());
+
+        // Grey text on the dark background: luminance ~0.5 at full strength,
+        // anti-aliased edges lower - use a threshold well above the plain
+        // background (45/255 ~= 0.18) but below the grey core.
+        int brightList = 0;
+        for (int y = 60; y < 170; ++y)
+            for (int x = 40; x < 260; ++x)
+                if (img.getPixelAt (x, y).getBrightness () > 0.3f) ++brightList;
+        CHECK (brightList > 30, "empty-state text drawn in the list area");
+
+        const juce::Colour c = img.getPixelAt (10, 40);
+        CHECK (std::abs ((int) c.getRed() - 45) <= 8 && std::abs ((int) c.getGreen() - 45) <= 8,
+               "list area background is plain");
+    }
+
+    // With actions: row text must appear in the first two row bands (y 28..48, 48..68).
+    CHECK (app.actions.add ("Alpha") == 0, "first test action added");
+    CHECK (app.actions.add ("Beta") == 1, "second test action added");
+    {
+        ActionsPanel panel (app);
+        panel.setSize (300, 200);
+        const juce::Image img = panel.createComponentSnapshot (panel.getLocalBounds());
+
+        int brightRow0 = 0;
+        for (int y = 30; y < 46; ++y)
+            for (int x = 10; x < 290; ++x)
+                if (img.getPixelAt (x, y).getBrightness () > 0.5f) ++brightRow0;
+        CHECK (brightRow0 > 30, "row text drawn in the first row band");
+
+        int brightRow1 = 0;
+        for (int y = 50; y < 66; ++y)
+            for (int x = 10; x < 290; ++x)
+                if (img.getPixelAt (x, y).getBrightness () > 0.5f) ++brightRow1;
+        CHECK (brightRow1 > 30, "row text drawn in the second row band");
+    }
+
+    // Clean up so other tests sharing the isolated store see no actions.
+    while (!app.actions.empty ()) app.actions.removeSelected ({ 0 });
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -24870,6 +24923,7 @@ static int scRunUnitTestsImpl()
     progress ("actions validation");       testActionValidation();
     progress ("apply action steps");       testApplyActionSteps();
     progress ("action batch");             testActionBatch();
+    progress ("actions panel paint");      testActionsPanelPaint();
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
