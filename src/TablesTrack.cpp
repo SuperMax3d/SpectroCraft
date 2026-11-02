@@ -24,6 +24,28 @@ void TablesTrackView::setPlayhead (double tSecs)
     repaint();
 }
 
+void TablesTrackView::setValueRange (double lo, double hi)
+{
+    applyValueWindow (lo, hi);
+}
+
+void TablesTrackView::setSelection (const juce::Range<double>& s)
+{
+    if (s != selShown) { selShown = s; repaint(); }
+}
+
+// Single funnel for every change of the visible value window: validates,
+// stores, repaints and notifies MainWindow so the vertical scrollbar's thumb
+// follows wheel zooms, drags and refits.
+void TablesTrackView::applyValueWindow (double lo, double hi)
+{
+    if (!(hi > lo) || !std::isfinite ((float) lo) || !std::isfinite ((float) hi)) return;
+    vMin = lo;
+    vMax = hi;
+    repaint();
+    if (onValueWindowChanged) onValueWindowChanged (vMin, vMax);
+}
+
 juce::Rectangle<int> TablesTrackView::plotRect() const
 {
     // Same horizontal layout as the data tracks: a value-axis strip of width
@@ -68,15 +90,11 @@ void TablesTrackView::refit()
             mx = std::max (mx, hi);
         }
     }
-    if (!have) { fitMin = vMin = -1.0; fitMax = vMax = 1.0; repaint(); return; }
-
     const double pad = std::max ((mx - mn) * 0.1, 1e-9);
-    fitMin = mn - pad;
-    fitMax = mx + pad;
-    vMin = fitMin;
-    vMax = fitMax;
-    if (vMax <= vMin) vMax = vMin + 1e-9;
-    repaint();
+    fitMin = have ? mn - pad : -1.0;
+    fitMax = have ? mx + pad : 1.0;
+    if (fitMax <= fitMin) fitMax = fitMin + 1e-9;
+    applyValueWindow (fitMin, fitMax);
 }
 
 // ------------------------------------------------------------------ Paint --
@@ -243,9 +261,7 @@ void TablesTrackView::mouseDrag (const juce::MouseEvent& e)
             // Vertical pan: dragging down moves the window up in value space.
             const auto pr = plotRect();
             const double dv = ((double) dragStartY - (double) e.y) * (vMax - vMin) / pr.getHeight();
-            vMin = dragVMin + dv;
-            vMax = dragVMax + dv;
-            repaint();
+            applyValueWindow (dragVMin + dv, dragVMax + dv);
             break;
         }
 
@@ -311,11 +327,7 @@ void TablesTrackView::mouseUp (const juce::MouseEvent&)
                 const double top = valueAtY (rubberRect.getY());
                 const double bot = valueAtY (rubberRect.getBottom());
                 if (top - bot > 1e-12)
-                {
-                    vMax = top;
-                    vMin = bot;
-                    repaint();
-                }
+                    applyValueWindow (bot, top);
             }
             break;
         }
@@ -338,11 +350,9 @@ void TablesTrackView::mouseUp (const juce::MouseEvent&)
                 const double top = valueAtY (rubberRect.getY());
                 const double bot = valueAtY (rubberRect.getBottom());
                 if (top - bot > 1e-12)
-                {
-                    vMax = top;
-                    vMin = bot;
-                }
-                repaint();
+                    applyValueWindow (bot, top);
+                else
+                    repaint();
             }
             break;
         }
@@ -401,10 +411,10 @@ void TablesTrackView::mouseWheelMove (const juce::MouseEvent& e, const juce::Mou
     {
         const double pivot = valueAtY (e.y);
         const double factor = std::pow (1.2, -wheel.deltaY);
-        vMin = pivot + (vMin - pivot) * factor;
-        vMax = pivot + (vMax - pivot) * factor;
-        if (vMax - vMin < 1e-12 || !(std::isfinite ((float) (vMax - vMin)))) refit();
-        repaint();
+        const double nlo = pivot + (vMin - pivot) * factor;
+        const double nhi = pivot + (vMax - pivot) * factor;
+        if (nhi - nlo < 1e-12 || !std::isfinite ((float) (nhi - nlo))) refit();
+        else applyValueWindow (nlo, nhi);
         return;
     }
 

@@ -13199,7 +13199,7 @@ static void testHarmonicRatioAndClearAll()
                   view.copySpectrumToClipboard ();
                   lines = juce::StringArray::fromLines (
                       juce::SystemClipboard::getTextFromClipboard ());
-                  return lines.size() > 1 && lines[0].startsWith ("time_s,ch1_x")
+                  return lines.size() > 1 && lines[0].startsWith ("time_s	ch1_x")
                          && !lines[0].contains ("ch1_Hz");
               }), "clipboard header has ratio columns");
         if (lines.size() > 1)
@@ -13207,7 +13207,7 @@ static void testHarmonicRatioAndClearAll()
             juce::StringArray cols;
             // Explicit StringRef: the bare "," literal would bind to the
             // addTokens(StringRef, bool) overload and split on whitespace.
-            cols.addTokens (lines[1], juce::String (","), juce::String());
+            cols.addTokens (lines[1], juce::String ("	"), juce::String());
             CHECK (cols.size() == 5, "five columns per row (time + x/level per channel)");
             if (cols.size() == 5)
             {
@@ -13291,7 +13291,7 @@ static void testCopyCurveAltScales()
         const auto lines = juce::StringArray::fromLines (
             juce::SystemClipboard::getTextFromClipboard());
         return lines.isEmpty() ? juce::StringArray {}
-                               : juce::StringArray::fromTokens (lines[0], ",", "");
+                               : juce::StringArray::fromTokens (lines[0], "	", "");
     };
 
     // --- No alternative scales: output is unchanged ----------------------
@@ -13308,7 +13308,7 @@ static void testCopyCurveAltScales()
                   const auto lines = juce::StringArray::fromLines (
                       juce::SystemClipboard::getTextFromClipboard());
                   cols = lines.isEmpty() ? juce::StringArray {}
-                                         : juce::StringArray::fromTokens (lines[0], ",", "");
+                                         : juce::StringArray::fromTokens (lines[0], "	", "");
                   return cols.size() == 2 && cols[0] == "freq_Hz";
               }), "no alt columns when no alternative scale is set");
     }
@@ -13342,7 +13342,7 @@ static void testCopyCurveAltScales()
                       checked = 0; ok = true;
                       for (int i = 1; i < lines.size(); ++i)
                       {
-                          const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                          const auto rc = juce::StringArray::fromTokens (lines[i], "	", "");
                           if (rc.size() != 3) { ok = false; break; }
                           // Both columns are rounded to 3 decimals: allow the sum.
                           if (std::abs (rc[1].getDoubleValue()
@@ -13371,7 +13371,7 @@ static void testCopyCurveAltScales()
                       checked = 0; ok = true;
                       for (int i = 1; i < lines.size(); ++i)
                       {
-                          const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                          const auto rc = juce::StringArray::fromTokens (lines[i], "	", "");
                           if (rc.size() != 4) { ok = false; break; }
                           if (std::abs (rc[3].getDoubleValue()
                                        - rc[2].getDoubleValue() / 1000.0) > 1.5e-3)
@@ -13399,7 +13399,7 @@ static void testCopyCurveAltScales()
                       checked = 0; ok = true;
                       for (int i = 1; i < lines.size(); ++i)
                       {
-                          const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                          const auto rc = juce::StringArray::fromTokens (lines[i], "	", "");
                           if (rc.size() != 3) { ok = false; break; }
                           if (std::abs (rc[1].getDoubleValue()
                                        - rc[0].getDoubleValue() / 1000.0) > 1.5e-3)
@@ -13444,7 +13444,7 @@ static void testCopyCurveAltScales()
                       checked = 0; ok = true;
                       for (int i = 1; i < lines.size(); ++i)
                       {
-                          const auto rc = juce::StringArray::fromTokens (lines[i], ",", "");
+                          const auto rc = juce::StringArray::fromTokens (lines[i], "	", "");
                           if (rc.size() != 4) { ok = false; break; }
                           if (std::abs (rc[1].getDoubleValue()
                                        - rc[0].getDoubleValue() / 1000.0) > 1.5e-3
@@ -22751,35 +22751,100 @@ static void testTablesImport()
         CHECK (!importTable ("bad", "", t, &err), "empty csv rejected");
         CHECK (!importTable ("bad2", "hello\nworld\nfoo\n", t, &err), "all-text grid rejected");
     }
+
+    // --- Tab-separated columns are accepted like commas --------------------------
+    {
+        TableData t;
+        std::string err;
+        CHECK (importTable ("tsv", "a\tb\n1\t2.5\n3\t4.5\n", t, &err), "tab-separated csv imports");
+        if (t.params.size() == 2)
+        {
+            CHECK (t.params[0].name == "a" && t.params[1].name == "b", "tab headers used");
+            CHECK (std::abs (t.params[0].values[1] - 3.0) < 1e-9
+                  && std::abs (t.params[1].values[1] - 4.5) < 1e-9, "tab cell values parsed");
+        }
+    }
+
+    // --- Time-column auto-detection -------------------------------------------------
+    {
+        TableData t;
+        std::string err;
+        CHECK (importTable ("tc", "time_s,amp\n0.0,1\n0.5,2\n1.0,3\n", t, &err, 10.0),
+              "time column detected and dropped as a parameter");
+        CHECK (t.params.size() == 1 && t.params[0].name == "amp", "only the data column remains");
+        CHECK (std::abs (t.sampleRate - 2.0) < 1e-9, "rate fitted to the timestamps ((rows-1)/span)");
+        CHECK (std::abs (t.offsetSecs) < 1e-9, "start inside the duration keeps its offset");
+        if (!t.params.empty())
+            CHECK (t.params[0].values.size() == 3 && std::abs (t.params[0].values[2] - 3.0) < 1e-9,
+                  "data rows preserved without interpolation");
+    }
+
+    // --- Time column starting beyond the duration is shifted to begin at 0 --------
+    {
+        TableData t;
+        std::string err;
+        CHECK (importTable ("tc2", "time_s,amp\n5.0,1\n6.0,2\n7.0,3\n", t, &err, 4.0),
+              "late time column detected");
+        CHECK (std::abs (t.sampleRate - 1.0) < 1e-9, "rate fitted to the shifted span");
+        CHECK (std::abs (t.offsetSecs) < 1e-9, "start beyond duration shifts the table to 0");
+    }
+
+    // --- Time column starting inside the duration keeps its absolute start --------
+    {
+        TableData t;
+        std::string err;
+        CHECK (importTable ("tc3", "time_s,amp\n1.0,1\n2.0,2\n3.0,3\n", t, &err, 10.0),
+              "in-range time column detected");
+        CHECK (std::abs (t.offsetSecs - 1.0) < 1e-9, "absolute start kept as the offset");
+    }
+
+    // --- Non-increasing timestamps are NOT a time column ---------------------------
+    {
+        TableData t;
+        std::string err;
+        CHECK (importTable ("tc4", "time,amp\n2.0,1\n1.0,2\n3.0,3\n", t, &err),
+              "non-increasing first column imports normally");
+        CHECK (t.params.size() == 2 && std::abs (t.sampleRate - 1000.0) < 1e-9,
+              "time-like column stays a parameter at the default rate");
+    }
+
+    // --- A header without "time" is never treated as timestamps ---------------------
+    {
+        TableData t;
+        std::string err;
+        CHECK (importTable ("tc5", "t_s,amp\n0.0,1\n0.5,2\n1.0,3\n", t, &err),
+              "plain increasing column imports normally");
+        CHECK (t.params.size() == 2, "no time detection without the word 'time'");
+    }
 }
 
 static void testTablesDownsampleAndTransforms()
 {
     using namespace sc::tables;
 
-    // --- Downsample: length scales with the rate, endpoints preserved ---------
+    // --- Downsample: remove-only decimation, no interpolation ------------------
     {
         TableData t;
         std::string err;
         CHECK (importTable ("ds", "v\n0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", t, &err), "ramp imports");
-        const double oldRate = t.sampleRate;   // 1000 rows/s by default
+        // 1000 rows/s by default; asking for 500 Hz keeps every 2nd row.
         downsampleTable (t, 500.0);
-        CHECK (std::abs (t.sampleRate - 500.0) < 1e-9, "rate updated");
+        CHECK (std::abs (t.sampleRate - 500.0) < 1e-9, "rate is exactly oldRate/N");
         if (!t.params.empty())
         {
             const auto& v = t.params[0].values;
-            // N=10 at 1000 Hz -> round(10 * 500/1000) = 5 samples.
-            CHECK (v.size() == 5, "downsampled to half the rows");
-            CHECK (std::abs (v.front()) < 1e-9 && std::abs (v.back() - 9.0) < 1e-9,
-                  "endpoints preserved by downsample");
-            CHECK (std::abs (v[2] - 4.5) < 1e-9, "midpoint linearly interpolated");
+            CHECK (v.size() == 5, "every Nth row kept (rows removed only)");
+            bool rawOnly = true;
+            for (size_t i = 0; i < v.size (); ++i)
+                if (std::abs (v[i] - double (2 * int (i))) > 1e-9) { rawOnly = false; break; }
+            CHECK (rawOnly, "kept values are the original rows, never interpolated");
         }
 
-        // Upsampling keeps the endpoints too.
+        // Asking for a rate at or above the current one removes nothing.
         downsampleTable (t, 2000.0);
         if (!t.params.empty())
-            CHECK (t.params[0].values.size() == 20 && std::abs (t.params[0].values.back() - 9.0) < 1e-9,
-                  "upsampled length and endpoint");
+            CHECK (t.params[0].values.size() == 5 && std::abs (t.sampleRate - 500.0) < 1e-9,
+                  "no-op when already at or below the requested rate");
     }
 
     // --- transformValue: normalized -> inverted -> absolute -> scale+offset --
@@ -23332,6 +23397,126 @@ static void testTablesAlignTarget()
     }
 
     wav.deleteFile();
+}
+
+//==============================================================================
+// Per-channel-row table overlay: every visible channel row gets its own copy
+// of the curve, scaled to that row - never stretched across the full view.
+static void testTablesPerRowOverlay()
+{
+    const juce::File wav = makeTempFile ("tables_perrow.wav");
+    writeWav (wav, 2, kToneRate, kToneFrames, [] (int ch, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                              * (ch == 0 ? 300.0 : 600.0)
+                                              * (double) f / rate); });
+    Application app;
+    if (!app.openFile (wav)) { wav.deleteFile (); return; }
+    FileDoc* d = app.doc ();
+    CHECK (d != nullptr, "per-row overlay: doc created");
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    std::string err;
+    // Time column spanning the whole document -> a ramp across every row.
+    const juce::String csv = "time_s,v\n0.0,0\n0.5,2\n1.0,4\n1.5,6\n2.0,8\n";
+    CHECK (app.addTableFromCsv ("Ramp", csv, &err), "ramp table imported");
+    auto& p0 = d->tables[0].params[0];
+    p0.colorIndex = 7;   // pink: absent from the waveform fill and spectral map
+
+    // kPalette[7] is (255,120,200); match it tightly so anti-aliased edges of
+    // other content cannot false-positive.
+    auto isPink = [] (const juce::Colour& px)
+    { return px.getRed () > 235 && px.getGreen () >= 95
+             && px.getGreen () <= 145 && px.getBlue () >= 180
+             && px.getBlue () <= 220; };
+    auto countPink = [&isPink] (const juce::Image& img, const juce::Rectangle<int>& band)
+    {
+        int n = 0;
+        for (int y = std::max (0, band.getY ()) ;
+             y < std::min (img.getHeight (), band.getBottom ()); ++y)
+            for (int x = std::max (0, band.getX ()) ;
+                 x < std::min (img.getWidth (), band.getRight ()); ++x)
+                if (isPink (img.getPixelAt (x, y))) ++n;
+        return n;
+    };
+    // Mean y of the pink cluster in one column: -1 when absent.
+    auto rowOffsetAt = [&isPink] (const juce::Image& img, int x, int yLo, int yHi)
+    {
+        double sum = 0.0; int n = 0;
+        for (int y = std::max (0, yLo); y < std::min (img.getHeight (), yHi); ++y)
+            if (isPink (img.getPixelAt (x, y))) { sum += (double) y; ++n; }
+        return n > 0 ? (float) (sum / (double) n) : -1.0f;
+    };
+
+    const int W = 400, H = 300;
+
+    // --- Waveform overlay: one curve per channel row ------------------------
+    app.setTablesMode (0);
+    {
+        WaveformView wv (app);
+        wv.setSize (W, H);
+        wv.setViewRange (0.0, app.audioEngine ().duration ());
+        wv.setVisibleChannels ({ 0, 1 });
+
+        juce::Image img (juce::Image::ARGB, W, H, true);
+        { juce::Graphics g (img); wv.paint (g); }
+
+        const auto pr = wv.plotRect ();
+        const int midY = pr.getY () + pr.getHeight () / 2;
+        CHECK (countPink (img, { pr.getX (), pr.getY (), pr.getWidth (), midY - pr.getY () }) > 0,
+              "waveform overlay draws the curve in channel row 1");
+        CHECK (countPink (img, { pr.getX (), midY + 3, pr.getWidth (), pr.getBottom () - midY - 3 }) > 0,
+              "waveform overlay draws the curve in channel row 2");
+        // Identical per-row copies: at one probe column the pink cluster sits
+        // the same distance below each row's top. A single stretched curve
+        // would not.
+        const int xProbe = pr.getX () + pr.getWidth () / 4;
+        const float offTop = rowOffsetAt (img, xProbe, pr.getY (), midY);
+        const float offBot = rowOffsetAt (img, xProbe, midY, pr.getBottom ());
+        CHECK (offTop >= 0.0f && offBot >= 0.0f,
+              "waveform overlay present at the probe column in both rows");
+        if (offTop >= 0.0f && offBot >= 0.0f)
+        {
+            const auto rows = WaveformView::channelRowRects (pr.getWidth (), pr.getHeight (), 2);
+            CHECK (std::abs ((offTop - (float) rows[0].getY ())
+                            - (offBot - (float) rows[1].getY ())) <= 3.0f,
+                  "waveform overlay is identical in both channel rows");
+        }
+    }
+
+    // --- Spectrogram overlay: the same per-row behaviour --------------------
+    p0.alignTarget = 1;
+    app.setTablesMode (1);
+    {
+        SpectralView sv (app);
+        sv.setSize (W, H);
+        sv.setViewRange (0.0, app.audioEngine ().duration ());
+        sv.setVisibleChannels ({ 0, 1 });
+        sv.setSettings (app.settings);
+
+        juce::Image img (juce::Image::ARGB, W, H, true);
+        { juce::Graphics g (img); sv.paint (g); }
+
+        const auto pr = sv.plotRect ();
+        const int midY = pr.getY () + pr.getHeight () / 2;
+        CHECK (countPink (img, { pr.getX (), pr.getY (), pr.getWidth (), midY - pr.getY () }) > 0,
+              "spectrogram overlay draws the curve in channel row 1");
+        CHECK (countPink (img, { pr.getX (), midY + 3, pr.getWidth (), pr.getBottom () - midY - 3 }) > 0,
+              "spectrogram overlay draws the curve in channel row 2");
+        const int xProbe = pr.getX () + pr.getWidth () / 4;
+        const float offTop = rowOffsetAt (img, xProbe, pr.getY (), midY);
+        const float offBot = rowOffsetAt (img, xProbe, midY, pr.getBottom ());
+        CHECK (offTop >= 0.0f && offBot >= 0.0f,
+              "spectrogram overlay present at the probe column in both rows");
+        if (offTop >= 0.0f && offBot >= 0.0f)
+        {
+            const auto rows = WaveformView::channelRowRects (pr.getWidth (), pr.getHeight (), 2);
+            CHECK (std::abs ((offTop - (float) rows[0].getY ())
+                            - (offBot - (float) rows[1].getY ())) <= 3.0f,
+                  "spectrogram overlay is identical in both channel rows");
+        }
+    }
+
+    wav.deleteFile ();
 }
 
 //=============================================================================
@@ -24035,16 +24220,16 @@ static void testSelectionChannelClip()
         return v;
     };
 
-    // --- Waveform: selection dragged from row 0 into row 1 stays on row 0 ---
+    // --- Waveform: a time-range selection spans every channel row ----------
     {
         auto* view = makeWaveView ();
         view->mouseDown (mkMouse (*view, 100, yRow0Top, lmb));
-        CHECK (app.selectionRow == 0, "selection drag starts on the first channel row");
+        CHECK (app.selectionRow == -1, "time-range selection covers all channels");
         view->mouseDrag (mkMouse (*view, 300, H - 20, lmb));   // dragged over row 1
         view->mouseUp   (mkMouse (*view, 300, H - 20, lmb));
 
         CHECK (!app.selection.isEmpty(), "the drag produced a time selection");
-        CHECK (app.selectionRow == 0, "selection stays clipped to its start row");
+        CHECK (app.selectionRow == -1, "selection still covers every channel row");
 
         // Probe the blue fill inside the selection x-range near each row top.
         const int sx = (int) view->timeToX ((app.selection.getStart()
@@ -24057,8 +24242,8 @@ static void testSelectionChannelClip()
             return (int) c.getBlue() > (int) c.getRed() + 30
                    && (int) c.getBlue() > (int) c.getGreen() + 25;
         };
-        CHECK (probeBlue (sx, yRow0Top), "selection fill is drawn inside the start row");
-        CHECK (!probeBlue (sx, yRow1Top), "selection fill does not spill into the other row");
+        CHECK (probeBlue (sx, yRow0Top) && probeBlue (sx, yRow1Top),
+               "selection fill is drawn on every channel row");
 
         // Select All spans every row again.
         app.selectAll();
@@ -24133,12 +24318,12 @@ static void testSelectionChannelClip()
         view->setVisibleChannels ({ 0, 1 });
 
         view->mouseDown (mkMouse (*view, 100, yRow0Top, lmb));
-        CHECK (app.selectionRow == 0, "spectral selection drag starts on the first row");
+        CHECK (app.selectionRow == -1, "spectral time-range selection covers all channels");
         view->mouseDrag (mkMouse (*view, 300, H - 20, lmb));   // dragged over row 1
         view->mouseUp   (mkMouse (*view, 300, H - 20, lmb));
 
-        CHECK (!app.selection.isEmpty() && app.selectionRow == 0,
-               "spectral selection stays clipped to its start row");
+        CHECK (!app.selection.isEmpty() && app.selectionRow == -1,
+               "spectral selection still covers every channel row");
 
         const int sx = (int) view->timeToX ((app.selection.getStart()
                                              + app.selection.getEnd()) * 0.5);
@@ -24150,8 +24335,8 @@ static void testSelectionChannelClip()
             return (int) c.getBlue() > (int) c.getRed() + 30
                    && (int) c.getBlue() > (int) c.getGreen() + 25;
         };
-        CHECK (probeBlue (sx, yRow0Top), "spectral selection fill is drawn inside the start row");
-        CHECK (!probeBlue (sx, yRow1Top), "spectral selection fill does not spill into the other row");
+        CHECK (probeBlue (sx, yRow0Top) && probeBlue (sx, yRow1Top),
+               "spectral selection fill is drawn on every channel row");
 
         // Box-zoom: the frequency range comes from the clipped box mapped
         // through the drag-start row (row 0 spans y[24..159]).
@@ -24908,6 +25093,7 @@ static int scRunUnitTestsImpl()
     progress ("tables panel");           testTablesPanel();
     progress ("tables overlay + picker"); testTablesOverlayAndPicker();
     progress ("tables align targets");   testTablesAlignTarget();
+    progress ("tables per-row overlay"); testTablesPerRowOverlay();
     progress ("tables solo + rename");   testTablesSoloAndRename();
     progress ("tables timeline warp");   testTablesTimelineWarp();
     progress ("tables shared alignment");testTablesSharedAlignment();

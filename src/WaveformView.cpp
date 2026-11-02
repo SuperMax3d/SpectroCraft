@@ -198,10 +198,9 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
         else
         {
             dragMode = DragMode::Select;
-            // The selection belongs to the channel row it started on: both
-            // views clip their rectangle to that row so dragging over another
-            // channel does not paint over it.
-            app.selectionRow = rowAtY (e.y);
+            // Time-range selections span every channel row: edits apply to
+            // all channels, so the highlight covers them all too.
+            app.selectionRow = -1;
             if (app.onStateChange) app.onStateChange ();   // repaint both views
             app.setSelection ({ dragStartTime, dragStartTime });
             selection = app.selection;
@@ -783,36 +782,48 @@ void WaveformView::drawTablesOverlay (juce::Graphics& g)
 
     const auto pr = plotRect();
     if (pr.getWidth() <= 1 || pr.getHeight() <= 1) return;
-    const float ampPx = pr.getHeight() * 0.45f * (float) vZoom;
-    const float center = pr.getY() + pr.getHeight() * 0.5f;
 
-    for (const auto& t : tables)
+    // One identical curve per visible channel row, scaled to that row's own
+    // centre and height - the same layout paintChannel() uses for the data.
+    int visCount = 0;
+    const int chans = app.audioEngine().numChannels();
+    for (int ch = 0; ch < chans; ++ch)
+        if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
+    const auto rows = channelRowRects (pr.getWidth(), pr.getHeight(), visCount);
+
+    for (const auto& rr : rows)
     {
-        if (!t.visible) continue;
-        for (const auto& p : t.params)
+        const float center = pr.getY() + rr.getY() + rr.getHeight() * 0.5f;
+        const float ampPx = rr.getHeight() * 0.45f * (float) vZoom;
+
+        for (const auto& t : tables)
         {
-            if (!p.visible || p.alignTarget != 0 || p.values.size() < 2) continue;
-
-            double mn = p.values[0], mx = p.values[0];
-            for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
-            const auto [off, sc] = t.effectiveTimeMap (p);
-
-            juce::Path path;
-            bool started = false;
-            for (int i = 0; i < pr.getWidth(); ++i)
+            if (!t.visible) continue;
+            for (const auto& p : t.params)
             {
-                const double tDoc = xToTime ((double) (pr.getX() + i));
-                const double tTab = (tDoc - off) / sc;
-                if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
-                const double v = sc::tables::overlayValue (
-                    sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
-                const float y = center + (float) ((vOffset - v) * ampPx);
-                const float x = (float) (pr.getX() + i) + 0.5f;
-                if (!started) { path.startNewSubPath (x, y); started = true; }
-                else          path.lineTo (x, y);
+                if (!p.visible || p.alignTarget != 0 || p.values.size() < 2) continue;
+
+                double mn = p.values[0], mx = p.values[0];
+                for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
+                const auto [off, sc] = t.effectiveTimeMap (p);
+
+                juce::Path path;
+                bool started = false;
+                for (int i = 0; i < pr.getWidth(); ++i)
+                {
+                    const double tDoc = xToTime ((double) (pr.getX() + i));
+                    const double tTab = (tDoc - off) / sc;
+                    if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
+                    const double v = sc::tables::overlayValue (
+                        sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
+                    const float y = center + (float) ((vOffset - v) * ampPx);
+                    const float x = (float) (pr.getX() + i) + 0.5f;
+                    if (!started) { path.startNewSubPath (x, y); started = true; }
+                    else          path.lineTo (x, y);
+                }
+                g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
+                g.strokePath (path, juce::PathStrokeType (2.0f));
             }
-            g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
-            g.strokePath (path, juce::PathStrokeType (2.0f));
         }
     }
 }

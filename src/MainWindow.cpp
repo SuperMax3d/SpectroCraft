@@ -163,9 +163,23 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         else            // track data: time window + every vertical range
             zoomOutFull ();
     };
+    // The dedicated track's vertical scrollbar: dragging the thumb sets the
+    // strip's value window, and any wheel/drag/refit change inside the strip
+    // moves the thumb back.
+    tablesTrack->onValueWindowChanged = [this] (double, double)
+    {
+        updateScrollBars ();   // keeps the scrollbar's range + thumb in sync
+    };
+
     tablesSep     = std::make_unique<ViewSplitter>();
     tablesSep->onDrag = [this] (const juce::MouseEvent& e) { handleTablesSepDrag (e); };
     tablesVScroll = std::make_unique<ValueScrollBar>();
+    tablesVScroll->setTooltip ("Visible value range of the dedicated tables track: drag the "
+                               "thumb to pan, drag an edge to zoom, click outside the thumb to jump.");
+    tablesVScroll->onChange = [this] (double lo, double hi)
+    {
+        if (tablesTrack && hi > lo) tablesTrack->setValueRange (lo, hi);
+    };
 
     fileListPanel->onOpenRequested = [this] { handleFileOpen(); };
 
@@ -1754,6 +1768,8 @@ void MainWindow::syncSharedState()
         // even though the pointer did not.
         spectralView->repaint();
     }
+    if (tablesTrack)
+        tablesTrack->setSelection (app.selection);   // dedicated track's blue band follows the shared selection
     refreshPanels();
 
     // Persist the session settings whenever any of the persisted fields

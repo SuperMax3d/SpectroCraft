@@ -33,6 +33,14 @@ public:
         values (with 10% padding) and repaints. Called when tables change. */
     void refit();
 
+    /** Sets the visible value window directly (e.g. from the vertical
+        scrollbar). lo is the bottom value, hi the top one. */
+    void setValueRange (double lo, double hi);
+
+    /** Shared time selection: repaints only when it actually changed, so
+        syncSharedState() can call this on every state change cheaply. */
+    void setSelection (const juce::Range<double>& s);
+
     // Value<->pixel mapping of the plot area (public for headless tests).
     double valueAtY (int y) const;
     int yForValue (double v) const;
@@ -46,10 +54,15 @@ public:
     std::function<void(double t0, double t1)> onTimeWindow;   // horizontal zoom / box-zoom time part
     std::function<void()> onZoomToSelection;
     std::function<void(bool axisOnly)> onZoomOutFull;
+    // Notified whenever the visible value window changes (wheel, drag,
+    // refit, scrollbar): MainWindow uses it to keep the vertical scrollbar's
+    // thumb in sync.
+    std::function<void(double lo, double hi)> onValueWindowChanged;
 
 private:
     juce::Rectangle<int> plotRect() const;
     juce::Rectangle<int> axisStripRect() const;
+    void applyValueWindow (double lo, double hi);
     struct HoverLabel { juce::String text; float y; juce::Colour colour; };
     void collectHoverLabels (int mouseX, int mouseY);
     bool onAxisX (int x) const;
@@ -60,6 +73,7 @@ private:
     double playheadT = 0.0;
     double vMin = -1.0, vMax = 1.0; // visible value window (max at top)
     double fitMin = -1.0, fitMax = 1.0;   // full auto-fit range
+    juce::Range<double> selShown { 0.0, 0.0 };
 
     enum class DragMode { None, VPan, ZoomAxis, ZoomBox };
     DragMode dragMode = DragMode::None;

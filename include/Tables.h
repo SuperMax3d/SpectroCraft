@@ -77,26 +77,39 @@ extern const juce::Colour kPalette[12];
 
 // ------------------------------------------------------------------ Import --
 
-/** Splits CSV text into a grid of fields. Handles quoted fields (with
-    embedded commas), CRLF/LF line endings and trims surrounding spaces. */
+/** Splits CSV/TSV text into a grid of fields. Handles quoted fields (with
+    embedded separators), comma AND tab column separators, CRLF/LF line
+    endings and trims surrounding spaces. */
 std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text);
 
 /** True when the cell parses as a number or true/false (i.e. is data). */
 bool cellIsData (const juce::String& s, double* out = nullptr);
 
-/** Imports CSV text into `out`. Rules:
+/** Imports CSV/TSV text into `out`. Rules:
     - if the first column contains only text, the grid is transposed first;
     - a leading row with any non-numeric cell becomes the header (column
       titles become parameter names; empty titles get "ParamN");
     - true/false cells become 1.0/0.0;
     - scattered non-data cells inside an otherwise numeric column are
       linearly interpolated from their nearest valid neighbours;
-    - a column with no data at all is ignored. */
-bool importTable (const juce::String& name, const juce::String& csvText,
-                  TableData& out, std::string* errOut = nullptr);
+    - a column with no data at all is ignored.
 
-/** Resamples every parameter to `newRateHz` rows/second (linear). The new
-    length is max(2, round(N * newRate / oldRate)); endpoints are preserved. */
+    Time-column auto-detection: when the first column's header contains
+    "time" (case-insensitive) and its values are strictly increasing, that
+    column positions the rows on the document timeline instead of becoming a
+    parameter. The table is fitted to the uniform-grid model with
+    sampleRate = (rows-1)/span and offsetSecs = start; when `docDurationSecs`
+    is >= 0 and the start lies beyond it, the whole span is shifted so that
+    the table starts at 0. */
+bool importTable (const juce::String& name, const juce::String& csvText,
+                  TableData& out, std::string* errOut = nullptr,
+                  double docDurationSecs = -1.0);
+
+/** Decimates every parameter so the table holds at most `newRateHz` rows per
+    second: keeps every ceil(oldRate/newRate)th row - pure removal, no
+    interpolation and no added data. The table's sample rate becomes exactly
+    oldRate/N (the density of the kept rows). Does nothing when the current
+    rate is already at or below `newRateHz`. */
 void downsampleTable (TableData& t, double newRateHz);
 
 // ------------------------------------------------- Timeline anchoring --

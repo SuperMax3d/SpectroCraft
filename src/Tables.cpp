@@ -70,7 +70,7 @@ std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
         {
             inQuotes = true;
         }
-        else if (c == ',')
+        else if (c == ',' || c == '\t')   // comma- and tab-separated alike
         {
             pushField();
         }
@@ -145,7 +145,7 @@ static void interpolateColumn (std::vector<double>& vals, const std::vector<bool
 }
 
 bool importTable (const juce::String& name, const juce::String& csvText,
-                  TableData& out, std::string* errOut)
+                  TableData& out, std::string* errOut, double docDurationSecs)
 {
     auto grid = parseCsvGrid (csvText);
     if (grid.empty ())
@@ -184,7 +184,42 @@ bool importTable (const juce::String& name, const juce::String& csvText,
     out = TableData {};
     out.name = name;
 
-    for (int c = 0; c < C; ++c)
+    // Time-column auto-detection: a first column whose header contains
+    // "time" and whose values are strictly increasing positions the rows on
+    // the document timeline instead of becoming a parameter. The uniform-
+    // grid model is fitted with sampleRate = (rows-1)/span; when the start
+    // lies beyond the audio duration, the span is shifted to begin at 0.
+    int firstDataCol = 0;
+    if (hasHeader && C >= 2 && dataRows >= 2)
+    {
+        const auto hdr = grid[0][(size_t) 0].trim().toLowerCase();
+        if (hdr.contains ("time"))
+        {
+            std::vector<double> ts ((size_t) dataRows);
+            bool allNum = true;
+            for (int r = 0; r < dataRows && allNum; ++r)
+            {
+                const auto& rowRef = grid[(size_t) (r + 1)];
+                if (rowRef.empty () || !cellIsData (rowRef[(size_t) 0], &ts[(size_t) r]))
+                    allNum = false;
+            }
+            bool increasing = true;
+            for (int r = 1; r < dataRows && increasing; ++r)
+                if (!(ts[(size_t) r] > ts[(size_t) (r - 1)])) increasing = false;
+
+            const double tStart = ts[(size_t) 0], tEnd = ts[(size_t) (dataRows - 1)];
+            if (allNum && increasing && tEnd > tStart)
+            {
+                const double shift = (docDurationSecs >= 0.0 && tStart > docDurationSecs)
+                                     ? tStart : 0.0;
+                out.sampleRate = (double) (dataRows - 1) / (tEnd - tStart);
+                out.offsetSecs = tStart - shift;
+                firstDataCol = 1;   // the time column is not a parameter
+            }
+        }
+    }
+
+    for (int c = firstDataCol; c < C; ++c)
     {
         std::vector<double> vals ((size_t) dataRows);
         std::vector<bool> valid ((size_t) dataRows, false);
@@ -232,23 +267,23 @@ void downsampleTable (TableData& t, double newRateHz)
 {
     if (!(newRateHz > 0.0)) return;
     const double oldRate = t.sampleRate;
+
+    // Remove-only decimation: keep every Nth row so the resulting density is
+    // at most newRateHz rows/second. No interpolation, no added data.
+    const int N = (int) std::ceil (oldRate / newRateHz);
+    if (N <= 1) return;   // already at or below the requested rate
+
     for (auto& p : t.params)
     {
         const int nOld = (int) p.values.size();
         if (nOld < 2) continue;
-        const int nNew = std::max (2, (int) std::lround ((double) nOld * newRateHz / oldRate));
-        std::vector<double> out ((size_t) nNew);
-        for (int i = 0; i < nNew; ++i)
-        {
-            const double pos = (double) i * (nOld - 1) / (nNew - 1);
-            const int lo = std::min (nOld - 2, (int) pos);
-            const double frac = pos - lo;
-            out[(size_t) i] = p.values[(size_t) lo] * (1.0 - frac)
-                            + p.values[(size_t) (lo + 1)] * frac;
-        }
+        std::vector<double> out;
+        out.reserve ((size_t) ((nOld - 1) / N + 1));
+        for (int i = 0; i < nOld; i += N)
+            out.push_back (p.values[(size_t) i]);
         p.values = std::move (out);
     }
-    t.sampleRate = newRateHz;
+    t.sampleRate = oldRate / (double) N;   // exact density of the kept rows
 }
 
 // ------------------------------------------------- Timeline anchoring --

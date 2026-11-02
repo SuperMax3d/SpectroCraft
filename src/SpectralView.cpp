@@ -433,14 +433,9 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
         else
         {
             dragMode = DragMode::Select;
-            // The selection belongs to the channel row it started on: both
-            // views clip their rectangle to that row so dragging over another
-            // channel does not paint over it.
-            int selRow = -1;
-            const auto rows0 = rowRects ();
-            for (size_t r = 0; r < rows0.size (); ++r)
-                if (e.y >= rows0[(size_t) r].getY()) selRow = (int) r;   // last match wins
-            app.selectionRow = selRow;
+            // Time-range selections span every channel row: edits apply to
+            // all channels, so the highlight covers them all too.
+            app.selectionRow = -1;
             if (app.onStateChange) app.onStateChange ();   // repaint both views
             app.setSelection ({ dragStartTime, dragStartTime });
             selection = app.selection;
@@ -2140,36 +2135,43 @@ void SpectralView::drawTablesOverlay (juce::Graphics& g)
     const auto pr = plotRect();
     if (pr.getWidth() <= 1 || pr.getHeight() <= 1) return;
 
-    for (const auto& t : tables)
+    // One identical curve per visible channel row, mapped into that row's own
+    // frequency span - the same layout renderSpectralContent() uses for data.
+    const auto rows = rowRects ();
+
+    for (const auto& rr : rows)
     {
-        if (!t.visible) continue;
-        for (const auto& p : t.params)
+        for (const auto& t : tables)
         {
-            if (!p.visible || p.alignTarget != 1 || p.values.size() < 2) continue;
-
-            double mn = p.values[0], mx = p.values[0];
-            for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
-            const auto [off, sc] = t.effectiveTimeMap (p);
-
-            juce::Path path;
-            bool started = false;
-            for (int i = 0; i < pr.getWidth(); ++i)
+            if (!t.visible) continue;
+            for (const auto& p : t.params)
             {
-                const double tDoc = xToTime ((double) (pr.getX() + i));
-                const double tTab = (tDoc - off) / sc;
-                if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
-                const double v = sc::tables::overlayValue (
-                    sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
-                if (!std::isfinite ((float) v)) { started = false; continue; }
-                const double fHz = getFreqMin () + 0.5 * (v + 1.0) * (getFreqMax () - getFreqMin ());
-                if (!(fHz >= 0.0)) { started = false; continue; }
-                const float y = pr.getY() + freqToY (fHz, pr.getHeight());
-                const float x = (float) (pr.getX() + i) + 0.5f;
-                if (!started) { path.startNewSubPath (x, y); started = true; }
-                else          path.lineTo (x, y);
+                if (!p.visible || p.alignTarget != 1 || p.values.size() < 2) continue;
+
+                double mn = p.values[0], mx = p.values[0];
+                for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
+                const auto [off, sc] = t.effectiveTimeMap (p);
+
+                juce::Path path;
+                bool started = false;
+                for (int i = 0; i < pr.getWidth(); ++i)
+                {
+                    const double tDoc = xToTime ((double) (pr.getX() + i));
+                    const double tTab = (tDoc - off) / sc;
+                    if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
+                    const double v = sc::tables::overlayValue (
+                        sc::tables::paramValueAt (t, p, tTab), p, mn, mx);
+                    if (!std::isfinite ((float) v)) { started = false; continue; }
+                    const double fHz = getFreqMin () + 0.5 * (v + 1.0) * (getFreqMax () - getFreqMin ());
+                    if (!(fHz >= 0.0)) { started = false; continue; }
+                    const float y = rr.getY() + freqToY (fHz, rr.getHeight());
+                    const float x = (float) (pr.getX() + i) + 0.5f;
+                    if (!started) { path.startNewSubPath (x, y); started = true; }
+                    else          path.lineTo (x, y);
+                }
+                g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
+                g.strokePath (path, juce::PathStrokeType (2.0f));
             }
-            g.setColour (sc::tables::kPalette[p.colorIndex % 12]);
-            g.strokePath (path, juce::PathStrokeType (2.0f));
         }
     }
 }

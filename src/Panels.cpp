@@ -4495,6 +4495,8 @@ void FFTAnalysisView::mouseWheelMove (const juce::MouseEvent& e, const juce::Mou
 
 void FFTAnalysisView::copySpectrumToClipboard()
 {
+    const juce::String sep = "	";   // tab-separated columns (Excel-friendly)
+
     const double rate = app.audioEngine().sampleRate();
     // Export the currently visible frequency window.
     const double fLo = fLo_, fHi = fHi_;
@@ -4522,14 +4524,14 @@ void FFTAnalysisView::copySpectrumToClipboard()
     auto appendAlts = [&] (juce::String& line, double freqHz)
     {
         for (const auto* r : altRefs)
-            line += "," + juce::String (Application::altScaleValue (*r, freqHz), 3);
+            line += sep + juce::String (Application::altScaleValue (*r, freqHz), 3);
     };
 
     // Appends the alternative-reference column names to a header.
     auto appendAltHeaders = [&] (juce::String& header, const juce::String& prefix)
     {
         for (const auto* r : altRefs)
-            header += "," + prefix + r->name;
+            header += sep + prefix + r->name;
     };
 
     // Curve modes export the points of the currently displayed curve instead
@@ -4552,22 +4554,22 @@ void FFTAnalysisView::copySpectrumToClipboard()
             const juce::String chName = "ch" + juce::String (c + 1) + "_";
             if (axisMode_ == 3 && hRatio)
             {
-                header += "," + chName + "x";
-                header += "," + chName + sc.spectralUnitLabel();
+                header += sep + chName + "x";
+                header += sep + chName + sc.spectralUnitLabel();
             }
             else if (axisMode_ == 3)
             {
-                header += "," + chName + "Hz";
+                header += sep + chName + "Hz";
                 appendAltHeaders (header, chName);
-                header += "," + chName + sc.spectralUnitLabel();
+                header += sep + chName + sc.spectralUnitLabel();
             }
             else if (axisMode_ == 4)
             {
-                header += "," + chName + sc.spectralUnitLabel() + "," + chName + "Hz";
+                header += sep + chName + sc.spectralUnitLabel() + sep + chName + "Hz";
                 appendAltHeaders (header, chName);
             }
             else
-                header += "," + chName + sc.spectralUnitLabel();
+                header += sep + chName + sc.spectralUnitLabel();
         }
         lines.add (header);
 
@@ -4601,22 +4603,22 @@ void FFTAnalysisView::copySpectrumToClipboard()
                 if (i >= cd.x.size()) continue;   // defensive: channels are equal-sized
                 if (axisMode_ == 3 && hRatio)
                 {
-                    line += "," + juce::String (cd.freqHz[i], 3);
-                    line += "," + fmtLevel (cd.ampDb[i]);
+                    line += sep + juce::String (cd.freqHz[i], 3);
+                    line += sep + fmtLevel (cd.ampDb[i]);
                 }
                 else if (axisMode_ == 3)
                 {
-                    line += "," + juce::String (cd.freqHz[i], 2);
+                    line += sep + juce::String (cd.freqHz[i], 2);
                     appendAlts (line, cd.freqHz[i]);
-                    line += "," + fmtLevel (cd.ampDb[i]);
+                    line += sep + fmtLevel (cd.ampDb[i]);
                 }
                 else if (axisMode_ == 4)
                 {
-                    line += "," + fmtLevel (cd.ampDb[i]) + "," + juce::String (cd.freqHz[i], 2);
+                    line += sep + fmtLevel (cd.ampDb[i]) + sep + juce::String (cd.freqHz[i], 2);
                     appendAlts (line, cd.freqHz[i]);
                 }
                 else
-                    line += "," + fmtLevel (cd.ampDb[i]);
+                    line += sep + fmtLevel (cd.ampDb[i]);
             }
             lines.add (line);
         }
@@ -4629,7 +4631,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
     juce::String header = "freq_Hz";
     appendAltHeaders (header, "");
     for (size_t c = 0; c < mags.size() && c < 4; ++c)
-        header += ",ch" + juce::String ((int) c + 1) + "_" + sc.spectralUnitLabel();
+        header += sep + "ch" + juce::String ((int) c + 1) + "_" + sc.spectralUnitLabel();
     lines.add (header);
 
     if (axisMode_ == 2 && !thirdOctMags.empty())
@@ -4643,7 +4645,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < thirdOctMags[c].size())
                     // Band values are stored in relative-dB space, exactly as painted.
-                    line += "," + fmtLevel ((double) thirdOctMags[c][b]);
+                    line += sep + fmtLevel ((double) thirdOctMags[c][b]);
             lines.add (line);
         }
         juce::SystemClipboard::copyTextToClipboard (lines.joinIntoString ("\n"));
@@ -4661,7 +4663,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
             const int bin = std::min (k, (int) mags[c].size() - 1);
             // Magnitudes are normalised against the fixed floor, so the
             // level is -kNormFloorDb * (1 - mag), exactly as painted.
-            line += "," + fmtLevel (-kNormFloorDb * (1.0 - (double) mags[c][(size_t) bin]));
+            line += sep + fmtLevel (-kNormFloorDb * (1.0 - (double) mags[c][(size_t) bin]));
         }
         lines.add (line);
     }
@@ -9708,10 +9710,11 @@ void TablesPanel::downsamplePrimaryTable()
 
     auto& t = d->tables[(size_t) ref.tableIdx];
     double rate = t.sampleRate;
-    if (!tablesPromptNumber (this, "Downsample Table",
+    if (!tablesPromptNumber (this, "Down sample",
                              "New sample rate in Hz for \"" + t.name + "\"\n"
-                             "(current: " + juce::String (t.sampleRate, 1) + " Hz):",
-                             juce::String (t.sampleRate, 1), rate))
+                             "(current: " + juce::String (t.sampleRate, 1) + " Hz).\n"
+                             "Rows are removed only - no interpolation or added data.",
+                             "10", rate))
         return;
     if (!(rate > 0.0)) return;
 
@@ -10196,7 +10199,10 @@ void TablesPanel::showContextMenu (int row)
 
     // Rename the item under the mouse (primary row).
     if (haveTableScope)
+    {
         m.addItem (6, "Rename Table...");
+        m.addItem (8, "Down sample...");
+    }
     else if (haveParamScope)
         m.addItem (7, "Rename Parameter...");
 
@@ -10297,6 +10303,7 @@ void TablesPanel::showContextMenu (int row)
         case 5: requestClose (); break;
         case 6: renamePrimaryTable (); break;
         case 7: renamePrimaryParameter (); break;
+        case 8: downsamplePrimaryTable (); break;
 
         // Parameter-level Align submenu: Waveform = 21..23, Spectrogram = 24..26.
         case 21: showManualAlignDialog (prRef.tableIdx, prRef.paramIdx, 0); break;

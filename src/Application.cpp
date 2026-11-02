@@ -1489,7 +1489,9 @@ bool Application::addTableFromCsv (const juce::String& name, const juce::String&
     }
 
     sc::tables::TableData t;
-    if (!sc::tables::importTable (name, csvText, t, errOut))
+    // The duration lets the importer normalise a detected time column whose
+    // start lies beyond this file (absolute timestamps from a longer take).
+    if (!sc::tables::importTable (name, csvText, t, errOut, audioEngine().duration()))
         return false;
 
     // Give every new parameter a colour not used by any existing parameter in

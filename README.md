@@ -1709,6 +1709,7 @@ across restarts.
   curve modes, and a shared `Name` column after `freq_Hz` in Amp-vs-Freq and
   the classic/1/3-octave tables — converted by exactly the same factor as the
   axis overlay, so the clipboard table holds both raw Hz and your scaled units.
+  Every exported table uses **tab-separated columns** (Excel-friendly).
 - **Go to Time... (Ctrl+G)**: a small dialog with one field for the active time
   axis mode plus one field per enabled alternative-time reference. Type into any
   of them and OK jumps the playhead there — the main field takes plain seconds,
@@ -1896,23 +1897,29 @@ list: a table row followed by its parameter rows.
   *Clipboard*; parameter names come from the first row's column titles).
 - Right-clicking a selection offers **Remove Selected**, **Copy** (CSV with a
   header row of parameter names), **Rename Table...** / **Rename Parameter...**
-  (prompts for the new name of the item under the mouse), **Downsample...**
-  (prompts for the desired rows/second) and **Close Panel**. Excel-style
-  multi-selection applies: plain click, Ctrl/Cmd+click toggle, Shift+click range.
+  (prompts for the new name of the item under the mouse), **Down sample...**
+  (prompts for a new rate in Hz, default 10 — rows are *removed only*, keeping
+  every Nth row so the density is at most that rate; no interpolation and no
+  added data) and **Close Panel**. Excel-style multi-selection applies: plain
+  click, Ctrl/Cmd+click toggle, Shift+click range.
 - The dropdown at the top picks where visible parameters are drawn:
   - **Overlay on Waveform** — parameters whose alignment target is *Waveform*
     are drawn over the waveform view. Each parameter's raw range is first
     fitted into [-1,+1] (so the curve is visible regardless of the data's
     units), then its Inverted/Absolute/offset/scale settings are applied and
-    the result lands in amplitude units;
+    the result lands in amplitude units. With several channels visible, every
+    channel row gets its own copy of the same curves scaled to that row's
+    centre and height;
   - **Overlay on Spectrogram** — same for parameters targeted at *Spectrogram*:
     the fitted [-1,+1] value is mapped linearly onto the view's current
-    frequency range and drawn through its own frequency axis;
+    frequency range and drawn through its own frequency axis, once per visible
+    channel row (each row maps the curve across its own frequency span);
   - **Dedicated track** — a resizable strip above/below the data views (next
     to the time ruler) shows every visible parameter auto-scaled on the same
     dark background as the waveform/spectral tracks, with its own vertical
-    zoom/pan scrollbar, the blue time-selection band and the red playhead over
-    it. Hovering near a curve lists each parameter's *unscaled* value at that
+    zoom/pan scrollbar (fully two-way: dragging the thumb pans or zooms the
+    track's value window, and wheel-zooming inside the track moves the thumb),
+    the blue time-selection band and the red playhead over it. Hovering near a curve lists each parameter's *unscaled* value at that
     time. The strip is separated from the data views by a draggable splitter
     (like the waveform/spectrogram one): dragging it up or down resizes the
     track.
@@ -1956,10 +1963,17 @@ list: a table row followed by its parameter rows.
   **Auto Align <table> <param> with <table> <param>**: a mean-subtracted
   cross-correlation finds the delay between the curves (the parameter under the
   mouse is shifted onto the other one).
-- Import rules: `true`/`false` cells become `1.0`/`0.0`; if the first column is
-  entirely text the grid is transposed before import (rows become parameters);
-  scattered missing numeric values are interpolated from their neighbours;
-  columns that contain only text are ignored.
+- Import rules: both **comma- and tab-separated** data are accepted; `true`/
+  `false` cells become `1.0`/`0.0`; if the first column is entirely text the
+  grid is transposed before import (rows become parameters); scattered missing
+  numeric values are interpolated from their neighbours; columns that contain
+  only text are ignored.
+- **Time-column auto-detection**: when the first column's header contains
+  *time* and its values are strictly increasing numbers, it is treated as a
+  timestamp axis instead of a parameter — no parameter is created for it, the
+  remaining columns keep their rows at those exact timestamps (the table's row
+  rate is fitted to `(rows-1)/span`), and if the first timestamp lies beyond
+  the audio duration the whole span is shifted so the table starts at 0.
 - Tables **follow timeline edits**: deleting, inserting or stretching audio
   (including Content Aware Time Scale) warps every table's rows — each row
   stays anchored to its document time, values are re-interpolated through the
@@ -2068,7 +2082,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
 | `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`, including optional per-channel full-scale values), saved spectral selections, data tables (with their alignment/transform state), axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Also keeps the raw `bkdk` payload of the source file (when present) so WAV saves preserve it byte-for-byte. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
 | `BkdkChunk` (`src/BkdkChunk.cpp`) | Parser for the custom `bkdk` RIFF chunk found in some legacy measurement WAV files: NUL-separated ASCII fields, one 11-field group per channel whose Calibration field (sample × gain = pascals) drives the automatic Pascal calibration on load. A single defined group applies to every channel; missing/unparseable values fall back to no scaling. |
-| `Tables` (`src/Tables.cpp`) | Data-table model + CSV import (quoted fields, CRLF, boolean cells, first-column-text transpose, scattered-gap interpolation, text-only column drop), per-parameter downsample, value transforms (normalized/inverted/absolute + offset/scale), composed table+parameter time maps, mean-subtracted cross-correlation auto-align lag, and the JSON serialise/parse used by `FileMeta`. |
+| `Tables` (`src/Tables.cpp`) | Data-table model + CSV import (comma/tab separated, quoted fields, CRLF, boolean cells, first-column-text transpose, time-column auto-detection with duration-based start shift, scattered-gap interpolation, text-only column drop), remove-only downsample decimation, value transforms (normalized/inverted/absolute + offset/scale), composed table+parameter time maps, mean-subtracted cross-correlation auto-align lag, and the JSON serialise/parse used by `FileMeta`. |
 | `TablesTrackView` (`src/TablesTrack.cpp`) | The dedicated-tables strip: draws every visible table parameter auto-scaled into its own plot area (same width as the data views, same left-axis width), with vertical zoom/pan driven by a `ValueScrollBar`, the blue time-selection band and red playhead over it, and hover readout of each curve's unscaled value at the cursor time. |
 | `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, data tables, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
