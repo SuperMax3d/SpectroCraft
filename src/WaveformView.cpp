@@ -642,8 +642,10 @@ void WaveformView::paint (juce::Graphics& g)
             g.drawText (lab, getWidth() - kLeftAxisWidth + 4, (int) center - 8,
                        kLeftAxisWidth - 6, 16, juce::Justification::centredRight, false);
         else
+            // Outer edge of the axis strip: keeps the channel label clear of
+            // the dB/zero tick labels that hug the plot edge.
             g.drawText (lab, 2, (int) center - 8, kLeftAxisWidth - 4, 16,
-                       juce::Justification::centredRight, false);
+                       juce::Justification::centredLeft, false);
         ++row;
     }
 
@@ -1038,16 +1040,16 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
                 }
             }
 
-            // Zero-line label. It is aligned to the outer edge of the axis
-            // strip because at zero vertical offset it would otherwise sit on
-            // top of the channel name ("L"/"R") that hugs the plot edge.
+            // Zero-line label. It hugs the plot edge like the other dB tick
+            // labels (labJ); the channel name sits on the outer edge instead,
+            // so at zero vertical offset nothing overlaps.
             {
                 const float yZero = center + (float) (vOffset * ampScale);
                 if (yZero >= pr.getY() && yZero <= pr.getBottom())
                 {
                     g.setColour (juce::Colour::fromRGB (170, 170, 170));
                     g.drawText (zeroLineLabel (app.waveVScaleMode), labX, (int) yZero - 7,
-                               kLeftAxisWidth - 4, 14, juce::Justification::centredLeft, false);
+                               kLeftAxisWidth - 4, 14, labJ, false);
                 }
             }
         }

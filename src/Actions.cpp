@@ -172,7 +172,7 @@ juce::String jsonEscape (const juce::String& s)
 {
     const auto utf = s.toStdString();
     std::string out;
-    for (char c : utf)
+    for (unsigned char c : utf)
         switch (c)
         {
             case '"':  out += "\\\""; break;
@@ -180,7 +180,17 @@ juce::String jsonEscape (const juce::String& s)
             case '\n': out += "\\n";    break;
             case '\r': out += "\\r";    break;
             case '\t': out += "\\t";    break;
-            default:   out += c;        break;
+            default:
+                if (c < 0x20)
+                {
+                    // JSON requires escaping every other control character.
+                    char buf[8];
+                    std::snprintf (buf, sizeof (buf), "\\u%04x", c);
+                    out += buf;
+                }
+                else
+                    out += (char) c;
+                break;
         }
     return juce::String::fromUTF8 (out.c_str());
 }
@@ -210,7 +220,7 @@ void prettyRec (const juce::var& v, int depth, std::string& out)
         int i = 0;
         for (const auto& kv : props)
         {
-            out += pad () + jsonEscape (kv.name.toString()).toStdString() + ": ";
+            out += pad () + "\"" + jsonEscape (kv.name.toString()).toStdString() + "\": ";
             prettyRec (kv.value, depth + 1, out);
             if (++i < props.size ()) out += ",";
             out += "\n";
@@ -218,7 +228,7 @@ void prettyRec (const juce::var& v, int depth, std::string& out)
         out += pad () + "}";
     }
     else if (v.isString())
-        out += jsonEscape (v.toString()).toStdString ();
+        out += "\"" + jsonEscape (v.toString()).toStdString() + "\"";
     else if (v.isBool())
         out += (bool) v ? "true" : "false";
     else if (isNumericVar (v))

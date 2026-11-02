@@ -24576,6 +24576,71 @@ static void testActionStoreJson()
     CHECK (store.size () == 1 && store.get (0)->name == "Gamma", "actions: remove selected works");
 }
 
+/** Replicates the Edit Action dialog round trip: pretty-print act->toJson()
+    and re-parse it exactly like ActionEditWindow::okClicked does. */
+static void testActionEditRoundTrip()
+{
+    sc::ActionStore store;
+    CHECK (store.add ("Probe") == 0, "edit rt: action added");
+
+    auto* a = store.get (0);
+    // Steps shaped like the ones recording produces.
+    {
+        sc::ActionStep s; s.type = "changeGain";
+        s.params = sc::makeVarObject ({ { "db", -6.5 } });
+        a->steps.push_back (s);
+    }
+    {
+        sc::ActionStep s; s.type = "python";
+        s.params = sc::makeVarObject (
+            { { "script", juce::String ("C:/Users/me/my scripts/fix \"it\".py") } });
+        a->steps.push_back (s);
+    }
+    {
+        sc::ActionStep s; s.type = "filterEq";
+        s.params = sc::makeVarObject ({ { "points", juce::String ("100,0;1000,-6.25") } });
+        a->steps.push_back (s);
+    }
+    {
+        sc::ActionStep s; s.type = "genTone";
+        s.params = sc::makeVarObject (
+            { { "freq", 440.0 }, { "amp", 0.5 }, { "secs", 2.0 } });
+        a->steps.push_back (s);
+    }
+
+    // The exact dialog flow: pretty-print, then parse the editor text.
+    const juce::String text = sc::jsonPrettyPrint (a->toJson());
+    CHECK (text.isNotEmpty (), "edit rt: pretty print non-empty");
+    const auto root = juce::JSON::parse (text);
+    CHECK (root.isObject(), "edit rt: re-parsed document is an object");
+    if (root.isObject())
+    {
+        CHECK (root.getProperty ("name", juce::var()).toString() == "Probe",
+              "edit rt: name survives round trip");
+        const auto steps = root.getProperty ("steps", juce::var());
+        CHECK (steps.isArray() && steps.size () == 4, "edit rt: step count survives");
+    }
+
+    // An action with no steps must also round-trip.
+    sc::ActionStore empty;
+    CHECK (empty.add ("Empty") == 0, "edit rt: empty action added");
+    const auto text2 = sc::jsonPrettyPrint (empty.get (0)->toJson());
+    const auto root2 = juce::JSON::parse (text2);
+    CHECK (root2.isObject(), "edit rt: step-less action re-parses as object");
+
+    // Strings with control characters must be escaped so the document stays valid.
+    sc::ActionStore ctrl;
+    CHECK (ctrl.add ("Ctrl") == 0, "edit rt: ctrl action added");
+    {
+        sc::ActionStep s; s.type = "python";
+        s.params = sc::makeVarObject ({ { "script", juce::String ("line1\u0007bell\nend") } });
+        ctrl.get (0)->steps.push_back (s);
+    }
+    const auto text3 = sc::jsonPrettyPrint (ctrl.get (0)->toJson());
+    const auto root3 = juce::JSON::parse (text3);
+    CHECK (root3.isObject(), "edit rt: control chars in strings stay valid JSON");
+}
+
 static void testActionValidation()
 {
     auto step = [] (const juce::String& type, const juce::var& p) {
@@ -24791,48 +24856,72 @@ static void testActionsPanelPaint()
 {
     Application app;   // isolated store under SC_TESTS_EXE
 
-    // Empty state: the "No actions yet." text must be drawn in the LIST area,
-    // i.e. below the 28 px button row. Regression: listArea() used to return
-    // the removed top strip (this JUCE build's removeFromTop returns the
-    // REMOVED portion), so nothing was ever visible.
+    // Empty state: the TableListBox paints its own (dark) background and no
+    // text - nothing bright may appear below the header row.
     {
         ActionsPanel panel (app);
         panel.setSize (300, 200);
         const juce::Image img = panel.createComponentSnapshot (panel.getLocalBounds());
 
-        // Grey text on the dark background: luminance ~0.5 at full strength,
-        // anti-aliased edges lower - use a threshold well above the plain
-        // background (45/255 ~= 0.18) but below the grey core.
         int brightList = 0;
         for (int y = 60; y < 170; ++y)
             for (int x = 40; x < 260; ++x)
                 if (img.getPixelAt (x, y).getBrightness () > 0.3f) ++brightList;
-        CHECK (brightList > 30, "empty-state text drawn in the list area");
+        CHECK (brightList == 0, "empty list has no text");
 
-        const juce::Colour c = img.getPixelAt (10, 40);
+        // The button-row background is the standard panel grey.
+        const juce::Colour c = img.getPixelAt (2, 2);
         CHECK (std::abs ((int) c.getRed() - 45) <= 8 && std::abs ((int) c.getGreen() - 45) <= 8,
-               "list area background is plain");
+               "button-row background is plain");
     }
 
-    // With actions: row text must appear in the first two row bands (y 28..48, 48..68).
+    // With actions: row text must appear in the first two row bands, and a
+    // selected row gets the marker-style blue highlight.
     CHECK (app.actions.add ("Alpha") == 0, "first test action added");
     CHECK (app.actions.add ("Beta") == 1, "second test action added");
     {
         ActionsPanel panel (app);
         panel.setSize (300, 200);
+
+        // Row geometry comes from the table itself: header below the
+        // button row, then fixed-height rows. getCellPosition(..., true) is
+        // TABLE-relative - translate it into panel coordinates.
+        auto row0 = panel.listTable ().getCellPosition (1, 0, true);
+        auto row1 = panel.listTable ().getCellPosition (1, 1, true);
+        const int tx = panel.listTable ().getX(), ty = panel.listTable ().getY();
+        row0.translate (tx, ty);
+        row1.translate (tx, ty);
+        CHECK (row0.getHeight () > 0 && row1.getY () >= row0.getBottom (), "rows laid out");
+
         const juce::Image img = panel.createComponentSnapshot (panel.getLocalBounds());
 
-        int brightRow0 = 0;
-        for (int y = 30; y < 46; ++y)
-            for (int x = 10; x < 290; ++x)
-                if (img.getPixelAt (x, y).getBrightness () > 0.5f) ++brightRow0;
-        CHECK (brightRow0 > 30, "row text drawn in the first row band");
+        auto countBright = [&] (const juce::Rectangle<int>& r) -> int
+        {
+            int n = 0;
+            for (int y = std::max (0, r.getY() + 2); y < std::min (panel.getHeight (), r.getBottom () - 2); ++y)
+                for (int x = 10; x < 290; ++x)
+                    if (img.getPixelAt (x, y).getBrightness () > 0.5f) ++n;
+            return n;
+        };
 
-        int brightRow1 = 0;
-        for (int y = 50; y < 66; ++y)
-            for (int x = 10; x < 290; ++x)
-                if (img.getPixelAt (x, y).getBrightness () > 0.5f) ++brightRow1;
-        CHECK (brightRow1 > 30, "row text drawn in the second row band");
+        CHECK (countBright (row0) > 30, "row text drawn in the first row band");
+        CHECK (countBright (row1) > 30, "row text drawn in the second row band");
+
+        // Selecting a row paints it with the marker-style blue highlight.
+        juce::SparseSet<int> sel;
+        sel.addRange ({ 0, 1 });
+        panel.listTable ().setSelectedRows (sel, juce::dontSendNotification);
+        const juce::Image img2 = panel.createComponentSnapshot (panel.getLocalBounds());
+
+        int blueRow0 = 0;
+        for (int y = row0.getY() + 3; y < row0.getBottom () - 3; ++y)
+            for (int x = 5; x < 295; ++x)
+            {
+                const auto c = img2.getPixelAt (x, y);
+                if (std::abs ((int) c.getRed() - 60) <= 12 && std::abs ((int) c.getGreen() - 80) <= 12
+                    && std::abs ((int) c.getBlue() - 120) <= 12) ++blueRow0;
+            }
+        CHECK (blueRow0 > 50, "selected row painted with the marker-style highlight");
     }
 
     // Clean up so other tests sharing the isolated store see no actions.
@@ -25106,6 +25195,7 @@ static int scRunUnitTestsImpl()
     progress ("split execute first run"); testSplitExecuteFirstRun();
     progress ("stem sep advanced layout"); testStemSepAdvancedLayout();
     progress ("actions store json");       testActionStoreJson();
+    progress ("action edit round trip");   testActionEditRoundTrip();
     progress ("actions validation");       testActionValidation();
     progress ("apply action steps");       testApplyActionSteps();
     progress ("action batch");             testActionBatch();

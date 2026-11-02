@@ -6779,14 +6779,6 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ToolsGenNoise,   "Generate Noise...",   app.audioEngine().isFileLoaded(), false);
         menu.addItem (ToolsGenTone,    "Generate Tone...",    app.audioEngine().isFileLoaded(), false);
     }
-    else if (menuName == "Actions")
-    {
-        const int selIdx = actionsPanel ? actionsPanel->primaryIndex() : -1;
-        const bool hasAction = app.actions.validIndex (selIdx);
-        menu.addItem (ActionsRunSelected, "Run Selected Action\tCtrl+Shift+P",
-                      hasAction && app.audioEngine().isFileLoaded(), false);
-        menu.addItem (ActionsBatch, "Batch...", hasAction, false);
-    }
     else if (menuName == "Window")
     {
         // One entry per left-column panel, in canonical order; a checkmark
@@ -6813,8 +6805,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
 
 juce::StringArray MainWindow::getMenuBarNames()
 {
+    // The Actions panel is reachable from the left-panel tabs; its menu was
+    // removed (Ctrl+Shift+P still runs the selected action).
     return { "File", "Edit", "Selection", "View", "Transport", "Effects",
-             "Actions", "Window", "Help" };
+             "Window", "Help" };
 }
 
 // The list panel (Markers or Transcription) currently shown in a left-panel

@@ -2157,24 +2157,49 @@ public:
     int recordingIndex() const { return app.actionRec.actionIndex; }
     int numActions() const { return app.actions.size (); }
 
+    // Accessors for headless unit tests (same as the marker panel).
+    juce::TableListBox& listTable() { return table; }
+    int numSelectedRows() const { return table.getNumSelectedRows (); }
+
 private:
     Application& app;
     std::vector<int> selected_;   // selected action indices (multi-select)
     int anchor_ = -1;             // shift-click range anchor
-    int scroll_ = 0;              // first visible row
 
     juce::TextButton newBtn, recordBtn, runBtn, batchBtn;
 
     static constexpr int kHeaderH = 28;   // button row height
-    static constexpr int kRowH = 20;
 
-    juce::Rectangle<int> listArea() const;
-    juce::Rectangle<int> rowRect (int i) const;
-    int rowAt (juce::Point<int>) const;   // -1 when no row is under the point
+    class Model : public juce::TableListBoxModel
+    {
+    public:
+        explicit Model (ActionsPanel* owner);
+        int getNumRows() override;
+        void paintRowBackground (juce::Graphics& g, int rowNumber, int width, int height,
+                                 bool selected) override;
+        void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
+                        bool selected) override;
+        // Excel-style multi-selection: plain click = anchor + single select
+        // (JUCE default), Ctrl/Cmd+click toggles one row (JUCE default),
+        // Shift+click replaces the selection with the exact range from the
+        // anchor to this row - handled by the panel.
+        void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+        void selectedRowsChanged (int) override;
 
-    void mouseDown (const juce::MouseEvent& e) override;
-    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
-    void showContextMenu (juce::Point<int> at);
+    private:
+        ActionsPanel* owner;
+    };
+
+    Model model { this };
+    juce::TableListBox table { "", &model };   // same style as the marker list
+
+    // Excel-style click handling for the table rows.
+    void onRowClicked (int row, const juce::MouseEvent& e);
+    void syncSelectionFromTable();
+    void applySelectionToTable();
+
+    void mouseDown (const juce::MouseEvent&) override;
+    void showContextMenu ();
 
     JUCE_DECLARE_NON_COPYABLE (ActionsPanel)
 };

@@ -6218,6 +6218,9 @@ void MarkerListPanel::updateDetails()
 
 void MarkerListPanel::refresh()
 {
+    // Adding a marker needs audio to anchor it to - disable the button when
+    // no file is loaded (the state sync calls refresh() on open/close).
+    addBtn.setEnabled (app.audioEngine().isFileLoaded());
     table.updateContent();
     table.repaint();
     updateDetails();
@@ -10323,7 +10326,8 @@ void TablesPanel::showContextMenu (int row)
 
 void TablesPanel::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colours::black);
+    // Same dark grey as the other panels.
+    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
 }
 
 void TablesPanel::resized()
@@ -10344,6 +10348,62 @@ void TablesPanel::resized()
 
 // ============================================================= Actions panel
 
+ActionsPanel::Model::Model (ActionsPanel* ownerIn) : owner (ownerIn) {}
+
+int ActionsPanel::Model::getNumRows() { return (int) owner->app.actions.size (); }
+
+void ActionsPanel::Model::paintRowBackground (juce::Graphics& g, int, int width,
+                                              int height, bool selected)
+{
+    if (selected)
+    {
+        // Same selection colour as the marker list.
+        g.setColour (juce::Colour::fromRGB (60, 80, 120));
+        g.fillRect (0, 0, width, height);
+    }
+}
+
+void ActionsPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int columnId,
+                                     int width, int height, bool)
+{
+    if (rowNumber < 0 || rowNumber >= getNumRows()) return;
+    const auto* act = owner->app.actions.get (rowNumber);
+    if (act == nullptr) return;
+
+    g.setFont (11.0f);
+    if (columnId == 1)   // Name
+    {
+        int x = 4;
+        if (owner->isRecording() && owner->recordingIndex () == rowNumber)
+        {
+            g.setColour (juce::Colours::red);
+            g.fillEllipse (x, height / 2 - 4, 8, 8);
+            x += 12;
+        }
+        g.setColour (juce::Colours::white);
+        g.drawText (act->name, x, 0, width - x - 4, height,
+                    juce::Justification::centredLeft, false);
+    }
+    else                 // Size
+    {
+        const int n = (int) act->steps.size ();
+        g.setColour (juce::Colours::lightgrey);
+        g.drawText (n == 0 ? "-" : juce::String (n) + " step" + (n == 1 ? "" : "s"),
+                    4, 0, width - 8, height, juce::Justification::centredLeft, false);
+    }
+}
+
+void ActionsPanel::Model::cellClicked (int rowNumber, int, const juce::MouseEvent& e)
+{
+    if (rowNumber >= 0 && rowNumber < getNumRows())
+        owner->onRowClicked (rowNumber, e);
+}
+
+void ActionsPanel::Model::selectedRowsChanged (int)
+{
+    owner->syncSelectionFromTable ();
+}
+
 ActionsPanel::ActionsPanel (Application& a) : app (a)
 {
     newBtn.setButtonText ("New");
@@ -10358,44 +10418,87 @@ ActionsPanel::ActionsPanel (Application& a) : app (a)
     recordBtn.onClick = [this] { handleRecord (); };
     runBtn.onClick = [this] { handleRun (); };
     batchBtn.onClick = [this] { handleBatch (); };
+
+    // Same table style as the marker list: light header with Name/Size columns.
+    auto& header = table.getHeader();
+    const int fixedFlags = juce::TableHeaderComponent::notResizableOrSortable;
+    header.addColumn ("Name", 1, 200, 60, -1, fixedFlags);
+    header.addColumn ("Size", 2, 80, 40, -1, fixedFlags);
+
+    // Excel-style multi-selection: Ctrl/Cmd+click toggles rows, Shift+click
+    // range-selects from the anchor row.
+    table.setMultipleSelectionEnabled (true);
+    table.setSuppressShiftRangeSelection (true);   // we do the exact-range shift select ourselves
+
+    addAndMakeVisible (&table);
+
+    // Right-clicking a row shows the panel context menu. Deep registration is
+    // required: clicks on rows are delivered to the row's own component, not
+    // to the TableListBox itself.
+    table.addMouseListener (this, true);
 }
 
-juce::Rectangle<int> ActionsPanel::listArea() const
+void ActionsPanel::syncSelectionFromTable()
 {
-    // NOTE: in this JUCE build removeFromTop() returns the REMOVED strip and
-    // modifies the rectangle in place - so discard the return value.
-    auto b = getLocalBounds();
-    b.removeFromTop (kHeaderH);
-    return b;
+    std::vector<int> rows;
+    for (int r : sparseRows (table.getSelectedRows()))
+        if (r >= 0 && r < app.actions.size ()) rows.push_back (r);
+
+    bool same = rows.size () == selected_.size ();
+    if (same)
+        for (size_t i = 0; i < rows.size (); ++i)
+            if (rows[i] != selected_[(size_t) i]) { same = false; break; }
+    if (!same)
+    {
+        selected_ = std::move (rows);
+        repaint();
+    }
 }
 
-juce::Rectangle<int> ActionsPanel::rowRect (int i) const
+void ActionsPanel::applySelectionToTable()
 {
-    auto list = listArea();
-    return juce::Rectangle<int> (0, list.getY() + scroll_ * kRowH + i * kRowH,
-                                getWidth(), kRowH);
+    juce::SparseSet<int> sel;
+    for (int i : selected_)
+        if (i >= 0 && i < app.actions.size ()) sel.addRange ({ i, i + 1 });
+    table.setSelectedRows (sel, juce::dontSendNotification);
 }
 
-int ActionsPanel::rowAt (juce::Point<int> p) const
+void ActionsPanel::onRowClicked (int row, const juce::MouseEvent& e)
 {
-    auto list = listArea();
-    if (!list.contains (p)) return -1;
-    for (int i = 0; i < app.actions.size (); ++i)
-        if (rowRect (i).contains (p)) return i;
-    return -1;
-}
+    if (e.mods.isPopupMenu ()) return;   // right-click: keep any multi-selection
 
-bool ActionsPanel::isSelected (int i) const
-{
-    for (int j : selected_)
-        if (j == i) return true;
-    return false;
+    table.setWantsKeyboardFocus (true);
+    table.grabKeyboardFocus ();
+
+    if (e.mods.isShiftDown())
+    {
+        // Excel: the selection becomes EXACTLY anchor..row (JUCE's built-in
+        // shift behaviour unions instead).
+        const int n = app.actions.size ();
+        const int a = (anchor_ >= 0 && anchor_ < n) ? anchor_ : row;
+        juce::SparseSet<int> sel;
+        sel.addRange ({ std::min (a, row), std::max (a, row) + 1 });
+        table.setSelectedRows (sel, juce::sendNotification);
+    }
+    else if (e.mods.isCtrlDown())
+    {
+        // JUCE already toggled this row in selectRowsBasedOnModifierKeys before
+        // cellClicked fires - just track the anchor here.
+        anchor_ = row;
+    }
+    else
+    {
+        selected_ = { row };
+        anchor_ = row;
+        applySelectionToTable();
+    }
 }
 
 void ActionsPanel::clearSelection()
 {
     selected_.clear ();
     anchor_ = -1;
+    applySelectionToTable();
 }
 
 void ActionsPanel::resized()
@@ -10406,127 +10509,64 @@ void ActionsPanel::resized()
     recordBtn.setBounds (newBtn.getRight() + gap, 2, bw, kHeaderH - 6);
     runBtn.setBounds (recordBtn.getRight() + gap, 2, bw, kHeaderH - 6);
     batchBtn.setBounds (runBtn.getRight() + gap, 2, bw, kHeaderH - 6);
+
+    table.setBounds (0, kHeaderH, getWidth(), std::max (0, getHeight() - kHeaderH));
 }
 
 void ActionsPanel::paint (juce::Graphics& g)
 {
-    auto b = getLocalBounds();
+    // The table provides the list styling (same as the marker panel); this
+    // only paints the button-row background.
     g.fillAll (juce::Colour::fromRGB (45, 45, 48));
-
-    const auto list = listArea();
-    const int n = app.actions.size ();
-    if (n == 0)
-    {
-        g.setColour (juce::Colours::grey);
-        g.setFont (11.0f);
-        g.drawText ("No actions yet.\nUse New or Record to create one.",
-                    list, juce::Justification::centred);
-        return;
-    }
-
-    const int visibleRows = std::max (1, list.getHeight() / kRowH);
-    scroll_ = std::clamp (scroll_, 0, std::max (0, n - visibleRows));
-
-    g.setFont (11.0f);
-    for (int i = 0; i < n; ++i)
-    {
-        auto r = rowRect (i).getIntersection (list);
-        if (r.isEmpty()) continue;
-
-        const bool sel = isSelected (i);
-        if (sel)
-        {
-            g.setColour (juce::Colour::fromRGB (64, 92, 158));
-            g.fillRoundedRectangle (r.toFloat(), 3.0f);   // 2-arg form in this JUCE
-        }
-
-        const bool rec = app.actionRec.active && app.actionRec.actionIndex == i;
-
-        auto textRect = r.withTrimmedLeft (8);
-        if (rec)
-        {
-            g.setColour (juce::Colours::red);
-            g.fillEllipse (textRect.removeFromLeft (12).toFloat());
-        }
-
-        const auto* act = app.actions.get (i);
-        // removeFromRight() returns the removed strip; we want the remainder.
-        textRect.removeFromRight (64);
-        g.setColour (sel ? juce::Colours::white : juce::Colour::fromRGB (205, 205, 215));
-        g.drawText (act->name, textRect,
-                    juce::Justification::left, false);
-
-        if (!act->steps.empty())
-        {
-            g.setColour (juce::Colours::grey);
-            g.drawText (juce::String ((int) act->steps.size()) + " step"
-                        + (act->steps.size () == 1 ? "" : "s"),
-                        r.withTrimmedLeft (r.getWidth() - 64),
-                        juce::Justification::right, false);
-        }
-    }
 }
 
 void ActionsPanel::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.mods.isRightButtonDown())
-    {
-        showContextMenu (e.getPosition());
+    if (!e.mods.isRightButtonDown() || e.mods.isLeftButtonDown())
         return;
+
+    // The event position is relative to the component that was actually hit
+    // (a row child of the table); walk up the parent chain to get it in
+    // table coordinates.
+    float px = e.getPosition().x;
+    float py = e.getPosition().y;
+    for (auto* c = e.eventComponent; c != nullptr && c != &table;
+         c = c->getParentComponent())
+    {
+        px += static_cast<float> (c->getX());
+        py += static_cast<float> (c->getY());
+    }
+    const auto pInTable = juce::Point<int> ((int) px, (int) py);
+
+    // JUCE 9's TableListBox has no getRowNumberAtPosition; find the row by
+    // testing each cell position (action lists are small).
+    int row = -1;
+    for (int r = 0; r < table.getNumRows(); ++r)
+        if (table.getCellPosition (1, r, true).contains (pInTable))
+        {
+            row = r;
+            break;
+        }
+
+    // Right-clicking a row selects it only when nothing is selected yet - an
+    // existing multi-selection is left alone so the menu can act on all of it.
+    if (row >= 0 && table.getNumSelectedRows () == 0)
+    {
+        anchor_ = row;
+        selected_ = { row };
+        applySelectionToTable();
     }
 
-    const int idx = rowAt (e.getPosition());
-    if (idx < 0)
-    {
-        clearSelection();
-        repaint();
-        return;
-    }
-
-    if (e.mods.isShiftDown())
-    {
-        const int lo = anchor_ >= 0 ? std::min (anchor_, idx) : 0;
-        const int hi = anchor_ >= 0 ? std::max (anchor_, idx) : idx;
-        selected_.clear ();
-        for (int i = lo; i <= hi && i < app.actions.size (); ++i)
-            selected_.push_back (i);
-    }
-    else if (e.mods.isCtrlDown())
-    {
-        anchor_ = idx;
-        auto it = std::find (selected_.begin (), selected_.end (), idx);
-        if (it == selected_.end ()) selected_.push_back (idx);
-        else                        selected_.erase (it);
-    }
-    else
-    {
-        selected_ = { idx };
-        anchor_ = idx;
-    }
-
-    repaint();
+    showContextMenu ();
 }
 
-void ActionsPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+void ActionsPanel::showContextMenu ()
 {
-    if (juce::approximatelyEqual (wheel.deltaY, 0.0f)) return;
-    scroll_ += (wheel.deltaY < 0.0f ? 1 : -1) * std::max (1, std::abs ((int) wheel.deltaY));
-    repaint();
-}
-
-void ActionsPanel::showContextMenu (juce::Point<int> at)
-{
-    const int idx = rowAt (at);
-    if (idx >= 0 && !isSelected (idx))
-    {
-        selected_ = { idx };
-        anchor_ = idx;
-        repaint();
-    }
-
     juce::PopupMenu m;
     const bool hasSel = !selected_.empty ();
-    m.addItem (1, "Remove Selected", hasSel, true);
+    // NOTE: the 4th argument is "checked" - it must stay false or JUCE draws
+    // a checkmark next to the item.
+    m.addItem (1, "Remove Selected", hasSel, false);
     m.addItem (2, "Rename",          hasSel, false);
     m.addItem (3, "Edit",            hasSel, false);
     m.addSeparator ();
@@ -10538,7 +10578,7 @@ void ActionsPanel::showContextMenu (juce::Point<int> at)
             app.actions.removeSelected (selected_);
             clearSelection();
             app.saveActions ();
-            repaint();
+            table.updateContent ();
             break;
 
         case 2:
@@ -10563,8 +10603,10 @@ void ActionsPanel::showContextMenu (juce::Point<int> at)
                                                    "Rename Action",
                                                    "That name is empty or already in use.", "", this);
             else
+            {
                 app.saveActions ();
-            repaint();
+                table.updateContent ();   // refresh the Name cell text
+            }
             break;
         }
 
@@ -10573,7 +10615,7 @@ void ActionsPanel::showContextMenu (juce::Point<int> at)
             const int p = primaryIndex();
             if (p < 0) return;
             auto* w = new ActionEditWindow (app, p);
-            w->onSaved = [this] { repaint (); };
+            w->onSaved = [this] { table.updateContent (); };
             w->onCloseRequested = [w] { juce::MessageManager::callAsync ([w] { delete w; }); };
             w->centreWithSize (680, 540);
             w->setVisible (true);
@@ -10615,6 +10657,8 @@ void ActionsPanel::handleNew()
 
     selected_ = { idx };
     anchor_ = idx;
+    applySelectionToTable();
+    table.updateContent ();
     app.saveActions ();
     repaint();
 }
@@ -10656,6 +10700,8 @@ void ActionsPanel::handleRecord()
         }
         selected_ = { idx };
         anchor_ = idx;
+        applySelectionToTable();
+        table.updateContent ();
         app.saveActions ();
     }
 
