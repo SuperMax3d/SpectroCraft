@@ -309,6 +309,7 @@ private:
     int dragStartY = 0;
     double dragStartTime = 0.0;
     int panLastX = 0;   // last delivered cursor x during time panning
+    int panLastY = 0;   // last delivered cursor y during frequency-axis panning
     juce::Rectangle<int> zoomRect;   // right-drag box-zoom rubber band
     bool haveZoomRect = false;
 
@@ -347,6 +348,9 @@ private:
     bool haveImage = false;
     int imgW = 0, imgH = 0;
     double imgT0 = -1, imgT1 = -1;
+    // Sample count at last render: a growing doc (recording) or in-place edit
+    // must force a re-render even when the time window did not move.
+    int64_t imgContentVer = -1;   // engine content version at last render
 
     // Single path for all time-window changes: updates state and notifies
     // MainWindow with the new range.

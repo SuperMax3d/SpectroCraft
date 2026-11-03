@@ -154,6 +154,7 @@ bool AudioEngine::appendSamples (const float* interleaved, int64_t numFrames)
     totalSamples += numFrames;
     durationSecs = (double) totalSamples / rate;
     unsaved = true;
+    contentVer.fetch_add (1);
 
     // Keep the overview pyramid fresh while it is still cheap to rebuild; for
     // long recordings the caller does one final rebuild when recording stops.
@@ -190,6 +191,7 @@ bool AudioEngine::overwriteSamples (const float* interleaved, int64_t startFrame
     }
 
     unsaved = true;
+    contentVer.fetch_add (1);
 
     // The length never changes, so the growth-based append throttle can't
     // fire here: refresh on a time throttle instead (~4x per second).

@@ -1500,9 +1500,12 @@ static void testHistoryPanelPaint()
 
     // Regression: the current row's highlight used to be drawn with fillAll(),
     // which painted over the whole panel and hid every earlier row + the header.
-    CHECK (colNear (290, 34, 30, 42, 68), "rows above the current one keep the dark blue background");
-    CHECK (colNear (150, 12, 95, 100, 112), "header area is grey and not covered by the highlight");
-    CHECK (colNear (290, 74, 70, 96, 145), "current row band carries the blue highlight");
+    // Styling matches the Actions table (LookAndFeel_V4 dark scheme):
+    // body RGB(38,50,56); header = 60% white over it ~ RGB(168,173,175);
+    // current-row highlight RGB(60,80,120).
+    CHECK (colNear (290, 34, 38, 50, 56), "rows above the current one keep the dark blue-green background");
+    CHECK (colNear (150, 12, 168, 173, 175), "header area is light grey and not covered by the highlight");
+    CHECK (colNear (290, 74, 60, 80, 120), "current row band carries the blue highlight");
 
     // Past rows must still show bright text.
     int bright = 0;
@@ -7678,9 +7681,12 @@ static void testAxisPanAndLogTicks()
         view.mouseDown (mkMouse (view, 20, 60, lmb));
         view.mouseDrag (mkMouse (view, 20, 80, lmb));
 
-        CHECK (std::abs (view.getFreqMin() - fmin * (f0 / f1)) / fmin < 1e-9
-              && std::abs (view.getFreqMax() - fmax * (f0 / f1)) / fmax < 1e-9,
-               "log axis drag multiplies the range by the cursor frequency ratio");
+        // Half-speed grab in log space: the full-step ratio f0/f1 is halved
+        // in log terms, i.e. its square root - same feel as the waveform's
+        // axis drag.
+        CHECK (std::abs (view.getFreqMin() - fmin * std::sqrt (f0 / f1)) / fmin < 1e-9
+              && std::abs (view.getFreqMax() - fmax * std::sqrt (f0 / f1)) / fmax < 1e-9,
+               "log axis drag multiplies the range by the square root of the cursor frequency ratio");
         CHECK (app.playhead == 0.0, "spectral axis drag does not move the playhead");
     }
 
@@ -7704,9 +7710,11 @@ static void testAxisPanAndLogTicks()
         view.mouseDown (mkMouse (view, 20, 80, lmb));
         view.mouseDrag (mkMouse (view, 20, 100, lmb));
 
-        CHECK (std::abs (view.getFreqMin() - (fmin + d)) < 1e-6
-              && std::abs (view.getFreqMax() - (fmax + d)) < 1e-6,
-               "linear axis drag shifts the range by the cursor frequency delta");
+        // Half-speed grab: the range shifts by half the cursor's frequency
+        // delta - same feel as the waveform's axis drag.
+        CHECK (std::abs (view.getFreqMin() - (fmin + 0.5 * d)) < 1e-6
+              && std::abs (view.getFreqMax() - (fmax + 0.5 * d)) < 1e-6,
+               "linear axis drag shifts the range by half the cursor frequency delta");
     }
 
     // --- Log ruler: intermediate 2x/5x ticks are drawn darker than decades ---
@@ -22755,7 +22763,9 @@ static void testOverwriteSamples()
         data[(size_t) f * 2 + 0] = (float) f;
         data[(size_t) f * 2 + 1] = -(float) f;
     }
+    const int64_t v0 = eng.contentVersion ();
     CHECK (eng.appendSamples (data.data (), N), "appended initial frames");
+    CHECK (eng.contentVersion () == v0 + 1, "append bumps the content version");
 
     // Overwrite frames [50, 80): new values must land exactly there.
     std::vector<float> patch ((size_t) 30 * 2);
@@ -22790,12 +22800,16 @@ static void testOverwriteSamples()
         if ((f >= N - 5 ? ch1[(size_t) f] : -(float) f) != (f >= N - 5 ? 7.5f : -(float) f))
             { tailOk = false; break; }
     CHECK (tailOk, "only the last five frames were overwritten");
+    // Both real overwrites bumped the version; the degenerate ones below
+    // must not.
+    CHECK (eng.contentVersion () == v0 + 3, "each successful overwrite bumps the content version");
 
     // Degenerate requests are rejected without touching the buffer.
     CHECK (!eng.overwriteSamples (tail.data (), N, 10), "start at end is a no-op failure");
     CHECK (!eng.overwriteSamples (tail.data (), -3, 10), "negative start is a no-op failure");
     CHECK (!eng.overwriteSamples (tail.data (), 5, 0), "zero length is a no-op failure");
     CHECK (eng.numSamples () == N, "length still unchanged");
+    CHECK (eng.contentVersion () == v0 + 3, "rejected overwrites leave the content version alone");
 }
 
 /** Recording Options: mode state + persistence, duration labels, Timed
@@ -23503,6 +23517,57 @@ static void testTablesAutoAlignLag()
     aliT3.params.push_back (aliP3);
     const double lag3 = autoAlignLag (refT2, refT2.params[0], aliT3, aliT3.params[0]);
     CHECK (std::abs (lag3 + L2) < 0.02, "unequal durations still align");
+
+    // Idempotency: applying the lag to the aligned table's offset must make a
+    // second pass find ~0 instead of shifting again.
+    aliT.offsetSecs += lag;
+    const double lagAgain = autoAlignLag (refT, refT.params[0], aliT, aliT.params[0]);
+    CHECK (std::abs (lagAgain) < 0.02, "second auto align pass is a no-op");
+
+    // Pre-existing offsets: the correlation must run in doc time. The
+    // reference sits at [1, 3] s; the aligned copy's content is delayed by L
+    // in its own table time but the table itself starts at 2 s, so in doc
+    // time it trails the reference by (1 + L) seconds.
+    TableData refT4, aliT4;
+    refT4.sampleRate = aliT4.sampleRate = rate;
+    refT4.offsetSecs = 1.0;
+    aliT4.offsetSecs = 2.0;
+    ParamData refP4, aliP4;
+    refP4.name = "ref"; aliP4.name = "ali";
+    for (int i = 0; i <= N; ++i)
+    {
+        const double tSecs = (double) i / rate;
+        refP4.values.push_back (sigAt (tSecs));
+        aliP4.values.push_back (sigAt (tSecs - L));
+    }
+    refT4.params.push_back (refP4);
+    aliT4.params.push_back (aliP4);
+    const double lag4 = autoAlignLag (refT4, refT4.params[0], aliT4, aliT4.params[0]);
+    CHECK (std::abs (lag4 + 1.0 + L) < 0.02, "doc-time offsets are honoured");
+    aliT4.offsetSecs += lag4;
+    const double lag4Again = autoAlignLag (refT4, refT4.params[0], aliT4, aliT4.params[0]);
+    CHECK (std::abs (lag4Again) < 0.02, "offset case is idempotent too");
+
+    // Same-table pair: the curves share the table map, so only the aligned
+    // parameter's own offset can separate them; aligning must converge.
+    TableData sameT;
+    sameT.sampleRate = rate;
+    ParamData pA, pB;
+    pA.name = "a"; pB.name = "b";
+    for (int i = 0; i <= N; ++i)
+    {
+        const double tSecs = (double) i / rate;
+        pA.values.push_back (sigAt (tSecs));
+        pB.values.push_back (sigAt (tSecs - L));   // b trails a by L
+    }
+    sameT.params.push_back (pA);
+    sameT.params.push_back (pB);
+    const double lagS = autoAlignLag (sameT, sameT.params[1], sameT, sameT.params[0]);
+    CHECK (std::abs (lagS - L) < 0.02, "same-table pair: a trails b by L so lag is +L");
+    // Apply to the vector's copy of pA (push_back copied it out of scope).
+    sameT.params[0].offsetSecs += lagS;
+    const double lagSAgain = autoAlignLag (sameT, sameT.params[1], sameT, sameT.params[0]);
+    CHECK (std::abs (lagSAgain) < 0.02, "same-table alignment is idempotent");
 }
 
 static void testTablesSerialiseParse()

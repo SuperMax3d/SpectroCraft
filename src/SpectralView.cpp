@@ -436,6 +436,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
             // Left-drag on the frequency axis pans the vertical range; it must
             // not move the playhead.
             dragMode = DragMode::VPan;
+            panLastY = e.y;
         }
         else
         {
@@ -587,9 +588,13 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
         }
         case DragMode::VPan:
         {
-            // Grab-and-drag: the frequency under the cursor at drag start stays
-            // under the cursor. The shift is applied in log space for a log
-            // axis and linearly otherwise.
+            // Incremental half-speed grab, same feel as the waveform view's
+            // axis drag: content follows the cursor at 0.5 px per cursor
+            // pixel and the delta is measured from the last delivered
+            // position, so reversing direction responds immediately (deltas
+            // eaten by an edge pin do not accumulate). Log axes shift in log
+            // space (half a step = square root of the full-step ratio) so
+            // the zoom level is preserved.
             const auto rows = rowRects ();
             if (!rows.empty())
             {
@@ -597,29 +602,37 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
                 for (const auto& rr : rows)
                     if (rr.contains (dragStartX, dragStartY)) { row = rr; break; }
 
-                const double f0 = yToFreq ((float) (dragStartY - row.getY()), row.getHeight());
-                const double f1 = yToFreq ((float) (e.y - row.getY()), row.getHeight());
-                const double nyq = app.audioEngine().sampleRate() * 0.5;
-                if (settings_.logFrequency && f0 > 0.0 && f1 > 0.0)
+                const int dy = e.y - panLastY;
+                panLastY = e.y;
+                if (dy != 0 && row.getHeight() > 0)
                 {
-                    // Grab-and-drag in log space: scale both bounds by the same
-                    // ratio so the zoom level is preserved.
-                    const double R = f0 / f1;
-                    double lo2 = freqMin * R, hi2 = freqMax * R;
-                    // Pin at most one edge to its limit; shifting both would
-                    // silently change the span and make reversing direction
-                    // feel sticky (the range could never return to where it was).
-                    if (lo2 < 1.0) lo2 = 1.0;
-                    else if (hi2 > nyq) hi2 = nyq;
-                    setFrequencyRange (lo2, hi2);
-                }
-                else
-                {
-                    const double d = f0 - f1;
-                    double lo2 = freqMin + d, hi2 = freqMax + d;
-                    if (lo2 < 1.0) lo2 = 1.0;          // pin the bottom edge
-                    else if (hi2 > nyq) hi2 = nyq;     // pin the top edge
-                    setFrequencyRange (lo2, hi2);
+                    const double nyq = app.audioEngine().sampleRate() * 0.5;
+                    if (settings_.logFrequency && freqMin > 1e-9)
+                    {
+                        // Full-step ratio between the previous and current
+                        // cursor positions, clamped to the row so a cursor
+                        // outside it cannot run away.
+                        const float yPrev = std::clamp ((float) (panLastY - dy),
+                                                       (float) row.getY(), (float) row.getBottom());
+                        const float yNow  = std::clamp ((float) panLastY,
+                                                       (float) row.getY(), (float) row.getBottom());
+                        const double Rfull = yToFreq ((float) (yPrev - row.getY()), row.getHeight())
+                                           / yToFreq ((float) (yNow  - row.getY()), row.getHeight());
+                        const double R = std::sqrt (std::max (1e-30, Rfull));
+                        double lo2 = freqMin * R, hi2 = freqMax * R;
+                        if (lo2 < 1.0) lo2 = 1.0;          // pin the bottom edge
+                        else if (hi2 > nyq) hi2 = nyq;     // pin the top edge
+                        setFrequencyRange (lo2, hi2);
+                    }
+                    else
+                    {
+                        // yToFreq is linear in pixels: half the per-pixel step.
+                        const double dFull = (freqMax - freqMin) * (double) dy / row.getHeight();
+                        double lo2 = freqMin + 0.5 * dFull, hi2 = freqMax + 0.5 * dFull;
+                        if (lo2 < 1.0) lo2 = 1.0;          // pin the bottom edge
+                        else if (hi2 > nyq) hi2 = nyq;     // pin the top edge
+                        setFrequencyRange (lo2, hi2);
+                    }
                 }
             }
             break;
@@ -1236,8 +1249,13 @@ void SpectralView::paint (juce::Graphics& g)
     const auto pr = plotRect();
     const int w = pr.getWidth(), h = pr.getHeight();
 
-    // Re-render the spectral image only when the view range / settings changed.
-    if (imageDirty || !haveImage || w != imgW || h != imgH || viewStart != imgT0 || viewEnd != imgT1)
+    // Re-render the spectral image when the view range, size or the audio
+    // content itself changed: a recording mutates the doc in place (append,
+    // or loop-mode overwrite at constant length), which must refresh the
+    // picture even though the time window did not move.
+    const int64_t cvNow = app.audioEngine().contentVersion();
+    if (imageDirty || !haveImage || w != imgW || h != imgH
+        || viewStart != imgT0 || viewEnd != imgT1 || cvNow != imgContentVer)
     {
         // The engine uses the passed Settings for everything: feed it this
         // view's local frequency limits.
@@ -1249,6 +1267,7 @@ void SpectralView::paint (juce::Graphics& g)
         renderSpectralContent (cachedImage, rs);
 
         imgW = w; imgH = h; imgT0 = viewStart; imgT1 = viewEnd;
+        imgContentVer = cvNow;
         haveImage = true;
         imageDirty = false;
     }

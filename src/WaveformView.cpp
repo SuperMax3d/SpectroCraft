@@ -729,10 +729,11 @@ void WaveformView::paint (juce::Graphics& g)
             const double x = timeToX (m.start);
             if (x < -50 || x > getWidth() + 50)
                 continue;
-            // The range bracket sits at the ruler edge: just below the top
-            // ruler by default, or just above the bottom ruler when it is
-            // moved there (View menu).
-            const float brY = rulerAtBottom() ? pr.getBottom() - 14.0f : pr.getY() + 6.0f;
+            // The range bracket always sits at the top of the plot - just
+            // below the top edge - with the title underneath it, exactly
+            // like the spectral view's overlay. (Anchoring it to a bottom
+            // ruler instead made the title straddle the bracket line.)
+            const float brY = pr.getY() + 6.0f;
             g.setColour (m.colour.withAlpha (0.8f));
             if (m.end < 0)
             {
@@ -741,10 +742,9 @@ void WaveformView::paint (juce::Graphics& g)
             else
             {
                 const double x2 = timeToX (m.end);
-                const float vEnd = rulerAtBottom() ? (float) pr.getY() : (float) pr.getBottom();
                 g.drawLine ((float) x, brY, (float) x2, brY, 2.0f);
-                g.drawLine ((float) x, brY, (float) x, vEnd, 1.0f);
-                g.drawLine ((float) x2, brY, (float) x2, vEnd, 1.0f);
+                g.drawLine ((float) x, brY, (float) x, pr.getBottom(), 1.0f);
+                g.drawLine ((float) x2, brY, (float) x2, pr.getBottom(), 1.0f);
             }
             // Title: may run past this marker's own range, but must stop
             // before the next marker starts so that marker's title has room.
@@ -759,9 +759,8 @@ void WaveformView::paint (juce::Graphics& g)
                     ? timeToX (ms[i + 1].start) - 2.0
                     : (double) getWidth() + 50.0;
                 const double w = std::max (0.0, rightEdge - textX);
-                const int titleY = rulerAtBottom() ? pr.getBottom() - 20 : pr.getY() + 8;
                 if (w > 0.0)
-                    g.drawText (m.name, (int) textX, titleY, (int) w, 14,
+                    g.drawText (m.name, (int) textX, pr.getY() + 8, (int) w, 14,
                                 juce::Justification::topLeft, true);
             }
         }

@@ -518,23 +518,27 @@ double paramValueAt (const TableData& t, const ParamData& p, double tTableSecs)
 
 namespace {
 
-// Resamples a parameter onto a uniform grid spanning [0, spanSecs]. Points
-// beyond the parameter's own duration become NaN so they never enter the
-// correlation sums (a flat zero tail would bias the peak).
-std::vector<double> nccResample (const TableData& t, const ParamData& p,
-                                 double spanSecs, int nPts)
+// Resamples a parameter onto a uniform doc-time grid spanning
+// [tMinSecs, tMinSecs + spanSecs], honouring its effective time map
+// (docTime = off + sc*tTable). Points outside the parameter's own duration
+// become NaN so they never enter the correlation sums (a flat zero tail
+// would bias the peak).
+std::vector<double> nccResampleDoc (const TableData& t, const ParamData& p,
+                                    double offSecs, double scaleTime,
+                                    double tMinSecs, double spanSecs, int nPts)
 {
     std::vector<double> v ((size_t) nPts);
     const double dur = p.duration (t.sampleRate);
     for (int i = 0; i < nPts; ++i)
     {
-        const double tt = spanSecs * (double) i / (double) (nPts - 1);
-        if (tt > dur)
+        const double tt = tMinSecs + spanSecs * (double) i / (double) (nPts - 1);
+        const double tTab = (tt - offSecs) / scaleTime;
+        if (tTab < 0.0 || tTab > dur)
         {
             v[(size_t) i] = std::nan ("");
             continue;
         }
-        const double val = paramValueAt (t, p, tt);
+        const double val = paramValueAt (t, p, tTab);
         v[(size_t) i] = std::isfinite (val) ? val : std::nan ("");
     }
     return v;
@@ -595,29 +599,41 @@ int nccBestLag (const std::vector<double>& A, const std::vector<double>& B,
 double autoAlignLag (const TableData& refTable, const ParamData& refParam,
                      const TableData& aliTable, const ParamData& aliParam)
 {
-    // Normalized cross-correlation: for every candidate shift the Pearson
-    // correlation is computed over the overlap of both parameters only, so
-    // amplitude differences and unequal durations cannot bias the peak.
-    // Two stages: a coarse pass over the full lag range on a grid spanning
-    // the union of both durations, then an 8x finer refinement around the
-    // best coarse lag. Result in seconds; positive means B's content sits
-    // later than A's (callers negate it to shift B earlier).
+    // Normalized cross-correlation in DOCUMENT time: both parameters are
+    // resampled through their effective maps (docTime = off + sc*tTable) onto
+    // a common grid spanning the union of their doc-time ranges. Correlating
+    // raw table times instead would ignore existing offsets/stretches, so a
+    // second alignment pass would rediscover the same lag and shift again.
+    // For every candidate shift the Pearson correlation is computed over the
+    // overlap of both parameters only, so amplitude differences and unequal
+    // durations cannot bias the peak. Two stages: a coarse pass over the full
+    // lag range on a grid spanning the union of both ranges, then an 8x finer
+    // refinement around the best coarse lag. Result in doc seconds; adding it
+    // to B's effective offset shifts its content onto A's (a second run then
+    // finds ~0 and leaves everything untouched).
     const double durA = refParam.duration (refTable.sampleRate);
     const double durB = aliParam.duration (aliTable.sampleRate);
     if (!(std::max (durA, durB) > 0.0)) return 0.0;
 
-    const double span = std::max (durA, durB);
+    const auto [offA, scA] = refTable.effectiveTimeMap (refParam);
+    const auto [offB, scB] = aliTable.effectiveTimeMap (aliParam);
+    if (!(scA > 1e-9) || !(scB > 1e-9)) return 0.0;
+
+    const double tMin = std::min (offA, offB);
+    const double span = std::max (offA + scA * durA, offB + scB * durB) - tMin;
+    if (!(span > 0.0)) return 0.0;
+
     const int M1 = std::clamp ((int) std::lround (span * 256.0), 256, 8192);
-    auto A1 = nccResample (refTable, refParam, span, M1);
-    auto B1 = nccResample (aliTable, aliParam, span, M1);
+    auto A1 = nccResampleDoc (refTable, refParam, offA, scA, tMin, span, M1);
+    auto B1 = nccResampleDoc (aliTable, aliParam, offB, scB, tMin, span, M1);
 
     const int lagCoarse = nccBestLag (A1, B1, std::max (8, M1 / 20));
 
     // Refine on an 8x finer grid around the coarse winner.
     const int R = 8;
     const int M2 = std::min (65536, M1 * R);
-    auto A2 = nccResample (refTable, refParam, span, M2);
-    auto B2 = nccResample (aliTable, aliParam, span, M2);
+    auto A2 = nccResampleDoc (refTable, refParam, offA, scA, tMin, span, M2);
+    auto B2 = nccResampleDoc (aliTable, aliParam, offB, scB, tMin, span, M2);
 
     const double finePerCoarse = (double) (M2 - 1) / (double) (M1 - 1);
     const int centre = (int) std::lround (lagCoarse * finePerCoarse);

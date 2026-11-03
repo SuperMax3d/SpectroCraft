@@ -273,9 +273,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     current state is highlighted; states you can still redo are dimmed below it.
     **Clicking any row jumps straight to that state**, undoing or redoing as
     many steps as needed in one batched operation (a single mipmap rebuild for
-    the whole run instead of one per step). Styled like the other panels:
-    dark blue list background under a grey header with **Step** and **Action**
-    columns; the header's right side still shows "N of M applied".
+    the whole run instead of one per step). Styled exactly like the Actions
+    table: dark blue-green list background under a light grey header with
+    black bold **Step** and **Action** columns; the header's right side still
+    shows "N of M applied".
   - **Python**: a script editor next to History. The dropdown lists every
     `*.py` file in your personal script folder (`%APPDATA%/SpectroCraft/python`
     on Windows, created automatically with six examples: *Dynamic
@@ -448,8 +449,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     with each band's centre value written in white between its borders,
     just inside the spectrogram on the same side as the vertical frequency
     axis (labels are skipped when a band is too thin on screen or would hit
-    a channel label). All three default to on, are remembered between
-    sessions, and leave the axis labels untouched when off.
+    a channel label). The first two default to on; **Show 1/3 Octave Grid**
+    defaults to off. All three are remembered between sessions and leave the
+    axis labels untouched when off.
   - Main area: waveform view on top, spectral view below, separated by a
     **draggable divider** — drag it up/down to resize the two views. A time
     scrollbar runs along the bottom, aligned with the data region (inset by
@@ -972,7 +974,12 @@ a race guard against the playback thread) and steps the follow-end window
 `AudioEngine::overwriteSamples()` once the document reaches its configured
 length — writing in place at a wrapping position without ever growing the
 buffer. Mipmaps are rebuilt throttled during recording (only while the file is
-small enough that it matters) and once more on stop.
+small enough that it matters) and once more on stop. The spectrogram also
+re-renders every tick even when the view window does not move: its paint path
+invalidates the cached image whenever the engine's content version changes —
+appended *and* loop-mode overwritten samples both bump it — so a fixed-window
+view shows new data as it arrives (only the newly recorded tiles are computed;
+the tiled LRU cache keeps that cheap).
 
 ---
 
@@ -2000,12 +2007,16 @@ list: a table row followed by its parameter rows.
   a Waveform-targeted parameter is drawn by the waveform overlay, a
   Spectrogram-targeted one by the spectrogram overlay, and Dedicated-targeted
   parameters only appear in the dedicated track (which always shows every
-  visible parameter). Auto Align shifts the whole table of the aligned
-  parameter by the correlated lag.
+  visible parameter). Auto Align adds the correlated lag to the aligned
+  parameter's own time offset (both curves share the table map, so only that
+  can separate them).
 - With two parameters from different tables selected, right-clicking shows
-  **Auto Align <table> <param> with <table> <param>**: a mean-subtracted
-  cross-correlation finds the delay between the curves (the parameter under the
-  mouse is shifted onto the other one).
+  **Auto Align <table> <param> with <table> <param>**: a normalized
+  cross-correlation in *document* time (each curve resampled through its
+  effective offset/scale onto the union of both ranges) finds the delay
+  between the curves and shifts the parameter under the mouse onto the other
+  one. Because the correlation runs in doc time, re-running Auto Align after
+  applying it is a no-op instead of shifting again.
 - Import rules: both **comma- and tab-separated** data are accepted; `true`/
   `false` cells become `1.0`/`0.0`; if the first column is entirely text the
   grid is transposed before import (rows become parameters); scattered missing
@@ -2114,7 +2125,7 @@ Clean separation into independent components (see `include/` + `src/`):
 
 | Component | Responsibility |
 |---|---|
-| `AudioEngine` (`juce::AudioSource`) | File I/O via AudioFormatManager, streaming vs in-memory decision, sample access API, mipmap pyramid for the waveform overview, playback transport (play/pause/loop), edit primitives (`applyPatch`, silence/fade/normalize/reverse/cut/copy/paste/delete) plus `initNew` (empty or pre-filled documents with no file path yet), `readRange` and `pasteMixAt` (sum-in-place paste that appends past end-of-file). All disk reads are mutex-protected; the UI thread never blocks on I/O. |
+| `AudioEngine` (`juce::AudioSource`) | File I/O via AudioFormatManager, streaming vs in-memory decision, sample access API, mipmap pyramid for the waveform overview, playback transport (play/pause/loop), edit primitives (`applyPatch`, silence/fade/normalize/reverse/cut/copy/paste/delete) plus `initNew` (empty or pre-filled documents with no file path yet), `readRange` and `pasteMixAt` (sum-in-place paste that appends past end-of-file), and recording append/overwrite (`appendSamples` / `overwriteSamples`) with a monotonic content version views compare to invalidate cached renders. All disk reads are mutex-protected; the UI thread never blocks on I/O. |
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
@@ -2125,7 +2136,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
 | `FileDoc` | One per loaded file: its own `AudioEngine`, `MarkerManager` and `UndoManager`, plus the remembered playhead position, selection range, visible-channel list, scale calibration (`ScaleCalibration`, including optional per-channel full-scale values), saved spectral selections, data tables (with their alignment/transform state), axis calibrations (`AltRefState`), Frequency Analysis settings (`FreqAnalysisState`) and the metadata storage mode. Also keeps the raw `bkdk` payload of the source file (when present) so WAV saves preserve it byte-for-byte. Created by `Application::openFile` (from disk) or `Application::newFile` / `copyToNewFile` (path-less documents); destroyed on close (the audio player is detached from its engine *before* destruction). |
 | `BkdkChunk` (`src/BkdkChunk.cpp`) | Parser for the custom `bkdk` RIFF chunk found in some legacy measurement WAV files: NUL-separated ASCII fields, one 11-field group per channel whose Calibration field (sample × gain = pascals) drives the automatic Pascal calibration on load. A single defined group applies to every channel; missing/unparseable values fall back to no scaling. |
-| `Tables` (`src/Tables.cpp`) | Data-table model + CSV import (comma/tab separated, quoted fields, CRLF, boolean cells, first-column-text transpose, time-column auto-detection with duration-based start shift, scattered-gap interpolation, text-only column drop), remove-only downsample decimation, value transforms (normalized/inverted/absolute + offset/scale), composed table+parameter time maps, mean-subtracted cross-correlation auto-align lag, and the JSON serialise/parse used by `FileMeta`. |
+| `Tables` (`src/Tables.cpp`) | Data-table model + CSV import (comma/tab separated, quoted fields, CRLF, boolean cells, first-column-text transpose, time-column auto-detection with duration-based start shift, scattered-gap interpolation, text-only column drop), remove-only downsample decimation, value transforms (normalized/inverted/absolute + offset/scale), composed table+parameter time maps, document-time normalized cross-correlation auto-align lag (idempotent), and the JSON serialise/parse used by `FileMeta`. |
 | `TablesTrackView` (`src/TablesTrack.cpp`) | The dedicated-tables strip: draws every visible table parameter auto-scaled into its own plot area (same width as the data views, same left-axis width), with vertical zoom/pan driven by a `ValueScrollBar`, the blue time-selection band and red playhead over it, vertical yellow marker delimiter lines (no bracket line or titles on this strip), and hover readout of each curve's unscaled value at the cursor time. |
 | `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, data tables, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |

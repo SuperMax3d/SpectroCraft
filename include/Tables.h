@@ -180,10 +180,12 @@ double paramValueAt (const TableData& t, const ParamData& p, double tTableSecs);
 
 // ------------------------------------------------------------- Auto align --
 
-/** Cross-correlates two parameters to find the best time lag for aligning
-    `alignTo` onto `reference`. Both are resampled to a common grid first.
-    Returns the lag in seconds: adding it to alignTo.offsetSecs shifts its
-    curve so that its content matches reference's (positive = later). */
+/** Cross-correlates two parameters in DOCUMENT time (through their effective
+    offset/scale maps) to find the best lag for aligning `aliParam` onto
+    `refParam`. Both are resampled onto a common grid spanning the union of
+    their doc-time ranges. Returns the lag in seconds: adding it to ali's
+    effective offset shifts its curve so that its content matches ref's.
+    Re-running after applying the result yields ~0 (idempotent). */
 double autoAlignLag (const TableData& refTable, const ParamData& refParam,
                      const TableData& aliTable, const ParamData& aliParam);
 

@@ -907,14 +907,19 @@ static constexpr int kHistStepColW = 36;
 void HistoryPanel::paint (juce::Graphics& g)
 {
     auto b = getLocalBounds();
-    // Dark blue list background, like the other panels' lists.
-    g.fillAll (juce::Colour::fromRGB (30, 42, 68));
+    // Same table style as the Actions panel's TableListBox under the default
+    // LookAndFeel_V4 dark scheme: body = widgetBackground RGB(38,50,56) and a
+    // header of 60% white over it (light grey) with black bold text and a
+    // half-black bottom outline.
+    g.fillAll (juce::Colour::fromRGB (38, 50, 56));
 
-    // Grey header row with the two column titles; applied-count stays right.
-    g.setColour (juce::Colour::fromRGB (95, 100, 112));
+    // Header row with the two column titles; applied-count stays right.
+    g.setColour (juce::Colours::white.withAlpha (0.6f));
     g.fillRect (0, 0, b.getWidth(), kHeaderH);
-    g.setFont (12.0f);
-    g.setColour (juce::Colours::white);
+    g.setColour (juce::Colours::black.withAlpha (0.5f));
+    g.fillRect (0, kHeaderH - 1, b.getWidth(), 1);
+    g.setFont (juce::Font (12.0f, juce::Font::bold));
+    g.setColour (juce::Colours::black);
     const int listX = 2;   // matches listArea()
     g.drawText ("Step", juce::Rectangle<int> (listX + 2, 3, kHistStepColW, kHeaderH - 6),
                 juce::Justification::centredRight, false);
@@ -924,8 +929,8 @@ void HistoryPanel::paint (juce::Graphics& g)
                 juce::Justification::left, false);
 
     const int totalActions = std::max (0, (int) rows_.size() - 1);
-    g.setFont (11.0f);
-    g.setColour (juce::Colour::fromRGB (225, 228, 236));
+    g.setFont (juce::Font (11.0f, juce::Font::bold));
+    g.setColour (juce::Colours::black);
     g.drawText (juce::String (currentState_) + " of " + juce::String (totalActions) + " applied",
                 juce::Rectangle<int> (b.getWidth() - 168, 4, 160, kHeaderH - 8),
                 juce::Justification::right, false);
@@ -954,7 +959,8 @@ void HistoryPanel::paint (juce::Graphics& g)
         const bool current = (i == currentState_);
         if (current)
         {
-            g.setColour (juce::Colour::fromRGB (70, 96, 145));
+            // Same selection colour as the Actions/marker table rows.
+            g.setColour (juce::Colour::fromRGB (60, 80, 120));
             g.fillRect (r);
         }
 
@@ -10829,19 +10835,28 @@ void TablesPanel::showContextMenu (int row)
                     {
                         const double lag = sc::tables::autoAlignLag (refT, refT.params[(size_t) b.paramIdx],
                                                                     aliT, aliT.params[(size_t) a.paramIdx]);
-                        // Time alignment is shared at the table level: the
-                        // parameter under the mouse lands on its effective map
-                        // shifted by the lag, and every other parameter of its
-                        // table adopts that same map.
                         auto& p = aliT.params[(size_t) a.paramIdx];
-                        const double effOff = aliT.offsetSecs + p.offsetSecs;
-                        const double effSc  = aliT.scaleTime * p.scaleTime;
-                        aliT.offsetSecs = effOff + lag;
-                        aliT.scaleTime = effSc;
-                        for (auto& q : aliT.params)
+                        if (a.tableIdx == b.tableIdx)
                         {
-                            q.offsetSecs = 0.0;
-                            q.scaleTime = 1.0;
+                            // Both curves share the table's time map, so only
+                            // this parameter's own offset can separate them.
+                            p.offsetSecs += lag;
+                        }
+                        else
+                        {
+                            // Time alignment is shared at the table level: the
+                            // parameter under the mouse lands on its effective
+                            // map shifted by the lag, and every other parameter
+                            // of its table adopts that same map.
+                            const double effOff = aliT.offsetSecs + p.offsetSecs;
+                            const double effSc  = aliT.scaleTime * p.scaleTime;
+                            aliT.offsetSecs = effOff + lag;
+                            aliT.scaleTime = effSc;
+                            for (auto& q : aliT.params)
+                            {
+                                q.offsetSecs = 0.0;
+                                q.scaleTime = 1.0;
+                            }
                         }
                         d->metaDirty = true;
                         refresh ();

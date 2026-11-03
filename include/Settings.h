@@ -108,7 +108,7 @@ struct Settings
     // amplitude levels in the waveform, frequency ticks in the spectrogram.
     bool showAmpGrid = true;      // "Show Amplitude Grid"
     bool showFreqGrid = true;     // "Show Frequency Grid"
-    bool showThirdOctaveGrid = true;  // "Show 1/3 Octave Grid"
+    bool showThirdOctaveGrid = false; // "Show 1/3 Octave Grid" (off on first launch, persisted after)
     bool showDedicatedTrackGrid = true;   // "Show Dedicated Track Grid"
 
     // Spectrogram harmonic markers (Spectral Controls panel), persisted between
