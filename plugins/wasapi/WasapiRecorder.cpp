@@ -65,6 +65,17 @@ static const DWORD kStreamFlagsAutoConvert = 0x1;  // AUDCLNT_STREAMFLAGS_AUTOCO
 static const DWORD kStreamFlagsLoopback    = 0x4;  // AUDCLNT_STREAMFLAGS_LOOPBACK (standard value)
 // Some stacks reject the plain loopback flag and only accept it combined
 // with AUTOCONVERT, so setupCapture() tries both orderings.
+//
+// Alternate SDK variant: some audio stacks (e.g. the Windows 11 VM stack,
+// whose AudioSessionTypes.h defines these values) use a completely different
+// bit layout for AUDCLNT_STREAMFLAGS:
+static const DWORD kStreamFlagsLoopbackAlt      = 0x20000;   // LOOPBACK on that stack
+static const DWORD kStreamFlagsEventCallbackAlt = 0x40000;   // EVENTCALLBACK on that stack
+// On such an engine the standard values open a session that streams frames
+// but never delivers captured content (all zeros). Audacity's PortAudio build
+// uses these alternate values and captures correctly, so setupCapture() tries
+// them first for loopback. Stock Windows rejects 0x60000 as invalid flags and
+// the standard attempts below still apply.
 
 // KSDATAFORMAT subtypes (stable GUIDs from ks.h).
 static const GUID kSubtypePcm   { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
@@ -190,6 +201,12 @@ struct CaptureState {
     IAudioRenderClientLocal* keepAliveRc = nullptr;
     UINT32                   keepAliveBufFrames = 0;
     UINT32                   keepAliveBlockAlign = 0;
+
+    // Event-callback mode (alternate SDK variant): the engine requires a
+    // registered event handle before Start when EVENTCALLBACK is set.
+    HANDLE           captureEvent = nullptr;
+    bool             useEventMode = false;
+
     bool                     ownsComInit = false;   // we called CoInitializeEx in setup
 
     // Ring buffer of interleaved float32 frames (thread-safe FIFO; reads
@@ -529,6 +546,12 @@ static void cleanupCapture(CaptureState* st)
     }
     if (st->localCapture != nullptr) { st->localCapture->Release (); st->localCapture = nullptr; }
     if (st->capture != nullptr) { st->capture->Release (); st->capture = nullptr; }
+    if (st->captureEvent != nullptr)
+    {
+        CloseHandle (st->captureEvent);
+        st->captureEvent = nullptr;
+    }
+    st->useEventMode = false;
     if (st->client  != nullptr)
     {
         st->client->Stop ();
@@ -621,9 +644,20 @@ static int setupCapture(CaptureState* st)
     struct Attempt { DWORD fl; const WAVEFORMATEX* fmt; DWORD shareMode; };
     std::vector<Attempt> tries;
     if (!st->dev.rawFmtBytes.empty ())
+    {
+        // Alternate-SDK loopback first: EVENTCALLBACK|LOOPBACK with the mix
+        // format verbatim. This is what Audacity's PortAudio build uses on
+        // stacks whose AudioSessionTypes.h defines LOOPBACK=0x20000 /
+        // EVENTCALLBACK=0x40000; stock Windows rejects these flags and falls
+        // through to the standard attempts below.
+        if (st->dev.loopback)
+            tries.push_back ({ kStreamFlagsEventCallbackAlt | kStreamFlagsLoopbackAlt,
+                               reinterpret_cast<const WAVEFORMATEX*> (st->dev.rawFmtBytes.data ()),
+                               AUDCLNT_SHAREMODE_SHARED });
         tries.push_back ({ st->dev.loopback ? kStreamFlagsLoopback : 0,
                            reinterpret_cast<const WAVEFORMATEX*> (st->dev.rawFmtBytes.data ()),
                            AUDCLNT_SHAREMODE_SHARED });
+    }
     tries.push_back ({ flags, &st->dev.fmt, AUDCLNT_SHAREMODE_SHARED });
     tries.push_back ({ flags, &pcm16, AUDCLNT_SHAREMODE_SHARED });
     // NOTE: no exclusive-mode attempt. Some drivers crash inside the audio
@@ -642,6 +676,16 @@ static int setupCapture(CaptureState* st)
             // sure our conversion table matches it.
             if (t.fmt == &pcm16)
                 st->dev.fmt = pcm16;
+            // Event-callback mode requires a registered event handle before
+            // Start. We still poll GetBuffer in the worker loop; the engine
+            // only needs the handle to exist.
+            if ((t.fl & kStreamFlagsEventCallbackAlt) != 0)
+            {
+                st->captureEvent = CreateEventW (nullptr, FALSE, FALSE, nullptr);
+                if (st->captureEvent != nullptr &&
+                    SUCCEEDED (st->client->SetEventHandle (st->captureEvent)))
+                    st->useEventMode = true;
+            }
             break;
         }
         lastHr = hr;

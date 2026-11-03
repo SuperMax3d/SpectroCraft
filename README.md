@@ -915,10 +915,15 @@ automatically. It enumerates:
   `AUDCLNT_STREAMFLAGS_LOOPBACK` flag;
 - **Capture devices** — every capture endpoint.
 
-It opens endpoints in shared mode only and negotiates the format: it tries the
-endpoint's native mix format first, then falls back to auto-conversion (native,
-then PCM16) so unusual device formats still work. Exclusive-mode attempts are
-deliberately avoided — a few drivers crash inside an exclusive `Initialize`
+It opens endpoints in shared mode only and negotiates both format **and**
+stream flags: for loopback it tries, in order, (1) `EVENTCALLBACK | LOOPBACK`
+with the alternate SDK bit values (`0x40000 | 0x20000`, as defined by
+`AudioSessionTypes.h` on some stacks — this is what Audacity's PortAudio build
+uses there), registering an event handle before `Start`; (2) the standard
+`AUDCLNT_STREAMFLAGS_LOOPBACK` (`0x4`); then auto-conversion fallbacks (native,
+then PCM16). Stock Windows rejects the alternate flags as invalid and falls
+down to the standard path, so both stack families work. Exclusive-mode attempts
+are deliberately avoided — a few drivers crash inside an exclusive `Initialize`
 even though shared mode works fine on the same endpoint (shared is what
 Audacity uses). All WASAPI calls run on one dedicated worker thread inside the
 DLL.
@@ -926,11 +931,12 @@ DLL.
 Notes:
 - Loopback capture requires Windows 8+ and works best when something is actually
   playing through that endpoint (silence otherwise).
-- On some virtualized/VM audio stacks the shared-mode engine accepts
-  `Initialize`/`Start` but never advances the capture buffer; on such systems
-  recording starts cleanly but no data arrives. This is an environmental
-  limitation of the VM's audio service, not a plugin bug — regular Windows
-  machines deliver data normally.
+- On some virtualized/VM audio stacks a loopback session opened with the
+  standard flag values streams frames in real time but never delivers captured
+  content (all zeros). The alternate-flag attempt above fixes this: on such
+  systems loopback now captures real data exactly like Audacity does, and when
+  nothing is playing the plugin's silent keep-alive render stream keeps a
+  continuous (silent) capture flowing so the host watchdog never starves.
 - **Failures are visible.** A zero-data watchdog in the host stops a session that
   has delivered nothing for ~3 s and shows a message box with the plugin's last
   error (`sc_rec_last_error`); stopping such a session manually does the same
@@ -950,8 +956,10 @@ Notes:
   string property in the store for the first value that looks like a human-
   readable name (short, no GUID/path syntax). Fallbacks: "Loopback device",
   "Capture device".
-- Loopback stream flags are probed (`AUDCLNT_STREAMFLAGS_LOOPBACK` first, then a
-  reduced-stack alternative) so both standard and virtualized stacks start.
+- The silent keep-alive render stream (a shared-mode session on the same
+  endpoint that pumps silence) is started before capture begins: WASAPI
+  loopback only delivers packets while the endpoint's audio engine is actively
+  rendering, so without it an idle endpoint yields no frames at all.
 
 ### How the host drives it
 
