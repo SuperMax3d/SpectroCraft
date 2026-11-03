@@ -40,12 +40,14 @@ public:
     Mode getMode() const { return mode_; }
     double getSpeedFactor () const;   // parsed from the visible fields (> 0)
     double getPercentile () const;    // clamped to [0, 100]
+    bool markOnly() const { return markOnly_ != nullptr && markOnly_->getToggleState(); }
 
     juce::ComboBox* modeCombo() const { return modeCombo_; }   // unit tests
     // Row visibility (unit tests): per-mode visibility is tracked on the rows.
     bool durationRowVisible()   const;
     bool factorRowVisible()     const;
     bool percentileRowVisible() const;
+    bool markOnlyVisible()      const;
     juce::String getResultText() const { return resultLabel_->getText(); }   // unit tests
 
 private:
@@ -65,6 +67,7 @@ private:
     class LabeledField* durRow_ = nullptr;   // defined in MainWindow.cpp
     class LabeledField* facRow_ = nullptr;
     class LabeledField* pctRow_ = nullptr;
+    juce::TextButton* markOnly_ = nullptr;
     juce::Label* resultLabel_ = nullptr;
 };
 

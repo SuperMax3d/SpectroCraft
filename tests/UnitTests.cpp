@@ -7,6 +7,7 @@
 #include <JuceHeader.h>
 #include <array>
 #include <cstring>
+#include <set>
 #include <ctime>
 #include "Application.h"
 #include "AudioEngine.h"
@@ -17214,7 +17215,7 @@ int64_t catExpectedOutputLen (const std::vector<std::vector<float>>& buf, double
 {
     const int64_t span = (int64_t) buf[0].size();
     const int xfMax = (int) std::min<int64_t> (
-        std::max<int64_t> (16, (int64_t) std::llround (rate * 0.005)), span / 8);
+        std::max<int64_t> (16, (int64_t) std::llround (rate * 0.01)), span / 8);
     auto sorted = editsIn;
     std::sort (sorted.begin (), sorted.end (),
                [] (const sc::cat::Edit& x, const sc::cat::Edit& y) { return x.start < y.start; });
@@ -17238,8 +17239,10 @@ int64_t catExpectedOutputLen (const std::vector<std::vector<float>>& buf, double
         else
         {
             const int xf1 = (int) std::min<int64_t> ({ (int64_t) xfMax, L / 2 });
-            const int xf2 = (int) std::min<int64_t> ({ (int64_t) xfMax, span - (s + L), roomAfter });
-            outLen += (s - pos) + (L - xf1) + xf1 + (L - xf1) + xf2;
+            const int xf2 = (int) std::min<int64_t> ({ (int64_t) xfMax, span - (s + L), roomAfter,
+                                                      (int64_t) std::max<int64_t> (0, L - xf1) });
+            outLen += (s - pos) + std::max<int64_t> (0, L - xf1) + xf1
+                     + std::max<int64_t> (0, L - xf1 - xf2) + xf2;
             pos = s + L + xf2;
         }
     }
@@ -17349,7 +17352,7 @@ static void testCatPlanAndApply()
 
         // The prefix up to the first edit's crossfade zone is bit-exact.
         const int xfMax = (int) std::min<int64_t> (
-            std::max<int64_t> (16, (int64_t) std::llround (rate * 0.005)),
+            std::max<int64_t> (16, (int64_t) std::llround (rate * 0.01)),
             (int64_t) buf[0].size () / 8);
         const int64_t verbatimEnd = edits.front ().start - xfMax;
         bool prefixOk = true;
@@ -17406,6 +17409,195 @@ static void testCatReduceGaps()
     // Zero percentile removes nothing.
     CHECK (sc::cat::removableSamplesAtPercentile (a, 0.0, 3) == 0,
           "percentile 0 removes nothing");
+}
+
+// Correlation-based end-point refinement: for a steady tone the cut end must
+// snap to a position whose phase matches the start of the removed section;
+// silence and uncorrelated material are left untouched.
+static void testCatRefineEndpoints()
+{
+    const double rate = kToneRate;   // 8 kHz -> H = 256, tone period P = rate/300
+    const int64_t n = (int64_t) (3 * rate);
+    std::vector<std::vector<float>> buf(1, std::vector<float>((size_t)n));
+    for (int64_t i = 0; i < n; ++i)
+        buf[0][(size_t)i] = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                           * 300.0 * (double) i / rate);
+
+    sc::cat::Analysis a;
+    CHECK (sc::cat::analyze (buf, 1, rate, a), "analysis succeeded");
+
+    const double P = rate / 300.0;
+    auto phaseDist = [] (int64_t d, double period) {
+        double r = std::fmod ((double) d, period);
+        if (r < 0) r += period;
+        return std::min (r, period - r);
+    };
+
+    // A removal whose planned end is clearly off the phase grid.
+    const int64_t s = 2 * rate;
+    const int64_t L = 790;   // nearest aligned point is ~10 samples away
+    CHECK (phaseDist (L, P) > P / 3.0, "planned end starts misaligned");
+
+    std::vector<sc::cat::Edit> edits = { sc::cat::Edit { s, L, false } };
+    auto refined = sc::cat::refineRemovalEndpoints (buf, 1, rate, edits, &a);
+    CHECK ((int) refined.size () == 1 && refined[0].start == s, "edit kept in place");
+    const int64_t Lr = refined[0].len;
+    CHECK (Lr > 0 && std::abs ((double) (Lr - L)) <= 2.0 * a.hop + 1,
+          "end moved within the search window");
+    CHECK (phaseDist (Lr, P) < P / 3.0,
+          "refined end snaps back onto the phase grid of the start");
+
+    // Silence: NCC is undefined -> no movement at all.
+    std::vector<std::vector<float>> buf2(1, std::vector<float>((size_t)n));
+    for (int64_t i = 0; i < n; ++i)
+        if ((double) i >= rate && (double) i < 2 * rate)
+            buf2[0][(size_t)i] = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                               * 300.0 * (double) i / rate);
+    sc::cat::Analysis a2;
+    CHECK (sc::cat::analyze (buf2, 1, rate, a2), "analysis succeeded (silence case)");
+    std::vector<sc::cat::Edit> edits2 = { sc::cat::Edit { (int64_t) (rate / 4), L, false } };   // inside the silence
+    auto refined2 = sc::cat::refineRemovalEndpoints (buf2, 1, rate, edits2, &a2);
+    CHECK ((int) refined2.size () == 1 && refined2[0].len == L,
+          "silent edit is left untouched");
+
+    // White noise: no correlation above threshold -> no movement.
+    juce::Random rng (0xC0FFEEu);
+    std::vector<std::vector<float>> buf3(1, std::vector<float>((size_t)n));
+    for (auto& v : buf3[0]) v = (float) rng.nextDouble ();
+    sc::cat::Analysis a3;
+    CHECK (sc::cat::analyze (buf3, 1, rate, a3), "analysis succeeded (noise case)");
+    std::vector<sc::cat::Edit> edits3 = { sc::cat::Edit { s, L, false } };
+    auto refined3 = sc::cat::refineRemovalEndpoints (buf3, 1, rate, edits3, &a3);
+    CHECK ((int) refined3.size () == 1 && refined3[0].len == L,
+          "noise edit is left untouched");
+
+    // Duplication edits pass through unchanged.
+    std::vector<sc::cat::Edit> edits4 = { sc::cat::Edit { s, L, true } };
+    auto refined4 = sc::cat::refineRemovalEndpoints (buf, 1, rate, edits4, &a);
+    CHECK ((int) refined4.size () == 1 && refined4[0].len == L && refined4[0].duplicate,
+          "duplication edit passes through");
+}
+
+// The Reduce Gaps "mark only" mode adds region markers at the removable gaps
+// without touching the audio.
+static void testCatMarkRemovals()
+{
+    const juce::File wav = makeTempFile ("cat_mark.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate, [] (int, int64_t f, double rate) {
+            return (f >= rate / 2 && f < rate * 3 / 2)
+                ? 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                           * 300.0 * (double) f / rate)
+                : 0.0f; }), "wrote cat wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened cat wav");
+    AudioEngine& eng = app.audioEngine ();
+    const int64_t origTotal = eng.numSamples ();
+    const auto origMarkers = app.markers().markers();
+
+    std::string err;
+    const int added = app.contentAwareMarkRemovals (50.0, &err);
+    CHECK (added >= 1, "at least one marker was added: " + err);
+
+    // Audio untouched and no undo step created.
+    CHECK (eng.numSamples () == origTotal, "audio length unchanged");
+    CHECK (app.undo().undoSize() == 0, "no undo entry for marking");
+
+    const auto& ms = app.markers().markers();
+    CHECK ((int) ms.size() == (int) origMarkers.size() + added,
+          "marker count matches the return value");
+
+    // Each marker is a run of whole hops, named and inside the file.
+    bool okShape = true;
+    for (const Marker& m : ms)
+    {
+        const double hops = (m.end - m.start) * kToneRate / 256.0;
+        if (hops < 1e-9 || std::abs (hops - std::round (hops)) > 1e-6
+            || !m.name.startsWith ("CAT remove ")
+            || m.start < -1e-9 || m.end > 2.0 + 1e-6)
+            okShape = false;
+    }
+    CHECK (okShape, "markers are hop-aligned runs named 'CAT remove N'");
+
+    // Selection-scoped marking: only gaps inside the selection get marked.
+    // Markers are kept sorted by start time, so diff the sets instead of
+    // assuming new entries are appended at the end.
+    auto keyOf = [] (const Marker& m) { return std::make_pair ((double) m.start, (double) m.end); };
+    std::multiset<std::pair<double, double>> beforeSet;
+    for (const Marker& m : ms) beforeSet.insert (keyOf (m));
+
+    app.selection = { 0.1, 0.4 };
+    const int added2 = app.contentAwareMarkRemovals (50.0, &err);
+    CHECK (added2 >= 1, "selection marking added markers: " + err);
+    const auto& ms2 = app.markers().markers();
+    int newCount = 0;
+    bool inSel = true;
+    std::multiset<std::pair<double, double>> remaining (beforeSet);
+    for (const Marker& m : ms2)
+    {
+        if (remaining.erase (keyOf (m)) == 1) continue;   // matches a pre-existing marker
+        ++newCount;
+        if (m.start < 0.1 - 1e-6 || m.end > 0.4 + 1e-6)
+            inSel = false;
+    }
+    CHECK (newCount == added2, "marker count matches the return value");
+    CHECK (remaining.empty (), "no pre-existing marker was lost");
+    CHECK (inSel, "selection-scoped markers stay inside the selection");
+}
+
+// Head/tail coverage: leading silence must be taggable from t=0 and trailing
+// content removable up to about one FFT window before EOF.
+static void testCatEarlyFileCoverage()
+{
+    const double rate = kToneRate;   // 8 kHz -> N = 1024, H = 256
+    const int64_t n = (int64_t) (3 * rate);
+
+    auto makeBuf = [] (bool silenceFirst) {
+        std::vector<std::vector<float>> buf(1, std::vector<float>((size_t)n));
+        for (int64_t i = 0; i < n; ++i)
+        {
+            const bool inTone = silenceFirst
+                ? ((double) i >= rate && (double) i < 3 * rate)
+                : ((double) i < 2 * rate);
+            buf[0][(size_t)i] = inTone
+                ? 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                           * 300.0 * (double) i / rate)
+                : 0.0f;
+        }
+        return buf;
+    };
+
+    // Leading silence: some removal must start at sample 0.
+    {
+        auto buf = makeBuf (true);
+        sc::cat::Analysis a;
+        CHECK (sc::cat::analyze (buf, 1, rate, a), "analysis succeeded");
+        auto edits = sc::cat::reduceGapsEdits (a, 99.0, 3);
+        int64_t firstStart = -1;
+        for (const sc::cat::Edit& e : edits)
+            if (!e.duplicate && (firstStart < 0 || e.start < firstStart)) firstStart = e.start;
+        fprintf (stderr, "[cat-early] leading silence: %zu removals, first start=%lld\n",
+                 edits.size(), (long long) firstStart);
+        CHECK (firstStart == 0, "leading silence is tagged for removal starting at t=0");
+    }
+
+    // Trailing silence: the last removable sample must reach within one FFT window of EOF.
+    {
+        auto buf = makeBuf (false);   // tone [0,2), silence [2,3)
+        sc::cat::Analysis a;
+        CHECK (sc::cat::analyze (buf, 1, rate, a), "analysis succeeded");
+        auto edits = sc::cat::reduceGapsEdits (a, 99.0, 3);
+        int64_t maxEnd = 0;
+        for (const sc::cat::Edit& e : edits)
+            if (!e.duplicate) maxEnd = std::max<int64_t> (maxEnd, e.start + e.len);
+        fprintf (stderr, "[cat-early] trailing silence: %zu removals, last end=%lld of %lld\n",
+                 edits.size(), (long long) maxEnd, (long long) n);
+        // The last gap ends at the start of the final frame, so content within
+        // one FFT window (+ one hop) of EOF can never be tagged: inherent to
+        // frame-based analysis.
+        CHECK (maxEnd >= n - a.fftSize - a.hop,
+              "trailing silence is removable up to ~one FFT window before EOF");
+    }
 }
 
 static void testCatEffectApp()
@@ -17658,8 +17850,8 @@ static void testCatDialog()
     CHECK (panel->getMode () == CatTimeScalePanel::Mode::TimeStretch, "default mode is Time Stretch");
     // Per-mode visibility is tracked on the LabeledField rows.
     CHECK (panel->durationRowVisible () && panel->factorRowVisible ()
-              && !panel->percentileRowVisible (),
-          "time-stretch rows visible in the default mode");
+              && !panel->percentileRowVisible () && !panel->markOnlyVisible (),
+          "time-stretch rows visible, mark-only hidden in the default mode");
 
     // Duration initialised to the reference length (whole file: 2 s).
     CHECK (std::abs (durEd->getText ().getDoubleValue () - 2.0) < 1e-6,
@@ -17689,8 +17881,9 @@ static void testCatDialog()
     juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
     CHECK (panel->getMode () == CatTimeScalePanel::Mode::ReduceGaps, "mode switched to Reduce Gaps");
     CHECK (!panel->durationRowVisible () && !panel->factorRowVisible ()
-              && panel->percentileRowVisible (),
-          "percentile row visible in reduce-gaps mode");
+              && panel->percentileRowVisible () && panel->markOnlyVisible (),
+          "percentile row and mark-only checkbox visible in reduce-gaps mode");
+    CHECK (!panel->markOnly (), "mark-only is off by default");
 
     // The preview shows the resulting duration for the current percentile.
     bool hasPreview = false;
@@ -25677,6 +25870,9 @@ static int scRunUnitTestsImpl()
     progress ("cat analyze");               testCatAnalyze();
     progress ("cat plan + apply");          testCatPlanAndApply();
     progress ("cat reduce gaps");           testCatReduceGaps();
+    progress ("cat refine endpoints");      testCatRefineEndpoints();
+    progress ("cat mark removals");         testCatMarkRemovals();
+    progress ("cat early file coverage");   testCatEarlyFileCoverage();
     progress ("cat effect (app)");          testCatEffectApp();
     progress ("cat state remap");           testCatStateRemap();
     progress ("cat dialog");                testCatDialog();

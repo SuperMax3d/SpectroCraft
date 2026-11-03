@@ -73,9 +73,24 @@ int64_t removableSamplesAtPercentile (const Analysis& a, double percentile, int 
     onset gaps are never touched. */
 std::vector<Edit> planTimeScaleEdits (const Analysis& a, int64_t deltaSamples, juce::Random& rng);
 
-/** Apply the planned edits in the time domain with short crossfades. Returns
-    the new per-channel content for [0, rangeLen). With no edits this is an
-    exact copy of the input. */
+/** For every removal edit, moves its end point to a nearby position where the
+    audio resembles the start of the removed section (normalised cross-correlation
+    over one hop), so that the equal-power crossfade joins similar material and
+    phase discontinuities at the cut are minimised. The search window spans two
+    hops either side of the planned end point, so for periodic material the end
+    snaps to the nearest period boundary and the average length drift is ~0.
+    End points never move into protected gaps or into the next edit; silent
+    segments (undefined NCC) are left untouched. Duplication edits pass through
+    unchanged. */
+std::vector<Edit> refineRemovalEndpoints (const std::vector<std::vector<float>>& chans, int nchans,
+                                          double rate, const std::vector<Edit>& edits,
+                                          const Analysis* a = nullptr);
+
+/** Apply the planned edits in the time domain with ~10 ms equal-power
+    (cosine/sine) crossfades. Returns the new per-channel content for
+    [0, rangeLen). With no edits this is an exact copy of the input. Each
+    removal consumes its planned length plus its right crossfade zone; each
+    duplication adds L - xf1 samples (xf1 = its left crossfade length). */
 std::vector<std::vector<float>> applyEdits (const std::vector<std::vector<float>>& chans, int nchans,
                                             double rate, const std::vector<Edit>& edits);
 

@@ -282,15 +282,122 @@ std::vector<Edit> planTimeScaleEdits (const Analysis& a, int64_t deltaSamples, j
 
 // --------------------------------------------------------------- applying --
 
+/** Pearson correlation of two equal-length segments; 0 when either is
+    (near-)constant and carries no shape information. */
+static double nccSegments (const float* a, const float* b, int m)
+{
+    double sa = 0.0, sb = 0.0;
+    for (int i = 0; i < m; ++i) { sa += a[i]; sb += b[i]; }
+    const double ma = sa / m, mb = sb / m;
+    double num = 0.0, da = 0.0, db = 0.0;
+    for (int i = 0; i < m; ++i)
+    {
+        const double x = a[i] - ma, y = b[i] - mb;
+        num += x * y; da += x * x; db += y * y;
+    }
+    if (da <= 1e-18 || db <= 1e-18) return 0.0;
+    return num / std::sqrt (da * db);
+}
+
+std::vector<Edit> refineRemovalEndpoints (const std::vector<std::vector<float>>& chans, int nchans,
+                                          double rate, const std::vector<Edit>& edits,
+                                          const Analysis* a)
+{
+    auto out = edits;
+    if (out.empty () || nchans <= 0 || chans.empty ()) return out;
+    const int64_t span = (int64_t) chans[0].size();
+
+    // Same hop as analyze(): the reference segment is one hop long and the
+    // search window spans two hops either side of the planned end point.
+    // Searching both directions keeps the average drift around zero: for
+    // periodic material the nearest period boundary lies within half a
+    // period of the planned end, whichever way that is.
+    const int H = 256;
+    const int M = H;
+    const int W2 = 2 * H;   // window radius
+    constexpr double kMinNcc = 0.5;   // weaker matches are not worth moving for
+
+    // Mono mixdown of a few channels: NCC is a similarity measure, so one
+    // averaged channel is enough and keeps the cost down on multichannel files.
+    const int nc = std::min (nchans, 8);
+    std::vector<float> mono ((size_t) span);
+    for (int64_t i = 0; i < span; ++i)
+    {
+        double v = 0.0;
+        for (int c = 0; c < nc; ++c) v += chans[(size_t) c][(size_t) i];
+        mono[(size_t) i] = (float) (v / nc);
+    }
+
+    // nextProtected[g] = first protected gap index >= g (-1: none), so the
+    // per-edit search can stop at a protected zone in O(1).
+    std::vector<int> nextProt;
+    if (a != nullptr && !a->protectedGap.empty ())
+    {
+        const int G = a->numGaps ();
+        nextProt.resize ((size_t) G + 1, -1);
+        for (int g = G - 1; g >= 0; --g)
+            nextProt[(size_t) g] = a->protectedGap[(size_t) g] ? g : nextProt[(size_t) (g + 1)];
+    }
+
+    auto sortedIdx = out;
+    std::sort (sortedIdx.begin (), sortedIdx.end (),
+               [] (const Edit& x, const Edit& y) { return x.start < y.start; });
+
+    for (size_t k = 0; k < sortedIdx.size (); ++k)
+    {
+        const Edit e = sortedIdx[k];
+        if (e.duplicate || e.len <= 0) continue;
+
+        const int64_t s = std::max<int64_t> (std::min<int64_t> (e.start, span), 0);
+        const int64_t L = std::min<int64_t> (e.len, span - s);
+        if (L < H / 4) continue;   // trivially short: not worth aligning
+        const int64_t plannedEnd = s + L;
+
+        int64_t jMin = std::max<int64_t> (s + 1, plannedEnd - W2);
+        int64_t jMax = std::min<int64_t> (span - M, plannedEnd + W2);
+        // Leave at least one hop before the next removal edit.
+        for (size_t m2 = k + 1; m2 < sortedIdx.size (); ++m2)
+            if (!sortedIdx[m2].duplicate) { jMax = std::min<int64_t> (jMax, sortedIdx[m2].start - H); break; }
+        // Never extend into a protected gap's sample range.
+        if (!nextProt.empty ())
+        {
+            const int g0 = (int) ((plannedEnd + H - 1) / H);
+            if (g0 < (int) nextProt.size () && nextProt[(size_t) g0] >= 0)
+                jMax = std::min<int64_t> (jMax, (int64_t) nextProt[(size_t) g0] * H);
+        }
+        if (jMax < jMin) continue;
+
+        // Skip silent references: NCC is undefined there and the cut is already smooth.
+        double refRms = 0.0;
+        for (int i = 0; i < M; ++i) { const float v = mono[(size_t) (s + i)]; refRms += (double) v * v; }
+        if (refRms / M < 1e-10) continue;
+
+        double best = kMinNcc;
+        int64_t bestJ = plannedEnd;
+        for (int64_t j = jMin; j <= jMax; ++j)
+        {
+            const double r = nccSegments (mono.data () + s, mono.data () + j, M);
+            if (r > best) { best = r; bestJ = j; }
+        }
+        if (bestJ == plannedEnd) continue;
+
+        sortedIdx[k].start = s;
+        sortedIdx[k].len = bestJ - s;
+    }
+
+    return sortedIdx;
+}
+
 std::vector<std::vector<float>> applyEdits (const std::vector<std::vector<float>>& chans, int nchans,
                                             double rate, const std::vector<Edit>& edits)
 {
     if (nchans <= 0 || chans.empty()) return {};
     const int64_t span = (int64_t) chans[0].size();
 
-    // Short crossfade: ~5 ms, capped so it always fits the local material.
-    const int xfMax = (int) std::min<int64_t> (std::max<int64_t> (16, (int64_t) std::llround (rate * 0.005)),
+    // Short equal-power crossfade: ~10 ms, capped so it always fits the local material.
+    const int xfMax = (int) std::min<int64_t> (std::max<int64_t> (16, (int64_t) std::llround (rate * 0.01)),
                                                span / 8);
+    const double halfPi = juce::MathConstants<double>::pi * 0.5;
 
     auto sorted = edits;
     std::sort (sorted.begin(), sorted.end (),
@@ -316,7 +423,7 @@ std::vector<std::vector<float>> applyEdits (const std::vector<std::vector<float>
         const int64_t nextStart = (ei + 1 < sorted.size ()) ? std::max<int64_t> (sorted[ei + 1].start, pos) : span;
         const int64_t roomAfter = std::max<int64_t> (0, nextStart - (s + L));
 
-        if (!e.duplicate)   // removal: blend the tail before s with the head after s+L
+        if (!e.duplicate)   // removal: equal-power fade from the tail before s to the head after s+L
         {
             const int xf = (int) std::min<int64_t> ({ (int64_t) xfMax, s - pos, roomAfter });
             for (int c = 0; c < nchans; ++c)
@@ -325,15 +432,25 @@ std::vector<std::vector<float>> applyEdits (const std::vector<std::vector<float>
                 const float* src = chans[(size_t) c].data();
                 if (s - xf > pos)
                     o.insert (o.end (), src + pos, src + s - xf);
-                for (int i = 0; i < xf; ++i)
-                    o.push_back ((src[s - xf + i] + src[s + L + i]) * 0.5f);
+                if (xf >= 2)
+                {
+                    for (int i = 0; i < xf; ++i)
+                    {
+                        const double t = (double) i / (double) (xf - 1);
+                        o.push_back ((float) (src[s - xf + i] * std::cos (halfPi * t)
+                                           + src[s + L + i] * std::sin (halfPi * t)));
+                    }
+                }
+                else if (xf == 1)
+                    o.push_back (src[s]);   // single sample: continue the left side exactly
             }
             pos = s + L + xf;
         }
         else   // duplication: keep the segment, insert a copy after it with smooth joins
         {
             const int xf1 = (int) std::min<int64_t> ({ (int64_t) xfMax, L / 2 });
-            const int xf2 = (int) std::min<int64_t> ({ (int64_t) xfMax, span - (s + L), roomAfter });
+            const int xf2 = (int) std::min<int64_t> ({ (int64_t) xfMax, span - (s + L), roomAfter,
+                                                      (int64_t) std::max<int64_t> (0, L - xf1) });
             for (int c = 0; c < nchans; ++c)
             {
                 auto& o = out[(size_t) c];
@@ -342,12 +459,26 @@ std::vector<std::vector<float>> applyEdits (const std::vector<std::vector<float>
                     o.insert (o.end (), src + pos, src + s);          // verbatim up to the segment
                 if (L - xf1 > 0)
                     o.insert (o.end (), src + s, src + s + L - xf1);  // original head
-                for (int i = 0; i < xf1; ++i)                        // original tail -> copy head
-                    o.push_back ((src[s + L - xf1 + i] + src[s + i]) * 0.5f);
-                if (L - xf1 > 0)
-                    o.insert (o.end (), src + s + xf1, src + s + L);  // copy middle/tail
-                for (int i = 0; i < xf2; ++i)                        // copy tail -> following head
-                    o.push_back ((src[s + L - xf2 + i] + src[s + L + i]) * 0.5f);
+                if (xf1 >= 2)
+                    for (int i = 0; i < xf1; ++i)                   // equal-power: original tail -> copy head
+                    {
+                        const double t = (double) i / (double) (xf1 - 1);
+                        o.push_back ((float) (src[s + L - xf1 + i] * std::cos (halfPi * t)
+                                           + src[s + i] * std::sin (halfPi * t)));
+                    }
+                else if (xf1 == 1)
+                    o.push_back (src[s + L - 1]);   // single sample: continue the original tail exactly
+                if (L - xf1 - xf2 > 0)
+                    o.insert (o.end (), src + s + xf1, src + s + L - xf2);   // copy middle
+                if (xf2 >= 2)
+                    for (int i = 0; i < xf2; ++i)                   // equal-power: copy tail -> following head
+                    {
+                        const double t = (double) i / (double) (xf2 - 1);
+                        o.push_back ((float) (src[s + L - xf2 + i] * std::cos (halfPi * t)
+                                           + src[s + L + i] * std::sin (halfPi * t)));
+                    }
+                else if (xf2 == 1)
+                    o.push_back (src[s + L - 1]);   // single sample: continue the copy tail exactly
             }
             pos = s + L + xf2;
         }

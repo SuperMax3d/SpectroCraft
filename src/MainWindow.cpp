@@ -4530,6 +4530,9 @@ CatTimeScalePanel::CatTimeScalePanel (double refDurationSecs)
     pctRow_ = new LabeledField ("Percentile:", "40",
         "Remove every gap whose spectral change is below this percentile (0-100) of all gaps in the range.");
     pctRow_->editor()->setName ("catPercentile");
+    markOnly_ = new juce::TextButton ("Mark only");
+    markOnly_->setClickingTogglesState (true);
+    markOnly_->setTooltip ("Add a region marker at every removable gap instead of deleting the audio.");
     resultLabel_ = new juce::Label ("", "Analysing ...");
 
     addAndMakeVisible (modeLabel_);
@@ -4537,6 +4540,7 @@ CatTimeScalePanel::CatTimeScalePanel (double refDurationSecs)
     addAndMakeVisible (durRow_);
     addAndMakeVisible (facRow_);
     addAndMakeVisible (pctRow_);
+    addAndMakeVisible (markOnly_);
     addAndMakeVisible (resultLabel_);
 
     modeLabel_->setBounds (0, 5, 132, 18);
@@ -4544,6 +4548,7 @@ CatTimeScalePanel::CatTimeScalePanel (double refDurationSecs)
     durRow_->setBounds (0, 34, kInputRowW, kInputRowH);
     facRow_->setBounds (0, 62, kInputRowW, kInputRowH);
     pctRow_->setBounds (0, 34, kInputRowW, kInputRowH);   // same slot as the duration row
+    markOnly_->setBounds (0, 62, 190, kInputRowH);        // same slot as the factor row
     resultLabel_->setBounds (0, 92, kInputRowW, 18);
 
     modeCombo_->setSelectedItemIndex (0, juce::dontSendNotification);
@@ -4591,6 +4596,7 @@ void CatTimeScalePanel::setMode (Mode m)
     durRow_->setVisible (!reduce);
     facRow_->setVisible (!reduce);
     pctRow_->setVisible (reduce);
+    markOnly_->setVisible (reduce);   // "mark instead of delete" only applies to gap removals
     refreshResult ();
 }
 
@@ -4653,6 +4659,7 @@ double CatTimeScalePanel::getPercentile () const
 bool CatTimeScalePanel::durationRowVisible()   const { return durRow_ != nullptr && durRow_->isVisible(); }
 bool CatTimeScalePanel::factorRowVisible()     const { return facRow_ != nullptr && facRow_->isVisible(); }
 bool CatTimeScalePanel::percentileRowVisible() const { return pctRow_ != nullptr && pctRow_->isVisible(); }
+bool CatTimeScalePanel::markOnlyVisible()      const { return markOnly_ != nullptr && markOnly_->isVisible(); }
 
 juce::AlertWindow* MainWindow::createContentAwareTimeScaleDialog()
 {
@@ -4664,7 +4671,7 @@ juce::AlertWindow* MainWindow::createContentAwareTimeScaleDialog()
         msg += juce::String (app.selection.getLength (), 3) + "s selection";
     else
         msg += "the whole file (" + juce::String (eng.numSamples () / rate, 3) + "s).";
-    msg += "\nThe audio is analysed with an STFT: the most stable gaps (least change between consecutive frames) are removed or duplicated in the time domain with short crossfades. Onsets and transients are protected.";
+    msg += "\nThe audio is analysed with an STFT: the most stable gaps (least change between consecutive frames) are removed or duplicated in the time domain. Each cut is joined with a 10 ms equal-power crossfade placed where the audio resembles its surroundings, and onsets and transients are protected.";
 
     auto* w = new juce::AlertWindow ("Content Aware Time Scale", msg,
                                      juce::AlertWindow::QuestionIcon, this);
@@ -4701,16 +4708,35 @@ void MainWindow::showContentAwareTimeScaleDialog(std::function<void(bool)> onApp
 
     const int result = w->runModalLoop ();
 
-    bool reduce = false;
+    bool reduce = false, markOnly = false;
     double factor = 1.0, pct = 40.0;
     if (auto* p = dynamic_cast<CatTimeScalePanel*> (w->getCustomComponent (0)))
     {
         reduce = (p->getMode() == CatTimeScalePanel::Mode::ReduceGaps);
         factor = p->getSpeedFactor ();
         pct = p->getPercentile ();
+        markOnly = p->markOnly ();
     }
     delete w;
     if (result != 1) { if (onApplied) onApplied (false); return; }   // cancelled
+
+    if (reduce && markOnly)
+    {
+        // Mark the removable gaps with region markers instead of deleting audio.
+        // No action step is recorded: replaying a CAT step would delete, and
+        // like manual marker insertion this leaves no undo entry either.
+        std::string err;
+        const int added = app.contentAwareMarkRemovals (pct, &err);
+        if (added >= 0)
+        {
+            if (markersPanel != nullptr) markersPanel->refresh ();
+            syncSharedState ();
+            if (onApplied) onApplied (true);
+        }
+        else
+            showEditError (err);
+        return;
+    }
 
     app.recordActionStep (sc::actionTypes::kCatTimeScale,
         sc::makeVarObject ({

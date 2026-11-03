@@ -710,11 +710,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       has less stable material than requested; segments are then picked with
       an exponential preference for the most stable region plus a light length
       bonus until the requested amount is reached. Every edit joins its sides
-      with a short (~5 ms) crossfade, so no clicks appear at the seams.
+      with a 10 ms equal-power (cosine/sine) crossfade; each removal's end
+      point is additionally moved to where the audio resembles its start
+      (normalised cross-correlation over one hop, searched within two hops of
+      the planned end), so the fade blends similar material and no clicks
+      appear at the seams.
     - **Reduce Gaps** — a percentile field (0–100): every region whose
       frame-to-frame change sits at or below that percentile of all gaps is
       deleted. The resulting duration is shown live in the dialog before you
-      apply, so you can dial the amount in.
+      apply, so you can dial the amount in. A **Mark only** checkbox adds a
+      region marker at every removable gap instead of deleting audio (no undo
+      step, like manual markers).
     Both modes work on the time selection (or the whole file when nothing is
     selected), change the file length like Time Stretch — markers, saved
     selections and FFT snapshots are warped through the same time-warp — and
@@ -2379,7 +2385,12 @@ delays the window from appearing.
     the file with the edited range staying selected in place, undo restores the
     original length *and* content exactly, and a factor-2 stretch halves the
     whole file (hop-quantised); the dialog's row visibility switches with the
-    mode drop-down.
+    mode drop-down; end-point refinement snaps a steady tone's cut end back
+    onto its phase grid while leaving silence and noise untouched; mark-only
+    mode adds hop-aligned "CAT remove N" region markers without touching the
+    audio or the undo stack (selection-scoped marking stays inside the
+    selection); head/tail coverage shows leading silence tagged from t=0 and
+    trailing content removable up to one FFT window before EOF.
   - **Single-instance mode**: the persisted setting round-trips through a real
     properties file (checked by default; stored 0/1 read back); a full wire-
     protocol round trip over a named pipe delivers both paths intact (including

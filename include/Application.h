@@ -599,6 +599,13 @@ public:
     bool contentAwareTimeScale (bool reduceGaps, double percentile, double speedFactor,
                                 std::string* errOut = nullptr);
 
+    /** Content Aware Time Scale - "mark only" mode: runs the same Reduce Gaps
+        analysis over the active range and adds one region marker per removable
+        gap run instead of deleting any audio. Returns the number of markers
+        added, or -1 on error (errOut set). The audio is left untouched; like
+        manual marker insertion this does not create an undo step. */
+    int contentAwareMarkRemovals (double percentile, std::string* errOut = nullptr);
+
     // Snapshot of the time-anchored state taken before an edit that inserts /
     // deletes / shortens / stretches timeline data: playhead and selection
     // (Application members) plus the active document's spectral selection,

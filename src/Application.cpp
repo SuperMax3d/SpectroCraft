@@ -3003,7 +3003,11 @@ bool Application::contentAwareTimeScale (bool reduceGaps, double percentile,
             return true;   // no stable material found - bit-exact no-op
     }
 
-    auto newData = sc::cat::applyEdits (data, nch, rate, edits);
+    // Move each removal's end point to where the audio resembles its start,
+    // so the equal-power crossfade joins similar material. The total number of
+    // samples removed stays exactly as planned.
+    auto refined = sc::cat::refineRemovalEndpoints (data, nch, rate, edits, &a);
+    auto newData = sc::cat::applyEdits (data, nch, rate, refined);
 
     const double aSec = (double) range.getStart () / rate;
     const double oldEndSecs = (double) range.getEnd () / rate;
@@ -3034,6 +3038,49 @@ bool Application::contentAwareTimeScale (bool reduceGaps, double percentile,
 
     syncActiveDoc ();
     return true;
+}
+
+int Application::contentAwareMarkRemovals (double percentile, std::string* errOut)
+{
+    auto& eng = audioEngine ();
+    if (!eng.isFileLoaded ()) { *errOut = "No file loaded."; return -1; }
+
+    const double rate = eng.sampleRate ();
+    const int nch = eng.numChannels ();
+    const int64_t total = eng.numSamples ();
+
+    juce::Range<int64_t> range = selection.isEmpty ()
+        ? juce::Range<int64_t> { 0, total }
+        : selectionSamples (*this).getIntersectionWith ({ 0, total });
+    if (range.getLength () <= 0) { *errOut = "Nothing to mark."; return -1; }
+
+    const size_t bytes = (size_t) nch * (size_t) range.getLength () * sizeof (float);
+    if (bytes > kCatMaxBytes)
+    { *errOut = "The selection is too large for content-aware analysis."; return -1; }
+
+    std::vector<std::vector<float>> data;
+    if (!eng.readRange (range.getStart (), range.getLength (), data))
+    { *errOut = "Could not read the audio data."; return -1; }
+
+    sc::cat::Analysis a;
+    if (!sc::cat::analyze (data, nch, rate, a))
+    { *errOut = "The selection is too short for content-aware analysis."; return -1; }
+
+    auto edits = sc::cat::reduceGapsEdits (a, percentile, 3);
+    if (edits.empty ())
+    { *errOut = "No gaps qualify for removal in this range."; return -1; }
+
+    const double t0 = (double) range.getStart () / rate;
+    int added = 0;
+    for (const sc::cat::Edit& e : edits)
+    {
+        const double ms = t0 + (double) e.start / rate;
+        const double me = t0 + (double) (e.start + e.len) / rate;
+        if (me - ms <= 1e-6) continue;
+        markers().addRegionMarker (ms, me,
+                                   "CAT remove " + juce::String (++added));
+    }
+    return added;
 }
 
 bool Application::applyFilterEq (const std::vector<sc::eq::EqPoint>& pts,
