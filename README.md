@@ -269,13 +269,21 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     current state is highlighted; states you can still redo are dimmed below it.
     **Clicking any row jumps straight to that state**, undoing or redoing as
     many steps as needed in one batched operation (a single mipmap rebuild for
-    the whole run instead of one per step). The header shows "N of M applied".
+    the whole run instead of one per step). Styled like the other panels:
+    dark blue list background under a grey header with **Step** and **Action**
+    columns; the header's right side still shows "N of M applied".
   - **Python**: a script editor next to History. The dropdown lists every
     `*.py` file in your personal script folder (`%APPDATA%/SpectroCraft/python`
     on Windows, created automatically with six examples: *Dynamic
     processing*, *Threshold*, *Modulation*, *Add Echo*, *Sync And Merge*
-    and *Make Loop* (the last two are described below). **Add** creates a new script
-    from a template, **Remove** deletes the selected one, and **Run** executes
+    and *Make Loop* (the last two are described below). The first script in
+    the list is selected by default, and whichever script you load last is
+    remembered and restored when SpectroCraft is reopened. Right-clicking the
+    panel offers **Reset to original** for the built-in example scripts —
+    after confirming "Are you sure you want to reset this script to the
+    default value?" the file's text is replaced with its factory version.
+    **Add** creates a new script from a template, **Remove** deletes the
+    selected one, and **Run** executes
     it against the current selection — or against the whole file when nothing
     is selected. The run is undoable (it appears in History as "Python script
     '<name>'").
@@ -425,13 +433,19 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     bottom. When both views are stacked, exactly one of them draws the shared
     time ruler: the waveform when it is at the top, the spectrogram (the lower
     view) when it is at the bottom — the other hides its strip and expands.
-    The same section offers **Show Amplitude Grid** and **Show Frequency
-    Grid**, which hide/show the horizontal grey grid lines inside the data
-    tracks - the dB amplitude levels in each waveform track (plus a line at
-    amplitude 0, labelled **-inf** in dB mode, **0.000** in Normalized and
-    **0** in Wav Units) and the frequency tick lines in each spectrogram
-    track. Both default to on, are remembered between sessions, and leave the
-    axis labels untouched when off.
+    The same section offers **Show Amplitude Grid**, **Show Frequency
+    Grid** and **Show 1/3 Octave Grid**. The first two hide/show the
+    horizontal grey grid lines inside the data tracks - the dB amplitude
+    levels in each waveform track (plus a line at amplitude 0, labelled
+    **-inf** in dB mode, **0.000** in Normalized and **0** in Wav Units) and
+    the frequency tick lines in each spectrogram track. The third overlays
+    thin delicate white dashed lines at the borders of the IEC 61260-1 1/3
+    octave bands (centres 1, 1.25, 1.6, 2, 2.5, 3.15, 4, 5, 6.3, 8 × 10ⁿ Hz)
+    with each band's centre value written in white between its borders,
+    just inside the spectrogram on the same side as the vertical frequency
+    axis (labels are skipped when a band is too thin on screen or would hit
+    a channel label). All three default to on, are remembered between
+    sessions, and leave the axis labels untouched when off.
   - Main area: waveform view on top, spectral view below, separated by a
     **draggable divider** — drag it up/down to resize the two views. A time
     scrollbar runs along the bottom, aligned with the data region (inset by
@@ -1604,7 +1618,7 @@ main window itself — arrow keys keep working there too. Interactive widgets
 the standard Windows behaviour for arrow keys while focused; click back into a
 view to return playhead control.
 
-Menus: **File, Edit, Selection, View, Transport, Effects, Window, Help** (the
+Menus: **File, Edit, Selection, Transport, Effects, View, Window, Help** (the
 Window menu opens/closes the individual left-column panels and carries the
 **Allow multiple instances** toggle — see above). The Edit menu has a
 checkable **Snap to Zero Crossings** toggle (**off by default**): when on,
@@ -2093,7 +2107,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
 | `Panels.cpp`: `FileListPanel`, `FFTAnalysisView`, `SpectralControlsPanel`, `MarkerListPanel`, `SelectionPanel`, `DrawingPanel`, `TablesPanel`, `PythonPanel` | Classic DAW-style left column: the **Files** list (every loaded document with its properties; double-click activates, right-click Activate/Close/Set Unit and Scale/Open Containing Folder), live FFT analysis with cursor readout (drawn in frequency space — never indexes the magnitude vector by pixel x), a selectable axis mode (FFT Linear / FFT Log / 1/3 Octave band plot, plus Freq vs Time / Amp vs Time / Amp-vs-Freq curve modes with Ref Time / Smooth / Track options and their own per-mode snapshot store) and harmonic reference lines (right-click **Activate Harmonics** / **Copy Harmonics** / **Clear Harmonics**), spectral settings (colour map/dB/Log-Linear toggle/Reset Freq/FFT size), the marker table, named spectral selections with comments + harmonic cloning, user drawings over the spectrogram (text/arrow/rectangle/freehand with per-item comments, visibility toggles and fit-to-view; Excel-style multi-selection in all three list panels; persisted automatically with per-file metadata), imported CSV **data tables** (`TablesPanel`: indented table/parameter rows with visibility eyes; parameters carry unique palette colours — click cycles, double-click opens the preset picker — plus CSV drag-and-drop / clipboard import with transpose & gap-interpolation rules, downsample, copy, overlay-on-waveform/spectrogram or dedicated-track display modes, and manual/click-picked/correlation-based time alignment per table and per parameter), and the **Python** script editor (dropdown + Add/Remove/Run over a multi-line editor). Panels mutate shared state through `Application` and notify `MainWindow` via `app.onStateChange`. |
-| `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with eight example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
+| `PythonScripts` | Python panel support: per-user script folder management (`%APPDATA%/SpectroCraft/python`, auto-created with six example scripts), interpreter probing on the PATH, metadata JSON building, float32 WAV temp-file I/O and cross-platform child-process launching (CreateProcess/fork) with cancellation. `Application::runPythonScript` exchanges data with the script through temp files and commits the result via the normal undoable edit path. |
 | `MarkerManager` | Point/region markers with title + comment, sorting, find-near; persisted via per-file metadata (embedded RIFF chunks or `.meta.json`). |
 | WAV marker writer (`AudioEngine::saveWavWithMarkers`) | Custom RIFF writer for `.wav` saves: `fmt` (IEEE float32), `cue` (one entry per marker at its start sample), `LIST`/`adtl` with `labl` (title) + `ltxt` (comment) entries, then the raw interleaved `data`. All chunk sizes are computed up front; streaming files are written in 1 MB blocks. |
 | `UndoManager` / `UndoPatch` | 50-level undo/redo stacks of compact patches (old/new sample data + length delta) instead of full snapshots. |
@@ -2412,6 +2426,14 @@ delays the window from appearing.
     offset exactly; reversing responds immediately, no ratcheting), and a
     left-drag on the dedicated track's value axis moves content with the
     cursor like the other tracks' axes do.
+  - **1/3 octave grid**: the IEC preferred centre series inside a range is
+    exact (100…1600 for [100 Hz, 2 kHz]), and a headless paint check renders
+    the spectrogram with the overlay off vs on — the grid-on image must show
+    visible new pixels (the dashed band borders + centre labels).
+  - **Menu bar order**: View sits directly between Effects and Window in the
+    menu bar (File Edit Selection Transport Effects View Window Help), and
+    the View menu's new "Show 1/3 Octave Grid" item (listed directly under
+    "Show Frequency Grid") toggles its setting when clicked.
   - **FFT axis wheel zoom**: in Amp vs Time / Freq vs Time a wheel over the
     plot or bottom time ruler shrinks only the time window, one over the right
     vertical axis strip (or Shift+wheel) shrinks only the level/frequency

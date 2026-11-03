@@ -1268,6 +1268,7 @@ void SpectralView::paint (juce::Graphics& g)
     else
         g.fillRect (0, 0, kLeftAxisWidth, getHeight());
     drawFrequencyRuler (g);
+    drawThirdOctaveGrid (g);
     drawTimeRuler (g);
 
     // Channel labels on the left of each track: "L"/"R" for stereo files,
@@ -1656,6 +1657,99 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
             const int nTicks = rr.getHeight() >= 64 ? 5 : 2;
             for (int i = 0; i <= nTicks; ++i)
                 drawTickAndLabel (fMin + (fMax - fMin) * i / nTicks);
+        }
+    }
+}
+
+std::vector<double> SpectralView::thirdOctaveCentres (double fMin, double fMax)
+{
+    // IEC 61260-1 preferred centre frequencies: {1, 1.25, 1.6, 2, 2.5,
+    // 3.15, 4, 5, 6.3, 8} x 10^m Hz.
+    static const double mant[] = { 1.0, 1.25, 1.6, 2.0, 2.5, 3.15, 4.0, 5.0,
+                                   6.3, 8.0 };
+    std::vector<double> out;
+    for (int p = -1; p <= 6; ++p)
+        for (double m : mant)
+        {
+            const double f = m * std::pow (10.0, p);
+            if (f >= fMin - 1e-9 && f <= fMax + 1e-9) out.push_back (f);
+        }
+    std::sort (out.begin(), out.end());
+    return out;
+}
+
+void SpectralView::drawThirdOctaveGrid (juce::Graphics& g)
+{
+    if (!app.settings.showThirdOctaveGrid) return;
+
+    const double rate = app.audioEngine().sampleRate();
+    const double fMax = std::min (rate * 0.5, freqMax);
+    const double fMin = std::max (1.0, freqMin);
+    if (fMax <= fMin) return;
+
+    const auto centres = thirdOctaveCentres (fMin, fMax);
+    if (centres.empty()) return;
+
+    // Band borders sit at the geometric mean of neighbouring centre
+    // frequencies; the outermost visible bands fall back to the range edges.
+    auto border = [] (double a, double b) { return std::sqrt (a * b); };
+
+    const float x0 = axisOnRight() ? 0.0f : (float) kLeftAxisWidth;
+    const float x1 = axisOnRight() ? (float) (layoutWidth() - kLeftAxisWidth)
+                                   : (float) layoutWidth();
+    // The centre label sits just inside the plot, on the same side as the
+    // vertical frequency axis.
+    const int labelW = 56;
+    const float labelX = axisOnRight() ? x1 - labelW : x0 + 2;
+
+    // A channel label ("L"/"R") sits at each row's centre; keep band labels
+    // out of that zone, like the frequency ruler does.
+    const bool hasChanLabel = (channels.size() > 1 || app.audioEngine().numChannels() == 2);
+
+    g.setFont (9.0f);
+    static const float dash[] = { 4.0f, 3.0f };
+
+    for (const auto& rr : rowRects())
+    {
+        if (rr.getHeight() <= 0) continue;
+        auto yOf = [&] (double f) { return (float) rr.getY() + freqToY (f, rr.getHeight()); };
+
+        for (size_t i = 0; i < centres.size(); ++i)
+        {
+            const double fc = centres[i];
+            const double lo = (i > 0) ? border (centres[i - 1], fc) : fMin;
+            const double hi = (i + 1 < centres.size()) ? border (fc, centres[i + 1]) : fMax;
+
+            // Thin delicate white dashed lines at the band borders.
+            g.setColour (juce::Colour::fromRGBA (255, 255, 255, 70));
+            g.drawDashedLine (juce::Line<float> (x0, yOf (lo), x1, yOf (lo)), dash, 2, 1.0f);
+            g.drawDashedLine (juce::Line<float> (x0, yOf (hi), x1, yOf (hi)), dash, 2, 1.0f);
+
+            // Centre value between the borders; skip it when the band is too
+            // thin on screen or would collide with the channel label.
+            const float yc = yOf (fc);
+            if (std::abs (yOf (lo) - yOf (hi)) < 14.0f) continue;
+            if ((float) yc < rr.getY() + 8.0f || (float) yc > rr.getBottom() - 2.0f)
+                continue;
+            if (hasChanLabel && std::abs (yc - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
+                continue;
+
+            juce::String lab;
+            if (fc >= 1000.0)
+            {
+                juce::String s = juce::String (fc / 1000.0, 2);
+                while (s.endsWith ("0")) s = s.dropLastCharacters (1);
+                if (s.endsWith (".")) s = s.dropLastCharacters (1);
+                lab = s + "k";
+            }
+            else
+                lab = juce::String ((int) std::lround (fc));
+
+            g.setColour (juce::Colours::white);
+            g.drawText (lab, (int) labelX, (int) yc - 7, labelW, 12,
+                        axisOnRight() ? juce::Justification::bottomRight
+                                      : juce::Justification::bottomLeft,
+                        false);
         }
     }
 }

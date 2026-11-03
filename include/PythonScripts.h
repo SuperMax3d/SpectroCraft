@@ -19,6 +19,10 @@ juce::File scriptFolder();
     but only when a file does not exist yet, so user edits are never clobbered. */
 void ensureExampleScripts (const juce::File& dir);
 
+/** The original text of a built-in example script, looked up by file name
+    ("Dynamic processing.py", "Threshold.py", ...); empty for user scripts. */
+juce::String defaultScriptText (const juce::String& fileName);
+
 /** All *.py files in `dir`, sorted by name. */
 std::vector<juce::File> listScripts (const juce::File& dir = scriptFolder());
 

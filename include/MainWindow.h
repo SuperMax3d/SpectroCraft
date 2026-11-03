@@ -482,6 +482,7 @@ public:
         ViewRulerAtBottom,    // time ruler at the bottom of both track views
         ViewShowAmpGrid,      // horizontal amplitude grid lines in the waveform tracks
         ViewShowFreqGrid,     // horizontal frequency grid lines in the spectrogram tracks
+        ViewShowThirdOctGrid, // 1/3 octave band borders + centre labels in the spectrogram
         ViewShowDedTrackGrid, // horizontal value grid lines in the dedicated tables track
         ViewColourMap,
         SelectionToolTimeRange = 3500, SelectionToolMarquee, SelectionToolLasso,

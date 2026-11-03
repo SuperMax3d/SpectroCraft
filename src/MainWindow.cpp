@@ -2719,6 +2719,12 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         if (app.onStateChange) app.onStateChange ();
         return;
     }
+    if (menuItemID == ViewShowThirdOctGrid)
+    {
+        app.settings.showThirdOctaveGrid = !app.settings.showThirdOctaveGrid;
+        if (app.onStateChange) app.onStateChange ();   // repaints + persists
+        return;
+    }
     if (menuItemID == ViewShowDedTrackGrid)
     {
         app.settings.showDedicatedTrackGrid = !app.settings.showDedicatedTrackGrid;
@@ -6717,6 +6723,8 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       app.settings.showAmpGrid);
         menu.addItem (ViewShowFreqGrid, "Show Frequency Grid", true,
                       app.settings.showFreqGrid);
+        menu.addItem (ViewShowThirdOctGrid, "Show 1/3 Octave Grid", true,
+                      app.settings.showThirdOctaveGrid);
         menu.addItem (ViewShowDedTrackGrid, "Show Dedicated Track Grid", true,
                       app.settings.showDedicatedTrackGrid);
 
@@ -6852,8 +6860,9 @@ juce::StringArray MainWindow::getMenuBarNames()
 {
     // The Actions panel is reachable from the left-panel tabs; its menu was
     // removed (Ctrl+Shift+P still runs the selected action).
-    return { "File", "Edit", "Selection", "View", "Transport", "Effects",
-             "Window", "Help" };
+    // View sits between Effects and Window (classic DAW menu order).
+    return { "File", "Edit", "Selection", "Transport", "Effects",
+             "View", "Window", "Help" };
 }
 
 // The list panel (Markers or Transcription) currently shown in a left-panel

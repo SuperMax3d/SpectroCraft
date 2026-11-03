@@ -521,27 +521,38 @@ juce::File scriptFolder()
                 .getChildFile ("python");
 }
 
-void ensureExampleScripts (const juce::File& dir)
+// The six built-in example scripts: file name -> original body. Shared by
+// ensureExampleScripts() and defaultScriptText().
+static std::vector<std::pair<juce::String, juce::String>> exampleBodies()
 {
-    if (!dir.exists())
-        dir.createDirectory ();
-
-    struct Ex { const char* name; juce::String body; };
-    const Ex examples[] = {
+    return {
         { "Dynamic processing.py",  dynamicProcessingScript () },
         { "Threshold.py",           thresholdScript () },
         { "Modulation.py",          modulationScript () },
         { "Add Echo.py",             echoScript () },
         { "Sync And Merge.py",       syncAndMergeScript () },
-        { "Make Loop.py",            makeLoopScript () },
+        { "Make Loop.py",            makeLoopScript () }
     };
+}
 
-    for (const auto& e : examples)
+void ensureExampleScripts (const juce::File& dir)
+{
+    if (!dir.exists())
+        dir.createDirectory ();
+
+    for (const auto& e : exampleBodies())
     {
-        const juce::File f = dir.getChildFile (e.name);
+        const juce::File f = dir.getChildFile (e.first);
         if (!f.existsAsFile())
-            f.replaceWithText (e.body);   // never overwrite an existing script
+            f.replaceWithText (e.second);   // never overwrite an existing script
     }
+}
+
+juce::String defaultScriptText (const juce::String& fileName)
+{
+    for (const auto& e : exampleBodies())
+        if (e.first == fileName) return e.second;
+    return {};
 }
 
 juce::String newScriptTemplate() { return newScriptTemplateText (); }

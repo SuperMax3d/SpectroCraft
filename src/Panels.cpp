@@ -900,20 +900,32 @@ void HistoryPanel::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWhe
     repaint();
 }
 
+// The Step column width inside the list area; the step number is drawn
+// right-aligned in it and the action text starts just after.
+static constexpr int kHistStepColW = 36;
+
 void HistoryPanel::paint (juce::Graphics& g)
 {
     auto b = getLocalBounds();
-    g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+    // Dark blue list background, like the other panels' lists.
+    g.fillAll (juce::Colour::fromRGB (30, 42, 68));
 
-    // Header: title left, applied-count right.
+    // Grey header row with the two column titles; applied-count stays right.
+    g.setColour (juce::Colour::fromRGB (95, 100, 112));
+    g.fillRect (0, 0, b.getWidth(), kHeaderH);
     g.setFont (12.0f);
     g.setColour (juce::Colours::white);
-    g.drawText ("History", juce::Rectangle<int> (8, 3, 160, kHeaderH - 6),
+    const int listX = 2;   // matches listArea()
+    g.drawText ("Step", juce::Rectangle<int> (listX + 2, 3, kHistStepColW, kHeaderH - 6),
+                juce::Justification::centredRight, false);
+    g.drawText ("Action", juce::Rectangle<int> (listX + kHistStepColW + 8, 3,
+                                                std::max (1, b.getWidth() - listX - kHistStepColW - 176),
+                                                kHeaderH - 6),
                 juce::Justification::left, false);
 
     const int totalActions = std::max (0, (int) rows_.size() - 1);
     g.setFont (11.0f);
-    g.setColour (juce::Colour::fromRGB (170, 170, 180));
+    g.setColour (juce::Colour::fromRGB (225, 228, 236));
     g.drawText (juce::String (currentState_) + " of " + juce::String (totalActions) + " applied",
                 juce::Rectangle<int> (b.getWidth() - 168, 4, 160, kHeaderH - 8),
                 juce::Justification::right, false);
@@ -942,15 +954,24 @@ void HistoryPanel::paint (juce::Graphics& g)
         const bool current = (i == currentState_);
         if (current)
         {
-            g.setColour (juce::Colour::fromRGB (58, 64, 80));
+            g.setColour (juce::Colour::fromRGB (70, 96, 145));
             g.fillRect (r);
         }
 
         // Past rows are bright, future (redoable) ones dimmed.
-        g.setColour (rows_[(size_t) i].future ? juce::Colour::fromRGB (120, 120, 128)
+        g.setColour (rows_[(size_t) i].future ? juce::Colour::fromRGB (130, 138, 152)
                                                : juce::Colours::white);
-        g.drawText (juce::String (i) + ". " + rows_[(size_t) i].text,
-                    r.reduced (6, 1), juce::Justification::left, false);
+
+        // Step number in its own column, action text after it.
+        auto stepCol = juce::Rectangle<int> (r.getX() + 2, r.getY(),
+                                             kHistStepColW, r.getHeight());
+        g.drawText (juce::String (i), stepCol, juce::Justification::centredRight,
+                    false);
+        auto actCol = juce::Rectangle<int> (stepCol.getRight() + 6, r.getY(),
+                                            std::max (1, r.getRight() - stepCol.getRight() - 8),
+                                            r.getHeight());
+        g.drawText (rows_[(size_t) i].text, actCol, juce::Justification::centredLeft,
+                    false);
     }
 }
 
@@ -8338,11 +8359,48 @@ PythonPanel::PythonPanel (Application& appIn, const juce::File& folder)
     refreshScripts ();
 }
 
-// Right-click on empty panel area: offer to close the panel.
+// Right-click menu: "Reset to original" for built-in example scripts, plus
+// the usual "Close Panel".
 void PythonPanel::mouseDown (const juce::MouseEvent& e)
 {
     if (!e.mods.isRightButtonDown()) return;
-    if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
+    juce::PopupMenu m;
+    const int resetId = 1, closeId = 2;
+    if (canResetCurrentScript ())
+        m.addItem (resetId, "Reset to original");
+    m.addItem (closeId, "Close Panel");
+    const int sel = m.showMenu (juce::PopupMenu::Options().withMousePosition());
+    if (sel == resetId) confirmResetToOriginal ();
+    else if (sel == closeId && onCloseRequested) onCloseRequested ();
+}
+
+bool PythonPanel::canResetCurrentScript () const
+{
+    if (currentIdx < 0 || currentIdx >= (int) scripts.size ()) return false;
+    return !sc::py::defaultScriptText (scripts[(size_t) currentIdx].getFileName()).isEmpty ();
+}
+
+void PythonPanel::resetCurrentScriptToOriginal ()
+{
+    if (!canResetCurrentScript ()) return;
+    const juce::File f = scripts[(size_t) currentIdx];
+    f.replaceWithText (sc::py::defaultScriptText (f.getFileName()));
+    loadCurrentScript ();   // reload the editor text from disk
+}
+
+void PythonPanel::confirmResetToOriginal ()
+{
+    if (!canResetCurrentScript ()) return;
+    auto* w = new juce::AlertWindow ("Reset Script",
+        "Are you sure you want to reset this script to the default value?",
+        juce::AlertWindow::QuestionIcon, this);
+    w->setColour (juce::AlertWindow::backgroundColourId,
+                 juce::Colour::fromRGB (45, 45, 48));
+    w->addButton ("Reset", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    const int r = w->runModalLoop ();
+    delete w;
+    if (r == 1) resetCurrentScriptToOriginal ();
 }
 
 void PythonPanel::refreshScripts ()
@@ -8354,6 +8412,17 @@ void PythonPanel::refreshScripts ()
     currentIdx = -1;
     for (int i = 0; i < (int) scripts.size (); ++i)
         if (scripts[(size_t) i].getFullPathName () == keepPath) { currentIdx = i; break; }
+
+    // Restore the last-used script from a previous session, or fall back to
+    // the first script in the list so the panel never starts empty.
+    if (currentIdx < 0)
+    {
+        const juce::String saved = app.recentStore->getValue ("python_last_script");
+        for (int i = 0; i < (int) scripts.size (); ++i)
+            if (!saved.isEmpty () && scripts[(size_t) i].getFileName () == saved)
+            { currentIdx = i; break; }
+    }
+    if (currentIdx < 0 && !scripts.empty ()) currentIdx = 0;
 
     scriptBox.clear (juce::dontSendNotification);
     for (int i = 0; i < (int) scripts.size (); ++i)
@@ -8376,6 +8445,11 @@ void PythonPanel::loadCurrentScript ()
     currentIdx = idx;
     editor.setText (scripts[(size_t) idx].loadFileAsString (),
                     juce::dontSendNotification);
+
+    // Remember this script as the last-used one for the next session.
+    app.recentStore->setValue ("python_last_script",
+                               scripts[(size_t) idx].getFileName());
+    app.recentStore->save ();
 }
 
 void PythonPanel::showAddDialog ()

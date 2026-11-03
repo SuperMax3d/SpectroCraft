@@ -2172,13 +2172,19 @@ public:
     std::function<void()> onCloseRequested;
     void requestClose() { if (onCloseRequested) onCloseRequested(); }
 
+    // Right-click "Reset to original": only offered for the built-in example
+    // scripts; replaces the file with its factory text after a confirm prompt.
+    bool canResetCurrentScript() const;
+    void resetCurrentScriptToOriginal();   // no prompt (used by tests)
+
 private:
     void resized() override;
-    void mouseDown (const juce::MouseEvent&) override;   // right-click = Close Panel
+    void mouseDown (const juce::MouseEvent&) override;   // right-click menu
     void loadCurrentScript();
     void showAddDialog();
     void confirmRemove();
     void requestRun();
+    void confirmResetToOriginal();   // prompt, then resetCurrentScriptToOriginal()
 
     Application& app;
     juce::File scriptDir;

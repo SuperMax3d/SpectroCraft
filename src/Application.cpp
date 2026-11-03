@@ -173,6 +173,7 @@ void Application::loadSettings ()
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
     settings.showAmpGrid        = recentStore->getIntValue ("show_amp_grid", 1) != 0;
     settings.showFreqGrid       = recentStore->getIntValue ("show_freq_grid", 1) != 0;
+    settings.showThirdOctaveGrid = recentStore->getIntValue ("show_third_oct_grid", 1) != 0;
     settings.showDedicatedTrackGrid = recentStore->getIntValue ("show_ded_track_grid", 1) != 0;
     // Spectrogram harmonic markers (Spectral Controls panel).
     settings.specHarmVisible    = recentStore->getIntValue ("spec_harm_visible",
@@ -277,6 +278,7 @@ void Application::saveSettings ()
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);
     recentStore->setValue ("show_freq_grid", settings.showFreqGrid ? 1 : 0);
+    recentStore->setValue ("show_third_oct_grid", settings.showThirdOctaveGrid ? 1 : 0);
     recentStore->setValue ("show_ded_track_grid", settings.showDedicatedTrackGrid ? 1 : 0);
     recentStore->setValue ("spec_harm_visible", settings.specHarmVisible ? 1 : 0);
     recentStore->setValue ("spec_harm_max", settings.specHarmMaxK);

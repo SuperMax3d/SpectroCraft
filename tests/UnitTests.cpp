@@ -1500,9 +1500,9 @@ static void testHistoryPanelPaint()
 
     // Regression: the current row's highlight used to be drawn with fillAll(),
     // which painted over the whole panel and hid every earlier row + the header.
-    CHECK (colNear (290, 34, 45, 45, 48), "rows above the current one keep the plain background");
-    CHECK (colNear (150, 12, 45, 45, 48), "header area is not covered by the highlight");
-    CHECK (colNear (290, 74, 58, 64, 80), "current row band carries the dark grey-blue highlight");
+    CHECK (colNear (290, 34, 30, 42, 68), "rows above the current one keep the dark blue background");
+    CHECK (colNear (150, 12, 95, 100, 112), "header area is grey and not covered by the highlight");
+    CHECK (colNear (290, 74, 70, 96, 145), "current row band carries the blue highlight");
 
     // Past rows must still show bright text.
     int bright = 0;
@@ -13970,7 +13970,8 @@ static void testSplitSpectralSelectionApp()
     // is disabled and the direct call reports an error.
     {
         std::unique_ptr<MainWindow> win (new MainWindow (app, "split sel"));
-        const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
+        // Menu bar order: File Edit Selection Transport Effects View Window Help.
+        const juce::PopupMenu fxMenu = win->getMenuForIndex (4, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
         CHECK (fxMenu.getNumItems() == 19, "Effects menu lists the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #else
@@ -14049,6 +14050,9 @@ static void testSplitSpectralSelectionViewRefresh()
     // The ground-truth render below uses a fixed FFT size, so pin the view to
     // manual mode too (auto is on by default and would pick its own size).
     app.settings.fftAuto = false;
+    // This test compares raw tile data against the paint; turn off overlay
+    // grids (1/3-octave lines are white dashes that exceed the tolerance).
+    app.settings.showThirdOctaveGrid = false;
     FileDoc* d = app.doc();
     if (!d) return;
     AudioEngine& eng = app.audioEngine ();
@@ -18415,6 +18419,7 @@ static void testNsCopyNoiseTracks()
 // ------------------------------------------------- Python script panel
 static void testPythonScripts()
 {
+
     const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
         .getChildFile ("sc_pytest_"
                        + juce::String ((int64_t) juce::Time::getCurrentTime ().toMilliseconds ()));
@@ -18732,6 +18737,9 @@ static void testPythonScripts()
     // 6) Panel UI: combo lists the scripts, selecting one loads its text.
     {
         Application app;
+        // Deterministic start: no persisted last-used script from other tests.
+        app.recentStore->removeValue ("python_last_script");
+
         PythonPanel panel (app, dir);
         panel.setSize (320, 400);
 
@@ -18760,12 +18768,56 @@ static void testPythonScripts()
         if (box != nullptr)
         {
             CHECK (box->getNumItems () == 6, "combo lists the six scripts");
+
+            // The first script in the list is selected by default and its
+            // text loaded into the editor.
+            CHECK (box->getSelectedId () == 1, "first script selected by default");
+            const juce::String first = dir.getChildFile ("Add Echo.py").loadFileAsString ();
+            CHECK (ed != nullptr && ed->getText () == first,
+                  "default selection loads the first script's text");
+
             // sendNotificationSync: the headless test has no message loop to
             // process the async update that plain sendNotification would queue.
             box->setSelectedId (4, juce::sendNotificationSync);   // Modulation.py
             const juce::String expect = dir.getChildFile ("Modulation.py").loadFileAsString ();
             CHECK (ed != nullptr && ed->getText () == expect,
                   "selecting a script loads its text into the editor");
+            CHECK (app.recentStore->getValue ("python_last_script") == "Modulation.py",
+                  "the last-used script is persisted for the next session");
+
+            // Reset to original: Threshold.py was user-edited earlier in this
+            // test, so resetting must restore its factory text on disk and in
+            // the editor.
+            // NOTE: in this JUCE build ComboBox::getItemText is 0-based.
+            int thrIdx = -1;
+            for (int i = 0; i < box->getNumItems (); ++i)
+                if (box->getItemText (i) == "Threshold.py") { thrIdx = i; break; }
+            CHECK (thrIdx >= 0, "threshold script is listed");
+            box->setSelectedId (thrIdx + 1, juce::sendNotificationSync);
+            CHECK (panel.canResetCurrentScript (),
+                  "a built-in example script offers reset to original");
+            panel.resetCurrentScriptToOriginal ();
+            const juce::String thrNow = dir.getChildFile ("Threshold.py").loadFileAsString ();
+            CHECK (!thrNow.contains ("user edit"),
+                  "reset restored the factory text on disk");
+            // replaceWithText writes native line endings (CRLF on Windows);
+            // normalise before comparing against the LF-only factory string.
+            const juce::String thrNorm = thrNow.replace ("\r\n", "\n");
+            CHECK (thrNorm == sc::py::defaultScriptText ("Threshold.py"),
+                  "disk content matches the factory text exactly");
+            CHECK (ed->getText () == thrNow,
+                  "editor reloaded with the original text");
+
+            // User scripts have no reset entry.
+            dir.getChildFile ("MyCustom.py").replaceWithText ("# mine\n");
+            panel.refreshScripts ();
+            int cIdx = -1;
+            for (int i = 0; i < box->getNumItems (); ++i)
+                if (box->getItemText (i) == "MyCustom.py") { cIdx = i; break; }
+            CHECK (cIdx >= 0, "custom script is listed");
+            box->setSelectedId (cIdx + 1, juce::sendNotificationSync);
+            CHECK (!panel.canResetCurrentScript (),
+                  "user scripts cannot be reset to original");
         }
     }
 
@@ -21559,15 +21611,17 @@ static void testTrackAxisPlacement()
 
     // --- View menu: two checkable items; clicking toggles the settings ------
     std::unique_ptr<MainWindow> win (new MainWindow (app, "track axis placement"));
-    const juce::PopupMenu viewMenu = win->getMenuForIndex (3, "View");
-    // 18 items for a stereo file (the Colour Map submenu moved out of this
-    // menu; channel visibility is still listed per channel).
-    CHECK (viewMenu.getNumItems() == 18, "View menu item count with stereo file");
+    // Menu bar order: File Edit Selection Transport Effects View Window Help.
+    const juce::PopupMenu viewMenu = win->getMenuForIndex (5, "View");
+    // 19 items for a stereo file (the Colour Map submenu moved out of this
+    // menu; the 1/3 octave grid item was added under the frequency grid;
+    // channel visibility is still listed per channel).
+    CHECK (viewMenu.getNumItems() == 19, "View menu item count with stereo file");
 
     // --- Resample lives in its own section of the Edit menu -----------------
     const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
     CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
-    const juce::PopupMenu fxMenu = win->getMenuForIndex (5, "Effects");
+    const juce::PopupMenu fxMenu = win->getMenuForIndex (4, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
 #else
@@ -24889,6 +24943,96 @@ static void testWaveformZeroLine()
     wav.deleteFile();
 }
 
+// ------------------------------------------------------- 1/3 octave grid
+static void testThirdOctaveGrid()
+{
+    // The IEC 61260-1 preferred centre frequencies inside a range.
+    const auto cs = SpectralView::thirdOctaveCentres (100.0, 2000.0);
+    const std::vector<double> expect = { 100, 125, 160, 200, 250, 315, 400,
+                                         500, 630, 800, 1000, 1250, 1600,
+                                         2000 };
+    CHECK (cs == expect, "centres are the IEC preferred values in range");
+    // Between the p=1 band (…40, 50, 63, 80 Hz) and the p=2 band (100 Hz
+    // and up) there is no centre frequency at all.
+    CHECK (SpectralView::thirdOctaveCentres (90.0, 99.0).empty (),
+          "no centre inside a sub-band range yields no bands");
+
+    // The overlay actually paints: with the grid on, the rendered view must
+    // differ from the grid-off render.
+    const juce::File wav = makeTempFile ("thirdoct.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "open wav for third-octave grid test");
+    app.settings.logFrequency = true;   // deterministic frequency mapping
+    app.settings.showFreqGrid = false;  // keep the diff free of other grid lines
+
+    SpectralView view (app);
+    view.setSize (480, 320);
+    view.setViewRange (0.0, 4.0);
+    view.setVisibleChannels ({ 0 });
+    view.setFrequencyRange (100.0, 2000.0);
+
+    auto render = [&] () -> juce::Image
+    {
+        view.setSettings (app.settings);
+        juce::Image img (juce::Image::ARGB, 480, 320, true);
+        { juce::Graphics g (img); view.paint (g); }
+        return img;
+    };
+
+    app.settings.showThirdOctaveGrid = false;
+    const auto off = render ();
+    app.settings.showThirdOctaveGrid = true;
+    const auto on = render ();
+
+    int diffPixels = 0;
+    for (int y = 0; y < 320; ++y)
+        for (int x = 0; x < 480; ++x)
+        {
+            const auto a = off.getPixelAt (x, y), b = on.getPixelAt (x, y);
+            if (std::abs ((int) a.getRed() - (int) b.getRed()) > 8
+                || std::abs ((int) a.getGreen() - (int) b.getGreen()) > 8)
+                ++diffPixels;
+        }
+    CHECK (off != on && diffPixels >= 50,
+          "the 1/3 octave grid overlay draws visible lines");
+
+    wav.deleteFile ();
+}
+
+// ------------------------------------------------------- menu bar order
+static void testMenuBarOrder()
+{
+    Application app;
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "menu bar order"));
+    const juce::StringArray names = win->getMenuBarNames ();
+    auto idxOf = [&] (const juce::String& n) -> int
+    {
+        for (int i = 0; i < names.size (); ++i)
+            if (names[i] == n) return i;
+        return -1;
+    };
+    const int iFx = idxOf ("Effects"), iView = idxOf ("View"), iWin = idxOf ("Window");
+    CHECK (iFx >= 0 && iView >= 0 && iWin >= 0, "all three menus exist");
+    CHECK (iView == iFx + 1 && iWin == iView + 1,
+          "View sits between Effects and Window");
+
+    // The View menu carries the new grid item (listed directly under
+    // "Show Frequency Grid" in the menu definition): toggling it by ID must
+    // flip the setting. Pin the flag first: a fresh Application loads the
+    // persisted value from disk, which an earlier test may have changed.
+    app.settings.showThirdOctaveGrid = true;
+    win->menuItemSelected (MainWindow::MenuIDs::ViewShowThirdOctGrid, iView);
+    CHECK (!app.settings.showThirdOctaveGrid,
+          "the 1/3 octave grid item toggles the setting off via the View menu");
+    app.settings.showThirdOctaveGrid = true;
+}
+
 // ------------------------------------------------------- fft axis wheel zoom
 // In Freq vs Time / Amp vs Time a scroll-wheel over an axis must zoom only
 // that axis (like the waveform/spectral views), not both axes at once.
@@ -26018,6 +26162,8 @@ static int scRunUnitTestsImpl()
     progress ("tables dedicated strip"); testTablesDedicatedStrip();
     progress ("single instance mode");   testSingleInstance();
     progress ("waveform zero line");     testWaveformZeroLine();
+    progress ("1/3 octave grid");        testThirdOctaveGrid();
+    progress ("menu bar order");         testMenuBarOrder();
     progress ("fft axis wheel zoom");    testFFTAxisWheelZoom();
     progress ("selection channel clip"); testSelectionChannelClip();
     progress ("split execute first run"); testSplitExecuteFirstRun();

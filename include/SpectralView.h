@@ -228,6 +228,10 @@ public:
         is 1, otherwise the scaled value (custom units are unitless). */
     static juce::String formatFreqAxisLabel (double fHz, double factor);
 
+    // The preferred 1/3 octave centre frequencies inside [fMin, fMax] Hz,
+    // ascending: {1, 1.25, 1.6, 2, 2.5, 3.15, 4, 5, 6.3, 8} x 10^m.
+    static std::vector<double> thirdOctaveCentres (double fMin, double fMax);
+
     // Plot area (below the top time ruler, starting at kLeftAxisWidth so it
     // aligns with the waveform view).
     juce::Rectangle<int> plotRect() const;
@@ -352,6 +356,11 @@ private:
 
     void drawTimeRuler (juce::Graphics& g);
     void drawFrequencyRuler (juce::Graphics& g);
+
+    // 1/3 octave band overlay (View > Show 1/3 Octave Grid): thin white
+    // dashed lines at each IEC 61260-1 band border plus the band's centre
+    // frequency written in white between them, on the axis side of the plot.
+    void drawThirdOctaveGrid (juce::Graphics& g);
     void drawOverlays (juce::Graphics& g);
 
     // Draws the active doc's drawings plus (optionally) the live in-progress
