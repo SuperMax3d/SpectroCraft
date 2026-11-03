@@ -747,10 +747,12 @@ void MainWindow::resized()
     if (waveformView) waveformView->setShowTimeRuler (!showSpec || !rulerBottom);
     if (spectralView) spectralView->setShowOwnTimeRuler (!showWave || rulerBottom);
 
-    // When both views are stacked, the marker titles only appear on the
-    // spectrogram; a lone waveform view keeps its own. The delimiter lines
-    // stay in both.
-    if (waveformView) waveformView->setShowMarkerTitles (!showSpec);
+    // Marker overlays: the waveform always draws its full overlay (vertical
+    // lines + bracket line + titles). While it is stacked above, the
+    // spectrogram shows only the vertical delimiter lines; a lone
+    // spectrogram draws the full overlay itself.
+    if (waveformView) waveformView->setShowMarkerTitles (true);
+    if (spectralView) spectralView->setShowMarkerTitles (!showWave);
 
     // Time scrollbar at the bottom of the main area.
     if (timeBar) timeBar->setVisible (haveFile);
@@ -1777,6 +1779,10 @@ void MainWindow::syncSharedState()
     {
         tablesTrack->setPlayhead (app.playhead);
         tablesTrack->setSelection (app.selection);   // dedicated track's blue band follows the shared selection
+        // Cheap repaint: marker delimiter lines read app.markers() live in
+        // paint(), so a changed list must force one even though no setter
+        // carries it.
+        tablesTrack->repaint();
     }
     refreshPanels();
 

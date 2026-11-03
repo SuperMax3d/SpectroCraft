@@ -1835,6 +1835,9 @@ void SpectralView::drawSpectralShapesOverlay (juce::Graphics& g, bool includeLiv
 
 // Markers — clipped to the plot so lines and titles never paint over the
 // left frequency axis when a marker starts before the visible window.
+// While the waveform is stacked above (showMarkerTitles == false) only the
+// vertical delimiter lines are drawn here; the bracket line and titles live
+// on the waveform instead. A lone spectrogram draws the full overlay.
 void SpectralView::drawMarkersOverlay (juce::Graphics& g)
 {
     if (!markerList) return;
@@ -1857,10 +1860,20 @@ void SpectralView::drawMarkersOverlay (juce::Graphics& g)
             else
             {
                 const double x2 = timeToX (m.end);
-                g.drawLine ((float) x, (float) pr.getY() + 6, (float) x2, (float) pr.getY() + 6, 2.0f);
-                g.drawLine ((float) x, (float) pr.getY() + 6, (float) x, pr.getBottom(), 1.0f);
-                g.drawLine ((float) x2, (float) pr.getY() + 6, (float) x2, pr.getBottom(), 1.0f);
+                if (!showMarkerTitles)
+                {
+                    // Stacked below the waveform: delimiter lines only.
+                    g.drawVerticalLine ((int) x,  (float) pr.getY(), (float) pr.getBottom());
+                    g.drawVerticalLine ((int) x2, (float) pr.getY(), (float) pr.getBottom());
+                }
+                else
+                {
+                    g.drawLine ((float) x, (float) pr.getY() + 6, (float) x2, (float) pr.getY() + 6, 2.0f);
+                    g.drawLine ((float) x, (float) pr.getY() + 6, (float) x, pr.getBottom(), 1.0f);
+                    g.drawLine ((float) x2, (float) pr.getY() + 6, (float) x2, pr.getBottom(), 1.0f);
+                }
             }
+            if (!showMarkerTitles) continue;   // no titles while stacked
             // Title: may run past this marker's own range, but must stop
             // before the next marker starts so that marker's title has room.
             g.setFont (10.0f);

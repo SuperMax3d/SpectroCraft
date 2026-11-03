@@ -21523,18 +21523,23 @@ static void testCtrl0ZoomOutFull()
     wav.deleteFile();
 }
 
-// ---------------- Marker titles in the stacked dual view ----------------
-// With both views visible the marker titles only appear on the spectrogram;
-// a lone waveform view keeps its own. The delimiter lines stay in both.
+// ---------------- Marker overlays in the stacked dual view -----------------
+// The waveform always draws its full marker overlay (vertical lines + top
+// bracket line + yellow titles). While it is stacked above, the spectrogram
+// shows only the vertical delimiter lines; a lone spectrogram draws the full
+// overlay itself.
 static void testMarkerTitleVisibility()
 {
     Application app;
     std::unique_ptr<MainWindow> win (new MainWindow (app, "marker title visibility"));
 
-    // Default layout: both views stacked -> the waveform suppresses titles.
+    // Default layout: both views stacked -> the waveform keeps its titles and
+    // the spectrogram drops to delimiter lines only.
     CHECK (win->waveformVisible() && win->spectrogramVisible(), "both views shown by default");
-    CHECK (!win->waveformViewComp()->showsMarkerTitles (),
-          "stacked: marker titles suppressed on the waveform");
+    CHECK (win->waveformViewComp()->showsMarkerTitles (),
+          "stacked: waveform keeps its full marker overlay");
+    CHECK (!win->spectralViewComp()->showsMarkerTitles (),
+          "stacked: spectrogram shows delimiter lines only");
 
     // Hide the spectrogram -> the lone waveform keeps its own titles.
     win->menuItemSelected (MainWindow::MenuIDs::ViewShowSpectral, 3);
@@ -21547,12 +21552,111 @@ static void testMarkerTitleVisibility()
     CHECK (win->waveformVisible() && win->spectrogramVisible(), "both views again");
     win->menuItemSelected (MainWindow::MenuIDs::ViewShowWaveform, 3);
     CHECK (!win->waveformVisible() && win->spectrogramVisible(), "cycled to spectrogram only");
+    CHECK (win->spectralViewComp()->showsMarkerTitles (),
+          "lone spectrogram draws the full marker overlay");
 
-    // Back to both -> suppressed on the waveform again.
+    // Back to both -> lines-only on the spectrogram again.
     win->menuItemSelected (MainWindow::MenuIDs::ViewShowWaveform, 3);
     CHECK (win->waveformVisible() && win->spectrogramVisible(), "back to both views");
-    CHECK (!win->waveformViewComp()->showsMarkerTitles (),
-          "stacked again: marker titles suppressed on the waveform");
+    CHECK (!win->spectralViewComp()->showsMarkerTitles (),
+          "stacked again: spectrogram back to delimiter lines only");
+}
+
+// ---------------- Marker lines on the dedicated tables track --------------
+// The dedicated strip shows ONLY vertical yellow delimiter lines for markers
+// (no bracket line, no titles). Verified by pixel counts: a marker column
+// must be almost entirely yellowish while a neighbour column carries only
+// the thin parameter curve.
+static void testDedicatedTrackMarkerLines()
+{
+    const juce::File wav = makeTempFile ("ded_markers.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate,
+            [] (int, int64_t f, double rate)
+            { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote wav for dedicated track marker lines test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open for dedicated track marker lines test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "dedicated track markers"));
+
+    std::string err;
+    const juce::String csv = "alpha\n1.0\n3.0\n5.0\n7.0\n9.0\n11.0\n13.0\n15.0\n";
+    CHECK (app.addTableFromCsv ("T", csv, &err), "import table for the strip");
+    app.setTablesMode (2);
+    win->resized();
+
+    auto* ttBase = win->tablesTrackComp();
+    auto* tt = dynamic_cast<TablesTrackView*> (ttBase);
+    CHECK (tt != nullptr && tt->isVisible(), "dedicated strip is visible");
+    if (!tt) { wav.deleteFile (); return; }
+
+    const double dur = app.audioEngine ().duration ();
+    CHECK (app.markers ().addPointMarker (dur * 0.25, "P") > 0, "point marker added");
+    CHECK (app.markers ().addRegionMarker (dur * 0.50, dur * 0.75, "R") > 0,
+          "region marker added");
+    win->syncSharedState ();   // pushes the repaint for the live marker list
+
+    const juce::Image shot = tt->createComponentSnapshot (tt->getLocalBounds());
+    const int W = tt->getWidth (), H = tt->getHeight();
+    CHECK (W > 100 && H >= 30, "strip has a usable size");
+
+    // Pixel column closest to a doc time via the public mapping (the line is
+    // drawn at lround of that same position).
+    auto colOf = [&] (double tSecs) -> int
+    {
+        int best = -1;
+        double bestErr = 1e30;
+        for (int x = 0; x < W; ++x)
+        {
+            const double e = std::abs (tt->timeAtX (x) - tSecs);
+            if (e < bestErr) { bestErr = e; best = x; }
+        }
+        return bestErr <= dur / W * 0.75 ? best : -1;
+    };
+
+    // Yellowish = the marker line colour (yellow @80% over the dark strip).
+    auto yellowCount = [&] (int x, int y0, int y1) -> int
+    {
+        int n = 0;
+        for (int y = y0; y < y1 && y < H; ++y)
+        {
+            const auto c = shot.getPixelAt (x, y);
+            if (c.getRed () > 150 && c.getGreen () > 150 && c.getBlue () < 90) ++n;
+        }
+        return n;
+    };
+
+    const int xP = colOf (dur * 0.25);
+    const int xA = colOf (dur * 0.50);
+    const int xB = colOf (dur * 0.75);
+    CHECK (xP >= 0 && xA >= 0 && xB >= 0, "marker columns found");
+
+    // A full-height vertical line: far more yellow pixels than a neighbour
+    // column (the parameter curve contributes equally to both).
+    const int yTop = 1, yBot = H - 1;
+    CHECK (yellowCount (xP, yTop, yBot) > 0.8 * (yBot - yTop),
+          "point marker draws a full-height vertical line on the strip");
+    CHECK (yellowCount (xA, yTop, yBot) > 0.8 * (yBot - yTop),
+          "region start edge draws a vertical line on the strip");
+    CHECK (yellowCount (xB, yTop, yBot) > 0.8 * (yBot - yTop),
+          "region end edge draws a vertical line on the strip");
+
+    // No horizontal bracket line: in the rows just below the top edge only
+    // the vertical lines and thin curve crossings may be yellowish - a
+    // bracket would light up most columns between the region's edges.
+    int topYellowCols = 0;
+    for (int x = 0; x < W; ++x)
+        if (yellowCount (x, 1, 7) > 0) ++topYellowCols;
+    CHECK (topYellowCols < W / 4,
+          "no horizontal bracket line at the top of the strip");
+
+    // A column with no marker carries only the thin curve.
+    const int xC = colOf (dur * 0.40);
+    CHECK (xC >= 0 && yellowCount (xC, yTop, yBot) < 0.1 * (yBot - yTop),
+          "unmarked column has no vertical line");
+
+    wav.deleteFile ();
 }
 
 // ---------------- View menu: axis on right / ruler at bottom (persisted) -----
@@ -26137,6 +26241,7 @@ static int scRunUnitTestsImpl()
     progress ("left panels toggle shortcut"); testLeftPanelsToggleShortcut();
     progress ("ctrl+0 zoom out full"); testCtrl0ZoomOutFull();
     progress ("marker title visibility"); testMarkerTitleVisibility();
+    progress ("dedicated track marker lines"); testDedicatedTrackMarkerLines();
     progress ("track axis placement"); testTrackAxisPlacement();
     progress ("spectrogram export options"); testSpectrogramExportOptions();
     progress ("audio.cpp cli wrapper");  testAudioCppCli();

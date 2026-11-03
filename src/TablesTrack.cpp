@@ -222,6 +222,32 @@ void TablesTrackView::paint (juce::Graphics& g)
         }
     }
 
+    // Marker delimiter lines: only vertical lines on this strip (no bracket
+    // line, no titles). Clipped to the plot so a marker before the visible
+    // window never paints over the value axis.
+    {
+        const auto& ms = app.markers().markers();
+        if (!ms.empty() && t1 > t0)
+        {
+            const juce::Graphics::ScopedSaveState save (g);
+            g.reduceClipRegion (pr);
+            for (const Marker& m : ms)
+            {
+                const double x = pr.getX() + (m.start - t0) / (t1 - t0) * pr.getWidth();
+                if (x < pr.getX() - 50 || x > pr.getRight() + 50) continue;
+                g.setColour (m.colour.withAlpha (0.8f));
+                g.drawVerticalLine ((int) std::lround (x), (float) pr.getY(),
+                                    (float) pr.getBottom());
+                if (m.end >= 0)
+                {
+                    const double x2 = pr.getX() + (m.end - t0) / (t1 - t0) * pr.getWidth();
+                    g.drawVerticalLine ((int) std::lround (x2), (float) pr.getY(),
+                                        (float) pr.getBottom());
+                }
+            }
+        }
+    }
+
     // Red playhead over the whole strip.
     if (t1 > t0)
     {

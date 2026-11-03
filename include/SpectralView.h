@@ -180,6 +180,15 @@ public:
     void setShowOwnTimeRuler (bool show);
     bool showsOwnTimeRuler() const { return showOwnTimeRuler; }
 
+    /** While the waveform is stacked above, the spectrogram draws only the
+        marker delimiter lines (no bracket line, no titles); a lone
+        spectrogram draws the full overlay. */
+    void setShowMarkerTitles (bool show)
+    {
+        if (show != showMarkerTitles) { showMarkerTitles = show; repaint(); }
+    }
+    bool showsMarkerTitles() const { return showMarkerTitles; }
+
     /** Reserves `px` pixels below the top time ruler for the dedicated tables
         track (MainWindow places it there when the ruler is at the top). */
     void setTablesTopInset (int px)
@@ -274,6 +283,7 @@ private:
     std::vector<std::pair<double, double>> freePts_;   // (tSecs, fHz) path
 
     bool showOwnTimeRuler = true;
+    bool showMarkerTitles = true;   // false while the waveform is stacked above
     int tablesTopInset = 0;   // reserved strip below the top ruler (tables track)
     // Offscreen export layout: when set, plotRect()/rulerH()/layoutWidth() /
     // layoutHeight() address this rectangle instead of the component bounds.
