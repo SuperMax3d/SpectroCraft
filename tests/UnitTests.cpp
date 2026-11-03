@@ -21659,6 +21659,85 @@ static void testDedicatedTrackMarkerLines()
     wav.deleteFile ();
 }
 
+//==============================================================================
+// Dedicated track + Tables panel preview must sync on file load ------------
+// A WAV whose embedded metadata carries tables in "Dedicated track" mode
+// must show its curve on the strip and focus the first table in the panel
+// preview immediately - no visibility toggle or row click required.
+static void testDedicatedTrackLoadSync()
+{
+    const juce::File wav = makeTempFile ("ded_load_sync.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 20 * 8000,
+            [] (int, int64_t f, double rate)
+            { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); }),
+          "wrote wav for dedicated load sync test");
+
+    Application app;
+    CHECK (app.openFile (wav), "open for dedicated load sync test");
+    FileDoc* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile(); return; }
+
+    // Simulate an embedded table parsed during load: it is on the doc before
+    // activate() fires, so no onTablesChanged runs for it. The values lie
+    // outside the track's initial [-1, 1] value window and most times lie
+    // outside its initial [0, 1] time window.
+    sc::tables::TableData t; std::string err;
+    CHECK (sc::tables::importTable ("Embedded", "time_s,v\n0,10\n5,20\n10,30\n15,40\n19,50\n",
+                                    t, &err),
+          "embedded table imports");
+    d->tables.push_back (std::move (t));
+    d->tables[0].params[0].colorIndex = 2;   // yellow
+
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "dedicated load sync"));
+    app.activate (0);   // fires onActiveDocChanged -> activateDocUI (the open path)
+
+    auto* ttBase = win->tablesTrackComp();
+    auto* tt = dynamic_cast<TablesTrackView*> (ttBase);
+    CHECK (tt != nullptr && tt->isVisible(), "dedicated strip visible on load");
+    if (tt == nullptr || !tt->isVisible()) { wav.deleteFile(); return; }
+
+    // The panel preview must focus the first table without any row click.
+    auto* tp = win->tablesPanelComp();
+    CHECK (tp != nullptr && tp->plotView().focusTableIndex() == 0,
+          "panel preview focuses the first table on load");
+
+    const juce::Image shot = tt->createComponentSnapshot (tt->getLocalBounds());
+    const int W = tt->getWidth(), H = tt->getHeight();
+    CHECK (W > 100 && H >= 30, "strip has a usable size");
+
+
+    // Yellow curve pixels somewhere in the plot area.
+    bool foundCurve = false;
+    for (int y = 0; y < H && !foundCurve; ++y)
+        for (int x = 61; x < W; ++x)
+            if (shot.getPixelAt (x, y).getRed () > 200
+                && shot.getPixelAt (x, y).getGreen () > 190
+                && shot.getPixelAt (x, y).getBlue () < 140)
+                { foundCurve = true; break; }
+    CHECK (foundCurve, "curve drawn on the strip without a visibility toggle");
+
+    // Horizontal grid lines: rows where most of the plot width is grid colour
+    // (scan every row: with a short strip only 2-3 lines fit).
+    int gridRows = 0;
+    for (int y = 0; y < H; ++y)
+    {
+        int n = 0, total = 0;
+        for (int x = 62; x < W - 2; x += 4)
+        {
+            ++total;
+            if (std::abs ((int) shot.getPixelAt (x, y).getRed () - 60) <= 12
+                && std::abs ((int) shot.getPixelAt (x, y).getGreen () - 60) <= 12
+                && std::abs ((int) shot.getPixelAt (x, y).getBlue () - 68) <= 14)
+                ++n;
+        }
+        if (total > 0 && n >= total * 3 / 4) ++gridRows;
+    }
+    CHECK (gridRows >= 2, "horizontal grid lines drawn on the strip");
+
+    wav.deleteFile();
+}
+
 // ---------------- View menu: axis on right / ruler at bottom (persisted) -----
 
 static void testTrackAxisPlacement()
@@ -26242,6 +26321,7 @@ static int scRunUnitTestsImpl()
     progress ("ctrl+0 zoom out full"); testCtrl0ZoomOutFull();
     progress ("marker title visibility"); testMarkerTitleVisibility();
     progress ("dedicated track marker lines"); testDedicatedTrackMarkerLines();
+    progress ("dedicated track load sync"); testDedicatedTrackLoadSync();
     progress ("track axis placement"); testTrackAxisPlacement();
     progress ("spectrogram export options"); testSpectrogramExportOptions();
     progress ("audio.cpp cli wrapper");  testAudioCppCli();

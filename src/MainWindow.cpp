@@ -2138,6 +2138,15 @@ void MainWindow::activateDocUI()
     // saved values, mirror them into the panel's combos (no-op otherwise).
     if (fftPanel) fftPanel->resyncFromSettings();
 
+    // A file whose embedded tables are parsed during load never fires
+    // onTablesChanged, so push the shared time window and value fit into the
+    // dedicated strip here (covers fresh loads and doc switches alike).
+    if (tablesTrack && !app.activeTables().empty())
+    {
+        tablesTrack->refit();
+        tablesTrack->setTimeRange (app.viewStart, app.viewEnd);
+    }
+
     syncSharedState();
     updateTitle();
 

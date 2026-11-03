@@ -158,7 +158,8 @@ void TablesTrackView::paint (juce::Graphics& g)
         if (app.settings.showDedicatedTrackGrid)
         {
             g.setColour (juce::Colour::fromRGB (60, 60, 68));
-            g.drawHorizontalLine (pr.getX(), (float) y, (float) pr.getRight());
+            // NOTE: this JUCE build's drawHorizontalLine takes (y, left, right).
+            g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
         }
         g.setColour (juce::Colours::lightgrey);
         g.drawText (juce::String (v, valueDecimals (v)),

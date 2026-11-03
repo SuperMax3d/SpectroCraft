@@ -9350,7 +9350,7 @@ void TablesPlotView::paint (juce::Graphics& g)
         for (double L = std::ceil (mn / vStep) * vStep; L <= mx + 1e-9; L += vStep)
         {
             const int y = pr.getY() + (int) std::lround ((mx - L) / (mx - mn) * pr.getHeight());
-            g.drawHorizontalLine ((float) pr.getX(), (float) y, (float) pr.getRight());
+            g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
         }
     }
 
@@ -9884,8 +9884,11 @@ void TablesPanel::Model::cellClicked (int rowNumber, int columnId, const juce::M
     owner->onRowClicked (rowNumber, e);
 }
 
+// listDoc starts null so the first refresh() takes the doc-change branch and
+// default-selects row 0: a freshly loaded file's tables must show in the
+// preview without any click (the doc may already be active at construction).
 TablesPanel::TablesPanel (Application& appIn)
-    : app (appIn), listDoc (appIn.doc()), plot (appIn)
+    : app (appIn), listDoc (nullptr), plot (appIn)
 {
     masterShowBtn.setComponentID ("tables-showall-btn");
 
@@ -9940,13 +9943,27 @@ void TablesPanel::refresh()
                 rows_.push_back ({ ti, pi });
         }
 
+    // Refresh the row count first: setSelectedRows() clamps against
+    // totalItems, which is only valid after updateContent().
+    table.updateContent ();
+
     // The row selection belongs to the document whose tables are shown.
     if (d != listDoc)
     {
         listDoc = d;
         anchorRow = -1;
         juce::SparseSet<int> none;
-        table.setSelectedRows (none, juce::sendNotification);
+        table.setSelectedRows (none, juce::dontSendNotification);
+
+        // Default to the first row so a freshly loaded file's tables show in
+        // the preview without any click; an empty doc keeps no selection.
+        if (!rows_.empty())
+        {
+            anchorRow = 0;
+            juce::SparseSet<int> sel;
+            sel.addRange ({ 0, 1 });
+            table.setSelectedRows (sel, juce::sendNotification);
+        }
     }
 
     masterShowBtn.shown = app.showAllTables;
@@ -9958,7 +9975,6 @@ void TablesPanel::refresh()
     plot.setFocusTableIndex (pr >= 0 ? rows_[(size_t) pr].tableIdx : -1);
 
     updateStatus ();
-    table.updateContent ();
     table.repaint ();
     plot.repaint ();   // colours / visibility may have changed under the preview
 }

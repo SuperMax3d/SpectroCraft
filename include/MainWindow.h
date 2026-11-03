@@ -158,6 +158,7 @@ public:
     juce::Component* waveVScrollBarComp() { return waveVScroll.get (); }   // unit tests
     juce::Component* specVScrollBarComp() { return specVScroll.get (); }   // unit tests
     juce::Component* tablesTrackComp() { return tablesTrack.get (); }      // unit tests
+    TablesPanel* tablesPanelComp() { return tablesPanel.get (); }          // unit tests
     juce::Component* tablesSepComp()   { return tablesSep.get (); }        // unit tests
     /** Top/bottom insets (px) that keep a view's vertical scrollbar clear of its own time ruler strip. */
     static void vScrollInsetsForView (juce::Component* view, int& topInset, int& botInset);
