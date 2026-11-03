@@ -108,6 +108,7 @@ struct Settings
     // amplitude levels in the waveform, frequency ticks in the spectrogram.
     bool showAmpGrid = true;      // "Show Amplitude Grid"
     bool showFreqGrid = true;     // "Show Frequency Grid"
+    bool showDedicatedTrackGrid = true;   // "Show Dedicated Track Grid"
 
     // Spectrogram harmonic markers (Spectral Controls panel), persisted between
     // sessions: while the mouse is over a channel row, small white circles mark
@@ -188,6 +189,7 @@ struct Settings
             && trackRulerAtBottom == o.trackRulerAtBottom
             && showAmpGrid == o.showAmpGrid
             && showFreqGrid == o.showFreqGrid
+            && showDedicatedTrackGrid == o.showDedicatedTrackGrid
             && specHarmVisible == o.specHarmVisible
             && specHarmMaxK == o.specHarmMaxK
             && specHarmN == o.specHarmN

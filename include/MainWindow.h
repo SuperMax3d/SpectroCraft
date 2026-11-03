@@ -479,13 +479,14 @@ public:
         ViewRulerAtBottom,    // time ruler at the bottom of both track views
         ViewShowAmpGrid,      // horizontal amplitude grid lines in the waveform tracks
         ViewShowFreqGrid,     // horizontal frequency grid lines in the spectrogram tracks
+        ViewShowDedTrackGrid, // horizontal value grid lines in the dedicated tables track
         ViewColourMap,
         SelectionToolTimeRange = 3500, SelectionToolMarquee, SelectionToolLasso,
         SelectionToolPaintbrush, SelectionClear, SelectionBrushSmaller,
         SelectionBrushLarger,
         TransportPlay = 4000, TransportStop, TransportPause, TransportLoop,
         TransportPlaySpectralSel,
-        TransportRecord,          // start/stop recording (plugin-based capture; F10)
+        TransportRecord,          // start/stop recording (plugin-based capture; Shift+F10)
         RecOptUnlimited = 4100,   // Recording Options submenu
         RecOptLoop,
         RecOptTimed,

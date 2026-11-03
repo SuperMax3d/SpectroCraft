@@ -21367,9 +21367,9 @@ static void testTrackAxisPlacement()
     // --- View menu: two checkable items; clicking toggles the settings ------
     std::unique_ptr<MainWindow> win (new MainWindow (app, "track axis placement"));
     const juce::PopupMenu viewMenu = win->getMenuForIndex (3, "View");
-    // 17 items for a stereo file (the Colour Map submenu moved out of this
+    // 18 items for a stereo file (the Colour Map submenu moved out of this
     // menu; channel visibility is still listed per channel).
-    CHECK (viewMenu.getNumItems() == 17, "View menu item count with stereo file");
+    CHECK (viewMenu.getNumItems() == 18, "View menu item count with stereo file");
 
     // --- Resample lives in its own section of the Edit menu -----------------
     const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
@@ -21447,6 +21447,12 @@ static void testTrackAxisPlacement()
     win->menuItemSelected (MainWindow::MenuIDs::ViewShowFreqGrid, 3);
     CHECK (!app.settings.showAmpGrid && !app.settings.showFreqGrid,
           "freq grid toggled off via the menu");
+
+    // The dedicated tables track has its own grid toggle as well.
+    CHECK (app.settings.showDedicatedTrackGrid, "dedicated track grid is ON by default");
+    win->menuItemSelected (MainWindow::MenuIDs::ViewShowDedTrackGrid, 3);
+    CHECK (!app.settings.showDedicatedTrackGrid,
+          "dedicated track grid toggled off via the menu");
 
     // Waveform: with the grid on, row 0's upper 0 dB line lands exactly on
     // (48,48,48); hidden it falls back to the plain background. Row 0 is
@@ -23036,6 +23042,37 @@ static void testTablesAutoAlignLag()
     // Identical curves -> zero lag.
     const double lag0 = autoAlignLag (refT, refT.params[0], refT, refT.params[0]);
     CHECK (std::abs (lag0) < 1e-6, "identical curves give zero lag");
+
+    // Amplitude scaling + DC offset must not move the peak (normalized
+    // cross-correlation is invariant to both).
+    TableData aliT2;
+    aliT2.sampleRate = rate;
+    ParamData aliP2;
+    aliP2.name = "ali2";
+    for (int i = 0; i <= N; ++i)
+        aliP2.values.push_back (0.4 * sigAt ((double) i / rate - L) + 2.3);
+    aliT2.params.push_back (aliP2);
+    const double lag2 = autoAlignLag (refT, refT.params[0], aliT2, aliT2.params[0]);
+    CHECK (std::abs (lag2 + L) < 0.02, "scaled/offset copy still aligns");
+
+    // Unequal durations: the reference is a 2 s chirp; the aligned copy is a
+    // longer 3.5 s recording of the same chirp delayed by 1.5 s (beyond half
+    // of the shorter duration, so only a union-span search can find it).
+    const double L2 = 1.5;
+    TableData refT2, aliT3;
+    refT2.sampleRate = aliT3.sampleRate = rate;
+    ParamData refP2, aliP3;
+    refP2.name = "ref"; aliP3.name = "ali";
+    const int N2 = (int) std::lround (2.0 * rate);
+    for (int i = 0; i <= N2; ++i)
+        refP2.values.push_back (sigAt ((double) i / rate));
+    const int N3 = (int) std::lround (3.5 * rate);
+    for (int i = 0; i <= N3; ++i)
+        aliP3.values.push_back (sigAt ((double) i / rate - L2));
+    refT2.params.push_back (refP2);
+    aliT3.params.push_back (aliP3);
+    const double lag3 = autoAlignLag (refT2, refT2.params[0], aliT3, aliT3.params[0]);
+    CHECK (std::abs (lag3 + L2) < 0.02, "unequal durations still align");
 }
 
 static void testTablesSerialiseParse()
@@ -23873,6 +23910,69 @@ static void testTablesTimelineWarp()
     }
 }
 
+// Time Stretch / Content-aware scale warp the table rows together with the
+// audio; undo/redo must restore and re-apply that warp exactly, so the
+// dedicated track never drifts out of sync with the waveform.
+static void testTablesStretchUndoRedo()
+{
+    using namespace sc::tables;
+
+    const juce::File wav = makeTempFile ("tbl_stretch_undo.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 4 * kToneRate,
+            [] (int, int64_t f, double rate) { return 0.5f; }), "wrote stretch undo wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for table stretch undo/redo");
+    FileDoc* d = app.doc();
+    if (d == nullptr) return;
+
+    // One parameter over [0, 4) s at 100 rows/s: value = 50 * docTime.
+    TableData t;
+    t.name = "t";
+    t.sampleRate = 100.0;
+    ParamData p;
+    p.name = "sig";
+    for (int i = 0; i < 400; ++i)
+        p.values.push_back ((double) i * 0.5);
+    t.params.push_back (p);
+    d->tables.push_back (t);
+
+    auto sameTable = [] (const TableData& a, const TableData& b)
+    {
+        if (a.name != b.name || std::abs (a.sampleRate - b.sampleRate) > 1e-12
+            || std::abs (a.offsetSecs - b.offsetSecs) > 1e-9
+            || std::abs (a.scaleTime - b.scaleTime) > 1e-9
+            || a.params.size () != b.params.size ())
+            return false;
+        for (size_t i = 0; i < a.params.size (); ++i)
+        {
+            const auto& pa = a.params[i];
+            const auto& pb = b.params[i];
+            if (pa.name != pb.name || pa.values != pb.values
+                || std::abs (pa.offsetSecs - pb.offsetSecs) > 1e-9
+                || std::abs (pa.scaleTime - pb.scaleTime) > 1e-9)
+                return false;
+        }
+        return true;
+    };
+
+    const TableData orig = d->tables[0];
+
+    std::string err;
+    app.setSelection ({ 2.0, 3.0 });
+    CHECK (app.timeStretch (-50.0f, &err), "stretch succeeds");
+
+    // The domain grew from [0,4) to ~[0,5): the row count must grow too.
+    const TableData warped = d->tables[0];
+    CHECK (warped.params[0].values.size () > 400, "rows follow the stretched domain");
+
+    app.undoStep ();
+    CHECK (sameTable (d->tables[0], orig), "undo restores the pre-stretch table exactly");
+
+    app.redoStep ();
+    CHECK (sameTable (d->tables[0], warped), "redo re-applies the table warp exactly");
+}
+
 // Time alignment is shared at the table level: aligning one parameter of a
 // multi-parameter table re-aligns every parameter of that table together.
 static void testTablesSharedAlignment()
@@ -23918,6 +24018,40 @@ static void testTablesSharedAlignment()
 
     // The aligned parameter's target view is still per-parameter.
     CHECK (t.params[0].alignTarget == 0, "aligned parameter keeps its own align target");
+}
+
+// ---------------- Playhead resync after close/reopen -----------------------
+// Closing a file destroys its FileDoc; reopening rebuilds it from disk. The
+// shared playhead must be pushed into EVERY view (waveform, spectrogram and
+// the dedicated tables track) so none of them drift out of sync.
+static void testTablesPlayheadResyncAfterReopen()
+{
+    const juce::File wav = makeTempFile ("tbl_resync.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate,
+            [] (int, int64_t f, double rate) { return 0.5f; }), "wrote resync wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "open for playhead resync test");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "playhead resync"));
+    TablesTrackView* tt = dynamic_cast<TablesTrackView*> (win->tablesTrackComp());
+    CHECK (tt != nullptr, "dedicated track exists in the main window");
+    if (tt == nullptr) { wav.deleteFile(); return; }
+
+    app.setSelection ({ 0.5, 1.5 });
+    app.setPlayhead (1.25);
+    win->syncSharedState ();
+    CHECK (std::abs (tt->getPlayhead () - 1.25) < 1e-9,
+          "track playhead follows the shared playhead");
+
+    // Close and reopen: the doc is rebuilt from disk, then the shared state
+    // must be re-pushed into every view.
+    app.closeFile ();
+    CHECK (app.openFile (wav), "reopen after close");
+    win->syncSharedState ();
+    CHECK (std::abs (tt->getPlayhead () - app.playhead) < 1e-9,
+          "track playhead resynced with the shared playhead after reopen");
+
+    wav.deleteFile ();
 }
 
 // ---------------- Two-point vertical alignment + dedicated track mouse -----
@@ -23995,7 +24129,13 @@ static void testTablesTwoPointVerticalAlign()
     const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
     const int x1 = 60, x2 = 150;
 
+    // A left click moves the shared playhead to the clicked time (same
+    // behaviour as clicking on the waveform).
+    app.setPlayhead (0.0);
     track.mouseDown (mkMouse (track, x1, 30, lmb));
+    CHECK (std::abs (app.playhead - track.timeAtX (x1)) < 1e-9,
+          "click on the dedicated track moves the playhead");
+
     track.mouseDrag (mkMouse (track, x2, 34, lmb));
     track.mouseUp   (mkMouse (track, x2, 34, lmb));
     CHECK (!app.selection.isEmpty(), "left-drag created a time selection");
@@ -25594,6 +25734,8 @@ static int scRunUnitTestsImpl()
     progress ("tables per-row overlay"); testTablesPerRowOverlay();
     progress ("tables solo + rename");   testTablesSoloAndRename();
     progress ("tables timeline warp");   testTablesTimelineWarp();
+    progress ("tables stretch undo/redo"); testTablesStretchUndoRedo();
+    progress ("tables playhead resync"); testTablesPlayheadResyncAfterReopen();
     progress ("tables shared alignment");testTablesSharedAlignment();
     progress ("tables 2pt vertical align"); testTablesTwoPointVerticalAlign();
     progress ("tables colour picker dialog"); testTablesColourPickerDialog();

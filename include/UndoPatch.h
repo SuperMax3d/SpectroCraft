@@ -6,6 +6,7 @@
 #include "SpectralSelection.h"   // SpectralSelection (active spectral selection)
 #include "DrawingItem.h"         // DrawingItem (user drawings on the spectrogram)
 #include "ScttChunk.h"           // ScttSegment (transcription segments)
+#include "Tables.h"              // sc::tables::TableData (same)
 #include <vector>
 #include <array>
 #include <cstdint>
@@ -94,6 +95,9 @@ struct Patch
     SpectralSelection oldSpecSel, newSpecSel;
     std::vector<DrawingItem> oldDrawings, newDrawings;
     std::vector<ScttSegment> oldScttSegs, newScttSegs;
+    // Parameter tables: their sample rows are warped by the same edits
+    // (stretch / delete / insert), so undo/redo must restore them too.
+    std::vector<sc::tables::TableData> oldTables, newTables;
     static constexpr int kSnapshotSlots = 8;
     std::array<SnapshotSlotChange, kSnapshotSlots> snapshotSlots {};
     // Same for the curve snapshots stored in the Freq/Amp analysis modes.

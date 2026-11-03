@@ -29,6 +29,7 @@ public:
     /** Shared time window (kept in sync with the waveform/spectral views). */
     void setTimeRange (double t0, double t1);
     void setPlayhead (double tSecs);
+    double getPlayhead() const { return playheadT; }   // headless tests
 
     /** Recomputes the visible value range from all visible parameters' raw
         values (with 10% padding) and repaints. Called when tables change. */

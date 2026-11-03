@@ -173,6 +173,7 @@ void Application::loadSettings ()
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
     settings.showAmpGrid        = recentStore->getIntValue ("show_amp_grid", 1) != 0;
     settings.showFreqGrid       = recentStore->getIntValue ("show_freq_grid", 1) != 0;
+    settings.showDedicatedTrackGrid = recentStore->getIntValue ("show_ded_track_grid", 1) != 0;
     // Spectrogram harmonic markers (Spectral Controls panel).
     settings.specHarmVisible    = recentStore->getIntValue ("spec_harm_visible",
                                                             settings.specHarmVisible ? 1 : 0) != 0;
@@ -276,6 +277,7 @@ void Application::saveSettings ()
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);
     recentStore->setValue ("show_freq_grid", settings.showFreqGrid ? 1 : 0);
+    recentStore->setValue ("show_ded_track_grid", settings.showDedicatedTrackGrid ? 1 : 0);
     recentStore->setValue ("spec_harm_visible", settings.specHarmVisible ? 1 : 0);
     recentStore->setValue ("spec_harm_max", settings.specHarmMaxK);
     recentStore->setValue ("spec_harm_n", settings.specHarmN);
@@ -4095,7 +4097,13 @@ void Application::restorePatchSideState (FileDoc* d, const Patch& p, bool isRedo
         d->spectralSel   = isRedo ? p.newSpecSel : p.oldSpecSel;
         d->drawings      = isRedo ? p.newDrawings : p.oldDrawings;
         d->sctt.segments = isRedo ? p.newScttSegs : p.oldScttSegs;
+        d->tables        = isRedo ? p.newTables  : p.oldTables;
     }
+
+    // The table rows moved back with the audio: refresh the Tables panel and
+    // the dedicated track so they show the restored curves immediately.
+    if (p.hasTimeAnchored && !d->tables.empty () && onTablesChanged)
+        onTablesChanged ();
 
     d->metaDirty = true;   // restored state differs from what was last saved
     // Markers/selections persist with the unified metadata on Save - no live sidecar.
@@ -4115,6 +4123,7 @@ Application::TimeAnchoredState Application::captureTimeAnchored () const
         t.spectralSel   = d->spectralSel;
         t.drawings      = d->drawings;
         t.scttSegments  = d->sctt.segments;
+        t.tables        = d->tables;   // warped by the same timeline edits
     }
     return t;
 }
@@ -4130,6 +4139,7 @@ void Application::commitTimeAnchoredToPatch (const TimeAnchoredState& before, Pa
     p.oldDrawings  = before.drawings;
     p.oldScttSegs  = before.scttSegments;
 
+    p.oldTables    = before.tables;
     p.newPlayhead  = playhead;
     p.newSel       = selection;
     if (d != nullptr)
@@ -4137,7 +4147,13 @@ void Application::commitTimeAnchoredToPatch (const TimeAnchoredState& before, Pa
         p.newSpecSel   = d->spectralSel;
         p.newDrawings  = d->drawings;
         p.newScttSegs  = d->sctt.segments;
+        p.newTables    = d->tables;   // warped by the edit that just ran
     }
+
+    // The table rows moved with the audio: refresh the Tables panel and the
+    // dedicated track so they show the warped curves immediately.
+    if (d != nullptr && !d->tables.empty () && onTablesChanged)
+        onTablesChanged ();
 }
 
 void Application::undoStep() { undoSteps (1); }

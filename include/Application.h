@@ -602,9 +602,11 @@ public:
     // Snapshot of the time-anchored state taken before an edit that inserts /
     // deletes / shortens / stretches timeline data: playhead and selection
     // (Application members) plus the active document's spectral selection,
-    // user drawings and SCTT transcription segments. commitTimeAnchoredToPatch
-    // stores both this snapshot and the post-edit state into p so undo/redo
-    // can restore them together with the audio.
+    // user drawings, SCTT transcription segments and parameter tables. The
+    // table rows are warped by the same edits as the audio, so they travel in
+    // this snapshot too. commitTimeAnchoredToPatch stores both this snapshot
+    // and the post-edit state into p so undo/redo can restore them together
+    // with the audio.
     struct TimeAnchoredState
     {
         double playhead = 0.0;
@@ -612,6 +614,7 @@ public:
         SpectralSelection spectralSel;
         std::vector<DrawingItem> drawings;
         std::vector<ScttSegment> scttSegments;
+        std::vector<sc::tables::TableData> tables;
     };
 
     TimeAnchoredState captureTimeAnchored () const;

@@ -141,8 +141,13 @@ void TablesTrackView::paint (juce::Graphics& g)
     {
         const double v = vMax + (vMin - vMax) * ((double) i / nLines);
         const int y = yForValue (v);
-        g.setColour (juce::Colour::fromRGB (60, 60, 68));
-        g.drawHorizontalLine (pr.getX(), (float) y, (float) pr.getRight());
+        // The grey horizontal grid lines can be hidden from the View menu;
+        // the axis labels below are unaffected.
+        if (app.settings.showDedicatedTrackGrid)
+        {
+            g.setColour (juce::Colour::fromRGB (60, 60, 68));
+            g.drawHorizontalLine (pr.getX(), (float) y, (float) pr.getRight());
+        }
         g.setColour (juce::Colours::lightgrey);
         g.drawText (juce::String (v, 4), juce::Rectangle<int> (axisStrip.getX() + 2, y - 8,
                     kAxisW - 6, 15), axRight ? juce::Justification::right
@@ -266,9 +271,21 @@ void TablesTrackView::mouseDown (const juce::MouseEvent& e)
     // vertical pan on the value-axis strip.
     if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown())
     {
-        dragMode = onAxisX (e.x) ? DragMode::VPan : DragMode::Select;
-        dragVMin = vMin;
-        dragVMax = vMax;
+        if (onAxisX (e.x))
+        {
+            dragMode = DragMode::VPan;
+            dragVMin = vMin;
+            dragVMax = vMax;
+            return;
+        }
+
+        // Clicking in the data area moves the playhead to that position,
+        // exactly like the waveform view. Dragging then extends a time
+        // selection from the click point; a plain click leaves none.
+        const double tClick = timeAtX (e.x);
+        app.setPlayhead (tClick);
+        dragMode = DragMode::Select;
+        app.setSelection ({ tClick, tClick });   // zero width until dragged
         return;
     }
 

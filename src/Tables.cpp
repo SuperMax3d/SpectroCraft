@@ -516,51 +516,131 @@ double paramValueAt (const TableData& t, const ParamData& p, double tTableSecs)
 
 // ------------------------------------------------------------- Auto align --
 
-static std::vector<double> resampleToGrid (const TableData& t, const ParamData& p,
-                                           double durSecs, int nPts)
+namespace {
+
+// Resamples a parameter onto a uniform grid spanning [0, spanSecs]. Points
+// beyond the parameter's own duration become NaN so they never enter the
+// correlation sums (a flat zero tail would bias the peak).
+std::vector<double> nccResample (const TableData& t, const ParamData& p,
+                                 double spanSecs, int nPts)
 {
-    std::vector<double> out ((size_t) nPts);
+    std::vector<double> v ((size_t) nPts);
+    const double dur = p.duration (t.sampleRate);
     for (int i = 0; i < nPts; ++i)
-        out[(size_t) i] = paramValueAt (t, p, (double) i * durSecs / (nPts - 1));
-    return out;
+    {
+        const double tt = spanSecs * (double) i / (double) (nPts - 1);
+        if (tt > dur)
+        {
+            v[(size_t) i] = std::nan ("");
+            continue;
+        }
+        const double val = paramValueAt (t, p, tt);
+        v[(size_t) i] = std::isfinite (val) ? val : std::nan ("");
+    }
+    return v;
 }
+
+// Pearson correlation between A and B shifted by L samples (positive L means
+// B's content sits later than A's), computed over the overlap only. Returns
+// NaN when the overlap is too small or one side is constant there.
+double nccAtLag (const std::vector<double>& A, const std::vector<double>& B,
+                 int L, int minOverlap)
+{
+    const int M = (int) A.size();
+    const int i0 = std::max (0, -L);
+    const int i1 = std::min (M, M - L);   // exclusive upper bound
+    double sa = 0.0, sb = 0.0, sxy = 0.0, sxx = 0.0, syy = 0.0;
+    int n = 0;
+    for (int i = i0; i < i1; ++i)
+    {
+        const double a = A[(size_t) i];
+        const double b = B[(size_t) (i + L)];
+        if (!std::isfinite (a) || !std::isfinite (b)) continue;
+        sa += a; sb += b; sxy += a * b; sxx += a * a; syy += b * b; ++n;
+    }
+    if (n < minOverlap) return std::nan ("");
+
+    const double cov = n * sxy - sa * sb;
+    const double den = std::sqrt ((n * sxx - sa * sa) * (n * syy - sb * sb));
+    if (!(den > 1e-30)) return std::nan ("");   // constant signal: no timing info
+
+    return cov / den;
+}
+
+// The lag whose |Pearson r| is maximal over the full search range.
+int nccBestLag (const std::vector<double>& A, const std::vector<double>& B,
+                int minOverlap)
+{
+    const int M = (int) A.size();
+    double bestAbs = -1.0, bestSigned = 0.0;
+    int bestLag = 0;
+    for (int L = -(M - 1); L <= M - 1; ++L)
+    {
+        const double r = nccAtLag (A, B, L, minOverlap);
+        if (!std::isfinite (r)) continue;
+        const double absR = std::abs (r);
+        // Prefer the stronger |r|; break exact ties toward positive r.
+        if (absR > bestAbs + 1e-9 || (std::abs (absR - bestAbs) <= 1e-9 && r > bestSigned))
+        {
+            bestAbs = absR;
+            bestSigned = r;
+            bestLag = L;
+        }
+    }
+    return bestLag;   // 0 when no lag had enough overlap
+}
+
+} // namespace
 
 double autoAlignLag (const TableData& refTable, const ParamData& refParam,
                      const TableData& aliTable, const ParamData& aliParam)
 {
+    // Normalized cross-correlation: for every candidate shift the Pearson
+    // correlation is computed over the overlap of both parameters only, so
+    // amplitude differences and unequal durations cannot bias the peak.
+    // Two stages: a coarse pass over the full lag range on a grid spanning
+    // the union of both durations, then an 8x finer refinement around the
+    // best coarse lag. Result in seconds; positive means B's content sits
+    // later than A's (callers negate it to shift B earlier).
     const double durA = refParam.duration (refTable.sampleRate);
     const double durB = aliParam.duration (aliTable.sampleRate);
-    const double dur  = std::min (durA, durB);
-    if (!(dur > 0.0)) return 0.0;
+    if (!(std::max (durA, durB) > 0.0)) return 0.0;
 
-    // Common grid: at most 4096 points so the O(M^2) correlation stays cheap.
-    const int M = std::max (16, std::min (4096, (int) std::lround (dur * 512.0)));
-    auto A = resampleToGrid (refTable, refParam, dur, M);
-    auto B = resampleToGrid (aliTable, aliParam, dur, M);
+    const double span = std::max (durA, durB);
+    const int M1 = std::clamp ((int) std::lround (span * 256.0), 256, 8192);
+    auto A1 = nccResample (refTable, refParam, span, M1);
+    auto B1 = nccResample (aliTable, aliParam, span, M1);
 
-    // Mean-subtract both so the correlation is level-independent.
-    double mA = 0.0, mB = 0.0;
-    for (auto v : A) mA += v;
-    for (auto v : B) mB += v;
-    mA /= M; mB /= M;
-    for (auto& v : A) v -= mA;
-    for (auto& v : B) v -= mB;
+    const int lagCoarse = nccBestLag (A1, B1, std::max (8, M1 / 20));
 
-    const int maxLag = M / 2;
-    double bestScore = -1e300, bestLag = 0.0;
-    for (int L = -maxLag; L <= maxLag; ++L)
+    // Refine on an 8x finer grid around the coarse winner.
+    const int R = 8;
+    const int M2 = std::min (65536, M1 * R);
+    auto A2 = nccResample (refTable, refParam, span, M2);
+    auto B2 = nccResample (aliTable, aliParam, span, M2);
+
+    const double finePerCoarse = (double) (M2 - 1) / (double) (M1 - 1);
+    const int centre = (int) std::lround (lagCoarse * finePerCoarse);
+    const int minOverlap2 = std::max (8, M2 / 20);
+
+    double bestAbs = -1.0, bestSigned = 0.0;
+    int bestFineLag = centre;   // fallback: the coarse estimate itself
+    for (int L = centre - R; L <= centre + R; ++L)
     {
-        double s = 0.0;
-        if (L >= 0)
-            for (int i = 0; i + L < M; ++i) s += A[(size_t) i] * B[(size_t) (i + L)];
-        else
-            for (int i = -L; i < M; ++i)     s += A[(size_t) i] * B[(size_t) (i + L)];
-        if (s > bestScore) { bestScore = s; bestLag = (double) L; }
+        const double r = nccAtLag (A2, B2, L, minOverlap2);
+        if (!std::isfinite (r)) continue;
+        const double absR = std::abs (r);
+        if (absR > bestAbs + 1e-9 || (std::abs (absR - bestAbs) <= 1e-9 && r > bestSigned))
+        {
+            bestAbs = absR;
+            bestSigned = r;
+            bestFineLag = L;
+        }
     }
 
-    // c(L) peaks at the lag where B's content sits L samples AFTER A's, so
-    // shifting B earlier by that many seconds aligns it onto A.
-    return -bestLag * dur / (M - 1);
+    // A positive lag means B's content sits later than A's, so shifting B
+    // earlier by that many seconds aligns it onto A.
+    return -((double) bestFineLag * span / (double) (M2 - 1));
 }
 
 // ------------------------------------------------------------- Persistence --

@@ -1298,6 +1298,7 @@ void MainWindow::timerCallback()
     app.syncActiveDoc ();   // remember it in the active document
     waveformView->setPlayhead (pos);
     spectralView->setPlayhead (pos);
+    if (tablesTrack) tablesTrack->setPlayhead (pos);   // keep the dedicated track in step
     if (statusBar) statusBar->setPlayhead (pos);
 }
 
@@ -1773,7 +1774,10 @@ void MainWindow::syncSharedState()
         spectralView->repaint();
     }
     if (tablesTrack)
+    {
+        tablesTrack->setPlayhead (app.playhead);
         tablesTrack->setSelection (app.selection);   // dedicated track's blue band follows the shared selection
+    }
     refreshPanels();
 
     // Persist the session settings whenever any of the persisted fields
@@ -2713,6 +2717,15 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     {
         app.settings.showFreqGrid = !app.settings.showFreqGrid;
         if (app.onStateChange) app.onStateChange ();
+        return;
+    }
+    if (menuItemID == ViewShowDedTrackGrid)
+    {
+        app.settings.showDedicatedTrackGrid = !app.settings.showDedicatedTrackGrid;
+        // syncSharedState() does not unconditionally repaint the dedicated
+        // track, so ask for it explicitly.
+        if (tablesTrack) tablesTrack->repaint();
+        if (app.onStateChange) app.onStateChange ();   // persists the flag
         return;
     }
 
@@ -6678,6 +6691,8 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       app.settings.showAmpGrid);
         menu.addItem (ViewShowFreqGrid, "Show Frequency Grid", true,
                       app.settings.showFreqGrid);
+        menu.addItem (ViewShowDedTrackGrid, "Show Dedicated Track Grid", true,
+                      app.settings.showDedicatedTrackGrid);
 
         // Per-channel visibility toggles (applies to both views).
         // Ctrl/Shift+click shows only that channel; the same is available from

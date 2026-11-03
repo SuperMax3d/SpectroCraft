@@ -9989,47 +9989,55 @@ void TablesPanel::copySelection()
     const int pr = primaryRow();
     if (d == nullptr || pr < 0) return;
 
+    // Tab-separated text with a leading document-time column ("time_s"): the
+    // clipboard round-trips through paste, because importTable() recognises
+    // the time header and re-positions the rows on the timeline.
     juce::String csv;
     if (isTableRow (pr))
     {
         // Whole table: header row of parameter names + one row per sample.
         const auto& t = d->tables[(size_t) rows_[(size_t) pr].tableIdx];
+        csv += "time_s";
         for (size_t i = 0; i < t.params.size(); ++i)
-            csv += (i ? "," : "") + csvQuoteField (t.params[i].name);
+            csv += "\t" + csvQuoteField (t.params[i].name);
         int nRows = 0;
         if (!t.params.empty())
             nRows = (int) t.params[0].values.size();
         for (int r = 0; r < nRows && !t.params.empty(); ++r)
         {
-            csv += "\n";
+            csv += "\n" + juce::String (t.docTimeOfSample (t.params[0], r), 6);
             for (size_t i = 0; i < t.params.size(); ++i)
                 if ((size_t) r < t.params[i].values.size())
-                    csv += (i ? "," : "") + juce::String (t.params[i].values[(size_t) r], 6);
+                    csv += "\t" + juce::String (t.params[i].values[(size_t) r], 6);
         }
     }
     else
     {
-        // Selected parameters: one column each, from their own tables.
-        std::vector<const sc::tables::ParamData*> cols;
+        // Selected parameters: one column each, from their own tables. The
+        // time column follows the first selected parameter's effective map.
+        struct Col { const sc::tables::TableData* table; const sc::tables::ParamData* param; };
+        std::vector<Col> cols;
         for (int r : selectedRowIndices())
         {
             const auto ref = rowRef (r);
             if (ref.paramIdx < 0) continue;
             if (ref.tableIdx >= 0 && ref.tableIdx < (int) d->tables.size()
                 && ref.paramIdx < (int) d->tables[(size_t) ref.tableIdx].params.size())
-                cols.push_back (&d->tables[(size_t) ref.tableIdx].params[(size_t) ref.paramIdx]);
+                cols.push_back ({ &d->tables[(size_t) ref.tableIdx],
+                                  &d->tables[(size_t) ref.tableIdx].params[(size_t) ref.paramIdx] });
         }
         if (cols.empty()) return;
 
-        for (size_t i = 0; i < cols.size(); ++i)
-            csv += (i ? "," : "") + csvQuoteField (cols[i]->name);
+        csv += "time_s";
+        for (const auto& c : cols)
+            csv += "\t" + csvQuoteField (c.param->name);
         int nRows = INT_MAX;
-        for (const auto* p : cols) nRows = std::min (nRows, (int) p->values.size());
+        for (const auto& c : cols) nRows = std::min (nRows, (int) c.param->values.size());
         for (int r = 0; r < nRows; ++r)
         {
-            csv += "\n";
-            for (size_t i = 0; i < cols.size(); ++i)
-                csv += (i ? "," : "") + juce::String (cols[i]->values[(size_t) r], 6);
+            csv += "\n" + juce::String (cols[0].table->docTimeOfSample (*cols[0].param, r), 6);
+            for (const auto& c : cols)
+                csv += "\t" + juce::String (c.param->values[(size_t) r], 6);
         }
     }
 
@@ -10112,14 +10120,14 @@ void ManualAlignWindow::resized()
 {
     auto r = getLocalBounds ();
 
-    // Bottom button row.
+    // Bottom button row (anchored to the bottom of the window, not y=0).
     const int btnH = 26;
     auto bot = r.removeFromBottom (btnH + 10);
-    okBtn.setBounds (bot.getRight () - 74, 0, 68, btnH);
-    cancelBtn.setBounds (okBtn.getX () - 8 - 78, 0, 78, btnH);
+    okBtn.setBounds (bot.getRight () - 74, bot.getY (), 68, btnH);
+    cancelBtn.setBounds (okBtn.getX () - 8 - 78, bot.getY (), 78, btnH);
 
     // Message area at the top.
-    auto msgArea = r.removeFromTop (34);
+    auto msgArea = r.removeFromTop (26);
     msgLabel.setBounds (msgArea.withTrimmedLeft (10).withTrimmedRight (10));
 
     // Labeled field rows: label on the left, editor on the right.
@@ -10178,12 +10186,7 @@ void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam, int tar
 
     auto* w = new ManualAlignWindow (
         juce::String ("Align ") + (paramLevel ? "Parameter" : "Table"),
-        paramLevel
-            ? "Time mapping is shared by all three display modes of this table.\n"
-              "Each mode has its own vertical value offset/scale.\n"
-              "(normalized / inverted / absolute take 0 or 1)"
-            : "doc time = offset + scale x table time.\n"
-              "Time alignment is shared by every parameter of this table.");
+        "Manual Alignment:");
 
     w->addRow ("Time offset (s)",
                "Shift along the timeline: doc time = offset + scale x table time (+ = later). Shared by all three display modes.",
@@ -10220,9 +10223,14 @@ void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam, int tar
     }
 
     // Size the window from its rows: message area + row pitch per field + buttons.
-    const int contentH = 34 + w->numRows () * 27 + 10 + 26;
+    const int contentH = 26 + w->numRows () * 27 + 10 + 26;
     w->setSize (356, contentH);
     w->setResizable (false, false);
+
+    // Centre on the main window's current position instead of appearing in
+    // the screen corner.
+    if (juce::Component* top = getTopLevelComponent ())
+        w->setBounds (top->getBounds ().withSize (356, contentH));
 
     bool okPressed = false;
     w->onOk = [&okPressed] { okPressed = true; };
