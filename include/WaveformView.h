@@ -235,6 +235,7 @@ private:
     int dragStartY = 0;
     double dragStartTime = 0.0;
     int panLastX = 0;   // last delivered cursor x during time panning
+    int panLastY = 0;   // last delivered cursor y during vertical-axis panning
     juce::Rectangle<int> zoomRect;   // right-drag box-zoom rubber band
     bool haveZoomRect = false;
 

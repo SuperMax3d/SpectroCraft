@@ -1935,10 +1935,15 @@ list: a table row followed by its parameter rows.
     time. The strip is separated from the data views by a draggable splitter
     (like the waveform/spectrogram one): dragging it up or down resizes the
     track.
-    - **Left-drag** pans vertically; the **wheel over the value axis** zooms
-      vertically around the cursor, while the **wheel anywhere else in the
-      strip** zooms *horizontally* around the cursor (the shared time window —
-      exactly like the other tracks).
+    - **Left-drag on the value axis** pans vertically with the content
+      following the cursor (like the waveform/spectrogram axes); left-drag in
+      the data area makes a time selection. The **wheel over the value axis**
+      zooms vertically around the cursor, while the **wheel anywhere else in
+      the strip** zooms *horizontally* around the cursor (the shared time
+      window — exactly like the other tracks). Axis labels and hover values
+      drop their decimals as the magnitude grows (4 below 1, none at 1000+).
+    - The panel's preview plot draws a grid like the Frequency Analysis graph
+      and shows a delicate white vertical cursor line while hovering.
     - **Right-drag from the data area** box-zooms both axes at once: a
       translucent blue rubber band is drawn while dragging, and on release the
       dragged span becomes the new time window *and* value range. **Right-drag
@@ -2399,8 +2404,14 @@ delays the window from appearing.
     default, and toggling it persists to disk immediately.
   - **Waveform zero line**: the per-mode zero-line labels ("0" / "-inf" /
     "0.000") and a headless paint check that with the amplitude grid on the row
-    centre carries the grey zero line while with it off only the fixed
-    row-centre divider shows.
+    centre carries the grey zero line while with it off only the (60,60,60)
+    divider shows - drawn at amplitude zero so it follows the vertical
+    pan/zoom instead of staying fixed at the row middle.
+  - **Track v-pan behaviour**: a left-drag on the waveform's amplitude axis
+    follows the cursor in both directions (drag down then back up restores the
+    offset exactly; reversing responds immediately, no ratcheting), and a
+    left-drag on the dedicated track's value axis moves content with the
+    cursor like the other tracks' axes do.
   - **FFT axis wheel zoom**: in Amp vs Time / Freq vs Time a wheel over the
     plot or bottom time ruler shrinks only the time window, one over the right
     vertical axis strip (or Shift+wheel) shrinks only the level/frequency

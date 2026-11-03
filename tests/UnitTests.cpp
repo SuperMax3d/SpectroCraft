@@ -24358,6 +24358,84 @@ static void testTablesTwoPointVerticalAlign()
 }
 
 //==============================================================================
+// Vertical-axis pan behaviour: the waveform's axis drag must follow the
+// cursor in BOTH directions (no ratcheting in the first drag's direction),
+// and the dedicated track's axis drag must move content with the cursor,
+// like the waveform/spectrogram axes do.
+static void testTrackVPanBehaviour()
+{
+    const juce::File wav = makeTempFile ("vpan_test.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate,
+            [] (int, int64_t f, double rate) { return 0.5f; }), "wrote vpan wav");
+
+    Application app;
+    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    // A previous test may have persisted a right-hand track axis to disk and
+    // this fresh instance loads it - pin the layout the drag coordinates use.
+    app.settings.trackAxisOnRight = false;
+
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+
+    // --- Waveform: axis drag follows the cursor both ways ------------------
+    {
+        WaveformView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (0.0, 2.0);
+        view.setVisibleChannels ({ 0 });
+
+        CHECK (std::abs (view.getVerticalOffset()) < 1e-12, "starts at zero offset");
+
+        // Left-drag on the left amplitude axis: down, then back up by the same
+        // amount must return exactly to the start. The old code measured every
+        // delta from the drag-start position and ratcheted in the first drag's
+        // direction - dragging back never restored the offset.
+        view.mouseDown (mkMouse (view, 30, 100, lmb));
+        view.mouseDrag (mkMouse (view, 30, 150, lmb));
+        const double oDown = view.getVerticalOffset();
+        CHECK (oDown > 0.0, "dragging down moves the content down");
+
+        view.mouseDrag (mkMouse (view, 30, 100, lmb));
+        CHECK (std::abs (view.getVerticalOffset()) < 1e-9,
+               "dragging back up returns exactly to the start");
+
+        // Continue past the start: the offset must go negative immediately.
+        view.mouseDrag (mkMouse (view, 30, 50, lmb));
+        CHECK (std::abs (view.getVerticalOffset() + oDown) < 1e-9,
+               "reversing direction responds symmetrically");
+
+        view.mouseUp (mkMouse (view, 30, 50, lmb));
+    }
+
+    // --- Dedicated track: axis drag moves content with the cursor ----------
+    {
+        TablesTrackView track (app);
+        track.setSize (300, 80);
+        track.setTimeRange (0.0, 2.0);
+
+        double lo = -1.0, hi = 1.0;
+        track.onValueWindowChanged = [&] (double a, double b) { lo = a; hi = b; };
+
+        // The axis strip is the left 60 px by default: drag down on it. The
+        // value window must shift UP in value space so the data moves DOWN
+        // with the cursor (matching the waveform/spectrogram axis drags).
+        track.mouseDown (mkMouse (track, 30, 20, lmb));
+        track.mouseDrag (mkMouse (track, 30, 60, lmb));
+        const double dv = 40.0 * 2.0 / 80.0;   // dy * span / plot height
+        CHECK (std::abs (lo - (-1.0 + dv)) < 1e-9 && std::abs (hi - (1.0 + dv)) < 1e-9,
+               "dragging down on the track axis moves content down");
+
+        // Back up: returns exactly to the original window.
+        track.mouseDrag (mkMouse (track, 30, 20, lmb));
+        CHECK (std::abs (lo + 1.0) < 1e-9 && std::abs (hi - 1.0) < 1e-9,
+               "dragging back up restores the original window");
+
+        track.mouseUp (mkMouse (track, 30, 20, lmb));
+    }
+
+    wav.deleteFile ();
+}
+
+//==============================================================================
 // Parameter colour picker dialog: custom swatches, RGB editing,
 // New/Delete/Reset, OK/Cancel semantics and palette persistence.
 static void testTablesColourPickerDialog()
@@ -24801,7 +24879,7 @@ static void testWaveformZeroLine()
     app.settings.showAmpGrid = false;
     const auto pOff = centrePixel();
     CHECK (std::abs ((int) pOff.getRed() - 60) <= 2 && std::abs ((int) pOff.getGreen() - 60) <= 2,
-          "without grid the fixed row-centre line (60,60,60) shows");
+          "without grid the amplitude-zero line (60,60,60) shows at row centre");
 
     app.settings.showAmpGrid = true;
     const auto pOn = centrePixel();
@@ -25934,6 +26012,7 @@ static int scRunUnitTestsImpl()
     progress ("tables playhead resync"); testTablesPlayheadResyncAfterReopen();
     progress ("tables shared alignment");testTablesSharedAlignment();
     progress ("tables 2pt vertical align"); testTablesTwoPointVerticalAlign();
+    progress ("track v-pan behaviour");   testTrackVPanBehaviour();
     progress ("tables colour picker dialog"); testTablesColourPickerDialog();
     progress ("paste live repro");       testPasteLiveRepro();
     progress ("tables dedicated strip"); testTablesDedicatedStrip();

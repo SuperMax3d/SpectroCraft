@@ -216,6 +216,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
             // Left-drag on the amplitude axis pans the vertical range; it must
             // not move the playhead.
             dragMode = DragMode::VPan;
+            panLastY = e.y;
         }
         else
         {
@@ -278,8 +279,14 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
             // Grab-and-drag: content follows the cursor (drag down -> the
             // waveform moves down). Panned at half speed so a full-scale view
             // does not saturate the +/-2 offset clamp after a few pixels.
+            // The delta is measured from the last delivered position and that
+            // anchor always advances to the cursor - like the time pan, so
+            // reversing direction responds immediately instead of ratcheting
+            // in the first drag's direction (deltas eaten by the +/-2 clamp do
+            // not accumulate).
             const double ampPx = rowAmpPx();
-            vOffset = std::clamp (vOffset + 0.5 * (e.y - dragStartY) / ampPx, -2.0, 2.0);
+            vOffset = std::clamp (vOffset + 0.5 * (e.y - panLastY) / ampPx, -2.0, 2.0);
+            panLastY = e.y;
             dirty = true;
             if (onVerticalZoomChanged) onVerticalZoomChanged();
             repaint();
@@ -648,8 +655,13 @@ void WaveformView::paint (juce::Graphics& g)
         const int chanH = rr.getHeight();
         const float center = chanY + chanH * 0.5f;
         const float amp = chanH * 0.45f * (float) vZoom;
+        // The row's centre line is drawn at amplitude zero: it follows the
+        // vertical pan/zoom with the data instead of staying fixed at the
+        // middle of the row.
         g.setColour (juce::Colour::fromRGB (60, 60, 60));
-        g.drawHorizontalLine ((int) center, (float) pr.getX(), (float) pr.getRight());
+        const float zeroY = center + (float) (vOffset * amp);
+        if (zeroY >= pr.getY() && zeroY <= pr.getBottom())
+            g.drawHorizontalLine ((int) zeroY, (float) pr.getX(), (float) pr.getRight());
         paintChannel (g, ch, chanY, chanH, center, amp);
 
         // Channel label on the left of every track: "L"/"R" for stereo files,

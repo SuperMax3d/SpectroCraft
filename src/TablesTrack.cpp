@@ -122,6 +122,18 @@ bool TablesTrackView::onAxisX (int x) const
     return app.settings.trackAxisOnRight ? x >= getWidth() - kAxisW : x < kAxisW;
 }
 
+// Fewer decimals for large magnitudes so big values stay readable in the
+// narrow axis strip and hover labels.
+static int valueDecimals (double v)
+{
+    const double a = std::abs (v);
+    if (a < 1.0) return 4;
+    if (a < 10.0) return 3;
+    if (a < 100.0) return 2;
+    if (a < 1000.0) return 1;
+    return 0;
+}
+
 void TablesTrackView::paint (juce::Graphics& g)
 {
     // Same background as the waveform/spectral data tracks.
@@ -149,7 +161,8 @@ void TablesTrackView::paint (juce::Graphics& g)
             g.drawHorizontalLine (pr.getX(), (float) y, (float) pr.getRight());
         }
         g.setColour (juce::Colours::lightgrey);
-        g.drawText (juce::String (v, 4), juce::Rectangle<int> (axisStrip.getX() + 2, y - 8,
+        g.drawText (juce::String (v, valueDecimals (v)),
+                   juce::Rectangle<int> (axisStrip.getX() + 2, y - 8,
                     kAxisW - 6, 15), axRight ? juce::Justification::right
                                              : juce::Justification::left, true);
     }
@@ -311,9 +324,10 @@ void TablesTrackView::mouseDrag (const juce::MouseEvent& e)
         case DragMode::VPan:
         {
             if (vMax <= vMin) break;
-            // Vertical pan: dragging down moves the window up in value space.
+            // Vertical pan: content follows the cursor (drag down -> the data
+            // moves down), matching the waveform/spectrogram axis drags.
             const auto pr = plotRect();
-            const double dv = ((double) dragStartY - (double) e.y) * (vMax - vMin) / pr.getHeight();
+            const double dv = ((double) e.y - (double) dragStartY) * (vMax - vMin) / pr.getHeight();
             applyValueWindow (dragVMin + dv, dragVMax + dv);
             break;
         }
@@ -557,7 +571,7 @@ void TablesTrackView::collectHoverLabels (int mouseX, int mouseY)
             const double vRaw = sc::tables::paramValueAt (t, p, tTab);   // unscaled value
             const int y = yForValue (sc::tables::dedicatedValue (vRaw, p));
             if (std::abs ((float) y - (float) mouseY) <= 8.0f)
-                hits.push_back ({ (float) y, p.name + "  " + juce::String (vRaw, 4),
+                hits.push_back ({ (float) y, p.name + "  " + juce::String (vRaw, valueDecimals (vRaw)),
                                   sc::tables::tableColourAt (p.colorIndex,
                                                              app.settings.tableCustomColours) });
         }

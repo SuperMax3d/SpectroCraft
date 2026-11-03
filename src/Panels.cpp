@@ -9258,6 +9258,27 @@ void TablesPlotView::paint (juce::Graphics& g)
 
     const int axisH = 14;   // time labels at the bottom
     const auto pr = juce::Rectangle<int> (2, 2, getWidth() - 4, getHeight() - 4 - axisH);
+    const int nLab = 4;
+
+    // Grid like the Frequency Analysis graph: vertical lines at the time-label
+    // positions and horizontal lines on a nice value step.
+    g.setColour (juce::Colour::fromRGB (40, 40, 46));
+    for (int i = 0; i <= nLab; ++i)
+        g.drawVerticalLine ((float) (pr.getX() + pr.getWidth() * i / nLab),
+                            (float) pr.getY(), (float) pr.getBottom());
+    {
+        const double vSpan = std::max (1e-9, mx - mn);
+        const double raw = vSpan / 5.0;
+        const double mag = std::pow (10.0, std::floor (std::log10 (raw)));
+        double vStep = 10.0 * mag;
+        for (double m : { 1.0, 2.0, 5.0 })
+            if (m * mag >= raw) { vStep = m * mag; break; }
+        for (double L = std::ceil (mn / vStep) * vStep; L <= mx + 1e-9; L += vStep)
+        {
+            const int y = pr.getY() + (int) std::lround ((mx - L) / (mx - mn) * pr.getHeight());
+            g.drawHorizontalLine ((float) pr.getX(), (float) y, (float) pr.getRight());
+        }
+    }
 
     for (const auto& p : t.params)
     {
@@ -9279,12 +9300,18 @@ void TablesPlotView::paint (juce::Graphics& g)
     // Time axis: a few labels in seconds.
     g.setFont (9.0f);
     g.setColour (juce::Colours::grey);
-    const int nLab = 4;
     for (int i = 0; i <= nLab; ++i)
         g.drawText (juce::String (dur * ((double) i / nLab), 2),
                     juce::Rectangle<int> (pr.getX() + pr.getWidth() * i / nLab - 18,
                                           getHeight() - axisH + 1, 36, 12),
                     juce::Justification::centred, true);
+
+    // Delicate white vertical cursor line, like the Frequency Analysis graph.
+    if (hoverPos_.x >= pr.getX() && hoverPos_.x <= pr.getRight())
+    {
+        g.setColour (juce::Colour::fromRGBA (255, 255, 255, 90));
+        g.drawVerticalLine ((float) hoverPos_.x, (float) pr.getY(), (float) pr.getBottom());
+    }
 
     // Hover readout: the unscaled value of every visible parameter at the
     // hovered table time, stacked from the top like the dedicated track's
