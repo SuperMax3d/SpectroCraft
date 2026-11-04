@@ -22,6 +22,13 @@ public:
     int numFrames = 0;
     std::vector<float> mag; // [frame * numBins + bin], dB values (e.g. -120..0)
 
+    // Validity stamp for the tile cache: the engine and its content version
+    // the tile was computed from, and how many samples the engine held then
+    // (a tile computed while recording may be cut short by the end of data).
+    const void* source = nullptr;   // identity only, never dereferenced
+    int64_t contentVersion = -1;
+    int64_t availSamples = 0;
+
     float get (int frame, int bin) const
     {
         if (frame >= 0 && frame < numFrames && bin >= 0 && bin < numBins)
@@ -126,6 +133,10 @@ public:
 
     void clearCache();
     size_t cacheSize() const;
+    /** Bytes of magnitude data held by the tile cache. */
+    size_t cacheBytes() const;
+    /** Memory budget of the tile cache (evicts least-recently-used tiles). */
+    void setMaxCacheBytes (size_t bytes);
 
     // Exposed for unit tests / diagnostics. Returns dB magnitudes (no gain/bias/dB scaling).
     std::shared_ptr<SpectralTile> computeTile (const AudioEngine& engine, int channel,
@@ -142,10 +153,27 @@ private:
     ColourMap colourMap_ = ColourMap::Classic;
     std::array<uint8_t, 256 * 4> lut_ = buildColourLUT (ColourMap::Classic);
 
+    // Cache validity (called with cacheMutex_ held): records an in-place
+    // overwrite when the content version moved without the length growing,
+    // and tells whether a cached tile must be recomputed.
+    void noteContentLocked (const AudioEngine& engine, int64_t version, int64_t total);
+    bool tileStaleLocked (const SpectralTile& t, const AudioEngine& engine,
+                          int64_t version, int64_t total) const;
+    void evictLocked();
+
     std::unordered_map<TileKey, std::shared_ptr<SpectralTile>, TileKeyHash> cache_;
     std::list<TileKey> lru_;
     mutable std::mutex cacheMutex_;
     size_t maxTiles_ = 512;
+    // Byte budget: the tile size grows with fftSize ((fftSize/2) * 256 * 4 bytes),
+    // so a tile count alone does not bound memory (512 tiles of 65536 = 16 GB).
+    size_t maxCacheBytes_ = (size_t) 1 << 30;   // 1 GiB
+    size_t cacheBytes_ = 0;
+
+    const void* seenEngine_ = nullptr;   // last engine seen by getTiles (identity only)
+    int64_t seenVersion_ = -1;
+    int64_t seenSamples_ = -1;
+    int64_t overwriteVersion_ = -1;      // tiles older than this were overwritten in place
 
     std::unique_ptr<juce::ThreadPool> pool_;
 

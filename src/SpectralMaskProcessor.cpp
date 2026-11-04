@@ -555,10 +555,16 @@ namespace SpectralMask
         chans.resize ((size_t) numChannels);
         for (auto& cs : chans)
         {
+            // Reserve room for the window plus a large audio block so the
+            // per-block growth in process() normally stays within capacity.
+            cs.acc.reserve ((size_t) N * 2 + 16384);
+            cs.winSum.reserve ((size_t) N * 2 + 16384);
             cs.acc.assign ((size_t) N, 0.0f);
             cs.winSum.assign ((size_t) N, 0.0f);
             cs.accStart = -1;
         }
+        frameBuf.assign ((size_t) N * 2, 0.0f);
+        binGains.assign ((size_t) N / 2 + 1, 0.0f);
         nextFrame = 0;
         lastEnd = -1;
         primed = true;
@@ -619,7 +625,10 @@ namespace SpectralMask
         }
 
         const double binHz = rate / N;
-        std::vector<float> buf ((size_t) N * 2, 0.0f);
+        if (frameBuf.size() < (size_t) N * 2)
+            frameBuf.assign ((size_t) N * 2, 0.0f);
+        if (binGains.size() < (size_t) N / 2 + 1)
+            binGains.assign ((size_t) N / 2 + 1, 0.0f);
 
         for (int64_t k = nextFrame; k <= kLast; ++k)
         {
@@ -627,11 +636,16 @@ namespace SpectralMask
             const size_t off0 = (size_t) (s_k - chans[0].accStart);
             const double tSecs = (double) s_k / rate;
 
+            // Selection membership depends only on (frame, bin): evaluate it
+            // once per frame, not once per channel.
+            for (int b = 0; b <= N / 2; ++b)
+                binGains[(size_t) b] = sel.contains (tSecs, (double) b * binHz) ? 1.0f : 0.0f;
+
             for (size_t ci = 0; ci < datas.size() && ci < chans.size(); ++ci)
             {
                 auto& cs = chans[ci];
                 auto& data = datas[ci];
-                float* d = buf.data();
+                float* d = frameBuf.data();
                 const int64_t dataEnd = dataStart + (int64_t) data.size();
 
                 for (int i = 0; i < N; ++i)
@@ -646,7 +660,7 @@ namespace SpectralMask
 
                 for (int b = 0; b <= N / 2; ++b)
                 {
-                    const float g = sel.contains (tSecs, (double) b * binHz) ? 1.0f : 0.0f;
+                    const float g = binGains[(size_t) b];
                     d[(size_t) b * 2]     *= g;
                     d[(size_t) b * 2 + 1] *= g;
                 }
@@ -695,18 +709,23 @@ namespace SpectralMask
                 // Rebuild the window as exactly N samples anchored at `end`.
                 // The pending contribution region [end, kLast*H+N) is shorter
                 // than N, so copy only what exists and zero-fill the rest.
-                std::vector<float> na ((size_t) N, 0.0f);
-                std::vector<float> nw ((size_t) N, 0.0f);
+                // Done in place (shift down, shrink): no allocation on the
+                // audio thread, the capacity is kept for the next block.
                 const int64_t delta = newAnchor - cs.accStart;
+                size_t keep = 0;
                 if (delta >= 0 && (size_t) delta < cs.acc.size())
                 {
                     const size_t shift = (size_t) delta;
-                    const size_t keep = std::min ((size_t) N, cs.acc.size() - shift);
-                    std::copy_n (cs.acc.begin() + shift, (int) keep, na.begin());
-                    std::copy_n (cs.winSum.begin() + shift, (int) keep, nw.begin());
+                    keep = std::min ((size_t) N, cs.acc.size() - shift);
+                    std::copy (cs.acc.begin() + (std::ptrdiff_t) shift,
+                               cs.acc.begin() + (std::ptrdiff_t) (shift + keep), cs.acc.begin());
+                    std::copy (cs.winSum.begin() + (std::ptrdiff_t) shift,
+                               cs.winSum.begin() + (std::ptrdiff_t) (shift + keep), cs.winSum.begin());
                 }
-                cs.acc.swap (na);
-                cs.winSum.swap (nw);
+                cs.acc.resize ((size_t) N, 0.0f);
+                cs.winSum.resize ((size_t) N, 0.0f);
+                std::fill (cs.acc.begin() + (std::ptrdiff_t) keep, cs.acc.end(), 0.0f);
+                std::fill (cs.winSum.begin() + (std::ptrdiff_t) keep, cs.winSum.end(), 0.0f);
                 cs.accStart = newAnchor;
             }
         }
