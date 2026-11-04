@@ -1,18 +1,31 @@
-# Windows build + unit tests.
+# Build + unit tests: Windows Release (the shipped configuration) and a lean
+# macOS Debug build (jassert enabled, so JUCE assertions show up in the logs;
+# no AI / FFmpeg: those runtimes are vendored for Windows only).
 #
-# Lean build (-DSPECTRO_ENABLE_AI=OFF): the AI tests download model weights on
+# Lean builds (-DSPECTRO_ENABLE_AI=OFF): the AI tests download model weights on
 # first use, which a CI runner should not depend on. Every other dependency
 # (JUCE, SoXR, SoundTouch, FFmpeg) is vendored under extern/.
+#
+# Only the app target is built: it embeds the unit suite (--run-unit-tests,
+# which is what ctest runs) and depends on the fake recorder plugin the
+# recording tests load (tests/CMakeLists.txt). The console SpectroCraftTests
+# target would compile UnitTests.cpp and src/ a second time for nothing.
+#
+# ctest runs the suite as SC_TEST_SHARDS parallel processes (one per CPU of
+# the configuring machine, see tests/CMakeLists.txt); -j lets them overlap.
 name: build
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
+# One run per PR (pull_request only; branch pushes other than main do not
+# trigger), a newer push to the same PR cancels the older run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows:
@@ -26,17 +39,45 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -A x64 -DSPECTRO_ENABLE_AI=OFF
 
-      - name: Build (Release)
-        run: cmake --build build --config Release --parallel
+      - name: Build (Release, app + fake recorder plugin)
+        run: cmake --build build --config Release --target SpectroCraft --parallel
 
-      # Runs SpectroCraft.exe --run-unit-tests (registered in tests/CMakeLists.txt).
-      - name: Unit tests
-        run: ctest --test-dir build -C Release --output-on-failure --timeout 3600
+      - name: Unit tests (parallel shards)
+        run: ctest --test-dir build -C Release -j $env:NUMBER_OF_PROCESSORS --output-on-failure
 
-      - name: Upload test log
+      - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-log
-          path: build/Testing/Temporary/LastTest.log
+          name: ctest-logs-windows
+          path: build/Testing/Temporary/
+          if-no-files-found: ignore
+
+  macos-debug:
+    runs-on: macos-14
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DSPECTRO_ENABLE_AI=OFF
+          -DSPECTRO_ENABLE_FFMPEG=OFF
+
+      - name: Build (Debug, app + fake recorder plugin)
+        run: cmake --build build --target SpectroCraft --parallel "$(sysctl -n hw.ncpu)"
+
+      - name: Unit tests (parallel shards)
+        run: ctest --test-dir build -j "$(sysctl -n hw.ncpu)" --output-on-failure
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-macos-debug
+          path: build/Testing/Temporary/
           if-no-files-found: ignore

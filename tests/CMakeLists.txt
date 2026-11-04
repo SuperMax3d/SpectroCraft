@@ -110,23 +110,48 @@ target_compile_definitions (SpectroCraftTests
 
 # ---------------------------------------------------------------------------
 # Recorder plugins for testing (standard API, see include/RecorderPlugin.h).
-# The fake plugin is a deterministic test double; the real WASAPI plugin is
-# shipped alongside so loading it can be exercised when devices exist. Both
-# land in <test exe dir>/recorders/, which RecorderHost scans by default.
+# The fake plugin is a deterministic, portable test double (C ABI, loaded by
+# LoadLibrary on Windows and dlopen on macOS / Linux). It is copied to two
+# test-only folders, never next to the real app (the app's own
+# <exe dir>/recorders/ and its bundle stay untouched):
+#  - <SpectroCraftTests dir>/recorders/ : scanned by default by the console
+#    test binary, and the folder ctest passes as SC_TEST_RECORDER_DIR;
+#  - <build>/test-recorders/            : a config-independent folder the
+#    suite finds by walking up from the app executable when the suite is run
+#    by hand (SpectroCraft --run-unit-tests without ctest's environment).
+# The app target depends on it: the app embeds the unit suite
+# (--run-unit-tests), so `ninja SpectroCraft` / `cmake --build --target
+# SpectroCraft` alone is enough to run the recording tests.
+# The copied file carries the platform's shared-library extension (.dll,
+# .dylib, .so): RecorderHost::pluginFilePattern (src/Recorder.cpp) scans for
+# exactly that.
 # ---------------------------------------------------------------------------
+set (SC_FAKE_REC_FILENAME "fake_rec${CMAKE_SHARED_LIBRARY_SUFFIX}")
+set (SC_TEST_RECORDERS_NEUTRAL_DIR "${CMAKE_BINARY_DIR}/test-recorders")
+
 add_library (sc_fake_recorder SHARED plugins/fake_rec/FakeRecPlugin.cpp)
 target_include_directories (sc_fake_recorder PRIVATE ${CMAKE_SOURCE_DIR}/include)
 set_target_properties (sc_fake_recorder PROPERTIES
     OUTPUT_NAME fake_rec
     PREFIX ""
     CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED ON)
+    CXX_STANDARD_REQUIRED ON
+    CXX_VISIBILITY_PRESET hidden)   # only the SC_REC_EXPORT entry points
+if (NOT WIN32)
+    find_package (Threads REQUIRED)
+    target_link_libraries (sc_fake_recorder PRIVATE Threads::Threads)
+endif()
 
 add_custom_command(TARGET sc_fake_recorder POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:SpectroCraftTests>/recorders
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:sc_fake_recorder>
-            $<TARGET_FILE_DIR:SpectroCraftTests>/recorders/fake_rec.dll)
+            $<TARGET_FILE_DIR:SpectroCraftTests>/recorders/${SC_FAKE_REC_FILENAME}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SC_TEST_RECORDERS_NEUTRAL_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:sc_fake_recorder>
+            ${SC_TEST_RECORDERS_NEUTRAL_DIR}/${SC_FAKE_REC_FILENAME}
+    COMMENT "Copying the fake recorder plugin to the test recorder folders")
 
 if (WIN32 AND TARGET sc_wasapi_recorder)
     add_custom_command(TARGET SpectroCraftTests POST_BUILD
@@ -136,6 +161,7 @@ if (WIN32 AND TARGET sc_wasapi_recorder)
 endif()
 
 add_dependencies (SpectroCraftTests sc_fake_recorder)
+add_dependencies (SpectroCraft sc_fake_recorder)
 
 # ---------------------------------------------------------------------------
 # ctest: run the unit suite through the app's --run-unit-tests entry point
@@ -192,6 +218,11 @@ foreach (k RANGE 0 ${SC_LAST_SHARD})
     set (env ${SC_TEST_ENV_COMMON}
         "SC_TEST_SHARD=${k}/${SC_TEST_SHARDS}"
         "SC_TEST_CLAIM_DIR=${SC_TEST_CLAIM_DIR}")
+    if (NOT k EQUAL 0)
+        # Only shard 0 (which runs the serial tests, including the ones that
+        # need a real output device) may open the audio device.
+        list (APPEND env "SC_NO_AUDIO_DEVICE=1")
+    endif()
     if (NOT WIN32)
         # Own HOME per shard: settings, recent files and model cache never collide.
         set (home "${CMAKE_CURRENT_BINARY_DIR}/test-home/shard${k}")

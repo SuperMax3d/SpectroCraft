@@ -88,6 +88,11 @@ endif()
 add_dependencies (SpectroCraft sc_bump_version)
 target_include_directories (SpectroCraft PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
+# JUCE writes <JuceLibraryCode>/SpectroCraft_resources.rc only when targeting
+# Windows (same test as _juce_add_resources_rc in JUCEUtils.cmake): elsewhere
+# there is nothing to patch, and depending on the missing rc broke the macOS /
+# Linux build ("no rule to make SpectroCraft_resources.rc").
+if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 get_target_property (SC_JUCE_CODE_DIR SpectroCraft JUCE_GENERATED_SOURCES_DIRECTORY)
 set (SC_RC_FILE "${SC_JUCE_CODE_DIR}/SpectroCraft_resources.rc")
 # Only the rc is patched (JuceHeader.h is left alone: rewriting it on every
@@ -112,6 +117,7 @@ if (TARGET SpectroCraft_rc_lib)   # must compile the rc only after it is patched
     add_dependencies (SpectroCraft_rc_lib sc_bump_version sc_patch_generated)
 endif()
 add_dependencies (SpectroCraft sc_patch_generated)
+endif()   # Windows resources.rc
 
 # AVX2 FFT: compile this one translation unit with /arch:AVX2 on MSVC so the
 # intrinsics are available; runtime CPUID dispatch falls back to scalar otherwise.
