@@ -4849,7 +4849,16 @@ static void testChangeGainDialog()
             // so this order is what makes typing work immediately.
             dlg->enterModalState (false);
             editor->grabKeyboardFocus();
-            if (haveFocus)
+            // The field can only hold keyboard focus once the OS has focused
+            // the dialog's window. Being the foreground process is not enough:
+            // under Xvfb with no window manager the new window may never be
+            // focused, which made this check flaky on the Linux CI.
+            const bool windowFocused = haveFocus
+                && scPumpUntil ([dlg] { auto* p = dlg->getPeer(); return p != nullptr && p->isFocused(); }, 1000);
+            if (haveFocus && !windowFocused)
+                scSkip ("change gain dialog: the OS did not focus the dialog window"
+                        " (no window manager?), field-focus check skipped");
+            if (windowFocused)
                 CHECK (scPumpUntil ([editor] { return editor->hasKeyboardFocus (false); }, 1000),
                        "field has keyboard focus once the dialog is showing");
             dlg->exitModalState (0);
