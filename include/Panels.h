@@ -412,6 +412,12 @@ public:
     int getAxisMode() const { return axisMode_; }
     const std::vector<std::vector<float>>& getThirdOctMags() const { return thirdOctMags; }
 
+    // Channel whose calibration labels the shared level axis: the first
+    // channel of the displayed live data (falls back to the first visible
+    // channel, -1 = default full-scale value). Per-channel ("bkdk") full
+    // scales differ, so channel 0's value is wrong when it is not displayed.
+    int levelAxisChannel() const;
+
     // Centred moving-average smoothing of a series (window in points).
     static void smoothSeries (std::vector<float>& v, int window);
 
@@ -719,6 +725,15 @@ private:
     // live-cache key.
     int cachedScaleUnit_ = -1;
     bool cachedPascalMode_ = false;
+    // Rest of the live-cache key: the exact channel list (a solo switch keeps
+    // the count but changes the channels), the engine and its content version
+    // (edits/recording on the same region), and for the curve modes the
+    // spectral-selection mask.
+    std::vector<int> cachedChans_;        // channels behind mags / thirdOctMags
+    std::vector<int> cachedCurveChans_;   // channels behind liveCurves
+    const AudioEngine* cachedEngine_ = nullptr;
+    int64_t cachedContentVer_ = -1;
+    uint64_t cachedMaskHash_ = 0;
     int64_t lastComputeMs = 0;
     bool lastComputeWasExpensive = false;   // multi-window averaging (throttle key)
     // Set by the axis-mode combo: fit both axes once the new mode's data has
@@ -785,6 +800,12 @@ private:
     // The actual cache refresh; recomputeIfNeeded() wraps it with the
     // deferred post-mode-change zoom fit.
     void doRecompute ();
+
+    // Valid visible channels of the active engine, in display order: the
+    // channel list behind the live caches (part of their keys).
+    std::vector<int> liveChannels() const;
+    // ENBW (in bins) of the current window type at FFT size n.
+    double currentEnbwBins (int n) const;
 
     // Recompute the live curves for the current mode/track/smoothing over
     // region [t0, t1] (called from recomputeIfNeeded()).
@@ -1232,8 +1253,9 @@ public:
     // the Time Offset; Sample mode shows sample counts.
     juce::String markerTimeText (double t, bool duration) const;
     /** Parses a begin/end/length field: displayed value -> real seconds.
-        Empty/invalid text yields 0 in displayed units (parseTimeCode parity). */
-    double parseMarkerTime (const juce::String& s, bool duration) const;
+        Empty/invalid text yields 0 in displayed units (parseTimeCode parity)
+        and sets *ok to false when ok is given. */
+    double parseMarkerTime (const juce::String& s, bool duration, bool* ok = nullptr) const;
 
     // Double-click a row: selects it - which sets the time selection to the
     // marker's range and makes sure both views' time window includes it (+10%
@@ -1252,6 +1274,10 @@ public:
     // DEL key: actually deletes the WAV data of the active selection - zeros
     // a spectral selection, or trims out a time range (app.del).
     void deleteAudioData ();
+    // Set by MainWindow: runs the delete through its destructive-edit path
+    // (streamed-file materialisation + view refresh). Unset (tests): app.del()
+    // followed by app.onStateChange().
+    std::function<void()> onDeleteAudioRequested;
     // Pans/zooms both views so that every selected marker is visible
     // (ensureTimeRangeVisible adds the usual 10% margin).
     void fitViewToSelected ();
@@ -1301,7 +1327,7 @@ private:
         void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
         void cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
         void selectedRowsChanged (int) override;
-        // DEL removes every selected marker (not just the last-clicked one).
+        // DEL deletes the audio of the active (marker-union) time selection.
         void deleteKeyPressed (int) override;
 
     private:
@@ -1321,9 +1347,17 @@ private:
     int searchAnchorRow = -1;    // row of the last found match (-1 = none)
 
     void updateDetails();
-    void onBeginEndChanged (bool isBegin);
-    void onLengthChanged();
-    void onTitleCommentChanged (bool isTitle);
+
+    // Detail editors: typing only marks the field pending; the edits are
+    // applied together on Return / focus loss / before the selection moves.
+    enum { kPendingBegin = 1, kPendingEnd = 2, kPendingLength = 4,
+           kPendingTitle = 8, kPendingComment = 16 };
+    int pendingEdits = 0;
+    const FileDoc* detailsDoc = nullptr;   // doc whose markers the editors show
+    void commitPendingEdits (bool followMarker = true);
+    void applyBeginEnd (int id, bool beginDirty, bool endDirty);
+    void applyLength (int id);
+    void applyTitleComment (int id, bool title, bool comment);
 
     JUCE_DECLARE_NON_COPYABLE (MarkerListPanel)
 };
@@ -1518,6 +1552,10 @@ public:
     // DEL key: actually deletes the WAV data of the active selection - zeros
     // a spectral selection, or trims out a time range (app.del).
     void deleteAudioData ();
+    // Set by MainWindow: runs the delete through its destructive-edit path
+    // (streamed-file materialisation + view refresh). Unset (tests): app.del()
+    // followed by app.onStateChange().
+    std::function<void()> onDeleteAudioRequested;
     // Pans/zooms both views so that every selected stored selection's time
     // range is visible (ensureTimeRangeVisible adds the usual 10% margin).
     void fitViewToSelected ();
@@ -2177,6 +2215,12 @@ public:
     bool canResetCurrentScript() const;
     void resetCurrentScriptToOriginal();   // no prompt (used by tests)
 
+    // Writes the editor text back to the current script file when it was
+    // edited since the last load/save. Called before switching scripts and
+    // before Add; MainWindow may call it on quit. Returns false (after
+    // telling the user) when the file could not be written.
+    bool saveCurrentScriptIfModified();
+
 private:
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;   // right-click menu
@@ -2190,6 +2234,7 @@ private:
     juce::File scriptDir;
     std::vector<juce::File> scripts;
     int currentIdx = -1;
+    juce::String loadedText;   // editor text as last loaded/saved (dirty check)
 
     juce::ComboBox scriptBox;
     juce::TextButton addBtn, removeBtn, runBtn;
