@@ -297,6 +297,34 @@ static void testSdspRenderBinMapping()
            "3 kHz tone drawn on the 3 kHz row, got " + juce::String (fPeak, 1) + " Hz");
 }
 
+
+// integration (persistence#3): a selection made only of subtractive shapes
+// selects nothing - no STFT pass, no undo entry, no "unsaved", samples intact.
+static void testSdspSubtractiveOnlyIsNoOp()
+{
+    progress ("regression spectral-dsp (integration): subtractive-only selection is a no-op");
+    AudioEngine eng;
+    ::UndoManager um;
+    eng.setUndoManager (&um);
+    std::vector<std::vector<float>> data (1, std::vector<float> (8000));
+    for (int i = 0; i < 8000; ++i)
+        data[0][(size_t) i] = 0.5f * (float) std::sin (0.3 * i);
+    CHECK (eng.initNew (1, 8000.0, &data), "subtractive-only: document");
+    const int64_t v0 = eng.contentVersion ();
+
+    SpectralSelection sel;
+    sel.addRect (0.1, 0.5, 100.0, 2000.0, /*subtract=*/true);
+    CHECK (!sel.empty () && !sel.hasAdditiveShape (), "subtractive-only: list is non-empty but selects nothing");
+
+    std::string err;
+    CHECK (SpectralMask::applyMaskedGain (eng, { 0, 8000 }, sel, 0.0f, "mute", nullptr, &err),
+           "subtractive-only: applyMaskedGain succeeds");
+    CHECK (!um.canUndo (), "subtractive-only: no undo entry recorded");
+    CHECK (eng.contentVersion () == v0, "subtractive-only: content unchanged (version)");
+    float x = 0.0f;
+    CHECK (eng.readSamples (0, 1234, 1, &x) && x == data[0][1234], "subtractive-only: samples untouched");
+}
+
 static void runRegression_spectral_dsp()
 {
     testSdspScFftAllSizes();
@@ -305,4 +333,5 @@ static void runRegression_spectral_dsp()
     testSdspConcurrentGetTiles();
     testSdspCacheByteBudget();
     testSdspRenderBinMapping();
+    testSdspSubtractiveOnlyIsNoOp();
 }

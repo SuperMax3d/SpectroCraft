@@ -1314,7 +1314,8 @@ void Application::clearSpectralSelection ()
 void Application::pushSpectralMaskToEngine ()
 {
     auto* d = doc();
-    const bool active = playSpectralSel && d && !d->spectralSel.empty ();
+    // A selection made only of subtractive shapes selects nothing.
+    const bool active = playSpectralSel && d && d->spectralSel.hasAdditiveShape ();
     audioEngine ().setSpectralPlaybackMask (
         active ? std::make_shared<SpectralSelection> (d->spectralSel) : nullptr);
 }
@@ -1322,7 +1323,7 @@ void Application::pushSpectralMaskToEngine ()
 bool Application::hasSpectralSelection () const
 {
     auto* d = doc();
-    return d && !d->spectralSel.empty ();
+    return d && d->spectralSel.hasAdditiveShape ();   // subtractive-only selects nothing
 }
 
 void Application::refreshSpectralSelectionUI ()
@@ -3560,17 +3561,40 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
             nt[i] = orig[i] - filt[i];
     }
 
-    if (!audioEngine().replaceWithNoiseTracks (samples, data, noiseTracks,
-                "Noise suppressed (" + juce::String (modelId) + ") and copied noise to new track(s)"))
-        return fail ("Could not apply the noise suppression.");
+    // The commit changes the channel count and edits visibleChannels and the
+    // active document, which the message thread reads while painting: run it
+    // there (inference above stays on the worker), like runPythonScript.
+    auto commit = [&] () -> bool
+    {
+        if (!audioEngine().replaceWithNoiseTracks (samples, data, noiseTracks,
+                    "Noise suppressed (" + juce::String (modelId) + ") and copied noise to new track(s)"))
+            return false;
 
-    // Make the freshly added channels visible (leave other choices alone).
-    const int n = audioEngine().numChannels ();
-    for (int ch = nch; ch < n; ++ch)
-        if (!isChannelVisible (ch))
-            visibleChannels.push_back (ch);
-    std::sort (visibleChannels.begin (), visibleChannels.end());
-    syncActiveDoc ();
+        // Make the freshly added channels visible (leave other choices alone).
+        const int n = audioEngine().numChannels ();
+        for (int ch = nch; ch < n; ++ch)
+            if (!isChannelVisible (ch))
+                visibleChannels.push_back (ch);
+        std::sort (visibleChannels.begin (), visibleChannels.end());
+        syncActiveDoc ();
+        return true;
+    };
+
+    bool committed = false;
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
+    if (mm == nullptr || mm->isThisTheMessageThread ())
+        committed = commit ();   // tests / CLI: already on the right thread
+    else
+    {
+        // The message thread never waits on this worker (non-blocking modal
+        // progress dialog), so waiting here cannot deadlock.
+        juce::WaitableEvent done;
+        if (!juce::MessageManager::callAsync ([&] { committed = commit (); done.signal (); }))
+            return fail ("Could not apply the noise suppression (the application is shutting down).");
+        done.wait (-1);
+    }
+    if (!committed)
+        return fail ("Could not apply the noise suppression.");
 
     return true;
 }
@@ -4118,6 +4142,17 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
 }
 #endif
 
+// Undo/redo could not apply a patch: the history was cleared. Tell the user
+// (asynchronously: undo runs from key handlers and menus).
+static void reportHistoryCleared (const char* what)
+{
+    if (juce::MessageManager::getInstanceWithoutCreating () == nullptr)
+        return;
+    juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+        what, juce::String ("The edit could not be ") + (juce::String (what) == "Undo" ? "undone" : "redone")
+              + " (not enough memory?). The undo history was cleared.");
+}
+
 void Application::undoSteps (int n)
 {
     FileDoc* d = doc();
@@ -4129,7 +4164,16 @@ void Application::undoSteps (int n)
     {
         Patch p;
         if (!d->undo.popUndo (p)) break;
-        d->engine.applyPatch (p, false, /*rebuild=*/false);
+        if (!d->engine.applyPatch (p, false, /*rebuild=*/false))
+        {
+            // The patch was already moved to the other stack but the buffer
+            // is unchanged (out of memory, or a patch inconsistent with the
+            // audio): the history no longer matches the samples, so drop it
+            // rather than keep a corrupt undo/redo chain.
+            d->undo.clear ();
+            reportHistoryCleared ("Undo");
+            break;
+        }
         if (p.hasSideState) restorePatchSideState (d, p, false);
         ++done;
     }
@@ -4152,7 +4196,16 @@ void Application::redoSteps (int n)
     {
         Patch p;
         if (!d->undo.popRedo (p)) break;
-        d->engine.applyPatch (p, true, /*rebuild=*/false);
+        if (!d->engine.applyPatch (p, true, /*rebuild=*/false))
+        {
+            // The patch was already moved to the other stack but the buffer
+            // is unchanged (out of memory, or a patch inconsistent with the
+            // audio): the history no longer matches the samples, so drop it
+            // rather than keep a corrupt undo/redo chain.
+            d->undo.clear ();
+            reportHistoryCleared ("Redo");
+            break;
+        }
         if (p.hasSideState) restorePatchSideState (d, p, true);
         ++done;
     }

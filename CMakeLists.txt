@@ -58,7 +58,4 @@ add_subdirectory(src)
 enable_testing()
 add_subdirectory(tests)
 
-# `ctest` runs the unit suite (SpectroCraftTests exits non-zero when a CHECK fails).
-if(TARGET SpectroCraftTests)
-    add_test(NAME SpectroCraftUnitTests COMMAND SpectroCraftTests)
-endif()
+# `ctest` registration lives in tests/CMakeLists.txt (unit_tests, with the test environment).

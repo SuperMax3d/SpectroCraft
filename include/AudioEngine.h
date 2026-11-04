@@ -47,10 +47,11 @@ public:
     const juce::File& getFile() const { return currentFile; }
     int numChannels() const { return nchans; }
     int64_t numSamples() const { return totalSamples; }
-    /** Monotonic version of the audio content: bumped whenever samples are
-        appended or overwritten in place (recording). Views that cache a
-        rendered picture compare it to decide on re-renders even when neither
-        the length nor the time window changed (loop-mode recording). */
+    /** Monotonic version of the audio content: bumped whenever the samples
+        change - edits, undo/redo, recording (append / in-place overwrite),
+        load, new document and close. Views and analysis caches compare it to
+        decide on re-renders even when neither the length nor the time window
+        changed (an in-place edit, loop-mode recording). */
     int64_t contentVersion() const { return contentVer.load (); }
     double sampleRate() const { return rate; }
     double duration() const { return durationSecs; }
@@ -382,7 +383,7 @@ private:
 
     int nchans = 0;
     int64_t totalSamples = 0;
-    std::atomic<int64_t> contentVer{ 0 };   // bumped on append/overwrite
+    std::atomic<int64_t> contentVer{ 0 };   // see contentVersion()
     double rate = 44100.0;
     double durationSecs = 0.0;
     bool hasFile = false;

@@ -215,11 +215,23 @@ static void testViewsClippedSelectionPaint()
     const juce::Image full = sv->createComponentSnapshot (sv->getLocalBounds (), true, 1.0f);
     const juce::Rectangle<int> col (cx - 2, 0, 5, sv->getHeight ());
     const juce::Image part = sv->createComponentSnapshot (col, true, 1.0f);
+    // The selection fill is a whole-pixel mask blended at alpha ~80/255, so a
+    // mask pixel set or cleared differently shifts a channel by 20+ levels.
+    // The anti-aliased polygon border, on the other hand, is rasterised by the
+    // native renderer (CoreGraphics on macOS), whose edge coverage differs by
+    // 1-2 levels between a full and a clipped/offset snapshot (measured: 10
+    // border pixels, none with the border stroke disabled). Tolerate that.
     int diff = 0;
     for (int y = 0; y < sv->getHeight (); ++y)
         for (int dx = 0; dx < 5; ++dx)
-            if (full.getPixelAt (cx - 2 + dx, y) != part.getPixelAt (dx, y))
-                ++diff;
+        {
+            const auto a = full.getPixelAt (cx - 2 + dx, y), b = part.getPixelAt (dx, y);
+            const int d = std::max ({ std::abs ((int) a.getRed ()   - (int) b.getRed ()),
+                                      std::abs ((int) a.getGreen () - (int) b.getGreen ()),
+                                      std::abs ((int) a.getBlue ()  - (int) b.getBlue ()),
+                                      std::abs ((int) a.getAlpha () - (int) b.getAlpha ()) });
+            if (d > 4) ++diff;
+        }
     CHECK (diff == 0, "views#W4: a 5 px repaint draws the same selection pixels as a full paint");
 }
 

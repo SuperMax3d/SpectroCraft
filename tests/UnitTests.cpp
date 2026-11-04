@@ -825,9 +825,13 @@ static void testWaveformPerSampleZoom()
 static void testMarkerAxisClipping()
 {
     const juce::File wav = makeTempFile ("marker_clip.wav");
+    // Amplitude 0.15 reads about -19.5 dB RMS in the calibrated spectrogram
+    // (sqrt(2)*|X|/sum(w)). That is the level the 0.5 tone had under the old
+    // |X|/N scale, well below the palette's yellow; at 0.5 (-9 dB) the tone's
+    // brightest pixels near the file end already count as "yellow" below.
     writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
     {
-        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
+        return 0.15f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
     });
 
     Application app;
@@ -1467,6 +1471,11 @@ static void testMarkerPanelDetails()
         ed.setText (t, true);
         // Pump until the queue is quiescent; a single runDispatchLoopUntil(0)
         // pass can miss messages that only become visible on the next cycle.
+        for (int i = 0; i < 8; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+        // The detail editors no longer commit on every keystroke (typing only
+        // marks the field pending): commit like the user does, with Return.
+        if (ed.onReturnKey) ed.onReturnKey();
         for (int i = 0; i < 8; ++i)
             juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
     };
@@ -2802,9 +2811,14 @@ static void testFFTClickAndAverage()
         const int bin880 = (int) std::lround (880.0 * 1024 / 8000.0);
         CHECK (spec[0][(size_t) bin440] > 0.3, "averaged selection keeps the 440 Hz tone");
         CHECK (spec[0][(size_t) bin880] > 0.3, "averaged selection keeps the 880 Hz tone");
-        // Magnitudes are mapped against a fixed -160 dB floor: 0.3 ~= -112 dB,
-        // which is still far below the ~-40 dB tone peaks.
-        CHECK (spec[0][25] < 0.3, "far bin stays quiet in the averaged spectrum");
+        // Magnitudes are mapped against a fixed -160 dB floor (1.0 = 0 dB, so
+        // 0.5 = 80 dB). The levels are calibrated RMS (a 0.5 sine reads -9 dB)
+        // and averaged in power (Welch), so the absolute floor of a far bin
+        // depends on that convention: compare it to the tones instead. The far
+        // bin (~195 Hz) must sit at least 80 dB below the 440 Hz tone (measured:
+        // ~97 dB below).
+        CHECK (spec[0][25] < spec[0][(size_t) bin440] - 0.5f,
+               "far bin stays quiet in the averaged spectrum");
     }
 }
 
@@ -12033,15 +12047,22 @@ static void testSpectralSelectionRenderHole()
     { juce::Graphics g0 (base); view.paint (g0); }
 
     auto sameAsBase = [&] (int x, int y) { return img.getPixelAt (x, y) == base.getPixelAt (x, y); };
-    // The selection fill is RGBA(70,130,255,~80): over any dark background it
-    // lands around (44,60,105) — clearly blue-dominant.
-    auto blueTint = [] (const juce::Colour& p) { return p.getBlue() - p.getRed() > 40; };
+    // The selection fill is RGBA(70,130,255,~80): it pulls the pixel towards
+    // blue. Over a dark background it lands around (44,60,105); over the
+    // calibrated spectrogram (a 0.5 tone reads -9 dB RMS) the background at
+    // 250 Hz is already a bright magenta (~198,25,140 -> ~158,58,176), so the
+    // tint is measured relative to the no-selection pixel, not in absolute terms.
+    auto blueShift = [] (const juce::Colour& p, const juce::Colour& under)
+    {
+        return (p.getBlue() - p.getRed()) - (under.getBlue() - under.getRed()) > 40;
+    };
 
     const auto prSel = view.plotRect();
     const int yLow   = prSel.getY() + (int) view.freqToY (250.0, prSel.getHeight());  // inside both rects' freq span
     const int xAonly = (int) view.timeToX (0.15);        // inside A only -> blue fill
     CHECK (!sameAsBase (xAonly, yLow), "additive area differs from the no-selection baseline");
-    CHECK (blueTint (img.getPixelAt (xAonly, yLow)), "additive area renders blue");
+    CHECK (blueShift (img.getPixelAt (xAonly, yLow), base.getPixelAt (xAonly, yLow)),
+           "additive area renders blue");
 
     const int xHole = (int) view.timeToX (0.25);         // inside A and B -> hole, no fill
     CHECK (sameAsBase (xHole, yLow), "subtractive overlap renders as a hole");
@@ -14238,6 +14259,12 @@ static void testSplitSpectralSelectionViewRefresh()
     // This test compares raw tile data against the paint; turn off overlay
     // grids (1/3-octave lines are white dashes that exceed the tolerance).
     app.settings.showThirdOctaveGrid = false;
+    // The grey frequency grid is an overlay the ground-truth render lacks too:
+    // its 500 Hz line sits on channel 1's 500 Hz tone, which the calibrated
+    // spectrogram (+9 dB vs the old |X|/N scale) now draws far brighter than
+    // the line, so the difference there exceeds the tolerance.
+    const bool freqGridWas = app.settings.showFreqGrid;
+    app.settings.showFreqGrid = false;
     FileDoc* d = app.doc();
     if (!d) return;
     AudioEngine& eng = app.audioEngine ();
@@ -14308,6 +14335,12 @@ static void testSplitSpectralSelectionViewRefresh()
             }
         CHECK (maxDiff < 90.0, "view row matches the fresh engine render");
     }
+
+    // The grid flag is a persisted setting and the MainWindow above synced it
+    // into the (per-run) settings store: restore it so later tests still see
+    // the default grid.
+    app.settings.showFreqGrid = freqGridWas;
+    app.saveSettings ();
 }
 
 static void testSplitSpectralSelectionTrack1To2App()
@@ -22455,7 +22488,7 @@ static void testStartupTrace()
     log.deleteFile();
 
     scStart::begin();
-    const juce::File used = scStart::enable (log);
+    const juce::File used = scStart::enable (log, SC_VERSION_STRING);
     CHECK (scStart::isEnabled (), "enable turns measurement on");
     CHECK (used == log, "writable preferred path is used");
 
@@ -22472,6 +22505,8 @@ static void testStartupTrace()
     CHECK (content.contains ("[startup] phase-a: T+"), "phase-a line written");
     CHECK (content.contains ("[startup] phase-b: T+"), "phase-b line written");
     CHECK (content.contains ("custom-note-line"), "note line written");
+    // The log carries the build's bumped version, not JUCE's ProjectInfo default.
+    CHECK (content.contains ("version: " SC_VERSION_STRING), "version line carries SC_VERSION_STRING");
 
     scStart::disable();
     const int64 c = scStart::mark ("phase-c");
@@ -23311,10 +23346,12 @@ static void testZoomFitAutoMode()
     // --- Auto fit follows a new selection ------------------------------------
     app.setSelection ({ 0.0, 1.0 });          // quiet half
     v.recomputeIfNeeded ();
-    // The FFT pipeline normalises |X|/N without coherent-gain correction, so a
-    // full-scale sine reads about -12 dB; the 0.05-amplitude tone peaks near -39.
+    // The FFT panel reads calibrated RMS levels (window coherent gain
+    // corrected): a sine of peak A reads 20*log10(A/sqrt 2), so the 0.05 tone
+    // peaks near -29 dB (fit top with margin: about -23) and the 0.9 one near
+    // -3.9 dB (fit top about +3).
     const double topQuiet = v.getDbTop();
-    CHECK (topQuiet < -25.0 && topQuiet > -50.0, "quiet region fitted low");
+    CHECK (topQuiet < -15.0 && topQuiet > -45.0, "quiet region fitted low");
 
     juce::Thread::sleep (kScThrottleWaitMs);                 // defeat the expensive-recompute throttle
     app.setSelection ({ 1.0, 2.0 });          // loud half: new selection auto-fits

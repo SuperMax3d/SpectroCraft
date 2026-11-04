@@ -236,10 +236,57 @@ static void testRegressionPythonBridge()
     dir.deleteRecursively ();
 }
 
+
+// integration (audio_engine#1): undo/redo of a patch the engine rejects
+// (stale/inconsistent, or out of memory) must not leave the history out of
+// step with the samples: the history is cleared, the audio is untouched.
+// integration (persistence#2): a subtractive-only spectral selection is no
+// selection at all for the app (no playback mask, no "has selection").
+static void testRegressionUndoRejectedPatchAndSubtractiveSel ()
+{
+    progress ("regression application (integration): rejected undo patch clears the history; subtractive-only selection");
+    const juce::File wav = makeTempFile ("reg_app_undo_reject.wav");
+    writeWav (wav, 1, 8000.0, 1000, [] (int, int64_t, double) { return 0.25f; });
+    Application app;
+    CHECK (app.openFile (wav), "reg app undo: open");
+    if (app.doc () == nullptr) return;
+    auto& eng = app.audioEngine ();
+    std::string err;
+    std::vector<std::vector<float>> rows (1, std::vector<float> (10, 0.5f));
+    CHECK (eng.replaceSamples ({ 100, 110 }, rows, "edit", &err) && app.undo ().canUndo (),
+           "reg app undo: edit recorded");
+    app.undo ().lastRecorded ().lengthDelta = 50;   // corrupt it: 10 -> 10 samples needs 0
+
+    app.undoSteps (1);
+    float x = 0.0f;
+    CHECK (eng.readSamples (0, 105, 1, &x) && x == 0.5f, "reg app undo: rejected undo left the audio as it was");
+    CHECK (!app.undo ().canUndo () && app.undo ().redoSize () == 0,
+           "reg app undo: the out-of-step history was cleared");
+    // The warning is shown asynchronously: let it appear, then dismiss it.
+    for (int i = 0; i < 5; ++i)
+        juce::MessageManager::getInstance ()->runDispatchLoopUntil (5);
+    juce::ModalComponentManager::getInstance ()->cancelAllModalComponents ();
+    for (int i = 0; i < 5; ++i)
+        juce::MessageManager::getInstance ()->runDispatchLoopUntil (5);
+
+    // Subtractive-only selection.
+    SpectralSelection sub;
+    sub.addRect (0.01, 0.05, 100.0, 1000.0, /*subtract=*/true);
+    app.doc ()->spectralSel = sub;
+    CHECK (!app.hasSpectralSelection (), "reg app: a subtractive-only selection is no selection");
+    SpectralSelection add;
+    add.addRect (0.01, 0.05, 100.0, 1000.0, /*subtract=*/false);
+    app.doc ()->spectralSel = add;
+    CHECK (app.hasSpectralSelection (), "reg app: an additive shape is a selection");
+
+    wav.deleteFile ();
+}
+
 static void runRegression_application()
 {
     testRegressionLoopRecordSmallPulls ();
     testRegressionPythonSplitCommand ();
     testRegressionPythonMetaRegionEnd ();
     testRegressionPythonBridge ();
+    testRegressionUndoRejectedPatchAndSubtractiveSel ();
 }

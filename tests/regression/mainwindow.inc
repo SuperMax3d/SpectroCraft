@@ -392,6 +392,76 @@ static void regMwWaveScrollBarPans()
     wav.deleteFile ();
 }
 
+
+// integration (handoffs persistence#1, views#2, panels#2a): a metadata edit
+// made while a background save runs keeps the document dirty; the spectral
+// scrollbar follows the log/linear frequency setting; DEL in the Markers list
+// deletes through MainWindow's destructive-edit route.
+static void regMwIntegrationHandoffs()
+{
+    progress ("regression mainwindow (integration): save keeps later metadata edits dirty, log scrollbar, DEL route");
+    const juce::File wav = regMwWriteWav ("reg_mw_integ_src.wav", 0.25f);
+    const juce::File dst = makeTempFile ("reg_mw_integ_dst.wav");
+    dst.deleteFile ();
+    Application app;
+    CHECK (app.openFile (wav), "reg mw integ: opened wav");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "reg mw integ"));
+    FileDoc* d = app.doc ();
+    if (d == nullptr) return;
+
+    // Save, then "edit" the metadata before the completion callback has run
+    // (it only runs when the message loop is pumped below).
+    d->metaDirty = true;
+    const int jobs = sc::WorkProgressDialog::numActive ();
+    win->runSaveAsync (dst, true);
+    d->metaDirty = true;   // a marker added while the worker writes the file
+    for (int i = 0; i < 1000 && sc::WorkProgressDialog::numActive () > jobs; ++i)
+        regMwPump (10);
+    regMwPump (10);
+    CHECK (dst.existsAsFile (), "reg mw integ: file saved");
+    CHECK ((bool) d->metaDirty, "reg mw integ: an edit made during the save keeps the document dirty");
+
+    // Nothing changed during this one: it ends clean.
+    win->runSaveAsync (dst, false);
+    for (int i = 0; i < 1000 && sc::WorkProgressDialog::numActive () > jobs; ++i)
+        regMwPump (10);
+    regMwPump (10);
+    CHECK (!d->metaDirty, "reg mw integ: an undisturbed save clears the metadata flag");
+
+    // Log frequency axis -> logarithmic scrollbar, without waiting for a zoom.
+    auto* bar = dynamic_cast<ValueScrollBar*> (win->specVScrollBarComp ());
+    CHECK (bar != nullptr, "reg mw integ: spectral scrollbar exists");
+    if (bar != nullptr)
+    {
+        app.settings.logFrequency = true;
+        if (app.onStateChange) app.onStateChange ();
+        CHECK (bar->isLogarithmic (), "reg mw integ: log frequency -> logarithmic scrollbar");
+        app.settings.logFrequency = false;
+        if (app.onStateChange) app.onStateChange ();
+        CHECK (!bar->isLogarithmic (), "reg mw integ: linear frequency -> linear scrollbar");
+    }
+
+    // DEL hooks of the Markers and Selection panels are wired.
+    auto* markers = dynamic_cast<MarkerListPanel*> (win->panelForId ("markers"));
+    auto* selPanel = dynamic_cast<SelectionPanel*> (win->panelForId ("selection"));
+    CHECK (markers != nullptr && markers->onDeleteAudioRequested != nullptr,
+           "reg mw integ: Markers DEL routed through MainWindow");
+    CHECK (selPanel != nullptr && selPanel->onDeleteAudioRequested != nullptr,
+           "reg mw integ: Selection DEL routed through MainWindow");
+    if (markers != nullptr && markers->onDeleteAudioRequested != nullptr)
+    {
+        const int64_t before = app.audioEngine ().numSamples ();
+        app.setSelection ({ 0.1, 0.2 });
+        markers->onDeleteAudioRequested ();
+        regMwPump (10);
+        CHECK (app.audioEngine ().numSamples () == before - 800, "reg mw integ: DEL deleted the selected 0.1 s");
+    }
+
+    win.reset ();
+    wav.deleteFile ();
+    dst.deleteFile ();
+}
+
 static void runRegression_mainwindow()
 {
     regMwFilterEqDialogOwnsComponents ();
@@ -404,4 +474,5 @@ static void runRegression_mainwindow()
     regMwSaveAsRenamesDoc ();
     regMwOpenFailureAndDragFilter ();
     regMwWaveScrollBarPans ();
+    regMwIntegrationHandoffs ();
 }

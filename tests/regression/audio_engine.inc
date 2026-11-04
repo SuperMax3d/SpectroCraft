@@ -297,15 +297,29 @@ static void testAeRf64Save()
     CHECK (u64 (28) == (uint64_t) 1001 * 2 * 4, "W2: ds64 data size");
     CHECK (u64 (36) == 1001, "W2: ds64 sample count");
 
-    AudioEngine back;
-    CHECK (back.loadFile (out), "W2: RF64 file loads");
-    CHECK (back.numChannels () == 2 && back.numSamples () == 1001, "W2: RF64 shape read back");
-    bool same = true;
-    for (int ch = 0; ch < 2 && same; ++ch)
-        for (int i = 0; i < 1001; ++i)
-            if (readOneSample (back, ch, i) != aeChanValue (ch, i)) { same = false; break; }
+    // fmt then data, the data chunk's 32-bit size holding the -1 sentinel.
+    CHECK (std::memcmp (b + 48, "fmt ", 4) == 0 && u32 (52) == 16, "W2: fmt chunk after ds64");
+    CHECK (std::memcmp (b + 72, "data", 4) == 0 && u32 (76) == 0xffffffffu, "W2: data chunk size = -1");
+
+    // Read the samples back from the bytes rather than through JUCE: JUCE's
+    // WavAudioFormatReader rejects a chunk whose 32-bit size exceeds the bytes
+    // left in the file (`length > numBytesAvailable`), so it reads the -1 data
+    // size of a forced RF64 file smaller than 4 GiB as zero frames. A real
+    // RF64 file (> 4 GiB, the only case saveFile writes one) passes that check.
+    // The forced file itself is valid EBU 3306: CoreAudio (afinfo) and ffmpeg
+    // both read 2 ch x 1001 frames of float32 from it.
+    const bool shape = u32 (56) == 0x00020003u   // WAVE_FORMAT_IEEE_FLOAT, 2 channels
+                       && mb.getSize () >= 80 + (size_t) 1001 * 2 * 4;
+    CHECK (shape, "W2: RF64 shape read back");
+    bool same = shape;
+    for (int i = 0; same && i < 1001; ++i)
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float v;
+            std::memcpy (&v, b + 80 + ((size_t) i * 2 + (size_t) ch) * 4, 4);
+            if (v != aeChanValue (ch, i)) { same = false; break; }
+        }
     CHECK (same, "W2: RF64 samples read back exactly");
-    back.closeFile ();
     out.deleteFile ();
 }
 
@@ -362,6 +376,47 @@ static void testAeAtomicSave()
     dir.deleteRecursively ();
 }
 
+
+// integration (panels#1): contentVersion() moves with EVERY content change,
+// not only recording: the FFT panel and the spectrogram key their caches on it.
+static void testAeContentVersionFollowsEdits ()
+{
+    progress ("regression audio-engine (integration): contentVersion follows edits, undo/redo, load, close");
+    AudioEngine eng;
+    ::UndoManager um;
+    eng.setUndoManager (&um);
+    std::vector<std::vector<float>> data (2, std::vector<float> (1000, 0.25f));
+    int64_t v = eng.contentVersion ();
+    CHECK (eng.initNew (2, 8000.0, &data) && eng.contentVersion () > v, "content version: new document bumps");
+
+    v = eng.contentVersion ();
+    std::string err;
+    std::vector<std::vector<float>> rows (2, std::vector<float> (10, 0.5f));
+    CHECK (eng.replaceSamples ({ 100, 110 }, rows, "edit", &err) && eng.contentVersion () > v,
+           "content version: an in-place edit (same length) bumps");
+
+    v = eng.contentVersion ();
+    ::Patch p;
+    CHECK (um.popUndo (p) && eng.applyPatch (p, false) && eng.contentVersion () > v, "content version: undo bumps");
+    v = eng.contentVersion ();
+    CHECK (um.popRedo (p) && eng.applyPatch (p, true) && eng.contentVersion () > v, "content version: redo bumps");
+
+    v = eng.contentVersion ();
+    CHECK (eng.deleteSamples ({ 0, 10 }, &err) && eng.contentVersion () > v, "content version: delete bumps");
+
+    v = eng.contentVersion ();
+    ::Patch bad;
+    bad.oldStart = 100; bad.oldEnd = 110;
+    bad.newData.assign (2, std::vector<float> (10, 0.5f));
+    bad.lengthDelta = 50;
+    CHECK (!eng.applyPatch (bad, true) && eng.contentVersion () == v,
+           "content version: a rejected patch leaves it alone");
+
+    v = eng.contentVersion ();
+    eng.closeFile ();
+    CHECK (eng.contentVersion () > v, "content version: close bumps");
+}
+
 static void runRegression_audio_engine()
 {
     testAeStreamedReadHonoursChannel ();
@@ -372,4 +427,5 @@ static void runRegression_audio_engine()
     testAeRejectInconsistentPatches ();
     testAeRf64Save ();
     testAeAtomicSave ();
+    testAeContentVersionFollowsEdits ();
 }

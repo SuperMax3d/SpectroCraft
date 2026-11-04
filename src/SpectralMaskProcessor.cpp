@@ -178,7 +178,7 @@ namespace SpectralMask
         if (linearGain == 1.0f) return true;
 
         auto r = range.getIntersectionWith ({ 0, eng.numSamples() });
-        if (r.getLength() <= 0 || sel.empty()) return true;   // nothing to do
+        if (r.getLength() <= 0 || !sel.hasAdditiveShape()) return true;   // nothing to do (subtractive-only selects nothing)
 
         // Fail early on streamed files that cannot be materialised, before
         // spending time on the STFT pass.
@@ -203,7 +203,7 @@ namespace SpectralMask
     {
         if (!eng.isFileLoaded()) return false;
         auto r = range.getIntersectionWith ({ 0, eng.numSamples() });
-        if (r.getLength() <= 0 || sel.empty()) return true;
+        if (r.getLength() <= 0 || !sel.hasAdditiveShape()) return true;
 
         return stftPass (eng, r, [&sel] (double tSecs, double fHz) {
             return sel.contains (tSecs, fHz) ? 1.0f : 0.0f;
@@ -221,7 +221,7 @@ namespace SpectralMask
             if ((int64_t) c.size () != len) return false;   // inconsistent channel lengths
 
         outA.assign ((size_t) nch, std::vector<float> ((size_t) len, 0.0f));
-        if (sel.empty ()) return true;                     // empty mask -> all zeros
+        if (!sel.hasAdditiveShape ()) return true;         // empty mask -> all zeros
 
         const int64_t total = rangeStart + len;            // virtual file length
         auto r = juce::Range<int64_t> { rangeStart, total }.getIntersectionWith ({ 0, total });
@@ -358,7 +358,7 @@ namespace SpectralMask
         outExtracted.clear ();
         outResidual.clear ();
         outExtent = { 0, 0 };
-        if (r.getLength() <= 0 || sel.empty()) return true;   // nothing to do
+        if (r.getLength() <= 0 || !sel.hasAdditiveShape()) return true;   // nothing to do (subtractive-only selects nothing)
 
         const int N = fftSize(), H = hopSize();
         const double rate = eng.sampleRate();

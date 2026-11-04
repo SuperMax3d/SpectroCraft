@@ -271,6 +271,16 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     pythonPanel->onCloseRequested     = [this] { setPanelVisible ("python", false); };
     controlsPanel->onCloseRequested   = [this] { setPanelVisible ("controls", false); };
     markersPanel->onCloseRequested    = [this] { setPanelVisible ("markers", false); };
+    // DEL in the Markers / Selection lists deletes the selected audio: same
+    // route as Edit > Delete (streamed-file materialisation + refreshAfterEdit:
+    // window clamp, tile-cache purge, shared-state sync).
+    auto deleteSelectedAudio = [this]
+    {
+        app.recordActionStep (sc::actionTypes::kDelete);
+        runDestructiveEdit ([this] (std::string* e) { return app.del (e); });
+    };
+    markersPanel->onDeleteAudioRequested   = deleteSelectedAudio;
+    selectionPanel->onDeleteAudioRequested = deleteSelectedAudio;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     if (transcriptionPanel)
         transcriptionPanel->onCloseRequested =
@@ -1831,6 +1841,10 @@ void MainWindow::syncSharedState()
         // Cheap overlay-only repaint: marker list contents may have changed
         // even though the pointer did not.
         spectralView->repaint();
+        // A log/linear frequency switch must remap the vertical bar now,
+        // not at the next zoom.
+        if (specVScroll && specVScroll->isLogarithmic () != spectralView->isLogFrequency ())
+            updateScrollBars ();
     }
     if (tablesTrack)
     {
@@ -2296,10 +2310,15 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
         && d->metaMode == sc::MetaMode::Embedded)
         d->metaMode = sc::MetaMode::External;   // non-WAV cannot carry RIFF chunks
 
-    std::thread ([this, file, saveAs, dlg, d] {
+    // Snapshot the metadata change counter BEFORE the worker builds the SCMD
+    // payload: an edit made while the save runs (a transcription finishing,
+    // an async callback, ...) bumps it and keeps the document dirty.
+    const uint64_t metaSnapshot = d != nullptr ? d->metaDirty.changeCount () : 0;
+
+    std::thread ([this, file, saveAs, dlg, d, metaSnapshot] {
         const bool ok = saveAs ? app.audioEngine().saveFileAs (file)
                                : app.audioEngine().saveFile (file);
-        juce::MessageManager::callAsync ([this, dlg, ok, file, d, saveAs] {
+        juce::MessageManager::callAsync ([this, dlg, ok, file, d, saveAs, metaSnapshot] {
             delete dlg;
             if (!ok)
             {
@@ -2327,19 +2346,31 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
 
             // External mode: the sidecar travels with the saved file and the
             // legacy per-category sidecars are consolidated into it.
+            bool metaWritten = true;
             if (d != nullptr && d->metaMode == sc::MetaMode::External)
             {
-                d->writeMetaSidecar (file);
-                juce::File lm (file.getFullPathName() + ".markers.json");
-                if (lm.existsAsFile()) lm.deleteFile();
-                const juce::File ls = savedSelectionsSidecarPath (file);
-                if (ls.existsAsFile()) ls.deleteFile();
+                metaWritten = d->writeMetaSidecar (file);
+                if (metaWritten)   // only once the consolidated copy is on disk
+                {
+                    juce::File lm (file.getFullPathName() + ".markers.json");
+                    if (lm.existsAsFile()) lm.deleteFile();
+                    const juce::File ls = savedSelectionsSidecarPath (file);
+                    if (ls.existsAsFile()) ls.deleteFile();
+                }
+                else
+                    juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                        "Save metadata failed",
+                        "The audio was saved, but the metadata sidecar next to\n"
+                            + file.getFullPathName ()
+                            + "\ncould not be written. Markers and selections are still unsaved.",
+                        "", this);
             }
 
             // The save wrote the audio AND every managed metadata chunk or
-            // sidecar, so the document's state now matches its disk copy.
-            if (d != nullptr)
-                d->metaDirty = false;
+            // sidecar, so the document's state now matches its disk copy -
+            // unless the metadata changed while the save was running.
+            if (d != nullptr && metaWritten)
+                d->metaDirty.clearIfUnchangedSince (metaSnapshot);
 
             updateTitle();
         });
@@ -2471,8 +2502,13 @@ void MainWindow::exportSpectralAsync (const juce::File& file,
     dlg->setProgress (-1.0);   // out of range -> indeterminate spinning bar
     dlg->beginModal ();
 
-    std::thread ([this, file, opts, dlg] {
-        const bool ok = spectralView ? spectralView->saveAsPng (file, &dlg->cancelled, opts) : false;
+    // Snapshot the view on the message thread (channels, time/frequency
+    // window, settings, overlays); the worker then never touches the view.
+    SpectralView::PngExportJob job = spectralView ? spectralView->preparePngExport (file, opts)
+                                                  : SpectralView::PngExportJob();
+
+    std::thread ([this, file, job, dlg] {
+        const bool ok = job != nullptr && job (&dlg->cancelled);
         juce::MessageManager::callAsync ([this, file, dlg, ok] {
             const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
@@ -6211,18 +6247,27 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
         });
 
         std::string err;
-        // A false progress return cancels: the pipeline stops at its next
-        // stage boundary and no audio is committed.
-        const bool ok = app.noiseSuppress (modelId, device, attenLimDb, df3PostFilter,
-            [sendProgress, dlg] (float f) {
-                sendProgress (0.95 * (double) f);
-                return !dlg->cancelled.load ();
-            }, &err,
-            autoDownload, copyNoise);
-        if (ok)
-            app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
-                sendProgress (0.95 + 0.05 * (double) f);
-            });
+        bool ok = false;
+        // An exception escaping this detached thread would call std::terminate
+        // (e.g. std::bad_alloc copying a very long selection): turn it into an
+        // error so the final callAsync always runs and the dialog closes.
+        try
+        {
+            // A false progress return cancels: the pipeline stops at its next
+            // stage boundary and no audio is committed.
+            ok = app.noiseSuppress (modelId, device, attenLimDb, df3PostFilter,
+                [sendProgress, dlg] (float f) {
+                    sendProgress (0.95 * (double) f);
+                    return !dlg->cancelled.load ();
+                }, &err,
+                autoDownload, copyNoise);
+            if (ok)
+                app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
+                    sendProgress (0.95 + 0.05 * (double) f);
+                });
+        }
+        catch (const std::exception& e) { ok = false; err = e.what (); }
+        catch (...)                     { ok = false; err = "Unexpected error during noise suppression."; }
 
         juce::MessageManager::callAsync ([this, modelId, dlg, ok, err, device, onDone] {
             const bool wasCancelled = dlg->cancelled.load ();
@@ -6471,15 +6516,23 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
         });
 
         std::string err;
-        // A false progress return cancels: download and mix/resample stop at
-        // their next checkpoint; inference itself cannot be interrupted
-        // mid-whisper_full, so a cancel during it finishes that phase first.
-        const bool ok = app.transcribe (modelId, language, translate, fast,
-            [sendProgress, dlg] (float f) {
-                sendProgress ((double) f);
-                return !dlg->cancelled.load ();
-            }, &err,
-            autoDownload);
+        bool ok = false;
+        // Never let an exception escape the detached thread (std::terminate):
+        // report it so the final callAsync always closes the dialog.
+        try
+        {
+            // A false progress return cancels: download and mix/resample stop at
+            // their next checkpoint; inference itself cannot be interrupted
+            // mid-whisper_full, so a cancel during it finishes that phase first.
+            ok = app.transcribe (modelId, language, translate, fast,
+                [sendProgress, dlg] (float f) {
+                    sendProgress ((double) f);
+                    return !dlg->cancelled.load ();
+                }, &err,
+                autoDownload);
+        }
+        catch (const std::exception& e) { ok = false; err = e.what (); }
+        catch (...)                     { ok = false; err = "Unexpected error during transcription."; }
 
         juce::MessageManager::callAsync ([this, dlg, ok, err, modelId, onDone] {
             const bool wasCancelled = dlg->cancelled.load ();
@@ -6735,6 +6788,7 @@ void MainWindow::updateScrollBars()
     if (specVScroll && spectralView && app.audioEngine().isFileLoaded())
     {
         const double nyq = 0.5 * app.audioEngine().sampleRate();
+        specVScroll->setLogarithmic (spectralView->isLogFrequency());   // match the axis mapping
         specVScroll->setRange (1.0, nyq);
         specVScroll->setWindow (spectralView->getFreqMin(), spectralView->getFreqMax());
     }

@@ -38,6 +38,7 @@
 #include "InvalidParamTrace.h"
 #include "SingleInstance.h"
 #include "StartupTrace.h"
+#include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include "MainWindow.h"
 #include "SpectralEngine.h"
 #include "PngWriter.h"
@@ -180,7 +181,7 @@ public:
                 const juce::File preferred = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
                                                  .getParentDirectory()
                                                  .getChildFile ("SpectroCraft_load_time.log");
-                const juce::File log = scStart::enable (preferred);
+                const juce::File log = scStart::enable (preferred, SC_VERSION_STRING);
                 std::printf ("load-time measurement enabled, log: %s\n",
                              log.getFullPathName().toRawUTF8());
                 std::fflush (stdout);
@@ -845,6 +846,14 @@ public:
 
     void systemRequestedQuit() override
     {
+        // The macOS application-menu Quit and WM_QUERYENDSESSION land here
+        // even while a modal progress dialog is open. A background job's
+        // worker still uses the documents and this window (it deletes its
+        // progress dialog when done): quitting now would destroy them under
+        // it. MainWindow's own Quit paths already refuse.
+        if (mainWindow != nullptr && mainWindow->isBackgroundJobRunning ())
+            return;
+
         // Ask before losing unsaved work: audio edits OR metadata that has
         // not been written to disk yet (markers, selections, calibrations,
         // transcription).

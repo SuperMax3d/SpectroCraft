@@ -245,9 +245,12 @@ FileListPanel::FileListPanel (Application& appIn)
 {
     openBtn.onClick = [this] { if (onOpenRequested) onOpenRequested(); };
     closeBtn.onClick = [this] {
-        // Closes the ACTIVE file; Application fires the callbacks that refresh
-        // this list and reset the views to whatever remains.
-        app.closeFile();
+        // Closes the ACTIVE file (same index Application::closeFile picks);
+        // Application fires the callbacks that refresh this list and reset
+        // the views to whatever remains.
+        if (app.numDocs() > 0)
+            closeDoc ((app.activeDocIndex >= 0 && app.activeDocIndex < app.numDocs())
+                          ? app.activeDocIndex : 0);
     };
 
     openBtn.setTooltip ("Open an audio file (WAV, AIFF, FLAC, MP3 or Ogg). "
@@ -286,7 +289,26 @@ void FileListPanel::activateDoc (int i)
 
 void FileListPanel::closeDoc (int i)
 {
-    if (i >= 0 && i < app.numDocs())
+    // A background job's worker still uses the documents (it deletes its
+    // progress dialog when it is done).
+    if (sc::WorkProgressDialog::numActive () > 0) return;
+    if (i < 0 || i >= app.numDocs()) return;
+
+    // Same prompt as File > Close (MainWindow::handleCloseFile): never drop
+    // unsaved edits or metadata without asking.
+    const FileDoc& d = *app.docs[(size_t) i];
+    if (app.docIsUnsaved (d))
+    {
+        const juce::String name = d.name.isNotEmpty () ? d.name : d.file.getFileName ();
+        juce::AlertWindow dlg ("Close File",
+            "This file has unsaved changes:\n\n" + name +
+            "\n\nDo you want to close it and discard the changes?",
+            juce::AlertWindow::WarningIcon, this);
+        dlg.addButton ("Close", 1);
+        dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (dlg.runModalLoop () != 1) return;   // keep it open
+    }
+    if (i < app.numDocs())
         app.closeDoc (i);
 }
 

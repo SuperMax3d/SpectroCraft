@@ -572,6 +572,45 @@ static void regrPanels_markerPasteTimes()
     wav.deleteFile();
 }
 
+
+// integration (mainwindow#3): the Files panel's Close (button / row menu) asks
+// before discarding unsaved changes, like File > Close; Cancel keeps the file.
+static void regrPanels_fileListCloseAsks()
+{
+    progress ("regression panels (integration): Files panel close asks before discarding unsaved changes");
+    const juce::File wav = makeTempFile ("reg_panels_close_ask.wav");
+    writeWav (wav, 1, 8000.0, 800, [] (int, int64_t, double) { return 0.1f; });
+    Application app;
+    CHECK (app.openFile (wav), "reg panels close: open");
+    if (app.doc () == nullptr) return;
+    app.doc ()->metaDirty = true;   // unsaved metadata
+    FileListPanel panel (app);
+    panel.setSize (300, 200);
+
+    bool asked = false;
+    {
+        ScModalDriver driver ([&] (juce::Component& m)
+        {
+            if (auto* aw = dynamic_cast<juce::AlertWindow*> (&m))
+            {
+                asked = true;
+                aw->exitModalState (0);   // Cancel
+                return true;
+            }
+            return false;
+        });
+        panel.closeDoc (0);
+    }
+    CHECK (asked, "reg panels close: unsaved document -> confirmation prompt");
+    CHECK (app.numDocs () == 1, "reg panels close: Cancel keeps the document open");
+
+    app.doc ()->metaDirty = false;
+    if (app.audioEngine ().hasUnsavedChanges ()) return;   // nothing else to check without a prompt
+    panel.closeDoc (0);
+    CHECK (app.numDocs () == 0, "reg panels close: a saved document closes without a prompt");
+    wav.deleteFile ();
+}
+
 static void runRegression_panels()
 {
     regrPanels_pythonAddDialog();
@@ -583,4 +622,5 @@ static void runRegression_panels()
     regrPanels_markerEditors();
     regrPanels_markerDocSwitch();
     regrPanels_markerPasteTimes();
+    regrPanels_fileListCloseAsks();
 }

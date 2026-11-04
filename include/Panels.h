@@ -167,6 +167,10 @@ public:
     static bool applyScaleValues (FileDoc& d, ScaleCalibration::Unit unit,
                                   const std::vector<double>& vals);
 
+    /** Closes document i (Close button / row menu): refuses while a background
+        job runs and asks before discarding unsaved changes, like File > Close. */
+    void closeDoc (int i);
+
 private:
     Application& app;
     juce::TextButton openBtn, closeBtn;
@@ -182,7 +186,6 @@ private:
     juce::Rectangle<int> rowRect (int i) const;
     int rowAt (int x, int y) const;       // -1 when no row is under the point
     void activateDoc (int i);
-    void closeDoc (int i);
     void showFileMenu (int row);
     void showScaleDialog (int row);
     void openContainingFolder (int row);

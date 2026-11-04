@@ -82,7 +82,10 @@ namespace scStart {
     // Turn on measurement and write a per-run header block to the log file.
     // The preferred path is used when writable, otherwise the app-data folder
     // is used instead. Returns the actual log file in use.
-    inline juce::File enable (const juce::File& preferredLog)
+    // `version` is the build's SC_VERSION_STRING (generated/Version.h, bumped
+    // on every build). It is passed in rather than included here so the TUs
+    // that include this header are not all rebuilt on every version bump.
+    inline juce::File enable (const juce::File& preferredLog, const char* version = nullptr)
     {
         if (!state.armed)
             begin();
@@ -102,7 +105,7 @@ namespace scStart {
                                          .getFullPathName();
         note ("==== SpectroCraft load-time measurement ====");
         note ("time: " + juce::Time::getCurrentTime().toString (true, true));
-        note ("version: " + juce::String (ProjectInfo::versionString));
+        note ("version: " + juce::String (version != nullptr ? version : "unknown"));
         note ("exe: " + exePath);
         note ("log: " + log.getFullPathName());
         note ("note: T0 = static init complete (a few ms after process start)");
