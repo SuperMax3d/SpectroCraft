@@ -54,7 +54,7 @@ jobs:
           if-no-files-found: ignore
 
   macos-debug:
-    runs-on: macos-14
+    runs-on: macos-15   # Xcode 16: AppleClang 15 (macos-14) rejects the menu-ID enumerators in comparisons
     timeout-minutes: 120
 
     steps:
