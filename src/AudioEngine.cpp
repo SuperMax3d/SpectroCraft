@@ -184,6 +184,12 @@ bool AudioEngine::readSamples (int channel, int64_t start, int64_t count, float*
     start = std::clamp<int64_t> (start, (int64_t) 0, totalSamples);
     count = std::clamp<int64_t> (count, (int64_t) 0, totalSamples - start);
 
+    // Nothing to read (e.g. the playhead sits at / past the end of the file):
+    // a valid empty read. Return before getReadPointer, which asserts on
+    // start == size even for an empty range.
+    if (count == 0)
+        return true;
+
     if (buffer)
     {
         const float* src = buffer->getReadPointer (channel, (int) start);

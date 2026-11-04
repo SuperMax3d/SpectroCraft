@@ -3,6 +3,7 @@
 #include "AlertGate.h"
 #include "Application.h"
 #include "MergeFiles.h"
+#include "OwningAlertWindow.h"   // dialogs with new-ed custom components
 #include "PythonScripts.h"
 #include "Resampler.h"
 #include "WorkProgress.h"
@@ -71,6 +72,15 @@ public:
         addAndMakeVisible (removeBtn_);
 
         rebuildAnchorList ();   // show any anchors this entry already carries
+    }
+
+    // The anchor widgets are raw children: a JUCE Component never deletes its
+    // children, so without this every anchor line leaked a Label and a
+    // TextButton when the row went away.
+    ~DescRow() override
+    {
+        for (auto* c : anchorWidgets_) delete c;
+        anchorWidgets_.clear ();
     }
 
     void layoutChildren (int w)
@@ -384,6 +394,13 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
 StemSeparationWindow::~StemSeparationWindow()
 {
     if (alive_) alive_->store (false);   // stop any pending worker callbacks
+
+    // rowsHost_ holds the DescRows created with new in rebuildRows(); a JUCE
+    // Component does not own its children, so closing the window in advanced
+    // mode leaked every row (TextEditor, Label, buttons). Delete them while
+    // descs_ (which the rows reference) is still alive.
+    for (int i = rowsHost_.getNumChildComponents () - 1; i >= 0; --i)
+        delete rowsHost_.getChildComponent (i);
 }
 
 void StemSeparationWindow::userTriedToCloseWindow()
@@ -780,7 +797,8 @@ void StemSeparationWindow::openDownloadDialog()
     if (!needBinary && !needModel)
         needModel = true;   // everything installed: offer downloading another model
 
-    juce::AlertWindow dlg ("Stem Separation setup", "", juce::AlertWindow::NoIcon, this);
+    // Owning: the Label/ComboBox rows below are added with new.
+    sc::OwningAlertWindow dlg ("Stem Separation setup", "", juce::AlertWindow::NoIcon, this);
     dlg.addButton ("Download", 1, {});
     dlg.addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 

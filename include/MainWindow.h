@@ -510,7 +510,7 @@ public:
         RecOptUnlimited = 4100,   // Recording Options submenu
         RecOptLoop,
         RecOptTimed,
-        RecDeviceBase = 4500,     // Recording Device submenu: + pluginIndex*1000 + deviceIndex
+        RecNoDeviceItem = 4200,   // disabled "(no devices)" / "(no recorder plugins found)" placeholders (ID 0 is reserved by PopupMenu)
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsInvert,           // Effects > Invert (spectral sel / time sel / whole file)
         ToolsTimeStretch,      // Effects > Time Stretch... (SoundTouch tempo change)
@@ -536,7 +536,13 @@ public:
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
         RecentBase = 9000,     // File > Open Recent items: RecentBase + index
-        ClearRecent = 9100     // File > Open Recent > Clear Recent Files
+        ClearRecent = 9100,    // File > Open Recent > Clear Recent Files
+        // Recording Device submenu: RecDeviceBase + pluginIndex*1000 + deviceIndex.
+        // Kept above every other ID: with the old base (4500) the second
+        // plugin's devices (5500+) fell outside the routed range and a third
+        // plugin's first device (6500) was WindowPanelBase.
+        RecDeviceBase = 10000,
+        RecDeviceEnd  = RecDeviceBase + 1000 * 1000   // up to 1000 plugins x 1000 devices
     };
 
 private:

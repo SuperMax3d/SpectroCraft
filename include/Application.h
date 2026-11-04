@@ -769,6 +769,12 @@ public:
     // first play request); ensureAudioReady() blocks until it has completed.
     bool audioDeviceReady() const;
     void startAudioInitAsync();
+    /** True when the real output device must stay closed: the environment
+        variable SC_NO_AUDIO_DEVICE is set (to anything but "0"), or the build
+        defines SC_NO_AUDIO_DEVICE. The init then completes at once without a
+        device (audioDeviceReady() turns true; play() is silent). Tests that
+        need a real device skip when this is true. */
+    static bool audioOutputDisabled();
     bool ensureAudioReady (int timeoutMs = -1);
 
     void play(); void stop(); void pause();

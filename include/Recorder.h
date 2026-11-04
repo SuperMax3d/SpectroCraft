@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "RecorderPlugin.h"
 #include <functional>
+#include <utility>
 #include <vector>
 
 namespace sc {
@@ -55,10 +56,16 @@ class RecorderHost
 public:
     static RecorderHost& instance();
 
-    /** Scans <exe dir>/recorders and %APPDATA%/SpectroCraft/recorders (plus an
-        optional extra directory) for plugin DLLs. Idempotent per directory;
-        call again after the user drops a new DLL in place. */
+    /** Scans <exe dir>/recorders and <user app data>/SpectroCraft/recorders
+        (plus an optional extra directory) for plugin libraries - see
+        pluginFilePattern(). Idempotent: already loaded files are kept and
+        files that failed to load are not retried until they change; call
+        again after the user drops a new plugin in place. */
     void scanPlugins(const juce::File& extraDir = {});
+
+    /** File pattern of a plugin library on this platform: "*.dll" (Windows),
+        "*.dylib" (macOS), "*.so" (Linux). */
+    static juce::String pluginFilePattern();
 
     const std::vector<Plugin>& plugins() const { return plugins_; }
     Plugin* findPlugin(const juce::String& id);
@@ -87,7 +94,9 @@ private:
     std::vector<Plugin> plugins_;
     Plugin* active_ = nullptr;
     juce::String activeDeviceId_;
-    mutable std::vector<juce::String> scannedDirs_;   // normalised full paths
+    // Plugin files that failed to load: full path + modification time (ms),
+    // so a rescan does not dlopen them again unless they were replaced.
+    std::vector<std::pair<juce::String, juce::int64>> rejected_;
 };
 
 }   // namespace rec

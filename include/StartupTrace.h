@@ -79,13 +79,34 @@ namespace scStart {
         state.emit (text);
     }
 
+    // Fallback log used when the preferred path is not writable:
+    // <dir>/SpectroCraft_load_time.log, where <dir> is, in order, `fallbackDir`
+    // when given, the SC_STARTUP_TRACE_DIR environment variable when set (a
+    // relative value is taken from the current directory), otherwise the
+    // user's app-data folder. The override lets tests exercise the fallback
+    // without touching the user's real log.
+    inline juce::File fallbackLogFile (const juce::File& fallbackDir = {})
+    {
+        juce::File dir = fallbackDir;
+        if (dir == juce::File())
+        {
+            const juce::String env = juce::SystemStats::getEnvironmentVariable ("SC_STARTUP_TRACE_DIR", {}).trim();
+            if (env.isNotEmpty())
+                dir = juce::File::getCurrentWorkingDirectory().getChildFile (env);
+        }
+        if (dir == juce::File())
+            dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory);
+        return dir.getChildFile ("SpectroCraft_load_time.log");
+    }
+
     // Turn on measurement and write a per-run header block to the log file.
-    // The preferred path is used when writable, otherwise the app-data folder
-    // is used instead. Returns the actual log file in use.
+    // The preferred path is used when writable, otherwise fallbackLogFile
+    // (fallbackDir) is used instead. Returns the actual log file in use.
     // `version` is the build's SC_VERSION_STRING (generated/Version.h, bumped
     // on every build). It is passed in rather than included here so the TUs
     // that include this header are not all rebuilt on every version bump.
-    inline juce::File enable (const juce::File& preferredLog, const char* version = nullptr)
+    inline juce::File enable (const juce::File& preferredLog, const char* version = nullptr,
+                              const juce::File& fallbackDir = {})
     {
         if (!state.armed)
             begin();
@@ -94,8 +115,7 @@ namespace scStart {
         {
             std::ofstream probe (log.getFullPathName().toStdString(), std::ios::app);
             if (!probe)
-                log = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                          .getChildFile ("SpectroCraft_load_time.log");
+                log = fallbackLogFile (fallbackDir);
         }
 
         state.enabled = true;

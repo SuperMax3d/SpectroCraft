@@ -4343,11 +4343,57 @@ bool Application::audioDeviceReady() const
     return audioDeviceIsReady.load();
 }
 
+bool Application::audioOutputDisabled()
+{
+#if defined (SC_NO_AUDIO_DEVICE)
+    return true;   // built without a real output device (headless test binary)
+#else
+    // Runtime switch for headless runs (ctest shards, CI): SC_NO_AUDIO_DEVICE=1
+    // keeps the default output device closed, so tests are silent and
+    // parallel test processes never fight over the hardware.
+    const juce::String v = juce::SystemStats::getEnvironmentVariable ("SC_NO_AUDIO_DEVICE", {}).trim ();
+    return v.isNotEmpty () && v != "0";
+#endif
+}
+
 void Application::startAudioInitAsync()
 {
     bool expected = false;
     if (!audioInitStarted.compare_exchange_strong (expected, true))
         return;   // already started or done - never spawn a second worker
+
+    if (audioOutputDisabled())
+    {
+        // No device will ever be opened: report the init as complete right
+        // away so callers waiting on it (ensureAudioReady, the "Preparing
+        // audio" dialog) carry on - playback then simply produces no sound.
+        {
+            std::lock_guard<std::mutex> g (audioInitLock);
+            audioDeviceIsReady.store (true);
+        }
+        audioInitCv.notify_all();
+        scStart::mark ("audio-device-disabled(SC_NO_AUDIO_DEVICE)");
+        return;
+    }
+
+    // Construct the device types HERE, on the message thread; only the slow
+    // part (scanning and opening the default device) goes to the worker.
+    // AudioDeviceManager would otherwise create them lazily inside
+    // initialiseWithDefaultDevices() on the worker thread, and some types
+    // bind to the creating thread: WASAPI's DeviceChangeDetector creates a
+    // hidden Win32 message window, which then belonged to a thread with no
+    // message loop that exits right after the init - device hot-plug
+    // notifications were never delivered. Constructing a type is cheap; it
+    // does not scan. Nothing touches audioDevice before this point (the
+    // constructor only adds the audio callback), so the list is still empty.
+    if (juce::MessageManager::existsAndIsCurrentThread())
+    {
+        juce::OwnedArray<juce::AudioIODeviceType> types;
+        audioDevice->createAudioDeviceTypes (types);
+        for (auto* t : types)
+            audioDevice->addAudioDeviceType (std::unique_ptr<juce::AudioIODeviceType> (t));
+        types.clear (false);   // ownership moved to the manager
+    }
 
     audioInitThread = std::thread ([this] {
         audioDevice->initialiseWithDefaultDevices (0, 2); // no input, stereo output
@@ -4387,7 +4433,7 @@ void Application::play()
 
     // Self-heal: if no output device is running (initialisation can fail when
     // the default device isn't available yet), try again now.
-    if (audioDevice->getCurrentAudioDevice() == nullptr)
+    if (audioDevice->getCurrentAudioDevice() == nullptr && !audioOutputDisabled())
         audioDevice->initialiseWithDefaultDevices (0, 2);
 
     // Restart from the beginning when playback is at (or past) the end.

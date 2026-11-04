@@ -663,7 +663,10 @@ bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
     {
         juce::AudioFormatManager fm;
         fm.registerBasicFormats();
-        if (auto* reader = fm.createReaderFor (wav))
+        // Owned: the raw pointer used to leak the reader and its open file
+        // stream on every metadata save (on Windows the open handle also
+        // blocks a later rename/replace of the WAV).
+        if (std::unique_ptr<juce::AudioFormatReader> reader { fm.createReaderFor (wav) })
         {
             rate   = reader->sampleRate;
             frames = reader->lengthInSamples;

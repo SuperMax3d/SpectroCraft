@@ -171,6 +171,12 @@ public:
         job runs and asks before discarding unsaved changes, like File > Close. */
     void closeDoc (int i);
 
+    /** Row menu > "Set Unit and Scale...": runs createScaleDialog() modally
+        (keyboard focus goes to the first full-scale field once the window is
+        showing, or to the unit combo while the unit is None) and applies the
+        confirmed values. Public for the unit tests. */
+    void showScaleDialog (int row);
+
 private:
     Application& app;
     juce::TextButton openBtn, closeBtn;
@@ -187,7 +193,6 @@ private:
     int rowAt (int x, int y) const;       // -1 when no row is under the point
     void activateDoc (int i);
     void showFileMenu (int row);
-    void showScaleDialog (int row);
     void openContainingFolder (int row);
 
     JUCE_DECLARE_NON_COPYABLE (FileListPanel)

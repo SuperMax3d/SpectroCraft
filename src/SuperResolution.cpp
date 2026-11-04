@@ -2,6 +2,7 @@
 #include "SuperResolution.h"
 #include "AlertGate.h"
 #include "AudioCpp.h"
+#include "OwningAlertWindow.h"   // dialogs with new-ed custom components
 #include "PythonScripts.h"   // sc::py::readFloatWav / writeFloatWav
 #include "Resampler.h"
 #include "WorkProgress.h"
@@ -351,7 +352,8 @@ void SuperResolutionWindow::openDownloadDialog()
     // for the currently selected mode.
     const int modeId = selectedModeId ();
 
-    juce::AlertWindow dlg ("Super Resolution setup", "", juce::AlertWindow::NoIcon, this);
+    // Owning: the Label/ComboBox rows below are added with new.
+    sc::OwningAlertWindow dlg ("Super Resolution setup", "", juce::AlertWindow::NoIcon, this);
     dlg.addButton ("Download", 1, {});
     dlg.addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 

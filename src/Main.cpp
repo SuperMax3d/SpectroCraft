@@ -750,6 +750,7 @@ public:
                 closer.startTimer (3000);
                 w->runModalLoop ();
                 delete w;
+                delete ed;   // AlertWindow does not delete its custom components
 
                 std::cout << "alert dialog closed\n";
                 quit();

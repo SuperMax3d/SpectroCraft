@@ -48,7 +48,20 @@ public:
     {
         for (int i = getNumCustomComponents(); --i >= 0;)
             delete removeCustomComponent (i);
+        ownedChildren_.clear();   // after the custom components they may listen to
     }
+
+    /** addChildComponent() + ownership: for helper components (listeners)
+        that must live exactly as long as the dialog. A plain child is never
+        deleted by juce::Component. */
+    void addOwnedChildComponent (juce::Component* c)
+    {
+        addChildComponent (c);
+        ownedChildren_.emplace_back (c);
+    }
+
+private:
+    std::vector<std::unique_ptr<juce::Component>> ownedChildren_;
 };
 
 /** Plain container (dialog row) that owns the children added to it with
@@ -1492,7 +1505,8 @@ std::vector<MainWindow::RecDeviceMenuItem> MainWindow::recordingDeviceItems (
         return out;
 
     const auto& p = plugins[(size_t) pluginIndex];
-    for (size_t j = 0; j < p.devices.size (); ++j)
+    // 1000 IDs per plugin (see RecDeviceBase): extra devices would alias the next plugin's.
+    for (size_t j = 0; j < std::min<size_t> (p.devices.size (), 1000); ++j)
     {
         RecDeviceMenuItem item;
         item.id      = (int) (RecDeviceBase + pluginIndex * 1000 + j);
@@ -1510,7 +1524,7 @@ juce::PopupMenu MainWindow::buildRecordingDeviceItems (const Application& app, i
     const auto items = recordingDeviceItems (app, pluginIndex);
     if (items.empty ())
     {
-        m.addItem (0, "(no devices)", false);
+        m.addItem (RecNoDeviceItem, "(no devices)", false);
         return m;
     }
     for (const auto& item : items)
@@ -1566,7 +1580,7 @@ juce::PopupMenu MainWindow::buildRecordingDeviceMenu (const Application& app)
     const auto& plugins = sc::rec::RecorderHost::instance ().plugins ();
     if (plugins.empty ())
     {
-        m.addItem (0, "(no recorder plugins found)", false);
+        m.addItem (RecNoDeviceItem, "(no recorder plugins found)", false);
         return m;
     }
 
@@ -2316,11 +2330,25 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
     // an async callback, ...) bumps it and keeps the document dirty.
     const uint64_t metaSnapshot = d != nullptr ? d->metaDirty.changeCount () : 0;
 
-    std::thread ([this, file, saveAs, dlg, d, metaSnapshot] {
-        const bool ok = saveAs ? app.audioEngine().saveFileAs (file)
-                               : app.audioEngine().saveFile (file);
-        juce::MessageManager::callAsync ([this, dlg, ok, file, d, saveAs, metaSnapshot] {
+    // Resolve the engine on the message thread: the worker must not look up
+    // "the active document" itself.
+    AudioEngine* eng = &app.audioEngine();
+    juce::Component::SafePointer<MainWindow> self (this);
+
+    std::thread ([self, eng, file, saveAs, dlg, d, metaSnapshot] {
+        const bool ok = saveAs ? eng->saveFileAs (file) : eng->saveFile (file);
+        juce::MessageManager::callAsync ([self, dlg, ok, file, d, saveAs, metaSnapshot] {
+            // The progress dialog blocks closing while the save runs, but be
+            // defensive: the window (or the document) may be gone by now.
+            if (self == nullptr)
+                return;
+            MainWindow* const mw = self.getComponent();
+            Application& app = mw->app;
             delete dlg;
+            const bool docAlive = d != nullptr
+                && std::any_of (app.docs.begin(), app.docs.end(),
+                                [d] (const std::unique_ptr<FileDoc>& p) { return p.get() == d; });
+            FileDoc* const doc = docAlive ? d : nullptr;
             if (!ok)
             {
                 // The * stays in the title; say why instead of failing silently.
@@ -2329,28 +2357,28 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
                                                    "Could not save " + file.getFullPathName ()
                                                        + ".\nCheck that the folder is writable, the file is not "
                                                          "locked by another program and the disk is not full.",
-                                                   "", this);
+                                                   "", mw);
                 return;
             }
 
             // Save As: the document's path AND display name now follow the new
             // location (Files list, footer, unsaved-changes prompts, Open Recent).
-            if (saveAs && d != nullptr)
+            if (saveAs && doc != nullptr)
             {
-                d->file = file;
-                d->name = file.getFileName ();
+                doc->file = file;
+                doc->name = file.getFileName ();
                 app.addRecentFile (file);
-                if (statusBar && d == app.doc ())
-                    statusBar->setFileName (file.getFileName ());
-                if (fileListPanel) fileListPanel->refresh ();
+                if (mw->statusBar && doc == app.doc ())
+                    mw->statusBar->setFileName (file.getFileName ());
+                if (mw->fileListPanel) mw->fileListPanel->refresh ();
             }
 
             // External mode: the sidecar travels with the saved file and the
             // legacy per-category sidecars are consolidated into it.
             bool metaWritten = true;
-            if (d != nullptr && d->metaMode == sc::MetaMode::External)
+            if (doc != nullptr && doc->metaMode == sc::MetaMode::External)
             {
-                metaWritten = d->writeMetaSidecar (file);
+                metaWritten = doc->writeMetaSidecar (file);
                 if (metaWritten)   // only once the consolidated copy is on disk
                 {
                     juce::File lm (file.getFullPathName() + ".markers.json");
@@ -2364,16 +2392,16 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
                         "The audio was saved, but the metadata sidecar next to\n"
                             + file.getFullPathName ()
                             + "\ncould not be written. Markers and selections are still unsaved.",
-                        "", this);
+                        "", mw);
             }
 
             // The save wrote the audio AND every managed metadata chunk or
             // sidecar, so the document's state now matches its disk copy -
             // unless the metadata changed while the save was running.
-            if (d != nullptr && metaWritten)
-                d->metaDirty.clearIfUnchangedSince (metaSnapshot);
+            if (doc != nullptr && metaWritten)
+                doc->metaDirty.clearIfUnchangedSince (metaSnapshot);
 
-            updateTitle();
+            mw->updateTitle();
         });
     }).detach();
 }
@@ -2747,7 +2775,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     using enum MenuIDs;
 
     // Recording Device submenu: RecDeviceBase + pluginIndex*1000 + deviceIndex.
-    if (menuItemID >= RecDeviceBase && menuItemID < 5000)
+    if (menuItemID >= RecDeviceBase && menuItemID < RecDeviceEnd)
     {
         handleRecDevicePick (menuItemID);
         return;
@@ -4221,6 +4249,12 @@ public:
         }
     }
 
+    // The buttons are raw children: juce::Component never deletes them.
+    ~RemixFillButtons() override
+    {
+        for (auto* b : buttons_) delete b;
+    }
+
     void resized() override
     {
         const int n = (int) buttons_.size();
@@ -5507,7 +5541,7 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     chansListener->window = w;
     chansListener->grid = grid;
     chansListener->inChans = curChans;
-    w->addChildComponent (chansListener);   // owned by the dialog
+    w->addOwnedChildComponent (chansListener);   // owned (and deleted) by the dialog
     chansEditor->addListener (chansListener);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));

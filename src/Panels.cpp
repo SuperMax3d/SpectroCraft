@@ -6,6 +6,7 @@
 #include "AlertGate.h"
 #include "WaveformView.h"   // formatFooterTime / parseTimeText (shared time text)
 #include "FFTHelpers.h"
+#include "OwningAlertWindow.h"   // dialogs with new-ed custom components
 #include "WorkProgress.h"
 #include <algorithm>
 #include <cctype>
@@ -433,13 +434,15 @@ juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
     dlg->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     dlg->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
-    // Focus the first field with its text pre-selected so a new value can be
-    // typed in immediately. AlertWindow disables keyboard focus on its editors,
-    // so re-enable it first or grabKeyboardFocus() would bounce to a button.
+    // Pre-select the first field's text so a new value can be typed in
+    // immediately. AlertWindow disables keyboard focus on its editors, so
+    // re-enable it first or a focus grab would bounce to a button. The actual
+    // grabKeyboardFocus() happens in showScaleDialog() once the window is
+    // showing: JUCE ignores (and asserts on) focus grabs for components that
+    // are not on screen yet.
     auto* valEdit = dlg->getTextEditor (scaleFieldId (0));
     valEdit->setWantsKeyboardFocus (true);
     valEdit->selectAll();
-    valEdit->grabKeyboardFocus();
 
     return dlg;
 }
@@ -450,6 +453,18 @@ void FileListPanel::showScaleDialog (int row)
     FileDoc& d = *app.docs[(size_t) row];
 
     auto* dlg = createScaleDialog (d);
+    if (dlg == nullptr) return;
+
+    // Enter modal state WITHOUT taking keyboard focus (runModalLoop() would
+    // otherwise grab it for the window itself), then focus the first enabled
+    // field now that the window is showing - or the unit combo while the unit
+    // is None and the value fields are disabled.
+    dlg->enterModalState (false);
+    if (auto* valEdit = dlg->getTextEditor (scaleFieldId (0)); valEdit != nullptr && valEdit->isEnabled())
+        valEdit->grabKeyboardFocus();
+    else if (auto* combo = dlg->getComboBoxComponent ("unit"))
+        combo->grabKeyboardFocus();
+
     const int result = dlg->runModalLoop();
     juce::ComboBox* unitCombo = dlg->getComboBoxComponent ("unit");
 
@@ -6065,9 +6080,14 @@ bool showFindDialog (juce::Component* parent, const juce::String& title,
     if (auto* ed = w->getTextEditor ("findQuery"))
     {
         ed->setWantsKeyboardFocus (true);
-        ed->grabKeyboardFocus();
         ed->selectAll();
     }
+
+    // Enter modal state without taking focus (the window is now showing),
+    // then focus the field: a grab before that is ignored by JUCE.
+    w->enterModalState (false);
+    if (auto* ed = w->getTextEditor ("findQuery"))
+        ed->grabKeyboardFocus();
 
     const int result = w->runModalLoop ();
     needle = w->getTextEditorContents ("findQuery").trim();
@@ -6564,7 +6584,8 @@ void MarkerListPanel::onRowClicked (int row, const juce::MouseEvent& e)
         return;   // right-click: just show the context menu - keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();   // so DEL works right after a click
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();   // so DEL works right after a click
 
     if (e.mods.isShiftDown ())
     {
@@ -7377,7 +7398,8 @@ void TranscriptionPanel::onRowClicked (int row, const juce::MouseEvent& e)
         return;   // right-click: just show the context menu - keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();
 
     auto* d = app.doc ();
     const int n = d != nullptr ? (int) d->sctt.segments.size () : 0;
@@ -7496,8 +7518,13 @@ void TranscriptionPanel::showEditDialog (int rowNumber)
     {
         startEd->setWantsKeyboardFocus (true);
         startEd->selectAll();
-        startEd->grabKeyboardFocus();
     }
+
+    // Show the dialog (modal, without taking focus) before focusing the
+    // field: JUCE ignores focus grabs on components that are not showing.
+    dlg.enterModalState (false);
+    if (startEd != nullptr)
+        startEd->grabKeyboardFocus();
 
     const int result = dlg.runModalLoop ();
     auto* endEd  = dlg.getTextEditor ("end");
@@ -8386,7 +8413,8 @@ void SelectionPanel::onRowClicked (int row, const juce::MouseEvent& e)
         return;   // right-click: just show the context menu - keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();   // so DEL works right after a click
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();   // so DEL works right after a click
 
     if (e.mods.isShiftDown ())
     {
@@ -8506,8 +8534,13 @@ void SelectionPanel::showEditDialog()
     {
         nameEd->setWantsKeyboardFocus (true);
         nameEd->selectAll();
-        nameEd->grabKeyboardFocus();
     }
+
+    // Show the dialog (modal, without taking focus) before focusing the
+    // field: JUCE ignores focus grabs on components that are not showing.
+    dlg.enterModalState (false);
+    if (nameEd != nullptr)
+        nameEd->grabKeyboardFocus();
 
     if (dlg.runModalLoop () != 1 || nameEd == nullptr) return;
     auto* commentEd = dlg.getTextEditor ("comment");
@@ -8556,8 +8589,13 @@ void SelectionPanel::showCloneNumbersDialog()
     {
         ed->setWantsKeyboardFocus (true);
         ed->selectAll();
-        ed->grabKeyboardFocus();
     }
+
+    // Show the dialog (modal, without taking focus) before focusing the
+    // field: JUCE ignores focus grabs on components that are not showing.
+    dlg.enterModalState (false);
+    if (ed != nullptr)
+        ed->grabKeyboardFocus();
 
     if (dlg.runModalLoop () != 1 || ed == nullptr) return;
 
@@ -8753,8 +8791,13 @@ void PythonPanel::showAddDialog ()
     {
         nameEdit->setWantsKeyboardFocus (true);
         nameEdit->selectAll();
-        nameEdit->grabKeyboardFocus();
     }
+
+    // Show the dialog (modal, without taking focus) before focusing the
+    // field: JUCE ignores focus grabs on components that are not showing.
+    w->enterModalState (false);
+    if (nameEdit != nullptr)
+        nameEdit->grabKeyboardFocus();
 
     const int result = w->runModalLoop ();
     // Read the name BEFORE deleting the dialog: nameEdit is one of its children.
@@ -8923,7 +8966,8 @@ static juce::Colour showColourPickerDialog (juce::Colour initial)
         }
     };
 
-    juce::AlertWindow w ("Drawing colour", "Choose the ink colour.",
+    // Owning: the swatch and sliders below are added with new.
+    sc::OwningAlertWindow w ("Drawing colour", "Choose the ink colour.",
                         juce::AlertWindow::NoIcon);
     w.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
 
@@ -9180,7 +9224,8 @@ void DrawingPanel::onRowClicked (int row, const juce::MouseEvent& e)
         return;   // right-click: just show the context menu - keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();   // so clicks keep the selection live
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();   // so clicks keep the selection live
 
     if (e.mods.isShiftDown ())
     {
@@ -9336,7 +9381,8 @@ void DrawingPanel::showEditDialog (int row)
     if (d == nullptr || row < 0 || row >= (int) d->drawings.size ()) return;
     const DrawingItem& it = d->drawings [(size_t) row];
 
-    juce::AlertWindow dlg ("Edit drawing",
+    // Owning: the swatch and sliders below are added with new.
+    sc::OwningAlertWindow dlg ("Edit drawing",
                           "Change this drawing's appearance and note.",
                           juce::AlertWindow::NoIcon);
     dlg.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
@@ -10282,7 +10328,8 @@ void TablesPanel::onRowClicked (int row, const juce::MouseEvent& e)
     if (e.mods.isPopupMenu ()) return;   // right-click: keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();
 
     if (e.mods.isShiftDown ())
     {
@@ -11323,7 +11370,8 @@ void ActionsPanel::onRowClicked (int row, const juce::MouseEvent& e)
     if (e.mods.isPopupMenu ()) return;   // right-click: keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();
 
     if (e.mods.isShiftDown())
     {
