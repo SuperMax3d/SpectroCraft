@@ -1025,30 +1025,26 @@ compiled:
 
 - `SpectroCraft_resources.rc` — the `VS_VERSION_INFO` resource embedded in the exe, so
   Windows **file properties** (File version / Product version) always carry the new version;
-- `JuceHeader.h` — keeps `ProjectInfo::versionString` / `versionNumber` in sync.
+
+`JuceHeader.h` is deliberately **not** patched: it is included by almost every
+translation unit, so rewriting it on every build forced a full rebuild.
+`ProjectInfo::versionString` therefore keeps JUCE's default; code that needs the
+bumped version (About box, `--measure_load_time` log) uses `SC_VERSION_STRING`
+from `generated/Version.h`.
 
 (In-place patching is used because this environment's `rc.exe` ignores `/D`
 preprocessor definitions, so JUCE's `JUCE_USER_DEFINED_RC_FILE` mechanism cannot be relied on.)
 
-### CPU erratum & SIMD dispatch
+### SIMD dispatch
 
-The AVX2 FFT path (`src/FFTAvx.cpp`) is guarded by a one-time hardware self-test:
-some CPUs (observed on an AMD Ryzen 9 3900X / Zen 2) have an erratum where a SIMD
-store inside a loop causes the CPU to commit one spurious extra iteration beyond
-the loop bounds, corrupting adjacent memory. The machine code is correct; the
-detection runs the exact load/add/store loop pattern over a sentinel-padded buffer
-and disables the AVX2 path for the life of the process if corruption is found.
-On affected machines the scalar JUCE FFT fallback is used instead (verified to be
-bit-identical in output).
-
-In addition, the AVX2 path is disabled outright in Debug builds: the erratum
-only manifests under concurrent multithreaded load, which a one-shot
-single-threaded self-test cannot reliably detect. (A separate, real bug that
-looked like this instability — a data race in the window-function cache that
-returned a dangling pointer when two threads first requested the same window —
-has been fixed; see `SpectralEngine::getWindow`.) The unit test suite and all
-offline renders now pass deterministically in **both** Debug and Release on the
-affected machine.
+`src/FFTAvx.cpp` contains an AVX2 radix-2 FFT that is compiled only when the
+translation unit is built with AVX2 enabled (`__AVX2__`); the default build
+does not enable it, so `scfft::realForward` uses JUCE's FFT (one cached
+`juce::dsp::FFT` per order and per thread). When compiled in, the AVX2 path is
+used only if CPUID reports AVX2 with OS YMM support and a one-time numerical
+self-test against a double-precision DFT passes. (An earlier "CPU erratum"
+note was a bug in the vector loop - 8-float vectors stepped by 4 - fixed in
+the 2026-11 audit.)
 
 ### Rendering backend (no D3D11/Direct2D at all)
 
@@ -1502,7 +1498,8 @@ sessions in `SpectroCraft.recent`.
 
 ```
 SpectroCraft.exe                          :: launch GUI
-SpectroCraft.exe --run-unit-tests         :: run the unit test suite, exit code 0 on success
+SpectroCraft.exe --run-unit-tests         :: run the unit test suite (isolated settings store),
+                                           :: exit code 0 on success, 1 if a check fails
 SpectroCraft.exe --generate-test-files [dir]   :: write tests/data/*.wav (default: tests/data)
 SpectroCraft.exe --test-spectral <in.wav> <out.png> [width height t0 t1]
                                            :: offline spectrogram render, e.g.
@@ -1540,6 +1537,13 @@ SpectroCraft.exe --batch <actionName> <inFolder> <outFolder> [formats] [rename]
                                               --subfolders scans recursively and mirrors
                                               the subfolder structure into outFolder.
 ```
+
+Exit codes: `--run-action` returns 0 on success, 1 when the action, a step,
+the input or the output fails, and 2 for a usage error. `--batch` returns 1
+only for a setup failure (missing folder, no matching file, unknown action);
+per-file failures are listed in the printed summary but do not change the exit
+code. `ctest` (after building) runs the unit suite through
+`SpectroCraft --run-unit-tests` (registered in `tests/CMakeLists.txt`).
 
 AI builds additionally accept (see [AI features](#ai-features)):
 

@@ -5,8 +5,9 @@ The following third-party code is included or used:
 
 | Component | Location | Licence | Notes |
 |---|---|---|---|
-| JUCE 9.0.4 | `extern/JUCE/` | GPL-3.0-only (see `extern/JUCE/LICENSE.md`) | Vendored, unmodified except two small defensive patches in the Windows accessibility layer (`juce_Windowing_windows.cpp`: `WM_GETOBJECT` returns no provider; `juce_Accessibility_windows.cpp`: never reports active UIA clients). |
+| JUCE 9.0.4 | `extern/JUCE/` | AGPL-3.0 / commercial JUCE licence, dual-licensed; used under the AGPLv3 (see `extern/JUCE/LICENSE.md`) | Vendored, unmodified except two small defensive patches in the Windows accessibility layer (`juce_Windowing_windows.cpp`: `WM_GETOBJECT` returns no provider; `juce_Accessibility_windows.cpp`: never reports active UIA clients). |
 | OpenVINO runtime 2024.6 (headers + DLLs) | `extern/OpenVINO/` | Apache-2.0 (+ model licences, see `extern/OpenVINO/licensing/`) | Used only when `-DSPECTRO_ENABLE_AI=ON`. Loaded at runtime; the app runs without it (delay-loaded import). |
+| SoundTouch 1.7.1 — Copyright (c) Olli Parviainen | `extern/soundtouch/` | LGPL-2.1-or-later (`extern/soundtouch/LICENSE.txt`) | Built statically for the time-stretch effect (`src/TimeStretch.cpp`). |
 | SoXR resampler | `extern/soxr/` | LGPL-2.1 (`COPYING.LGPL`, `LICENCE`, `AUTHORS`) | Built statically into the exe for Effects → Resample… and internal AI-rate conversion. |
 | whisper.cpp b5454 prebuilt binaries (+ ggml, llama.cpp) | `extern/whisper-b5454/` | MIT (see `extern/whisper-b5454/README.md`) | Speech transcription engine: official release DLLs loaded at runtime (`LoadLibrary`), CPU-only via ggml's per-microarchitecture SIMD backends. Only the C API headers are vendored for compilation. |
 | FFmpeg 7.1.1 (minimal audio-only build: libavformat, libavcodec, libavutil, libswresample) | `extern/ffmpeg/` | LGPL-2.1-or-later (`extern/ffmpeg/licensing/`) | Reads the audio track of video/audio files. Built without GPL/nonfree parts and without any video decoder; shipped as separate DLLs (replaceable). Source tag `n7.1.1` + exact configure options in `extern/ffmpeg/build.sh`. |
@@ -25,6 +26,7 @@ Model files are downloaded on demand to `%APPDATA%/SpectroCraft/models/<model-id
 
 ## Resulting licence of SpectroCraft
 
-AGPL-3.0 + GPL-3.0-only (JUCE, Intel DSP port) + LGPL-2.1 (SoXR) + MIT
-(whisper.cpp) + Apache-2.0 (OpenVINO runtime) + LGPL-2.1-or-later (FFmpeg DLLs)
-is compatible; the combined work remains **AGPL-3.0**.
+AGPL-3.0 (JUCE) + GPL-3.0-only (Intel DSP port) + LGPL-2.1 (SoXR) +
+LGPL-2.1-or-later (SoundTouch, FFmpeg DLLs) + MIT (whisper.cpp) + Apache-2.0
+(OpenVINO runtime) is compatible; the combined work remains **AGPL-3.0**.
+See also `THIRD_PARTY_NOTICES.md` at the repository root.
