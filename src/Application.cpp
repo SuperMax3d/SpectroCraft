@@ -3568,6 +3568,9 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 // Python scripts: run a user script against the selection (or whole file).
 // Data exchange happens through temp float32 WAV files plus a metadata JSON;
 // the result replaces that range in place and is undoable.
+// Not an AI feature: kept outside the SC_ENABLE_AI block so lean
+// (-DSPECTRO_ENABLE_AI=OFF) and non-Windows builds still link.
+#endif // SC_ENABLE_AI (noiseSuppress)
 
 bool Application::runPythonScript (const juce::File& script, const juce::String& scriptText,
                                    const std::string& pythonCmd,
@@ -3798,6 +3801,7 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
     return true;
 }
 
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 bool Application::transcribe (const std::string& modelId, const std::string& language,
                               bool translate, bool fast,
                               std::function<bool(float)> onProgress, std::string* errOut,

@@ -165,7 +165,7 @@ public:
                     if (!cur.isEmpty()) { args.add (cur); cur.clear(); }
                 }
                 else
-                    cur += c;
+                    cur += juce::String::charToString ((juce::juce_wchar) c);
             }
             if (!cur.isEmpty())
                 args.add (cur);

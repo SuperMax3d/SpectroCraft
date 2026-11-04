@@ -476,6 +476,7 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
         case 't':
             if (s.type == kTimeStretch)
                 return app.timeStretch ((float) numParam (p, "pct", 0.0), errOut);
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
             if (s.type == kTranscribe)
             {
                 const auto m = p.getProperty ("modelId", juce::var());
@@ -486,6 +487,10 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
                                        (bool) p.getProperty ("fast", juce::var()),
                                        nullptr, errOut);
             }
+#else
+            if (s.type == kTranscribe)
+                return fail ("transcribe: this build has no AI support");
+#endif
             if (s.type == kTrim)        return app.trimSelection (errOut);
             break;
 

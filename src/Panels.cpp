@@ -305,7 +305,12 @@ void FileListPanel::openContainingFolder (int row)
     ShellExecuteW (nullptr, L"open", folder.getFullPathName().toWideCharPointer(),
                    nullptr, nullptr, SW_SHOWNORMAL);
 #else
-    const juce::String cmd = (JUCE_MACOS ? "open " : "xdg-open ") + "\""
+   #if JUCE_MAC
+    const juce::String opener ("open ");
+   #else
+    const juce::String opener ("xdg-open ");
+   #endif
+    const juce::String cmd = opener + "\""
                             + folder.getFullPathName() + "\"";
     std::system (cmd.toRawUTF8());
 #endif

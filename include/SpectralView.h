@@ -10,20 +10,25 @@
 #include <vector>
 #include <functional>
 
+/** Overlays to bake into an exported spectrogram PNG (File -> Spectrogram).
+    All off by default: a plain export is just the spectral plot, exactly as
+    before these options existed. */
+struct SpectralExportOptions
+{
+    bool axes = false;        // include frequency + time axes around the plot
+    bool markers = false;     // draw marker lines and titles
+    bool selections = false;  // draw time selection band + spectral selection shapes
+    bool drawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
+};
+
 class SpectralView : public juce::Component,
                       public juce::SettableTooltipClient
 {
 public:
-    /** Overlays to bake into an exported spectrogram PNG (File -> Spectrogram).
-        All off by default: a plain export is just the spectral plot, exactly as
-        before these options existed. */
-    struct SpectralExportOptions
-    {
-        bool axes = false;        // include frequency + time axes around the plot
-        bool markers = false;     // draw marker lines and titles
-        bool selections = false;  // draw time selection band + spectral selection shapes
-        bool drawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
-    };
+    // Declared at namespace scope (below the includes) so that `= {}` default
+    // arguments inside this class compile on clang/GCC too: a nested struct with
+    // default member initialisers is incomplete until the enclosing class ends.
+    using SpectralExportOptions = ::SpectralExportOptions;
 
     explicit SpectralView (Application& app);
     ~SpectralView();

@@ -11441,6 +11441,29 @@ static void testAltScaleInFFTReadout()
     wav.deleteFile ();
 }
 
+// Shared fixtures (also used by non-AI tests, so kept outside SC_ENABLE_AI).
+// Two-tone test file: 500 Hz + 3500 Hz sines, mono 8 kHz.
+static const double kToneRate = 8000.0;
+static const int64_t kToneFrames = 16384;   // 2 seconds
+
+static bool writeTwoToneWav (const juce::File& path)
+{
+    return writeWav (path, 1, kToneRate, kToneFrames,
+        [] (int, int64_t f, double rate) {
+            const double t = (double) f / rate;
+            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 500.0 * t)
+                 + 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 3500.0 * t);
+        });
+}
+
+// Marquee covering only the 500 Hz tone.
+static SpectralSelection lowBandSel()
+{
+    SpectralSelection s;
+    s.addRect (0.0, kToneFrames / kToneRate, 300.0, 700.0, false);
+    return s;
+}
+
 #if defined(SC_ENABLE_AI)
 // Phase 0: OpenVINO runtime smoke test + generic model manager logic.
 // FIPS 180-4 test vectors for our self-contained SHA-256 (this JUCE build has
@@ -11712,6 +11735,8 @@ static void testAiDeviceResolution()
     CHECK (sc::resolveAiDevice ("CPU", cpuOnly) == "CPU", "explicit CPU -> CPU");
 }
 
+#endif   // SC_ENABLE_AI (AI plumbing tests); the tests below need no AI runtime
+
 // ------------------------------------------------- spectral selection model
 
 static void testSpectralSelectionModel()
@@ -11968,28 +11993,6 @@ static float toneAmp (const std::vector<float>& x, size_t from, size_t to,
     }
     const double n = (double) std::max<size_t> (1, to - from);
     return (float) (std::sqrt (sr * sr + si * si) / n * 2.0);
-}
-
-// Two-tone test file: 500 Hz + 3500 Hz sines, mono 8 kHz.
-static const double kToneRate = 8000.0;
-static const int64_t kToneFrames = 16384;   // 2 seconds
-
-static bool writeTwoToneWav (const juce::File& path)
-{
-    return writeWav (path, 1, kToneRate, kToneFrames,
-        [] (int, int64_t f, double rate) {
-            const double t = (double) f / rate;
-            return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 500.0 * t)
-                 + 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 3500.0 * t);
-        });
-}
-
-// Marquee covering only the 500 Hz tone.
-static SpectralSelection lowBandSel()
-{
-    SpectralSelection s;
-    s.addRect (0.0, kToneFrames / kToneRate, 300.0, 700.0, false);
-    return s;
 }
 
 // ------------------------------------------------- masked gain + zero-out
@@ -14491,6 +14494,7 @@ static void testPlaybackMaskStreaming()
     CHECK (!pm.matches (kToneRate, 2), "mismatched channel count detected");
 }
 
+#if defined(SC_ENABLE_AI)
 static double rmsOf (const std::vector<float>& v)
 {
     if (v.empty()) return 0.0;
@@ -17564,7 +17568,7 @@ static void testCatEarlyFileCoverage()
     const double rate = kToneRate;   // 8 kHz -> N = 1024, H = 256
     const int64_t n = (int64_t) (3 * rate);
 
-    auto makeBuf = [] (bool silenceFirst) {
+    auto makeBuf = [n, rate] (bool silenceFirst) {
         std::vector<std::vector<float>> buf(1, std::vector<float>((size_t)n));
         for (int64_t i = 0; i < n; ++i)
         {
@@ -26265,8 +26269,8 @@ static int scRunUnitTestsImpl()
     progress ("unified metadata");      testUnifiedMetadata();
     progress ("ai settings persist");   testAiSettingsPersistence();
     progress ("df stft round-trip");  testDfStft();
-    progress ("AI device resolution"); testAiDeviceResolution();
 #if defined(SC_ENABLE_AI)
+    progress ("AI device resolution"); testAiDeviceResolution();
     progress ("sha256 (self-contained)"); testSha256();
     progress ("AI plumbing");         testAIPlumbing();
     progress ("NS failure details");  testNsFailureDetails();

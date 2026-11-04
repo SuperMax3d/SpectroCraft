@@ -96,7 +96,7 @@ void AudioEngine::closeFile()
     buffer.reset();
     reader.reset();
     clearMipmaps();
-    currentFile = {};
+    currentFile = juce::File();
     nchans = 0; totalSamples = 0; rate = 44100.0; durationSecs = 0.0;
     hasFile = false; unsaved = false;
     playing = false; paused = false; looping = false;

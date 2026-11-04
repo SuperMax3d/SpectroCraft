@@ -6080,6 +6080,9 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
     }).detach();
 }
 
+#endif // SC_ENABLE_AI (noise suppression)
+
+// The Python bridge is not an AI feature: keep it in lean builds too.
 // ---------------------------------------------------------------------------
 // Python panel: run a user script against the selection (or whole file).
 // Progress: materialise + extract 0..30%, interpreter run 30..95% (the bar
@@ -6135,6 +6138,8 @@ void MainWindow::runPythonScriptAsync (const juce::File& script, const juce::Str
         });
     }).detach();
 }
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 
 // ---------------------------------------------------------------------------
 // Effects > Transcribe... — Whisper transcription of the whole file

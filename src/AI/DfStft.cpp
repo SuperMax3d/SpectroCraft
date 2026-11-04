@@ -119,7 +119,7 @@ void DfStft::dft960 (const C* in, C* out) const
     C buf[kM];
     for (int n = 0; n < kFftSize; ++n)
         buf[n] = cMul (in[n], _chirpB[n]);
-    std::memset (&buf[kFftSize], 0, (size_t) (kM - kFftSize) * sizeof C);
+    std::memset (&buf[kFftSize], 0, (size_t) (kM - kFftSize) * sizeof (C));
 
     fftDif (buf);
     for (int k = 0; k < kM; ++k)
