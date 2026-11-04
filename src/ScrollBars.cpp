@@ -7,6 +7,7 @@
 
 #include "ScrollBars.h"
 #include <algorithm>
+#include <cmath>
 
 // ---------------------------------------------------------------- TimeScrollBar
 
@@ -26,8 +27,13 @@ juce::Rectangle<int> TimeScrollBar::thumbRect() const
 
 void TimeScrollBar::applyWindow (double t0, double t1)
 {
+    // The ~8 px minimum only limits zooming IN from the bar: a window the
+    // views already zoomed below it must still pan and jump (same span).
     const double minSpan = 8.0 / std::max (1, getWidth()) * duration; // ~8 px
-    if (t1 - t0 < minSpan || t0 < -1e-9 || t1 > duration + 1e-9) return;
+    const double curSpan = winT1 - winT0;
+    const bool shrinks = (t1 - t0) < curSpan * (1.0 - 1e-9);
+    if (t1 <= t0 || (t1 - t0 < minSpan && shrinks)
+        || t0 < -1e-9 || t1 > duration + 1e-9) return;
     t0 = std::clamp (t0, 0.0, duration);
     t1 = std::clamp (t1, 0.0, duration);
     if (t0 == winT0 && t1 == winT1) return;
@@ -127,9 +133,9 @@ void TimeScrollBar::mouseUp (const juce::MouseEvent&) { mode = Mode::None; }
 juce::Rectangle<int> ValueScrollBar::thumbRect() const
 {
     const int h = std::max (1, getHeight());
-    const double range = rangeMax - rangeMin;
-    float y0 = (float) ((rangeMax - winHi) / range * h); // maximum value at the top
-    float y1 = (float) ((rangeMax - winLo) / range * h);
+    const double uMax = toU (rangeMax), range = uMax - toU (rangeMin);
+    float y0 = (float) ((uMax - toU (winHi)) / range * h); // maximum value at the top
+    float y1 = (float) ((uMax - toU (winLo)) / range * h);
     if (y1 - y0 < 8.0f)
     {
         const float c = 0.5f * (y0 + y1);
@@ -141,8 +147,13 @@ juce::Rectangle<int> ValueScrollBar::thumbRect() const
 
 void ValueScrollBar::applyWindow (double lo, double hi)
 {
-    const double minSpan = 8.0 / std::max (1, getHeight()) * (rangeMax - rangeMin); // ~8 px
-    if (hi - lo < minSpan || lo < rangeMin - 1e-9 || hi > rangeMax + 1e-9) return;
+    // Same rule as the time bar: the ~8 px minimum only blocks zooming in,
+    // never panning/jumping a window that is already narrower.
+    const double minSpan = 8.0 / std::max (1, getHeight()) * (toU (rangeMax) - toU (rangeMin)); // ~8 px
+    const double span = toU (hi) - toU (lo), curSpan = toU (winHi) - toU (winLo);
+    const bool shrinks = span < curSpan * (1.0 - 1e-9);
+    if (hi <= lo || (span < minSpan && shrinks)
+        || lo < rangeMin - 1e-9 || hi > rangeMax + 1e-9) return;
     lo = std::clamp (lo, rangeMin, rangeMax);
     hi = std::clamp (hi, rangeMin, rangeMax);
     if (lo == winLo && hi == winHi) return;
@@ -164,9 +175,12 @@ ValueScrollBar::Mode ValueScrollBar::hitTest (const juce::Rectangle<int>& thumb,
 
 void ValueScrollBar::jumpToValue (double v)
 {
-    const double span = winHi - winLo;
-    const double nlo = std::clamp (v - 0.5 * span, rangeMin, std::max (rangeMin, rangeMax - span));
-    applyWindow (nlo, nlo + span);
+    // In track space (log Hz on a logarithmic axis) so the window keeps its
+    // on-screen size.
+    const double uMin = toU (rangeMin), uMax = toU (rangeMax);
+    const double span = toU (winHi) - toU (winLo);
+    const double nlo = std::clamp (toU (v) - 0.5 * span, uMin, std::max (uMin, uMax - span));
+    applyWindow (fromU (nlo), std::min (rangeMax, fromU (nlo + span)));
 }
 
 void ValueScrollBar::paint (juce::Graphics& g)
@@ -190,7 +204,8 @@ void ValueScrollBar::mouseDown (const juce::MouseEvent& e)
     dragWinLo = winLo; dragWinHi = winHi;
 
     const auto tr = thumbRect();
-    const double vClick = rangeMax - (double) std::clamp (e.y, 0, h) / (double) h * (rangeMax - rangeMin);
+    const double uMax = toU (rangeMax);
+    const double vClick = fromU (uMax - (double) std::clamp (e.y, 0, h) / (double) h * (uMax - toU (rangeMin)));
 
     mode = hitTest (tr, (int) e.x, (int) e.y);
     if (mode == Mode::None)
@@ -206,30 +221,33 @@ void ValueScrollBar::mouseDrag (const juce::MouseEvent& e)
 {
     if (mode == Mode::None || rangeMax <= rangeMin) return;
     const int h = std::max (1, getHeight());
-    // Dragging up increases the value.
-    const double dv = -(double) (e.y - dragStartY) / (double) h * (rangeMax - rangeMin);
+    // Dragging up increases the value. All arithmetic in track space
+    // (toU), so a logarithmic frequency axis pans/zooms uniformly.
+    const double uMin = toU (rangeMin), uMax = toU (rangeMax);
+    const double dv = -(double) (e.y - dragStartY) / (double) h * (uMax - uMin);
+    const double uLo = toU (dragWinLo), uHi = toU (dragWinHi);
 
     switch (mode)
     {
         case Mode::Pan:
         {
-            const double span = dragWinHi - dragWinLo;
-            const double nlo = std::clamp (dragWinLo + dv, rangeMin, std::max (rangeMin, rangeMax - span));
-            applyWindow (nlo, nlo + span);
+            const double span = uHi - uLo;
+            const double nlo = std::clamp (uLo + dv, uMin, std::max (uMin, uMax - span));
+            applyWindow (fromU (nlo), std::min (rangeMax, fromU (nlo + span)));
             break;
         }
         case Mode::TopEdge: // drag the top edge -> zoom in/out at the high end
         {
-            const double minSpan = 8.0 / std::max (1, getHeight()) * (rangeMax - rangeMin);
-            const double nhi = std::clamp (dragWinHi + dv, dragWinLo + minSpan, rangeMax);
-            applyWindow (dragWinLo, nhi);
+            const double minSpan = 8.0 / std::max (1, getHeight()) * (uMax - uMin);
+            const double nhi = std::clamp (uHi + dv, std::min (uLo + minSpan, uMax), uMax);
+            applyWindow (dragWinLo, std::min (rangeMax, fromU (nhi)));
             break;
         }
         case Mode::BottomEdge: // drag the bottom edge -> zoom in/out at the low end
         {
-            const double minSpan = 8.0 / std::max (1, getHeight()) * (rangeMax - rangeMin);
-            const double nlo = std::clamp (dragWinLo + dv, rangeMin, dragWinHi - minSpan);
-            applyWindow (nlo, dragWinHi);
+            const double minSpan = 8.0 / std::max (1, getHeight()) * (uMax - uMin);
+            const double nlo = std::clamp (uLo + dv, uMin, std::max (uMin, uHi - minSpan));
+            applyWindow (std::max (rangeMin, fromU (nlo)), dragWinHi);
             break;
         }
         default: break;

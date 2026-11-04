@@ -104,7 +104,21 @@ public:
     }
     void setPlayhead (double t)
     {
-        if (t != playhead) { playhead = t; dirty = true; repaint(); }
+        if (t == playhead) return;
+        // Only the playhead line moves: repaint the old and new columns, not
+        // the whole view (called at 30 Hz during playback).
+        repaintPlayheadColumn (timeToX (playhead));
+        playhead = t;
+        dirty = true;
+        repaintPlayheadColumn (timeToX (playhead));
+    }
+    // Repaints the full-height strip around the playhead line drawn at x
+    // ((int) x or lround (x), 1 px wide).
+    void repaintPlayheadColumn (double x)
+    {
+        if (!std::isfinite (x)) { repaint(); return; }
+        const int xi = (int) std::floor (std::clamp (x, -4.0, (double) getWidth() + 4.0));
+        repaint (xi - 2, 0, 5, getHeight());
     }
     double getPlayhead() const { return playhead; }
     void setVisibleChannels (const std::vector<int>& chs);
