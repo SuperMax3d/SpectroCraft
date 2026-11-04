@@ -22,7 +22,31 @@ foreach (pair IN LISTS SC_OV_FILES)
     list (GET pair 1 name)
     file (REAL_PATH "${src}" real)
     file (COPY_FILE "${real}" "${DEST}/${name}" ONLY_IF_DIFFERENT)
+    list (APPEND sc_ov_copied "${DEST}/${name}")
 endforeach ()
+
+# Linux: OpenVINO's prebuilt libraries carry no run path, so libopenvino only
+# finds libtbb (and the CPU plugin / IR frontend find libopenvino) through the
+# executable's inherited DT_RPATH. Give each bundled OpenVINO library its own
+# RUNPATH=$ORIGIN: the folder is self-contained whoever loads the library
+# (dlopen of the plugin, ldd, tools). macOS install names are rewritten by
+# OpenVINO's @rpath layout already.
+if (NOT CMAKE_HOST_APPLE AND sc_ov_copied)
+    find_program (SC_PATCHELF patchelf)
+    if (SC_PATCHELF)
+        foreach (lib IN LISTS sc_ov_copied)
+            execute_process (COMMAND "${SC_PATCHELF}" --set-rpath "\$ORIGIN" "${lib}"
+                             RESULT_VARIABLE rc)
+            if (NOT rc EQUAL 0)
+                message (FATAL_ERROR "patchelf failed on ${lib}")
+            endif ()
+        endforeach ()
+    else ()
+        message (WARNING "patchelf not found: bundled OpenVINO libraries keep no run path "
+                         "(they still load from the app through its DT_RPATH; install patchelf "
+                         "for a fully self-contained folder)")
+    endif ()
+endif ()
 
 if (CMAKE_HOST_APPLE)   # script mode: the host is the target (no cross builds)
     file (GLOB libs LIST_DIRECTORIES false "${SC_WHISPER_LIB_DIR}/lib*.dylib")
