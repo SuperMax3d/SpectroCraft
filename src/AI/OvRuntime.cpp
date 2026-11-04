@@ -6,6 +6,7 @@
 #include <juce_core/juce_core.h>
 #include <cctype>
 #include <cstdio>
+#include <mutex>
 #if defined(_WIN32)
     #include <windows.h>   // LoadLibraryA / GetLastError (JUCE has already configured the Windows headers)
 #endif
@@ -70,6 +71,12 @@ static juce::File cacheDirPath()
 
 bool OvRuntime::init(std::string* errOut)
 {
+    if (_ready) return true;
+
+    // Called from the noise-suppression and transcription workers and the
+    // CLI: serialise so two threads never create / replace _core together.
+    static std::mutex initMutex;
+    std::lock_guard<std::mutex> lock (initMutex);
     if (_ready) return true;
 
 #if defined(_WIN32)

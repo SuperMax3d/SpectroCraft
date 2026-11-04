@@ -434,7 +434,8 @@ void SuperResolutionWindow::openDownloadDialog()
 
             setStatus ("Downloading " + choices[i].label + "...");
             ok = sc::acpp::downloadFile (choices[i].url, zip,
-                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err);
+                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err,
+                choices[i].sizeBytes);
             if (!ok && !prog->cancelled.load ())
                 setStatus ("Download failed: " + juce::String (err));
 
@@ -459,7 +460,8 @@ void SuperResolutionWindow::openDownloadDialog()
                                                       : sc::acpp::flashSrUrl (choices[i].file))
                                          .toStdString (),
                                          dest,
-                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err);
+                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err,
+                choices[i].sizeBytes);
             if (!ok && !prog->cancelled.load ())
                 setStatus ("Download failed: " + juce::String (err));
         }

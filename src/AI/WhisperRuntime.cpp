@@ -25,11 +25,11 @@ bool WhisperRuntime::load(std::string* errOut)
     if (_ready) return true;
 
 #if defined(_WIN32)
-    // The app directory is first in the default DLL search order, and the
-    // build copies whisper.dll next to the executable. Fall back to an
-    // explicit path beside the module for odd PATH configurations.
-    HMODULE h = ::LoadLibraryA ("whisper.dll");
-    if (h == nullptr)
+    // The build copies the runtime DLLs next to the executable: load them
+    // from there by full path. A bare name would fall through the default
+    // search order (system folders, PATH, current directory) whenever a DLL
+    // is missing from the app folder, and load whatever is found there.
+    std::string exeDir;
     {
         char modPath [MAX_PATH] = {};
         const DWORD n = ::GetModuleFileNameA (nullptr, modPath, MAX_PATH);
@@ -41,11 +41,16 @@ bool WhisperRuntime::load(std::string* errOut)
             if (lastSlash != nullptr)
             {
                 *lastSlash = '\0';
-                std::string full = std::string (modPath) + "\\whisper.dll";
-                h = ::LoadLibraryA (full.c_str ());
+                exeDir = modPath;
             }
         }
     }
+    // Bare names only when the exe path itself is unavailable (over MAX_PATH).
+    auto runtimeDll = [&exeDir] (const char* name) {
+        return exeDir.empty () ? std::string (name) : exeDir + "\\" + name;
+    };
+
+    HMODULE h = ::LoadLibraryA (runtimeDll ("whisper.dll").c_str ());
 
     if (h == nullptr)
     {
@@ -90,7 +95,7 @@ bool WhisperRuntime::load(std::string* errOut)
     // loaded by whisper.dll itself — b5454 expects the host application to call
     // ggml_backend_load_all(), which scans the executable's directory for
     // ggml-cpu-*.dll and registers the best-scoring one. It is idempotent.
-    HMODULE hggml = ::LoadLibraryA ("ggml.dll");
+    HMODULE hggml = ::LoadLibraryA (runtimeDll ("ggml.dll").c_str ());
     if (hggml == nullptr)
     {
         ::FreeLibrary (h);
@@ -111,7 +116,16 @@ bool WhisperRuntime::load(std::string* errOut)
         return false;
     }
     loadAllBackends = reinterpret_cast<void (*)()> (sym);
-    loadAllBackends ();
+
+    // ggml_backend_load_all() also scans the current directory for
+    // ggml-cpu-*.dll (e.g. a folder of WAV files on a network share when the
+    // app is launched by file association). Restrict the scan to the exe
+    // folder when this ggml build exports the path-taking variant.
+    void* symFromPath = ::GetProcAddress (hggml, "ggml_backend_load_all_from_path");
+    if (symFromPath != nullptr && !exeDir.empty ())
+        reinterpret_cast<void (*)(const char*)> (symFromPath) (exeDir.c_str ());
+    else
+        loadAllBackends ();
 
     _ready = true;
     return true;

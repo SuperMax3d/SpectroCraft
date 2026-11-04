@@ -5,6 +5,8 @@
 #include "AI/Sha256.h"
 
 #include <cstdio>
+#include <map>
+#include <mutex>
 #include <string>
 
 #include <juce_core/juce_core.h>
@@ -147,20 +149,64 @@ std::string fileNameFor(const ModelFileSpec& f)
 juce::File defaultModelRoot()
 {
 #if SC_TESTS_EXE
-    // Unit tests must never touch the user's real model cache.
-    static juce::File isolated = [] ()
-    {
-        auto f = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                    .getChildFile ("SpectroCraftTests-models");
-        if (f.exists()) f.deleteRecursively();
-        return f;
-    } ();
-    return isolated;
+    // Unit tests must never touch the user's real model cache. The isolated
+    // folder is kept between runs so the AI tests do not re-download ~170 MB
+    // of weights every time (ensureInstalled verifies what it reuses).
+    return juce::File::getSpecialLocation (juce::File::tempDirectory)
+               .getChildFile ("SpectroCraftTests-models");
 #else
     return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                .getChildFile ("SpectroCraft")
                .getChildFile ("models");
 #endif
+}
+
+// Files whose SHA-256 already matched in this process, keyed by full path,
+// with the size and modification time seen then: ensureInstalled() skips
+// re-hashing them (up to 3 GB per Whisper model) on every run.
+struct VerifiedStamp { int64_t size = 0; int64_t mtimeMs = 0; };
+
+std::mutex& verifiedMutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+std::map<juce::String, VerifiedStamp>& verifiedFiles()
+{
+    static std::map<juce::String, VerifiedStamp> files;
+    return files;
+}
+
+bool isKnownVerified(const juce::File& p)
+{
+    std::lock_guard<std::mutex> lock (verifiedMutex());
+    const auto it = verifiedFiles().find (p.getFullPathName ());
+    return it != verifiedFiles().end ()
+        && it->second.size == p.getSize ()
+        && it->second.mtimeMs == p.getLastModificationTime ().toMilliseconds ();
+}
+
+void rememberVerified(const juce::File& p)
+{
+    std::lock_guard<std::mutex> lock (verifiedMutex());
+    verifiedFiles()[p.getFullPathName ()] = { p.getSize (), p.getLastModificationTime ().toMilliseconds () };
+}
+
+bool fileMatchesSha256(const juce::File& p, const std::string& expected)
+{
+    juce::FileInputStream in (p);
+    if (in.failedToOpen ())
+        return false;
+    Sha256 digest;
+    char buf[1 << 16];
+    while (true)
+    {
+        const int n = in.read (buf, sizeof (buf));
+        if (n <= 0) break;
+        digest.update ((const unsigned char*) buf, (size_t) n);
+    }
+    return digest.hexDigest () == expected;
 }
 
 } // namespace
@@ -226,29 +272,12 @@ bool ModelManager::verifyInstalled(const ModelSpec& spec, std::string* badFileOu
         // Files without a published hash are accepted on existence alone.
         if (f.sha256.empty())
             continue;
-        juce::FileInputStream in (p);
-        Sha256 digest;
-        if (!in.failedToOpen ())
-        {
-            char buf[1 << 16];
-            while (true)
-            {
-                const int n = in.read (buf, sizeof (buf));
-                if (n <= 0) break;
-                digest.update ((const unsigned char*) buf, (size_t) n);
-            }
-        }
-        else
+        if (!fileMatchesSha256 (p, f.sha256))
         {
             if (badFileOut) *badFileOut = fileNameFor (f);
             return false;
         }
-        const std::string hex = digest.hexDigest ();
-        if (hex != f.sha256)
-        {
-            if (badFileOut) *badFileOut = fileNameFor (f);
-            return false;
-        }
+        rememberVerified (p);
     }
     return true;
 }
@@ -301,14 +330,31 @@ bool ModelManager::ensureInstalled(const ModelSpec& spec, ProgressFn onProgress,
 
         if (!downloadFile (f.url, dest, f.sha256, f.sizeBytes, fileProgress, errOut))
             return false;
+        rememberVerified (dest);   // hashed while downloading
     }
 
-    // Final verification pass over the whole model.
-    std::string bad;
-    if (!verifyInstalled (spec, &bad))
+    // Final verification pass over the whole model. Files already verified in
+    // this process (same size and modification time) are not hashed again.
+    for (const auto& f : spec.files)
     {
-        if (errOut) *errOut = "Checksum mismatch for '" + bad + "' — file deleted, please re-download.";
-        return false;
+        const juce::File p = dir.getChildFile (fileNameFor (f));
+        if (!p.existsAsFile ())
+        {
+            if (errOut) *errOut = "Model file '" + fileNameFor (f) + "' is missing.";
+            return false;
+        }
+        if (f.sha256.empty () || isKnownVerified (p))
+            continue;
+        if (!fileMatchesSha256 (p, f.sha256))
+        {
+            // Delete the corrupt file so the next attempt downloads it again
+            // (it has the right size, so it would otherwise be kept forever).
+            p.deleteFile ();
+            if (errOut) *errOut = "Checksum mismatch for '" + fileNameFor (f)
+                                  + "' — the corrupt file was deleted; run again to re-download it.";
+            return false;
+        }
+        rememberVerified (p);
     }
     return true;
 }
@@ -334,10 +380,25 @@ static bool wininetGet(const std::string& url, const juce::File& destPart,
         return false;
     }
 
+    // A stalled connection must end the transfer (as a failure) instead of
+    // blocking InternetReadFile - and the Cancel button - forever.
+    {
+        DWORD timeoutMs = 60000;
+        InternetSetOptionA (hInternet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeoutMs, sizeof (timeoutMs));
+        InternetSetOptionA (hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeoutMs, sizeof (timeoutMs));
+    }
+
     bool ok = false;
     // Note: this SDK's wininet.h has no INTERNET_FLAG_RECONNECT; the default
     // InternetOpenUrl behaviour already reconnects as needed.
-    const DWORD flags = (url.rfind ("https://", 0) == 0 ? INTERNET_FLAG_SECURE : 0);
+    DWORD flags = (url.rfind ("https://", 0) == 0 ? INTERNET_FLAG_SECURE : 0);
+    // Large model files: never serve them from / copy them into the WinINet cache.
+#ifdef INTERNET_FLAG_RELOAD
+    flags |= INTERNET_FLAG_RELOAD;
+#endif
+#ifdef INTERNET_FLAG_NO_CACHE_WRITE
+    flags |= INTERNET_FLAG_NO_CACHE_WRITE;
+#endif
     HINTERNET hRequest = InternetOpenUrlA (hInternet, url.c_str (), nullptr, 0,
                                            flags, 0);
     if (!hRequest)
@@ -348,17 +409,39 @@ static bool wininetGet(const std::string& url, const juce::File& destPart,
         return false;
     }
 
-    // Content-Length (may be 0 for chunked responses).
-    DWORD contentLength = 0;
-    DWORD lenSize = sizeof (contentLength);
+    // Final HTTP status (WinINet follows redirects). An error page (404, 403,
+    // proxy authentication, captive portal...) must not be hashed and then
+    // reported as a checksum problem.
+    DWORD status = 0, statusSize = sizeof (status);
     // This SDK's HttpQueryInfoA has a trailing lpdwIndex parameter.
-    HttpQueryInfoA (hRequest, HTTP_QUERY_CONTENT_LENGTH, &contentLength, &lenSize, nullptr);
-    const int64_t totalBytes = (int64_t) contentLength;
+    if (HttpQueryInfoA (hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                        &status, &statusSize, nullptr)
+        && (status < 200 || status > 299))
+    {
+        if (errOut) *errOut = "download failed: HTTP " + std::to_string ((int) status)
+                              + " (no internet access, a proxy or a captive portal?).";
+        InternetCloseHandle (hRequest);
+        InternetCloseHandle (hInternet);
+        return false;
+    }
+
+    // Content-Length, read as text: without HTTP_QUERY_FLAG_NUMBER the call
+    // returns a string, and the numeric form would be a 32-bit DWORD anyway.
+    // 0 = unknown (chunked responses): fall back to the registry size.
+    int64_t contentLength = 0;
+    {
+        char lenText[64] = {};
+        DWORD lenSize = sizeof (lenText) - 1;
+        if (HttpQueryInfoA (hRequest, HTTP_QUERY_CONTENT_LENGTH, lenText, &lenSize, nullptr))
+            contentLength = juce::String (lenText).trim ().getLargeIntValue ();
+        if (contentLength < 0) contentLength = 0;
+    }
+    const int64_t totalBytes = contentLength > 0 ? contentLength : expectedSize;
 
     destPart.deleteFile();   // FileOutputStream opens in append mode
     Sha256 digest;
     int64_t got = 0;
-    bool cancelled = false, openFailed = false;
+    bool cancelled = false, openFailed = false, transferError = false;
     {
         juce::FileOutputStream out (destPart);
         if (!out.failedToOpen())
@@ -368,19 +451,24 @@ static bool wininetGet(const std::string& url, const juce::File& destPart,
             while (!cancelled)
             {
                 DWORD nRead = 0;
-                // InternetReadFile returns FALSE with nRead == 0 at the end of
-                // the stream — that is a clean EOF, not an error. A premature
-                // stop (connection reset etc.) also lands here and is caught by
-                // the size / SHA-256 verification below.
-                if (!InternetReadFile (hRequest, buf, sizeof (buf), &nRead) || nRead == 0)
+                // InternetReadFile returns TRUE with nRead == 0 at the end of
+                // the stream; FALSE is a network error (reset, timeout...).
+                if (!InternetReadFile (hRequest, buf, sizeof (buf), &nRead))
+                {
+                    transferError = true;
+                    break;
+                }
+                if (nRead == 0)
                     break;
 
-                out.write ((const unsigned char*) buf, nRead);
+                if (!out.write ((const unsigned char*) buf, nRead))
+                    break;   // caught by the on-disk size check below
                 digest.update ((const unsigned char*) buf, nRead);
                 got += (int64_t) nRead;
 
-                if (onProgress && !onProgress (totalBytes > 0 ? (float) got / (float) totalBytes : 1.0f,
-                                               "downloading…"))
+                float frac = totalBytes > 0 ? (float) ((double) got / (double) totalBytes) : 1.0f;
+                if (frac > 1.0f) frac = 1.0f;
+                if (onProgress && !onProgress (frac, "downloading…"))
                     cancelled = true;
             }
 
@@ -400,25 +488,32 @@ static bool wininetGet(const std::string& url, const juce::File& destPart,
     {
         // Verification and rename happen only after the file is fully closed:
         // Windows will not move or delete a file that still has an open handle.
-        const std::string hex = digest.hexDigest ();
-        if (expectedSha256.empty() || hex == expectedSha256)
+        char msg [160];
+        if (transferError)
         {
-            if (expectedSize > 0 && got != expectedSize)
-            {
-                char msg [128];
-                std::snprintf (msg, sizeof (msg), "Downloaded size mismatch (%lld of %lld bytes).",
-                               (long long) got, (long long) expectedSize);
-                if (errOut) *errOut = msg;
-            }
-            else
-            {
-                if (finalDest.exists ()) finalDest.deleteFile ();
-                ok = destPart.moveFileTo (finalDest);
-            }
+            std::snprintf (msg, sizeof (msg), "The download was interrupted after %lld bytes (network error).",
+                           (long long) got);
+            if (errOut) *errOut = msg;
         }
-        else if (errOut)
+        else if (destPart.getSize () != got)
         {
-            *errOut = "SHA-256 mismatch: the downloaded file does not match the expected checksum.";
+            if (errOut) *errOut = "Could not write the whole file to the models folder (disk full?).";
+        }
+        else if ((contentLength > 0 && got != contentLength) || (expectedSize > 0 && got != expectedSize))
+        {
+            std::snprintf (msg, sizeof (msg), "Downloaded size mismatch (%lld of %lld bytes).",
+                           (long long) got, (long long) (expectedSize > 0 ? expectedSize : contentLength));
+            if (errOut) *errOut = msg;
+        }
+        else if (!expectedSha256.empty() && digest.hexDigest () != expectedSha256)
+        {
+            if (errOut) *errOut = "SHA-256 mismatch: the downloaded file does not match the expected checksum.";
+        }
+        else
+        {
+            if (finalDest.exists ()) finalDest.deleteFile ();
+            ok = destPart.moveFileTo (finalDest);
+            if (!ok && errOut) *errOut = "Could not move the downloaded file into place.";
         }
     }
 

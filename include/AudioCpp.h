@@ -111,10 +111,29 @@ void setInstalledVariant(const juce::String& variantId, const juce::File& d = {}
 // ---------------------------------------------------------------------------
 
 /** Download url to dest via dest.part + rename. onProgress(fraction 0..1)
-    returning false cancels the transfer. Returns true on success. */
+    returning false cancels the transfer. Returns true on success: a 2xx
+    HTTP status, a complete transfer (no network error, Content-Length
+    honoured) and, when expectedBytes > 0, exactly that many bytes. Anything
+    else deletes the .part file and leaves dest untouched. */
 bool downloadFile(const std::string& url, const juce::File& dest,
                   const std::function<bool(float)>& onProgress,
-                  std::string* errOut);
+                  std::string* errOut, int64_t expectedBytes = 0);
+
+/** Parse an HTTP Content-Length header value (64-bit); 0 when absent or
+    malformed. */
+int64_t parseContentLength(const char* text);
+
+/** Empty when a finished transfer may be installed, else the user-facing
+    reason. httpStatus / contentLength / expectedBytes of 0 mean unknown. */
+juce::String validateDownload(int httpStatus, int64_t contentLength, int64_t expectedBytes,
+                              int64_t received, bool transferError);
+
+/** Final step of downloadFile (platform-independent, exposed for tests):
+    validates the transfer and the bytes on disk, then renames part to dest.
+    On failure part is deleted, dest is left untouched and errOut is set. */
+bool commitDownload(const juce::File& part, const juce::File& dest,
+                    int httpStatus, int64_t contentLength, int64_t expectedBytes,
+                    int64_t received, bool transferError, std::string* errOut);
 
 /** Extract audiocpp_cli.exe from a downloaded release zip into d and record
     the variant marker. The zip itself is deleted afterwards. */

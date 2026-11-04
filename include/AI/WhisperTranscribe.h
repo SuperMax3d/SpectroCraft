@@ -36,7 +36,7 @@ public:
         int threads = 0;                 // 0 = hardware concurrency
     };
 
-    using ProgressFn = std::function<bool(float, const std::string&)>;   // false = (ignored) cancel hint
+    using ProgressFn = std::function<bool(float, const std::string&)>;   // false = cancel (aborts whisper_full)
 
     WhisperTranscriber() = default;
     ~WhisperTranscriber();

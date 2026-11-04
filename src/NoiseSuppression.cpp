@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <mutex>
 
@@ -38,6 +39,18 @@ bool report(std::function<bool(float)>& p, float v)
     return !p || p (v);
 }
 
+// OpenVINO reports inference / tensor-binding failures (device plugin errors,
+// out of memory, a corrupt model of the right size...) as exceptions. They
+// must not escape to the worker thread that runs the pipelines, where they
+// would terminate the whole application: turn them into an error message.
+bool failFromException(std::string* errOut, const std::string& device, const char* what)
+{
+    if (errOut)
+        *errOut = "AI processing failed on " + device + ": " + (what != nullptr ? what : "unknown error")
+                  + (device == "CPU" ? "" : " (try the CPU device)");
+    return false;
+}
+
 ai::DenseUnetModel* getCachedModel(const std::string& modelId, const std::string& device,
                                    const juce::File& xmlPath, std::string* errOut)
 {
@@ -52,22 +65,22 @@ ai::DenseUnetModel* getCachedModel(const std::string& modelId, const std::string
     if (!model->load (xmlPath.getFullPathName ().toStdString (), device, errOut))
         return nullptr;
 
-    ai::DenseUnetModel* raw = model.get();
-    {
-        std::lock_guard<std::mutex> lock (modelCacheMutex());
-        modelCache()[key] = std::move (model);
-    }
-    return raw;
+    // Another thread may have cached the same key meanwhile: keep that
+    // instance (it may be in use) and drop ours instead of replacing it.
+    std::lock_guard<std::mutex> lock (modelCacheMutex());
+    auto& slot = modelCache()[key];
+    if (!slot) slot = std::move (model);
+    return slot.get();
 }
 
 } // namespace
 
-bool runDenseUnetPipeline(const std::string& modelId, const std::string& device,
-                          double rate, int nChans,
-                          std::vector<std::vector<float>>& data,
-                          std::function<bool(float)> onProgress,
-                          std::string* errOut,
-                          const std::vector<int>* chans)
+static bool runDenseUnetPipelineImpl(const std::string& modelId, const std::string& device,
+                                     double rate, int nChans,
+                                     std::vector<std::vector<float>>& data,
+                                     std::function<bool(float)> onProgress,
+                                     std::string* errOut,
+                                     const std::vector<int>* chans)
 {
     auto fail = [&errOut] (const std::string& msg) -> bool
     {
@@ -202,21 +215,20 @@ ai::DeepFilter* getCachedDfModel(const std::string& modelId, const std::string& 
     if (!model->load (folder.getFullPathName ().toStdString (), device, sel, errOut))
         return nullptr;
 
-    ai::DeepFilter* raw = model.get();
-    {
-        std::lock_guard<std::mutex> lock (modelCacheMutex());
-        dfModelCache()[key] = std::move (model);
-    }
-    return raw;
+    // Keep an instance another thread may already have cached (and be using).
+    std::lock_guard<std::mutex> lock (modelCacheMutex());
+    auto& slot = dfModelCache()[key];
+    if (!slot) slot = std::move (model);
+    return slot.get();
 }
 
-bool runDeepFilterPipeline(const std::string& modelId, const std::string& device,
-                           double rate, int nChans,
-                           std::vector<std::vector<float>>& data,
-                           float attenLimDb, bool df3PostFilter,
-                           std::function<bool(float)> onProgress,
-                           std::string* errOut,
-                           const std::vector<int>* chans)
+static bool runDeepFilterPipelineImpl(const std::string& modelId, const std::string& device,
+                                      double rate, int nChans,
+                                      std::vector<std::vector<float>>& data,
+                                      float attenLimDb, bool df3PostFilter,
+                                      std::function<bool(float)> onProgress,
+                                      std::string* errOut,
+                                      const std::vector<int>* chans)
 {
     auto fail = [&errOut] (const std::string& msg) -> bool
     {
@@ -296,12 +308,19 @@ bool runDeepFilterPipeline(const std::string& modelId, const std::string& device
         // Chunked inference at 48 kHz.
         const size_t midLen = (size_t) mid.getNumSamples();
         std::vector<float> back ((size_t) midLen);
+        bool userCancelled = false;
         if (!model->filter (mid.getReadPointer (0), midLen, back,
                             attenLimDb, 20.f, isDF3 && df3PostFilter,
-                            [&onProgress, base, span] (float v) {
-                                return report (onProgress, base + (0.1f + 0.85f * v) * span);
+                            [&onProgress, &userCancelled, base, span] (float v) {
+                                const bool go = report (onProgress, base + (0.1f + 0.85f * v) * span);
+                                if (!go) userCancelled = true;
+                                return go;
                             }))
-            return false;   // cancelled
+        {
+            if (userCancelled) return false;   // cancelled
+            return fail ("Inference failed on " + device
+                         + (device == "CPU" ? std::string() : std::string (" (try the CPU device)")));
+        }
 
         // 48 kHz -> file rate.
         juce::AudioBuffer<float> midBack (1, (int) back.size());
@@ -325,6 +344,39 @@ bool runDeepFilterPipeline(const std::string& modelId, const std::string& device
     }
 
     return true;
+}
+
+bool runDenseUnetPipeline(const std::string& modelId, const std::string& device,
+                          double rate, int nChans,
+                          std::vector<std::vector<float>>& data,
+                          std::function<bool(float)> onProgress,
+                          std::string* errOut,
+                          const std::vector<int>* chans)
+{
+    try
+    {
+        return runDenseUnetPipelineImpl (modelId, device, rate, nChans, data,
+                                         std::move (onProgress), errOut, chans);
+    }
+    catch (const std::exception& e) { return failFromException (errOut, device, e.what ()); }
+    catch (...)                     { return failFromException (errOut, device, nullptr); }
+}
+
+bool runDeepFilterPipeline(const std::string& modelId, const std::string& device,
+                           double rate, int nChans,
+                           std::vector<std::vector<float>>& data,
+                           float attenLimDb, bool df3PostFilter,
+                           std::function<bool(float)> onProgress,
+                           std::string* errOut,
+                           const std::vector<int>* chans)
+{
+    try
+    {
+        return runDeepFilterPipelineImpl (modelId, device, rate, nChans, data, attenLimDb,
+                                          df3PostFilter, std::move (onProgress), errOut, chans);
+    }
+    catch (const std::exception& e) { return failFromException (errOut, device, e.what ()); }
+    catch (...)                     { return failFromException (errOut, device, nullptr); }
 }
 
 } // namespace sc

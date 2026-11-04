@@ -2,6 +2,8 @@
 #include "AudioCpp.h"
 #include "Resampler.h"
 
+#include <cstdint>
+
 #if JUCE_WINDOWS
 #  include <windows.h>
 #  include <wininet.h>
@@ -184,11 +186,77 @@ void setInstalledVariant(const juce::String& variantId, const juce::File& d)
 // Downloads.
 // ---------------------------------------------------------------------------
 
+int64_t parseContentLength(const char* text)
+{
+    if (text == nullptr) return 0;
+    while (*text == ' ' || *text == '\t') ++text;
+    int64_t v = 0;
+    bool any = false;
+    for (; *text >= '0' && *text <= '9'; ++text)
+    {
+        if (v > (INT64_MAX - 9) / 10) return 0;   // absurd value: treat as unknown
+        v = v * 10 + (int64_t) (*text - '0');
+        any = true;
+    }
+    while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
+    return (any && *text == '\0') ? v : 0;
+}
+
+juce::String validateDownload(int httpStatus, int64_t contentLength, int64_t expectedBytes,
+                              int64_t received, bool transferError)
+{
+    if (httpStatus != 0 && (httpStatus < 200 || httpStatus > 299))
+        return "download failed: HTTP " + juce::String (httpStatus)
+               + " (no internet access, a proxy or a captive portal?). Install the file manually.";
+    if (transferError)
+        return "The network transfer was interrupted after " + juce::String (received)
+               + " bytes. Please retry the download.";
+    if (received <= 0)
+        return "The server returned an empty file.";
+    if (contentLength > 0 && received != contentLength)
+        return "Incomplete download (" + juce::String (received) + " of "
+               + juce::String (contentLength) + " bytes). Please retry the download.";
+    if (expectedBytes > 0 && received != expectedBytes)
+        return "Unexpected download size (" + juce::String (received) + " bytes instead of "
+               + juce::String (expectedBytes) + "): the server probably returned an error page "
+               "(proxy / captive portal) instead of the file. Install the file manually.";
+    return {};
+}
+
+bool commitDownload(const juce::File& part, const juce::File& dest,
+                    int httpStatus, int64_t contentLength, int64_t expectedBytes,
+                    int64_t received, bool transferError, std::string* errOut)
+{
+    juce::String problem = validateDownload (httpStatus, contentLength, expectedBytes,
+                                             received, transferError);
+    // The bytes that actually reached the disk must match what was received
+    // (a full disk makes buffered writes fail silently).
+    if (problem.isEmpty () && part.getSize () != received)
+        problem = "Could not write the whole file to the models folder (disk full?).";
+
+    if (problem.isNotEmpty ())
+    {
+        part.deleteFile ();   // never leave a partial / invalid file behind
+        if (errOut) *errOut = problem.toStdString ();
+        return false;
+    }
+
+    // The stream is closed by now, so renaming cannot hit a sharing violation.
+    dest.deleteFile ();
+    if (!part.moveFileTo (dest))
+    {
+        part.deleteFile ();
+        if (errOut) *errOut = "Could not move the downloaded file into place.";
+        return false;
+    }
+    return true;
+}
+
 #if JUCE_WINDOWS
 
 bool downloadFile(const std::string& url, const juce::File& dest,
                   const std::function<bool(float)>& onProgress,
-                  std::string* errOut)
+                  std::string* errOut, int64_t expectedBytes)
 {
     HINTERNET hInternet = InternetOpenA ("SpectroCraft", INTERNET_OPEN_TYPE_PRECONFIG,
                                          nullptr, 0, 0);
@@ -198,7 +266,22 @@ bool downloadFile(const std::string& url, const juce::File& dest,
         return false;
     }
 
-    const DWORD flags = (url.rfind ("https://", 0) == 0 ? INTERNET_FLAG_SECURE : 0);
+    // A stalled connection must end the transfer (as a failure) instead of
+    // blocking InternetReadFile - and the Cancel button - forever.
+    {
+        DWORD timeoutMs = 60000;
+        InternetSetOptionA (hInternet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeoutMs, sizeof (timeoutMs));
+        InternetSetOptionA (hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeoutMs, sizeof (timeoutMs));
+    }
+
+    DWORD flags = (url.rfind ("https://", 0) == 0 ? INTERNET_FLAG_SECURE : 0);
+    // Multi-GB files: never serve them from / copy them into the WinINet cache.
+#ifdef INTERNET_FLAG_RELOAD
+    flags |= INTERNET_FLAG_RELOAD;
+#endif
+#ifdef INTERNET_FLAG_NO_CACHE_WRITE
+    flags |= INTERNET_FLAG_NO_CACHE_WRITE;
+#endif
     HINTERNET hRequest = InternetOpenUrlA (hInternet, url.c_str (), nullptr, 0, flags, 0);
     if (!hRequest)
     {
@@ -208,14 +291,33 @@ bool downloadFile(const std::string& url, const juce::File& dest,
         return false;
     }
 
-    // Content-Length (may be 0 for chunked responses).
-    DWORD contentLength = 0, lenSize = sizeof (contentLength);
-    HttpQueryInfoA (hRequest, HTTP_QUERY_CONTENT_LENGTH, &contentLength, &lenSize, nullptr);
-    const int64_t totalBytes = (int64_t) contentLength;
+    // Final status code (redirects are followed by WinINet). 0 = unknown.
+    DWORD status = 0, statusSize = sizeof (status);
+    if (!HttpQueryInfoA (hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                         &status, &statusSize, nullptr))
+        status = 0;
 
+    // Content-Length is read as text: the numeric form is a 32-bit DWORD and
+    // the model files exceed 4 GB. 0 = unknown (chunked responses).
+    int64_t contentLength = 0;
+    {
+        char lenText[64] = {};
+        DWORD lenSize = sizeof (lenText) - 1;
+        if (HttpQueryInfoA (hRequest, HTTP_QUERY_CONTENT_LENGTH, lenText, &lenSize, nullptr))
+            contentLength = parseContentLength (lenText);
+    }
+    const int64_t totalBytes = contentLength > 0 ? contentLength : expectedBytes;
+
+    dest.getParentDirectory ().createDirectory ();   // e.g. models/audiocpp/flashsr
     const juce::File part = dest.getSiblingFile (dest.getFileName () + ".part");
-    bool ok = false, cancelled = false, openFailed = false;
+    part.deleteFile ();   // FileOutputStream appends to an existing file
+    bool ok = false, cancelled = false, openFailed = false, transferError = false;
     int64_t got = 0;
+    if (status != 0 && (status < 200 || status > 299))
+    {
+        // Error page: do not save its body, commitDownload reports the code.
+    }
+    else
     {
         juce::FileOutputStream out (part);
         if (!out.failedToOpen ())
@@ -224,14 +326,24 @@ bool downloadFile(const std::string& url, const juce::File& dest,
             while (!cancelled)
             {
                 DWORD nRead = 0;
-                // InternetReadFile returns FALSE with nRead == 0 at clean EOF.
-                if (!InternetReadFile (hRequest, buf, sizeof (buf), &nRead) || nRead == 0)
+                // InternetReadFile returns TRUE with nRead == 0 at the end of
+                // the stream; FALSE is a network error (reset, timeout...).
+                if (!InternetReadFile (hRequest, buf, sizeof (buf), &nRead))
+                {
+                    transferError = true;
                     break;
-                out.write ((const unsigned char*) buf, nRead);
+                }
+                if (nRead == 0)
+                    break;
+                if (!out.write ((const unsigned char*) buf, nRead))
+                    break;   // the on-disk size check in commitDownload reports it
                 got += (int64_t) nRead;
-                if (onProgress && !onProgress (totalBytes > 0 ? (float) got / (float) totalBytes : 1.0f))
+                float frac = totalBytes > 0 ? (float) ((double) got / (double) totalBytes) : 1.0f;
+                if (frac > 1.0f) frac = 1.0f;
+                if (onProgress && !onProgress (frac))
                     cancelled = true;
             }
+            out.flush ();
         }
         else openFailed = true;
     }
@@ -240,19 +352,13 @@ bool downloadFile(const std::string& url, const juce::File& dest,
     {
         if (errOut) *errOut = "Could not write to the models folder.";
     }
-    else if (!cancelled && got > 0)
+    else if (!cancelled)
     {
-        // The stream is closed by now, so renaming cannot hit a sharing violation.
-        dest.deleteFile ();
-        ok = part.moveFileTo (dest);
-        if (!ok && errOut) *errOut = "Could not move the downloaded file into place.";
-    }
-    else if (cancelled)
-    {
-        // Leave no partial file behind.
+        ok = commitDownload (part, dest, (int) status, contentLength, expectedBytes,
+                             got, transferError, errOut);
     }
 
-    if (!ok) part.deleteFile ();
+    if (!ok) part.deleteFile ();   // leave no partial file behind
     InternetCloseHandle (hRequest);
     InternetCloseHandle (hInternet);
     return ok;
@@ -261,7 +367,7 @@ bool downloadFile(const std::string& url, const juce::File& dest,
 #else   // non-Windows: manual download only.
 
 bool downloadFile(const std::string&, const juce::File&,
-                  const std::function<bool(float)>&, std::string* errOut)
+                  const std::function<bool(float)>&, std::string* errOut, int64_t)
 {
     if (errOut) *errOut = "Automatic downloads are only supported on Windows in v1.";
     return false;

@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -53,7 +54,7 @@ public:
     // %APPDATA%/SpectroCraft/openvino-cache. Safe to call repeatedly.
     bool init(std::string* errOut = nullptr);
 
-    bool ready() const { return _ready; }
+    bool ready() const { return _ready.load (); }
 
     // True when this build was configured with -DSPECTRO_ENABLE_AI=ON.
 #ifdef SC_ENABLE_AI
@@ -78,7 +79,7 @@ public:
 
 private:
     OvRuntime() = default;
-    bool _ready = false;
+    std::atomic<bool> _ready { false };   // init() may run on several worker threads
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     std::shared_ptr<ov::Core> _core;
 #endif
