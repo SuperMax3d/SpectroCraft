@@ -132,5 +132,7 @@ static void runRegression_ai()
     testRegAiAcppCommitDownload ();
 #if defined(SC_ENABLE_AI)
     testRegAiEnsureInstalledDeletesCorruptFile ();
+#else
+    scSkip ("regression ai: ModelManager::ensureInstalled corrupt-file test needs an AI build (SPECTRO_ENABLE_AI)");
 #endif
 }

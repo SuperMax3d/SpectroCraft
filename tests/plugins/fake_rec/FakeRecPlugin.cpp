@@ -2,17 +2,27 @@
 // Fake recorder plugin - test double for the Recorder Plugin API v1.
 //
 // Deterministic: no wall-clock pacing. Each device generates a fixed set of
-// sine waves (exact phase accumulation) as fast as possible into an internal
-// ring, so unit tests can verify the full load/enumerate/configure/start/
-// pull/stop path with exact sample values.
+// sine waves (exact phase accumulation) into a bounded ring buffer. The
+// generator runs as fast as the host drains: when the ring holds kRingFrames
+// frames it sleeps on a condition variable until a read frees space (or stop
+// is requested). Frames are therefore never dropped, the stream read by the
+// host is one continuous sine per channel, and an idle session costs no CPU
+// (the former version produced without pause into an 8 MB vector and erased
+// its head on every 256-frame block).
+//
+// Portable (std::thread / std::condition_variable, C ABI): built and loaded
+// by dlopen on macOS / Linux as well as by LoadLibrary on Windows.
 // ============================================================================
 
 #ifndef _USE_MATH_DEFINES
 #define _USE_MATH_DEFINES 1
 #endif
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -33,43 +43,87 @@ struct FakeDevice
     std::vector<double> freqs;
 };
 
+// Ring capacity in frames: ~4 s at 8 kHz, ~2 s at 16 kHz. Larger than what
+// the host pulls per timer tick (up to one second of audio), so a pull always
+// finds a full second available as soon as the generator had a moment to run.
+constexpr size_t kRingFrames = 1u << 15;
+constexpr int kBlockFrames = 256;
+
+// Fixed-size circular buffer of interleaved frames (head = oldest frame).
 struct Ring
 {
-    std::vector<float> data;      // interleaved, oldest first
-    size_t capFrames = 1 << 20;
+    std::vector<float> data;
+    size_t capFrames = 0;
+    size_t head = 0;      // index of the oldest frame
+    size_t count = 0;     // frames stored
+    int ch = 1;
     mutable std::mutex mtx;
+    std::condition_variable spaceFreed;
 
-    void push(const float* p, int64_t frames, int ch)
+    void reset(int channels, size_t frames)
     {
-        if (frames <= 0 || ch <= 0) return;
         std::lock_guard<std::mutex> lk(mtx);
-        const size_t add = (size_t) frames * (size_t) ch;
-        data.insert(data.end(), p, p + add);
-        const size_t maxS = capFrames * (size_t) ch;
-        if (data.size() > maxS)
-            data.erase(data.begin(), data.begin() + (ptrdiff_t) (data.size() - maxS));
+        ch = std::max(1, channels);
+        capFrames = frames;
+        data.assign(capFrames * (size_t) ch, 0.0f);
+        head = 0;
+        count = 0;
     }
 
-    long long available(int ch) const
+    void clear()
     {
         std::lock_guard<std::mutex> lk(mtx);
-        return ch > 0 ? (long long) (data.size() / (size_t) ch) : 0LL;
+        head = 0;
+        count = 0;
     }
 
-    int read(float* dest, int ch, long long maxFrames)
+    // Blocks (without spinning) until `frames` frames fit or `stop` is set.
+    // Returns false when stopped before the block could be stored.
+    bool pushBlocking(const float* p, size_t frames, const std::atomic<bool>& stop)
     {
-        if (dest == nullptr || ch <= 0 || maxFrames <= 0) return 0;
+        std::unique_lock<std::mutex> lk(mtx);
+        while (!stop.load() && capFrames - count < frames)
+            spaceFreed.wait_for(lk, std::chrono::milliseconds(20));
+        if (stop.load())
+            return false;
+        size_t tail = (head + count) % capFrames;
+        for (size_t f = 0; f < frames; ++f)
+        {
+            std::memcpy(&data[tail * (size_t) ch], p + f * (size_t) ch, sizeof(float) * (size_t) ch);
+            tail = (tail + 1) % capFrames;
+        }
+        count += frames;
+        return true;
+    }
+
+    void wakeAll() { std::lock_guard<std::mutex> lk(mtx); spaceFreed.notify_all(); }
+
+    long long available() const
+    {
         std::lock_guard<std::mutex> lk(mtx);
-        const size_t have = data.size() / (size_t) ch;
-        const size_t take = std::min(have, (size_t) maxFrames);
-        if (take == 0) return 0;
-        const size_t n = take * (size_t) ch;
-        std::copy(data.begin(), data.begin() + n, dest);
-        data.erase(data.begin(), data.begin() + n);
+        return (long long) count;
+    }
+
+    int read(float* dest, long long maxFrames)
+    {
+        if (dest == nullptr || maxFrames <= 0) return 0;
+        size_t take = 0;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            take = std::min(count, (size_t) maxFrames);
+            if (take == 0) return 0;
+            // At most two contiguous runs (before and after the wrap).
+            const size_t first = std::min(take, capFrames - head);
+            std::memcpy(dest, &data[head * (size_t) ch], sizeof(float) * first * (size_t) ch);
+            if (take > first)
+                std::memcpy(dest + first * (size_t) ch, data.data(),
+                            sizeof(float) * (take - first) * (size_t) ch);
+            head = (head + take) % capFrames;
+            count -= take;
+        }
+        spaceFreed.notify_all();
         return (int) take;
     }
-
-    void clear() { std::lock_guard<std::mutex> lk(mtx); data.clear(); }
 };
 
 std::vector<FakeDevice> g_devices = {
@@ -87,11 +141,11 @@ std::string g_lastError;
 void genLoop(int index)
 {
     const FakeDevice& d = g_devices[(size_t) index];
-    std::vector<double> phase(d.channels, 0.0);
-    std::vector<float> block((size_t) d.channels * 256);
+    std::vector<double> phase((size_t) d.channels, 0.0);
+    std::vector<float> block((size_t) d.channels * (size_t) kBlockFrames);
     while (!g_stop.load())
     {
-        for (int f = 0; f < 256; ++f)
+        for (int f = 0; f < kBlockFrames; ++f)
             for (int c = 0; c < d.channels; ++c)
             {
                 const double fr = d.freqs[(size_t) c];
@@ -99,7 +153,8 @@ void genLoop(int index)
                     fr > 0.0 ? (float) std::sin(phase[(size_t) c]) : 0.0f;
                 phase[(size_t) c] += 2.0 * M_PI * fr / d.rate;
             }
-        g_ring.push(block.data(), 256, d.channels);
+        if (!g_ring.pushBlocking(block.data(), (size_t) kBlockFrames, g_stop))
+            break;
     }
 }
 
@@ -109,6 +164,11 @@ const FakeDevice* find(const char* id)
     for (const auto& d : g_devices)
         if (d.id == id) return &d;
     return nullptr;
+}
+
+int activeChannels()
+{
+    return g_activeIndex >= 0 ? g_devices[(size_t) g_activeIndex].channels : 1;
 }
 
 }   // namespace
@@ -125,7 +185,7 @@ SC_REC_EXPORT int sc_rec_get_plugin_info(sc_rec_plugin_info* out)
     if (out == nullptr) { g_lastError = "null"; return 1; }
     out->id = "fake";
     out->name = "Fake Recorder (test)";
-    out->version = "1.0";
+    out->version = "1.1";
     return 0;
 }
 
@@ -186,14 +246,12 @@ SC_REC_EXPORT int sc_rec_start(void)
 {
     if (g_running.load()) { g_lastError = "already running"; return 1; }
     if (g_activeIndex < 0) { g_lastError = "no device configured"; return 2; }
-    g_ring.clear();
+    if (g_thread.joinable()) { g_stop.store(true); g_ring.wakeAll(); g_thread.join(); }
+    g_ring.reset(activeChannels(), kRingFrames);
     g_stop.store(false);
-    if (g_thread.joinable()) g_thread.join();
     g_thread = std::thread(genLoop, g_activeIndex);
-    for (int i = 0; i < 100 && !g_running.load() && !g_stop.load(); ++i)
-        std::this_thread::yield();
-    // The generator never sets g_running itself - mark it here once the thread
-    // is up (it produces immediately).
+    // The generator produces immediately; the session counts as running as
+    // soon as its thread exists.
     g_running.store(1);
     return 0;
 }
@@ -202,6 +260,7 @@ SC_REC_EXPORT int sc_rec_stop(void)
 {
     if (!g_running.load() && !g_thread.joinable()) return 0;
     g_stop.store(true);
+    g_ring.wakeAll();
     if (g_thread.joinable()) g_thread.join();
     g_running.store(0);
     return 0;
@@ -214,15 +273,13 @@ SC_REC_EXPORT int sc_rec_is_running(void)
 
 SC_REC_EXPORT long long sc_rec_available_frames(void)
 {
-    const int ch = g_activeIndex >= 0 ? g_devices[(size_t) g_activeIndex].channels : 1;
-    return g_ring.available(ch);
+    return g_ring.available();
 }
 
 SC_REC_EXPORT int sc_rec_read(float* dest, int channels, long long maxFrames)
 {
     if (g_activeIndex < 0 && channels <= 0) return 0;
-    const int ch = g_activeIndex >= 0 ? g_devices[(size_t) g_activeIndex].channels : channels;
-    return g_ring.read(dest, ch, maxFrames);
+    return g_ring.read(dest, maxFrames);
 }
 
 SC_REC_EXPORT const char* sc_rec_last_error(void)

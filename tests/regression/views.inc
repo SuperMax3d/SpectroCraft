@@ -13,6 +13,37 @@ static int viewsSameColumnPixels (const juce::Image& a, int ax, const juce::Imag
     return same;
 }
 
+// Runs every message already queued, and the ones those post in turn (a few
+// rounds): a sentinel is posted behind them and the loop is pumped until it
+// ran. Used before taking a reference image, so asynchronous updates queued
+// by earlier setters (layout, view-range notifications) cannot land between
+// the reference and the state under test. Shared by the later GUI fragments
+// (panels.inc, mainwindow.inc are included after this file).
+static bool regDrainMessages (int rounds = 3, int timeoutMs = 5000)
+{
+    bool all = true;
+    for (int r = 0; r < rounds; ++r)
+    {
+        auto ran = std::make_shared<std::atomic<bool>> (false);
+        if (!juce::MessageManager::callAsync ([ran] { ran->store (true); }))
+            return false;
+        all = scPumpUntil ([ran] { return ran->load (); }, timeoutMs) && all;
+    }
+    return all;
+}
+
+// True when an application message box containing `text` was raised since the
+// last sc::alert::clearSuppressedMessages(). The runner puts sc::alert in
+// headless mode: message boxes are recorded instead of shown, so a modal
+// driver waiting for an AlertWindow never sees them.
+static bool regAlertShown (const juce::String& text)
+{
+    for (const auto& m : sc::alert::suppressedMessages ())
+        if (m.containsIgnoreCase (text))
+            return true;
+    return false;
+}
+
 // views#W1: the background PNG export reads the view only on the message
 // thread (preparePngExport); the job run on a worker must not see later UI
 // changes. saveAsPng() called from a worker takes the same snapshot path.
@@ -32,6 +63,7 @@ static void testViewsExportSnapshot()
     std::unique_ptr<MainWindow> win (new MainWindow (app, "views export"));
     SpectralView* sv = win->spectralViewComp ();
     CHECK (sv != nullptr, "views#W1: spectral view exists");
+    CHECK (app.doc () != nullptr, "views#W1: document open");
     if (sv == nullptr || app.doc () == nullptr) return;
 
     app.setSelection ({ 0.1, 0.3 });
@@ -69,19 +101,26 @@ static void testViewsExportSnapshot()
 
     // Legacy call from a worker thread: the snapshot hops to the message
     // thread, so the result equals a synchronous export of the current state.
-    const juce::File ref2 = dir.getChildFile ("ref2.png");
-    CHECK (sv->saveAsPng (ref2, nullptr, all), "views#W1: second synchronous export");
+    // The setters above queued asynchronous updates (layout, range
+    // notifications); they used to run during the pump below, i.e. BETWEEN
+    // the reference and the worker's snapshot, which made this check flaky.
+    // Drain them first, and take the reference after the worker returned
+    // (same settled state, nothing else touches the view meanwhile).
+    CHECK (regDrainMessages (), "views#W1: message queue drained before the threaded export");
     const juce::File outThread = dir.getChildFile ("thread.png");
     std::atomic<bool> done { false }, giveUp { false };
     bool okThread = false;
     std::thread w2 ([&] { okThread = sv->saveAsPng (outThread, &giveUp, all); done = true; });
-    const auto t0 = juce::Time::getMillisecondCounter ();
-    while (!done.load () && juce::Time::getMillisecondCounter () - t0 < 20000)
-        juce::MessageManager::getInstance ()->runDispatchLoopUntil (5);
+    const bool finished = scPumpUntil ([&done] { return done.load (); }, 20000);
     giveUp = true;   // never hang the suite if the message never ran
     w2.join ();
+    CHECK (finished, "views#W1: the worker's snapshot request was served within 20 s");
+    const juce::File ref2 = dir.getChildFile ("ref2.png");
+    CHECK (sv->saveAsPng (ref2, nullptr, all), "views#W1: second synchronous export");
     CHECK (okThread && fileChecksum (outThread) == fileChecksum (ref2),
            "views#W1: saveAsPng from a worker thread exports the message-thread snapshot");
+    win = nullptr;
+    dir.deleteRecursively ();
 }
 
 // Export canvas layout: axes on the right / ruler at the bottom used to be
@@ -183,10 +222,14 @@ static void testViewsExportLayout()
 
 // views#W4: the spectral selection raster is limited to the repaint clip;
 // a narrow repaint (playhead column) must produce the same pixels as a full
-// paint in that column.
+// paint in that column. This is a non-regression guard for that optimisation
+// (a clip/offset mistake in the clipped raster shows up as a mismatch); it
+// does not prove that the raster IS clipped - the unclipped code passed it
+// too. The column is first checked to really show the selection, so a
+// selection drawn in neither paint cannot pass for "identical".
 static void testViewsClippedSelectionPaint()
 {
-    progress ("regression views#W4: clipped selection raster matches full paint");
+    progress ("regression views#W4: clipped repaint draws the same selection pixels as a full paint");
     const juce::File dir = makeTempFile ("views_clip");
     dir.createDirectory ();
     const juce::File store = makeTempFile ("views_clip.recent");
@@ -205,14 +248,23 @@ static void testViewsClippedSelectionPaint()
         sv->setSize (800, 300);   // headless window may not be laid out
     sv->setViewRange (0.0, 1.0);
     app.setSelection ({ 0.0, 0.0 });
+    const auto pr = sv->plotRect ();
+    const int cx = pr.getX () + pr.getWidth () / 3;   // crosses the polygon
+    const juce::Image noSel = sv->createComponentSnapshot (sv->getLocalBounds (), true, 1.0f);
+
     std::vector<std::pair<double, double>> pts {
         { 0.1, 300.0 }, { 0.8, 500.0 }, { 0.6, 3000.0 }, { 0.3, 2500.0 }, { 0.15, 1200.0 } };
     app.doc ()->spectralSel.addPolygon (pts, false, true);
     sv->setSpectralSelectionChanged ();
 
-    const auto pr = sv->plotRect ();
-    const int cx = pr.getX () + pr.getWidth () / 3;   // crosses the polygon
     const juce::Image full = sv->createComponentSnapshot (sv->getLocalBounds (), true, 1.0f);
+    {
+        // The compared column must actually cross the selection fill.
+        const int unchanged = viewsSameColumnPixels (full, cx, noSel, cx, 0, sv->getHeight ());
+        CHECK (sv->getHeight () - unchanged >= 10,
+               "views#W4: the compared column shows the selection ("
+                   + juce::String (sv->getHeight () - unchanged) + " pixels changed by it)");
+    }
     const juce::Rectangle<int> col (cx - 2, 0, 5, sv->getHeight ());
     const juce::Image part = sv->createComponentSnapshot (col, true, 1.0f);
     // The selection fill is a whole-pixel mask blended at alpha ~80/255, so a

@@ -70,6 +70,12 @@ static void testSdspScFftAllSizes()
         }
     CHECK (allOk, juce::String ("scfft::realForward matches juce::dsp::FFT for N=2..65536 (")
                       + (scfft::hasAvx2() ? "AVX2 path" : "scalar path") + ")");
+    // On a CPU/build without AVX2 (Apple Silicon, non-AVX2 x86, or FFTAvx.cpp
+    // built without the AVX2 kernels) scfft falls back to the JUCE FFT, so the
+    // comparison above is JUCE against JUCE: say so instead of reporting the
+    // AVX2 kernels as verified.
+    if (!scfft::hasAvx2())
+        scSkip ("scfft AVX2 kernels not exercised (no AVX2 here): only the fallback path was compared");
 
     std::atomic<int> bad { 0 };
     std::vector<std::thread> threads;

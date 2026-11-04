@@ -8,9 +8,12 @@ static juce::File regMwWriteWav (const juce::String& name, float value, int64_t 
     return wav;
 }
 
-static void regMwPump (int ms)
+// Waits for a background save started by runSaveAsync: its completion
+// callback deletes the progress dialog first and then does the rest of its
+// work in the same message, so "no extra dialog alive" means "callback done".
+static bool regMwWaitJobsBackTo (int jobs, int timeoutMs = 10000)
 {
-    juce::MessageManager::getInstance ()->runDispatchLoopUntil (ms);
+    return scPumpUntil ([jobs] { return sc::WorkProgressDialog::numActive () <= jobs; }, timeoutMs);
 }
 
 // NEW:filtereq-dialog-uaf - juce::AlertWindow does not delete its custom
@@ -19,6 +22,7 @@ static void regMwPump (int ms)
 // destroyed: SIGBUS in parseUserPresets. The dialog must own (and delete) them.
 static void regMwFilterEqDialogOwnsComponents()
 {
+    progress ("regression mainwindow: Filter EQ dialog owns its components");
     const juce::File wav = regMwWriteWav ("reg_mw_eq_owns.wav", 0.0f);
     Application app;
     CHECK (app.openFile (wav), "reg mw: opened eq wav");
@@ -45,7 +49,7 @@ static void regMwFilterEqDialogOwnsComponents()
     if (combo != nullptr)
         combo->onChange = nullptr;
     win.reset ();
-    regMwPump (20);
+    regDrainMessages ();   // run the change message that was pending, if any
     wav.deleteFile ();
 }
 
@@ -53,6 +57,7 @@ static void regMwFilterEqDialogOwnsComponents()
 // by every generator/effect dialog.
 static void regMwLabeledFieldRowsAreDeleted()
 {
+    progress ("regression mainwindow: LabeledField rows deleted with the dialog");
     const juce::File wav = regMwWriteWav ("reg_mw_rows.wav", 0.0f);
     Application app;
     CHECK (app.openFile (wav), "reg mw: opened rows wav");
@@ -76,6 +81,7 @@ static void regMwLabeledFieldRowsAreDeleted()
 // and skip the queued delivery (alive_ captured by value).
 static void regMwCatDialogTeardown()
 {
+    progress ("regression mainwindow: CAT dialog teardown");
     const juce::File wav = makeTempFile ("reg_mw_cat.wav");
     CHECK (writeWav (wav, 1, 8000.0, 4 * 8000,
             [] (int, int64_t f, double rate) {
@@ -100,7 +106,10 @@ static void regMwCatDialogTeardown()
     std::string err;
     app.setSelection ({ 0.0, app.audioEngine ().duration () });
     CHECK (app.changeGain (-6.0f, &err), "reg mw: edit right after closing the cat dialog");
-    regMwPump (50);
+    // The worker was joined by the delete, so any delivery it posted is
+    // already queued: run the queue to its end (not a fixed 50 ms pump that
+    // could stop before it) - the delivery must find the panel gone.
+    CHECK (regDrainMessages (), "reg mw: queued cat deliveries ran");
 
     win.reset ();
     wav.deleteFile ();
@@ -111,6 +120,7 @@ static void regMwCatDialogTeardown()
 // show "Cancelling...", and live dialogs are counted as running jobs.
 static void regMwProgressDialogStaysModal()
 {
+    progress ("regression mainwindow: progress dialog stays modal");
     const int before = sc::WorkProgressDialog::numActive ();
 
     {
@@ -128,7 +138,7 @@ static void regMwProgressDialogStaysModal()
         dlg->enterModalState (false);
         juce::Component& c = *dlg;
         c.keyPressed (juce::KeyPress (juce::KeyPress::escapeKey));   // ESC = Cancel shortcut
-        regMwPump (30);                                             // triggerClick is async
+        scPumpUntil ([dlg] { return dlg->cancelled.load (); });     // triggerClick is async
         CHECK (dlg->cancelled.load (), "reg mw: ESC / Cancel requests the worker to stop");
         CHECK (dlg->isCurrentlyModal (false), "reg mw: the dialog stays modal after Cancel");
         auto* b = dlg->getButton ("Cancel");
@@ -154,6 +164,7 @@ static void regMwProgressDialogStaysModal()
 // refuses while a background job runs.
 static void regMwCloseAsksAndRespectsJobs()
 {
+    progress ("regression mainwindow: close asks and respects jobs");
     const juce::File wav = regMwWriteWav ("reg_mw_close.wav", 0.25f);
     Application app;
     std::unique_ptr<MainWindow> win (new MainWindow (app, "reg mw close"));
@@ -220,6 +231,7 @@ static void regMwCloseAsksAndRespectsJobs()
 // value, not read from the dead stack frame.
 static void regMwStreamedGainDialog()
 {
+    progress ("regression mainwindow: streamed gain dialog");
     const juce::File wav = regMwWriteWav ("reg_mw_stream_gain.wav", 0.25f, 4000);
     Application app;
     CHECK (app.openFile (wav), "reg mw: opened stream wav");
@@ -243,8 +255,7 @@ static void regMwStreamedGainDialog()
             return false;
         });
         win->showChangeGainDialog ([&] (bool ok) { done = true; applied = ok; });
-        for (int i = 0; i < 1000 && !done; ++i)   // the edit finishes on a worker
-            regMwPump (10);
+        scPumpUntil ([&done] { return done; }, 10000);   // the edit finishes on a worker
     }
     CHECK (done && applied, "reg mw: streamed gain edit completed");
     float v = 0.0f;
@@ -258,6 +269,7 @@ static void regMwStreamedGainDialog()
 // mainwindow#W1 (action replay) - the replayed step is captured by value.
 static void regMwStreamedReplayStep()
 {
+    progress ("regression mainwindow: streamed replay step");
     const juce::File wav = regMwWriteWav ("reg_mw_stream_replay.wav", 0.25f, 4000);
     Application app;
     CHECK (app.openFile (wav), "reg mw: opened replay wav");
@@ -284,12 +296,14 @@ static void regMwStreamedReplayStep()
                 }
             return false;
         });
+        // Headless runs record the box instead of showing it (sc::alert).
+        sc::alert::clearSuppressedMessages ();
         win->replaySteps_ = { step };
         win->replayPos_ = 0;
         win->replayName_ = "reg mw replay";
         win->continueReplay ();
-        for (int i = 0; i < 1000 && !finished; ++i)
-            regMwPump (10);
+        scPumpUntil ([&finished] { return finished || regAlertShown ("Run Action"); }, 10000);
+        finished = finished || regAlertShown ("Run Action");
         CHECK (finished, "reg mw: replay of the streamed step finished");
     }
     float v = 0.0f;
@@ -304,6 +318,7 @@ static void regMwStreamedReplayStep()
 // and records the new path in Open Recent.
 static void regMwSaveAsRenamesDoc()
 {
+    progress ("regression mainwindow: Save As renames the document");
     const juce::File wav = regMwWriteWav ("reg_mw_saveas_src.wav", 0.25f);
     const juce::File dst = makeTempFile ("reg_mw_saveas_dst.wav");
     dst.deleteFile ();
@@ -313,9 +328,7 @@ static void regMwSaveAsRenamesDoc()
 
     const int jobs = sc::WorkProgressDialog::numActive ();
     win->runSaveAsync (dst, true);
-    for (int i = 0; i < 1000 && sc::WorkProgressDialog::numActive () > jobs; ++i)
-        regMwPump (10);
-    regMwPump (10);
+    CHECK (regMwWaitJobsBackTo (jobs), "reg mw: Save As completed within 10 s");
 
     FileDoc* d = app.doc ();
     CHECK (d != nullptr && d->file == dst, "reg mw: Save As points the document at the new file");
@@ -332,6 +345,7 @@ static void regMwSaveAsRenamesDoc()
 // the drag filter matches whole extensions only.
 static void regMwOpenFailureAndDragFilter()
 {
+    progress ("regression mainwindow: open failure + drag filter");
     const juce::File bad = makeTempFile ("reg_mw_bad.wav");
     bad.replaceWithText ("this is not a wav file");
     Application app;
@@ -348,7 +362,9 @@ static void regMwOpenFailureAndDragFilter()
             }
             return false;
         });
+        sc::alert::clearSuppressedMessages ();
         win->openFile (bad);
+        shown = shown || regAlertShown ("Open failed");   // headless: recorded, not shown
         CHECK (shown, "reg mw: an unreadable file reports an error");
         CHECK (app.numDocs () == 0, "reg mw: nothing is opened");
     }
@@ -367,6 +383,7 @@ static void regMwOpenFailureAndDragFilter()
 // views#W10 - dragging the waveform's vertical scrollbar thumb pans the view.
 static void regMwWaveScrollBarPans()
 {
+    progress ("regression mainwindow: waveform scrollbar pans");
     const juce::File wav = regMwWriteWav ("reg_mw_vscroll.wav", 0.25f);
     Application app;
     CHECK (app.openFile (wav), "reg mw: opened vscroll wav");
@@ -407,7 +424,8 @@ static void regMwIntegrationHandoffs()
     CHECK (app.openFile (wav), "reg mw integ: opened wav");
     std::unique_ptr<MainWindow> win (new MainWindow (app, "reg mw integ"));
     FileDoc* d = app.doc ();
-    if (d == nullptr) return;
+    CHECK (d != nullptr, "reg mw integ: document open");
+    if (d == nullptr) { win.reset (); wav.deleteFile (); return; }
 
     // Save, then "edit" the metadata before the completion callback has run
     // (it only runs when the message loop is pumped below).
@@ -415,17 +433,13 @@ static void regMwIntegrationHandoffs()
     const int jobs = sc::WorkProgressDialog::numActive ();
     win->runSaveAsync (dst, true);
     d->metaDirty = true;   // a marker added while the worker writes the file
-    for (int i = 0; i < 1000 && sc::WorkProgressDialog::numActive () > jobs; ++i)
-        regMwPump (10);
-    regMwPump (10);
+    CHECK (regMwWaitJobsBackTo (jobs), "reg mw integ: first save completed within 10 s");
     CHECK (dst.existsAsFile (), "reg mw integ: file saved");
     CHECK ((bool) d->metaDirty, "reg mw integ: an edit made during the save keeps the document dirty");
 
     // Nothing changed during this one: it ends clean.
     win->runSaveAsync (dst, false);
-    for (int i = 0; i < 1000 && sc::WorkProgressDialog::numActive () > jobs; ++i)
-        regMwPump (10);
-    regMwPump (10);
+    CHECK (regMwWaitJobsBackTo (jobs), "reg mw integ: second save completed within 10 s");
     CHECK (!d->metaDirty, "reg mw integ: an undisturbed save clears the metadata flag");
 
     // Log frequency axis -> logarithmic scrollbar, without waiting for a zoom.
@@ -453,7 +467,9 @@ static void regMwIntegrationHandoffs()
         const int64_t before = app.audioEngine ().numSamples ();
         app.setSelection ({ 0.1, 0.2 });
         markers->onDeleteAudioRequested ();
-        regMwPump (10);
+        // The destructive-edit route may finish asynchronously: wait for the
+        // expected length (a wrong result fails after the timeout).
+        scPumpUntil ([&app, before] { return app.audioEngine ().numSamples () == before - 800; }, 5000);
         CHECK (app.audioEngine ().numSamples () == before - 800, "reg mw integ: DEL deleted the selected 0.1 s");
     }
 

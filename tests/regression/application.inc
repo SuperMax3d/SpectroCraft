@@ -7,12 +7,60 @@
     overwriteSamples(), which takes a frame position: blocks landed at 2*pos,
     and once 2*pos reached the capacity every pull failed after having already
     consumed the plugin's ring, so the recording silently stopped advancing. */
-static void testRegressionLoopRecordSmallPulls()
+// Folder holding the fake recorder plugin (tests/plugins/fake_rec, built with
+// the app on every platform, see tests/CMakeLists.txt): SC_TEST_RECORDER_DIR
+// when ctest set it, otherwise <build>/test-recorders found by walking up from
+// the executable (a hand-run `SpectroCraft --run-unit-tests` in the build
+// tree). Never the app's own <exe dir>/recorders: the fake plugin is not
+// shipped.
+static juce::File regFakeRecorderDir()
+{
+    const juce::File fromEnv = scTestRecorderDir ();
+    if (fromEnv != juce::File ())
+        return fromEnv;
+    juce::File dir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory ();
+    for (int i = 0; i < 10 && dir != juce::File (); ++i)
+    {
+        const juce::File d = dir.getChildFile ("test-recorders");
+        if (d.isDirectory ())
+            return d;
+        const juce::File parent = dir.getParentDirectory ();
+        if (parent == dir)
+            break;
+        dir = parent;
+    }
+    return {};
+}
+
+// Loads the fake recorder plugin into the RecorderHost singleton, whatever
+// earlier tests did (scanning is idempotent, so the result does not depend on
+// the test order or the shard). When it cannot be found: FAIL if ctest said
+// where it must be (SC_TEST_RECORDER_DIR), SKIP otherwise - never a silent
+// pass.
+static bool regLoadFakeRecorder (const juce::String& what)
 {
     auto& host = sc::rec::RecorderHost::instance ();
-    host.scanPlugins ();
-    if (host.findPlugin ("fake") == nullptr)
-        return;   // the fake recorder plugin is not built on this platform
+    const juce::File dir = regFakeRecorderDir ();
+    if (dir != juce::File ())
+        host.scanPlugins (dir);
+    if (host.findPlugin ("fake") != nullptr)
+        return true;
+    const juce::String why = what + ": fake recorder plugin not found ("
+                             + (dir != juce::File () ? dir.getFullPathName () : juce::String ("no test-recorders folder"))
+                             + ")";
+    if (scTestRecorderDir () != juce::File ())
+        CHECK (false, why);
+    else
+        scSkip (why);
+    return false;
+}
+
+static void testRegressionLoopRecordSmallPulls()
+{
+    progress ("regression application: loop recording with small pulls");
+    if (!regLoadFakeRecorder ("regression loop rec"))
+        return;
+    auto& host = sc::rec::RecorderHost::instance ();
 
     Application l;
     l.recording.pluginId = "fake";
@@ -24,8 +72,12 @@ static void testRegressionLoopRecordSmallPulls()
 
     std::string err;
     CHECK (l.startRecording (&err), "regression loop rec: session starts: " + err);
+    CHECK (l.recDoc () != nullptr, "regression loop rec: recording document created");
     if (!l.recording.active || l.recDoc () == nullptr)
+    {
+        l.stopRecording ();
         return;
+    }
 
     const int64_t cap = l.recording.loopCapFrames;   // 4000 frames
     CHECK (cap == 4000, "regression loop rec: capacity from duration");
@@ -59,6 +111,7 @@ static void testRegressionLoopRecordSmallPulls()
     PATH: the command must be split into executable + flags. */
 static void testRegressionPythonSplitCommand()
 {
+    progress ("regression application: Python command splitting");
     const juce::StringArray a = sc::py::splitCommand ("py -3");
     CHECK (a.size () == 2 && a[0] == "py" && a[1] == "-3", "regression py: 'py -3' splits in two");
 
@@ -75,6 +128,7 @@ static void testRegressionPythonSplitCommand()
 /** meta.json: region ends are seconds like starts and must not be rounded. */
 static void testRegressionPythonMetaRegionEnd()
 {
+    progress ("regression application: Python meta.json region ends");
     std::vector<Marker> ms (2);
     ms[0].name = "Climb";  ms[0].start = 1.25; ms[0].end = 2.75;   // region
     ms[1].name = "Point";  ms[1].start = 0.5;  ms[1].end = -1.0;   // point marker
@@ -97,11 +151,16 @@ static void testRegressionPythonMetaRegionEnd()
     is installed (like the existing Python end-to-end tests). */
 static void testRegressionPythonBridge()
 {
+    progress ("regression application: Python bridge (pipes, flags, NaN, worker commit)");
     std::string pyCmd;
     if (!sc::py::findPython (&pyCmd))
+    {
+        scSkip ("regression py: no Python interpreter found (findPython)");
         return;
+    }
 
     const juce::StringArray pyTokens = sc::py::splitCommand (pyCmd);
+    CHECK (!pyTokens.isEmpty (), "regression py: interpreter command splits into tokens");
     if (pyTokens.isEmpty ())
         return;
 
@@ -116,12 +175,15 @@ static void testRegressionPythonBridge()
     // The pipes used to be read only after the child exited, so the child
     // blocked on a full pipe forever (deadlock). Output was also decoded with
     // juce::String (const char*) on a buffer that is not NUL-terminated.
+    // 256 KB on stdout and 200 KB (100 000 two-byte characters) on stderr:
+    // several times any pipe buffer (4-64 KB), so the deadlock still shows,
+    // without making the child and the decoding slow.
     {
         const juce::File big = dir.getChildFile ("big_output.py");
         big.replaceWithText ("import sys\n"
-                             "sys.stdout.buffer.write(b'x' * 1000000)\n"
+                             "sys.stdout.buffer.write(b'x' * 262144)\n"
                              "sys.stdout.buffer.flush()\n"
-                             "sys.stderr.buffer.write(('\\u00e9' * 300000).encode('utf-8'))\n"
+                             "sys.stderr.buffer.write(('\\u00e9' * 100000).encode('utf-8'))\n"
                              "sys.stderr.buffer.flush()\n");
 
         juce::StringArray args;
@@ -138,9 +200,9 @@ static void testRegressionPythonBridge()
             &rc, &out, &errText);
 
         CHECK (finished && rc == 0, "regression py: verbose child does not deadlock on full pipes");
-        CHECK (out.length () == 1000000 && out.containsOnly ("x"),
+        CHECK (out.length () == 262144 && out.containsOnly ("x"),
                "regression py: stdout captured exactly (" + juce::String (out.length ()) + " chars)");
-        CHECK (errText.length () == 300000 && errText[0] == (juce::juce_wchar) 0xE9
+        CHECK (errText.length () == 100000 && errText[0] == (juce::juce_wchar) 0xE9
                    && errText.getLastCharacter () == (juce::juce_wchar) 0xE9,
                "regression py: stderr decoded as UTF-8 across read boundaries ("
                    + juce::String (errText.length ()) + " chars)");
@@ -215,8 +277,12 @@ static void testRegressionPythonBridge()
                                           &err);
                 done = true;
             });
-            while (!done.load ())
-                mm->runDispatchLoopUntil (5);   // keep the message thread alive, like the UI does
+            // Keep the message thread alive, like the UI does. The worker's
+            // own deadline only acts through the progress callback; bound the
+            // pump too (a little later) so a script that never reports
+            // progress fails here instead of hanging until the ctest timeout.
+            const bool finished = scPumpUntil ([&done] { return done.load (); }, 65000);
+            CHECK (finished, "regression py worker: script finished within 65 s");
             worker.join ();
 
             CHECK (ok, "regression py worker: make loop ran" + (ok ? juce::String () : ": " + juce::String (err)));
@@ -229,6 +295,10 @@ static void testRegressionPythonBridge()
                        "regression py worker: marker inside the removed tail dropped");
                 CHECK (app.undo ().undoSize () == 1, "regression py worker: one undo step");
             }
+        }
+        else
+        {
+            scSkip ("regression py worker: suite not running on the message thread");
         }
     }
 
@@ -257,17 +327,25 @@ static void testRegressionUndoRejectedPatchAndSubtractiveSel ()
            "reg app undo: edit recorded");
     app.undo ().lastRecorded ().lengthDelta = 50;   // corrupt it: 10 -> 10 samples needs 0
 
+    // The runner puts sc::alert in headless mode: the "history was cleared"
+    // warning is recorded synchronously instead of popping up (and possibly
+    // opening later, during another test). Check that it WOULD have been shown.
+    sc::alert::clearSuppressedMessages ();
     app.undoSteps (1);
     float x = 0.0f;
     CHECK (eng.readSamples (0, 105, 1, &x) && x == 0.5f, "reg app undo: rejected undo left the audio as it was");
     CHECK (!app.undo ().canUndo () && app.undo ().redoSize () == 0,
            "reg app undo: the out-of-step history was cleared");
-    // The warning is shown asynchronously: let it appear, then dismiss it.
-    for (int i = 0; i < 5; ++i)
-        juce::MessageManager::getInstance ()->runDispatchLoopUntil (5);
-    juce::ModalComponentManager::getInstance ()->cancelAllModalComponents ();
-    for (int i = 0; i < 5; ++i)
-        juce::MessageManager::getInstance ()->runDispatchLoopUntil (5);
+    if (sc::alert::isHeadless ())
+    {
+        CHECK (regAlertShown ("undo history was cleared"),
+               "reg app undo: the user is told the history was cleared ("
+                   + sc::alert::suppressedMessages ().joinIntoString (" | ") + ")");
+    }
+    else
+    {
+        scSkip ("reg app undo: alerts not headless, warning not checked");
+    }
 
     // Subtractive-only selection.
     SpectralSelection sub;

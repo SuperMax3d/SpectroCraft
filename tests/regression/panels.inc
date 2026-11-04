@@ -40,6 +40,7 @@ static juce::File regrPanels_freshDir (const juce::String& name)
 // before the editor switches to the new script.
 static void regrPanels_pythonAddDialog()
 {
+    progress ("regression panels: Python Add dialog name + save before switch");
     const juce::File dir = regrPanels_freshDir ("py_regr_add");
     Application app;
     app.recentStore->removeValue ("python_last_script");
@@ -58,8 +59,10 @@ static void regrPanels_pythonAddDialog()
     }
     CHECK (ed != nullptr && box != nullptr && addBtn != nullptr && addBtn->onClick,
            "regr python add: panel widgets found");
+    CHECK (box == nullptr || box->getNumItems() >= 1,
+           "regr python add: the example scripts are listed");
     if (ed == nullptr || box == nullptr || addBtn == nullptr || !addBtn->onClick
-        || box->getNumItems() < 1) return;
+        || box->getNumItems() < 1) { dir.deleteRecursively(); return; }
 
     const juce::File first = dir.getChildFile (box->getItemText (box->getSelectedItemIndex()));
     ed->setText ("# regr unsaved edit", false);
@@ -87,6 +90,7 @@ static void regrPanels_pythonAddDialog()
 // Switching scripts in the combo used to drop the editor's unsaved text.
 static void regrPanels_pythonSwitchKeepsEdits()
 {
+    progress ("regression panels: Python script switch keeps edits");
     const juce::File dir = regrPanels_freshDir ("py_regr_switch");
     Application app;
     app.recentStore->removeValue ("python_last_script");
@@ -102,7 +106,7 @@ static void regrPanels_pythonSwitchKeepsEdits()
     }
     CHECK (ed != nullptr && box != nullptr && box->getNumItems() >= 2,
            "regr python switch: combo + editor with two scripts");
-    if (ed == nullptr || box == nullptr || box->getNumItems() < 2) return;
+    if (ed == nullptr || box == nullptr || box->getNumItems() < 2) { dir.deleteRecursively(); return; }
 
     box->setSelectedId (1, juce::sendNotificationSync);
     const juce::File first = dir.getChildFile (box->getItemText (0));
@@ -131,6 +135,7 @@ static void regrPanels_pythonSwitchKeepsEdits()
 // (the old |X|/N read -12 dB (rect) / -18 dB (Hann) for A = 0.5).
 static void regrPanels_fftRmsNormalisation()
 {
+    progress ("regression panels: FFT RMS normalisation");
     const juce::File wav = makeTempFile ("regr_fft_norm.wav");
     // 500 Hz = bin 64 of a 1024-point FFT at 8 kHz: no scalloping.
     CHECK (writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
@@ -168,6 +173,7 @@ static void regrPanels_fftRmsNormalisation()
 // band power independently of the FFT size; no band is empty.
 static void regrPanels_thirdOctaveBandSum()
 {
+    progress ("regression panels: 1/3-octave band sum");
     // --- tone ---
     {
         const juce::File wav = makeTempFile ("regr_toct_tone.wav");
@@ -218,9 +224,25 @@ static void regrPanels_thirdOctaveBandSum()
 
         auto band1k = [&] (int n) -> double
         {
+            // The panel skips an expensive recompute requested within 60 ms
+            // of the previous one. Instead of sleeping a fixed margin past it
+            // (a 70 ms sleep was flaky on a loaded machine), retry until the
+            // spectrum really has the new size's bin count.
+            const size_t before = view.getSpectrum().empty() ? 0 : view.getSpectrum()[0].size();
             view.setFftSize (n);
-            juce::Thread::sleep (70);   // defeat the expensive-recompute throttle
-            view.recomputeIfNeeded();
+            const auto deadline = juce::Time::getMillisecondCounter() + 5000;
+            for (;;)
+            {
+                view.recomputeIfNeeded();
+                const size_t now = view.getSpectrum().empty() ? 0 : view.getSpectrum()[0].size();
+                if (now != 0 && now != before) break;
+                if (juce::Time::getMillisecondCounter() > deadline)
+                {
+                    CHECK (false, "regr 1/3 oct noise: FFT size " + juce::String (n) + " never recomputed");
+                    return -999.0;
+                }
+                juce::Thread::sleep (5);
+            }
             const auto& bands = view.getThirdOctMags();
             if (bands.empty() || b1k < 0 || b1k >= (int) bands[0].size()) return -999.0;
             return (double) bands[0][(size_t) b1k];
@@ -273,6 +295,7 @@ static void regrPanels_thirdOctaveBandSum()
 // change (same region) must both recompute the live spectrum.
 static void regrPanels_liveCacheKeys()
 {
+    progress ("regression panels: FFT live cache keys");
     const juce::File wav = makeTempFile ("regr_cache_solo.wav");
     CHECK (writeWav (wav, 2, 8000.0, 16000, [] (int ch, int64_t f, double rate)
         { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
@@ -352,6 +375,7 @@ static void regrPanels_liveCacheKeys()
 
 static void regrPanels_perChannelCalibration()
 {
+    progress ("regression panels: per-channel calibration (clipboard)");
     const juce::File wav = makeTempFile ("regr_bkdk_fft.wav");
     CHECK (writeWav (wav, 2, 8000.0, 16000, [] (int, int64_t f, double rate)
         { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
@@ -423,6 +447,7 @@ static void regrPanels_perChannelCalibration()
 
 static void regrPanels_markerEditors()
 {
+    progress ("regression panels: marker detail editors");
     const juce::File wav = makeTempFile ("regr_mk_edit.wav");
     CHECK (writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t f, double rate)   // 5 s
         { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
@@ -457,12 +482,13 @@ static void regrPanels_markerEditors()
             if (mk.id == id) return &mk;
         return nullptr;
     };
-    juce::MessageManager::getInstance();
     auto type = [] (juce::TextEditor& ed, const juce::String& t)
     {
-        ed.setText (t, true);   // async change message: pump it
-        for (int i = 0; i < 8; ++i)
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+        // setText (.., true) posts the change notification as a message:
+        // run the queue up to a sentinel posted behind it (not a fixed number
+        // of 1 ms pumps, which a loaded machine may not reach).
+        ed.setText (t, true);
+        CHECK (regDrainMessages (1), "regr markers: text change delivered");
     };
     auto pressReturn = [] (juce::TextEditor& ed) { if (ed.onReturnKey) ed.onReturnKey(); };
 
@@ -522,6 +548,7 @@ static void regrPanels_markerEditors()
 // Switching documents must drop the previous file's row selection.
 static void regrPanels_markerDocSwitch()
 {
+    progress ("regression panels: marker selection cleared on document switch");
     const juce::File wa = makeTempFile ("regr_mk_docA.wav");
     const juce::File wb = makeTempFile ("regr_mk_docB.wav");
     auto tone = [] (int, int64_t f, double rate)
@@ -553,6 +580,7 @@ static void regrPanels_markerDocSwitch()
 // Marker paste: h:mm:ss is read as hours, header/stray rows are skipped.
 static void regrPanels_markerPasteTimes()
 {
+    progress ("regression panels: marker paste h:mm:ss (clipboard)");
     const juce::File wav = makeTempFile ("regr_mk_paste.wav");
     CHECK (writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t, double) { return 0.0f; }),
            "regr paste: wrote");
@@ -605,8 +633,24 @@ static void regrPanels_fileListCloseAsks()
     CHECK (app.numDocs () == 1, "reg panels close: Cancel keeps the document open");
 
     app.doc ()->metaDirty = false;
-    if (app.audioEngine ().hasUnsavedChanges ()) return;   // nothing else to check without a prompt
-    panel.closeDoc (0);
+    CHECK (!app.audioEngine ().hasUnsavedChanges (),
+           "reg panels close: a freshly opened file has no unsaved audio changes");
+    bool askedAgain = false;
+    {
+        // Any prompt here is a failure; the driver only keeps it from blocking.
+        ScModalDriver driver ([&] (juce::Component& m)
+        {
+            if (auto* aw = dynamic_cast<juce::AlertWindow*> (&m))
+            {
+                askedAgain = true;
+                aw->exitModalState (0);
+                return true;
+            }
+            return false;
+        }, 2000);
+        panel.closeDoc (0);
+    }
+    CHECK (!askedAgain, "reg panels close: no prompt for a saved document");
     CHECK (app.numDocs () == 0, "reg panels close: a saved document closes without a prompt");
     wav.deleteFile ();
 }

@@ -1,6 +1,12 @@
 // Regression tests for the 2026-11 audit fixes (audio_engine). Included by tests/UnitTests.cpp;
 // uses its helpers (CHECK, progress, writeWav, makeTempFile, ...).
 
+#include <condition_variable>
+#include <cstdlib>
+#if ! JUCE_WINDOWS
+ #include <unistd.h>   // geteuid
+#endif
+
 // Distinct, easily recognisable value per channel and frame.
 static float aeChanValue (int ch, int64_t f)
 {
@@ -161,12 +167,33 @@ static void testAeSwapDuringPlayback()
         for (int i = 0; i < 777; ++i)
             clip.setSample (ch, i, 0.5f);
 
+    // Non-deterministic by nature: the old race (use-after-free during a
+    // swap) only shows when the timing falls badly; a sanitizer build is what
+    // makes this test discriminating. Kept cheap and bounded: the two helper
+    // threads yield on every pass (they no longer pin two cores while other
+    // shards run), the edit loop stops after 150 pairs or 1.5 s, and a
+    // watchdog turns a deadlocked edit (swap waiting forever for the audio
+    // thread) into an immediate failure instead of a ctest timeout.
     std::atomic<bool> stopFlag { false };
     std::atomic<bool> badOutput { false };
+    std::atomic<int> blocks { 0 }, reads { 0 };
+    std::mutex wdMutex;
+    std::condition_variable wdCv;
+    bool editsDone = false;
+    std::thread watchdog ([&] {
+        std::unique_lock<std::mutex> lk (wdMutex);
+        if (!wdCv.wait_for (lk, std::chrono::seconds (30), [&] { return editsDone; }))
+        {
+            std::cout << "FAIL: W1: paste/delete during playback deadlocked (no progress in 30 s)" << std::endl;
+            std::_Exit (3);
+        }
+    });
     std::thread audio ([&] {
         juce::AudioBuffer<float> out (2, 256);
         while (!stopFlag.load ())
         {
+            std::this_thread::yield ();
+            ++blocks;
             if (!eng.isPlaying ()) { eng.setPosition (0.0); eng.play (); }
             juce::AudioSourceChannelInfo info (&out, 0, 256);
             eng.getNextAudioBlock (info);
@@ -181,19 +208,42 @@ static void testAeSwapDuringPlayback()
     std::thread readerThread ([&] {
         std::vector<float> b (4096);
         while (!stopFlag.load ())
+        {
+            std::this_thread::yield ();
             for (int ch = 0; ch < 2; ++ch)
                 eng.readSamples (ch, 0, (int64_t) b.size (), b.data ());
+            ++reads;
+        }
     });
 
+    // Let both threads get going so the first swaps really race them.
+    const auto startWait = juce::Time::getMillisecondCounter ();
+    while ((blocks.load () == 0 || reads.load () == 0)
+           && juce::Time::getMillisecondCounter () - startWait < 2000)
+        std::this_thread::yield ();
+
     bool editsOk = true;
-    for (int k = 0; k < 150; ++k)
+    int pairs = 0;
+    const auto t0 = juce::Time::getMillisecondCounter ();
+    for (int k = 0; k < 150 && juce::Time::getMillisecondCounter () - t0 < 1500; ++k, ++pairs)
     {
         editsOk = eng.pasteAt (1000 + k * 13, clip) && editsOk;
         editsOk = eng.deleteSamples ({ 500, 500 + 777 }) && editsOk;
     }
+    {
+        std::lock_guard<std::mutex> lk (wdMutex);
+        editsDone = true;
+    }
+    wdCv.notify_all ();
     stopFlag = true;
     audio.join ();
     readerThread.join ();
+    watchdog.join ();
+    CHECK (blocks.load () > 0 && reads.load () > 0,
+           "W1: playback and reader threads ran during the edits ("
+               + juce::String (blocks.load ()) + " blocks, " + juce::String (reads.load ()) + " reads, "
+               + juce::String (pairs) + " edit pairs)");
+    CHECK (pairs >= 10, "W1: at least 10 paste/delete pairs ran within 1.5 s (" + juce::String (pairs) + ")");
     CHECK (editsOk, "W1: all edits succeeded while playing");
     CHECK (!badOutput.load (), "W1: playback output stayed valid during swaps");
     CHECK (eng.numSamples () == 48000, "W1: paste/delete pairs kept the length");
@@ -345,14 +395,29 @@ static void testAeAtomicSave()
    #if ! JUCE_WINDOWS
     // A directory without write permission: the old code could not delete
     // the target, so FileOutputStream appended a second RIFF to it and the
-    // save "succeeded" with a corrupted file.
-    dir.setReadOnly (true);
-    const bool savedRo = eng.saveFile (target);
-    dir.setReadOnly (false);
-    juce::MemoryBlock after;
-    target.loadFileAsData (after);
-    CHECK (!savedRo, "W3: save into a read-only directory reports failure");
-    CHECK (after == before, "W3: failed save left the existing file byte-identical");
+    // save "succeeded" with a corrupted file. Root ignores the permission
+    // (CI containers): the directory would stay writable, so skip there.
+    if (geteuid () == 0)
+    {
+        scSkip ("W3: read-only directory case skipped when running as root");
+    }
+    else
+    {
+        struct RestoreWritable
+        {
+            juce::File d;
+            ~RestoreWritable () { d.setReadOnly (false); }   // even if a CHECK path returns early
+        } restore { dir };
+        dir.setReadOnly (true);
+        const bool savedRo = eng.saveFile (target);
+        dir.setReadOnly (false);
+        juce::MemoryBlock after;
+        target.loadFileAsData (after);
+        CHECK (!savedRo, "W3: save into a read-only directory reports failure");
+        CHECK (after == before, "W3: failed save left the existing file byte-identical");
+    }
+   #else
+    scSkip ("W3: read-only directory case not run on Windows (directory read-only attribute does not block file creation)");
    #endif
 
     CHECK (eng.saveFile (target), "W3: normal save succeeds");

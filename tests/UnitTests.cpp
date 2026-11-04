@@ -95,10 +95,26 @@ static void scMissingFixture (const juce::String& name)
 // to the console test binary (<SpectroCraftTests dir>/recorders); when the
 // suite runs from the app (--run-unit-tests) ctest points SC_TEST_RECORDER_DIR
 // there, so the fake plugin never has to be shipped beside the real app.
+// Without the variable (app launched by hand), fall back to the
+// <build>/test-recorders folder built with the app, found by walking up from
+// the executable (same rule as regFakeRecorderDir() in regression/application.inc).
 static juce::File scTestRecorderDir ()
 {
     const juce::String d = juce::SystemStats::getEnvironmentVariable ("SC_TEST_RECORDER_DIR", {});
-    return (d.isNotEmpty() && juce::File::isAbsolutePath (d)) ? juce::File (d) : juce::File();
+    if (d.isNotEmpty() && juce::File::isAbsolutePath (d))
+        return juce::File (d);
+    juce::File dir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
+    for (int i = 0; i < 10 && dir != juce::File(); ++i)
+    {
+        const juce::File cand = dir.getChildFile ("test-recorders");
+        if (cand.isDirectory())
+            return cand;
+        const juce::File parent = dir.getParentDirectory();
+        if (parent == dir)
+            break;
+        dir = parent;
+    }
+    return juce::File();
 }
 
 // ---------------- Clipboard retry helpers ----------------
@@ -146,6 +162,14 @@ static juce::File scTestTempDir()
     return dir;
 }
 
+// Debug images ("for visual inspection") are only written when the run keeps
+// its temp folder (SC_TEST_KEEP_TEMP=1): otherwise nobody can look at them
+// and they only cost time.
+static bool scKeepTestArtifacts()
+{
+    return juce::SystemStats::getEnvironmentVariable ("SC_TEST_KEEP_TEMP", {}).isNotEmpty();
+}
+
 static juce::File makeTempFile (const juce::String& name)
 {
     static int counter = 0;
@@ -157,6 +181,23 @@ static juce::File makeTempFile (const juce::String& name)
 // need the recompute wait this long: a 10 ms margin was too thin for a loaded
 // machine or a coarse millisecond counter. Keep it above the panel's constant.
 static constexpr int kScThrottleWaitMs = 120;
+
+// Re-request the FFT panel's recompute until `cond` holds (the throttle has
+// expired and the new region was analysed) or timeoutMs elapsed. Returns as
+// soon as the panel recomputed (~60 ms) instead of a fixed 80-120 ms sleep,
+// and stays correct on a loaded machine. Returns the final value of `cond`.
+static bool scRecomputeUntil (FFTAnalysisView& view, const std::function<bool()>& cond,
+                              int timeoutMs = 2000)
+{
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + timeoutMs;
+    for (;;)
+    {
+        view.recomputeIfNeeded();
+        if (cond()) return true;
+        if (juce::Time::getMillisecondCounterHiRes() >= deadline) return false;
+        juce::Thread::sleep (5);
+    }
+}
 
 // ---------------- Condition waits ----------------
 // Pump the message loop until `cond` holds or `timeoutMs` elapsed; returns the
@@ -172,6 +213,16 @@ static bool scPumpUntil (const std::function<bool()>& cond, int timeoutMs = 2000
         if (juce::Time::getMillisecondCounterHiRes() >= deadline) return cond();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
     }
+}
+
+// Deliver every message posted so far: posts a marker message and pumps until
+// it ran (the queue is FIFO). False if it did not run within timeoutMs.
+// (Same as scFlushMessageQueue, defined later in the file by another range.)
+static bool scDeliverPostedMessages (int timeoutMs = 2000)
+{
+    auto done = std::make_shared<bool> (false);
+    juce::MessageManager::callAsync ([done] { *done = true; });
+    return scPumpUntil ([done] { return *done; }, timeoutMs);
 }
 
 // Keyboard focus only reaches a component when this process is the
@@ -253,55 +304,61 @@ static float readOneSample (const AudioEngine& eng, int ch, int64_t pos)
 }
 
 // ---------------- WAV generation ----------------
+// Minimal PCM float32 WAV written by hand. Samples are converted into a 256 KB
+// block and written block by block (the old byte-by-byte std::vector build
+// made the multi-million-frame fixtures of the load / resample tests cost
+// seconds in Debug).
 static bool writeWav (const juce::File& path, int nchans, double rate, int64_t frames,
                       const std::function<float (int ch, int64_t f, double rate)>& fn)
 {
-    AudioEngine eng; // unused; just to have formats available
-    // Write a minimal WAV by hand (PCM float32)
     const int bitsPerSample = 32;
     const int bytesPerSample = 4;
     const int blockAlign = nchans * bytesPerSample;
     const int64_t dataSize = frames * (int64_t) blockAlign;
     const int32_t byteRate = (int32_t) (rate * blockAlign);
 
-    auto put32 = [] (std::vector<uint8_t>& v, uint32_t x)
+    uint8_t header[44];
+    auto put32 = [&header] (int at, uint32_t x)
     {
-        v.push_back ((uint8_t) (x & 0xff)); v.push_back ((uint8_t) ((x >> 8) & 0xff));
-        v.push_back ((uint8_t) ((x >> 16) & 0xff)); v.push_back ((uint8_t) ((x >> 24) & 0xff));
+        header[at] = (uint8_t) (x & 0xff);           header[at + 1] = (uint8_t) ((x >> 8) & 0xff);
+        header[at + 2] = (uint8_t) ((x >> 16) & 0xff); header[at + 3] = (uint8_t) ((x >> 24) & 0xff);
     };
-    auto put16 = [] (std::vector<uint8_t>& v, uint16_t x)
+    auto put16 = [&header] (int at, uint16_t x)
     {
-        v.push_back ((uint8_t) (x & 0xff)); v.push_back ((uint8_t) ((x >> 8) & 0xff));
+        header[at] = (uint8_t) (x & 0xff); header[at + 1] = (uint8_t) ((x >> 8) & 0xff);
     };
-    auto putFloat = [&put32] (std::vector<uint8_t>& v, float f)
-    {
-        uint32_t u; std::memcpy (&u, &f, 4); put32 (v, u);
-    };
-
-    std::vector<uint8_t> d;
-    d.insert (d.end(), { 'R', 'I', 'F', 'F' });
-    put32 (d, (uint32_t) (36 + dataSize));
-    d.insert (d.end(), { 'W', 'A', 'V', 'E' });
-    d.insert (d.end(), { 'f', 'm', 't', ' ' });
-    put32 (d, 16);
-    put16 (d, 3); // format: IEEE float
-    put16 (d, (uint16_t) nchans);
-    put32 (d, (uint32_t) rate);
-    put32 (d, (uint32_t) byteRate);
-    put16 (d, (uint16_t) blockAlign);
-    put16 (d, (uint16_t) bitsPerSample);
-    d.insert (d.end(), { 'd', 'a', 't', 'a' });
-    put32 (d, (uint32_t) dataSize);
-
-    for (int64_t f = 0; f < frames; ++f)
-        for (int ch = 0; ch < nchans; ++ch)
-            putFloat (d, fn (ch, f, rate));
+    std::memcpy (header, "RIFF", 4);
+    put32 (4, (uint32_t) (36 + dataSize));
+    std::memcpy (header + 8, "WAVEfmt ", 8);
+    put32 (16, 16);
+    put16 (20, 3); // format: IEEE float
+    put16 (22, (uint16_t) nchans);
+    put32 (24, (uint32_t) rate);
+    put32 (28, (uint32_t) byteRate);
+    put16 (32, (uint16_t) blockAlign);
+    put16 (34, (uint16_t) bitsPerSample);
+    std::memcpy (header + 36, "data", 4);
+    put32 (40, (uint32_t) dataSize);
 
     path.deleteFile(); // FileOutputStream appends to existing files!
     juce::FileOutputStream out (path);
-    if (out.failedToOpen())
+    if (out.failedToOpen() || !out.write (header, sizeof (header)))
         return false;
-    return out.write (d.data(), (int) d.size());
+
+    const int64_t framesPerBlock = std::max<int64_t> (1, 65536 / std::max (1, nchans));
+    std::vector<float> block ((size_t) (framesPerBlock * nchans));
+    for (int64_t f0 = 0; f0 < frames; f0 += framesPerBlock)
+    {
+        const int64_t nf = std::min (framesPerBlock, frames - f0);
+        size_t k = 0;
+        for (int64_t f = f0; f < f0 + nf; ++f)
+            for (int ch = 0; ch < nchans; ++ch)
+                block[k++] = juce::ByteOrder::swapIfBigEndian (fn (ch, f, rate));
+        if (!out.write (block.data(), k * sizeof (float)))
+            return false;
+    }
+    out.flush();
+    return !out.getStatus().failed();
 }
 
 // ---------------- FFT correctness ----------------
@@ -700,6 +757,18 @@ static void testSpectral()
 
     // Verify the PNG file exists and has a non-trivial size
     CHECK (png.existsAsFile() && png.getSize() > 1000, "png non-trivial size");
+    // ...and decodes to the requested size with real content (not one flat colour).
+    {
+        const juce::Image back = juce::ImageFileFormat::loadFrom (png);
+        CHECK (back.isValid() && back.getWidth() == 256 && back.getHeight() == 128,
+               "png decodes at the requested 256x128 size");
+        std::set<juce::uint32> colours;
+        if (back.isValid())
+            for (int y = 0; y < back.getHeight(); y += 4)
+                for (int x = 0; x < back.getWidth(); x += 4)
+                    colours.insert (back.getPixelAt (x, y).getARGB());
+        CHECK (colours.size() > 4, "png holds a rendered spectrogram, not a flat image");
+    }
 
     // Verify a bright row exists near the 400 Hz band (log scale 20Hz..20kHz)
     // Just sanity: cache got populated
@@ -1097,11 +1166,18 @@ static void testPlayheadLineBottomRuler()
 
     const int rulerTop = 128 - WaveformView::kRulerH;   // plot/ruler boundary
 
-    // The line must run from the window top to its outer edge without a gap...
-    bool continuous = true;
-    for (int y = 0; y < 128 && continuous; ++y)
-        if (redSpanAt (y) <= 0) { continuous = false; }
-    CHECK (continuous, "playhead line runs from the top to the window edge");
+    // The line must run from the window top to its outer edge without a gap:
+    // through the plot AND through the bottom ruler strip (checked apart, the
+    // strip is what used to be missed).
+    auto continuousIn = [&] (int y0, int y1)
+    {
+        for (int y = y0; y < y1; ++y)
+            if (redSpanAt (y) <= 0) return false;
+        return y1 > y0;
+    };
+    CHECK (rulerTop > 0 && rulerTop < 128, "bottom ruler strip lies inside the view");
+    CHECK (continuousIn (0, rulerTop), "playhead line runs through the whole plot");
+    CHECK (continuousIn (rulerTop, 128), "playhead line continues through the bottom ruler strip");
 
     // ...and stay narrow everywhere - no triangle over the data or in the strip.
     bool narrowOk = true;
@@ -1222,7 +1298,6 @@ static void testVScrollInsets()
 
     Application app;
     CHECK (app.audioEngine().loadFile (wav), "vscroll: load wav");
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "vscroll insets test"));
 
     // Layout 0 - both views stacked, ruler at the top: the waveform owns the
@@ -1364,48 +1439,72 @@ static void testFFTAnalysisViewPaint()
     });
 
     Application app;
-    CHECK (app.audioEngine().loadFile (wav), "load wav for fft view test");
+    // openFile (not just audioEngine().loadFile): the panel analyses the
+    // document's visible channels, which a bare engine load leaves empty, so
+    // the spectrum was never computed and the paint checks ran on nothing.
+    CHECK (app.openFile (wav), "open wav for fft view test");
 
     FFTAnalysisView view (app);
     view.setSize (320, 300);
 
-    // Normal paint: must not crash and should produce a spectrum
+    // Paint into an image and count the plot pixels that are not plain black
+    // (grid, axes, curve): a paint that bails out early leaves the plot empty.
+    auto paintPlot = [&view] ()
     {
         juce::Image img (juce::Image::ARGB, 320, 300, true);
-        juce::Graphics g (img);
-        view.paint (g);
-    }
-    CHECK (true, "fft analysis view paints without crashing");
+        {
+            juce::Graphics g (img);
+            view.paint (g);
+        }
+        int drawn = 0;
+        const auto plot = view.plotBounds().getIntersection (img.getBounds());
+        for (int y = plot.getY(); y < plot.getBottom(); ++y)
+            for (int x = plot.getX(); x < plot.getRight(); ++x)
+            {
+                const auto c = img.getPixelAt (x, y);
+                if (c.getRed() + c.getGreen() + c.getBlue() > 60) ++drawn;
+            }
+        return drawn;
+    };
+    // The analysed spectrum must hold n/2+1 bins per channel and peak at the
+    // 400 Hz test tone.
+    auto spectrumOk = [&view] (int n)
+    {
+        const auto& m = view.getSpectrum();
+        if (view.getCachedN() != n || m.size() != 1 || (int) m[0].size() != n / 2 + 1)
+            return false;
+        const auto peak = std::max_element (m[0].begin() + 1, m[0].end()) - m[0].begin();
+        return std::abs ((double) peak * 8000.0 / n - 400.0) <= 2.0 * 8000.0 / n;
+    };
 
-    // Tiny selection (< 64 samples): recompute bails out; paint must not crash
+    // Normal paint: computes the spectrum and draws it.
+    const int defaultN = view.fftSize();
+    CHECK (paintPlot() > 0, "fft analysis view paints its plot");
+    CHECK (spectrumOk (defaultN), "fft analysis view computes the 400 Hz spectrum on paint");
+
+    // Tiny selection (< 64 samples): a single centred window; paint must not
+    // crash and still draws the plot.
     app.setSelection ({ 0.0, 0.001 });
-    {
-        juce::Image img (juce::Image::ARGB, 320, 300, true);
-        juce::Graphics g (img);
-        view.paint (g);
-    }
-    CHECK (true, "fft analysis view paints with tiny selection");
+    CHECK (paintPlot() > 0, "fft analysis view paints with tiny selection");
+    CHECK (spectrumOk (defaultN), "tiny selection still analyses one full window");
 
-    // Back to full range: must recover and paint again
+    // Back to full range: must recover and paint again (the tiny region was a
+    // single cheap window, so this recompute is not throttled).
     app.setSelection ({ 0.0, 2.0 });
-    {
-        juce::Image img (juce::Image::ARGB, 320, 300, true);
-        juce::Graphics g (img);
-        view.paint (g);
-    }
-    CHECK (true, "fft analysis view recovers after tiny selection");
+    CHECK (paintPlot() > 0, "fft analysis view recovers after tiny selection");
+    CHECK (spectrumOk (defaultN), "full-range spectrum recomputed after the tiny selection");
 
     // Large FFT size: the curve loop and cursor readout must never index the
     // magnitude vector beyond n/2+1 entries (this used to read out of bounds
-    // for x > half width and crash with large FFT sizes).
-    app.settings.fftSize = 65536;
-    app.settings.fftLocalN = 65536;   // analysis view uses its own persisted size
-    {
-        juce::Image img (juce::Image::ARGB, 320, 300, true);
-        juce::Graphics g (img);
-        view.paint (g); // draws the full curve across all bins
-    }
-    CHECK (true, "fft analysis view paints with 65536-point FFT");
+    // for x > half width and crash with large FFT sizes). The panel keeps its
+    // own size: set it through the combo (same path as the UI).
+    view.setFftSize (65536);
+    CHECK (view.fftSize() == 65536, "fft analysis view switched to 65536 points");
+    CHECK (paintPlot() > 0, "fft analysis view paints with 65536-point FFT");
+    CHECK (spectrumOk (65536), "65536-point spectrum has n/2+1 bins and the 400 Hz peak");
+    bool snapped = false; float sx = 0, sy = 0;
+    for (int x = view.plotBounds().getX(); x < view.plotBounds().getRight(); x += 7)
+        view.buildCursorInfo (x, view.plotBounds().getCentreY(), snapped, sx, sy);   // ASan: no OOB read
 
     wav.deleteFile();
 }
@@ -1495,7 +1594,12 @@ static void testMarkerPanelDetails()
     auto* lenEdit   = editorNamed ("marker-length-edit");
     auto* endEdit   = editorNamed ("marker-end-edit");
     CHECK (lenEdit != nullptr && endEdit != nullptr, "detail editors found by name");
-    if (! lenEdit || ! endEdit) { wav.deleteFile(); return; }
+    if (! lenEdit || ! endEdit)
+    {
+        wav.deleteFile();
+        juce::File (wav.getFullPathName() + ".markers.json").deleteFile();
+        return;
+    }
 
     auto markerById = [&] (int id) -> const Marker*
     {
@@ -1511,15 +1615,13 @@ static void testMarkerPanelDetails()
     auto setAndPump = [] (juce::TextEditor& ed, const juce::String& t)
     {
         ed.setText (t, true);
-        // Pump until the queue is quiescent; a single runDispatchLoopUntil(0)
-        // pass can miss messages that only become visible on the next cycle.
-        for (int i = 0; i < 8; ++i)
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+        // Deliver every posted message (FIFO sentinel) rather than 8 fixed
+        // 1 ms pumps, which could miss a late text-change message.
+        CHECK (scDeliverPostedMessages(), "marker panel: text change delivered");
         // The detail editors no longer commit on every keystroke (typing only
         // marks the field pending): commit like the user does, with Return.
         if (ed.onReturnKey) ed.onReturnKey();
-        for (int i = 0; i < 8; ++i)
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+        CHECK (scDeliverPostedMessages(), "marker panel: commit messages delivered");
     };
 
     // --- Length box shows the region length and drives the End time ---
@@ -1733,11 +1835,9 @@ static void testIndependentViews()
         return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate);
     });
 
-    progress ("ind: openFile");
     Application app;
     CHECK (app.openFile (wav), "open wav for independent view test"); // 4s file
 
-    progress ("ind: construct views");
     WaveformView wave (app);
     SpectralView spec (app);
     wave.setSize (300, 200);
@@ -1761,11 +1861,15 @@ static void testIndependentViews()
            "spectral window unaffected by waveform zoom");
 
     // Vertical zoom is independent per view: amplitude for the waveform...
-    wave.zoomVerticalBy (2.0);
-    CHECK (true, "waveform vertical zoom applied without crash");
-    // ...and frequency range for the spectral view.
     spec.resetFrequencyRange();
-    const double fMinBefore = 20.0;
+    const double specTopBefore = spec.yToFreq (0.0f, 200);
+    const double ampHalfBefore = wave.getVisibleAmpHalf();
+    wave.zoomVerticalBy (2.0);
+    CHECK (std::abs (wave.getVisibleAmpHalf() - ampHalfBefore * 0.5) < 1e-9,
+           "waveform vertical zoom halves the visible amplitude range");
+    CHECK (std::abs (spec.yToFreq (0.0f, 200) - specTopBefore) < 1e-9,
+           "spectral frequency axis unaffected by the waveform's vertical zoom");
+    // ...and frequency range for the spectral view.
     spec.zoomFrequencyBy (1.5); // zoom in on frequency axis
     {
         // After zooming, the top row must correspond to a lower max frequency:
@@ -1773,26 +1877,31 @@ static void testIndependentViews()
         const double fTop = spec.yToFreq (0.0f, 200);
         CHECK (fTop < std::min (rate * 0.5, 20000.0) - 1.0,
                "spectral frequency axis zoomed in");
-        (void) fMinBefore;
+        CHECK (std::abs (wave.getVisibleAmpHalf() - ampHalfBefore * 0.5) < 1e-9,
+               "waveform amplitude range unaffected by the spectral zoom");
     }
 
-    // Both views still paint headlessly with their independent state.
-    progress ("ind: wave paint");
+    // Both views still paint headlessly with their independent state: each
+    // image must hold real content (more than a flat background).
+    auto distinctColours = [] (const juce::Image& img)
+    {
+        std::set<juce::uint32> seen;
+        for (int y = 0; y < img.getHeight(); y += 2)
+            for (int x = 0; x < img.getWidth(); x += 2)
+                seen.insert (img.getPixelAt (x, y).getARGB());
+        return (int) seen.size();
+    };
     {
         juce::Image img (juce::Image::ARGB, 300, 200, true);
-        juce::Graphics g (img);
-        wave.paint (g);
+        { juce::Graphics g (img); wave.paint (g); }
+        CHECK (distinctColours (img) > 3, "waveform paints with independent state");
     }
-    CHECK (true, "waveform paints with independent state");
-    progress ("ind: spec paint");
     {
         juce::Image img (juce::Image::ARGB, 300, 200, true);
-        juce::Graphics g (img);
-        spec.paint (g);
+        { juce::Graphics g (img); spec.paint (g); }
+        CHECK (distinctColours (img) > 3, "spectral paints with independent state");
     }
-    CHECK (true, "spectral paints with independent state");
 
-    progress ("ind: done");
     wav.deleteFile();
 }
 
@@ -2465,6 +2574,7 @@ static void testFFTFollowPlayhead()
            "follow mode keeps the full FFT size despite a narrow selection");
 
     // The pure tone must peak near its true frequency, not smear low.
+    CHECK (!view.getSpectrum().empty(), "follow mode computed a spectrum");
     if (!view.getSpectrum().empty())
     {
         const auto& mag = view.getSpectrum()[0];
@@ -2527,9 +2637,12 @@ static void testThirdOctave()
 
         // The live band curve (channel colour = pink) must be drawn near the
         // top of the plot at the log-mapped x position of the 400 Hz centre.
+        // Use the panel's own mapping: the old hard-coded 34 px axis is now
+        // axisWidth() (60 px uncalibrated), which put x in the 500 Hz band.
         {
-            const double t = std::log (400.0 / 50.0) / std::log (4000.0 / 50.0);
-            const int x = 2 + (int) std::lround (t * (300 - 34 - 4));
+            const int x = (int) std::lround (view.freqToX (400.0));
+            CHECK (view.plotBounds().getX() < x && x < view.plotBounds().getRight(),
+                   "400 Hz lies inside the plot");
             bool foundPink = false;
             for (int yy = 54; yy < 146 && !foundPink; ++yy)
                 for (int xx = x - 4; xx <= x + 4; ++xx)
@@ -2889,14 +3002,9 @@ static void testThirdOctaveStepDrawing()
     juce::Image img (juce::Image::ARGB, 300, 200, true);
     { juce::Graphics g (img); view.paint (g); }
 
-    // The 400 Hz band cell spans ~383.5 .. 449.0 Hz on the log axis
-    // (fLo = 50, fHi = min(Nyquist, 16 kHz) = 4000 for an 8 kHz file).
-    const double fLo = 50.0, fHi = std::min (8000.0 * 0.5, 16000.0);
-    auto freqToX = [fLo, fHi] (double f)
-    {
-        // The right level axis is 60 px wide in dB mode (see FFTAnalysisView::axisWidth).
-        return 2 + (int) std::lround ((std::log (f / fLo) / std::log (fHi / fLo)) * (300 - 60 - 4));
-    };
+    // The 400 Hz band cell spans ~383.5 .. 449.0 Hz on the log axis. Map it
+    // with the panel's own freqToX (no copy of its axis-width / range rules).
+    auto freqToX = [&view] (double f) { return (int) std::lround (view.freqToX (f)); };
     const int xLo = freqToX (400.0 * std::pow (2.0, -1.0 / 6.0));
     const int xHi = freqToX (400.0 * std::pow (2.0,  1.0 / 6.0));
 
@@ -2959,6 +3067,11 @@ static void testChangeGain()
 // Plays at very low gain so it is barely audible.
 static void testPlaybackChain()
 {
+    if (Application::audioOutputDisabled())
+    {
+        scSkip ("playback chain: SC_NO_AUDIO_DEVICE set (no real output device in this shard)");
+        return;
+    }
 #if JUCE_WINDOWS
     ::CoInitializeEx (nullptr, COINIT_MULTITHREADED);
 
@@ -3053,11 +3166,10 @@ static void testSnapshotStoreAndRecompute()
           "stored snapshot peaks at the tone of its own region");
 
     // Store a second region: selection [2.5, 3.5] lies in the 880 Hz half.
-    // (Wait out the interactive drag throttle before requesting the new
-    // wide region.)
-    std::this_thread::sleep_for (std::chrono::milliseconds (80));
+    // (The interactive drag throttle delays this wide-region recompute.)
     app.setSelection ({ 2.5, 3.5 });
-    view.recomputeIfNeeded();
+    CHECK (scRecomputeUntil (view, [&] { return std::abs (peakHzOf (view.getSpectrum(), view.fftSize()) - 880.0) < 32.0; }),
+           "live analysis moved to the 880 Hz region");
     view.handleSnapshotClick (1);
     CHECK (view.snapshotShown (1), "second snapshot stored");
     CHECK (std::abs (peakHzOf (view.snapshotMags (1), view.snapshotN (1)) - 880.0) < 32.0,
@@ -3092,9 +3204,9 @@ static void testSnapshotStoreAndRecompute()
     CHECK (view.snapshotShown (1), "plain click toggles the stored curve back on");
 
     // ...then analyse a different region and plain-click again.
-    std::this_thread::sleep_for (std::chrono::milliseconds (80));
     app.setSelection ({ 0.5, 1.5 });   // different from snapshot 1's [2.5, 3.5]
-    view.recomputeIfNeeded();
+    CHECK (scRecomputeUntil (view, [&] { return std::abs (peakHzOf (view.getSpectrum(), view.fftSize()) - 440.0) < 8.0; }),
+           "live analysis moved back to the 440 Hz region");
     CHECK (view.snapshotShown (1), "snapshot still visible before next plain click");
     view.handleSnapshotClick (1);      // no modifiers in tests = plain click
     CHECK (!view.snapshotShown (1), "plain click on stored slot toggles visibility off");
@@ -3156,12 +3268,19 @@ static void testSnapshotOverlayPaint()
     CHECK (view.snapshotShown (0), "snapshot 1 stored and shown");
 
     // Move the live analysis to the second half so the live curve peaks at
-    // 880 Hz while the stored overlay still peaks at 440 Hz. The sleep keeps
-    // this recompute outside the 60 ms multi-window throttle, which would
-    // otherwise leave the live cache on the first-half data.
-    std::this_thread::sleep_for (std::chrono::milliseconds (100));
+    // 880 Hz while the stored overlay still peaks at 440 Hz. Re-request the
+    // recompute until it ran: the 60 ms multi-window throttle would otherwise
+    // leave the live cache on the first-half data.
     app.setSelection ({ 2.0, 4.0 });
-    view.recomputeIfNeeded();
+    auto livePeakHz = [&view]
+    {
+        const auto& m = view.getSpectrum();
+        if (m.empty() || m[0].size() < 2) return -1.0;
+        const auto pk = std::max_element (m[0].begin() + 1, m[0].end()) - m[0].begin();
+        return (double) pk * 8000.0 / view.fftSize();
+    };
+    CHECK (scRecomputeUntil (view, [&] { return std::abs (livePeakHz() - 880.0) < 32.0; }),
+           "live analysis moved to the 880 Hz half");
 
     auto countRed = [] (const juce::Image& img) -> int
     {
@@ -3234,11 +3353,12 @@ static void testSnapshotThirdOctaveOverlay()
     // now 880 Hz while the stored overlay must still render its band plot.
     app.setSelection ({ 2.0, 4.0 });
     view.setAxisMode (2);
-    // The mode change clears the band cache; the recompute below would be
-    // throttled if run within 60 ms of the first one (both regions are wider
-    // than a single FFT window), so wait out the throttle before forcing it.
-    juce::Thread::sleep (kScThrottleWaitMs);
-    view.recomputeIfNeeded();
+    // The mode change clears the band cache; the recompute is throttled
+    // within 60 ms of the first one (both regions are wider than a single FFT
+    // window), so re-request it until the bands were rebuilt.
+    CHECK (scRecomputeUntil (view, [&view] { return !view.getThirdOctMags().empty()
+                                                     && view.getThirdOctMags().size() == view.getSpectrum().size(); }),
+           "1/3-octave bands recomputed after the mode switch");
 
     juce::Image img (juce::Image::ARGB, 320, 300, true);
     { juce::Graphics g (img); view.paint (g); }
@@ -3356,10 +3476,12 @@ static void testStatusBarEditing()
     bar.onSelectionEdited = [&] (double a, double b)
     { gotA = a; gotB = b; bar.setSelection (a, b); };
 
+    // TextEditor change notifications are posted messages: deliver every
+    // message queued so far (FIFO sentinel) instead of a fixed number of 1 ms
+    // pumps, so both "applied" and "did not echo" checks are deterministic.
     auto pump = [] ()
     {
-        for (int i = 0; i < 8; ++i)
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+        CHECK (scDeliverPostedMessages(), "status bar: posted messages delivered");
     };
 
     bar.setSelection (10.0, 20.0);
@@ -3462,7 +3584,6 @@ static void testStatusBarFileName()
              { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 500.0 * (double) f / rate); });
 
     Application app;
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "footer name test"));
 
     CHECK (win->statusBarFileName().isEmpty(), "no file loaded: footer name is empty");
@@ -3531,7 +3652,6 @@ static void testTimeScrollBarOnLoad()
                                         * 300.0 * (double) f / rate); });
 
     Application app;
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "time bar test"));
 
     CHECK (!win->timeScrollBarVisible(), "no file: time scrollbar hidden");
@@ -4015,7 +4135,6 @@ static void testHomeEndPans()
                                         * 300.0 * (double) f / rate); });
 
     Application app;
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "home/end pan test"));
     win->openFile (wav);
     CHECK (app.audioEngine ().isFileLoaded (), "file loaded");
@@ -4093,10 +4212,18 @@ static void testArrowKeySelection()
     Application app;
     CHECK (app.openFile (wav), "open wav for arrow key test");
 
-    // A MessageManager is required before constructing the top-level window;
-    // it must still be alive when the window is destroyed.
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "arrow key test"));
+
+    // The window's timer clears the Shift+arrow anchor once it sees no
+    // PHYSICAL Shift key held. Run one tick synchronously (same code as the
+    // 30 Hz timer) instead of sleeping 600 ms for it to fire.
+    auto releaseShift = [&win]
+    {
+        if (juce::ModifierKeys::getCurrentModifiersRealtime().isShiftDown())
+            return false;   // somebody is holding Shift on this machine
+        win->timerCallback();
+        return true;
+    };
 
     const double fine = 1.0 / app.audioEngine().sampleRate();   // one sample
     auto coarse = [&] ()
@@ -4140,12 +4267,14 @@ static void testArrowKeySelection()
            "selection follows the playhead to the right");
 
     // Release Shift between the two shift-drag sequences so the next one
-    // anchors at a fresh position (the 30 Hz timer clears the anchor once it
-    // sees no physical Shift key held).
-    for (int i = 0; i < 12; ++i)
+    // anchors at a fresh position (the timer clears the anchor once it sees
+    // no physical Shift key held).
+    if (!releaseShift())
     {
-        std::this_thread::sleep_for (std::chrono::milliseconds (50));
-        mm->runDispatchLoopUntil (1);
+        scSkip ("arrow key selection: a physical Shift key is held, the anchor cannot be released");
+        win.reset();
+        wav.deleteFile();
+        return;
     }
 
     // Ctrl+Shift+Right: fine one-sample selection extension.
@@ -4169,14 +4298,9 @@ static void testArrowKeySelection()
     CHECK (selClose (anchor2 + fine - 4.0 * coarse (), anchor2),
            "selection follows the playhead to the left");
 
-    // Release Shift: no physical key is held in this process, so the 30 Hz timer
-    // clears the anchor within a few ticks; plain moves must then stop touching
-    // the selection. Pump the message loop while sleeping so the timer fires.
-    for (int i = 0; i < 12; ++i)
-    {
-        std::this_thread::sleep_for (std::chrono::milliseconds (50));
-        mm->runDispatchLoopUntil (1);
-    }
+    // Release Shift: the timer clears the anchor; plain moves must then stop
+    // touching the selection.
+    releaseShift();
     const juce::Range<double> frozen = app.selection;
     pressRight (juce::ModifierKeys::noModifiers);
     CHECK (app.selection == frozen, "after Shift release plain moves no longer change the selection");
@@ -4218,9 +4342,6 @@ static void testCtrlNumberChannelToggle()
     Application app;
     CHECK (app.openFile (wav), "open wav for ctrl+number test");
 
-    // A MessageManager is required before constructing the top-level window;
-    // it must still be alive when the window is destroyed.
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "ctrl number test"));
 
     auto press = [&] (char c, juce::ModifierKeys mods)
@@ -4283,7 +4404,6 @@ static void testResampleDialogFillButtons()
     Application app;
     CHECK (app.openFile (wav), "open wav for resample fill test");
 
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "resample fill test"));
 
     auto* w = win->createResampleDialog ();
@@ -4450,9 +4570,11 @@ static void testResampleDialogFillButtons()
 
     // Change the channel count to 4: the grid rebuilds with default weights
     // (each of the four outputs averages both inputs). The text-change
-    // notification is posted asynchronously, so pump the queue.
+    // notification is posted asynchronously: pump until the grid was rebuilt
+    // (a single 5 ms pump did not reliably deliver it).
     chansEd->setText ("4");
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (scPumpUntil ([&] { return weightsText ().size () == 8; }),
+           "channel-count change rebuilt the weight grid");
     expectWeights ("rebuild at 4 channels", { "0.5", "0.5", "0.5", "0.5",
                                               "0.5", "0.5", "0.5", "0.5" });
 
@@ -4467,7 +4589,9 @@ static void testResampleDialogFillButtons()
                        { "1", "1", "1", "1", "1", "1", "1", "1" });
     }
 
-    // Render headlessly so the layout can be visually inspected.
+    // Render headlessly so the layout can be visually inspected (only when
+    // the temp folder is kept: SC_TEST_KEEP_TEMP=1).
+    if (scKeepTestArtifacts())
     {
         const juce::File out = scTestTempDir()
             .getChildFile ("sc_resample_snapshot.png");
@@ -4506,7 +4630,6 @@ static void testF9ViewCycle()
     Application app;
     CHECK (app.openFile (wav), "open wav for F9 cycle test");
 
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "F9 cycle test"));
 
     auto pressF9 = [&] (juce::ModifierKeys mods)
@@ -4559,7 +4682,6 @@ static void testNoViewTooltips()
     Application app;
     CHECK (app.openFile (wav), "open wav for tooltip test");
 
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "tooltip test"));
 
     CHECK (win->waveformTooltip().isEmpty(), "no help tooltip over the waveform view");
@@ -4661,7 +4783,6 @@ static void testOpenRecentFiles()
         CHECK (app5.openFile (c), "open C");
         app5.closeFile ();          // close it again so the menu item re-opens it
 
-        juce::MessageManager* mm = juce::MessageManager::getInstance();
         std::unique_ptr<MainWindow> win (new MainWindow (app5, "recent files test"));
 
         win->menuItemSelected (MainWindow::MenuIDs::RecentBase + 0, 0);
@@ -4697,15 +4818,19 @@ static void testChangeGainDialog()
     CHECK (app.openFile (wav), "open wav for gain dialog test");
     app.setSelection ({ 0.1, 0.2 });
 
-    // A MessageManager is required before constructing the top-level window;
-    // it must still be alive when the window is destroyed.
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "gain dialog test"));
 
+    // Keyboard focus only reaches a component while this process is the
+    // foreground application. Without it the focus checks are skipped
+    // (visibly) and the full flow types into the field directly, so the
+    // replace-the-selection and Enter -> OK behaviour is still verified.
+    const bool haveFocus = scHasForegroundFocus();
+    if (!haveFocus)
+        scSkip ("change gain dialog: keyboard-focus checks need OS foreground"
+                " (typing is injected into the field directly instead)");
+
     // Build the dialog without running it modally: the field must be
-    // keyboard-focusable with its initial text fully selected. (Actual focus
-    // acquisition needs OS foreground, which a background test process does
-    // not have; that path is verified in the live GUI.)
+    // keyboard-focusable with its initial text fully selected.
     juce::AlertWindow* dlg = win->createGainDialog ();
     CHECK (dlg != nullptr, "gain dialog created");
     if (dlg != nullptr)
@@ -4724,8 +4849,9 @@ static void testChangeGainDialog()
             // so this order is what makes typing work immediately.
             dlg->enterModalState (false);
             editor->grabKeyboardFocus();
-            CHECK (editor->hasKeyboardFocus (false),
-                   "field has keyboard focus once the dialog is showing");
+            if (haveFocus)
+                CHECK (scPumpUntil ([editor] { return editor->hasKeyboardFocus (false); }, 1000),
+                       "field has keyboard focus once the dialog is showing");
             dlg->exitModalState (0);
         }
         delete dlg;
@@ -4743,13 +4869,15 @@ static void testChangeGainDialog()
 
             if (ed != nullptr && sl != nullptr)
             {
-                // TextEditor posts its change message asynchronously; pump so
-                // onTextChange runs in this headless test.
+                // TextEditor posts its change message asynchronously and a
+                // fixed number of pumps does not guarantee its delivery: set
+                // the text silently and run the dialog's own onTextChange
+                // handler synchronously (what the posted message would do).
+                CHECK (ed->onTextChange != nullptr, "gain field reacts to typing (onTextChange)");
                 auto setAndPump = [ed] (const juce::String& t)
                 {
-                    ed->setText (t, true);
-                    for (int i = 0; i < 8; ++i)
-                        juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+                    ed->setText (t, false);
+                    if (ed->onTextChange) ed->onTextChange();
                 };
 
                 const juce::Range<double> expectRange (-60.0, 24.0);
@@ -4784,9 +4912,10 @@ static void testChangeGainDialog()
     // Full user flow: open the dialog, type "6", press Enter -> OK. A
     // message-thread timer injects the keystrokes into the modal loop exactly
     // like a user: '6' must replace the pre-selected "0.0" and Return must
-    // trigger OK. Without keyboard focus (no OS foreground) the driver gives
-    // up after its timeout and dismisses the dialog, so the CHECKs below fail
-    // instead of the modal loop blocking forever.
+    // trigger OK. With OS foreground the keystroke goes to whatever has
+    // keyboard focus (which must be the field); without it, straight to the
+    // field. If focus never arrives the driver gives up after 3 s and
+    // dismisses the dialog, so the CHECKs below fail instead of hanging.
     {
         juce::AlertWindow* w = win->createGainDialog ();
         CHECK (w != nullptr, "gain dialog created for full-flow test");
@@ -4794,16 +4923,23 @@ static void testChangeGainDialog()
         {
             auto* ed = w->getTextEditor ("gainDb");
 
+            // Deliver what creating the dialog posted first (the TextEditor's
+            // async Value notification for its initial "0.0"): in the app it
+            // runs long before anyone can type, but a keystroke injected on
+            // the driver's first tick could otherwise be reverted by it.
+            CHECK (scDeliverPostedMessages (), "message queue flushed before driving the gain dialog");
+
             // Same sequence as showChangeGainDialog(): modal state without a
             // focus steal, then grab the field while the window is showing.
             w->enterModalState (false);
             if (ed != nullptr) ed->grabKeyboardFocus ();
 
-            ScModalDriver driver ([w] (juce::Component&)
+            ScModalDriver driver ([w, ed, haveFocus] (juce::Component&)
             {
                 // Wait until the field actually has keyboard focus...
-                auto* e2 = dynamic_cast<juce::TextEditor*> (
-                    juce::Component::getCurrentlyFocusedComponent ());
+                auto* e2 = haveFocus ? dynamic_cast<juce::TextEditor*> (
+                                           juce::Component::getCurrentlyFocusedComponent ())
+                                     : ed;
                 if (e2 == nullptr)
                     return false;
 
@@ -4814,13 +4950,14 @@ static void testChangeGainDialog()
                 // button; do that same trigger here.
                 if (auto* ok = w->getButton ("OK")) ok->triggerClick ();
                 return true;
-            });
+            }, 3000);
 
             const int result = w->runModalLoop ();
             const juce::String text = w->getTextEditorContents ("gainDb");
             delete w;
 
-            CHECK (driver.acted (), "the dialog's field received keyboard focus");
+            CHECK (driver.acted (), juce::String (haveFocus ? "the dialog's field received keyboard focus"
+                                                            : "the driver typed into the dialog's field"));
             CHECK (result == 1, "Enter submits the dialog via OK");
             CHECK (text.trim() == "6",
                    "typing replaced the pre-selected value instead of appending");
@@ -4950,8 +5087,6 @@ static void testSetScaleDialog()
     Application app;
     CHECK (app.openFile (wav), "open wav for scale dialog test");
 
-    // A MessageManager is required before grabbing keyboard focus in the dialog.
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<FileListPanel> panel (new FileListPanel (app));
 
     FileDoc& d = *app.docs[0];
@@ -5032,7 +5167,10 @@ static void testBkdkCalibration()
         for (const auto& s : group ("2.5"))  f.push_back (s);
         for (const auto& s : group ("3.75")) f.push_back (s);
         f.push_back ("END");   // Foot
-        const std::string p = makePayload (f) + "\0\0\0";   // trailing padding
+        // Trailing NUL padding. (A "\0\0\0" literal appended to a
+        // std::string adds nothing: it is read up to its first NUL.)
+        const std::string p = makePayload (f) + std::string (3, '\0');
+        CHECK (p.size() == makePayload (f).size() + 3, "test payload carries 3 padding NULs");
 
         sc::BkdkData bk;
         CHECK (sc::parseBkdkPayload (p, bk), "two-group payload parses");
@@ -5065,7 +5203,7 @@ static void testBkdkCalibration()
     {
         sc::BkdkData bk;
         CHECK (!sc::parseBkdkPayload ("", bk), "empty payload rejected");
-        std::string one = "onlyone\0";
+        const std::string one ("onlyone\0", 8);   // explicit length keeps the NUL
         CHECK (!sc::parseBkdkPayload (one, bk), "single token rejected");
 
         sc::BkdkData b2;
@@ -5096,7 +5234,7 @@ static void testBkdkCalibration()
         for (const auto& s : group ("2.5"))  f.push_back (s);
         for (const auto& s : group ("3.75")) f.push_back (s);
         f.push_back ("END");
-        const std::string payload = makePayload (f) + "\0\0\0";
+        const std::string payload = makePayload (f) + std::string (3, '\0');   // trailing padding
 
         RiffPatchEntry e;
         std::memcpy (e.fourcc, "bkdk", 4);
@@ -5297,7 +5435,6 @@ static void testBkdkCalibration()
         std::vector<double> pv { 2.5, 3.75 };
         d.scale.channelFullScale = pv;
 
-        juce::MessageManager* mm = juce::MessageManager::getInstance();
         std::unique_ptr<FileListPanel> panel (new FileListPanel (app));
         juce::AlertWindow* dlg = panel->createScaleDialog (d);
         CHECK (dlg != nullptr, "per-channel dialog created");
@@ -6283,8 +6420,6 @@ static void testCtxZoomOutFull()
     });
 
     Application app;
-    // A MessageManager is required before constructing the top-level window.
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "ctx zoom out test"));
     win->openFile (wav);
     CHECK (app.audioEngine().isFileLoaded(), "load wav for ctx zoom-out test");
@@ -6587,24 +6722,41 @@ static void testStemSepModeOutputCombos()
 
     // Switch to each htdemucs mode: the description area disappears and the
     // window shrinks, but nothing overlaps.
+    // The change is notified synchronously so the window's onChange (relayout
+    // + settings write) has run before the checks: an async notification
+    // followed by a 5 ms pump was not reliably delivered.
+    const int heightSam = dlg->getHeight();
     for (int m = 2; m <= 3; ++m)
     {
-        mode->setSelectedItemIndex (m - 1);
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+        mode->setSelectedItemIndex (m - 1, juce::sendNotificationSync);
         CHECK (dlg->selectedModeId () == m, "mode switch to " + juce::String (m));
+        CHECK (app.settings.stemSepMode == m, "mode " + juce::String (m) + " written to settings");
+        CHECK (dlg->getHeight() < heightSam, "window shrinks without the description area in mode "
+                                                 + juce::String (m));
         CHECK (noOverlap (dlg), "no overlapping controls in mode " + juce::String (m));
+    }
+    {
+        Application reread (store);
+        CHECK (reread.settings.stemSepMode == 3, "mode 3 persisted to the settings file");
     }
 
     // Back to Sam Audio: the description area is back and nothing overlaps.
-    mode->setSelectedItemIndex (0);
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    mode->setSelectedItemIndex (0, juce::sendNotificationSync);
     CHECK (dlg->selectedModeId () == 1, "back to Sam Audio");
+    CHECK (dlg->getHeight() == heightSam, "window regains its Sam Audio height");
     CHECK (noOverlap (dlg), "no overlapping controls after switching back");
 
-    // The mode choice persists in the settings.
+    // The mode choice persists in the settings (the file held 3 just before).
     CHECK (app.settings.stemSepMode == 1, "mode persisted to settings");
+    {
+        Application reread (store);
+        CHECK (reread.settings.stemSepMode == 1, "mode 1 persisted to the settings file");
+    }
 
     dlg->userTriedToCloseWindow ();
+    win.reset();
+    wav.deleteFile();
+    store.deleteFile();
 }
 
 // ---------------- Stem Separation output-mode persistence --------------------
@@ -6637,15 +6789,20 @@ static void testStemSepOutputModePersistence()
           "saved output mode restored (overwrite)");
     CHECK (dlg->selectedModeId () == 3, "saved mode restored (htdemucs_ft)");
 
-    // Changing the combo updates the settings immediately.
+    // Changing the combo updates the settings immediately (synchronous
+    // notification: the window's onChange has run when it returns).
     if (out != nullptr)
     {
-        out->setSelectedItemIndex (2);
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+        out->setSelectedItemIndex (2, juce::sendNotificationSync);
         CHECK (app.settings.stemSepOutputMode == 3, "output mode change persisted");
+        Application reread (store);
+        CHECK (reread.settings.stemSepOutputMode == 3, "output mode change written to the settings file");
     }
 
     dlg->userTriedToCloseWindow ();
+    win.reset();
+    wav.deleteFile();
+    store.deleteFile();
 }
 
 // ---------------- Stem Separation output modes: overwrite / append -----------
@@ -6673,7 +6830,6 @@ static void testStemSepApplyOutputModes()
     {
         Application app;
         CHECK (app.openFile (wav), "open wav for overwrite test");
-        auto& eng = app.audioEngine ();
         app.doc ()->markers.addPointMarker (0.1, "before");   // before ext start
         app.doc ()->markers.addRegionMarker (0.7, 0.9, "inside");   // inside range
 
@@ -6716,7 +6872,6 @@ static void testStemSepApplyOutputModes()
     {
         Application app;
         CHECK (app.openFile (wav), "open wav for append test");
-        auto& eng = app.audioEngine ();
 
         std::string err;
         sc::MergeResult resAp = makeResult ();
@@ -6731,7 +6886,7 @@ static void testStemSepApplyOutputModes()
         // extracted range [0.5 s .. 1.0 s] (= samples 4000..7999) and is
         // silent elsewhere.
         std::vector<std::vector<float>> all;
-        CHECK (eng.readRange (0, 8000, all) && all.size () == 3,
+        CHECK (app.audioEngine ().readRange (0, 8000, all) && all.size () == 3,
               "append: read back the three channels");
         if (all.size () == 3)
         {
@@ -7036,7 +7191,9 @@ static void testStemSepAnchorList()
     // The window grew by one line per anchor (kAnchorLineH = 20).
     CHECK (dlg->getHeight () == hBefore + 40, "window grows with the anchors");
 
-    // Render headlessly so the anchor-list layout can be visually inspected.
+    // Render headlessly so the anchor-list layout can be visually inspected
+    // (only when the temp folder is kept: SC_TEST_KEEP_TEMP=1).
+    if (scKeepTestArtifacts())
     {
         const juce::File out = scTestTempDir()
             .getChildFile ("sc_ss_anchor_snapshot.png");
@@ -7083,9 +7240,21 @@ static void testStemSepAnchorList()
 // enhanced WAV straight to --out.
 static void testSuperResCliArgs()
 {
-    const juce::File model = juce::File ("C:/models/audiocpp/AudioSR-GGUF/audiosr-basic-f32.gguf");
-    const juce::File inWav  = juce::File ("C:/tmp/sr_in.wav");
-    const juce::File outWav = juce::File ("C:/tmp/sr_out/enhanced.wav");
+    // Absolute paths on every platform (a "C:/..." string is a relative,
+    // invalid juce::File outside Windows). Nothing is created on disk.
+    const juce::File base   = scTestTempDir().getChildFile ("sr_cli");
+    const juce::File model  = base.getChildFile ("models/audiocpp/AudioSR-GGUF/audiosr-basic-f32.gguf");
+    const juce::File inWav  = base.getChildFile ("sr_in.wav");
+    const juce::File outWav = base.getChildFile ("sr_out/enhanced.wav");
+
+#if ! JUCE_WINDOWS
+    // The audio.cpp CLI only exists on Windows: elsewhere the builder is a
+    // stub by design (src/AudioCpp.cpp, POSIX branch) and must stay empty.
+    CHECK (sc::acpp::buildSuperResCliArgs (1, model, "cuda", inWav, outWav).isEmpty(),
+           "super-res CLI arguments are not built outside Windows");
+    scSkip ("super-res cli args: the audio.cpp CLI is Windows-only");
+    return;
+#endif
 
     // FlashSR: --task s2s --family builtin_audio_utils --model <m>
     //          --load-option utility=flashsr --backend <b> --audio <a> --out <o> --log
@@ -7132,8 +7301,8 @@ static void testSuperResCliArgs()
 static void testSuperResModelDiscovery()
 {
     // Isolated root so the real %APPDATA% models are never touched.
-    const juce::File root = makeTempFile ("sr_models_root.wav")
-        .getParentDirectory ().getChildFile ("sc_sr_models_" + juce::String ((int) std::time (nullptr)));
+    // (makeTempFile names are unique per process and shard: no clock suffix.)
+    const juce::File root = makeTempFile ("sr_models_root");
     if (root.exists ()) root.deleteRecursively ();
 
     // Empty root: nothing found for either family.
@@ -7257,8 +7426,7 @@ static void testSuperResModeOutputCombos()
     std::unique_ptr<MainWindow> win (new MainWindow (app, "super res modes"));
 
     // Isolated models root with one model per family.
-    const juce::File root = makeTempFile ("sr_modes_root.wav")
-        .getParentDirectory ().getChildFile ("sc_sr_modes_" + juce::String ((int) std::time (nullptr)));
+    const juce::File root = makeTempFile ("sr_modes_root");
     if (root.exists ()) root.deleteRecursively ();
     const juce::File flashDir = root.getChildFile ("flashsr");
     flashDir.createDirectory ();
@@ -7297,9 +7465,10 @@ static void testSuperResModeOutputCombos()
         CHECK (models->getItemText (0) == "flashsr.safetensors",
               "flashsr model name shown");
 
-    // Switch to AudioSR: the list updates to its GGUF folder.
-    mode->setSelectedItemIndex (1);
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    // Switch to AudioSR: the list updates to its GGUF folder. Notifications
+    // are synchronous so the window's onChange has run before the checks (an
+    // async notification + a 5 ms pump was not reliably delivered).
+    mode->setSelectedItemIndex (1, juce::sendNotificationSync);
     CHECK (dlg->selectedModeId () == 2, "mode switch to AudioSR");
     if (models != nullptr)
         CHECK (models->getNumItems () == 1 && models->getItemText (0) == "audiosr-basic-f32.gguf",
@@ -7307,21 +7476,29 @@ static void testSuperResModeOutputCombos()
 
     // The choices persist in the settings.
     CHECK (app.settings.superResMode == 2, "mode persisted to settings");
-    out->setSelectedItemIndex (2);
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    out->setSelectedItemIndex (2, juce::sendNotificationSync);
     CHECK (app.settings.superResOutputMode == 3,
           "output mode persisted to settings");
+    {
+        Application reread (store);
+        CHECK (reread.settings.superResMode == 2 && reread.settings.superResOutputMode == 3,
+               "mode and output mode written to the settings file");
+    }
 
     // Back to FlashSR: the model selection is restored from the saved name.
     app.settings.superResModel = "flashsr.safetensors";
-    mode->setSelectedItemIndex (0);
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    mode->setSelectedItemIndex (0, juce::sendNotificationSync);
+    CHECK (dlg->selectedModeId () == 1 && app.settings.superResMode == 1, "back to FlashSR");
     CHECK (models != nullptr && models->getNumItems () == 1
+          && models->getItemText (0) == "flashsr.safetensors"
           && models->getSelectedItemIndex () == 0,
           "flashsr model restored after switching back");
 
     root.deleteRecursively ();
     dlg->userTriedToCloseWindow ();
+    win.reset();
+    wav.deleteFile();
+    store.deleteFile();
 }
 
 // ---------------- Super Resolution apply output modes -----------------------
@@ -7360,7 +7537,6 @@ static void testSuperResApplyOutputModes()
     {
         Application app;
         CHECK (app.openFile (wav), "open wav for overwrite test");
-        auto& eng = app.audioEngine ();
         app.doc ()->markers.addPointMarker (0.1, "before");      // before ext start
         app.doc ()->markers.addPointMarker (0.52, "inside");     // inside the range
         app.doc ()->markers.addRegionMarker (0.51, 0.54, "span");
@@ -7411,7 +7587,6 @@ static void testSuperResApplyOutputModes()
     {
         Application app;
         CHECK (app.openFile (wav), "open wav for append test");
-        auto& eng = app.audioEngine ();
 
         std::string err;
         sc::MergeResult resAp = makeResult ();
@@ -7427,7 +7602,7 @@ static void testSuperResApplyOutputModes()
               "append: original track plus the enhanced one, same length");
 
         std::vector<std::vector<float>> all;
-        CHECK (eng.readRange (0, 8000, all) && all.size () == 2,
+        CHECK (app.audioEngine ().readRange (0, 8000, all) && all.size () == 2,
               "append: read back both channels");
         if (all.size () == 2)
         {
@@ -8503,27 +8678,41 @@ static void testSpectralControlsAndAsyncLoad()
         { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
                                           * 440.0 * (double) f / rate); });
 
+        // Shared state: if the wait below ever times out, the worker's late
+        // callbacks must not write into destroyed stack variables. A cancel
+        // flag (also shared) stops the worker in that case.
+        struct LoadState
+        {
+            std::mutex mtx;
+            int progressCount = 0, lastProgressX100 = -1;
+            bool finished = false, ok = false;
+            std::atomic<bool> cancel { false };
+        };
+        auto st = std::make_shared<LoadState>();
+
         Application app;
-        std::mutex mtx;
-        int progressCount = 0, lastProgressX100 = -1;
-        bool done = false;
-
         app.loadFileAsync (wav,
-            [&] (float p)
+            [st] (float p)
             {
-                std::lock_guard<std::mutex> l (mtx);
-                ++progressCount;
-                lastProgressX100 = (int) std::lround ((double) p * 100.0);
+                std::lock_guard<std::mutex> l (st->mtx);
+                ++st->progressCount;
+                st->lastProgressX100 = (int) std::lround ((double) p * 100.0);
             },
-            [&] (bool ok) { done = ok; });
+            [st] (bool ok) { st->ok = ok; st->finished = true; },
+            &st->cancel);
 
-        for (int i = 0; i < 500 && !done; ++i)
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+        // Wait for completion (success OR failure: a failed load must not
+        // cost the whole timeout).
+        if (!scPumpUntil ([st] { return st->finished; }, 5000))
+        {
+            st->cancel.store (true);
+            scPumpUntil ([st] { return st->finished; }, 5000);
+        }
 
-        CHECK (done, "async load completed successfully");
-        { std::lock_guard<std::mutex> l (mtx);
-          CHECK (progressCount > 0, "loading reported progress");
-          CHECK (lastProgressX100 >= 95, "progress reached the end of the file"); }
+        CHECK (st->finished && st->ok, "async load completed successfully");
+        { std::lock_guard<std::mutex> l (st->mtx);
+          CHECK (st->progressCount > 0, "loading reported progress");
+          CHECK (st->lastProgressX100 >= 95, "progress reached the end of the file"); }
         CHECK (app.audioEngine().isFileLoaded(), "document is active after async load");
 
         wav.deleteFile();
@@ -8689,8 +8878,6 @@ static void testEffectShortcutsAndRepeat()
     CHECK (app.openFile (wav), "open wav for effect shortcut test");
     const auto& eng = app.audioEngine();
 
-    // A MessageManager is required before constructing the top-level window.
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "fx shortcut test"));
 
     const auto ctrlShift = juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier;
@@ -8791,8 +8978,6 @@ static void testSpectralControlsResetAndAutoLabel()
     Application app;
     CHECK (app.openFile (wav), "open wav for reset/auto-label test");
 
-    // A MessageManager is required before constructing the top-level window.
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "sc reset label test"));
 
     auto* panelComp = win->panelForId ("controls");
@@ -9343,8 +9528,10 @@ static void testMultiFileSupport()
 
     app.activate (1);                    // B active
     app.setSelection ({ 0.1, 0.4 });
-    std::this_thread::sleep_for (std::chrono::milliseconds (80));
-    view.recomputeIfNeeded();
+    // A's wide region throttles the next recompute: re-request it until the
+    // live spectrum shows B's two channels.
+    CHECK (scRecomputeUntil (view, [&view] { return view.getSpectrum().size() == 2; }),
+           "live spectrum follows B (stereo)");
     view.handleSnapshotClick (1);        // snapshot 2 <- from B
     CHECK (view.snapshotN (1) == 1024 && view.snapshotShown (1), "snapshot stored from B");
 
@@ -9658,10 +9845,11 @@ static void testAltScaleMultiRef()
 static void testAxisScaleModes()
 {
     auto approx = [] (double a, double b) { return std::abs (a - b) <= 1e-9; };
+    // Deliver the TextEditor change messages posted so far (FIFO sentinel)
+    // instead of 8 fixed 1 ms pumps.
     auto pump = [] ()
     {
-        for (int i = 0; i < 8; ++i)
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+        CHECK (scDeliverPostedMessages(), "axis scale: posted messages delivered");
     };
     auto diffCount = [] (const juce::Image& a, const juce::Image& b)
     {
@@ -9735,7 +9923,8 @@ static void testAxisScaleModes()
         WaveformView* wv = nullptr;
         for (auto* c : win->getChildren ())
             if ((wv = dynamic_cast<WaveformView*> (c)) != nullptr) break;
-        CHECK (wv != nullptr && app.openFile (wav), "waveform view + file ready");
+        CHECK (wv != nullptr, "waveform view found in the main window");
+        CHECK (app.openFile (wav), "file opened for the waveform scale tests");
         if (!wv)
         {
             wav.deleteFile (); store.deleteFile ();
@@ -10012,7 +10201,7 @@ static void testMetadataSuite()
         // Build a doc with a marker + saved selection, save it embedded.
         {
             Application app;
-            if (!app.openFile (src)) { src.deleteFile (); return; }
+            if (!app.openFile (src)) { CHECK (false, "meta: open src"); src.deleteFile (); return; }
             FileDoc* d = app.doc ();
             CHECK (d != nullptr, "meta: doc created");
             if (d == nullptr) return;
@@ -10081,8 +10270,9 @@ static void testMetadataSuite()
                  { return (float) std::sin (2.0 * juce::MathConstants<double>::pi
                                             * 300.0 * (double) s / rate); });
         Application app;
-        if (!app.openFile (f)) { f.deleteFile (); return; }
+        if (!app.openFile (f)) { CHECK (false, "meta: open f"); f.deleteFile (); return; }
         FileDoc* d = app.doc ();
+        CHECK (d != nullptr, "meta: active doc exists");
         if (d == nullptr) return;
 
         // writeWav emits the lowercase RIFF id "data"; ids are case-sensitive
@@ -10124,8 +10314,9 @@ static void testMetadataSuite()
                  { return (float) std::sin (2.0 * juce::MathConstants<double>::pi
                                             * 300.0 * (double) s / rate); });
         Application app;
-        if (!app.openFile (f)) { f.deleteFile (); return; }
+        if (!app.openFile (f)) { CHECK (false, "meta: open f"); f.deleteFile (); return; }
         FileDoc* d = app.doc ();
+        CHECK (d != nullptr, "meta: active doc exists");
         if (d == nullptr) return;
 
         CHECK (app.setActiveDocMetaMode (sc::MetaMode::External), "meta: switch to external");
@@ -10155,6 +10346,7 @@ static void testMetadataSuite()
         Application app;
         CHECK (app.newFile (1, 8000.0), "meta: new doc created");
         FileDoc* d = app.doc ();
+        CHECK (d != nullptr, "meta: active doc exists");
         if (d == nullptr) return;
 
         CHECK (!d->metaDirty && !app.docIsUnsaved (*d),
@@ -10339,16 +10531,21 @@ static void testResampler()
 // ---------------- Cancellation of long-running operations (ESC / Cancel) ----
 static void testLoadCancel()
 {
-    // In-memory path: a file spanning several 1M-sample I/O chunks.
-    {
-        const juce::File wav = makeTempFile ("load_cancel_mem.wav");
-        CHECK (writeWav (wav, 2, 48000.0, 3000000,
-            [] (int c, int64_t f, double rate) {
-                return (float) std::sin (2.0 * juce::MathConstants<double>::pi
-                                         * (100.0 + 50.0 * c) * (double) f / rate);
-            }), "write large wav");
+    // One file spanning several 1M-sample I/O chunks (the size is what makes
+    // a mid-load cancel possible), shared by the in-memory and streaming paths.
+    const juce::File bigWav = makeTempFile ("load_cancel_big.wav");
+    CHECK (writeWav (bigWav, 2, 48000.0, 3000000,
+        [] (int c, int64_t f, double rate) {
+            return (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                     * (100.0 + 50.0 * c) * (double) f / rate);
+        }), "write large wav");
 
+    // In-memory path.
+    {
+        const juce::File& wav = bigWav;
         AudioEngine eng;
+        CHECK ((int64_t) 2 * 3000000 <= eng.maxInMemorySampleChannels(),
+               "the large wav takes the in-memory path");
         std::atomic<bool> cancel { false };
         const bool ok = eng.loadFile (wav,
             [&cancel] (float frac) { if (frac > 0.5f) cancel.store (true); },
@@ -10360,13 +10557,7 @@ static void testLoadCancel()
 
     // Streaming path: force streaming and cancel during mipmap construction.
     {
-        const juce::File wav = makeTempFile ("load_cancel_stream.wav");
-        CHECK (writeWav (wav, 2, 48000.0, 3000000,
-            [] (int c, int64_t f, double rate) {
-                return (float) std::sin (2.0 * juce::MathConstants<double>::pi
-                                         * (100.0 + 50.0 * c) * (double) f / rate);
-            }), "write large wav (streaming)");
-
+        const juce::File& wav = bigWav;
         AudioEngine eng;
         eng.setMaxInMemorySampleChannels (0);   // force the streaming path
         std::atomic<bool> cancel { false };
@@ -10392,7 +10583,9 @@ static void testLoadCancel()
         std::atomic<bool> cancel { true };
         CHECK (!eng.loadFile (wav, nullptr, &cancel), "pre-set cancel aborts immediately");
         CHECK (!eng.isFileLoaded (), "engine clean after pre-set cancel");
+        wav.deleteFile();
     }
+    bigWav.deleteFile();
 }
 
 // ------------------------------------------------------------------ large in-memory load
@@ -10405,7 +10598,7 @@ static void testLoadCancel()
 // processing path read wrong data.
 static void testLargeInMemoryLoad()
 {
-    // Mono: 1.5M frames @ 48k = 31.25M sample-channels -> two chunks, in-memory.
+    // Mono: 1.5M frames @ 48k = 1.5M sample-channels -> two 1M chunks, in-memory.
     {
         const int64_t frames = 1500000;
         const juce::File wav = makeTempFile ("large_mem_mono.wav");
@@ -10415,6 +10608,7 @@ static void testLargeInMemoryLoad()
 
         AudioEngine eng;
         CHECK (eng.loadFile (wav), "load large mono file");
+        CHECK (eng.fullyInMemory (), "large mono file loaded in memory (the chunked path under test)");
         CHECK (eng.numSamples () == frames, "full length reported");
 
         std::vector<float> d (100);
@@ -10438,7 +10632,7 @@ static void testLargeInMemoryLoad()
         CHECK (tailOk, "tail chunk intact (-0.5)");
     }
 
-    // Stereo: 3M frames @ 48k = 6M sample-channels -> three chunks, in-memory.
+    // Stereo: 3M frames @ 48k = 6M sample-channels -> six chunks, in-memory.
     {
         const int64_t frames = 3000000;
         const juce::File wav = makeTempFile ("large_mem_stereo.wav");
@@ -10448,6 +10642,7 @@ static void testLargeInMemoryLoad()
 
         AudioEngine eng;
         CHECK (eng.loadFile (wav), "load large stereo file");
+        CHECK (eng.fullyInMemory (), "large stereo file loaded in memory");
 
         std::vector<float> d (100);
         CHECK (eng.readSamples (0, frames / 2, 100, d.data ()), "read ch0 mid ok");
@@ -10801,9 +10996,9 @@ static void testFFTAnalysisRateChange()
     // are unchanged, so only the sample-rate cache key can invalidate.
     CHECK (app.audioEngine().resampleTo (16000.0), "resample 8 kHz -> 16 kHz");
     // The multi-window averaging path is throttled to one expensive compute
-    // per 60 ms; wait it out so this recompute actually runs.
-    std::this_thread::sleep_for (std::chrono::milliseconds (100));
-    view.recomputeIfNeeded();
+    // per 60 ms; re-request it until it ran (the check below stays strict:
+    // a cache that is never invalidated keeps the old peak and times out).
+    scRecomputeUntil (view, [&] { return peakBin (view.getSpectrum()) != peakBefore; });
 
     auto after = view.getSpectrum();
     const int peakAfter = peakBin (after);
@@ -10846,14 +11041,25 @@ static void testStatusBarSampleRate()
     bar.setSampleRate (0.0);
     CHECK (bar.getSampleRateText().isEmpty(), "zero rate clears the text");
 
-    // Painting with every part set must not crash.
-    bar.setSampleRate (44100.0);
+    // Painting with every part set must not crash, and the rate text must
+    // really be drawn: the same bar painted without a rate looks different.
     bar.setSelection (0.5, 1.25);
     bar.setPlayhead (0.75);
-    juce::Image img (juce::Image::ARGB, 600, 24, true);
-    juce::Graphics g (img);
-    bar.paint (g);
-    CHECK (true, "status bar paints with sample rate");
+    auto paintBar = [&bar]
+    {
+        juce::Image img (juce::Image::ARGB, 600, 24, true);
+        { juce::Graphics g (img); bar.paint (g); }
+        return img;
+    };
+    bar.setSampleRate (44100.0);
+    const juce::Image withRate = paintBar();
+    bar.setSampleRate (0.0);
+    const juce::Image withoutRate = paintBar();
+    int differing = 0;
+    for (int y = 0; y < 24; ++y)
+        for (int x = 0; x < 600; ++x)
+            if (withRate.getPixelAt (x, y) != withoutRate.getPixelAt (x, y)) ++differing;
+    CHECK (differing > 20, "status bar paints the sample-rate text");
 }
 
 // Phase 2: streaming STFT/ISTFT used by DeepFilterNet. Pure DSP — exercised in
@@ -10964,6 +11170,7 @@ static void testScttJson()
     const std::string json = scttToJson (d);
     ScttData d2;
     CHECK (parseScttJson (json, d2), "sctt json parses");
+    CHECK (d2.segments.size() == 2, "both segments round-trip");
     if (d2.segments.size() == 2)
     {
         CHECK (d2.version == 1, "version round-trip");
@@ -11005,6 +11212,7 @@ static void testScttChunkWav()
     // Read it back through the public RIFF reader.
     ScttData got;
     CHECK (readScttChunk (outWav, got), "sctt chunk read back");
+    CHECK (got.segments.size() == 2, "both segments read back from the chunk");
     if (got.segments.size() == 2)
     {
         CHECK (std::abs (got.segments[0].startSec - 0.25) < 1e-9, "chunk t0");
@@ -11728,9 +11936,15 @@ static void testAIPlumbing()
     }
 
     // --- Install state + checksum logic on a synthetic model -------------
-    juce::File root = mm.modelRoot ();
-    if (!root.exists ()) root.createDirectory ();
-    const juce::File dir = root.getChildFile ("synthetic-test-model");
+    // A private model root under the per-shard temp folder (rootOverride): the
+    // user's real models folder is never written, and parallel shards never
+    // share the synthetic model directory.
+    sc::ai::ModelManager local (scTestTempDir().getChildFile ("ai_models")
+                                    .getFullPathName().toStdString());
+    const juce::File root = local.modelRoot ();
+    CHECK (root.isAChildOf (scTestTempDir()), "synthetic model root is the test override");
+    root.createDirectory ();
+    const juce::File dir = local.dirFor ("synthetic-test-model");
     dir.deleteRecursively ();
     dir.createDirectory ();
 
@@ -11750,7 +11964,7 @@ static void testAIPlumbing()
                             (int64_t) contentB.toStdString ().size () });
 
     std::vector<std::string> missing;
-    CHECK (!mm.isInstalled (spec, &missing), "synthetic model not installed before files exist");
+    CHECK (!local.isInstalled (spec, &missing), "synthetic model not installed before files exist");
     CHECK (missing.size() == 2, "both files reported missing");
 
     auto writeFile = [] (const juce::File& p, const juce::String& s) {
@@ -11761,14 +11975,14 @@ static void testAIPlumbing()
     };
 
     writeFile (dir.getChildFile ("a.bin"), contentA);
-    CHECK (!mm.isInstalled (spec, &missing), "still not installed with one file missing");
+    CHECK (!local.isInstalled (spec, &missing), "still not installed with one file missing");
     CHECK (missing.size() == 1 && missing[0] == "b.bin", "only b.bin reported missing");
 
     writeFile (dir.getChildFile ("b.bin"), contentB);
-    CHECK (mm.isInstalled (spec, &missing), "installed once all files present with right sizes");
+    CHECK (local.isInstalled (spec, &missing), "installed once all files present with right sizes");
 
     std::string bad;
-    CHECK (mm.verifyInstalled (spec, &bad), "checksums verify for intact synthetic model");
+    CHECK (local.verifyInstalled (spec, &bad), "checksums verify for intact synthetic model");
 
     // Corrupt b.bin: size changes -> isInstalled false; sha also fails.
     {
@@ -11777,8 +11991,8 @@ static void testAIPlumbing()
         o.setPosition ((int64_t) contentB.toStdString ().size ());
         o.write (&extra, 1);
     }
-    CHECK (!mm.isInstalled (spec, nullptr), "corrupted file detected by size check");
-    CHECK (!mm.verifyInstalled (spec, &bad), "checksum mismatch detected");
+    CHECK (!local.isInstalled (spec, nullptr), "corrupted file detected by size check");
+    CHECK (!local.verifyInstalled (spec, &bad), "checksum mismatch detected");
     CHECK (bad == "b.bin", "mismatching file identified");
 
     // Restore and exercise the ensureInstalled fast path: everything present,
@@ -11786,8 +12000,9 @@ static void testAIPlumbing()
     writeFile (dir.getChildFile ("b.bin"), contentB);
     std::string err;
     bool cancelled = false;
-    CHECK (mm.ensureInstalled (spec, [&cancelled] (float, const std::string&) { return !cancelled; }, &err),
+    CHECK (local.ensureInstalled (spec, [&cancelled] (float, const std::string&) { return !cancelled; }, &err),
           "ensureInstalled fast path when already installed");
+    root.deleteRecursively ();
 
     // --- OpenVINO runtime smoke test --------------------------------------
 #if !defined(_DEBUG)
@@ -12378,6 +12593,7 @@ static void testDeleteShiftsMarkersAndSavedSelections()
     CHECK (app.openFile (wav), "open wav for deletion side-state test");
     FileDoc* d = app.doc();
     CHECK (d != nullptr, "active doc exists");
+    if (d == nullptr) { wav.deleteFile(); return; }
 
     const int m1 = app.markers().addPointMarker (8.0, "after-marker");
     SavedSpectralSelection ss;
@@ -12394,9 +12610,20 @@ static void testDeleteShiftsMarkersAndSavedSelections()
     const Marker* mk = findMarker (m1);
     CHECK (mk && std::abs (mk->start - 6.0) < 1e-9, "marker after the deleted range shifted left");
 
+    // Time span of the saved rect; false (a FAIL, not a crash of the whole
+    // suite through front() on an empty list) if a regression dropped it.
+    auto savedSpan = [&] (double& t0, double& t1)
+    {
+        if (d->savedSelections.empty() || d->savedSelections[0].data.shapes().empty())
+            return false;
+        const auto& r = d->savedSelections[0].data.shapes().front();
+        t0 = r.t0; t1 = r.t1;
+        return true;
+    };
+    double s0 = 0.0, s1 = 0.0;
+
     CHECK (d->savedSelections.size() == 1, "named saved selection kept");
-    const auto& sr = d->savedSelections[0].data.shapes().front();
-    CHECK (std::abs (sr.t0 - 5.0) < 1e-9 && std::abs (sr.t1 - 7.0) < 1e-9,
+    CHECK (savedSpan (s0, s1) && std::abs (s0 - 5.0) < 1e-9 && std::abs (s1 - 7.0) < 1e-9,
           "saved spectral rect shifted with the audio");
 
     const Patch& p = app.undo().undoAt (app.undo().undoSize() - 1);
@@ -12407,17 +12634,16 @@ static void testDeleteShiftsMarkersAndSavedSelections()
     mk = findMarker (m1);
     CHECK (mk && std::abs (mk->start - 8.0) < 1e-9, "undo restores the marker position");
     CHECK (d->savedSelections.size() == 1, "undo keeps the saved selection");
-    const auto& sr2 = d->savedSelections[0].data.shapes().front();
-    CHECK (std::abs (sr2.t0 - 7.0) < 1e-9 && std::abs (sr2.t1 - 9.0) < 1e-9,
+    CHECK (savedSpan (s0, s1) && std::abs (s0 - 7.0) < 1e-9 && std::abs (s1 - 9.0) < 1e-9,
           "undo restores the saved spectral rect");
 
     // Redo re-applies the adjustment.
     app.redoStep ();
     mk = findMarker (m1);
     CHECK (mk && std::abs (mk->start - 6.0) < 1e-9, "redo shifts the marker again");
-    const auto& sr3 = d->savedSelections[0].data.shapes().front();
-    CHECK (std::abs (sr3.t0 - 5.0) < 1e-9 && std::abs (sr3.t1 - 7.0) < 1e-9,
+    CHECK (savedSpan (s0, s1) && std::abs (s0 - 5.0) < 1e-9 && std::abs (s1 - 7.0) < 1e-9,
           "redo shifts the saved spectral rect again");
+    wav.deleteFile();
 }
 
 static void testTrimSelection()
@@ -12905,6 +13131,19 @@ static void testTimeAnchoredRemap()
     }
 }
 
+// FFTAnalysisView skips an expensive recompute requested less than 60 ms after
+// the previous one ("now - lastComputeMs < 60", src/Panels.cpp), stamping
+// lastComputeMs with Time::getMillisecondCounter() when a compute starts.
+// Waiting until that same counter has moved 61 ms past "now" (after the last
+// recomputeIfNeeded) guarantees the next recompute runs, whatever the machine
+// load: no fixed sleep with a guessed margin.
+static void scPassFftThrottle()
+{
+    const juce::uint32 start = juce::Time::getMillisecondCounter();
+    while (juce::Time::getMillisecondCounter() - start <= 60)
+        juce::Thread::sleep (2);
+}
+
 static void testDeleteAdjustsSnapshots()
 {
     const juce::File wav = makeTempFile ("snap_del.wav");
@@ -12927,13 +13166,13 @@ static void testDeleteAdjustsSnapshots()
     view.handleSnapshotClick (0);
     CHECK (view.snapshotN (0) > 0, "snapshot 0 stored");
 
-    std::this_thread::sleep_for (std::chrono::milliseconds (80));
+    scPassFftThrottle();
     app.setSelection ({ 5.0, 7.0 });
     view.recomputeIfNeeded();
     view.handleSnapshotClick (1);
     CHECK (view.snapshotN (1) > 0, "snapshot 1 stored");
 
-    std::this_thread::sleep_for (std::chrono::milliseconds (80));
+    scPassFftThrottle();
     app.setSelection ({ 4.2, 5.8 });
     view.recomputeIfNeeded();
     view.handleSnapshotClick (2);
@@ -12958,6 +13197,7 @@ static void testDeleteAdjustsSnapshots()
     // Redo-style: it is cleared again.
     view.restoreSnapshotSlots (d, p, true);
     CHECK (view.snapshotN (2) == 0, "redo clears the slot again");
+    wav.deleteFile();
 }
 
 static void testCurveAnalysisModes()
@@ -13165,14 +13405,14 @@ static void testCurveAnalysisModes()
         CHECK (view.curveSnapMode (0) == 3 && std::abs (view.curveSnapshotT0 (0) - 1.0) < 1e-9,
               "curve snapshot stored over [1,2]");
 
-        std::this_thread::sleep_for (std::chrono::milliseconds (80));
+        scPassFftThrottle();
         app2.setSelection ({ 5.0, 7.0 });
         view.recomputeIfNeeded();
         view.handleSnapshotClick (1);
         CHECK (view.curveSnapMode (1) == 3 && std::abs (view.curveSnapshotT0 (1) - 5.0) < 1e-9,
               "curve snapshot stored over [5,7]");
 
-        std::this_thread::sleep_for (std::chrono::milliseconds (80));
+        scPassFftThrottle();
         app2.setSelection ({ 4.2, 5.8 });
         view.recomputeIfNeeded();
         view.handleSnapshotClick (2);
@@ -13530,7 +13770,7 @@ static void testHarmonicRatioAndClearAll()
         app.setSelection ({ 0.0, 1.0 });
         v2.recomputeIfNeeded ();
         v2.handleSnapshotClick (0);
-        std::this_thread::sleep_for (std::chrono::milliseconds (80));
+        scPassFftThrottle();
         app.setSelection ({ 0.5, 1.0 });
         v2.recomputeIfNeeded ();
         v2.handleSnapshotClick (1);
@@ -13905,14 +14145,30 @@ static void testExtractMasked()
     CHECK (std::abs (a500 - 0.5f) < 0.01f, "A contains the masked tone");
     CHECK (a3500 < 0.01f, "A excludes the unmasked tone");
 
-    // B = original - A; A + B must reconstruct the original to within a
-    // couple of ULPs (floating-point round-trip, not bit-exact).
+    // The complement B = original - A (the documented contract) must be the
+    // clean other half: all of the 3500 Hz tone and none of the 500 Hz one.
+    // (The former "A + (orig - A) == orig" check held for ANY A.) A phase or
+    // amplitude error in A leaves 500 Hz in B even when |A| looks right.
     std::vector<float> orig ((size_t) kToneFrames);
     CHECK (eng.readSamples (0, 0, (int) kToneFrames, orig.data()), "read original");
-    double maxErr = 0.0;
-    for (size_t i = 0; i < orig.size(); ++i)
-        maxErr = std::max (maxErr, (double) std::abs (A[0][i] + (orig[i] - A[0][i]) - orig[i]));
-    CHECK (maxErr < 1e-6, "A + B reconstructs the original");
+    std::vector<float> B (orig.size());
+    for (size_t i = 0; i < orig.size() && i < A[0].size(); ++i)
+        B[i] = orig[i] - A[0][i];
+    const float b500 = toneAmp (B, 2048, (size_t) kToneFrames - 2048, 500.0, kToneRate);
+    const float b3500 = toneAmp (B, 2048, (size_t) kToneFrames - 2048, 3500.0, kToneRate);
+    CHECK (b500 < 0.01f, "complement (original - A) has no masked-tone content left");
+    CHECK (std::abs (b3500 - 0.5f) < 0.01f, "complement (original - A) keeps the unmasked tone");
+
+    // Independent path: maskBufferToSelection is documented to use the same
+    // STFT overlap-add on an in-memory buffer, so it must give the same A.
+    std::vector<std::vector<float>> A2;
+    CHECK (SpectralMask::maskBufferToSelection ({ orig }, 0, sel, kToneRate, A2),
+          "mask the in-memory buffer");
+    double maxDiff = A2.size() == 1 && A2[0].size() == A[0].size() ? 0.0 : 1.0;
+    for (size_t i = 0; maxDiff < 1.0 && i < A[0].size(); ++i)
+        maxDiff = std::max (maxDiff, (double) std::abs (A[0][i] - A2[0][i]));
+    CHECK (maxDiff < 1e-4, "extractMasked matches maskBufferToSelection on the same audio");
+    wav.deleteFile();
 }
 
 // Mean |FFT| over the bins whose centres lie in [fLoHz, fHiHz], taken from a
@@ -14289,10 +14545,11 @@ static void testSplitSpectralSelectionViewRefresh()
     // its 500 Hz line sits on channel 1's 500 Hz tone, which the calibrated
     // spectrogram (+9 dB vs the old |X|/N scale) now draws far brighter than
     // the line, so the difference there exceeds the tolerance.
-    const bool freqGridWas = app.settings.showFreqGrid;
+    // These are in-memory changes only: nothing is saved, and the runner
+    // resets the isolated settings store before every test anyway.
     app.settings.showFreqGrid = false;
     FileDoc* d = app.doc();
-    if (!d) return;
+    if (!d) { wav.deleteFile (); return; }
     AudioEngine& eng = app.audioEngine ();
 
     // Before the split both tones are present in channel 0.
@@ -14362,11 +14619,10 @@ static void testSplitSpectralSelectionViewRefresh()
         CHECK (maxDiff < 90.0, "view row matches the fresh engine render");
     }
 
-    // The grid flag is a persisted setting and the MainWindow above synced it
-    // into the (per-run) settings store: restore it so later tests still see
-    // the default grid.
-    app.settings.showFreqGrid = freqGridWas;
-    app.saveSettings ();
+    // No settings restore/save here: the former saveSettings() persisted
+    // fft_auto=0 and show_third_oct_grid=0 for every later test of the run.
+    win.reset ();
+    wav.deleteFile ();
 }
 
 static void testSplitSpectralSelectionTrack1To2App()
@@ -14496,6 +14752,18 @@ static void collectSplitConfigWidgets (juce::Component& root,
     }
 }
 
+// Deliver every message already queued: JUCE runs posted messages (callAsync,
+// AsyncUpdater, TextEditor/ComboBox async notifications) in FIFO order, so
+// once a sentinel posted now has run, all earlier ones have too. Unlike a
+// fixed number of short pumps, a "nothing happened" check after this cannot
+// pass just because the message had not been delivered yet.
+static bool scFlushMessageQueue (int timeoutMs = 2000)
+{
+    auto done = std::make_shared<bool> (false);
+    juce::MessageManager::callAsync ([done] { *done = true; });
+    return scPumpUntil ([done] { return *done; }, timeoutMs);
+}
+
 // ------------------------------------------------- split configuration dialog
 // The "Split Spectral Selection Configuration" window has one checkbox row per
 // channel, a destination field for each row and three preset buttons. Closing
@@ -14510,7 +14778,6 @@ static void testSplitConfigDialog()
     Application app;
     CHECK (app.openFile (wav), "open stereo wav for split config test");
 
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "split config test"));
 
     auto* w = win->createSplitConfigDialog ();
@@ -14533,12 +14800,12 @@ static void testSplitConfigDialog()
     // No saved configuration: the default is "last channel into new".
     CHECK (!checks[0]->getToggleState (), "channel 1 unchecked by default");
     CHECK (checks[1]->getToggleState (), "channel 2 checked by default");
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    scFlushMessageQueue ();   // deliver any queued notification (FIFO), not a 5 ms guess
     CHECK (dests[1]->getText().trim() == "3", "default destination is the new channel 3");
 
     // All Tracks: every channel extracts into its own new track.
     allBtn->onClick ();
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    scFlushMessageQueue ();   // deliver any queued notification (FIFO), not a 5 ms guess
     CHECK (checks[0]->getToggleState () && checks[1]->getToggleState (),
           "All Tracks ticks both channels");
     CHECK (dests[0]->getText().trim() == "3" && dests[1]->getText().trim() == "4",
@@ -14546,7 +14813,7 @@ static void testSplitConfigDialog()
 
     // Second last into last: only channel N-1, destination N.
     secondBtn->onClick ();
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    scFlushMessageQueue ();   // deliver any queued notification (FIFO), not a 5 ms guess
     CHECK (checks[0]->getToggleState () && !checks[1]->getToggleState (),
           "Second last ticks only channel 1");
     CHECK (dests[0]->getText().trim() == "2",
@@ -14554,7 +14821,7 @@ static void testSplitConfigDialog()
 
     // Last channel into new again.
     lastBtn->onClick ();
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    scFlushMessageQueue ();   // deliver any queued notification (FIFO), not a 5 ms guess
     CHECK (!checks[0]->getToggleState () && checks[1]->getToggleState (),
           "Last into new ticks only channel 2");
     CHECK (dests[1]->getText().trim() == "3",
@@ -14574,7 +14841,7 @@ static void testSplitConfigDialog()
     CHECK (checks2.size () == 2 && dests2.size () == 2, "second dialog has the grid");
     if (checks2.size () == 2 && dests2.size () == 2)
     {
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+        scFlushMessageQueue ();   // deliver any queued notification (FIFO), not a 5 ms guess
         CHECK (checks2[0]->getToggleState () && !checks2[1]->getToggleState (),
                "saved configuration prefills channel 1 only");
         CHECK (dests2[0]->getText().trim() == "3", "saved destination is ch3");
@@ -16209,6 +16476,21 @@ static void testDestroyedPanelPendingFit()
     int fitCalls = 0;
     app.onSetTimeWindow = [&] (double, double) { ++fitCalls; };
 
+    // Positive control: with the panel alive the same deferred fit does move
+    // the view (otherwise "discarded" below would hold for a fit that never
+    // fires at all).
+    {
+        DrawingPanel panel (app);
+        panel.setSize (320, 200);
+        juce::SparseSet<int> sel;
+        sel.addRange ({ 0, 1 });
+        panel.listTable ().setSelectedRows (sel, juce::sendNotification);
+        CHECK (scFlushMessageQueue (), "message queue flushed (live panel)");
+        CHECK (fitCalls > 0, "a live panel's deferred fit moves the view");
+    }
+    fitCalls = 0;
+    app.viewStart = 1.5; app.viewEnd = 2.0;
+
     {
         DrawingPanel panel (app);
         panel.setSize (320, 200);
@@ -16218,11 +16500,9 @@ static void testDestroyedPanelPendingFit()
         panel.listTable ().setSelectedRows (sel, juce::sendNotification);
     }   // panel destroyed while its fit message is still queued
 
-    // Pumping must not crash and must not move the view: the dead panel's fit
-    // has to be discarded instead of touching freed memory.
-    for (int i = 0; i < 8; ++i)
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
-
+    // Delivering the queued fit must not crash and must not move the view: the
+    // dead panel's fit has to be discarded instead of touching freed memory.
+    CHECK (scFlushMessageQueue (), "message queue flushed (dead panel)");
     CHECK (fitCalls == 0, "pending fit from a destroyed panel is discarded");
     wav.deleteFile (); store.deleteFile ();
 }
@@ -16416,6 +16696,22 @@ static void testSelectionRecallLive()
         return n;
     };
 
+    // The "not amber" checks alone also pass when nothing is drawn at all:
+    // the recalled mask must also show up in the live-mask blue
+    // (SpectralView::drawSpectralShapesOverlay fills 70,130,255 @ alpha 80).
+    auto countMaskBlue = [] (const juce::Image& img)
+    {
+        int n = 0;
+        for (int y = 0; y < img.getHeight(); ++y)
+            for (int x = 0; x < img.getWidth(); ++x)
+            {
+                const auto p = img.getPixelAt (x, y);
+                if (p.getBlue () >= p.getRed () + 30 && p.getBlue () >= p.getGreen () + 15
+                    && p.getBlue () >= 50) ++n;
+            }
+        return n;
+    };
+
     juce::Image base (juce::Image::ARGB, sv->getWidth(), sv->getHeight(), true);
     { juce::Graphics g (base); sv->paint (g); }
     CHECK (countAmber (base) < 20, "silent spectrogram has no amber-ish pixels");
@@ -16435,6 +16731,8 @@ static void testSelectionRecallLive()
     { juce::Graphics g (one); sv->paint (g); }
     CHECK (countAmber (one) < 20,
           "recalled selection is not drawn as an amber overlay");
+    CHECK (countMaskBlue (one) > countMaskBlue (base) + 100,
+          "the recalled selection is drawn as the live (blue) mask");
 
     // Ctrl+click row B: the live selection becomes the union of both.
     clickTableRow (sp->listTable (), 1, juce::ModifierKeys (juce::ModifierKeys::commandModifier));
@@ -16450,6 +16748,8 @@ static void testSelectionRecallLive()
     { juce::Graphics g (two); sv->paint (g); }
     CHECK (countAmber (two) < 20,
           "the union is drawn as the live mask, not amber");
+    CHECK (countMaskBlue (two) > countMaskBlue (base) + 100,
+          "the union is drawn as the live (blue) mask");
 
     // Toggling A off makes B alone the live mask; clearing all rows then
     // leaves that last non-empty selection in place.
@@ -16832,6 +17132,8 @@ static void testGenerateDialogs()
         delete w;
 
         auto* wn = win->createGenerateNoiseDialog();
+        CHECK (wn != nullptr, "noise dialog created without a target");
+        if (wn == nullptr) { win.reset (); wav.deleteFile (); return; }
         bool hasCombo = false;
         for (int i = 0; i < wn->getNumChildComponents (); ++i)
             if (dynamic_cast<juce::ComboBox*> (wn->getChildComponent (i)) != nullptr) hasCombo = true;
@@ -16842,7 +17144,9 @@ static void testGenerateDialogs()
         CHECK (findEditorRecursive (*wn, "genDuration") != nullptr,
               "noise dialog has a duration field without a target");
 
-        // Render headlessly so the layout can be visually inspected.
+        // Render headlessly so the layout can be visually inspected (only
+        // when the temp folder is kept: SC_TEST_KEEP_TEMP=1).
+        if (scKeepTestArtifacts())
         {
             const juce::File out = scTestTempDir()
                 .getChildFile ("sc_gen_noise_snapshot.png");
@@ -16865,6 +17169,8 @@ static void testGenerateDialogs()
         delete wn;
 
         auto* wt = win->createGenerateToneDialog();
+        CHECK (wt != nullptr, "tone dialog created without a target");
+        if (wt == nullptr) { win.reset (); wav.deleteFile (); return; }
         ToneListEditor* tones = nullptr;
         for (int i = 0; i < wt->getNumChildComponents (); ++i)
             if ((tones = dynamic_cast<ToneListEditor*> (wt->getChildComponent (i))) != nullptr) break;
@@ -16880,7 +17186,9 @@ static void testGenerateDialogs()
         CHECK (findEditorRecursive (*wt, "genDuration") != nullptr,
               "tone dialog has a duration field without a target");
 
-        // Render headlessly so the layout can be visually inspected.
+        // Render headlessly so the layout can be visually inspected (only
+        // when the temp folder is kept: SC_TEST_KEEP_TEMP=1).
+        if (scKeepTestArtifacts())
         {
             const juce::File out = scTestTempDir()
                 .getChildFile ("sc_gen_tone_snapshot.png");
@@ -16911,7 +17219,7 @@ static void testGenerateDialogs()
               "silence runs without a popup when a time selection exists");
 
         auto* wn = win->createGenerateNoiseDialog();
-        CHECK (findEditorRecursive (*wn, "genDuration") == nullptr,
+        CHECK (wn != nullptr && findEditorRecursive (*wn, "genDuration") == nullptr,
               "noise dialog drops the duration field with a time selection");
         delete wn;
     }
@@ -16921,7 +17229,7 @@ static void testGenerateDialogs()
     d->spectralSel = lowBandSel ();
     {
         auto* wt = win->createGenerateToneDialog();
-        CHECK (findEditorRecursive (*wt, "genDuration") == nullptr,
+        CHECK (wt != nullptr && findEditorRecursive (*wt, "genDuration") == nullptr,
               "tone dialog drops the duration field with a spectral selection");
         delete wt;
 
@@ -16982,25 +17290,31 @@ static void testNewEffectDialogs()
         CHECK (w != nullptr && findEditorRecursive (*w, "stretchDuration") != nullptr
                        && findEditorRecursive (*w, "stretchFactor") != nullptr,
               "time stretch dialog has linked duration and factor fields");
+        if (w == nullptr) { win.reset (); wav.deleteFile (); return; }
         CHECK (findSliderRecursive (*w) == nullptr,
               "time stretch dialog no longer uses a slider");
 
-        const juce::File out = scTestTempDir()
-            .getChildFile ("sc_time_stretch_snapshot.png");
-        const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
-        std::vector<uint8_t> px;
-        px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
-        for (int yy = 0; yy < img.getHeight (); ++yy)
-            for (int xx = 0; xx < img.getWidth (); ++xx)
-            {
-                const juce::Colour c = img.getPixelAt (xx, yy);
-                px.push_back ((uint8_t) c.getRed());
-                px.push_back ((uint8_t) c.getGreen());
-                px.push_back ((uint8_t) c.getBlue());
-                px.push_back ((uint8_t) c.getAlpha());
-            }
-        CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
-               "saved time-stretch snapshot: " + out.getFullPathName ());
+        // Layout snapshot for visual inspection: only when the temp folder is
+        // kept (SC_TEST_KEEP_TEMP=1).
+        if (scKeepTestArtifacts())
+        {
+            const juce::File out = scTestTempDir()
+                .getChildFile ("sc_time_stretch_snapshot.png");
+            const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
+            std::vector<uint8_t> px;
+            px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
+            for (int yy = 0; yy < img.getHeight (); ++yy)
+                for (int xx = 0; xx < img.getWidth (); ++xx)
+                {
+                    const juce::Colour c = img.getPixelAt (xx, yy);
+                    px.push_back ((uint8_t) c.getRed());
+                    px.push_back ((uint8_t) c.getGreen());
+                    px.push_back ((uint8_t) c.getBlue());
+                    px.push_back ((uint8_t) c.getAlpha());
+                }
+            CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
+                   "saved time-stretch snapshot: " + out.getFullPathName ());
+        }
 
         delete w;
     }
@@ -17008,6 +17322,8 @@ static void testNewEffectDialogs()
     // --- Filter EQ dialog -----------------------------------------------------
     {
         auto* w = win->createFilterEqDialog ();
+        CHECK (w != nullptr, "filter eq dialog created");
+        if (w == nullptr) { win.reset (); wav.deleteFile (); return; }
         EqCurveEditor* editor = nullptr;
         for (int i = 0; i < w->getNumChildComponents (); ++i)
             if ((editor = dynamic_cast<EqCurveEditor*> (w->getChildComponent (i))) != nullptr) break;
@@ -17026,28 +17342,44 @@ static void testNewEffectDialogs()
         {
             const int bassBoostId = [&] { for (int i = 1; i <= combo->getNumItems (); ++i) if (combo->getItemText (i - 1) == "Bass Boost") return i; return -1; }();
             CHECK (bassBoostId > 0, "Bass Boost preset is present");
-            combo->setSelectedId (bassBoostId);
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);   // async change
+            // The editor already holds points before the selection (the
+            // default curve), so "not empty" proved nothing: the points must
+            // be exactly the built-in Bass Boost curve. Synchronous
+            // notification: an async one is not delivered by a 5 ms pump.
+            std::vector<sc::eq::EqPoint> want;
+            for (const auto& pr : sc::eq::presets ())
+                if (pr.name == "Bass Boost") want = pr.points;
+            CHECK (!want.empty (), "Bass Boost is a built-in preset");
+            combo->setSelectedId (bassBoostId, juce::sendNotificationSync);
             const auto pts = editor->getPoints ();
-            CHECK (!pts.empty (), "preset loaded points into the editor");
+            bool same = !want.empty () && pts.size () == want.size ();
+            for (size_t i = 0; same && i < pts.size (); ++i)
+                same = std::abs (pts[i].freqHz - want[i].freqHz) < 1e-6
+                    && std::abs (pts[i].gainDb - want[i].gainDb) < 1e-6;
+            CHECK (same, "selecting Bass Boost loads exactly its points into the editor");
         }
 
-        const juce::File out = scTestTempDir()
-            .getChildFile ("sc_filter_eq_snapshot.png");
-        const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
-        std::vector<uint8_t> px;
-        px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
-        for (int yy = 0; yy < img.getHeight (); ++yy)
-            for (int xx = 0; xx < img.getWidth (); ++xx)
-            {
-                const juce::Colour c = img.getPixelAt (xx, yy);
-                px.push_back ((uint8_t) c.getRed());
-                px.push_back ((uint8_t) c.getGreen());
-                px.push_back ((uint8_t) c.getBlue());
-                px.push_back ((uint8_t) c.getAlpha());
-            }
-        CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
-               "saved filter-eq snapshot: " + out.getFullPathName ());
+        // Layout snapshot for visual inspection: only when the temp folder is
+        // kept (SC_TEST_KEEP_TEMP=1).
+        if (scKeepTestArtifacts())
+        {
+            const juce::File out = scTestTempDir()
+                .getChildFile ("sc_filter_eq_snapshot.png");
+            const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
+            std::vector<uint8_t> px;
+            px.reserve ((size_t) img.getWidth () * img.getHeight () * 4);
+            for (int yy = 0; yy < img.getHeight (); ++yy)
+                for (int xx = 0; xx < img.getWidth (); ++xx)
+                {
+                    const juce::Colour c = img.getPixelAt (xx, yy);
+                    px.push_back ((uint8_t) c.getRed());
+                    px.push_back ((uint8_t) c.getGreen());
+                    px.push_back ((uint8_t) c.getBlue());
+                    px.push_back ((uint8_t) c.getAlpha());
+                }
+            CHECK (PngWriter::writePng (out, img.getWidth (), img.getHeight (), px),
+                   "saved filter-eq snapshot: " + out.getFullPathName ());
+        }
 
         delete w;
     }
@@ -17085,23 +17417,30 @@ static void testTimeStretchDialogSync()
           "duration initialised to the reference length");
     CHECK (facEd->getText ().trim () == "1", "factor initialised to 1");
 
+    // TextEditor::setText notifies its listeners asynchronously (a posted
+    // command message): wait for the linked field instead of a 5 ms pump,
+    // which on macOS often returned before the message was delivered.
     // Duration -> factor: 2 s of a 4 s file is twice as fast.
     durEd->setText ("2");
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-    CHECK (std::abs (facEd->getText ().getDoubleValue () - 2.0) < 1e-6,
+    CHECK (scPumpUntil ([&] { return std::abs (facEd->getText ().getDoubleValue () - 2.0) < 1e-6; }),
           "factor follows the duration field");
 
     // Factor -> duration: factor 4 of a 4 s file is 1 s.
     facEd->setText ("4");
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-    CHECK (std::abs (durEd->getText ().getDoubleValue () - 1.0) < 1e-6,
+    CHECK (scPumpUntil ([&] { return std::abs (durEd->getText ().getDoubleValue () - 1.0) < 1e-6; }),
           "duration follows the factor field");
 
-    // Invalid input leaves the other field untouched.
+    // Invalid input leaves the other field untouched. Flush the queue so the
+    // listener has really seen "abc" (otherwise the factor would still be 4
+    // simply because nothing ran yet).
     durEd->setText ("abc");
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+    CHECK (scFlushMessageQueue (), "text-change message delivered");
     CHECK (std::abs (facEd->getText ().getDoubleValue () - 4.0) < 1e-6,
           "invalid duration text is ignored");
+    // ...and the link still works afterwards: 4 s of a 4 s file is factor 1.
+    durEd->setText ("4");
+    CHECK (scPumpUntil ([&] { return std::abs (facEd->getText ().getDoubleValue () - 1.0) < 1e-6; }),
+          "a valid duration after invalid text updates the factor again");
 
     delete w;
     wav.deleteFile ();
@@ -17153,7 +17492,7 @@ static void testEqPresetPersistence()
 
     auto* w = win->createFilterEqDialog ();
     CHECK (w != nullptr, "dialog created");
-    if (w == nullptr) { wav.deleteFile (); return; }
+    if (w == nullptr) { win.reset (); wav.deleteFile (); return; }
 
     EqCurveEditor* editor = nullptr;
     for (int i = 0; i < w->getNumChildComponents (); ++i)
@@ -17179,8 +17518,9 @@ static void testEqPresetPersistence()
         CHECK (cleanId > 0, "user preset is listed");
         if (cleanId > 0)
         {
-            combo->setSelectedId (cleanId);
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);   // async change
+            // Synchronous notification: an async one is not reliably
+            // delivered by a fixed 5 ms pump (failed on macOS).
+            combo->setSelectedId (cleanId, juce::sendNotificationSync);
             const auto cp = editor->getPoints ();
             CHECK (cp.size () == 1 && std::abs (cp[0].freqHz - 440.0) < 1e-9
                   && std::abs (cp[0].gainDb - 12.0) < 1e-6,
@@ -18069,11 +18409,11 @@ static void testCatDialog()
 
     auto* w = win->createContentAwareTimeScaleDialog ();
     CHECK (w != nullptr, "dialog created");
-    if (w == nullptr) { wav.deleteFile (); return; }
+    if (w == nullptr) { win.reset (); wav.deleteFile (); return; }
 
     auto* panel = dynamic_cast<CatTimeScalePanel*> (w->getCustomComponent (0));
     CHECK (panel != nullptr, "the dialog hosts a CatTimeScalePanel");
-    if (panel == nullptr) { delete w; wav.deleteFile (); return; }
+    if (panel == nullptr) { delete w; win.reset (); wav.deleteFile (); return; }
 
     // Regression: the panel must carry an explicit size. Without it AlertWindow
     // allocates no space for it and JUCE clips its children to 0x0, leaving a
@@ -18093,7 +18433,7 @@ static void testCatDialog()
     auto* facEd = findEditorRecursive (*w, "catFactor");
     auto* pctEd = findEditorRecursive (*w, "catPercentile");
     CHECK (durEd != nullptr && facEd != nullptr && pctEd != nullptr, "all fields present");
-    if (durEd == nullptr || facEd == nullptr || pctEd == nullptr) { delete w; wav.deleteFile (); return; }
+    if (durEd == nullptr || facEd == nullptr || pctEd == nullptr) { delete w; win.reset (); wav.deleteFile (); return; }
 
     CHECK (panel->getMode () == CatTimeScalePanel::Mode::TimeStretch, "default mode is Time Stretch");
     // Per-mode visibility is tracked on the LabeledField rows.
@@ -18105,28 +18445,26 @@ static void testCatDialog()
     CHECK (std::abs (durEd->getText ().getDoubleValue () - 2.0) < 1e-6,
           "duration initialised to the reference length");
 
-    // Linked fields, like Time Stretch.
+    // Linked fields, like Time Stretch. TextEditor notifies asynchronously:
+    // wait for the effect instead of a 5 ms pump (failed on macOS even when
+    // the test ran alone).
     durEd->setText ("1");
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-    CHECK (std::abs (panel->getSpeedFactor () - 2.0) < 1e-6,
+    CHECK (scPumpUntil ([&] { return std::abs (panel->getSpeedFactor () - 2.0) < 1e-6; }),
           "halving the duration doubles the speed factor");
 
-    // Wait for the background analysis to deliver its result.
-    bool analysed = false;
-    for (int i = 0; i < 200 && !analysed; ++i)
-    {
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+    // Wait for the background analysis to deliver its result (bounded: 10 s).
+    const bool analysed = scPumpUntil ([&] {
         const juce::String t = panel->getResultText ();
-        if (!t.startsWith ("Analysing") && !t.isEmpty ()) analysed = true;
-    }
+        return !t.startsWith ("Analysing") && !t.isEmpty ();
+    }, 10000);
     CHECK (analysed, "background analysis delivered a result");
     if (analysed)
         CHECK (panel->getResultText ().startsWith ("Target duration"),
               "time-stretch mode shows the target duration");
 
     // Switch to Reduce Gaps: percentile row appears and the preview switches.
-    combo->setSelectedId (2);   // async change message in this JUCE build
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+    // Synchronous notification instead of the async one + a 50 ms pump.
+    combo->setSelectedId (2, juce::sendNotificationSync);
     CHECK (panel->getMode () == CatTimeScalePanel::Mode::ReduceGaps, "mode switched to Reduce Gaps");
     CHECK (!panel->durationRowVisible () && !panel->factorRowVisible ()
               && panel->percentileRowVisible () && panel->markOnlyVisible (),
@@ -18134,21 +18472,18 @@ static void testCatDialog()
     CHECK (!panel->markOnly (), "mark-only is off by default");
 
     // The preview shows the resulting duration for the current percentile.
-    bool hasPreview = false;
-    for (int i = 0; i < 200 && !hasPreview; ++i)
-    {
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
-        if (panel->getResultText ().startsWith ("Resulting duration")) hasPreview = true;
-    }
+    const bool hasPreview = scPumpUntil ([&] {
+        return panel->getResultText ().startsWith ("Resulting duration");
+    }, 10000);
     CHECK (hasPreview, "reduce-gaps mode shows the resulting duration");
 
-    // Percentile parsing + clamping.
+    // Percentile parsing + clamping (async text-change notification).
     pctEd->setText ("75");
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-    CHECK (std::abs (panel->getPercentile () - 75.0) < 1e-9, "percentile parsed");
+    CHECK (scPumpUntil ([&] { return std::abs (panel->getPercentile () - 75.0) < 1e-9; }),
+          "percentile parsed");
     pctEd->setText ("250");
-    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-    CHECK (std::abs (panel->getPercentile () - 100.0) < 1e-9, "percentile clamped to 100");
+    CHECK (scPumpUntil ([&] { return std::abs (panel->getPercentile () - 100.0) < 1e-9; }),
+          "percentile clamped to 100");
 
     delete w;
     win.reset ();
@@ -18511,7 +18846,7 @@ static void testEnvelopeDialog()
 
     auto* w = win->createEnvelopeDialog ();
     CHECK (w != nullptr, "dialog created");
-    if (w == nullptr) { wav.deleteFile (); return; }
+    if (w == nullptr) { win.reset (); wav.deleteFile (); return; }
 
     EnvCurveEditor* editor = nullptr;
     for (int i = 0; i < w->getNumChildComponents (); ++i)
@@ -18539,8 +18874,9 @@ static void testEnvelopeDialog()
         CHECK (myId > 0, "user preset is listed");
         if (myId > 0)
         {
-            combo->setSelectedId (myId);
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);   // async change
+            // Synchronous notification: an async one is not reliably
+            // delivered by a fixed 5 ms pump (failed on macOS).
+            combo->setSelectedId (myId, juce::sendNotificationSync);
             const auto cp = editor->getPoints ();
             CHECK (cp.size () == 2 && std::abs (cp[0].tSec) < 1e-9
                   && std::abs (cp[0].gainDb) < 1e-6
@@ -19050,7 +19386,7 @@ static void testPythonScripts()
             const juce::String thrNorm = thrNow.replace ("\r\n", "\n");
             CHECK (thrNorm == sc::py::defaultScriptText ("Threshold.py"),
                   "disk content matches the factory text exactly");
-            CHECK (ed->getText () == thrNow,
+            CHECK (ed != nullptr && ed->getText () == thrNow,
                   "editor reloaded with the original text");
 
             // User scripts have no reset entry.
@@ -19629,6 +19965,7 @@ static void testNewFileCopyPasteMix()
         app.toggleChannelVisible (2);
         std::string err;
         CHECK (app.copyToNewFile (&err), "copy-to-new-file ok");
+        if (app.docs.size () < 2) return;   // the CHECK above failed: FAIL, not a crash
         FileDoc& nd = *app.docs[1];
         CHECK (nd.engine.numChannels () == 2,
               "new file has exactly the visible channels");
@@ -19652,6 +19989,7 @@ static void testNewFileCopyPasteMix()
         for (int ch = 0; ch < 4; ++ch)
             if (!app.isChannelVisible (ch)) app.toggleChannelVisible (ch);
         CHECK (app.copyToNewFile (&err), "copy-to-new-file of the whole file ok");
+        if (app.docs.size () < 3) return;   // the CHECK above failed: FAIL, not a crash
         FileDoc& nd2 = *app.docs[2];
         CHECK (nd2.engine.numSamples () == 8000 && nd2.engine.numChannels () == 4,
               "whole-file copy keeps length and all channels");
@@ -19671,6 +20009,7 @@ static void testNewFileCopyPasteMix()
 
         std::string err;
         CHECK (app.copyToNewFile (&err), "masked copy-to-new-file ok");
+        if (app.docs.size () < 2) return;   // the CHECK above failed: FAIL, not a crash
         FileDoc& nd = *app.docs[1];
         std::vector<float> got ((size_t) kToneFrames);
         CHECK (nd.engine.readSamples (0, 0, (int) kToneFrames, got.data()),
@@ -19701,6 +20040,7 @@ static void testNewFileCopyPasteMix()
         CHECK (app.newFile (2, kToneRate), "new target file");
         app.setSelection ({ 0, 0 });   // paste at position 0
         CHECK (app.paste (nullptr), "paste masked clipboard into new file");
+        if (app.docs.size () < 3) return;   // the CHECK above failed: FAIL, not a crash
         FileDoc& nd2 = *app.docs[2];
         std::vector<float> got2 ((size_t) kToneFrames);
         CHECK (nd2.engine.readSamples (0, 0, (int) kToneFrames, got2.data()),
@@ -19990,6 +20330,7 @@ static void testSelectionsDiskReload()
     CHECK (app.openFile (wav), "open wav with sidecar");
     auto* d = app.doc ();
     CHECK (d != nullptr, "doc exists");
+    if (d == nullptr) { wav.deleteFile (); return; }
     CHECK (d->savedSelections.size () == 2,
           "sidecar next to the wav loads automatically on open");
 
@@ -21245,14 +21586,21 @@ static void testVideoAudioExtraction()
 
         Application app;
         std::unique_ptr<MainWindow> win (new MainWindow (app, "video open gates test"));
-        juce::StringArray mp4;   mp4.add ("movie.mp4");
+        // Absolute paths, as a real drag & drop delivers them: the window
+        // builds juce::File objects from them (a relative name raised the
+        // juce_File.cpp:219 assertion). The files need not exist.
+        juce::StringArray mp4;   mp4.add (makeTempFile ("movie.mp4").getFullPathName ());
         CHECK (win->isInterestedInFileDrag (mp4), "drag & drop accepts .mp4");
-        juce::StringArray mixed; mixed.add ("clip.mkv"); mixed.add ("notes.txt");
+        juce::StringArray mixed; mixed.add (makeTempFile ("clip.mkv").getFullPathName ());
+                                 mixed.add (makeTempFile ("notes.txt").getFullPathName ());
         CHECK (win->isInterestedInFileDrag (mixed), "drag & drop accepts a batch containing .mkv");
-        juce::StringArray txt;   txt.add ("readme.txt");
+        juce::StringArray txt;   txt.add (makeTempFile ("readme.txt").getFullPathName ());
         CHECK (!win->isInterestedInFileDrag (txt), "drag & drop rejects plain text");
     }
 #else
+    // Visible in the summary: on this platform only the "no FFmpeg" gates run.
+    scSkip ("video audio extraction: built without FFmpeg (SC_ENABLE_FFMPEG), only the"
+            " no-video gates are checked");
     // No FFmpeg on this platform: registration must be a harmless no-op and the
     // File Open / drag & drop gates must not offer video extensions.
     juce::AudioFormatManager fm;
@@ -21263,8 +21611,12 @@ static void testVideoAudioExtraction()
     CHECK (!w.contains ("*.mp4"), "wildcard has no mp4 without FFmpeg");
     Application app;
     std::unique_ptr<MainWindow> win (new MainWindow (app, "video open gates test"));
-    juce::StringArray mp4;   mp4.add ("movie.mp4");
+    // Absolute path, as a real drag & drop delivers it (a relative name raised
+    // the juce_File.cpp:219 assertion).
+    juce::StringArray mp4;   mp4.add (makeTempFile ("movie.mp4").getFullPathName ());
     CHECK (!win->isInterestedInFileDrag (mp4), "drag & drop rejects .mp4 without FFmpeg");
+    juce::StringArray wavs;  wavs.add (makeTempFile ("take.wav").getFullPathName ());
+    CHECK (win->isInterestedInFileDrag (wavs), "drag & drop still accepts .wav without FFmpeg");
 #endif
 }
 
@@ -21490,7 +21842,6 @@ static void testDrawingPanel()
         Application app (store);
         CHECK (app.openFile (wav), "load for drawing panel test");
 
-        juce::MessageManager* mm = juce::MessageManager::getInstance();
         std::unique_ptr<MainWindow> win (new MainWindow (app, "drawing panel test"));
 
         // Capture the fit callbacks AFTER construction: the MainWindow wires
@@ -21547,14 +21898,18 @@ static void testDrawingPanel()
         dp->onRowClicked (0, mkMouse (*dp, 5, 5, lmbFit));   // schedules a deferred fit
         CHECK (capT0 < 0, "fit is deferred until the message loop runs");
         dp->simulateCellClick (0, 1, mkMouse (*dp, 5, 5, juce::ModifierKeys()));   // eye: hide + cancel
-        for (int i = 0; i < 25; ++i) mm->runDispatchLoopUntil (4);   // bounded pump
+        // Deliver everything queued so far (FIFO): the cancelled fit has
+        // really been processed, so "nothing moved" is a real check and not
+        // just a fit still waiting in the queue (the former 25 x 4 ms pump).
+        CHECK (scFlushMessageQueue (), "message queue flushed after the eye click");
         CHECK (capT0 < 0 && capF0 < 0, "eye click discarded the pending fit");
 
-        // Show it again and re-select: a plain selection still fits.
+        // Show it again and re-select: a plain selection still fits. Wait for
+        // the deferred fit itself (it failed intermittently with a fixed pump).
         dp->simulateCellClick (0, 1, mkMouse (*dp, 5, 5, juce::ModifierKeys()));
         dp->onRowClicked (0, mkMouse (*dp, 5, 5, lmbFit));
-        for (int i = 0; i < 25; ++i) mm->runDispatchLoopUntil (4);   // bounded pump
-        CHECK (capT0 >= 0 && capF0 >= 0, "plain selection still fits the view");
+        CHECK (scPumpUntil ([&] { return capT0 >= 0 && capF0 >= 0; }),
+              "plain selection still fits the view");
 
         // Master switch syncs with the app state.
         auto* showAll = dynamic_cast<EyeButton*> (dp->findChildWithID ("draw-showall-btn"));
@@ -21581,10 +21936,10 @@ static void testDrawingPanel()
         dp->onRowClicked (1, mkMouse (*dp, 5, 5, shiftLmb));
         CHECK (dp->numSelectedRows() == 2, "shift click extends the selection");
 
-        // The view fit is deferred to the message loop: pump it now. On a slow
-        // machine message delivery can take longer than a few milliseconds,
-        // so pump with a generous bounded wait.
-        for (int i = 0; i < 25 && capT0 < 0; ++i) mm->runDispatchLoopUntil (4);
+        // The view fit is deferred to the message loop: wait for it (bounded),
+        // then flush so a later, superseding fit cannot land after the check.
+        scPumpUntil ([&] { return capT0 >= 0 && capF0 >= 0; });
+        scFlushMessageQueue ();
 
         // Fit ran on the union of items one+two: t [0.2, 0.8] -> [0.14, 0.86],
         // f [100, 400] -> [70, 430].
@@ -21732,8 +22087,21 @@ static void testDrawingKeyShortcuts()
         }
     }
 
-    // A focused text editor suppresses the shortcuts. The editor must be
-    // inside a showing window: JUCE ignores focus grabs on hidden components.
+    // A focused text editor suppresses the shortcuts. MainWindow::keyPressed
+    // looks at the REAL focused component (getCurrentlyFocusedComponent), and
+    // the OS only gives keyboard focus to the foreground process: under
+    // ctest -j / CI / a busy desktop this part is skipped visibly instead of
+    // failing ("editor has focus" was a known macOS failure).
+    if (!scHasForegroundFocus ())
+    {
+        scSkip ("drawing key shortcuts: focused-editor / focused-button checks need OS foreground");
+        win.reset ();
+        wav.deleteFile ();
+        return;
+    }
+
+    // The editor must be inside a showing window: JUCE ignores focus grabs on
+    // hidden components.
     juce::Component host;
     host.addToDesktop (0);
     host.setSize (200, 100);
@@ -21759,6 +22127,7 @@ static void testDrawingKeyShortcuts()
     CHECK (!sv->isPendingDraw (), "Ctrl+letter does not arm a drawing tool");
 
     host.removeFromDesktop ();
+    win.reset ();
     wav.deleteFile();
 }
 
@@ -22511,13 +22880,17 @@ static void testStartupTrace()
     const juce::File log = makeTempFile ("startup_trace.log");
     log.deleteFile();
 
+    // The trace state is process-global (the app's own startup T0): restore it
+    // when done so this test leaves nothing behind for later tests.
+    const scStart::State savedState = scStart::state;
+
     scStart::begin();
     const juce::File used = scStart::enable (log, SC_VERSION_STRING);
     CHECK (scStart::isEnabled (), "enable turns measurement on");
     CHECK (used == log, "writable preferred path is used");
 
     const int64 a = scStart::mark ("phase-a");
-    std::this_thread::sleep_for (std::chrono::milliseconds (30));
+    std::this_thread::sleep_for (std::chrono::milliseconds (2));   // >= 1 ms apart
     const int64 b = scStart::mark ("phase-b");
     CHECK (a >= 0 && b > a, "marks are monotonically increasing");
 
@@ -22538,17 +22911,28 @@ static void testStartupTrace()
     CHECK (!log.loadFileAsString().contains ("phase-c"),
           "disabled mark writes nothing to the log");
 
-    // Unwritable preferred path falls back to the app-data folder.
-    const juce::File bad = scTestTempDir()
-                               .getChildFile ("sc_missing_dir_xyz")
-                               .getChildFile ("trace.log");
-    const juce::File fallback = scStart::enable (bad);
-    CHECK (fallback != bad, "unwritable path is rejected");
-    CHECK (fallback.getFileName() == "SpectroCraft_load_time.log",
-          "falls back to the app-data log name");
-    CHECK (scStart::isEnabled (), "re-enable works after disable");
+    // Unwritable preferred path falls back to a fallback folder. In the app
+    // that is the user's profile (~/Library on macOS); the test injects its
+    // own folder so the real SpectroCraft_load_time.log is never touched.
+    {
+        const juce::File fbDir = scTestTempDir().getChildFile ("startup_fallback");
+        fbDir.createDirectory();
+        const juce::File bad = scTestTempDir()
+                                   .getChildFile ("sc_missing_dir_xyz")
+                                   .getChildFile ("trace.log");
+        const juce::File fallback = scStart::enable (bad, nullptr, fbDir);
+        CHECK (fallback != bad, "unwritable path is rejected");
+        CHECK (fallback == fbDir.getChildFile ("SpectroCraft_load_time.log"),
+               "falls back to <fallback dir>/SpectroCraft_load_time.log");
+        CHECK (fallback.loadFileAsString().contains ("==== SpectroCraft load-time measurement ===="),
+              "fallback log receives the header block");
+        CHECK (scStart::isEnabled (), "re-enable works after disable");
+        scStart::disable();
+        fbDir.deleteRecursively();
+    }
 
     scStart::disable();
+    scStart::state = savedState;
     log.deleteFile();
 }
 
@@ -22556,6 +22940,11 @@ static void testStartupTrace()
 // completes and sets the ready flag; start is idempotent; play() gates on it.
 static void testLazyAudioInit()
 {
+    if (Application::audioOutputDisabled())
+    {
+        scSkip ("lazy audio init: SC_NO_AUDIO_DEVICE set (no real output device in this shard)");
+        return;
+    }
     Application app;   // SC_TESTS_EXE builds use an isolated temp recent-store
 
     CHECK (!app.audioDeviceReady(), "device not initialised eagerly at startup");
@@ -22573,6 +22962,9 @@ static void testLazyAudioInit()
     writeWav (wav, 1, 8000, 4000, [] (int, int64_t f, double)
              { return (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * f / 8000.0); });
     CHECK (app.openFile (wav), "open wav for lazy play test");
+    // Real output device: play silently (engine gain 0) - the transport is
+    // what is tested, not a 440 Hz beep out of the developer's speakers.
+    app.audioEngine().setGain (0.0f);
     app.play();
     CHECK (app.audioEngine().isPlaying(), "play() starts the transport once ready");
     app.stop();
@@ -22584,16 +22976,52 @@ static void testLazyAudioInit()
 // Recording (plugin-based capture)
 // ============================================================================
 
+// The deterministic fake recorder plugin, loaded by THIS test (scanPlugins is
+// idempotent): no recording test may rely on "recorder plugin API" having
+// scanned the folder earlier in the same process, which a shard or a filter
+// breaks. The plugin lives next to the console test binary; ctest points
+// SC_TEST_RECORDER_DIR at it for the app (--run-unit-tests). Without it the
+// plugin-dependent part is skipped explicitly (a failure under ctest, which
+// sets SC_REQUIRE_TEST_DATA=1 and always provides the plugin).
+static sc::rec::Plugin* scFakeRecorderOrSkip (const juce::String& what)
+{
+    auto& host = sc::rec::RecorderHost::instance ();
+    host.scanPlugins (scTestRecorderDir ());
+    if (auto* p = host.findPlugin ("fake"))
+        return p;
+    const juce::String why = what + ": fake recorder plugin not found (SC_TEST_RECORDER_DIR="
+                           + scTestRecorderDir ().getFullPathName () + ")";
+    if (juce::SystemStats::getEnvironmentVariable ("SC_REQUIRE_TEST_DATA", {}) == "1")
+        CHECK (false, why);
+    else
+        scSkip (why);
+    return nullptr;
+}
+
+// Call app.timerCallback() (one capture tick) until `done` holds or timeoutMs
+// elapsed. The fake plugin generates as fast as possible, so this replaces
+// fixed sleep(40) x 12 loops with a wait on the amount actually recorded.
+static bool scDriveRecordingUntil (Application& app, const std::function<bool()>& done,
+                                   int timeoutMs = 5000)
+{
+    const auto deadline = juce::Time::getMillisecondCounterHiRes () + timeoutMs;
+    while (!done ())
+    {
+        if (juce::Time::getMillisecondCounterHiRes () >= deadline)
+            return done ();
+        juce::Thread::sleep (5);
+        app.timerCallback ();
+    }
+    return true;
+}
+
 /** Full C-ABI round trip against the deterministic fake plugin DLL that
     CMake copies to <exe dir>/recorders/. */
 static void testRecorderPluginApi()
 {
     using namespace sc::rec;
     auto& host = RecorderHost::instance ();
-    host.scanPlugins (scTestRecorderDir ());   // idempotent; finds fake_rec.dll in exe/recorders
-
-    const Plugin* fake = host.findPlugin ("fake");
-    CHECK (fake != nullptr, "fake recorder plugin discovered in <exe>/recorders");
+    const Plugin* fake = scFakeRecorderOrSkip ("recorder plugin API");
     if (fake == nullptr) return;
 
     CHECK (fake->devices.size () == 2, "fake plugin exposes two devices");
@@ -22624,7 +23052,11 @@ static void testRecorderPluginApi()
     CHECK (host.start (&err), "start capture: " + err);
     CHECK (host.running (), "plugin reports running after start");
 
-    juce::Thread::sleep (150);   // the fake plugin generates as fast as possible
+    // The fake plugin generates as fast as possible: wait (bounded) for data
+    // instead of a fixed 150 ms sleep.
+    const auto availDeadline = juce::Time::getMillisecondCounter () + 5000;
+    while (host.availableFrames () <= 100 && juce::Time::getMillisecondCounter () < availDeadline)
+        juce::Thread::sleep (2);
     const long long avail = host.availableFrames ();
     CHECK (avail > 100, "frames available shortly after start");
 
@@ -22791,10 +23223,7 @@ static void testRecordingFollowWindow()
     live growth + follow behaviour, stop and check the recorded content. */
 static void testRecordingSession()
 {
-    auto& host = sc::rec::RecorderHost::instance ();
-    CHECK (host.findPlugin ("fake") != nullptr,
-          "fake plugin available for the session test");
-    if (host.findPlugin ("fake") == nullptr) return;
+    if (scFakeRecorderOrSkip ("recording session") == nullptr) return;
 
     Application app;   // SC_TESTS_EXE builds use an isolated temp recent-store
     app.recording.pluginId = "fake";
@@ -22815,15 +23244,11 @@ static void testRecordingSession()
     CHECK (app.doc ()->name.startsWith ("Recording_"),
           "document named Recording_<timestamp>");
 
-    // Drive the capture ticks manually (headless: no message pump). The fake
-    // plugin generates as fast as possible, so data is available at once.
-    for (int i = 0; i < 12; ++i)
-    {
-        juce::Thread::sleep (40);
-        app.timerCallback ();
-    }
-
-    CHECK (app.recording.framesRecorded > 8000, "at least ~1 s of frames appended");
+    // Drive the capture ticks manually (headless: no message pump) until at
+    // least 1 s is recorded. The fake plugin generates as fast as possible.
+    CHECK (scDriveRecordingUntil (app, [&] { return app.recording.framesRecorded > 8000
+                                                 && app.audioEngine ().duration () >= 1.0; }),
+          "at least ~1 s of frames appended");
     const double dur = app.audioEngine ().duration ();
     CHECK (dur >= 1.0, "document grew while recording");
     CHECK (std::abs (app.viewEnd - dur) < 1e-9, "view follows the recording end");
@@ -22891,8 +23316,9 @@ static void testRecordingSession()
     44100 Hz mic setting carried over to a 48000 Hz loopback). */
 static void testRecordingRateFallback()
 {
-    auto& host = sc::rec::RecorderHost::instance ();
-    if (host.findPlugin ("fake") == nullptr) return;
+    // Formerly a silent `return` without the plugin: the test passed having
+    // checked nothing.
+    if (scFakeRecorderOrSkip ("recording rate fallback") == nullptr) return;
 
     Application app;   // SC_TESTS_EXE builds use an isolated temp recent-store
     app.recording.pluginId = "fake";
@@ -22958,20 +23384,16 @@ static void testRecChannelComboItems()
     picks out the wanted channel into a mono document. */
 static void testRecChannelSelection()
 {
-    auto& host = sc::rec::RecorderHost::instance ();
-    CHECK (host.findPlugin ("fake") != nullptr,
-          "fake plugin available for the channel-selection test");
-    if (host.findPlugin ("fake") == nullptr) return;
+    if (scFakeRecorderOrSkip ("recording channel selection") == nullptr) return;
 
     const double pi = juce::MathConstants<double>::pi;
     const double theta = 2.0 * pi * 440.0 / 8000.0;   // fake dev2ch: ch1=440 Hz, ch2=silence
 
+    // Record until the content checks below have their 100 frames (plus a
+    // margin), instead of 12 fixed 40 ms sleeps per session.
     auto driveTicksAndStop = [] (Application& app) {
-        for (int i = 0; i < 12; ++i)
-        {
-            juce::Thread::sleep (40);
-            app.timerCallback ();
-        }
+        CHECK (scDriveRecordingUntil (app, [&] { return app.recording.framesRecorded >= 1000; }),
+              "at least 1000 frames recorded");
         app.stopRecording ();
         CHECK (!app.recording.active, "recording stopped");
     };
@@ -23156,9 +23578,7 @@ static void testRecModes()
     CHECK (Application::formatRecDurationSecs (90.5) == "90.5s", "fractional seconds label");
     CHECK (Application::formatRecDurationSecs (3671.0) == "1:01:11", "hours label");
 
-    auto& host = sc::rec::RecorderHost::instance ();
-    CHECK (host.findPlugin ("fake") != nullptr, "fake plugin available for the mode tests");
-    if (host.findPlugin ("fake") == nullptr) return;
+    if (scFakeRecorderOrSkip ("recording modes (timed / loop sessions)") == nullptr) return;
 
     // --- Timed: automatic stop after the requested duration -------------------
     {
@@ -23210,13 +23630,11 @@ static void testRecModes()
         CHECK (l.recording.loopCapFrames == 4000,
               "loop capacity computed from duration");
 
-        // Drive well past the capacity so several wraps happen.
-        for (int i = 0; i < 30 && l.recording.active; ++i)
-        {
-            juce::Thread::sleep (10);
-            l.timerCallback ();
-        }
-        CHECK (l.recording.framesRecorded > 4 * 4000, "several wraps of data captured");
+        // Drive well past the capacity so several wraps happen (bounded wait
+        // on the recorded amount instead of 30 fixed ticks).
+        CHECK (scDriveRecordingUntil (l, [&] { return !l.recording.active
+                                                   || l.recording.framesRecorded > 4 * 4000; })
+               && l.recording.framesRecorded > 4 * 4000, "several wraps of data captured");
 
         const int64_t capFrames = 4000;   // per-channel length == frame count
         CHECK (l.audioEngine ().numSamples () == capFrames,
@@ -23247,19 +23665,19 @@ static void testRecModes()
 static void testTransportRecordingMenu()
 {
     auto& host = sc::rec::RecorderHost::instance ();
-    host.scanPlugins (scTestRecorderDir ());
-
+    // The menu structure is checked with or without the fake plugin; the
+    // device items and the Shift+F10 session need it (skipped otherwise:
+    // starting a session without it only raises the "plugin no longer
+    // available" alert and used to cost ~4 s of message boxes).
+    const bool haveFake =
+        scFakeRecorderOrSkip ("transport recording menu (device items, Shift+F10 session)") != nullptr;
     int piFake = -1;
     for (int i = 0; i < (int) host.plugins ().size (); ++i)
         if (host.plugins ()[(size_t) i].id == "fake") { piFake = i; break; }
-    CHECK (piFake >= 0, "the fake plugin is loaded");
 
+    // The runner resets the isolated settings store before every test: the
+    // recording mode/device start from their defaults.
     Application app;
-    // Isolate from settings persisted by earlier tests (the test build shares
-    // one recent-store file).
-    app.recording.pluginId.clear ();
-    app.recording.deviceId.clear ();
-    app.setRecordingMode (Application::RecordingState::Mode::Unlimited);
     std::unique_ptr<MainWindow> win (new MainWindow (app, "recording menu test"));
 
     const juce::StringArray names = win->getMenuBarNames ();
@@ -23296,10 +23714,22 @@ static void testTransportRecordingMenu()
            && !opts2[0].checked,
           "loop mode ticked with its duration label");
 
-    // The device menu has one entry per loaded plugin.
+    // The device menu has one entry per loaded plugin, or a single disabled
+    // placeholder when none is installed.
     const juce::PopupMenu dm = MainWindow::buildRecordingDeviceMenu (app);
-    CHECK ((int) dm.getNumItems () == (int) host.plugins ().size (),
-          "one device-menu entry per loaded plugin");
+    if (host.plugins ().empty ())
+        CHECK (dm.getNumItems () == 1, "device menu shows one placeholder without plugins");
+    else
+        CHECK ((int) dm.getNumItems () == (int) host.plugins ().size (),
+              "one device-menu entry per loaded plugin");
+
+    // Plain F10 must be ignored by the main window's key handler.
+    CHECK (!win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key), nullptr),
+          "plain F10 is not handled by the main window");
+    CHECK (!app.recording.active, "plain F10 did not start a recording session");
+
+    if (!haveFake || piFake < 0)
+        return;
 
     // The fake plugin's sub-menu items: encoded IDs, names, no ticks yet.
     const auto items = MainWindow::recordingDeviceItems (app, piFake);
@@ -23326,13 +23756,9 @@ static void testTransportRecordingMenu()
     }
     CHECK (tickedFirst && !anyOtherTicked, "the selected device is the only ticked entry");
 
-    // Shift+F10 starts/stops recording from the main window's key handler;
-    // plain F10 must be ignored.
+    // Shift+F10 starts/stops recording from the main window's key handler.
     app.recording.channels = 2;
     app.recording.rate     = 8000.0;   // match the fake device
-    CHECK (!win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key), nullptr),
-          "plain F10 is not handled by the main window");
-    CHECK (!app.recording.active, "plain F10 did not start a recording session");
     CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F10Key, juce::ModifierKeys::shiftModifier, 0), nullptr),
           "Shift+F10 is handled by the main window");
     CHECK (app.recording.active, "Shift+F10 started a recording session");
@@ -23377,7 +23803,7 @@ static void testZoomFitAutoMode()
     const double topQuiet = v.getDbTop();
     CHECK (topQuiet < -15.0 && topQuiet > -45.0, "quiet region fitted low");
 
-    juce::Thread::sleep (kScThrottleWaitMs);                 // defeat the expensive-recompute throttle
+    scPassFftThrottle();   // defeat the expensive-recompute throttle
     app.setSelection ({ 1.0, 2.0 });          // loud half: new selection auto-fits
     v.recomputeIfNeeded ();
     const double topLoud = v.getDbTop();
@@ -23388,7 +23814,7 @@ static void testZoomFitAutoMode()
     // --- Manual zoom disables it ----------------------------------------------
     v.userChangedDisplayRange ();
     CHECK (!v.zoomFitAuto (), "manual range change disables auto zoom-fit");
-    juce::Thread::sleep (kScThrottleWaitMs);
+    scPassFftThrottle();
     app.setSelection ({ 0.0, 1.0 });          // back to the quiet half
     v.recomputeIfNeeded ();                   // fresh data is computed...
     CHECK (std::abs (v.getDbTop() - topLoud) < 0.01,
@@ -23408,19 +23834,19 @@ static void testZoomFitAutoMode()
         w.recomputeIfNeeded ();
         const double topLive = w.getDbTop();
 
-        juce::Thread::sleep (kScThrottleWaitMs);
+        scPassFftThrottle();
         app.setSelection ({ 0.0, 1.0 });      // quiet half live (auto-fits down)
         w.recomputeIfNeeded ();
         const double topQuiet2 = w.getDbTop();
         CHECK (topQuiet2 < topLive - 15.0, "fit followed the quieter live region");
 
-        juce::Thread::sleep (kScThrottleWaitMs);
+        scPassFftThrottle();
         app.setSelection ({ 1.0, 2.0 });      // loud half again: store + show it
         w.recomputeIfNeeded ();
         w.handleSnapshotClick (0);
         CHECK (w.snapshotShown (0), "loud snapshot stored and shown");
 
-        juce::Thread::sleep (kScThrottleWaitMs);
+        scPassFftThrottle();
         app.setSelection ({ 0.0, 1.0 });      // quiet live data + loud stored curve
         w.recomputeIfNeeded ();               // auto-fit must include the stored curve
         CHECK (w.getDbTop() > topQuiet2 + 15.0,
@@ -23428,6 +23854,7 @@ static void testZoomFitAutoMode()
         CHECK (std::abs (w.getDbTop() - topLive) < 8.0,
               "fit matches the loud curve's own range");
     }
+    wav.deleteFile ();
 }
 
 // ------------------------------------------------- F5 global refresh shortcut
@@ -23442,7 +23869,6 @@ static void testF5RefreshShortcut()
                                             * 300.0 * (double) f / rate); });
 
     Application app;
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "f5 refresh test"));
 
     win->openFile (wav);
@@ -23473,12 +23899,17 @@ static void testF5RefreshShortcut()
         CHECK (app.spectralEngine.cacheSize() == 0, "F5 cleared the tile cache");
         CHECK (sv->isImageDirty (), "F5 invalidated the spectral image");
 
-        // ...and it still works while a text editor has keyboard focus.
+        // ...and it still works when the key comes from a text editor. The
+        // editor is passed as the originating component (what the key
+        // dispatch gives the window); it is NOT given real keyboard focus:
+        // grabKeyboardFocus() on an unparented editor only raised a JUCE
+        // assertion (juce_Component.cpp:3027) and never took focus anyway, and
+        // real focus would need the app in the foreground.
         paintView ();   // recompute tiles into the fresh cache
+        CHECK (app.spectralEngine.cacheSize() > 0, "tile cache repopulated by the repaint");
         juce::TextEditor ed;
-        ed.grabKeyboardFocus ();
         CHECK (win->keyPressed (juce::KeyPress (juce::KeyPress::F5Key), &ed),
-              "F5 works with an editor focused");
+              "F5 works with an editor as the key's origin");
         CHECK (app.spectralEngine.cacheSize() == 0,
               "cache still cleared with editor focus");
     }
@@ -23544,6 +23975,7 @@ static void testTablesImport()
     {
         TableData t;
         CHECK (importTable ("gap", "v\n1\n\n5\n9\n", t), "gapped column imports");
+        CHECK (t.params.size() == 1, "gapped column: one parameter imported");
         if (t.params.size() == 1)
         {
             const auto& v = t.params[0].values;
@@ -23562,6 +23994,7 @@ static void testTablesImport()
     {
         TableData t;
         CHECK (importTable ("e", ",\n1,2\n3,4\n", t), "empty headers import ok");
+        CHECK (t.params.size() == 2, "empty headers: two parameters imported");
         if (t.params.size() == 2)
             CHECK (t.params[0].name == "Param1" && t.params[1].name == "Param2", "auto names assigned");
     }
@@ -23580,6 +24013,7 @@ static void testTablesImport()
         TableData t;
         CHECK (importTable ("dcr", "a,b\r\r\n1,2\r\r\n3,4\r\r\n", t),
               "double-CR csv imports without OOB access");
+        CHECK (t.params.size() == 2, "double-CR csv: two parameters imported");
         if (t.params.size() == 2)
             CHECK (t.params[0].values.size() >= 2 && t.params[1].values.size() >= 2,
                   "both columns imported despite ragged gap rows");
@@ -23589,6 +24023,7 @@ static void testTablesImport()
     {
         TableData t;
         CHECK (importTable ("rag", "a,b\n1,2\n3\n4,5\n", t), "ragged csv imports");
+        CHECK (t.params.size() == 2, "ragged csv: two parameters imported");
         if (t.params.size() == 2)
         {
             const auto& b = t.params[1].values;
@@ -23610,6 +24045,7 @@ static void testTablesImport()
         TableData t;
         std::string err;
         CHECK (importTable ("tsv", "a\tb\n1\t2.5\n3\t4.5\n", t, &err), "tab-separated csv imports");
+        CHECK (t.params.size() == 2, "tsv: two parameters imported");
         if (t.params.size() == 2)
         {
             CHECK (t.params[0].name == "a" && t.params[1].name == "b", "tab headers used");
@@ -23683,6 +24119,7 @@ static void testTablesDownsampleAndTransforms()
         // 1000 rows/s by default; asking for 500 Hz keeps every 2nd row.
         downsampleTable (t, 500.0);
         CHECK (std::abs (t.sampleRate - 500.0) < 1e-9, "rate is exactly oldRate/N");
+        CHECK (!t.params.empty(), "downsampled table keeps its parameter");
         if (!t.params.empty())
         {
             const auto& v = t.params[0].values;
@@ -23695,6 +24132,7 @@ static void testTablesDownsampleAndTransforms()
 
         // Asking for a rate at or above the current one removes nothing.
         downsampleTable (t, 2000.0);
+        CHECK (!t.params.empty(), "table keeps its parameter after a no-op downsample");
         if (!t.params.empty())
             CHECK (t.params[0].values.size() == 5 && std::abs (t.sampleRate - 500.0) < 1e-9,
                   "no-op when already at or below the requested rate");
@@ -23733,6 +24171,7 @@ static void testTablesDownsampleAndTransforms()
         TableData t;
         std::string err;
         CHECK (importTable ("pv", "v\n0\n10\n20\n30\n", t, &err), "ramp for value-at imports");
+        CHECK (!t.params.empty(), "value-at ramp: one parameter imported");
         if (!t.params.empty())
         {
             const auto& p = t.params[0];
@@ -23958,7 +24397,7 @@ static void testTablesPanel()
                                             * 300.0 * (double) f / rate); });
 
     Application app;
-    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    if (!app.openFile (wav)) { CHECK (false, "testTablesPanel: open the generated wav"); wav.deleteFile(); return; }
     FileDoc* d = app.doc ();
     CHECK (d != nullptr, "tables: doc created");
     if (d == nullptr) return;
@@ -24156,6 +24595,7 @@ static void testTablesOverlayAndPicker()
     {
         TableData t;
         CHECK (importTable ("cols", "a,b,c\n1,2,3\n4,5,6\n", t), "three-column csv imports");
+        CHECK (t.params.size() == 3, "three-column csv: three parameters imported");
         if (t.params.size() == 3)
             CHECK (t.params[0].colorIndex != t.params[1].colorIndex
                   && t.params[1].colorIndex != t.params[2].colorIndex
@@ -24168,7 +24608,7 @@ static void testTablesOverlayAndPicker()
              { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
                                             * 300.0 * (double) f / rate); });
     Application app;
-    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    if (!app.openFile (wav)) { CHECK (false, "testTablesOverlayAndPicker: open the generated wav"); wav.deleteFile(); return; }
     FileDoc* d = app.doc ();
     CHECK (d != nullptr, "overlay/picker: doc created");
     if (d == nullptr) { wav.deleteFile(); return; }
@@ -24192,7 +24632,6 @@ static void testTablesOverlayAndPicker()
 
     // --- Double-click on a parameter's square opens the colour picker ---------
     {
-        juce::MessageManager* mm = juce::MessageManager::getInstance();
         TablesPanel panel (app);
         panel.setSize (320, 420);
         panel.refresh();
@@ -24270,7 +24709,7 @@ static void testTablesAlignTarget()
              { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
                                             * 300.0 * (double) f / rate); });
     Application app;
-    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    if (!app.openFile (wav)) { CHECK (false, "testTablesAlignTarget: open the generated wav"); wav.deleteFile(); return; }
     FileDoc* d = app.doc ();
     CHECK (d != nullptr, "alignTarget: doc created");
     if (d == nullptr) { wav.deleteFile(); return; }
@@ -24375,7 +24814,7 @@ static void testTablesPerRowOverlay()
                                               * (ch == 0 ? 300.0 : 600.0)
                                               * (double) f / rate); });
     Application app;
-    if (!app.openFile (wav)) { wav.deleteFile (); return; }
+    if (!app.openFile (wav)) { CHECK (false, "testTablesPerRowOverlay: open the generated wav"); wav.deleteFile(); return; }
     FileDoc* d = app.doc ();
     CHECK (d != nullptr, "per-row overlay: doc created");
     if (d == nullptr) { wav.deleteFile (); return; }
@@ -24493,7 +24932,7 @@ static void testTablesSoloAndRename()
              { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
                                             * 300.0 * (double) f / rate); });
     Application app;
-    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    if (!app.openFile (wav)) { CHECK (false, "testTablesSoloAndRename: open the generated wav"); wav.deleteFile(); return; }
     FileDoc* d = app.doc ();
     CHECK (d != nullptr, "solo/rename: doc created");
     if (d == nullptr) { wav.deleteFile(); return; }
@@ -24767,6 +25206,7 @@ static void testTablesSharedAlignment()
     Application app;
     CHECK (app.openFile (wav), "opened shared align wav");
     auto* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile (); return; }
 
     juce::String csv = "alpha,beta\r\n";
     for (int i = 0; i < 200; ++i)
@@ -24783,6 +25223,8 @@ static void testTablesSharedAlignment()
     panel.handlePlotClick (0.1);
     panel.handleDocClick (0.3, 0.0);
 
+    CHECK (!d->tables.empty (), "the table was added to the document");
+    if (d->tables.empty ()) { wav.deleteFile (); return; }
     const auto& t = d->tables[0];
     CHECK (std::abs (t.offsetSecs - 0.2) < 1e-9, "alignment lands on the table's shared offset");
     CHECK (std::abs (t.scaleTime - 1.0) < 1e-9, "table scale stays 1 for a 1-point align");
@@ -24849,7 +25291,7 @@ static void testTablesTwoPointVerticalAlign()
             [] (int, int64_t f, double rate) { return 0.5f; }), "wrote 2pt wav");
 
     Application app;
-    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    if (!app.openFile (wav)) { CHECK (false, "testTablesTwoPointVerticalAlign: open the generated wav"); wav.deleteFile(); return; }
     auto* d = app.doc ();
     CHECK (d != nullptr, "2pt: doc created");
     if (d == nullptr) { wav.deleteFile(); return; }
@@ -24959,7 +25401,7 @@ static void testTrackVPanBehaviour()
             [] (int, int64_t f, double rate) { return 0.5f; }), "wrote vpan wav");
 
     Application app;
-    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    if (!app.openFile (wav)) { CHECK (false, "testTrackVPanBehaviour: open the generated wav"); wav.deleteFile(); return; }
     // A previous test may have persisted a right-hand track axis to disk and
     // this fresh instance loads it - pin the layout the drag coordinates use.
     app.settings.trackAxisOnRight = false;
@@ -25068,7 +25510,7 @@ static void testTablesColourPickerDialog()
              { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
                                             * 300.0 * (double) f / rate); });
     Application app;
-    if (!app.openFile (wav)) { wav.deleteFile(); return; }
+    if (!app.openFile (wav)) { CHECK (false, "testTablesColourPickerDialog: open the generated wav"); wav.deleteFile(); return; }
     FileDoc* d = app.doc ();
     CHECK (d != nullptr, "colour dialog: doc created");
     if (d == nullptr) { wav.deleteFile(); return; }
@@ -25183,8 +25625,24 @@ static void testTablesColourPickerDialog()
 // refresh the Tables panel and paint every view in overlay-on-waveform mode.
 static void testPasteLiveRepro()
 {
-    const juce::File wav = findTestDataFile ("mix_20s_stereo.wav");
-    if (!wav.existsAsFile()) { CHECK (false, "fixture mix_20s_stereo.wav missing"); return; }
+    // The live file is not in tests/data (the test FAILED on every machine):
+    // without it, a stand-in with the same shape (20 s stereo, two tones +
+    // noise) drives the same import / refresh / paint path.
+    juce::File wav = findTestDataFile ("mix_20s_stereo.wav");
+    bool generated = false;
+    if (!wav.existsAsFile())
+    {
+        wav = makeTempFile ("mix_20s_stereo_standin.wav");
+        juce::Random rng (1234);
+        CHECK (writeWav (wav, 2, 16000.0, 20 * 16000, [&rng] (int ch, int64_t f, double rate)
+               {
+                   const double t = (double) f / rate;
+                   return 0.3f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                   * (ch == 0 ? 440.0 : 1000.0) * t)
+                        + 0.05f * (rng.nextFloat() * 2.0f - 1.0f);
+               }), "paste repro: wrote the 20 s stereo stand-in");
+        generated = true;
+    }
 
     // Exact CSV from the live clipboard fixture: header + 200 rows.
     std::string csv = "alpha,beta\r\n";
@@ -25197,29 +25655,45 @@ static void testPasteLiveRepro()
         csv += buf;
     }
 
+    // An image some view painted into: at least a few opaque pixels.
+    auto paintedSomething = [] (const juce::Image& im)
+    {
+        int n = 0;
+        for (int y = 0; y < im.getHeight(); y += 3)
+            for (int x = 0; x < im.getWidth(); x += 3)
+                if (im.getPixelAt (x, y).getAlpha() > 0 && ++n >= 100) return true;
+        return false;
+    };
+
     Application app;
     CHECK (app.openFile (wav), "open fixture");
 
     std::string err;
     CHECK (app.addTableFromCsv ("Clipboard", juce::String (csv), &err),
           "import: " + err);
+    // (formerly CHECK (true, ...): verify the state the sequence produced)
+    CHECK (app.activeTables().size() == 1 && app.activeTables()[0].params.size() == 2
+           && app.activeTables()[0].params[0].values.size() == 200,
+          "headless: one two-parameter table of 200 rows imported");
 
     // Mirror MainWindow's onTablesChanged callback.
     TablesPanel panel (app);
     panel.setSize (400, 520);
     panel.refresh();
+    CHECK (panel.isTableRow (0) && !panel.isTableRow (1) && !panel.isTableRow (2),
+          "headless: the panel lists the table and its two parameters");
 
     WaveformView view (app);
     view.setSize (900, 300);
     juce::Image img (juce::Image::ARGB, 900, 300, true);
     { juce::Graphics g (img); view.paint (g); }
+    CHECK (paintedSomething (img), "headless: the waveform view painted");
 
     SpectralView sv (app);
     sv.setSize (900, 300);
     juce::Image img2 (juce::Image::ARGB, 900, 300, true);
     { juce::Graphics g (img2); sv.paint (g); }
-
-    CHECK (true, "headless paste sequence completed");
+    CHECK (paintedSomething (img2), "headless: the spectral view painted");
 
     // Full MainWindow path: real views with live state; import happens while
     // the window exists so onTablesChanged fires exactly as in the live app.
@@ -25236,6 +25710,15 @@ static void testPasteLiveRepro()
     win->addToDesktop();
     win->setBounds (300, 100, 1400, 900);
 
+    // Run the queued messages, then paint everything that is dirty NOW
+    // (instead of 50 x 20 ms pumps hoping the OS repaint timer fires).
+    auto settle = [&]
+    {
+        scFlushMessageQueue();
+        if (auto* peer = win->getPeer()) peer->performAnyPendingRepaintsNow();
+        scFlushMessageQueue();
+    };
+
     // The live user had clicked the Tables tab before pasting: make it
     // current so the panel is visible and its list box gets laid out.
     {
@@ -25244,33 +25727,37 @@ static void testPasteLiveRepro()
         for (int i = 0; i < tt->getNumTabs (); ++i)
             if (tt->getTabContentComponent (i) == tp)
                 tt->setCurrentTabIndex (i, true);
+        CHECK (tp != nullptr && tt->getCurrentContentComponent() == tp,
+              "main window: the Tables tab is current");
     }
-    for (int i = 0; i < 50; ++i)
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+    settle();
 
     std::string err2;
     CHECK (app2.addTableFromCsv ("Clipboard", juce::String (csv), &err2),
           "import into main window doc: " + err2);
+    settle();
+    CHECK (app2.activeTables().size() == 1 && app2.activeTables()[0].params.size() == 2,
+          "main window: the table is in the document after the repaint");
 
-    // Pump the message loop so pending repaints actually run.
-    for (int i = 0; i < 50; ++i)
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
-
-    CHECK (true, "main window paste sequence completed");
-
-    // The one live-only element: the real OLE system clipboard read.
-    const juce::String clip = juce::SystemClipboard::getTextFromClipboard ();
-    std::cerr << "[repro] clipboard length = " << clip.length() << "\n";
-    if (clip.contains ("alpha,beta"))
+    // The one live-only element: the real system clipboard. Its content is
+    // whatever the user copied last (non-deterministic) and it is shared by
+    // every process: opt-in only (SC_TEST_LIVE_CLIPBOARD=1).
+    if (juce::SystemStats::getEnvironmentVariable ("SC_TEST_LIVE_CLIPBOARD", {}).isNotEmpty())
     {
-        std::string err3;
-        CHECK (app2.addTableFromCsv ("ClipReal", clip, &err3),
-              "import from real clipboard: " + err3);
-        for (int i = 0; i < 50; ++i)
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        const juce::String clip = juce::SystemClipboard::getTextFromClipboard ();
+        std::cerr << "[repro] clipboard length = " << clip.length() << "\n";
+        if (clip.contains ("alpha,beta"))
+        {
+            std::string err3;
+            CHECK (app2.addTableFromCsv ("ClipReal", clip, &err3),
+                  "import from real clipboard: " + err3);
+            settle();
+            CHECK (app2.activeTables().size() == 2, "real clipboard table added");
+        }
     }
 
-    CHECK (true, "real clipboard paste sequence completed");
+    win.reset();
+    if (generated) wav.deleteFile();
 }
 
 static void testTablesDedicatedStrip()
@@ -25376,7 +25863,10 @@ static void testSingleInstance()
     tmpStore.deleteFile ();
 
     // --- Wire protocol round-trip over an in-process named pipe -----------
-    const juce::String pipeName = "SpectroCraft.UnitTest";
+    // Unique per run: with the former fixed "SpectroCraft.UnitTest" two test
+    // processes running at once (parallel shards, two worktrees) connected to
+    // each other's server.
+    const juce::String pipeName = "SpectroCraft.UnitTest." + juce::Uuid().toString().substring (0, 12);
 
     std::atomic<bool> got { false };
     juce::StringArray received;
@@ -25393,9 +25883,7 @@ static void testSingleInstance()
     CHECK (sc::singleinstance::forwardFiles (send, pipeName), "forward acknowledged by server");
 
     // The callback is dispatched on the message thread: pump until it fires.
-    for (int i = 0; i < 100 && !got.load (); ++i)
-        juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
-    CHECK (got.load (), "server delivered the file list");
+    CHECK (scPumpUntil ([&] { return got.load (); }, 5000), "server delivered the file list");
     CHECK (received.size () == 2, "both paths received");
     if (received.size () == 2)
     {
@@ -25403,9 +25891,19 @@ static void testSingleInstance()
         CHECK (received[1] == send[1], "second path (with spaces) intact");
     }
 
+    // A second client (a later launch) must be served by the same server.
+    got.store (false);
+    juce::StringArray send2;
+    send2.add (juce::File::getCurrentWorkingDirectory ().getFullPathName () + "/second.wav");
+    CHECK (sc::singleinstance::forwardFiles (send2, pipeName), "second client's forward acknowledged");
+    CHECK (scPumpUntil ([&] { return got.load (); }, 5000) && received.size () == 1
+           && received[0] == send2[0], "server delivered the second client's file list");
+
     // An empty list is forwarded and acknowledged without a callback.
     const juce::StringArray none;
+    got.store (false);
     CHECK (sc::singleinstance::forwardFiles (none, pipeName), "empty list acknowledged");
+    CHECK (scFlushMessageQueue () && !got.load (), "empty list triggers no callback");
 
     coord.stopServer ();
 
@@ -25680,6 +26178,11 @@ static void testSelectionChannelClip()
     Application app;
     CHECK (app.openFile (wav), "open stereo wav for channel-clip test");
     const double dur = app.audioEngine().duration();
+    // The geometry below assumes the default track layout (axis on the left,
+    // ruler on top). State it here rather than relying on what the settings
+    // store happens to hold.
+    app.settings.trackAxisOnRight   = false;
+    app.settings.trackRulerAtBottom = false;
 
     const juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
     const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
@@ -25866,7 +26369,6 @@ static void testSplitExecuteFirstRun()
 
     // A MessageManager is required before constructing the top-level window;
     // it must still be alive when the window is destroyed.
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "split f12 test"));
 
     // Active spectral selection: the low band carrying both tones.
@@ -25934,7 +26436,6 @@ static void testStemSepAdvancedLayout()
 
     Application app;
     CHECK (app.openFile (wav), "open wav for stem-sep layout test");
-    juce::MessageManager* mm = juce::MessageManager::getInstance();
     std::unique_ptr<MainWindow> win (new MainWindow (app, "stem sep layout"));
 
     auto findButton = [] (StemSeparationWindow* w, const juce::String& text)
@@ -26410,6 +26911,7 @@ static void testActionsPanelPaint()
 #include "regression/panels.inc"
 #include "regression/mainwindow.inc"
 #include "regression/application.inc"
+#include "regression/app_from_tests.inc"
 #include "regression/persistence.inc"
 #include "regression/ai.inc"
 
@@ -26464,9 +26966,9 @@ static bool scIsSerialTest (const char* name)
     static const char* const serial[] = {
         "marker panel details", "curve analysis modes", "harmonic ratio + clear all",
         "copy curve alt scales", "transcription clipboard", "tables panel", "paste live repro",
-        "change gain dialog", "drawing key shortcuts", "F5 refresh shortcut",
-        "single instance mode", "playback chain", "lazy audio init", "startup trace",
-        "regression: panels"
+        "change gain dialog", "drawing key shortcuts",
+        "playback chain", "lazy audio init",
+        "regression: panels", "regression: app_from_tests"
     };
     for (auto* s : serial)
         if (juce::String (name) == s) return true;
@@ -26894,6 +27396,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: panels", runRegression_panels);
     SC_RUN_TEST ("regression: mainwindow", runRegression_mainwindow);
     SC_RUN_TEST ("regression: application", runRegression_application);
+    SC_RUN_TEST ("regression: app_from_tests", runRegression_app_from_tests);
     SC_RUN_TEST ("regression: persistence", runRegression_persistence);
     SC_RUN_TEST ("regression: ai", runRegression_ai);
 
