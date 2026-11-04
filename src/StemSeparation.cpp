@@ -1,5 +1,6 @@
 // SpectroCraft - Stem Separation window (drives the audio.cpp CLI tool).
 #include "StemSeparation.h"
+#include "AlertGate.h"
 #include "Application.h"
 #include "MergeFiles.h"
 #include "PythonScripts.h"
@@ -1027,7 +1028,7 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
                 running_ = false;
                 statusLabel_.setText (msg, juce::dontSendNotification);
                 if (!detail.isEmpty ())
-                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                       "Stem Separation failed",
                                                       msg + "\n\n" + detail, "", this);
             });

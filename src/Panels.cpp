@@ -3,6 +3,7 @@
  */
 
 #include "Panels.h"
+#include "AlertGate.h"
 #include "WaveformView.h"   // formatFooterTime / parseTimeText (shared time text)
 #include "FFTHelpers.h"
 #include "WorkProgress.h"
@@ -4283,7 +4284,7 @@ void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
     const int n = text.isEmpty () ? 0 : text.getIntValue ();
     if (n < 1 || n > 1000)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Set Harmonic References",
                                             "Please enter an integer between 1 and 1000.",
                                             "", this);
@@ -4293,7 +4294,7 @@ void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
     const int maxK = maxText.isEmpty () ? 10 : maxText.getIntValue ();
     if (maxK < 1 || maxK > 1000)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Set Harmonic References",
                                             "Please enter an integer between 1 and 1000 for the\n"
                                             "number of harmonics to show.",
@@ -6736,7 +6737,7 @@ void MarkerListPanel::exportMarkersCsv()
         file = file.withFileExtension (".csv");
 
     if (!app.markers().saveCsv (file))
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Export failed",
                                             "Could not write the CSV file.", "", this);
 }
@@ -6762,7 +6763,7 @@ int MarkerListPanel::importMarkersCsv()
     }
     else
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Import failed",
                                             "No markers could be read from the CSV file.",
                                             "", this);
@@ -7507,7 +7508,7 @@ void TranscriptionPanel::showEditDialog (int rowNumber)
     const juce::String endText = (endEd != nullptr) ? endEd->getText() : juce::String();
     if (!parseTimeText (startEd->getText(), t0) || !parseTimeText (endText, t1))
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Edit Segment",
                                             "Please enter valid times for Start and End.",
                                             "", this);
@@ -7516,7 +7517,7 @@ void TranscriptionPanel::showEditDialog (int rowNumber)
 
     const juce::String text = (textEd != nullptr) ? textEd->getText().trim() : juce::String();
     if (!applySegmentEdit (rowNumber, t0, t1, text))
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Edit Segment",
                                             "Times must be non-negative.",
                                             "", this);
@@ -11453,7 +11454,7 @@ void ActionsPanel::showContextMenu ()
             if (r != 1) return;
 
             if (!app.actions.rename (p, name))
-                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                    "Rename Action",
                                                    "That name is empty or already in use.", "", this);
             else
@@ -11503,7 +11504,7 @@ void ActionsPanel::handleNew()
     const int idx = app.actions.add (name);
     if (idx < 0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "New Action",
                                            "That name is empty or already in use.", "", this);
         return;
@@ -11547,7 +11548,7 @@ void ActionsPanel::handleRecord()
         idx = app.actions.add (name);
         if (idx < 0)
         {
-            juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                "Record Action",
                                                "That name is empty or already in use.", "", this);
             return;
@@ -11570,14 +11571,14 @@ void ActionsPanel::handleRun()
     const int idx = primaryIndex();
     if (idx < 0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Run Action",
                                            "Select an action in the list first.", "", this);
         return;
     }
     if (app.actions.get (idx)->steps.empty ())
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Run Action",
                                            "The selected action has no recorded steps.", "", this);
         return;
@@ -11590,14 +11591,14 @@ void ActionsPanel::handleBatch()
     const int idx = primaryIndex();
     if (idx < 0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Action Batch",
                                            "Select an action in the list first.", "", this);
         return;
     }
     if (app.actions.get (idx)->steps.empty ())
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Action Batch",
                                            "The selected action has no recorded steps.", "", this);
         return;

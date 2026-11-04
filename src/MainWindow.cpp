@@ -6,6 +6,7 @@
  */
 
 #include "MainWindow.h"
+#include "AlertGate.h"
 #include "Application.h"
 #include "Recorder.h"
 #include "StartupTrace.h"
@@ -1455,7 +1456,7 @@ void MainWindow::filesDropped (const juce::StringArray& files, int, int)
             std::string err;
             const juce::String text = f.loadFileAsString ();
             if (!app.addTableFromCsv (f.getFileNameWithoutExtension (), text, &err))
-                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                     "Could not import table \"" + f.getFileName () + "\":\n"
                     + juce::String (err), "Tables");
             continue;
@@ -1586,7 +1587,7 @@ void MainWindow::handleStartStopRecording ()
 
     std::string err;
     if (!app.startRecording (&err))
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Recording",
                                            juce::String::fromUTF8 (err.c_str ()));
 }
@@ -1721,7 +1722,7 @@ void MainWindow::handleRecDevicePick (int id)
     std::string err;
     if (!host.configure (p.id, dev.id, wantCh, wantRate, wantDepth, &neg, &err))
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Recording Device",
                                            juce::String::fromUTF8 (err.c_str ()));
         return;
@@ -1944,7 +1945,7 @@ void MainWindow::openFile (const juce::File& file)
 
 void MainWindow::showOpenFailed (const juce::File& file)
 {
-    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                        "Open failed",
                                        "Could not open " + file.getFullPathName ()
                                            + ".\nThe file may be missing, damaged or in an unsupported format.",
@@ -1971,7 +1972,7 @@ void MainWindow::playWithAudioInit()
 
 void MainWindow::showEditError (const std::string& err)
 {
-    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                        "Effect failed",
                                        err.empty () ? "The effect could not be applied."
                                                      : juce::String (err),
@@ -2038,7 +2039,7 @@ void MainWindow::runAction (int index)
     if (act == nullptr || act->steps.empty ()) return;
     if (!app.audioEngine().isFileLoaded())
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Run Action",
                                             "Open a file first - actions are replayed on the active document.",
                                             "", this);
@@ -2058,7 +2059,7 @@ void MainWindow::stopReplay (const juce::String& why)
     replayPos_ = 0;
     replayName_.clear ();
     if (!name.isEmpty ())
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Run Action",
                                             "Action \"" + name + "\" stopped: " + why, "", this);
 }
@@ -2071,7 +2072,7 @@ void MainWindow::continueReplay()
         replaySteps_.clear ();
         replayPos_ = 0;
         replayName_.clear ();
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::InfoIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::InfoIcon,
                                            "Run Action",
                                            "Action \"" + name + "\" finished.", "", this);
         return;
@@ -2323,7 +2324,7 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
             if (!ok)
             {
                 // The * stays in the title; say why instead of failing silently.
-                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                    "Save failed",
                                                    "Could not save " + file.getFullPathName ()
                                                        + ".\nCheck that the folder is writable, the file is not "
@@ -2358,7 +2359,7 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
                     if (ls.existsAsFile()) ls.deleteFile();
                 }
                 else
-                    juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                    sc::alert::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
                         "Save metadata failed",
                         "The audio was saved, but the metadata sidecar next to\n"
                             + file.getFullPathName ()
@@ -2405,7 +2406,7 @@ void MainWindow::handleSaveMetadataOnly()
 {
     std::string err;
     if (!app.saveActiveDocMeta (&err))
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Save Metadata",
                                             juce::String::fromUTF8 (err.c_str()),
                                             "", this);
@@ -2513,7 +2514,7 @@ void MainWindow::exportSpectralAsync (const juce::File& file,
             const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (!ok && !wasCancelled)
-                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                     "Export failed",
                                                     "Could not write the PNG file.", "", this);
         });
@@ -4569,7 +4570,7 @@ void MainWindow::showGenerateToneDialog(std::function<void(bool)> onApplied)
 
     if (tones.empty())
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid tone list",
                                             "Please enter at least one tone with a positive frequency.",
                                             "", this);
@@ -5595,7 +5596,7 @@ void MainWindow::showResampleDialog(std::function<void(bool)> onApplied)
     const double newRate = rateText.trim().getDoubleValue();
     if (!std::isfinite (newRate) || newRate <= 0.0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid rate",
                                             "Please enter a positive sample rate in Hz.", "", this);
         if (onApplied) onApplied (false);
@@ -5605,7 +5606,7 @@ void MainWindow::showResampleDialog(std::function<void(bool)> onApplied)
     const int newChans = chansText.trim().getIntValue();
     if (newChans < 1 || newChans > kResampleMaxChans)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid channel count",
                                             "Please enter a channel count between 1 and "
                                             + juce::String (kResampleMaxChans) + ".", "", this);
@@ -5615,7 +5616,7 @@ void MainWindow::showResampleDialog(std::function<void(bool)> onApplied)
 
     if (!weightsOk || (int) weights.size() != newChans)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid mix weight",
                                             "Every weight field must be a number "
                                             "(empty means 0).", "", this);
@@ -5777,7 +5778,7 @@ void MainWindow::showNewFileDialog()
     const double rate = rateText.trim().getDoubleValue();
     if (chans < 1 || chans > 512)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid channel count",
                                             "Please enter a channel count between 1 and 512.",
                                             "", this);
@@ -5785,7 +5786,7 @@ void MainWindow::showNewFileDialog()
     }
     if (!std::isfinite (rate) || rate <= 0.0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid rate",
                                             "Please enter a positive sample rate in Hz.",
                                             "", this);
@@ -5841,7 +5842,7 @@ void MainWindow::runMergeFilesAsync (const std::vector<juce::File>& files, sc::M
                 {
                     const juce::String detail = err.empty () ? juce::String ("")
                                                              : juce::String ("\n") + juce::String (err);
-                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                        "Merge failed",
                                                        "The files could not be merged." + detail,
                                                        "", this);
@@ -5864,7 +5865,7 @@ void MainWindow::runMergeFilesAsync (const std::vector<juce::File>& files, sc::M
                     {
                         const juce::String detail = err.empty () ? juce::String ("")
                                                                  : juce::String ("\n") + juce::String (err);
-                        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                            "Merge failed",
                                                            "The files could not be merged." + detail,
                                                            "", this);
@@ -5888,7 +5889,7 @@ void MainWindow::runMergeFilesAsync (const std::vector<juce::File>& files, sc::M
                 {
                     const juce::String detail = cerr.empty () ? juce::String ("")
                                                               : juce::String ("\n") + juce::String (cerr);
-                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                        "Merge failed",
                                                        "The merged document could not be created." + detail,
                                                        "", this);
@@ -5982,7 +5983,7 @@ void MainWindow::runResampleAsync (double newRate,
             {
                 const juce::String detail = err.empty () ? juce::String ("")
                                                          : juce::String ("\n") + juce::String (err);
-                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                     "Resample failed",
                                                     "The file could not be resampled." + detail, "", this);
             }
@@ -6298,7 +6299,7 @@ void MainWindow::runPythonScriptAsync (const juce::File& script, const juce::Str
     std::string pyCmd;
     if (!sc::py::findPython (&pyCmd))
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::InfoIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::InfoIcon,
                                            "Python not found",
                                            sc::py::installHelpText (),
                                            juce::String(), this);

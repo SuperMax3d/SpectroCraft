@@ -1,5 +1,6 @@
 // SpectroCraft - Effects > Super Resolution (external audio.cpp CLI tool).
 #include "SuperResolution.h"
+#include "AlertGate.h"
 #include "AudioCpp.h"
 #include "PythonScripts.h"   // sc::py::readFloatWav / writeFloatWav
 #include "Resampler.h"
@@ -567,7 +568,7 @@ void SuperResolutionWindow::runWorker(std::unique_ptr<RunJob> job)
                 running_ = false;
                 statusLabel_.setText (msg, juce::dontSendNotification);
                 if (!detail.isEmpty ())
-                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                       "Super Resolution failed",
                                                       msg + "\n\n" + detail, "", this);
             });

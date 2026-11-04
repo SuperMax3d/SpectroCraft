@@ -10,6 +10,7 @@
 #include <set>
 #include <ctime>
 #include "Application.h"
+#include "AlertGate.h"
 #include "AudioEngine.h"
 #include "SpectralEngine.h"
 #include "MarkerManager.h"
@@ -127,11 +128,28 @@ static void progress (const char* name)
     std::cerr << "[test] " << name << "\n";
 }
 
+// Every file a test creates lives under one per-process folder, wiped at the
+// start and at the end of the run: parallel shards (SC_TEST_SHARD=k/n) never
+// collide and the system temp folder is not littered with test files.
+static juce::File scTestTempDir()
+{
+    static const juce::File dir = [] {
+        const auto shard = juce::SystemStats::getEnvironmentVariable ("SC_TEST_SHARD", {})
+                               .upToFirstOccurrenceOf ("/", false, false).trim();
+        auto d = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                     .getChildFile (shard.isEmpty() ? juce::String ("SpectroCraftTests-tmp")
+                                                    : "SpectroCraftTests-tmp-shard" + shard);
+        d.deleteRecursively();
+        d.createDirectory();
+        return d;
+    }();
+    return dir;
+}
+
 static juce::File makeTempFile (const juce::String& name)
 {
     static int counter = 0;
-    return juce::File::getSpecialLocation (juce::File::tempDirectory)
-        .getChildFile ("sc_test_" + juce::String (++counter) + "_" + name);
+    return scTestTempDir().getChildFile ("sc_test_" + juce::String (++counter) + "_" + name);
 }
 
 // The FFT analysis panel skips an expensive recompute requested within 60 ms
@@ -1254,7 +1272,6 @@ static void testVScrollInsets()
     }
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile();
 }
 
@@ -1545,7 +1562,7 @@ static void testMarkerPanelDetails()
     juce::File (wav.getFullPathName() + ".markers.json").deleteFile();
 
     // Tear down the message manager created above so it doesn't leak at exit.
-    delete juce::MessageManager::getInstance();
+    
 }
 
 // ---------------- Marker panel layout: labels, aligned editors, multi-line comment ----------------
@@ -2326,6 +2343,9 @@ int main (int argc, char** argv)
         const juce::String dir = argc > 2 ? argv[2] : ".";
         return scGenerateTestFiles (dir) ? 0 : 1;
     }
+    // One message manager for the whole run (the GUI exe has the
+    // application's); tests must never delete it.
+    juce::ScopedJuceInitialiser_GUI juceInit;
     return scRunUnitTests();
 }
 #endif
@@ -3438,7 +3458,6 @@ static void testStatusBarFileName()
     CHECK (win->statusBarFileName().isEmpty(), "closing every file clears the footer name");
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wavA.deleteFile();
     wavB.deleteFile();
 }
@@ -3500,7 +3519,6 @@ static void testTimeScrollBarOnLoad()
     CHECK (!win->timeScrollBarVisible(), "closing every file hides the time scrollbar again");
 
     win.reset();
-    delete mm;
     wav.deleteFile();
 }
 
@@ -3558,7 +3576,6 @@ static void testLeftPanelLayout()
         CHECK (win->topPanelTabs ()->isVisible (), "left panels shown again");
 
         win.reset();
-        delete mm;
     }
 
     // 5) A fresh app instance must restore the saved arrangement.
@@ -3575,7 +3592,6 @@ static void testLeftPanelLayout()
         CHECK (win->bottomPanelTabNames () == expectBottom, "group membership persisted");
 
         win.reset();
-        delete mm;
     }
 
     store.deleteFile ();
@@ -3928,7 +3944,6 @@ static void testClosePanelsAndWindowMenu()
               "only Frequency Analysis reopened");
 
         win.reset ();
-        delete mm;
     }
 
     // 7) Closed panels stay closed after a restart; open ones keep their order.
@@ -3959,7 +3974,6 @@ static void testClosePanelsAndWindowMenu()
         }
 
         win.reset ();
-        delete mm;
     }
 
     store.deleteFile ();
@@ -3999,7 +4013,6 @@ static void testHomeEndPans()
     CHECK (std::abs (app.playhead - dur) < 1e-9, "End moves the playhead to the end");
 
     win.reset();
-    delete mm;
     wav.deleteFile ();
 }
 
@@ -4161,7 +4174,6 @@ static void testArrowKeySelection()
            "deep zoom steps exactly one sample per press");
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile();
 }
 
@@ -4227,7 +4239,6 @@ static void testCtrlNumberChannelToggle()
     CHECK (app.isChannelVisible (0) && app.isChannelVisible (1), "both channels visible again");
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile();
 }
 
@@ -4252,7 +4263,7 @@ static void testResampleDialogFillButtons()
 
     auto* w = win->createResampleDialog ();
     CHECK (w != nullptr, "resample dialog created");
-    if (!w) { win.reset (); delete mm; wav.deleteFile (); return; }
+    if (!w) { win.reset (); wav.deleteFile (); return; }
 
 
     // Collect the named input fields and all weight editors. The two named
@@ -4285,7 +4296,7 @@ static void testResampleDialogFillButtons()
     CHECK (rateEd != nullptr, "sample-rate field found");
     CHECK (chansEd != nullptr, "channel-count field found");
     CHECK (weightEds.size () == 4, "2x2 weight fields for a stereo file");
-    if (!rateEd) { win.reset (); delete mm; wav.deleteFile (); return; }
+    if (!rateEd) { win.reset (); wav.deleteFile (); return; }
 
     // The input fields carry tooltips.
     CHECK (!rateEd->getTooltip ().isEmpty (), "sample-rate field has a tooltip");
@@ -4433,7 +4444,7 @@ static void testResampleDialogFillButtons()
 
     // Render headlessly so the layout can be visually inspected.
     {
-        const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        const juce::File out = scTestTempDir()
             .getChildFile ("sc_resample_snapshot.png");
         const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
         std::vector<uint8_t> px;
@@ -4453,7 +4464,6 @@ static void testResampleDialogFillButtons()
 
     delete w;
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile();
 }
 
@@ -4507,7 +4517,6 @@ static void testF9ViewCycle()
     CHECK (win->waveformVisible() && win->spectrogramVisible(), "state unchanged by Ctrl+F9");
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile();
 }
 
@@ -4532,7 +4541,6 @@ static void testNoViewTooltips()
     CHECK (win->spectralTooltip().isEmpty(), "no help tooltip over the spectrogram view");
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile ();
 }
 
@@ -4644,7 +4652,6 @@ static void testOpenRecentFiles()
               "stale recent entry is dropped when clicked");
 
         win.reset();   // destroy the window while its MessageManager is still alive
-        delete mm;
     }
 
     a.deleteFile (); b.deleteFile (); store.deleteFile ();
@@ -4796,7 +4803,6 @@ static void testChangeGainDialog()
     }
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile ();
 }
 
@@ -4967,7 +4973,6 @@ static void testSetScaleDialog()
     CHECK (!d.scale.isCalibrated (), "dialog does not modify the doc before OK");
 
     panel.reset();
-    delete mm;
     wav.deleteFile ();
 }
 
@@ -5285,7 +5290,6 @@ static void testBkdkCalibration()
         }
 
         panel.reset();
-        delete mm;
         wav.deleteFile ();
     }
 }
@@ -6303,7 +6307,6 @@ static void testCtxZoomOutFull()
            "Ctrl+0 resets the frequency range even when only it was zoomed");
 
     win.reset();
-    delete mm;
     wav.deleteFile();
 }
 
@@ -7010,7 +7013,7 @@ static void testStemSepAnchorList()
 
     // Render headlessly so the anchor-list layout can be visually inspected.
     {
-        const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        const juce::File out = scTestTempDir()
             .getChildFile ("sc_ss_anchor_snapshot.png");
         const juce::Image img = dlg->createComponentSnapshot (dlg->getLocalBounds (), true, 2.0f);
         std::vector<uint8_t> px;
@@ -8748,7 +8751,6 @@ static void testEffectShortcutsAndRepeat()
     }
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile ();
 }
 
@@ -8799,7 +8801,7 @@ static void testSpectralControlsResetAndAutoLabel()
     }
     CHECK (resetBtn != nullptr, "Reset button found");
 
-    if (!panel || !resetBtn) { win.reset (); delete mm; wav.deleteFile (); return; }
+    if (!panel || !resetBtn) { win.reset (); wav.deleteFile (); return; }
 
     // Dirty every setting the Reset button is supposed to restore.
     app.settings.fftAuto = false;
@@ -8839,7 +8841,6 @@ static void testSpectralControlsResetAndAutoLabel()
            "combo selection back on the Auto item");
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile ();
 }
 
@@ -14489,7 +14490,7 @@ static void testSplitConfigDialog()
 
     auto* w = win->createSplitConfigDialog ();
     CHECK (w != nullptr, "config dialog created");
-    if (!w) { win.reset (); delete mm; wav.deleteFile (); return; }
+    if (!w) { win.reset (); wav.deleteFile (); return; }
 
     std::vector<juce::TextButton*> checks;
     std::vector<juce::TextEditor*> dests;
@@ -14502,7 +14503,7 @@ static void testSplitConfigDialog()
           "the three preset buttons exist");
     if (checks.size () != 2 || dests.size () != 2
         || allBtn == nullptr || lastBtn == nullptr || secondBtn == nullptr)
-    { delete w; win.reset (); delete mm; wav.deleteFile (); return; }
+    { delete w; win.reset (); wav.deleteFile (); return; }
 
     // No saved configuration: the default is "last channel into new".
     CHECK (!checks[0]->getToggleState (), "channel 1 unchecked by default");
@@ -14540,7 +14541,7 @@ static void testSplitConfigDialog()
     app.settings.splitConfig = { { 0, 2 } };
     auto* w2 = win->createSplitConfigDialog ();
     CHECK (w2 != nullptr, "second dialog created");
-    if (!w2) { win.reset (); delete mm; wav.deleteFile (); return; }
+    if (!w2) { win.reset (); wav.deleteFile (); return; }
     std::vector<juce::TextButton*> checks2;
     std::vector<juce::TextEditor*> dests2;
     juce::TextButton* allBtn2 = nullptr, *lastBtn2 = nullptr, *secondBtn2 = nullptr;
@@ -14556,7 +14557,6 @@ static void testSplitConfigDialog()
     delete w2;
 
     win.reset ();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile();
 }
 
@@ -14807,7 +14807,7 @@ static void testDenseUnetPipeline()
 
     // Integration via Application: selection + undo/redo around the effect.
     {
-        const juce::File wav = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        const juce::File wav = scTestTempDir()
                                    .getChildFile ("SpectroCraftTests-ns-integration.wav");
         writeWav (wav, 2, rate, N,
                   [] (int ch, int64_t f, double) {
@@ -14957,7 +14957,7 @@ static void testDeepFilterPipeline()
 
     // Integration via Application: selection + undo/redo around the effect.
     {
-        const juce::File wav = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        const juce::File wav = scTestTempDir()
                                    .getChildFile ("SpectroCraftTests-df-integration.wav");
         writeWav (wav, 2, rate, N,
                   [] (int ch, int64_t f, double) {
@@ -15163,7 +15163,7 @@ static void testBatchTranscribe()
     }
 
     // Two short WAVs in a temp folder tree, one nested in a subfolder.
-    const juce::File folder = juce::File::getSpecialLocation (juce::File::tempDirectory)
+    const juce::File folder = scTestTempDir()
         .getChildFile ("sc_test_batch_" + juce::String ((int) std::time (nullptr)));
     folder.createDirectory ();
     const juce::File sub = folder.getChildFile ("sub");
@@ -16819,7 +16819,7 @@ static void testGenerateDialogs()
 
         // Render headlessly so the layout can be visually inspected.
         {
-            const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            const juce::File out = scTestTempDir()
                 .getChildFile ("sc_gen_noise_snapshot.png");
             const juce::Image img = wn->createComponentSnapshot (wn->getLocalBounds (), true, 2.0f);
             std::vector<uint8_t> px;
@@ -16857,7 +16857,7 @@ static void testGenerateDialogs()
 
         // Render headlessly so the layout can be visually inspected.
         {
-            const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+            const juce::File out = scTestTempDir()
                 .getChildFile ("sc_gen_tone_snapshot.png");
             const juce::Image img = wt->createComponentSnapshot (wt->getLocalBounds (), true, 2.0f);
             std::vector<uint8_t> px;
@@ -16960,7 +16960,7 @@ static void testNewEffectDialogs()
         CHECK (findSliderRecursive (*w) == nullptr,
               "time stretch dialog no longer uses a slider");
 
-        const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        const juce::File out = scTestTempDir()
             .getChildFile ("sc_time_stretch_snapshot.png");
         const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
         std::vector<uint8_t> px;
@@ -17007,7 +17007,7 @@ static void testNewEffectDialogs()
             CHECK (!pts.empty (), "preset loaded points into the editor");
         }
 
-        const juce::File out = juce::File::getSpecialLocation (juce::File::tempDirectory)
+        const juce::File out = scTestTempDir()
             .getChildFile ("sc_filter_eq_snapshot.png");
         const juce::Image img = w->createComponentSnapshot (w->getLocalBounds (), true, 2.0f);
         std::vector<uint8_t> px;
@@ -18639,7 +18639,7 @@ static void testNsCopyNoiseTracks()
 static void testPythonScripts()
 {
 
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+    const juce::File dir = scTestTempDir()
         .getChildFile ("sc_pytest_"
                        + juce::String ((int64_t) juce::Time::getCurrentTime ().toMilliseconds ()));
     dir.deleteRecursively ();   // deterministic start
@@ -21483,12 +21483,12 @@ static void testDrawingPanel()
         auto* bar = win->bottomPanelTabs ();
         const int dIdx = bar->getTabNames ().indexOf ("Drawing");
         CHECK (dIdx >= 0, "Drawing tab exists in the bottom group");
-        if (dIdx < 0) { win.reset(); delete mm; store.deleteFile(); wav.deleteFile(); return; }
+        if (dIdx < 0) { win.reset(); store.deleteFile(); wav.deleteFile(); return; }
         bar->setCurrentTabIndex (dIdx, true);   // parents the panel
 
         DrawingPanel* dp = dynamic_cast<DrawingPanel*> (bar->getCurrentContentComponent());
         CHECK (dp != nullptr, "Drawing panel is the current tab content");
-        if (dp == nullptr) { win.reset(); delete mm; store.deleteFile(); wav.deleteFile(); return; }
+        if (dp == nullptr) { win.reset(); store.deleteFile(); wav.deleteFile(); return; }
 
         // Three drawings through the app API.
         DrawingItem t1;
@@ -21575,7 +21575,6 @@ static void testDrawingPanel()
         CHECK (dp->listTable().getNumRows() == 1, "panel row count follows deletion");
 
         win.reset();
-        delete mm;
         store.deleteFile ();
         wav.deleteFile ();
     }
@@ -22453,7 +22452,7 @@ static void testAudioCppCli()
           "cli args with anchors insert --request-option before --out-dir");
 
     // --- discovery in an injectable folder -------------------------------------
-    const juce::File root = juce::File::getSpecialLocation (juce::File::tempDirectory)
+    const juce::File root = scTestTempDir()
         .getChildFile ("sc_acpp_test_"
                        + juce::String (juce::Random::getSystemRandom().nextInt (999998) + 1));
     root.createDirectory ();
@@ -22515,7 +22514,7 @@ static void testStartupTrace()
           "disabled mark writes nothing to the log");
 
     // Unwritable preferred path falls back to the app-data folder.
-    const juce::File bad = juce::File::getSpecialLocation (juce::File::tempDirectory)
+    const juce::File bad = scTestTempDir()
                                .getChildFile ("sc_missing_dir_xyz")
                                .getChildFile ("trace.log");
     const juce::File fallback = scStart::enable (bad);
@@ -23460,7 +23459,6 @@ static void testF5RefreshShortcut()
     }
 
     win.reset();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile();
     png.deleteFile();
 }
@@ -25330,7 +25328,7 @@ static void testTablesDedicatedStrip()
 static void testSingleInstance()
 {
     // --- The persisted setting reader -------------------------------------
-    const juce::File tmpStore = juce::File::getSpecialLocation (juce::File::tempDirectory)
+    const juce::File tmpStore = scTestTempDir()
                                    .getChildFile ("SpectroCraftSI_test.recent");
     if (tmpStore.existsAsFile()) tmpStore.deleteFile();
 
@@ -25894,7 +25892,6 @@ static void testSplitExecuteFirstRun()
     }
 
     win.reset ();   // destroy the window while its MessageManager is still alive
-    delete mm;
     wav.deleteFile ();
 }
 
@@ -25927,11 +25924,11 @@ static void testStemSepAdvancedLayout()
     win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
     StemSeparationWindow* dlg = win->stemSepWindow();
     CHECK (dlg != nullptr, "window opened for layout test");
-    if (!dlg) { delete mm; wav.deleteFile (); return; }
+    if (!dlg) { wav.deleteFile (); return; }
 
     juce::TextButton* advBtn = findButton (dlg, "Advanced...");
     CHECK (advBtn != nullptr, "advanced button found in simple mode");
-    auto cleanup = [&] { dlg->userTriedToCloseWindow (); win.reset (); delete mm; wav.deleteFile (); };
+    auto cleanup = [&] { dlg->userTriedToCloseWindow (); win.reset (); wav.deleteFile (); };
     if (!advBtn) { cleanup (); return; }
     advBtn->onClick ();   // enter advanced mode (one row)
 
@@ -26232,7 +26229,7 @@ static void testApplyActionSteps()
 
 static void testActionBatch()
 {
-    const juce::File root = juce::File::getSpecialLocation (juce::File::tempDirectory)
+    const juce::File root = scTestTempDir()
                                 .getChildFile ("sc_actions_batch_"
                                     + juce::String ((int) juce::Time::getCurrentTime().getMilliseconds()));
     root.deleteRecursively();
@@ -26394,6 +26391,9 @@ static void testActionsPanelPaint()
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
 // progress name contains one of the substrings (case-insensitive).
+// SC_TEST_SHARD=<k>/<n> (0 <= k < n) runs only every n-th selected test,
+// starting at k, so n processes can split the suite between them (ctest
+// registers one test per shard; run them with `ctest -j`).
 static bool scTestSelected (const char* name)
 {
     static const juce::StringArray filters = [] {
@@ -26407,12 +26407,121 @@ static bool scTestSelected (const char* name)
         if (juce::String (name).containsIgnoreCase (f)) return true;
     return false;
 }
-#define SC_RUN_TEST(name, fn) do { if (scTestSelected (name)) { progress (name); fn(); } } while (0)
+
+struct ScShard { int index = 0, count = 1; };
+static ScShard scTestShard()
+{
+    static const ScShard shard = [] {
+        ScShard sh;
+        const auto v = juce::SystemStats::getEnvironmentVariable ("SC_TEST_SHARD", {}).trim();
+        if (v.containsChar ('/'))
+        {
+            const int k = v.upToFirstOccurrenceOf ("/", false, false).getIntValue();
+            const int n = v.fromFirstOccurrenceOf ("/", false, false).getIntValue();
+            if (n > 0 && k >= 0 && k < n) { sh.index = k; sh.count = n; }
+        }
+        return sh;
+    }();
+    return shard;
+}
+
+struct ScTestTiming { std::string name; double seconds; int failed; };
+static std::vector<ScTestTiming> scTestTimings;
+
+static void scRunOneTest (const char* name, void (*fn)())
+{
+    static int selectedIndex = 0;
+    if (!scTestSelected (name)) return;
+    const auto shard = scTestShard();
+    if ((selectedIndex++ % shard.count) != shard.index) return;
+
+    progress (name);
+    auto* const mmBefore = juce::MessageManager::getInstanceWithoutCreating();
+    const int failuresBefore = failures;
+    const auto t0 = std::chrono::steady_clock::now();
+    fn();
+    const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+    if (juce::MessageManager::getInstanceWithoutCreating() != mmBefore)
+    {
+        // Later tests would silently run without a message loop (lost async
+        // callbacks, JUCE assertions blamed on the wrong test).
+        ++total; ++failures;
+        std::cout << "FAIL: test replaced or deleted the JUCE MessageManager\n";
+    }
+    scTestTimings.push_back ({ name, secs, failures - failuresBefore });
+    if (secs >= 1.0)
+        std::cerr << "[time] " << name << ": " << juce::String (secs, 2) << " s\n";
+}
+
+// Prints the slowest tests and, when SC_TEST_TIMINGS=<file> is set, writes
+// every test's duration and failure count as CSV (name,seconds,failed).
+static void scReportTimings()
+{
+    auto sorted = scTestTimings;
+    std::sort (sorted.begin(), sorted.end(),
+               [] (const ScTestTiming& a, const ScTestTiming& b) { return a.seconds > b.seconds; });
+    double sum = 0.0;
+    for (auto& t : sorted) sum += t.seconds;
+    std::cerr << "[time] " << sorted.size() << " tests ran in " << juce::String (sum, 1) << " s; slowest:\n";
+    for (size_t i = 0; i < sorted.size() && i < 15; ++i)
+        std::cerr << "[time]   " << juce::String (sorted[i].seconds, 2) << " s  " << sorted[i].name << "\n";
+
+    const auto csvPath = juce::SystemStats::getEnvironmentVariable ("SC_TEST_TIMINGS", {});
+    if (csvPath.isNotEmpty())
+    {
+        juce::String csv ("name,seconds,failed\n");
+        for (auto& t : scTestTimings)
+            csv << "\"" << juce::String (t.name).replace ("\"", "\"\"") << "\","
+                << juce::String (t.seconds, 4) << "," << t.failed << "\n";
+        juce::File (csvPath).replaceWithText (csv);
+    }
+}
+
+#define SC_RUN_TEST(name, fn) scRunOneTest (name, &fn)
+
+// Safety net: a modal component that stays up for more than 15 s while the
+// suite runs is a test (or app) bug - nobody is there to click it. Close it,
+// count a failure and say which dialog it was, instead of hanging the run or
+// waiting for the developer. Tests that drive dialogs on purpose finish well
+// within that time (ScModalDriver gives up after 10 s).
+struct ScModalWatchdog : private juce::Timer
+{
+    ScModalWatchdog()  { startTimer (250); }
+    ~ScModalWatchdog() override { stopTimer(); }
+
+    void timerCallback() override
+    {
+        auto* mcm = juce::ModalComponentManager::getInstanceWithoutCreating();
+        juce::Component* top = (mcm != nullptr && mcm->getNumModalComponents() > 0)
+                                   ? mcm->getModalComponent (0) : nullptr;
+        if (top != watched.getComponent())
+        {
+            watched = top;
+            since = juce::Time::getMillisecondCounterHiRes();
+            return;
+        }
+        if (top != nullptr && juce::Time::getMillisecondCounterHiRes() - since > 15000.0)
+        {
+            ++total; ++failures;
+            std::cout << "FAIL: unexpected modal dialog left open for 15 s: \""
+                      << top->getName() << "\" (closed by the test watchdog)\n";
+            top->exitModalState (0);
+            watched = nullptr;
+        }
+    }
+
+    juce::Component::SafePointer<juce::Component> watched;
+    double since = 0.0;
+};
 
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
     std::setvbuf (stdout, nullptr, _IONBF, 0);
+    // Application warnings are logged ("[alert] ...") instead of shown: no
+    // message box may wait for a click while the suite runs.
+    sc::alert::setHeadless (true);
+    ScModalWatchdog modalWatchdog;
     SC_RUN_TEST ("FFT", testFFT);
     SC_RUN_TEST ("scfft vs juce", testScFftVsJuce);
     SC_RUN_TEST ("scfft vs reference dft", testScFftVsReferenceDft);
@@ -26705,6 +26814,9 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: ai", runRegression_ai);
 
 
+    scReportTimings();
+    if (juce::SystemStats::getEnvironmentVariable ("SC_TEST_KEEP_TEMP", {}).isEmpty())
+        scTestTempDir().deleteRecursively();
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
     if (!skippedTests.isEmpty())
     {

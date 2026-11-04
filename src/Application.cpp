@@ -3,6 +3,7 @@
  */
 
 #include "Application.h"
+#include "AlertGate.h"
 #include "ContentAwareTimeScale.h"
 #include "Recorder.h"
 #include "StartupTrace.h"
@@ -91,8 +92,13 @@ Application::Application (const juce::File& recentStorePath)
         // test outcomes. Use a fresh per-run temp store instead.
         static juce::File isolatedStore = [] ()
         {
+            // One store per test shard (SC_TEST_SHARD=k/n) so parallel test
+            // processes never share settings.
+            const auto shard = juce::SystemStats::getEnvironmentVariable ("SC_TEST_SHARD", {})
+                                   .upToFirstOccurrenceOf ("/", false, false).trim();
             auto f = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                        .getChildFile ("SpectroCraftTests.recent");
+                        .getChildFile (shard.isEmpty() ? juce::String ("SpectroCraftTests.recent")
+                                                       : "SpectroCraftTests-shard" + shard + ".recent");
             if (f.existsAsFile()) f.deleteFile();
             return f;
         } ();
@@ -1165,7 +1171,7 @@ void Application::stopRecording ()
             const juce::String le = lastErr.trim ();
             if (!le.isEmpty () && le != "no error")
                 msg += "\n\n" + le;
-            juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                "Recording", msg);
         }
         else
@@ -4148,7 +4154,7 @@ static void reportHistoryCleared (const char* what)
 {
     if (juce::MessageManager::getInstanceWithoutCreating () == nullptr)
         return;
-    juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+    sc::alert::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
         what, juce::String ("The edit could not be ") + (juce::String (what) == "Undo" ? "undone" : "redone")
               + " (not enough memory?). The undo history was cleared.");
 }

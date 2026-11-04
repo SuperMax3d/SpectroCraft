@@ -105,7 +105,7 @@ static void testRegressionPythonBridge()
     if (pyTokens.isEmpty ())
         return;
 
-    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+    const juce::File dir = scTestTempDir()
         .getChildFile ("sc_regr_py_"
                        + juce::String ((int64_t) juce::Time::getCurrentTime ().toMilliseconds ()));
     dir.deleteRecursively ();
