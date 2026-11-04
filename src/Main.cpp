@@ -94,7 +94,7 @@ static bool writeFloatWav(const juce::File& file, int nchans, double rate,
     out.write ("WAVE", 4);
     out.write ("fmt ", 4);
     w32 (16);                    // fmt chunk size
-    w16 (1);                     // PCM format tag
+    w16 (3);                     // WAVE_FORMAT_IEEE_FLOAT (the samples are float32)
     w16 ((uint16_t) nchans);
     w32 ((uint32_t) rate);
     w32 ((uint32_t) (rate * blockAlign));   // byte rate
@@ -254,6 +254,7 @@ public:
                     std::cout << (isBatch
                         ? "usage: --batch <actionName> <inFolder> <outFolder> [formats] [rename] [--subfolders]\n"
                         : "usage: --run-action <actionName> <inputFile> <outputFile>\n");
+                    setApplicationReturnValue (2);
                     quit();
                     return;
                 }
@@ -271,6 +272,7 @@ public:
                 if (!actions.loadFromJson (store.getValue ("actions_json")))
                 {
                     std::cout << "could not load the recorded actions\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -282,6 +284,7 @@ public:
                 {
                     std::cout << "no recorded action named \"" << name.toRawUTF8()
                               << "\" with steps\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -298,6 +301,7 @@ public:
                     if (!app.openFile (a))
                     {
                         std::cout << "failed to open " << a.getFullPathName() << "\n";
+                        setApplicationReturnValue (1);
                         quit();
                         return;
                     }
@@ -310,6 +314,7 @@ public:
                         {
                             std::cout << "step \"" << step.type.toRawUTF8()
                                       << "\" failed: " << err << "\n";
+                            setApplicationReturnValue (1);
                             quit();
                             return;
                         }
@@ -317,6 +322,7 @@ public:
 
                     const bool ok = app.audioEngine().saveFileAs (b);
                     std::cout << (ok ? "wrote " : "failed to write ") << b.getFullPathName() << "\n";
+                    setApplicationReturnValue (ok ? 0 : 1);
                     quit();
                     return;
                 }
@@ -336,9 +342,10 @@ public:
 
                 const auto formats = sc::parseFormatList (formatsText);
                 std::string summary;
-                sc::runActionBatch (*action, a, b, formats, rename, subfolders,
-                                    tempStore, nullptr, nullptr, nullptr, &summary);
+                const bool batchOk = sc::runActionBatch (*action, a, b, formats, rename, subfolders,
+                                                         tempStore, nullptr, nullptr, nullptr, &summary);
                 std::cout << summary << "\n";
+                setApplicationReturnValue (batchOk ? 0 : 1);
                 quit();
                 return;
             }
@@ -774,8 +781,11 @@ public:
             }
             else if (args[i] == "--run-unit-tests")
             {
+                // Same isolation as SpectroCraftTests: never the user's real settings.
+                Application::useIsolatedSettingsStore (true);
                 const int rc = scRunUnitTests();
                 std::cout << (rc == 0 ? "all unit tests passed\n" : "unit tests FAILED\n");
+                setApplicationReturnValue (rc == 0 ? 0 : 1);   // usable from scripts / CI
                 quit();
                 return;
             }

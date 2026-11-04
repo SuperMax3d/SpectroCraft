@@ -48,11 +48,13 @@ namespace scCrash
     {
         if (g_modules[0])
             return;
+        // Pass the real capacity of g_modules: `need` is the size required for
+        // ALL loaded modules, which can exceed 128 entries (OpenVINO, FFmpeg,
+        // ggml, plugins...) and would overflow the static array.
         DWORD need = 0;
-        EnumProcessModules (GetCurrentProcess(), nullptr, 0, &need);
-        const int n = (int) std::min<size_t> (128, need / sizeof (HMODULE));
-        if (EnumProcessModules (GetCurrentProcess(), g_modules, need, &need))
+        if (EnumProcessModules (GetCurrentProcess(), g_modules, (DWORD) sizeof (g_modules), &need))
         {
+            const int n = (int) std::min<size_t> (128, need / sizeof (HMODULE));
             for (int i = 0; i < n; ++i)
             {
                 char path[512] = { 0 };
@@ -187,6 +189,7 @@ namespace scCrash
     struct PdataModule
     {
         DWORD64 base = 0;
+        size_t size = 0;           // image size (g_pdata is compacted: not indexable like g_mods)
         const RUNTIME_FUNCTION* funcs = nullptr;
         int count = 0;
     };
@@ -214,6 +217,7 @@ namespace scCrash
                 continue;
             PdataModule p {};
             p.base = g_mods[i].base;
+            p.size = g_mods[i].size;
             p.funcs = reinterpret_cast<const RUNTIME_FUNCTION*> (img + dd.VirtualAddress);
             p.count = (int) (dd.Size / sizeof (RUNTIME_FUNCTION));
             if (g_pdataCount < 128)
@@ -225,7 +229,7 @@ namespace scCrash
     {
         for (int i = 0; i < g_pdataCount; ++i)
         {
-            if (rip < g_pdata[i].base || rip >= g_pdata[i].base + g_mods[i].size)
+            if (rip < g_pdata[i].base || rip >= g_pdata[i].base + g_pdata[i].size)
                 continue;
             const DWORD64 off = rip - g_pdata[i].base;
             int lo = 0, hi = g_pdata[i].count - 1;
@@ -416,6 +420,22 @@ namespace scCrash
         // OpenVINO: compile_model throws a legitimate error our code catches,
         // but this handler used to TerminateProcess first).
         if (code == 0xE06D7363)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // Delay-load failures (VcppException ERROR_MOD_NOT_FOUND /
+        // ERROR_PROC_NOT_FOUND): raised when an optional /DELAYLOAD DLL such
+        // as openvino.dll is missing and caught by the caller (OvRuntime.cpp is
+        // built with /EHa for exactly that). Terminating here would make that
+        // graceful degradation impossible.
+        if (code == 0xC06D007E || code == 0xC06D007F)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // Success / informational / warning severities (e.g. RPC status codes
+        // raised and handled inside rpcrt4, debugger notifications) are never
+        // faults. A VEH sees every FIRST-chance exception, including ones a
+        // __try/__except further up will handle, so let them through: if one
+        // really goes unhandled, filterHandler still traces it and terminates.
+        if ((code & 0xC0000000u) != 0xC0000000u)
             return EXCEPTION_CONTINUE_SEARCH;
 
         // Any other exception: a real crash. Trace it and terminate.

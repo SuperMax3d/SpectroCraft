@@ -16,6 +16,7 @@
     #include "AI/WhisperPipeline.h"
 #endif
 #include <algorithm>
+#include <cmath>
 #include <thread>
 
 // Monotonic time warps for edits that insert / delete / stretch timeline
@@ -40,6 +41,18 @@ static double warpStretch (double t, double a, double bOld, double bNew)
     if (t >= bOld) return t + (bNew - bOld);
     const double k = (bNew - a) / (bOld - a);
     return a + (t - a) * k;
+}
+
+// See Application::useIsolatedSettingsStore().
+#if SC_TESTS_EXE
+static bool g_isolatedSettingsStore = true;
+#else
+static bool g_isolatedSettingsStore = false;
+#endif
+
+void Application::useIsolatedSettingsStore (bool on)
+{
+    g_isolatedSettingsStore = on;
 }
 
 Application::Application (const juce::File& recentStorePath)
@@ -71,8 +84,7 @@ Application::Application (const juce::File& recentStorePath)
     juce::File storePath;
     if (recentStorePath != juce::File())
         storePath = recentStorePath;
-#if SC_TESTS_EXE
-    else
+    else if (g_isolatedSettingsStore)
     {
         // Tests must never read or write the user's real settings file: a GUI
         // session that left non-default values behind would otherwise change
@@ -86,10 +98,8 @@ Application::Application (const juce::File& recentStorePath)
         } ();
         storePath = isolatedStore;
     }
-#else
     else
         storePath = opts.getDefaultFile();
-#endif
     scStart::mark ("before-properties-file");
     recentStore = std::make_unique<juce::PropertiesFile> (storePath, opts);
     scStart::mark ("after-properties-file");
@@ -979,7 +989,8 @@ bool Application::pullRecFrames (FileDoc* d, long long cap)
         docData = mapped.data ();
     }
 
-    const bool ok = loopFull ? eng.overwriteSamples (docData, writePosFrame * ch, frames)
+    // overwriteSamples() takes a frame position (not an interleaved sample index).
+    const bool ok = loopFull ? eng.overwriteSamples (docData, writePosFrame, frames)
                              : eng.appendSamples (docData, frames);
     if (!ok)
         return false;   // audio thread busy - data stays in the plugin ring
@@ -3654,7 +3665,8 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
     if (!prog (0.3f)) { cleanup (); return false; }   // cancelled - silent
 
     // Run the interpreter: <pythonCmd> <script> <in.wav> <out.wav> <meta.json>
-    const juce::StringArray cmdTokens (juce::String (pythonCmd).trim ());
+    // pythonCmd may carry extra flags ("py -3"): split it into tokens.
+    const juce::StringArray cmdTokens = sc::py::splitCommand (pythonCmd);
     if (cmdTokens.size () == 0)
     {
         cleanup ();
@@ -3725,70 +3737,111 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
         return fail ("The script's output is empty.");
     }
 
+    // NaN / Inf would propagate into the mipmaps, the spectral cache and the
+    // realtime output: reject them instead of committing a corrupt document.
+    for (int ch = 0; ch < nch; ++ch)
+        for (const float v : newData[(size_t) ch])
+            if (!std::isfinite (v))
+            {
+                cleanup ();
+                return fail ("The script's output contains NaN or infinite sample values"
+                             " (channel " + juce::String (ch + 1) + "). Nothing was changed.");
+            }
+
     if (!prog (0.9f)) { cleanup (); return false; }   // cancelled before commit - silent
 
     const juce::String desc = "Python script '" + script.getFileName () + "'";
-    bool ok;
-    if (got == want)
-        ok = audioEngine ().replaceSamples (samples, newData, desc, &err);
-    else
+
+    // The commit mutates the document, the undo history, markers, playhead,
+    // selection and (through onTimeRangeDeleted/Inserted) UI components such
+    // as the FFT snapshot buttons. All of that belongs to the message thread,
+    // which keeps painting while the worker waits behind the progress dialog,
+    // so when called from a worker thread run the commit there and wait.
+    auto commit = [&] () -> bool
     {
-        // Length-changing output: capture the non-audio state first so undo
-        // can restore it, exactly like a manual deletion does.
-        const size_t depthBefore = d->undo.depth ();
-        std::vector<Marker> oldMarkers = d->markers.markers ();
-        auto oldSavedSel = d->savedSelections;
-        TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
-
-        ok = audioEngine ().replaceRangeWithDifferentLength (samples, newData, desc, &err);
-        if (!ok || d->undo.depth () <= depthBefore)
-            ;
-        else if (got < want)
+        if (doc () != d)
         {
-            // The tail of the processed range is gone: drop / clip anything that
-            // referred to it.
-            const double aSec = (double) (samples.getStart () + got) / rate;
-            const double bSec = (double) samples.getEnd () / rate;
-            d->remapForDeletion (aSec, bSec);
-
-            // The cursor/selection follow their anchored positions; the old
-            // selection [start, end) now covers exactly the shortened range.
-            playhead  = warpDeletion (playhead, aSec, bSec);
-            selection = { warpDeletion (selection.getStart (), aSec, bSec),
-                          warpDeletion (selection.getEnd (),   aSec, bSec) };
-
-            Patch& p = d->undo.lastRecorded ();
-            p.hasSideState = true;
-            p.oldMarkers  = std::move (oldMarkers);
-            p.newMarkers  = d->markers.markers ();
-            p.oldSavedSel = std::move (oldSavedSel);
-            p.newSavedSel = d->savedSelections;
-            commitTimeAnchoredToPatch (oldTA, p);
-            if (onTimeRangeDeleted)
-                onTimeRangeDeleted (d, aSec, bSec, p, false);
+            err = "The active document changed while the script was running.";
+            return false;
         }
+        bool ok;
+        if (got == want)
+            ok = audioEngine ().replaceSamples (samples, newData, desc, &err);
         else
         {
-            // The processed range grew: content from its old end on shifted
-            // right by the delta.
-            const double aSec    = (double) samples.getEnd () / rate;
-            const double lenSecs = (double) (got - want) / rate;
-            d->remapForInsertion (aSec, lenSecs);
+            // Length-changing output: capture the non-audio state first so undo
+            // can restore it, exactly like a manual deletion does.
+            const size_t depthBefore = d->undo.depth ();
+            std::vector<Marker> oldMarkers = d->markers.markers ();
+            auto oldSavedSel = d->savedSelections;
+            TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
 
-            playhead  = warpInsertion (playhead, aSec, lenSecs);
-            selection = { warpInsertion (selection.getStart (), aSec, lenSecs),
-                          warpInsertion (selection.getEnd (),   aSec, lenSecs) };
+            ok = audioEngine ().replaceRangeWithDifferentLength (samples, newData, desc, &err);
+            if (!ok || d->undo.depth () <= depthBefore)
+                ;
+            else if (got < want)
+            {
+                // The tail of the processed range is gone: drop / clip anything that
+                // referred to it.
+                const double aSec = (double) (samples.getStart () + got) / rate;
+                const double bSec = (double) samples.getEnd () / rate;
+                d->remapForDeletion (aSec, bSec);
 
-            Patch& p = d->undo.lastRecorded ();
-            p.hasSideState = true;
-            p.oldMarkers  = std::move (oldMarkers);
-            p.newMarkers  = d->markers.markers ();
-            p.oldSavedSel = std::move (oldSavedSel);
-            p.newSavedSel = d->savedSelections;
-            commitTimeAnchoredToPatch (oldTA, p);
-            if (onTimeRangeInserted)
-                onTimeRangeInserted (d, aSec, lenSecs, p);
+                // The cursor/selection follow their anchored positions; the old
+                // selection [start, end) now covers exactly the shortened range.
+                playhead  = warpDeletion (playhead, aSec, bSec);
+                selection = { warpDeletion (selection.getStart (), aSec, bSec),
+                              warpDeletion (selection.getEnd (),   aSec, bSec) };
+
+                Patch& p = d->undo.lastRecorded ();
+                p.hasSideState = true;
+                p.oldMarkers  = std::move (oldMarkers);
+                p.newMarkers  = d->markers.markers ();
+                p.oldSavedSel = std::move (oldSavedSel);
+                p.newSavedSel = d->savedSelections;
+                commitTimeAnchoredToPatch (oldTA, p);
+                if (onTimeRangeDeleted)
+                    onTimeRangeDeleted (d, aSec, bSec, p, false);
+            }
+            else
+            {
+                // The processed range grew: content from its old end on shifted
+                // right by the delta.
+                const double aSec    = (double) samples.getEnd () / rate;
+                const double lenSecs = (double) (got - want) / rate;
+                d->remapForInsertion (aSec, lenSecs);
+
+                playhead  = warpInsertion (playhead, aSec, lenSecs);
+                selection = { warpInsertion (selection.getStart (), aSec, lenSecs),
+                              warpInsertion (selection.getEnd (),   aSec, lenSecs) };
+
+                Patch& p = d->undo.lastRecorded ();
+                p.hasSideState = true;
+                p.oldMarkers  = std::move (oldMarkers);
+                p.newMarkers  = d->markers.markers ();
+                p.oldSavedSel = std::move (oldSavedSel);
+                p.newSavedSel = d->savedSelections;
+                commitTimeAnchoredToPatch (oldTA, p);
+                if (onTimeRangeInserted)
+                    onTimeRangeInserted (d, aSec, lenSecs, p);
+            }
         }
+        return ok;
+    };
+
+    bool ok = false;
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
+    if (mm == nullptr || mm->isThisTheMessageThread ())
+        ok = commit ();
+    else
+    {
+        juce::WaitableEvent committed;
+        if (!juce::MessageManager::callAsync ([&] { ok = commit (); committed.signal (); }))
+        {
+            cleanup ();
+            return fail ("Could not apply the script's output (the application is shutting down).");
+        }
+        committed.wait (-1);
     }
 
     if (!ok)

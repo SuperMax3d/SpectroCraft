@@ -82,30 +82,31 @@ endif()
 # Version handling: sc_bump_version (root CMakeLists) bumps VERSION.txt on every
 # build and regenerates generated/Version.h (About box). sc_patch_generated then
 # rewrites the version into JUCE's generated resources.rc (VS_VERSION_INFO ->
-# Windows file properties) and JuceHeader.h, after juceaide has written them but
-# before they are compiled. (JUCE's JUCE_USER_DEFINED_RC_FILE mechanism is not
+# Windows file properties), after juceaide has written it but before it is
+# compiled. (JUCE's JUCE_USER_DEFINED_RC_FILE mechanism is not
 # usable here: this environment's rc.exe ignores /D preprocessor definitions.)
 add_dependencies (SpectroCraft sc_bump_version)
 target_include_directories (SpectroCraft PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
 get_target_property (SC_JUCE_CODE_DIR SpectroCraft JUCE_GENERATED_SOURCES_DIRECTORY)
 set (SC_RC_FILE "${SC_JUCE_CODE_DIR}/SpectroCraft_resources.rc")
-set (SC_HEADER_FILE "${SC_JUCE_CODE_DIR}/JuceHeader.h")
+# Only the rc is patched (JuceHeader.h is left alone: rewriting it on every
+# build forced a full rebuild). The command re-runs whenever bump_version
+# writes a new SC_VERSION.txt (a declared byproduct of sc_bump_version).
 add_custom_command (
     OUTPUT ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp
     COMMAND ${CMAKE_COMMAND}
             -DRC_FILE=${SC_RC_FILE}
-            -DHEADER_FILE=${SC_HEADER_FILE}
             -DVERSION_FILE=${CMAKE_BINARY_DIR}/generated/SC_VERSION.txt
             -DSTAMP_FILE=${CMAKE_BINARY_DIR}/generated/generated_patched.stamp
             -DICON_FILE=${CMAKE_SOURCE_DIR}/icon4.ico
             -P ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake
-    DEPENDS ${SC_RC_FILE} ${SC_HEADER_FILE} ${CMAKE_SOURCE_DIR}/icon4.ico
-    COMMENT "Applying bumped version to generated resources.rc / JuceHeader.h")
+    DEPENDS ${SC_RC_FILE} ${CMAKE_BINARY_DIR}/generated/SC_VERSION.txt
+            ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake ${CMAKE_SOURCE_DIR}/icon4.ico
+    COMMENT "Applying bumped version to generated resources.rc")
 add_custom_target (sc_patch_generated
     DEPENDS ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp)
-# bump must run first: the patch reads SC_VERSION.txt, and bump deletes the
-# stamp that makes this command re-run on every build.
+# bump must run first: the patch reads SC_VERSION.txt.
 add_dependencies (sc_patch_generated sc_bump_version)
 if (TARGET SpectroCraft_rc_lib)   # must compile the rc only after it is patched
     add_dependencies (SpectroCraft_rc_lib sc_bump_version sc_patch_generated)

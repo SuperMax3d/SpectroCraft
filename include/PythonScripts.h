@@ -35,6 +35,11 @@ juce::String newScriptTemplate ();
     returns true. */
 bool findPython (std::string* cmdOut, std::string* errOut = nullptr);
 
+/** Splits an interpreter command such as "py -3" (as returned by findPython)
+    into the executable and its extra arguments. Double-quoted tokens may
+    contain spaces (e.g. "\"C:/Program Files/Python/python.exe\" -u"). */
+juce::StringArray splitCommand (const std::string& cmd);
+
 /** Builds the metadata JSON handed to scripts: sample rate, channel count,
     file duration, selection range (seconds), whether the whole file was used,
     the source file name and every marker of the active document. */
@@ -51,10 +56,13 @@ bool writeFloatWav (const juce::File& file, const std::vector<std::vector<float>
 bool readFloatWav (const juce::File& file, double* rateOut, int* nchOut,
                    std::vector<std::vector<float>>& out);
 
-/** Runs `cmd` (e.g. "python" or "py -3") with `args`. Blocks until the process
-    exits; shouldContinue() is polled every 200 ms and a false return kills the
-    process. On success *exitCodeOut receives the exit code and stdout/stderr
-    are appended to outStdout/outStderr (when non-null). Returns false when the
+/** Runs the executable `cmd` (e.g. "python" or "py"; use splitCommand() for a
+    command with flags) with `args`. Blocks until the process exits;
+    shouldContinue() is polled every 200 ms and a false return kills the
+    process. stdout/stderr are read while the process runs (so a verbose child
+    never blocks on a full pipe) and appended, decoded as UTF-8, to
+    outStdout/outStderr (when non-null); on success *exitCodeOut receives the
+    exit code. Returns false when the
     executable could not be started or was killed by cancellation. */
 bool runProcess (const std::string& cmd, const juce::StringArray& args,
                  const std::function<bool ()>& shouldContinue,

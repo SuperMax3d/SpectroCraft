@@ -42,15 +42,23 @@ endif()
 # patch number in VERSION.txt (1.0.0 -> 1.0.1 -> ...), then regenerates
 # generated/Version.h (About box) + SC_VERSION.txt. The sc_patch_generated
 # target (src/CMakeLists.txt) applies that version to JUCE's generated
-# resources.rc / JuceHeader.h before they are compiled, so the exe's Windows
-# file properties always show the freshly bumped version.
+# resources.rc before it is compiled, so the exe's Windows file properties
+# always show the freshly bumped version. The generated files are declared as
+# BYPRODUCTS so Ninja re-checks what depends on them after this target ran
+# (instead of deciding at build start, one version behind).
 set(SC_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 add_custom_target(sc_bump_version ALL
     COMMAND ${CMAKE_COMMAND}
             -DSC_SOURCE_DIR=${CMAKE_SOURCE_DIR}
-            -P ${CMAKE_SOURCE_DIR}/cmake/bump_version.cmake)
+            -P ${CMAKE_SOURCE_DIR}/cmake/bump_version.cmake
+    BYPRODUCTS ${SC_GENERATED_DIR}/Version.h ${SC_GENERATED_DIR}/SC_VERSION.txt)
 
 add_subdirectory(src)
 
 enable_testing()
 add_subdirectory(tests)
+
+# `ctest` runs the unit suite (SpectroCraftTests exits non-zero when a CHECK fails).
+if(TARGET SpectroCraftTests)
+    add_test(NAME SpectroCraftUnitTests COMMAND SpectroCraftTests)
+endif()

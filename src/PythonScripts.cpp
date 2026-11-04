@@ -8,6 +8,8 @@
 #  include <unistd.h>
 #  include <sys/wait.h>
 #  include <signal.h>
+#  include <poll.h>
+#  include <cerrno>
 #  include <cstring>
 #endif
 
@@ -572,6 +574,16 @@ std::vector<juce::File> listScripts (const juce::File& dir)
     return out;
 }
 
+juce::StringArray splitCommand (const std::string& cmd)
+{
+    juce::StringArray tokens = juce::StringArray::fromTokens (
+        juce::String::fromUTF8 (cmd.c_str ()).trim (), true);
+    for (auto& t : tokens)
+        t = t.unquoted ();
+    tokens.removeEmptyStrings ();
+    return tokens;
+}
+
 // ============================================================================
 // Metadata JSON
 // ============================================================================
@@ -598,8 +610,9 @@ juce::String buildMetaJson (double sampleRate, int numChannels, double fileDurat
         mj->setProperty ("comment", m.comment);
         mj->setProperty ("start",   m.start);
         // Point markers have end == -1 in the sidecar format; keep that.
+        // Region ends are seconds, like start: keep the fractional part.
         mj->setProperty ("end",     (m.end < 0.0) ? juce::var ((int64_t) -1)
-                                                   : juce::var ((int64_t) std::llround (m.end)));
+                                                   : juce::var (m.end));
         markerArray.add (juce::var (mj));
     }
     root->setProperty ("markers", juce::var (markerArray));
@@ -719,8 +732,17 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
 
     HANDLE outR = INVALID_HANDLE_VALUE, outW = INVALID_HANDLE_VALUE;
     HANDLE errR = INVALID_HANDLE_VALUE, errW = INVALID_HANDLE_VALUE;
-    if (!CreatePipe (&outR, &outW, &sa, 0) || !CreatePipe (&errR, &errW, &sa, 0))
+    if (!CreatePipe (&outR, &outW, &sa, 1 << 16))
         return false;
+    if (!CreatePipe (&errR, &errW, &sa, 1 << 16))
+    {
+        CloseHandle (outR);
+        CloseHandle (outW);
+        return false;
+    }
+    // Only the write ends belong to the child; our read ends must not be inherited.
+    SetHandleInformation (outR, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation (errR, HANDLE_FLAG_INHERIT, 0);
 
     STARTUPINFOW si {};
     si.cb = sizeof (si);
@@ -741,12 +763,40 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
         return false;   // executable not found / failed to start
     }
 
+    // The pipes are drained while the child runs: a child that writes more
+    // than the pipe buffer would otherwise block forever on a full pipe while
+    // we wait for it to exit. PeekNamedPipe keeps the reads non-blocking. The
+    // raw bytes are collected and decoded once at the end, so a multi-byte
+    // UTF-8 sequence split across two reads stays intact.
+    std::string outBytes, errBytes;
+    auto drain = [] (HANDLE h, std::string& dest)
+    {
+        char tmp[8192];
+        for (;;)
+        {
+            DWORD avail = 0;
+            if (!PeekNamedPipe (h, nullptr, 0, nullptr, &avail, nullptr) || avail == 0)
+                return;
+            const DWORD want = avail < (DWORD) sizeof (tmp) ? avail : (DWORD) sizeof (tmp);
+            DWORD got = 0;
+            if (!ReadFile (h, tmp, want, &got, nullptr) || got == 0)
+                return;
+            dest.append (tmp, (size_t) got);
+        }
+    };
+
     int rc = -1;
     bool killed = false;
+    uint32_t lastPoll = juce::Time::getMillisecondCounter ();
     for (;;)
     {
-        const DWORD w = WaitForSingleObject (pi.hProcess, 200);
+        const DWORD w = WaitForSingleObject (pi.hProcess, 20);
+        drain (outR, outBytes);
+        drain (errR, errBytes);
         if (w == WAIT_OBJECT_0) break;
+        const uint32_t now = juce::Time::getMillisecondCounter ();
+        if (now - lastPoll < 200) continue;
+        lastPoll = now;
         if (shouldContinue != nullptr && !shouldContinue ())
         {
             TerminateProcess (pi.hProcess, 1);
@@ -759,16 +809,11 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
     if (!killed)
         GetExitCodeProcess (pi.hProcess, (DWORD*) &rc);
 
-    auto drain = [] (HANDLE h, juce::String* dest)
-    {
-        if (dest == nullptr || h == INVALID_HANDLE_VALUE) return;
-        char tmp[8192];
-        DWORD got = 0;
-        while (ReadFile (h, tmp, sizeof (tmp), &got, nullptr) && got > 0)
-            *dest += juce::String (tmp);   // UTF-8
-    };
-    drain (outR, outStdout);
-    drain (errR, outStderr);
+    // Whatever the child wrote just before exiting is still in the pipes.
+    drain (outR, outBytes);
+    drain (errR, errBytes);
+    if (outStdout != nullptr) *outStdout += juce::String::fromUTF8 (outBytes.data (), (int) outBytes.size ());
+    if (outStderr != nullptr) *outStderr += juce::String::fromUTF8 (errBytes.data (), (int) errBytes.size ());
 
     CloseHandle (outR);
     CloseHandle (errR);
@@ -787,11 +832,27 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
 {
     int outp[2] = { -1, -1 };
     int errp[2] = { -1, -1 };
-    if (pipe (outp) != 0 || pipe (errp) != 0) return false;
+    if (pipe (outp) != 0) return false;
+    if (pipe (errp) != 0) { close (outp[0]); close (outp[1]); return false; }
+
+    // Build argv before fork(): only async-signal-safe calls are allowed in
+    // the child of a multi-threaded process (no malloc / strdup there).
+    std::vector<std::string> argStore;
+    argStore.push_back (cmd);
+    for (const auto& a : args)
+        argStore.push_back (a.toStdString ());
+    std::vector<char*> argv;
+    for (auto& a : argStore)
+        argv.push_back (a.data ());
+    argv.push_back (nullptr);
 
     const pid_t pid = fork ();
     if (pid < 0)
+    {
+        close (outp[0]); close (outp[1]);
+        close (errp[0]); close (errp[1]);
         return false;
+    }
 
     if (pid == 0)   // child
     {
@@ -799,26 +860,60 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
         dup2 (errp[1], STDERR_FILENO);
         close (outp[0]); close (outp[1]);
         close (errp[0]); close (errp[1]);
-
-        // Build a proper argv with heap-allocated strings that outlive execvp.
-        std::vector<char*> argv;
-        argv.push_back (strdup (cmd.c_str ()));
-        for (const auto& a : args)
-            argv.push_back (strdup (a.toRawUTF8 ()));
-        argv.push_back (nullptr);
-        execvp (cmd.c_str (), argv.data ());
+        execvp (argv[0], argv.data ());
         _exit (127);
     }
 
     close (outp[1]);
     close (errp[1]);
 
+    // Drain the pipes while the child runs (a child that fills a pipe would
+    // otherwise block forever while we wait for it to exit). Raw bytes are
+    // decoded once at the end so split UTF-8 sequences stay intact.
+    std::string outBytes, errBytes;
+    bool outOpen = true, errOpen = true;
+    auto pump = [&] (int timeoutMs)
+    {
+        struct pollfd fds[2];
+        int nfds = 0;
+        if (outOpen) { fds[nfds].fd = outp[0]; fds[nfds].events = POLLIN; fds[nfds].revents = 0; ++nfds; }
+        if (errOpen) { fds[nfds].fd = errp[0]; fds[nfds].events = POLLIN; fds[nfds].revents = 0; ++nfds; }
+        if (nfds == 0)
+        {
+            if (timeoutMs > 0) juce::Thread::sleep (timeoutMs);
+            return false;
+        }
+        if (poll (fds, (nfds_t) nfds, timeoutMs) <= 0)
+            return false;
+        bool gotData = false;
+        for (int i = 0; i < nfds; ++i)
+        {
+            if (fds[i].revents == 0) continue;
+            const bool isOut = fds[i].fd == outp[0];
+            char tmp[8192];
+            const ssize_t got = read (fds[i].fd, tmp, sizeof (tmp));
+            if (got > 0)
+            {
+                (isOut ? outBytes : errBytes).append (tmp, (size_t) got);
+                gotData = true;
+            }
+            else if (got == 0 || errno != EINTR)
+                (isOut ? outOpen : errOpen) = false;   // EOF / error
+        }
+        return gotData;
+    };
+
     int rc = -1;
     bool killed = false;
+    uint32_t lastPoll = juce::Time::getMillisecondCounter ();
     for (;;)
     {
+        pump (20);
         pid_t r = waitpid (pid, &rc, WNOHANG);
         if (r == pid) break;
+        const uint32_t now = juce::Time::getMillisecondCounter ();
+        if (now - lastPoll < 200) continue;
+        lastPoll = now;
         if (shouldContinue != nullptr && !shouldContinue ())
         {
             kill (pid, SIGTERM);
@@ -826,21 +921,15 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
             waitpid (pid, &rc, 0);
             break;
         }
-        juce::Thread::sleep (200);
     }
 
-    auto drain = [] (int fd, juce::String* dest)
-    {
-        if (dest == nullptr || fd < 0) return;
-        char tmp[8192];
-        ssize_t got = 0;
-        while ((got = read (fd, tmp, sizeof (tmp))) > 0)
-            *dest += juce::String (tmp);   // UTF-8
-    };
-    drain (outp[0], outStdout);
-    drain (errp[0], outStderr);
+    // Whatever the child wrote just before exiting is still in the pipes. Do
+    // not wait for EOF: a grandchild may still hold the write ends open.
+    while (pump (0)) {}
     close (outp[0]);
     close (errp[0]);
+    if (outStdout != nullptr) *outStdout += juce::String::fromUTF8 (outBytes.data (), (int) outBytes.size ());
+    if (outStderr != nullptr) *outStderr += juce::String::fromUTF8 (errBytes.data (), (int) errBytes.size ());
 
     if (WIFEXITED (rc)) rc = WEXITSTATUS (rc); else rc = -1;
     if (exitCodeOut != nullptr) *exitCodeOut = rc;
