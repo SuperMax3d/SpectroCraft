@@ -1,6 +1,7 @@
 # SpectroCraft console test application
 juce_add_console_app (SpectroCraftTests
     PRODUCT_NAME "SpectroCraftTests"
+    NEEDS_CURL ${SC_JUCE_NEEDS_CURL}   # Linux AI build only (see src/CMakeLists.txt)
 )
 
 target_sources (SpectroCraftTests
@@ -54,7 +55,7 @@ if (TARGET sc_openvino)
         ${CMAKE_SOURCE_DIR}/src/AI/DeepFilter.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/WhisperTranscribe.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/WhisperPipeline.cpp
-        ${CMAKE_SOURCE_DIR}/src/AI/WhisperRuntime.cpp   # dynamic loader for the prebuilt b5454 DLLs
+        ${CMAKE_SOURCE_DIR}/src/AI/WhisperRuntime.cpp   # run-time loader for the b5454 libraries (DLL / dylib / so)
         ${CMAKE_SOURCE_DIR}/src/NoiseSuppression.cpp)
     # Vendored whisper.cpp b5454 C API header (see src/CMakeLists.txt).
     target_include_directories (SpectroCraftTests PRIVATE ${CMAKE_SOURCE_DIR}/extern/whisper-b5454/include)
@@ -101,7 +102,7 @@ target_link_libraries (SpectroCraftTests
 target_compile_definitions (SpectroCraftTests
     PRIVATE
         JUCE_WEB_BROWSER=0
-        JUCE_USE_CURL=0
+        JUCE_USE_CURL=${SC_JUCE_USE_CURL}
         JUCE_MODAL_LOOPS_PERMITTED=1
         SC_TESTS_EXE=1
         SC_NO_AUDIO_DEVICE=1   # headless tests: no real output device
@@ -199,6 +200,10 @@ endif()
 set (SC_TEST_SHARDS ${SC_NCPU} CACHE STRING "Number of parallel unit-test processes registered with ctest")
 
 set (SC_TEST_CLAIM_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-claims")
+# AI model weights downloaded by the tests on macOS / Linux (see SC_MODELS_DIR
+# below); outside the build tree with -DSC_TEST_MODELS_DIR=<dir>.
+set (SC_TEST_MODELS_DIR "${CMAKE_BINARY_DIR}/test-models" CACHE PATH
+     "Model cache of the AI unit tests on macOS / Linux (SC_MODELS_DIR)")
 set (SC_TEST_ENV_COMMON
     "SC_TEST_DATA_DIR=${CMAKE_SOURCE_DIR}/tests/data"
     "SC_REQUIRE_TEST_DATA=1"
@@ -228,6 +233,14 @@ foreach (k RANGE 0 ${SC_LAST_SHARD})
         set (home "${CMAKE_CURRENT_BINARY_DIR}/test-home/shard${k}")
         file (MAKE_DIRECTORY "${home}")
         list (APPEND env "HOME=${home}")
+        if (TARGET sc_openvino)
+            # AI build: macOS resolves the per-user folders without $HOME, so
+            # the model and OpenVINO caches are redirected explicitly. Models
+            # are shared by the shards (downloads go to a per-process .part
+            # file, then an atomic rename) and kept between runs (CI cache).
+            list (APPEND env "SC_MODELS_DIR=${SC_TEST_MODELS_DIR}"
+                             "SC_OPENVINO_CACHE_DIR=${home}/openvino-cache")
+        endif()
     endif()
     add_test (NAME unit_tests_shard${k}
               COMMAND $<TARGET_FILE:SpectroCraft> --run-unit-tests)
@@ -249,6 +262,10 @@ if (NOT WIN32)
     set (home "${CMAKE_CURRENT_BINARY_DIR}/test-home/serial")
     file (MAKE_DIRECTORY "${home}")
     list (APPEND serial_env "HOME=${home}")
+    if (TARGET sc_openvino)
+        list (APPEND serial_env "SC_MODELS_DIR=${SC_TEST_MODELS_DIR}"
+                                "SC_OPENVINO_CACHE_DIR=${home}/openvino-cache")
+    endif()
 endif()
 add_test (NAME unit_tests_serial
           COMMAND $<TARGET_FILE:SpectroCraft> --run-unit-tests)

@@ -3,7 +3,9 @@ juce_add_gui_app (SpectroCraft
     PRODUCT_NAME "SpectroCraft"
     COMPANY_NAME "SpectroCraft"
     NEEDS_WEB_BROWSER FALSE
-    NEEDS_CURL FALSE
+    # libcurl only for the Linux AI build (HTTPS model downloads through
+    # juce::WebInputStream); everywhere else JUCE needs none.
+    NEEDS_CURL ${SC_JUCE_NEEDS_CURL}
 )
 
 target_sources (SpectroCraft
@@ -48,7 +50,8 @@ target_sources (SpectroCraft
 )
 
 # AI module (OpenVINO plumbing + model manager). Only compiled when the
-# OpenVINO runtime target exists (SPECTRO_ENABLE_AI=ON on Windows).
+# OpenVINO runtime target exists (SPECTRO_ENABLE_AI=ON: vendored DLLs on
+# Windows, cmake/ScAiRuntimes.cmake on macOS / Linux).
 if (TARGET sc_openvino)
     target_sources (SpectroCraft PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/OvRuntime.cpp
@@ -59,7 +62,7 @@ if (TARGET sc_openvino)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DeepFilter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperTranscribe.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperPipeline.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperRuntime.cpp   # dynamic loader for the prebuilt b5454 DLLs
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperRuntime.cpp   # run-time loader for the b5454 libraries (DLL / dylib / so)
         ${CMAKE_CURRENT_SOURCE_DIR}/NoiseSuppression.cpp)
     # Vendored whisper.cpp b5454 C API header (the binaries themselves are
     # loaded at runtime — see extern/whisper-b5454/README.md).
@@ -160,6 +163,6 @@ target_compile_definitions (SpectroCraft
     PRIVATE
         JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_WEB_BROWSER=0
-        JUCE_USE_CURL=0
+        JUCE_USE_CURL=${SC_JUCE_USE_CURL}
         JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SpectroCraft,JUCE_PRODUCT_NAME>"
 )

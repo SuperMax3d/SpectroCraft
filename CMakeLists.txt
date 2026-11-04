@@ -15,12 +15,23 @@ add_subdirectory(extern/soxr)
 # uses for its Change Tempo / Time Stretch effect.
 add_subdirectory(extern/soundtouch)
 
-# AI features (OpenVINO noise suppression, later Whisper). The OpenVINO runtime
-# is vendored in extern/OpenVINO; model weights are downloaded on first use and
-# never committed. Disable with -DSPECTRO_ENABLE_AI=OFF for a lean build.
-option(SPECTRO_ENABLE_AI "Build AI features (OpenVINO noise suppression)" ON)
+# AI features (OpenVINO noise suppression, whisper.cpp transcription). Windows:
+# the runtime DLLs are vendored (extern/OpenVINO, bin/Release). macOS / Linux:
+# the pinned OpenVINO 2024.6 archive and whisper.cpp b5454 are fetched and
+# verified at configure time (cmake/ScAiRuntimes.cmake). Model weights are
+# downloaded on first use and never committed. Disable with
+# -DSPECTRO_ENABLE_AI=OFF for a lean build.
+option(SPECTRO_ENABLE_AI "Build AI features (OpenVINO noise suppression, Whisper transcription)" ON)
+set(SC_JUCE_NEEDS_CURL FALSE)   # set to TRUE by ScAiRuntimes.cmake on Linux
 if (SPECTRO_ENABLE_AI AND WIN32)
     add_subdirectory(extern/OpenVINO)
+elseif (SPECTRO_ENABLE_AI AND (APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+    include(cmake/ScAiRuntimes.cmake)
+endif()
+if (SC_JUCE_NEEDS_CURL)
+    set(SC_JUCE_USE_CURL 1)
+else()
+    set(SC_JUCE_USE_CURL 0)
 endif()
 
 # FFmpeg (LGPL-2.1+) audio extraction for video containers (.mp4, .mkv, ...).

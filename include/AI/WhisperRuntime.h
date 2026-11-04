@@ -1,11 +1,14 @@
-// SpectroCraft — dynamic loader for the prebuilt whisper.cpp b5454 DLLs.
+// SpectroCraft — run-time loader for the whisper.cpp b5454 libraries.
 //
-// The official release binaries (see extern/whisper-b5454/README.md) are
-// loaded at runtime with LoadLibrary + GetProcAddress, so the executable is
-// built without compiling whisper.cpp/ggml into it and starts even when the
-// DLLs are missing (only transcription degrades). The C API struct layouts
-// come from the vendored b5454 header (include/whisper.h), which must match
-// the shipped binaries exactly.
+// Windows: the official release binaries (see extern/whisper-b5454/README.md)
+// are loaded with LoadLibrary + GetProcAddress. macOS / Linux: libwhisper and
+// libggml* are built from the same tag by cmake/ScAiRuntimes.cmake, shipped
+// next to the executable (Linux) or in the app bundle's Frameworks folder
+// (macOS), and loaded with dlopen + dlsym. Either way the executable is built
+// without compiling whisper.cpp/ggml into it and starts even when the
+// libraries are missing (only transcription degrades). The C API struct
+// layouts come from the vendored b5454 header (include/whisper.h), which must
+// match the shipped binaries exactly (checked at configure time off Windows).
 
 #pragma once
 
@@ -19,8 +22,8 @@ class WhisperRuntime {
 public:
     static WhisperRuntime& instance();
 
-    // Loads whisper.dll (next to the executable) and resolves every entry
-    // point. Idempotent; safe from multiple threads. Returns false with a
+    // Loads whisper.dll / libwhisper.dylib / libwhisper.so (see above) and
+    // resolves every entry point. Idempotent; safe from multiple threads. Returns false with a
     // human-readable message in *errOut when the DLL or a symbol is missing.
     bool load(std::string* errOut);
 

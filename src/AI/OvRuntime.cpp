@@ -49,8 +49,16 @@ namespace ai {
 
 OvRuntime& OvRuntime::instance()
 {
+#if defined(_WIN32)
     static OvRuntime rt;
     return rt;
+#else
+    // macOS / Linux: never destroyed. Run at exit, ~ov::Core unloads the CPU
+    // plugin after the plugin's own static objects are gone (libc++ aborts
+    // with "mutex lock failed" in the plugin). The OS reclaims everything.
+    static OvRuntime* rt = new OvRuntime ();
+    return *rt;
+#endif
 }
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -60,6 +68,15 @@ static juce::File cacheDirPath()
     auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                   .getChildFile ("SpectroCraft")
                   .getChildFile ("openvino-cache");
+#if !defined(_WIN32)
+    // macOS / Linux: SC_OPENVINO_CACHE_DIR=<absolute folder> replaces it (the
+    // unit tests set it; see SC_MODELS_DIR in ModelManager.cpp).
+    {
+        const juce::String env = juce::SystemStats::getEnvironmentVariable ("SC_OPENVINO_CACHE_DIR", {}).trim ();
+        if (env.isNotEmpty () && juce::File::isAbsolutePath (env))
+            dir = juce::File (env);
+    }
+#endif
 #if SC_TESTS_EXE
     // Keep unit tests away from the user's real cache.
     dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
@@ -99,6 +116,10 @@ bool OvRuntime::init(std::string* errOut)
         return false;
     }
 #endif
+    // macOS / Linux: libopenvino is linked normally (no delay-load); the build
+    // ships it with the CPU plugin, the IR frontend and oneTBB in the app
+    // (Contents/Frameworks, or next to the executable on Linux). OpenVINO
+    // finds the plugin and the frontend in the folder it was loaded from.
 
     try
     {

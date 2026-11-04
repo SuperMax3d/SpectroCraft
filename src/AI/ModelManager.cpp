@@ -15,6 +15,12 @@
     #define WIN32_LEAN_AND_MEAN
     #include <windows.h>
     #include <wininet.h>
+#else
+    #include <cerrno>
+    #include <cstring>
+    #include <memory>
+    #include <stdio.h>      // ::rename
+    #include <unistd.h>     // ::getpid
 #endif
 
 namespace sc { namespace ai {
@@ -148,6 +154,17 @@ std::string fileNameFor(const ModelFileSpec& f)
 
 juce::File defaultModelRoot()
 {
+#if !defined(_WIN32)
+    // macOS / Linux: SC_MODELS_DIR=<absolute folder> replaces the models root.
+    // The unit tests use it (ctest sets it, `--run-unit-tests` defaults it to a
+    // temp folder): on macOS the per-user folders are resolved without $HOME,
+    // so redirecting HOME alone would still fill the real ~/Library.
+    {
+        const juce::String env = juce::SystemStats::getEnvironmentVariable ("SC_MODELS_DIR", {}).trim ();
+        if (env.isNotEmpty () && juce::File::isAbsolutePath (env))
+            return juce::File (env);
+    }
+#endif
 #if SC_TESTS_EXE
     // Unit tests must never touch the user's real model cache. The isolated
     // folder is kept between runs so the AI tests do not re-download ~170 MB
@@ -290,6 +307,11 @@ int64_t ModelManager::freeDiskSpaceBytes(const juce::File& dir)
     if (GetDiskFreeSpaceExW (path.toWideCharPointer (),
                              &freeBytes, &totalBytes, &availBytes))
         return (int64_t) availBytes.QuadPart;
+#else
+    // statfs() of the folder (or of its closest existing parent).
+    const int64_t avail = dir.getBytesFreeOnVolume ();
+    if (avail > 0)
+        return avail;
 #endif
     return 0;   // unknown -> caller skips the check
 }
@@ -361,8 +383,9 @@ bool ModelManager::ensureInstalled(const ModelSpec& spec, ProgressFn onProgress,
 
 // ---------------------------------------------------------------------------
 // Downloading. Windows: blocking WinInet GET with redirect following, streamed
-// to <dest>.part while hashing, then renamed into place on success. Other
-// platforms: not supported in v1 (manual install instructions are shown).
+// to <dest>.part while hashing, then renamed into place on success. macOS /
+// Linux: the same contract on juce::WebInputStream (NSURLSession on macOS,
+// libcurl on Linux).
 // ---------------------------------------------------------------------------
 
 #if defined(_WIN32)
@@ -534,14 +557,146 @@ bool ModelManager::downloadFile(const std::string& url, const juce::File& dest,
     return wininetGet (url, part, dest, expectedSha256, expectedSize, onProgress, errOut);
 }
 
-#else   // non-Windows: v1 does not auto-download off Windows.
+#else   // macOS / Linux
 
-bool ModelManager::downloadFile(const std::string&, const juce::File&,
-                                const std::string&, int64_t, ProgressFn, std::string* errOut)
+// Same guarantees as wininetGet above: final HTTP status checked (an error
+// page is never hashed), expected size and Content-Length enforced, streamed
+// to a .part file while hashing, SHA-256 verified, renamed into place only
+// when everything matched, cancellation through onProgress, 60 s timeouts.
+static bool webStreamGet(const std::string& url, const juce::File& destPart,
+                         const juce::File& finalDest,
+                         const std::string& expectedSha256, int64_t expectedSize,
+                         ModelManager::ProgressFn onProgress, std::string* errOut)
 {
-    if (errOut) *errOut = "Automatic model download is only supported on Windows in v1. "
-        "Download the files manually into the models folder.";
-    return false;
+    juce::WebInputStream in (juce::URL (juce::String (url)), false);
+    // Hugging Face "resolve" URLs redirect to their CDN. The timeout covers the
+    // connection and, through libcurl's low-speed limit / NSURLSession's idle
+    // timeout, a transfer that stalls.
+    in.withConnectionTimeout (60000)
+      .withNumRedirectsToFollow (10)
+      .withExtraHeaders ("User-Agent: SpectroCraft");
+
+    if (!in.connect (nullptr))
+    {
+        if (errOut) *errOut = "HTTP request failed (no network connection?).";
+        return false;
+    }
+
+    // Final status after redirects.
+    const int status = in.getStatusCode ();
+    if (status < 200 || status > 299)
+    {
+        if (errOut) *errOut = "download failed: HTTP " + std::to_string (status)
+                              + " (no internet access, a proxy or a captive portal?).";
+        return false;
+    }
+
+    // 0 = unknown (chunked responses): fall back to the registry size.
+    int64_t contentLength = (int64_t) in.getTotalLength ();
+    if (contentLength < 0) contentLength = 0;
+    const int64_t totalBytes = contentLength > 0 ? contentLength : expectedSize;
+
+    destPart.deleteFile ();   // FileOutputStream opens in append mode
+    Sha256 digest;
+    int64_t got = 0;
+    bool ok = false, cancelled = false, openFailed = false, transferError = false;
+    {
+        juce::FileOutputStream out (destPart);
+        if (!out.failedToOpen ())
+        {
+            // On the heap: macOS worker threads have small stacks.
+            constexpr int bufSize = 1 << 18;
+            std::unique_ptr<char[]> buf (new char[(size_t) bufSize]);
+
+            while (!cancelled)
+            {
+                const int nRead = in.read (buf.get (), bufSize);
+                if (nRead < 0)
+                {
+                    transferError = true;
+                    break;
+                }
+                if (nRead == 0)
+                {
+                    // End of the body, or a network error (libcurl reports it
+                    // here; NSURLSession ends the stream early, which the size
+                    // checks below catch).
+                    if (in.isError ())
+                        transferError = true;
+                    break;
+                }
+
+                if (!out.write (buf.get (), (size_t) nRead))
+                    break;   // caught by the on-disk size check below
+                digest.update ((const unsigned char*) buf.get (), (size_t) nRead);
+                got += (int64_t) nRead;
+
+                float frac = totalBytes > 0 ? (float) ((double) got / (double) totalBytes) : 1.0f;
+                if (frac > 1.0f) frac = 1.0f;
+                if (onProgress && !onProgress (frac, "downloading…"))
+                    cancelled = true;
+            }
+
+            out.flush ();   // closed when this block ends, before any rename
+        }
+        else
+        {
+            openFailed = true;
+        }
+    }
+
+    if (openFailed)
+    {
+        if (errOut) *errOut = "Could not write to the models folder.";
+    }
+    else if (!cancelled)
+    {
+        char msg [160];
+        if (transferError)
+        {
+            std::snprintf (msg, sizeof (msg), "The download was interrupted after %lld bytes (network error).",
+                           (long long) got);
+            if (errOut) *errOut = msg;
+        }
+        else if (destPart.getSize () != got)
+        {
+            if (errOut) *errOut = "Could not write the whole file to the models folder (disk full?).";
+        }
+        else if ((contentLength > 0 && got != contentLength) || (expectedSize > 0 && got != expectedSize))
+        {
+            std::snprintf (msg, sizeof (msg), "Downloaded size mismatch (%lld of %lld bytes).",
+                           (long long) got, (long long) (expectedSize > 0 ? expectedSize : contentLength));
+            if (errOut) *errOut = msg;
+        }
+        else if (!expectedSha256.empty () && digest.hexDigest () != expectedSha256)
+        {
+            if (errOut) *errOut = "SHA-256 mismatch: the downloaded file does not match the expected checksum.";
+        }
+        else
+        {
+            // rename(2) replaces an existing file atomically: another process
+            // checking the model never sees it missing or half-written.
+            ok = ::rename (destPart.getFullPathName ().toRawUTF8 (),
+                           finalDest.getFullPathName ().toRawUTF8 ()) == 0;
+            if (!ok && errOut)
+                *errOut = std::string ("Could not move the downloaded file into place (")
+                          + std::strerror (errno) + ").";
+        }
+    }
+
+    if (!ok) destPart.deleteFile ();
+    return ok;
+}
+
+bool ModelManager::downloadFile(const std::string& url, const juce::File& dest,
+                                const std::string& expectedSha256, int64_t expectedSize,
+                                ProgressFn onProgress, std::string* errOut)
+{
+    // One .part file per process: test shards (or two app instances) that
+    // download the same model at once never write into each other's file.
+    const juce::File part = dest.getSiblingFile (dest.getFileName () + "."
+                                                 + juce::String ((int) ::getpid ()) + ".part");
+    return webStreamGet (url, part, dest, expectedSha256, expectedSize, onProgress, errOut);
 }
 
 #endif

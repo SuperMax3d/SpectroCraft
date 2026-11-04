@@ -24,8 +24,15 @@ namespace {
 // 10–30 s; re-applying the effect afterwards should start instantly.
 std::map<std::string, std::unique_ptr<ai::DenseUnetModel>>& modelCache()
 {
+#if defined(_WIN32)
     static std::map<std::string, std::unique_ptr<ai::DenseUnetModel>> cache;
     return cache;
+#else
+    // Never destroyed, like the ov::Core (see OvRuntime::instance): compiled
+    // models released at exit would call into an already finalised plugin.
+    static auto* cache = new std::map<std::string, std::unique_ptr<ai::DenseUnetModel>> ();
+    return *cache;
+#endif
 }
 
 std::mutex& modelCacheMutex()
@@ -196,8 +203,14 @@ static bool runDenseUnetPipelineImpl(const std::string& modelId, const std::stri
 
 std::map<std::string, std::unique_ptr<ai::DeepFilter>>& dfModelCache()
 {
+#if defined(_WIN32)
     static std::map<std::string, std::unique_ptr<ai::DeepFilter>> cache;
     return cache;
+#else
+    // Never destroyed (see modelCache above).
+    static auto* cache = new std::map<std::string, std::unique_ptr<ai::DeepFilter>> ();
+    return *cache;
+#endif
 }
 
 ai::DeepFilter* getCachedDfModel(const std::string& modelId, const std::string& device,

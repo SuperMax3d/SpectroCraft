@@ -12005,7 +12005,7 @@ static void testAIPlumbing()
     root.deleteRecursively ();
 
     // --- OpenVINO runtime smoke test --------------------------------------
-#if !defined(_DEBUG)
+#if !(defined(_DEBUG) && defined(_MSC_VER))   // MSVC debug CRT only (see below)
     auto& rt = sc::ai::OvRuntime::instance ();
     const bool initOk = rt.init (&err);
     // Graceful skip when the OpenVINO runtime DLLs are not installed (the
@@ -15010,7 +15010,7 @@ static void testDenseUnetPipeline()
     CHECK (spec != nullptr, "denseunet registered in the model registry");
     if (!spec) return;
 
-#if defined(_DEBUG)
+#if defined(_DEBUG) && defined(_MSC_VER)
     // OpenVINO 2024.6 cannot be initialised under the MSVC debug CRT (see
     // testAIPlumbing); inference is therefore only exercised in Release.
     scSkip ("denseunet pipeline test: MSVC debug CRT");
@@ -15168,7 +15168,7 @@ static void testDeepFilterPipeline()
     CHECK (spec3 != nullptr, "deepfilternet3 registered in the model registry");
     if (!spec2 || !spec3) return;
 
-#if defined(_DEBUG)
+#if defined(_DEBUG) && defined(_MSC_VER)
     // OpenVINO 2024.6 cannot be initialised under the MSVC debug CRT.
     scSkip ("deepfilter pipeline test: MSVC debug CRT");
     return;

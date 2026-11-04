@@ -85,8 +85,8 @@ static bool writeFloatWav(const juce::File& file, int nchans, double rate,
     juce::FileOutputStream out (file);
     if (out.failedToOpen()) return false;
 
-    // This build is Windows-only (little-endian), so the native-order writers
-    // are already little-endian.
+    // AI builds target little-endian CPUs only (x86-64, arm64), so the
+    // native-order writers are already little-endian.
     auto w16 = [&out] (uint16_t v) { out.writeShort ((short) v); };
     auto w32 = [&out] (uint32_t v) { out.writeInt ((int) v); };
 
@@ -785,6 +785,19 @@ public:
             {
                 // Same isolation as SpectroCraftTests: never the user's real settings.
                 Application::useIsolatedSettingsStore (true);
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI && !defined(_WIN32)
+                // ... nor the user's real model / OpenVINO caches (macOS resolves
+                // ~/Library without $HOME). ctest passes its own folders; a run
+                // by hand uses the same temp folders as SpectroCraftTests,
+                // kept between runs so the weights are not downloaded again.
+                {
+                    const juce::File tmp = juce::File::getSpecialLocation (juce::File::tempDirectory);
+                    ::setenv ("SC_MODELS_DIR",
+                              tmp.getChildFile ("SpectroCraftTests-models").getFullPathName ().toRawUTF8 (), 0);
+                    ::setenv ("SC_OPENVINO_CACHE_DIR",
+                              tmp.getChildFile ("SpectroCraftTests-openvino-cache").getFullPathName ().toRawUTF8 (), 0);
+                }
+#endif
                 const int rc = scRunUnitTests();
                 std::cout << (rc == 0 ? "all unit tests passed\n" : "unit tests FAILED\n");
                 setApplicationReturnValue (rc == 0 ? 0 : 1);   // usable from scripts / CI

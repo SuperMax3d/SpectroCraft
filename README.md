@@ -1177,6 +1177,40 @@ the OpenVINO runtime exposes a GPU or NPU device it is used automatically
 Transcription always runs on CPU — ggml auto-selects an AVX2/AVX-512 backend
 for your microarchitecture at load time.
 
+### macOS and Linux builds
+
+On macOS (arm64 or x86_64) and Linux (Ubuntu 24.04 x86_64) the same option
+fetches the runtimes at configure time instead of using the Windows DLLs of
+`bin/Release` (`cmake/ScAiRuntimes.cmake`; nothing binary is committed):
+
+- **OpenVINO 2024.6.0** — Intel's official archive for the platform from
+  `storage.openvinotoolkit.org`, checked against its published SHA-256
+  (pinned in the CMake file). `-DSC_OPENVINO_DIR=<install>` uses an existing
+  OpenVINO 2024.6 installation instead (other distributions / architectures).
+- **whisper.cpp b5454** — source archive of the tagged commit (SHA-256
+  pinned), built as shared libraries in Release; its `whisper.h` / `ggml.h`
+  must be identical to the vendored ones in `extern/whisper-b5454/include`.
+  On Linux x86_64 it is built with one ggml CPU backend per micro-architecture,
+  like the Windows binaries.
+- The libraries the app needs (`libopenvino`, the CPU plugin, the IR
+  frontend, `libtbb`, `libwhisper`, `libggml*`) are copied into
+  `SpectroCraft.app/Contents/Frameworks` (macOS) or next to the `SpectroCraft`
+  executable (Linux, RPATH `$ORIGIN`); ship that folder with the binary.
+- `-DSC_AI_DOWNLOAD_DIR=<dir>` keeps the downloaded archives outside the build
+  tree (shared between build trees, CI cache).
+- Linux needs `libcurl4-openssl-dev` (models are downloaded with JUCE's libcurl
+  backend) in addition to JUCE's usual packages; macOS needs nothing more.
+- Models are stored in `~/Library/SpectroCraft/models` (macOS) or
+  `~/.config/SpectroCraft/models` (Linux). The unit tests use
+  `SC_MODELS_DIR` instead (ctest: `<build>/test-models`, a run of
+  `--run-unit-tests` by hand: the temp folder), so they never fill the real
+  profile.
+
+```
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPECTRO_ENABLE_AI=ON
+cmake --build build --target SpectroCraft
+```
+
 ### How it works
 
 - **Noise Suppression** (`Effects → Noise Suppression…`) processes the current

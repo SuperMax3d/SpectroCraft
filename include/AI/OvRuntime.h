@@ -6,6 +6,9 @@
 // but with /DELAYLOAD:openvino.dll so the executable starts even when the
 // runtime DLLs are missing. init() probes openvino.dll via LoadLibrary and
 // reports a clear error in that case — only the AI features degrade.
+// macOS / Linux: the official 2024.6 archive is fetched at configure time
+// (cmake/ScAiRuntimes.cmake), linked normally and its libraries are shipped
+// inside the app (Contents/Frameworks / next to the executable).
 //
 // When built with -DSPECTRO_ENABLE_AI=OFF this class degrades to a stub that
 // reports "AI disabled" — the rest of the app keeps working.
