@@ -81,3 +81,43 @@ jobs:
           name: ctest-logs-macos-debug
           path: build/Testing/Temporary/
           if-no-files-found: ignore
+
+  # Linux: lean Debug build (no AI / FFmpeg), tests under a virtual X display.
+  # JUCE's Linux dependencies: ALSA, FreeType/fontconfig, X11 extensions, GL.
+  linux-debug:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install JUCE dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build xvfb xauth \
+            libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev \
+            libxrandr-dev libxrender-dev libglu1-mesa-dev mesa-common-dev
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DSPECTRO_ENABLE_AI=OFF
+          -DSPECTRO_ENABLE_FFMPEG=OFF
+
+      - name: Build (Debug, app + fake recorder plugin)
+        run: cmake --build build --target SpectroCraft --parallel "$(nproc)"
+
+      - name: Unit tests (parallel shards, virtual display)
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build -j "$(nproc)" --output-on-failure
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-linux-debug
+          path: build/Testing/Temporary/
+          if-no-files-found: ignore
