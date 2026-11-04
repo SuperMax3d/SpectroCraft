@@ -43,6 +43,11 @@ public:
     // in SpectroCraftTests; SpectroCraft --run-unit-tests turns it on too, so
     // both executables run the suite against the same isolated settings.
     static void useIsolatedSettingsStore (bool on);
+    /** The per-process temp settings store used when isolation is on. */
+    static juce::File isolatedSettingsStoreFile();
+    /** Deletes the isolated store (no-op when isolation is off): the next
+        Application starts from default settings. */
+    static void resetIsolatedSettingsStore();
 
     // All loaded files. The active document is what the views and panels show.
     std::vector<std::unique_ptr<FileDoc>> docs;

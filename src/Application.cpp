@@ -56,6 +56,31 @@ void Application::useIsolatedSettingsStore (bool on)
     g_isolatedSettingsStore = on;
 }
 
+juce::File Application::isolatedSettingsStoreFile()
+{
+    // One store per test shard (SC_TEST_SHARD=k/n) so parallel test processes
+    // never share settings. Wiped once per process; the test runner also
+    // resets it before every test (resetIsolatedSettingsStore) so no test
+    // depends on settings left behind by an earlier one.
+    static const juce::File f = [] ()
+    {
+        const auto shard = juce::SystemStats::getEnvironmentVariable ("SC_TEST_SHARD", {})
+                               .upToFirstOccurrenceOf ("/", false, false).trim();
+        auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                        .getChildFile (shard.isEmpty() ? juce::String ("SpectroCraftTests.recent")
+                                                       : "SpectroCraftTests-shard" + shard + ".recent");
+        file.deleteFile();
+        return file;
+    } ();
+    return f;
+}
+
+void Application::resetIsolatedSettingsStore()
+{
+    if (g_isolatedSettingsStore)
+        isolatedSettingsStoreFile().deleteFile();
+}
+
 Application::Application (const juce::File& recentStorePath)
 {
     emptyEngine.setUndoManager (&emptyUndo);
@@ -89,20 +114,8 @@ Application::Application (const juce::File& recentStorePath)
     {
         // Tests must never read or write the user's real settings file: a GUI
         // session that left non-default values behind would otherwise change
-        // test outcomes. Use a fresh per-run temp store instead.
-        static juce::File isolatedStore = [] ()
-        {
-            // One store per test shard (SC_TEST_SHARD=k/n) so parallel test
-            // processes never share settings.
-            const auto shard = juce::SystemStats::getEnvironmentVariable ("SC_TEST_SHARD", {})
-                                   .upToFirstOccurrenceOf ("/", false, false).trim();
-            auto f = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                        .getChildFile (shard.isEmpty() ? juce::String ("SpectroCraftTests.recent")
-                                                       : "SpectroCraftTests-shard" + shard + ".recent");
-            if (f.existsAsFile()) f.deleteFile();
-            return f;
-        } ();
-        storePath = isolatedStore;
+        // test outcomes.
+        storePath = isolatedSettingsStoreFile();
     }
     else
         storePath = opts.getDefaultFile();

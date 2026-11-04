@@ -156,21 +156,75 @@ add_dependencies (SpectroCraftTests sc_fake_recorder)
 #    itself (see SC_TESTS_EXE in Application.cpp) - CI runners are disposable.
 # Run with: ctest --test-dir build -C <config> --output-on-failure
 # ---------------------------------------------------------------------------
-add_test (NAME unit_tests
-          COMMAND $<TARGET_FILE:SpectroCraft> --run-unit-tests)
+# The suite is split across SC_TEST_SHARDS processes (default: one per CPU
+# core, at most 8) that share the work dynamically through a claim folder
+# (SC_TEST_CLAIM_DIR, see scClaimTest in UnitTests.cpp). Tests that use the
+# clipboard, keyboard focus, the audio device or the single-instance pipe run
+# only in shard 0. Run them together with:  ctest --test-dir build -j <n>
+# A single-process run: -DSC_TEST_REGISTER_SERIAL=ON, then ctest -L serial.
+include (ProcessorCount)
+ProcessorCount (SC_NCPU)
+if (SC_NCPU LESS 1)
+    set (SC_NCPU 2)
+endif()
+if (SC_NCPU GREATER 8)
+    set (SC_NCPU 8)
+endif()
+set (SC_TEST_SHARDS ${SC_NCPU} CACHE STRING "Number of parallel unit-test processes registered with ctest")
 
-set (SC_TEST_ENV
+set (SC_TEST_CLAIM_DIR "${CMAKE_CURRENT_BINARY_DIR}/test-claims")
+set (SC_TEST_ENV_COMMON
     "SC_TEST_DATA_DIR=${CMAKE_SOURCE_DIR}/tests/data"
     "SC_REQUIRE_TEST_DATA=1"
     "SC_TEST_RECORDER_DIR=$<TARGET_FILE_DIR:SpectroCraftTests>/recorders")
-if (NOT WIN32)
-    set (SC_TEST_HOME "${CMAKE_CURRENT_BINARY_DIR}/test-home")
-    file (MAKE_DIRECTORY "${SC_TEST_HOME}")
-    list (APPEND SC_TEST_ENV "HOME=${SC_TEST_HOME}")
-endif()
 
-set_tests_properties (unit_tests PROPERTIES
+# Fixture: wipe the claim folder before the shards start.
+add_test (NAME unit_tests_claims_reset
+          COMMAND ${CMAKE_COMMAND} -E rm -rf "${SC_TEST_CLAIM_DIR}")
+add_test (NAME unit_tests_claims_mkdir
+          COMMAND ${CMAKE_COMMAND} -E make_directory "${SC_TEST_CLAIM_DIR}")
+set_tests_properties (unit_tests_claims_reset PROPERTIES FIXTURES_SETUP sc_claims_clean)
+set_tests_properties (unit_tests_claims_mkdir PROPERTIES FIXTURES_SETUP sc_claims
+                                                         FIXTURES_REQUIRED sc_claims_clean)
+
+math (EXPR SC_LAST_SHARD "${SC_TEST_SHARDS} - 1")
+foreach (k RANGE 0 ${SC_LAST_SHARD})
+    set (env ${SC_TEST_ENV_COMMON}
+        "SC_TEST_SHARD=${k}/${SC_TEST_SHARDS}"
+        "SC_TEST_CLAIM_DIR=${SC_TEST_CLAIM_DIR}")
+    if (NOT WIN32)
+        # Own HOME per shard: settings, recent files and model cache never collide.
+        set (home "${CMAKE_CURRENT_BINARY_DIR}/test-home/shard${k}")
+        file (MAKE_DIRECTORY "${home}")
+        list (APPEND env "HOME=${home}")
+    endif()
+    add_test (NAME unit_tests_shard${k}
+              COMMAND $<TARGET_FILE:SpectroCraft> --run-unit-tests)
+    set_tests_properties (unit_tests_shard${k} PROPERTIES
+        PASS_REGULAR_EXPRESSION "all unit tests passed"
+        FAIL_REGULAR_EXPRESSION "unit tests FAILED"
+        ENVIRONMENT "${env}"
+        FIXTURES_REQUIRED sc_claims
+        LABELS "unit;parallel"
+        TIMEOUT 1800)
+endforeach()
+
+# Whole suite in one process (slower; handy to rule out sharding effects).
+# Opt-in so a plain `ctest -j` does not run everything twice.
+option (SC_TEST_REGISTER_SERIAL "Also register unit_tests_serial (whole suite, one process)" OFF)
+if (SC_TEST_REGISTER_SERIAL)
+set (serial_env ${SC_TEST_ENV_COMMON})
+if (NOT WIN32)
+    set (home "${CMAKE_CURRENT_BINARY_DIR}/test-home/serial")
+    file (MAKE_DIRECTORY "${home}")
+    list (APPEND serial_env "HOME=${home}")
+endif()
+add_test (NAME unit_tests_serial
+          COMMAND $<TARGET_FILE:SpectroCraft> --run-unit-tests)
+set_tests_properties (unit_tests_serial PROPERTIES
     PASS_REGULAR_EXPRESSION "all unit tests passed"
     FAIL_REGULAR_EXPRESSION "unit tests FAILED"
-    ENVIRONMENT "${SC_TEST_ENV}"
+    ENVIRONMENT "${serial_env}"
+    LABELS "serial"
     TIMEOUT 3600)
+endif()

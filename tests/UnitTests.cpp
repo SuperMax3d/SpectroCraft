@@ -158,6 +158,31 @@ static juce::File makeTempFile (const juce::String& name)
 // machine or a coarse millisecond counter. Keep it above the panel's constant.
 static constexpr int kScThrottleWaitMs = 120;
 
+// ---------------- Condition waits ----------------
+// Pump the message loop until `cond` holds or `timeoutMs` elapsed; returns the
+// final value of `cond`. Use instead of fixed sleeps / fixed pump counts:
+// fast when the event arrives early, robust on a loaded machine (parallel
+// shards, CI) where a fixed 5-50 ms wait is a coin flip.
+static bool scPumpUntil (const std::function<bool()>& cond, int timeoutMs = 2000)
+{
+    const auto deadline = juce::Time::getMillisecondCounterHiRes() + timeoutMs;
+    for (;;)
+    {
+        if (cond()) return true;
+        if (juce::Time::getMillisecondCounterHiRes() >= deadline) return cond();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+    }
+}
+
+// Keyboard focus only reaches a component when this process is the
+// foreground application. Under ctest -j / CI / a busy desktop it usually is
+// not: tests that need real focus call this and scSkip() instead of failing
+// (and instead of waiting for ScModalDriver's 10 s timeout).
+static bool scHasForegroundFocus()
+{
+    return juce::Process::isForegroundProcess();
+}
+
 // ---------------- Modal dialog driver ----------------
 // Drives a synchronous modal dialog from the MESSAGE thread: a timer, fired
 // by the dialog's own nested runModalLoop(), polls every 20 ms and hands the
@@ -26393,7 +26418,7 @@ static void testActionsPanelPaint()
 // progress name contains one of the substrings (case-insensitive).
 // SC_TEST_SHARD=<k>/<n> (0 <= k < n) runs only every n-th selected test,
 // starting at k, so n processes can split the suite between them (ctest
-// registers one test per shard; run them with `ctest -j`).
+// registers one test per shard: run them with `ctest -j <n>`).
 static bool scTestSelected (const char* name)
 {
     static const juce::StringArray filters = [] {
@@ -26414,15 +26439,68 @@ static ScShard scTestShard()
     static const ScShard shard = [] {
         ScShard sh;
         const auto v = juce::SystemStats::getEnvironmentVariable ("SC_TEST_SHARD", {}).trim();
-        if (v.containsChar ('/'))
+        if (v.isEmpty())
+            return sh;
+        const int k = v.upToFirstOccurrenceOf ("/", false, false).getIntValue();
+        const int n = v.fromFirstOccurrenceOf ("/", false, false).getIntValue();
+        if (!v.containsChar ('/') || n <= 0 || k < 0 || k >= n)
         {
-            const int k = v.upToFirstOccurrenceOf ("/", false, false).getIntValue();
-            const int n = v.fromFirstOccurrenceOf ("/", false, false).getIntValue();
-            if (n > 0 && k >= 0 && k < n) { sh.index = k; sh.count = n; }
+            // A typo must not silently run the whole suite in every shard.
+            std::cerr << "SC_TEST_SHARD=\"" << v << "\" is invalid (expected k/n with 0 <= k < n)\n";
+            std::exit (2);
         }
+        sh.index = k; sh.count = n;
         return sh;
     }();
     return shard;
+}
+
+// Tests that use a desktop-wide resource (system clipboard, keyboard focus,
+// the single-instance pipe, the audio device, the user's log folder) must not
+// overlap with another process doing the same: they only ever run in shard 0,
+// one after the other.
+static bool scIsSerialTest (const char* name)
+{
+    static const char* const serial[] = {
+        "marker panel details", "curve analysis modes", "harmonic ratio + clear all",
+        "copy curve alt scales", "transcription clipboard", "tables panel", "paste live repro",
+        "change gain dialog", "drawing key shortcuts", "F5 refresh shortcut",
+        "single instance mode", "playback chain", "lazy audio init", "startup trace",
+        "regression: panels"
+    };
+    for (auto* s : serial)
+        if (juce::String (name) == s) return true;
+    return false;
+}
+
+// With several shards, SC_TEST_CLAIM_DIR=<dir> switches from a static
+// round-robin split to dynamic balancing: every shard walks the test list and
+// runs a test only if it is first to create <dir>/<index>.claim, so a shard
+// that drew cheap tests simply takes more of them. ctest wipes <dir> before
+// the shards start (tests/CMakeLists.txt).
+static bool scClaimTest (int index, const char* name)
+{
+    const auto shard = scTestShard();
+    if (shard.count <= 1)
+        return true;
+    if (scIsSerialTest (name))
+        return shard.index == 0;
+
+    static const juce::String claimDir =
+        juce::SystemStats::getEnvironmentVariable ("SC_TEST_CLAIM_DIR", {});
+    if (claimDir.isEmpty())
+        return (index % shard.count) == shard.index;
+
+    const auto path = juce::File (claimDir).getChildFile (juce::String (index) + ".claim")
+                          .getFullPathName();
+    // "wx": create exclusively, fails if another shard already claimed it.
+    if (FILE* f = std::fopen (path.toRawUTF8(), "wx"))
+    {
+        std::fputs (juce::String (shard.index).toRawUTF8(), f);
+        std::fclose (f);
+        return true;
+    }
+    return false;
 }
 
 struct ScTestTiming { std::string name; double seconds; int failed; };
@@ -26432,8 +26510,11 @@ static void scRunOneTest (const char* name, void (*fn)())
 {
     static int selectedIndex = 0;
     if (!scTestSelected (name)) return;
-    const auto shard = scTestShard();
-    if ((selectedIndex++ % shard.count) != shard.index) return;
+    if (!scClaimTest (selectedIndex++, name)) return;
+
+    // Every test starts from default settings: nothing a previous test saved
+    // (in this process) may change its outcome, whatever the shard layout.
+    Application::resetIsolatedSettingsStore();
 
     progress (name);
     auto* const mmBefore = juce::MessageManager::getInstanceWithoutCreating();
@@ -26466,7 +26547,10 @@ static void scReportTimings()
     for (size_t i = 0; i < sorted.size() && i < 15; ++i)
         std::cerr << "[time]   " << juce::String (sorted[i].seconds, 2) << " s  " << sorted[i].name << "\n";
 
-    const auto csvPath = juce::SystemStats::getEnvironmentVariable ("SC_TEST_TIMINGS", {});
+    auto csvPath = juce::SystemStats::getEnvironmentVariable ("SC_TEST_TIMINGS", {});
+    if (csvPath.isNotEmpty() && scTestShard().count > 1)   // one file per shard
+        csvPath = csvPath.upToLastOccurrenceOf (".", false, false) + "-shard"
+                  + juce::String (scTestShard().index) + ".csv";
     if (csvPath.isNotEmpty())
     {
         juce::String csv ("name,seconds,failed\n");
@@ -26690,13 +26774,13 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("masked gain + zero-out", testMaskedGainAndZero);
     SC_RUN_TEST ("masked edit mipmap refresh", testMaskedEditRebuildsMipmaps);
     SC_RUN_TEST ("extract masked A+B=orig", testExtractMasked);
-    SC_RUN_TEST ("split spectral selection (processor)", testSplitSpectralSelectionTrack1To2App);
-    testSplitSpectralSelectionTrack1To2MixesIntoExisting();
+    SC_RUN_TEST ("split spectral selection (track 1->2, app)", testSplitSpectralSelectionTrack1To2App);
+    SC_RUN_TEST ("split spectral selection (track 1->2 mixes into existing)", testSplitSpectralSelectionTrack1To2MixesIntoExisting);
     SC_RUN_TEST ("split configuration dialog", testSplitConfigDialog);
     SC_RUN_TEST ("configured split multi-pair + undo", testSplitSpectralSelectionConfiguredMulti);
-    testSplitSpectralSelectionProcessor();
-    testSplitSpectralSelectionEdgeFade();
-    testSplitSpectralSelectionExtentBounds();
+    SC_RUN_TEST ("split spectral selection (processor)", testSplitSpectralSelectionProcessor);
+    SC_RUN_TEST ("split spectral selection (edge fade)", testSplitSpectralSelectionEdgeFade);
+    SC_RUN_TEST ("split spectral selection (extent bounds)", testSplitSpectralSelectionExtentBounds);
     SC_RUN_TEST ("split spectral selection (app + undo)", testSplitSpectralSelectionApp);
     SC_RUN_TEST ("split view refresh", testSplitSpectralSelectionViewRefresh);
     SC_RUN_TEST ("playback mask streaming", testPlaybackMaskStreaming);
