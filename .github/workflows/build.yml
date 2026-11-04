@@ -1,0 +1,42 @@
+# Windows build + unit tests.
+#
+# Lean build (-DSPECTRO_ENABLE_AI=OFF): the AI tests download model weights on
+# first use, which a CI runner should not depend on. Every other dependency
+# (JUCE, SoXR, SoundTouch, FFmpeg) is vendored under extern/.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DSPECTRO_ENABLE_AI=OFF
+
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel
+
+      # Runs SpectroCraft.exe --run-unit-tests (registered in tests/CMakeLists.txt).
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 3600
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-log
+          path: build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore

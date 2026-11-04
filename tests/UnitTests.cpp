@@ -66,6 +66,40 @@ static int total = 0;
 #define CHECK(cond, name) \
     do { ++total; if (!(cond)) { ++failures; std::cout << "FAIL: " << name << "\n"; } } while (0)
 
+// ---------------- Skipped tests ----------------
+// Every test (or part of one) that cannot run here is recorded, printed as
+// "SKIP: ..." and listed again in the final summary, so a run that silently
+// exercised less than usual is visible.
+static juce::StringArray skippedTests;
+
+static void scSkip (const juce::String& why)
+{
+    skippedTests.add (why);
+    std::cout << "SKIP: " << why << "\n";
+}
+
+// A tests/data fixture that could not be found. With SC_REQUIRE_TEST_DATA=1
+// (set by ctest, where the source tree is known) this is a failure: a
+// relocated binary must not report "all unit tests passed" without having
+// read the reference files.
+static void scMissingFixture (const juce::String& name)
+{
+    if (juce::SystemStats::getEnvironmentVariable ("SC_REQUIRE_TEST_DATA", {}) == "1")
+        CHECK (false, "test fixture tests/data/" + name + " not found");
+    else
+        scSkip ("test fixture tests/data/" + name + " not found");
+}
+
+// Extra recorder-plugin folder for the fake test plugin. CMake copies it next
+// to the console test binary (<SpectroCraftTests dir>/recorders); when the
+// suite runs from the app (--run-unit-tests) ctest points SC_TEST_RECORDER_DIR
+// there, so the fake plugin never has to be shipped beside the real app.
+static juce::File scTestRecorderDir ()
+{
+    const juce::String d = juce::SystemStats::getEnvironmentVariable ("SC_TEST_RECORDER_DIR", {});
+    return (d.isNotEmpty() && juce::File::isAbsolutePath (d)) ? juce::File (d) : juce::File();
+}
+
 // ---------------- Clipboard retry helpers ----------------
 // In this VM the Windows clipboard can lag behind copyTextToClipboard() or be
 // briefly held by another process, in which case a write silently does nothing
@@ -99,6 +133,74 @@ static juce::File makeTempFile (const juce::String& name)
     return juce::File::getSpecialLocation (juce::File::tempDirectory)
         .getChildFile ("sc_test_" + juce::String (++counter) + "_" + name);
 }
+
+// The FFT analysis panel skips an expensive recompute requested within 60 ms
+// of the previous one (src/Panels.cpp, "now - lastComputeMs < 60"). Tests that
+// need the recompute wait this long: a 10 ms margin was too thin for a loaded
+// machine or a coarse millisecond counter. Keep it above the panel's constant.
+static constexpr int kScThrottleWaitMs = 120;
+
+// ---------------- Modal dialog driver ----------------
+// Drives a synchronous modal dialog from the MESSAGE thread: a timer, fired
+// by the dialog's own nested runModalLoop(), polls every 20 ms and hands the
+// currently modal component to 'act' until it returns true. Past the timeout
+// any component still modal is dismissed with exitModalState (0), so a dialog
+// that never gets what the test waits for (e.g. keyboard focus, which needs OS
+// foreground) fails its CHECKs instead of hanging the whole suite. Replaces
+// helper threads that read JUCE component state off the message thread and
+// left callAsync lambdas pointing at dead stack variables.
+class ScModalDriver : private juce::Timer
+{
+public:
+    explicit ScModalDriver (std::function<bool (juce::Component& modal)> actFn, int timeoutMs = 10000)
+        : act (std::move (actFn)),
+          deadline (juce::Time::getMillisecondCounter () + (juce::uint32) timeoutMs)
+    {
+        startTimer (20);
+    }
+
+    ~ScModalDriver () override { stopTimer (); }
+
+    // For dialogs that are not run synchronously by the triggering call:
+    // pump the message loop until 'act' succeeded or the timeout dismissed it.
+    void waitUntilDone ()
+    {
+        while (!didAct && !didTimeOut)
+            juce::MessageManager::getInstance ()->runDispatchLoopUntil (20);
+    }
+
+    bool acted () const noexcept    { return didAct; }
+    bool timedOut () const noexcept { return didTimeOut; }
+
+private:
+    void timerCallback () override
+    {
+        auto* m = juce::Component::getCurrentlyModalComponent ();
+        if (!didAct && m != nullptr && act (*m))
+        {
+            didAct = true;
+            return;   // keep ticking as a watchdog until the dialog has closed
+        }
+        if (didAct && m == nullptr)
+        {
+            stopTimer ();   // driven and closed: nothing left to watch
+            return;
+        }
+
+        if (juce::Time::getMillisecondCounter () >= deadline)
+        {
+            if (!didTimeOut)
+                std::cout << "  [timeout] modal dialog not driven in time - dismissing it\n";
+            didTimeOut = true;
+            if (m != nullptr)
+                m->exitModalState (0);
+        }
+    }
+
+    std::function<bool (juce::Component&)> act;
+    juce::uint32 deadline;
+    bool didAct = false, didTimeOut = false;
+};
 
 static float readOneSample (const AudioEngine& eng, int ch, int64_t pos)
 {
@@ -238,6 +340,60 @@ static void testScFftVsJuce()
         if (m > bestMag) { bestMag = m; best = b2; }
     }
     CHECK (std::abs (best - kTone) <= 1, "scfft tone peak on correct bin");
+}
+
+// ---------------- scfft vs double-precision reference DFT ----------------
+// Complex values (not just magnitudes: phase/sign/packing errors too) for every
+// power-of-two size from 16 to 4096, against a direct DFT in double precision.
+// Reports when the AVX2 kernel is not the one being exercised (Debug builds,
+// non-AVX2 CPUs), so a run that only tested the JUCE fallback is visible.
+static void testScFftVsReferenceDft()
+{
+    if (!scfft::hasAvx2 ())
+        scSkip ("scfft AVX2 kernel not exercised (no AVX2 or Debug build): JUCE fallback tested only");
+
+    const double twoPi = 2.0 * juce::MathConstants<double>::pi;
+    for (int order = 4; order <= 12; ++order)
+    {
+        const int N = 1 << order;
+        std::vector<float> x ((size_t) N * 2, 0.0f);
+        uint32_t seed = 0x9e3779b9u ^ (uint32_t) order;
+        for (int i = 0; i < N; ++i)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            x[(size_t) i] = (float) ((seed >> 8) / 8388608.0 - 1.0);
+        }
+        const std::vector<float> in (x.begin(), x.begin() + N);
+
+        scfft::realForward (x.data(), order);
+
+        // Twiddle table: exp(-2 pi i m / N) for m = (k * n) mod N.
+        std::vector<double> c ((size_t) N), sn ((size_t) N);
+        for (int m = 0; m < N; ++m)
+        {
+            c[(size_t) m]  = std::cos (twoPi * m / N);
+            sn[(size_t) m] = -std::sin (twoPi * m / N);
+        }
+
+        double maxErr = 0.0, maxMag = 1e-12;
+        int worst = -1;
+        for (int k = 0; k <= N / 2; ++k)
+        {
+            double re = 0.0, im = 0.0;
+            for (int n = 0; n < N; ++n)
+            {
+                const size_t m = (size_t) (((int64_t) k * n) & (N - 1));
+                re += in[(size_t) n] * c[m];
+                im += in[(size_t) n] * sn[m];
+            }
+            maxMag = std::max (maxMag, std::hypot (re, im));
+            const double err = std::hypot ((double) x[(size_t) k * 2] - re, (double) x[(size_t) k * 2 + 1] - im);
+            if (err > maxErr) { maxErr = err; worst = k; }
+        }
+        CHECK (maxErr < 1e-4 * maxMag,
+               "scfft N=" + juce::String (N) + " matches the reference DFT (re+im): worst bin "
+               + juce::String (worst) + " error " + juce::String (maxErr / maxMag) + " of peak");
+    }
 }
 
 // ---------------- Markers ----------------
@@ -1593,6 +1749,14 @@ static void testIndependentViews()
 // Locates a file inside tests/data/ by walking up from the executable.
 static juce::File findTestDataFile (const juce::String& name)
 {
+    // SC_TEST_DATA_DIR (set by ctest) names the fixture folder explicitly.
+    const juce::String dataDir = juce::SystemStats::getEnvironmentVariable ("SC_TEST_DATA_DIR", {});
+    if (dataDir.isNotEmpty() && juce::File::isAbsolutePath (dataDir))
+    {
+        const juce::File f = juce::File (dataDir).getChildFile (name);
+        if (f.existsAsFile())
+            return f;
+    }
     juce::File dir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
     for (int i = 0; i < 8 && dir != juce::File(); ++i)
     {
@@ -1602,7 +1766,15 @@ static juce::File findTestDataFile (const juce::String& name)
         dir = dir.getParentDirectory();
     }
     const juce::File cwd = juce::File::getCurrentWorkingDirectory().getChildFile ("tests/data/" + name);
-    return cwd.existsAsFile() ? cwd : juce::File();
+    if (cwd.existsAsFile())
+        return cwd;
+#ifdef SC_SOURCE_DIR
+    // Last resort: the source tree this binary was configured from.
+    const juce::File src = juce::File (SC_SOURCE_DIR).getChildFile ("tests/data/" + name);
+    if (src.existsAsFile())
+        return src;
+#endif
+    return juce::File();
 }
 
 static void testScrollBars()
@@ -1869,6 +2041,8 @@ static void testLoadMarkersFromWav()
             CHECK (std::abs (m.end - (8864.0 + 9085.0) / 44100.0) < 1e-9, "reference wav: region end exact");
         }
     }
+    else
+        scMissingFixture ("tone_1s_mono_marker_correct.wav");
 
     // A malformed RIFF must fail cleanly without crashing or inventing markers.
     const juce::File bad = findTestDataFile ("tone_1s_mono_marker_incorrect.wav");
@@ -1878,6 +2052,8 @@ static void testLoadMarkersFromWav()
         CHECK (!mm.loadFromWavFile (bad, 44100.0), "malformed wav: no markers recovered");
         CHECK (mm.count() == 0, "malformed wav: list stays empty");
     }
+    else
+        scMissingFixture ("tone_1s_mono_marker_incorrect.wav");
 
     // 2) Round-trip through our own writer: point + region markers with odd- and
     // even-length titles/comments.
@@ -1927,7 +2103,7 @@ static void testMarkerWavByteExact()
 {
     const juce::File ref = findTestDataFile ("tone_10s_stereo_correct.wav");
     if (!ref.existsAsFile())
-    { std::cout << "  (skipped: reference file not found)\n"; return; }
+    { scMissingFixture ("tone_10s_stereo_correct.wav"); return; }
 
     AudioEngine eng;
     MarkerManager mm;
@@ -2161,9 +2337,9 @@ static void testGdiRendererForced()
         CHECK (peer->getCurrentRenderingEngine() == 0,
                "top-level windows use the GDI software renderer (not Direct2D)");
     else
-        std::cerr << "  [skip] no peer created for test component\n";
+        scSkip ("rendering backend: no peer created for test component");
 #else
-    std::cerr << "  [skip] rendering backend test is Windows-only\n";
+    scSkip ("rendering backend test is Windows-only");
 #endif
 }
 
@@ -2731,8 +2907,8 @@ static void testPlaybackChain()
     const juce::String err = device.initialiseWithDefaultDevices (0, 2);
     if (!err.isEmpty() || device.getCurrentAudioDevice() == nullptr)
     {
-        std::cerr << "  [skip] no default audio output device"
-                  << (err.isEmpty() ? String() : (" (" + err + ")")) << "\n";
+        scSkip ("playback chain: no default audio output device"
+                + (err.isEmpty() ? juce::String() : (" (" + err + ")")));
         ::CoUninitialize();
         return;
     }
@@ -2741,7 +2917,8 @@ static void testPlaybackChain()
     const juce::File wav = findTestDataFile ("tone_10s_stereo.wav");
     if (!wav.existsAsFile() || !engine.loadFile (wav))
     {
-        std::cerr << "  [skip] tone_10s_stereo.wav not found\n";
+        if (!wav.existsAsFile()) scMissingFixture ("tone_10s_stereo.wav");
+        else CHECK (false, "playback chain: tone_10s_stereo.wav loads");
         ::CoUninitialize();
         return;
     }
@@ -2769,7 +2946,7 @@ static void testPlaybackChain()
     player.setSource (nullptr);
     ::CoUninitialize();
 #else
-    std::cerr << "  [skip] playback chain test is Windows-only\n";
+    scSkip ("playback chain test is Windows-only");
 #endif
 }
 
@@ -3001,7 +3178,7 @@ static void testSnapshotThirdOctaveOverlay()
     // The mode change clears the band cache; the recompute below would be
     // throttled if run within 60 ms of the first one (both regions are wider
     // than a single FFT window), so wait out the throttle before forcing it.
-    juce::Thread::sleep (70);
+    juce::Thread::sleep (kScThrottleWaitMs);
     view.recomputeIfNeeded();
 
     juce::Image img (juce::Image::ARGB, 320, 300, true);
@@ -3829,11 +4006,21 @@ static void testSpectralProbe()
     CHECK (app.openFile (wav), "open wav for probe test");
 
     SpectralEngine engine;
-    const Settings s = app.settings;   // default: 2048-point Hann, hop 512
+    // Pinned analysis settings (2048-point Hann, hop 512) rather than
+    // app.settings, which a persisted store could have changed.
+    Settings s;
+    s.fftSize = 2048; s.hopSize = 512; s.windowType = 1;
     const float peak = engine.probeMagnitude (app.audioEngine(), 0, 1.0, 400.0, s, 0);
     const float off  = engine.probeMagnitude (app.audioEngine(), 0, 1.0, 300.0, s, 0);
 
-    CHECK (peak > -35.0f && peak < -5.0f, "probe finds the 400 Hz tone");
+    // Level convention (spectral-dsp#W4): a sine of peak amplitude A reads
+    // 20*log10(A/sqrt 2) on its bin, i.e. RMS dB re full scale (-9.03 dB for
+    // A = 0.5). 400 Hz sits 0.4 bin off bin 102 (8 kHz / 2048), where the Hann
+    // scalloping loss is 0.906 dB: expected -9.94 dB. The tolerance catches any
+    // -6/-12 dB normalisation slip (window gain, one-sided factor, peak/RMS).
+    const float expected = (float) (20.0 * std::log10 (0.5 / std::sqrt (2.0))) - 0.906f;
+    CHECK (std::abs (peak - expected) < 0.25f,
+           "probe reads the 400 Hz tone at its calibrated level (-9.94 dB), got " + juce::String (peak, 2));
     CHECK (off < peak - 15.0f, "probe is much quieter off the tone frequency");
 }
 
@@ -4548,9 +4735,12 @@ static void testChangeGainDialog()
         delete w;
     }
 
-    // Full user flow: open the dialog, type "6", press Enter -> OK. A helper
-    // thread injects the keystrokes into the modal loop exactly like a user:
-    // '6' must replace the pre-selected "0.0" and Return must trigger OK.
+    // Full user flow: open the dialog, type "6", press Enter -> OK. A
+    // message-thread timer injects the keystrokes into the modal loop exactly
+    // like a user: '6' must replace the pre-selected "0.0" and Return must
+    // trigger OK. Without keyboard focus (no OS foreground) the driver gives
+    // up after its timeout and dismisses the dialog, so the CHECKs below fail
+    // instead of the modal loop blocking forever.
     {
         juce::AlertWindow* w = win->createGainDialog ();
         CHECK (w != nullptr, "gain dialog created for full-flow test");
@@ -4563,44 +4753,28 @@ static void testChangeGainDialog()
             w->enterModalState (false);
             if (ed != nullptr) ed->grabKeyboardFocus ();
 
-            std::atomic<bool> injected { false };
-            std::thread helper ([&]
+            ScModalDriver driver ([w] (juce::Component&)
             {
                 // Wait until the field actually has keyboard focus...
-                for (int i = 0; i < 500 && !injected.load(); ++i)
-                {
-                    auto* ed2 = dynamic_cast<juce::TextEditor*> (
-                        juce::Component::getCurrentlyFocusedComponent ());
-                    if (ed2 != nullptr)
-                    {
-                        // ...then type '6' and press Enter on the message thread.
-                        juce::MessageManager::callAsync ([&]
-                        {
-                            auto* e2 = static_cast<juce::TextEditor*> (
-                                juce::Component::getCurrentlyFocusedComponent ());
-                            if (e2 != nullptr)
-                            {
-                                // keyCode '6' with text character '6'.
-                                e2->keyPressed (juce::KeyPress ('6', {}, '6'));
-                                // Return is not consumed by the field, so in a
-                                // real event it bubbles to the window, whose
-                                // keyPressed() triggers the OK button; do that
-                                // same trigger here.
-                                if (auto* ok = w->getButton ("OK")) ok->triggerClick ();
-                            }
-                        });
-                        injected.store (true);
-                    }
-                    std::this_thread::sleep_for (std::chrono::milliseconds (20));
-                }
+                auto* e2 = dynamic_cast<juce::TextEditor*> (
+                    juce::Component::getCurrentlyFocusedComponent ());
+                if (e2 == nullptr)
+                    return false;
+
+                // ...then type '6' (keyCode '6' with text character '6').
+                e2->keyPressed (juce::KeyPress ('6', {}, '6'));
+                // Return is not consumed by the field, so in a real event it
+                // bubbles to the window, whose keyPressed() triggers the OK
+                // button; do that same trigger here.
+                if (auto* ok = w->getButton ("OK")) ok->triggerClick ();
+                return true;
             });
 
             const int result = w->runModalLoop ();
-            helper.join ();
             const juce::String text = w->getTextEditorContents ("gainDb");
             delete w;
 
-            CHECK (injected.load(), "helper thread found the focused field");
+            CHECK (driver.acted (), "the dialog's field received keyboard focus");
             CHECK (result == 1, "Enter submits the dialog via OK");
             CHECK (text.trim() == "6",
                    "typing replaced the pre-selected value instead of appending");
@@ -11586,7 +11760,7 @@ static void testAIPlumbing()
 #if defined(_WIN32)
     if (!initOk && !LoadLibraryA ("openvino.dll"))
     {
-        std::cerr << "  [OpenVINO runtime smoke test skipped: openvino.dll not installed]\n";
+        scSkip ("OpenVINO runtime smoke test: openvino.dll not installed");
         return;
     }
 #endif
@@ -11608,7 +11782,7 @@ static void testAIPlumbing()
     // (std::bad_alloc inside plugin discovery; verified with a standalone
     // repro). The AI plumbing is therefore smoke-tested in Release builds;
     // Debug builds exercise everything up to this point.
-    std::cerr << "  [OpenVINO runtime smoke test skipped: MSVC debug CRT]\n";
+    scSkip ("OpenVINO runtime smoke test: MSVC debug CRT");
 #endif
 }
 
@@ -14514,7 +14688,7 @@ static void testDenseUnetPipeline()
 #if defined(_DEBUG)
     // OpenVINO 2024.6 cannot be initialised under the MSVC debug CRT (see
     // testAIPlumbing); inference is therefore only exercised in Release.
-    std::cerr << "  [denseunet pipeline test skipped: MSVC debug CRT]\n";
+    scSkip ("denseunet pipeline test: MSVC debug CRT");
     return;
 #endif
 
@@ -14523,7 +14697,7 @@ static void testDenseUnetPipeline()
     // executable is delay-loaded and runs fine without them).
     if (!LoadLibraryA ("openvino.dll"))
     {
-        std::cerr << "  [denseunet pipeline test skipped: openvino.dll not installed]\n";
+        scSkip ("denseunet pipeline test: openvino.dll not installed");
         return;
     }
 #endif
@@ -14538,7 +14712,7 @@ static void testDenseUnetPipeline()
     {
         // Graceful skip: no network / non-Windows. The pipeline is still
         // compiled and linked; only the model weights are missing.
-        std::cerr << "  [denseunet pipeline test skipped: model unavailable (" << err << ")]\n";
+        scSkip ("denseunet pipeline test: model unavailable (" + juce::String (err) + ")");
         return;
     }
 
@@ -14671,7 +14845,7 @@ static void testDeepFilterPipeline()
 
 #if defined(_DEBUG)
     // OpenVINO 2024.6 cannot be initialised under the MSVC debug CRT.
-    std::cerr << "  [deepfilter pipeline test skipped: MSVC debug CRT]\n";
+    scSkip ("deepfilter pipeline test: MSVC debug CRT");
     return;
 #endif
 
@@ -14680,7 +14854,7 @@ static void testDeepFilterPipeline()
     // executable is delay-loaded and runs fine without them).
     if (!LoadLibraryA ("openvino.dll"))
     {
-        std::cerr << "  [deepfilter pipeline test skipped: openvino.dll not installed]\n";
+        scSkip ("deepfilter pipeline test: openvino.dll not installed");
         return;
     }
 #endif
@@ -14692,7 +14866,7 @@ static void testDeepFilterPipeline()
         [&cancelled] (float, const std::string&) { return !cancelled; }, &err);
     if (!installed)
     {
-        std::cerr << "  [deepfilter pipeline test skipped: model unavailable (" << err << ")]\n";
+        scSkip ("deepfilter pipeline test: model unavailable (" + juce::String (err) + ")");
         return;
     }
 
@@ -14837,7 +15011,7 @@ static void testWhisperPipeline()
 #if defined(_WIN32)
     if (!LoadLibraryA ("whisper.dll"))
     {
-        std::cerr << "  [whisper pipeline test skipped: whisper.dll not installed]\n";
+        scSkip ("whisper pipeline test: whisper.dll not installed");
         return;
     }
 #endif
@@ -14852,7 +15026,7 @@ static void testWhisperPipeline()
     if (!installed)
     {
         // Graceful skip: no network / non-Windows.
-        std::cerr << "  [whisper pipeline test skipped: model unavailable (" << err << ")]\n";
+        scSkip ("whisper pipeline test: model unavailable (" + juce::String (err) + ")");
         return;
     }
 
@@ -14937,7 +15111,7 @@ static void testBatchTranscribe()
 #if defined(_WIN32)
     if (!LoadLibraryA ("whisper.dll"))
     {
-        std::cerr << "  [batch transcribe skipped: whisper.dll not installed]\n";
+        scSkip ("batch transcribe: whisper.dll not installed");
         return;
     }
 #endif
@@ -14951,7 +15125,7 @@ static void testBatchTranscribe()
         [&cancelled] (float, const std::string&) { return !cancelled; }, &err);
     if (!installed)
     {
-        std::cerr << "  [batch transcribe skipped: model unavailable (" << err << ")]\n";
+        scSkip ("batch transcribe: model unavailable (" + juce::String (err) + ")");
         return;
     }
 
@@ -18740,6 +18914,7 @@ static void testPythonScripts()
     else
     {
         // No interpreter here: a missing executable must fail cleanly.
+        scSkip ("python scripts: end-to-end run (no Python interpreter found)");
         int rc = -1;
         CHECK (!sc::py::runProcess ("definitely_not_a_real_exe_xyz", {},
                                     [] { return true; }, &rc),
@@ -18938,6 +19113,41 @@ static std::vector<AudioEngine::MipLevel> scRefMips (const std::vector<std::vect
     return out;
 }
 
+// Compares one mipmap level against the reference: shapes first (channel
+// count + per-channel block count), then every value. Any mismatch returns
+// false with a description of the first difference; b is never indexed past
+// its own size.
+static bool scMipLevelEqual (const AudioEngine::MipLevel& a, const AudioEngine::MipLevel& b,
+                             juce::String& firstDiff)
+{
+    if (a.min.size() != b.min.size() || a.max.size() != b.max.size() || b.min.size() != b.max.size())
+    {
+        firstDiff = "channel count " + juce::String ((int64_t) a.min.size()) + " vs "
+                  + juce::String ((int64_t) b.min.size());
+        return false;
+    }
+    for (size_t ch = 0; ch < b.min.size(); ++ch)
+    {
+        if (a.min[ch].size() != b.min[ch].size() || a.max[ch].size() != b.max[ch].size()
+            || b.min[ch].size() != b.max[ch].size())
+        {
+            firstDiff = "ch " + juce::String ((int64_t) ch) + " block count "
+                      + juce::String ((int64_t) a.min[ch].size()) + " vs "
+                      + juce::String ((int64_t) b.min[ch].size());
+            return false;
+        }
+        for (size_t i = 0; i < b.min[ch].size(); ++i)
+            if (a.min[ch][i] != b.min[ch][i] || a.max[ch][i] != b.max[ch][i])
+            {
+                firstDiff = "ch " + juce::String ((int64_t) ch) + " block " + juce::String ((int64_t) i)
+                          + ": min " + juce::String (a.min[ch][i]) + " vs " + juce::String (b.min[ch][i])
+                          + ", max " + juce::String (a.max[ch][i]) + " vs " + juce::String (b.max[ch][i]);
+                return false;
+            }
+    }
+    return true;
+}
+
 static void scCheckMips (const AudioEngine& eng, const std::vector<std::vector<float>>& chs,
                          const char* what)
 {
@@ -18952,13 +19162,45 @@ static void scCheckMips (const AudioEngine& eng, const std::vector<std::vector<f
         const auto& b = ref[li];
         CHECK (a.factor == b.factor, juce::String (what) + ": level factor");
 
-        bool same = true;
-        for (int ch = 0; ch < (int) b.min.size() && same; ++ch)
-            for (size_t i = 0; i < a.min[ch].size(); ++i)
-                if (a.min[ch][i] != b.min[ch][i] || a.max[ch][i] != b.max[ch][i])
-                    break;
-        CHECK (same, juce::String (what) + ": level values bit-exact");
+        juce::String firstDiff;
+        const bool same = scMipLevelEqual (a, b, firstDiff);
+        CHECK (same, juce::String (what) + ": level values bit-exact (factor "
+                     + juce::String (b.factor) + ", " + firstDiff + ")");
     }
+}
+
+// The comparator behind "level values bit-exact" must actually be able to
+// fail: a single changed value, a missing tail block or a missing channel
+// all have to be reported (it used to break out of the loop without ever
+// clearing its result, so every level compared equal).
+static void testMipLevelComparator()
+{
+    AudioEngine::MipLevel ref;
+    ref.factor = 4;
+    ref.min = { { -0.5f, 0.0f, -0.25f }, { -1.0f, 0.0f, 0.0f } };
+    ref.max = { {  0.5f, 0.0f,  0.75f }, {  1.0f, 0.5f, 0.0f } };
+
+    juce::String diff;
+    CHECK (scMipLevelEqual (ref, ref, diff), "mip comparator: identical levels compare equal");
+
+    auto minDiff = ref;
+    minDiff.min[1][2] = -0.0001f;
+    CHECK (!scMipLevelEqual (minDiff, ref, diff), "mip comparator: one changed min value is reported");
+
+    auto maxDiff = ref;
+    maxDiff.max[0][0] = 0.50001f;
+    CHECK (!scMipLevelEqual (maxDiff, ref, diff), "mip comparator: one changed max value is reported");
+
+    auto shortTail = ref;
+    shortTail.min[0].pop_back();
+    shortTail.max[0].pop_back();
+    CHECK (!scMipLevelEqual (shortTail, ref, diff), "mip comparator: missing tail block is reported");
+    CHECK (!scMipLevelEqual (ref, shortTail, diff), "mip comparator: extra tail block is reported");
+
+    auto oneChannel = ref;
+    oneChannel.min.pop_back();
+    oneChannel.max.pop_back();
+    CHECK (!scMipLevelEqual (oneChannel, ref, diff), "mip comparator: missing channel is reported");
 }
 
 static void testMipmapBitExact()
@@ -22289,7 +22531,7 @@ static void testRecorderPluginApi()
 {
     using namespace sc::rec;
     auto& host = RecorderHost::instance ();
-    host.scanPlugins ();   // idempotent; finds fake_rec.dll in exe/recorders
+    host.scanPlugins (scTestRecorderDir ());   // idempotent; finds fake_rec.dll in exe/recorders
 
     const Plugin* fake = host.findPlugin ("fake");
     CHECK (fake != nullptr, "fake recorder plugin discovered in <exe>/recorders");
@@ -22946,7 +23188,7 @@ static void testRecModes()
 static void testTransportRecordingMenu()
 {
     auto& host = sc::rec::RecorderHost::instance ();
-    host.scanPlugins ();
+    host.scanPlugins (scTestRecorderDir ());
 
     int piFake = -1;
     for (int i = 0; i < (int) host.plugins ().size (); ++i)
@@ -23074,7 +23316,7 @@ static void testZoomFitAutoMode()
     const double topQuiet = v.getDbTop();
     CHECK (topQuiet < -25.0 && topQuiet > -50.0, "quiet region fitted low");
 
-    juce::Thread::sleep (70);                 // defeat the expensive-recompute throttle
+    juce::Thread::sleep (kScThrottleWaitMs);                 // defeat the expensive-recompute throttle
     app.setSelection ({ 1.0, 2.0 });          // loud half: new selection auto-fits
     v.recomputeIfNeeded ();
     const double topLoud = v.getDbTop();
@@ -23085,7 +23327,7 @@ static void testZoomFitAutoMode()
     // --- Manual zoom disables it ----------------------------------------------
     v.userChangedDisplayRange ();
     CHECK (!v.zoomFitAuto (), "manual range change disables auto zoom-fit");
-    juce::Thread::sleep (70);
+    juce::Thread::sleep (kScThrottleWaitMs);
     app.setSelection ({ 0.0, 1.0 });          // back to the quiet half
     v.recomputeIfNeeded ();                   // fresh data is computed...
     CHECK (std::abs (v.getDbTop() - topLoud) < 0.01,
@@ -23105,19 +23347,19 @@ static void testZoomFitAutoMode()
         w.recomputeIfNeeded ();
         const double topLive = w.getDbTop();
 
-        juce::Thread::sleep (70);
+        juce::Thread::sleep (kScThrottleWaitMs);
         app.setSelection ({ 0.0, 1.0 });      // quiet half live (auto-fits down)
         w.recomputeIfNeeded ();
         const double topQuiet2 = w.getDbTop();
         CHECK (topQuiet2 < topLive - 15.0, "fit followed the quieter live region");
 
-        juce::Thread::sleep (70);
+        juce::Thread::sleep (kScThrottleWaitMs);
         app.setSelection ({ 1.0, 2.0 });      // loud half again: store + show it
         w.recomputeIfNeeded ();
         w.handleSnapshotClick (0);
         CHECK (w.snapshotShown (0), "loud snapshot stored and shown");
 
-        juce::Thread::sleep (70);
+        juce::Thread::sleep (kScThrottleWaitMs);
         app.setSelection ({ 0.0, 1.0 });      // quiet live data + loud stored curve
         w.recomputeIfNeeded ();               // auto-fit must include the stored curve
         CHECK (w.getDbTop() > topQuiet2 + 15.0,
@@ -23896,23 +24138,17 @@ static void testTablesOverlayAndPicker()
         panel.refresh();
 
         std::atomic<bool> picked { false };
-        std::thread helper ([&picked]
+        ScModalDriver driver ([&picked] (juce::Component& modal)
         {
-            for (int i = 0; i < 500 && !picked.load (); ++i)
-            {
-                juce::MessageManager::callAsync ([&picked]
-                {
-                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
-                        if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
-                            { dlg->selectForTest (7); dlg->okForTest (); picked.store (true); }
-                });
-                std::this_thread::sleep_for (std::chrono::milliseconds (20));
-            }
+            juce::Component* const m = &modal;
+            if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
+                { dlg->selectForTest (7); dlg->okForTest (); picked.store (true); }
+            return picked.load ();
         });
 
         const juce::MouseEvent dbl = mkMouse (panel, 10, 10, {}, 2);
         panel.simulateCellClick (1, 2, dbl);   // double-click on the colour square
-        helper.join ();
+        driver.waitUntilDone ();
 
         CHECK (picked.load (), "picker dialog was shown and a swatch applied");
         CHECK (d->tables[0].params[0].colorIndex == 7, "chosen preset colour stored");
@@ -24256,29 +24492,23 @@ static void testTablesSoloAndRename()
     // --- Rename a parameter through the prompt dialog -----------------------
     {
         std::atomic<bool> done { false };
-        std::thread helper ([&done]
+        ScModalDriver driver ([&done] (juce::Component& modal)
         {
-            for (int i = 0; i < 500 && !done.load (); ++i)
-            {
-                juce::MessageManager::callAsync ([&done]
-                {
-                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
-                        if (auto* aw = dynamic_cast<juce::AlertWindow*> (m))
-                            if (aw->getTitle () == "Rename Parameter")
-                                if (auto* ed = aw->getTextEditor ("name"))
-                                {
-                                    ed->setText ("beta2");
-                                    done.store (true);
-                                    aw->exitModalState (1);   // OK
-                                }
-                });
-                std::this_thread::sleep_for (std::chrono::milliseconds (20));
-            }
+            juce::Component* const m = &modal;
+            if (auto* aw = dynamic_cast<juce::AlertWindow*> (m))
+                if (aw->getTitle () == "Rename Parameter")
+                    if (auto* ed = aw->getTextEditor ("name"))
+                    {
+                        ed->setText ("beta2");
+                        done.store (true);
+                        aw->exitModalState (1);   // OK
+                    }
+            return done.load ();
         });
 
         panel.simulateCellClick (1, 3, mkMouse (panel, 10, 10, {}));   // select T1/alpha row
         panel.renamePrimaryParameter ();
-        helper.join ();
+        driver.waitUntilDone ();
 
         CHECK (done.load (), "rename dialog was shown");
         CHECK (d->tables[0].params[0].name == "beta2", "parameter renamed");
@@ -24287,29 +24517,23 @@ static void testTablesSoloAndRename()
     // --- Rename a table through the prompt dialog ---------------------------
     {
         std::atomic<bool> done { false };
-        std::thread helper ([&done]
+        ScModalDriver driver ([&done] (juce::Component& modal)
         {
-            for (int i = 0; i < 500 && !done.load (); ++i)
-            {
-                juce::MessageManager::callAsync ([&done]
-                {
-                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
-                        if (auto* aw = dynamic_cast<juce::AlertWindow*> (m))
-                            if (aw->getTitle () == "Rename Table")
-                                if (auto* ed = aw->getTextEditor ("name"))
-                                {
-                                    ed->setText ("T1x");
-                                    done.store (true);
-                                    aw->exitModalState (1);   // OK
-                                }
-                });
-                std::this_thread::sleep_for (std::chrono::milliseconds (20));
-            }
+            juce::Component* const m = &modal;
+            if (auto* aw = dynamic_cast<juce::AlertWindow*> (m))
+                if (aw->getTitle () == "Rename Table")
+                    if (auto* ed = aw->getTextEditor ("name"))
+                    {
+                        ed->setText ("T1x");
+                        done.store (true);
+                        aw->exitModalState (1);   // OK
+                    }
+            return done.load ();
         });
 
         panel.simulateCellClick (0, 3, mkMouse (panel, 10, 10, {}));   // select T1 row
         panel.renamePrimaryTable ();
-        helper.join ();
+        driver.waitUntilDone ();
 
         CHECK (done.load (), "table rename dialog was shown");
         CHECK (d->tables[0].name == "T1x", "table renamed");
@@ -24801,23 +25025,17 @@ static void testTablesColourPickerDialog()
     {
         const int c0 = d->tables[0].params[0].colorIndex;
         std::atomic<bool> shown { false };
-        std::thread helper ([&shown]
+        ScModalDriver driver ([&shown] (juce::Component& modal)
         {
-            for (int i = 0; i < 500 && !shown.load (); ++i)
-            {
-                juce::MessageManager::callAsync ([&shown]
-                {
-                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
-                        if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
-                            { shown.store (true); dlg->cancelForTest (); }
-                });
-                std::this_thread::sleep_for (std::chrono::milliseconds (20));
-            }
+            juce::Component* const m = &modal;
+            if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
+                { shown.store (true); dlg->cancelForTest (); }
+            return shown.load ();
         });
 
         const juce::MouseEvent dbl = mkMouse (panel, 10, 10, {}, 2);
         panel.simulateCellClick (1, 2, dbl);   // double-click on the colour square
-        helper.join ();
+        driver.waitUntilDone ();
 
         CHECK (shown.load (), "double-click opened the colour dialog");
         CHECK (d->tables[0].params[0].colorIndex == c0,
@@ -24828,40 +25046,34 @@ static void testTablesColourPickerDialog()
     {
         app.settings.tableCustomColours = { juce::Colour::fromRGB (10, 20, 30) };
         std::atomic<bool> done { false };
-        std::thread helper ([&done]
+        ScModalDriver driver ([&done] (juce::Component& modal)
         {
-            for (int i = 0; i < 500 && !done.load (); ++i)
+            juce::Component* const m = &modal;
+            if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
             {
-                juce::MessageManager::callAsync ([&done]
-                {
-                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
-                        if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
-                        {
-                            CHECK (dlg->selectedSwatch () == 0, "opens on the current colour");
-                            // Pick the custom swatch and edit its RGB in place...
-                            dlg->selectForTest (12);
-                            CHECK (dlg->swatchColourAt (12) == juce::Colour::fromRGB (10, 20, 30),
-                                  "custom swatch seeded from settings");
-                            dlg->setRgbForTest (50, 60, 70);
-                            // ...New copies it, Delete removes the copy again.
-                            dlg->newForTest ();
-                            CHECK (dlg->selectedSwatch () == 13
-                                  && dlg->swatchColourAt (13) == juce::Colour::fromRGB (50, 60, 70),
-                                  "New copies the selected swatch");
-                            dlg->deleteForTest ();
-                            CHECK (dlg->selectedSwatch () == 12,
-                                  "Delete falls back to the previous swatch");
-                            dlg->okForTest ();
-                            done.store (true);
-                        }
-                });
-                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+                CHECK (dlg->selectedSwatch () == 0, "opens on the current colour");
+                // Pick the custom swatch and edit its RGB in place...
+                dlg->selectForTest (12);
+                CHECK (dlg->swatchColourAt (12) == juce::Colour::fromRGB (10, 20, 30),
+                      "custom swatch seeded from settings");
+                dlg->setRgbForTest (50, 60, 70);
+                // ...New copies it, Delete removes the copy again.
+                dlg->newForTest ();
+                CHECK (dlg->selectedSwatch () == 13
+                      && dlg->swatchColourAt (13) == juce::Colour::fromRGB (50, 60, 70),
+                      "New copies the selected swatch");
+                dlg->deleteForTest ();
+                CHECK (dlg->selectedSwatch () == 12,
+                      "Delete falls back to the previous swatch");
+                dlg->okForTest ();
+                done.store (true);
             }
+            return done.load ();
         });
 
         const juce::MouseEvent dbl = mkMouse (panel, 10, 10, {}, 2);
         panel.simulateCellClick (1, 2, dbl);
-        helper.join ();
+        driver.waitUntilDone ();
 
         CHECK (done.load (), "picker dialog was shown");
         CHECK (d->tables[0].params[0].colorIndex == 12, "OK applied the custom swatch index");
@@ -24877,32 +25089,26 @@ static void testTablesColourPickerDialog()
         app.settings.tableCustomColours = { juce::Colour::fromRGB (1, 2, 3),
                                             juce::Colour::fromRGB (4, 5, 6) };
         std::atomic<bool> done { false };
-        std::thread helper ([&done]
+        ScModalDriver driver ([&done] (juce::Component& modal)
         {
-            for (int i = 0; i < 500 && !done.load (); ++i)
+            juce::Component* const m = &modal;
+            if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
             {
-                juce::MessageManager::callAsync ([&done]
-                {
-                    if (auto* m = juce::Component::getCurrentlyModalComponent ())
-                        if (auto* dlg = dynamic_cast<TablesColourDialog*> (m))
-                        {
-                            dlg->selectForTest (13);
-                            CHECK (dlg->swatchColourAt (13) == juce::Colour::fromRGB (4, 5, 6),
-                                  "second custom visible");
-                            dlg->resetForTest ();
-                            CHECK (dlg->selectedSwatch () < 12,
-                                  "Reset drops all customs and selects a default");
-                            dlg->cancelForTest ();
-                            done.store (true);
-                        }
-                });
-                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+                dlg->selectForTest (13);
+                CHECK (dlg->swatchColourAt (13) == juce::Colour::fromRGB (4, 5, 6),
+                      "second custom visible");
+                dlg->resetForTest ();
+                CHECK (dlg->selectedSwatch () < 12,
+                      "Reset drops all customs and selects a default");
+                dlg->cancelForTest ();
+                done.store (true);
             }
+            return done.load ();
         });
 
         const juce::MouseEvent dbl = mkMouse (panel, 10, 10, {}, 2);
         panel.simulateCellClick (1, 2, dbl);
-        helper.join ();
+        driver.waitUntilDone ();
 
         CHECK (done.load (), "picker dialog was shown");
         CHECK (app.settings.tableCustomColours.size () == 2, "cancel discards the Reset edit");
@@ -25611,25 +25817,21 @@ static void testSplitExecuteFirstRun()
     // (exits the modal loop with result 1, like clicking OK) so that closing
     // saves the default preset and then executes the split.
     std::atomic<bool> okClicked { false };
-    std::thread helper ([&okClicked]
-    {
-        for (int i = 0; i < 500 && !okClicked.load (); ++i)
+    {   // driver scoped: it must be gone before the MessageManager is deleted
+        ScModalDriver driver ([&okClicked] (juce::Component& modal)
         {
-            juce::MessageManager::callAsync ([&okClicked]
+            juce::Component* const m = &modal;
+            if (dynamic_cast<juce::AlertWindow*> (m) != nullptr)
             {
-                if (auto* m = juce::Component::getCurrentlyModalComponent ())
-                    if (dynamic_cast<juce::AlertWindow*> (m) != nullptr)
-                    {
-                        m->exitModalState (1);   // same as clicking OK
-                        okClicked.store (true);
-                    }
-            });
-            std::this_thread::sleep_for (std::chrono::milliseconds (20));
-        }
-    });
+                m->exitModalState (1);   // same as clicking OK
+                okClicked.store (true);
+            }
+            return okClicked.load ();
+        });
 
-    win->runSplitExecute ();
-    helper.join ();
+        win->runSplitExecute ();
+        driver.waitUntilDone ();
+    }
 
     CHECK (okClicked.load (), "configuration dialog was shown and closed");
     CHECK (d->splitConfigured, "document marked configured after closing");
@@ -26176,6 +26378,7 @@ static int scRunUnitTestsImpl()
     std::setvbuf (stdout, nullptr, _IONBF, 0);
     SC_RUN_TEST ("FFT", testFFT);
     SC_RUN_TEST ("scfft vs juce", testScFftVsJuce);
+    SC_RUN_TEST ("scfft vs reference dft", testScFftVsReferenceDft);
     SC_RUN_TEST ("markers", testMarkers);
     SC_RUN_TEST ("marker insert adj", testMarkerInsertionAdjust);
     SC_RUN_TEST ("marker csv", testMarkerCsvRoundTrip);
@@ -26259,6 +26462,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("axis pan + log ticks", testAxisPanAndLogTicks);
     SC_RUN_TEST ("time axis ticks", testTimeAxisTicks);
     SC_RUN_TEST ("time text formatting", testTimeFormatting);
+    SC_RUN_TEST ("mip level comparator", testMipLevelComparator);
     SC_RUN_TEST ("mipmap bit-exact", testMipmapBitExact);
     SC_RUN_TEST ("marker title clip", testMarkerTitleClipping);
     SC_RUN_TEST ("FFT view interactions", testFFTViewInteractions);
@@ -26465,6 +26669,12 @@ static int scRunUnitTestsImpl()
 
 
     std::cerr << (total - failures) << "/" << total << " checks passed\n";
+    if (!skippedTests.isEmpty())
+    {
+        std::cerr << skippedTests.size() << " test(s) or test part(s) skipped:\n";
+        for (auto& sk : skippedTests)
+            std::cerr << "  - " << sk << "\n";
+    }
     return failures == 0 ? 0 : 1;
 }
 

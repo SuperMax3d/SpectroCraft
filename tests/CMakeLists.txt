@@ -136,3 +136,41 @@ if (WIN32 AND TARGET sc_wasapi_recorder)
 endif()
 
 add_dependencies (SpectroCraftTests sc_fake_recorder)
+
+# ---------------------------------------------------------------------------
+# ctest: run the unit suite through the app's --run-unit-tests entry point
+# (the same code path users and the README document).
+#  - Pass/fail is decided from the summary line the app prints: the GUI exe
+#    does not (yet) return the suite's result as its process exit code, and a
+#    crash or hang never prints "all unit tests passed".
+#  - SC_TEST_DATA_DIR / SC_REQUIRE_TEST_DATA: the reference files in
+#    tests/data are found regardless of where the exe lives, and a missing one
+#    is a failure instead of a silently skipped test.
+#  - SC_TEST_RECORDER_DIR: the fake recorder plugin is loaded from the test
+#    binary's recorders/ folder; it is never copied next to the real app.
+#  - On macOS/Linux HOME is redirected to the build tree so the run cannot
+#    touch the user's real settings store (SpectroCraft.recent: recent files,
+#    recorded actions...) or model cache. On Windows the app resolves those
+#    through the shell folder API, which ignores the environment: there the
+#    suite still uses the real per-user store unless the app isolates it
+#    itself (see SC_TESTS_EXE in Application.cpp) - CI runners are disposable.
+# Run with: ctest --test-dir build -C <config> --output-on-failure
+# ---------------------------------------------------------------------------
+add_test (NAME unit_tests
+          COMMAND $<TARGET_FILE:SpectroCraft> --run-unit-tests)
+
+set (SC_TEST_ENV
+    "SC_TEST_DATA_DIR=${CMAKE_SOURCE_DIR}/tests/data"
+    "SC_REQUIRE_TEST_DATA=1"
+    "SC_TEST_RECORDER_DIR=$<TARGET_FILE_DIR:SpectroCraftTests>/recorders")
+if (NOT WIN32)
+    set (SC_TEST_HOME "${CMAKE_CURRENT_BINARY_DIR}/test-home")
+    file (MAKE_DIRECTORY "${SC_TEST_HOME}")
+    list (APPEND SC_TEST_ENV "HOME=${SC_TEST_HOME}")
+endif()
+
+set_tests_properties (unit_tests PROPERTIES
+    PASS_REGULAR_EXPRESSION "all unit tests passed"
+    FAIL_REGULAR_EXPRESSION "unit tests FAILED"
+    ENVIRONMENT "${SC_TEST_ENV}"
+    TIMEOUT 3600)
