@@ -581,7 +581,7 @@ std::string buildCueChunkPayload(const std::vector<Marker>& markers,
     auto startSampleOf = [&] (const Marker& m) -> uint32_t
     {
         return static_cast<uint32_t> (
-            std::clamp (std::llround (m.start * sampleRate), int64_t(0), totalSamples));
+            std::clamp<int64_t> ((int64_t) std::llround (m.start * sampleRate), int64_t(0), totalSamples));
     };
 
     std::string out;
@@ -611,7 +611,7 @@ std::string buildAdtlListPayload(const std::vector<Marker>& markers,
         if (m.end <= 0.0 || m.end <= m.start)
             return 0;   // point marker
         return static_cast<uint32_t> (
-            std::clamp (std::llround ((m.end - m.start) * sampleRate), int64_t(0), totalSamples));
+            std::clamp<int64_t> ((int64_t) std::llround ((m.end - m.start) * sampleRate), int64_t(0), totalSamples));
     };
 
     std::string out;
