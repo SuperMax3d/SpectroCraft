@@ -10,6 +10,36 @@
 #include "FileMeta.h"
 #include "UndoManager.h"
 
+/** FileDoc::metaDirty: a bool that also counts how often it was set. Every
+    assignment of true bumps a change counter, so an asynchronous save can
+    take a snapshot before it starts and, when it completes, clear the flag
+    only if nothing was modified meanwhile (clearIfUnchangedSince). Plain
+    `metaDirty = true/false` and `if (metaDirty)` keep working unchanged. */
+class MetaDirtyFlag
+{
+public:
+    MetaDirtyFlag& operator= (bool v) noexcept
+    {
+        if (v) ++changes;
+        dirty = v;
+        return *this;
+    }
+    operator bool() const noexcept { return dirty; }
+
+    /** Snapshot to take (message thread) before starting a background save. */
+    uint64_t changeCount() const noexcept { return changes; }
+
+    /** Clears the flag unless it was set again after `snapshot` was taken. */
+    void clearIfUnchangedSince (uint64_t snapshot) noexcept
+    {
+        if (changes == snapshot) dirty = false;
+    }
+
+private:
+    bool dirty = false;
+    uint64_t changes = 0;
+};
+
 /** Everything that belongs to one loaded audio file: its audio data, markers,
     edit history and the UI cursor/selection. Multiple FileDocs can be open at
     once; Application keeps track of which one is active. */
@@ -39,7 +69,8 @@ public:
     /** Raw payload of the source file's "bkdk" RIFF chunk, kept so WAV
         saves can preserve it byte-for-byte. Empty when the source had none.
         Loading a file with this chunk auto-calibrates `scale` to Pascal using
-        each channel's Calibration field (see src/FileDoc.cpp). */
+        each channel's Calibration field, when every channel has a readable
+        one (see src/FileDoc.cpp). */
     std::string originalBkdkPayload;
 
     // Named spectral selections (Selection panel). Persisted automatically with
@@ -115,8 +146,11 @@ public:
         calibrations, analysis settings, transcription) differs from what is
         on disk. Set by the mutation entry points; cleared whenever the
         metadata is written to disk (Save / Save As / Save Metadata /
-        storage-mode switch). load() ends with it false. */
-    bool metaDirty = false;
+        storage-mode switch). load() ends with it false. A background save
+        must not clear it with a plain `= false` (an edit made while it ran
+        would be marked clean): snapshot metaDirty.changeCount() before the
+        save and call metaDirty.clearIfUnchangedSince() when it completes. */
+    MetaDirtyFlag metaDirty;
 
     // Per-file copies of the session-wide display state, persisted with the
     // bundle (restored into the session when this doc becomes active).

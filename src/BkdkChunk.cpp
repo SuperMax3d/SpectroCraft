@@ -7,7 +7,7 @@
 namespace sc
 {
 
-double BkdkData::calibrationFor (int ch) const
+bool BkdkData::hasCalibrationFor (int ch) const
 {
     int g = -1;
     if (ch >= 0 && ch < static_cast<int> (channels.size()))
@@ -15,11 +15,19 @@ double BkdkData::calibrationFor (int ch) const
     else if (channels.size() == 1)
         g = 0;   // a single defined group applies to every channel
 
-    if (g < 0) return 1.0;   // no data for this channel: leave it unscaled
+    if (g < 0) return false;   // no data for this channel
 
     const juce::String& s = channels[static_cast<size_t> (g)][7];   // field #8
     const double v = s.trim().getDoubleValue();
-    return (std::isfinite (v) && v > 0.0) ? v : 1.0;
+    return std::isfinite (v) && v > 0.0;
+}
+
+double BkdkData::calibrationFor (int ch) const
+{
+    if (!hasCalibrationFor (ch)) return 1.0;   // leave it unscaled
+
+    const size_t g = (ch >= 0 && ch < static_cast<int> (channels.size())) ? static_cast<size_t> (ch) : 0;
+    return channels[g][7].trim().getDoubleValue();   // field #8
 }
 
 bool parseBkdkPayload (const std::string& payload, BkdkData& out)

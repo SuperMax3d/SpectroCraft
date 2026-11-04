@@ -77,6 +77,13 @@ void SpectralSelection::clear()
     shapeList.clear();
 }
 
+bool SpectralSelection::hasAdditiveShape() const
+{
+    for (const auto& s : shapeList)
+        if (!s.subtract) return true;
+    return false;
+}
+
 static void normaliseRect (double& t0, double& t1, double& f0, double& f1)
 {
     if (t0 > t1) std::swap (t0, t1);

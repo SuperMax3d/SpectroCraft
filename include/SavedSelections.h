@@ -26,7 +26,7 @@ juce::File savedSelectionsSidecarPath (const juce::File& audioFile);
 juce::String serialiseSavedSelections (const std::vector<SavedSpectralSelection>& list);
 
 // Parses the JSON produced by serialiseSavedSelections(). Returns false when
-// the text is not valid for this format; on success `out` is replaced with
-// the parsed list (empty list included).
+// the text is not valid for this format (`out` is then left empty); on
+// success `out` is replaced with the parsed list (empty list included).
 bool deserialiseSavedSelections (const juce::String& json,
                                  std::vector<SavedSpectralSelection>& out);

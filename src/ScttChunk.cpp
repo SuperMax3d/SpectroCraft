@@ -2,11 +2,13 @@
 
 #include "ScttChunk.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #include <juce_core/juce_core.h>
 
@@ -335,6 +337,32 @@ static bool readU32le(juce::InputStream& in, uint32_t* v)
     return true;
 }
 
+// Copies one chunk payload of `size` bytes from `in` to `out` through a fixed
+// 1 MiB buffer (constant memory whatever the chunk size), then writes the RIFF
+// word-alignment pad byte for odd sizes. The source's pad byte is skipped; a
+// pad missing at the very end of the file (a common writer bug) is tolerated.
+static bool copyChunkPayload(juce::InputStream& in, juce::OutputStream& out,
+                             int64_t size, std::vector<uint8_t>& buf)
+{
+    const size_t slice = (size_t) 1 << 20;
+    if (buf.size() < slice) buf.resize (slice);
+    int64_t done = 0;
+    while (done < size)
+    {
+        const int n = (int) std::min<int64_t> (size - done, (int64_t) slice);
+        const int got = in.read (buf.data(), n);
+        if (got <= 0) return false;   // truncated chunk
+        if (!out.write (buf.data(), (size_t) got)) return false;
+        done += got;
+    }
+    if ((size & 1) != 0)
+    {
+        if (!in.isExhausted ()) in.skipNextBytes (1);
+        if (!out.writeByte (0)) return false;
+    }
+    return true;
+}
+
 bool readRiffChunkPayload(const juce::File& wavFile, const char fourcc[4],
                           std::string& out, bool adtlList,
                           bool keepTrailingZeros)
@@ -353,7 +381,7 @@ bool readRiffChunkPayload(const juce::File& wavFile, const char fourcc[4],
     {
         char id [4];
         uint32_t size = 0;
-        if (!in.read (id, 4) || !readU32le (in, &size)) break;   // truncated header
+        if (in.read (id, 4) != 4 || !readU32le (in, &size)) break;   // truncated header
 
         bool match = std::memcmp (id, fourcc, 4) == 0;
         if (match && adtlList)
@@ -368,6 +396,12 @@ bool readRiffChunkPayload(const juce::File& wavFile, const char fourcc[4],
 
         if (match)
         {
+            // Never trust the declared size beyond the bytes actually left in
+            // the file: a corrupt or truncated chunk would otherwise allocate
+            // up to 4 GB here.
+            if ((int64_t) size > total - in.getPosition ()
+                || size > (uint32_t) std::numeric_limits<int>::max ())
+                return false;
             out.assign ((size_t) size, '\0');
             if (in.read (out.data (), size) != (int) size) return false;   // truncated payload
             if (!keepTrailingZeros)
@@ -441,7 +475,7 @@ bool replaceScttChunkInWav(const juce::File& wavFile, const std::string& json,
     {
         char fourcc [4];
         uint32_t size = 0;
-        if (!in.read (fourcc, 4) || !readU32le (in, &size)) { ok = false; break; }
+        if (in.read (fourcc, 4) != 4 || !readU32le (in, &size)) { ok = false; break; }
 
         // Payload plus its word-alignment pad byte.
         const int64_t padded = (int64_t) size + ((size & 1) ? 1 : 0);
@@ -454,21 +488,7 @@ bool replaceScttChunkInWav(const juce::File& wavFile, const std::string& json,
 
         out.write (fourcc, 4);
         out.writeInt ((int) size);
-        if (padded > 0)
-        {
-            buf.resize ((size_t) padded);
-            int64_t done = 0;
-            while (done < padded && ok)
-            {
-                // Copy in 1 MiB slices so the buffer stays small even for huge chunks.
-                int64_t n = padded - done;
-                if (n > (int64_t) (1 << 20)) n = (int64_t) (1 << 20);
-                const int got = in.read (buf.data() + (size_t) done, (int) n);
-                if (got <= 0) { ok = false; break; }
-                out.write (buf.data() + (size_t) done, (size_t) got);
-                done += got;
-            }
-        }
+        if (!copyChunkPayload (in, out, (int64_t) size, buf)) ok = false;
     }
 
     // Append the new SCTT chunk (payload word-aligned with a zero pad byte).
@@ -668,7 +688,7 @@ bool patchRiffChunks(const juce::File& wavFile,
     {
         char fourcc [4];
         uint32_t size = 0;
-        if (!in.read (fourcc, 4) || !readU32le (in, &size)) { ok = false; break; }
+        if (in.read (fourcc, 4) != 4 || !readU32le (in, &size)) { ok = false; break; }
 
         const int64_t padded = static_cast<int64_t> (size) + ((size & 1) ? 1 : 0);
 
@@ -699,20 +719,7 @@ bool patchRiffChunks(const juce::File& wavFile,
 
         out.write (fourcc, 4);
         out.writeInt ((int) size);
-        if (padded > 0)
-        {
-            buf.resize ((size_t) padded);
-            int64_t done = 0;
-            while (done < padded && ok)
-            {
-                int64_t n = padded - done;
-                if (n > static_cast<int64_t> (1 << 20)) n = static_cast<int64_t> (1 << 20);
-                const int got = in.read (buf.data() + (size_t) done, (int) n);
-                if (got <= 0) { ok = false; break; }
-                out.write (buf.data() + (size_t) done, (size_t) got);
-                done += got;
-            }
-        }
+        if (!copyChunkPayload (in, out, (int64_t) size, buf)) ok = false;
     }
 
     // Append the fresh chunks (payload word-aligned with a zero pad byte).

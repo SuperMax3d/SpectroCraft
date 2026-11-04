@@ -91,6 +91,12 @@ class SpectralSelection
 public:
     void clear();
     bool empty() const { return shapeList.empty(); }
+
+    // A subtractive shape only removes area from the shapes drawn before it,
+    // so a list holding only subtractive shapes is non-empty yet selects
+    // nothing. Callers that act on the selected area (gain edits, playback
+    // masks) should test this rather than !empty().
+    bool hasAdditiveShape() const;
     int count() const { return (int) shapeList.size(); }
     const std::vector<SpectralShape>& shapes() const { return shapeList; }
 

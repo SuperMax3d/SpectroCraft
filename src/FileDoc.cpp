@@ -119,6 +119,9 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
     // "bkdk" calibration chunk (if present): auto-calibrate to Pascal using
     // each channel's Calibration field. A single defined group applies to every
     // channel; the raw payload is kept so WAV saves preserve it byte-for-byte.
+    // The calibration is applied only when EVERY channel has a readable value:
+    // the 1.0 fallback would otherwise show dB-SPL figures for a fictitious
+    // 1 Pa full scale, so the scale loaded from the metadata stays in place.
     originalBkdkPayload.clear();
     if (isWav)
     {
@@ -131,17 +134,24 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
                 originalBkdkPayload = raw;
                 const int nch = engine.numChannels();
                 std::vector<double> vals ((size_t) nch);
+                bool allReadable = nch > 0;
                 for (int i = 0; i < nch; ++i)
+                {
                     vals[(size_t) i] = bk.calibrationFor (i);
+                    allReadable = allReadable && bk.hasCalibrationFor (i);
+                }
 
-                scale.unit = ScaleCalibration::Unit::Pascal;
-                bool same = true;
-                for (int i = 1; i < nch && same; ++i)
-                    if (vals[(size_t) i] != vals[0]) same = false;
-                scale.fullScaleValue = vals.empty() ? 1.0 : vals[0];
-                scale.channelFullScale.clear();
-                if (!same && vals.size() > 1)
-                    scale.channelFullScale = std::move (vals);
+                if (allReadable)
+                {
+                    scale.unit = ScaleCalibration::Unit::Pascal;
+                    bool same = true;
+                    for (int i = 1; i < nch && same; ++i)
+                        if (vals[(size_t) i] != vals[0]) same = false;
+                    scale.fullScaleValue = vals.empty() ? 1.0 : vals[0];
+                    scale.channelFullScale.clear();
+                    if (!same && vals.size() > 1)
+                        scale.channelFullScale = std::move (vals);
+                }
             }
         }
     }
