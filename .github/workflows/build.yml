@@ -45,6 +45,18 @@ jobs:
       - name: Unit tests (parallel shards)
         run: ctest --test-dir build -C Release -j $env:NUMBER_OF_PROCESSORS --output-on-failure
 
+      - name: Upload app (Windows x64, Release)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          # SpectroCraft.exe + FFmpeg DLLs + recorders/wasapi_recorder.dll.
+          # Lean build: no AI noise suppression / transcription (OpenVINO, whisper).
+          name: SpectroCraft-windows-x64
+          path: |
+            build/src/SpectroCraft_artefacts/Release/
+            !build/src/SpectroCraft_artefacts/Release/**/*.pdb
+          retention-days: 30
+
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -73,6 +85,19 @@ jobs:
 
       - name: Unit tests (parallel shards)
         run: ctest --test-dir build -j "$(sysctl -n hw.ncpu)" --output-on-failure
+
+      # tar first: upload-artifact zips drop the executable bit of the app.
+      - name: Package app (macOS arm64)
+        if: success()
+        run: tar -czf SpectroCraft-macos-arm64.tar.gz -C build/src/SpectroCraft_artefacts/Debug SpectroCraft.app
+
+      - name: Upload app (macOS arm64, Debug, unsigned)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpectroCraft-macos-arm64
+          path: SpectroCraft-macos-arm64.tar.gz
+          retention-days: 30
 
       - name: Upload test logs
         if: failure()
@@ -114,6 +139,18 @@ jobs:
 
       - name: Unit tests (parallel shards, virtual display)
         run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build -j "$(nproc)" --output-on-failure
+
+      - name: Package app (Linux x64)
+        if: success()
+        run: tar -czf SpectroCraft-linux-x64.tar.gz -C build/src/SpectroCraft_artefacts/Debug SpectroCraft
+
+      - name: Upload app (Linux x64, Debug)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpectroCraft-linux-x64
+          path: SpectroCraft-linux-x64.tar.gz
+          retention-days: 30
 
       - name: Upload test logs
         if: failure()
