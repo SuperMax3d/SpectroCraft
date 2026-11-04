@@ -109,7 +109,8 @@ jobs:
           -DSPECTRO_ENABLE_FFMPEG=OFF
 
       - name: Build (Debug, app + fake recorder plugin)
-        run: cmake --build build --target SpectroCraft --parallel "$(nproc)"
+        # -k 0: report every compile error of a first Linux build at once.
+        run: cmake --build build --target SpectroCraft --parallel "$(nproc)" -- -k 0
 
       - name: Unit tests (parallel shards, virtual display)
         run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build -j "$(nproc)" --output-on-failure

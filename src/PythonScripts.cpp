@@ -594,7 +594,7 @@ juce::String buildMetaJson (double sampleRate, int numChannels, double fileDurat
                             const std::vector<Marker>& markers)
 {
     auto root = new juce::DynamicObject ();
-    root->setProperty ("sampleRate",        (int64_t) sampleRate);
+    root->setProperty ("sampleRate",        (juce::int64) sampleRate);
     root->setProperty ("numChannels",       numChannels);
     root->setProperty ("fileDurationSec",   fileDurationSec);
     root->setProperty ("selectionStartSec", selectionSecs.getStart ());
@@ -611,7 +611,7 @@ juce::String buildMetaJson (double sampleRate, int numChannels, double fileDurat
         mj->setProperty ("start",   m.start);
         // Point markers have end == -1 in the sidecar format; keep that.
         // Region ends are seconds, like start: keep the fractional part.
-        mj->setProperty ("end",     (m.end < 0.0) ? juce::var ((int64_t) -1)
+        mj->setProperty ("end",     (m.end < 0.0) ? juce::var ((juce::int64) -1)
                                                    : juce::var (m.end));
         markerArray.add (juce::var (mj));
     }
