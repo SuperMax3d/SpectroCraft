@@ -39,6 +39,7 @@
 #include "SingleInstance.h"
 #include "StartupTrace.h"
 #include "MainWindow.h"
+#include "RuntimeDlls.h"
 #include "SpectralEngine.h"
 #include "PngWriter.h"
 #include "Settings.h"
@@ -133,6 +134,12 @@ public:
 
     void initialise (const juce::String& commandLine) override
     {
+#if defined (_WIN32)
+        // Bundled runtime DLLs live in the SpectroCraft subfolder next to this
+        // executable; add it to the process DLL search path before anything
+        // loads or delay-load-resolves one of them.
+        sc::setupRuntimeDllSearchPath();
+#endif
         try
         {
             initialiseInternal (commandLine);

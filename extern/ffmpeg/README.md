@@ -2,7 +2,9 @@
 
 A **minimal, audio-only, LGPL** build of [FFmpeg](https://ffmpeg.org) 7.1.1, vendored the same way as
 `extern/OpenVINO` and `extern/whisper-b5454`: headers + import libraries here, prebuilt DLLs in the
-repo's self-contained runtime folder `<repo>/bin/Release`, copied next to `SpectroCraft.exe` by CMake. It lets SpectroCraft read the audio track out of practically any
+repo's self-contained runtime folder `<repo>/bin/Release/SpectroCraft`, copied into a
+`SpectroCraft` subfolder next to `SpectroCraft.exe` by CMake (the app adds that folder
+to its DLL search path at startup; see `include/RuntimeDlls.h`). It lets SpectroCraft read the audio track out of practically any
 video (or audio) container. The integration lives in `src/VideoAudio.cpp`
 (a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample, registered after JUCE's
 basic formats so native files keep their usual readers); this folder makes the library available

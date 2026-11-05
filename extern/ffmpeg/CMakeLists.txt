@@ -25,8 +25,8 @@ else ()
 endif ()
 
 # Runtime DLLs (all four are required, they depend on each other). They live
-# in the repo's self-contained runtime folder, bin/Release.
-set(SC_FFMPEG_BIN_DIR ${CMAKE_SOURCE_DIR}/bin/Release)
+# in the repo's self-contained runtime folder, bin/Release/SpectroCraft.
+set(SC_FFMPEG_BIN_DIR ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft)
 set(SC_FFMPEG_DLLS
     ${SC_FFMPEG_BIN_DIR}/avformat-61.dll
     ${SC_FFMPEG_BIN_DIR}/avcodec-61.dll
@@ -43,16 +43,33 @@ function (sc_enable_ffmpeg tgt)
     target_compile_definitions(${tgt} PRIVATE SC_ENABLE_FFMPEG=1)
     target_link_libraries(${tgt} PRIVATE sc_ffmpeg)
 
+    # The four FFmpeg DLLs are direct imports of the executable, so they are
+    # delay-loaded (/DELAYLOAD): the process starts even when they are missing,
+    # and VideoAudio.cpp probes avformat-61.dll on first use for a graceful
+    # "video extraction unavailable" instead of a delay-load SEH abort. They
+    # are deployed into the same "SpectroCraft" subfolder next to the exe that
+    # sc::setupRuntimeDllSearchPath() (include/RuntimeDlls.h) adds to the DLL
+    # search path at startup; the exe-directory fallback keeps old flat layouts
+    # working.
+    set_property(TARGET ${tgt} APPEND PROPERTY LINK_OPTIONS
+        "/DELAYLOAD:avformat-61.dll"
+        "/DELAYLOAD:avcodec-61.dll"
+        "/DELAYLOAD:swresample-5.dll"
+        "/DELAYLOAD:avutil-59.dll")
+    target_link_libraries(${tgt} PRIVATE delayimp.lib)
+
     # The prebuilt DLLs live in the repo's self-contained runtime folder,
-    # bin/Release (the same folder that ships on GitHub with the app).
+    # bin/Release/SpectroCraft (the same layout that ships on GitHub with the app).
+    set(SC_RUNTIME_DLL_DIR $<TARGET_FILE_DIR:${tgt}>/SpectroCraft)
     add_custom_command(TARGET ${tgt} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${SC_RUNTIME_DLL_DIR}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/bin/Release/avformat-61.dll
-            ${CMAKE_SOURCE_DIR}/bin/Release/avcodec-61.dll
-            ${CMAKE_SOURCE_DIR}/bin/Release/swresample-5.dll
-            ${CMAKE_SOURCE_DIR}/bin/Release/avutil-59.dll
-            $<TARGET_FILE_DIR:${tgt}>
-        COMMENT "Copying FFmpeg (audio extraction) runtime DLLs next to ${tgt}")
+            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/avformat-61.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/avcodec-61.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/swresample-5.dll
+            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/avutil-59.dll
+            ${SC_RUNTIME_DLL_DIR}
+        COMMENT "Copying FFmpeg (audio extraction) runtime DLLs to the SpectroCraft folder next to ${tgt}")
 endfunction ()
 
 # Optional helper tool: sc_extract_audio.exe <video> <out.wav>  (see the C file).

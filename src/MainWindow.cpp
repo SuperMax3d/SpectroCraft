@@ -5860,7 +5860,7 @@ std::string sc::buildNsFailureDetails (const std::string& err, const std::string
                 ? "The OpenVINO runtime could not be loaded - its DLLs are missing."
                 : "openvino.dll loaded, but one of its companion DLLs is missing.";
             details += "\n\n" + prefix
-                       + " All four must sit in the same folder as SpectroCraft.exe:\n"
+                       + " All four must sit together in the SpectroCraft folder next to SpectroCraft.exe:\n"
                        "  openvino.dll\n"
                        "  openvino_intel_cpu_plugin.dll\n"
                        "  openvino_ir_frontend.dll\n"

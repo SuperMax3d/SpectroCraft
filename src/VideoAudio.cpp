@@ -12,6 +12,17 @@ extern "C" {
 #include <libswresample/swresample.h>
 }
 
+#if defined(_WIN32)
+    // JUCE's headers do not pull in windows.h on their own; keep NOMINMAX set
+    // so the min/max macros never leak into later C++ headers.
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <windows.h>
+    #undef max
+    #undef min
+#endif
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -74,6 +85,26 @@ private:
 VideoAudioReader::VideoAudioReader (const juce::File& file, juce::InputStream* streamToOwn)
     : AudioFormatReader (nullptr, "FFmpeg audio"), ownedStream_ (streamToOwn)
 {
+#if defined(_WIN32)
+    // The FFmpeg DLLs are delay-loaded (/DELAYLOAD), so a missing runtime would
+    // otherwise abort the process with a SEH delay-load failure on the first
+    // FFmpeg call below. Probe it for a graceful "cannot open" instead: the
+    // standard search order (exe directory, then the SpectroCraft subfolder
+    // added at startup by sc::setupRuntimeDllSearchPath) covers both layouts,
+    // and success loads all four DLLs at once, so the delayed import stubs can
+    // never fail afterwards.
+    static const bool ffmpegRuntimePresent = [] {
+        HMODULE h = ::LoadLibraryA ("avformat-61.dll");
+        if (h == nullptr)
+            std::fprintf (stderr, "[video] FFmpeg runtime not found - video container "
+                                   "extraction is unavailable (Windows error %lu).\n",
+                           (unsigned) GetLastError ());
+        return h != nullptr;
+    } ();
+    if (!ffmpegRuntimePresent)
+        return;   // numChannels stays 0 -> createReaderFor() reports failure
+#endif
+
     usesFloatingPointData = true;
     bitsPerSample = 32;
 

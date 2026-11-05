@@ -34,6 +34,7 @@
 #include "SuperResolution.h"  // the Effects > Super Resolution window
 #include "Recorder.h"         // recorder plugin host (Transport > Record)
 #include "RecorderRing.h"      // the WASAPI plugin's thread-safe capture ring
+#include "RuntimeDlls.h"    // runtime DLL search path (SpectroCraft subfolder)
 #include "SingleInstance.h"   // single-instance mode + file forwarding pipe
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
@@ -2135,6 +2136,10 @@ int main (int argc, char** argv)
 {
 #ifdef _WIN32
     scCrash::install();
+    // Bundled runtime DLLs live in the SpectroCraft subfolder next to this
+    // executable; add it to the process DLL search path before any AI/FFmpeg
+    // test loads one of them.
+    sc::setupRuntimeDllSearchPath();
 #endif
     if (argc > 1 && juce::String (argv[1]) == "--generate-test-files")
     {

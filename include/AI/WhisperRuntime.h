@@ -19,7 +19,8 @@ class WhisperRuntime {
 public:
     static WhisperRuntime& instance();
 
-    // Loads whisper.dll (next to the executable) and resolves every entry
+    // Loads whisper.dll (from the SpectroCraft subfolder next to the
+    // executable, falling back to the exe directory) and resolves every entry
     // point. Idempotent; safe from multiple threads. Returns false with a
     // human-readable message in *errOut when the DLL or a symbol is missing.
     bool load(std::string* errOut);
@@ -41,9 +42,12 @@ public:
     int                      (*langMaxId)       ()                                          = nullptr;
     const char*              (*langStr)         (int)                                       = nullptr;
 
-    // From ggml.dll: registers every backend DLL found next to the executable
-    // (ggml-cpu-<arch>.dll, best score wins). b5454's whisper.dll does NOT do
-    // this itself — the host application must call it before creating a context.
+    // From ggml.dll: the default backend scan (ggml_backend_load_all), which
+    // looks in the executable's directory. load() prefers scanning the
+    // SpectroCraft subfolder next to the exe via ggml_backend_load_all_from_path
+    // and only falls back to this for old flat layouts. b5454's whisper.dll
+    // does NOT register backends itself — the host application must do it
+    // before creating a context.
     void                     (*loadAllBackends) ()                                          = nullptr;
 
 private:

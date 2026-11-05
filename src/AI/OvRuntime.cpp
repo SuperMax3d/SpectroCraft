@@ -7,7 +7,15 @@
 #include <cctype>
 #include <cstdio>
 #if defined(_WIN32)
-    #include <windows.h>   // LoadLibraryA / GetLastError (JUCE has already configured the Windows headers)
+    // JUCE's headers do not pull in windows.h on their own; keep NOMINMAX set
+    // so the min/max macros never leak into later C++ headers (openvino.hpp is
+    // already parsed above, but this makes it include-order independent).
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <windows.h>
+    #undef max
+    #undef min
 #endif
 
 namespace sc {
@@ -79,6 +87,9 @@ bool OvRuntime::init(std::string* errOut)
     // but the IR frontend and CPU plugin DLLs load dynamically later - their
     // absence surfaces at read_model/compile time instead (sc::buildNsFailureDetails
     // classifies those errors so users still get the four-DLL instructions).
+    // The runtime DLLs live in the SpectroCraft subfolder next to the exe, which
+    // sc::setupRuntimeDllSearchPath() adds to the search path at startup; the
+    // exe directory is searched first, so old flat layouts keep working.
     // On success the DLL stays loaded and the delayed import stubs find it
     // already present.
     if (!LoadLibraryA ("openvino.dll"))
@@ -86,7 +97,7 @@ bool OvRuntime::init(std::string* errOut)
         char msg [300];
         std::snprintf (msg, sizeof msg,
                        "OpenVINO runtime could not be loaded (Windows error %lu).\n"
-                       "The OpenVINO DLLs are missing — install them next to SpectroCraft.exe.",
+                       "The OpenVINO DLLs are missing — they should be in the SpectroCraft folder next to SpectroCraft.exe.",
                        (unsigned) GetLastError ());
         if (errOut) *errOut = msg;
         return false;

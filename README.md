@@ -816,8 +816,13 @@ plain audio file** (WAV/FLAC/AIFF) with the decoded audio.
 
 The FFmpeg runtime is vendored in `extern/ffmpeg/` (headers + import
 libraries) with its four prebuilt Windows x64 DLLs (~2.6 MB total:
-`avformat-61`, `avcodec-61`, `swresample-5`, `avutil-59`) in `bin/Release`,
-copied next to the executable at build time. It is a
+`avformat-61`, `avcodec-61`, `swresample-5`, `avutil-59`) in
+`bin/Release/SpectroCraft`, copied into the `SpectroCraft` subfolder next to the
+executable at build time.
+The four DLLs are delay-loaded (`/DELAYLOAD`) so the app starts even when they
+are missing; on first use of video extraction the runtime is probed and, if
+absent, opening video files simply fails with a clear message instead of
+crashing. It is a
 minimal **audio-only** build (demuxers + audio decoders, no video decoding,
 no encoders/filters/network) under **LGPL-2.1-or-later**, so it can be
 dynamically linked without affecting SpectroCraft's AGPL-3.0 licence — see
@@ -1001,9 +1006,21 @@ Outputs:
 - Release: `cmake --build build --config Release` → same paths under `Release/`
 
 Every exe is self-contained after a build: all runtime DLLs (FFmpeg, OpenVINO,
-whisper) are copied next to it by CMake. The repo's `bin/Release` folder holds the
-prebuilt app plus every external DLL, so downloading just that folder gives you a
-working installation.
+whisper) are copied into a **`SpectroCraft` subfolder next to the executable** by
+CMake. The app discovers that folder at startup from its own path and adds it to
+its DLL search path — no installation, no environment variables, fully portable:
+
+```
+SpectroCraft.exe          <- the application
+SpectroCraft\             <- runtime DLLs (OpenVINO, whisper.cpp/ggml, FFmpeg)
+recorders\                <- recorder plugins (wasapi_recorder.dll)
+```
+
+Older flat layouts with the DLLs directly beside `SpectroCraft.exe` keep working:
+Windows always searches the exe directory first, so both layouts are supported and
+the exe-directory copy wins when both are present. The repo's `bin/Release` folder
+holds the prebuilt app plus every external DLL, so downloading just that folder
+gives you a working installation.
 
 Notes:
 
@@ -1275,17 +1292,18 @@ whisper-base: \  ggml-base.bin   (i.e. a single ggml-<name>.bin for every model)
 The failure dialog always shows the exact destination folder and the download
 URLs in a copyable text box. The **OpenVINO runtime DLLs** (`openvino.dll`,
 `openvino_intel_cpu_plugin.dll`, `openvino_ir_frontend.dll`, `tbb12.dll`) must sit
-next to `SpectroCraft.exe` for noise suppression — they ship in `bin/Release`
-and are copied there by the CMake build. A prebuilt exe without them fails
-gracefully; even a *partial* set (e.g. only `openvino.dll`) is detected and the
-dialog lists all four required files plus where to get them. Transcription needs
-the **whisper runtime DLLs** (`whisper.dll` plus 12 ggml/llama DLLs — all in
-`bin/Release`, see `extern/whisper-b5454/README.md`) next to `SpectroCraft.exe`; the CMake build copies
-them there too, and a missing or incompatible set is reported with a clear error.
+in the `SpectroCraft` folder next to `SpectroCraft.exe` for noise suppression — they
+ship in `bin/Release/SpectroCraft` and are copied there by the CMake build. A
+prebuilt exe without them fails gracefully; even a *partial* set (e.g. only
+`openvino.dll`) is detected and the dialog lists all four required files plus where
+to get them. Transcription needs the **whisper runtime DLLs** (`whisper.dll` plus
+12 ggml/llama DLLs — all in `bin/Release/SpectroCraft`, see
+`extern/whisper-b5454/README.md`) in that same folder; the CMake build copies them
+there too, and a missing or incompatible set is reported with a clear error.
 
 To use a **GPU or NPU**, install its plugin DLL from the same OpenVINO release
 (`runtime\Windows\bin`): `openvino_intel_gpu_plugin.dll` for GPU,
-`openvino_npu_plugin.dll` for NPU — next to `SpectroCraft.exe`. Until then the
+`openvino_npu_plugin.dll` for NPU — into the same `SpectroCraft` folder. Until then the
 runtime simply doesn't list that device, *Auto* stays on CPU, and selecting it
 explicitly falls back to CPU with a note in the progress dialog.
 
@@ -2514,9 +2532,10 @@ should agree.
 ## Project layout
 
 ```
-bin/Release             self-contained runtime folder: SpectroCraft.exe plus all
-                        external DLLs (FFmpeg, OpenVINO, whisper) — download this
-                        folder alone for a working install
+bin/Release             self-contained runtime folder: SpectroCraft.exe plus the
+                        SpectroCraft/ subfolder with every external DLL (FFmpeg,
+                        OpenVINO, whisper) — download this folder alone for a
+                        working install
 icon1..4.ico            application icon candidates; icon4.ico is the active one
                         (PE resource + runtime WM_SETICON)
 CMakeLists.txt            root build (JUCE vendored in extern/)

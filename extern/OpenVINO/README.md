@@ -15,7 +15,7 @@ the toolkit (GPU/NPU plugins, Python, samples) is omitted.
 ## Contents
 
 ```
-<repo>/bin/Release/              the runtime DLLs live in the repo's self-contained
+<repo>/bin/Release/SpectroCraft/ the runtime DLLs live in the repo's self-contained
   openvino.dll                    folder (shipped on GitHub with the app):
   openvino_intel_cpu_plugin.dll   core runtime (ov::Core, model read/compile)
   openvino_ir_frontend.dll        OpenVINO IR (.xml/.bin) frontend
@@ -41,8 +41,10 @@ licensing/
 
 ## How it is used
 
-`src/AI/OvRuntime.cpp` loads `openvino.dll` from the application directory at
-runtime (the CMake build copies them from `<repo>/bin/Release` next to the exe).
+`src/AI/OvRuntime.cpp` loads `openvino.dll` by name at runtime; it is found in
+the `SpectroCraft` subfolder next to the exe, which `sc::setupRuntimeDllSearchPath()`
+(`include/RuntimeDlls.h`) adds to the DLL search path at startup (the CMake build
+copies them there from `<repo>/bin/Release/SpectroCraft`).
 The CPU plugin
 and IR frontend are discovered by OpenVINO automatically because they sit in
 the same folder as `openvino.dll`.

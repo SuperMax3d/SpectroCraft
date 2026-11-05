@@ -1,7 +1,9 @@
 // SpectroCraft — OpenVINO runtime wrapper (Phase 0 of the AI plan).
 //
 // Owns a single ov::Core for the whole process. The OpenVINO DLLs are vendored
-// in extern/OpenVINO and copied next to the executable by CMake; linking is
+// in extern/OpenVINO and copied into the SpectroCraft subfolder next to the
+// executable by CMake (the app adds that folder to its DLL search path at
+// startup); linking is
 // done against the generated import library extern/OpenVINO/lib/openvino.lib,
 // but with /DELAYLOAD:openvino.dll so the executable starts even when the
 // runtime DLLs are missing. init() probes openvino.dll via LoadLibrary and
