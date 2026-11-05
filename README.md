@@ -1036,6 +1036,11 @@ The version number is **auto-incremented on every build**: a custom target runs 
 `VERSION.txt` (first build on a fresh checkout uses `1.0.0`, then `1.0.1`, `1.0.2`, …)
 and writes `generated/Version.h` — defining `SC_VERSION_STRING`, shown in **Help > About**.
 
+On **GitHub Actions** builds the patch number comes from the workflow run number
+(`GITHUB_RUN_NUMBER`) instead, so every CI build and release gets a unique,
+monotonically increasing version (`1.0.<run>`, with major/minor taken from `VERSION.txt`
+when present) without needing to push `VERSION.txt` back; nothing is written in that mode.
+
 A second custom command (`cmake/patch_generated.cmake`) then rewrites the freshly bumped
 version into JUCE's generated files *after* juceaide has written them but *before* they are
 compiled:

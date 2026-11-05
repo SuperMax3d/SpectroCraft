@@ -1,12 +1,20 @@
 # bump_version.cmake - run on every build (via the sc_bump_version target).
 #
-# 1. Reads VERSION.txt from the source root (seeds it with 1.0.0 if missing),
-#    increments the patch number and writes it back, so every compile gets a
-#    fresh version: first build = 1.0.0, then 1.0.1 -> 1.0.2 ...
-# 2. Generates <build>/generated/Version.h with SC_VERSION_STRING for the
-#    About box / unit tests.
-# 3. Writes <build>/generated/SC_VERSION.txt so patch_generated.cmake can apply
-#    the same version to JUCE's generated resources.rc.
+# Local builds: reads VERSION.txt from the source root (seeds it with 1.0.0 if
+# missing), increments the patch number and writes it back, so every compile
+# gets a fresh version: first build = 1.0.0, then 1.0.1 -> 1.0.2 ...
+#
+# GitHub Actions builds (GITHUB_RUN_NUMBER set): use the workflow run number as
+# the patch component instead - unique and monotonically increasing per repo,
+# shared by every job of one push, with no need to push VERSION.txt back.
+# Major/minor come from VERSION.txt when present and valid, else 1.0; nothing
+# is written back (the checkout is ephemeral).
+#
+# Both modes then:
+#   2. Generate <build>/generated/Version.h with SC_VERSION_STRING for the
+#      About box / unit tests.
+#   3. Write <build>/generated/SC_VERSION.txt so patch_generated.cmake can apply
+#      the same version to JUCE's generated resources.rc (file properties).
 #
 # Generated files are only rewritten when their content changes, so their
 # timestamps (and everything that depends on them) stay put otherwise. The
@@ -35,6 +43,29 @@ function(sc_write_if_changed path content)
 endfunction()
 
 # --- read / seed the version ---------------------------------------------
+set(sc_ci_mode FALSE)
+if(DEFINED ENV{GITHUB_RUN_NUMBER} AND NOT "$ENV{GITHUB_RUN_NUMBER}" STREQUAL "")
+    # GitHub Actions: derive the patch number from the run number (see header).
+    set(sc_ci_mode TRUE)
+    set(sc_pat "$ENV{GITHUB_RUN_NUMBER}")
+    if(EXISTS "${VERSION_FILE}")
+        file(STRINGS "${VERSION_FILE}" old_version LIMIT_COUNT 1)
+        string(STRIP "${old_version}" old_version)
+        if(old_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+            string(REGEX MATCHALL "[0-9]+" version_parts "${old_version}")
+            list(GET version_parts 0 sc_maj)
+            list(GET version_parts 1 sc_min)
+        endif()
+    endif()
+    if(NOT DEFINED sc_maj)
+        set(sc_maj 1)
+    endif()
+    if(NOT DEFINED sc_min)
+        set(sc_min 0)
+    endif()
+    set(new_version "${sc_maj}.${sc_min}.${sc_pat}")
+    message(STATUS "SpectroCraft version: ${new_version} (GitHub Actions run #${sc_pat})")
+else()
 # First build on a fresh checkout uses 1.0.0; every later build increments
 # the patch number.
 if(EXISTS "${VERSION_FILE}")
@@ -57,8 +88,11 @@ else()
     set(new_version "1.0.0")
     message(STATUS "SpectroCraft version: seeded 1.0.0 (first build)")
 endif()
+endif()
 
-file(WRITE "${VERSION_FILE}" "${new_version}\n")
+if(NOT sc_ci_mode)
+    file(WRITE "${VERSION_FILE}" "${new_version}\n")
+endif()
 
 # --- Version.h for the About box ------------------------------------------
 string(REPLACE "." ";" vparts "${new_version}")
