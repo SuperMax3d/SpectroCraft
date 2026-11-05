@@ -1,12 +1,9 @@
-# Build + unit tests: Windows Release (the shipped configuration) and lean
-# macOS / Linux Debug builds (jassert enabled, so JUCE assertions show up in
-# the logs; no AI / FFmpeg), plus one AI build per platform: Windows uses the
-# vendored DLLs, macOS / Linux fetch the pinned OpenVINO 2024.6 archive and
-# whisper.cpp b5454 at configure time (cmake/ScAiRuntimes.cmake).
-#
-# Lean builds (-DSPECTRO_ENABLE_AI=OFF): the AI tests download model weights on
-# first use, which a CI runner should not depend on. Every other dependency
-# (JUCE, SoXR, SoundTouch, FFmpeg) is vendored under extern/.
+# Build + unit tests: one AI build per platform (-DSPECTRO_ENABLE_AI=ON).
+# Windows uses the vendored runtime DLLs; macOS / Linux fetch the pinned
+# OpenVINO 2024.6 archive and whisper.cpp b5454 at configure time
+# (cmake/ScAiRuntimes.cmake). Every other dependency (JUCE, SoXR, SoundTouch,
+# FFmpeg) is vendored under extern/. Model weights are downloaded by the tests
+# on first use and cached between runs.
 #
 # Only the app target is built: it embeds the unit suite (--run-unit-tests,
 # which is what ctest runs) and depends on the fake recorder plugin the
@@ -19,54 +16,17 @@ name: build
 
 on:
   push:
-    branches: [main]
+    branches: [main, audit-fixes-2026-11]
   pull_request:
   workflow_dispatch:
 
-# One run per PR (pull_request only; branch pushes other than main do not
+# One run per ref (branch pushes to main / audit-fixes-2026-11 and PRs both
 # trigger), a newer push to the same PR cancels the older run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  windows:
-    runs-on: windows-latest
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure
-        run: cmake -S . -B build -A x64 -DSPECTRO_ENABLE_AI=OFF
-
-      - name: Build (Release, app + fake recorder plugin)
-        run: cmake --build build --config Release --target SpectroCraft --parallel
-
-      - name: Unit tests (parallel shards)
-        run: ctest --test-dir build -C Release -j $env:NUMBER_OF_PROCESSORS --output-on-failure
-
-      - name: Upload app (Windows x64, Release)
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          # SpectroCraft.exe + FFmpeg DLLs + recorders/wasapi_recorder.dll.
-          # Lean build: no AI noise suppression / transcription (OpenVINO, whisper).
-          name: SpectroCraft-windows-x64
-          path: |
-            build/src/SpectroCraft_artefacts/Release/
-            !build/src/SpectroCraft_artefacts/Release/**/*.pdb
-          retention-days: 30
-
-      - name: Upload test logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctest-logs-windows
-          path: build/Testing/Temporary/
-          if-no-files-found: ignore
-
   # Windows with the AI features (OpenVINO noise suppression, whisper.cpp
   # transcription): the configuration that ships in bin/Release. The runtime
   # DLLs are vendored there and copied next to the exe; model weights are not
@@ -97,12 +57,12 @@ jobs:
       - name: Unit tests (shards in turn, AI tests included)
         run: ctest --test-dir build -C Release -j 1 --output-on-failure
 
-      - name: Upload app (Windows x64, Release, with AI)
+      - name: Upload app (Windows x64, Release)
         if: success()
         uses: actions/upload-artifact@v4
         with:
           # SpectroCraft.exe + OpenVINO / whisper.cpp / FFmpeg DLLs + recorders/.
-          name: SpectroCraft-windows-x64-ai
+          name: SpectroCraft-windows-x64
           path: |
             build/src/SpectroCraft_artefacts/Release/
             !build/src/SpectroCraft_artefacts/Release/**/*.pdb
@@ -112,51 +72,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-logs-windows-ai
+          name: ctest-logs-windows
           path: build/Testing/Temporary/
           if-no-files-found: ignore
 
-  macos-debug:
-    runs-on: macos-15   # Xcode 16: AppleClang 15 (macos-14) rejects the menu-ID enumerators in comparisons
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure
-        run: >
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=Debug
-          -DSPECTRO_ENABLE_AI=OFF
-          -DSPECTRO_ENABLE_FFMPEG=OFF
-
-      - name: Build (Debug, app + fake recorder plugin)
-        run: cmake --build build --target SpectroCraft --parallel "$(sysctl -n hw.ncpu)"
-
-      - name: Unit tests (parallel shards)
-        run: ctest --test-dir build -j "$(sysctl -n hw.ncpu)" --output-on-failure
-
-      # tar first: upload-artifact zips drop the executable bit of the app.
-      - name: Package app (macOS arm64)
-        if: success()
-        run: tar -czf SpectroCraft-macos-arm64.tar.gz -C build/src/SpectroCraft_artefacts/Debug SpectroCraft.app
-
-      - name: Upload app (macOS arm64, Debug, unsigned)
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: SpectroCraft-macos-arm64
-          path: SpectroCraft-macos-arm64.tar.gz
-          retention-days: 30
-
-      - name: Upload test logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctest-logs-macos-debug
-          path: build/Testing/Temporary/
-          if-no-files-found: ignore
 
   # macOS with the AI features: OpenVINO 2024.6 (official arm64 archive) and
   # whisper.cpp b5454 (built from source, Release) are fetched and verified at
@@ -218,78 +137,26 @@ jobs:
         run: ctest --test-dir build -j "$(sysctl -n hw.ncpu)" --output-on-failure
 
       # tar first: upload-artifact zips drop the executable bit and symlinks.
-      - name: Package app (macOS arm64, with AI)
+      - name: Package app (macOS arm64)
         if: success()
-        run: tar -czf SpectroCraft-macos-arm64-ai.tar.gz -C build/src/SpectroCraft_artefacts/Debug SpectroCraft.app
+        run: tar -czf SpectroCraft-macos-arm64.tar.gz -C build/src/SpectroCraft_artefacts/Debug SpectroCraft.app
 
-      - name: Upload app (macOS arm64, Debug, unsigned, with AI)
+      - name: Upload app (macOS arm64, Debug, unsigned)
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: SpectroCraft-macos-arm64-ai
-          path: SpectroCraft-macos-arm64-ai.tar.gz
+          name: SpectroCraft-macos-arm64
+          path: SpectroCraft-macos-arm64.tar.gz
           retention-days: 30
 
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-logs-macos-ai
+          name: ctest-logs-macos
           path: build/Testing/Temporary/
           if-no-files-found: ignore
 
-  # Linux: lean Debug build (no AI / FFmpeg), tests under a virtual X display.
-  # JUCE's Linux dependencies: ALSA, FreeType/fontconfig, X11 extensions, GL.
-  linux-debug:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install JUCE dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ninja-build xvfb xauth \
-            libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
-            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev \
-            libxrandr-dev libxrender-dev libxi-dev libegl-dev libgl-dev libglu1-mesa-dev mesa-common-dev
-
-      - name: Configure
-        run: >
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Debug
-          -DSPECTRO_ENABLE_AI=OFF
-          -DSPECTRO_ENABLE_FFMPEG=OFF
-
-      - name: Build (Debug, app + fake recorder plugin)
-        # -k 0: report every compile error of a first Linux build at once.
-        run: cmake --build build --target SpectroCraft --parallel "$(nproc)" -- -k 0
-
-      - name: Unit tests (parallel shards, virtual display)
-        run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build -j "$(nproc)" --output-on-failure
-
-      - name: Package app (Linux x64)
-        if: success()
-        run: tar -czf SpectroCraft-linux-x64.tar.gz -C build/src/SpectroCraft_artefacts/Debug SpectroCraft
-
-      - name: Upload app (Linux x64, Debug)
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: SpectroCraft-linux-x64
-          path: SpectroCraft-linux-x64.tar.gz
-          retention-days: 30
-
-      - name: Upload test logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctest-logs-linux-debug
-          path: build/Testing/Temporary/
-          if-no-files-found: ignore
 
   # Linux with the AI features: OpenVINO 2024.6 (official Ubuntu 24.04 x86_64
   # archive) and whisper.cpp b5454 (built from source, Release, one ggml CPU
@@ -365,22 +232,22 @@ jobs:
         run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build -j "$(nproc)" --output-on-failure
 
       # The executable needs the libraries next to it: ship the whole folder.
-      - name: Package app (Linux x64, with AI)
+      - name: Package app (Linux x64)
         if: success()
-        run: tar -czf SpectroCraft-linux-x64-ai.tar.gz -C build/src/SpectroCraft_artefacts Debug
+        run: tar -czf SpectroCraft-linux-x64.tar.gz -C build/src/SpectroCraft_artefacts Debug
 
-      - name: Upload app (Linux x64, Debug, with AI)
+      - name: Upload app (Linux x64, Debug)
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: SpectroCraft-linux-x64-ai
-          path: SpectroCraft-linux-x64-ai.tar.gz
+          name: SpectroCraft-linux-x64
+          path: SpectroCraft-linux-x64.tar.gz
           retention-days: 30
 
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-logs-linux-ai
+          name: ctest-logs-linux
           path: build/Testing/Temporary/
           if-no-files-found: ignore
