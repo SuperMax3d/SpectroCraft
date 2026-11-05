@@ -3,7 +3,9 @@ juce_add_gui_app (SpectroCraft
     PRODUCT_NAME "SpectroCraft"
     COMPANY_NAME "SpectroCraft"
     NEEDS_WEB_BROWSER FALSE
-    NEEDS_CURL FALSE
+    # libcurl only for the Linux AI build (HTTPS model downloads through
+    # juce::WebInputStream); everywhere else JUCE needs none.
+    NEEDS_CURL ${SC_JUCE_NEEDS_CURL}
 )
 
 target_sources (SpectroCraft
@@ -48,7 +50,8 @@ target_sources (SpectroCraft
 )
 
 # AI module (OpenVINO plumbing + model manager). Only compiled when the
-# OpenVINO runtime target exists (SPECTRO_ENABLE_AI=ON on Windows).
+# OpenVINO runtime target exists (SPECTRO_ENABLE_AI=ON: vendored DLLs on
+# Windows, cmake/ScAiRuntimes.cmake on macOS / Linux).
 if (TARGET sc_openvino)
     target_sources (SpectroCraft PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/OvRuntime.cpp
@@ -59,7 +62,7 @@ if (TARGET sc_openvino)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DeepFilter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperTranscribe.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperPipeline.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperRuntime.cpp   # dynamic loader for the prebuilt b5454 DLLs
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/WhisperRuntime.cpp   # run-time loader for the b5454 libraries (DLL / dylib / so)
         ${CMAKE_CURRENT_SOURCE_DIR}/NoiseSuppression.cpp)
     # Vendored whisper.cpp b5454 C API header (the binaries themselves are
     # loaded at runtime — see extern/whisper-b5454/README.md).
@@ -82,35 +85,42 @@ endif()
 # Version handling: sc_bump_version (root CMakeLists) bumps VERSION.txt on every
 # build and regenerates generated/Version.h (About box). sc_patch_generated then
 # rewrites the version into JUCE's generated resources.rc (VS_VERSION_INFO ->
-# Windows file properties) and JuceHeader.h, after juceaide has written them but
-# before they are compiled. (JUCE's JUCE_USER_DEFINED_RC_FILE mechanism is not
+# Windows file properties), after juceaide has written it but before it is
+# compiled. (JUCE's JUCE_USER_DEFINED_RC_FILE mechanism is not
 # usable here: this environment's rc.exe ignores /D preprocessor definitions.)
 add_dependencies (SpectroCraft sc_bump_version)
 target_include_directories (SpectroCraft PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
+# JUCE writes <JuceLibraryCode>/SpectroCraft_resources.rc only when targeting
+# Windows (same test as _juce_add_resources_rc in JUCEUtils.cmake): elsewhere
+# there is nothing to patch, and depending on the missing rc broke the macOS /
+# Linux build ("no rule to make SpectroCraft_resources.rc").
+if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 get_target_property (SC_JUCE_CODE_DIR SpectroCraft JUCE_GENERATED_SOURCES_DIRECTORY)
 set (SC_RC_FILE "${SC_JUCE_CODE_DIR}/SpectroCraft_resources.rc")
-set (SC_HEADER_FILE "${SC_JUCE_CODE_DIR}/JuceHeader.h")
+# Only the rc is patched (JuceHeader.h is left alone: rewriting it on every
+# build forced a full rebuild). The command re-runs whenever bump_version
+# writes a new SC_VERSION.txt (a declared byproduct of sc_bump_version).
 add_custom_command (
     OUTPUT ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp
     COMMAND ${CMAKE_COMMAND}
             -DRC_FILE=${SC_RC_FILE}
-            -DHEADER_FILE=${SC_HEADER_FILE}
             -DVERSION_FILE=${CMAKE_BINARY_DIR}/generated/SC_VERSION.txt
             -DSTAMP_FILE=${CMAKE_BINARY_DIR}/generated/generated_patched.stamp
             -DICON_FILE=${CMAKE_SOURCE_DIR}/icon4.ico
             -P ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake
-    DEPENDS ${SC_RC_FILE} ${SC_HEADER_FILE} ${CMAKE_SOURCE_DIR}/icon4.ico
-    COMMENT "Applying bumped version to generated resources.rc / JuceHeader.h")
+    DEPENDS ${SC_RC_FILE} ${CMAKE_BINARY_DIR}/generated/SC_VERSION.txt
+            ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake ${CMAKE_SOURCE_DIR}/icon4.ico
+    COMMENT "Applying bumped version to generated resources.rc")
 add_custom_target (sc_patch_generated
     DEPENDS ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp)
-# bump must run first: the patch reads SC_VERSION.txt, and bump deletes the
-# stamp that makes this command re-run on every build.
+# bump must run first: the patch reads SC_VERSION.txt.
 add_dependencies (sc_patch_generated sc_bump_version)
 if (TARGET SpectroCraft_rc_lib)   # must compile the rc only after it is patched
     add_dependencies (SpectroCraft_rc_lib sc_bump_version sc_patch_generated)
 endif()
 add_dependencies (SpectroCraft sc_patch_generated)
+endif()   # Windows resources.rc
 
 # AVX2 FFT: compile this one translation unit with /arch:AVX2 on MSVC so the
 # intrinsics are available; runtime CPUID dispatch falls back to scalar otherwise.
@@ -153,6 +163,6 @@ target_compile_definitions (SpectroCraft
     PRIVATE
         JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_WEB_BROWSER=0
-        JUCE_USE_CURL=0
+        JUCE_USE_CURL=${SC_JUCE_USE_CURL}
         JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SpectroCraft,JUCE_PRODUCT_NAME>"
 )

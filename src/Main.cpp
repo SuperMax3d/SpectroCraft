@@ -38,6 +38,7 @@
 #include "InvalidParamTrace.h"
 #include "SingleInstance.h"
 #include "StartupTrace.h"
+#include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include "MainWindow.h"
 #include "RuntimeDlls.h"
 #include "SpectralEngine.h"
@@ -85,8 +86,8 @@ static bool writeFloatWav(const juce::File& file, int nchans, double rate,
     juce::FileOutputStream out (file);
     if (out.failedToOpen()) return false;
 
-    // This build is Windows-only (little-endian), so the native-order writers
-    // are already little-endian.
+    // AI builds target little-endian CPUs only (x86-64, arm64), so the
+    // native-order writers are already little-endian.
     auto w16 = [&out] (uint16_t v) { out.writeShort ((short) v); };
     auto w32 = [&out] (uint32_t v) { out.writeInt ((int) v); };
 
@@ -95,7 +96,7 @@ static bool writeFloatWav(const juce::File& file, int nchans, double rate,
     out.write ("WAVE", 4);
     out.write ("fmt ", 4);
     w32 (16);                    // fmt chunk size
-    w16 (1);                     // PCM format tag
+    w16 (3);                     // WAVE_FORMAT_IEEE_FLOAT (the samples are float32)
     w16 ((uint16_t) nchans);
     w32 ((uint32_t) rate);
     w32 ((uint32_t) (rate * blockAlign));   // byte rate
@@ -172,7 +173,7 @@ public:
                     if (!cur.isEmpty()) { args.add (cur); cur.clear(); }
                 }
                 else
-                    cur += c;
+                    cur += juce::String::charToString ((juce::juce_wchar) c);
             }
             if (!cur.isEmpty())
                 args.add (cur);
@@ -187,7 +188,7 @@ public:
                 const juce::File preferred = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
                                                  .getParentDirectory()
                                                  .getChildFile ("SpectroCraft_load_time.log");
-                const juce::File log = scStart::enable (preferred);
+                const juce::File log = scStart::enable (preferred, SC_VERSION_STRING);
                 std::printf ("load-time measurement enabled, log: %s\n",
                              log.getFullPathName().toRawUTF8());
                 std::fflush (stdout);
@@ -261,6 +262,7 @@ public:
                     std::cout << (isBatch
                         ? "usage: --batch <actionName> <inFolder> <outFolder> [formats] [rename] [--subfolders]\n"
                         : "usage: --run-action <actionName> <inputFile> <outputFile>\n");
+                    setApplicationReturnValue (2);
                     quit();
                     return;
                 }
@@ -278,6 +280,7 @@ public:
                 if (!actions.loadFromJson (store.getValue ("actions_json")))
                 {
                     std::cout << "could not load the recorded actions\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -289,6 +292,7 @@ public:
                 {
                     std::cout << "no recorded action named \"" << name.toRawUTF8()
                               << "\" with steps\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -305,6 +309,7 @@ public:
                     if (!app.openFile (a))
                     {
                         std::cout << "failed to open " << a.getFullPathName() << "\n";
+                        setApplicationReturnValue (1);
                         quit();
                         return;
                     }
@@ -317,6 +322,7 @@ public:
                         {
                             std::cout << "step \"" << step.type.toRawUTF8()
                                       << "\" failed: " << err << "\n";
+                            setApplicationReturnValue (1);
                             quit();
                             return;
                         }
@@ -324,6 +330,7 @@ public:
 
                     const bool ok = app.audioEngine().saveFileAs (b);
                     std::cout << (ok ? "wrote " : "failed to write ") << b.getFullPathName() << "\n";
+                    setApplicationReturnValue (ok ? 0 : 1);
                     quit();
                     return;
                 }
@@ -343,9 +350,10 @@ public:
 
                 const auto formats = sc::parseFormatList (formatsText);
                 std::string summary;
-                sc::runActionBatch (*action, a, b, formats, rename, subfolders,
-                                    tempStore, nullptr, nullptr, nullptr, &summary);
+                const bool batchOk = sc::runActionBatch (*action, a, b, formats, rename, subfolders,
+                                                         tempStore, nullptr, nullptr, nullptr, &summary);
                 std::cout << summary << "\n";
+                setApplicationReturnValue (batchOk ? 0 : 1);
                 quit();
                 return;
             }
@@ -749,6 +757,7 @@ public:
                 closer.startTimer (3000);
                 w->runModalLoop ();
                 delete w;
+                delete ed;   // AlertWindow does not delete its custom components
 
                 std::cout << "alert dialog closed\n";
                 quit();
@@ -781,8 +790,24 @@ public:
             }
             else if (args[i] == "--run-unit-tests")
             {
+                // Same isolation as SpectroCraftTests: never the user's real settings.
+                Application::useIsolatedSettingsStore (true);
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI && !defined(_WIN32)
+                // ... nor the user's real model / OpenVINO caches (macOS resolves
+                // ~/Library without $HOME). ctest passes its own folders; a run
+                // by hand uses the same temp folders as SpectroCraftTests,
+                // kept between runs so the weights are not downloaded again.
+                {
+                    const juce::File tmp = juce::File::getSpecialLocation (juce::File::tempDirectory);
+                    ::setenv ("SC_MODELS_DIR",
+                              tmp.getChildFile ("SpectroCraftTests-models").getFullPathName ().toRawUTF8 (), 0);
+                    ::setenv ("SC_OPENVINO_CACHE_DIR",
+                              tmp.getChildFile ("SpectroCraftTests-openvino-cache").getFullPathName ().toRawUTF8 (), 0);
+                }
+#endif
                 const int rc = scRunUnitTests();
                 std::cout << (rc == 0 ? "all unit tests passed\n" : "unit tests FAILED\n");
+                setApplicationReturnValue (rc == 0 ? 0 : 1);   // usable from scripts / CI
                 quit();
                 return;
             }
@@ -842,6 +867,14 @@ public:
 
     void systemRequestedQuit() override
     {
+        // The macOS application-menu Quit and WM_QUERYENDSESSION land here
+        // even while a modal progress dialog is open. A background job's
+        // worker still uses the documents and this window (it deletes its
+        // progress dialog when done): quitting now would destroy them under
+        // it. MainWindow's own Quit paths already refuse.
+        if (mainWindow != nullptr && mainWindow->isBackgroundJobRunning ())
+            return;
+
         // Ask before losing unsaved work: audio edits OR metadata that has
         // not been written to disk yet (markers, selections, calibrations,
         // transcription).

@@ -1,7 +1,9 @@
 // SpectroCraft - Stem Separation window (drives the audio.cpp CLI tool).
 #include "StemSeparation.h"
+#include "AlertGate.h"
 #include "Application.h"
 #include "MergeFiles.h"
+#include "OwningAlertWindow.h"   // dialogs with new-ed custom components
 #include "PythonScripts.h"
 #include "Resampler.h"
 #include "WorkProgress.h"
@@ -70,6 +72,15 @@ public:
         addAndMakeVisible (removeBtn_);
 
         rebuildAnchorList ();   // show any anchors this entry already carries
+    }
+
+    // The anchor widgets are raw children: a JUCE Component never deletes its
+    // children, so without this every anchor line leaked a Label and a
+    // TextButton when the row went away.
+    ~DescRow() override
+    {
+        for (auto* c : anchorWidgets_) delete c;
+        anchorWidgets_.clear ();
     }
 
     void layoutChildren (int w)
@@ -383,6 +394,13 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
 StemSeparationWindow::~StemSeparationWindow()
 {
     if (alive_) alive_->store (false);   // stop any pending worker callbacks
+
+    // rowsHost_ holds the DescRows created with new in rebuildRows(); a JUCE
+    // Component does not own its children, so closing the window in advanced
+    // mode leaked every row (TextEditor, Label, buttons). Delete them while
+    // descs_ (which the rows reference) is still alive.
+    for (int i = rowsHost_.getNumChildComponents () - 1; i >= 0; --i)
+        delete rowsHost_.getChildComponent (i);
 }
 
 void StemSeparationWindow::userTriedToCloseWindow()
@@ -779,7 +797,8 @@ void StemSeparationWindow::openDownloadDialog()
     if (!needBinary && !needModel)
         needModel = true;   // everything installed: offer downloading another model
 
-    juce::AlertWindow dlg ("Stem Separation setup", "", juce::AlertWindow::NoIcon, this);
+    // Owning: the Label/ComboBox rows below are added with new.
+    sc::OwningAlertWindow dlg ("Stem Separation setup", "", juce::AlertWindow::NoIcon, this);
     dlg.addButton ("Download", 1, {});
     dlg.addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
@@ -863,7 +882,8 @@ void StemSeparationWindow::openDownloadDialog()
 
             setStatus ("Downloading " + choices[i].label + "...");
             ok = sc::acpp::downloadFile (choices[i].url, zip,
-                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err);
+                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err,
+                choices[i].sizeBytes);
             if (!ok && !prog->cancelled.load ())
                 setStatus ("Download failed: " + juce::String (err));
 
@@ -886,7 +906,8 @@ void StemSeparationWindow::openDownloadDialog()
             setStatus ("Downloading " + choices[i].file + "...");
             ok = sc::acpp::downloadFile (sc::acpp::modelUrl (choices[i].file).toStdString (),
                                          dest,
-                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err);
+                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err,
+                choices[i].sizeBytes);
             if (!ok && !prog->cancelled.load ())
                 setStatus ("Download failed: " + juce::String (err));
         }
@@ -1025,7 +1046,7 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
                 running_ = false;
                 statusLabel_.setText (msg, juce::dontSendNotification);
                 if (!detail.isEmpty ())
-                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                       "Stem Separation failed",
                                                       msg + "\n\n" + detail, "", this);
             });

@@ -77,8 +77,16 @@ std::vector<VadRegion> detectSpeechRegions(const float* p, int n)
 // language/mode) without reloading.
 std::map<std::string, std::unique_ptr<WhisperTranscriber>>& whisperCache()
 {
+#if defined(_WIN32)
     static std::map<std::string, std::unique_ptr<WhisperTranscriber>> cache;
     return cache;
+#else
+    // macOS / Linux: never destroyed, like the OpenVINO objects (see
+    // OvRuntime::instance): whisper_free at exit would run after ggml's own
+    // static state (Metal device, backend registry) may already be gone.
+    static auto* cache = new std::map<std::string, std::unique_ptr<WhisperTranscriber>> ();
+    return *cache;
+#endif
 }
 
 std::mutex& whisperCacheMutex()

@@ -1,17 +1,22 @@
 # patch_generated.cmake - apply the freshly bumped version to JUCE's generated
-# files *after* juceaide has written them but *before* they are compiled.
+# resources.rc *after* juceaide has written it but *before* it is compiled.
 #
 #   RC_FILE      : <JuceLibraryCode>/SpectroCraft_resources.rc  (VS_VERSION_INFO)
-#   HEADER_FILE  : <JuceLibraryCode>/JuceHeader.h              (ProjectInfo::versionString)
 #   VERSION_FILE : <build>/generated/SC_VERSION.txt            (written by bump_version.cmake)
 #   STAMP_FILE   : stamp written when done (drives the custom command)
+#
+# JuceHeader.h is deliberately NOT patched any more: it is included by almost
+# every translation unit, so rewriting its ProjectInfo::versionString on every
+# build (the version is bumped on every build) forced a full rebuild each time.
+# Code that needs the bumped version uses SC_VERSION_STRING from the generated
+# Version.h instead. Files are only rewritten when their content changes.
 #
 # This exists because this environment's rc.exe ignores /D preprocessor
 # definitions, so JUCE's JUCE_USER_DEFINED_RC_FILE mechanism cannot be used.
 
 cmake_minimum_required(VERSION 3.22)
 
-if(NOT RC_FILE OR NOT HEADER_FILE OR NOT VERSION_FILE OR NOT STAMP_FILE)
+if(NOT RC_FILE OR NOT VERSION_FILE OR NOT STAMP_FILE)
     message(FATAL_ERROR "patch_generated.cmake: missing -D arguments")
 endif()
 
@@ -22,33 +27,7 @@ if(NOT new_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
     message(FATAL_ERROR "patch_generated.cmake: bad version '${new_version}'")
 endif()
 
-string(REPLACE "." ";" vparts "${new_version}")
-list(GET vparts 0 sc_maj)
-list(GET vparts 1 sc_min)
-list(GET vparts 2 sc_pat)
 string(REPLACE "." "," new_comma "${new_version}")
-
-# versionNumber = 0xMMmmpp (CMake's math() has no hex output, so convert manually)
-math(EXPR vnum "(${sc_maj} * 65536 + ${sc_min} * 256 + ${sc_pat})")
-set(hex_digits "0123456789ABCDEF")
-set(vhex "")
-math(EXPR tmp "${vnum}")
-while(tmp GREATER 0)
-    math(EXPR d "${tmp} % 16")
-    string(SUBSTRING "${hex_digits}" ${d} 1 c)
-    set(vhex "${c}${vhex}")
-    math(EXPR tmp "${tmp} / 16")
-endwhile()
-if(vhex STREQUAL "")
-    set(vhex "0")
-endif()
-string(LENGTH "${vhex}" vhex_len)
-math(EXPR vhex_pad "6 - ${vhex_len}")
-if(vhex_pad GREATER 0)
-    string(SUBSTRING "000000" 0 ${vhex_pad} vhex_zeros)
-    set(vhex "${vhex_zeros}${vhex}")
-endif()
-set(version_hex "0x${vhex}")
 
 # --- resources.rc ----------------------------------------------------------
 if(NOT EXISTS "${RC_FILE}")
@@ -81,6 +60,19 @@ string(FIND "${rc}" "IDI_APP" icon_pos)
 if (icon_pos GREATER 0)
     string(SUBSTRING "${rc}" 0 ${icon_pos} rc)
 endif()
+# Normalise the end to exactly one newline so re-running produces an identical
+# file (otherwise every run added a blank line and the rc was always rewritten).
+string(LENGTH "${rc}" rc_len)
+while(rc_len GREATER 0)
+    math(EXPR rc_last "${rc_len} - 1")
+    string(SUBSTRING "${rc}" ${rc_last} 1 rc_ch)
+    if(NOT (rc_ch STREQUAL "\n" OR rc_ch STREQUAL "\r"))
+        break()
+    endif()
+    string(SUBSTRING "${rc}" 0 ${rc_last} rc)
+    set(rc_len ${rc_last})
+endwhile()
+string(APPEND rc "\n")
 if(DEFINED ICON_FILE AND EXISTS "${ICON_FILE}")
     get_filename_component (icon_abs "${ICON_FILE}" ABSOLUTE)
     string(REPLACE "\\" "/" icon_path "${icon_abs}")
@@ -89,20 +81,11 @@ else()
     message(WARNING "patch_generated.cmake: ${ICON_FILE} not found, exe will have no PE icon resource")
 endif()
 
-file(WRITE "${RC_FILE}" "${rc}")
-
-# --- JuceHeader.h -----------------------------------------------------------
-if(NOT EXISTS "${HEADER_FILE}")
-    message(FATAL_ERROR "patch_generated.cmake: ${HEADER_FILE} not found (juceaide did not run?)")
+file(READ "${RC_FILE}" rc_current)
+if(NOT rc_current STREQUAL rc)
+    file(WRITE "${RC_FILE}" "${rc}")
 endif()
-
-file(READ "${HEADER_FILE}" hdr)
-string(REGEX REPLACE "(versionString[ ]*=[ ]*\")[0-9]+\.[0-9]+\.[0-9]+(\")"
-       "\\1${new_version}\\2" hdr "${hdr}")
-string(REGEX REPLACE "(versionNumber[ ]*=[ ]*)0x[0-9a-fA-F]+"
-       "\\1${version_hex}" hdr "${hdr}")
-file(WRITE "${HEADER_FILE}" "${hdr}")
 
 # --- stamp -------------------------------------------------------------------
 file(WRITE "${STAMP_FILE}" "patched ${new_version}\n")
-message(STATUS "SpectroCraft: patched generated resources.rc / JuceHeader.h to ${new_version}")
+message(STATUS "SpectroCraft: patched generated resources.rc to ${new_version}")

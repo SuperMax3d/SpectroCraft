@@ -10,6 +10,8 @@
 #include "Panels.h"
 #include <memory>
 #include <algorithm>
+#include <atomic>
+#include <thread>
 
 #include "WorkProgress.h"
 #include "ContentAwareTimeScale.h"
@@ -27,10 +29,13 @@ public:
     enum class Mode { TimeStretch, ReduceGaps };
 
     explicit CatTimeScalePanel (double refDurationSecs);
+    ~CatTimeScalePanel() override;   // joins the analysis worker, deletes the rows
 
-    /** Starts a detached worker that runs fn() off the UI thread and then
-        delivers its result via setAnalysis(). Safe to call once; if the panel
-        is destroyed before fn() finishes, the delivery is skipped. */
+    /** Starts a worker that runs fn() off the UI thread and then delivers its
+        result via setAnalysis(). Only the first call starts a worker. The
+        destructor waits for fn() to return, so fn() never reads application
+        state after the dialog is gone (edit applied, document closed); a
+        delivery still queued then is skipped. */
     void startAnalysis (std::function<void(sc::cat::Analysis&, bool&, juce::String&)> fn);
 
     /** Delivers a finished analysis (call on the message thread). ok=false
@@ -61,6 +66,7 @@ private:
     sc::cat::Analysis analysis_;
     bool analysisOk_ = false;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>> (true);
+    std::thread worker_;   // analysis thread, joined by the destructor
 
     juce::Label* modeLabel_ = nullptr;
     juce::ComboBox* modeCombo_ = nullptr;
@@ -131,6 +137,15 @@ public:
     void handleFileSaveAs();
     void handleSaveMetadataOnly();
     void handleCloseAll();
+    /** Ctrl+W / Ctrl+F4 / File > Close: closes the active document, asking
+        first when it has unsaved changes (same prompt style as Close All /
+        Quit). Returns true if a document was closed. */
+    bool handleCloseFile();
+    /** True while a background job is running (a progress dialog other than
+        the "Preparing audio" wait is alive; its worker deletes it when done).
+        Documents must not be closed or switched, nor the app quit, until then. */
+    bool isBackgroundJobRunning() const;
+    void showOpenFailed (const juce::File& file);   // "Open failed" message box
     void updateTitle();
     void setupViews();
     void activateDocUI();   // reset both views + sync panels after a doc switch
@@ -495,7 +510,7 @@ public:
         RecOptUnlimited = 4100,   // Recording Options submenu
         RecOptLoop,
         RecOptTimed,
-        RecDeviceBase = 4500,     // Recording Device submenu: + pluginIndex*1000 + deviceIndex
+        RecNoDeviceItem = 4200,   // disabled "(no devices)" / "(no recorder plugins found)" placeholders (ID 0 is reserved by PopupMenu)
         ToolsSilence = 5000, ToolsFadeIn, ToolsFadeOut, ToolsNormalize, ToolsChangeGain, ToolsReverse,
         ToolsInvert,           // Effects > Invert (spectral sel / time sel / whole file)
         ToolsTimeStretch,      // Effects > Time Stretch... (SoundTouch tempo change)
@@ -521,7 +536,13 @@ public:
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
         RecentBase = 9000,     // File > Open Recent items: RecentBase + index
-        ClearRecent = 9100     // File > Open Recent > Clear Recent Files
+        ClearRecent = 9100,    // File > Open Recent > Clear Recent Files
+        // Recording Device submenu: RecDeviceBase + pluginIndex*1000 + deviceIndex.
+        // Kept above every other ID: with the old base (4500) the second
+        // plugin's devices (5500+) fell outside the routed range and a third
+        // plugin's first device (6500) was WindowPanelBase.
+        RecDeviceBase = 10000,
+        RecDeviceEnd  = RecDeviceBase + 1000 * 1000   // up to 1000 plugins x 1000 devices
     };
 
 private:

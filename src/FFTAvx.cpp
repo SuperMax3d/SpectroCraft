@@ -6,20 +6,29 @@
  *   input : data[0 .. N-1] reals (buffer holds 2*N floats)
  *   output: bins k = 0..N/2 interleaved at data[k*2] (re), data[k*2+1] (im)
  *
- * This file is compiled with /arch:AVX2 on MSVC; on CPUs without AVX2 (or when
- * the flag was not enabled) scfft::realForward falls back to JUCE's scalar FFT.
+ * The AVX2 path is only compiled when the translation unit is built with AVX2
+ * enabled (__AVX2__, e.g. /arch:AVX2 on MSVC); the current build does not set
+ * it. On CPUs without AVX2, or without the flag, scfft::realForward falls back
+ * to JUCE's FFT.
  */
 
 #include "FFTHelpers.h"
 #include <JuceHeader.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
 
 #if defined(__AVX2__)
 #  include <immintrin.h>
+#  if defined(_MSC_VER)
+#    include <intrin.h>
+#  elif defined(__GNUC__) || defined(__clang__)
+#    include <cpuid.h>
+#  endif
 #endif
 
 namespace scfft
@@ -27,74 +36,91 @@ namespace scfft
 #if defined(__AVX2__)
     namespace
     {
-        // One-time hardware self-test.
-        //
-        // Some CPUs (observed on an AMD Ryzen 9 3900X / Zen 2) have an erratum
-        // where a SIMD store inside a loop causes the CPU to commit one extra,
-        // out-of-bounds iteration of the loop body. The machine code is correct;
-        // the spurious iteration loads the memory just past the array, computes
-        // on it and stores the result back - corrupting adjacent heap data.
-        //
-        // We detect this by running the exact loop pattern (load + add + store,
-        // stepping 4 floats) over a small sentinel-padded buffer and checking
-        // that nothing outside the data region was touched. If corruption is
-        // found, the AVX2 path is disabled for the life of the process.
-        bool avx2HardwareSelfTest ()
+        void realForwardAvx2 (float* data, int order);
+
+        // One-time numerical self-test: the AVX2 transform of a small
+        // deterministic signal must match a double-precision DFT, and must not
+        // write outside its 2*N buffer. (The former "CPU erratum" self-test
+        // flagged a real bug: the butterfly loop stepped 4 floats while
+        // loading/storing 8, so it wrote past each butterfly group. The loop
+        // now steps 8; this check guards against any regression.)
+        bool avx2SelfTest ()
         {
+            constexpr int order = 6, N = 1 << order, PAD = 64;
             const float SENTINEL = 1e30f;
-            constexpr int PAD = 64, M = 8;
-            std::vector<float> buf ((size_t) (M + 2 * PAD), SENTINEL);
-            float* r = buf.data() + PAD;
-            for (int k = 0; k < M; ++k)
-                r[k] = (float) k * 0.1f;
-
-            // The exact pattern used by the vectorized FFT butterfly loop.
-            for (int i = 0; i < M; i += 4)
+            std::vector<float> buf ((size_t) (2 * N + 2 * PAD), SENTINEL);
+            float* d = buf.data() + PAD;
+            std::vector<double> x ((size_t) N);
+            for (int i = 0; i < N; ++i)
             {
-                const __m256 v = _mm256_loadu_ps (r + i);
-                const __m256 w = _mm256_add_ps (v, v);
-                _mm256_storeu_ps (r + i, w);
+                x[(size_t) i] = std::sin (0.37 * i) + 0.25 * std::cos (1.9 * i + 0.5);
+                d[i] = (float) x[(size_t) i];
             }
+            realForwardAvx2 (d, order);
 
-            for (size_t k = 0; k < buf.size(); ++k)
+            for (int k = 0; k < PAD; ++k)
+                if (buf[(size_t) k] != SENTINEL || buf[(size_t) (PAD + 2 * N + k)] != SENTINEL)
+                    return false;
+
+            const double pi = juce::MathConstants<double>::pi;
+            for (int k = 0; k <= N / 2; ++k)
             {
-                if (k >= (size_t) PAD && k < (size_t) (PAD + M))
-                    continue;
-                if (buf[k] != SENTINEL)
-                    return false;   // spurious extra iteration corrupted the padding
+                double re = 0.0, im = 0.0;
+                for (int i = 0; i < N; ++i)
+                {
+                    re += x[(size_t) i] * std::cos (-2.0 * pi * k * i / N);
+                    im += x[(size_t) i] * std::sin (-2.0 * pi * k * i / N);
+                }
+                if (std::abs ((double) d[k * 2] - re) > 1e-3 || std::abs ((double) d[k * 2 + 1] - im) > 1e-3)
+                    return false;
             }
             return true;
+        }
+
+        // True when the CPU reports AVX2 and the OS saves the YMM state.
+        bool cpuHasAvx2 ()
+        {
+#  if defined(_MSC_VER)
+            int info[4] = { 0 };
+            __cpuid (info, 0);
+            if (info[0] < 7)
+                return false;
+            __cpuid (info, 1);
+            const bool osxsave = (info[2] & (1 << 27)) != 0, avx = (info[2] & (1 << 28)) != 0;
+            if (! osxsave || ! avx)
+                return false;
+            if ((_xgetbv (0) & 6) != 6)
+                return false;   // OS does not save XMM/YMM state
+            __cpuidex (info, 7, 0);
+            return (info[1] & (1 << 5)) != 0;   // leaf 7 EBX bit 5 = AVX2
+#  elif defined(__GNUC__) || defined(__clang__)
+            unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+            if (__get_cpuid_max (0, nullptr) < 7)
+                return false;
+            __cpuid_count (1, 0, eax, ebx, ecx, edx);
+            if ((ecx & (1u << 27)) == 0 || (ecx & (1u << 28)) == 0)
+                return false;
+            unsigned int xlo = 0, xhi = 0;
+            __asm__ volatile ("xgetbv" : "=a" (xlo), "=d" (xhi) : "c" (0));
+            if ((xlo & 6u) != 6u)
+                return false;   // OS does not save XMM/YMM state
+            __cpuid_count (7, 0, eax, ebx, ecx, edx);
+            return (ebx & (1u << 5)) != 0;      // leaf 7 EBX bit 5 = AVX2
+#  else
+            return false;
+#  endif
         }
     } // namespace
 #endif
 
     bool hasAvx2()
     {
-#if defined(_DEBUG)
-        // The AVX2 path is disabled in Debug builds: on affected CPUs (e.g.
-        // Ryzen 9 3900X) the SIMD-store erratum only manifests under
-        // concurrent multithreaded load, which a one-shot single-threaded
-        // self-test cannot reliably detect. Release keeps AVX2 when the
-        // hardware test passes.
-        return false;
-#elif defined(__AVX2__)
+#if defined(__AVX2__)
         static std::once_flag flag;
         static bool ok = false;
         std::call_once (flag, [] ()
         {
-            int info[4] = { 0 };
-#  if defined(_MSC_VER)
-            __cpuid (info, 1);
-#  elif defined(__GNUC__) || defined(__clang__)
-            unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-            __cpuid_count (1, 0, eax, ebx, ecx, edx);
-            info[2] = (int) ecx;
-#  else
-            return;
-#  endif
-            if ((info[2] & (1 << 28)) == 0)
-                return;   // no AVX2
-            ok = avx2HardwareSelfTest ();
+            ok = cpuHasAvx2 () && avx2SelfTest ();
         });
         return ok;
 #else
@@ -142,8 +168,11 @@ namespace scfft
             }
 
             const std::lock_guard<std::mutex> lk (twMutex);
-            twCache.emplace (order, ts);
-            return *ts;   // safe: shared_ptr keeps it alive even if the map rehashes
+            // Return the set actually stored: if another thread inserted one for
+            // this order first, emplace keeps that one and our local `ts` would
+            // be destroyed on return (dangling reference).
+            auto it = twCache.emplace (order, ts).first;
+            return *it->second;   // the map's shared_ptr keeps it alive across rehashes
         }
 
         void bitReverse (float* re, float* im, int N)
@@ -179,8 +208,10 @@ namespace scfft
                 for (int group = 0; group < N; group += len)
                 {
                     int j = 0;
-                    // Vectorized butterflies: 4 complex points per iteration.
-                    for (; j + 3 < half; j += 4)
+                    // Vectorized butterflies: 8 complex points per iteration
+                    // (one __m256 holds 8 floats, so the step must be 8 and all
+                    // 8 lanes must stay inside [0, half)).
+                    for (; j + 7 < half; j += 8)
                     {
                         const __m256 ar = _mm256_loadu_ps (re + group + j);
                         const __m256 ai = _mm256_loadu_ps (im + group + j);
@@ -253,7 +284,19 @@ namespace scfft
             return;
         }
 #endif
-        // Scalar fallback: JUCE's FFT with the identical buffer contract.
+        // Scalar fallback: JUCE's FFT with the identical buffer contract. The
+        // FFT object (twiddle tables, plan) is built once per order and per
+        // thread instead of on every call; thread-local so no JUCE backend has
+        // to be shared across threads.
+        if (order >= 0 && order < 32)
+        {
+            thread_local std::array<std::unique_ptr<juce::dsp::FFT>, 32> ffts;
+            auto& fft = ffts[(size_t) order];
+            if (fft == nullptr)
+                fft = std::make_unique<juce::dsp::FFT> (order);
+            fft->performRealOnlyForwardTransform (data, true);
+            return;
+        }
         juce::dsp::FFT fft (order);
         fft.performRealOnlyForwardTransform (data, true);
     }

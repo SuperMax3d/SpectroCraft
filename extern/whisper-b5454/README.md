@@ -43,3 +43,17 @@ is required from the system — no SDL, no OpenVINO.
 MIT — Copyright (c) 2024-2025 Georgi Gerganov and the whisper.cpp contributors
 (https://github.com/ggml-org/whisper.cpp). The ggml and llama.cpp components
 are MIT as well. See `third_party/licenses/NOTICE.md`.
+
+## macOS and Linux
+
+There are no prebuilt binaries in the repository for these platforms:
+`cmake/ScAiRuntimes.cmake` downloads the source archive of the same tag
+(commit `d1be6fde11ac6e0407606b4e42fe72d34add8037`, SHA-256 pinned), checks
+that its `include/whisper.h` and `ggml/include/ggml.h` are identical to the
+headers vendored here, and builds `libwhisper` + `libggml*` as shared
+libraries (Release, `GGML_NATIVE=OFF`, `GGML_OPENMP=OFF`; Linux x86_64:
+`GGML_BACKEND_DL=ON` + `GGML_CPU_ALL_VARIANTS=ON`, the scheme of the Windows
+release). The libraries are copied into `SpectroCraft.app/Contents/Frameworks`
+(macOS) or next to the executable (Linux) and loaded with `dlopen` + `dlsym`
+by `src/AI/WhisperRuntime.cpp`, which then calls
+`ggml_backend_load_all_from_path` on that folder.

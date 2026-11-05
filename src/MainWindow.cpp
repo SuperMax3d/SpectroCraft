@@ -6,6 +6,7 @@
  */
 
 #include "MainWindow.h"
+#include "AlertGate.h"
 #include "Application.h"
 #include "Recorder.h"
 #include "StartupTrace.h"
@@ -29,6 +30,48 @@
 
 // Dark tab background matching the panel backgrounds (Panels.cpp).
 static const juce::Colour kDarkTabBg (45, 45, 48);
+
+namespace
+{
+/** juce::AlertWindow never deletes the components passed to
+    addCustomComponent() (see juce_AlertWindow.h), and the dialogs below hand
+    them over with `new`. They leaked - and a leaked ComboBox with a pending
+    async change message later ran its onChange lambda (capturing this
+    MainWindow) after the window was gone: SIGBUS in the Filter EQ dialog.
+    This AlertWindow owns and deletes its custom components. */
+class OwningAlertWindow : public juce::AlertWindow
+{
+public:
+    using juce::AlertWindow::AlertWindow;
+
+    ~OwningAlertWindow() override
+    {
+        for (int i = getNumCustomComponents(); --i >= 0;)
+            delete removeCustomComponent (i);
+        ownedChildren_.clear();   // after the custom components they may listen to
+    }
+
+    /** addChildComponent() + ownership: for helper components (listeners)
+        that must live exactly as long as the dialog. A plain child is never
+        deleted by juce::Component. */
+    void addOwnedChildComponent (juce::Component* c)
+    {
+        addChildComponent (c);
+        ownedChildren_.emplace_back (c);
+    }
+
+private:
+    std::vector<std::unique_ptr<juce::Component>> ownedChildren_;
+};
+
+/** Plain container (dialog row) that owns the children added to it with
+    addAndMakeVisible (new ...); juce::Component does not delete them. */
+class OwningRow : public juce::Component
+{
+public:
+    ~OwningRow() override { deleteAllChildren(); }
+};
+} // namespace
 
 #if JUCE_WINDOWS
 #ifndef NOMINMAX
@@ -242,6 +285,16 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     pythonPanel->onCloseRequested     = [this] { setPanelVisible ("python", false); };
     controlsPanel->onCloseRequested   = [this] { setPanelVisible ("controls", false); };
     markersPanel->onCloseRequested    = [this] { setPanelVisible ("markers", false); };
+    // DEL in the Markers / Selection lists deletes the selected audio: same
+    // route as Edit > Delete (streamed-file materialisation + refreshAfterEdit:
+    // window clamp, tile-cache purge, shared-state sync).
+    auto deleteSelectedAudio = [this]
+    {
+        app.recordActionStep (sc::actionTypes::kDelete);
+        runDestructiveEdit ([this] (std::string* e) { return app.del (e); });
+    };
+    markersPanel->onDeleteAudioRequested   = deleteSelectedAudio;
+    selectionPanel->onDeleteAudioRequested = deleteSelectedAudio;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     if (transcriptionPanel)
         transcriptionPanel->onCloseRequested =
@@ -296,7 +349,12 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     timeBar->onChange = [this] (double t0, double t1) { applyTimeWindow (t0, t1); };
     waveVScroll->onChange = [this] (double lo, double hi) {
         if (waveformView && hi > lo)
-            waveformView->setVerticalZoom (2.0 / (0.9 * (hi - lo)));
+        {
+            // Centre -> vertical offset (pan), span -> zoom. setVerticalRange
+            // only repaints on a zoom change, so a pure pan needs one here.
+            waveformView->setVerticalRange (lo, hi);
+            waveformView->repaint();
+        }
     };
     specVScroll->onChange = [this] (double lo, double hi) {
         if (spectralView && hi > lo) spectralView->setFrequencyRange (lo, hi);
@@ -528,6 +586,23 @@ using WorkProgressDialog = sc::WorkProgressDialog;
 
 MainWindow::~MainWindow()
 {
+    // The Application outlives this window (tests reuse it; shutdown resets
+    // the window first): uninstall every callback that captured `this`.
+    app.onStateChange = nullptr;
+    app.onSetTimeWindow = nullptr;
+    app.onArmNewDrawing = nullptr;
+    app.onDrawingsChanged = nullptr;
+    app.onTablesChanged = nullptr;
+    app.onArmTableAlignClick = nullptr;
+    app.onSetSpectralFreqRange = nullptr;
+    app.onPlayheadChanged = nullptr;
+    app.onActiveDocChanged = nullptr;
+    app.onFileClosed = nullptr;
+    app.onTimeRangeDeleted = nullptr;
+    app.onTimeRangeStretched = nullptr;
+    app.onTimeRangeInserted = nullptr;
+    app.onPatchSideStateRestored = nullptr;
+
     if (audioInitDialog != nullptr)
     {
         auto* dlg = audioInitDialog;   // deleting exits the modal state
@@ -1231,6 +1306,9 @@ void MainWindow::handleSplitterDrag (const juce::MouseEvent& e)
 
 void MainWindow::closeButtonPressed()
 {
+    // Never quit under a running worker: it still uses the documents (and
+    // this window) and deletes its progress dialog when it finishes.
+    if (isBackgroundJobRunning ()) return;
     JUCEApplication::getInstance()->systemRequestedQuit();
 }
 
@@ -1348,13 +1426,16 @@ juce::String MainWindow::openAudioWildcard()
 
 bool MainWindow::isInterestedInFileDrag (const juce::StringArray& files)
 {
-    static const juce::String supported = allOpenableExtensions();
+    // Whole-token match: a substring test accepted files without an
+    // extension (contains ("") is true) and partial ones such as ".wa".
+    static const juce::StringArray supported =
+        juce::StringArray::fromTokens (allOpenableExtensions(), " ", "");
     for (const auto& f : files)
     {
         // CSV files are not audio: they import as tables in the Tables panel
         // (filesDropped routes them to addTableFromCsv).
         const auto ext = juce::File (f).getFileExtension().toLowerCase();
-        if (ext == ".csv" || supported.contains (ext))
+        if (ext == ".csv" || (ext.isNotEmpty() && supported.contains (ext)))
             return true;
     }
     return false;
@@ -1388,7 +1469,7 @@ void MainWindow::filesDropped (const juce::StringArray& files, int, int)
             std::string err;
             const juce::String text = f.loadFileAsString ();
             if (!app.addTableFromCsv (f.getFileNameWithoutExtension (), text, &err))
-                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                     "Could not import table \"" + f.getFileName () + "\":\n"
                     + juce::String (err), "Tables");
             continue;
@@ -1424,7 +1505,8 @@ std::vector<MainWindow::RecDeviceMenuItem> MainWindow::recordingDeviceItems (
         return out;
 
     const auto& p = plugins[(size_t) pluginIndex];
-    for (size_t j = 0; j < p.devices.size (); ++j)
+    // 1000 IDs per plugin (see RecDeviceBase): extra devices would alias the next plugin's.
+    for (size_t j = 0; j < std::min<size_t> (p.devices.size (), 1000); ++j)
     {
         RecDeviceMenuItem item;
         item.id      = (int) (RecDeviceBase + pluginIndex * 1000 + j);
@@ -1442,7 +1524,7 @@ juce::PopupMenu MainWindow::buildRecordingDeviceItems (const Application& app, i
     const auto items = recordingDeviceItems (app, pluginIndex);
     if (items.empty ())
     {
-        m.addItem (0, "(no devices)", false);
+        m.addItem (RecNoDeviceItem, "(no devices)", false);
         return m;
     }
     for (const auto& item : items)
@@ -1498,7 +1580,7 @@ juce::PopupMenu MainWindow::buildRecordingDeviceMenu (const Application& app)
     const auto& plugins = sc::rec::RecorderHost::instance ().plugins ();
     if (plugins.empty ())
     {
-        m.addItem (0, "(no recorder plugins found)", false);
+        m.addItem (RecNoDeviceItem, "(no recorder plugins found)", false);
         return m;
     }
 
@@ -1519,7 +1601,7 @@ void MainWindow::handleStartStopRecording ()
 
     std::string err;
     if (!app.startRecording (&err))
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Recording",
                                            juce::String::fromUTF8 (err.c_str ()));
 }
@@ -1654,7 +1736,7 @@ void MainWindow::handleRecDevicePick (int id)
     std::string err;
     if (!host.configure (p.id, dev.id, wantCh, wantRate, wantDepth, &neg, &err))
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Recording Device",
                                            juce::String::fromUTF8 (err.c_str ()));
         return;
@@ -1774,6 +1856,10 @@ void MainWindow::syncSharedState()
         // Cheap overlay-only repaint: marker list contents may have changed
         // even though the pointer did not.
         spectralView->repaint();
+        // A log/linear frequency switch must remap the vertical bar now,
+        // not at the next zoom.
+        if (specVScroll && specVScroll->isLogarithmic () != spectralView->isLogFrequency ())
+            updateScrollBars ();
     }
     if (tablesTrack)
     {
@@ -1844,6 +1930,16 @@ static const int64_t kLargeFileBytes = 200ll * 1024 * 1024;
 
 void MainWindow::openFile (const juce::File& file)
 {
+    // A worker still uses the active document (e.g. a file handed over by a
+    // second instance during a long edit): activating another one now would
+    // retarget it. Open the file once the job has finished.
+    if (isBackgroundJobRunning ())
+    {
+        juce::Component::SafePointer<MainWindow> safe (this);
+        juce::Timer::callAfterDelay (250, [safe, file] { if (safe != nullptr) safe->openFile (file); });
+        return;
+    }
+
     // Already loaded? Just make it active again (fast, no progress needed).
     for (int i = 0; i < app.numDocs(); ++i)
         if (app.docs[(size_t) i]->file == file)
@@ -1858,7 +1954,16 @@ void MainWindow::openFile (const juce::File& file)
     // app.openFile() activates the new document and fires onActiveDocChanged,
     // which resets both views to this file and syncs every panel.
     if (!app.openFile (file))
-        return;
+        showOpenFailed (file);
+}
+
+void MainWindow::showOpenFailed (const juce::File& file)
+{
+    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
+                                       "Open failed",
+                                       "Could not open " + file.getFullPathName ()
+                                           + ".\nThe file may be missing, damaged or in an unsupported format.",
+                                       "", this);
 }
 
 void MainWindow::playWithAudioInit()
@@ -1873,12 +1978,15 @@ void MainWindow::playWithAudioInit()
     audioInitDialog = new WorkProgressDialog ("Preparing audio",
                                               "Initialising the audio output device...\nThis only takes a moment.",
                                               false, this);
+    // Not a worker job (nothing is touched until the device is ready): keep
+    // AlertWindow's ESC-to-dismiss as an escape hatch should the driver hang.
+    audioInitDialog->setEscapeKeyCancels (true);
     audioInitDialog->beginModal();
 }
 
 void MainWindow::showEditError (const std::string& err)
 {
-    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                        "Effect failed",
                                        err.empty () ? "The effect could not be applied."
                                                      : juce::String (err),
@@ -1907,9 +2015,12 @@ void MainWindow::runDestructiveEdit(std::function<bool(std::string*)> edit,
     dlg->setProgress (0.0);
     dlg->beginModal ();
 
-    std::thread ([this, edit, dlg, onDone] {
+    // The engine is resolved here, on the message thread: the worker must
+    // materialise the document the edit was requested on.
+    AudioEngine* engPtr = &eng;
+    std::thread ([this, edit, dlg, onDone, engPtr] {
         std::string err;
-        bool ok = app.audioEngine().ensureEditable (&err,
+        bool ok = engPtr->ensureEditable (&err,
                                                     [dlg] (float f) {
                                                         juce::MessageManager::callAsync (
                                                             [dlg, f] { dlg->setProgress (0.9f * f); });
@@ -1942,7 +2053,7 @@ void MainWindow::runAction (int index)
     if (act == nullptr || act->steps.empty ()) return;
     if (!app.audioEngine().isFileLoaded())
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Run Action",
                                             "Open a file first - actions are replayed on the active document.",
                                             "", this);
@@ -1962,7 +2073,7 @@ void MainWindow::stopReplay (const juce::String& why)
     replayPos_ = 0;
     replayName_.clear ();
     if (!name.isEmpty ())
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Run Action",
                                             "Action \"" + name + "\" stopped: " + why, "", this);
 }
@@ -1975,7 +2086,7 @@ void MainWindow::continueReplay()
         replaySteps_.clear ();
         replayPos_ = 0;
         replayName_.clear ();
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::InfoIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::InfoIcon,
                                            "Run Action",
                                            "Action \"" + name + "\" finished.", "", this);
         return;
@@ -2081,7 +2192,9 @@ void MainWindow::continueReplay()
     }
 
     // Everything else is a synchronous engine edit.
-    runDestructiveEdit ([this, &s] (std::string* e) { return sc::applyActionStep (app, s, e); },
+    // s is captured by value: on a streamed file the edit runs on a worker
+    // thread after this function has returned.
+    runDestructiveEdit ([this, s] (std::string* e) { return sc::applyActionStep (app, s, e); },
                        cont);
 }
 
@@ -2108,7 +2221,11 @@ void MainWindow::openFileWithProgress (const juce::File& file)
             juce::MessageManager::callAsync ([dlg, frac]
             { dlg->setProgress ((double) frac); });
         },
-        [dlg] (bool) { delete dlg; },
+        [this, dlg, file] (bool ok) {
+            const bool wasCancelled = dlg->cancelled.load ();
+            delete dlg;
+            if (!ok && !wasCancelled) showOpenFailed (file);   // a cancel is not an error
+        },
         &dlg->cancelled);
 }
 
@@ -2208,34 +2325,83 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
         && d->metaMode == sc::MetaMode::Embedded)
         d->metaMode = sc::MetaMode::External;   // non-WAV cannot carry RIFF chunks
 
-    std::thread ([this, file, saveAs, dlg, d] {
-        const bool ok = saveAs ? app.audioEngine().saveFileAs (file)
-                               : app.audioEngine().saveFile (file);
-        juce::MessageManager::callAsync ([this, dlg, ok, file, d, saveAs] {
-            delete dlg;
-            if (!ok) return;
+    // Snapshot the metadata change counter BEFORE the worker builds the SCMD
+    // payload: an edit made while the save runs (a transcription finishing,
+    // an async callback, ...) bumps it and keeps the document dirty.
+    const uint64_t metaSnapshot = d != nullptr ? d->metaDirty.changeCount () : 0;
 
-            // Save As: the document's path now points at the new location.
-            if (saveAs && d != nullptr)
-                d->file = file;
+    // Resolve the engine on the message thread: the worker must not look up
+    // "the active document" itself.
+    AudioEngine* eng = &app.audioEngine();
+    juce::Component::SafePointer<MainWindow> self (this);
+
+    std::thread ([self, eng, file, saveAs, dlg, d, metaSnapshot] {
+        const bool ok = saveAs ? eng->saveFileAs (file) : eng->saveFile (file);
+        juce::MessageManager::callAsync ([self, dlg, ok, file, d, saveAs, metaSnapshot] {
+            // The progress dialog blocks closing while the save runs, but be
+            // defensive: the window (or the document) may be gone by now.
+            if (self == nullptr)
+                return;
+            MainWindow* const mw = self.getComponent();
+            Application& app = mw->app;
+            delete dlg;
+            const bool docAlive = d != nullptr
+                && std::any_of (app.docs.begin(), app.docs.end(),
+                                [d] (const std::unique_ptr<FileDoc>& p) { return p.get() == d; });
+            FileDoc* const doc = docAlive ? d : nullptr;
+            if (!ok)
+            {
+                // The * stays in the title; say why instead of failing silently.
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
+                                                   "Save failed",
+                                                   "Could not save " + file.getFullPathName ()
+                                                       + ".\nCheck that the folder is writable, the file is not "
+                                                         "locked by another program and the disk is not full.",
+                                                   "", mw);
+                return;
+            }
+
+            // Save As: the document's path AND display name now follow the new
+            // location (Files list, footer, unsaved-changes prompts, Open Recent).
+            if (saveAs && doc != nullptr)
+            {
+                doc->file = file;
+                doc->name = file.getFileName ();
+                app.addRecentFile (file);
+                if (mw->statusBar && doc == app.doc ())
+                    mw->statusBar->setFileName (file.getFileName ());
+                if (mw->fileListPanel) mw->fileListPanel->refresh ();
+            }
 
             // External mode: the sidecar travels with the saved file and the
             // legacy per-category sidecars are consolidated into it.
-            if (d != nullptr && d->metaMode == sc::MetaMode::External)
+            bool metaWritten = true;
+            if (doc != nullptr && doc->metaMode == sc::MetaMode::External)
             {
-                d->writeMetaSidecar (file);
-                juce::File lm (file.getFullPathName() + ".markers.json");
-                if (lm.existsAsFile()) lm.deleteFile();
-                const juce::File ls = savedSelectionsSidecarPath (file);
-                if (ls.existsAsFile()) ls.deleteFile();
+                metaWritten = doc->writeMetaSidecar (file);
+                if (metaWritten)   // only once the consolidated copy is on disk
+                {
+                    juce::File lm (file.getFullPathName() + ".markers.json");
+                    if (lm.existsAsFile()) lm.deleteFile();
+                    const juce::File ls = savedSelectionsSidecarPath (file);
+                    if (ls.existsAsFile()) ls.deleteFile();
+                }
+                else
+                    sc::alert::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+                        "Save metadata failed",
+                        "The audio was saved, but the metadata sidecar next to\n"
+                            + file.getFullPathName ()
+                            + "\ncould not be written. Markers and selections are still unsaved.",
+                        "", mw);
             }
 
             // The save wrote the audio AND every managed metadata chunk or
-            // sidecar, so the document's state now matches its disk copy.
-            if (d != nullptr)
-                d->metaDirty = false;
+            // sidecar, so the document's state now matches its disk copy -
+            // unless the metadata changed while the save was running.
+            if (doc != nullptr && metaWritten)
+                doc->metaDirty.clearIfUnchangedSince (metaSnapshot);
 
-            updateTitle();
+            mw->updateTitle();
         });
     }).detach();
 }
@@ -2268,7 +2434,7 @@ void MainWindow::handleSaveMetadataOnly()
 {
     std::string err;
     if (!app.saveActiveDocMeta (&err))
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Save Metadata",
                                             juce::String::fromUTF8 (err.c_str()),
                                             "", this);
@@ -2276,9 +2442,41 @@ void MainWindow::handleSaveMetadataOnly()
         updateTitle();   // the * disappears if nothing else is unsaved
 }
 
+bool MainWindow::isBackgroundJobRunning() const
+{
+    const int waits = audioInitDialog != nullptr ? 1 : 0;   // not a job: nothing to protect
+    return sc::WorkProgressDialog::numActive () > waits;
+}
+
+bool MainWindow::handleCloseFile()
+{
+    if (app.numDocs () == 0 || isBackgroundJobRunning ()) return false;
+
+    // Same document Application::closeFile() closes.
+    const int idx = (app.activeDocIndex >= 0 && app.activeDocIndex < app.numDocs ())
+                        ? app.activeDocIndex : 0;
+    const FileDoc& d = *app.docs[(size_t) idx];
+    if (app.docIsUnsaved (d))
+    {
+        const juce::String name = d.name.isNotEmpty () ? d.name : d.file.getFileName ();
+        juce::AlertWindow dlg ("Close File",
+            "This file has unsaved changes:\n\n" + name +
+            "\n\nDo you want to close it and discard the changes?",
+            juce::AlertWindow::WarningIcon, this);
+        dlg.addButton ("Close", 1);
+        dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (dlg.runModalLoop () != 1) return false;   // keep it open
+    }
+
+    // closeFile() fires onActiveDocChanged (or resets the empty state),
+    // which refreshes every panel and view.
+    app.closeFile ();
+    return true;
+}
+
 void MainWindow::handleCloseAll()
 {
-    if (app.numDocs () == 0) return;
+    if (app.numDocs () == 0 || isBackgroundJobRunning ()) return;
 
     const auto closeMatching = [this] (bool includeUnsaved)
     {
@@ -2333,13 +2531,18 @@ void MainWindow::exportSpectralAsync (const juce::File& file,
     dlg->setProgress (-1.0);   // out of range -> indeterminate spinning bar
     dlg->beginModal ();
 
-    std::thread ([this, file, opts, dlg] {
-        const bool ok = spectralView ? spectralView->saveAsPng (file, &dlg->cancelled, opts) : false;
+    // Snapshot the view on the message thread (channels, time/frequency
+    // window, settings, overlays); the worker then never touches the view.
+    SpectralView::PngExportJob job = spectralView ? spectralView->preparePngExport (file, opts)
+                                                  : SpectralView::PngExportJob();
+
+    std::thread ([this, file, job, dlg] {
+        const bool ok = job != nullptr && job (&dlg->cancelled);
         juce::MessageManager::callAsync ([this, file, dlg, ok] {
             const bool wasCancelled = dlg->cancelled.load ();
             delete dlg;
             if (!ok && !wasCancelled)
-                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                     "Export failed",
                                                     "Could not write the PNG file.", "", this);
         });
@@ -2544,7 +2747,7 @@ juce::String MainWindow::buildAboutText()
 // scrollable and selectable (same pattern as showAiFailureDialog).
 static void showAboutDialog (Component* parent)
 {
-    auto* w = new juce::AlertWindow ("About SpectroCraft", "",
+    auto* w = new OwningAlertWindow ("About SpectroCraft", "",
                                      juce::AlertWindow::NoIcon, parent);
     auto* ed = new juce::TextEditor ();
     ed->setMultiLine (true);
@@ -2572,7 +2775,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     using enum MenuIDs;
 
     // Recording Device submenu: RecDeviceBase + pluginIndex*1000 + deviceIndex.
-    if (menuItemID >= RecDeviceBase && menuItemID < 5000)
+    if (menuItemID >= RecDeviceBase && menuItemID < RecDeviceEnd)
     {
         handleRecDevicePick (menuItemID);
         return;
@@ -2763,9 +2966,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             break;
 
         case FileClose:
-            // closeFile() fires onActiveDocChanged (or resets the empty state),
-            // which refreshes every panel and view.
-            app.closeFile();
+            handleCloseFile();   // asks first when the file has unsaved changes
             break;
         case FileSave: handleFileSave(); break;
         case FileSaveAs: handleFileSaveAs(); break;
@@ -2800,7 +3001,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             app.settings.exportDrawings = !app.settings.exportDrawings;
             if (app.onStateChange) app.onStateChange();
             break;
-        case FileQuit: JUCEApplication::getInstance()->systemRequestedQuit(); break;
+        case FileQuit: closeButtonPressed(); break;   // refuses while a job runs
 
         case EditUndo: app.undoStep(); refreshAfterEdit(); break;
         case EditRedo: app.redoStep(); refreshAfterEdit(); break;
@@ -3099,7 +3300,7 @@ static bool promptNumberValue (juce::Component* parent, const juce::String& titl
                                const juce::String& message, const juce::String& initial,
                                double& out, bool clockStyle)
 {
-    auto* w = new juce::AlertWindow (title, message, juce::AlertWindow::QuestionIcon, parent);
+    auto* w = new OwningAlertWindow (title, message, juce::AlertWindow::QuestionIcon, parent);
     w->addTextEditor ("value", initial);
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -3267,7 +3468,7 @@ juce::AlertWindow* MainWindow::createAltRefEditDialog (bool isFreq, int index)
     if (index < 0 || index >= (int) refs.size()) return nullptr;
     const Application::AltScaleRef& r = refs[(size_t) index];
 
-    auto* w = new juce::AlertWindow ("Edit Alternative Scale Reference",
+    auto* w = new OwningAlertWindow ("Edit Alternative Scale Reference",
                                      "Rename the reference, edit its two endpoint values,\n"
                                      "or delete it. The other references are untouched.",
                                      juce::AlertWindow::NoIcon, this);
@@ -3388,7 +3589,7 @@ juce::AlertWindow* MainWindow::createGoToTimeDialog ()
     const double rate = std::max (1.0, app.audioEngine().sampleRate());
     const GoToTimeFields fields = computeGoToTimeFields (app);
 
-    auto* w = new juce::AlertWindow ("Go to Time",
+    auto* w = new OwningAlertWindow ("Go to Time",
                                      "Type a time in any field and press OK.\n"
                                      "The first non-empty value (top to bottom) is used.",
                                      juce::AlertWindow::QuestionIcon, this);
@@ -3527,7 +3728,7 @@ static bool parseGainDbText (const juce::String& s, double& out)
 // selection on the visible channels (undoable).
 juce::AlertWindow* MainWindow::createGainDialog()
 {
-    auto* w = new juce::AlertWindow ("Change Gain",
+    auto* w = new OwningAlertWindow ("Change Gain",
                                      "Apply gain to the selection (dB):",
                                      juce::AlertWindow::QuestionIcon, this);
     w->addTextEditor ("gainDb", "0.0");
@@ -3606,7 +3807,10 @@ void MainWindow::showChangeGainDialog(std::function<void(bool)> onApplied)
     const float db = (float) text.trim().getDoubleValue();
     app.recordActionStep (sc::actionTypes::kChangeGain,
                           sc::makeVarObject ({ { "db", db } }));
-    runDestructiveEdit ([&] (std::string* e)
+    // Parameters are captured by value (here and in the other dialogs): on a
+    // streamed file runDestructiveEdit runs the edit on a worker thread after
+    // this function has returned.
+    runDestructiveEdit ([this, db] (std::string* e)
         { const bool ok = app.changeGain (db, e); if (ok) lastEffectId = ToolsChangeGain; return ok; },
                        [onApplied] (bool ok) { if (onApplied) onApplied (ok); });
 }
@@ -3630,6 +3834,8 @@ public:
         addAndMakeVisible (label_);
         addAndMakeVisible (editor_);
     }
+
+    ~LabeledField() override { deleteAllChildren(); }   // label_ and editor_
 
     juce::TextEditor* editor() const { return editor_; }
 
@@ -3749,11 +3955,13 @@ public:
         setBounds (0, 0, widthFor (inChans_), kRowH);
     }
 
+    ~RemixGrid() override { deleteAllChildren(); }   // the rows' labels and editors
+
     int numRows() const { return (int) rows_.size(); }
 
     void rebuild (int outChans, const std::vector<std::vector<double>>& defaults)
     {
-        removeAllChildren();
+        deleteAllChildren();   // every child is a row label/editor created below
         rows_.clear();
         for (int r = 0; r < outChans; ++r)
         {
@@ -3926,6 +4134,8 @@ public:
         setSize (kGridW, std::max ((size_t) nChans_ * kRowH + 8, (size_t) 96));
     }
 
+    ~SplitConfigGrid() override { deleteAllChildren(); }   // checks_, dests_, presets_
+
     /** Prefills one row: checked state and destination text (1-based). */
     void setRow (int idx0, bool checked, int destOneBased)
     {
@@ -4039,6 +4249,12 @@ public:
         }
     }
 
+    // The buttons are raw children: juce::Component never deletes them.
+    ~RemixFillButtons() override
+    {
+        for (auto* b : buttons_) delete b;
+    }
+
     void resized() override
     {
         const int n = (int) buttons_.size();
@@ -4091,7 +4307,7 @@ juce::AlertWindow* MainWindow::createGenerateSilenceDialog()
     if (app.hasSpectralSelection () || !app.selection.isEmpty ())
         return nullptr;
 
-    auto* w = new juce::AlertWindow ("Generate Silence", genTargetMessage (app, "silence"),
+    auto* w = new OwningAlertWindow ("Generate Silence", genTargetMessage (app, "silence"),
                                      juce::AlertWindow::QuestionIcon, this);
 
     auto* durRow = new LabeledField ("Duration:", "1.0",
@@ -4133,7 +4349,7 @@ void MainWindow::showGenerateSilenceDialog(std::function<void(bool)> onApplied)
 
     app.recordActionStep (sc::actionTypes::kGenSilence,
                           sc::makeVarObject ({ { "dur", dur } }));
-    runDestructiveEdit ([&] (std::string* e) { return app.generateSilence (dur, e); },
+    runDestructiveEdit ([this, dur] (std::string* e) { return app.generateSilence (dur, e); },
                        [onApplied] (bool ok) { if (onApplied) onApplied (ok); });
 }
 
@@ -4172,7 +4388,7 @@ static double generatorTargetRms (Application& app)
 
 juce::AlertWindow* MainWindow::createGenerateNoiseDialog()
 {
-    auto* w = new juce::AlertWindow ("Generate Noise", genTargetMessage (app, "noise"),
+    auto* w = new OwningAlertWindow ("Generate Noise", genTargetMessage (app, "noise"),
                                      juce::AlertWindow::QuestionIcon, this);
 
     auto* typeCombo = new juce::ComboBox();
@@ -4185,7 +4401,7 @@ juce::AlertWindow* MainWindow::createGenerateNoiseDialog()
     w->addCustomComponent (typeCombo);
 
     // Intensity slider + Average Level button in one row.
-    auto* noiseRow = new juce::Component ();
+    auto* noiseRow = new OwningRow ();
     noiseRow->setSize (340, 30);
     auto* intensity = new juce::Slider (juce::Slider::LinearHorizontal,
                                         juce::Slider::TextBoxLeft);
@@ -4291,13 +4507,13 @@ void MainWindow::showGenerateNoiseDialog(std::function<void(bool)> onApplied)
             { "type", typeId == 2 ? "pink" : (typeId == 3 ? "brown" : "white") },
             { "intensity", intensity },
             { "dur", dur } }));
-    runDestructiveEdit ([&] (std::string* e) { return app.generateNoise (type, intensity, dur, e); },
+    runDestructiveEdit ([this, type, intensity, dur] (std::string* e) { return app.generateNoise (type, intensity, dur, e); },
                        [onApplied] (bool ok) { if (onApplied) onApplied (ok); });
 }
 
 juce::AlertWindow* MainWindow::createGenerateToneDialog()
 {
-    auto* w = new juce::AlertWindow ("Generate Tone", genTargetMessage (app, "tone"),
+    auto* w = new OwningAlertWindow ("Generate Tone", genTargetMessage (app, "tone"),
                                      juce::AlertWindow::QuestionIcon, this);
 
     auto* waveCombo = new juce::ComboBox();
@@ -4388,7 +4604,7 @@ void MainWindow::showGenerateToneDialog(std::function<void(bool)> onApplied)
 
     if (tones.empty())
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid tone list",
                                             "Please enter at least one tone with a positive frequency.",
                                             "", this);
@@ -4414,7 +4630,7 @@ void MainWindow::showGenerateToneDialog(std::function<void(bool)> onApplied)
                      : (waveId == 3 ? "sawtooth"
                      : (waveId == 4 ? "triangle" : "sine")) },
             { "dur", dur } }));
-    runDestructiveEdit ([&] (std::string* e) { return app.generateTone (tones, shape, dur, e); },
+    runDestructiveEdit ([this, tones, shape, dur] (std::string* e) { return app.generateTone (tones, shape, dur, e); },
                        [onApplied] (bool ok) { if (onApplied) onApplied (ok); });
 }
 
@@ -4444,7 +4660,7 @@ juce::AlertWindow* MainWindow::createTimeStretchDialog()
         msg += "the whole file (" + juce::String (eng.numSamples () / rate, 3) + "s).";
     msg += "\nThe pitch is preserved. The two fields are linked: a speed factor of 2 makes the audio twice as fast (half the duration), 0.5 twice as slow.";
 
-    auto* w = new juce::AlertWindow ("Time Stretch", msg,
+    auto* w = new OwningAlertWindow ("Time Stretch", msg,
                                      juce::AlertWindow::QuestionIcon, this);
 
     const double refDur = std::max (1e-9, stretchReferenceDuration (app));
@@ -4518,7 +4734,7 @@ void MainWindow::showTimeStretchDialog(std::function<void(bool)> onApplied)
     const float pct = (float) jlimit (-95.0f, 3000.0f, (float) (100.0 * (factor - 1.0)));
     app.recordActionStep (sc::actionTypes::kTimeStretch,
                           sc::makeVarObject ({ { "pct", pct } }));
-    runDestructiveEdit ([&] (std::string* e)
+    runDestructiveEdit ([this, pct] (std::string* e)
         { const bool ok = app.timeStretch (pct, e);
           if (ok) lastEffectId = ToolsTimeStretch;
           return ok; },
@@ -4581,22 +4797,35 @@ CatTimeScalePanel::CatTimeScalePanel (double refDurationSecs)
     setMode (Mode::TimeStretch);
 }
 
+CatTimeScalePanel::~CatTimeScalePanel()
+{
+    // Clear alive_ first so a delivery already queued on the message thread is
+    // skipped, then wait for the worker: fn() reads the active document's
+    // engine and selection, which the caller may edit or close as soon as the
+    // dialog is deleted. The wait is bounded by one analysis of the range.
+    alive_->store (false);
+    if (worker_.joinable ())
+        worker_.join ();
+    deleteAllChildren ();   // rows, combo, labels created with new
+}
+
 void CatTimeScalePanel::startAnalysis (std::function<void(sc::cat::Analysis&, bool&, juce::String&)> fn)
 {
-    std::thread ([this, fn]
+    if (worker_.joinable ()) return;   // one analysis per panel
+
+    // The flag is captured by value: the queued delivery may run after this
+    // panel was deleted and must not reach it through `this`.
+    worker_ = std::thread ([this, fn, alive = alive_]
     {
         sc::cat::Analysis a;
         bool ok = false;
         juce::String err;
         fn (a, ok, err);
 
-        // The dialog is modal: it can only be closed from the message thread,
-        // where the destructor clears alive_ before deleting this panel. A
-        // callback that still sees true therefore always finds a live panel.
-        if (!alive_->load ()) return;
-        juce::MessageManager::callAsync ([this, a = std::move (a), ok, err]
-            { if (alive_->load ()) setAnalysis (std::move (a), ok, err); });
-    }).detach ();
+        if (!alive->load ()) return;
+        juce::MessageManager::callAsync ([this, alive, a = std::move (a), ok, err]
+            { if (alive->load ()) setAnalysis (std::move (a), ok, err); });
+    });
 }
 
 void CatTimeScalePanel::setAnalysis (sc::cat::Analysis a, bool ok, const juce::String& err)
@@ -4694,7 +4923,7 @@ juce::AlertWindow* MainWindow::createContentAwareTimeScaleDialog()
         msg += "the whole file (" + juce::String (eng.numSamples () / rate, 3) + "s).";
     msg += "\nThe audio is analysed with an STFT: the most stable gaps (least change between consecutive frames) are removed or duplicated in the time domain. Each cut is joined with a 10 ms equal-power crossfade placed where the audio resembles its surroundings, and onsets and transients are protected.";
 
-    auto* w = new juce::AlertWindow ("Content Aware Time Scale", msg,
+    auto* w = new OwningAlertWindow ("Content Aware Time Scale", msg,
                                      juce::AlertWindow::QuestionIcon, this);
 
     const double refDur = std::max (1e-9, stretchReferenceDuration (app));
@@ -4764,7 +4993,7 @@ void MainWindow::showContentAwareTimeScaleDialog(std::function<void(bool)> onApp
             { "reduceGaps", reduce },
             { "percentile", pct },
             { "speedFactor", factor } }));
-    runDestructiveEdit ([&] (std::string* e)
+    runDestructiveEdit ([this, reduce, pct, factor] (std::string* e)
         { const bool ok = app.contentAwareTimeScale (reduce, pct, factor, e);
           if (ok) lastEffectId = ToolsCatTimeScale;
           return ok; },
@@ -4777,7 +5006,7 @@ void MainWindow::showContentAwareTimeScaleDialog(std::function<void(bool)> onApp
 // presets (Add/Delete), and a remembered last-used curve.
 juce::AlertWindow* MainWindow::createFilterEqDialog()
 {
-    auto* w = new juce::AlertWindow ("Filter EQ",
+    auto* w = new OwningAlertWindow ("Filter EQ",
         "Drag points to shape the curve; click empty space to add a point, "
         "double-click a point to type its exact coordinates and right-click it "
         "to remove it. The response passes exactly through every control "
@@ -4792,7 +5021,7 @@ juce::AlertWindow* MainWindow::createFilterEqDialog()
 
     // Preset row: the combo plus Add/Delete buttons in one container, which
     // also gives the OK button below a little more breathing room.
-    auto* presetRow = new juce::Component ();
+    auto* presetRow = new OwningRow ();
     presetRow->setSize (360, 34);
     auto* presetCombo = new juce::ComboBox ();
     presetCombo->setName ("Preset");
@@ -4867,7 +5096,7 @@ juce::AlertWindow* MainWindow::createFilterEqDialog()
             if (!taken) break;
         };
 
-        auto* dlg = new juce::AlertWindow ("Add Preset",
+        auto* dlg = new OwningAlertWindow ("Add Preset",
             "Name for the new preset (the current curve will be saved):",
             juce::AlertWindow::QuestionIcon, this);
         dlg->addTextEditor ("presetName", defaultName);
@@ -4941,7 +5170,7 @@ void MainWindow::showEqPointDialog (EqCurveEditor* editor, int idx)
     const auto pts = editor->getPoints ();
     if (idx < 0 || idx >= (int) pts.size ()) return;
 
-    auto* w = new juce::AlertWindow ("Edit Point",
+    auto* w = new OwningAlertWindow ("Edit Point",
         "Type the exact coordinates of this point:",
         juce::AlertWindow::QuestionIcon, this);
     auto* fRow = new LabeledField ("Frequency (Hz):", formatWeightText (pts[idx].freqHz), "");
@@ -5006,7 +5235,7 @@ void MainWindow::showFilterEqDialog(std::function<void(bool)> onApplied)
 
     app.recordActionStep (sc::actionTypes::kFilterEq,
                           sc::makeVarObject ({ { "points", sc::eq::serializePoints (pts) } }));
-    runDestructiveEdit ([&] (std::string* e)
+    runDestructiveEdit ([this, pts] (std::string* e)
         { const bool ok = app.applyFilterEq (pts, e); if (ok) lastEffectId = ToolsFilterEq; return ok; },
                        [onApplied] (bool ok) { if (onApplied) onApplied (ok); });
 }
@@ -5025,7 +5254,7 @@ static double envelopeTargetSeconds (Application& app)
 
 juce::AlertWindow* MainWindow::createEnvelopeDialog()
 {
-    auto* w = new juce::AlertWindow ("Envelope",
+    auto* w = new OwningAlertWindow ("Envelope",
         "Drag points to shape the amplitude over time; click empty space to add a point, "
         "double-click a point to type its exact coordinates and right-click it to remove it. "
         "The curve is applied as a per-sample gain: to the active spectral selection if there "
@@ -5039,7 +5268,7 @@ juce::AlertWindow* MainWindow::createEnvelopeDialog()
 
     // Preset row: the combo plus Add/Delete buttons in one container, which
     // also gives the OK button below a little more breathing room.
-    auto* presetRow = new juce::Component ();
+    auto* presetRow = new OwningRow ();
     presetRow->setSize (360, 34);
     auto* presetCombo = new juce::ComboBox ();
     presetCombo->setName ("Preset");
@@ -5115,7 +5344,7 @@ juce::AlertWindow* MainWindow::createEnvelopeDialog()
             if (!taken) break;
         };
 
-        auto* dlg = new juce::AlertWindow ("Add Preset",
+        auto* dlg = new OwningAlertWindow ("Add Preset",
             "Name for the new preset (the current curve will be saved):",
             juce::AlertWindow::QuestionIcon, this);
         dlg->addTextEditor ("presetName", defaultName);
@@ -5189,7 +5418,7 @@ void MainWindow::showEnvPointDialog (EnvCurveEditor* editor, int idx)
     const auto pts = editor->getPoints ();
     if (idx < 0 || idx >= (int) pts.size ()) return;
 
-    auto* w = new juce::AlertWindow ("Edit Point",
+    auto* w = new OwningAlertWindow ("Edit Point",
         "Type the exact coordinates of this point:",
         juce::AlertWindow::QuestionIcon, this);
     auto* tRow = new LabeledField ("Time (s):", formatWeightText (pts[idx].tSec), "");
@@ -5251,7 +5480,7 @@ void MainWindow::showEnvelopeDialog(std::function<void(bool)> onApplied)
 
     app.recordActionStep (sc::actionTypes::kEnvelope,
                           sc::makeVarObject ({ { "points", sc::env::serializePoints (pts) } }));
-    runDestructiveEdit ([&] (std::string* e)
+    runDestructiveEdit ([this, pts] (std::string* e)
         { const bool ok = app.applyEnvelope (pts, e); if (ok) lastEffectId = ToolsEnvelope; return ok; },
                        [onApplied] (bool ok) { if (onApplied) onApplied (ok); });
 }
@@ -5262,7 +5491,7 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     const double cur = eng.sampleRate();
     const int curChans = eng.numChannels();
 
-    auto* w = new juce::AlertWindow ("Resample",
+    auto* w = new OwningAlertWindow ("Resample",
                                      "Current rate: " + juce::String (cur, 3) + " Hz, "
                                      + juce::String (curChans) + " channel(s)\n"
                                      "(whole file; cannot be undone)",
@@ -5312,7 +5541,7 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     chansListener->window = w;
     chansListener->grid = grid;
     chansListener->inChans = curChans;
-    w->addChildComponent (chansListener);   // owned by the dialog
+    w->addOwnedChildComponent (chansListener);   // owned (and deleted) by the dialog
     chansEditor->addListener (chansListener);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
@@ -5401,7 +5630,7 @@ void MainWindow::showResampleDialog(std::function<void(bool)> onApplied)
     const double newRate = rateText.trim().getDoubleValue();
     if (!std::isfinite (newRate) || newRate <= 0.0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid rate",
                                             "Please enter a positive sample rate in Hz.", "", this);
         if (onApplied) onApplied (false);
@@ -5411,7 +5640,7 @@ void MainWindow::showResampleDialog(std::function<void(bool)> onApplied)
     const int newChans = chansText.trim().getIntValue();
     if (newChans < 1 || newChans > kResampleMaxChans)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid channel count",
                                             "Please enter a channel count between 1 and "
                                             + juce::String (kResampleMaxChans) + ".", "", this);
@@ -5421,7 +5650,7 @@ void MainWindow::showResampleDialog(std::function<void(bool)> onApplied)
 
     if (!weightsOk || (int) weights.size() != newChans)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid mix weight",
                                             "Every weight field must be a number "
                                             "(empty means 0).", "", this);
@@ -5457,7 +5686,7 @@ juce::AlertWindow* MainWindow::createSplitConfigDialog (bool willExecuteAfter)
     auto& eng = app.audioEngine();
     const int nChans = std::max (1, eng.numChannels());
 
-    auto* w = new juce::AlertWindow ("Split Spectral Selection Configuration",
+    auto* w = new OwningAlertWindow ("Split Spectral Selection Configuration",
                                      "Tick the channels to extract the selected band from. "
                                      "Each destination is a channel number: an existing "
                                      "channel mixes in the extracted content; a number above "
@@ -5544,7 +5773,7 @@ void MainWindow::showNewFileDialog()
         defRate = app.audioEngine().sampleRate();
     }
 
-    auto* w = new juce::AlertWindow ("New File",
+    auto* w = new OwningAlertWindow ("New File",
                                      "Create a new empty audio file.\n"
                                      "Number of channels:\n"
                                      "Sample rate (Hz):",
@@ -5583,7 +5812,7 @@ void MainWindow::showNewFileDialog()
     const double rate = rateText.trim().getDoubleValue();
     if (chans < 1 || chans > 512)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid channel count",
                                             "Please enter a channel count between 1 and 512.",
                                             "", this);
@@ -5591,7 +5820,7 @@ void MainWindow::showNewFileDialog()
     }
     if (!std::isfinite (rate) || rate <= 0.0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Invalid rate",
                                             "Please enter a positive sample rate in Hz.",
                                             "", this);
@@ -5647,7 +5876,7 @@ void MainWindow::runMergeFilesAsync (const std::vector<juce::File>& files, sc::M
                 {
                     const juce::String detail = err.empty () ? juce::String ("")
                                                              : juce::String ("\n") + juce::String (err);
-                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                        "Merge failed",
                                                        "The files could not be merged." + detail,
                                                        "", this);
@@ -5670,7 +5899,7 @@ void MainWindow::runMergeFilesAsync (const std::vector<juce::File>& files, sc::M
                     {
                         const juce::String detail = err.empty () ? juce::String ("")
                                                                  : juce::String ("\n") + juce::String (err);
-                        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                            "Merge failed",
                                                            "The files could not be merged." + detail,
                                                            "", this);
@@ -5694,7 +5923,7 @@ void MainWindow::runMergeFilesAsync (const std::vector<juce::File>& files, sc::M
                 {
                     const juce::String detail = cerr.empty () ? juce::String ("")
                                                               : juce::String ("\n") + juce::String (cerr);
-                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                        "Merge failed",
                                                        "The merged document could not be created." + detail,
                                                        "", this);
@@ -5737,7 +5966,8 @@ void MainWindow::runResampleAsync (double newRate,
     dlg->setProgress (0.0);
     dlg->beginModal ();
 
-    std::thread ([this, newRate, remixWeights, dlg, onDone] {
+    AudioEngine* engPtr = &eng;   // resolved on the message thread (see runDestructiveEdit)
+    std::thread ([this, newRate, remixWeights, dlg, onDone, engPtr] {
         double lastSent = -1.0;
         auto sendProgress = [dlg, &lastSent] (double v) {
             if (v - lastSent < 0.02 && v != 1.0) return;
@@ -5748,13 +5978,13 @@ void MainWindow::runResampleAsync (double newRate,
         // Cancellation stops at a SoXR chunk boundary; the buffer swap only
         // happens on success, so a cancelled resample changes nothing.
         std::string err;
-        const bool ok = app.audioEngine().resampleTo (
+        const bool ok = engPtr->resampleTo (
             newRate,
             [sendProgress] (float f) { sendProgress (0.85 * (double) f); },
             &dlg->cancelled, &err,
             remixWeights.empty() ? nullptr : &remixWeights);
         if (ok)
-            app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
+            engPtr->rebuildMipmaps ([sendProgress] (float f) {
                 sendProgress (0.85 + 0.15 * (double) f);
             });
 
@@ -5787,7 +6017,7 @@ void MainWindow::runResampleAsync (double newRate,
             {
                 const juce::String detail = err.empty () ? juce::String ("")
                                                          : juce::String ("\n") + juce::String (err);
-                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                     "Resample failed",
                                                     "The file could not be resampled." + detail, "", this);
             }
@@ -5897,7 +6127,7 @@ static void showAiFailureDialog (const juce::String& feature, const std::string&
     // not selectable, and users need to copy paths/URLs out of this box.
     // Enter/Escape still close the dialog because key events bubble up from the
     // editor (read-only editors pass them through).
-    auto* w = new juce::AlertWindow (feature + " Failed",
+    auto* w = new OwningAlertWindow (feature + " Failed",
                                      "The operation could not be completed.\n"
                                      "Details below - select any text to copy it.",
                                      juce::AlertWindow::WarningIcon, parent);
@@ -5916,7 +6146,7 @@ static void showAiFailureDialog (const juce::String& feature, const std::string&
 
 juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
 {
-    auto* w = new juce::AlertWindow ("Noise Suppression",
+    auto* w = new OwningAlertWindow ("Noise Suppression",
                                      "The selection will be processed by the chosen AI model.\n"
                                      "First use downloads the model weights to\n"
                                      "%APPDATA%/SpectroCraft/models.\n"
@@ -6052,18 +6282,27 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
         });
 
         std::string err;
-        // A false progress return cancels: the pipeline stops at its next
-        // stage boundary and no audio is committed.
-        const bool ok = app.noiseSuppress (modelId, device, attenLimDb, df3PostFilter,
-            [sendProgress, dlg] (float f) {
-                sendProgress (0.95 * (double) f);
-                return !dlg->cancelled.load ();
-            }, &err,
-            autoDownload, copyNoise);
-        if (ok)
-            app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
-                sendProgress (0.95 + 0.05 * (double) f);
-            });
+        bool ok = false;
+        // An exception escaping this detached thread would call std::terminate
+        // (e.g. std::bad_alloc copying a very long selection): turn it into an
+        // error so the final callAsync always runs and the dialog closes.
+        try
+        {
+            // A false progress return cancels: the pipeline stops at its next
+            // stage boundary and no audio is committed.
+            ok = app.noiseSuppress (modelId, device, attenLimDb, df3PostFilter,
+                [sendProgress, dlg] (float f) {
+                    sendProgress (0.95 * (double) f);
+                    return !dlg->cancelled.load ();
+                }, &err,
+                autoDownload, copyNoise);
+            if (ok)
+                app.audioEngine().rebuildMipmaps ([sendProgress] (float f) {
+                    sendProgress (0.95 + 0.05 * (double) f);
+                });
+        }
+        catch (const std::exception& e) { ok = false; err = e.what (); }
+        catch (...)                     { ok = false; err = "Unexpected error during noise suppression."; }
 
         juce::MessageManager::callAsync ([this, modelId, dlg, ok, err, device, onDone] {
             const bool wasCancelled = dlg->cancelled.load ();
@@ -6080,6 +6319,9 @@ void MainWindow::runNoiseSuppressAsync (const std::string& modelId, const std::s
     }).detach();
 }
 
+#endif // SC_ENABLE_AI (noise suppression)
+
+// The Python bridge is not an AI feature: keep it in lean builds too.
 // ---------------------------------------------------------------------------
 // Python panel: run a user script against the selection (or whole file).
 // Progress: materialise + extract 0..30%, interpreter run 30..95% (the bar
@@ -6091,7 +6333,7 @@ void MainWindow::runPythonScriptAsync (const juce::File& script, const juce::Str
     std::string pyCmd;
     if (!sc::py::findPython (&pyCmd))
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::InfoIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::InfoIcon,
                                            "Python not found",
                                            sc::py::installHelpText (),
                                            juce::String(), this);
@@ -6135,6 +6377,8 @@ void MainWindow::runPythonScriptAsync (const juce::File& script, const juce::Str
         });
     }).detach();
 }
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 
 // ---------------------------------------------------------------------------
 // Effects > Transcribe... — Whisper transcription of the whole file
@@ -6181,7 +6425,7 @@ static const juce::StringArray& transcribeLanguageCodes()
 
 juce::AlertWindow* MainWindow::createTranscribeDialog()
 {
-    auto* w = new juce::AlertWindow ("Transcription",
+    auto* w = new OwningAlertWindow ("Transcription",
                                      "The WHOLE file will be transcribed by Whisper; the visible "
                                      "channels are mixed to mono.\n"
                                      "First use downloads the model weights to\n"
@@ -6307,15 +6551,23 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
         });
 
         std::string err;
-        // A false progress return cancels: download and mix/resample stop at
-        // their next checkpoint; inference itself cannot be interrupted
-        // mid-whisper_full, so a cancel during it finishes that phase first.
-        const bool ok = app.transcribe (modelId, language, translate, fast,
-            [sendProgress, dlg] (float f) {
-                sendProgress ((double) f);
-                return !dlg->cancelled.load ();
-            }, &err,
-            autoDownload);
+        bool ok = false;
+        // Never let an exception escape the detached thread (std::terminate):
+        // report it so the final callAsync always closes the dialog.
+        try
+        {
+            // A false progress return cancels: download and mix/resample stop at
+            // their next checkpoint; inference itself cannot be interrupted
+            // mid-whisper_full, so a cancel during it finishes that phase first.
+            ok = app.transcribe (modelId, language, translate, fast,
+                [sendProgress, dlg] (float f) {
+                    sendProgress ((double) f);
+                    return !dlg->cancelled.load ();
+                }, &err,
+                autoDownload);
+        }
+        catch (const std::exception& e) { ok = false; err = e.what (); }
+        catch (...)                     { ok = false; err = "Unexpected error during transcription."; }
 
         juce::MessageManager::callAsync ([this, dlg, ok, err, modelId, onDone] {
             const bool wasCancelled = dlg->cancelled.load ();
@@ -6350,7 +6602,7 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
 // written back in place; nothing opens in the editor.
 juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& folder)
 {
-    auto* w = new juce::AlertWindow ("Transcribe Folder",
+    auto* w = new OwningAlertWindow ("Transcribe Folder",
                                      "Every .wav file in this folder (including subfolders)\n"
                                      "will be transcribed by Whisper and its SCTT chunk\n"
                                      "updated in place. The files are NOT opened in the editor.\n"
@@ -6533,7 +6785,7 @@ void MainWindow::runBatchTranscribeAsync (const juce::File& folder,
             for (const auto& f : summary.failures)
                 msg += "\n  - " + juce::String (f);
 
-            auto* w = new juce::AlertWindow ("Transcription Finished",
+            auto* w = new OwningAlertWindow ("Transcription Finished",
                                              msg, juce::AlertWindow::InfoIcon);
             w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
             w->enterModalState (false);
@@ -6557,18 +6809,21 @@ void MainWindow::updateScrollBars()
     }
 
     // Waveform: track is [-1, +1]; the thumb shows the visible amplitude range
-    // centred on zero (the waveform view is always vertically centred).
+    // around the view's vertical offset (moved by the amplitude-axis pan and
+    // the box zoom). The track grows to include a window panned past +/-1.
     if (waveVScroll && waveformView && app.audioEngine().isFileLoaded())
     {
-        waveVScroll->setRange (-1.0, 1.0);
-        const double h = std::min (1.0, waveformView->getVisibleAmpHalf());
-        waveVScroll->setWindow (-h, h);
+        const double h = waveformView->getVisibleAmpHalf();
+        const double c = waveformView->getVerticalOffset();
+        waveVScroll->setRange (std::min (-1.0, c - h), std::max (1.0, c + h));
+        waveVScroll->setWindow (c - h, c + h);
     }
 
     // Spectrogram: track is [1 Hz, Nyquist]; the thumb shows the visible range.
     if (specVScroll && spectralView && app.audioEngine().isFileLoaded())
     {
         const double nyq = 0.5 * app.audioEngine().sampleRate();
+        specVScroll->setLogarithmic (spectralView->isLogFrequency());   // match the axis mapping
         specVScroll->setRange (1.0, nyq);
         specVScroll->setWindow (spectralView->getFreqMin(), spectralView->getFreqMax());
     }
@@ -6711,7 +6966,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     }
     else if (menuName == "View")
     {
-        menu.addItem (ViewZoomIn, "Zoom In\tCtrl++", true, false);
+        menu.addItem (ViewZoomIn, "Zoom In\tCtrl+=", true, false);   // the handler tests '='
         menu.addItem (ViewZoomOut, "Zoom Out\tCtrl+-", true, false);
         menu.addItem (ViewZoomFit, "Zoom Fit", app.audioEngine().isFileLoaded(), false);
         menu.addItem (ViewZoomToSelection, "Zoom to Selection", !app.selection.isEmpty(), false);
@@ -6885,9 +7140,26 @@ juce::StringArray MainWindow::getMenuBarNames()
 // the two tab bars (they are draggable between them).
 juce::Component* MainWindow::activeListPanel() const
 {
-    juce::Component* cur = bottomTabs.getCurrentContentComponent ();
-    if (cur == nullptr) cur = topTabs.getCurrentContentComponent ();
-    return cur;
+    // Either tab group may show a searchable panel (Markers, Transcription):
+    // prefer the one holding the keyboard focus, then any visible one (bottom
+    // group first). Taking the bottom group's tab blindly left Ctrl+F / F3
+    // dead whenever Markers sat on top and another tab was active below.
+    const auto searchable = [this] (const juce::Component* c)
+    {
+        if (c == nullptr) return false;
+        if (c == markersPanel.get ()) return true;
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+        if (c == transcriptionPanel.get ()) return true;
+#endif
+        return false;
+    };
+    juce::Component* const bottom = bottomTabs.getCurrentContentComponent ();
+    juce::Component* const top    = topTabs.getCurrentContentComponent ();
+    for (auto* c : { bottom, top })
+        if (searchable (c) && c->hasKeyboardFocus (true)) return c;
+    for (auto* c : { bottom, top })
+        if (searchable (c)) return c;
+    return bottom != nullptr ? bottom : top;
 }
 
 // Ctrl+F / F3: search the active list panel. With no query set yet, open the
@@ -6951,6 +7223,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     // Ctrl+Tab / Ctrl+Shift+Tab cycles through the loaded files.
     if (key.getKeyCode() == juce::KeyPress::tabKey && key.getModifiers().isCommandDown())
     {
+        if (isBackgroundJobRunning ()) return true;   // a worker still uses the active document
         app.cycleActiveDoc (!key.getModifiers().isShiftDown());
         return true;
     }
@@ -7029,9 +7302,12 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('h', juce::ModifierKeys::commandModifier, 0)) { toggleHarmonicMarkers (); return true; }
     // Ctrl+Shift+Enter toggles the left panel column.
     if (key == juce::KeyPress (juce::KeyPress::returnKey, juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { setLeftPanelsVisible (!leftPanelsVisible); return true; }
-    if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }
+    if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { handleCloseFile(); return true; }
+    // Shortcuts announced by the File / Transport menus.
+    if (key == juce::KeyPress ('q', juce::ModifierKeys::commandModifier, 0)) { closeButtonPressed(); return true; }
+    if (key == juce::KeyPress ('.', juce::ModifierKeys::commandModifier, 0)) { app.stop(); return true; }
     // Ctrl+F4 also closes the active file (browser-style tab close).
-    if (key == juce::KeyPress (juce::KeyPress::F4Key, juce::ModifierKeys::commandModifier, 0)) { app.closeFile(); return true; }
+    if (key == juce::KeyPress (juce::KeyPress::F4Key, juce::ModifierKeys::commandModifier, 0)) { handleCloseFile(); return true; }
     if (key == juce::KeyPress ('z', juce::ModifierKeys::commandModifier, 0)) { app.undoStep(); refreshAfterEdit(); return true; }
     if (key == juce::KeyPress ('y', juce::ModifierKeys::commandModifier, 0)) { app.redoStep(); refreshAfterEdit(); return true; }
     if (key == juce::KeyPress ('x', juce::ModifierKeys::commandModifier, 0)) { runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); return true; }

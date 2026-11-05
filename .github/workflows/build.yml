@@ -1,0 +1,253 @@
+# Build + unit tests: one AI build per platform (-DSPECTRO_ENABLE_AI=ON).
+# Windows uses the vendored runtime DLLs; macOS / Linux fetch the pinned
+# OpenVINO 2024.6 archive and whisper.cpp b5454 at configure time
+# (cmake/ScAiRuntimes.cmake). Every other dependency (JUCE, SoXR, SoundTouch,
+# FFmpeg) is vendored under extern/. Model weights are downloaded by the tests
+# on first use and cached between runs.
+#
+# Only the app target is built: it embeds the unit suite (--run-unit-tests,
+# which is what ctest runs) and depends on the fake recorder plugin the
+# recording tests load (tests/CMakeLists.txt). The console SpectroCraftTests
+# target would compile UnitTests.cpp and src/ a second time for nothing.
+#
+# ctest runs the suite as SC_TEST_SHARDS parallel processes (one per CPU of
+# the configuring machine, see tests/CMakeLists.txt); -j lets them overlap.
+name: build
+
+on:
+  push:
+    branches: [main, audit-fixes-2026-11]
+  pull_request:
+  workflow_dispatch:
+
+# One run per ref (branch pushes to main / audit-fixes-2026-11 and PRs both
+# trigger), a newer push to the same PR cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Windows with the AI features (OpenVINO noise suppression, whisper.cpp
+  # transcription): the configuration that ships in bin/Release. The runtime
+  # DLLs are vendored there and copied next to the exe; model weights are not
+  # shipped - the app downloads them on first use (tests download them into
+  # %APPDATA%/SpectroCraft/models, cached between runs).
+  windows-ai:
+    runs-on: windows-latest
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache AI model weights
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Roaming\SpectroCraft\models
+          key: sc-models-${{ hashFiles('src/AI/ModelManager.cpp') }}
+
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DSPECTRO_ENABLE_AI=ON
+
+      - name: Build (Release, app + fake recorder plugin)
+        run: cmake --build build --config Release --target SpectroCraft --parallel
+
+      # -j 1: shards in turn, so two processes never download the same model
+      # file at the same time.
+      - name: Unit tests (shards in turn, AI tests included)
+        run: ctest --test-dir build -C Release -j 1 --output-on-failure
+
+      - name: Upload app (Windows x64, Release)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          # SpectroCraft.exe + OpenVINO / whisper.cpp / FFmpeg DLLs + recorders/.
+          name: SpectroCraft-windows-x64
+          path: |
+            build/src/SpectroCraft_artefacts/Release/
+            !build/src/SpectroCraft_artefacts/Release/**/*.pdb
+          retention-days: 30
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-windows
+          path: build/Testing/Temporary/
+          if-no-files-found: ignore
+
+
+  # macOS with the AI features: OpenVINO 2024.6 (official arm64 archive) and
+  # whisper.cpp b5454 (built from source, Release) are fetched and verified at
+  # configure time and shipped in SpectroCraft.app/Contents/Frameworks. The
+  # runtime archives and the model weights the tests download are cached.
+  # Shards run in parallel: each download goes to a per-process .part file
+  # and is renamed into place atomically (src/AI/ModelManager.cpp).
+  macos-ai:
+    runs-on: macos-15
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache AI runtime archives (OpenVINO, whisper.cpp sources)
+        uses: actions/cache@v4
+        with:
+          path: ai-downloads
+          key: sc-ai-runtimes-macos-arm64-${{ hashFiles('cmake/ScAiRuntimes.cmake') }}
+
+      - name: Cache AI model weights
+        uses: actions/cache@v4
+        with:
+          path: test-models
+          key: sc-models-posix-${{ hashFiles('src/AI/ModelManager.cpp') }}
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DSPECTRO_ENABLE_AI=ON
+          -DSPECTRO_ENABLE_FFMPEG=OFF
+          -DSC_AI_DOWNLOAD_DIR="$GITHUB_WORKSPACE/ai-downloads"
+          -DSC_TEST_MODELS_DIR="$GITHUB_WORKSPACE/test-models"
+
+      - name: Build (Debug, app + fake recorder plugin + AI runtimes)
+        run: cmake --build build --target SpectroCraft --parallel "$(sysctl -n hw.ncpu)"
+
+      # Every library in the bundle must resolve inside the bundle: no
+      # reference to the build tree, the runner or Homebrew.
+      - name: Check the bundled AI runtime
+        run: |
+          app=build/src/SpectroCraft_artefacts/Debug/SpectroCraft.app/Contents
+          ls -la "$app/Frameworks"
+          bad=0
+          for f in "$app/MacOS/SpectroCraft" "$app"/Frameworks/*; do
+            [ -L "$f" ] && continue
+            if otool -L "$f" | tail -n +2 | grep -v -E '@rpath/|/usr/lib/|/System/Library/'; then
+              echo "::error::$f links outside the bundle"; bad=1
+            fi
+            if otool -l "$f" | grep -A2 LC_RPATH | grep ' path ' | grep -v -E '@(loader|executable)_path'; then
+              echo "::error::$f has an absolute run path"; bad=1
+            fi
+          done
+          exit $bad
+
+      - name: Unit tests (parallel shards, AI tests included)
+        run: ctest --test-dir build -j "$(sysctl -n hw.ncpu)" --output-on-failure
+
+      # tar first: upload-artifact zips drop the executable bit and symlinks.
+      - name: Package app (macOS arm64)
+        if: success()
+        run: tar -czf SpectroCraft-macos-arm64.tar.gz -C build/src/SpectroCraft_artefacts/Debug SpectroCraft.app
+
+      - name: Upload app (macOS arm64, Debug, unsigned)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpectroCraft-macos-arm64
+          path: SpectroCraft-macos-arm64.tar.gz
+          retention-days: 30
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-macos
+          path: build/Testing/Temporary/
+          if-no-files-found: ignore
+
+
+  # Linux with the AI features: OpenVINO 2024.6 (official Ubuntu 24.04 x86_64
+  # archive) and whisper.cpp b5454 (built from source, Release, one ggml CPU
+  # backend per x86 micro-architecture) are fetched at configure time and
+  # copied next to the executable (RPATH $ORIGIN). Model downloads go through
+  # JUCE's libcurl backend (libcurl4-openssl-dev).
+  linux-ai:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install JUCE dependencies (+ libcurl for the model downloads)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build xvfb xauth pkg-config patchelf \
+            libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev \
+            libxrandr-dev libxrender-dev libxi-dev libegl-dev libgl-dev libglu1-mesa-dev mesa-common-dev \
+            libcurl4-openssl-dev
+
+      - name: Cache AI runtime archives (OpenVINO, whisper.cpp sources)
+        uses: actions/cache@v4
+        with:
+          path: ai-downloads
+          key: sc-ai-runtimes-linux-x64-${{ hashFiles('cmake/ScAiRuntimes.cmake') }}
+
+      - name: Cache AI model weights
+        uses: actions/cache@v4
+        with:
+          path: test-models
+          key: sc-models-posix-${{ hashFiles('src/AI/ModelManager.cpp') }}
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DSPECTRO_ENABLE_AI=ON
+          -DSPECTRO_ENABLE_FFMPEG=OFF
+          -DSC_AI_DOWNLOAD_DIR="$GITHUB_WORKSPACE/ai-downloads"
+          -DSC_TEST_MODELS_DIR="$GITHUB_WORKSPACE/test-models"
+
+      - name: Build (Debug, app + fake recorder plugin + AI runtimes)
+        run: cmake --build build --target SpectroCraft --parallel "$(nproc)" -- -k 0
+
+      # Every library must resolve from the executable's folder: none missing,
+      # none taken from the build tree, run paths limited to $ORIGIN.
+      - name: Check the bundled AI runtime
+        run: |
+          dir=build/src/SpectroCraft_artefacts/Debug
+          here=$(cd "$dir" && pwd)
+          ls -la "$dir"
+          bad=0
+          for f in "$dir/SpectroCraft" "$dir"/lib*.so*; do
+            [ -L "$f" ] && continue
+            if ldd "$f" | grep 'not found'; then
+              echo "::error::$f: unresolved dependency"; bad=1
+            fi
+            outside=$(ldd "$f" | awk '/=>/ {print $3}' | grep -v -E "^($here/|/lib/|/usr/lib/|/lib64/)" || true)
+            if [ -n "$outside" ]; then
+              echo "::error::$f resolves libraries outside its folder: $outside"; bad=1
+            fi
+            if readelf -d "$f" | grep -E 'R(UN)?PATH' | grep -v -E '\[\$ORIGIN\]'; then
+              echo "::error::$f: run path other than \$ORIGIN"; bad=1
+            fi
+          done
+          exit $bad
+
+      - name: Unit tests (parallel shards, AI tests included, virtual display)
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build -j "$(nproc)" --output-on-failure
+
+      # The executable needs the libraries next to it: ship the whole folder.
+      - name: Package app (Linux x64)
+        if: success()
+        run: tar -czf SpectroCraft-linux-x64.tar.gz -C build/src/SpectroCraft_artefacts Debug
+
+      - name: Upload app (Linux x64, Debug)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpectroCraft-linux-x64
+          path: SpectroCraft-linux-x64.tar.gz
+          retention-days: 30
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-linux
+          path: build/Testing/Temporary/
+          if-no-files-found: ignore

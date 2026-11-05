@@ -162,7 +162,22 @@ void SpectralEngine::computeFrames (SpectralTile& tile, const AudioEngine& engin
     float* buf = fftBuf.data();
 
     const int order = (int) std::log2 ((double) fftSize);
-    const double invN = 1.0 / (double) fftSize;
+
+    // Amplitude calibration: divide by the window sum (coherent gain * N) and
+    // apply the one-sided factor 2, then express the level as RMS (/sqrt 2) so
+    // a sine of peak amplitude A reads 20*log10(A/sqrt(2)) on its bin - a
+    // full-scale sine reads -3.01 dB, i.e. 90.97 dB-SPL with a 1 Pa full scale,
+    // the same convention as the FFT panel's 1/3-octave dB-SPL mode. DC has no
+    // mirrored negative-frequency half, so it takes no one-sided factor.
+    double winSum = (double) fftSize;
+    if (win != nullptr)
+    {
+        winSum = 0.0;
+        for (int i = 0; i < fftSize; ++i)
+            winSum += (double) win[i];
+    }
+    const double scaleAc = std::sqrt (2.0) / std::max (1e-30, winSum);
+    const double scaleDc = 1.0 / std::max (1e-30, winSum);
 
     for (int f = frameStart; f < frameStart + frameCount && f < tile.numFrames; ++f)
     {
@@ -181,7 +196,8 @@ void SpectralEngine::computeFrames (SpectralTile& tile, const AudioEngine& engin
         for (int b = 0; b < numBins; ++b)
         {
             const float re = buf[b * 2], im = buf[b * 2 + 1];
-            const double m = std::sqrt ((double) re * re + (double) im * im) * invN;
+            const double m = std::sqrt ((double) re * re + (double) im * im)
+                           * (b == 0 ? scaleDc : scaleAc);
             row[(size_t) b] = (float) (20.0 * std::log10 (std::max (1e-12, m)));
         }
     }
@@ -209,6 +225,51 @@ std::shared_ptr<SpectralTile> SpectralEngine::computeTile (
     return tile;
 }
 
+void SpectralEngine::noteContentLocked (const AudioEngine& engine, int64_t version, int64_t total)
+{
+    // A content change that did not grow the document is an in-place
+    // overwrite (loop-mode recording): no range is reported, so every tile
+    // computed before it is stale. Growth alone (appendSamples) only affects
+    // tiles that were cut short by the old end of data (see tileStaleLocked).
+    if (seenEngine_ == &engine && version != seenVersion_ && total <= seenSamples_)
+        overwriteVersion_ = version;
+    seenEngine_ = &engine;
+    seenVersion_ = version;
+    seenSamples_ = total;
+}
+
+bool SpectralEngine::tileStaleLocked (const SpectralTile& t, const AudioEngine& engine,
+                                      int64_t version, int64_t total) const
+{
+    if (t.source != &engine)
+        return true;
+    if (t.contentVersion == version)
+        return false;
+    if (t.contentVersion < overwriteVersion_)
+        return true;   // samples were overwritten in place since this tile was computed
+    // Appended since: the tile is stale if the samples its frames read
+    // ([start, start + (kFramesPerTile-1)*hop + fftSize)) were not all
+    // available when it was computed but more are now.
+    const int64_t need = std::min (total, t.startSample
+                                          + (int64_t) (kFramesPerTile - 1) * t.hopSize + t.fftSize);
+    return t.availSamples < need;
+}
+
+void SpectralEngine::evictLocked()
+{
+    while (!lru_.empty() && (cache_.size() > maxTiles_ || cacheBytes_ > maxCacheBytes_))
+    {
+        const TileKey victim = lru_.front();
+        lru_.pop_front();
+        auto it = cache_.find (victim);
+        if (it != cache_.end())
+        {
+            cacheBytes_ -= std::min (cacheBytes_, it->second->mag.size() * sizeof (float));
+            cache_.erase (it);
+        }
+    }
+}
+
 std::vector<std::shared_ptr<SpectralTile>>
 SpectralEngine::getTiles (const AudioEngine& engine, int channel,
                           int64_t startSample, int64_t endSample, int level,
@@ -226,17 +287,23 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
     const int64_t firstTile = startSample / tileSamples;
     const int64_t lastTile = std::max (firstTile, (endSample - 1) / tileSamples);
 
+    // Snapshot the content state once: tiles computed below are stamped with
+    // it, so data appended or overwritten meanwhile makes them stale later.
+    const int64_t version = engine.contentVersion();
+    const int64_t total = engine.numSamples();
+
     // Collect cache hits and misses
     struct Job { int64_t tileIndex; std::shared_ptr<SpectralTile> result; };
     std::vector<Job> jobs;
 
     {
         const std::lock_guard<std::mutex> lock (cacheMutex_);
+        noteContentLocked (engine, version, total);
         for (int64_t t = firstTile; t <= lastTile; ++t)
         {
             TileKey key{ t, channel, level, s.fftSize, s.hopSize, s.windowType };
             auto it = cache_.find (key);
-            if (it != cache_.end())
+            if (it != cache_.end() && !tileStaleLocked (*it->second, engine, version, total))
             {
                 lru_.erase (std::find (lru_.begin(), lru_.end(), key));
                 lru_.push_back (key);
@@ -244,7 +311,7 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
             }
             else
             {
-                jobs.push_back ({ t, nullptr });
+                jobs.push_back ({ t, nullptr });   // missing or stale: recompute
             }
         }
     }
@@ -255,8 +322,19 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
     const int chunkFrames = kFramesPerTile / kChunksPerTile;
 
     struct Chunk { size_t missIdx; int frameStart; int frameCount; };
-    std::vector<Chunk> chunks;
-    std::vector<std::shared_ptr<SpectralTile>> missTiles; // indexed by missIdx
+
+    // State shared with the pool jobs. Held by shared_ptr so a job that only
+    // starts after this call returned finds no chunk left and exits without
+    // touching anything else; the caller waits until every chunk is done.
+    struct Work
+    {
+        std::vector<Chunk> chunks;
+        std::vector<std::shared_ptr<SpectralTile>> missTiles; // indexed by missIdx
+        std::atomic<int> next{ 0 };
+        std::atomic<int> done{ 0 };
+        juce::WaitableEvent finished;
+    };
+    auto w = std::make_shared<Work>();
     std::vector<int64_t> missTileIndices;                 // parallel to missTiles
     std::vector<size_t> missJobIndices;                   // job index for each miss
 
@@ -267,7 +345,7 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
             continue;
         const int64_t t = j.tileIndex;
         const int64_t tileStart = t * tileSamples;
-        const int64_t n = std::min (tileSamples, engine.numSamples() - tileStart);
+        const int64_t n = std::min (tileSamples, total - tileStart);
 
         auto tile = std::make_shared<SpectralTile>();
         tile->startSample = tileStart;
@@ -279,51 +357,62 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
         if (tile->numFrames <= 0)
             tile->numFrames = 1;
         tile->mag.assign ((size_t) tile->numBins * tile->numFrames, -300.0f);
+        tile->source = &engine;
+        tile->contentVersion = version;
+        tile->availSamples = total;
 
-        const size_t mi = missTiles.size();
-        missTiles.push_back (std::move (tile));
+        const size_t mi = w->missTiles.size();
+        w->missTiles.push_back (std::move (tile));
         missTileIndices.push_back (t);
         missJobIndices.push_back (ji);
 
         for (int c = 0; c < kChunksPerTile; ++c)
         {
             const int fs = c * chunkFrames;
-            if (fs >= missTiles[mi]->numFrames)
+            if (fs >= w->missTiles[mi]->numFrames)
                 break;
-            chunks.push_back ({ mi, fs, std::min (chunkFrames, missTiles[mi]->numFrames - fs) });
+            w->chunks.push_back ({ mi, fs, std::min (chunkFrames, w->missTiles[mi]->numFrames - fs) });
         }
     }
 
     // Compute all chunks in parallel (disjoint frame ranges -> no data locks).
-    if (!chunks.empty())
+    if (!w->chunks.empty())
     {
-        std::atomic<int> next{ 0 };
-        auto work = [&]
+        const int fftSize = s.fftSize, windowType = s.windowType;
+        const AudioEngine* eng = &engine;
+        // engine / this / cancel are only touched after a chunk was claimed,
+        // i.e. while the caller is still waiting below.
+        auto work = [this, w, eng, channel, fftSize, hop, windowType, cancel]
         {
+            const int numChunks = (int) w->chunks.size();
             for (;;)
             {
-                const int i = next.fetch_add (1);
-                if ((size_t) i >= chunks.size())
+                const int i = w->next.fetch_add (1);
+                if (i >= numChunks)
                     break;
-                const Chunk& c = chunks[(size_t) i];
-                computeFrames (*missTiles[c.missIdx], engine, channel,
-                               missTiles[c.missIdx]->startSample,
-                               c.frameStart, c.frameCount,
-                               s.fftSize, hop, s.windowType);
+                if (cancel == nullptr || !cancel->load())
+                {
+                    const Chunk& c = w->chunks[(size_t) i];
+                    computeFrames (*w->missTiles[c.missIdx], *eng, channel,
+                                   w->missTiles[c.missIdx]->startSample,
+                                   c.frameStart, c.frameCount,
+                                   fftSize, hop, windowType);
+                }
+                if (w->done.fetch_add (1) + 1 == numChunks)
+                    w->finished.signal();
             }
         };
 
-        const int nJobs = std::min ((int) chunks.size(), pool_->getNumThreads());
-        if (nJobs > 1)
-        {
-            for (int i = 0; i < nJobs; ++i)
-                pool_->addJob ([&] { work(); }); // fresh lambda rvalue per job
-            pool_->removeAllJobs (true, 300000);  // block until all chunk jobs finish
-        }
-        else
-        {
-            work();
-        }
+        // Wait only for THIS call's chunks (never removeAllJobs, which would
+        // steal or drop the jobs of a concurrent getTiles on the same pool).
+        // The calling thread works too, so progress never depends on pool
+        // threads busy with other callers.
+        const int nJobs = std::min ((int) w->chunks.size(), pool_->getNumThreads());
+        for (int i = 1; i < nJobs; ++i)
+            pool_->addJob ([work] { work(); });   // fresh lambda rvalue per job
+        work();
+        if (w->done.load() < (int) w->chunks.size())
+            w->finished.wait (-1);
 
         // Publish completed tiles into the cache and link them to their jobs.
         // If cancelled while computing, do NOT publish: the tiles may be
@@ -331,24 +420,35 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
         if (cancel != nullptr && cancel->load())
             return out;
         const std::lock_guard<std::mutex> lock (cacheMutex_);
-        for (size_t mi = 0; mi < missTiles.size(); ++mi)
+        for (size_t mi = 0; mi < w->missTiles.size(); ++mi)
         {
+            const auto& tile = w->missTiles[mi];
+            jobs[missJobIndices[mi]].result = tile;
             TileKey key{ missTileIndices[mi], channel, level, s.fftSize, s.hopSize, s.windowType };
-            cache_[key] = missTiles[mi];
+            auto it = cache_.find (key);
+            if (it != cache_.end())
+            {
+                // A concurrent call may already have published a fresher tile.
+                if (it->second->source == tile->source
+                    && it->second->contentVersion > tile->contentVersion)
+                    continue;
+                cacheBytes_ -= std::min (cacheBytes_, it->second->mag.size() * sizeof (float));
+                it->second = tile;
+                lru_.erase (std::find (lru_.begin(), lru_.end(), key));
+            }
+            else
+            {
+                cache_.emplace (key, tile);
+            }
+            cacheBytes_ += tile->mag.size() * sizeof (float);
             lru_.push_back (key);
-            jobs[missJobIndices[mi]].result = missTiles[mi];
         }
     }
 
-    // LRU eviction
+    // LRU eviction (tiles already in `jobs` stay alive for this caller)
     {
         const std::lock_guard<std::mutex> lock (cacheMutex_);
-        while (cache_.size() > maxTiles_)
-        {
-            const TileKey victim = lru_.front();
-            lru_.pop_front();
-            cache_.erase (victim);
-        }
+        evictLocked();
     }
 
     for (auto& j : jobs)
@@ -484,7 +584,8 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
         else
             freq = (double) s.minFrequency + rowT * ((double) s.maxFrequency - (double) s.minFrequency);
 
-        const double binF = (freq / rate) * 2.0 * (numBins - 1);
+        // Bin b is centred on b * rate / fftSize (same mapping as probeMagnitude).
+        const double binF = freq * (double) s.fftSize / rate;
         const double bin = std::clamp (binF, -0.5, (double) numBins - 0.5);
 
         // dB -> display value: normalise into the [dbMinDb, dbMaxDb] window,
@@ -538,10 +639,26 @@ void SpectralEngine::clearCache()
     const std::lock_guard<std::mutex> lock (cacheMutex_);
     cache_.clear();
     lru_.clear();
+    cacheBytes_ = 0;
+    seenEngine_ = nullptr;
+    seenVersion_ = seenSamples_ = overwriteVersion_ = -1;
 }
 
 size_t SpectralEngine::cacheSize() const
 {
     const std::lock_guard<std::mutex> lock (cacheMutex_);
     return cache_.size();
+}
+
+size_t SpectralEngine::cacheBytes() const
+{
+    const std::lock_guard<std::mutex> lock (cacheMutex_);
+    return cacheBytes_;
+}
+
+void SpectralEngine::setMaxCacheBytes (size_t bytes)
+{
+    const std::lock_guard<std::mutex> lock (cacheMutex_);
+    maxCacheBytes_ = bytes;
+    evictLocked();
 }

@@ -3,6 +3,7 @@
  */
 
 #include "Application.h"
+#include "AlertGate.h"
 #include "ContentAwareTimeScale.h"
 #include "Recorder.h"
 #include "StartupTrace.h"
@@ -16,6 +17,7 @@
     #include "AI/WhisperPipeline.h"
 #endif
 #include <algorithm>
+#include <cmath>
 #include <thread>
 
 // Monotonic time warps for edits that insert / delete / stretch timeline
@@ -40,6 +42,43 @@ static double warpStretch (double t, double a, double bOld, double bNew)
     if (t >= bOld) return t + (bNew - bOld);
     const double k = (bNew - a) / (bOld - a);
     return a + (t - a) * k;
+}
+
+// See Application::useIsolatedSettingsStore().
+#if SC_TESTS_EXE
+static bool g_isolatedSettingsStore = true;
+#else
+static bool g_isolatedSettingsStore = false;
+#endif
+
+void Application::useIsolatedSettingsStore (bool on)
+{
+    g_isolatedSettingsStore = on;
+}
+
+juce::File Application::isolatedSettingsStoreFile()
+{
+    // One store per test shard (SC_TEST_SHARD=k/n) so parallel test processes
+    // never share settings. Wiped once per process; the test runner also
+    // resets it before every test (resetIsolatedSettingsStore) so no test
+    // depends on settings left behind by an earlier one.
+    static const juce::File f = [] ()
+    {
+        const auto shard = juce::SystemStats::getEnvironmentVariable ("SC_TEST_SHARD", {})
+                               .upToFirstOccurrenceOf ("/", false, false).trim();
+        auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                        .getChildFile (shard.isEmpty() ? juce::String ("SpectroCraftTests.recent")
+                                                       : "SpectroCraftTests-shard" + shard + ".recent");
+        file.deleteFile();
+        return file;
+    } ();
+    return f;
+}
+
+void Application::resetIsolatedSettingsStore()
+{
+    if (g_isolatedSettingsStore)
+        isolatedSettingsStoreFile().deleteFile();
 }
 
 Application::Application (const juce::File& recentStorePath)
@@ -71,25 +110,15 @@ Application::Application (const juce::File& recentStorePath)
     juce::File storePath;
     if (recentStorePath != juce::File())
         storePath = recentStorePath;
-#if SC_TESTS_EXE
-    else
+    else if (g_isolatedSettingsStore)
     {
         // Tests must never read or write the user's real settings file: a GUI
         // session that left non-default values behind would otherwise change
-        // test outcomes. Use a fresh per-run temp store instead.
-        static juce::File isolatedStore = [] ()
-        {
-            auto f = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                        .getChildFile ("SpectroCraftTests.recent");
-            if (f.existsAsFile()) f.deleteFile();
-            return f;
-        } ();
-        storePath = isolatedStore;
+        // test outcomes.
+        storePath = isolatedSettingsStoreFile();
     }
-#else
     else
         storePath = opts.getDefaultFile();
-#endif
     scStart::mark ("before-properties-file");
     recentStore = std::make_unique<juce::PropertiesFile> (storePath, opts);
     scStart::mark ("after-properties-file");
@@ -979,7 +1008,8 @@ bool Application::pullRecFrames (FileDoc* d, long long cap)
         docData = mapped.data ();
     }
 
-    const bool ok = loopFull ? eng.overwriteSamples (docData, writePosFrame * ch, frames)
+    // overwriteSamples() takes a frame position (not an interleaved sample index).
+    const bool ok = loopFull ? eng.overwriteSamples (docData, writePosFrame, frames)
                              : eng.appendSamples (docData, frames);
     if (!ok)
         return false;   // audio thread busy - data stays in the plugin ring
@@ -1154,7 +1184,7 @@ void Application::stopRecording ()
             const juce::String le = lastErr.trim ();
             if (!le.isEmpty () && le != "no error")
                 msg += "\n\n" + le;
-            juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                "Recording", msg);
         }
         else
@@ -1303,7 +1333,8 @@ void Application::clearSpectralSelection ()
 void Application::pushSpectralMaskToEngine ()
 {
     auto* d = doc();
-    const bool active = playSpectralSel && d && !d->spectralSel.empty ();
+    // A selection made only of subtractive shapes selects nothing.
+    const bool active = playSpectralSel && d && d->spectralSel.hasAdditiveShape ();
     audioEngine ().setSpectralPlaybackMask (
         active ? std::make_shared<SpectralSelection> (d->spectralSel) : nullptr);
 }
@@ -1311,7 +1342,7 @@ void Application::pushSpectralMaskToEngine ()
 bool Application::hasSpectralSelection () const
 {
     auto* d = doc();
-    return d && !d->spectralSel.empty ();
+    return d && d->spectralSel.hasAdditiveShape ();   // subtractive-only selects nothing
 }
 
 void Application::refreshSpectralSelectionUI ()
@@ -3549,17 +3580,40 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
             nt[i] = orig[i] - filt[i];
     }
 
-    if (!audioEngine().replaceWithNoiseTracks (samples, data, noiseTracks,
-                "Noise suppressed (" + juce::String (modelId) + ") and copied noise to new track(s)"))
-        return fail ("Could not apply the noise suppression.");
+    // The commit changes the channel count and edits visibleChannels and the
+    // active document, which the message thread reads while painting: run it
+    // there (inference above stays on the worker), like runPythonScript.
+    auto commit = [&] () -> bool
+    {
+        if (!audioEngine().replaceWithNoiseTracks (samples, data, noiseTracks,
+                    "Noise suppressed (" + juce::String (modelId) + ") and copied noise to new track(s)"))
+            return false;
 
-    // Make the freshly added channels visible (leave other choices alone).
-    const int n = audioEngine().numChannels ();
-    for (int ch = nch; ch < n; ++ch)
-        if (!isChannelVisible (ch))
-            visibleChannels.push_back (ch);
-    std::sort (visibleChannels.begin (), visibleChannels.end());
-    syncActiveDoc ();
+        // Make the freshly added channels visible (leave other choices alone).
+        const int n = audioEngine().numChannels ();
+        for (int ch = nch; ch < n; ++ch)
+            if (!isChannelVisible (ch))
+                visibleChannels.push_back (ch);
+        std::sort (visibleChannels.begin (), visibleChannels.end());
+        syncActiveDoc ();
+        return true;
+    };
+
+    bool committed = false;
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
+    if (mm == nullptr || mm->isThisTheMessageThread ())
+        committed = commit ();   // tests / CLI: already on the right thread
+    else
+    {
+        // The message thread never waits on this worker (non-blocking modal
+        // progress dialog), so waiting here cannot deadlock.
+        juce::WaitableEvent done;
+        if (!juce::MessageManager::callAsync ([&] { committed = commit (); done.signal (); }))
+            return fail ("Could not apply the noise suppression (the application is shutting down).");
+        done.wait (-1);
+    }
+    if (!committed)
+        return fail ("Could not apply the noise suppression.");
 
     return true;
 }
@@ -3568,6 +3622,9 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 // Python scripts: run a user script against the selection (or whole file).
 // Data exchange happens through temp float32 WAV files plus a metadata JSON;
 // the result replaces that range in place and is undoable.
+// Not an AI feature: kept outside the SC_ENABLE_AI block so lean
+// (-DSPECTRO_ENABLE_AI=OFF) and non-Windows builds still link.
+#endif // SC_ENABLE_AI (noiseSuppress)
 
 bool Application::runPythonScript (const juce::File& script, const juce::String& scriptText,
                                    const std::string& pythonCmd,
@@ -3651,7 +3708,8 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
     if (!prog (0.3f)) { cleanup (); return false; }   // cancelled - silent
 
     // Run the interpreter: <pythonCmd> <script> <in.wav> <out.wav> <meta.json>
-    const juce::StringArray cmdTokens (juce::String (pythonCmd).trim ());
+    // pythonCmd may carry extra flags ("py -3"): split it into tokens.
+    const juce::StringArray cmdTokens = sc::py::splitCommand (pythonCmd);
     if (cmdTokens.size () == 0)
     {
         cleanup ();
@@ -3722,70 +3780,111 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
         return fail ("The script's output is empty.");
     }
 
+    // NaN / Inf would propagate into the mipmaps, the spectral cache and the
+    // realtime output: reject them instead of committing a corrupt document.
+    for (int ch = 0; ch < nch; ++ch)
+        for (const float v : newData[(size_t) ch])
+            if (!std::isfinite (v))
+            {
+                cleanup ();
+                return fail ("The script's output contains NaN or infinite sample values"
+                             " (channel " + juce::String (ch + 1) + "). Nothing was changed.");
+            }
+
     if (!prog (0.9f)) { cleanup (); return false; }   // cancelled before commit - silent
 
     const juce::String desc = "Python script '" + script.getFileName () + "'";
-    bool ok;
-    if (got == want)
-        ok = audioEngine ().replaceSamples (samples, newData, desc, &err);
-    else
+
+    // The commit mutates the document, the undo history, markers, playhead,
+    // selection and (through onTimeRangeDeleted/Inserted) UI components such
+    // as the FFT snapshot buttons. All of that belongs to the message thread,
+    // which keeps painting while the worker waits behind the progress dialog,
+    // so when called from a worker thread run the commit there and wait.
+    auto commit = [&] () -> bool
     {
-        // Length-changing output: capture the non-audio state first so undo
-        // can restore it, exactly like a manual deletion does.
-        const size_t depthBefore = d->undo.depth ();
-        std::vector<Marker> oldMarkers = d->markers.markers ();
-        auto oldSavedSel = d->savedSelections;
-        TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
-
-        ok = audioEngine ().replaceRangeWithDifferentLength (samples, newData, desc, &err);
-        if (!ok || d->undo.depth () <= depthBefore)
-            ;
-        else if (got < want)
+        if (doc () != d)
         {
-            // The tail of the processed range is gone: drop / clip anything that
-            // referred to it.
-            const double aSec = (double) (samples.getStart () + got) / rate;
-            const double bSec = (double) samples.getEnd () / rate;
-            d->remapForDeletion (aSec, bSec);
-
-            // The cursor/selection follow their anchored positions; the old
-            // selection [start, end) now covers exactly the shortened range.
-            playhead  = warpDeletion (playhead, aSec, bSec);
-            selection = { warpDeletion (selection.getStart (), aSec, bSec),
-                          warpDeletion (selection.getEnd (),   aSec, bSec) };
-
-            Patch& p = d->undo.lastRecorded ();
-            p.hasSideState = true;
-            p.oldMarkers  = std::move (oldMarkers);
-            p.newMarkers  = d->markers.markers ();
-            p.oldSavedSel = std::move (oldSavedSel);
-            p.newSavedSel = d->savedSelections;
-            commitTimeAnchoredToPatch (oldTA, p);
-            if (onTimeRangeDeleted)
-                onTimeRangeDeleted (d, aSec, bSec, p, false);
+            err = "The active document changed while the script was running.";
+            return false;
         }
+        bool ok;
+        if (got == want)
+            ok = audioEngine ().replaceSamples (samples, newData, desc, &err);
         else
         {
-            // The processed range grew: content from its old end on shifted
-            // right by the delta.
-            const double aSec    = (double) samples.getEnd () / rate;
-            const double lenSecs = (double) (got - want) / rate;
-            d->remapForInsertion (aSec, lenSecs);
+            // Length-changing output: capture the non-audio state first so undo
+            // can restore it, exactly like a manual deletion does.
+            const size_t depthBefore = d->undo.depth ();
+            std::vector<Marker> oldMarkers = d->markers.markers ();
+            auto oldSavedSel = d->savedSelections;
+            TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
 
-            playhead  = warpInsertion (playhead, aSec, lenSecs);
-            selection = { warpInsertion (selection.getStart (), aSec, lenSecs),
-                          warpInsertion (selection.getEnd (),   aSec, lenSecs) };
+            ok = audioEngine ().replaceRangeWithDifferentLength (samples, newData, desc, &err);
+            if (!ok || d->undo.depth () <= depthBefore)
+                ;
+            else if (got < want)
+            {
+                // The tail of the processed range is gone: drop / clip anything that
+                // referred to it.
+                const double aSec = (double) (samples.getStart () + got) / rate;
+                const double bSec = (double) samples.getEnd () / rate;
+                d->remapForDeletion (aSec, bSec);
 
-            Patch& p = d->undo.lastRecorded ();
-            p.hasSideState = true;
-            p.oldMarkers  = std::move (oldMarkers);
-            p.newMarkers  = d->markers.markers ();
-            p.oldSavedSel = std::move (oldSavedSel);
-            p.newSavedSel = d->savedSelections;
-            commitTimeAnchoredToPatch (oldTA, p);
-            if (onTimeRangeInserted)
-                onTimeRangeInserted (d, aSec, lenSecs, p);
+                // The cursor/selection follow their anchored positions; the old
+                // selection [start, end) now covers exactly the shortened range.
+                playhead  = warpDeletion (playhead, aSec, bSec);
+                selection = { warpDeletion (selection.getStart (), aSec, bSec),
+                              warpDeletion (selection.getEnd (),   aSec, bSec) };
+
+                Patch& p = d->undo.lastRecorded ();
+                p.hasSideState = true;
+                p.oldMarkers  = std::move (oldMarkers);
+                p.newMarkers  = d->markers.markers ();
+                p.oldSavedSel = std::move (oldSavedSel);
+                p.newSavedSel = d->savedSelections;
+                commitTimeAnchoredToPatch (oldTA, p);
+                if (onTimeRangeDeleted)
+                    onTimeRangeDeleted (d, aSec, bSec, p, false);
+            }
+            else
+            {
+                // The processed range grew: content from its old end on shifted
+                // right by the delta.
+                const double aSec    = (double) samples.getEnd () / rate;
+                const double lenSecs = (double) (got - want) / rate;
+                d->remapForInsertion (aSec, lenSecs);
+
+                playhead  = warpInsertion (playhead, aSec, lenSecs);
+                selection = { warpInsertion (selection.getStart (), aSec, lenSecs),
+                              warpInsertion (selection.getEnd (),   aSec, lenSecs) };
+
+                Patch& p = d->undo.lastRecorded ();
+                p.hasSideState = true;
+                p.oldMarkers  = std::move (oldMarkers);
+                p.newMarkers  = d->markers.markers ();
+                p.oldSavedSel = std::move (oldSavedSel);
+                p.newSavedSel = d->savedSelections;
+                commitTimeAnchoredToPatch (oldTA, p);
+                if (onTimeRangeInserted)
+                    onTimeRangeInserted (d, aSec, lenSecs, p);
+            }
         }
+        return ok;
+    };
+
+    bool ok = false;
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
+    if (mm == nullptr || mm->isThisTheMessageThread ())
+        ok = commit ();
+    else
+    {
+        juce::WaitableEvent committed;
+        if (!juce::MessageManager::callAsync ([&] { ok = commit (); committed.signal (); }))
+        {
+            cleanup ();
+            return fail ("Could not apply the script's output (the application is shutting down).");
+        }
+        committed.wait (-1);
     }
 
     if (!ok)
@@ -3798,6 +3897,7 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
     return true;
 }
 
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 bool Application::transcribe (const std::string& modelId, const std::string& language,
                               bool translate, bool fast,
                               std::function<bool(float)> onProgress, std::string* errOut,
@@ -4061,6 +4161,17 @@ bool Application::batchTranscribeFolder (const juce::File& folder,
 }
 #endif
 
+// Undo/redo could not apply a patch: the history was cleared. Tell the user
+// (asynchronously: undo runs from key handlers and menus).
+static void reportHistoryCleared (const char* what)
+{
+    if (juce::MessageManager::getInstanceWithoutCreating () == nullptr)
+        return;
+    sc::alert::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
+        what, juce::String ("The edit could not be ") + (juce::String (what) == "Undo" ? "undone" : "redone")
+              + " (not enough memory?). The undo history was cleared.");
+}
+
 void Application::undoSteps (int n)
 {
     FileDoc* d = doc();
@@ -4072,7 +4183,16 @@ void Application::undoSteps (int n)
     {
         Patch p;
         if (!d->undo.popUndo (p)) break;
-        d->engine.applyPatch (p, false, /*rebuild=*/false);
+        if (!d->engine.applyPatch (p, false, /*rebuild=*/false))
+        {
+            // The patch was already moved to the other stack but the buffer
+            // is unchanged (out of memory, or a patch inconsistent with the
+            // audio): the history no longer matches the samples, so drop it
+            // rather than keep a corrupt undo/redo chain.
+            d->undo.clear ();
+            reportHistoryCleared ("Undo");
+            break;
+        }
         if (p.hasSideState) restorePatchSideState (d, p, false);
         ++done;
     }
@@ -4095,7 +4215,16 @@ void Application::redoSteps (int n)
     {
         Patch p;
         if (!d->undo.popRedo (p)) break;
-        d->engine.applyPatch (p, true, /*rebuild=*/false);
+        if (!d->engine.applyPatch (p, true, /*rebuild=*/false))
+        {
+            // The patch was already moved to the other stack but the buffer
+            // is unchanged (out of memory, or a patch inconsistent with the
+            // audio): the history no longer matches the samples, so drop it
+            // rather than keep a corrupt undo/redo chain.
+            d->undo.clear ();
+            reportHistoryCleared ("Redo");
+            break;
+        }
         if (p.hasSideState) restorePatchSideState (d, p, true);
         ++done;
     }
@@ -4214,11 +4343,57 @@ bool Application::audioDeviceReady() const
     return audioDeviceIsReady.load();
 }
 
+bool Application::audioOutputDisabled()
+{
+#if defined (SC_NO_AUDIO_DEVICE)
+    return true;   // built without a real output device (headless test binary)
+#else
+    // Runtime switch for headless runs (ctest shards, CI): SC_NO_AUDIO_DEVICE=1
+    // keeps the default output device closed, so tests are silent and
+    // parallel test processes never fight over the hardware.
+    const juce::String v = juce::SystemStats::getEnvironmentVariable ("SC_NO_AUDIO_DEVICE", {}).trim ();
+    return v.isNotEmpty () && v != "0";
+#endif
+}
+
 void Application::startAudioInitAsync()
 {
     bool expected = false;
     if (!audioInitStarted.compare_exchange_strong (expected, true))
         return;   // already started or done - never spawn a second worker
+
+    if (audioOutputDisabled())
+    {
+        // No device will ever be opened: report the init as complete right
+        // away so callers waiting on it (ensureAudioReady, the "Preparing
+        // audio" dialog) carry on - playback then simply produces no sound.
+        {
+            std::lock_guard<std::mutex> g (audioInitLock);
+            audioDeviceIsReady.store (true);
+        }
+        audioInitCv.notify_all();
+        scStart::mark ("audio-device-disabled(SC_NO_AUDIO_DEVICE)");
+        return;
+    }
+
+    // Construct the device types HERE, on the message thread; only the slow
+    // part (scanning and opening the default device) goes to the worker.
+    // AudioDeviceManager would otherwise create them lazily inside
+    // initialiseWithDefaultDevices() on the worker thread, and some types
+    // bind to the creating thread: WASAPI's DeviceChangeDetector creates a
+    // hidden Win32 message window, which then belonged to a thread with no
+    // message loop that exits right after the init - device hot-plug
+    // notifications were never delivered. Constructing a type is cheap; it
+    // does not scan. Nothing touches audioDevice before this point (the
+    // constructor only adds the audio callback), so the list is still empty.
+    if (juce::MessageManager::existsAndIsCurrentThread())
+    {
+        juce::OwnedArray<juce::AudioIODeviceType> types;
+        audioDevice->createAudioDeviceTypes (types);
+        for (auto* t : types)
+            audioDevice->addAudioDeviceType (std::unique_ptr<juce::AudioIODeviceType> (t));
+        types.clear (false);   // ownership moved to the manager
+    }
 
     audioInitThread = std::thread ([this] {
         audioDevice->initialiseWithDefaultDevices (0, 2); // no input, stereo output
@@ -4258,7 +4433,7 @@ void Application::play()
 
     // Self-heal: if no output device is running (initialisation can fail when
     // the default device isn't available yet), try again now.
-    if (audioDevice->getCurrentAudioDevice() == nullptr)
+    if (audioDevice->getCurrentAudioDevice() == nullptr && !audioOutputDisabled())
         audioDevice->initialiseWithDefaultDevices (0, 2);
 
     // Restart from the beginning when playback is at (or past) the end.

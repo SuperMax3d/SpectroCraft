@@ -1,6 +1,9 @@
 // SpectroCraft - recorder plugin host implementation
 #include "Recorder.h"
 
+#include <algorithm>
+#include <cstddef>
+
 #if defined (JUCE_WINDOWS)
     #define NOMINMAX
     #include <windows.h>
@@ -60,6 +63,20 @@ void RecorderHost::unloadAll()
     active_ = nullptr;
 }
 
+juce::String RecorderHost::pluginFilePattern()
+{
+    // A plugin is a shared library in the platform's native format. (The scan
+    // used to look for *.dll everywhere, so a .dylib / .so plugin was never
+    // found on macOS / Linux.)
+#if defined (JUCE_WINDOWS)
+    return "*.dll";
+#elif defined (JUCE_MAC)
+    return "*.dylib";
+#else
+    return "*.so";
+#endif
+}
+
 void RecorderHost::scanPlugins(const juce::File& extraDir)
 {
     std::vector<juce::File> dirs;
@@ -72,24 +89,44 @@ void RecorderHost::scanPlugins(const juce::File& extraDir)
     if (extraDir != juce::File ())
         dirs.push_back (extraDir);
 
+    // Every call lists the directories again, so a plugin dropped in after the
+    // first scan is found by the next one (the menu and startRecording() rely
+    // on that). Already loaded files are skipped, and so are files that were
+    // rejected before, until they change on disk.
+    std::vector<juce::String> seenDirs;   // de-duplicates within this call only
     for (const auto& d : dirs)
     {
         const juce::String key = d.getFullPathName ().toLowerCase ();
-        bool seen = false;
-        for (const auto& s : scannedDirs_)
-            if (s == key) { seen = true; break; }
-        if (seen || !d.isDirectory ())
+        if (std::find (seenDirs.begin (), seenDirs.end (), key) != seenDirs.end ()
+                || !d.isDirectory ())
             continue;
-        scannedDirs_.push_back (key);
+        seenDirs.push_back (key);
 
-        for (const auto& entry : juce::RangedDirectoryIterator (d, false, "*.dll"))
+        for (const auto& entry : juce::RangedDirectoryIterator (d, false, pluginFilePattern ()))
         {
             const juce::File f = entry.getFile ();
             bool have = false;
             for (const auto& p : plugins_)
                 if (p.file == f) { have = true; break; }
-            if (!have)
-                loadOne (f);
+            if (have)
+                continue;
+
+            const juce::String path = f.getFullPathName ();
+            const juce::int64 stamp = f.getLastModificationTime ().toMilliseconds ();
+            const auto rej = std::find_if (rejected_.begin (), rejected_.end (),
+                                           [&path] (const auto& r) { return r.first == path; });
+            if (rej != rejected_.end () && rej->second == stamp)
+                continue;   // same file failed to load before
+
+            if (loadOne (f))
+            {
+                if (rej != rejected_.end ())
+                    rejected_.erase (rej);
+            }
+            else if (rej != rejected_.end ())
+                rej->second = stamp;
+            else
+                rejected_.emplace_back (path, stamp);
         }
     }
 
@@ -164,7 +201,12 @@ bool RecorderHost::loadOne(const juce::File& dll)
 
     p.module = mod;
     refreshDevices (p);
+    // active_ points into plugins_: re-point it if push_back reallocates.
+    // (All callers run on the message thread, which also pulls the frames.)
+    const std::ptrdiff_t activeIdx = active_ != nullptr ? active_ - plugins_.data () : -1;
     plugins_.push_back (std::move (p));
+    if (activeIdx >= 0)
+        active_ = plugins_.data () + activeIdx;
     return true;
 }
 

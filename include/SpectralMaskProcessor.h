@@ -139,6 +139,11 @@ namespace SpectralMask
         juce::dsp::FFT fft { 11 };
         std::vector<float> window;
         std::vector<ChannelState> chans;
+        // Per-frame scratch, sized in prepare() so process() (audio thread)
+        // does not allocate: FFT buffer and the selection gain of each bin
+        // (identical for every channel of a frame).
+        std::vector<float> frameBuf;
+        std::vector<float> binGains;
         int64_t nextFrame = 0;           // first analysis frame not yet processed
         int64_t lastEnd = -1;            // absStart + outCount of the previous call
     };

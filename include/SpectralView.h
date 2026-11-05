@@ -10,20 +10,25 @@
 #include <vector>
 #include <functional>
 
+/** Overlays to bake into an exported spectrogram PNG (File -> Spectrogram).
+    All off by default: a plain export is just the spectral plot, exactly as
+    before these options existed. */
+struct SpectralExportOptions
+{
+    bool axes = false;        // include frequency + time axes around the plot
+    bool markers = false;     // draw marker lines and titles
+    bool selections = false;  // draw time selection band + spectral selection shapes
+    bool drawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
+};
+
 class SpectralView : public juce::Component,
                       public juce::SettableTooltipClient
 {
 public:
-    /** Overlays to bake into an exported spectrogram PNG (File -> Spectrogram).
-        All off by default: a plain export is just the spectral plot, exactly as
-        before these options existed. */
-    struct SpectralExportOptions
-    {
-        bool axes = false;        // include frequency + time axes around the plot
-        bool markers = false;     // draw marker lines and titles
-        bool selections = false;  // draw time selection band + spectral selection shapes
-        bool drawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
-    };
+    // Declared at namespace scope (below the includes) so that `= {}` default
+    // arguments inside this class compile on clang/GCC too: a nested struct with
+    // default member initialisers is incomplete until the enclosing class ends.
+    using SpectralExportOptions = ::SpectralExportOptions;
 
     explicit SpectralView (Application& app);
     ~SpectralView();
@@ -70,7 +75,20 @@ public:
     void setSpectralSelectionChanged() { repaint(); }
     void setPlayhead (double t)
     {
-        if (t != playhead) { playhead = t; repaint(); }
+        if (t == playhead) return;
+        // Only the playhead line moves: repaint the old and new columns, not
+        // the whole view (called at 30 Hz during playback).
+        repaintPlayheadColumn (timeToX (playhead));
+        playhead = t;
+        repaintPlayheadColumn (timeToX (playhead));
+    }
+    // Repaints the full-height strip around the playhead line drawn at x
+    // ((int) x or lround (x), 1 px wide).
+    void repaintPlayheadColumn (double x)
+    {
+        if (!std::isfinite (x)) { repaint(); return; }
+        const int xi = (int) std::floor (std::clamp (x, -4.0, (double) getWidth() + 4.0));
+        repaint (xi - 2, 0, 5, getHeight());
     }
     double getPlayhead() const { return playhead; }
     void setMarkers (const std::vector<Marker>* m)
@@ -100,6 +118,9 @@ public:
     // Current local frequency-axis limits (for the vertical scrollbar).
     double getFreqMin() const { return freqMin; }
     double getFreqMax() const { return freqMax; }
+    // True when the frequency axis is logarithmic (the vertical scrollbar
+    // must then map log(Hz) too: ValueScrollBar::setLogarithmic).
+    bool isLogFrequency() const { return settings_.logFrequency; }
 
     // Effective FFT size for the current zoom levels: in auto mode this is
     // recomputed from the time window + frequency axis + row height, otherwise
@@ -151,10 +172,23 @@ public:
         only the spectral plot area is written; `opts` can additionally bake
         in the axes and/or the markers / selections / drawings overlays.
         If cancel points at an atomic set to true, rendering stops early and
-        false is returned without writing any file. */
+        false is returned without writing any file.
+        Safe to call from a worker thread: the state snapshot is then taken
+        on the message thread (prefer preparePngExport() there). */
     bool saveAsPng (const juce::File& file,
                    const std::atomic<bool>* cancel = nullptr,
                    const SpectralExportOptions& opts = {});
+
+    /** Background export, phase 1 - call on the MESSAGE thread. Captures the
+        view state (channels, time/frequency window, settings, audio engine)
+        and composes the requested overlays now; the returned job renders the
+        spectral content, composites and writes the PNG without touching this
+        component, so it may run on any thread (it returns false when
+        cancelled or on failure). Returns an empty function when there is
+        nothing to export. */
+    using PngExportJob = std::function<bool (const std::atomic<bool>* cancel)>;
+    PngExportJob preparePngExport (const juce::File& file,
+                                   const SpectralExportOptions& opts = {});
 
     // Notify MainWindow that the time window changed: (newStart, newEnd).
     // MainWindow applies it to BOTH views so they always show the same range.
@@ -200,7 +234,7 @@ public:
     // address the EXPORT layout instead of the live component bounds.
     int rulerH() const
     {
-        return haveExportLayout_ ? exportLayout_.getY()
+        return haveExportLayout_ ? exportRulerH_
                                  : (showOwnTimeRuler ? kRulerH : 0);
     }
 
@@ -253,7 +287,7 @@ public:
     // Full canvas size used by the drawing code: normally the component's own
     // bounds, but the export layout while saveAsPng() is composing.
     int layoutWidth()  const { return haveExportLayout_ ? (kLeftAxisWidth + exportLayout_.getWidth())  : getWidth(); }
-    int layoutHeight() const { return haveExportLayout_ ? (exportLayout_.getY() + exportLayout_.getHeight()) : getHeight(); }
+    int layoutHeight() const { return haveExportLayout_ ? (exportLayout_.getHeight() + exportRulerH_) : getHeight(); }
 
     // Overlay pieces, split so an export can bake in a subset of them.
     void drawTimeSelectionOverlay (juce::Graphics& g);
@@ -287,8 +321,11 @@ private:
     int tablesTopInset = 0;   // reserved strip below the top ruler (tables track)
     // Offscreen export layout: when set, plotRect()/rulerH()/layoutWidth() /
     // layoutHeight() address this rectangle instead of the component bounds.
+    // Only ever set on the message thread, for the duration of one
+    // preparePngExport() call.
     bool haveExportLayout_ = false;
     juce::Rectangle<int> exportLayout_;
+    int exportRulerH_ = 0;   // time-ruler strip of the export canvas (0 = no axes)
     SpectralEngine& spectral;
     double viewStart = 0, viewEnd = 10;
     double freqMin = 20.0, freqMax = 20000.0;   // local frequency axis limits
@@ -361,6 +398,22 @@ private:
     // Returns false if cancelled mid-render.
     bool renderSpectralContent (juce::Image& img, const Settings& rs,
                                 const std::atomic<bool>* cancel = nullptr);
+
+    // The view state renderSpectralContent() reads, captured by value so an
+    // export can render on a worker thread without touching the component.
+    struct RenderSnapshot
+    {
+        std::vector<int> channels;
+        double t0 = 0.0, t1 = 0.0;          // time window
+        double fMin = 20.0, fMax = 20000.0; // frequency-axis limits
+        double sampleRate = 0.0;
+    };
+    RenderSnapshot makeRenderSnapshot() const;
+    static Settings effectiveSettingsFor (const Settings& base, int rowHeightPx,
+                                          const RenderSnapshot& s);
+    static bool renderSpectralRows (SpectralEngine& spectral, AudioEngine& audio,
+                                    const RenderSnapshot& s, juce::Image& img,
+                                    const Settings& rs, const std::atomic<bool>* cancel);
 
     // Resolves the settings to use when rendering one channel row: starts from
     // `base`, applies this view's live frequency-axis limits (which may have

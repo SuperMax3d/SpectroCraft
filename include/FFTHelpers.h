@@ -7,15 +7,14 @@
 //   output: bins k = 0..N/2 written interleaved at data[k*2] (re), data[k*2+1] (im)
 //
 // When the CPU supports AVX2 (and this translation unit was compiled with it)
-// a vectorized radix-2 DIT FFT is used; otherwise it falls back to JUCE's
-// scalar implementation.
+// a vectorized radix-2 DIT FFT is used; otherwise it falls back to JUCE's FFT
+// (cached per order and thread).
 
 namespace scfft
 {
-    /** True if the current CPU has AVX2, the AVX2 path was compiled in,
-     *  AND a one-time runtime self-test confirms that SIMD store loops
-     *  behave correctly on this hardware (some CPUs have an erratum where
-     *  vector stores inside a loop commit one spurious extra iteration).
+    /** True if the AVX2 path was compiled in (__AVX2__), the CPU reports AVX2
+     *  with OS YMM-state support, and a one-time numerical self-test of the
+     *  AVX2 FFT against a double-precision DFT passed.
      */
     bool hasAvx2();
 

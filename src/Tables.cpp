@@ -84,20 +84,21 @@ void parseCustomColours (const juce::String& text, std::vector<juce::Colour>& ou
 
 // NOTE: this JUCE build has no String::operator+=(char16_t) - on MSVC a
 // char16_t would silently bind to the int overload and append the character's
-// numeric code. Accumulate raw UTF-16 units instead and convert once per field.
+// numeric code. Accumulate code points instead and convert once per field.
 std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
 {
     std::vector<std::vector<juce::String>> grid;
     std::vector<juce::String> row;
-    // CharPointer_UTF16's CharType is wchar_t on Windows (distinct from
-    // uint16/char16_t), so accumulate in wchar_t units.
-    std::vector<wchar_t> fieldBuf;
+    // juce::String::operator[] yields full code points (juce_wchar); keep
+    // them as UTF-32 so non-BMP characters survive and the code is portable
+    // (wchar_t is 16-bit on Windows but 32-bit on macOS/Linux).
+    std::vector<juce::juce_wchar> fieldBuf;
     bool inQuotes = false;
 
     auto pushField = [&] ()
     {
         if (!fieldBuf.empty ())
-            row.push_back (juce::String (juce::CharPointer_UTF16 (fieldBuf.data()),
+            row.push_back (juce::String (juce::CharPointer_UTF32 (fieldBuf.data()),
                                          (size_t) fieldBuf.size()).trim());
         else
             row.push_back (juce::String());
@@ -110,7 +111,7 @@ std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
 
     for (size_t i = 0; i < text.length(); ++i)
     {
-        const char16_t c = text[(int) i];
+        const juce::juce_wchar c = text[(int) i];
         if (inQuotes)
         {
             if (c == '"')
@@ -124,7 +125,7 @@ std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
                     continue;   // closing quote: not part of the field
                 }
             }
-            fieldBuf.push_back ((wchar_t) c);
+            fieldBuf.push_back (c);
         }
         else if (c == '"')
         {
@@ -143,7 +144,7 @@ std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
         }
         else
         {
-            fieldBuf.push_back ((wchar_t) c);
+            fieldBuf.push_back (c);
         }
     }
     if (!fieldBuf.empty () || !row.empty())

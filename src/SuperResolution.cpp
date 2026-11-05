@@ -1,6 +1,8 @@
 // SpectroCraft - Effects > Super Resolution (external audio.cpp CLI tool).
 #include "SuperResolution.h"
+#include "AlertGate.h"
 #include "AudioCpp.h"
+#include "OwningAlertWindow.h"   // dialogs with new-ed custom components
 #include "PythonScripts.h"   // sc::py::readFloatWav / writeFloatWav
 #include "Resampler.h"
 #include "WorkProgress.h"
@@ -350,7 +352,8 @@ void SuperResolutionWindow::openDownloadDialog()
     // for the currently selected mode.
     const int modeId = selectedModeId ();
 
-    juce::AlertWindow dlg ("Super Resolution setup", "", juce::AlertWindow::NoIcon, this);
+    // Owning: the Label/ComboBox rows below are added with new.
+    sc::OwningAlertWindow dlg ("Super Resolution setup", "", juce::AlertWindow::NoIcon, this);
     dlg.addButton ("Download", 1, {});
     dlg.addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
@@ -434,7 +437,8 @@ void SuperResolutionWindow::openDownloadDialog()
 
             setStatus ("Downloading " + choices[i].label + "...");
             ok = sc::acpp::downloadFile (choices[i].url, zip,
-                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err);
+                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err,
+                choices[i].sizeBytes);
             if (!ok && !prog->cancelled.load ())
                 setStatus ("Download failed: " + juce::String (err));
 
@@ -459,7 +463,8 @@ void SuperResolutionWindow::openDownloadDialog()
                                                       : sc::acpp::flashSrUrl (choices[i].file))
                                          .toStdString (),
                                          dest,
-                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err);
+                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err,
+                choices[i].sizeBytes);
             if (!ok && !prog->cancelled.load ())
                 setStatus ("Download failed: " + juce::String (err));
         }
@@ -565,7 +570,7 @@ void SuperResolutionWindow::runWorker(std::unique_ptr<RunJob> job)
                 running_ = false;
                 statusLabel_.setText (msg, juce::dontSendNotification);
                 if (!detail.isEmpty ())
-                    juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                       "Super Resolution failed",
                                                       msg + "\n\n" + detail, "", this);
             });

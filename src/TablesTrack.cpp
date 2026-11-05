@@ -20,8 +20,20 @@ void TablesTrackView::setTimeRange (double t0In, double t1In)
 void TablesTrackView::setPlayhead (double tSecs)
 {
     if (tSecs == playheadT) return;
+    // Only the playhead line moves (30 Hz during playback): repaint the old
+    // and new columns instead of the whole track.
+    const auto pr = plotRect();
+    auto repaintColumn = [this, &pr] (double t)
+    {
+        if (!(t1 > t0)) { repaint(); return; }
+        const double px = pr.getX() + (t - t0) / (t1 - t0) * pr.getWidth();
+        if (!std::isfinite (px)) { repaint(); return; }
+        const int xi = (int) std::floor (std::clamp (px, -4.0, (double) getWidth() + 4.0));
+        repaint (xi - 2, 0, 5, getHeight());
+    };
+    repaintColumn (playheadT);
     playheadT = tSecs;
-    repaint();
+    repaintColumn (playheadT);
 }
 
 void TablesTrackView::setValueRange (double lo, double hi)

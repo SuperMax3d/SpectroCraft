@@ -1,11 +1,14 @@
-// SpectroCraft — dynamic loader for the prebuilt whisper.cpp b5454 DLLs.
+// SpectroCraft — run-time loader for the whisper.cpp b5454 libraries.
 //
-// The official release binaries (see extern/whisper-b5454/README.md) are
-// loaded at runtime with LoadLibrary + GetProcAddress, so the executable is
-// built without compiling whisper.cpp/ggml into it and starts even when the
-// DLLs are missing (only transcription degrades). The C API struct layouts
-// come from the vendored b5454 header (include/whisper.h), which must match
-// the shipped binaries exactly.
+// Windows: the official release binaries (see extern/whisper-b5454/README.md)
+// are loaded with LoadLibrary + GetProcAddress. macOS / Linux: libwhisper and
+// libggml* are built from the same tag by cmake/ScAiRuntimes.cmake, shipped
+// next to the executable (Linux) or in the app bundle's Frameworks folder
+// (macOS), and loaded with dlopen + dlsym. Either way the executable is built
+// without compiling whisper.cpp/ggml into it and starts even when the
+// libraries are missing (only transcription degrades). The C API struct
+// layouts come from the vendored b5454 header (include/whisper.h), which must
+// match the shipped binaries exactly (checked at configure time off Windows).
 
 #pragma once
 
@@ -19,9 +22,11 @@ class WhisperRuntime {
 public:
     static WhisperRuntime& instance();
 
-    // Loads whisper.dll (from the SpectroCraft subfolder next to the
-    // executable, falling back to the exe directory) and resolves every entry
-    // point. Idempotent; safe from multiple threads. Returns false with a
+    // Loads whisper.dll / libwhisper.dylib / libwhisper.so (see above) and
+    // resolves every entry point. On Windows the DLLs live in the SpectroCraft
+    // subfolder next to the executable (added to the process search path at
+    // startup), with a fallback to the exe directory for old flat layouts.
+    // Idempotent; safe from multiple threads. Returns false with a
     // human-readable message in *errOut when the DLL or a symbol is missing.
     bool load(std::string* errOut);
 
@@ -42,10 +47,11 @@ public:
     int                      (*langMaxId)       ()                                          = nullptr;
     const char*              (*langStr)         (int)                                       = nullptr;
 
-    // From ggml.dll: the default backend scan (ggml_backend_load_all), which
-    // looks in the executable's directory. load() prefers scanning the
-    // SpectroCraft subfolder next to the exe via ggml_backend_load_all_from_path
-    // and only falls back to this for old flat layouts. b5454's whisper.dll
+    // From ggml (ggml.dll / libggml): registers every CPU backend library.
+    // load() prefers scanning the runtime folder via
+    // ggml_backend_load_all_from_path (the SpectroCraft subfolder next to the
+    // exe on Windows, the executable's own folder off Windows) and only falls
+    // back to this default scan for old flat layouts. b5454's whisper library
     // does NOT register backends itself — the host application must do it
     // before creating a context.
     void                     (*loadAllBackends) ()                                          = nullptr;

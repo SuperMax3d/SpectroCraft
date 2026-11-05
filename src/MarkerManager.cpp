@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <string>
 #include <unordered_map>
 
 MarkerManager::MarkerManager() {}
@@ -309,92 +311,151 @@ bool MarkerManager::loadSidecar (const juce::File& audioFile)
     if (s.isEmpty())
         return false;
 
-    auto findKeyNum = [&s] (const juce::String& key, size_t objStart, size_t objEnd, double& value) -> bool
+    // Accept both the signed colour form this app writes (-2147483648 ..
+    // 2147483647) and plain unsigned ARGB (0 .. 4294967295). The normalisation
+    // keeps the value inside int range so the cast is exact instead of
+    // saturating on x86-64.
+    auto colourFrom = [] (double cv)
     {
-        const auto at = s.indexOf ((int) objStart, key);
-        if (at < 0 || (size_t) at >= objEnd)
-            return false;
-        size_t pos = (size_t) at + (size_t) key.length();
-        while (pos < objEnd && (s[(int) pos] == ':' || s[(int) pos] == ' '))
-            ++pos;
-        const auto start = pos;
-        while (pos < objEnd && (s[(int) pos] == '-' || s[(int) pos] == '.' || s[(int) pos] == 'e'
-               || s[(int) pos] == 'E'
-               || (s[(int) pos] >= '0' && s[(int) pos] <= '9')))
-            ++pos;
-        value = s.substring ((int) start, (int) pos).getFloatValue();
+        if (cv >= 2147483648.0)
+            cv -= 4294967296.0;
+        if (!(cv >= -2147483648.0 && cv <= 2147483647.0))
+            return Marker().colour;   // out of range / NaN: keep the default
+        return juce::Colour ((uint32) (int) cv);
+    };
+
+    // saveSidecar writes JSON with escaped strings: parse it with juce::JSON so
+    // the escapes are decoded, braces inside names/comments are not taken for
+    // the end of the object and times keep their full double precision.
+    const juce::var root = juce::JSON::parse (s);
+    if (const auto* obj = root.getDynamicObject())
+    {
+        const juce::var arrVar = obj->getProperties().getWithDefault ("markers", juce::var());
+        if (const auto* arr = arrVar.isArray() ? arrVar.getArray() : nullptr)
+        {
+            for (int i = 0; i < arr->size(); ++i)
+            {
+                const auto* o = (*arr)[i].getDynamicObject();
+                if (o == nullptr)
+                    continue;
+                const auto& p = o->getProperties();
+                if (!p.contains ("id"))
+                    continue;   // same rule as the tolerant scanner below
+
+                Marker m;
+                m.id      = (int) static_cast<double> (p.getWithDefault ("id", 0));
+                m.name    = p.getWithDefault ("name", "").toString();
+                m.comment = p.getWithDefault ("comment", "").toString();
+                m.start   = static_cast<double> (p.getWithDefault ("start", 0.0));
+                m.end     = static_cast<double> (p.getWithDefault ("end", -1.0));
+                if (p.contains ("colour"))
+                    m.colour = colourFrom (static_cast<double> (p.getWithDefault ("colour", 0)));
+
+                if (m.id >= nextId) nextId = m.id + 1;
+                list.push_back (m);
+            }
+            sort();
+            return true;
+        }
+    }
+
+    // Fallback for sidecars juce::JSON rejects (e.g. a non-finite time written
+    // as "nan" by an old version): tolerant scan of the UTF-8 bytes, aware of
+    // quoted strings and escapes. Succeeds only when a marker was recovered.
+    const std::string u = s.toStdString();
+    const size_t npos = std::string::npos;
+
+    auto objectEnd = [&u, npos] (size_t open) -> size_t
+    {
+        bool inStr = false;
+        for (size_t i = open + 1; i < u.size(); ++i)
+        {
+            const char c = u[i];
+            if (inStr)
+            {
+                if (c == '\\') ++i;
+                else if (c == '"') inStr = false;
+            }
+            else if (c == '"') inStr = true;
+            else if (c == '}') return i;
+        }
+        return npos;
+    };
+    auto keyAt = [&u, npos] (const char* key, size_t a, size_t b) -> size_t
+    {
+        const size_t at = u.find (key, a);
+        return (at == npos || at >= b) ? npos : at + std::strlen (key);
+    };
+    auto keyNum = [&] (const char* key, size_t a, size_t b, double& value) -> bool
+    {
+        size_t q = keyAt (key, a, b);
+        if (q == npos) return false;
+        while (q < b && (u[q] == ':' || u[q] == ' ')) ++q;
+        const size_t st = q;
+        while (q < b && (u[q] == '-' || u[q] == '+' || u[q] == '.' || u[q] == 'e' || u[q] == 'E'
+                         || (u[q] >= '0' && u[q] <= '9')))
+            ++q;
+        value = juce::String::fromUTF8 (u.data() + st, (int) (q - st)).getDoubleValue();
         return true;
+    };
+    auto keyStr = [&] (const char* key, size_t a, size_t b, juce::String& value) -> bool
+    {
+        size_t q = keyAt (key, a, b);
+        if (q == npos) return false;
+        while (q < b && u[q] != '"') ++q;   // opening quote of the value
+        std::string v;
+        for (++q; q < b; ++q)
+        {
+            const char c = u[q];
+            if (c == '"')
+            {
+                value = juce::String::fromUTF8 (v.data(), (int) v.size());
+                return true;
+            }
+            if (c == '\\' && q + 1 < b)
+            {
+                const char e = u[++q];
+                v += e == 'n' ? '\n' : e == 'r' ? '\r' : e == 't' ? '\t' : e;
+            }
+            else
+                v += c;
+        }
+        return false;
     };
 
     size_t pos = 0;
     while (true)
     {
-        const auto open = s.indexOfChar ((int) pos, '{');
-        if (open < 0) break;
-        const auto close = s.indexOfChar ((int) open + 1, '}');
-        if (close < 0) break;
-        const size_t objStart = (size_t) open, objEnd = (size_t) close;
+        const size_t open = u.find ('{', pos);
+        if (open == npos) break;
+        const size_t close = objectEnd (open);
+        if (close == npos) break;
 
         Marker m;
         double v = 0;
-        if (!findKeyNum ("\"id\"", objStart, objEnd, v))
+        if (keyNum ("\"id\"", open, close, v))
         {
-            pos = objEnd + 1;
-            continue;
-        }
-        m.id = (int) v;
-        findKeyNum ("\"start\"", objStart, objEnd, v); m.start = v;
-        findKeyNum ("\"end\"", objStart, objEnd, v); m.end = v;
+            m.id = (int) v;
+            if (keyNum ("\"start\"", open, close, v)) m.start = v;
+            if (keyNum ("\"end\"", open, close, v))   m.end = v;
+            keyStr ("\"name\"", open, close, m.name);
+            keyStr ("\"comment\"", open, close, m.comment);
+            if (keyNum ("\"colour\"", open, close, v))
+                m.colour = colourFrom (v);
 
-        const auto nameAt = s.indexOf ((int) objStart, "\"name\"");
-        if (nameAt >= 0 && (size_t) nameAt < objEnd)
-        {
-            size_t q = (size_t) nameAt + 6;
-            while (q < objEnd && s[(int) q] != '"') ++q;
-            ++q;
-            const auto qEnd = s.indexOfChar ((int) q, '"');
-            if (qEnd >= 0 && (size_t) qEnd < objEnd)
-                m.name = s.substring ((int) q, (int) qEnd);
+            if (m.id >= nextId) nextId = m.id + 1;
+            list.push_back (m);
         }
-
-        const auto colAt = s.indexOf ((int) objStart, "\"colour\"");
-        if (colAt >= 0 && (size_t) colAt < objEnd)
-        {
-            double cv = 0;
-            if (findKeyNum ("\"colour\"", objStart, objEnd, cv))
-            {
-                // Accept both the signed form this app writes (-2147483648 ..
-                // 2147483647) and plain unsigned ARGB (0 .. 4294967295). The
-                // normalisation keeps the value inside int range so the cast
-                // below is exact instead of saturating on x86-64.
-                if (cv >= 2147483648.0)
-                    cv -= 4294967296.0;
-                m.colour = juce::Colour ((uint32) (int) cv);
-            }
-        }
-
-        const auto comAt = s.indexOf ((int) objStart, "\"comment\"");
-        if (comAt >= 0 && (size_t) comAt < objEnd)
-        {
-            size_t q = (size_t) comAt + 9;
-            while (q < objEnd && s[(int) q] != '"') ++q;
-            ++q;
-            const auto qEnd = s.indexOfChar ((int) q, '"');
-            if (qEnd >= 0 && (size_t) qEnd < objEnd)
-                m.comment = s.substring ((int) q, (int) qEnd);
-        }
-
-        if (m.id >= nextId) nextId = m.id + 1;
-        list.push_back (m);
-        pos = objEnd + 1;
+        pos = close + 1;
     }
     sort();
-    return true;
+    return !list.empty();
 }
 
 // Reads markers embedded in a WAV file using the classic DAW RIFF marker layout:
-//   "cue" chunk : u32 count + N x {u32 id, u32 startSample, "data", u32, u32,
-//                 u32} (standard RIFF's 16-byte entries are also accepted)
+//   "cue" chunk : u32 count + N x {u32 id, u32 position, "data", u32, u32,
+//                 u32 sampleOffset} (24-byte cue points; 16-byte entries are
+//                 also accepted)
 //   LIST/"adtl" : one ltxt sub-chunk per marker (region length in samples),
 //                 then labl (title) and note (comment) text entries keyed by
 //                 cue id. Text entries declare size 5+len; even-length texts
@@ -433,12 +494,9 @@ bool MarkerManager::loadFromWavFile (const juce::File& wavFile, double sampleRat
         out[4] = 0;
         return true;
     };
-    auto skip = [&in] (int64_t n) -> bool
-    {
-        return in->setPosition (in->getPosition() + n);
-    };
+    const int64_t total = in->getTotalLength();
 
-    while (!in->isExhausted())
+    while (in->getPosition() + 8 <= total)
     {
         char cid[5];
         if (!readFourCC (cid))
@@ -447,102 +505,110 @@ bool MarkerManager::loadFromWavFile (const juce::File& wavFile, double sampleRat
         if (csize < 0)
             break;
 
-        if (std::strcmp (cid, "cue ") == 0 && csize >= 8)
+        // Every chunk ends at a known offset (payload + RIFF word-alignment pad
+        // byte for odd sizes). Jumping there after each chunk keeps the scan
+        // aligned even when a chunk is odd-sized or only partly parsed. A size
+        // larger than what is left in the file is never used to allocate.
+        const int64_t payloadStart = in->getPosition();
+        const int64_t avail = total - payloadStart;
+        const int64_t next = payloadStart + csize + (csize & 1);
+
+        if (std::strcmp (cid, "cue ") == 0 && csize >= 8 && csize <= avail)
         {
             const uint32_t n = (uint32_t) readU32 ();
-            // Legacy DAW exports use 24-byte entries; standard RIFF uses 16-byte ones.
-            if ((n <= 100000 && csize == 4 + 24LL * n)
-                    || (n <= 100000 && csize == 4 + 16LL * n))
+            // Legacy DAW exports and standard RIFF use 24-byte cue points;
+            // 16-byte entries (position at offset 12) are also accepted.
+            if (n > 0 && n <= 100000
+                    && (csize == 4 + 24LL * n || csize == 4 + 16LL * n))
             {
                 const int64_t entrySize = (csize - 4) / (int64_t) n;
                 std::vector<uint8_t> body ((size_t) (csize - 4));
-                if (in->read (body.data(), body.size()) == (int64_t) body.size())
+                if (in->read (body.data(), (int) body.size()) == (int) body.size())
                     for (uint32_t i = 0; i < n; ++i)
                     {
                         const auto* e = body.data() + entrySize * (int64_t) i;
                         uint32_t id, start;
                         std::memcpy (&id, e, 4);
-                        std::memcpy (&start, entrySize == 24 ? e + 4 : e + 12, 4);
+                        if (entrySize == 24)
+                        {
+                            // dwSampleOffset (+20) is the sample position inside
+                            // the "data" chunk; dwPosition (+4) is the play-order
+                            // position, which some writers leave at 0 (others
+                            // fill only it).
+                            uint32_t position, sampleOffset;
+                            std::memcpy (&position, e + 4, 4);
+                            std::memcpy (&sampleOffset, e + 20, 4);
+                            const bool inData = std::memcmp (e + 8, "data", 4) == 0;
+                            start = (inData && sampleOffset != 0) ? sampleOffset : position;
+                        }
+                        else
+                            std::memcpy (&start, e + 12, 4);
                         cueStarts[(int) id] = start;
                     }
             }
-            else
-                skip (csize - 4); // malformed or unknown layout: skip
         }
-        else if (std::strcmp (cid, "LIST") == 0 && csize >= 8)
+        else if (std::strcmp (cid, "LIST") == 0 && csize >= 8 && csize <= avail)
         {
             char listType[5];
-            if (!readFourCC (listType))
-                break;
-            const int64_t remaining = csize - 4;
-
-            if (std::strcmp (listType, "adtl") != 0)
+            if (readFourCC (listType) && std::strcmp (listType, "adtl") == 0)
             {
-                skip (remaining); // some other list type: skip
-                continue;
-            }
-
-            int64_t pos = 0;
-            while (pos + 8 <= remaining && !in->isExhausted())
-            {
-                char sid[5];
-                if (!readFourCC (sid))
-                    break;
-                const int64_t ssize = readU32 ();
-                if (ssize < 0 || pos + 8 + ssize > remaining)
-                    break; // truncated or malformed: stop parsing this list
-
-                if (std::strcmp (sid, "ltxt") == 0 && ssize >= 12)
+                const int64_t remaining = csize - 4;
+                int64_t pos = 0;
+                while (pos + 8 <= remaining)
                 {
-                    uint32_t id = 0, len = 0;
-                    in->read (&id, 4);
-                    in->read (&len, 4);
-                    regionLens[(int) id] = len;
-                    skip (ssize - 8);
-                }
-                else if ((std::strcmp (sid, "labl") == 0 || std::strcmp (sid, "note") == 0)
-                         && ssize >= 9)
-                {
-                    uint32_t id = 0;
-                    in->read (&id, 4);
-                    const int64_t textBytes = ssize - 4; // declared covers cueID + text
-                    std::vector<uint8_t> tb ((size_t) textBytes);
-                    if (in->read (tb.data(), tb.size()) != (int64_t) tb.size())
+                    char sid[5];
+                    if (!readFourCC (sid))
                         break;
-                    const juce::String text = juce::String::fromUTF8 ((const char*) tb.data());
-                    if (std::strcmp (sid, "labl") == 0)
-                        titles[(int) id] = text;
-                    else
-                        comments[(int) id] = text;
+                    const int64_t ssize = readU32 ();
+                    if (ssize < 0 || pos + 8 + ssize > remaining)
+                        break; // truncated or malformed: stop parsing this list
+                    const int64_t subStart = in->getPosition();
 
-                    // Even-length texts carry one alignment NUL beyond the
-                    // declared size; consume it when present.
-                    if (((ssize - 5) % 2) == 0 && pos + 8 + ssize < remaining)
+                    if (std::strcmp (sid, "ltxt") == 0 && ssize >= 12)
                     {
-                        const auto savePos = in->getPosition();
-                        char pad = 1;
-                        if (in->read (&pad, 1) != 1 || pad != 0)
-                            in->setPosition (savePos);
+                        uint32_t id = 0, len = 0;
+                        in->read (&id, 4);
+                        in->read (&len, 4);
+                        regionLens[(int) id] = len;
+                    }
+                    else if ((std::strcmp (sid, "labl") == 0 || std::strcmp (sid, "note") == 0)
+                             && ssize >= 5 && ssize - 4 <= (1 << 20))
+                    {
+                        uint32_t id = 0;
+                        in->read (&id, 4);
+                        // Declared size covers cueID + text (+ NUL); the extra
+                        // zero keeps fromUTF8 inside the buffer when a writer
+                        // omits the terminator.
+                        const int textBytes = (int) (ssize - 4);
+                        std::vector<char> tb ((size_t) textBytes + 1, '\0');
+                        if (in->read (tb.data(), textBytes) != textBytes)
+                            break;
+                        const juce::String text = juce::String::fromUTF8 (tb.data());
+                        if (std::strcmp (sid, "labl") == 0)
+                            titles[(int) id] = text;
                         else
+                            comments[(int) id] = text;
+                    }
+
+                    pos += 8 + ssize;
+
+                    // Odd-sized sub-chunks carry one alignment NUL beyond the
+                    // declared size. Some writers omit it, so only consume a
+                    // byte that really is a zero pad.
+                    if ((ssize & 1) != 0 && pos < remaining)
+                    {
+                        char pad = 1;
+                        if (in->setPosition (subStart + ssize) && in->read (&pad, 1) == 1 && pad == 0)
                             ++pos;
                     }
+                    if (!in->setPosition (payloadStart + 4 + pos))
+                        break;
                 }
-                else
-                {
-                    // Unknown sub-chunk: skip its declared payload.
-                    skip (ssize);
-                }
-
-                pos += 8 + ssize;
             }
         }
-        else
-        {
-            // Skip the chunk body without reading it (the audio data can be
-            // many GB).
-            if (!skip (csize))
-                break;
-        }
+
+        if (!in->setPosition (next))
+            break;
     }
 
     if (cueStarts.empty())
@@ -592,19 +658,21 @@ juce::String csvField (const juce::String& s)
     return flat;
 }
 
-std::vector<juce::String> csvLineFields (const juce::String& line)
+std::vector<juce::String> csvLineFields (const juce::String& line, juce_wchar sep)
 {
     std::vector<juce::String> out;
     juce::String cur;
     bool inQuotes = false;
-    for (int i = 0; i < line.length(); ++i)
+    // Walk the characters with a pointer: String::operator[] is O(index) on
+    // this build's UTF-8 strings.
+    for (auto p = line.getCharPointer(); !p.isEmpty();)
     {
-        const juce_wchar c = line[i];
+        const juce_wchar c = p.getAndAdvance();
         if (inQuotes)
         {
             if (c == '"')
             {
-                if (i + 1 < line.length() && line[i + 1] == '"') { cur << '"'; ++i; }
+                if (*p == '"') { cur << '"'; ++p; }
                 else inQuotes = false;
             }
             else
@@ -614,7 +682,7 @@ std::vector<juce::String> csvLineFields (const juce::String& line)
         {
             inQuotes = true;   // quotes only start a field at its beginning
         }
-        else if (c == ',')
+        else if (c == sep)
         {
             out.push_back (cur);
             cur.clear();
@@ -626,14 +694,50 @@ std::vector<juce::String> csvLineFields (const juce::String& line)
     return out;
 }
 
+// Field separator of a CSV file, guessed from its first non-empty line:
+// ';' (spreadsheets in decimal-comma locales such as fr-CA) when that line
+// has at least as many unquoted ';' as ',', otherwise ','.
+juce_wchar csvSeparator (const juce::StringArray& lines)
+{
+    for (const auto& line : lines)
+    {
+        if (line.trim().isEmpty())
+            continue;
+        int commas = 0, semis = 0;
+        bool inQuotes = false;
+        for (auto p = line.getCharPointer(); !p.isEmpty();)
+        {
+            const juce_wchar c = p.getAndAdvance();
+            if (c == '"') inQuotes = !inQuotes;
+            else if (!inQuotes && c == ',') ++commas;
+            else if (!inQuotes && c == ';') ++semis;
+        }
+        return (semis > 0 && semis >= commas) ? (juce_wchar) ';' : (juce_wchar) ',';
+    }
+    return ',';
+}
+
 double csvTime (const juce::String& text)
 {
-    // Accepts plain seconds ("12.5") or a time code ("0:04.536", "1:02").
-    const int colon = text.indexOfChar (':');
-    if (colon >= 0)
-        return text.substring (0, colon).getDoubleValue() * 60.0
-             + text.substring (colon + 1).getDoubleValue();
-    return text.getDoubleValue();
+    // Accepts plain seconds ("12.5", or "12,5" with a decimal comma) or a time
+    // code: m:ss ("0:04.536", "1:02") or h:mm:ss ("1:02:03.5"). Anything that
+    // is not a number (e.g. a header cell) gives NaN so the line is skipped.
+    juce::StringArray parts;
+    parts.addTokens (text.trim(), ":", "");
+    if (parts.isEmpty() || parts.size() > 3)
+        return std::numeric_limits<double>::quiet_NaN();
+
+    double seconds = 0.0;
+    for (auto part : parts)
+    {
+        part = part.trim();
+        if (!part.containsChar ('.') && part.containsChar (','))
+            part = part.replaceCharacter (',', '.');
+        if (!part.containsAnyOf ("0123456789") || !part.containsOnly ("0123456789.+-eE"))
+            return std::numeric_limits<double>::quiet_NaN();
+        seconds = seconds * 60.0 + part.getDoubleValue();
+    }
+    return seconds;
 }
 
 } // namespace
@@ -643,8 +747,8 @@ bool MarkerManager::saveCsv (const juce::File& file) const
     juce::String out = "Title,Begin,End,Comment";
     for (const auto& m : list)
         out << "\r\n" << csvField (m.name)
-            << ',' << juce::String (m.start, 3)
-            << ',' << (m.end < 0 ? "-" : juce::String (m.end, 3))
+            << ',' << juce::String (m.start, 6)
+            << ',' << (m.end < 0 ? "-" : juce::String (m.end, 6))
             << ',' << csvField (m.comment);
 
     return file.replaceWithText (out);
@@ -658,6 +762,7 @@ int MarkerManager::loadCsv (const juce::File& file, double durationSec)
 
     juce::StringArray lines;
     lines.addLines (text);
+    const juce_wchar sep = csvSeparator (lines);
 
     int added = 0;
     for (int li = 0; li < lines.size(); ++li)
@@ -666,7 +771,7 @@ int MarkerManager::loadCsv (const juce::File& file, double durationSec)
         if (line.isEmpty())
             continue;
 
-        const auto fields = csvLineFields (line);
+        const auto fields = csvLineFields (line, sep);
         if (fields.size() < 2)   // need at least Title + Begin
             continue;
 

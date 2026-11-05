@@ -6,6 +6,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <atomic>
 #include <cctype>
 #include <thread>
 
@@ -15,6 +16,7 @@ namespace {
 
 struct ProgressBridge {
     WhisperTranscriber::ProgressFn fn;
+    std::atomic<bool> cancelled { false };   // set when fn returns false
 };
 
 // b5454 progress callback signature (identical to v1.6.x).
@@ -28,8 +30,18 @@ void whisperProgressCb(struct whisper_context*, struct whisper_state*, int progr
         float p = (float) progress / 100.0f;
         if (p < 0.0f) p = 0.0f;
         if (p > 1.0f) p = 1.0f;
-        b->fn (p, "transcribing…");
+        if (!b->fn (p, "transcribing…"))
+            b->cancelled.store (true);
     }
+}
+
+// Polled by ggml during the encoder / decoder graphs (possibly from its
+// worker threads): a cancel requested through the progress callback stops
+// whisper_full within one computation instead of at the end of the file.
+bool whisperAbortCb(void* user)
+{
+    auto* b = static_cast<ProgressBridge*>(user);
+    return b != nullptr && b->cancelled.load ();
 }
 
 void reportError(std::string* errOut, const juce::String& msg)
@@ -117,10 +129,13 @@ bool WhisperTranscriber::transcribe(const float* samples, int nSamples, const Op
     ProgressBridge bridge { onProgress };
     params.progress_callback         = whisperProgressCb;
     params.progress_callback_user_data = &bridge;
+    params.abort_callback            = whisperAbortCb;
+    params.abort_callback_user_data  = &bridge;
 
     if (rt.full (_ctx, params, samples, nSamples) != 0)
     {
-        reportError (errOut, "Whisper inference failed.");
+        if (!bridge.cancelled.load ())   // a user cancel is not an error
+            reportError (errOut, "Whisper inference failed.");
         return false;
     }
 
@@ -176,10 +191,13 @@ bool WhisperTranscriber::transcribeRegion(const float* samples, int nSamples, co
     ProgressBridge bridge { onProgress };
     params.progress_callback         = whisperProgressCb;
     params.progress_callback_user_data = &bridge;
+    params.abort_callback            = whisperAbortCb;
+    params.abort_callback_user_data  = &bridge;
 
     if (rt.full (_ctx, params, samples, nSamples) != 0)
     {
-        reportError (errOut, "Whisper inference failed.");
+        if (!bridge.cancelled.load ())   // a user cancel is not an error
+            reportError (errOut, "Whisper inference failed.");
         return false;
     }
 

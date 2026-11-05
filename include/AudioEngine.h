@@ -12,6 +12,7 @@
 #include <memory>
 #include <vector>
 #include <mutex>
+#include <shared_mutex>
 
 class UndoManager; // fwd
 struct Marker;     // fwd (MarkerManager)
@@ -46,10 +47,11 @@ public:
     const juce::File& getFile() const { return currentFile; }
     int numChannels() const { return nchans; }
     int64_t numSamples() const { return totalSamples; }
-    /** Monotonic version of the audio content: bumped whenever samples are
-        appended or overwritten in place (recording). Views that cache a
-        rendered picture compare it to decide on re-renders even when neither
-        the length nor the time window changed (loop-mode recording). */
+    /** Monotonic version of the audio content: bumped whenever the samples
+        change - edits, undo/redo, recording (append / in-place overwrite),
+        load, new document and close. Views and analysis caches compare it to
+        decide on re-renders even when neither the length nor the time window
+        changed (an in-place edit, loop-mode recording). */
     int64_t contentVersion() const { return contentVer.load (); }
     double sampleRate() const { return rate; }
     double duration() const { return durationSecs; }
@@ -62,7 +64,10 @@ public:
         float32 data into it (used while recording). Returns false for
         streaming documents or bad arguments. Mipmaps are refreshed with a
         throttle so long recordings stay responsive; the caller should do one
-        final rebuild when recording stops. */
+        final rebuild when recording stops. Storage grows geometrically, so a
+        call costs O(numFrames), not O(document length). Also returns false
+        when memory runs out or the document would exceed 2^31 - 1 frames
+        (the data then stays with the caller). */
     bool appendSamples (const float* interleaved, int64_t numFrames);
 
     /** Overwrites numFrames frames of interleaved float32 data starting at
@@ -76,7 +81,8 @@ public:
                            int64_t numFrames);
 
     /** True while the audio thread is reading from the in-memory buffer.
-        Callers that mutate `buffer` must wait for this to be false. */
+        (Informational: every engine method that swaps or resizes `buffer`
+        now synchronises with the audio thread and other readers itself.) */
     bool audioThreadInBuffer() const { return audioInBufferSection.load () > 0; }
 
     // ---- Transport ----
@@ -210,8 +216,11 @@ public:
                      std::string* errOut = nullptr,
                      const std::vector<std::vector<double>>* remixWeights = nullptr);
 
-    /** Stop playback and wait for any in-flight audio block to finish reading
-        the buffer, so a long-running worker can modify it safely. */
+    /** Stop playback and wait (without a time limit) for any in-flight audio
+        block to finish reading the buffer, so a long-running worker can work
+        on it safely. Engine edits additionally block the audio thread and the
+        other readers while they swap the buffer, so this is only needed to
+        keep playback from reading content that is being rewritten. */
     void quiesceForEdit ();
 
     // Replace the entire audio content with `data` (one row per channel, all
@@ -263,8 +272,16 @@ public:
     bool applyPatch (const ::Patch& p, bool forward, bool rebuild = true);
 
     // ---- Saving ----
+    // Saves are atomic: the data goes to a temporary file next to the target,
+    // which replaces the target only once it is complete and verified - a
+    // failed save leaves any existing file untouched. WAV files larger than
+    // 4 GiB are written as RF64 (EBU Tech 3306).
     bool saveFile (const juce::File& file) const;
     bool saveFileAs (const juce::File& file);
+
+    // Forces the RF64 layout for every WAV save, whatever its size (tests and
+    // tools that need RF64 output; the default writes RF64 only when needed).
+    void setForceRf64ForSave (bool f) { forceRf64 = f; }
 
     // Markers embedded into WAV files as RIFF "cue" + "LIST"/"adtl" chunks.
     void setMarkersForSave (const std::vector<Marker>* m) { saveMarkers = m; }
@@ -346,6 +363,18 @@ private:
     mutable std::mutex readerMutex;
 
     std::unique_ptr<juce::AudioBuffer<float>> buffer;
+    // Readers of `buffer`/`reader` (readSamples: FFT pool, paint, audio thread)
+    // hold this shared; code that swaps or frees them holds it exclusively
+    // (see BufferSwapScope in AudioEngine.cpp).
+    mutable std::shared_mutex bufferMutex;
+    std::atomic<int> bufferSwapPending{ 0 };   // >0 while a swap runs: audio blocks output silence
+    // While recording, `buffer` refers to this per-channel storage, which has
+    // spare capacity (recCapacity frames) so appends do not copy the whole
+    // document every tick. Empty whenever `buffer` owns its own data.
+    std::vector<std::unique_ptr<float[]>> recStore;
+    int64_t recCapacity = 0;
+    std::vector<std::vector<float>> playTmp;   // audio-thread scratch, reused across blocks
+    bool forceRf64 = false;
     std::vector<MipLevel> mips;
     int64_t baseFactor = 1;
     int64_t mipBaseTotal = 0;   // totalSamples at the last mipmap rebuild (append throttle)
@@ -354,7 +383,7 @@ private:
 
     int nchans = 0;
     int64_t totalSamples = 0;
-    std::atomic<int64_t> contentVer{ 0 };   // bumped on append/overwrite
+    std::atomic<int64_t> contentVer{ 0 };   // see contentVersion()
     double rate = 44100.0;
     double durationSecs = 0.0;
     bool hasFile = false;
@@ -386,6 +415,15 @@ private:
 
     void clearMipmaps();
     bool saveWavWithMarkers (const juce::File& file) const;
+    bool commitSavedFile (const juce::TemporaryFile& temp, const juce::File& file) const;
+
+    // RAII exclusive access to `buffer`: new audio blocks output silence,
+    // the in-flight one is awaited and other readers are locked out.
+    struct BufferSwapScope;
+    // Replaces `buffer` (and the shape fields) under a BufferSwapScope; the
+    // old buffer and any recording storage are freed after the scope ends.
+    void swapInBuffer (std::unique_ptr<juce::AudioBuffer<float>> nb, int newChans,
+                       int64_t newTotal, double newRate);
 
     // friends: static edit helpers in AudioEngine.cpp
     friend void recordReplace (AudioEngine&, const juce::Range<int64_t>&,

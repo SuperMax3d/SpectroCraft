@@ -1,4 +1,6 @@
-// SpectroCraft — dynamic loader for the prebuilt whisper.cpp b5454 DLLs.
+// SpectroCraft — run-time loader for the whisper.cpp b5454 libraries
+// (prebuilt DLLs on Windows; libwhisper.dylib / .so built by
+// cmake/ScAiRuntimes.cmake on macOS / Linux).
 // See include/AI/WhisperRuntime.h and extern/whisper-b5454/README.md.
 
 #include "AI/WhisperRuntime.h"
@@ -19,6 +21,9 @@
     #include <windows.h>
     #undef max
     #undef min
+#else
+    #include <juce_core/juce_core.h>
+    #include <dlfcn.h>
 #endif
 
 namespace sc { namespace ai {
@@ -160,8 +165,101 @@ bool WhisperRuntime::load(std::string* errOut)
     _ready = true;
     return true;
 #else
-    (void) errOut;
-    return false;   // prebuilt binaries are shipped for Windows x64 only
+    // macOS / Linux: the build (cmake/ScAiRuntimes.cmake) copies libwhisper
+    // and the ggml libraries next to the executable (Linux, console tools) or
+    // into <app>.app/Contents/Frameworks (macOS app bundle). Load them from
+    // there by full path, never through the default search order.
+   #if JUCE_MAC
+    const char* const libName = "libwhisper.dylib";
+   #else
+    const char* const libName = "libwhisper.so";
+   #endif
+    const juce::File exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                                  .getParentDirectory ();
+    juce::Array<juce::File> searchDirs { exeDir };
+   #if JUCE_MAC
+    searchDirs.add (exeDir.getSiblingFile ("Frameworks"));   // Contents/MacOS -> Contents/Frameworks
+   #endif
+
+    void* h = nullptr;
+    juce::File libDir;
+    std::string loadError;
+    for (const auto& dir : searchDirs)
+    {
+        const juce::File lib = dir.getChildFile (libName);
+        if (!lib.existsAsFile ())
+            continue;
+        h = ::dlopen (lib.getFullPathName ().toRawUTF8 (), RTLD_NOW | RTLD_LOCAL);
+        if (h != nullptr)
+        {
+            libDir = dir;
+            break;
+        }
+        if (const char* e = ::dlerror ())
+            loadError = e;
+    }
+
+    if (h == nullptr)
+    {
+        if (errOut != nullptr)
+        {
+            juce::StringArray where;
+            for (const auto& dir : searchDirs)
+                where.add (dir.getFullPathName ());
+            *errOut = std::string (libName) + (loadError.empty ()
+                          ? " was not found in " + where.joinIntoString (" or ").toStdString ()
+                          : " could not be loaded (" + loadError + ")")
+                      + ". The bundled whisper.cpp b5454 runtime is missing - transcription is unavailable.";
+        }
+        return false;
+    }
+
+    // dlsym on the handle also searches the libraries libwhisper depends on
+    // (libggml, libggml-base), which is where the ggml entry points live.
+    auto resolve = [&h] <typename Fn> (Fn& fn, const char* name) -> bool {
+        void* sym = ::dlsym (h, name);
+        if (sym == nullptr) return false;
+        fn = reinterpret_cast<Fn> (sym);
+        return true;
+    };
+
+    // Every symbol must be present: a partial match means an incompatible
+    // libwhisper version and would crash on the first call.
+    bool ok = resolve (initFromFilePath,  "whisper_init_from_file_with_params")
+           && resolve (freeContext,       "whisper_free")
+           && resolve (fullDefaultParams, "whisper_full_default_params")
+           && resolve (full,              "whisper_full")
+           && resolve (nSegments,         "whisper_full_n_segments")
+           && resolve (segmentT0,         "whisper_full_get_segment_t0")
+           && resolve (segmentT1,         "whisper_full_get_segment_t1")
+           && resolve (segmentText,       "whisper_full_get_segment_text")
+           && resolve (langId,            "whisper_full_lang_id")
+           && resolve (langMaxId,         "whisper_lang_max_id")
+           && resolve (langStr,           "whisper_lang_str")
+           && resolve (loadAllBackends,   "ggml_backend_load_all");
+
+    if (!ok)
+    {
+        ::dlclose (h);
+        if (errOut != nullptr)
+            *errOut = std::string ("The bundled ") + libName + " is missing expected entry points - it "
+                      "does not match the whisper.cpp b5454 version SpectroCraft was built for.";
+        return false;
+    }
+
+    // Backends built as loadable modules (Linux x86-64: one ggml CPU backend
+    // per micro-architecture, libggml-cpu-<arch>.so) are registered by the
+    // host, like on Windows. Restrict the scan to the runtime folder: the
+    // path-less variant also scans the current directory. On macOS the
+    // backends are linked into libggml and this registers nothing more.
+    void* symFromPath = ::dlsym (h, "ggml_backend_load_all_from_path");
+    if (symFromPath != nullptr)
+        reinterpret_cast<void (*)(const char*)> (symFromPath) (libDir.getFullPathName ().toRawUTF8 ());
+    else
+        loadAllBackends ();
+
+    _ready = true;
+    return true;
 #endif
 }
 

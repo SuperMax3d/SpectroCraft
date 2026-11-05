@@ -31,6 +31,10 @@ struct BkdkData
         A single defined group applies to every channel; a missing group or
         unparseable value falls back to 1.0 (no scaling). */
     double calibrationFor (int ch) const;
+
+    /** True when channel `ch` has a group whose Calibration field holds a
+        finite positive number (i.e. calibrationFor() is not the 1.0 fallback). */
+    bool hasCalibrationFor (int ch) const;
 };
 
 /** Parses the raw payload of a "bkdk" chunk: NUL-separated ASCII strings,

@@ -12,7 +12,9 @@
 #include "MarkerManager.h"
 #include "PngWriter.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <future>
 
 // Time-pan speed: content moves this many px per cursor pixel (0.5 = half
 // speed, matching the waveform view's grab pan).
@@ -1111,77 +1113,137 @@ bool SpectralView::saveAsPng (const juce::File& file,
                              const std::atomic<bool>* cancel,
                              const SpectralExportOptions& opts)
 {
-    if (!app.audioEngine().isFileLoaded() || channels.empty()) return false;
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (mm == nullptr || mm->isThisTheMessageThread())
+    {
+        const auto job = preparePngExport (file, opts);
+        return job != nullptr && job (cancel);
+    }
+
+    // Called from a worker thread: the view state must not be read here
+    // (paint() and the UI keep mutating it). Take the snapshot on the
+    // message thread, then run the heavy part on this thread. Polling (not
+    // a blocking get) so a cancel or a message that is never delivered
+    // cannot hang this thread.
+    auto promise = std::make_shared<std::promise<PngExportJob>>();
+    auto future = promise->get_future();
+    if (!juce::MessageManager::callAsync ([this, promise, file, opts]
+            { promise->set_value (preparePngExport (file, opts)); }))
+        return false;
+    for (;;)
+    {
+        if (future.wait_for (std::chrono::milliseconds (20)) == std::future_status::ready)
+            break;
+        if (cancel != nullptr && cancel->load())
+            return false;   // the async snapshot (if it still runs) is discarded
+    }
+    PngExportJob job;
+    try { job = future.get(); }
+    catch (const std::future_error&) { return false; }   // message dropped unrun
+    return job != nullptr && job (cancel);
+}
+
+SpectralView::PngExportJob SpectralView::preparePngExport (const juce::File& file,
+                                                           const SpectralExportOptions& opts)
+{
+    // Everything that reads the component happens HERE, on the message
+    // thread; the returned job only uses the values captured below.
+    jassert (juce::MessageManager::getInstanceWithoutCreating() == nullptr
+             || juce::MessageManager::existsAndIsCurrentThread());
+    if (!app.audioEngine().isFileLoaded() || channels.empty()) return {};
     const auto pr = plotRect();
     const int pw = pr.getWidth(), ph = pr.getHeight();
-    if (pw <= 0 || ph <= 0) return false;
+    if (pw <= 0 || ph <= 0) return {};
 
     Settings rs = settings_;
     rs.minFrequency = (float) std::max (1.0, freqMin);
     rs.maxFrequency = (float) std::min (app.audioEngine().sampleRate() * 0.5, freqMax);
+    const RenderSnapshot snap = makeRenderSnapshot();
 
-    // The spectral content is the only long-running step: render it first so
-    // a cancel never wastes time on the overlay composition.
-    juce::Image plotImg (juce::Image::ARGB, pw, ph, true);
-    if (!renderSpectralContent (plotImg, rs, cancel))
-        return false;   // cancelled: no PNG is written
+    // The export canvas follows the current axis/ruler placement (View
+    // menu); with axes, the axis strip and the time ruler are added on
+    // whichever side they currently sit.
+    const int ox = (opts.axes && !axisOnRight()) ? kLeftAxisWidth : 0;
+    const int oy = (opts.axes && !rulerAtBottom()) ? kRulerH : 0;
+    const int W = pw + (opts.axes ? kLeftAxisWidth : 0);
+    const int H = ph + (opts.axes ? kRulerH : 0);
 
-    // The export canvas follows the current axis/ruler placement (View menu).
-    const int ox = opts.axes ? (axisOnRight() ? 0 : kLeftAxisWidth) : 0;
-    const int oy = opts.axes ? (rulerAtBottom() ? 0 : kRulerH) : 0;
-    const int W = pw + ox, H = ph + oy;
-
-    // Compose the final image. For this block only, plotRect()/rulerH() and
-    // everything built on them (row rects, timeToX, rulers, overlays) address
-    // the export canvas instead of the live component bounds.
-    haveExportLayout_ = true;
-    exportLayout_ = juce::Rectangle<int> (ox, oy, pw, ph);
-
-    juce::Image img (juce::Image::ARGB, W, H, true);
+    // Overlays are cheap: compose them now into a transparent layer laid
+    // over the spectral plot by the job. For this block only, plotRect() /
+    // rulerH() and everything built on them (row rects, timeToX, rulers,
+    // overlays) address the export canvas instead of the live bounds.
+    // Software images: no platform/GPU image thread affinity for the job.
+    juce::Image overlay;
+    if (opts.axes || opts.selections || opts.markers || opts.drawings)
     {
-        juce::Graphics g (img);
-        g.fillAll (juce::Colours::black);
-        g.drawImage (plotImg,
-                     juce::Rectangle<float> ((float) ox, (float) oy, (float) pw, (float) ph),
-                     juce::RectanglePlacement::fillDestination);
-
-        if (opts.axes)
+        overlay = juce::Image (juce::Image::ARGB, W, H, true, juce::SoftwareImageType());
+        haveExportLayout_ = true;
+        exportLayout_ = juce::Rectangle<int> (ox, oy, pw, ph);
+        exportRulerH_ = opts.axes ? kRulerH : 0;
         {
-            // Opaque ruler background so the labels stay readable over the spectrum.
-            g.setColour (juce::Colour::fromRGB (32, 32, 36));
-            if (axisOnRight())
-                g.fillRect (W - kLeftAxisWidth, 0, kLeftAxisWidth, H);
-            else
-                g.fillRect (0, 0, kLeftAxisWidth, H);
-            drawFrequencyRuler (g);
-            drawTimeRuler (g);
-            drawChannelLabels (g);
-        }
+            juce::Graphics g (overlay);
+            if (opts.axes)
+            {
+                // Opaque ruler background so the labels stay readable over the spectrum.
+                g.setColour (juce::Colour::fromRGB (32, 32, 36));
+                if (axisOnRight())
+                    g.fillRect (W - kLeftAxisWidth, 0, kLeftAxisWidth, H);
+                else
+                    g.fillRect (0, 0, kLeftAxisWidth, H);
+                drawFrequencyRuler (g);
+                drawTimeRuler (g);
+                drawChannelLabels (g);
+            }
 
-        if (opts.selections)
-        {
-            drawTimeSelectionOverlay (g);
-            drawSpectralShapesOverlay (g, false);   // committed shapes only
+            if (opts.selections)
+            {
+                drawTimeSelectionOverlay (g);
+                drawSpectralShapesOverlay (g, false);   // committed shapes only
+            }
+            if (opts.markers)  drawMarkersOverlay (g);
+            if (opts.drawings) drawDrawings (g, false); // committed items only
         }
-        if (opts.markers)  drawMarkersOverlay (g);
-        if (opts.drawings) drawDrawings (g, false); // committed items only
+        haveExportLayout_ = false;
+        exportRulerH_ = 0;
     }
 
-    haveExportLayout_ = false;
+    SpectralEngine* const engine = &spectral;
+    AudioEngine* const audio = &app.audioEngine();   // pinned: not whatever doc is active later
+    return [engine, audio, snap, rs, overlay, file, ox, oy, pw, ph, W, H]
+           (const std::atomic<bool>* cancel) -> bool
+    {
+        // The spectral content is the only long-running step.
+        juce::Image plotImg (juce::Image::ARGB, pw, ph, true, juce::SoftwareImageType());
+        if (!renderSpectralRows (*engine, *audio, snap, plotImg, rs, cancel))
+            return false;   // cancelled: no PNG is written
 
-    // Extract raw pixels and write a PNG with our own writer.
-    std::vector<uint8_t> rgba ((size_t) W * H * 4);
-    for (int y = 0; y < H; ++y)
-        for (int x = 0; x < W; ++x)
+        juce::Image img (juce::Image::ARGB, W, H, true, juce::SoftwareImageType());
         {
-            const juce::Colour c = img.getPixelAt (x, y);
-            const size_t o = ((size_t) y * W + x) * 4;
-            rgba[o + 0] = (uint8_t) c.getRed();
-            rgba[o + 1] = (uint8_t) c.getGreen();
-            rgba[o + 2] = (uint8_t) c.getBlue();
-            rgba[o + 3] = (uint8_t) c.getAlpha();
+            juce::Graphics g (img);
+            g.fillAll (juce::Colours::black);
+            g.drawImageAt (plotImg, ox, oy);
+            if (overlay.isValid())
+                g.drawImageAt (overlay, 0, 0);
         }
-    return PngWriter::writePng (file, W, H, rgba);
+
+        // Extract raw pixels through one BitmapData (not getPixelAt per
+        // pixel) and write a PNG with our own writer.
+        std::vector<uint8_t> rgba ((size_t) W * H * 4);
+        {
+            const juce::Image::BitmapData bd (img, juce::Image::BitmapData::readOnly);
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x)
+                {
+                    const juce::Colour c = bd.getPixelColour (x, y);
+                    const size_t o = ((size_t) y * W + x) * 4;
+                    rgba[o + 0] = (uint8_t) c.getRed();
+                    rgba[o + 1] = (uint8_t) c.getGreen();
+                    rgba[o + 2] = (uint8_t) c.getBlue();
+                    rgba[o + 3] = (uint8_t) c.getAlpha();
+                }
+        }
+        return PngWriter::writePng (file, W, H, rgba);
+    };
 }
 
 void SpectralView::zoomFrequencyBy (double factor)
@@ -1263,7 +1325,12 @@ void SpectralView::paint (juce::Graphics& g)
         rs.minFrequency = (float) std::max (1.0, freqMin);
         rs.maxFrequency = (float) std::min (app.audioEngine().sampleRate() * 0.5, freqMax);
 
-        cachedImage = juce::Image (juce::Image::ARGB, w, h, true);
+        // Reuse the image while its size holds (no full-frame reallocation
+        // on every re-render, e.g. each recorded block or pan step).
+        if (!cachedImage.isValid() || cachedImage.getWidth() != w || cachedImage.getHeight() != h)
+            cachedImage = juce::Image (juce::Image::ARGB, w, h, true);
+        else
+            cachedImage.clear (cachedImage.getBounds());
         renderSpectralContent (cachedImage, rs);
 
         imgW = w; imgH = h; imgT0 = viewStart; imgT1 = viewEnd;
@@ -1328,17 +1395,35 @@ void SpectralView::paint (juce::Graphics& g)
 // into an ARGB image of size w×h. Used by paint() and saveAsPng().
 Settings SpectralView::effectiveSettingsForRender (const Settings& base, int rowHeightPx) const
 {
+    return effectiveSettingsFor (base, rowHeightPx, makeRenderSnapshot());
+}
+
+SpectralView::RenderSnapshot SpectralView::makeRenderSnapshot() const
+{
+    RenderSnapshot s;
+    s.channels = channels;
+    s.t0 = viewStart;
+    s.t1 = viewEnd;
+    s.fMin = freqMin;
+    s.fMax = freqMax;
+    s.sampleRate = app.audioEngine().sampleRate();
+    return s;
+}
+
+Settings SpectralView::effectiveSettingsFor (const Settings& base, int rowHeightPx,
+                                             const RenderSnapshot& s)
+{
     Settings rs = base;
     // The frequency axis may have been zoomed/panned since the panel last
     // sent its settings: render with this view's live limits, not whatever
     // minFrequency/maxFrequency the caller's copy still carries.
-    rs.minFrequency = (float) std::max (1.0, freqMin);
-    rs.maxFrequency = (float) std::min (app.audioEngine().sampleRate() * 0.5, freqMax);
+    rs.minFrequency = (float) std::max (1.0, s.fMin);
+    rs.maxFrequency = (float) std::min (s.sampleRate * 0.5, s.fMax);
     if (rs.fftAuto)
-        rs.fftSize = SpectralEngine::chooseFftSize (viewEnd - viewStart,
-                                                    app.audioEngine().sampleRate(),
+        rs.fftSize = SpectralEngine::chooseFftSize (s.t1 - s.t0,
+                                                    s.sampleRate,
                                                     std::max (1, rowHeightPx),
-                                                    freqMin, freqMax,
+                                                    s.fMin, s.fMax,
                                                     rs.autoTargetTimeSlices,
                                                     rs.autoBinsPerPixel);
     return rs;
@@ -1366,6 +1451,17 @@ int SpectralView::autoFftSizeForCurrentZoom() const
 bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
                                           const std::atomic<bool>* cancel)
 {
+    return renderSpectralRows (spectral, app.audioEngine(), makeRenderSnapshot(),
+                               img, rs, cancel);
+}
+
+// Reads nothing but its arguments: runs on the message thread (paint) or on
+// an export worker thread (preparePngExport job).
+bool SpectralView::renderSpectralRows (SpectralEngine& spectral, AudioEngine& audio,
+                                       const RenderSnapshot& s, juce::Image& img,
+                                       const Settings& rs, const std::atomic<bool>* cancel)
+{
+    const auto& channels = s.channels;
     auto cancelled = [cancel] { return cancel != nullptr && cancel->load(); };
 
     const int w = img.getWidth(), h = img.getHeight();
@@ -1377,6 +1473,7 @@ bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
     // dark gaps of the axis colour. Each row gets its own frequency axis on
     // the left.
     const auto rows = WaveformView::channelRowRects (w, h, (int) channels.size());
+    std::vector<uint8_t> pixels;   // reused across rows (the engine re-assigns it)
     for (size_t r = 0; r < rows.size(); ++r)
     {
         if (cancelled()) return false;
@@ -1388,9 +1485,8 @@ bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
         // Auto FFT-size mode: the effective size depends on this row's height
         // and the current zoom levels, so it is resolved per row from the
         // caller's base settings (which carry the live frequency limits).
-        const Settings rsRow = effectiveSettingsForRender (rs, rr.getHeight());
-        std::vector<uint8_t> pixels;
-        spectral.renderToPixels (app.audioEngine(), rsRow, w, rr.getHeight(), viewStart, viewEnd, { ch }, pixels, cancel);
+        const Settings rsRow = effectiveSettingsFor (rs, rr.getHeight(), s);
+        spectral.renderToPixels (audio, rsRow, w, rr.getHeight(), s.t0, s.t1, { ch }, pixels, cancel);
         if (cancelled()) return false;
 
         for (int y = 0; y < rr.getHeight(); ++y)
@@ -2483,14 +2579,19 @@ void SpectralView::drawSpectralShapes (juce::Graphics& g,
     // SpectralSelection::contains() computes, so the overlay shows real holes
     // where Ctrl-dragged regions were cut out instead of painting more blue on
     // top - what you see is precisely what gets edited / played back.
-    const int W = getWidth();
-    const size_t totalPx = (size_t) W * (size_t) std::max (1, getHeight());
+    // Sized from the drawing layout, not the component bounds: an export
+    // canvas can be taller (axes added below a hidden own ruler) and its plot
+    // starts at x = 0 without axes.
+    const auto pr = plotRect();
+    const int W = std::max (layoutWidth(), pr.getRight());
+    const int maskH = std::max ({ 1, layoutHeight(), rows.back().getBottom() });
+    const size_t totalPx = (size_t) W * (size_t) maskH;
     if (selMask.size() < totalPx) selMask.assign (totalPx, 0);
     std::fill (selMask.begin(), selMask.begin() + totalPx, 0);
 
     // The mask covers the plot only; a right-placed axis keeps its strip out.
-    const int plotX = axisOnRight() ? 0 : kLeftAxisWidth;
-    const int plotRight = axisOnRight() ? W - kLeftAxisWidth - 1 : W - 1;
+    const int plotX = std::max (0, pr.getX());
+    const int plotRight = pr.getRight() - 1;
 
     for (const auto& row : rows)
     {
@@ -2498,6 +2599,9 @@ void SpectralView::drawSpectralShapes (juce::Graphics& g,
         // ScopedSaveState + reduceClipRegion instead.
         const juce::Graphics::ScopedSaveState save (g);
         if (!g.reduceClipRegion (row)) continue;   // row outside the repaint clip
+        // Only the clipped part can show: rasterise just that (a playhead
+        // repaint is a few pixels wide).
+        const auto clip = g.getClipBounds();
 
         const int rh = std::max (1, row.getHeight());
 
@@ -2515,14 +2619,16 @@ void SpectralView::drawSpectralShapes (juce::Graphics& g,
             // timeToX clamps to the plot, so reject off-screen shapes explicitly.
             if (bb.getRight() <= viewStart || bb.getX() >= viewEnd) continue;
 
-            int x0 = std::max (plotX, (int) std::floor (timeToX (bb.getX())));
-            int x1 = std::min (plotRight, (int) std::ceil (timeToX (bb.getRight())));
+            int x0 = std::max ({ plotX, clip.getX() - 1, (int) std::floor (timeToX (bb.getX())) });
+            int x1 = std::min ({ plotRight, clip.getRight(), (int) std::ceil (timeToX (bb.getRight())) });
             if (x1 < x0) continue;
 
             // Frequency span -> row-local y range (high frequency at the top).
             const double fLo = bb.getY(), fHi = bb.getY() + bb.getHeight();
-            int yTop = std::max (0, (int) std::floor ((double) freqToY (fHi, rh)));
-            int yBot  = std::min (rh - 1, (int) std::ceil ((double) freqToY (fLo, rh)));
+            int yTop = std::max ({ 0, clip.getY() - row.getY() - 1,
+                                   (int) std::floor ((double) freqToY (fHi, rh)) });
+            int yBot  = std::min ({ rh - 1, clip.getBottom() - row.getY(),
+                                    (int) std::ceil ((double) freqToY (fLo, rh)) });
             if (yBot < yTop) continue;
 
             uint8_t* const maskBase = selMask.data() + (size_t) row.getY() * W;

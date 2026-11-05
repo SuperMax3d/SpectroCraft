@@ -38,6 +38,17 @@ public:
     explicit Application (const juce::File& recentStorePath = {});
     ~Application();
 
+    // When on, Applications created without an explicit store use a fresh
+    // per-run temp store instead of the user's real settings file. Always on
+    // in SpectroCraftTests; SpectroCraft --run-unit-tests turns it on too, so
+    // both executables run the suite against the same isolated settings.
+    static void useIsolatedSettingsStore (bool on);
+    /** The per-process temp settings store used when isolation is on. */
+    static juce::File isolatedSettingsStoreFile();
+    /** Deletes the isolated store (no-op when isolation is off): the next
+        Application starts from default settings. */
+    static void resetIsolatedSettingsStore();
+
     // All loaded files. The active document is what the views and panels show.
     std::vector<std::unique_ptr<FileDoc>> docs;
     int activeDocIndex = -1;
@@ -758,6 +769,12 @@ public:
     // first play request); ensureAudioReady() blocks until it has completed.
     bool audioDeviceReady() const;
     void startAudioInitAsync();
+    /** True when the real output device must stay closed: the environment
+        variable SC_NO_AUDIO_DEVICE is set (to anything but "0"), or the build
+        defines SC_NO_AUDIO_DEVICE. The init then completes at once without a
+        device (audioDeviceReady() turns true; play() is silent). Tests that
+        need a real device skip when this is true. */
+    static bool audioOutputDisabled();
     bool ensureAudioReady (int timeoutMs = -1);
 
     void play(); void stop(); void pause();

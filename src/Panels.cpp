@@ -3,8 +3,10 @@
  */
 
 #include "Panels.h"
+#include "AlertGate.h"
 #include "WaveformView.h"   // formatFooterTime / parseTimeText (shared time text)
 #include "FFTHelpers.h"
+#include "OwningAlertWindow.h"   // dialogs with new-ed custom components
 #include "WorkProgress.h"
 #include <algorithm>
 #include <cctype>
@@ -224,15 +226,11 @@ juce::TabBarButton* DragTabBar::createTabButton (const juce::String& tabName, in
 
 static double parseTimeCode (const juce::String& text)
 {
-    // Accepts "12", "12.5", "0:04.536", "1:02"
-    const int colon = text.indexOfChar (':');
-    if (colon >= 0)
-    {
-        const double m = text.substring (0, colon).getDoubleValue();
-        const double s = text.substring (colon + 1).getDoubleValue();
-        return m * 60.0 + s;
-    }
-    return text.getDoubleValue();
+    // Accepts "12", "12.5", "0:04.536", "1:02", "1:02:03" (the shared time
+    // parser); anything else - a header row, stray text - yields -1 so the
+    // caller skips it instead of reading it as 0 s / mis-reading h:mm:ss.
+    double v = 0.0;
+    return parseTimeText (text, v) ? v : -1.0;
 }
 
 // Rectangle helper (JUCE 9 has no withXOffset)
@@ -249,9 +247,12 @@ FileListPanel::FileListPanel (Application& appIn)
 {
     openBtn.onClick = [this] { if (onOpenRequested) onOpenRequested(); };
     closeBtn.onClick = [this] {
-        // Closes the ACTIVE file; Application fires the callbacks that refresh
-        // this list and reset the views to whatever remains.
-        app.closeFile();
+        // Closes the ACTIVE file (same index Application::closeFile picks);
+        // Application fires the callbacks that refresh this list and reset
+        // the views to whatever remains.
+        if (app.numDocs() > 0)
+            closeDoc ((app.activeDocIndex >= 0 && app.activeDocIndex < app.numDocs())
+                          ? app.activeDocIndex : 0);
     };
 
     openBtn.setTooltip ("Open an audio file (WAV, AIFF, FLAC, MP3 or Ogg). "
@@ -290,7 +291,26 @@ void FileListPanel::activateDoc (int i)
 
 void FileListPanel::closeDoc (int i)
 {
-    if (i >= 0 && i < app.numDocs())
+    // A background job's worker still uses the documents (it deletes its
+    // progress dialog when it is done).
+    if (sc::WorkProgressDialog::numActive () > 0) return;
+    if (i < 0 || i >= app.numDocs()) return;
+
+    // Same prompt as File > Close (MainWindow::handleCloseFile): never drop
+    // unsaved edits or metadata without asking.
+    const FileDoc& d = *app.docs[(size_t) i];
+    if (app.docIsUnsaved (d))
+    {
+        const juce::String name = d.name.isNotEmpty () ? d.name : d.file.getFileName ();
+        juce::AlertWindow dlg ("Close File",
+            "This file has unsaved changes:\n\n" + name +
+            "\n\nDo you want to close it and discard the changes?",
+            juce::AlertWindow::WarningIcon, this);
+        dlg.addButton ("Close", 1);
+        dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (dlg.runModalLoop () != 1) return;   // keep it open
+    }
+    if (i < app.numDocs())
         app.closeDoc (i);
 }
 
@@ -305,7 +325,12 @@ void FileListPanel::openContainingFolder (int row)
     ShellExecuteW (nullptr, L"open", folder.getFullPathName().toWideCharPointer(),
                    nullptr, nullptr, SW_SHOWNORMAL);
 #else
-    const juce::String cmd = (JUCE_MACOS ? "open " : "xdg-open ") + "\""
+   #if JUCE_MAC
+    const juce::String opener ("open ");
+   #else
+    const juce::String opener ("xdg-open ");
+   #endif
+    const juce::String cmd = opener + "\""
                             + folder.getFullPathName() + "\"";
     std::system (cmd.toRawUTF8());
 #endif
@@ -409,13 +434,15 @@ juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
     dlg->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     dlg->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
-    // Focus the first field with its text pre-selected so a new value can be
-    // typed in immediately. AlertWindow disables keyboard focus on its editors,
-    // so re-enable it first or grabKeyboardFocus() would bounce to a button.
+    // Pre-select the first field's text so a new value can be typed in
+    // immediately. AlertWindow disables keyboard focus on its editors, so
+    // re-enable it first or a focus grab would bounce to a button. The actual
+    // grabKeyboardFocus() happens in showScaleDialog() once the window is
+    // showing: JUCE ignores (and asserts on) focus grabs for components that
+    // are not on screen yet.
     auto* valEdit = dlg->getTextEditor (scaleFieldId (0));
     valEdit->setWantsKeyboardFocus (true);
     valEdit->selectAll();
-    valEdit->grabKeyboardFocus();
 
     return dlg;
 }
@@ -426,6 +453,18 @@ void FileListPanel::showScaleDialog (int row)
     FileDoc& d = *app.docs[(size_t) row];
 
     auto* dlg = createScaleDialog (d);
+    if (dlg == nullptr) return;
+
+    // Enter modal state WITHOUT taking keyboard focus (runModalLoop() would
+    // otherwise grab it for the window itself), then focus the first enabled
+    // field now that the window is showing - or the unit combo while the unit
+    // is None and the value fields are disabled.
+    dlg->enterModalState (false);
+    if (auto* valEdit = dlg->getTextEditor (scaleFieldId (0)); valEdit != nullptr && valEdit->isEnabled())
+        valEdit->grabKeyboardFocus();
+    else if (auto* combo = dlg->getComboBoxComponent ("unit"))
+        combo->grabKeyboardFocus();
+
     const int result = dlg->runModalLoop();
     juce::ComboBox* unitCombo = dlg->getComboBoxComponent ("unit");
 
@@ -726,41 +765,70 @@ static bool isThirdOctLabelFreq (double f)
     return false;
 }
 
-// Average an FFT magnitude curve into 1/3-octave bands.
-// mag holds dB-normalized values in [0,1] for an n-point FFT at the given rate;
-// returns one normalized value per band whose centre is <= Nyquist. Power is
-// averaged over all bins inside each band (band edges = centre * 2^(+-1/6)).
 // Cap on the number of averaged FFT windows per channel for wide selections.
 static constexpr int64_t kMaxAvgWindows = 2048;
 
+// Analysis window of the classic spectrum path (0 = rectangular, 1 = Hann,
+// 2 = Hamming), shared by the live spectrum, snapshots and the band ENBW.
+static std::vector<float> makeAnalysisWindow (int wt, int n)
+{
+    std::vector<float> win ((size_t) n, 1.0f);
+    if (wt == 1 || wt == 2)
+        for (int i = 0; i < n; ++i)
+            win[(size_t) i] = (wt == 1)
+                ? 0.5f * (1.0f - (float) std::cos (2.0 * juce::MathConstants<double>::pi * i / n))
+                : 0.54f - 0.46f * (float) std::cos (2.0 * juce::MathConstants<double>::pi * i / (n - 1));
+    return win;
+}
+
+// Equivalent noise bandwidth of a window, in bins: n * sum(w^2) / sum(w)^2
+// (1.0 rectangular, 1.5 Hann, ~1.36 Hamming).
+static double windowEnbwBins (const std::vector<float>& win)
+{
+    double s1 = 0.0, s2 = 0.0;
+    for (float w : win) { s1 += w; s2 += (double) w * w; }
+    return s1 > 0.0 ? (double) win.size() * s2 / (s1 * s1) : 1.0;
+}
+
+// Sum an FFT magnitude curve into 1/3-octave band levels.
+// mag holds dB-normalized RMS amplitudes in [0,1] (see computeRegionFrom) for
+// an n-point FFT at the given rate; returns one normalized value per band
+// whose centre is <= Nyquist. The band level is the SUM of the bin powers
+// inside the band (a bin straddling an edge contributes its overlapping
+// fraction, so narrow low bands are never empty), divided by the window's
+// ENBW so that both a tone and broadband noise read their true band power,
+// independent of the FFT size. Band edges come from the exact base-10 centre
+// behind each nominal label (fc * 10^(+-1/20)), so adjacent bands neither
+// overlap nor leave gaps.
 static std::vector<float> toThirdOctBands (const std::vector<float>& mag, int n,
-                                           double rate)
+                                           double rate, double enbwBins)
 {
     const double nyq = rate * 0.5;
     // Same fixed normalization floor as the live curve (see kNormFloorDb).
     const double dBMin = -160.0;
+    const double binHz = rate / (double) n;
+    const int lastBin = std::min (n / 2, (int) mag.size() - 1);
     std::vector<float> out;
     for (int b = 0; b < kNumThirdOctBands && kThirdOctCenters[b] <= nyq; ++b)
     {
-        const double fc = kThirdOctCenters[b];
-        const double lo = fc * std::pow (2.0, -1.0 / 6.0);
-        const double hi = fc * std::pow (2.0,  1.0 / 6.0);
-        int kLo = (int) std::ceil (lo * n / rate);
-        int kHi = (int) std::floor (hi * n / rate);
-        kLo = std::max (1, kLo);
-        kHi = std::min (n / 2, kHi);
+        const double idx = std::round (10.0 * std::log10 (kThirdOctCenters[b] / 1000.0));
+        const double fc = 1000.0 * std::pow (10.0, idx / 10.0);
+        const double lo = fc * std::pow (10.0, -0.05);
+        const double hi = fc * std::pow (10.0,  0.05);
+        const int kLo = std::max (1, (int) std::floor (lo / binHz + 0.5));
+        const int kHi = std::min (lastBin, (int) std::floor (hi / binHz + 0.5));
 
         double sumPow = 0.0;
-        int cnt = 0;
-        for (int k = kLo; k <= kHi && k < (int) mag.size(); ++k)
+        for (int k = kLo; k <= kHi; ++k)
         {
-            const double dB = dBMin * (1.0 - (double) mag[k]);   // undo normalization
-            const double m = std::pow (10.0, dB / 20.0);
-            sumPow += m * m;
-            ++cnt;
+            const double overlap = std::min ((k + 0.5) * binHz, hi)
+                                 - std::max ((k - 0.5) * binHz, lo);
+            if (overlap <= 0.0) continue;
+            const double dB = dBMin * (1.0 - (double) mag[(size_t) k]);   // undo normalization
+            sumPow += std::pow (10.0, dB / 10.0) * (overlap / binHz);
         }
-        const double bm = cnt > 0 ? std::sqrt (sumPow / (double) cnt) : 0.0;
-        const double dBb = 20.0 * std::log10 (std::max (1e-12, bm));
+        const double p = sumPow / std::max (1e-9, enbwBins);
+        const double dBb = 10.0 * std::log10 (std::max (1e-24, p));
         out.push_back ((float) std::clamp ((dBb - dBMin) / (-dBMin), 0.0, 1.0));
     }
     return out;
@@ -1182,6 +1250,51 @@ bool FFTAnalysisView::fitDataReady() const
     return cachedN > 1 && !mags.empty ();
 }
 
+// Fingerprint of a spectral-selection mask (0 = no mask): part of the curve
+// cache key, so redrawing the selection over the same time region recomputes.
+static uint64_t spectralMaskHash (const SpectralSelection* sel)
+{
+    if (sel == nullptr || sel->empty()) return 0;
+    uint64_t h = 1469598103934665603ull;   // FNV-1a
+    auto mix = [&h] (const void* p, size_t n)
+    {
+        const auto* b = static_cast<const uint8_t*> (p);
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    };
+    auto mixD = [&mix] (double v) { mix (&v, sizeof (v)); };
+    for (const auto& sh : sel->shapes())
+    {
+        const int head[4] = { (int) sh.kind, sh.subtract ? 1 : 0, sh.cols, sh.rows };
+        mix (head, sizeof (head));
+        mixD (sh.t0); mixD (sh.t1); mixD (sh.f0); mixD (sh.f1); mixD (sh.strokeRadiusHz);
+        for (const auto& pt : sh.pts) { mixD (pt.first); mixD (pt.second); }
+        if (!sh.grid.empty()) mix (sh.grid.data(), sh.grid.size());
+    }
+    return h == 0 ? 1 : h;
+}
+
+std::vector<int> FFTAnalysisView::liveChannels() const
+{
+    const auto& eng = app.audioEngine();
+    std::vector<int> out;
+    for (int ch : app.visibleChannels)
+        if (ch >= 0 && ch < eng.numChannels())
+            out.push_back (ch);
+    return out;
+}
+
+double FFTAnalysisView::currentEnbwBins (int n) const
+{
+    return windowEnbwBins (makeAnalysisWindow (windowCombo.getSelectedId() - 1, n));
+}
+
+int FFTAnalysisView::levelAxisChannel() const
+{
+    const auto& chans = (axisMode_ >= 3) ? cachedCurveChans_ : cachedChans_;
+    if (!chans.empty()) return chans.front();
+    return app.visibleChannels.empty() ? -1 : app.visibleChannels.front();
+}
+
 bool FFTAnalysisView::curveCacheValid() const
 {
     if (!app.audioEngine().isFileLoaded()) return false;
@@ -1189,11 +1302,14 @@ bool FFTAnalysisView::curveCacheValid() const
     if (!app.selection.isEmpty()) { t0 = app.selection.getStart(); t1 = app.selection.getEnd(); }
     else                          { t0 = app.playhead;          t1 = app.playhead; }
     const auto& eng = app.audioEngine();
+    const FileDoc* d = app.doc();
     return !liveCurves.empty() && cachedCurveMode == axisMode_
         && cachedCurveTrack == track_ && cachedCurveSmooth == smooth_
         && cachedT0 == t0 && cachedT1 == t1
         && cachedRate == eng.sampleRate() && cachedFile == eng.getFile()
-        && liveCurves.size() == app.visibleChannels.size();
+        && cachedEngine_ == &eng && cachedContentVer_ == eng.contentVersion()
+        && cachedCurveChans_ == liveChannels()
+        && cachedMaskHash_ == spectralMaskHash (d != nullptr ? &d->spectralSel : nullptr);
 }
 
 // Fit [lo, hi] to a data range with a total margin of +10% (5% above the max,
@@ -1534,9 +1650,12 @@ static int syncSmoothValue (int sm)
 // Core averaging computation shared by the live spectrum and every stored
 // snapshot: analyse region [t0, t1] with windows of exactly n samples at the
 // current window type. A region wider than one window is covered by several
-// evenly spaced windows whose linear magnitudes are averaged (the classic
-// "average over the selection" behaviour); a point or short region gets a
-// single window centred on it.
+// evenly spaced windows whose bin powers are averaged (the classic "average
+// over the selection" behaviour); a point or short region gets a single
+// window centred on it. Each bin is scaled to an RMS amplitude: corrected for
+// the window's coherent gain (sum of w) and single-sided (x sqrt(2) except DC
+// and Nyquist), so a sine of peak A reads A/sqrt(2) whatever the window - the
+// same convention as the dB-SPL 1/3-octave pipeline.
 void FFTAnalysisView::computeRegionFrom (AudioEngine& eng, const std::vector<int>& chans,
                                          double t0, double t1, int n,
                                          std::vector<std::vector<float>>& outMags)
@@ -1572,15 +1691,10 @@ void FFTAnalysisView::computeRegionFrom (AudioEngine& eng, const std::vector<int
     const int order = (int) std::log2 ((double) n);
 
     // Window function, computed once and shared by all channels.
-    std::vector<float> win ((size_t) n, 1.0f);
-    const int wt = windowCombo.getSelectedId() - 1;
-    if (wt == 1 || wt == 2)
-    {
-        for (int i = 0; i < n; ++i)
-            win[(size_t) i] = (wt == 1)
-                ? 0.5f * (1.0f - std::cos (2.0 * juce::MathConstants<double>::pi * i / n))
-                : 0.54f - 0.46f * std::cos (2.0 * juce::MathConstants<double>::pi * i / (n - 1));
-    }
+    const std::vector<float> win = makeAnalysisWindow (windowCombo.getSelectedId() - 1, n);
+    double sumW = 0.0;
+    for (float w : win) sumW += w;
+    sumW = std::max (1e-12, sumW);
 
     // Fixed normalization floor: the stored magnitudes do not depend on the
     // visible level window, so zooming out never changes the curve data.
@@ -1589,7 +1703,7 @@ void FFTAnalysisView::computeRegionFrom (AudioEngine& eng, const std::vector<int
     {
         if (ch < 0 || ch >= eng.numChannels()) continue;
 
-        // Average the linear magnitudes of all windows in this channel.
+        // Average the bin powers of all windows in this channel.
         std::vector<double> acc ((size_t) (n / 2 + 1), 0.0);
         std::vector<float> samples ((size_t) n, 0.0f);   // zero-filled: partial reads at the file end stay silent
         std::vector<float> buf ((size_t) n * 2, 0.0f);
@@ -1603,14 +1717,16 @@ void FFTAnalysisView::computeRegionFrom (AudioEngine& eng, const std::vector<int
             for (int k = 0; k <= n / 2; ++k)
             {
                 const float re = buf[k * 2], im = buf[k * 2 + 1];
-                acc[(size_t) k] += std::sqrt ((double) re * re + (double) im * im);
+                acc[(size_t) k] += (double) re * re + (double) im * im;
             }
         }
 
         std::vector<float> mag ((size_t) (n / 2 + 1));
         for (int k = 0; k <= n / 2; ++k)
         {
-            const double m = acc[(size_t) k] / ((double) winStarts.size() * n);
+            const double oneSided = (k == 0 || k == n / 2) ? 1.0 : std::sqrt (2.0);
+            const double m = std::sqrt (acc[(size_t) k] / (double) winStarts.size())
+                             * oneSided / sumW;
             const double dB = 20.0 * std::log10 (std::max (1e-12, m));
             mag[k] = (float) std::clamp ((dB - dBMin) / (-dBMin), 0.0, 1.0);
         }
@@ -1738,12 +1854,18 @@ void FFTAnalysisView::doRecompute()
     // octave order), so re-lay out when the pipeline flips.
     if (dbSpl != cachedPascalMode_) resized();
 
+    // Channel list and content version complete the cache key: a solo switch
+    // keeps the channel count, and an edit/recording keeps the region.
+    const std::vector<int> chans = liveChannels();
+    const int64_t contentVer = eng.contentVersion();
+
     if (dbSpl)
     {
         const bool upToDate = !thirdOctMags.empty()
-            && thirdOctMags.size() == app.visibleChannels.size()
+            && thirdOctMags.size() == chans.size() && cachedChans_ == chans
             && cachedT0 == t0 && cachedT1 == t1 && cachedRate == eng.sampleRate()
-            && cachedFile == file && cachedScaleUnit_ == scaleUnit;
+            && cachedFile == file && cachedScaleUnit_ == scaleUnit
+            && cachedEngine_ == &eng && cachedContentVer_ == contentVer;
         if (upToDate) return;
 
         // Throttle repeated expensive computations the same way as below.
@@ -1758,10 +1880,12 @@ void FFTAnalysisView::doRecompute()
         // on every recompute — never accumulate stale curves.
         mags.clear (); cachedN = 0;
         thirdOctMags.clear();
-        for (int ch : app.visibleChannels)
-            if (ch >= 0 && ch < eng.numChannels())
-                thirdOctMags.push_back (thirdOctBandsRef (eng, ch, t0, t1, thirdOctOrder_));
+        for (int ch : chans)
+            thirdOctMags.push_back (thirdOctBandsRef (eng, ch, t0, t1, thirdOctOrder_));
 
+        cachedChans_ = chans;
+        cachedEngine_ = &eng;
+        cachedContentVer_ = contentVer;
         cachedT0 = t0; cachedT1 = t1;
         cachedRate = eng.sampleRate();
         cachedFile = file;
@@ -1775,9 +1899,10 @@ void FFTAnalysisView::doRecompute()
     // NOTE: switching files does NOT clear stored snapshots - they are shared
     // across all open files and each one remembers its own source document.
 
-    if (mags.size() == app.visibleChannels.size() && cachedN == n && cachedT0 == t0
+    if (mags.size() == chans.size() && cachedChans_ == chans && cachedN == n && cachedT0 == t0
         && cachedT1 == t1 && cachedRate == eng.sampleRate()
         && cachedFile == file && cachedScaleUnit_ == scaleUnit
+        && cachedEngine_ == &eng && cachedContentVer_ == contentVer
         && (axisMode_ != 2 || thirdOctMags.size() == mags.size()))
         return;
 
@@ -1791,18 +1916,22 @@ void FFTAnalysisView::doRecompute()
         && now - lastComputeMs < 60)
         return;
 
-    computeRegion (t0, t1, n, mags);
+    computeRegionFrom (app.audioEngine(), chans, t0, t1, n, mags);
 
-    // 1/3-octave band values for mode 2 (power-averaged per band), stored in
+    // 1/3-octave band values for mode 2 (bin powers summed per band), stored in
     // the view's relative-dB space. Replace the cache on every recompute —
     // never accumulate, or stale curves from earlier clicks would be drawn
     // alongside the live one.
     thirdOctMags.clear();
     if (axisMode_ == 2)
         for (auto& m : mags)
-            thirdOctMags.push_back (bandsNormalizedToDb (toThirdOctBands (m, n, eng.sampleRate())));
+            thirdOctMags.push_back (bandsNormalizedToDb (toThirdOctBands (m, n, eng.sampleRate(),
+                                                                          currentEnbwBins (n))));
 
     cachedN = n; cachedT0 = t0; cachedT1 = t1;
+    cachedChans_ = chans;
+    cachedEngine_ = &eng;
+    cachedContentVer_ = contentVer;
     cachedRate = eng.sampleRate();
     cachedFile = file;
     cachedScaleUnit_ = scaleUnit;
@@ -1872,10 +2001,21 @@ void FFTAnalysisView::recomputeCurve (double t0, double t1)
         }
 
     const auto file = eng.getFile();
+    // A spectral selection masks the analysis: only bins inside it count.
+    const SpectralSelection* mask = nullptr;
+    FileDoc* d = app.doc();
+    if (d != nullptr && !d->spectralSel.empty())
+        mask = &d->spectralSel;
+    const std::vector<int> chans = liveChannels();
+    const int64_t contentVer = eng.contentVersion();
+    const uint64_t maskHash = spectralMaskHash (mask);
+
     if (cachedCurveMode == axisMode_ && cachedCurveTrack == track_
         && cachedCurveSmooth == smooth_ && cachedT0 == t0 && cachedT1 == t1
         && cachedRate == rate && cachedFile == file
-        && liveCurves.size() == app.visibleChannels.size())
+        && liveCurves.size() == chans.size() && cachedCurveChans_ == chans
+        && cachedEngine_ == &eng && cachedContentVer_ == contentVer
+        && cachedMaskHash_ == maskHash)
         return;
 
     // Throttle repeated expensive multi-frame computations (same policy as
@@ -1886,14 +2026,7 @@ void FFTAnalysisView::recomputeCurve (double t0, double t1)
         && regionLenS > (double) kTimeModeFFT)
         return;
 
-    // A spectral selection masks the analysis: only bins inside it count.
-    const SpectralSelection* mask = nullptr;
-    FileDoc* d = app.doc();
-    if (d != nullptr && !d->spectralSel.empty())
-        mask = &d->spectralSel;
-
     std::vector<CurveData> out;
-    const auto& chans = app.visibleChannels;
     if (axisMode_ == 5)
         // Fixed frame settings: the FFT size / window type combos are hidden in
         // this mode and no longer affect it.
@@ -1916,6 +2049,10 @@ void FFTAnalysisView::recomputeCurve (double t0, double t1)
     cachedCurveMode = axisMode_;
     cachedCurveTrack = track_;
     cachedCurveSmooth = smooth_;
+    cachedCurveChans_ = chans;
+    cachedEngine_ = &eng;
+    cachedContentVer_ = contentVer;
+    cachedMaskHash_ = maskHash;
     cachedT0 = t0; cachedT1 = t1;
     cachedRate = rate;
     cachedFile = file;
@@ -1951,6 +2088,9 @@ void FFTAnalysisView::computeTimeCurveFrom (const AudioEngine& eng, const std::v
         for (int i = 0; i < fftN; ++i)
             win[(size_t) i] = 0.5f * (1.0f - std::cos (2.0 * juce::MathConstants<double>::pi
                                                        * (double) i / (double) fftN));
+        double sumW = 0.0;
+        for (float w : win) sumW += w;
+        const double ampScale = std::sqrt (2.0) / std::max (1e-12, sumW);
 
         std::vector<float> samples ((size_t) fftN, 0.0f);   // zero-filled: partial reads at the file end stay silent
         std::vector<float> buf ((size_t) fftN * 2, 0.0f);
@@ -1980,9 +2120,10 @@ void FFTAnalysisView::computeTimeCurveFrom (const AudioEngine& eng, const std::v
 
             // Max: strongest bin's level + frequency. Total / Weighted:
             // summed level + amplitude-weighted average (centroid) frequency.
-            // Normalise by the FFT size exactly like the classic spectrum path,
-            // so a full-scale tone lands near 0 dB (window coherent gain aside).
-            const double lin = (track == 0) ? maxMag / fftN : sumLin / fftN;
+            // Normalise exactly like the classic spectrum path (coherent gain
+            // of the window, single-sided RMS), so a tone of peak A reads
+            // A/sqrt(2).
+            const double lin = (track == 0 ? maxMag : sumLin) * ampScale;
             cd.x.push_back (tMid);
             cd.ampDb.push_back ((float) std::max (-kNormFloorDb,
                                                   20.0 * std::log10 (std::max (1e-12, lin))));
@@ -2025,6 +2166,10 @@ void FFTAnalysisView::computeSpectrumCurveFrom (const AudioEngine& eng, const st
                     : 0.54f - 0.46f * std::cos (2.0 * juce::MathConstants<double>::pi
                                                * (double) i / ((double) n - 1.0));
 
+        double sumW = 0.0;
+        for (float w : win) sumW += w;
+        const double ampScale = std::sqrt (2.0) / std::max (1e-12, sumW);
+
         std::vector<float> samples ((size_t) n, 0.0f);
         std::vector<float> buf ((size_t) n * 2, 0.0f);
         const std::vector<int64_t> starts = curveFrameStarts (totalSamples, s0, s1, n);
@@ -2048,15 +2193,15 @@ void FFTAnalysisView::computeSpectrumCurveFrom (const AudioEngine& eng, const st
             }
         }
 
-        // Same normalisation as the classic spectrum path: divide by the FFT
-        // size (and by the frame count for Total) so levels are comparable to
-        // the averaged spectrum of a single window.
+        // Same normalisation as the classic spectrum path: window coherent
+        // gain and single-sided RMS (and the frame count for Total) so levels
+        // are comparable to the averaged spectrum of a single window.
         const double numFrames = std::max<int64_t> (1, starts.size());
         for (int k = 1; k <= n / 2; ++k)
         {
             const double f = (double) k * rate / (double) n;
-            const double lin = (track == 0) ? accMax[(size_t) k] / n
-                                            : accSum[(size_t) k] / ((double) numFrames * n);
+            const double lin = (track == 0) ? accMax[(size_t) k] * ampScale
+                                            : accSum[(size_t) k] * ampScale / (double) numFrames;
             cd.x.push_back (f);
             cd.ampDb.push_back ((float) std::max (-kNormFloorDb,
                                                   20.0 * std::log10 (std::max (1e-12, lin))));
@@ -2126,7 +2271,8 @@ void FFTAnalysisView::refreshSnapshotBands()
         s.dbSpl = pascalSrc;
         if (!pascalSrc)
             for (auto& m : s.mags)
-                s.bands.push_back (bandsNormalizedToDb (toThirdOctBands (m, s.n, rate)));
+                s.bands.push_back (bandsNormalizedToDb (toThirdOctBands (m, s.n, rate,
+                                                                         currentEnbwBins (s.n))));
         else
             for (int ch : s.chans)
                 if (ch >= 0 && ch < s.source->engine.numChannels())
@@ -2473,9 +2619,12 @@ void FFTAnalysisView::paint (juce::Graphics& g)
     // With a scale calibration the grid lines show absolute levels
     // (dB-SPL for Pascal files; linear V/g values for volts/grams files)
     // instead of relative dB.
+    // The curves are drawn in relative dB, so the axis follows the calibration
+    // of the first displayed channel (per-channel "bkdk" full scales differ).
     const ScaleCalibration& sc = app.scale();
+    const int axisCh = levelAxisChannel();
     for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
-        g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
+        g.drawText (ScaleCalibration::formatSpectralLevel (L, sc, axisCh), plot.getRight() + 4,
                     (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
 
     // Harmonic reference lines: while active, the reference frequency is
@@ -2759,10 +2908,11 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
                 g.drawHorizontalLine ((int) levelToY (L), plot.getX(), plot.getRight());
 
             const ScaleCalibration& sc = app.scale();
+            const int axisCh = levelAxisChannel();   // first displayed channel's calibration
             g.setColour (juce::Colours::lightgrey);
             g.setFont (9.0f);
             for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
-                g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
+                g.drawText (ScaleCalibration::formatSpectralLevel (L, sc, axisCh), plot.getRight() + 4,
                             (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
         }
 
@@ -2796,10 +2946,11 @@ void FFTAnalysisView::paintCurveModes (juce::Graphics& g)
         drawFreqXLabels (g, plot, axisB, freqTicks, subTicks, thirdOctFallback);
 
         const ScaleCalibration& sc = app.scale();
+        const int axisCh = levelAxisChannel();   // first displayed channel's calibration
         g.setColour (juce::Colours::lightgrey);
         g.setFont (9.0f);
         for (double L = std::floor (dbTop_ / dbStep) * dbStep; L >= dbBottom_ - 1e-9; L -= dbStep)
-            g.drawText (ScaleCalibration::formatSpectralLevel (L, sc), plot.getRight() + 4,
+            g.drawText (ScaleCalibration::formatSpectralLevel (L, sc, axisCh), plot.getRight() + 4,
                         (int) levelToY (L) - 7, axisR - 6, 14, juce::Justification::centredLeft, false);
     }
 
@@ -3380,7 +3531,7 @@ void FFTAnalysisView::handleCurveSnapshotClick (int i, juce::ModifierKeys mods)
         cs.smooth = smooth_;
         cs.data = liveCurves;   // copy of the current live curves (already tracked/smoothed)
         cs.source = app.doc();  // remember which file this came from
-        cs.chans = app.visibleChannels;
+        cs.chans = cachedCurveChans_;   // the channels behind liveCurves
         cs.shown = true;        // newly captured data is shown
     }
     else
@@ -3436,7 +3587,7 @@ void FFTAnalysisView::handleSnapshotClick (int i, juce::ModifierKeys mods)
         s.mags = mags;
         s.dbSpl = pascalStore;
         s.source = app.doc();           // remember which file this came from
-        s.chans = app.visibleChannels;  // channels visible at store time
+        s.chans = cachedChans_;  // channels behind the copied live cache
         refreshSnapshotBands();
         s.shown = true;   // newly captured data is shown
     }
@@ -4044,19 +4195,21 @@ juce::String FFTAnalysisView::buildHarmonicsTable() const
     if (!(fFund > 0.0) || !std::isfinite (fFund))
         return {};
 
+    // Amplitude comes from the first visible channel at the nearest FFT bin.
+    const auto& mag = mags.front();
+    const int magCh = cachedChans_.empty() ? -1 : cachedChans_.front();
+
     // Same level formatting as "Copy Spectrum to Clipboard": absolute linear
-    // values for volts/grams files, otherwise dB relative to full scale.
+    // values for volts/grams files, otherwise dB relative to full scale - with
+    // that channel's own full-scale value (per-channel "bkdk" calibration).
     const ScaleCalibration& sc = app.scale();
-    const double off = sc.levelOffsetDb();
+    const double off = sc.levelOffsetDb (magCh);
     auto fmtLevel = [&] (double relDb) -> juce::String
     {
         if (sc.usesLinearLevels())
-            return ScaleCalibration::formatLevelValue (sc.fullScaleValue * std::pow (10.0, relDb / 20.0), 6);
+            return ScaleCalibration::formatLevelValue (sc.fullScaleFor (magCh) * std::pow (10.0, relDb / 20.0), 6);
         return juce::String (relDb + off, 2);
     };
-
-    // Amplitude comes from the first visible channel at the nearest FFT bin.
-    const auto& mag = mags.front();
     const int maxBin = std::min ((int) (cachedN / 2), (int) mag.size() - 1);
 
     juce::StringArray lines;
@@ -4146,7 +4299,7 @@ void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
     const int n = text.isEmpty () ? 0 : text.getIntValue ();
     if (n < 1 || n > 1000)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Set Harmonic References",
                                             "Please enter an integer between 1 and 1000.",
                                             "", this);
@@ -4156,7 +4309,7 @@ void FFTAnalysisView::showSetHarmonicDialog (double clickFreqHz)
     const int maxK = maxText.isEmpty () ? 10 : maxText.getIntValue ();
     if (maxK < 1 || maxK > 1000)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Set Harmonic References",
                                             "Please enter an integer between 1 and 1000 for the\n"
                                             "number of harmonics to show.",
@@ -4530,13 +4683,19 @@ void FFTAnalysisView::copySpectrumToClipboard()
 
     // With a scale calibration the exported values are absolute levels;
     // volts/grams files export linear physical values instead (unit in header).
+    // Each column uses its own channel's full-scale value: legacy "bkdk" files
+    // carry one calibration per channel.
     const ScaleCalibration& sc = app.scale();
-    const double off = sc.levelOffsetDb();
-    auto fmtLevel = [&] (double relDb) -> juce::String
+    auto fmtLevel = [&] (double relDb, int ch) -> juce::String
     {
         if (sc.usesLinearLevels())
-            return ScaleCalibration::formatLevelValue (sc.fullScaleValue * std::pow (10.0, relDb / 20.0), 6);
-        return juce::String (relDb + off, 2);
+            return ScaleCalibration::formatLevelValue (sc.fullScaleFor (ch) * std::pow (10.0, relDb / 20.0), 6);
+        return juce::String (relDb + sc.levelOffsetDb (ch), 2);
+    };
+    // Source channel of data column c (live caches are in display order).
+    auto chanOf = [] (const std::vector<int>& chans, size_t c) -> int
+    {
+        return c < chans.size() ? chans[c] : -1;
     };
 
     // Alternative frequency scales: one extra column per enabled reference,
@@ -4628,24 +4787,25 @@ void FFTAnalysisView::copySpectrumToClipboard()
             {
                 const auto& cd = lv[(size_t) c];
                 if (i >= cd.x.size()) continue;   // defensive: channels are equal-sized
+                const int ch = chanOf (cachedCurveChans_, (size_t) c);
                 if (axisMode_ == 3 && hRatio)
                 {
                     line += sep + juce::String (cd.freqHz[i], 3);
-                    line += sep + fmtLevel (cd.ampDb[i]);
+                    line += sep + fmtLevel (cd.ampDb[i], ch);
                 }
                 else if (axisMode_ == 3)
                 {
                     line += sep + juce::String (cd.freqHz[i], 2);
                     appendAlts (line, cd.freqHz[i]);
-                    line += sep + fmtLevel (cd.ampDb[i]);
+                    line += sep + fmtLevel (cd.ampDb[i], ch);
                 }
                 else if (axisMode_ == 4)
                 {
-                    line += sep + fmtLevel (cd.ampDb[i]) + sep + juce::String (cd.freqHz[i], 2);
+                    line += sep + fmtLevel (cd.ampDb[i], ch) + sep + juce::String (cd.freqHz[i], 2);
                     appendAlts (line, cd.freqHz[i]);
                 }
                 else
-                    line += sep + fmtLevel (cd.ampDb[i]);
+                    line += sep + fmtLevel (cd.ampDb[i], ch);
             }
             lines.add (line);
         }
@@ -4672,7 +4832,7 @@ void FFTAnalysisView::copySpectrumToClipboard()
             for (size_t c = 0; c < thirdOctMags.size() && c < 4; ++c)
                 if (b < thirdOctMags[c].size())
                     // Band values are stored in relative-dB space, exactly as painted.
-                    line += sep + fmtLevel ((double) thirdOctMags[c][b]);
+                    line += sep + fmtLevel ((double) thirdOctMags[c][b], chanOf (cachedChans_, c));
             lines.add (line);
         }
         juce::SystemClipboard::copyTextToClipboard (lines.joinIntoString ("\n"));
@@ -4690,7 +4850,8 @@ void FFTAnalysisView::copySpectrumToClipboard()
             const int bin = std::min (k, (int) mags[c].size() - 1);
             // Magnitudes are normalised against the fixed floor, so the
             // level is -kNormFloorDb * (1 - mag), exactly as painted.
-            line += sep + fmtLevel (-kNormFloorDb * (1.0 - (double) mags[c][(size_t) bin]));
+            line += sep + fmtLevel (-kNormFloorDb * (1.0 - (double) mags[c][(size_t) bin]),
+                                    chanOf (cachedChans_, c));
         }
         lines.add (line);
     }
@@ -5919,9 +6080,14 @@ bool showFindDialog (juce::Component* parent, const juce::String& title,
     if (auto* ed = w->getTextEditor ("findQuery"))
     {
         ed->setWantsKeyboardFocus (true);
-        ed->grabKeyboardFocus();
         ed->selectAll();
     }
+
+    // Enter modal state without taking focus (the window is now showing),
+    // then focus the field: a grab before that is ignored by JUCE.
+    w->enterModalState (false);
+    if (auto* ed = w->getTextEditor ("findQuery"))
+        ed->grabKeyboardFocus();
 
     const int result = w->runModalLoop ();
     needle = w->getTextEditorContents ("findQuery").trim();
@@ -6029,9 +6195,15 @@ void MarkerListPanel::Model::deleteKeyPressed (int)
 
 void MarkerListPanel::deleteAudioData ()
 {
+    // MainWindow routes this through its destructive-edit path (async
+    // materialisation of streamed files + full view refresh).
+    if (onDeleteAudioRequested) { onDeleteAudioRequested (); return; }
+
     std::string err;
     if (!app.del (&err))
         showSelectionMessage ("Delete", juce::String (err.c_str ()));
+    else if (app.onStateChange)
+        app.onStateChange ();   // the views must drop the deleted range
 }
 
 MarkerListPanel::MarkerListPanel (Application& appIn)
@@ -6088,11 +6260,23 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
 
     deleteBtn.onClick = [this] { deleteSelected (); };
 
-    beginEdit.onTextChange   = [this] { onBeginEndChanged (true); };
-    endEdit.onTextChange     = [this] { onBeginEndChanged (false); };
-    lengthEdit.onTextChange  = [this] { onLengthChanged(); };
-    titleEdit.onTextChange   = [this] { onTitleCommentChanged (true); };
-    commentEdit.onTextChange = [this] { onTitleCommentChanged (false); };
+    // The detail editors commit on Return / focus loss (and before the row
+    // selection moves), not on every keystroke: per-keystroke commits re-sorted
+    // the list under the caret, rewrote the field being typed in, and turned a
+    // region into a point as soon as Length was cleared to retype it.
+    beginEdit.onTextChange   = [this] { if (!editing) pendingEdits |= kPendingBegin; };
+    endEdit.onTextChange     = [this] { if (!editing) pendingEdits |= kPendingEnd; };
+    lengthEdit.onTextChange  = [this] { if (!editing) pendingEdits |= kPendingLength; };
+    titleEdit.onTextChange   = [this] { if (!editing) pendingEdits |= kPendingTitle; };
+    commentEdit.onTextChange = [this] { if (!editing) pendingEdits |= kPendingComment; };
+    for (auto* ed : { &beginEdit, &endEdit, &lengthEdit, &titleEdit, &commentEdit })
+    {
+        ed->onFocusLost = [this] { commitPendingEdits(); };
+        ed->onEscapeKey = [this] { pendingEdits = 0; updateDetails(); };   // revert
+    }
+    // The comment is multi-line: Return inserts a line break there.
+    for (auto* ed : { &beginEdit, &endEdit, &lengthEdit, &titleEdit })
+        ed->onReturnKey = [this] { commitPendingEdits(); };
 
     // Right-clicking a row in the table shows the marker context menu. Deep
     // registration is required: clicks on rows are delivered to the row's own
@@ -6104,95 +6288,149 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
     deleteBtn.setTooltip ("Delete every selected marker from the list and from both views.");
     table.setTooltip ("Double-click a row to edit its details in the fields below. "
                       "Ctrl+click toggles rows, Shift+click range-selects from the last plain click "
-                      "and fits all of it in view; DEL removes every selected marker. "
+                      "and fits all of it in view; DEL deletes the AUDIO of the selected markers' "
+                      "time range (undoable) - right-click > Delete Selected removes the markers. "
                       "Right-click for copy/paste.");
-    beginEdit.setTooltip ("Begin time of the selected marker, in seconds.");
-    endEdit.setTooltip ("End time of the selected marker, in seconds (leave empty for a point marker).");
+    beginEdit.setTooltip ("Begin time of the selected marker, in seconds. Press Return or leave "
+                          "the field to apply, Esc to revert.");
+    endEdit.setTooltip ("End time of the selected marker, in seconds (leave empty for a point marker). "
+                        "Press Return or leave the field to apply.");
     lengthEdit.setTooltip ("Length of the selected region marker. Editing it adjusts the End time "
-                           "(and vice versa); leave empty to make it a point marker.");
+                           "(and vice versa); leave empty to make it a point marker. "
+                           "Press Return or leave the field to apply.");
     titleEdit.setTooltip ("Title shown on the marker line and in the Title column.");
     commentEdit.setTooltip ("Free-text comment stored with the marker (saved into WAV cue chunks).");;
 
     refresh();
 }
 
-// Title / Comment editors below the table edit the selected marker in place.
-void MarkerListPanel::onTitleCommentChanged (bool isTitle)
+static const Marker* findMarkerById (Application& app, int id)
 {
-    if (editing || selectedRow < 0 || selectedRow >= (int) app.markers().count()) return;
-    const auto& m = app.markers().markers()[(size_t) selectedRow];
-    const juce::String text = (isTitle ? titleEdit : commentEdit).getText().trim();
-
-    if (isTitle)
-        app.markers().renameMarker (m.id, text.isEmpty() ? m.name : text);
-    else
-        app.markers().setComment (m.id, text);
-
-    editing = true;
-    updateDetails();
-    editing = false;
-    table.repaint();
-    if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
+    for (const auto& mk : app.markers().markers())
+        if (mk.id == id) return &mk;
+    return nullptr;
 }
 
-void MarkerListPanel::onBeginEndChanged (bool isBegin)
+// Applies every pending detail edit to the selected marker in one go, then
+// re-syncs the editors and the views once. followMarker: re-select the edited
+// marker's row (edits re-sort the list by start time); false while the table
+// selection is already moving elsewhere.
+void MarkerListPanel::commitPendingEdits (bool followMarker)
 {
-    if (editing || selectedRow < 0 || selectedRow >= (int) app.markers().count()) return;
-    const auto& m = app.markers().markers()[(size_t) selectedRow];
-    double begin = parseMarkerTime (beginEdit.getText(), false);
-    double end = parseMarkerTime (endEdit.getText(), false);
-
-    const double dur = app.audioEngine().duration();
-
-    if (m.end < 0) // point marker: begin moves it; typing an end turns it into a region
+    const int p = pendingEdits;
+    pendingEdits = 0;
+    if (p == 0) return;
+    if (app.doc() != detailsDoc || selectedRow < 0 || selectedRow >= (int) app.markers().count())
     {
-        if (isBegin && begin >= 0.0 && begin <= dur)
-            app.markers().moveMarker (m.id, begin);
-        else if (!isBegin && begin >= 0.0 && end > begin + 1e-9)
-            app.markers().setRegion (m.id, std::min (begin, dur), std::min (end, dur));
+        updateDetails();   // nothing to apply the text to: show the real values
+        return;
     }
-    else
+    const int id = app.markers().markers()[(size_t) selectedRow].id;
+
+    if (p & (kPendingBegin | kPendingEnd))
+        applyBeginEnd (id, (p & kPendingBegin) != 0, (p & kPendingEnd) != 0);
+    if ((p & kPendingLength) != 0 && (p & kPendingEnd) == 0)   // an explicit End wins
+        applyLength (id);
+    if (p & (kPendingTitle | kPendingComment))
+        applyTitleComment (id, (p & kPendingTitle) != 0, (p & kPendingComment) != 0);
+
+    if (followMarker)
     {
-        if (begin >= 0.0 && end > begin && end <= dur + 1e-6)
-            app.markers().setRegion (m.id, begin, std::min (end, dur));
+        const auto& ms = app.markers().markers();
+        for (int r = 0; r < (int) ms.size(); ++r)
+            if (ms[(size_t) r].id == id)
+            {
+                if (r != selectedRow)
+                {
+                    selectedRow = r;
+                    anchorRow = r;
+                    juce::SparseSet<int> sel;
+                    sel.addRange ({ r, r + 1 });
+                    table.setSelectedRows (sel, juce::dontSendNotification);
+                }
+                break;
+            }
     }
 
-    editing = true;
     updateDetails();
-    editing = false;
     table.repaint();
-    if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
+    if (app.onStateChange) app.onStateChange(); // refresh the views' marker overlays
+}
+
+// Title / Comment editors below the table edit the selected marker in place.
+void MarkerListPanel::applyTitleComment (int id, bool title, bool comment)
+{
+    const Marker* m = findMarkerById (app, id);
+    if (m == nullptr) return;
+    if (title)
+    {
+        const juce::String text = titleEdit.getText().trim();
+        app.markers().renameMarker (id, text.isEmpty() ? m->name : text);
+    }
+    if (comment)
+        app.markers().setComment (id, commentEdit.getText().trim());
+}
+
+void MarkerListPanel::applyBeginEnd (int id, bool beginDirty, bool endDirty)
+{
+    const Marker* m = findMarkerById (app, id);
+    if (m == nullptr) return;
+    const double dur = app.audioEngine().duration();
+    const bool wasPoint = m->end < 0;
+    const double oldStart = m->start, oldEnd = m->end;
+
+    // Invalid text leaves that bound alone (it used to jump to 0 s).
+    bool beginOk = false, endOk = false;
+    double begin = beginDirty ? parseMarkerTime (beginEdit.getText(), false, &beginOk) : oldStart;
+    if (!beginOk) { beginDirty = false; begin = oldStart; }
+    const bool endEmpty = endEdit.getText().trim().isEmpty();
+    double end = endDirty ? parseMarkerTime (endEdit.getText(), false, &endOk) : oldEnd;
+    if (endDirty && !endEmpty && !endOk) { endDirty = false; end = oldEnd; }
+
+    if (endDirty && endEmpty)
+    {
+        // Clearing End turns a region into a point marker (see the tooltip).
+        if (!wasPoint) app.markers().setPoint (id);
+        if (beginDirty && begin >= 0.0 && begin <= dur) app.markers().moveMarker (id, begin);
+        return;
+    }
+    if (!beginDirty && !endDirty) return;
+
+    if (wasPoint && !endDirty)
+    {
+        if (begin >= 0.0 && begin <= dur)
+            app.markers().moveMarker (id, begin);
+        return;
+    }
+    // Region (or a point marker that just got an End).
+    end = std::min (end, dur);
+    if (begin >= 0.0 && begin <= dur && end > begin + 1e-9)
+        app.markers().setRegion (id, begin, end);
 }
 
 // Editing the Length field adjusts the End time; clearing it turns a region
 // marker back into a point marker. (Editing End updates this box via updateDetails.)
-void MarkerListPanel::onLengthChanged()
+void MarkerListPanel::applyLength (int id)
 {
-    if (editing || selectedRow < 0 || selectedRow >= (int) app.markers().count()) return;
-    const auto& m = app.markers().markers()[(size_t) selectedRow];
+    const Marker* m = findMarkerById (app, id);
+    if (m == nullptr) return;
 
-    double len = parseMarkerTime (lengthEdit.getText(), true);   // empty -> 0.0
+    const juce::String text = lengthEdit.getText();
+    bool ok = false;
+    const double len = parseMarkerTime (text, true, &ok);
+    if (!text.trim().isEmpty() && !ok) return;   // invalid text: keep the marker
     if (!(len > 0.0))
     {
-        if (m.end >= 0)
-            app.markers().setPoint (m.id);
+        if (m->end >= 0)
+            app.markers().setPoint (id);
+        return;
     }
+    const double start = m->start;
+    const double end = std::min (start + len, app.audioEngine().duration());
+    if (end <= start + 1e-9)
+        app.markers().setPoint (id); // too short to be a region
     else
-    {
-        double end = m.start + len;
-        const double dur = app.audioEngine().duration();
-        if (end > dur) end = dur;
-        if (end <= m.start + 1e-9)
-            app.markers().setPoint (m.id); // too short to be a region
-        else
-            app.markers().setRegion (m.id, m.start, end);
-    }
-
-    editing = true;
-    updateDetails();
-    editing = false;
-    table.repaint();
-    if (app.onStateChange) app.onStateChange(); // refresh the spectral view's marker overlay
+        app.markers().setRegion (id, start, end);
 }
 
 juce::String MarkerListPanel::markerTimeText (double t, bool duration) const
@@ -6205,12 +6443,15 @@ juce::String MarkerListPanel::markerTimeText (double t, bool duration) const
     return formatTimeCode (t);   // classic m:ss.ddd in the default Time mode
 }
 
-double MarkerListPanel::parseMarkerTime (const juce::String& s, bool duration) const
+double MarkerListPanel::parseMarkerTime (const juce::String& s, bool duration, bool* ok) const
 {
-    // Displayed value; empty/invalid text becomes 0 (same as parseTimeCode).
+    // Displayed value; empty/invalid text becomes 0 (same as parseTimeCode)
+    // and reports *ok = false so editors can ignore it.
     double v = 0.0;
-    if (!s.trim().isEmpty() && !parseSignedClock (s, v))
+    const bool parsed = !s.trim().isEmpty() && parseSignedClock (s, v);
+    if (!parsed)
         v = 0.0;
+    if (ok != nullptr) *ok = parsed;
 
     const double r = std::max (1.0, app.audioEngine().sampleRate());
     if (!duration && app.timeAxisMode == TimeAxisMode::TimeOffset)
@@ -6224,6 +6465,7 @@ void MarkerListPanel::updateDetails()
 {
     if (selectedRow < 0 || selectedRow >= (int) app.markers().count())
     {
+        pendingEdits = 0;
         beginEdit.setText ("", juce::dontSendNotification);
         endEdit.setText ("", juce::dontSendNotification);
         lengthEdit.setText ("", juce::dontSendNotification);
@@ -6233,13 +6475,18 @@ void MarkerListPanel::updateDetails()
     }
 
     const auto& m = app.markers().markers()[(size_t) selectedRow];
+    // Fields with an uncommitted edit keep the typed text: a state refresh
+    // from elsewhere must not wipe what the user is typing.
+    auto put = [this] (juce::TextEditor& ed, int bit, const juce::String& t)
+    {
+        if ((pendingEdits & bit) == 0) ed.setText (t, juce::dontSendNotification);
+    };
     editing = true;
-    beginEdit.setText (markerTimeText (m.start, false), juce::dontSendNotification);
-    endEdit.setText (m.end < 0 ? "" : markerTimeText (m.end, false), juce::dontSendNotification);
-    lengthEdit.setText (m.end < 0 ? "" : markerTimeText (m.end - m.start, true),
-                        juce::dontSendNotification);
-    titleEdit.setText (m.name, juce::dontSendNotification);
-    commentEdit.setText (m.comment, juce::dontSendNotification);
+    put (beginEdit, kPendingBegin, markerTimeText (m.start, false));
+    put (endEdit, kPendingEnd, m.end < 0 ? "" : markerTimeText (m.end, false));
+    put (lengthEdit, kPendingLength, m.end < 0 ? "" : markerTimeText (m.end - m.start, true));
+    put (titleEdit, kPendingTitle, m.name);
+    put (commentEdit, kPendingComment, m.comment);
     editing = false;
 }
 
@@ -6248,6 +6495,16 @@ void MarkerListPanel::refresh()
     // Adding a marker needs audio to anchor it to - disable the button when
     // no file is loaded (the state sync calls refresh() on open/close).
     addBtn.setEnabled (app.audioEngine().isFileLoaded());
+    if (app.doc() != detailsDoc)
+    {
+        // Another document is active: the selected row index and any
+        // uncommitted detail edit belonged to the previous file's markers.
+        detailsDoc = app.doc();
+        pendingEdits = 0;
+        selectedRow = -1;
+        anchorRow = -1;
+        table.setSelectedRows (juce::SparseSet<int>(), juce::dontSendNotification);
+    }
     table.updateContent();
     table.repaint();
     updateDetails();
@@ -6255,6 +6512,7 @@ void MarkerListPanel::refresh()
 
 void MarkerListPanel::selectRow (int row)
 {
+    commitPendingEdits();   // the typed values belong to the current row
     if (row < 0 || row >= (int) app.markers().count())
     {
         selectedRow = -1;
@@ -6277,6 +6535,8 @@ int MarkerListPanel::primaryRow() const
 
 void MarkerListPanel::onSelectionSetChanged()
 {
+    // Uncommitted detail edits belong to the previously selected marker.
+    commitPendingEdits (false);
     selectedRow = primaryRow();
     updateDetails();
 
@@ -6324,7 +6584,8 @@ void MarkerListPanel::onRowClicked (int row, const juce::MouseEvent& e)
         return;   // right-click: just show the context menu - keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();   // so DEL works right after a click
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();   // so DEL works right after a click
 
     if (e.mods.isShiftDown ())
     {
@@ -6362,6 +6623,7 @@ void MarkerListPanel::deleteSelected ()
             ids.push_back (app.markers().markers()[(size_t) r].id);
 
     if (ids.empty()) return;
+    pendingEdits = 0;   // the edited marker may be among the removed ones
     for (int id : ids)
         app.markers().removeMarker (id);
 
@@ -6496,7 +6758,7 @@ void MarkerListPanel::exportMarkersCsv()
         file = file.withFileExtension (".csv");
 
     if (!app.markers().saveCsv (file))
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Export failed",
                                             "Could not write the CSV file.", "", this);
 }
@@ -6522,7 +6784,7 @@ int MarkerListPanel::importMarkersCsv()
     }
     else
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Import failed",
                                             "No markers could be read from the CSV file.",
                                             "", this);
@@ -7136,7 +7398,8 @@ void TranscriptionPanel::onRowClicked (int row, const juce::MouseEvent& e)
         return;   // right-click: just show the context menu - keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();
 
     auto* d = app.doc ();
     const int n = d != nullptr ? (int) d->sctt.segments.size () : 0;
@@ -7255,8 +7518,13 @@ void TranscriptionPanel::showEditDialog (int rowNumber)
     {
         startEd->setWantsKeyboardFocus (true);
         startEd->selectAll();
-        startEd->grabKeyboardFocus();
     }
+
+    // Show the dialog (modal, without taking focus) before focusing the
+    // field: JUCE ignores focus grabs on components that are not showing.
+    dlg.enterModalState (false);
+    if (startEd != nullptr)
+        startEd->grabKeyboardFocus();
 
     const int result = dlg.runModalLoop ();
     auto* endEd  = dlg.getTextEditor ("end");
@@ -7267,7 +7535,7 @@ void TranscriptionPanel::showEditDialog (int rowNumber)
     const juce::String endText = (endEd != nullptr) ? endEd->getText() : juce::String();
     if (!parseTimeText (startEd->getText(), t0) || !parseTimeText (endText, t1))
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Edit Segment",
                                             "Please enter valid times for Start and End.",
                                             "", this);
@@ -7276,7 +7544,7 @@ void TranscriptionPanel::showEditDialog (int rowNumber)
 
     const juce::String text = (textEd != nullptr) ? textEd->getText().trim() : juce::String();
     if (!applySegmentEdit (rowNumber, t0, t1, text))
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Edit Segment",
                                             "Times must be non-negative.",
                                             "", this);
@@ -7981,9 +8249,15 @@ void SelectionPanel::recallSelected ()
 
 void SelectionPanel::deleteAudioData ()
 {
+    // MainWindow routes this through its destructive-edit path (async
+    // materialisation of streamed files + full view refresh).
+    if (onDeleteAudioRequested) { onDeleteAudioRequested (); return; }
+
     std::string err;
     if (!app.del (&err))
         showSelectionMessage ("Delete", juce::String (err.c_str ()));
+    else if (app.onStateChange)
+        app.onStateChange ();   // the views must drop the deleted range
 }
 
 // Right-click: select the row under the cursor when nothing is selected yet
@@ -8139,7 +8413,8 @@ void SelectionPanel::onRowClicked (int row, const juce::MouseEvent& e)
         return;   // right-click: just show the context menu - keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();   // so DEL works right after a click
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();   // so DEL works right after a click
 
     if (e.mods.isShiftDown ())
     {
@@ -8259,8 +8534,13 @@ void SelectionPanel::showEditDialog()
     {
         nameEd->setWantsKeyboardFocus (true);
         nameEd->selectAll();
-        nameEd->grabKeyboardFocus();
     }
+
+    // Show the dialog (modal, without taking focus) before focusing the
+    // field: JUCE ignores focus grabs on components that are not showing.
+    dlg.enterModalState (false);
+    if (nameEd != nullptr)
+        nameEd->grabKeyboardFocus();
 
     if (dlg.runModalLoop () != 1 || nameEd == nullptr) return;
     auto* commentEd = dlg.getTextEditor ("comment");
@@ -8309,8 +8589,13 @@ void SelectionPanel::showCloneNumbersDialog()
     {
         ed->setWantsKeyboardFocus (true);
         ed->selectAll();
-        ed->grabKeyboardFocus();
     }
+
+    // Show the dialog (modal, without taking focus) before focusing the
+    // field: JUCE ignores focus grabs on components that are not showing.
+    dlg.enterModalState (false);
+    if (ed != nullptr)
+        ed->grabKeyboardFocus();
 
     if (dlg.runModalLoop () != 1 || ed == nullptr) return;
 
@@ -8353,7 +8638,18 @@ PythonPanel::PythonPanel (Application& appIn, const juce::File& folder)
     editor.setFont (juce::Font ("Consolas", 13.0f, juce::Font::plain));
     addAndMakeVisible (&editor);
 
-    scriptBox.onChange = [this] { loadCurrentScript (); };
+    // Switching scripts keeps the edits of the one being left (only Run used
+    // to write the editor text to disk, so every other path lost them).
+    scriptBox.onChange = [this]
+    {
+        if (!saveCurrentScriptIfModified ())
+        {   // could not save: stay on the edited script instead of dropping it
+            if (currentIdx >= 0)
+                scriptBox.setSelectedItemIndex (currentIdx, juce::dontSendNotification);
+            return;
+        }
+        loadCurrentScript ();
+    };
     addBtn.setButtonText ("Add");
     removeBtn.setButtonText ("Remove");
     runBtn.setButtonText ("Run");
@@ -8390,8 +8686,28 @@ void PythonPanel::resetCurrentScriptToOriginal ()
 {
     if (!canResetCurrentScript ()) return;
     const juce::File f = scripts[(size_t) currentIdx];
-    f.replaceWithText (sc::py::defaultScriptText (f.getFileName()));
+    if (!f.replaceWithText (sc::py::defaultScriptText (f.getFileName())))
+    {
+        showSelectionMessage ("Reset Script", "Could not write '" + f.getFullPathName () + "'.");
+        return;
+    }
     loadCurrentScript ();   // reload the editor text from disk
+}
+
+bool PythonPanel::saveCurrentScriptIfModified ()
+{
+    if (currentIdx < 0 || currentIdx >= (int) scripts.size ()) return true;
+    const juce::String text = editor.getText ();
+    if (text == loadedText) return true;   // nothing typed since the last load/save
+
+    const juce::File f = scripts[(size_t) currentIdx];
+    if (!f.replaceWithText (text))
+    {
+        showSelectionMessage ("Python", "Could not save '" + f.getFullPathName () + "'.");
+        return false;
+    }
+    loadedText = text;
+    return true;
 }
 
 void PythonPanel::confirmResetToOriginal ()
@@ -8445,12 +8761,14 @@ void PythonPanel::loadCurrentScript ()
     if (idx < 0 || idx >= (int) scripts.size ())
     {
         editor.setText ("", juce::dontSendNotification);
+        loadedText = {};
         return;
     }
 
     currentIdx = idx;
     editor.setText (scripts[(size_t) idx].loadFileAsString (),
                     juce::dontSendNotification);
+    loadedText = editor.getText ();   // baseline for saveCurrentScriptIfModified
 
     // Remember this script as the last-used one for the next session.
     app.recentStore->setValue ("python_last_script",
@@ -8473,15 +8791,22 @@ void PythonPanel::showAddDialog ()
     {
         nameEdit->setWantsKeyboardFocus (true);
         nameEdit->selectAll();
-        nameEdit->grabKeyboardFocus();
     }
 
+    // Show the dialog (modal, without taking focus) before focusing the
+    // field: JUCE ignores focus grabs on components that are not showing.
+    w->enterModalState (false);
+    if (nameEdit != nullptr)
+        nameEdit->grabKeyboardFocus();
+
     const int result = w->runModalLoop ();
+    // Read the name BEFORE deleting the dialog: nameEdit is one of its children.
+    const juce::String typed = w->getTextEditorContents ("name");
     delete w;
-    if (result != 1 || nameEdit == nullptr) return;
+    if (result != 1) return;
 
     // Sanitise: strip path separators / invalid characters, force a .py suffix.
-    juce::String name = nameEdit->getText ().trim ();
+    juce::String name = typed.trim ();
     for (int i = 0; i < name.length (); ++i)
     {
         const juce_wchar c = name[i];
@@ -8501,13 +8826,19 @@ void PythonPanel::showAddDialog ()
                                            juce::AlertWindow::WarningIcon, this);
         err->setColour (juce::AlertWindow::backgroundColourId,
                         juce::Colour::fromRGB (45, 45, 48));
-        err->addButton ("OK", 1);
-        err->enterModalState ();
+        err->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        err->runModalLoop ();   // enterModalState() + delete never showed it
         delete err;
         return;
     }
 
-    f.replaceWithText (sc::py::newScriptTemplate ());
+    // Keep the edits of the current script before the editor switches away.
+    if (!saveCurrentScriptIfModified ()) return;
+    if (!f.replaceWithText (sc::py::newScriptTemplate ()))
+    {
+        showSelectionMessage ("New Script", "Could not create '" + f.getFullPathName () + "'.");
+        return;
+    }
     refreshScripts ();
 
     for (int i = 0; i < (int) scripts.size (); ++i)
@@ -8537,7 +8868,11 @@ void PythonPanel::confirmRemove ()
     delete w;
 
     if (result != 1) return;
-    f.deleteFile ();
+    if (!f.deleteFile ())
+    {
+        showSelectionMessage ("Delete Script", "Could not delete '" + f.getFullPathName () + "'.");
+        return;
+    }
     refreshScripts ();
 }
 
@@ -8549,8 +8884,8 @@ void PythonPanel::requestRun ()
                                             juce::AlertWindow::InfoIcon, this);
         info->setColour (juce::AlertWindow::backgroundColourId,
                          juce::Colour::fromRGB (45, 45, 48));
-        info->addButton ("OK", 1);
-        info->enterModalState ();
+        info->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        info->runModalLoop ();   // enterModalState() + delete never showed it
         delete info;
         return;
     }
@@ -8561,8 +8896,8 @@ void PythonPanel::requestRun ()
                                             juce::AlertWindow::InfoIcon, this);
         info->setColour (juce::AlertWindow::backgroundColourId,
                          juce::Colour::fromRGB (45, 45, 48));
-        info->addButton ("OK", 1);
-        info->enterModalState ();
+        info->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        info->runModalLoop ();   // enterModalState() + delete never showed it
         delete info;
         return;
     }
@@ -8631,7 +8966,8 @@ static juce::Colour showColourPickerDialog (juce::Colour initial)
         }
     };
 
-    juce::AlertWindow w ("Drawing colour", "Choose the ink colour.",
+    // Owning: the swatch and sliders below are added with new.
+    sc::OwningAlertWindow w ("Drawing colour", "Choose the ink colour.",
                         juce::AlertWindow::NoIcon);
     w.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
 
@@ -8888,7 +9224,8 @@ void DrawingPanel::onRowClicked (int row, const juce::MouseEvent& e)
         return;   // right-click: just show the context menu - keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();   // so clicks keep the selection live
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();   // so clicks keep the selection live
 
     if (e.mods.isShiftDown ())
     {
@@ -9044,7 +9381,8 @@ void DrawingPanel::showEditDialog (int row)
     if (d == nullptr || row < 0 || row >= (int) d->drawings.size ()) return;
     const DrawingItem& it = d->drawings [(size_t) row];
 
-    juce::AlertWindow dlg ("Edit drawing",
+    // Owning: the swatch and sliders below are added with new.
+    sc::OwningAlertWindow dlg ("Edit drawing",
                           "Change this drawing's appearance and note.",
                           juce::AlertWindow::NoIcon);
     dlg.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
@@ -9990,7 +10328,8 @@ void TablesPanel::onRowClicked (int row, const juce::MouseEvent& e)
     if (e.mods.isPopupMenu ()) return;   // right-click: keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();
 
     if (e.mods.isShiftDown ())
     {
@@ -11031,7 +11370,8 @@ void ActionsPanel::onRowClicked (int row, const juce::MouseEvent& e)
     if (e.mods.isPopupMenu ()) return;   // right-click: keep any multi-selection
 
     table.setWantsKeyboardFocus (true);
-    table.grabKeyboardFocus ();
+    if (table.isShowing ())   // a focus grab on a hidden table is a no-op (and asserts)
+        table.grabKeyboardFocus ();
 
     if (e.mods.isShiftDown())
     {
@@ -11162,7 +11502,7 @@ void ActionsPanel::showContextMenu ()
             if (r != 1) return;
 
             if (!app.actions.rename (p, name))
-                juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                    "Rename Action",
                                                    "That name is empty or already in use.", "", this);
             else
@@ -11212,7 +11552,7 @@ void ActionsPanel::handleNew()
     const int idx = app.actions.add (name);
     if (idx < 0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "New Action",
                                            "That name is empty or already in use.", "", this);
         return;
@@ -11256,7 +11596,7 @@ void ActionsPanel::handleRecord()
         idx = app.actions.add (name);
         if (idx < 0)
         {
-            juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                                "Record Action",
                                                "That name is empty or already in use.", "", this);
             return;
@@ -11279,14 +11619,14 @@ void ActionsPanel::handleRun()
     const int idx = primaryIndex();
     if (idx < 0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Run Action",
                                            "Select an action in the list first.", "", this);
         return;
     }
     if (app.actions.get (idx)->steps.empty ())
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Run Action",
                                            "The selected action has no recorded steps.", "", this);
         return;
@@ -11299,14 +11639,14 @@ void ActionsPanel::handleBatch()
     const int idx = primaryIndex();
     if (idx < 0)
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Action Batch",
                                            "Select an action in the list first.", "", this);
         return;
     }
     if (app.actions.get (idx)->steps.empty ())
     {
-        juce::AlertWindow::showMessageBox (juce::AlertWindow::WarningIcon,
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                            "Action Batch",
                                            "The selected action has no recorded steps.", "", this);
         return;

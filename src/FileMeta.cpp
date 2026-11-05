@@ -163,8 +163,11 @@ static bool readPointPair (const juce::var& v, std::pair<double, double>& out)
 {
     const auto* a = v.isArray () ? v.getArray() : nullptr;
     if (a == nullptr || a->size() != 2) return false;
-    out.first  = (*a)[0].isDouble() ? static_cast<double> ((*a)[0]) : 0.0;
-    out.second = (*a)[1].isDouble() ? static_cast<double> ((*a)[1]) : 0.0;
+    // Integral values written by other tools ("[1, 200]") parse as int/int64.
+    auto num = [] (const juce::var& x)
+    { return (x.isDouble() || x.isInt() || x.isInt64()) ? static_cast<double> (x) : 0.0; };
+    out.first  = num ((*a)[0]);
+    out.second = num ((*a)[1]);
     return true;
 }
 
@@ -630,17 +633,27 @@ bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
 
     // ---- Gather every category from its current home ----------------------
     // Same priority as FileDoc::load: unified .meta.json > legacy sidecars >
-    // embedded RIFF chunks.
-    MetaBundle b;
-
+    // embedded RIFF chunks. The unified sidecar and the SCMD chunk are parsed
+    // separately: parsing both into one bundle would let SCMD override the
+    // unified copy.
     const bool isWav = wav.getFileExtension().equalsIgnoreCase (".wav");
     const juce::File unified = fileMetaSidecarPath (wav);
+    MetaBundle unifiedB, scmdB;
     if (unified.existsAsFile ())
-        parseBundle (unified.loadFileAsString (), b);   // corrupt = partial merge
+        parseBundle (unified.loadFileAsString (), unifiedB);   // corrupt = partial merge
 
     std::string scmdJson;
     if (isWav && readRiffChunkPayload (wav, "SCMD", scmdJson))
-        parseBundle (scmdJson, b);
+        parseBundle (scmdJson, scmdB);
+
+    // Categories with no legacy sidecar: unified > SCMD.
+    MetaBundle b;
+    b.drawings     = unifiedB.haveDrawings     ? unifiedB.drawings     : scmdB.drawings;
+    b.scale        = unifiedB.haveScale        ? unifiedB.scale        : scmdB.scale;
+    b.altRef       = unifiedB.haveAltRef       ? unifiedB.altRef       : scmdB.altRef;
+    b.freqAnalysis = unifiedB.haveFreqAnalysis ? unifiedB.freqAnalysis : scmdB.freqAnalysis;
+    b.tables       = unifiedB.haveTables       ? unifiedB.tables       : scmdB.tables;
+    b.tablesMode   = unifiedB.haveTables       ? unifiedB.tablesMode   : scmdB.tablesMode;
 
     // The cue/adtl payloads are sample-based: the file's rate is needed both to
     // READ them and to REBUILD them below.
@@ -650,40 +663,65 @@ bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
     {
         juce::AudioFormatManager fm;
         fm.registerBasicFormats();
-        if (auto* reader = fm.createReaderFor (wav))
+        // Owned: the raw pointer used to leak the reader and its open file
+        // stream on every metadata save (on Windows the open handle also
+        // blocks a later rename/replace of the WAV).
+        if (std::unique_ptr<juce::AudioFormatReader> reader { fm.createReaderFor (wav) })
         {
             rate   = reader->sampleRate;
             frames = reader->lengthInSamples;
         }
     }
 
+    // The cue/adtl chunks rebuilt below are sample-based: without a readable
+    // rate every marker would be written at sample 0.
+    if (target == MetaSaveTarget::Embedded && !(rate > 0.0))
+        return fail ("cannot read the WAV audio format");
+
+    const juce::File legacyM = juce::File (wav.getFullPathName() + ".markers.json");
+    const juce::File legacyS = savedSelectionsSidecarPath (wav);
+
+    // A legacy sidecar is deleted below only once its content is in the
+    // bundle (or superseded by the unified sidecar, as FileDoc::load does).
+    // One that exists but cannot be read stops the migration: it may be the
+    // only copy of that data.
+    auto unreadable = [] (const juce::File& f) { return f.existsAsFile () && f.getSize () > 0; };
+
     // Markers: unified > legacy .markers.json > SCMD > cue/adtl.
-    if (!b.haveMarkers)
+    if (unifiedB.haveMarkers)
+        b.markers = unifiedB.markers;
+    else
     {
-        const juce::File legacyM = juce::File (wav.getFullPathName() + ".markers.json");
         MarkerManager mm;
-        if (legacyM.existsAsFile () && mm.loadSidecar (legacyM))
+        // loadSidecar takes the AUDIO file and appends ".markers.json" itself.
+        if (legacyM.existsAsFile () && mm.loadSidecar (wav))
             b.markers = mm.markers();
+        else if (unreadable (legacyM))
+            return fail ("the legacy .markers.json sidecar could not be read; file left unchanged");
+        else if (scmdB.haveMarkers)
+            b.markers = scmdB.markers;
         else if (isWav && mm.loadFromWavFile (wav, rate))
             b.markers = mm.markers();
     }
 
     // Selections: unified > legacy .selections.json > SCMD.
-    if (!b.haveSelections)
-    {
-        const juce::File legacyS = savedSelectionsSidecarPath (wav);
-        if (legacyS.existsAsFile ()
-            && deserialiseSavedSelections (legacyS.loadFileAsString (), b.selections))
-            ;   // filled
-    }
+    if (unifiedB.haveSelections)
+        b.selections = unifiedB.selections;
+    else if (legacyS.existsAsFile ()
+             && deserialiseSavedSelections (legacyS.loadFileAsString (), b.selections))
+        ;   // filled
+    else if (unreadable (legacyS))
+        return fail ("the legacy .selections.json sidecar could not be read; file left unchanged");
+    else if (scmdB.haveSelections)
+        b.selections = scmdB.selections;
 
     // Transcription: unified > SCTT chunk.
-    if (!b.haveTranscription && isWav)
+    if (unifiedB.haveTranscription)
+        b.transcription = unifiedB.transcription;
+    else if (isWav)
         readScttChunk (wav, b.transcription);
 
     // ---- Write the bundle in the requested mode ---------------------------
-    const juce::File legacyM = juce::File (wav.getFullPathName() + ".markers.json");
-    const juce::File legacyS = savedSelectionsSidecarPath (wav);
 
     auto mkEntry = [] (const char* id, bool adtlList,
                        std::string payload, bool present) -> RiffPatchEntry

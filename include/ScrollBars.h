@@ -1,6 +1,8 @@
 #pragma once
 // SpectroCraft - Custom scrollbars (zoom/pan sliders)
 #include <JuceHeader.h>
+#include <algorithm>
+#include <cmath>
 #include <functional>
 
 /** Horizontal time scrollbar: the track spans the whole file, the thumb shows
@@ -66,6 +68,14 @@ public:
     {
         if (lo != winLo || hi != winHi) { winLo = lo; winHi = hi; repaint(); }
     }
+    /** Logarithmic track (e.g. the spectrogram's log-frequency axis): the
+        thumb, pan, jump and edge zoom then work in log(value) so the bar
+        matches the axis. Ignored while rangeMin <= 0. */
+    void setLogarithmic (bool shouldBeLog)
+    {
+        if (shouldBeLog != logScale) { logScale = shouldBeLog; repaint(); }
+    }
+    bool isLogarithmic() const { return logScale; }
 
     // State accessors (public so the logic can be tested headlessly).
     enum class Mode { None, Pan, TopEdge, BottomEdge };
@@ -81,9 +91,15 @@ public:
 
 private:
     double rangeMin = 0.0, rangeMax = 1.0, winLo = 0.0, winHi = 1.0;
+    bool logScale = false;
     Mode mode = Mode::None;
     int dragStartY = 0;
     double dragWinLo = 0.0, dragWinHi = 1.0;
+
+    // Value <-> track-space mapping (identity unless logarithmic).
+    bool useLog() const { return logScale && rangeMin > 0.0; }
+    double toU (double v) const { return useLog() ? std::log (std::max (v, rangeMin)) : v; }
+    double fromU (double u) const { return useLog() ? std::exp (u) : u; }
 
     JUCE_DECLARE_NON_COPYABLE (ValueScrollBar)
 };

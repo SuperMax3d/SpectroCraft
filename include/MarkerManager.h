@@ -71,14 +71,16 @@ public:
     bool loadSidecar (const juce::File& audioFile);
 
     // Reads markers embedded in a WAV file (RIFF "cue" + LIST/"adtl" chunks,
-    // classic DAW marker layout; standard 16-byte cue entries are also accepted).
+    // classic DAW marker layout with 24-byte cue points; 16-byte entries are
+    // also accepted). Odd-sized chunks are skipped with their RIFF pad byte.
     // The file is streamed chunk-by-chunk, the audio data is never read.
     // Returns true if at least one marker was recovered.
     bool loadFromWavFile (const juce::File& wavFile, double sampleRate);
 
     // CSV export/import: "Title,Begin,End,Comment" with a header row; times in
-    // seconds (3 decimals); fields containing commas/quotes are quoted per
-    // RFC 4180. Point markers have End = "-".
+    // seconds (6 decimals); fields containing commas/quotes are quoted per
+    // RFC 4180. Point markers have End = "-". Import also accepts ';'-separated
+    // files with decimal commas and m:ss / h:mm:ss time codes.
     bool saveCsv (const juce::File& file) const;
 
     // Appends the parsed markers to the current list, clamping them to

@@ -141,6 +141,20 @@ struct Coordinator::Impl final : public juce::Thread
                 auto cb = onFiles;
                 juce::MessageManager::callAsync ([cb, p = paths] { cb (p); });
             }
+
+           #if ! defined (_WIN32)
+            // POSIX: JUCE's NamedPipe is a pair of FIFOs and the server keeps
+            // its write end open (cached descriptor). Once this client closes
+            // its read end, every later write fails with EPIPE, so only the
+            // FIRST forwarded launch was ever acknowledged - the next senders
+            // timed out and opened a second instance. Start each client on a
+            // fresh pipe. A client that connects during the swap retries its
+            // open until it finds the new FIFOs (NamedPipe::write keeps
+            // retrying until its timeout). Windows named pipes reconnect per
+            // client by themselves and are left alone.
+            pipe.close ();
+            if (!pipe.createNewPipe (pipeName, false)) return;
+           #endif
         }
     }
 

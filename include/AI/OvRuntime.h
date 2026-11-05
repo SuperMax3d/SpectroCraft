@@ -8,6 +8,9 @@
 // but with /DELAYLOAD:openvino.dll so the executable starts even when the
 // runtime DLLs are missing. init() probes openvino.dll via LoadLibrary and
 // reports a clear error in that case — only the AI features degrade.
+// macOS / Linux: the official 2024.6 archive is fetched at configure time
+// (cmake/ScAiRuntimes.cmake), linked normally and its libraries are shipped
+// inside the app (Contents/Frameworks / next to the executable).
 //
 // When built with -DSPECTRO_ENABLE_AI=OFF this class degrades to a stub that
 // reports "AI disabled" — the rest of the app keeps working.
@@ -19,6 +22,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -55,7 +59,7 @@ public:
     // %APPDATA%/SpectroCraft/openvino-cache. Safe to call repeatedly.
     bool init(std::string* errOut = nullptr);
 
-    bool ready() const { return _ready; }
+    bool ready() const { return _ready.load (); }
 
     // True when this build was configured with -DSPECTRO_ENABLE_AI=ON.
 #ifdef SC_ENABLE_AI
@@ -80,7 +84,7 @@ public:
 
 private:
     OvRuntime() = default;
-    bool _ready = false;
+    std::atomic<bool> _ready { false };   // init() may run on several worker threads
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     std::shared_ptr<ov::Core> _core;
 #endif
