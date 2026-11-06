@@ -32,3 +32,11 @@ desktop.ini
 # Local test builds are no longer distributed via the repo (GitHub Releases
 # from CI ship them instead); keep a local build for testing.
 /bin/
+
+# MCP adapter (tools/mcp): local Claude Code config and Python artefacts
+/.mcp.json
+/tools/mcp/.venv/
+/tools/mcp/uv.lock
+/tools/mcp/*.egg-info/
+__pycache__/
+.pytest_cache/

@@ -1366,8 +1366,9 @@ explicitly falls back to CPU with a note in the progress dialog.
 **Effects → Stem Separation…** separates an audio element you describe in plain
 language ("birds", "a cello", "the bass drum") from the current selection — or
 from the whole file when nothing is selected. It runs the prebuilt
-`audiocpp_cli.exe` tool as a child process; no part of it is compiled into
-SpectroCraft.
+`audiocpp_cli` tool (`audiocpp_cli.exe` on Windows) as a child process; no part
+of it is compiled into SpectroCraft. It works on Windows x64, macOS (Apple
+silicon and Intel, with the Metal GPU backend) and Linux x64.
 
 The **Mode** dropdown selects the separation family:
 
@@ -1384,25 +1385,43 @@ the dialog is hidden entirely.
 The dialog's **Download…** button fetches what is missing (with progress and
 cancel):
 
-- **Binary** — one Windows x64 variant from the [0xShug0/audio.cpp](https://github.com/0xShug0/audio.cpp)
-  releases: *CPU portable* (~29 MB), *CUDA 12.4* (~465 MB), *CUDA 13.3*
-  (~276 MB) or *Vulkan portable* (~63 MB). The zip is extracted into the models
-  folder and a variant marker is written so the dialog knows what you have.
+- **Binary** — one variant of this platform's build from the
+  [0xShug0/audio.cpp](https://github.com/0xShug0/audio.cpp) v0.9.2-drama3-base-small
+  release, checked against its published SHA-256:
+  - Windows x64: *CPU portable* (~29 MB), *CUDA 12.4* (~465 MB), *CUDA 13.3*
+    (~276 MB) or *Vulkan portable* (~63 MB) — a zip, of which only
+    `audiocpp_cli.exe` is extracted (so the CUDA variants do not start yet: they
+    also need the zip's `ggml*.dll`);
+  - macOS: *Metal* for Apple silicon (~33 MB) or for Intel Macs (~35 MB) — a
+    self-contained `audiocpp_cli` with the `cpu` and `metal` backends;
+  - Linux x64: *CPU portable* (~61 MB) or *Vulkan portable* (~75 MB) —
+    `audiocpp_cli` plus the `libggml*.so` libraries it loads from its own folder
+    (it also needs the system's `libgomp.so.1`, and the Vulkan loader for the
+    Vulkan variant).
+
+  The archive is extracted into the models folder, the executable checked
+  against its own published SHA-256, and a variant marker is written so the
+  dialog knows what you have.
 - **Models** — any number of `sam-audio-*.gguf` weights from
   [audio-cpp/SAM-Audio-GGUF](https://huggingface.co/audio-cpp/SAM-Audio-GGUF/tree/main)
   (small/base/large in q8_0/bf16/f32). The model dropdown lists every `.gguf`
   found, so you can install more manually and they appear automatically.
 - **htdemucs models** — for the two htdemucs modes: `htdemucs_6stems` uses any
-  `.gguf` file placed in `%APPDATA%\SpectroCraft\models\audiocpp\HTDemucs-6stems-GGUF\`
+  `.gguf` file placed in `<models>/audiocpp/HTDemucs-6stems-GGUF/`
   (the model dropdown lists them), and `htdemucs_ft` uses the folder
-  `%APPDATA%\SpectroCraft\models\audiocpp\htdemucs_ft\`, which must contain at
+  `<models>/audiocpp/htdemucs_ft/`, which must contain at
   least one `.gguf` file. These are not offered by the downloader — install them
-  manually (e.g. from [huggingface.co/htdemucs](https://huggingface.co)).
+  manually (e.g. `htdemucs-6stems-q8_0.gguf`, 42 MB, from
+  [audio-cpp/audio.cpp-gguf](https://huggingface.co/audio-cpp/audio.cpp-gguf/tree/main/HTDemucs-6stems-GGUF)).
 
-Everything lives in `%APPDATA%\SpectroCraft\models\audiocpp\` — put
-`audiocpp_cli.exe` (plus its runtime DLLs) and one or more `sam-audio-*.gguf`
-files there by hand if you prefer not to use the downloader. The *Backend*
-dropdown (*Cpu* / *Cuda* / *Vulkan*) must match the installed binary variant.
+Everything lives in `<models>/audiocpp/`, where `<models>` is
+`%APPDATA%\SpectroCraft\models` (Windows), `~/Library/SpectroCraft/models` (macOS)
+or `~/.config/SpectroCraft/models` (Linux) — put the CLI (with the libraries
+next to it in its release archive) and one or more `sam-audio-*.gguf` files
+there by hand if you prefer not to use the downloader. The *Backend* dropdown
+(*Cpu* / *Cuda* / *Vulkan*, plus *Metal* on macOS) should match the installed
+binary variant; the status line warns when it does not (the macOS build accepts
+both *Cpu* and *Metal*).
 
 ### How a run works
 
@@ -1493,7 +1512,7 @@ anchors that no longer fit are dropped while their text is kept.
 **Effects → Super Resolution…** enhances a time range of the current file into
 a single *mono 48 kHz* track — both model families downmix and resample to
 their native pipeline internally, regardless of the source's rate or channel
-count. Like Stem Separation it drives the prebuilt `audiocpp_cli.exe` as a
+count. Like Stem Separation it drives the prebuilt `audiocpp_cli` as a
 child process; nothing is compiled into SpectroCraft.
 
 The **Mode** dropdown selects the family:
@@ -1511,14 +1530,14 @@ cancel), using the same CLI-binary variants as Stem Separation:
 
 - **FlashSR model** — `flashsr.safetensors` (~0.3 MB) from the audio.cpp
   repository assets, installed to
-  `%APPDATA%\SpectroCraft\models\audiocpp\flashsr\flashsr.safetensors`.
+  `<models>/audiocpp/flashsr/flashsr.safetensors` (`<models>`: see Stem separation).
 - **AudioSR models** — e.g. `audiosr-basic-f32.gguf` (~5.8 GB) from the
   Hugging Face repository above, installed to
-  `%APPDATA%\SpectroCraft\models\audiocpp\AudioSR-GGUF\`. Install any other
+  `<models>/audiocpp/AudioSR-GGUF/`. Install any other
   `.gguf` there by hand and it appears in the model dropdown automatically.
 
-The *Backend* dropdown (*Cpu* / *Cuda* / *Vulkan*) must match the installed
-binary variant (shared with Stem Separation).
+The *Backend* dropdown (*Cpu* / *Cuda* / *Vulkan*, plus *Metal* on macOS) should
+match the installed binary variant (shared with Stem Separation).
 
 ### How a run works
 
@@ -1526,7 +1545,7 @@ binary variant (shared with Stem Separation).
    (seeded once from the current selection when the window opens; **Select All**
    resets them to the full duration), with the resulting length shown in the
    **Duration** label next to them. That range is extracted to a temporary WAV.
-2. `audiocpp_cli.exe` runs with `--task s2s`, the chosen family/model/backend,
+2. `audiocpp_cli` runs with `--task s2s`, the chosen family/model/backend,
    the input WAV and an output path; its log lines stream into the progress
 dialog (cancellable). The tool writes one enhanced WAV straight to that path.
 3. The result is applied according to the **Output** dropdown at the bottom of
@@ -1635,6 +1654,54 @@ SpectroCraft.exe --test-ns-failure-alert <in.wav> [modelId] ["fake error"]
 ```
 
 The test executable accepts the same flags (useful for CI without a display).
+
+---
+
+## AI control (Claude Code / MCP)
+
+SpectroCraft can be driven by Claude Code (VS Code extension or terminal) **while it is
+open**: state, history, undo/redo, any of the 20 action steps on a time range
+and explicit channels, views, playback, markers, long jobs (AI, Python) with progress. The app
+starts a control server on the **loopback interface only** (`127.0.0.1`, ephemeral port,
+token specific to each instance) when *Window > Allow AI control (localhost)* is checked (disabled by
+default) or when it is launched with `--control`. The token and the port are published in
+`<application data>/SpectroCraft/control/<pid>.json` (macOS `~/Library/SpectroCraft/control`,
+Linux `~/.config/SpectroCraft/control`, Windows `%APPDATA%\SpectroCraft\control`, file 0600 on
+macOS/Linux). A small Python MCP adapter (`tools/mcp`) connects Claude Code to this server.
+
+The same commands run without a window:
+
+```
+SpectroCraft --json <requests.ndjson | -> [--json-out <responses.ndjson>] [--use-user-settings]
+SpectroCraft --list-commands [--markdown]     :: list of commands (JSON Schema of the parameters)
+SpectroCraft --control                        :: GUI + control server (never forwarded
+                                              :: to an already open instance)
+```
+
+One request per line (`{"id":1,"cmd":"step.run","params":{"select":{"start":1.0,"end":2.5},
+"step":{"type":"changeGain","params":{"db":-3}}}}`), one response per line; exit code 0 (all
+ok), 1 (at least one error), 2 (usage, unreadable JSON, line > 1 MiB, unknown option). Any
+`--xxx` option unknown to the executable now gives exit code 2 instead of starting the interface.
+
+Installing the adapter (Python 3.11+):
+
+    cp .mcp.json.example .mcp.json      # set SPECTROCRAFT_EXE to your executable
+    # with uv: nothing else (uv run creates tools/mcp/.venv)
+    # without uv: pip install -e tools/mcp, then "command": "python3", "args": ["-m", "spectrocraft_mcp"]
+
+Open the folder in VS Code (or run `claude`) then ask, for example, "open recording_b.wav,
+select 2–3.5 s, apply a fade-out and show me the history".
+`python3 tools/mcp/sc_client.py app.state` checks the connection without the `mcp` package.
+
+Security: loopback only, mandatory token (`session.hello`), opt-in, paths limited to the home
+folder, the scripts folder and the temporary folder (`control_roots` setting), `confirm:true`
+required for destructive operations (overwriting a file, closing an unsaved document, Python
+script outside the scripts folder). CMake option `-DSC_ENABLE_CONTROL=OFF` for a build without
+the control server.
+
+Details: [docs/ai-control/mcp.md](docs/ai-control/mcp.md) (macOS/Windows/Linux installation,
+troubleshooting); protocol: [docs/ai-control/REPORT.md](docs/ai-control/REPORT.md) §6; progress:
+[docs/ai-control/progress/](docs/ai-control/progress/).
 
 ---
 

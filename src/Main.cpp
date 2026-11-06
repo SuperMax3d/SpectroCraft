@@ -44,6 +44,10 @@
 #include "SpectralEngine.h"
 #include "PngWriter.h"
 #include "Settings.h"
+#include "control/JsonCli.h"
+#include "control/ControlServer.h"
+#include "control/ControlState.h"
+#include "control/StateJson.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -198,6 +202,17 @@ public:
         // opened after the app is up - single-instance handling below may hand
         // them to a running instance instead.
         std::vector<juce::File> cliFiles;
+        bool controlFlag = false;
+
+        // Headless JSON mode owns the whole command line (its options may
+        // come in any order): see include/control/JsonCli.h.
+        if (args.contains ("--json") || args.contains ("--list-commands"))
+        {
+            const int rc = sc::control::runJsonCli (args);
+            setApplicationReturnValue (rc);
+            quit();
+            return;
+        }
 
         for (int i = 0; i < args.size(); ++i)
         {
@@ -206,6 +221,7 @@ public:
                 if (i + 2 >= args.size())
                 {
                     std::cout << "usage: --test-spectral <in.wav> <out.png> [w h t0 t1]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -225,6 +241,7 @@ public:
                 if (!engine.loadFile (in))
                 {
                     std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -246,6 +263,7 @@ public:
                 spectral.renderToPixels (engine, s, w, h, tt0, tt1, allChans, rgba);
                 const bool ok = PngWriter::writePng (out, w, h, rgba);
                 std::cout << (ok ? "wrote " : "failed to write ") << out.getFullPathName() << "\n";
+                setApplicationReturnValue (ok ? 0 : 1);
                 quit();
                 return;
             }
@@ -310,6 +328,7 @@ public:
                     {
                         std::cout << "failed to open " << a.getFullPathName() << "\n";
                         setApplicationReturnValue (1);
+                        setApplicationReturnValue (1);
                         quit();
                         return;
                     }
@@ -363,6 +382,7 @@ public:
                 if (i + 1 >= args.size())
                 {
                     std::cout << "usage: --test-load <in.wav>\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -374,6 +394,7 @@ public:
                 if (!engine.loadFile (in, [&progressCalls] (float) { ++progressCalls; }))
                 {
                     std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;   // ~AudioEngine runs here
                 }
@@ -394,6 +415,7 @@ public:
                 if (i + 2 >= args.size())
                 {
                     std::cout << "usage: --test-noise-suppression <in.wav> <out.wav> [modelId]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -407,6 +429,7 @@ public:
                 if (!engine.loadFile (in))
                 {
                     std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -421,6 +444,7 @@ public:
                     if (!engine.readSamples (c, 0, frames, data[c].data()))
                     {
                         std::cout << "failed to read audio\n";
+                        setApplicationReturnValue (1);
                         quit();
                         return;
                     }
@@ -448,12 +472,14 @@ public:
                 if (!ok)
                 {
                     std::cout << "noise suppression failed: " << err << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
 
                 const bool wrote = writeFloatWav (out, nch, rate, data);
                 std::cout << (wrote ? "wrote " : "failed to write ") << out.getFullPathName() << "\n";
+                setApplicationReturnValue (wrote ? 0 : 1);
                 quit();
                 return;
             }
@@ -464,6 +490,7 @@ public:
                 if (i + 1 >= args.size())
                 {
                     std::cout << "usage: --test-transcribe <in.wav> [modelId] [language] [fast 0|1]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -479,6 +506,7 @@ public:
                 if (!engine.loadFile (in))
                 {
                     std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -509,6 +537,7 @@ public:
                         [&progress] (float f, const std::string&) { return progress (0.15f * f); }, &err))
                 {
                     std::cout << "model install failed: " << err << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -527,6 +556,7 @@ public:
                 if (!ok)
                 {
                     std::cout << "transcription failed: " << err << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -547,6 +577,7 @@ public:
                 if (i + 1 >= args.size())
                 {
                     std::cout << "usage: --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1] [fast 0|1] [--translate] [--channel N] [--no-auto-download] [--meta-mode auto|embedded|external]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -612,7 +643,11 @@ public:
                     }
                 }
 
-                Application app;   // no GUI needed for the batch run
+                // No GUI needed for the batch run; an isolated settings store so a
+                // headless run never rewrites the user's SpectroCraft.recent.
+                const juce::File batchStore = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                                  .getChildFile ("SpectroCraft_test_batch_transcribe.recent");
+                Application app (batchStore);
                 BatchTranscribeSummary sum;
                 std::string err;
                 const bool ok = app.batchTranscribeFolder (
@@ -637,6 +672,7 @@ public:
                 if (!ok)
                 {
                     std::cout << "batch transcription failed: " << err << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -647,6 +683,7 @@ public:
                           << "failed: "  << sum.failed  << "\n";
                 for (const auto& f : sum.failures)
                     std::cout << "  - " << f << "\n";
+                setApplicationReturnValue (sum.failed > 0 ? 1 : 0);
                 quit();
                 return;
             }
@@ -662,6 +699,7 @@ public:
                 if (i + 1 >= args.size())
                 {
                     std::cout << "usage: --test-ns-failure-alert <in.wav> [modelId] [\"fake error\"]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -683,6 +721,7 @@ public:
                     if (!engine.loadFile (in))
                     {
                         std::cout << "failed to open " << in.getFullPathName() << "\n";
+                        setApplicationReturnValue (1);
                         quit();
                         return;
                     }
@@ -696,6 +735,7 @@ public:
                         if (!engine.readSamples (c, 0, frames, data[c].data()))
                         {
                             std::cout << "failed to read audio\n";
+                            setApplicationReturnValue (1);
                             quit();
                             return;
                         }
@@ -820,7 +860,37 @@ public:
                 quit();
                 return;
             }
-            else if (args[i].length() > 0 && !args[i].startsWith ("--"))
+            else if (args[i] == "--json" || args[i] == "--list-commands")
+            {
+                // Headless JSON mode (AI control): one request per line in,
+                // one response per line out. See include/control/JsonCli.h.
+                const int rc = sc::control::runJsonCli (args);
+                setApplicationReturnValue (rc);
+                quit();
+                return;
+            }
+            else if (args[i] == "--measure_load_time")
+            {
+                // handled before this loop
+            }
+#if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
+            else if (args[i] == "--control")
+            {
+                // AI control: start the loopback control server whatever the
+                // setting, and never hand off to a running instance.
+                controlFlag = true;
+            }
+#endif
+            else if (args[i].startsWith ("--"))
+            {
+                // Unknown flags used to be ignored silently and the UI started.
+                std::cerr << "unknown flag " << args[i].toRawUTF8()
+                          << " (see README: command-line options)\n";
+                setApplicationReturnValue (2);
+                quit();
+                return;
+            }
+            else if (args[i].length() > 0)
             {
                 const juce::File f = resolvePath (args[i]);
                 if (f.existsAsFile()) cliFiles.push_back (f);
@@ -829,6 +899,9 @@ public:
 
         // Single-instance mode: when "Allow multiple instances" is off, hand
         // the command-line files to a running instance and quit this one.
+        // --control skips it: the instance launched by the AI adapter must be
+        // a controllable one (it writes its own discovery file).
+        if (!controlFlag)
         {
             juce::StringArray names;
             for (const auto& f : cliFiles) names.add (f.getFullPathName());
@@ -851,6 +924,13 @@ public:
             });
         forwarder->startServer ();
 
+        // AI control server (opt-in: Window > Allow AI control, or --control).
+#if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
+        mainWindow->onControlToggled = [this] (bool on) { setControlServer (on); };
+        if (controlFlag || app->settings.controlEnabled)
+            setControlServer (true);
+#endif
+
         // Open the command-line files. Routing through MainWindow::openFile
         // gives large files their async load with a progress dialog, exactly
         // like File > Open.
@@ -860,6 +940,10 @@ public:
 
     void shutdown() override
     {
+        // Control server first: in-flight requests get shutting_down and its
+        // threads are joined while the window and documents still exist.
+        if (controlServer != nullptr) controlServer->stop ();
+        controlServer.reset ();
         if (forwarder != nullptr) forwarder->stopServer ();
         mainWindow.reset();
         app.reset();
@@ -907,6 +991,42 @@ private:
     std::unique_ptr<Application> app;
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<sc::singleinstance::Coordinator> forwarder;   // file-forwarding server
+    std::unique_ptr<sc::control::ControlServer> controlServer;    // AI control (loopback)
+
+    void setControlServer (bool on)
+    {
+        if (!on)
+        {
+            if (controlServer != nullptr) controlServer->stop ();
+            controlServer.reset ();
+            if (mainWindow != nullptr) { mainWindow->setControlClients (0); mainWindow->controlServerRunning = false; }
+            return;
+        }
+        if (controlServer != nullptr || app == nullptr) return;
+        controlServer = std::make_unique<sc::control::ControlServer> (*app);
+        controlServer->onClientsChanged = [this] (int n) {
+            if (mainWindow != nullptr) mainWindow->setControlClients (n);
+        };
+        // Persistent journal (JSON Lines, metadata only) while the server runs.
+        auto& journal = app->control().journal;
+        if (journal.file() == juce::File())
+        {
+            sc::control::Journal::pruneOldSessions (sc::control::Journal::journalFolder());
+            journal.setFile (sc::control::Journal::sessionFile (sc::control::processId()));
+        }
+        juce::String err;
+        if (controlServer->start (&err))
+        {
+            if (mainWindow != nullptr) mainWindow->controlServerRunning = true;
+            std::fprintf (stderr, "[control] listening on 127.0.0.1:%d (%s)\n", controlServer->port (),
+                          controlServer->discoveryFile ().getFullPathName ().toRawUTF8 ());
+        }
+        else
+        {
+            std::fprintf (stderr, "[control] could not start: %s\n", err.toRawUTF8 ());
+            controlServer.reset ();
+        }
+    }
 };
 
 START_JUCE_APPLICATION (SpectroCraftApplication)

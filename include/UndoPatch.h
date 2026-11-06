@@ -73,6 +73,17 @@ struct Patch
     // Human-readable action name shown in the History tab, e.g. "Deleted samples".
     juce::String description;
 
+    // Provenance (AI control journal, History tab details), set by
+    // UndoManager::record: a per-document monotonic sequence number, the wall
+    // clock time, the operation (command id or recorded step type), its
+    // parameters (JSON, metadata only) and who asked ("menu", "api:<client>",
+    // "cli").
+    int64_t seq = 0;
+    int64_t timestampMs = 0;
+    juce::String opId;
+    juce::var params;
+    juce::String source;
+
     // Non-audio state affected by the edit. Deleting a time range also shifts
     // / trims / drops markers, stored frequency analyses (FFT snapshot slots)
     // and named spectral selections of that file; their before/after states

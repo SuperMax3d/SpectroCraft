@@ -57,6 +57,12 @@ jobs:
       - name: Unit tests (shards in turn, AI tests included)
         run: ctest --test-dir build -C Release -j 1 --output-on-failure
 
+      # Real audio.cpp CLI (cpu zip): catalogue install, FlashSR super
+      # resolution and htdemucs stem separation (~70 MB downloaded).
+      - name: audio.cpp end to end (real CLI)
+        timeout-minutes: 30
+        run: python tools/acpp_e2e.py --exe build/src/SpectroCraft_artefacts/Release/SpectroCraft.exe --variant cpu --backend cpu
+
       - name: Upload app (Windows x64, Release)
         if: success()
         uses: actions/upload-artifact@v4
@@ -135,6 +141,13 @@ jobs:
 
       - name: Unit tests (parallel shards, AI tests included)
         run: ctest --test-dir build -j "$(sysctl -n hw.ncpu)" --output-on-failure
+
+      # Real audio.cpp CLI (Metal build, cpu backend: a usable GPU is not
+      # guaranteed on hosted runners): catalogue install of the .tar.gz,
+      # FlashSR super resolution and htdemucs stem separation (~75 MB).
+      - name: audio.cpp end to end (real CLI)
+        timeout-minutes: 30
+        run: python3 tools/acpp_e2e.py --exe build/src/SpectroCraft_artefacts/Debug/SpectroCraft.app/Contents/MacOS/SpectroCraft --variant metal --backend cpu
 
       # tar first: upload-artifact zips drop the executable bit and symlinks.
       - name: Package app (macOS arm64)
@@ -231,6 +244,13 @@ jobs:
       - name: Unit tests (parallel shards, AI tests included, virtual display)
         run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build -j "$(nproc)" --output-on-failure
 
+      # Real audio.cpp CLI (cpu .tar.gz with its libggml*.so): catalogue
+      # install, FlashSR super resolution and htdemucs stem separation
+      # (~105 MB downloaded).
+      - name: audio.cpp end to end (real CLI)
+        timeout-minutes: 30
+        run: xvfb-run -a python3 tools/acpp_e2e.py --exe build/src/SpectroCraft_artefacts/Debug/SpectroCraft --variant cpu --backend cpu
+
       # The executable needs the libraries next to it: ship the whole folder.
       - name: Package app (Linux x64)
         if: success()
@@ -251,3 +271,28 @@ jobs:
           name: ctest-logs-linux
           path: build/Testing/Temporary/
           if-no-files-found: ignore
+
+  # Python MCP adapter (tools/mcp, AI control lot 2): pytest against a fake
+  # NDJSON server and a fake executable. No C++ build; test_real_exe.py skips
+  # (no SPECTROCRAFT_EXE).
+  mcp-tests:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the adapter and its test dependencies
+        run: pip install -e "tools/mcp[test]"
+
+      - name: pytest
+        run: pytest tools/mcp/tests -ra

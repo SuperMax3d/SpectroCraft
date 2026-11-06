@@ -16,6 +16,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/FileDoc.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioEngine.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SpectralEngine.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Measures.cpp      # headless measurements (FFT panel + measure.* commands)
         ${CMAKE_CURRENT_SOURCE_DIR}/SpectralSelection.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SavedSelections.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SpectralMaskProcessor.cpp
@@ -42,11 +43,15 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_CURRENT_SOURCE_DIR}/StemSeparation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SuperResolution.cpp   # audio.cpp super-resolution (FlashSR/AudioSR)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/StemService.cpp      # headless stem separation (audio.cpp CLI, no UI)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/SuperResService.cpp  # headless super resolution (audio.cpp CLI, no UI)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp   # standalone SHA-256 (Python script hashes, model checks)
         ${CMAKE_CURRENT_SOURCE_DIR}/Tables.cpp      # CSV table import/alignment/persistence
         ${CMAKE_CURRENT_SOURCE_DIR}/TablesTrack.cpp # dedicated tables track view
         ${CMAKE_CURRENT_SOURCE_DIR}/Recorder.cpp    # recorder plugin host (Transport > Record)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
         ${CMAKE_SOURCE_DIR}/tests/UnitTests.cpp
+        ${SC_CONTROL_SOURCES}                       # AI control: registry, journal, jobs, --json
 )
 
 # AI module (OpenVINO plumbing + model manager). Only compiled when the
@@ -56,7 +61,7 @@ if (TARGET sc_openvino)
     target_sources (SpectroCraft PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/OvRuntime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/ModelManager.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/ModelCatalog.cpp   # unified read model over ModelManager + sc::acpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DenseUnetModel.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DeepFilterNetModel.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DeepFilter.cpp
@@ -162,6 +167,7 @@ target_link_libraries (SpectroCraft
 target_compile_definitions (SpectroCraft
     PRIVATE
         JUCE_MODAL_LOOPS_PERMITTED=1
+        SC_ENABLE_CONTROL=${SC_CONTROL_DEFINE}
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=${SC_JUCE_USE_CURL}
         JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SpectroCraft,JUCE_PRODUCT_NAME>"

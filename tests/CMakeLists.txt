@@ -9,6 +9,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/tests/UnitTests.cpp
         ${CMAKE_SOURCE_DIR}/src/AudioEngine.cpp
         ${CMAKE_SOURCE_DIR}/src/SpectralEngine.cpp
+        ${CMAKE_SOURCE_DIR}/src/Measures.cpp      # headless measurements (FFT panel + measure.* commands)
         ${CMAKE_SOURCE_DIR}/src/SpectralSelection.cpp
         ${CMAKE_SOURCE_DIR}/src/SavedSelections.cpp
         ${CMAKE_SOURCE_DIR}/src/SpectralMaskProcessor.cpp
@@ -40,8 +41,12 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_SOURCE_DIR}/src/StemSeparation.cpp
         ${CMAKE_SOURCE_DIR}/src/SuperResolution.cpp   # audio.cpp super-resolution (FlashSR/AudioSR)
+        ${CMAKE_SOURCE_DIR}/src/AI/StemService.cpp      # headless stem separation (audio.cpp CLI, no UI)
+        ${CMAKE_SOURCE_DIR}/src/AI/SuperResService.cpp  # headless super resolution (audio.cpp CLI, no UI)
+        ${CMAKE_SOURCE_DIR}/src/AI/Sha256.cpp   # standalone SHA-256 (Python script hashes, model checks)
         ${CMAKE_SOURCE_DIR}/src/Recorder.cpp    # recorder plugin host (Transport > Record)
         ${CMAKE_SOURCE_DIR}/src/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
+        ${SC_CONTROL_SOURCES}                   # AI control (registry, journal, jobs, --json)
 )
 
 # AI module — same gating as the app target.
@@ -49,7 +54,7 @@ if (TARGET sc_openvino)
     target_sources (SpectroCraftTests PRIVATE
         ${CMAKE_SOURCE_DIR}/src/AI/OvRuntime.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/ModelManager.cpp
-        ${CMAKE_SOURCE_DIR}/src/AI/Sha256.cpp
+        ${CMAKE_SOURCE_DIR}/src/AI/ModelCatalog.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/DenseUnetModel.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/DeepFilterNetModel.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/DeepFilter.cpp
@@ -104,6 +109,7 @@ target_compile_definitions (SpectroCraftTests
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=${SC_JUCE_USE_CURL}
         JUCE_MODAL_LOOPS_PERMITTED=1
+        SC_ENABLE_CONTROL=${SC_CONTROL_DEFINE}
         SC_TESTS_EXE=1
         SC_NO_AUDIO_DEVICE=1   # headless tests: no real output device
         SC_SOURCE_DIR="${CMAKE_SOURCE_DIR}"

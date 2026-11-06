@@ -596,30 +596,17 @@ void FileListPanel::paint (juce::Graphics& g)
 
 // ================================================================= FFTAnalysisView
 
-// Standard IEC 61260-1 1/3-octave centre frequencies, 50 Hz .. 16 kHz.
-static const double kThirdOctCenters[] = {
-    50.0, 63.0, 80.0, 100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0,
-    500.0, 630.0, 800.0, 1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0,
-    4000.0, 5000.0, 6300.0, 8000.0, 10000.0, 12500.0, 16000.0
-};
-static constexpr int kNumThirdOctBands = (int) (sizeof (kThirdOctCenters) / sizeof (kThirdOctCenters[0]));
+// The spectrum, 1/3-octave and curve computations live in the headless
+// measurement module (include/Measures.h) so the panel and the measure.*
+// commands share one implementation; the panel only adds caching, the region
+// taken from the selection and the drawing.
+namespace measures = sc::measures;
 
-const double* FFTAnalysisView::thirdOctCentres() noexcept { return kThirdOctCenters; }
-int FFTAnalysisView::numThirdOctBands() noexcept { return kNumThirdOctBands; }
+const double* FFTAnalysisView::thirdOctCentres() noexcept { return measures::iecThirdOctCentres(); }
+int FFTAnalysisView::numThirdOctBands() noexcept { return measures::numIecThirdOctBands(); }
 
-// Decade-based 1/3-octave band centres of the dB-SPL pipeline:
-// fc(i) = 1000 * 10^((i-30)/10), i = 17..43 (50.12 Hz .. 19952.6 Hz).
-static const double kThirdOptCentersRef[] = {
-    50.1187,   63.0957,   79.4328,  100.0,     125.8925,  158.4893,
-    199.5262,  251.1886,  316.2278,  398.1072,  501.1872,  630.9573,
-    794.3282,  1000.0,    1258.9254, 1584.8932, 1995.2623, 2511.8864,
-    3162.2777, 3981.0717, 5011.8723, 6309.5734, 7943.2823, 10000.0,
-    12589.2541, 15848.9319, 19952.6231
-};
-static const int kNumThirdOptBandsRef = 27;
-
-const double* FFTAnalysisView::thirdOptCentresRef() noexcept { return kThirdOptCentersRef; }
-int FFTAnalysisView::numThirdOptBandsRef() noexcept { return kNumThirdOptBandsRef; }
+const double* FFTAnalysisView::thirdOptCentresRef() noexcept { return measures::refThirdOctCentres(); }
+int FFTAnalysisView::numThirdOptBandsRef() noexcept { return measures::numRefThirdOctBands(); }
 
 bool FFTAnalysisView::pascalThirdOct() const
 {
@@ -628,129 +615,19 @@ bool FFTAnalysisView::pascalThirdOct() const
 
 const double* FFTAnalysisView::bandCentres() const
 {
-    return pascalThirdOct() ? kThirdOptCentersRef : kThirdOctCenters;
+    return pascalThirdOct() ? measures::refThirdOctCentres() : measures::iecThirdOctCentres();
 }
 
 int FFTAnalysisView::numBands() const
 {
-    return pascalThirdOct() ? kNumThirdOptBandsRef : kNumThirdOctBands;
-}
-
-// Convert normalized [0..1] band values to the view's relative-dB space.
-static std::vector<float> bandsNormalizedToDb (const std::vector<float>& norm)
-{
-    std::vector<float> out (norm.size());
-    for (size_t i = 0; i < norm.size(); ++i)
-        out[i] = (float) (-FFTAnalysisView::kNormFloorDb * (1.0 - (double) norm[i]));
-    return out;
+    return pascalThirdOct() ? measures::numRefThirdOctBands() : measures::numIecThirdOctBands();
 }
 
 std::vector<float> FFTAnalysisView::thirdOctBandsRef (const AudioEngine& eng, int ch,
                                                       double t0, double t1, int order)
 {
-    // Reference-analyzer 1/3-octave pipeline: fixed 65536-point Hanning frames
-    // at 50% overlap, frame-averaged power spectrum (no coherent-gain
-    // correction), Butterworth bandpass weighting of order 2*`order`, and the
-    // classic +98.5 dB offset. The result is expressed in this view's
-    // relative-dB space so that formatSpectralLevel() renders it as dB-SPL
-    // once a Pascal full-scale value is set, reproducing the reference
-    // analyzer's numbers.
-    const int N = 65536;
-    const double rate = eng.sampleRate();
-    if (!(rate > 0.0) || ch < 0 || ch >= eng.numChannels()) return {};
-    const double dur = eng.duration();
-    t0 = std::clamp (t0, 0.0, dur);
-    t1 = std::clamp (t1, t0, dur);
-
-    // Frame starts: the reference frames the analysed slice from its start with
-    // a hop of N/2; long regions are capped and spread evenly so interactive
-    // use stays responsive. A region shorter than one frame gets a single
-    // centred (zero-padded) frame.
-    std::vector<int64_t> starts;
-    const int64_t s0 = (int64_t) (t0 * rate);
-    const int64_t s1 = (int64_t) (t1 * rate);
-    const int64_t total = eng.numSamples();
-    if (s1 - s0 <= N)
-        starts.push_back (std::clamp<int64_t> ((s0 + s1) / 2 - N / 2, 0,
-                                               std::max<int64_t> (0, total - N)));
-    else
-    {
-        const int64_t hop = N / 2;
-        const int64_t full = (s1 - s0) / hop;   // reference frame count for the slice
-        const int maxFrames = 2048;            // cap for interactive use
-        if (full <= maxFrames)
-            for (int64_t i = 0; i < full; ++i)
-                starts.push_back (s0 + i * hop);
-        else
-            for (int i = 0; i < maxFrames; ++i)
-                starts.push_back (std::clamp<int64_t>
-                                  (s0 + (int64_t) ((double) i * (full - 1) / (maxFrames - 1)) * hop,
-                                   s0, std::min<int64_t> (s1, total - N)));
-    }
-
-    // Symmetric Hanning window exactly as the reference uses it.
-    std::vector<float> win ((size_t) N);
-    for (int i = 0; i < N; ++i)
-        win[i] = 0.5f - 0.5f * std::cos (2.0 * juce::MathConstants<double>::pi
-                                          * (double) (i + 1) / (N + 1));
-
-    const int orderLog = 16;   // log2(65536)
-    std::vector<float> buf ((size_t) N * 2);
-    std::vector<double> psd ((size_t) N / 2, 0.0);
-    for (int64_t s : starts)
-    {
-        // Zero-fill first: reads near the file end are clamped and leave
-        // the tail untouched, which must stay silent.
-        std::fill (buf.begin(), buf.end(), 0.0f);
-        if (!eng.readSamples (ch, s, N, buf.data())) continue;
-        for (int i = 0; i < N; ++i) buf[i] *= win[i];
-        scfft::realForward (buf.data(), orderLog);
-        for (int j = 0; j < N / 2; ++j)
-            psd[(size_t) j] += (double) buf[j * 2] * buf[j * 2]
-                             + (double) buf[j * 2 + 1] * buf[j * 2 + 1];
-    }
-    // Reference PSD normalisation: divide by frame count and (N+1).
-    const double invN = 1.0 / ((double) starts.size() * (N + 1));
-    for (auto& v : psd) v *= invN;
-
-    // Butterworth bandpass weighting per the reference's PSD2OneThirdOctave.
-    const int nOrd = 2 * order;
-    const double lowerF = std::pow (2.0, -1.0 / 6.0), upperF = std::pow (2.0, 1.0 / 6.0);
-    const double Qr = 1.0 / (upperF - lowerF);
-    const double piC = juce::MathConstants<double>::pi;
-    const double Qd = piC * Qr / ((double) nOrd * std::sin (piC / (double) nOrd));
-    const double binHz = rate / N;
-
-    std::vector<float> out;
-    for (int i = 17; i <= 43; ++i)
-    {
-        const double fc = 1000.0 * std::pow (10.0, (i - 30) / 10.0);
-        double sum = 0.0;
-        // Upper scan: from the middle bin upward while the weighting is > 1e-4.
-        for (int j = (int) std::floor (fc / binHz); j < N / 2; ++j)
-        {
-            const double ratio = (double) j * binHz / fc;
-            const double gain = 1.0 / (1.0 + std::pow (Qd * (ratio - 1.0 / ratio), nOrd));
-            if (gain <= 1e-4) break;
-            sum += psd[(size_t) j] * gain;
-        }
-        // Lower scan: from the bin below the middle downward while > 1e-6.
-        for (int j = (int) std::floor (fc / binHz) - 1; j >= 0 && j < N / 2; --j)
-        {
-            const double ratio = (double) j * binHz / fc;
-            const double gain = 1.0 / (1.0 + std::pow (Qd * (ratio - 1.0 / ratio), nOrd));
-            if (gain <= 1e-6) break;
-            sum += psd[(size_t) j] * gain;
-        }
-        // Reference dB conversion: 10*log10(sum/(N/2)) + 98.5; empty bands
-        // read as -999 (the reference's "no data" sentinel).
-        const double L = (sum > 0.0) ? 10.0 * std::log10 (sum / (N / 2)) + 98.5 : -999.0;
-        // Express in the view's relative-dB space: formatSpectralLevel() adds
-        // levelOffsetDb(ch) = 20*log10(F/2e-5), so subtracting the dB-SPL
-        // reference (20*log10(2e-5)) leaves exactly the reference value.
-        out.push_back ((float) L + (float) (20.0 * std::log10 (2e-5)));
-    }
-    return out;
+    // Reference-analyzer pipeline, unchanged, now in the measurement module.
+    return measures::thirdOctaveRefBands (eng, ch, t0, t1, order);
 }
 
 // Only a subset of band centres gets an axis label (every ~3rd band), so the
@@ -763,75 +640,6 @@ static bool isThirdOctLabelFreq (double f)
         if (std::abs (f - c) < std::max (1e-6, c * 0.005))
             return true;
     return false;
-}
-
-// Cap on the number of averaged FFT windows per channel for wide selections.
-static constexpr int64_t kMaxAvgWindows = 2048;
-
-// Analysis window of the classic spectrum path (0 = rectangular, 1 = Hann,
-// 2 = Hamming), shared by the live spectrum, snapshots and the band ENBW.
-static std::vector<float> makeAnalysisWindow (int wt, int n)
-{
-    std::vector<float> win ((size_t) n, 1.0f);
-    if (wt == 1 || wt == 2)
-        for (int i = 0; i < n; ++i)
-            win[(size_t) i] = (wt == 1)
-                ? 0.5f * (1.0f - (float) std::cos (2.0 * juce::MathConstants<double>::pi * i / n))
-                : 0.54f - 0.46f * (float) std::cos (2.0 * juce::MathConstants<double>::pi * i / (n - 1));
-    return win;
-}
-
-// Equivalent noise bandwidth of a window, in bins: n * sum(w^2) / sum(w)^2
-// (1.0 rectangular, 1.5 Hann, ~1.36 Hamming).
-static double windowEnbwBins (const std::vector<float>& win)
-{
-    double s1 = 0.0, s2 = 0.0;
-    for (float w : win) { s1 += w; s2 += (double) w * w; }
-    return s1 > 0.0 ? (double) win.size() * s2 / (s1 * s1) : 1.0;
-}
-
-// Sum an FFT magnitude curve into 1/3-octave band levels.
-// mag holds dB-normalized RMS amplitudes in [0,1] (see computeRegionFrom) for
-// an n-point FFT at the given rate; returns one normalized value per band
-// whose centre is <= Nyquist. The band level is the SUM of the bin powers
-// inside the band (a bin straddling an edge contributes its overlapping
-// fraction, so narrow low bands are never empty), divided by the window's
-// ENBW so that both a tone and broadband noise read their true band power,
-// independent of the FFT size. Band edges come from the exact base-10 centre
-// behind each nominal label (fc * 10^(+-1/20)), so adjacent bands neither
-// overlap nor leave gaps.
-static std::vector<float> toThirdOctBands (const std::vector<float>& mag, int n,
-                                           double rate, double enbwBins)
-{
-    const double nyq = rate * 0.5;
-    // Same fixed normalization floor as the live curve (see kNormFloorDb).
-    const double dBMin = -160.0;
-    const double binHz = rate / (double) n;
-    const int lastBin = std::min (n / 2, (int) mag.size() - 1);
-    std::vector<float> out;
-    for (int b = 0; b < kNumThirdOctBands && kThirdOctCenters[b] <= nyq; ++b)
-    {
-        const double idx = std::round (10.0 * std::log10 (kThirdOctCenters[b] / 1000.0));
-        const double fc = 1000.0 * std::pow (10.0, idx / 10.0);
-        const double lo = fc * std::pow (10.0, -0.05);
-        const double hi = fc * std::pow (10.0,  0.05);
-        const int kLo = std::max (1, (int) std::floor (lo / binHz + 0.5));
-        const int kHi = std::min (lastBin, (int) std::floor (hi / binHz + 0.5));
-
-        double sumPow = 0.0;
-        for (int k = kLo; k <= kHi; ++k)
-        {
-            const double overlap = std::min ((k + 0.5) * binHz, hi)
-                                 - std::max ((k - 0.5) * binHz, lo);
-            if (overlap <= 0.0) continue;
-            const double dB = dBMin * (1.0 - (double) mag[(size_t) k]);   // undo normalization
-            sumPow += std::pow (10.0, dB / 10.0) * (overlap / binHz);
-        }
-        const double p = sumPow / std::max (1e-9, enbwBins);
-        const double dBb = 10.0 * std::log10 (std::max (1e-24, p));
-        out.push_back ((float) std::clamp ((dBb - dBMin) / (-dBMin), 0.0, 1.0));
-    }
-    return out;
 }
 
 // Curve colours for the live spectrum (one per visible channel).
@@ -916,13 +724,25 @@ void HistoryPanel::refresh()
         ::UndoManager& u = d->undo;
         // Row 0 is the state right after the file was loaded; one row per
         // recorded action follows, oldest first. Redoable actions come last.
-        rows_.push_back ({ "Loaded " + d->name, false });
+        // Only edits made through AI control get a detail (time + client):
+        // the tab looks exactly as before for edits made in the window.
+        auto detailOf = [] (const Patch& p) {
+            if (p.timestampMs <= 0 || p.source.isEmpty() || p.source == "menu") return juce::String();
+            return juce::Time (p.timestampMs).formatted ("%H:%M:%S") + "  " + p.source;
+        };
+        rows_.push_back ({ "Loaded " + d->name, false, {} });
         for (size_t i = 0; i < u.undoSize(); ++i)
             rows_.push_back ({ u.undoAt(i).description.isEmpty() ? juce::String ("Edit") : u.undoAt(i).description,
-                               false });
-        for (size_t i = 0; i < u.redoSize(); ++i)
-            rows_.push_back ({ u.redoAt(i).description.isEmpty() ? juce::String ("Edit") : u.redoAt(i).description,
-                               true });
+                               false, detailOf (u.undoAt (i)) });
+        // Future rows in redo order: the redo stack's back() is the next redo,
+        // so a click on the first future row (redoSteps(1)) re-applies the
+        // entry that row names. (Listing redoAt(0..n) showed them reversed.)
+        for (size_t k = 0; k < u.redoSize(); ++k)
+        {
+            const Patch& p = u.redoAt (u.redoSize() - 1 - k);
+            rows_.push_back ({ p.description.isEmpty() ? juce::String ("Edit") : p.description,
+                               true, detailOf (p) });
+        }
         currentState_ = (int) u.undoSize();
     }
 
@@ -1046,6 +866,13 @@ void HistoryPanel::paint (juce::Graphics& g)
                                             r.getHeight());
         g.drawText (rows_[(size_t) i].text, actCol, juce::Justification::centredLeft,
                     false);
+        // Time (and origin, for edits made through AI control) on the right.
+        if (rows_[(size_t) i].detail.isNotEmpty() && actCol.getWidth() > 220)
+        {
+            g.setColour (juce::Colour::fromRGB (150, 160, 175));
+            g.drawText (rows_[(size_t) i].detail, actCol.withTrimmedLeft (actCol.getWidth() - 200),
+                        juce::Justification::centredRight, false);
+        }
     }
 }
 
@@ -1285,7 +1112,7 @@ std::vector<int> FFTAnalysisView::liveChannels() const
 
 double FFTAnalysisView::currentEnbwBins (int n) const
 {
-    return windowEnbwBins (makeAnalysisWindow (windowCombo.getSelectedId() - 1, n));
+    return measures::enbwBins (windowCombo.getSelectedId() - 1, n);
 }
 
 int FFTAnalysisView::levelAxisChannel() const
@@ -1648,90 +1475,14 @@ static int syncSmoothValue (int sm)
 }
 
 // Core averaging computation shared by the live spectrum and every stored
-// snapshot: analyse region [t0, t1] with windows of exactly n samples at the
-// current window type. A region wider than one window is covered by several
-// evenly spaced windows whose bin powers are averaged (the classic "average
-// over the selection" behaviour); a point or short region gets a single
-// window centred on it. Each bin is scaled to an RMS amplitude: corrected for
-// the window's coherent gain (sum of w) and single-sided (x sqrt(2) except DC
-// and Nyquist), so a sine of peak A reads A/sqrt(2) whatever the window - the
-// same convention as the dB-SPL 1/3-octave pipeline.
+// snapshot (see measures::regionSpectrumNorm): region [t0, t1], windows of
+// exactly n samples at the panel's current window type, bin powers averaged
+// and stored normalised vs kNormFloorDb.
 void FFTAnalysisView::computeRegionFrom (AudioEngine& eng, const std::vector<int>& chans,
                                          double t0, double t1, int n,
                                          std::vector<std::vector<float>>& outMags)
 {
-    const double rate = eng.sampleRate();
-    const double dur = eng.duration();
-
-    // Where to place the FFT windows (sample offsets).
-    std::vector<int64_t> winStarts;
-    {
-        const double regionLenS = std::max (0.0, (t1 - t0) * rate);   // in samples
-        if (regionLenS <= (double) n)
-        {
-            int64_t s = (int64_t) ((t0 + t1) * 0.5 * rate) - n / 2;   // centre on the region
-            const int64_t maxStart = std::max<int64_t> (0, (int64_t) (dur * rate) - n);
-            winStarts.push_back (std::clamp<int64_t> (s, 0, maxStart));
-        }
-        else
-        {
-            // Cap the work: at most kMaxAvgWindows windows and ~4M samples.
-            const int numW = (int) std::min<int64_t> ({ kMaxAvgWindows,
-                                                        (int64_t) std::ceil (regionLenS / n),
-                                                        std::max<int64_t> (1, 4000000 / n) });
-            for (int i = 0; i < numW; ++i)
-            {
-                const double s = t0 * rate + ((double) i * (regionLenS - n) / (numW - 1));
-                winStarts.push_back ((int64_t) std::clamp (s, 0.0, dur * rate - n));
-            }
-        }
-    }
-
-    outMags.clear();
-    const int order = (int) std::log2 ((double) n);
-
-    // Window function, computed once and shared by all channels.
-    const std::vector<float> win = makeAnalysisWindow (windowCombo.getSelectedId() - 1, n);
-    double sumW = 0.0;
-    for (float w : win) sumW += w;
-    sumW = std::max (1e-12, sumW);
-
-    // Fixed normalization floor: the stored magnitudes do not depend on the
-    // visible level window, so zooming out never changes the curve data.
-    const double dBMin = -FFTAnalysisView::kNormFloorDb;
-    for (int ch : chans)
-    {
-        if (ch < 0 || ch >= eng.numChannels()) continue;
-
-        // Average the bin powers of all windows in this channel.
-        std::vector<double> acc ((size_t) (n / 2 + 1), 0.0);
-        std::vector<float> samples ((size_t) n, 0.0f);   // zero-filled: partial reads at the file end stay silent
-        std::vector<float> buf ((size_t) n * 2, 0.0f);
-        for (int64_t s : winStarts)
-        {
-            std::fill (samples.begin(), samples.end(), 0.0f);
-            if (!eng.readSamples (ch, s, n, samples.data())) continue;
-            for (int i = 0; i < n; ++i)
-                buf[i] = samples[i] * win[(size_t) i];
-            scfft::realForward (buf.data(), order);      // AVX2 when available via scfft
-            for (int k = 0; k <= n / 2; ++k)
-            {
-                const float re = buf[k * 2], im = buf[k * 2 + 1];
-                acc[(size_t) k] += (double) re * re + (double) im * im;
-            }
-        }
-
-        std::vector<float> mag ((size_t) (n / 2 + 1));
-        for (int k = 0; k <= n / 2; ++k)
-        {
-            const double oneSided = (k == 0 || k == n / 2) ? 1.0 : std::sqrt (2.0);
-            const double m = std::sqrt (acc[(size_t) k] / (double) winStarts.size())
-                             * oneSided / sumW;
-            const double dB = 20.0 * std::log10 (std::max (1e-12, m));
-            mag[k] = (float) std::clamp ((dB - dBMin) / (-dBMin), 0.0, 1.0);
-        }
-        outMags.push_back (std::move (mag));
-    }
+    measures::regionSpectrumNorm (eng, chans, t0, t1, n, windowCombo.getSelectedId() - 1, outMags);
 }
 
 void FFTAnalysisView::resyncFromSettings ()
@@ -1925,7 +1676,7 @@ void FFTAnalysisView::doRecompute()
     thirdOctMags.clear();
     if (axisMode_ == 2)
         for (auto& m : mags)
-            thirdOctMags.push_back (bandsNormalizedToDb (toThirdOctBands (m, n, eng.sampleRate(),
+            thirdOctMags.push_back (measures::bandsNormalizedToDb (measures::toThirdOctBands (m, n, eng.sampleRate(),
                                                                           currentEnbwBins (n))));
 
     cachedN = n; cachedT0 = t0; cachedT1 = t1;
@@ -1946,34 +1697,8 @@ void FFTAnalysisView::doRecompute()
 // compute per-frame curves over the analysed region instead of an averaged
 // spectrum. A spectral selection acts as a mask: only bins inside it count.
 
-static constexpr int kMaxCurveFrames = 2048;   // max points in one curve
-static constexpr int kTimeModeFFT = 2048;      // fixed FFT size for the time modes
-
-// Frame placement shared by both curve computations: frames of `fftN`
-// samples covering [s0, s1] with a hop that yields at most kMaxCurveFrames
-// points. A region shorter than one window gets a single frame centred on it
-// (clamped inside the file).
-static std::vector<int64_t> curveFrameStarts (double totalSamples,
-                                              int64_t s0, int64_t s1, int fftN)
-{
-    std::vector<int64_t> starts;
-    const int64_t avail = s1 - s0;
-    if (avail <= fftN)
-    {
-        const int64_t mid = (int64_t) ((s0 + s1) * 0.5);
-        starts.push_back (std::clamp<int64_t> (mid - fftN / 2, 0,
-                                                std::max<int64_t> (0, totalSamples - fftN)));
-        return starts;
-    }
-    const int64_t hop = std::max<int64_t> (fftN / 4,
-                                           (avail + kMaxCurveFrames - 1) / kMaxCurveFrames);
-    for (int64_t s = s0; s + fftN <= s1 && (int) starts.size() < kMaxCurveFrames; s += hop)
-        starts.push_back (s);
-    if (starts.empty())
-        starts.push_back (std::clamp<int64_t> (s0, 0,
-                                               std::max<int64_t> (0, totalSamples - fftN)));
-    return starts;
-}
+// Fixed FFT size of the curve modes (see measures::timeCurve / spectrumCurve).
+static constexpr int kTimeModeFFT = measures::kTimeModeFFT;
 
 void FFTAnalysisView::recomputeCurve (double t0, double t1)
 {
@@ -2030,9 +1755,9 @@ void FFTAnalysisView::recomputeCurve (double t0, double t1)
     if (axisMode_ == 5)
         // Fixed frame settings: the FFT size / window type combos are hidden in
         // this mode and no longer affect it.
-        computeSpectrumCurveFrom (eng, chans, t0, t1, kTimeModeFFT, 1, track_, mask, out);
+        measures::spectrumCurve (eng, chans, t0, t1, kTimeModeFFT, 1, track_, mask, out);
     else
-        computeTimeCurveFrom (eng, chans, t0, t1, track_, mask, out);
+        measures::timeCurve (eng, chans, t0, t1, track_, mask, out);
 
     // Moving-average smoothing on the plotted series. In Amp vs Freq mode only
     // the amplitude is smoothed: the x values are bin centres and must stay
@@ -2061,172 +1786,9 @@ void FFTAnalysisView::recomputeCurve (double t0, double t1)
     lastComputeWasExpensive = regionLenS > (double) kTimeModeFFT * 4;
 }
 
-void FFTAnalysisView::computeTimeCurveFrom (const AudioEngine& eng, const std::vector<int>& chans,
-                                            double t0, double t1, int track,
-                                            const SpectralSelection* mask,
-                                            std::vector<CurveData>& out)
-{
-    const double rate = eng.sampleRate();
-    const double durS = eng.duration();
-    const int64_t totalSamples = (int64_t) (durS * rate);
-    const int64_t s0 = (int64_t) std::clamp (t0 * rate, 0.0, (double) totalSamples);
-    const int64_t s1 = (int64_t) std::clamp (t1 * rate, (double) s0, (double) totalSamples);
-    const int fftN = kTimeModeFFT;
-
-    out.clear();
-    for (int ch : chans)
-    {
-        if (ch < 0 || ch >= eng.numChannels()) continue;
-
-        CurveData cd;
-        std::vector<int64_t> starts = curveFrameStarts (totalSamples, s0, s1, fftN);
-
-        const int order = (int) std::log2 ((double) fftN);
-        // Fixed Hann window for the time-based modes: the Win type combo is
-        // hidden there, and a Hann keeps peak tracking free of leakage.
-        std::vector<float> win ((size_t) fftN);
-        for (int i = 0; i < fftN; ++i)
-            win[(size_t) i] = 0.5f * (1.0f - std::cos (2.0 * juce::MathConstants<double>::pi
-                                                       * (double) i / (double) fftN));
-        double sumW = 0.0;
-        for (float w : win) sumW += w;
-        const double ampScale = std::sqrt (2.0) / std::max (1e-12, sumW);
-
-        std::vector<float> samples ((size_t) fftN, 0.0f);   // zero-filled: partial reads at the file end stay silent
-        std::vector<float> buf ((size_t) fftN * 2, 0.0f);
-
-        for (int64_t s : starts)
-        {
-            const double tMid = ((double) s + fftN / 2.0) / rate;   // frame centre time
-            std::fill (samples.begin(), samples.end(), 0.0f);
-            if (!eng.readSamples (ch, s, fftN, samples.data())) continue;
-            for (int i = 0; i < fftN; ++i)
-                buf[i] = samples[i] * win[(size_t) i];
-            scfft::realForward (buf.data(), order);
-
-            double maxMag = 0.0, maxF = 0.0, sumLin = 0.0, wsum = 0.0;
-            for (int k = 1; k <= fftN / 2; ++k)
-            {
-                const float re = buf[k * 2], im = buf[k * 2 + 1];
-                const double m = std::sqrt ((double) re * re + (double) im * im);
-                if (mask != nullptr
-                    && !mask->contains (tMid, (double) k * rate / (double) fftN))
-                    continue;   // outside the spectral selection: this bin does not count
-                const double f = (double) k * rate / (double) fftN;
-                if (m > maxMag) { maxMag = m; maxF = f; }
-                sumLin += m;
-                wsum += m * f;
-            }
-
-            // Max: strongest bin's level + frequency. Total / Weighted:
-            // summed level + amplitude-weighted average (centroid) frequency.
-            // Normalise exactly like the classic spectrum path (coherent gain
-            // of the window, single-sided RMS), so a tone of peak A reads
-            // A/sqrt(2).
-            const double lin = (track == 0 ? maxMag : sumLin) * ampScale;
-            cd.x.push_back (tMid);
-            cd.ampDb.push_back ((float) std::max (-kNormFloorDb,
-                                                  20.0 * std::log10 (std::max (1e-12, lin))));
-            cd.freqHz.push_back ((float) ((track == 0) ? maxF
-                                                      : (sumLin > 1e-30 ? wsum / sumLin : 0.0)));
-        }
-
-        out.push_back (std::move (cd));
-    }
-}
-
-void FFTAnalysisView::computeSpectrumCurveFrom (const AudioEngine& eng, const std::vector<int>& chans,
-                                                double t0, double t1, int n, int windowType,
-                                                int track, const SpectralSelection* mask,
-                                                std::vector<CurveData>& out)
-{
-    const double rate = eng.sampleRate();
-    const double durS = eng.duration();
-    const int64_t totalSamples = (int64_t) (durS * rate);
-    const int64_t s0 = (int64_t) std::clamp (t0 * rate, 0.0, (double) totalSamples);
-    const int64_t s1 = (int64_t) std::clamp (t1 * rate, (double) s0, (double) totalSamples);
-
-    out.clear();
-    for (int ch : chans)
-    {
-        if (ch < 0 || ch >= eng.numChannels()) continue;
-
-        CurveData cd;
-        const int numBins = n / 2 + 1;
-        std::vector<double> accMax ((size_t) numBins, 0.0);   // per-bin max linear magnitude
-        std::vector<double> accSum ((size_t) numBins, 0.0);   // per-bin summed magnitudes
-
-        const int order = (int) std::log2 ((double) n);
-        std::vector<float> win ((size_t) n, 1.0f);
-        if (windowType == 1 || windowType == 2)
-            for (int i = 0; i < n; ++i)
-                win[(size_t) i] = (windowType == 1)
-                    ? 0.5f * (1.0f - std::cos (2.0 * juce::MathConstants<double>::pi
-                                               * (double) i / (double) n))
-                    : 0.54f - 0.46f * std::cos (2.0 * juce::MathConstants<double>::pi
-                                               * (double) i / ((double) n - 1.0));
-
-        double sumW = 0.0;
-        for (float w : win) sumW += w;
-        const double ampScale = std::sqrt (2.0) / std::max (1e-12, sumW);
-
-        std::vector<float> samples ((size_t) n, 0.0f);
-        std::vector<float> buf ((size_t) n * 2, 0.0f);
-        const std::vector<int64_t> starts = curveFrameStarts (totalSamples, s0, s1, n);
-        for (int64_t s : starts)
-        {
-            const double tMid = ((double) s + n / 2.0) / rate;
-            std::fill (samples.begin(), samples.end(), 0.0f);
-            if (!eng.readSamples (ch, s, n, samples.data())) continue;
-            for (int i = 0; i < n; ++i)
-                buf[i] = samples[i] * win[(size_t) i];
-            scfft::realForward (buf.data(), order);
-            for (int k = 1; k <= n / 2; ++k)
-            {
-                if (mask != nullptr
-                    && !mask->contains (tMid, (double) k * rate / (double) n))
-                    continue;
-                const float re = buf[k * 2], im = buf[k * 2 + 1];
-                const double m = std::sqrt ((double) re * re + (double) im * im);
-                if (m > accMax[(size_t) k]) accMax[(size_t) k] = m;
-                accSum[(size_t) k] += m;
-            }
-        }
-
-        // Same normalisation as the classic spectrum path: window coherent
-        // gain and single-sided RMS (and the frame count for Total) so levels
-        // are comparable to the averaged spectrum of a single window.
-        const double numFrames = std::max<int64_t> (1, starts.size());
-        for (int k = 1; k <= n / 2; ++k)
-        {
-            const double f = (double) k * rate / (double) n;
-            const double lin = (track == 0) ? accMax[(size_t) k] * ampScale
-                                            : accSum[(size_t) k] * ampScale / (double) numFrames;
-            cd.x.push_back (f);
-            cd.ampDb.push_back ((float) std::max (-kNormFloorDb,
-                                                  20.0 * std::log10 (std::max (1e-12, lin))));
-            cd.freqHz.push_back ((float) f);   // the "frequency curve" is the axis itself
-        }
-
-        out.push_back (std::move (cd));
-    }
-}
-
 void FFTAnalysisView::smoothSeries (std::vector<float>& v, int window)
 {
-    if (window < 2 || v.size() <= (size_t) window) return;
-    const size_t half = (size_t) (window - 1) / 2;   // windows are odd: 3 or 5
-    std::vector<float> tmp (v);
-    for (size_t i = 0; i < v.size(); ++i)
-    {
-        double acc = 0.0;
-        size_t cnt = 0;
-        const size_t lo = (i > half) ? i - half : 0;
-        const size_t hi = std::min (v.size() - 1, i + half);
-        for (size_t j = lo; j <= hi; ++j)
-        { acc += tmp[j]; ++cnt; }
-        v[i] = (float) (acc / (double) cnt);
-    }
+    measures::smoothSeries (v, window);
 }
 
 void FFTAnalysisView::recomputeSnapshots()
@@ -2271,7 +1833,7 @@ void FFTAnalysisView::refreshSnapshotBands()
         s.dbSpl = pascalSrc;
         if (!pascalSrc)
             for (auto& m : s.mags)
-                s.bands.push_back (bandsNormalizedToDb (toThirdOctBands (m, s.n, rate,
+                s.bands.push_back (measures::bandsNormalizedToDb (measures::toThirdOctBands (m, s.n, rate,
                                                                          currentEnbwBins (s.n))));
         else
             for (int ch : s.chans)
@@ -3691,10 +3253,10 @@ void FFTAnalysisView::recomputeCurveSlot (int i)
 
     std::vector<CurveData> out;
     if (cs.mode == 5)
-        computeSpectrumCurveFrom (cs.source->engine, cs.chans, cs.t0, cs.t1,
-                                  kTimeModeFFT, 1, track_, mask, out);
+        measures::spectrumCurve (cs.source->engine, cs.chans, cs.t0, cs.t1,
+                                 kTimeModeFFT, 1, track_, mask, out);
     else
-        computeTimeCurveFrom (cs.source->engine, cs.chans, cs.t0, cs.t1, track_, mask, out);
+        measures::timeCurve (cs.source->engine, cs.chans, cs.t0, cs.t1, track_, mask, out);
 
     if (smooth_ > 1)
         for (auto& cd : out)
@@ -4210,23 +3772,27 @@ juce::String FFTAnalysisView::buildHarmonicsTable() const
             return ScaleCalibration::formatLevelValue (sc.fullScaleFor (magCh) * std::pow (10.0, relDb / 20.0), 6);
         return juce::String (relDb + off, 2);
     };
-    const int maxBin = std::min ((int) (cachedN / 2), (int) mag.size() - 1);
+    // Harmonics 1..N at the bin nearest to k * fFund (shared with the
+    // measure.harmonics command through the measurement module).
+    std::vector<double> relDb (mag.size());
+    for (size_t k = 0; k < mag.size(); ++k)
+        relDb[k] = measures::normToDb (mag[k]);
+    measures::HarmonicsParams hp;
+    hp.anchorHz = harmonicAnchorF_;
+    hp.anchorN = harmonicN_;
+    hp.maxK = harmonicN_;
+    hp.search = measures::HarmonicsParams::Search::NearestBin;
+    const auto hr = measures::harmonics (relDb, rate, cachedN, hp);
 
     juce::StringArray lines;
     lines.add ("Harmonic\tFrequency\tAmplitude");
-    for (int k = 1; k <= harmonicN_; ++k)
+    for (const auto& h : hr.harmonics)
     {
-        const double f = (double) k * fFund;
-        juce::String line = juce::String (k) + "\t" + juce::String (f, 3);
-        if (maxBin < 1 || f > rate * 0.5)
+        juce::String line = juce::String (h.k) + "\t" + juce::String (h.expectedHz, 3);
+        if (!h.valid)
             line += "\t";   // no FFT data above Nyquist: leave the cell empty
         else
-        {
-            const int bin = (int) std::clamp ((double) std::lround (f * cachedN / rate),
-                                              0.0, (double) maxBin);
-            const double dB = -kNormFloorDb * (1.0 - (double) mag[(size_t) bin]);
-            line += "\t" + fmtLevel (dB);
-        }
+            line += "\t" + fmtLevel (h.relDb);
         lines.add (line);
     }
     return lines.joinIntoString ("\r\n");
@@ -7206,6 +6772,19 @@ void StatusBar::paint (juce::Graphics& g)
         {
             g.drawText (modeText, leftX, 0, w, b.getHeight(),
                         juce::Justification::left, false);
+            leftX += w + 12;
+        }
+    }
+    if (!controlText_.isEmpty() && leftX < b.getWidth() - 8)
+    {
+        // AI control indicator (a client is connected to the control server).
+        g.setColour (juce::Colour::fromRGB (255, 190, 80));
+        const juce::Font f (12.0f);
+        const int w = std::min (b.getWidth() - leftX - 8,
+                                (int) juce::GlyphArrangement::getStringWidth (f, controlText_) + 8);
+        if (w > 10)
+        {
+            g.drawText (controlText_, leftX, 0, w, b.getHeight(), juce::Justification::left, false);
             leftX += w + 12;
         }
     }

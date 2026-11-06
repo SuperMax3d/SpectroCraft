@@ -393,3 +393,66 @@ bool runDeepFilterPipeline(const std::string& modelId, const std::string& device
 }
 
 } // namespace sc
+
+// Moved from src/MainWindow.cpp (lot 3 of the AI-control plan): the text is
+// built from the model registry only, so it belongs to the AI module where
+// headless callers (CLI, control commands) can use it without the UI.
+std::string sc::buildNsFailureDetails (const std::string& err, const std::string& modelId,
+                                       const std::string& device)
+{
+    juce::String details = err.empty () ? "The selection could not be processed." : err;
+    auto& mm = sc::ai::ModelManager::instance ();
+    // When any of the OpenVINO DLLs is missing, pointing the user at model
+    // downloads would be a trap (the weights are irrelevant until the runtime
+    // loads), so every such case gets the DLL instructions instead.
+    //
+    // "OpenVINO runtime unavailable" is our own prefix for a failed LoadLibrary
+    // probe: openvino.dll itself missing, or its static import tbb12.dll. Two
+    // more companion DLLs load *dynamically* later and surface as OpenVINO
+    // exceptions at model-read / compile time instead:
+    //  - openvino_ir_frontend.dll absent -> "Unable to read the model ..."
+    //    with an EMPTY "Available frontends:" list;
+    //  - openvino_intel_cpu_plugin.dll absent -> 'Device with "CPU" name is
+    //    not registered in the OpenVINO Runtime'.
+    const bool runtimeMissing = details.startsWith ("OpenVINO runtime unavailable")
+        || details.contains ("is not registered in the OpenVINO Runtime")
+        || (details.contains ("Unable to read the model")
+            && juce::String (details).trim ().endsWith ("Available frontends:"));
+    // Only point at model downloads when the error plausibly involves the
+    // model itself; "No WAV files found in ..." does not.
+    const bool looksModelRelated = details.isEmpty ()
+        || details.contains ("model")
+        || details.contains ("install")
+        || details.contains ("download");
+    if (const auto* spec = mm.find (modelId))
+    {
+        if (runtimeMissing)
+        {
+            const juce::String prefix = details.startsWith ("OpenVINO runtime unavailable")
+                ? "The OpenVINO runtime could not be loaded - its DLLs are missing."
+                : "openvino.dll loaded, but one of its companion DLLs is missing.";
+            details += "\n\n" + prefix
+                       + " All four must sit together in the SpectroCraft folder next to SpectroCraft.exe:\n"
+                       "  openvino.dll\n"
+                       "  openvino_intel_cpu_plugin.dll\n"
+                       "  openvino_ir_frontend.dll\n"
+                       "  tbb12.dll\n";
+            if (device == "GPU")
+                details += "  openvino_intel_gpu_plugin.dll   (needed because you selected GPU)\n";
+            else if (device == "NPU")
+                details += "  openvino_npu_plugin.dll         (needed because you selected NPU)\n";
+            details += "\nWhere to get them:\n"
+                       "- If you built SpectroCraft from source: bin/Release in the repository.\n"
+                       "- Otherwise download OpenVINO 2024.6 from https://github.com/openvinotoolkit/openvino/releases\n"
+                       "  and take the DLLs from its runtime\\Windows\\bin folder.";
+        }
+        else if (looksModelRelated)
+        {
+            details += "\n\nManual installation: download these files into:\n"
+                       + mm.dirFor (spec->id).getFullPathName () + "\n";
+            for (const auto& f : spec->files)
+                details += "  " + juce::String (f.url) + "\n";
+        }
+    }
+    return details.toStdString ();
+}

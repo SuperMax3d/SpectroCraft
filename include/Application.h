@@ -20,6 +20,8 @@
 #include <thread>
 #include <condition_variable>
 
+namespace sc::control { class ControlState; }   // AI control (include/control/ControlState.h)
+
 // Result of a batch folder transcription run (see Application::batchTranscribeFolder).
 struct BatchTranscribeSummary
 {
@@ -373,6 +375,24 @@ public:
 
     /** Persists the action store to disk. */
     void saveActions();
+
+    /** AI control state of this application: session journal, jobs, UI
+        bridge (created on first use, stopped first by the destructor). */
+    sc::control::ControlState& control();
+
+    /** Saves document d to `file` (message thread, blocking): the audio plus
+        its managed metadata (embedded chunks, or the .meta.json sidecar in
+        external mode, consolidating the legacy sidecars). saveAs = true also
+        moves the document's path/name to `file` and adds it to Open Recent.
+        Non-WAV targets switch embedded metadata to external, as File > Save
+        As does. Returns false with errOut set on failure; *metaWrittenOut
+        (optional) tells whether the metadata reached the disk.
+        beginSave / completeSave are the two message-thread halves around
+        the engine's save, for callers that run the audio write on a worker. */
+    bool saveDocument (FileDoc& d, const juce::File& file, bool saveAs,
+                       std::string* errOut = nullptr, bool* metaWrittenOut = nullptr);
+    uint64_t beginSave (FileDoc& d, const juce::File& file);
+    bool completeSave (FileDoc& d, const juce::File& file, bool saveAs, uint64_t metaSnapshot);
 
     // AI feature preferences, persisted in the same store (keys ai_*).
     bool aiAutoDownload = true;          // download missing models on first use
@@ -758,10 +778,15 @@ public:
     // current selection, or the whole file when nothing is selected.
     // pythonCmd is the interpreter command found by sc::py::findPython
     // (e.g. "python" or "py -3"). The script receives a float32 WAV of the
-    // range plus a metadata JSON and must write back an output WAV with the
-    // same rate/channels/length; the result replaces that range in place and
-    // is undoable. onProgress reports 0..1 (excluding the final mipmap
-    // rebuild) and returning false cancels (killing the child process).
+    // range plus a metadata JSON and writes back an output WAV with the same
+    // rate/channels/length (the result replaces that range in place and is
+    // undoable) and/or a result.json (markers, text, measures, tables: see
+    // sc::py::resultContractText; out.wav is optional when result.json
+    // exists). onProgress reports 0..1 (excluding the final mipmap rebuild)
+    // and returning false cancels (killing the child's process tree). A
+    // sc::py::ScopedScriptRunCapture on the calling thread imposes its
+    // RunOptions (timeout) and receives the run report (SHA-256, exit code,
+    // outputs, result.json).
     bool runPythonScript (const juce::File& script, const juce::String& scriptText,
                           const std::string& pythonCmd,
                           std::function<bool(float)> onProgress = nullptr,
@@ -866,6 +891,12 @@ public:
     std::function<void()> onActiveDocChanged;
 
 private:
+    std::unique_ptr<sc::control::ControlState> control_;
+    // Set first thing in the destructor: workers waiting for a message-thread
+    // commit (AI ops, Python) give up instead of deadlocking while the
+    // destructor joins the AI-control jobs.
+    std::atomic<bool> destroying_ { false };
+
     // Lazy audio init state. audioInitThread is joined in the destructor so a
     // pending worker can never outlive the AudioDeviceManager it initialises.
     std::atomic<bool> audioInitStarted { false };

@@ -10,6 +10,8 @@
 #include "Application.h"
 #include "Recorder.h"
 #include "StartupTrace.h"
+#include "control/ControlState.h"   // AI control: app.control().ui
+#include "control/CommandRegistry.h" // menu actions run through the registry
 #include <thread>
 #include "WaveformView.h"
 #include "SpectralView.h"
@@ -576,6 +578,10 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
             scStart::note (juce::String ("total launch->window: T+") + juce::String (ms) + " ms");
         });
 
+    // AI control: commands may now refresh this window, drive its views and
+    // show job progress (sc::control::UiBridge).
+    app.control().ui = this;
+
     setVisible (true);
 }
 
@@ -602,6 +608,8 @@ MainWindow::~MainWindow()
     app.onTimeRangeStretched = nullptr;
     app.onTimeRangeInserted = nullptr;
     app.onPatchSideStateRestored = nullptr;
+    if (app.control().ui == this)
+        app.control().ui = nullptr;
 
     if (audioInitDialog != nullptr)
     {
@@ -1322,6 +1330,12 @@ void MainWindow::userTriedToCloseWindow()
 
 void MainWindow::timerCallback()
 {
+    // AI control journal: edits made with the mouse/menus become "history"
+    // entries (and history.changed events) within a tick. Only while the
+    // control server runs: nobody else reads the journal.
+    if (controlServerRunning)
+        app.control().pollDocuments();
+
     // Kick off the lazy audio device init on the first tick. The timer only
     // runs while this window is alive, so no deferred callback can outlive it.
     if (!audioInitKickedOff)
@@ -2072,6 +2086,12 @@ void MainWindow::stopReplay (const juce::String& why)
     replaySteps_.clear ();
     replayPos_ = 0;
     replayName_.clear ();
+    if (onReplayFinished)   // a caller that reports itself (no blocking message box)
+    {
+        auto cb = onReplayFinished;
+        cb (false, "Action \"" + name + "\" stopped: " + why);
+        return;
+    }
     if (!name.isEmpty ())
         sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Run Action",
@@ -2086,6 +2106,12 @@ void MainWindow::continueReplay()
         replaySteps_.clear ();
         replayPos_ = 0;
         replayName_.clear ();
+        if (onReplayFinished)
+        {
+            auto cb = onReplayFinished;
+            cb (true, "Action \"" + name + "\" finished.");
+            return;
+        }
         sc::alert::showMessageBox (juce::AlertWindow::InfoIcon,
                                            "Run Action",
                                            "Action \"" + name + "\" finished.", "", this);
@@ -2321,14 +2347,11 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
     dlg->enterModalState (false);
 
     FileDoc* d = app.doc();   // the document being saved (modal loop blocks switches)
-    if (d != nullptr && !file.getFileExtension().equalsIgnoreCase (".wav")
-        && d->metaMode == sc::MetaMode::Embedded)
-        d->metaMode = sc::MetaMode::External;   // non-WAV cannot carry RIFF chunks
-
-    // Snapshot the metadata change counter BEFORE the worker builds the SCMD
-    // payload: an edit made while the save runs (a transcription finishing,
-    // an async callback, ...) bumps it and keeps the document dirty.
-    const uint64_t metaSnapshot = d != nullptr ? d->metaDirty.changeCount () : 0;
+    // Non-WAV targets switch embedded metadata to external, and the metadata
+    // change counter is snapshotted BEFORE the worker builds the SCMD payload:
+    // an edit made while the save runs keeps the document dirty. Shared with
+    // the AI-control doc.save / doc.saveAs (Application::beginSave).
+    const uint64_t metaSnapshot = d != nullptr ? app.beginSave (*d, file) : 0;
 
     // Resolve the engine on the message thread: the worker must not look up
     // "the active document" itself.
@@ -2363,30 +2386,20 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
 
             // Save As: the document's path AND display name now follow the new
             // location (Files list, footer, unsaved-changes prompts, Open Recent).
-            if (saveAs && doc != nullptr)
+            // Path/name/Open Recent (Save As), the external-mode sidecar with
+            // the legacy per-category sidecars consolidated into it, and the
+            // metadata-dirty flag (unless the metadata changed while the save
+            // ran): Application::completeSave, shared with AI control.
+            if (doc != nullptr)
             {
-                doc->file = file;
-                doc->name = file.getFileName ();
-                app.addRecentFile (file);
-                if (mw->statusBar && doc == app.doc ())
-                    mw->statusBar->setFileName (file.getFileName ());
-                if (mw->fileListPanel) mw->fileListPanel->refresh ();
-            }
-
-            // External mode: the sidecar travels with the saved file and the
-            // legacy per-category sidecars are consolidated into it.
-            bool metaWritten = true;
-            if (doc != nullptr && doc->metaMode == sc::MetaMode::External)
-            {
-                metaWritten = doc->writeMetaSidecar (file);
-                if (metaWritten)   // only once the consolidated copy is on disk
+                const bool metaWritten = app.completeSave (*doc, file, saveAs, metaSnapshot);
+                if (saveAs)
                 {
-                    juce::File lm (file.getFullPathName() + ".markers.json");
-                    if (lm.existsAsFile()) lm.deleteFile();
-                    const juce::File ls = savedSelectionsSidecarPath (file);
-                    if (ls.existsAsFile()) ls.deleteFile();
+                    if (mw->statusBar && doc == app.doc ())
+                        mw->statusBar->setFileName (file.getFileName ());
+                    if (mw->fileListPanel) mw->fileListPanel->refresh ();
                 }
-                else
+                if (!metaWritten)
                     sc::alert::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
                         "Save metadata failed",
                         "The audio was saved, but the metadata sidecar next to\n"
@@ -2394,12 +2407,6 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
                             + "\ncould not be written. Markers and selections are still unsaved.",
                         "", mw);
             }
-
-            // The save wrote the audio AND every managed metadata chunk or
-            // sidecar, so the document's state now matches its disk copy -
-            // unless the metadata changed while the save was running.
-            if (doc != nullptr && metaWritten)
-                doc->metaDirty.clearIfUnchangedSince (metaSnapshot);
 
             mw->updateTitle();
         });
@@ -2800,6 +2807,16 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         return;
     }
 
+    // Window menu: "Allow AI control (localhost)". Persisted and applied at
+    // once (Main.cpp starts/stops the control server).
+    if (menuItemID == WindowAllowControl)
+    {
+        app.settings.controlEnabled = !app.settings.controlEnabled;
+        app.saveSettings ();
+        if (onControlToggled) onControlToggled (app.settings.controlEnabled);
+        return;
+    }
+
     // File > Open Recent items.
     if (menuItemID >= RecentBase && menuItemID < RecentBase + Application::kMaxRecentFiles)
     {
@@ -3003,31 +3020,20 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             break;
         case FileQuit: closeButtonPressed(); break;   // refuses while a job runs
 
-        case EditUndo: app.undoStep(); refreshAfterEdit(); break;
-        case EditRedo: app.redoStep(); refreshAfterEdit(); break;
-        case EditCut:    runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); break;
-        case EditCopy:   app.copy(); break;   // read-only; works on streamed files too
-        case EditPaste:  runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); break;
-        case EditCopyToNewFile:
-        {
-            std::string err;
-            if (!app.copyToNewFile (&err))
-                showEditError (err);
-            // Success: the new document is already active; onActiveDocChanged
-            // has synchronised the UI.
-            break;
-        }
-        case EditPasteMix: runDestructiveEdit ([&] (std::string* e) { return app.pasteMix (e); }); break;
-        case EditPasteToNewChannels:
-            runDestructiveEdit ([&] (std::string* e) { return app.pasteToNewChannels (e); });
-            break;
-        case EditDelete: app.recordActionStep (sc::actionTypes::kDelete);
-                         runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); break;
-        case EditTrimSelection:
-            app.recordActionStep (sc::actionTypes::kTrim);
-            runDestructiveEdit ([&] (std::string* e) { return app.trimSelection (e); });
-            break;
-        case EditSelectAll: app.selectAll(); syncSharedState(); break;
+        // Edit menu: through the command registry (same code as the API; a
+        // streamed file is loaded into memory by the registry's job detour,
+        // behind the same progress dialog runDestructiveEdit showed).
+        case EditUndo: runMenuCommand ("history.undo", {}, 0, true); refreshAfterEdit(); break;
+        case EditRedo: runMenuCommand ("history.redo", {}, 0, true); refreshAfterEdit(); break;
+        case EditCut:    runMenuCommand ("edit.cut"); break;
+        case EditCopy:   runMenuCommand ("edit.copy", {}, 0, true); break;   // read-only; works on streamed files too
+        case EditPaste:  runMenuCommand ("edit.paste"); break;
+        case EditCopyToNewFile: runMenuCommand ("edit.copyToNewFile"); break;
+        case EditPasteMix: runMenuCommand ("edit.pasteMix"); break;
+        case EditPasteToNewChannels: runMenuCommand ("edit.pasteToNewChannels"); break;
+        case EditDelete: runMenuCommand ("edit.delete"); break;
+        case EditTrimSelection: runMenuCommand ("edit.trim"); break;
+        case EditSelectAll: runMenuCommand ("selection.all", {}, 0, true); syncSharedState(); break;
         case EditSnapToZeroCrossings:
             app.settings.snapToZeroCrossings = !app.settings.snapToZeroCrossings;
             if (app.onStateChange) app.onStateChange();   // persist the new state
@@ -3093,14 +3099,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         // Immediate effects record themselves as the "last effect" so that
         // Ctrl+Shift+F can repeat them; dialog-based effects do the same at
         // their apply points.
-        case ToolsSilence:   app.recordActionStep (sc::actionTypes::kSilence);
-                             runDestructiveEdit ([&] (std::string* e) { const bool ok = app.silence (e); if (ok) lastEffectId = ToolsSilence; return ok; }); break;
-        case ToolsFadeIn:    app.recordActionStep (sc::actionTypes::kFadeIn);
-                             runDestructiveEdit ([&] (std::string* e) { const bool ok = app.fadeIn (e); if (ok) lastEffectId = ToolsFadeIn; return ok; }); break;
-        case ToolsFadeOut:   app.recordActionStep (sc::actionTypes::kFadeOut);
-                             runDestructiveEdit ([&] (std::string* e) { const bool ok = app.fadeOut (e); if (ok) lastEffectId = ToolsFadeOut; return ok; }); break;
-        case ToolsNormalize: app.recordActionStep (sc::actionTypes::kNormalize);
-                             runDestructiveEdit ([&] (std::string* e) { const bool ok = app.normalize (e); if (ok) lastEffectId = ToolsNormalize; return ok; }); break;
+        case ToolsSilence:   runMenuCommand ("effect.silence", {}, ToolsSilence); break;
+        case ToolsFadeIn:    runMenuCommand ("effect.fadeIn", {}, ToolsFadeIn); break;
+        case ToolsFadeOut:   runMenuCommand ("effect.fadeOut", {}, ToolsFadeOut); break;
+        case ToolsNormalize: runMenuCommand ("effect.normalize", {}, ToolsNormalize); break;
         case ToolsChangeGain: showChangeGainDialog(); break;
         case ToolsResample: showResampleDialog(); break;
         case ToolsStemSeparate: showStemSeparationWindow(); break;
@@ -3123,10 +3125,8 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ActionsBatch:
             showActionBatchWindow (actionsPanel ? actionsPanel->primaryIndex() : -1);
             break;
-        case ToolsReverse: app.recordActionStep (sc::actionTypes::kReverse);
-                           runDestructiveEdit ([&] (std::string* e) { const bool ok = app.reverse (e); if (ok) lastEffectId = ToolsReverse; return ok; }); break;
-        case ToolsInvert:      app.recordActionStep (sc::actionTypes::kInvert);
-                               runDestructiveEdit ([&] (std::string* e) { const bool ok = app.invertSelection (e); if (ok) lastEffectId = ToolsInvert; return ok; }); break;
+        case ToolsReverse: runMenuCommand ("effect.reverse", {}, ToolsReverse); break;
+        case ToolsInvert:  runMenuCommand ("effect.invert", {}, ToolsInvert); break;
         case ToolsTimeStretch: showTimeStretchDialog(); break;
         case ToolsCatTimeScale: showContentAwareTimeScaleDialog(); break;
         case ToolsFilterEq:    showFilterEqDialog(); break;
@@ -6085,65 +6085,6 @@ std::string aiDevicePrefFromText (const juce::String& text)
 }
 
 } // namespace sc
-std::string sc::buildNsFailureDetails (const std::string& err, const std::string& modelId,
-                                       const std::string& device)
-{
-    juce::String details = err.empty () ? "The selection could not be processed." : err;
-    auto& mm = sc::ai::ModelManager::instance ();
-    // When any of the OpenVINO DLLs is missing, pointing the user at model
-    // downloads would be a trap (the weights are irrelevant until the runtime
-    // loads), so every such case gets the DLL instructions instead.
-    //
-    // "OpenVINO runtime unavailable" is our own prefix for a failed LoadLibrary
-    // probe: openvino.dll itself missing, or its static import tbb12.dll. Two
-    // more companion DLLs load *dynamically* later and surface as OpenVINO
-    // exceptions at model-read / compile time instead:
-    //  - openvino_ir_frontend.dll absent -> "Unable to read the model ..."
-    //    with an EMPTY "Available frontends:" list;
-    //  - openvino_intel_cpu_plugin.dll absent -> 'Device with "CPU" name is
-    //    not registered in the OpenVINO Runtime'.
-    const bool runtimeMissing = details.startsWith ("OpenVINO runtime unavailable")
-        || details.contains ("is not registered in the OpenVINO Runtime")
-        || (details.contains ("Unable to read the model")
-            && juce::String (details).trim ().endsWith ("Available frontends:"));
-    // Only point at model downloads when the error plausibly involves the
-    // model itself; "No WAV files found in ..." does not.
-    const bool looksModelRelated = details.isEmpty ()
-        || details.contains ("model")
-        || details.contains ("install")
-        || details.contains ("download");
-    if (const auto* spec = mm.find (modelId))
-    {
-        if (runtimeMissing)
-        {
-            const juce::String prefix = details.startsWith ("OpenVINO runtime unavailable")
-                ? "The OpenVINO runtime could not be loaded - its DLLs are missing."
-                : "openvino.dll loaded, but one of its companion DLLs is missing.";
-            details += "\n\n" + prefix
-                       + " All four must sit together in the SpectroCraft folder next to SpectroCraft.exe:\n"
-                       "  openvino.dll\n"
-                       "  openvino_intel_cpu_plugin.dll\n"
-                       "  openvino_ir_frontend.dll\n"
-                       "  tbb12.dll\n";
-            if (device == "GPU")
-                details += "  openvino_intel_gpu_plugin.dll   (needed because you selected GPU)\n";
-            else if (device == "NPU")
-                details += "  openvino_npu_plugin.dll         (needed because you selected NPU)\n";
-            details += "\nWhere to get them:\n"
-                       "- If you built SpectroCraft from source: bin/Release in the repository.\n"
-                       "- Otherwise download OpenVINO 2024.6 from https://github.com/openvinotoolkit/openvino/releases\n"
-                       "  and take the DLLs from its runtime\\Windows\\bin folder.";
-        }
-        else if (looksModelRelated)
-        {
-            details += "\n\nManual installation: download these files into:\n"
-                       + mm.dirFor (spec->id).getFullPathName () + "\n";
-            for (const auto& f : spec->files)
-                details += "  " + juce::String (f.url) + "\n";
-        }
-    }
-    return details.toStdString ();
-}
 
 // Shared failure dialog for the AI features: a copyable read-only text editor
 // with the error details (paths/URLs), built by sc::buildNsFailureDetails().
@@ -7147,6 +7088,12 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSeparator ();
         menu.addItem (WindowAllowMultiple, "Allow multiple instances", true,
                       app.settings.allowMultipleInstances);
+        // AI control (Claude Code in VS Code, scripts): loopback-only server,
+        // token in <app data>/SpectroCraft/control/<pid>.json. Off by default.
+#if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
+        menu.addItem (WindowAllowControl, "Allow AI control (localhost)", true,
+                      app.settings.controlEnabled);
+#endif
     }
     else if (menuName == "Help")
     {
@@ -7563,5 +7510,166 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         return true;
     }
 
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// sc::control::UiBridge: what AI-control commands may ask of this window.
+// Every method is non-blocking (no modal loop, no FileChooser, no message box).
+// ---------------------------------------------------------------------------
+
+void MainWindow::zoomVertical (double factor)
+{
+    zoomVerticalBoth (factor);
+}
+
+bool MainWindow::setViewVisible (const juce::String& what, bool visible)
+{
+    if (what == "waveform" || what == "spectral")
+    {
+        const bool wave = what == "waveform";
+        // Hiding both views is not allowed (same rule as the View menu).
+        if (!visible && !(wave ? showSpectralView : showWaveformView))
+            return false;
+        (wave ? showWaveformView : showSpectralView) = visible;
+        resized();
+        return true;
+    }
+    if (what == "leftPanels")
+    {
+        setLeftPanelsVisible (visible);
+        return true;
+    }
+    return false;
+}
+
+bool MainWindow::isViewVisible (const juce::String& what) const
+{
+    if (what == "waveform")   return showWaveformView;
+    if (what == "spectral")   return showSpectralView;
+    if (what == "leftPanels") return leftPanelsVisible;
+    return false;
+}
+
+juce::StringArray MainWindow::panelNames() const
+{
+    juce::StringArray names;
+    for (const auto& e : leftPanelEntries())
+        names.add (e.name);
+    return names;
+}
+
+bool MainWindow::setPanelVisibleAt (int index, bool visible)
+{
+    const auto entries = leftPanelEntries();
+    if (index < 0 || index >= (int) entries.size()) return false;
+    setPanelVisible (entries[(size_t) index].id, visible);
+    return true;
+}
+
+bool MainWindow::isPanelOpenAt (int index) const
+{
+    const auto entries = leftPanelEntries();
+    if (index < 0 || index >= (int) entries.size()) return false;
+    return isPanelOpen (entries[(size_t) index].id);
+}
+
+void* MainWindow::beginJobDialog (const juce::String& title, const juce::String& status)
+{
+    // The same non-blocking progress dialog as the menus' background jobs:
+    // isBackgroundJobRunning() and systemRequestedQuit() see it unchanged.
+    auto* dlg = new WorkProgressDialog (title, status, true, this);
+    dlg->setProgress (0.0);
+    dlg->beginModal();
+    return dlg;
+}
+
+void MainWindow::setJobProgress (void* handle, double progress, const juce::String& status)
+{
+    auto* dlg = static_cast<WorkProgressDialog*> (handle);
+    if (dlg == nullptr) return;
+    dlg->setProgress (progress < 0.0 ? -1.0 : juce::jlimit (0.0, 1.0, progress));
+    if (status.isNotEmpty()) dlg->setStatusText (status);
+}
+
+const std::atomic<bool>* MainWindow::jobCancelFlag (void* handle) const
+{
+    auto* dlg = static_cast<WorkProgressDialog*> (handle);
+    return dlg != nullptr ? &dlg->cancelled : nullptr;
+}
+
+void MainWindow::endJobDialog (void* handle)
+{
+    delete static_cast<WorkProgressDialog*> (handle);   // deleting exits the modal state
+    // The job may have edited, opened or saved a document.
+    refreshAfterEdit();
+    updateTitle();
+    refreshPanels();
+}
+
+void MainWindow::setControlClients (int count)
+{
+    controlClients_ = count;
+    if (statusBar != nullptr)
+        statusBar->setControlText (count > 0 ? "AI control: " + juce::String (count)
+                                                   + (count == 1 ? " client" : " clients")
+                                             : juce::String());
+}
+
+void MainWindow::requestQuit (bool discardUnsaved)
+{
+    // Same refusals as systemRequestedQuit(), checked again now: a job or an
+    // edit may have started since app.quit was accepted.
+    if (isBackgroundJobRunning() || app.control().jobs.numRunning() > 0)
+        return;
+    if (!discardUnsaved && !app.unsavedDocNames().empty())
+        return;
+    juce::JUCEApplicationBase::quit();
+}
+
+// ---------------------------------------------------------------------------
+// Menu actions through the command registry (AI control lot 6).
+// ---------------------------------------------------------------------------
+bool MainWindow::runMenuCommand (const juce::String& cmd, const juce::var& params, int effectId, bool quiet)
+{
+    sc::control::InvokeOptions io;
+    io.source = "menu";
+    io.ui = this;
+    io.fromMenu = true;
+    const auto r = sc::control::CommandRegistry::instance().invoke (app, cmd, params, {}, io);
+    const bool ok = (bool) r.getProperty ("ok", false);
+    const auto res = r.getProperty ("result", {});
+    if (ok && res.hasProperty ("job") && res.getProperty ("state", {}).toString() == "running")
+    {
+        // Streamed file: the registry loads it in a job behind the progress
+        // dialog; report a failure (and the repeat-effect id) when it ends.
+        const juce::String jobId = res.getProperty ("job", {}).toString();
+        juce::Component::SafePointer<MainWindow> self (this);
+        auto check = std::make_shared<std::function<void()>>();
+        std::weak_ptr<std::function<void()>> weak = check;
+        *check = [self, jobId, effectId, quiet, weak] {
+            if (self == nullptr) return;
+            auto& jobs = self->app.control().jobs;
+            if (!jobs.isFinished (jobId))
+            {
+                if (auto again = weak.lock()) juce::Timer::callAfterDelay (100, [again] { (*again)(); });
+                return;
+            }
+            const auto o = jobs.outcome (jobId);
+            if (o && o->ok) { if (effectId != 0) self->lastEffectId = effectId; }
+            else if (o && !quiet && o->error.code != sc::control::err::cancelled)
+                self->showEditError (o->error.message.toStdString());
+        };
+        juce::Timer::callAfterDelay (100, [check] { (*check)(); });
+        return true;
+    }
+    if (ok)
+    {
+        if (effectId != 0) lastEffectId = effectId;
+        return true;
+    }
+    const auto e = r.getProperty ("error", {});
+    if (!quiet && e.getProperty ("code", {}).toString() != sc::control::err::cancelled)
+        showEditError (e.getProperty ("message", {}).toString().toStdString());
     return false;
 }

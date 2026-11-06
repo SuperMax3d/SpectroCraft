@@ -1,11 +1,10 @@
 // SpectroCraft - Stem Separation window (drives the audio.cpp CLI tool).
 #include "StemSeparation.h"
+#include "AI/StemService.h"      // the headless separation run (no UI)
 #include "AlertGate.h"
 #include "Application.h"
 #include "MergeFiles.h"
 #include "OwningAlertWindow.h"   // dialogs with new-ed custom components
-#include "PythonScripts.h"
-#include "Resampler.h"
 #include "WorkProgress.h"
 
 #include <algorithm>
@@ -18,22 +17,6 @@ constexpr int kWinW     = 620;
 constexpr int kMargin   = 12;
 constexpr int kRowBaseH    = 30;   // first row of a description (editor + buttons)
 constexpr int kAnchorLineH = 20;   // one line of the anchor list under it
-
-/** Converts absolute document-time anchors to input-file-relative ones.
-    Ranges that fall outside the extracted input are clamped; empty results
-    are dropped. Pure function so it can be unit-tested without a process. */
-std::vector<sc::acpp::Anchor> anchorsRelativeToInput(const std::vector<sc::acpp::Anchor>& absAnchors,
-                                                     double extStartSecs, double inputDurSecs)
-{
-    std::vector<sc::acpp::Anchor> out;
-    for (const auto& a : absAnchors)
-    {
-        const double s = std::max (0.0, a.startSecs - extStartSecs);
-        const double e = std::min (inputDurSecs, a.stopSecs - extStartSecs);
-        if (e > s) out.push_back ({ a.include, s, e });
-    }
-    return out;
-}
 
 /** One row of the advanced section: description text + its anchor list
     (one "Included/Excluded: t0 - t1 s" line per anchor, each with its own
@@ -149,14 +132,6 @@ private:
     std::vector<juce::Component*> anchorWidgets_;   // label + Remove button per anchor
 };
 
-/** RAII cleanup for the per-run temporary folder. */
-struct TempCleaner
-{
-    explicit TempCleaner (const juce::File& f) : dir_ (f) {}
-    ~TempCleaner() { if (!dir_.getFullPathName().isEmpty ()) dir_.deleteRecursively (); }
-    juce::File dir_;
-};
-
 } // namespace
 
 //==============================================================================
@@ -167,7 +142,7 @@ struct StemSeparationWindow::RunJob
 {
     std::vector<StemDescEntry> descs;
     juce::File model;
-    juce::String backendCli;          // "cpu" / "cuda" / "vulkan"
+    juce::String backendCli;          // "cpu" / "cuda" / "vulkan" / "metal"
     bool extractFromOriginal = true;
     double extStartSecs = 0.0;        // extraction range in source seconds
     double extStopSecs = 0.0;
@@ -300,12 +275,13 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
         app_.saveSettings ();
         refreshStatusIdle ();
     };
-    backendCombo_.addItem ("Cpu", 1);
-    backendCombo_.addItem ("Cuda", 2);
-    backendCombo_.addItem ("Vulkan", 3);
+    // Cpu, Cuda, Vulkan (+ Metal on macOS): ids 1.. in sc::acpp::backendChoices() order.
+    const auto backends = sc::acpp::backendChoices ();
+    for (size_t i = 0; i < backends.size (); ++i)
+        backendCombo_.addItem (backends[i].label, (int) i + 1);
     // This JUCE build uses 0-based combo positions; the stored setting is a
-    // 1-based id (1=Cpu 2=Cuda 3=Vulkan), so convert in both directions.
-    backendCombo_.setSelectedItemIndex (std::clamp (app_.settings.acppBackend, 1, 3) - 1,
+    // 1-based id (1=Cpu 2=Cuda 3=Vulkan 4=Metal), so convert in both directions.
+    backendCombo_.setSelectedItemIndex (std::clamp (app_.settings.acppBackend, 1, (int) backends.size ()) - 1,
                                        juce::dontSendNotification);
     backendCombo_.onChange = [this]
     {
@@ -482,7 +458,7 @@ void StemSeparationWindow::refreshStatusIdle()
 
     juce::String s;
     if (!hasBin)
-        s = "The audiocpp_cli.exe binary is not installed yet - use Download...";
+        s = "The " + sc::acpp::binaryFileName () + " binary is not installed yet - use Download...";
     else if (demucs && !hasModel)
         s = (selectedModeId () == 2
              ? "No htdemucs_6stems model found - place a .gguf file in the HTDemucs-6stems-GGUF folder."
@@ -494,9 +470,7 @@ void StemSeparationWindow::refreshStatusIdle()
         const juce::String variant = sc::acpp::installedVariant ();
         // Convert the 0-based position back to the stored 1-based id.
         const int backendIdx = backendCombo_.getSelectedItemIndex () + 1;
-        const bool mismatch = (variant == "cpu" && backendIdx != 1)
-                          || ((variant == "cuda12.4" || variant == "cuda13.3") && backendIdx != 2)
-                          || (variant == "vulkan" && backendIdx != 3);
+        const bool mismatch = !sc::acpp::variantSupportsBackend (variant, sc::acpp::backendForChoiceId (backendIdx));
         s = juce::String ("Ready: ") + modelCombo_.getText ()
           + (variant.isEmpty () ? juce::String ("") : juce::String ("  [") + variant + "]");
         if (mismatch)
@@ -878,7 +852,7 @@ void StemSeparationWindow::openDownloadDialog()
         {
             const auto choices = sc::acpp::binaryChoices ();
             const size_t i = (size_t) std::min (std::max (1, binaryChoice), (int) choices.size ()) - 1;
-            const juce::File zip = root.getChildFile ("audiocpp_bin.zip");
+            const juce::File zip = root.getChildFile (sc::acpp::archiveFileName ());   // .zip or .tar.gz
 
             setStatus ("Downloading " + choices[i].label + "...");
             ok = sc::acpp::downloadFile (choices[i].url, zip,
@@ -890,7 +864,7 @@ void StemSeparationWindow::openDownloadDialog()
             if (ok)
             {
                 setStatus ("Extracting the binary...");
-                ok = sc::acpp::installBinaryFromZip (zip, choices[i].id, root, &err);
+                ok = sc::acpp::installBinaryFromArchive (zip, choices[i].id, root, &err);
                 if (!ok && !prog->cancelled.load ())
                     setStatus ("Extraction failed: " + juce::String (err));
             }
@@ -1002,7 +976,7 @@ void StemSeparationWindow::startRun()
     job.model = model;
     // Convert the 0-based position back to the stored 1-based id.
     const int bi = backendCombo_.getSelectedItemIndex () + 1;
-    job.backendCli = (bi == 2 ? "cuda" : bi == 3 ? "vulkan" : "cpu");
+    job.backendCli = sc::acpp::backendForChoiceId (bi);
     job.extractFromOriginal = extractOrigToggle_.getToggleState ();
     job.extStartSecs = s0;
     job.extStopSecs  = s1;
@@ -1026,18 +1000,6 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
     std::thread ([this, guard = alive_, jobPtr = std::move (job), prog] {
         RunJob& j = *jobPtr;
 
-        auto setStatus = [prog] (const juce::String& s)
-            { juce::MessageManager::callAsync ([prog, s] { prog->setStatusText (s); }); };
-        auto setProgress = [prog] (double v)
-            { juce::MessageManager::callAsync ([prog, v] { prog->setProgress (v); }); };
-
-        // Tail of a long log for the error dialog.
-        auto tail = [] (const juce::String& s, int maxChars = 2000) -> juce::String
-        {
-            if (s.length () <= maxChars) return s;
-            return "..." + s.substring (s.length () - maxChars, s.length ());
-        };
-
         auto fail = [this, guard, prog] (const juce::String& msg, const juce::String& detail = {})
         {
             juce::MessageManager::callAsync ([this, guard, prog, msg, detail] {
@@ -1052,231 +1014,44 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
             });
         };
 
-        // 1. Extract the input range into a temporary float WAV.
+        // 1. Read the input range (the separation itself is headless: sc::StemService).
         auto& eng = app_.audioEngine ();
         const int64_t startFrame = (int64_t) std::llround (j.extStartSecs * j.rate);
         const int64_t nFrames    = (int64_t) std::llround ((j.extStopSecs - j.extStartSecs) * j.rate);
         if (nFrames <= 0) { fail ("The selected range is empty."); return; }
 
-        TempCleaner cleaner (juce::File::getSpecialLocation (juce::File::tempDirectory)
-            .getChildFile ("SpectroCraft_stem_"
-                           + juce::String (juce::Random::getSystemRandom().nextInt (999998) + 1)));
-        const juce::File tmpIn = cleaner.dir_.getChildFile ("input.wav");
-        if (!cleaner.dir_.createDirectory ())
-        { fail ("Could not create the temporary working folder."); return; }
-
-        std::vector<std::vector<float>> inData;
-        if (!eng.readRange (startFrame, nFrames, inData) || inData.empty () || inData[0].empty ())
+        sc::StemService::Request req;
+        if (!eng.readRange (startFrame, nFrames, req.input) || req.input.empty () || req.input[0].empty ())
         { fail ("Could not read the selected range."); return; }
 
-        // The htdemucs families require a 44.1 kHz input: resample the
-        // extraction when the source rate differs.
-        double writeRate = j.rate;
-        if (j.mode >= 2 && std::abs (writeRate - 44100.0) > 1e-6 * 44100.0)
+        req.mode = (j.mode == 2 ? sc::StemService::Mode::HtDemucs6
+                    : j.mode == 3 ? sc::StemService::Mode::HtDemucsFt
+                                  : sc::StemService::Mode::SamAudio);
+        for (const auto& d : j.descs)
+            req.descriptions.push_back ({ d.text, d.anchors });
+        req.model = j.model;
+        req.backend = j.backendCli;
+        req.extractFromOriginal = j.extractFromOriginal;
+        req.extStartSecs = j.extStartSecs;
+        req.sourceRate = j.rate;
+
+        // 2-3. Run the CLI and bring every track to the source rate.
+        auto res = sc::StemService::run (req,
+            [prog] (double fraction, const juce::String& status) {
+                if (status.isNotEmpty ())
+                    juce::MessageManager::callAsync ([prog, status] { prog->setStatusText (status); });
+                if (fraction >= 0.0)
+                    juce::MessageManager::callAsync ([prog, fraction] { prog->setProgress (fraction); });
+            },
+            [prog] { return prog->cancelled.load (); });
+
+        if (!res.ok)
         {
-            setStatus ("Resampling the input to 44.1 kHz...");
-            std::vector<std::vector<float>> rs;
-            for (auto& c : inData)
-            {
-                juce::AudioBuffer<float> in (1, (int) c.size ());
-                std::copy (c.begin (), c.end (), in.getWritePointer (0));
-                juce::AudioBuffer<float> out (1, (int) sc::Resampler::estimateOutputFrames (
-                    (int64_t) c.size (), writeRate, 44100.0));
-                if (!sc::Resampler::resample (in, writeRate, 44100.0, out))
-                { fail ("Could not resample the input to 44.1 kHz."); return; }
-                rs.push_back (std::vector<float> (out.getReadPointer (0),
-                                                  out.getReadPointer (0) + out.getNumSamples ()));
-            }
-            inData = std::move (rs);
-            writeRate = 44100.0;
+            fail (res.error, res.detail);
+            return;
         }
 
-        if (!sc::py::writeFloatWav (tmpIn, inData, writeRate))
-        { fail ("Could not write the temporary input file."); return; }
-
-        // Subsequent descriptions must work on a single mono track rather than
-        // the whole multichannel extraction. Write a downmixed copy once when
-        // the source has more than one channel (mono sources need none). Not
-        // needed for the htdemucs modes: they run a single plain separation.
-        const juce::File tmpInMono = cleaner.dir_.getChildFile ("input_mono.wav");
-        bool haveMonoCopy = false;
-        if (j.mode == 1 && inData.size () > 1)
-        {
-            std::vector<std::vector<float>> mono;
-            mono.push_back (sc::acpp::downmixToMono (inData));
-            if (!sc::py::writeFloatWav (tmpInMono, mono, j.rate))
-                { fail ("Could not write the temporary mono input file."); return; }
-            haveMonoCopy = true;
-        }
-
-        const double inputDur = (double) nFrames / j.rate;
-
-        // 2. Run the separation through the CLI.
-        std::vector<std::vector<float>> tracks;      // one per output track
-        std::vector<double> trackRates;
-        juce::File prevResidual;
-
-        if (j.mode >= 2)
-        {
-            // Plain separation task: a single CLI call with no description or
-            // anchors. The tool writes one named .wav file per stem into outDir.
-            const juce::String family = (j.mode == 2 ? "htdemucs_6stems" : "htdemucs");
-            setStatus ("Running " + family + "...");
-            setProgress (0.0);
-
-            const juce::File outDir = cleaner.dir_.getChildFile ("sep");
-            sc::acpp::RunResult rr;
-            std::string err;
-            auto lastUi = std::chrono::steady_clock::now () - std::chrono::milliseconds (500);
-            const bool ok = sc::acpp::runSepTask (
-                sc::acpp::binaryPath (), family, j.model, j.backendCli, tmpIn, outDir,
-                [&] { return !prog->cancelled.load (); },
-                [&] (const juce::String& line) {
-                    const auto now = std::chrono::steady_clock::now ();
-                    if (now - lastUi < std::chrono::milliseconds (300)) return;
-                    lastUi = now;
-                    setStatus ("Running " + family + "  |  " + line);
-                },
-                &rr, &err);
-
-            if (!ok)
-            {
-                if (rr.cancelled)
-                { fail ("Run cancelled."); return; }
-                const juce::String detail = rr.stderrText.isNotEmpty () ? tail (rr.stderrText)
-                                : rr.stdoutText.isNotEmpty ()          ? tail (rr.stdoutText)
-                                                                        : juce::String (err);
-                fail ("Stem separation failed.", detail);
-                return;
-            }
-
-            // Collect every stem wav in the output folder, sorted by name so
-            // the track order is stable across runs.
-            std::vector<juce::File> stems;
-            for (auto entry : juce::RangedDirectoryIterator (outDir, false))
-                if (entry.getFile().hasFileExtension ("wav"))
-                    stems.push_back (entry.getFile());
-            std::sort (stems.begin (), stems.end (),
-                       [] (const juce::File& a, const juce::File& b) {
-                           return a.getFileName().toLowerCase() < b.getFileName().toLowerCase (); });
-            if (stems.empty ())
-            { fail ("The tool produced no stem files in " + outDir.getFullPathName ()); return; }
-
-            for (const auto& f : stems)
-            {
-                double tRate = 0.0;
-                int nchT = 0;
-                std::vector<std::vector<float>> tData;
-                if (!sc::py::readFloatWav (f, &tRate, &nchT, tData))
-                { fail ("Could not read the tool's output file " + f.getFileName () + "."); return; }
-                for (auto& c : tData)   { tracks.push_back (std::move (c)); trackRates.push_back (tRate); }
-            }
-            setProgress (1.0);
-        }
-        else
-        {
-            const int N = (int) j.descs.size ();
-
-            for (int i = 0; i < N; ++i)
-            {
-            if (prog->cancelled.load ())
-            { fail ("Run cancelled."); return; }
-
-            const auto& d = j.descs[(size_t) i];
-            const juce::String what = "Description " + juce::String (i + 1) + "/" + juce::String (N)
-                                     + ": " + d.text;
-            setStatus (what);
-            setProgress ((double) i / (double) N);
-
-            // Chained mode: every description after the first works on the
-            // previous residual. From-original mode: subsequent descriptions
-            // work on a single mono track of the original extraction - never
-            // the whole multichannel file (the first keeps the full input).
-            juce::File inWav;
-            if (!j.extractFromOriginal && i > 0)   inWav = prevResidual;
-            else if (i > 0 && haveMonoCopy)        inWav = tmpInMono;
-            else                                   inWav = tmpIn;
-            const juce::File outDir = cleaner.dir_.getChildFile ("d" + juce::String (i + 1));
-
-            auto relAnchors = anchorsRelativeToInput (d.anchors, j.extStartSecs, inputDur);
-
-            sc::acpp::RunResult rr;
-            std::string err;
-            auto lastUi = std::chrono::steady_clock::now () - std::chrono::milliseconds (500);
-            const bool ok = sc::acpp::runStemSeparation (
-                sc::acpp::binaryPath (), j.model, j.backendCli, inWav, d.text, relAnchors, outDir,
-                [&] { return !prog->cancelled.load (); },
-                [&] (const juce::String& line) {
-                    const auto now = std::chrono::steady_clock::now ();
-                    if (now - lastUi < std::chrono::milliseconds (300)) return;
-                    lastUi = now;
-                    setStatus (what + "  |  " + line);
-                },
-                &rr, &err);
-
-            if (!ok)
-            {
-                if (rr.cancelled)
-                { fail ("Run cancelled."); return; }
-
-                // The CLI reports errors on stdout as well as stderr, so fall
-                // back to the output tail when stderr is empty.
-                const juce::String detail = rr.stderrText.isNotEmpty () ? tail (rr.stderrText)
-                                : rr.stdoutText.isNotEmpty ()          ? tail (rr.stdoutText)
-                                                                        : juce::String (err);
-                fail ("Stem separation failed for '" + d.text + "'.", detail);
-                return;
-            }
-
-            const juce::File targetF   = outDir.getChildFile ("target.wav");
-            const juce::File residualF = outDir.getChildFile ("residual.wav");
-            if (!targetF.existsAsFile () || !residualF.existsAsFile ())
-            { fail ("The tool did not produce target.wav / residual.wav in " + outDir.getFullPathName ()); return; }
-
-            double tRate = 0.0, rRate = 0.0;
-            int nchT = 0, nchR = 0;
-            std::vector<std::vector<float>> tData, rData;
-            if (!sc::py::readFloatWav (targetF, &tRate, &nchT, tData)
-                || !sc::py::readFloatWav (residualF, &rRate, &nchR, rData))
-            { fail ("Could not read the tool's output files."); return; }
-
-            // Every description contributes its target; only the LAST one
-            // also keeps its residual, so a run with N descriptions yields
-            // N targets plus a single final "everything else" track instead of
-            // an intermediate residual after every step.
-            for (auto& c : tData)   { tracks.push_back (std::move (c)); trackRates.push_back (tRate); }
-            if (i + 1 == N)
-                for (auto& c : rData) { tracks.push_back (std::move (c)); trackRates.push_back (rRate); }
-            prevResidual = residualF;   // still needed as the next step's input
-            setProgress ((double) (i + 1) / (double) N);
-            }
-        }
-
-        // 3. Normalise every track to the source rate and pad to equal length.
-        int64_t maxLen = 0;
-        for (const auto& t : tracks) maxLen = std::max (maxLen, (int64_t) t.size ());
-        if (maxLen <= 0) { fail ("The tool produced empty output."); return; }
-
-        sc::MergeResult result;
-        result.rate = j.rate;
-        for (size_t i = 0; i < tracks.size (); ++i)
-        {
-            auto& t = tracks[i];
-            if (std::abs (trackRates[i] - j.rate) > 1e-6 * j.rate && !t.empty ())
-            {
-                juce::AudioBuffer<float> in (1, (int) t.size ());
-                std::copy (t.begin (), t.end (), in.getWritePointer (0));
-                juce::AudioBuffer<float> out (1, (int) sc::Resampler::estimateOutputFrames (
-                    (int64_t) t.size (), trackRates[i], j.rate));
-                if (!sc::Resampler::resample (in, trackRates[i], j.rate, out))
-                { fail ("Could not resample the tool's output to " + juce::String (j.rate, 0) + " Hz."); return; }
-                t.assign (out.getReadPointer (0), out.getReadPointer (0) + out.getNumSamples ());
-            }
-            t.resize ((size_t) maxLen, 0.0f);
-        }
-
-        result.channels = (int) tracks.size ();
-        result.data     = std::move (tracks);
+        sc::MergeResult result = std::move (res.merged);
         const int nTracks = result.channels;
 
         // 4. Create the new document on the message thread. The result is

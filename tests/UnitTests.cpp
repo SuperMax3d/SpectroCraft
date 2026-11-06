@@ -47,6 +47,7 @@
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include "CrashTrace.h"  // crash stack traces in the test binary
 #include "StartupTrace.h"
+#include "control/StateJson.h"   // processId() for the per-process temp folder
 #include <thread>
 #include <chrono>
 #if JUCE_WINDOWS
@@ -64,6 +65,13 @@
 
 static int failures = 0;
 static int total = 0;
+
+// Window > "Allow AI control (localhost)" exists only with the control server built in.
+#if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
+static constexpr int kScControlMenuItems = 1;
+#else
+static constexpr int kScControlMenuItems = 0;
+#endif
 
 #define CHECK(cond, name) \
     do { ++total; if (!(cond)) { ++failures; std::cout << "FAIL: " << name << "\n"; } } while (0)
@@ -153,9 +161,13 @@ static juce::File scTestTempDir()
     static const juce::File dir = [] {
         const auto shard = juce::SystemStats::getEnvironmentVariable ("SC_TEST_SHARD", {})
                                .upToFirstOccurrenceOf ("/", false, false).trim();
+        // The process id keeps two runs apart too (two worktrees or two
+        // checkouts testing at once on one machine used to wipe each other's
+        // "shard<k>" folder mid-run).
         auto d = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                     .getChildFile (shard.isEmpty() ? juce::String ("SpectroCraftTests-tmp")
-                                                    : "SpectroCraftTests-tmp-shard" + shard);
+                     .getChildFile ((shard.isEmpty() ? juce::String ("SpectroCraftTests-tmp")
+                                                     : "SpectroCraftTests-tmp-shard" + shard)
+                                    + "-" + juce::String (sc::control::processId()));
         d.deleteRecursively();
         d.createDirectory();
         return d;
@@ -3987,9 +3999,10 @@ static void testClosePanelsAndWindowMenu()
         const int wIdx = windowMenuIndex (*win);
         CHECK (wIdx >= 0, "Window menu exists in the menu bar");
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        // +1: the "Allow multiple instances" toggle below the panels
+        // +1: the "Allow multiple instances" toggle below the panels, +1 "Allow
+        // AI control (localhost)" when the control server is built in
         // (the separator between them is not counted by getNumItems).
-        CHECK (wm.getNumItems () == kNumPanels + 1, "Window menu lists every panel");
+        CHECK (wm.getNumItems () == kNumPanels + 1 + kScControlMenuItems, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
         // persists it to the store file immediately.
@@ -4112,7 +4125,7 @@ static void testClosePanelsAndWindowMenu()
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == kNumPanels + 1, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == kNumPanels + 1 + kScControlMenuItems, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 0, wIdx);   // files
@@ -7260,15 +7273,6 @@ static void testSuperResCliArgs()
     const juce::File model  = base.getChildFile ("models/audiocpp/AudioSR-GGUF/audiosr-basic-f32.gguf");
     const juce::File inWav  = base.getChildFile ("sr_in.wav");
     const juce::File outWav = base.getChildFile ("sr_out/enhanced.wav");
-
-#if ! JUCE_WINDOWS
-    // The audio.cpp CLI only exists on Windows: elsewhere the builder is a
-    // stub by design (src/AudioCpp.cpp, POSIX branch) and must stay empty.
-    CHECK (sc::acpp::buildSuperResCliArgs (1, model, "cuda", inWav, outWav).isEmpty(),
-           "super-res CLI arguments are not built outside Windows");
-    scSkip ("super-res cli args: the audio.cpp CLI is Windows-only");
-    return;
-#endif
 
     // FlashSR: --task s2s --family builtin_audio_utils --model <m>
     //          --load-option utility=flashsr --backend <b> --audio <a> --out <o> --log
@@ -22946,7 +22950,8 @@ static void testAudioCppCli()
         CHECK (listModels (root)[0].getFileName() == "sam-audio-small-q8_0.gguf",
               "listed model keeps its file name");
 
-    const juce::File bin = root.getChildFile ("audiocpp_cli.exe");
+    const juce::File bin = binaryPath (root);
+    CHECK (bin.getFileName () == binaryFileName (), "binary path uses the platform's file name");
     bin.replaceWithText ("x");
     CHECK (hasBinary (root),               "installed binary is detected");
 
@@ -22957,6 +22962,46 @@ static void testAudioCppCli()
     CHECK (!hasBinary (root),              "deleted binary no longer detected");
 
     root.deleteRecursively ();
+
+    // --- platform: executable name, variants, backend combo ---------------------
+#if JUCE_WINDOWS
+    CHECK (binaryFileName () == "audiocpp_cli.exe" && archiveFileName () == "audiocpp_bin.zip"
+               && binaryChoices ().size () == 4 && platformTag () == "windows-x64",
+           "platform: Windows x64 offers the 4 zip variants");
+#elif JUCE_MAC
+    CHECK (binaryFileName () == "audiocpp_cli" && archiveFileName () == "audiocpp_bin.tar.gz"
+               && binaryChoices ().size () == 1 && binaryChoices ()[0].id == "metal"
+               && juce::String (binaryChoices ()[0].url).endsWith (".tar.gz")
+               && juce::String (platformTag ()).startsWith ("macos-"),
+           "platform: macOS offers the Metal tar.gz build for its architecture");
+#else
+    CHECK (binaryFileName () == "audiocpp_cli" && archiveFileName () == "audiocpp_bin.tar.gz",
+           "platform: Linux executable / archive names");
+#  if defined(__x86_64__)
+    CHECK (binaryChoices ().size () == 2 && binaryChoices ()[0].id == "cpu" && binaryChoices ()[1].id == "vulkan"
+               && platformTag () == "linux-x64",
+           "platform: Linux x64 offers the cpu and vulkan tar.gz builds");
+#  endif
+#endif
+    CHECK (platformSupported () == !binaryChoices ().empty (), "platform: supported iff a CLI build is offered");
+    const auto bc = backendChoices ();
+    CHECK (bc.size () >= 3 && bc[0].cli == "cpu" && bc[1].cli == "cuda" && bc[2].cli == "vulkan",
+           "backend combo: ids 1-3 are Cpu, Cuda, Vulkan everywhere (stored setting)");
+#if JUCE_MAC
+    CHECK (bc.size () == 4 && bc[3].cli == "metal" && backendForChoiceId (4) == "metal",
+           "backend combo: Metal is id 4 on macOS");
+#else
+    CHECK (bc.size () == 3, "backend combo: no Metal outside macOS");
+#endif
+    CHECK (backendForChoiceId (0) == "cpu" && backendForChoiceId (99) == "cpu" && backendForChoiceId (2) == "cuda",
+           "backend combo: out-of-range ids fall back to cpu");
+    CHECK (variantSupportsBackend ("metal", "metal") && variantSupportsBackend ("metal", "cpu")
+               && !variantSupportsBackend ("metal", "cuda") && !variantSupportsBackend ("cpu", "vulkan")
+               && variantSupportsBackend ("cuda12.4", "cuda") && !variantSupportsBackend ("cuda13.3", "cpu")
+               && variantSupportsBackend ("", "metal") && variantSupportsBackend ("vulkan", "vulkan"),
+           "backend combo: variant / backend compatibility (status-line warning)");
+    CHECK (isKnownBackend ("metal") && isKnownBackend ("cpu") && !isKnownBackend ("Metal") && !isKnownBackend ("best"),
+           "backend: the services accept cpu, cuda, vulkan, metal");
 }
 
 static void testStartupTrace()
@@ -26835,6 +26880,59 @@ static void testApplyActionSteps()
     // Unknown types fail cleanly.
     CHECK (!sc::applyActionStep (app, mkStep ("bogus", juce::var()), &err), "actions: unknown type fails");
     CHECK (!err.empty (), "actions: failure message filled");
+
+    // Unknown types are never dispatched by their first letter: "sxxx" used
+    // to run silence, "dxxx" delete, "nxxx" normalize.
+    {
+        app.setSelection ({ 0.1, 0.4 });
+        const int64_t n0 = eng.numSamples();
+        const float s0 = readOneSample (eng, 0, 2000);
+        const int undo0 = (int) app.undo().undoSize();
+        for (const char* t : { "sxxx", "dxxx", "nxxx", "ixxx", "silencex" })
+        {
+            err.clear();
+            CHECK (!sc::applyActionStep (app, mkStep (t, juce::var()), &err),
+                   juce::String ("actions: look-alike type is rejected: ") + t);
+            CHECK (juce::String (err).contains ("unknown step type"),
+                   juce::String ("actions: look-alike type reports unknown: ") + t);
+        }
+        CHECK (eng.numSamples() == n0 && readOneSample (eng, 0, 2000) == s0
+                   && (int) app.undo().undoSize() == undo0,
+               "actions: rejected look-alike types left the audio untouched");
+    }
+
+    // envelope replays (it was validated and recorded, but had no case in
+    // applyActionStep): -6 dB flat over the selection halves the amplitude.
+    {
+        app.setSelection ({ 0.0, 0.0 });
+        const float s0 = readOneSample (eng, 0, 1000);
+        juce::Array<juce::var> pts;
+        pts.add (sc::makeVarObject ({ { "t", 0.0 }, { "g", -6.0206 } }));
+        pts.add (sc::makeVarObject ({ { "t", 100.0 }, { "g", -6.0206 } }));
+        const auto pe = sc::makeVarObject ({ { "points", juce::var (pts) } });
+        err.clear();
+        const bool ok = sc::applyActionStep (app, mkStep ("envelope", pe), &err);
+        CHECK (ok, "actions: envelope applies (" + juce::String (err) + ")");
+        CHECK (std::abs (readOneSample (eng, 0, 1000) - 0.5f * s0) < 1e-3f,
+               "actions: envelope -6 dB halved the samples");
+        err.clear();
+        CHECK (!sc::applyActionStep (app, mkStep ("envelope", sc::makeVarObject ({})), &err),
+               "actions: envelope without points fails");
+    }
+
+#if !(defined(SC_ENABLE_AI) && SC_ENABLE_AI)
+    // Non-AI build: noiseSuppress used to fall through to normalize().
+    {
+        app.selectAll();
+        const float s0 = readOneSample (eng, 0, 1000);
+        err.clear();
+        CHECK (!sc::applyActionStep (app, mkStep ("noiseSuppress",
+                   sc::makeVarObject ({ { "modelId", "denseunet" } })), &err),
+               "actions: noiseSuppress fails in a non-AI build");
+        CHECK (juce::String (err).contains ("no AI support"), "actions: noiseSuppress says the build has no AI");
+        CHECK (readOneSample (eng, 0, 1000) == s0, "actions: noiseSuppress did not normalize");
+    }
+#endif
 }
 
 static void testActionBatch()
@@ -26998,6 +27096,16 @@ static void testActionsPanelPaint()
 #include "regression/app_from_tests.inc"
 #include "regression/persistence.inc"
 #include "regression/ai.inc"
+#include "regression/control.inc"   // AI control: registry, step.run, history, --json
+#include "regression/control_server.inc"   // AI control: loopback server, path roots, view/transport
+#include "regression/journal.inc"   // AI control lot 5: journal, enriched patches, history JSON
+#include "regression/menu_commands.inc"   // AI control lot 6: typed commands, menu == command
+#include "regression/lot7_control.inc"   // AI control lot 7: python.run, fuzz, load
+#include "regression/ai_catalog.inc"
+#include "regression/ai_commands.inc"   // AI control lot 3: ai.* commands
+#include "regression/measures.inc"
+#include "regression/measure_commands.inc"   // AI control lot 4: measure.* commands
+#include "regression/hardening.inc"   // lot 7: Python bridge + headless stem/SR services
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -27052,7 +27160,9 @@ static bool scIsSerialTest (const char* name)
         "copy curve alt scales", "transcription clipboard", "tables panel", "paste live repro",
         "change gain dialog", "drawing key shortcuts",
         "playback chain", "lazy audio init",
-        "regression: panels", "regression: app_from_tests"
+        "regression: panels", "regression: app_from_tests",
+        "control server",   // loopback sockets + the user's control discovery folder
+        "control load"
     };
     for (auto* s : serial)
         if (juce::String (name) == s) return true;
@@ -27484,6 +27594,17 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: app_from_tests", runRegression_app_from_tests);
     SC_RUN_TEST ("regression: persistence", runRegression_persistence);
     SC_RUN_TEST ("regression: ai", runRegression_ai);
+    SC_RUN_TEST ("regression: control", runRegression_control);
+    SC_RUN_TEST ("control server", runRegression_controlServer);
+    SC_RUN_TEST ("regression: journal", runRegression_journal);
+    SC_RUN_TEST ("regression: menu_commands", runRegression_menuCommands);
+    SC_RUN_TEST ("regression: lot7_control", runRegression_lot7Control);
+    SC_RUN_TEST ("control load", testControlLoad);
+    SC_RUN_TEST ("regression: ai_catalog", runRegression_ai_catalog);
+    SC_RUN_TEST ("regression: ai_commands", runRegression_aiCommands);
+    SC_RUN_TEST ("regression: measures", runRegression_measures);
+    SC_RUN_TEST ("regression: measure_commands", runRegression_measureCommands);
+    SC_RUN_TEST ("regression: hardening", runRegression_hardening);
 
 
     scReportTimings();
