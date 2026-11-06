@@ -1,4 +1,4 @@
-"""Blocking NDJSON client for the SpectroCraft control server (RAPPORT.md 6).
+"""Blocking NDJSON client for the SpectroCraft control server (REPORT.md 6).
 
 - one TCP connection to 127.0.0.1:<port> read from the discovery file;
 - first line ``session.hello {token, client, subscribe, sinceSeq}``;

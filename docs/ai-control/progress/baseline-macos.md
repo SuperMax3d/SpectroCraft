@@ -1,13 +1,13 @@
-# Référence de tests avant tout changement (macOS)
+# Test baseline before any change (macOS)
 
-Date : 2026-11-05. Branche `ai-control`, tip `76de144` (= `main` de SuperMax3d `8c527e3` + commit de docs).
+Date: 2026-11-05. Branch `ai-control`, tip `76de144` (= SuperMax3d's `main` `8c527e3` + a docs commit).
 
-## Écart par rapport à la consigne
+## Deviation from the instructions
 
-La consigne prévoyait un agent cloud Linux (`baseline-linux.md`, build sous `xvfb-run`). L'exécution a en
-fait tourné sur le Mac de Nicolas (MacBook Air M-series, macOS 26.6, Xcode 26.6, AppleClang 21, arm64),
-dans un worktree isolé. Pas de Docker ni de VM Linux disponibles : **aucun build Linux local**. Linux et
-Windows sont couverts par le CI (`gh workflow run build.yml`, voir les notes de chaque lot).
+The instructions called for a Linux cloud agent (`baseline-linux.md`, build under `xvfb-run`). The run
+actually took place on Nicolas's Mac (MacBook Air M-series, macOS 26.6, Xcode 26.6, AppleClang 21, arm64),
+in an isolated worktree. No Docker or Linux VM available: **no local Linux build**. Linux and
+Windows are covered by CI (`gh workflow run build.yml`, see each lot's notes).
 
 ## Configuration
 
@@ -18,19 +18,19 @@ cmake --build build --target SpectroCraft --parallel 8
 ctest --test-dir build -j 8 -V
 ```
 
-Archives OpenVINO 2024.6 (arm64) et whisper.cpp b5454 déjà téléchargées (cache local), modèles de test
-`denseunet`, `deepfilternet2`, `whisper-base` déjà présents : les tests IA ont tourné réellement.
+OpenVINO 2024.6 (arm64) and whisper.cpp b5454 archives already downloaded (local cache), test models
+`denseunet`, `deepfilternet2`, `whisper-base` already present: the AI tests actually ran.
 
-## Résultat
+## Result
 
-- Build : OK, sans erreur.
-- ctest : **10/10** (2 fixtures + 8 shards), 67 s.
-- Vérifications : **4859/4859 checks passed** (somme des 8 shards).
-- 9 tests ou parties sautés, tous attendus sur macOS :
-  - change gain dialog / drawing key shortcuts / scale dialog focus : focus clavier exigeant le premier plan OS ;
-  - playback chain, rendering backend : Windows seulement ;
-  - scfft AVX2 (×2) : pas d'AVX2 sur arm64 ;
-  - super-res cli args : CLI audio.cpp Windows seulement ;
-  - video audio extraction : build sans FFmpeg.
+- Build: OK, no errors.
+- ctest: **10/10** (2 fixtures + 8 shards), 67 s.
+- Checks: **4859/4859 checks passed** (sum over the 8 shards).
+- 9 tests or parts skipped, all expected on macOS:
+  - change gain dialog / drawing key shortcuts / scale dialog focus: keyboard focus requires the OS foreground;
+  - playback chain, rendering backend: Windows only;
+  - scfft AVX2 (×2): no AVX2 on arm64;
+  - super-res cli args: audio.cpp CLI is Windows only;
+  - video audio extraction: build without FFmpeg.
 
-Aucun échec préexistant.
+No pre-existing failures.

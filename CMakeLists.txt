@@ -64,7 +64,7 @@ add_custom_target(sc_bump_version ALL
             -P ${CMAKE_SOURCE_DIR}/cmake/bump_version.cmake
     BYPRODUCTS ${SC_GENERATED_DIR}/Version.h ${SC_GENERATED_DIR}/SC_VERSION.txt)
 
-# Loopback control server + --control + Window > Allow AI control (RAPPORT
+# Loopback control server + --control + Window > Allow AI control (REPORT
 # §9 Q14). OFF builds keep the registry, --json and action replay.
 option(SC_ENABLE_CONTROL "Build the AI-control server (localhost, opt-in at run time)" ON)
 if (SC_ENABLE_CONTROL)
@@ -73,7 +73,7 @@ else()
     set(SC_CONTROL_DEFINE 0)
 endif()
 
-# AI control (docs/ai-control/RAPPORT.md §5): command registry, session
+# AI control (docs/ai-control/REPORT.md §5): command registry, session
 # journal, jobs, --json CLI. Shared by the app and the console test target.
 set(SC_CONTROL_SOURCES
     ${CMAKE_SOURCE_DIR}/src/control/CommandRegistry.cpp

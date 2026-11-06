@@ -1,4 +1,4 @@
-"""MCP tools generated from ``app.describe`` (RAPPORT.md 6.2 and 7.3).
+"""MCP tools generated from ``app.describe`` (REPORT.md 6.2 and 7.3).
 
 Every command published by the app becomes one tool whose ``inputSchema`` is
 the command's ``params`` JSON Schema, kept as is; the adapter only adds three

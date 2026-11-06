@@ -1,57 +1,57 @@
-# Lot 4 — mesures chiffrées exportables
+# Lot 4 — exportable numeric measures
 
-Statut : **fait**. Le module de calcul `sc::measures` (extrait de `FFTAnalysisView`, égalité bit à bit
-avec le panneau, nouvelles mesures levels/peaks/harmonics) a été livré par l'agent parallèle
-`ai-control-measures` (voir `lot-4-core.md`) ; ce fichier couvre la fusion et les commandes.
+Status: **done**. The computation module `sc::measures` (extracted from `FFTAnalysisView`, bit-for-bit
+equal to the panel, new levels/peaks/harmonics measures) was delivered by the parallel agent
+`ai-control-measures` (see `lot-4-core.md`); this file covers the merge and the commands.
 
-## Fusion
+## Merge
 
-`ai-control-measures` fusionnée à `8d4ace9` (conflit trivial `tests/UnitTests.cpp`, deux côtés gardés).
+`ai-control-measures` merged at `8d4ace9` (trivial conflict in `tests/UnitTests.cpp`, both sides kept).
 
-## Commandes (`src/control/commands/Measure.cpp`)
+## Commands (`src/control/commands/Measure.cpp`)
 
-| Commande | Fonction | Notes |
+| Command | Function | Notes |
 |---|---|---|
-| `measure.levels {start, end, channels, clipThreshold}` | `measures::levels` | RMS/crête/instant de crête/facteur de crête/DC/min/max/écrêtés par canal, `unit:"dBFS"`, `calibration{unit, fullScale[], levelOffsetDb[], calibrated[]}`, et si calibré `rmsAbsDb/peakAbsDb/absUnit/rmsPhysical/peakPhysical` |
-| `measure.spectrum {…, fftSize, window, overlap, values, peaks{…}}` | `measures::spectrum` + `peaks` | défaut `fftSize` = celui du panneau (`settings.fftLocalN`) pour retrouver les chiffres de l'écran ; refus au-delà de 1 M valeurs inline |
-| `measure.thirdOctave {…, mode, order, fftSize, window}` | `measures::thirdOctave` | défaut = choix du panneau : `reference` (dB-SPL) pour un fichier en Pascal, `iec` sinon ; bandes vides `-999` ; ordre ∉ {1,2,3,4,5,10,20,30,40} → `invalid_params` |
-| `measure.harmonics {…, channel, fundamentalHz | anchorHz+n | auto, maxK, search, toleranceHz}` | `measures::harmonics` | THD si la fondamentale est valide ; pas de fondamentale → `failed` avec indice |
-| `measure.curve {kind: rms|peak|ampVsTime|freqVsTime|ampVsFreq, …}` | `levelCurve` / `timeCurve` / `spectrumCurve` | `track`, `smooth`, `useSpectralSelection` (copie de la sélection spectrale) |
-| `measure.probe {t, f, channel}` | `SpectralEngine::probeMagnitude` | thread de messages (cache de tuiles partagé avec les vues), réglages du spectrogramme |
-| `measure.spectrogramData {…, fftSize, hop, fMax, format}` | `SpectralEngine::computeTile` sur une **instance locale** (aucun cache partagé : sûr sur un worker) | inline ≤ 1 M valeurs, sinon fichier `f32` (lisible par `numpy.fromfile(p,'<f4').reshape(frames,bins)`) ou `csv` dans `<temp>/SpectroCraft/control-out/` ; refus au-delà de 50 M valeurs |
-| `export.spectrogram {path, start, end, width, height, overlays, confirm}` | `renderToPng` (instance locale) | job ; `confirm` si la cible existe ; **overlays → `needs_ui`** (voir écarts) |
-| `markers.exportCsv {path, confirm}` / `markers.importCsv {path}` | `MarkerManager::saveCsv/loadCsv` | périmètre de chemins |
+| `measure.levels {start, end, channels, clipThreshold}` | `measures::levels` | RMS/peak/peak time/crest factor/DC/min/max/clipped per channel, `unit:"dBFS"`, `calibration{unit, fullScale[], levelOffsetDb[], calibrated[]}`, and if calibrated `rmsAbsDb/peakAbsDb/absUnit/rmsPhysical/peakPhysical` |
+| `measure.spectrum {…, fftSize, window, overlap, values, peaks{…}}` | `measures::spectrum` + `peaks` | default `fftSize` = the panel's (`settings.fftLocalN`) so the on-screen numbers are reproduced; refused beyond 1 M inline values |
+| `measure.thirdOctave {…, mode, order, fftSize, window}` | `measures::thirdOctave` | default = the panel's choice: `reference` (dB-SPL) for a file in Pascal, `iec` otherwise; empty bands `-999`; order ∉ {1,2,3,4,5,10,20,30,40} → `invalid_params` |
+| `measure.harmonics {…, channel, fundamentalHz | anchorHz+n | auto, maxK, search, toleranceHz}` | `measures::harmonics` | THD if the fundamental is valid; no fundamental → `failed` with a hint |
+| `measure.curve {kind: rms|peak|ampVsTime|freqVsTime|ampVsFreq, …}` | `levelCurve` / `timeCurve` / `spectrumCurve` | `track`, `smooth`, `useSpectralSelection` (copy of the spectral selection) |
+| `measure.probe {t, f, channel}` | `SpectralEngine::probeMagnitude` | message thread (tile cache shared with the views), spectrogram settings |
+| `measure.spectrogramData {…, fftSize, hop, fMax, format}` | `SpectralEngine::computeTile` on a **local instance** (no shared cache: safe on a worker) | inline ≤ 1 M values, otherwise an `f32` file (readable with `numpy.fromfile(p,'<f4').reshape(frames,bins)`) or `csv` in `<temp>/SpectroCraft/control-out/`; refused beyond 50 M values |
+| `export.spectrogram {path, start, end, width, height, overlays, confirm}` | `renderToPng` (local instance) | job; `confirm` if the target exists; **overlays → `needs_ui`** (see deviations) |
+| `markers.exportCsv {path, confirm}` / `markers.importCsv {path}` | `MarkerManager::saveCsv/loadCsv` | path perimeter |
 
-Exécution : petite région → inline sur le thread de messages ; grosse (> 20 M échantillons-canaux pour
-`levels`, 5 M pour les analyses FFT), mode référence de 1/3 d'octave, spectrogramme, export → **job
-exclusif** (`mutating:true`) : pendant qu'il lit le document, ni édition ni fermeture ne passent (garde
-busy du registre) ; et un job de mesure refuse de démarrer à côté d'un job mutant (les commandes
-`measure.*` sont `Query`, donc la garde générale ne les arrête pas). Le worker ne reçoit qu'une
-référence à l'`AudioEngine` (lecture `readSamples`, thread-safe) et une **copie** de la calibration.
+Execution: small region → inline on the message thread; large (> 20 M sample-channels for
+`levels`, 5 M for the FFT analyses), 1/3-octave reference mode, spectrogram, export → **exclusive
+job** (`mutating:true`): while it reads the document, neither edits nor closing get through (the
+registry's busy guard); and a measure job refuses to start alongside a mutating job (the
+`measure.*` commands are `Query`, so the general guard does not stop them). The worker receives only a
+reference to the `AudioEngine` (`readSamples` reads, thread-safe) and a **copy** of the calibration.
 
-## Tests (`tests/regression/measure_commands.inc`, « regression: measure_commands »)
+## Tests (`tests/regression/measure_commands.inc`, "regression: measure_commands")
 
-Sinus pleine échelle sur un bin exact (~1 kHz), fichier calibré 1 Pa :
-`measure.levels` crête 0 dBFS, RMS −3,01 dBFS, **90,97 dB-SPL** ; `measure.spectrum` **identique à
-`sc::measures::spectrum` (le code du panneau)** au 1/1000 dB près (arrondi JSON), bin du ton −3,01 dB,
-pic le plus fort au ton ; `measure.thirdOctave` mode référence en job, unité dB-SPL, **bande 1 kHz
-≈ 91 dB-SPL** (même référence que les tests dB-SPL du 2026-11-03), ordre invalide refusé ;
-harmoniques ; courbes rms (−3,01 dBFS par fenêtre) et ampVsFreq ; probe ; spectrogramme inline et
-fichier f32 de taille frames×bins×4 ; export PNG, `confirm_required`, `needs_ui` pour les overlays ;
-aller-retour CSV des marqueurs ; job de mesure refusé pendant un job mutant.
+Full-scale sine on an exact bin (~1 kHz), file calibrated to 1 Pa:
+`measure.levels` peak 0 dBFS, RMS −3.01 dBFS, **90.97 dB-SPL**; `measure.spectrum` **identical to
+`sc::measures::spectrum` (the panel's code)** to within 1/1000 dB (JSON rounding), tone bin −3.01 dB,
+strongest peak at the tone; `measure.thirdOctave` reference mode as a job, unit dB-SPL, **1 kHz band
+≈ 91 dB-SPL** (same reference as the dB-SPL tests of 2026-11-03), invalid order refused;
+harmonics; rms curves (−3.01 dBFS per window) and ampVsFreq; probe; spectrogram inline and
+f32 file of size frames×bins×4; PNG export, `confirm_required`, `needs_ui` for the overlays;
+marker CSV round trip; measure job refused during a mutating job.
 
-Résultats (macOS arm64, Debug + IA) : « measure,control » 1018/1018 ; suite complète **5998/5998**.
+Results (macOS arm64, Debug + AI): "measure,control" 1018/1018; full suite **5998/5998**.
 
-## Écarts
+## Deviations
 
-- `export.spectrogram` avec overlays : la commande répond `needs_ui` **même dans l'app ouverte**.
-  `MainWindow::preparePngExport` (`SpectralView::PngExportJob`) n'est pas encore exposé par `UiBridge` ;
-  l'export sans overlays (rendu headless identique à `--test-spectral`) est disponible partout.
-  À faire au lot 6 avec la migration de `FileExportSpectral`.
-- Pas d'écriture `.npy` (optionnelle au plan) : `f32` + forme suffisent.
-- `measure.probe` ne donne pas `frameSec` (la fonction de `SpectralEngine` ne l'expose pas).
+- `export.spectrogram` with overlays: the command answers `needs_ui` **even in the open app**.
+  `MainWindow::preparePngExport` (`SpectralView::PngExportJob`) is not yet exposed by `UiBridge`;
+  export without overlays (headless rendering identical to `--test-spectral`) is available everywhere.
+  To do in lot 6 with the migration of `FileExportSpectral`.
+- No `.npy` writing (optional in the plan): `f32` + shape is enough.
+- `measure.probe` does not give `frameSec` (the `SpectralEngine` function does not expose it).
 
-## Consignes
+## Instructions
 
-- Les valeurs « de l'écran » supposent les mêmes réglages que le panneau (taille FFT, fenêtre) : les
-  défauts des commandes lisent les réglages courants de l'app.
+- The "on-screen" values assume the same settings as the panel (FFT size, window): the
+  commands' defaults read the app's current settings.

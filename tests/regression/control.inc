@@ -1,4 +1,4 @@
-// AI control (docs/ai-control/RAPPORT.md §5-§6): command registry, step.run,
+// AI control (docs/ai-control/REPORT.md §5-§6): command registry, step.run,
 // history, journal, --json CLI. Included by tests/UnitTests.cpp; uses its
 // helpers (CHECK, scSkip, writeWav, makeTempFile, scPumpUntil, ...).
 #include "control/CommandRegistry.h"
@@ -401,7 +401,7 @@ static void testControlDescribe()
                               "job.get", "job.cancel" })
         CHECK (ids.contains (must), juce::String ("describe: lot-0 command present: ") + must);
 
-    // Spot checks of the generated schema (RAPPORT §6.2 shape).
+    // Spot checks of the generated schema (REPORT §6.2 shape).
     const auto* run = reg.find ("step.run");
     if (run != nullptr)
     {

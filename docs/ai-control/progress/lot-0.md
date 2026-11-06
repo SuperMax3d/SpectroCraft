@@ -1,112 +1,112 @@
-# Lot 0 — registre minimal, `step.run`, journal de session, `--json`, correctifs Actions
+# Lot 0 — minimal registry, `step.run`, session journal, `--json`, Actions fixes
 
-Statut : **fait** (macOS arm64, build Debug avec IA). Linux/Windows : voir le CI (note en fin de fichier).
+Status: **done** (macOS arm64, Debug build with AI). Linux/Windows: see CI (note at the end of the file).
 
 ## Commits
 
-1. `f1cfa62` — *Fix action-step replay defects and worker-side AI commits* : **uniquement** les correctifs
-   indépendants, livrables à SuperMax3d en PR séparée (Q12) :
-   - `applyActionStep` : `case 'e'` (`envelope`) ajouté ;
-   - étape `noiseSuppress` : `device` (param optionnel, sinon `app.aiDevicePref`) résolu par
-     `sc::resolveAiDevice` contre `OvRuntime::devices()` au lieu du littéral `"auto"` ; `df3PostFilter`,
-     `copyNoise`, `autoDownload` honorés ;
-   - build sans IA : `noiseSuppress` échoue (« no AI support ») au lieu d'exécuter `normalize` ;
-   - dispatch durci : type inconnu rejeté avant le `switch`, chaque `case` compare le nom complet
-     (« sxxx » lançait `silence`) ;
-   - `Application::transcribe` et la branche par défaut de `Application::noiseSuppress` committent sur le
-     thread de messages (`callAsync` + `WaitableEvent`, helper `commitOnMessageThread`), comme la branche
-     `copyNoise` et `runPythonScript`. La transcription n'est stockée que si le document est encore ouvert.
-   - Tests : `testApplyActionSteps` (envelope, types sosies, NS sans IA) et
-     `testRegAiNoiseSuppressCommitHop` (`regression/ai.inc`) qui **prouve** l'attente du thread de messages
-     (worker bloqué tant que le thread de messages ne pompe pas) et rejoue NS avec `device:"auto"`.
-2. Commit du lot 0 proprement dit (registre, commandes, `--json`, tests) — voir `git log`.
+1. `f1cfa62` — *Fix action-step replay defects and worker-side AI commits*: **only** the independent
+   fixes, deliverable to SuperMax3d as a separate PR (Q12):
+   - `applyActionStep`: `case 'e'` (`envelope`) added;
+   - `noiseSuppress` step: `device` (optional param, otherwise `app.aiDevicePref`) resolved by
+     `sc::resolveAiDevice` against `OvRuntime::devices()` instead of the literal `"auto"`; `df3PostFilter`,
+     `copyNoise`, `autoDownload` honoured;
+   - build without AI: `noiseSuppress` fails ("no AI support") instead of running `normalize`;
+   - hardened dispatch: unknown type rejected before the `switch`, each `case` compares the full name
+     ("sxxx" launched `silence`);
+   - `Application::transcribe` and the default branch of `Application::noiseSuppress` commit on the
+     message thread (`callAsync` + `WaitableEvent`, helper `commitOnMessageThread`), like the
+     `copyNoise` branch and `runPythonScript`. The transcription is only stored if the document is still open.
+   - Tests: `testApplyActionSteps` (envelope, look-alike types, NS without AI) and
+     `testRegAiNoiseSuppressCommitHop` (`regression/ai.inc`), which **proves** the wait on the message thread
+     (worker blocked as long as the message thread is not pumping) and replays NS with `device:"auto"`.
+2. The lot 0 commit proper (registry, commands, `--json`, tests) — see `git log`.
 
-## Ce qui a été fait
+## What was done
 
-Nouveaux fichiers (`include/control/`, `src/control/`) :
+New files (`include/control/`, `src/control/`):
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| `CommandRegistry.h/.cpp` | `Spec {id, title, category, params (ParamSpec), flags, aliases, handler}`, `ParamSpec` → validation **et** JSON Schema draft 2020-12 restreint (une seule source), `Request::parse`, `invoke()` (ordre du §5.2 : résolution du doc → drapeaux → garde busy → bascule de doc temporaire → `ScopedCapture` → handler → journal → `refreshAfterEdit` → enveloppe) |
-| `ControlState.h/.cpp` | état par `Application` : `Journal`, `JobManager`, `UiBridge*`, puits d'événements ; `Application::control()` (créé à la demande, arrêté en premier par `~Application`) |
-| `Journal.h/.cpp` | anneau 10 000 entrées, `seq` monotone, `kind ∈ command|step|history|job`, thread-safe, miroir JSONL prévu (lot 5) |
-| `JobManager.h/.cpp` | jobs `j-<n>` (un `std::thread` chacun, jamais détaché, joint à l'arrêt), un seul mutant à la fois, progression throttlée, `JobControl::onMessageThread` (commit par `callAsync`, attente bornée : abandon à l'arrêt) |
-| `UiBridge.h` | interface (implémentée par `MainWindow` au lot 1 ; `nullptr` en CLI/tests) |
-| `StateJson.h/.cpp` | `app.state`, résumé de doc, `history.list` (sémantique `HistoryPanel`, jamais `oldData/newData`), `helloInfo`, version depuis `Version.h` |
-| `JsonCli.h/.cpp` | `--json <f|->`, `--json-out`, `--use-user-settings`, `--list-commands [--markdown]` ; session ligne à ligne (`runJsonSession`, testable sans processus) |
+| `CommandRegistry.h/.cpp` | `Spec {id, title, category, params (ParamSpec), flags, aliases, handler}`, `ParamSpec` → validation **and** restricted JSON Schema draft 2020-12 (a single source), `Request::parse`, `invoke()` (order of §5.2: doc resolution → flags → busy guard → temporary doc switch → `ScopedCapture` → handler → journal → `refreshAfterEdit` → envelope) |
+| `ControlState.h/.cpp` | per-`Application` state: `Journal`, `JobManager`, `UiBridge*`, event sink; `Application::control()` (created on demand, stopped first by `~Application`) |
+| `Journal.h/.cpp` | ring of 10,000 entries, monotonic `seq`, `kind ∈ command|step|history|job`, thread-safe, JSONL mirror planned (lot 5) |
+| `JobManager.h/.cpp` | jobs `j-<n>` (one `std::thread` each, never detached, joined on shutdown), only one mutating job at a time, throttled progress, `JobControl::onMessageThread` (commit via `callAsync`, bounded wait: abandoned on shutdown) |
+| `UiBridge.h` | interface (implemented by `MainWindow` in lot 1; `nullptr` in CLI/tests) |
+| `StateJson.h/.cpp` | `app.state`, doc summary, `history.list` (`HistoryPanel` semantics, never `oldData/newData`), `helloInfo`, version from `Version.h` |
+| `JsonCli.h/.cpp` | `--json <f|->`, `--json-out`, `--use-user-settings`, `--list-commands [--markdown]`; line-by-line session (`runJsonSession`, testable without a process) |
 | `commands/Core.cpp` | `app.describe`, `app.state`, `doc.list/open/activate/meta/saveAs/save`, `selection.set/all`, `journal.read`, `debug.sleep` |
-| `commands/History.cpp` | `history.list/undo/redo/jumpTo` (échec d'`applyPatch` → `failed {historyCleared:true}`) |
-| `commands/Steps.cpp` | `step.run`, `steps.run`, `step.validate` (les 20 types, `select` explicite, `channels[]`) |
-| `commands/Jobs.cpp` | `job.get/cancel/list` (annulation réservée au client lanceur sauf `force`) |
+| `commands/History.cpp` | `history.list/undo/redo/jumpTo` (`applyPatch` failure → `failed {historyCleared:true}`) |
+| `commands/Steps.cpp` | `step.run`, `steps.run`, `step.validate` (the 20 types, explicit `select`, `channels[]`) |
+| `commands/Jobs.cpp` | `job.get/cancel/list` (cancellation reserved to the launching client unless `force`) |
 
-Modifications : `FileDoc::id` (id stable, atomique) ; `AlertGate::ScopedCapture` (profondeur + liste capturée,
-ne touche jamais au drapeau headless) ; `Application::recordActionStep` journalise **avant** la garde
-`actionRec.active` ; `undoSteps/redoSteps` journalisent undo/redo/vidage ; `Application::saveDocument`
-(+ `beginSave/completeSave`, logique extraite de `MainWindow::runSaveAsync`) ; `Main.cpp` : branche
-`--json/--list-commands`, **flag inconnu → code 2** (avant : ignoré, l'UI démarrait) ; CMake :
-`SC_CONTROL_SOURCES` partagé par l'app et `SpectroCraftTests`.
+Changes: `FileDoc::id` (stable, atomic id); `AlertGate::ScopedCapture` (depth + captured list,
+never touches the headless flag); `Application::recordActionStep` journals **before** the
+`actionRec.active` guard; `undoSteps/redoSteps` journal undo/redo/clearing; `Application::saveDocument`
+(+ `beginSave/completeSave`, logic extracted from `MainWindow::runSaveAsync`); `Main.cpp`: branch for
+`--json/--list-commands`, **unknown flag → exit code 2** (before: ignored, the UI started); CMake:
+`SC_CONTROL_SOURCES` shared by the app and `SpectroCraftTests`.
 
-## Tests ajoutés (`tests/regression/control.inc`, « regression: control »)
+## Tests added (`tests/regression/control.inc`, "regression: control")
 
-- `testControlRegistry` : les **20** `actionTypes` passent `step.validate` puis `step.run` sur une plage
-  explicite et un canal (IA : `denseunet` avec `device:"auto"`, `whisper-base`, Python : `Threshold.py`
-  — skip explicite si modèle/interpréteur absent ; sans IA : `unsupported_build`).
-- `testControlDocsHistory` : `no_document`, chemins relatifs refusés, ids stables, `unknown_doc`,
-  **édition d'un document non actif** (`docSwitched`, actif et sélection restaurés), `selection.set` sur doc
-  non actif, `history.list` (jointure opId/params/source), undo/redo/jumpTo (pile redo conservée),
-  `redoDiscarded`, `doc.saveAs` (`confirm_required` puis écriture), `doc.save` exige `confirm`, `doc.meta`,
-  journal (commandes, étapes, undo/redo, source `menu`), `ScopedCapture`, `busy` pendant un job mutant,
-  `job.cancel`, `job_not_found`, arrêt des jobs < 2 s à la destruction.
-- `testControlDescribe` : chaque commande a un schéma objet fermé ; ses `params` minimaux générés passent la
-  validation ; chaque `invalid_params` cite un `path` présent dans le schéma ; contrôles min/max/enum/entier/
-  items/plage.
-- `testControlJsonCli` : streaming ligne à ligne (chaque ligne répondue avant lecture de la suivante),
-  codes 0/1/2, `continueOnError`, JSON illisible → 2, ligne > 1 Mio → 2, **timeout d'un LongRunning**
-  (`debug.sleep` annulé et rapporté `timeout` en < 5 s) ; puis l'**exécutable réel** (`--json fichier
-  --json-out fichier` avec espaces dans le chemin, codes 0/1/2, flag inconnu → 2, `--list-commands --markdown`).
+- `testControlRegistry`: all **20** `actionTypes` pass `step.validate` then `step.run` on an
+  explicit range and one channel (AI: `denseunet` with `device:"auto"`, `whisper-base`, Python: `Threshold.py`
+  — explicit skip if model/interpreter is missing; without AI: `unsupported_build`).
+- `testControlDocsHistory`: `no_document`, relative paths refused, stable ids, `unknown_doc`,
+  **editing a non-active document** (`docSwitched`, active document and selection restored), `selection.set` on a
+  non-active doc, `history.list` (opId/params/source join), undo/redo/jumpTo (redo stack kept),
+  `redoDiscarded`, `doc.saveAs` (`confirm_required` then write), `doc.save` requires `confirm`, `doc.meta`,
+  journal (commands, steps, undo/redo, source `menu`), `ScopedCapture`, `busy` during a mutating job,
+  `job.cancel`, `job_not_found`, jobs stopped in < 2 s on destruction.
+- `testControlDescribe`: every command has a closed object schema; its generated minimal `params` pass
+  validation; every `invalid_params` cites a `path` present in the schema; min/max/enum/integer/
+  items/range checks.
+- `testControlJsonCli`: line-by-line streaming (each line answered before the next one is read),
+  exit codes 0/1/2, `continueOnError`, unreadable JSON → 2, line > 1 MiB → 2, **timeout of a LongRunning**
+  (`debug.sleep` cancelled and reported as `timeout` in < 5 s); then the **real executable** (`--json file
+  --json-out file` with spaces in the path, exit codes 0/1/2, unknown flag → 2, `--list-commands --markdown`).
 
-## Résultats (macOS arm64, Debug + IA, `ctest -j 8`)
+## Results (macOS arm64, Debug + AI, `ctest -j 8`)
 
-- « regression: control » seul : **431/431** (avec `apply action steps`), aucun skip (modèles et Python présents).
-- Suite complète : **5283/5284** checks (référence : 4859/4859). L'unique échec,
-  `single instance mode: empty list acknowledged`, est le délai fixe de 2 s du tube FileForward sous la
-  charge de la machine (cinq agents compilent et testent en parallèle sur ce Mac) ; il passe 5 fois sur 5
-  seul, ne touche aucun code modifié ici, et était déjà apparu une fois sur l'arbre des seuls correctifs.
-- **Correctif d'infrastructure de test** : le dossier temporaire de la suite s'appelait
-  `SpectroCraftTests-tmp-shard<k>` pour **tous** les processus de la machine ; deux checkouts testés en
-  même temps (ici : les autres agents) s'effaçaient mutuellement leurs fichiers en cours de run (échecs
-  « file loaded », « doc.open », segfault d'un shard). Il porte maintenant le PID
+- "regression: control" alone: **431/431** (with `apply action steps`), no skips (models and Python present).
+- Full suite: **5283/5284** checks (baseline: 4859/4859). The only failure,
+  `single instance mode: empty list acknowledged`, is the fixed 2 s delay of the FileForward pipe under
+  machine load (five agents are building and testing in parallel on this Mac); it passes 5 times out of 5
+  on its own, touches no code changed here, and had already appeared once on the fixes-only tree.
+- **Test infrastructure fix**: the suite's temporary folder was named
+  `SpectroCraftTests-tmp-shard<k>` for **all** processes on the machine; two checkouts tested at
+  the same time (here: the other agents) deleted each other's files mid-run (failures
+  "file loaded", "doc.open", a shard segfault). It now includes the PID
   (`...-shard<k>-<pid>`, `tests/UnitTests.cpp`, `scTestTempDir`).
 
-## Écarts par rapport au plan
+## Deviations from the plan
 
-- **JobManager avancé au lot 0** (prévu au lot 1) : sans lui, impossible de tester « timeout d'un
-  LongRunning » exigé par `testControlJsonCli`. Une commande de test `debug.sleep` (catégorie `debug`,
-  drapeau `Internal`, cachée de `app.describe` par défaut) sert de job témoin.
-- `doc.save` (en place, `confirm` obligatoire) ajouté dès le lot 0 à côté de `doc.saveAs` (même code).
-- `doc.activate`, `job.get/cancel/list` ajoutés dès le lot 0 (bon marché, utiles au CLI).
-- `history.list` : avant le lot 5, `opId/params/source/ts` viennent d'une **jointure best-effort** avec le
-  journal (profondeur undo + description) ; elle se trompe si la pile a été tronquée à 64 niveaux.
-- La liste des états futurs est dans l'**ordre de redo** (le prochain redo d'abord). Constat : le
-  History panel (`HistoryPanel::refresh`, `src/Panels.cpp:920-925`) liste `redoAt(0..n)`, c'est-à-dire
-  l'ordre inverse : la première ligne « future » affichée n'est pas celle que rejoue un clic dessus.
-  Non corrigé ici (UI, à confirmer avec Max) ; à traiter au lot 5 qui retouche ce panneau.
-- Pas de build Linux local (machine macOS, voir `baseline-macos.md`).
+- **JobManager brought forward to lot 0** (planned for lot 1): without it, the "timeout of a
+  LongRunning" test required by `testControlJsonCli` is impossible. A test command `debug.sleep` (category `debug`,
+  flag `Internal`, hidden from `app.describe` by default) serves as the reference job.
+- `doc.save` (in place, `confirm` mandatory) added already in lot 0 alongside `doc.saveAs` (same code).
+- `doc.activate`, `job.get/cancel/list` added already in lot 0 (cheap, useful for the CLI).
+- `history.list`: before lot 5, `opId/params/source/ts` come from a **best-effort join** with the
+  journal (undo depth + description); it gets it wrong if the stack has been truncated at 64 levels.
+- The list of future states is in **redo order** (next redo first). Finding: the
+  History panel (`HistoryPanel::refresh`, `src/Panels.cpp:920-925`) lists `redoAt(0..n)`, i.e.
+  the reverse order: the first "future" row displayed is not the one that clicking it replays.
+  Not fixed here (UI, to confirm with Max); to be handled in lot 5, which reworks this panel.
+- No local Linux build (macOS machine, see `baseline-macos.md`).
 
-## Dettes / limites connues
+## Debts / known limitations
 
-- `step.run` est **synchrone** au lot 0 : en GUI, un `noiseSuppress`/`transcribe`/`python` long bloquerait
-  le thread de messages (le serveur du lot 1 répondrait `timeout`). Le lot 1 convertit ces types en jobs.
-- Pas encore de détour « fichier streamé → job » ni de périmètre de chemins (`control_roots`) : lot 1.
-- `recordActionStep` est appelé par les menus **avant** l'édition : une édition qui échoue laisse une
-  entrée `step` dans le journal.
-- Le journal n'a pas encore de fichier JSONL (lot 5).
+- `step.run` is **synchronous** in lot 0: in the GUI, a long `noiseSuppress`/`transcribe`/`python` would block
+  the message thread (the lot 1 server would answer `timeout`). Lot 1 converts these types into jobs.
+- No "streamed file → job" detour yet, and no path perimeter (`control_roots`): lot 1.
+- `recordActionStep` is called by the menus **before** the edit: an edit that fails leaves a
+  `step` entry in the journal.
+- The journal does not have a JSONL file yet (lot 5).
 
-## Consignes pour la suite
+## Instructions for what comes next
 
-- Lot 1 : brancher `ControlState::eventSink` et `Journal::onAppend` sur le serveur ; implémenter `UiBridge`
-  dans `MainWindow` ; convertir les types longs de `step.run` et le détour streamé en jobs via
-  `JobManager::start` + `JobControl::onMessageThread` ; ajouter le périmètre de chemins dans `doc.open`,
+- Lot 1: wire `ControlState::eventSink` and `Journal::onAppend` to the server; implement `UiBridge`
+  in `MainWindow`; convert the long `step.run` types and the streamed detour into jobs via
+  `JobManager::start` + `JobControl::onMessageThread`; add the path perimeter to `doc.open`,
   `doc.saveAs`, `python`.
-- Toute nouvelle commande : un `Spec` avec ses `ParamSpec` (le schéma suit) et, si lecture pure, le
-  drapeau `Query` (non journalisée en cas de succès).
+- Any new command: a `Spec` with its `ParamSpec`s (the schema follows) and, if it is a pure read, the
+  `Query` flag (not journaled on success).

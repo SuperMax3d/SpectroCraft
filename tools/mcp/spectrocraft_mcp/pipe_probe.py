@@ -1,4 +1,4 @@
-"""Probe the ``SpectroCraft.FileForward`` single-instance pipe (RAPPORT.md 7.3).
+"""Probe the ``SpectroCraft.FileForward`` single-instance pipe (REPORT.md 7.3).
 
 Every running SpectroCraft hosts this pipe, with or without AI control
 (``src/SingleInstance.cpp``). Sending a message with zero paths (``int32 0``)

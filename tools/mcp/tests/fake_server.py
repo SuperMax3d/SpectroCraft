@@ -1,4 +1,4 @@
-"""In-process fake of the SpectroCraft control server (RAPPORT.md section 6).
+"""In-process fake of the SpectroCraft control server (REPORT.md section 6).
 
 Implements the NDJSON envelope for the commands the adapter calls: token
 check in session.hello, routing by id (replies may be out of order), events

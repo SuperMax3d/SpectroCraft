@@ -1,4 +1,4 @@
-"""SpectroCraft MCP server (stdio) for Claude Code (RAPPORT.md 7).
+"""SpectroCraft MCP server (stdio) for Claude Code (REPORT.md 7).
 
 Fixed tools (section 7.3) are FastMCP functions. Dynamic tools, one per
 command of ``app.describe``, are served by overriding ``FastMCP.list_tools``

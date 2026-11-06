@@ -4,7 +4,7 @@
 // Every externally drivable feature is one Spec { id, params, flags, handler }
 // registered here. Four facades consume it: the loopback control server
 // (open app), the --json CLI mode (headless), action replay and, later, the
-// menus. See docs/ai-control/RAPPORT.md §5-§6 for the protocol.
+// menus. See docs/ai-control/REPORT.md §5-§6 for the protocol.
 //
 // Threading: invoke() and every handler run on the JUCE message thread.
 // Long work goes to a job (JobManager) that commits back to the message thread.
@@ -77,7 +77,7 @@ struct ParamSpec
 
 inline ParamSpec P (const juce::String& name, PType type) { ParamSpec s; s.name = name; s.type = type; return s; }
 
-/** Closed error code set (RAPPORT §6.1). */
+/** Closed error code set (REPORT §6.1). */
 namespace err {
 constexpr const char* unauthorized        = "unauthorized";
 constexpr const char* unknownCmd          = "unknown_cmd";

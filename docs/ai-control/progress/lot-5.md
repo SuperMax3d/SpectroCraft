@@ -1,75 +1,75 @@
-# Lot 5 — journal persistant, Patch enrichi, événements avec rejeu
+# Lot 5 — persistent journal, enriched Patch, events with replay
 
-Statut : **fait**.
+Status: **done**.
 
-## Ce qui a été fait
+## What was done
 
-- **`Patch` enrichi** (`include/UndoPatch.h`) : `seq` (monotone par document), `timestampMs`, `opId`,
-  `params` (JSON, métadonnées), `source` (`menu`, `api:<client>`, `cli`, `test`). Posés par
-  `UndoManager::record` (le seul point d'enregistrement, §3 #7) depuis un **contexte d'opération**
-  (`sc::undoctx`, `include/UndoManager.h`) :
-  - une portée sur le thread courant (`undoctx::Scoped`) : posée par `CommandRegistry::invoke` autour
-    du handler (`opId` = id de la commande, `params` = ses paramètres sans jeton, `source` = client)
-    et par `ScopedInvokeSource` autour des commits de jobs ;
-  - sinon une opération « en attente » annoncée par `Application::recordActionStep` (dialogues/menus :
-    type d'étape + params, source `menu`) et prise par le prochain `record()` **sur n'importe quel
-    thread** (l'édition peut tourner sur un worker), valable 60 s ; les jobs IA/Python l'utilisent aussi
-    (leur patch est enregistré dans le hop de commit de l'`Application`, hors de toute portée) ;
-  - sinon `opId:"menu"`, `source:"menu"` (couper/coller, souris…).
-  La pile en attente ne garde que des chaînes (un `static` ne doit pas posséder de `juce::var` : le
-  détecteur de fuites de JUCE s'en plaignait).
-- **Journal complet** (`ControlState::pollDocuments`) : à chaque commande (avant/après), à chaque fin de
-  job, et à 30 Hz par le minuteur de la fenêtre **quand le serveur de contrôle tourne** :
-  - `history` `recorded` par nouveau patch (`patchSeq, ts, opId, params, source, description,
-    undoDepth, redoDepth`) — y compris les éditions à la souris ; `undo`/`redo` (déjà journalisés par
-    `undoSteps/redoSteps`) ; `cleared` avec raison (`undo failed`, `redo failed`, `resample` déduit d'un
-    changement de fréquence, `unknown`) ;
-  - `meta` `changed` quand le compteur `metaDirty` d'un document bouge (marqueurs, sélections, dessins,
-    tables, transcription : on donne les comptes, jamais le contenu) ;
+- **Enriched `Patch`** (`include/UndoPatch.h`): `seq` (monotonic per document), `timestampMs`, `opId`,
+  `params` (JSON, metadata), `source` (`menu`, `api:<client>`, `cli`, `test`). Set by
+  `UndoManager::record` (the only recording point, §3 #7) from an **operation context**
+  (`sc::undoctx`, `include/UndoManager.h`):
+  - a scope on the current thread (`undoctx::Scoped`): set by `CommandRegistry::invoke` around
+    the handler (`opId` = command id, `params` = its parameters without the token, `source` = client)
+    and by `ScopedInvokeSource` around job commits;
+  - otherwise a "pending" operation announced by `Application::recordActionStep` (dialogs/menus:
+    step type + params, source `menu`) and taken by the next `record()` **on any
+    thread** (the edit may run on a worker), valid for 60 s; the AI/Python jobs use it too
+    (their patch is recorded in the `Application`'s commit hop, outside any scope);
+  - otherwise `opId:"menu"`, `source:"menu"` (cut/paste, mouse…).
+  The pending stack keeps only strings (a `static` must not own a `juce::var`: JUCE's
+  leak detector complained about it).
+- **Complete journal** (`ControlState::pollDocuments`): on every command (before/after), at every job
+  end, and at 30 Hz via the window's timer **when the control server is running**:
+  - `history` `recorded` per new patch (`patchSeq, ts, opId, params, source, description,
+    undoDepth, redoDepth`) — including mouse edits; `undo`/`redo` (already journaled by
+    `undoSteps/redoSteps`); `cleared` with a reason (`undo failed`, `redo failed`, `resample` inferred from a
+    sample-rate change, `unknown`);
+  - `meta` `changed` when a document's `metaDirty` counter moves (markers, selections, drawings,
+    tables, transcription: counts are given, never the content);
   - `doc` `opened` / `closed`.
-  Les entrées `command` ne portent plus `undoDepth/description` : c'est l'entrée `history recorded`
-  qui attribue chaque patch.
-- **Persistance JSON Lines** : `<userApplicationDataDirectory>/SpectroCraft/journal/
-  session-<pid>-<yyyy-mm-dd>.jsonl` (macOS `~/Library/SpectroCraft/journal`), activée au démarrage du
-  serveur de contrôle (Q6), rotation au-delà de 64 Mo (`.1.jsonl`), 30 sessions gardées.
-  `journal.read {sinceSeq}` relit le fichier pour les entrées sorties de l'anneau (10 000) et recoud
-  sans trou avec l'anneau ; `file` indique le chemin.
-- **Événements** : une entrée = un événement (`history.changed`, `meta.changed`, `doc.changed`, sinon
-  `journal.entry` si abonné), `seq` = celui du journal ; les événements non journalisés (`job.*`,
-  `doc.changed` des commandes) prennent un `seq` réservé (`Journal::reserveSeq`) dans le même compteur.
-  Rejeu `sinceSeq` à `session.hello` / `events.subscribe` (ordre croissant).
-- **`history.list`** lit `patchSeq/ts/opId/params/source` dans les patches (la jointure best-effort du
-  lot 0 ne sert plus que de repli) ; enveloppe des commandes `Mutates` : **`patchSeq`** du dernier patch.
-- **History tab** : les éditions faites par l'API affichent à droite `hh:mm:ss  api:<client>` (rien ne
-  change pour les éditions faites dans la fenêtre, pour ne pas toucher l'aspect ni les tests de rendu) ;
-  **correctif** : les lignes futures sont listées dans l'ordre de redo (le constat du lot 0 : un clic
-  sur la première ligne future rejouait une autre entrée que celle affichée).
+  The `command` entries no longer carry `undoDepth/description`: it is the `history recorded` entry
+  that attributes each patch.
+- **JSON Lines persistence**: `<userApplicationDataDirectory>/SpectroCraft/journal/
+  session-<pid>-<yyyy-mm-dd>.jsonl` (macOS `~/Library/SpectroCraft/journal`), enabled when the
+  control server starts (Q6), rotation beyond 64 MB (`.1.jsonl`), 30 sessions kept.
+  `journal.read {sinceSeq}` re-reads the file for entries that have left the ring (10,000) and stitches
+  them to the ring without a gap; `file` gives the path.
+- **Events**: one entry = one event (`history.changed`, `meta.changed`, `doc.changed`, otherwise
+  `journal.entry` if subscribed), `seq` = the journal's; non-journaled events (`job.*`,
+  `doc.changed` from commands) take a reserved `seq` (`Journal::reserveSeq`) from the same counter.
+  `sinceSeq` replay at `session.hello` / `events.subscribe` (ascending order).
+- **`history.list`** reads `patchSeq/ts/opId/params/source` from the patches (lot 0's best-effort join
+  now only serves as a fallback); envelope of `Mutates` commands: **`patchSeq`** of the last patch.
+- **History tab**: edits made through the API show `hh:mm:ss  api:<client>` on the right (nothing
+  changes for edits made in the window, so as not to touch the look or the rendering tests);
+  **fix**: future rows are listed in redo order (lot 0's finding: a click
+  on the first future row replayed a different entry from the one displayed).
 
-## Tests (`tests/regression/journal.inc`, « regression: journal »)
+## Tests (`tests/regression/journal.inc`, "regression: journal")
 
-Journal autonome : anneau de 10 000, miroir JSONL de chaque entrée, lecture au-delà de l'anneau depuis
-le fichier puis couture sans trou, `reserveSeq`. Patches : édition API (seq, heure, commande, params,
-client, `patchSeq` dans l'enveloppe), édition de dialogue (type d'étape + params + `menu`), édition
-sans type (`menu`). Journal : une entrée `recorded` par patch, attributions API/menu, idempotence du
-sondage, undo, marqueur → `meta`, rééchantillonnage → `cleared {reason:"resample"}`, ouverture/fermeture.
-`history.list` : chaque état porte `patchSeq/ts/opId/source` ; futurs dans l'ordre de redo ; History
-tab dans le même ordre, détail heure+client pour l'API, et la 1re ligne future est bien celle que
-`redoSteps(1)` rejoue. Serveur (`control_server.inc`) : un nouveau client avec `sinceSeq:0` reçoit les
-`history.changed` rejoués dans l'ordre des `seq`.
+Standalone journal: ring of 10,000, JSONL mirror of each entry, reading beyond the ring from
+the file then gap-free stitching, `reserveSeq`. Patches: API edit (seq, time, command, params,
+client, `patchSeq` in the envelope), dialog edit (step type + params + `menu`), edit
+without a type (`menu`). Journal: one `recorded` entry per patch, API/menu attributions, polling
+idempotence, undo, marker → `meta`, resampling → `cleared {reason:"resample"}`, open/close.
+`history.list`: each state carries `patchSeq/ts/opId/source`; futures in redo order; History
+tab in the same order, time+client detail for the API, and the 1st future row is indeed the one that
+`redoSteps(1)` replays. Server (`control_server.inc`): a new client with `sinceSeq:0` receives the
+replayed `history.changed` events in `seq` order.
 
-Résultats : voir en bas.
+Results: see the bottom.
 
-## Écarts / dettes
+## Deviations / debts
 
-- Pas de crochet `MarkerManager::onChange` ni de `UndoManager::onChanged` : un **sondage** (à chaque
-  commande, fin de job, et 30 Hz dans la fenêtre si le serveur tourne) couvre tous les chemins sans
-  câbler chaque création de `FileDoc` (une douzaine de sites) ; latence ≤ 33 ms dans l'app ouverte.
-  Le journal d'une session headless (`--json`) n'est complet qu'aux frontières de commandes, ce qui y est
-  équivalent.
-- Une annonce `recordActionStep` suivie d'une annulation du dialogue reste « en attente » ≤ 60 s et
-  peut étiqueter la prochaine édition à la souris.
-- La profondeur d'undo reste 64 ; les patches éjectés gardent leur entrée `recorded` dans le journal.
+- No `MarkerManager::onChange` hook nor `UndoManager::onChanged`: **polling** (on every
+  command, job end, and at 30 Hz in the window if the server is running) covers all paths without
+  wiring each `FileDoc` creation (a dozen sites); latency ≤ 33 ms in the open app.
+  The journal of a headless session (`--json`) is only complete at command boundaries, which there is
+  equivalent.
+- A `recordActionStep` announcement followed by a dialog cancellation stays "pending" for ≤ 60 s and
+  can label the next mouse edit.
+- Undo depth remains 64; evicted patches keep their `recorded` entry in the journal.
 
-## Résultats
+## Results
 
-macOS arm64, Debug + IA : « journal,control,history » 907/907 ; suite complète **6026/6026**, 10/10.
+macOS arm64, Debug + AI: "journal,control,history" 907/907; full suite **6026/6026**, 10/10.

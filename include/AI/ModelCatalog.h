@@ -1,5 +1,5 @@
 // SpectroCraft — unified AI model catalogue (lot 3 of the AI-control plan,
-// docs/ai-control/RAPPORT.md §5.2 "ModelCatalog", §6.5).
+// docs/ai-control/REPORT.md §5.2 "ModelCatalog", §6.5).
 //
 // One read model over the two registries the app has:
 //   - sc::ai::ModelManager: OpenVINO noise-suppression IRs and the whisper.cpp
@@ -184,7 +184,7 @@ public:
                                                   const std::string& expectedSha256)>;
     void setAudioCppDownloaderForTests(AudioCppDownloader d) { _acppDownloader = std::move (d); }
 
-    // --- JSON (RAPPORT §6.5 shapes) -------------------------------------
+    // --- JSON (REPORT §6.5 shapes) -------------------------------------
     /** One ai.models.list element. */
     juce::var entryJson(const CatalogEntry& e) const;
     /** ai.models.list result: {"modelsRoot","audiocppRoot","models":[...]}. */

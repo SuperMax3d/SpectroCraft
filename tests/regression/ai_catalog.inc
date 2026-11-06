@@ -287,7 +287,7 @@ static void testRegAiCatBuiltIns()
     root.deleteRecursively ();
 }
 
-// JSON shapes (RAPPORT §6.5): ai.models.list and ai.devices.
+// JSON shapes (REPORT §6.5): ai.models.list and ai.devices.
 static void testRegAiCatJson()
 {
     const juce::File root = makeTempFile ("catalog_json");

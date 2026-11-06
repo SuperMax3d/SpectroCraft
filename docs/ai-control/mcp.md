@@ -1,38 +1,38 @@
-# Adaptateur MCP SpectroCraft (Claude Code)
+# SpectroCraft MCP adapter (Claude Code)
 
-`tools/mcp` contient le serveur MCP qui permet à Claude Code (VS Code ou terminal) de piloter
-SpectroCraft **ouvert** : état, historique, undo/redo, étapes d'édition sur une plage précise, jobs IA,
-mesures. Architecture et protocole : `RAPPORT.md` §5-§7. Consignes d'usage pour Claude : `CLAUDE.md`
-à la racine.
+`tools/mcp` contains the MCP server that lets Claude Code (VS Code or terminal) drive an **open**
+SpectroCraft: state, history, undo/redo, editing steps on a precise range, AI jobs,
+measurements. Architecture and protocol: `REPORT.md` §5-§7. Usage instructions for Claude: `CLAUDE.md`
+at the root.
 
 ```
 Claude Code ──stdio MCP──▶ spectrocraft-mcp (Python) ──TCP 127.0.0.1:<port>, NDJSON──▶ SpectroCraft
-                             lit <appData>/SpectroCraft/control/<pid>.json {port, token}
+                             reads <appData>/SpectroCraft/control/<pid>.json {port, token}
 ```
 
-## Prérequis
+## Prerequisites
 
-- **Python 3.11+** et le SDK `mcp` **1.x** (`mcp>=1.6,<2` ; la série 2.x a renommé FastMCP et n'est pas
-  encore prise en charge). Rien d'autre.
-- Une version de SpectroCraft qui accepte `--control` / *Window > Allow AI control (localhost)*
-  (serveur de contrôle, lot 1). Le mode sans fenêtre `--json` (outil `sc_headless`) existe dès le lot 0.
-- Aucune règle de pare-feu : tout passe par la boucle locale `127.0.0.1` sur un port éphémère ; rien
-  n'écoute sur le réseau.
+- **Python 3.11+** and the `mcp` SDK **1.x** (`mcp>=1.6,<2`; the 2.x series renamed FastMCP and is not
+  supported yet). Nothing else.
+- A SpectroCraft version that accepts `--control` / *Window > Allow AI control (localhost)*
+  (control server, lot 1). The windowless `--json` mode (`sc_headless` tool) exists since lot 0.
+- No firewall rule: everything goes through the local loopback `127.0.0.1` on an ephemeral port; nothing
+  listens on the network.
 
 ## Installation
 
-### Variante `uv` (recommandée)
+### `uv` variant (recommended)
 
-`uv` crée et met à jour l'environnement tout seul (`tools/mcp/.venv`, ignoré par git).
+`uv` creates and updates the environment by itself (`tools/mcp/.venv`, ignored by git).
 
 ```sh
 # macOS / Linux
-brew install uv            # ou : curl -LsSf https://astral.sh/uv/install.sh | sh
+brew install uv            # or: curl -LsSf https://astral.sh/uv/install.sh | sh
 cp .mcp.json.example .mcp.json
-# éditer SPECTROCRAFT_EXE dans .mcp.json, puis ouvrir le dossier dans VS Code / lancer `claude`
+# edit SPECTROCRAFT_EXE in .mcp.json, then open the folder in VS Code / run `claude`
 ```
 
-`.mcp.json` (local, ignoré par git) — valeurs macOS du gabarit :
+`.mcp.json` (local, ignored by git) — macOS values of the template:
 
 ```json
 {"mcpServers":{"spectrocraft":{
@@ -41,101 +41,101 @@ cp .mcp.json.example .mcp.json
          "SPECTROCRAFT_LAUNCH":"ask"}}}}
 ```
 
-### Variante `pip`
+### `pip` variant
 
 ```sh
-python3 -m venv .venv && . .venv/bin/activate      # Windows : py -3 -m venv .venv ; .venv\Scripts\activate
-pip install -e tools/mcp                           # + "[test]" pour lancer les tests
+python3 -m venv .venv && . .venv/bin/activate      # Windows: py -3 -m venv .venv ; .venv\Scripts\activate
+pip install -e tools/mcp                           # + "[test]" to run the tests
 ```
 
-puis, dans `.mcp.json`, remplacer `command`/`args` par l'interpréteur de cet environnement :
+then, in `.mcp.json`, replace `command`/`args` with the interpreter of that environment:
 
 ```json
-"command": "/chemin/du/depot/.venv/bin/python", "args": ["-m", "spectrocraft_mcp"]
+"command": "/path/to/repo/.venv/bin/python", "args": ["-m", "spectrocraft_mcp"]
 ```
 
-(ou `"command":"spectrocraft-mcp"` si le script installé est dans le `PATH` de Claude Code).
+(or `"command":"spectrocraft-mcp"` if the installed script is in Claude Code's `PATH`).
 
 ### Windows
 
 ```json
 {"mcpServers":{"spectrocraft":{
   "command":"py","args":["-3","-m","spectrocraft_mcp"],
-  "env":{"SPECTROCRAFT_EXE":"C:\\chemin\\du\\depot\\build\\src\\SpectroCraft_artefacts\\Release\\SpectroCraft.exe",
+  "env":{"SPECTROCRAFT_EXE":"C:\\path\\to\\repo\\build\\src\\SpectroCraft_artefacts\\Release\\SpectroCraft.exe",
          "SPECTROCRAFT_LAUNCH":"ask"}}}}
 ```
 
-après `py -3 -m pip install -e tools/mcp`. La variante `uv` marche aussi telle quelle (`uv` pour
-Windows). Le chemin réel de l'exe est `build\src\SpectroCraft_artefacts\<Config>\SpectroCraft.exe`
-(le rapport §7.4 omettait `src\`).
+after `py -3 -m pip install -e tools/mcp`. The `uv` variant also works as is (`uv` for
+Windows). The actual path of the exe is `build\src\SpectroCraft_artefacts\<Config>\SpectroCraft.exe`
+(report §7.4 omitted `src\`).
 
 ### Linux
 
-Identique à macOS ; `SPECTROCRAFT_EXE` pointe vers `build/src/SpectroCraft_artefacts/<Config>/SpectroCraft`.
-Sans session graphique, seul `sc_headless` (mode `--json`) fonctionne.
+Same as macOS; `SPECTROCRAFT_EXE` points to `build/src/SpectroCraft_artefacts/<Config>/SpectroCraft`.
+Without a graphical session, only `sc_headless` (`--json` mode) works.
 
-### Vérifier
+### Checking
 
 ```sh
-python3 tools/mcp/sc_client.py --list        # instances détectées (aucune dépendance)
-python3 tools/mcp/sc_client.py app.state     # état de l'app ouverte
+python3 tools/mcp/sc_client.py --list        # detected instances (no dependencies)
+python3 tools/mcp/sc_client.py app.state     # state of the open app
 ```
 
-Dans Claude Code : `/mcp` doit montrer `spectrocraft` connecté ; demander « sc_status ».
+In Claude Code: `/mcp` must show `spectrocraft` connected; ask for "sc_status".
 
-## Variables d'environnement
+## Environment variables
 
-| Variable | Rôle |
+| Variable | Role |
 |---|---|
-| `SPECTROCRAFT_EXE` | exécutable (ou bundle `.app`) pour `sc_launch` et `sc_headless` |
-| `SPECTROCRAFT_LAUNCH` | `ask` (défaut : erreur claire qui propose `sc_launch`), `auto` (lance l'app au premier outil), `never` (jamais : utiliser `sc_headless`) |
-| `SPECTROCRAFT_PID` | instance à piloter quand plusieurs sont ouvertes (sinon la plus récente) |
-| `SPECTROCRAFT_JOB_WAIT_S` | attente maximale d'un job par un outil (défaut 600 s ; au-delà l'outil rend la main, le job continue) |
-| `SPECTROCRAFT_CONTROL_DIR` | dossier des fichiers de découverte (tests ; défaut ci-dessous) |
-| `SPECTROCRAFT_MCP_LOG` | niveau de log sur stderr (`INFO`, `DEBUG`) |
+| `SPECTROCRAFT_EXE` | executable (or `.app` bundle) for `sc_launch` and `sc_headless` |
+| `SPECTROCRAFT_LAUNCH` | `ask` (default: clear error that offers `sc_launch`), `auto` (launches the app on the first tool call), `never` (never: use `sc_headless`) |
+| `SPECTROCRAFT_PID` | instance to drive when several are open (otherwise the most recent one) |
+| `SPECTROCRAFT_JOB_WAIT_S` | maximum time a tool waits for a job (default 600 s; beyond that the tool returns, the job continues) |
+| `SPECTROCRAFT_CONTROL_DIR` | folder of the discovery files (tests; default below) |
+| `SPECTROCRAFT_MCP_LOG` | log level on stderr (`INFO`, `DEBUG`) |
 
-Fichiers de découverte `<pid>.json` : macOS `~/Library/SpectroCraft/control`, Linux
-`$XDG_CONFIG_HOME/SpectroCraft/control` (défaut `~/.config/…`), Windows `%APPDATA%\SpectroCraft\control`.
+Discovery files `<pid>.json`: macOS `~/Library/SpectroCraft/control`, Linux
+`$XDG_CONFIG_HOME/SpectroCraft/control` (default `~/.config/…`), Windows `%APPDATA%\SpectroCraft\control`.
 
-## Outils
+## Tools
 
-Outils fixes (§7.3) : `sc_status`, `sc_launch`, `sc_state`, `sc_history`, `sc_undo`, `sc_redo`,
+Fixed tools (§7.3): `sc_status`, `sc_launch`, `sc_state`, `sc_history`, `sc_undo`, `sc_redo`,
 `sc_jump`, `sc_run_step`, `sc_run`, `sc_open`, `sc_save`, `sc_close`, `sc_models`, `sc_install_model`,
 `sc_devices`, `sc_noise_suppress`, `sc_transcribe`, `sc_measure_levels`, `sc_third_octave`,
 `sc_spectrum`, `sc_export_spectrogram`, `sc_jobs`, `sc_cancel`, `sc_headless`.
 
-Outils **dynamiques** : un par commande publiée par `app.describe` (hors `session.*` et commandes
-internes), nommés `sc_<domaine>_<commande>` (`sc_selection_set`, `sc_step_run`…). Leur `inputSchema` est
-le schéma `params` de la commande, inchangé, plus trois propriétés optionnelles ajoutées par
-l'adaptateur : `doc`, `timeoutMs`, `confirm`. Ils apparaissent au premier contact avec l'app (notification
-`tools/list_changed`) : une commande ajoutée côté C++ est disponible sans toucher au Python.
+**Dynamic** tools: one per command published by `app.describe` (except `session.*` and internal
+commands), named `sc_<domain>_<command>` (`sc_selection_set`, `sc_step_run`…). Their `inputSchema` is
+the command's `params` schema, unchanged, plus three optional properties added by
+the adapter: `doc`, `timeoutMs`, `confirm`. They appear on first contact with the app (`tools/list_changed`
+notification): a command added on the C++ side is available without touching the Python.
 
-Ressources : `spectrocraft://commands` (describe complet) et `spectrocraft://journal/tail` (fin du
-journal de session, JSON Lines).
+Resources: `spectrocraft://commands` (full describe) and `spectrocraft://journal/tail` (end of the
+session journal, JSON Lines).
 
-## Dépannage
+## Troubleshooting
 
-| Symptôme | Cause / solution |
+| Symptom | Cause / solution |
 |---|---|
-| `control_disabled` : « SpectroCraft is open but its AI control server is off » | l'app est ouverte (le tube `SpectroCraft.FileForward` répond) mais le contrôle est coupé : *Window > Allow AI control (localhost)*, ou relancer l'app avec `--control`, ou `sc_launch(force=true)` (seconde instance) |
-| `no_instance` | aucune app : `sc_launch` (avec `SPECTROCRAFT_EXE`), `SPECTROCRAFT_LAUNCH=auto`, ou `sc_headless` |
-| `launch_failed` « did not write its discovery file » | version de l'app antérieure au serveur de contrôle (lot 1), ou crash au démarrage : lancer `SpectroCraft --control` à la main |
-| `unauthorized` | jeton périmé (app relancée) : `sc_status` relit les fichiers ; trois échecs → pause de 2 s côté app |
-| `timeout` | une boîte de dialogue modale bloque le thread de l'app : la fermer |
-| `busy` | un job modifiant ou un dialogue de progression est actif : `sc_jobs`, attendre ou `sc_cancel` |
-| `protocol_mismatch` | app et adaptateur de versions de protocole différentes : mettre à jour l'un des deux |
-| Pas d'outils `sc_<domaine>_…` | normal tant qu'aucune app contrôlable n'a été contactée ; appeler `sc_status` |
-| `ModuleNotFoundError: mcp.server.fastmcp` | `mcp` 2.x installé à la main : `pip install "mcp<2"` (le `pyproject` l'impose déjà) |
-| Pare-feu | aucun réglage nécessaire : loopback uniquement, port éphémère |
+| `control_disabled`: "SpectroCraft is open but its AI control server is off" | the app is open (the `SpectroCraft.FileForward` pipe answers) but control is off: *Window > Allow AI control (localhost)*, or restart the app with `--control`, or `sc_launch(force=true)` (second instance) |
+| `no_instance` | no app: `sc_launch` (with `SPECTROCRAFT_EXE`), `SPECTROCRAFT_LAUNCH=auto`, or `sc_headless` |
+| `launch_failed` "did not write its discovery file" | app version older than the control server (lot 1), or crash at startup: run `SpectroCraft --control` by hand |
+| `unauthorized` | stale token (app restarted): `sc_status` rereads the files; three failures → 2 s pause on the app side |
+| `timeout` | a modal dialog box is blocking the app's thread: close it |
+| `busy` | a modifying job or a progress dialog is active: `sc_jobs`, wait or `sc_cancel` |
+| `protocol_mismatch` | app and adapter have different protocol versions: update one of the two |
+| No `sc_<domain>_…` tools | normal as long as no controllable app has been contacted; call `sc_status` |
+| `ModuleNotFoundError: mcp.server.fastmcp` | `mcp` 2.x installed by hand: `pip install "mcp<2"` (the `pyproject` already enforces it) |
+| Firewall | no setting needed: loopback only, ephemeral port |
 
-Fichiers `<pid>.json` orphelins (crash) : supprimés automatiquement par l'adaptateur (PID mort, ou PID
-réutilisé par un processus plus récent que `startedAt`).
+Orphaned `<pid>.json` files (crash): deleted automatically by the adapter (dead PID, or PID
+reused by a process more recent than `startedAt`).
 
 ## Tests
 
 ```sh
 pip install -e "tools/mcp[test]"
-pytest tools/mcp/tests                                   # faux serveur NDJSON + faux exe, ~10 s
-SPECTROCRAFT_EXE=<exe> pytest tools/mcp/tests/test_real_exe.py   # vrai mode --json
-SPECTROCRAFT_EXE=<exe> tools/mcp/smoke.sh /abs/fichier.wav       # app ouverte (--control), local
+pytest tools/mcp/tests                                   # fake NDJSON server + fake exe, ~10 s
+SPECTROCRAFT_EXE=<exe> pytest tools/mcp/tests/test_real_exe.py   # real --json mode
+SPECTROCRAFT_EXE=<exe> tools/mcp/smoke.sh /abs/file.wav          # app open (--control), local
 ```

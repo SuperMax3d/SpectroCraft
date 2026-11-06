@@ -677,7 +677,7 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
     juce::StringArray alerts;
     bool docSwitched = false, activated = false;
 
-    // RAPPORT §5.2 step 4: a mutating command on a streamed (not fully in
+    // REPORT §5.2 step 4: a mutating command on a streamed (not fully in
     // memory) document first loads it into memory on a worker - like
     // MainWindow::runDestructiveEdit - then runs on the message thread.
     // (history.* never: an undoable edit has already loaded the file.)

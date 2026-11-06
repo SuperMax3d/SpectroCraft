@@ -3,7 +3,7 @@
 // Thin wrappers: models / devices come from sc::ai::ModelCatalog (engine-
 // agnostic, it will survive the planned migration of all AI to audio.cpp);
 // noise suppression and transcription run through the shared step runner
-// (jobs, select/channels, strict device resolution). RAPPORT §6.5.
+// (jobs, select/channels, strict device resolution). REPORT §6.5.
 #include "control/CommandRegistry.h"
 #include "control/ControlState.h"
 #include "control/PathPolicy.h"

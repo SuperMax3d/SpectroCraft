@@ -1636,50 +1636,50 @@ The test executable accepts the same flags (useful for CI without a display).
 
 ---
 
-## Contrôle par IA (Claude Code / MCP)
+## AI control (Claude Code / MCP)
 
-SpectroCraft peut être piloté par Claude Code (extension VS Code ou terminal) **pendant qu'il est
-ouvert** : état, historique, undo/redo, n'importe laquelle des 20 étapes d'action sur une plage de temps
-et des canaux explicites, vues, lecture, marqueurs, jobs longs (IA, Python) avec progression. L'app
-démarre un serveur de contrôle sur l'interface **loopback uniquement** (`127.0.0.1`, port éphémère,
-jeton propre à chaque instance) quand *Window > Allow AI control (localhost)* est coché (désactivé par
-défaut) ou quand elle est lancée avec `--control`. Le jeton et le port sont publiés dans
-`<données d'application>/SpectroCraft/control/<pid>.json` (macOS `~/Library/SpectroCraft/control`,
-Linux `~/.config/SpectroCraft/control`, Windows `%APPDATA%\SpectroCraft\control`, fichier 0600 sur
-macOS/Linux). Un petit adaptateur MCP Python (`tools/mcp`) relie Claude Code à ce serveur.
+SpectroCraft can be driven by Claude Code (VS Code extension or terminal) **while it is
+open**: state, history, undo/redo, any of the 20 action steps on a time range
+and explicit channels, views, playback, markers, long jobs (AI, Python) with progress. The app
+starts a control server on the **loopback interface only** (`127.0.0.1`, ephemeral port,
+token specific to each instance) when *Window > Allow AI control (localhost)* is checked (disabled by
+default) or when it is launched with `--control`. The token and the port are published in
+`<application data>/SpectroCraft/control/<pid>.json` (macOS `~/Library/SpectroCraft/control`,
+Linux `~/.config/SpectroCraft/control`, Windows `%APPDATA%\SpectroCraft\control`, file 0600 on
+macOS/Linux). A small Python MCP adapter (`tools/mcp`) connects Claude Code to this server.
 
-Les mêmes commandes tournent sans fenêtre :
+The same commands run without a window:
 
 ```
-SpectroCraft --json <requêtes.ndjson | -> [--json-out <réponses.ndjson>] [--use-user-settings]
-SpectroCraft --list-commands [--markdown]     :: liste des commandes (JSON Schema des paramètres)
-SpectroCraft --control                        :: GUI + serveur de contrôle (jamais de transfert
-                                              :: vers une instance déjà ouverte)
+SpectroCraft --json <requests.ndjson | -> [--json-out <responses.ndjson>] [--use-user-settings]
+SpectroCraft --list-commands [--markdown]     :: list of commands (JSON Schema of the parameters)
+SpectroCraft --control                        :: GUI + control server (never forwarded
+                                              :: to an already open instance)
 ```
 
-Une requête par ligne (`{"id":1,"cmd":"step.run","params":{"select":{"start":1.0,"end":2.5},
-"step":{"type":"changeGain","params":{"db":-3}}}}`), une réponse par ligne ; code de retour 0 (tout
-ok), 1 (au moins une erreur), 2 (usage, JSON illisible, ligne > 1 Mio, option inconnue). Toute
-option `--xxx` inconnue de l'exécutable donne désormais le code 2 au lieu de démarrer l'interface.
+One request per line (`{"id":1,"cmd":"step.run","params":{"select":{"start":1.0,"end":2.5},
+"step":{"type":"changeGain","params":{"db":-3}}}}`), one response per line; exit code 0 (all
+ok), 1 (at least one error), 2 (usage, unreadable JSON, line > 1 MiB, unknown option). Any
+`--xxx` option unknown to the executable now gives exit code 2 instead of starting the interface.
 
-Installation de l'adaptateur (Python 3.11+) :
+Installing the adapter (Python 3.11+):
 
-    cp .mcp.json.example .mcp.json      # régler SPECTROCRAFT_EXE sur votre exécutable
-    # avec uv : rien d'autre (uv run crée tools/mcp/.venv)
-    # sans uv : pip install -e tools/mcp, puis "command": "python3", "args": ["-m", "spectrocraft_mcp"]
+    cp .mcp.json.example .mcp.json      # set SPECTROCRAFT_EXE to your executable
+    # with uv: nothing else (uv run creates tools/mcp/.venv)
+    # without uv: pip install -e tools/mcp, then "command": "python3", "args": ["-m", "spectrocraft_mcp"]
 
-Ouvrir le dossier dans VS Code (ou lancer `claude`) puis demander par exemple « ouvre recording_b.wav,
-sélectionne 2–3,5 s, applique un fade-out et montre-moi l'historique ».
-`python3 tools/mcp/sc_client.py app.state` vérifie la connexion sans le paquet `mcp`.
+Open the folder in VS Code (or run `claude`) then ask, for example, "open recording_b.wav,
+select 2–3.5 s, apply a fade-out and show me the history".
+`python3 tools/mcp/sc_client.py app.state` checks the connection without the `mcp` package.
 
-Sécurité : loopback seulement, jeton obligatoire (`session.hello`), opt-in, chemins limités au dossier
-personnel, au dossier des scripts et au dossier temporaire (réglage `control_roots`), `confirm:true`
-exigé pour les opérations destructives (écraser un fichier, fermer un document non sauvé, script
-Python hors du dossier des scripts). Option CMake `-DSC_ENABLE_CONTROL=OFF` pour un build sans
-serveur de contrôle.
+Security: loopback only, mandatory token (`session.hello`), opt-in, paths limited to the home
+folder, the scripts folder and the temporary folder (`control_roots` setting), `confirm:true`
+required for destructive operations (overwriting a file, closing an unsaved document, Python
+script outside the scripts folder). CMake option `-DSC_ENABLE_CONTROL=OFF` for a build without
+the control server.
 
-Détails : [docs/ai-control/mcp.md](docs/ai-control/mcp.md) (installation macOS/Windows/Linux,
-dépannage) ; protocole : [docs/ai-control/RAPPORT.md](docs/ai-control/RAPPORT.md) §6 ; avancement :
+Details: [docs/ai-control/mcp.md](docs/ai-control/mcp.md) (macOS/Windows/Linux installation,
+troubleshooting); protocol: [docs/ai-control/REPORT.md](docs/ai-control/REPORT.md) §6; progress:
 [docs/ai-control/progress/](docs/ai-control/progress/).
 
 ---

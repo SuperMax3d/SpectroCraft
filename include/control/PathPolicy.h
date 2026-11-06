@@ -1,5 +1,5 @@
 #pragma once
-// SpectroCraft - AI control: which files a command may read or write (RAPPORT §5.3).
+// SpectroCraft - AI control: which files a command may read or write (REPORT §5.3).
 //
 // Paths must be absolute and, after resolving symbolic links, lie under one of
 // the allowed roots: setting "control_roots" (";"-separated absolute folders)

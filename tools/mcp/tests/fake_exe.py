@@ -1,6 +1,6 @@
 """Stand-in for the SpectroCraft executable (tests only).
 
-``--json <file|-> [--json-out <f>]``: RAPPORT.md 6.9 line-by-line mode, no
+``--json <file|-> [--json-out <f>]``: REPORT.md 6.9 line-by-line mode, no
 session.hello, optional ``{"continueOnError":true}`` first line, exit code
 0 / 1 / 2. ``--control``: starts a FakeServer and writes its discovery file
 into ``$SPECTROCRAFT_CONTROL_DIR`` with this process's pid, then idles.

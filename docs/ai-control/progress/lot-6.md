@@ -1,87 +1,87 @@
-# Lot 6 — éclatement des commandes et migration des menus
+# Lot 6 — splitting out the commands and migrating the menus
 
-Statut : **partiel, solide** (ce qui est livré est testé ; la liste exacte de ce qui reste est en bas).
+Status: **partial, solid** (what is delivered is tested; the exact list of what remains is at the bottom).
 
-## Fait
+## Done
 
-### Commandes typées (`src/control/commands/Edit.cpp`)
+### Typed commands (`src/control/commands/Edit.cpp`)
 
-- Les **20 types d'étapes** ont une commande typée dont l'alias est l'ancien nom de type :
+- The **20 step types** have a typed command whose alias is the old type name:
   `effect.silence/fadeIn/fadeOut/normalize/reverse/invert/changeGain {db}/timeStretch {pct}/
   catTimeScale/filterEq {points}/envelope {points}/resample {rate, weights}`, `gen.silence/noise/tone`,
-  `edit.delete/trim`, plus `ai.noiseSuppress`/`ai.transcribe` (lot 3) ; `python` → `python.run` au lot 7.
-  Chaque commande a ses `ParamSpec` (schéma publié, `invalid_params` avec `path`) + `select`/`channels`
-  et passe par le **même** exécuteur que `step.run` (jobs, enregistrement d'action, journal).
+  `edit.delete/trim`, plus `ai.noiseSuppress`/`ai.transcribe` (lot 3); `python` → `python.run` in lot 7.
+  Each command has its `ParamSpec`s (published schema, `invalid_params` with `path`) + `select`/`channels`
+  and goes through the **same** executor as `step.run` (jobs, action recording, journal).
 - `edit.cut/copy/paste/pasteMix/pasteToNewChannels/copyToNewFile {select}`, `edit.splitSpectralSel`.
-- `doc.new {channels, sampleRate, durationSec}` (`doc.activate` existait depuis le lot 0).
+- `doc.new {channels, sampleRate, durationSec}` (`doc.activate` has existed since lot 0).
 - `selection.tool`, `selection.clearSpectral`, `selection.brush`.
-- `settings.get {keys}` / `settings.set {values}` : table de clés (mêmes noms que `SpectroCraft.recent`)
-  avec **les mêmes bornes** que `loadSettings` (`fft_size` 99999 → 65536, `clamped:["fft_size"]`),
-  validation complète avant application, persistance (`saveSettings` + `saveAiSettings`). **Sécurité** :
-  `control_enabled`/`control_roots` ne sont pas modifiables par l'API (un client ne peut pas élargir
-  son propre accès) ; clé inconnue → `invalid_params`.
+- `settings.get {keys}` / `settings.set {values}`: key table (same names as `SpectroCraft.recent`)
+  with **the same bounds** as `loadSettings` (`fft_size` 99999 → 65536, `clamped:["fft_size"]`),
+  full validation before applying, persistence (`saveSettings` + `saveAiSettings`). **Security**:
+  `control_enabled`/`control_roots` cannot be modified through the API (a client cannot widen
+  its own access); unknown key → `invalid_params`.
 - `recent.list/remove/clear`, `meta.setMode {embedded|external}`, `meta.save`,
-  `record.start/stop/setMode`, `actions.list`, `actions.run {name|index, select, channels}` (une entrée
-  d'historique par étape), `tables.list`, `tables.importCsv`.
-- `docs/commands.md` **généré** (`SpectroCraft --list-commands --markdown`, trié par domaine) :
-  100 commandes.
+  `record.start/stop/setMode`, `actions.list`, `actions.run {name|index, select, channels}` (one history
+  entry per step), `tables.list`, `tables.importCsv`.
+- `docs/commands.md` **generated** (`SpectroCraft --list-commands --markdown`, sorted by domain):
+  100 commands.
 
-### Menus migrés (passent par `CommandRegistry::invoke`, source `menu`)
+### Migrated menus (go through `CommandRegistry::invoke`, source `menu`)
 
-`MainWindow::runMenuCommand (cmd, params, effectId, quiet)` : même code, même rafraîchissement
-(`UiBridge`), même enregistrement d'action, même journal et même provenance de patch (`opId` =
-commande) que l'API ; un fichier streamé passe par le détour du registre (job + dialogue de
-progression, erreur affichée à la fin du job), une erreur synchrone par `showEditError`.
+`MainWindow::runMenuCommand (cmd, params, effectId, quiet)`: same code, same refresh
+(`UiBridge`), same action recording, same journal and same patch provenance (`opId` =
+command) as the API; a streamed file goes through the registry's detour (job + progress
+dialog, error shown at the end of the job), a synchronous error through `showEditError`.
 
-| MenuID | Commande |
+| MenuID | Command |
 |---|---|
 | `EditUndo`, `EditRedo` | `history.undo`, `history.redo` |
 | `EditCut`, `EditCopy`, `EditPaste`, `EditPasteMix`, `EditPasteToNewChannels`, `EditCopyToNewFile` | `edit.*` |
 | `EditDelete`, `EditTrimSelection` | `edit.delete`, `edit.trim` |
 | `EditSelectAll` | `selection.all` |
-| `ToolsSilence`, `ToolsFadeIn`, `ToolsFadeOut`, `ToolsNormalize`, `ToolsReverse`, `ToolsInvert` | `effect.*` (l'id « répéter le dernier effet » est conservé) |
+| `ToolsSilence`, `ToolsFadeIn`, `ToolsFadeOut`, `ToolsNormalize`, `ToolsReverse`, `ToolsInvert` | `effect.*` (the "repeat last effect" id is kept) |
 
-Soit **17 MenuIDs** et **8 des 27 sites `recordActionStep`** (ceux des effets immédiats et de
-Delete/Trim) : l'enregistrement d'action se fait maintenant dans le registre, après succès.
+That is **17 MenuIDs** and **8 of the 27 `recordActionStep` sites** (those of the immediate effects and of
+Delete/Trim): action recording now happens in the registry, after success.
 
-- `continueReplay` : nouveau rappel `MainWindow::onReplayFinished (ok, message)` qui remplace les boîtes
-  modales « finished / stopped » quand il est posé (l'API `actions.run` n'utilise de toute façon pas
-  `continueReplay`).
+- `continueReplay`: new callback `MainWindow::onReplayFinished (ok, message)` that replaces the
+  "finished / stopped" modal boxes when it is set (the `actions.run` API does not use
+  `continueReplay` anyway).
 
-## Tests (`tests/regression/menu_commands.inc`, « regression: menu_commands »)
+## Tests (`tests/regression/menu_commands.inc`, "regression: menu_commands")
 
-- **menu == commande** pour les 8 menus d'effets/édition : le menu (`menuItemSelected` sur une vraie
-  `MainWindow`) et l'API sur le même fichier et la même plage donnent **des échantillons identiques** ;
-  le patch du menu porte `opId` = la commande et `source:"menu"` ; `getLastEffectId` conservé.
-- Couper/coller/annuler/tout sélectionner par le menu passent par le registre (`edit.cut` crédité).
-- Chaque type d'étape a sa commande typée ; `effect.changeGain` == `step.run changeGain` ; bornes
-  validées ; alias ; `gen.tone` ; presse-papiers ; `edit.copyToNewFile` ; `doc.new` ;
-  `selection.tool/brush` ; `settings.set` (borne, refus `control_*`, clé inconnue) / `settings.get` ;
-  `recent.list` ; `meta.setMode/save` ; `actions.run` (2 entrées d'historique) / `actions.list` ;
-  `tables.list` ; `record.stop/setMode`.
+- **menu == command** for the 8 effect/edit menus: the menu (`menuItemSelected` on a real
+  `MainWindow`) and the API on the same file and the same range give **identical samples**;
+  the menu's patch carries `opId` = the command and `source:"menu"`; `getLastEffectId` kept.
+- Cut/paste/undo/select all through the menu go through the registry (`edit.cut` credited).
+- Each step type has its typed command; `effect.changeGain` == `step.run changeGain`; bounds
+  validated; aliases; `gen.tone`; clipboard; `edit.copyToNewFile`; `doc.new`;
+  `selection.tool/brush`; `settings.set` (bound, `control_*` refusal, unknown key) / `settings.get`;
+  `recent.list`; `meta.setMode/save`; `actions.run` (2 history entries) / `actions.list`;
+  `tables.list`; `record.stop/setMode`.
 
-Résultats (macOS arm64, Debug + IA) : « menu_commands + control » 1111/1111 ; suite complète
+Results (macOS arm64, Debug + AI): "menu_commands + control" 1111/1111; full suite
 **6410/6410**, 10/10.
 
-## Ce qui reste (précisément)
+## What remains (precisely)
 
-1. **Façades** : `applyActionStep`, `validateStepParams`, `isKnownActionType` restent les
-   implémentations d'origine (le registre les appelle) au lieu de devenir des façades de 5 lignes sur
-   `invoke` : le rejeu d'actions enregistrées et le batch (`runActionBatch`, `--run-action`, `--batch`)
-   tournent sur des `Application` isolées sur des workers, où `invoke` (thread de messages) ne
-   s'applique pas tel quel. À faire avec Max : décider si le batch passe par `--json`.
-2. **Dialogues d'effets** (19 sites `recordActionStep` restants) : `showChangeGainDialog`,
+1. **Facades**: `applyActionStep`, `validateStepParams`, `isKnownActionType` remain the
+   original implementations (the registry calls them) instead of becoming 5-line facades over
+   `invoke`: replay of recorded actions and batch (`runActionBatch`, `--run-action`, `--batch`)
+   run on isolated `Application`s on workers, where `invoke` (message thread) does not
+   apply as is. To do with Max: decide whether batch goes through `--json`.
+2. **Effect dialogs** (19 remaining `recordActionStep` sites): `showChangeGainDialog`,
    `TimeStretch`, `CatTimeScale`, `FilterEq`, `Envelope`, `Resample`, `GenSilence/Noise/Tone`,
-   `NoiseSuppress`, `Transcribe`, Python : le dialogue reste le formulaire et applique lui-même ; il
-   faudrait que son bouton « Apply » appelle `runMenuCommand ("effect.changeGain", {db})` etc. Les
-   éditions qu'ils produisent sont quand même journalisées et attribuées (`opId` = type d'étape,
+   `NoiseSuppress`, `Transcribe`, Python: the dialog remains the form and applies the edit itself; its
+   "Apply" button should call `runMenuCommand ("effect.changeGain", {db})` etc. The
+   edits they produce are still journaled and attributed (`opId` = step type,
    `source:"menu"`, lot 5).
-3. **MenuIDs non migrés** (ont une commande API mais le menu garde son chemin propre) : `FileOpen/Save/
-   SaveAs/Close/CloseAll/New/Quit` (FileChooser / confirmations), `View*` (zoom, vues, grilles :
-   bascules de `settings`), `Transport*` (le menu garde `playWithAudioInit` et son dialogue),
+3. **Non-migrated MenuIDs** (they have an API command but the menu keeps its own path): `FileOpen/Save/
+   SaveAs/Close/CloseAll/New/Quit` (FileChooser / confirmations), `View*` (zoom, views, grids:
+   `settings` toggles), `Transport*` (the menu keeps `playWithAudioInit` and its dialog),
    `Selection*`, `Rec*`, `Meta*`, `Exp*`, `WindowAllowMultiple`, `Recent*`, `ActionsRunSelected/Batch`,
    `ToolsSplitSpectralSel*`.
-4. **Sans commande** : `export.snapshot` (`FileSnapshot`, NeedsUi), `drawing.*`, `clone.*`,
-   `selection.saved.*`, `actions.batch`, `export.spectrogram` avec overlays (lot 4), `tables.*` autres
-   que list/importCsv.
-5. Test « menu == commande » étendu aux commandes ci-dessus quand elles seront migrées.
+4. **Without a command**: `export.snapshot` (`FileSnapshot`, NeedsUi), `drawing.*`, `clone.*`,
+   `selection.saved.*`, `actions.batch`, `export.spectrogram` with overlays (lot 4), `tables.*` other
+   than list/importCsv.
+5. "menu == command" test extended to the commands above once they are migrated.

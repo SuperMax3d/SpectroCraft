@@ -1,3 +1,3 @@
-# Notes de passation par lot
+# Per-lot hand-off notes
 
-Un fichier `lot-N.md` par lot terminé : ce qui est fait, écarts au plan, dettes, consignes pour la suite.
+One `lot-N.md` file per completed lot: what was done, deviations from the plan, debts, instructions for what comes next.

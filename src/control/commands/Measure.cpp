@@ -1,5 +1,5 @@
 // SpectroCraft - AI control: measurements (measure.*), spectrogram export,
-// marker CSV (RAPPORT §6.6, lot 4). Thin wrappers over sc::measures (the
+// marker CSV (REPORT §6.6, lot 4). Thin wrappers over sc::measures (the
 // module the FFT panel itself uses, so the numbers are the screen's) and
 // SpectralEngine. Long measurements run as exclusive jobs: the document they
 // read can be neither edited nor closed meanwhile.

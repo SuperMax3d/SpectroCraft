@@ -1,6 +1,6 @@
 """Constants, error type and error hints of the SpectroCraft control protocol.
 
-Reference: docs/ai-control/RAPPORT.md section 6 (envelope, closed error codes)
+Reference: docs/ai-control/REPORT.md section 6 (envelope, closed error codes)
 and section 5.3 (limits). Standard library only: this module is imported by
 the dependency-free ``sc_client.py``.
 """

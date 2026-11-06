@@ -1,88 +1,88 @@
-# SpectroCraft — consignes pour Claude Code
+# SpectroCraft — instructions for Claude Code
 
-Éditeur audio/spectral C++20 / JUCE 9. Ce fichier dit comment **piloter l'app** avec les outils MCP
-`spectrocraft` et comment **construire / tester** le dépôt. Référence du protocole :
-`docs/ai-control/RAPPORT.md` (§6), installation de l'adaptateur : `docs/ai-control/mcp.md`.
+C++20 / JUCE 9 audio/spectral editor. This file explains how to **drive the app** with the `spectrocraft`
+MCP tools and how to **build / test** the repository. Protocol reference:
+`docs/ai-control/REPORT.md` (§6), adapter installation: `docs/ai-control/mcp.md`.
 
-## Piloter SpectroCraft (outils MCP `spectrocraft`)
+## Driving SpectroCraft (`spectrocraft` MCP tools)
 
-L'adaptateur (`tools/mcp`, déclaré dans `.mcp.json`, copié de `.mcp.json.example`) parle à l'app
-**ouverte** par TCP loopback. Rien ne passe par l'interface graphique : l'écran se met à jour en direct.
+The adapter (`tools/mcp`, declared in `.mcp.json`, copied from `.mcp.json.example`) talks to the **open**
+app over loopback TCP. Nothing goes through the graphical interface: the screen updates live.
 
-Démarrage d'une session :
+Starting a session:
 
-1. `sc_status` : instances détectées, version, documents ouverts. S'il n'y en a pas, le message dit
-   pourquoi : app fermée (proposer `sc_launch`) ou app ouverte **sans** contrôle (demander à l'utilisateur
-   d'activer *Window > Allow AI control (localhost)*, ou `sc_launch(force=true)` pour une seconde instance).
-2. `sc_state` : documents (`docId`), document actif, sélection, vue, transport, jobs en cours.
+1. `sc_status`: detected instances, version, open documents. If there are none, the message says
+   why: app closed (offer `sc_launch`) or app open **without** control (ask the user to
+   enable *Window > Allow AI control (localhost)*, or `sc_launch(force=true)` for a second instance).
+2. `sc_state`: documents (`docId`), active document, selection, view, transport, running jobs.
 
-Vocabulaire :
+Vocabulary:
 
-- **docId** : identifiant entier **stable** d'un document (`sc_state`, `doc.list`). Le paramètre `doc` de
-  chaque outil accepte un docId ou un chemin absolu ; absent = document actif. Ne jamais utiliser un index
-  de liste. Agir sur un document non actif le rend actif le temps de la commande (`docSwitched:true`),
-  sauf `view.*` et `transport.*` (ce que montre ou joue la fenêtre) : `invalid_params`, appeler
-  `doc.activate` d'abord. Un job (IA, Python) lancé sur un document non actif le rend actif
-  (`activated:true`). Chemins : absolus, sous le dossier personnel, le dossier des scripts ou le dossier
-  temporaire, sinon `confirm_required {reason:"outside_roots"}`.
-- **select** : plage d'une étape, `"all"` ou `{start, end}` en **secondes**. Sans `select`, la sélection
-  courante de l'app est utilisée. `sc_run_step(type, params, start, end, channels)` le construit.
-- **channels** : canaux **0-based** (`[0]` = premier canal). Absent = canaux visibles.
-- **Unités** : secondes, Hz, dB. Les niveaux portent toujours leur unité (`dBFS`, ou `dB-SPL` quand le
-  document est calibré) : la recopier telle quelle, ne jamais la deviner.
-- **Étapes** (`step.run`) : les 20 types d'actions — `silence, fadeIn, fadeOut, normalize, reverse, invert,
+- **docId**: **stable** integer identifier of a document (`sc_state`, `doc.list`). The `doc` parameter of
+  every tool accepts a docId or an absolute path; absent = active document. Never use a list
+  index. Acting on a non-active document makes it active for the duration of the command (`docSwitched:true`),
+  except `view.*` and `transport.*` (what the window shows or plays): `invalid_params`, call
+  `doc.activate` first. A job (AI, Python) started on a non-active document makes it active
+  (`activated:true`). Paths: absolute, under the home folder, the scripts folder or the temporary
+  folder, otherwise `confirm_required {reason:"outside_roots"}`.
+- **select**: range of a step, `"all"` or `{start, end}` in **seconds**. Without `select`, the app's current
+  selection is used. `sc_run_step(type, params, start, end, channels)` builds it.
+- **channels**: **0-based** channels (`[0]` = first channel). Absent = visible channels.
+- **Units**: seconds, Hz, dB. Levels always carry their unit (`dBFS`, or `dB-SPL` when the
+  document is calibrated): copy it as is, never guess it.
+- **Steps** (`step.run`): the 20 action types — `silence, fadeIn, fadeOut, normalize, reverse, invert,
   changeGain {db}, timeStretch, catTimeScale, filterEq, envelope, resample, delete, trim, genSilence,
-  genNoise, genTone, noiseSuppress, transcribe, python`. Paramètres exacts : ressource
-  `spectrocraft://commands` ou `step.validate`.
-- **Jobs** : les opérations longues (installation de modèle, débruitage, transcription, gros fichiers)
-  renvoient `{"job":"j-N"}` ; les outils attendent la fin en relayant la progression (`wait=false` pour
-  rendre la main). `sc_jobs(job)` pour suivre, `sc_cancel(job)` pour annuler. Un seul job modifiant à la
-  fois : sinon erreur `busy`.
-- **confirm** : les opérations destructives (écraser un fichier, fermer un document non sauvé, chemin hors
-  des racines autorisées) échouent d'abord avec `confirm_required`. **Demander à l'utilisateur**, puis
-  rappeler le même outil avec `confirm=true`. Ne jamais passer `confirm=true` d'office.
-- **Historique** : chaque édition est annulable (`sc_undo`, `sc_redo`, `sc_jump(state)`) ;
-  `sc_history` montre les états (opId, params, source `api:…` ou `menu`). La première édition après un
-  retour en arrière vide la pile redo (`redoDiscarded` dans la réponse) : le signaler.
-- Une réponse peut contenir `eventsSinceLastCall` : éditions faites entre-temps par l'utilisateur (souris,
-  `source:"menu"`) ou par une autre session. En tenir compte avant d'enchaîner.
+  genNoise, genTone, noiseSuppress, transcribe, python`. Exact parameters: the
+  `spectrocraft://commands` resource or `step.validate`.
+- **Jobs**: long operations (model installation, noise suppression, transcription, large files)
+  return `{"job":"j-N"}`; the tools wait for completion while relaying progress (`wait=false` to
+  return immediately). `sc_jobs(job)` to follow, `sc_cancel(job)` to cancel. Only one modifying job at a
+  time: otherwise a `busy` error.
+- **confirm**: destructive operations (overwriting a file, closing an unsaved document, path outside
+  the allowed roots) first fail with `confirm_required`. **Ask the user**, then
+  call the same tool again with `confirm=true`. Never pass `confirm=true` on your own.
+- **History**: every edit can be undone (`sc_undo`, `sc_redo`, `sc_jump(state)`);
+  `sc_history` shows the states (opId, params, source `api:…` or `menu`). The first edit after going
+  back empties the redo stack (`redoDiscarded` in the response): report it.
+- A response may contain `eventsSinceLastCall`: edits made in the meantime by the user (mouse,
+  `source:"menu"`) or by another session. Take them into account before continuing.
 
-Outils : `sc_status`, `sc_launch`, `sc_state`, `sc_history`, `sc_undo`, `sc_redo`, `sc_jump`,
-`sc_run_step`, `sc_run(cmd, params)` (toute commande), `sc_open`, `sc_save`, `sc_close`, `sc_models`,
+Tools: `sc_status`, `sc_launch`, `sc_state`, `sc_history`, `sc_undo`, `sc_redo`, `sc_jump`,
+`sc_run_step`, `sc_run(cmd, params)` (any command), `sc_open`, `sc_save`, `sc_close`, `sc_models`,
 `sc_install_model`, `sc_devices`, `sc_noise_suppress`, `sc_transcribe`, `sc_measure_levels`,
-`sc_third_octave`, `sc_spectrum`, `sc_export_spectrogram`, `sc_jobs`, `sc_cancel`, `sc_headless`, plus un
-outil **généré** par commande de l'app (`sc_<domaine>_<commande>`, ex. `sc_selection_set`,
-`sc_effect_changeGain`) dont le schéma vient de `app.describe`. Une commande pas encore livrée par la
-version de l'app répond `unknown_cmd` : le dire, ne pas contourner.
+`sc_third_octave`, `sc_spectrum`, `sc_export_spectrogram`, `sc_jobs`, `sc_cancel`, `sc_headless`, plus one
+**generated** tool per app command (`sc_<domain>_<command>`, e.g. `sc_selection_set`,
+`sc_effect_changeGain`) whose schema comes from `app.describe`. A command not yet shipped by the
+app version answers `unknown_cmd`: say so, do not work around it.
 
-Erreurs : le texte d'erreur donne le code (`invalid_params`, `no_document`, `busy`, `timeout`,
-`needs_ui`, `unsupported_build`, …), l'indice de l'app et la marche à suivre. `timeout` signifie presque
-toujours qu'une boîte de dialogue modale est ouverte dans l'app : demander à l'utilisateur de la fermer.
+Errors: the error text gives the code (`invalid_params`, `no_document`, `busy`, `timeout`,
+`needs_ui`, `unsupported_build`, …), the app's hint and what to do. `timeout` almost
+always means a modal dialog box is open in the app: ask the user to close it.
 
-Sans app ouverte : `sc_headless([{cmd, params}, …])` lance `SpectroCraft --json -` (pas de fenêtre,
-pas de `session.hello`, jobs attendus en ligne). En terminal, sans le paquet `mcp` :
-`python3 tools/mcp/sc_client.py app.state` (diagnostic, voir `--help`).
+Without an open app: `sc_headless([{cmd, params}, …])` runs `SpectroCraft --json -` (no window,
+no `session.hello`, jobs awaited inline). In a terminal, without the `mcp` package:
+`python3 tools/mcp/sc_client.py app.state` (diagnostics, see `--help`).
 
-## Construire et tester le dépôt
+## Building and testing the repository
 
 ```sh
-# Debug, Ninja (macOS / Linux) ; Windows : même chose dans un « x64 Native Tools Command Prompt »
+# Debug, Ninja (macOS / Linux); Windows: same thing in an "x64 Native Tools Command Prompt"
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DSPECTRO_ENABLE_AI=ON
 cmake --build build --target SpectroCraft
-ctest --test-dir build -j 8 --output-on-failure          # Linux : sous xvfb-run -a
+ctest --test-dir build -j 8 --output-on-failure          # Linux: under xvfb-run -a
 
-# un sous-ensemble de la suite embarquée (sous-chaînes du nom de test, séparées par des virgules)
+# a subset of the embedded suite (substrings of the test name, comma-separated)
 SC_TEST_FILTER=control build/src/SpectroCraft_artefacts/Debug/SpectroCraft --run-unit-tests
-#   macOS : build/src/SpectroCraft_artefacts/Debug/SpectroCraft.app/Contents/MacOS/SpectroCraft
+#   macOS: build/src/SpectroCraft_artefacts/Debug/SpectroCraft.app/Contents/MacOS/SpectroCraft
 
-# adaptateur MCP (Python 3.11+, sans build C++)
+# MCP adapter (Python 3.11+, no C++ build)
 pip install -e "tools/mcp[test]" && pytest tools/mcp/tests
-SPECTROCRAFT_EXE=<exe> pytest tools/mcp/tests/test_real_exe.py   # contre le vrai --json
-SPECTROCRAFT_EXE=<exe> tools/mcp/smoke.sh /abs/fichier.wav       # bout en bout, app ouverte (local)
+SPECTROCRAFT_EXE=<exe> pytest tools/mcp/tests/test_real_exe.py   # against the real --json
+SPECTROCRAFT_EXE=<exe> tools/mcp/smoke.sh /abs/file.wav          # end to end, app open (local)
 ```
 
-- `-DSPECTRO_ENABLE_AI=OFF` pour un build léger (pas d'OpenVINO / whisper.cpp).
-- Les tests C++ sont dans `tests/UnitTests.cpp` et `tests/regression/*.inc` (contrôle IA :
-  `tests/regression/control.inc`), lancés par `--run-unit-tests` ; ctest les répartit en shards.
-- Code du contrôle IA : `include/control/`, `src/control/` (registre de commandes, `--json`, serveur) ;
-  notes de passation par lot : `docs/ai-control/progress/`.
+- `-DSPECTRO_ENABLE_AI=OFF` for a light build (no OpenVINO / whisper.cpp).
+- The C++ tests are in `tests/UnitTests.cpp` and `tests/regression/*.inc` (AI control:
+  `tests/regression/control.inc`), run by `--run-unit-tests`; ctest splits them into shards.
+- AI control code: `include/control/`, `src/control/` (command registry, `--json`, server);
+  per-lot handoff notes: `docs/ai-control/progress/`.

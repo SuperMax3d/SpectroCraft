@@ -1,70 +1,70 @@
-# Lot 3 — cœur « modèles IA, devices » (sans registre de commandes)
+# Lot 3 — "AI models, devices" core (without the command registry)
 
-Branche `ai-control-catalog`, créée depuis `ai-control` = `76de144` (le commit de docs `5a80afd`
-indiqué dans la consigne a été amendé en `76de144` sur le fork ; seule différence : deux lignes de
-`DECISIONS.md`). Ne dépend ni de `src/control/` ni du `JobManager` : le lot 0 du fil principal
-(`693f3f3`) n'est pas inclus, les wrappers `ai.*` restent à écrire (voir « Fusion » plus bas).
+Branch `ai-control-catalog`, created from `ai-control` = `76de144` (the docs commit `5a80afd`
+given in the instructions was amended into `76de144` on the fork; the only difference: two lines of
+`DECISIONS.md`). Depends neither on `src/control/` nor on the `JobManager`: lot 0 of the main line
+(`693f3f3`) is not included, the `ai.*` wrappers remain to be written (see "Merge" below).
 
-## Fait
+## Done
 
-1. **`sc::ai::ModelCatalog`** (`include/AI/ModelCatalog.h`, `src/AI/ModelCatalog.cpp`) : une vue
-   unique sur les deux registres. 32 entrées : 15 de `ModelManager` (3 OpenVINO + 12 Whisper),
-   4 binaires audio.cpp (`audiocpp-cli-<variant>`), 9 SAM-Audio, FlashSR, AudioSR, 2 htdemucs
-   « manuels » (détectés seulement, pas de source de téléchargement dans l'app).
-   - Champs : `id, engine (openvino|whisper|audiocpp), family (noiseSuppress|transcribe|stems|superRes|runtime),
-     displayName, folder, files[{name,url,sizeBytes,sha256}], archive (zip des runtimes), variant,
+1. **`sc::ai::ModelCatalog`** (`include/AI/ModelCatalog.h`, `src/AI/ModelCatalog.cpp`): a single
+   view over the two registries. 32 entries: 15 from `ModelManager` (3 OpenVINO + 12 Whisper),
+   4 audio.cpp binaries (`audiocpp-cli-<variant>`), 9 SAM-Audio, FlashSR, AudioSR, 2 "manual" htdemucs
+   (detected only, no download source in the app).
+   - Fields: `id, engine (openvino|whisper|audiocpp), family (noiseSuppress|transcribe|stems|superRes|runtime),
+     displayName, folder, files[{name,url,sizeBytes,sha256}], archive (zip of the runtimes), variant,
      backends, platforms, license, source, installable, reason, reasonCode, manual`.
-   - Moteur = donnée : la migration vers l'API C d'audio.cpp (demande de SuperMax3d, **non faite ici**)
-     ajoutera des entrées / un nouvel `engine`, sans toucher au format JSON.
-   - `status()` (stat seulement, aucun hash), `installPlan()` (pré-contrôle synchrone pour le handler),
-     `install()` / `verify()` / `remove()` **bloquants**, sûrs depuis un worker, progression + annulation
-     par `CatalogProgressFn (float, status) -> bool`, garde « busy » par id (les 4 variantes du CLI
-     partagent une seule clé : un seul `audiocpp_cli.exe`).
-   - Codes d'erreur = sous-ensemble de `sc::control::err` : `invalid_params`, `busy`, `cancelled`,
-     `unsupported_platform`, `model_not_installed`, `failed` → un wrapper transmet `CatalogOutcome` tel quel.
-   - JSON §6.5 : `listJson()` (`{"modelsRoot","audiocppRoot","models":[…]}`), `entryJson()`,
-     `removalPreview()` (texte pour `confirm_required` : « Removes 148 MB under … »), résultats
-     d'install/verify/remove aux formes de `job.done` du §6.5.
-2. **SHA-256 des assets audio.cpp** : les 15 assets référencés ont été **téléchargés et hachés**
-   (2026-11-05) ; chaque valeur est égale au `digest` publié par GitHub (releases) ou à l'oid LFS
-   publié par Hugging Face. Ajoutés dans `binaryChoices/modelChoices/flashSrChoices/audioSRChoices`
-   (`include/AudioCpp.h` : champs `sha256`, `exeSha256`, `exeSizeBytes`, `catalogBlocker`).
-   - `sc::acpp::downloadFile` vérifie maintenant le SHA-256 en flux (paramètre optionnel, sinon
-     `knownSha256ForUrl(url)`) : les dialogues Stem/Super Resolution, inchangés, en profitent.
-     `commitDownload` refuse un hash faux (le `.part` est supprimé, la destination intacte).
-   - `installBinaryFromZip` extrait dans un dossier temporaire, compare `audiocpp_cli.exe` au hash
-     publié de la variante, puis seulement remplace le binaire en place (un zip refusé ne détruit plus
-     le binaire existant).
-   - URL FlashSR épinglée sur le commit `38156353` au lieu de `main` (sinon le hash publié pourrait
-     cesser de correspondre).
-   - Téléchargement/exécution audio.cpp toujours **Windows seulement** (stubs POSIX inchangés).
-3. **Devices réels** : `sc::ai::resolveAiDevice(engine, requested, available)` (pur) +
-   `resolveAiDevice(engine, requested)` / `resolveAiDevice(requested)` (listes réelles),
-   `availableDevices()`, `audioCppBackendsForVariant()`, `devicesJson()` (forme §6.5 ; sans `init`,
-   OpenVINO n'est pas chargé : `"initialised":false,"devices":null`). Un device indisponible est une
-   **erreur explicite** (`invalid_params`, « device GPU is not available for openvino »,
-   `details.expected = "one of [auto, CPU]"`), jamais un repli silencieux. L'ancien
-   `sc::resolveAiDevice` (repli CPU + note) reste pour les dialogues, non modifiés.
-4. **`SC_MODELS_DIR` sur toutes les plateformes** : `ModelManager` (racine), `sc::acpp::dir()`
-   (`<SC_MODELS_DIR>/audiocpp`, avant : jamais), et `SC_OPENVINO_CACHE_DIR` aussi sous Windows.
-5. **Installs `file://`** dans `ModelManager` (`localFileGet` : mêmes contrôles taille + SHA-256,
-   `.part`, annulation) : miroir hors-ligne et fixtures de tests sans réseau.
-6. **`buildNsFailureDetails`** déplacé de `src/MainWindow.cpp` vers `src/NoiseSuppression.cpp`
-   (module IA ; la déclaration était déjà dans `include/NoiseSuppression.h`). MainWindow : suppression seule.
-7. `src/AI/Sha256.cpp` passe dans les sources toujours compilées (AudioCpp.cpp en a besoin même hors IA).
+   - Engine = data: the migration to the audio.cpp C API (SuperMax3d's request, **not done here**)
+     will add entries / a new `engine`, without touching the JSON format.
+   - `status()` (stat only, no hashing), `installPlan()` (synchronous pre-check for the handler),
+     `install()` / `verify()` / `remove()` **blocking**, safe from a worker, progress + cancellation
+     through `CatalogProgressFn (float, status) -> bool`, per-id "busy" guard (the 4 CLI variants
+     share a single key: only one `audiocpp_cli.exe`).
+   - Error codes = subset of `sc::control::err`: `invalid_params`, `busy`, `cancelled`,
+     `unsupported_platform`, `model_not_installed`, `failed` → a wrapper passes `CatalogOutcome` on as-is.
+   - JSON §6.5: `listJson()` (`{"modelsRoot","audiocppRoot","models":[…]}`), `entryJson()`,
+     `removalPreview()` (text for `confirm_required`: "Removes 148 MB under …"), install/verify/remove
+     results in the `job.done` shapes of §6.5.
+2. **SHA-256 of the audio.cpp assets**: the 15 referenced assets were **downloaded and hashed**
+   (2026-11-05); each value equals the `digest` published by GitHub (releases) or the LFS oid
+   published by Hugging Face. Added to `binaryChoices/modelChoices/flashSrChoices/audioSRChoices`
+   (`include/AudioCpp.h`: fields `sha256`, `exeSha256`, `exeSizeBytes`, `catalogBlocker`).
+   - `sc::acpp::downloadFile` now verifies the SHA-256 while streaming (optional parameter, otherwise
+     `knownSha256ForUrl(url)`): the Stem/Super Resolution dialogs, unchanged, benefit from it.
+     `commitDownload` refuses a wrong hash (the `.part` is deleted, the destination left intact).
+   - `installBinaryFromZip` extracts into a temporary folder, compares `audiocpp_cli.exe` with the
+     published hash of the variant, and only then replaces the binary in place (a refused zip no longer destroys
+     the existing binary).
+   - FlashSR URL pinned to commit `38156353` instead of `main` (otherwise the published hash could
+     stop matching).
+   - audio.cpp download/execution still **Windows only** (POSIX stubs unchanged).
+3. **Real devices**: `sc::ai::resolveAiDevice(engine, requested, available)` (pure) +
+   `resolveAiDevice(engine, requested)` / `resolveAiDevice(requested)` (real lists),
+   `availableDevices()`, `audioCppBackendsForVariant()`, `devicesJson()` (§6.5 shape; without `init`,
+   OpenVINO is not loaded: `"initialised":false,"devices":null`). An unavailable device is an
+   **explicit error** (`invalid_params`, "device GPU is not available for openvino",
+   `details.expected = "one of [auto, CPU]"`), never a silent fallback. The old
+   `sc::resolveAiDevice` (CPU fallback + note) remains for the dialogs, unchanged.
+4. **`SC_MODELS_DIR` on all platforms**: `ModelManager` (root), `sc::acpp::dir()`
+   (`<SC_MODELS_DIR>/audiocpp`, before: never), and `SC_OPENVINO_CACHE_DIR` also on Windows.
+5. **`file://` installs** in `ModelManager` (`localFileGet`: same size + SHA-256 checks,
+   `.part`, cancellation): offline mirror and network-free test fixtures.
+6. **`buildNsFailureDetails`** moved from `src/MainWindow.cpp` to `src/NoiseSuppression.cpp`
+   (AI module; the declaration was already in `include/NoiseSuppression.h`). MainWindow: removal only.
+7. `src/AI/Sha256.cpp` moves into the always-compiled sources (AudioCpp.cpp needs it even without AI).
 
-## Table des hashes (assets audio.cpp)
+## Hash table (audio.cpp assets)
 
-| Asset | SHA-256 | Taille (octets) | Source |
+| Asset | SHA-256 | Size (bytes) | Source |
 |---|---|---|---|
 | bin cpu-portable (zip) | `9654c8f66f87bda768196d934059be896399b43703b06e5f2b857430775bec3b` | 28786884 | https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2-drama3-base-small/audio-v0.9.2-drama3-base-small-bin-windows-x64-cpu-portable.zip |
-| ↳ `audiocpp_cli.exe` | `427875df84983e950103caa78c435e2dd3cef4b99dc0295c4f941e49598fda06` | 27326464 | (dans le zip) |
+| ↳ `audiocpp_cli.exe` | `427875df84983e950103caa78c435e2dd3cef4b99dc0295c4f941e49598fda06` | 27326464 | (inside the zip) |
 | bin cuda12.4 (zip) | `48852da40790c40f3285bca6c53ff7829b3963080f0e95b6742f868fc1d7c757` | 464268606 | …/audio-v0.9.2-drama3-base-small-bin-windows-x64-cuda12.4.zip |
-| ↳ `audiocpp_cli.exe` | `ee1ae0b3dce0918f33dd9446e55c21f50120bcf4501a98a9a9a1ef4b7eaa91a9` | 26529280 | (dans le zip) |
+| ↳ `audiocpp_cli.exe` | `ee1ae0b3dce0918f33dd9446e55c21f50120bcf4501a98a9a9a1ef4b7eaa91a9` | 26529280 | (inside the zip) |
 | bin cuda13.3 (zip) | `b570efa4b17c2aa32c431c653489c009b58f57f60d68782b3b94b6c06304a9e8` | 275837338 | …/audio-v0.9.2-drama3-base-small-bin-windows-x64-cuda13.3.zip |
-| ↳ `audiocpp_cli.exe` | `baf36544d8734099b5fb22c3284f5a0c4d5dba0272f36e8180a16d77bda2e7c9` | 26537472 | (dans le zip) |
+| ↳ `audiocpp_cli.exe` | `baf36544d8734099b5fb22c3284f5a0c4d5dba0272f36e8180a16d77bda2e7c9` | 26537472 | (inside the zip) |
 | bin vulkan-portable (zip) | `9c943d406af3543cc5005d158ed583210cd7a13371bffcd4b7f262f7a6a5ad16` | 63227361 | …/audio-v0.9.2-drama3-base-small-bin-windows-x64-vulkan-portable.zip |
-| ↳ `audiocpp_cli.exe` | `373e76168f317f7b8f63bf0ccdf1f2048c01cc995fdcdd507a17264d3d4e09a4` | 84764672 | (dans le zip) |
+| ↳ `audiocpp_cli.exe` | `373e76168f317f7b8f63bf0ccdf1f2048c01cc995fdcdd507a17264d3d4e09a4` | 84764672 | (inside the zip) |
 | flashsr/flashsr.safetensors | `cfa15eb8576e50cff30bc9851fc2ca8e74b6ea379fbcded03c9cc44458b1c6e2` | 356008 | https://github.com/0xShug0/audio.cpp/raw/38156353396fae68d10388c960b900a8fda8373f/assets/framework/audio_utilities/flashsr/flashsr.safetensors |
 | sam-audio-small-q8_0.gguf | `82e7aaf7b8c458f67183a4924950dbb10ad1979a9c057f1a906c79752a4ba243` | 2379290272 | https://huggingface.co/audio-cpp/SAM-Audio-GGUF/resolve/main/sam-audio-small-q8_0.gguf |
 | sam-audio-small-bf16.gguf | `48e51ad99e08eb976cbcbf65e1dd725b0e76b00618fd857a05dc7b7dadceb46b` | 2824105568 | …/SAM-Audio-GGUF/resolve/main/sam-audio-small-bf16.gguf |
@@ -77,108 +77,108 @@ indiqué dans la consigne a été amendé en `76de144` sur le fork ; seule diff�
 | sam-audio-large-f32.gguf | `bdfe2614aca0a85eebf2304959f9783125655ecb9475e56cd180f4551d32043a` | 15401675328 | …/SAM-Audio-GGUF/resolve/main/sam-audio-large-f32.gguf |
 | AudioSR-GGUF/audiosr-basic-f32.gguf | `bf92d26c638e82f5051dfd8cf5899798d64ce5366ff63bad8b5930a82fce5bff` | 6177855616 | https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/AudioSR-GGUF/audiosr-basic-f32.gguf |
 
-Tous les fichiers : HTTP 200, taille reçue = taille du catalogue. Les tailles étaient déjà exactes.
-Aucun asset n'est resté sans hash.
+All files: HTTP 200, size received = catalog size. The sizes were already correct.
+No asset was left without a hash.
 
-## État `installable` (catalogue intégré)
+## `installable` state (built-in catalog)
 
-- OpenVINO / Whisper (15) : `installable:true` partout (hashes déjà présents).
-- audio.cpp, Windows : CPU portable, Vulkan portable, 9 SAM-Audio, FlashSR, AudioSR → `true`.
-- audio.cpp hors Windows : `false`, `reasonCode:"unsupported_platform"`.
-- **CUDA 12.4 / 13.3 : `false`, `reasonCode:"blocked"`** — constat : leur `audiocpp_cli.exe` importe
-  `ggml.dll` et `ggml-base.dll` (fournis dans le même zip), alors que `installBinaryFromZip` n'extrait
-  que l'exe ; un binaire CUDA installé ainsi ne peut pas démarrer (non exécuté : déduit de la table
-  d'imports). Les variantes « portable » n'importent que le runtime MSVC. Les dialogues proposent
-  toujours CUDA (StemSeparation.cpp hors de mon périmètre) : à corriger en extrayant toutes les DLL.
-- htdemucs-6stems / htdemucs-ft : `false`, `reasonCode:"manual"` (les fichiers existent sur
-  `audio-cpp/audio.cpp-gguf/HTDemucs-6stems-GGUF`, mais l'app n'a pas d'URL ; non ajoutée).
+- OpenVINO / Whisper (15): `installable:true` everywhere (hashes already present).
+- audio.cpp, Windows: CPU portable, Vulkan portable, 9 SAM-Audio, FlashSR, AudioSR → `true`.
+- audio.cpp outside Windows: `false`, `reasonCode:"unsupported_platform"`.
+- **CUDA 12.4 / 13.3: `false`, `reasonCode:"blocked"`** — finding: their `audiocpp_cli.exe` imports
+  `ggml.dll` and `ggml-base.dll` (shipped in the same zip), whereas `installBinaryFromZip` only extracts
+  the exe; a CUDA binary installed this way cannot start (not executed: deduced from the import
+  table). The "portable" variants only import the MSVC runtime. The dialogs still offer
+  CUDA (StemSeparation.cpp outside my scope): to be fixed by extracting all the DLLs.
+- htdemucs-6stems / htdemucs-ft: `false`, `reasonCode:"manual"` (the files exist on
+  `audio-cpp/audio.cpp-gguf/HTDemucs-6stems-GGUF`, but the app has no URL; not added).
 
 ## Tests
 
-`tests/regression/ai_catalog.inc` (suite `regression: ai_catalog`, enregistrée dans `tests/UnitTests.cpp`,
-2 lignes) — aucun réseau :
-- hashes acpp (tous présents, recherche par URL, FlashSR épinglé), `validateSha256`, `commitDownload`
-  avec hash faux/juste, `sha256OfFile`, `installBinaryFromZip` (exe refusé, binaire existant préservé,
-  variante inconnue acceptée) ;
-- `SC_MODELS_DIR` (ModelManager + `acpp::dir()`, valeur relative ignorée) — tourne aussi sous Windows ;
-- catalogue intégré : 32 entrées, ids uniques, champs cohérents, `installable ⇒ sha256 + taille + URL`,
-  raisons présentes, CUDA bloqué, plateforme ;
-- JSON §6.5 après aller-retour texte (`whisper-base`, tailles > 4 Go, runtime), `devicesJson` ;
-- `resolveAiDevice` : auto/GPU/NPU/CPU, `GPU.n`, casse, refus explicites, moteur inconnu, whisper, audio.cpp ;
-- install/verify/remove par `file://` (annulation sans fichier partiel, progression, corruption
-  détectée puis réparée, hash publié faux refusé, entrée non installable, busy concurrent par thread,
-  aperçu de suppression, suppression idempotente, id inconnu) ;
-- chemin d'install audio.cpp (zip + exe + variante, modèle en sous-dossier, hash faux refusé, slot CLI
-  partagé busy) via un téléchargeur injecté (`setAudioCppDownloaderForTests`), donc testé sur macOS/Linux.
+`tests/regression/ai_catalog.inc` (suite `regression: ai_catalog`, registered in `tests/UnitTests.cpp`,
+2 lines) — no network:
+- acpp hashes (all present, lookup by URL, FlashSR pinned), `validateSha256`, `commitDownload`
+  with wrong/correct hash, `sha256OfFile`, `installBinaryFromZip` (exe refused, existing binary preserved,
+  unknown variant accepted);
+- `SC_MODELS_DIR` (ModelManager + `acpp::dir()`, relative value ignored) — also runs on Windows;
+- built-in catalog: 32 entries, unique ids, consistent fields, `installable ⇒ sha256 + size + URL`,
+  reasons present, CUDA blocked, platform;
+- JSON §6.5 after a text round-trip (`whisper-base`, sizes > 4 GB, runtime), `devicesJson`;
+- `resolveAiDevice`: auto/GPU/NPU/CPU, `GPU.n`, case, explicit refusals, unknown engine, whisper, audio.cpp;
+- install/verify/remove via `file://` (cancellation without a partial file, progress, corruption
+  detected then repaired, wrong published hash refused, non-installable entry, concurrent busy per thread,
+  removal preview, idempotent removal, unknown id);
+- audio.cpp install path (zip + exe + variant, model in a subfolder, wrong hash refused, shared CLI slot
+  busy) via an injected downloader (`setAudioCppDownloaderForTests`), hence tested on macOS/Linux.
 
-Résultats (macOS 26 arm64, AppleClang 21, Debug, `SPECTRO_ENABLE_AI=ON`, ctest 8 shards) :
-- base `76de144` : 10/10 ctest OK ;
-- après le lot : 10/10 ctest OK (deux passes complètes, avant et après les corrections de revue) ;
-  `regression: ai_catalog` ≈ 0,04 s.
-- build `SPECTRO_ENABLE_AI=OFF` (macOS) : compile ; `regression: ai*` 43/43 (les parties catalogue
-  sont sautées avec `SKIP`, les contrôles SHA-256 audio.cpp et `SC_MODELS_DIR` tournent).
-- interférences locales, sans rapport avec le lot : d'autres agents lançaient la suite en même temps
-  sur la même machine. (a) `scTestTempDir()` = `<temp>/SpectroCraftTests-tmp-shard<k>` est global et
-  vidé au démarrage de chaque passe → une passe a eu des dizaines d'échecs « write wav » + SegFaults ;
-  avec un `TMPDIR` privé, disparus. (b) `single instance mode` (tube nommé global) échoue parfois
-  (« empty list acknowledged », « second client's forward acknowledged ») ; seul : 13/13. Dernière
-  passe complète (TMPDIR privé) : 9/10 shards OK, le 10e uniquement sur ce test de tube.
-  Le CI (machines isolées) fait foi.
-- **CI** `build.yml` (workflow_dispatch sur `f12f175`, run 42155383758) : `windows-ai` ✅ (MSVC Release,
-  chemins audio.cpp Windows compilés et testés), `macos-ai` ✅, `linux-ai` ✅.
+Results (macOS 26 arm64, AppleClang 21, Debug, `SPECTRO_ENABLE_AI=ON`, ctest 8 shards):
+- base `76de144`: 10/10 ctest OK;
+- after the lot: 10/10 ctest OK (two full passes, before and after the review fixes);
+  `regression: ai_catalog` ≈ 0.04 s.
+- `SPECTRO_ENABLE_AI=OFF` build (macOS): compiles; `regression: ai*` 43/43 (the catalog parts
+  are skipped with `SKIP`, the audio.cpp SHA-256 and `SC_MODELS_DIR` checks run).
+- local interference, unrelated to the lot: other agents were running the suite at the same time
+  on the same machine. (a) `scTestTempDir()` = `<temp>/SpectroCraftTests-tmp-shard<k>` is global and
+  emptied at the start of each pass → one pass had dozens of "write wav" failures + SegFaults;
+  with a private `TMPDIR`, gone. (b) `single instance mode` (global named pipe) sometimes fails
+  ("empty list acknowledged", "second client's forward acknowledged"); alone: 13/13. Last
+  full pass (private TMPDIR): 9/10 shards OK, the 10th only on this pipe test.
+  CI (isolated machines) is authoritative.
+- **CI** `build.yml` (workflow_dispatch on `f12f175`, run 42155383758): `windows-ai` ✅ (MSVC Release,
+  audio.cpp Windows paths compiled and tested), `macos-ai` ✅, `linux-ai` ✅.
 
-## Écarts
+## Deviations
 
-- Base `76de144` et non `5a80afd` (voir en tête).
-- Fichiers hors liste touchés : aucun, sauf `tests/UnitTests.cpp` (ligne `SC_RUN_TEST` en plus de
-  l'`#include`, nécessaire pour exécuter la suite).
-- `tests/CMakeLists.txt` non modifié (hors périmètre) : la cible console `SpectroCraftTests` (non
-  construite par le CI, `--target SpectroCraft`) devrait lister `src/AI/Sha256.cpp` hors du bloc IA et
-  `src/AI/ModelCatalog.cpp` dans le bloc IA si on la fait revivre.
-- Sous Windows, ctest et `--run-unit-tests` ne posent toujours pas `SC_MODELS_DIR` (tests/CMakeLists.txt,
-  Main.cpp hors périmètre) : l'override est honoré mais personne ne s'en sert encore côté Windows.
-- `verified` dans la liste = « SHA-256 vérifié dans ce processus » (pas de hachage pendant `list`) ;
-  `false` ne veut pas dire corrompu : appeler `ai.models.verify`.
+- Base `76de144` and not `5a80afd` (see the top of the file).
+- Files outside the list touched: none, except `tests/UnitTests.cpp` (`SC_RUN_TEST` line in addition to
+  the `#include`, needed to run the suite).
+- `tests/CMakeLists.txt` not modified (out of scope): the console target `SpectroCraftTests` (not
+  built by CI, `--target SpectroCraft`) should list `src/AI/Sha256.cpp` outside the AI block and
+  `src/AI/ModelCatalog.cpp` inside the AI block if it is ever revived.
+- On Windows, ctest and `--run-unit-tests` still do not set `SC_MODELS_DIR` (tests/CMakeLists.txt,
+  Main.cpp out of scope): the override is honoured but nobody uses it yet on the Windows side.
+- `verified` in the list = "SHA-256 verified in this process" (no hashing during `list`);
+  `false` does not mean corrupted: call `ai.models.verify`.
 
-## Fusion : ce que le fil principal doit faire
+## Merge: what the main line must do
 
-Fichier proposé : `src/control/commands/Ai.cpp`, drapeaux `AiBuildOnly`. Tout le travail est dans le
-catalogue ; chaque handler fait 5-15 lignes.
+Proposed file: `src/control/commands/Ai.cpp`, flags `AiBuildOnly`. All the work is in the
+catalog; each handler is 5-15 lines.
 
 - `ai.models.list` (`Query`) → `Outcome::success (ModelCatalog::instance().listJson())`.
-- `ai.models.install {modelId}` (`LongRunning`) :
+- `ai.models.install {modelId}` (`LongRunning`):
   1. `auto plan = cat.installPlan (id); if (!plan.ok) return Outcome::failure (plan.code, plan.message, plan.details);`
-  2. `jobs.start ({ "ai.models.install", false /*non mutant*/, … }, [id] (JobControl& jc) {
+  2. `jobs.start ({ "ai.models.install", false /*non-mutating*/, … }, [id] (JobControl& jc) {
        auto o = ModelCatalog::instance().install (id, [&] (float f, const std::string& s)
                     { jc.progress (f, s); return !jc.cancelled(); });
        return o.ok ? Outcome::success (o.result) : Outcome::failure (o.code, o.message, o.details); });`
-  3. réponse immédiate `{"job":…, "sizeBytes": plan.result.sizeBytes}`.
-- `ai.models.verify {modelId}` : même patron avec `cat.verify`.
-- `ai.models.remove {modelId, confirm}` (`Destructive`) : sans `confirm` →
-  `confirm_required` avec `cat.removalPreview(id).result.message` ; refuser `busy` si un job IA
-  (noiseSuppress/transcribe) utilise ce modèle (le catalogue ne connaît que ses propres opérations) ;
-  puis `cat.remove(id)` (rapide pour OpenVINO/Whisper ; en job si on veut être prudent sur les gros GGUF).
-- `ai.devices {init}` (`Query`) : `init:false` → `devicesJson (app.aiDevicePref, false)` direct ;
-  `init:true` → job (charge OpenVINO), résultat `devicesJson (app.aiDevicePref, true)`.
-- `ai.setDevice {engine, device, persist}` : `openvino` → `resolveAiDevice ("openvino", device)` dans un
-  job si le runtime n'est pas prêt (ou `availableDevices(…, false)` si `ready()`), erreur →
-  `Outcome::failure (r.code, r.message, r.errorJson()["details"])` ; succès → `app.aiDevicePref = r.requested`
-  (`"auto"` ou nom), `persist` → `saveSettings`, résultat `r.toJson()` + `persisted`.
-  `audiocpp` → mémoriser le backend à part (pas de réglage existant).
-- **Actions.cpp** (lot 0, `f1cfa62`) : l'étape `noiseSuppress` utilise encore l'ancien
-  `sc::resolveAiDevice` (repli CPU silencieux). Pour une commande API, appeler
-  `sc::ai::resolveAiDevice ("openvino", pref)` et échouer sur `!r.ok` ; garder le repli pour le
-  rejeu d'actions enregistrées si on veut la compatibilité.
-- `--test-ns-failure-alert`, dialogues : `buildNsFailureDetails` inchangé (même déclaration).
-- Conflits attendus au merge : `tests/UnitTests.cpp` (lignes voisines de `regression/ai.inc`),
-  `src/CMakeLists.txt` (liste des sources) — triviaux.
+  3. immediate response `{"job":…, "sizeBytes": plan.result.sizeBytes}`.
+- `ai.models.verify {modelId}`: same pattern with `cat.verify`.
+- `ai.models.remove {modelId, confirm}` (`Destructive`): without `confirm` →
+  `confirm_required` with `cat.removalPreview(id).result.message`; refuse with `busy` if an AI job
+  (noiseSuppress/transcribe) uses this model (the catalog only knows its own operations);
+  then `cat.remove(id)` (fast for OpenVINO/Whisper; as a job if one wants to be careful with the large GGUFs).
+- `ai.devices {init}` (`Query`): `init:false` → `devicesJson (app.aiDevicePref, false)` directly;
+  `init:true` → job (loads OpenVINO), result `devicesJson (app.aiDevicePref, true)`.
+- `ai.setDevice {engine, device, persist}`: `openvino` → `resolveAiDevice ("openvino", device)` in a
+  job if the runtime is not ready (or `availableDevices(…, false)` if `ready()`), error →
+  `Outcome::failure (r.code, r.message, r.errorJson()["details"])`; success → `app.aiDevicePref = r.requested`
+  (`"auto"` or name), `persist` → `saveSettings`, result `r.toJson()` + `persisted`.
+  `audiocpp` → store the backend separately (no existing setting).
+- **Actions.cpp** (lot 0, `f1cfa62`): the `noiseSuppress` step still uses the old
+  `sc::resolveAiDevice` (silent CPU fallback). For an API command, call
+  `sc::ai::resolveAiDevice ("openvino", pref)` and fail on `!r.ok`; keep the fallback for the
+  replay of recorded actions if compatibility is wanted.
+- `--test-ns-failure-alert`, dialogs: `buildNsFailureDetails` unchanged (same declaration).
+- Conflicts expected at merge: `tests/UnitTests.cpp` (lines neighbouring `regression/ai.inc`),
+  `src/CMakeLists.txt` (list of sources) — trivial.
 
-## Dettes / suite
+## Debts / next steps
 
-- Extraire toutes les DLL des zips CUDA (StemSeparation/SuperResolution/`installBinaryFromZip`), puis
-  retirer `catalogBlocker`.
-- Le verrou « busy » ne couvre pas les téléchargements lancés par les dialogues (premier usage NS /
-  Whisper, setup Stem/SR) ; sous Windows deux téléchargements simultanés du même fichier partagent
-  le même `.part` (préexistant).
-- Migration audio.cpp (API C, backends cpu/vulkan/cuda/metal) : ajouter un `engine` et des entrées ;
-  `resolveAiDevice` accepte déjà les backends comme données.
+- Extract all the DLLs from the CUDA zips (StemSeparation/SuperResolution/`installBinaryFromZip`), then
+  remove `catalogBlocker`.
+- The "busy" lock does not cover downloads started by the dialogs (first NS /
+  Whisper use, Stem/SR setup); on Windows two simultaneous downloads of the same file share
+  the same `.part` (pre-existing).
+- audio.cpp migration (C API, cpu/vulkan/cuda/metal backends): add an `engine` and entries;
+  `resolveAiDevice` already accepts backends as data.

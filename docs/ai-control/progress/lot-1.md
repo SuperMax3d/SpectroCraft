@@ -1,171 +1,171 @@
-# Lot 1 — serveur de contrôle dans l'app ouverte + jobs
+# Lot 1 — control server in the running app + jobs
 
-Statut : **fait** (macOS arm64). Voir « Résultats » et « CI » en fin de fichier.
+Status: **done** (macOS arm64). See "Results" and "CI" at the end of the file.
 
-## Ce qui a été fait
+## What was done
 
-### Serveur (`include/control/ControlServer.h`, `src/control/ControlServer.cpp`)
+### Server (`include/control/ControlServer.h`, `src/control/ControlServer.cpp`)
 
-- `juce::Thread "SC-Control"` : `createListener (0, "127.0.0.1")` + `getBoundPort()`, boucle d'acceptation
-  `waitUntilReady (true, 500)` ; un thread `SC-ControlClient-<n>` par client, **4 clients max** (le 5ᵉ reçoit
-  `busy` puis est fermé).
-- NDJSON : découpage sur `\n` (CRLF toléré), ligne > 1 Mio → `invalid_params` et la session continue,
-  JSON illisible → `invalid_params`.
-- **Authentification** : `session.hello {token, client, subscribe[], sinceSeq}` obligatoire en premier
-  (comparaison à temps constant) ; 3 échecs → pause de 2 s ; `unauthorized` sinon. Jeton = 2 `Uuid`
-  (64 hex), jamais journalisé (`sanitizedParams` retire `token`), seulement dans le fichier de découverte.
-- **Le thread réseau ne touche jamais `Application`** : chaque requête est postée par `callAsync` avec un
-  `PendingCall` partagé (`WaitableEvent` + `abandoned`) et attendue **au plus `timeoutMs`** (défaut 30 s) →
-  `timeout {hint: "a modal dialog is probably open"}` ; pendant l'attente, la file d'événements est vidée
-  toutes les 20 ms. À l'arrêt, attente abandonnée → `shutting_down`.
-- **Arrêt** (`stop()`) : `shuttingDown`, **auto-connexion au port réel** avant `listener->close()`
-  (JUCE se connecte au port 0 sur Linux, §5.2), `stopThread (2000)`, sessions fermées puis jointes,
-  fichier de découverte supprimé. Appelé dans `shutdown()` **avant** `mainWindow.reset()`.
-- **Fichier de découverte** `<userApplicationDataDirectory>/SpectroCraft/control/<pid>.json`
-  `{pid, port, token, version, protocol, startedAt, exe, platform}` : dossier 0700, fichier créé vide,
-  passé en **0600**, puis écrit (POSIX) ; balayage des fichiers dont le PID est mort au démarrage
+- `juce::Thread "SC-Control"`: `createListener (0, "127.0.0.1")` + `getBoundPort()`, accept loop
+  `waitUntilReady (true, 500)`; one `SC-ControlClient-<n>` thread per client, **4 clients max** (the 5th receives
+  `busy` and is then closed).
+- NDJSON: split on `\n` (CRLF tolerated), line > 1 MiB → `invalid_params` and the session continues,
+  unreadable JSON → `invalid_params`.
+- **Authentication**: `session.hello {token, client, subscribe[], sinceSeq}` mandatory first
+  (constant-time comparison); 3 failures → 2 s pause; `unauthorized` otherwise. Token = 2 `Uuid`s
+  (64 hex), never journaled (`sanitizedParams` strips `token`), only in the discovery file.
+- **The network thread never touches `Application`**: each request is posted via `callAsync` with a shared
+  `PendingCall` (`WaitableEvent` + `abandoned`) and waited for **at most `timeoutMs`** (default 30 s) →
+  `timeout {hint: "a modal dialog is probably open"}`; while waiting, the event queue is drained
+  every 20 ms. On shutdown, the wait is abandoned → `shutting_down`.
+- **Shutdown** (`stop()`): `shuttingDown`, **self-connection to the actual port** before `listener->close()`
+  (JUCE connects to port 0 on Linux, §5.2), `stopThread (2000)`, sessions closed then joined,
+  discovery file deleted. Called in `shutdown()` **before** `mainWindow.reset()`.
+- **Discovery file** `<userApplicationDataDirectory>/SpectroCraft/control/<pid>.json`
+  `{pid, port, token, version, protocol, startedAt, exe, platform}`: folder 0700, file created empty,
+  set to **0600**, then written (POSIX); at startup, files whose PID is dead are swept
   (`kill(pid,0)` / `OpenProcess`).
-- **Événements** : chaque entrée de journal → `journal.entry` (abonnement `journal`) et, selon le type,
-  `history.changed` (undo/redo, commandes et jobs mutants, éditions menu) ; `job.progress`/`job.done`
-  (JobManager) ; `doc.changed` (commandes doc/selection/view/markers). File bornée à 1000 par client,
-  `events.dropped {count}` au-delà. `events.subscribe {kinds, sinceSeq}` et `session.hello {sinceSeq}`
-  **rejouent** le journal en mémoire (le rejeu complet/persistant est au lot 5).
-- `session.bye` ferme proprement.
+- **Events**: each journal entry → `journal.entry` (subscription `journal`) and, depending on the type,
+  `history.changed` (undo/redo, mutating commands and jobs, menu edits); `job.progress`/`job.done`
+  (JobManager); `doc.changed` (doc/selection/view/markers commands). Queue bounded at 1000 per client,
+  `events.dropped {count}` beyond that. `events.subscribe {kinds, sinceSeq}` and `session.hello {sinceSeq}`
+  **replay** the in-memory journal (full/persistent replay is in lot 5).
+- `session.bye` closes cleanly.
 
-### Application / fenêtre
+### Application / window
 
-- Réglage `control_enabled` (défaut 0), menu **Window > Allow AI control (localhost)** (démarre/arrête le
-  serveur à chaud), flag **`--control`** (démarre le serveur et **saute `handleStartup`** : jamais de
-  forward vers une instance existante, même avec `multi_instance=0`, Q15).
-- Option CMake **`SC_ENABLE_CONTROL`** (ON, Q14) : à OFF, plus de serveur, de `--control` ni d'item de menu
-  (le registre et `--json` restent).
-- Indicateur « AI control: N client(s) » dans la barre d'état (`StatusBar::setControlText`).
-- `MainWindow` implémente `sc::control::UiBridge` (rafraîchissement, fenêtre temporelle, zooms, vues,
-  panneaux, dialogue de progression non bloquant des jobs, quit) et s'enregistre dans `app.control().ui`.
-- `MainWindow::runSaveAsync` passe désormais par `Application::beginSave/completeSave` (un seul chemin de
-  sauvegarde pour le menu et l'API).
+- Setting `control_enabled` (default 0), menu **Window > Allow AI control (localhost)** (starts/stops the
+  server live), flag **`--control`** (starts the server and **skips `handleStartup`**: never any
+  forward to an existing instance, even with `multi_instance=0`, Q15).
+- CMake option **`SC_ENABLE_CONTROL`** (ON, Q14): when OFF, no server, no `--control` and no menu item
+  (the registry and `--json` remain).
+- "AI control: N client(s)" indicator in the status bar (`StatusBar::setControlText`).
+- `MainWindow` implements `sc::control::UiBridge` (refresh, time window, zooms, views,
+  panels, non-blocking progress dialog for jobs, quit) and registers itself in `app.control().ui`.
+- `MainWindow::runSaveAsync` now goes through `Application::beginSave/completeSave` (a single
+  save path for the menu and the API).
 
 ### Jobs
 
-- `startJob (ctx, …)` : avec fenêtre, ouvre le même `WorkProgressDialog` que les menus (Annuler compris →
-  annule le job) ; `isBackgroundJobRunning()` et le refus de quitter le voient sans modification.
-- Deviennent des jobs : `step.run`/`steps.run` contenant `noiseSuppress`, `transcribe` ou `python`
-  (le worker n'édite jamais le document : ces méthodes committent via le thread de messages ; les autres
-  étapes d'une séquence passent par `JobControl::onMessageThread`) ; `doc.open` > 200 Mo (FileDoc chargé sur
-  le worker, inséré sur le thread de messages) ; `doc.save/saveAs` dans l'app ouverte (écriture audio sur le
-  worker, `completeSave` sur le thread de messages) ; **tout `Mutates` sur un fichier streamé** (détour
-  §5.2 étape 4 : `ensureEditable` sur le worker puis la commande, résultat `materialised:true`).
-- Un job sur un document non actif rend ce document actif durablement (`activated:true`), puisque le
-  worker travaille sur le document actif.
-- Pendant un job mutant, toute commande non `Query` (hors `job.*`) répond `busy`.
+- `startJob (ctx, …)`: with a window, opens the same `WorkProgressDialog` as the menus (Cancel included →
+  cancels the job); `isBackgroundJobRunning()` and the quit refusal see it without modification.
+- These become jobs: `step.run`/`steps.run` containing `noiseSuppress`, `transcribe` or `python`
+  (the worker never edits the document: these methods commit via the message thread; the other
+  steps of a sequence go through `JobControl::onMessageThread`); `doc.open` > 200 MB (FileDoc loaded on
+  the worker, inserted on the message thread); `doc.save/saveAs` in the running app (audio written on the
+  worker, `completeSave` on the message thread); **any `Mutates` on a streamed file** (detour
+  §5.2 step 4: `ensureEditable` on the worker then the command, result `materialised:true`).
+- A job on a non-active document makes that document active permanently (`activated:true`), since the
+  worker works on the active document.
+- During a mutating job, any non-`Query` command (except `job.*`) answers `busy`.
 
-### Nouvelles commandes
+### New commands
 
 `view.set`, `view.zoom {factor|to|vertical}`, `view.channels`, `view.show` (NeedsUi), `ui.panels`,
 `ui.panel.set` (NeedsUi), `transport.play/stop/pause/loop/playSpectralSel` (`ensureAudioReady (2000)`,
-jamais l'attente infinie de `play()`), `markers.add/list`, `doc.close {confirm}`, `doc.closeAll {confirm}`,
-`app.quit {confirm}` (NeedsUi ; refusé si un job tourne).
+never the infinite wait of `play()`), `markers.add/list`, `doc.close {confirm}`, `doc.closeAll {confirm}`,
+`app.quit {confirm}` (NeedsUi; refused if a job is running).
 
-### Sécurité (§5.3)
+### Security (§5.3)
 
-- Loopback seulement, jeton, opt-in, pause après 3 échecs, 4 clients, lignes ≤ 1 Mio, params ≤ 256 Kio,
-  file d'événements bornée.
-- **Périmètre de chemins** (`include/control/PathPolicy.h`) : racines = réglage `control_roots`
-  (séparateur `;`) ou, par défaut, dossier personnel + `scriptFolder()` + dossier temporaire ; liens
-  symboliques résolus sur chaque composant existant (`realpath`, POSIX) ; hors racines →
-  `confirm_required {reason:"outside_roots"}` ; dossier `control/` et `SpectroCraft.recent` refusés même
-  avec `confirm`. Appliqué à `doc.open`, `doc.saveAs`, et aux scripts des étapes `python`, qui exigent en
-  plus `confirm` hors de `scriptFolder()`.
+- Loopback only, token, opt-in, pause after 3 failures, 4 clients, lines ≤ 1 MiB, params ≤ 256 KiB,
+  bounded event queue.
+- **Path perimeter** (`include/control/PathPolicy.h`): roots = setting `control_roots`
+  (separator `;`) or, by default, home folder + `scriptFolder()` + temporary folder; symbolic
+  links resolved on every existing component (`realpath`, POSIX); outside the roots →
+  `confirm_required {reason:"outside_roots"}`; the `control/` folder and `SpectroCraft.recent` are refused even
+  with `confirm`. Applied to `doc.open`, `doc.saveAs`, and to the scripts of `python` steps, which additionally
+  require `confirm` outside `scriptFolder()`.
 
-## Tests (`tests/regression/control_server.inc`, test sériel « control server »)
+## Tests (`tests/regression/control_server.inc`, serial test "control server")
 
-- serveur : balayage d'un `<pid>.json` forgé (PID mort), fichier de découverte `{pid, port, token,
-  protocol}` en 0600, `unauthorized` avant hello, mauvais jeton, **pause ≥ 1,5 s après 3 échecs**,
-  hello (protocole, version), `doc.open`, `step.run` sur doc non actif (`docSwitched`), événement
-  `history.changed`, job + `job.done`, ligne > 1 Mio puis session encore utilisable, `unknown_cmd`, JSON
-  illisible ; **thread de messages bloqué → `timeout`** (attente bornée) ; 4 clients acceptés, 5ᵉ `busy` ;
-  **arrêt avec un client connecté et une requête en vol** : `stop()` < 2 s, réponse `shutting_down`,
-  fichier supprimé, port fermé ; redémarrage.
-- périmètre de chemins : temp autorisé, hors racines → `confirm_required`, `confirm` accepté, dossier de
-  contrôle et `.recent` refusés, `doc.saveAs` hors racines, lien symbolique sortant résolu.
-- vue/transport/marqueurs/fermeture en headless (`needs_ui` pour vertical/show/quit), **fichier streamé →
-  job qui le matérialise puis applique l'étape**.
+- server: sweep of a forged `<pid>.json` (dead PID), discovery file `{pid, port, token,
+  protocol}` in 0600, `unauthorized` before hello, wrong token, **pause ≥ 1.5 s after 3 failures**,
+  hello (protocol, version), `doc.open`, `step.run` on a non-active doc (`docSwitched`), `history.changed`
+  event, job + `job.done`, line > 1 MiB then session still usable, `unknown_cmd`, unreadable
+  JSON; **message thread blocked → `timeout`** (bounded wait); 4 clients accepted, 5th `busy`;
+  **shutdown with a connected client and a request in flight**: `stop()` < 2 s, `shutting_down` response,
+  file deleted, port closed; restart.
+- path perimeter: temp allowed, outside the roots → `confirm_required`, `confirm` accepted, control
+  folder and `.recent` refused, `doc.saveAs` outside the roots, outgoing symbolic link resolved.
+- view/transport/markers/close in headless mode (`needs_ui` for vertical/show/quit), **streamed file →
+  job that materialises it then applies the step**.
 
-## Revue indépendante (sous-agent relecteur, lecture seule) et correctifs appliqués
+## Independent review (reviewer sub-agent, read-only) and fixes applied
 
-Une relecture adversariale des lots 0-1 a relevé, puis j'ai corrigé dans ce lot :
+An adversarial review of lots 0-1 found the following, which I then fixed in this lot:
 
-1. **Garde busy trop étroite** : seules les commandes `Mutates|LongRunning` étaient refusées pendant un
-   dialogue modal / une opération de fond. JUCE délivre les `callAsync` dans les boucles modales : un
-   `doc.close` pouvait libérer le document qu'écrit le thread de `runSaveAsync` (use-after-free). Désormais
-   **toute commande non `Query`** (hors `job.*`) répond `busy` dans ces cas.
-2. **`app.quit`** contournait le refus « job en cours » : `requestQuit (discardUnsaved)` revérifie, au moment
-   de quitter, `isBackgroundJobRunning()`, les jobs API et les documents non sauvés.
-3. **Crash avant authentification** : le parseur JSON de JUCE est récursif ; une ligne de 100 000 `[`
-   aurait fait déborder la pile du thread de session. Profondeur limitée à 64 (pré-scan) ; avant
-   `session.hello`, lignes ≤ 4 Kio et **10 s** pour s'authentifier (sinon fermeture : les 4 places ne
-   peuvent plus être squattées).
-4. Étapes exécutées dans un job journalisées `source:"menu"` → `ScopedInvokeSource` autour des commits.
-5. `history.list` attribuait la dernière édition à `doc.save`/`history.undo` : `undoDepth/description`
-   ne sont journalisés que si le contenu a réellement changé (`contentVersion`), hors catégorie `history`
-   (idem pour les entrées de fin de job).
-6. `transport.*` et `view.*` sur un document non actif jouaient/affichaient le mauvais document : drapeau
+1. **Busy guard too narrow**: only `Mutates|LongRunning` commands were refused during a
+   modal dialog / a background operation. JUCE delivers `callAsync` calls inside modal loops: a
+   `doc.close` could free the document that the `runSaveAsync` thread is writing (use-after-free). Now
+   **any non-`Query` command** (except `job.*`) answers `busy` in these cases.
+2. **`app.quit`** bypassed the "job running" refusal: `requestQuit (discardUnsaved)` re-checks, at the moment
+   of quitting, `isBackgroundJobRunning()`, the API jobs and the unsaved documents.
+3. **Crash before authentication**: JUCE's JSON parser is recursive; a line of 100,000 `[`
+   would have overflowed the session thread's stack. Depth limited to 64 (pre-scan); before
+   `session.hello`, lines ≤ 4 KiB and **10 s** to authenticate (otherwise closed: the 4 slots can
+   no longer be squatted).
+4. Steps executed in a job were journaled as `source:"menu"` → `ScopedInvokeSource` around the commits.
+5. `history.list` attributed the last edit to `doc.save`/`history.undo`: `undoDepth/description`
+   are only journaled if the content actually changed (`contentVersion`), outside the `history` category
+   (same for job-completion entries).
+6. `transport.*` and `view.*` on a non-active document played/displayed the wrong document: flag
    `ActiveDocOnly` → `invalid_params {hint: doc.activate}`.
-7. `send()` côté serveur borné à 5 s et interrompu par l'arrêt.
-8. `session.hello` : réponse unique même en cas d'échec, authentification **après** la réponse, aucun
-   événement avant elle, rejeu ensuite.
-9. Ordre des options de `--json` libre (`--json-out` avant `--json` donnait « unknown flag »).
+7. Server-side `send()` bounded to 5 s and interrupted by shutdown.
+8. `session.hello`: a single response even on failure, authentication **after** the response, no
+   event before it, replay afterwards.
+9. `--json` options can come in any order (`--json-out` before `--json` gave "unknown flag").
 
-Suspicions non corrigées (documentées) : le worker d'un job de sauvegarde ou du détour streamé lit/écrit
-l'`AudioEngine` pendant que des `Query` (`app.state`) lisent ses compteurs atomiques — c'est le modèle de
-`MainWindow::runDestructiveEdit`/`runSaveAsync`, qui repose sur la synchronisation interne d'`AudioEngine` ;
-un arrêt de l'app attend la fin d'une sauvegarde ou d'un téléchargement en cours (pas d'annulation
-possible) ; `job.cancel` se fie au nom de client déclaré.
+Unfixed suspicions (documented): the worker of a save job or of the streamed detour reads/writes
+the `AudioEngine` while `Query` commands (`app.state`) read its atomic counters — this is the model of
+`MainWindow::runDestructiveEdit`/`runSaveAsync`, which relies on `AudioEngine`'s internal synchronisation;
+an app shutdown waits for an ongoing save or download to finish (no cancellation
+possible); `job.cancel` trusts the declared client name.
 
-Contraintes du lot 2 (adaptateur MCP) respectées : `seq` des événements = compteur du journal
-(`Journal::reserveSeq` pour les événements non journalisés, **un seul événement par entrée**) ;
-fichier de découverte écrit après le démarrage du thread d'acceptation, supprimé à l'arrêt ;
-`startedAt` ISO-8601 UTC ; FileForward inchangé ; `--control` saute `handleStartup` ; `Query` seulement
-sur des lectures pures. Formes alignées sur le §6 à peu de frais : `history.list` porte `doc` **et**
-`docId`, l'état 0 `label` **et** `description` ; `doc.open` renvoie `id` **et** `doc`. `patchSeq` :
+Lot 2 constraints (MCP adapter) respected: event `seq` = journal counter
+(`Journal::reserveSeq` for non-journaled events, **a single event per entry**);
+discovery file written after the accept thread starts, deleted on shutdown;
+`startedAt` ISO-8601 UTC; FileForward unchanged; `--control` skips `handleStartup`; `Query` only
+on pure reads. Shapes aligned with §6 at little cost: `history.list` carries `doc` **and**
+`docId`, state 0 `label` **and** `description`; `doc.open` returns `id` **and** `doc`. `patchSeq`:
 lot 5.
 
-## Écarts par rapport au plan
+## Deviations from the plan
 
-- `tools/mcp/sc_client.py` **non écrit ici** : l'agent du lot 2 (`ai-control-mcp`) possède `tools/mcp/**`.
-  Le test bout-en-bout manuel a été fait avec un script Python jetable (voir « Résultats »).
-- `ClientSession` est dans `ControlServer.cpp` (pas de `ClientSession.cpp` séparé).
-- Requêtes d'un même client traitées **séquentiellement** (pas de pipeline de 64 requêtes en vol) : la
-  limite de 64 est donc trivialement respectée ; un client qui veut du parallélisme ouvre une 2ᵉ connexion.
-- `transport.play` sans périphérique (CI, `SC_NO_AUDIO_DEVICE`) réussit en silence (`deviceDisabled:true`)
-  au lieu d'échouer : c'est le comportement de `Application::play()`.
-- Windows : la résolution des liens ne porte que sur le dernier composant du chemin.
+- `tools/mcp/sc_client.py` **not written here**: the lot 2 agent (`ai-control-mcp`) owns `tools/mcp/**`.
+  The manual end-to-end test was done with a throwaway Python script (see "Results").
+- `ClientSession` is in `ControlServer.cpp` (no separate `ClientSession.cpp`).
+- Requests from a single client are processed **sequentially** (no pipeline of 64 in-flight requests): the
+  limit of 64 is therefore trivially respected; a client that wants parallelism opens a 2nd connection.
+- `transport.play` without a device (CI, `SC_NO_AUDIO_DEVICE`) succeeds silently (`deviceDisabled:true`)
+  instead of failing: this is the behaviour of `Application::play()`.
+- Windows: link resolution only applies to the last component of the path.
 
-## Dettes / limites
+## Debts / limitations
 
-- Le rejeu d'événements ne couvre que l'anneau mémoire (10 000 entrées) ; persistance au lot 5.
-- L'abandon d'une requête après `timeout` n'annule pas son exécution : elle peut encore s'exécuter quand
-  le thread de messages se libère (le client doit relire `app.state`).
-- Pas d'ACL explicite sur Windows pour le fichier de découverte (profil utilisateur, modèle de menace
-  retenu au §5.2).
+- Event replay only covers the in-memory ring (10,000 entries); persistence in lot 5.
+- Abandoning a request after `timeout` does not cancel its execution: it may still run when
+  the message thread frees up (the client must re-read `app.state`).
+- No explicit ACL on Windows for the discovery file (user profile, threat model
+  adopted in §5.2).
 
-## Résultats (macOS arm64, Debug + IA)
+## Results (macOS arm64, Debug + AI)
 
-- « control server » : 67/67 (sériel), « regression: control » + serveur : 655/655 avec les tests voisins.
-- Suite complète `ctest -j 8` : **5482/5482**, 10/10 (référence 4859, lot 0 5284).
-- **Bout en bout réel** (script Python jetable, app lancée avec `--control`, vraie fenêtre) : découverte
-  (`~/Library/SpectroCraft/control/<pid>.json`), `session.hello`, `doc.open`, `step.run fadeOut` avec
-  événement `history.changed` (source `api:smoke`), `history.list`, `view.zoom {vertical}` (NeedsUi),
-  `ui.panels`, `history.undo`, `app.state`, `app.quit {confirm}` → l'app quitte (code 0) et supprime son
-  fichier. Un fichier orphelin laissé par un `kill` a bien été balayé au lancement suivant.
-- Ce test a montré que le dossier temporaire de JUCE sur macOS est `$TMPDIR/SpectroCraft` : les racines
-  par défaut incluent donc aussi `$TMPDIR` et `/tmp` (POSIX).
-- Linux : correctif de portabilité `int64_t` → `juce::int64` (le CI `linux-ai` du lot 0 avait échoué sur
-  `contentVersion()` : `long` ambigu pour `juce::var`) ; macOS et Windows du lot 0 étaient verts.
+- "control server": 67/67 (serial), "regression: control" + server: 655/655 with the neighbouring tests.
+- Full suite `ctest -j 8`: **5482/5482**, 10/10 (baseline 4859, lot 0 5284).
+- **Real end-to-end** (throwaway Python script, app launched with `--control`, real window): discovery
+  (`~/Library/SpectroCraft/control/<pid>.json`), `session.hello`, `doc.open`, `step.run fadeOut` with
+  `history.changed` event (source `api:smoke`), `history.list`, `view.zoom {vertical}` (NeedsUi),
+  `ui.panels`, `history.undo`, `app.state`, `app.quit {confirm}` → the app quits (code 0) and deletes its
+  file. An orphan file left by a `kill` was correctly swept at the next launch.
+- This test showed that JUCE's temporary folder on macOS is `$TMPDIR/SpectroCraft`: the default roots
+  therefore also include `$TMPDIR` and `/tmp` (POSIX).
+- Linux: portability fix `int64_t` → `juce::int64` (lot 0's `linux-ai` CI had failed on
+  `contentVersion()`: `long` ambiguous for `juce::var`); lot 0's macOS and Windows were green.
 
-## Consignes pour la suite
+## Instructions for what comes next
 
-- Lot 2 : le protocole réel est celui de `src/control` (enveloppe §6) ; `session.hello` renvoie
+- Lot 2: the actual protocol is the one in `src/control` (§6 envelope); `session.hello` returns
   `{app, version, pid, protocol, platform, capabilities, commands, journalSeq, client, replayed}`.
-  Événements : `{"event", "seq", "ts", "data"}`.
-- Toute commande longue : `startJob` + `JobControl::onMessageThread` pour le commit.
+  Events: `{"event", "seq", "ts", "data"}`.
+- Any long command: `startJob` + `JobControl::onMessageThread` for the commit.

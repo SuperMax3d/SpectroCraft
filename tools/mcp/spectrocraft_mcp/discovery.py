@@ -2,7 +2,7 @@
 
 Each instance whose control server is on writes
 ``<userApplicationDataDirectory>/SpectroCraft/control/<pid>.json`` =
-``{pid, port, token, version, startedAt, exe, protocol}`` (RAPPORT.md 5.2).
+``{pid, port, token, version, startedAt, exe, protocol}`` (REPORT.md 5.2).
 Real paths (JUCE ``userApplicationDataDirectory``):
 
 - macOS   ``~/Library/SpectroCraft/control``   (not "Application Support")

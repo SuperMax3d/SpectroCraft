@@ -128,7 +128,7 @@ def run_headless(
     timeout_s: float = 300.0,
     extra_args: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Run ``SPECTROCRAFT_EXE --json - --json-out <tmp>`` (RAPPORT.md 6.9).
+    """Run ``SPECTROCRAFT_EXE --json - --json-out <tmp>`` (REPORT.md 6.9).
 
     No ``session.hello`` in this mode. Requests without ``id`` get ``h1``,
     ``h2``... Returns ``{"exitCode", "responses", "stderrTail"?}``.

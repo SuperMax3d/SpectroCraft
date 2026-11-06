@@ -6,7 +6,7 @@
 //   SpectroCraft --list-commands [--markdown]
 //
 // One request per line, one response per line (same envelope as the control
-// socket, RAPPORT §6), read and answered line by line: each response is
+// socket, REPORT §6), read and answered line by line: each response is
 // flushed before the next line is read, so a parent process can hold a
 // dialogue over pipes. Jobs are waited for (message loop pumped) and inlined;
 // a line's timeoutMs (default 30 s, 0 = unlimited) cancels them.

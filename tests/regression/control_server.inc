@@ -311,7 +311,7 @@ static void testControlServer()
     disc.deleteRecursively();
 }
 
-// Path roots (RAPPORT §5.3): home + scripts + temp; outside -> confirm_required;
+// Path roots (REPORT §5.3): home + scripts + temp; outside -> confirm_required;
 // the control folder and the settings store are always refused.
 static void testControlPathPolicy()
 {
