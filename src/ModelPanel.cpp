@@ -749,6 +749,9 @@ ModelPanel::ModelPanel (Application& app_) : app (app_)
     btnSave.setTooltip ("Save the model session to its file (or choose one when unsaved).");
     btnSaveAs.setTooltip ("Save the model session to a chosen .json file.");
 
+    btnAddComp.setButtonText ("+ Add");
+    btnAddComp.setTooltip ("Add a new harmonic component to the session.");
+
     matchPctLbl.setText ("Match %", juce::dontSendNotification);
     inclDbLbl.setText ("Incl dB", juce::dontSendNotification);
     overDbLbl.setText ("Over dB", juce::dontSendNotification);
@@ -792,6 +795,7 @@ ModelPanel::ModelPanel (Application& app_) : app (app_)
     matchPctEd.setComponentID ("matchPct");
     inclDbEd.setComponentID ("inclDb");
     overDbEd.setComponentID ("overDb");
+    btnAddComp.setComponentID ("addComp");
 
     // ---- session toolbar -------------------------------------------------
     btnNew.onClick = [this] { newSession (); };
@@ -812,6 +816,29 @@ ModelPanel::ModelPanel (Application& app_) : app (app_)
         else                        saveAsFlow (*this);
     };
     btnSaveAs.onClick = [this] { saveAsFlow (*this); };
+
+    btnAddComp.onClick = [this]
+    {
+        auto* s = session ();
+        if (s == nullptr) return;
+        // First unused name: Component 1, Component 2, ...
+        juce::String base = "Component ";
+        int n = 1;
+        for (;; ++n)
+        {
+            const juce::String nm = base + juce::String (n);
+            bool taken = false;
+            for (const auto& c : s->components)
+                if (c.name == nm) { taken = true; break; }
+            if (!taken)
+            {
+                s->addComponent (nm, 0);   // 0 = harmonic
+                selectedComp_ = (int) s->components.size () - 1;
+                break;
+            }
+        }
+        refresh ();
+    };
 
     // ---- session settings -------------------------------------------------
     auto bindSetting = [this] (juce::TextEditor& ed, double* field)
@@ -959,6 +986,7 @@ ModelPanel::ModelPanel (Application& app_) : app (app_)
     addAndMakeVisible (&inclDbEd);
     addAndMakeVisible (&overDbEd);
     addAndMakeVisible (&listHdr);
+    addAndMakeVisible (&btnAddComp);
     addAndMakeVisible (&compList);
     addAndMakeVisible (&nameLbl);
     addAndMakeVisible (&typeLbl);
@@ -1389,7 +1417,8 @@ void ModelPanel::resized()
 
     // Component list.
     y += 30;
-    listHdr.setBounds (m, y, W - 2 * m, 14);
+    listHdr.setBounds (m, y + 3, W - 2 * m - 58, 14);
+    btnAddComp.setBounds (W - m - 52, y, 52, 20);
     const int listH = std::clamp ((int) (getHeight () * 0.22), 72, 160);
     compList.setBounds (m, y + 16, W - 2 * m, listH);
 

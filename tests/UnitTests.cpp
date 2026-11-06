@@ -27839,6 +27839,18 @@ static void testModelPanelSession()
     panel.refresh ();
     CHECK (panel.numComponentsShown () == 0, "component deleted from the list");
 
+    // The "+ Add" button creates a harmonic component with an auto-incremented name.
+    { juce::TextButton* add = dynamic_cast<juce::TextButton*> (panel.findChildWithID ("addComp"));
+      CHECK (add != nullptr, "add component button found");
+      if (add != nullptr)
+      {
+          add->triggerClick ();
+          juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+          CHECK (s->components.size () == 1 && s->components[0].name == "Component 1",
+                "+ Add created Component 1");
+          CHECK (panel.numComponentsShown () == 1, "+ Add listed in the component list");
+      } }
+
     out.deleteFile ();
     store.deleteFile ();
 }

@@ -160,7 +160,7 @@ private:
     // ---- widgets ----------------------------------------------------------
     Application& app;
 
-    juce::TextButton btnNew, btnOpen, btnSave, btnSaveAs;
+    juce::TextButton btnNew, btnOpen, btnSave, btnSaveAs, btnAddComp;
     juce::Label sessionNameLbl;
 
     juce::Label matchPctLbl, inclDbLbl, overDbLbl;
