@@ -7274,15 +7274,6 @@ static void testSuperResCliArgs()
     const juce::File inWav  = base.getChildFile ("sr_in.wav");
     const juce::File outWav = base.getChildFile ("sr_out/enhanced.wav");
 
-#if ! JUCE_WINDOWS
-    // The audio.cpp CLI only exists on Windows: elsewhere the builder is a
-    // stub by design (src/AudioCpp.cpp, POSIX branch) and must stay empty.
-    CHECK (sc::acpp::buildSuperResCliArgs (1, model, "cuda", inWav, outWav).isEmpty(),
-           "super-res CLI arguments are not built outside Windows");
-    scSkip ("super-res cli args: the audio.cpp CLI is Windows-only");
-    return;
-#endif
-
     // FlashSR: --task s2s --family builtin_audio_utils --model <m>
     //          --load-option utility=flashsr --backend <b> --audio <a> --out <o> --log
     auto a1 = sc::acpp::buildSuperResCliArgs (1, model, "cuda", inWav, outWav);
@@ -22889,7 +22880,8 @@ static void testAudioCppCli()
         CHECK (listModels (root)[0].getFileName() == "sam-audio-small-q8_0.gguf",
               "listed model keeps its file name");
 
-    const juce::File bin = root.getChildFile ("audiocpp_cli.exe");
+    const juce::File bin = binaryPath (root);
+    CHECK (bin.getFileName () == binaryFileName (), "binary path uses the platform's file name");
     bin.replaceWithText ("x");
     CHECK (hasBinary (root),               "installed binary is detected");
 
@@ -22900,6 +22892,46 @@ static void testAudioCppCli()
     CHECK (!hasBinary (root),              "deleted binary no longer detected");
 
     root.deleteRecursively ();
+
+    // --- platform: executable name, variants, backend combo ---------------------
+#if JUCE_WINDOWS
+    CHECK (binaryFileName () == "audiocpp_cli.exe" && archiveFileName () == "audiocpp_bin.zip"
+               && binaryChoices ().size () == 4 && platformTag () == "windows-x64",
+           "platform: Windows x64 offers the 4 zip variants");
+#elif JUCE_MAC
+    CHECK (binaryFileName () == "audiocpp_cli" && archiveFileName () == "audiocpp_bin.tar.gz"
+               && binaryChoices ().size () == 1 && binaryChoices ()[0].id == "metal"
+               && juce::String (binaryChoices ()[0].url).endsWith (".tar.gz")
+               && juce::String (platformTag ()).startsWith ("macos-"),
+           "platform: macOS offers the Metal tar.gz build for its architecture");
+#else
+    CHECK (binaryFileName () == "audiocpp_cli" && archiveFileName () == "audiocpp_bin.tar.gz",
+           "platform: Linux executable / archive names");
+#  if defined(__x86_64__)
+    CHECK (binaryChoices ().size () == 2 && binaryChoices ()[0].id == "cpu" && binaryChoices ()[1].id == "vulkan"
+               && platformTag () == "linux-x64",
+           "platform: Linux x64 offers the cpu and vulkan tar.gz builds");
+#  endif
+#endif
+    CHECK (platformSupported () == !binaryChoices ().empty (), "platform: supported iff a CLI build is offered");
+    const auto bc = backendChoices ();
+    CHECK (bc.size () >= 3 && bc[0].cli == "cpu" && bc[1].cli == "cuda" && bc[2].cli == "vulkan",
+           "backend combo: ids 1-3 are Cpu, Cuda, Vulkan everywhere (stored setting)");
+#if JUCE_MAC
+    CHECK (bc.size () == 4 && bc[3].cli == "metal" && backendForChoiceId (4) == "metal",
+           "backend combo: Metal is id 4 on macOS");
+#else
+    CHECK (bc.size () == 3, "backend combo: no Metal outside macOS");
+#endif
+    CHECK (backendForChoiceId (0) == "cpu" && backendForChoiceId (99) == "cpu" && backendForChoiceId (2) == "cuda",
+           "backend combo: out-of-range ids fall back to cpu");
+    CHECK (variantSupportsBackend ("metal", "metal") && variantSupportsBackend ("metal", "cpu")
+               && !variantSupportsBackend ("metal", "cuda") && !variantSupportsBackend ("cpu", "vulkan")
+               && variantSupportsBackend ("cuda12.4", "cuda") && !variantSupportsBackend ("cuda13.3", "cpu")
+               && variantSupportsBackend ("", "metal") && variantSupportsBackend ("vulkan", "vulkan"),
+           "backend combo: variant / backend compatibility (status-line warning)");
+    CHECK (isKnownBackend ("metal") && isKnownBackend ("cpu") && !isKnownBackend ("Metal") && !isKnownBackend ("best"),
+           "backend: the services accept cpu, cuda, vulkan, metal");
 }
 
 static void testStartupTrace()

@@ -112,7 +112,8 @@ launch a modal alert "reopen windows?" that blocked the suite:
   Transport/Selection/Record menus, `export.snapshot`, `drawing.*`, `clone.*`, `selection.saved.*`,
   `actions.batch`).
 - `export.spectrogram` with overlays (`UiBridge` → `preparePngExport`).
-- Stems/SR to be run on a Windows workstation with the audio.cpp binaries and models.
+- Stems/SR: now also on macOS and Linux, run for real on macOS and by the CI on all three
+  platforms (htdemucs + FlashSR), see `audiocpp-posix.md`; SAM-Audio (2.4 GB) only with a fake CLI.
 - Windows: resolution of links in the middle of a path (scope), ACL of the discovery file.
 - `step.run {type:"python"}` without timeout (prefer `python.run`).
 - Memory drift measurement over 10,000 commands.

@@ -5,6 +5,7 @@
 #include "control/UiBridge.h"
 #include "Application.h"
 #include "AlertGate.h"
+#include "AudioCpp.h"
 #include "WorkProgress.h"
 
 #include <cmath>
@@ -78,7 +79,7 @@ juce::StringArray flagNames (uint32_t f)
     if (f & NeedsUi)     s.add ("NeedsUi");
     if (f & Destructive) s.add ("Destructive");
     if (f & AiBuildOnly) s.add ("AiBuildOnly");
-    if (f & WindowsOnly) s.add ("WindowsOnly");
+    if (f & NeedsAudioCpp) s.add ("NeedsAudioCpp");
     if (f & Internal)    s.add ("Internal");
     if (f & Query)       s.add ("Query");
     if (f & ActiveDocOnly) s.add ("ActiveDocOnly");
@@ -620,11 +621,11 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
     if (spec->flags & AiBuildOnly)
         return respondError (err::unsupportedBuild, spec->id + " needs an AI-enabled build (SPECTRO_ENABLE_AI)");
 #endif
-#if !JUCE_WINDOWS
-    if (spec->flags & WindowsOnly)
-        return respondError (err::unsupportedPlatform, spec->id + " is Windows-only",
-                             obj ({ { "platform", juce::SystemStats::getOperatingSystemName() } }));
-#endif
+    if ((spec->flags & NeedsAudioCpp) && !sc::acpp::platformSupported())
+        return respondError (err::unsupportedPlatform,
+                             spec->id + ": audio.cpp publishes no CLI build for this platform",
+                             obj ({ { "platform", juce::String (sc::acpp::platformTag()) },
+                                    { "os", juce::SystemStats::getOperatingSystemName() } }));
     if ((spec->flags & NeedsUi) && ui == nullptr)
         return respondError (err::needsUi, spec->id + " needs the open application window",
                              obj ({ { "hint", "run it against the open app (--control), not --json" } }));

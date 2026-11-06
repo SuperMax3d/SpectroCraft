@@ -149,7 +149,9 @@ def _description(cmd: dict[str, Any]) -> str:
         notes.append("Needs the open app window (not available headless).")
     if "AiBuildOnly" in flags:
         notes.append("AI builds only.")
-    if "WindowsOnly" in flags:
+    if "NeedsAudioCpp" in flags:
+        notes.append("Runs the audio.cpp CLI (Windows x64, macOS, Linux x64); install it first with sc_install_model.")
+    if "WindowsOnly" in flags:  # apps built before the macOS / Linux port
         notes.append("Windows only.")
     aliases = [a for a in cmd.get("aliases") or [] if a]
     if aliases:

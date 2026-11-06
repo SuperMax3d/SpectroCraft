@@ -4,6 +4,7 @@
 
 #include "Application.h"
 #include "AlertGate.h"
+#include "AudioCpp.h"
 #include "ContentAwareTimeScale.h"
 #include "Recorder.h"
 #include "StartupTrace.h"
@@ -223,7 +224,8 @@ void Application::loadSettings ()
     settings.exportDrawings   = recentStore->getIntValue ("exp_drawings", 0) != 0;
     // Stem Separation (Effects menu).
     settings.acppModel          = recentStore->getValue ("acpp_model", juce::String ());
-    settings.acppBackend        = std::clamp ((int) recentStore->getIntValue ("acpp_backend", 1), 1, 3);
+    settings.acppBackend        = std::clamp ((int) recentStore->getIntValue ("acpp_backend", 1), 1,
+                                              (int) sc::acpp::backendChoices ().size ());
     settings.acppExtractOriginal = recentStore->getIntValue ("acpp_extract_orig", 1) != 0;
     settings.stemSepMode        = std::clamp ((int) recentStore->getIntValue ("stem_sep_mode", 1), 1, 3);
     settings.acppModel6         = recentStore->getValue ("acpp_model_6", juce::String ());

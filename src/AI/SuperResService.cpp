@@ -29,11 +29,7 @@ juce::String logTail (const juce::String& s, int maxChars = 2000)
 
 bool SuperResService::supported()
 {
-#if JUCE_WINDOWS
-    return true;
-#else
-    return false;
-#endif
+    return sc::acpp::platformSupported ();
 }
 
 juce::String SuperResService::validate (const Request& req, juce::String* codeOut)
@@ -48,8 +44,8 @@ juce::String SuperResService::validate (const Request& req, juce::String* codeOu
     const int m = (int) req.mode;
     if (m != 1 && m != 2)
         return bad ("invalid_mode", "Unknown super resolution mode " + juce::String (m) + ".");
-    if (req.backend != "cpu" && req.backend != "cuda" && req.backend != "vulkan")
-        return bad ("invalid_backend", "Unknown backend '" + req.backend + "' (expected cpu, cuda or vulkan).");
+    if (!sc::acpp::isKnownBackend (req.backend))
+        return bad ("invalid_backend", "Unknown backend '" + req.backend + "' (expected cpu, cuda, vulkan or metal).");
     if (!std::isfinite (req.sourceRate) || req.sourceRate <= 0.0)
         return bad ("invalid_rate", "The source sample rate is invalid.");
     if (req.input.empty () || req.input[0].empty ())
@@ -60,7 +56,7 @@ juce::String SuperResService::validate (const Request& req, juce::String* codeOu
 
     const juce::File bin = req.binary == juce::File () ? sc::acpp::binaryPath () : req.binary;
     if (!bin.existsAsFile ())
-        return bad ("binary_missing", "The audiocpp_cli.exe binary is missing.");
+        return bad ("binary_missing", "The " + sc::acpp::binaryFileName () + " binary is missing.");
     if (!req.model.existsAsFile ())
         return bad ("model_missing", req.mode == Mode::AudioSR ? "The AudioSR model file is missing."
                                                                 : "The FlashSR model file is missing.");
@@ -95,7 +91,8 @@ SuperResService::Result SuperResService::run (const Request& req, const Progress
         return fail (code.toRawUTF8 (), invalid);
     if (!supported ())
         return fail ("unsupported_platform", "Super resolution failed.",
-                     "Super Resolution requires the Windows CLI binary.");
+                     "audio.cpp publishes no CLI build for this platform ("
+                     + juce::String (sc::acpp::platformTag ()) + ").");
 
     const juce::File binary = req.binary == juce::File () ? sc::acpp::binaryPath () : req.binary;
     const bool audioSR = req.mode == Mode::AudioSR;

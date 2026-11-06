@@ -32,7 +32,7 @@ struct LayoutYs
 struct SuperResolutionWindow::RunJob
 {
     juce::File model;
-    juce::String backendCli;          // "cpu" / "cuda" / "vulkan"
+    juce::String backendCli;          // "cpu" / "cuda" / "vulkan" / "metal"
     double extStartSecs = 0.0;        // extraction range in source seconds
     double extStopSecs = 0.0;
     double rate = 48000.0;            // source document rate
@@ -123,13 +123,14 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
         refreshStatusIdle ();
     };
 
-    backendCombo_.addItem ("Cpu", 1);
-    backendCombo_.addItem ("Cuda", 2);
-    backendCombo_.addItem ("Vulkan", 3);
+    // Cpu, Cuda, Vulkan (+ Metal on macOS): ids 1.. in sc::acpp::backendChoices() order.
+    const auto backends = sc::acpp::backendChoices ();
+    for (size_t i = 0; i < backends.size (); ++i)
+        backendCombo_.addItem (backends[i].label, (int) i + 1);
     // This JUCE build uses 0-based combo positions; the stored setting is a
-    // 1-based id (1=Cpu 2=Cuda 3=Vulkan), so convert in both directions. The
+    // 1-based id (1=Cpu 2=Cuda 3=Vulkan 4=Metal), so convert in both directions. The
     // backend choice is shared with Stem Separation - same CLI binary.
-    backendCombo_.setSelectedItemIndex (std::clamp (app_.settings.acppBackend, 1, 3) - 1,
+    backendCombo_.setSelectedItemIndex (std::clamp (app_.settings.acppBackend, 1, (int) backends.size ()) - 1,
                                         juce::dontSendNotification);
     backendCombo_.onChange = [this]
     {
@@ -294,7 +295,7 @@ void SuperResolutionWindow::refreshStatusIdle()
 
     juce::String s;
     if (!hasBin)
-        s = "The audiocpp_cli.exe binary is not installed yet - use Download...";
+        s = "The " + sc::acpp::binaryFileName () + " binary is not installed yet - use Download...";
     else if (selectedModeId () == 2 && !hasModel)
         s = "No AudioSR model found in the AudioSR-GGUF folder - use Download...";
     else if (selectedModeId () != 2 && !hasModel)
@@ -304,9 +305,7 @@ void SuperResolutionWindow::refreshStatusIdle()
         const juce::String variant = sc::acpp::installedVariant (modelsRoot ());
         // Convert the 0-based position back to the stored 1-based id.
         const int backendIdx = backendCombo_.getSelectedItemIndex () + 1;
-        const bool mismatch = (variant == "cpu" && backendIdx != 1)
-                          || ((variant == "cuda12.4" || variant == "cuda13.3") && backendIdx != 2)
-                          || (variant == "vulkan" && backendIdx != 3);
+        const bool mismatch = !sc::acpp::variantSupportsBackend (variant, sc::acpp::backendForChoiceId (backendIdx));
         s = juce::String ("Ready: ") + modelCombo_.getText ()
           + (variant.isEmpty () ? juce::String ("") : juce::String ("  [") + variant + "]");
         if (mismatch)
@@ -424,7 +423,7 @@ void SuperResolutionWindow::openDownloadDialog()
         {
             const auto choices = sc::acpp::binaryChoices ();
             const size_t i = (size_t) std::min (std::max (1, binaryChoice), (int) choices.size ()) - 1;
-            const juce::File zip = root.getChildFile ("audiocpp_bin.zip");
+            const juce::File zip = root.getChildFile (sc::acpp::archiveFileName ());   // .zip or .tar.gz
 
             setStatus ("Downloading " + choices[i].label + "...");
             ok = sc::acpp::downloadFile (choices[i].url, zip,
@@ -436,7 +435,7 @@ void SuperResolutionWindow::openDownloadDialog()
             if (ok)
             {
                 setStatus ("Extracting the binary...");
-                ok = sc::acpp::installBinaryFromZip (zip, choices[i].id, root, &err);
+                ok = sc::acpp::installBinaryFromArchive (zip, choices[i].id, root, &err);
                 if (!ok && !prog->cancelled.load ())
                     setStatus ("Extraction failed: " + juce::String (err));
             }
@@ -518,7 +517,7 @@ void SuperResolutionWindow::startRun()
     job.model = model;
     // Convert the 0-based position back to the stored 1-based id.
     const int bi = backendCombo_.getSelectedItemIndex () + 1;
-    job.backendCli = (bi == 2 ? "cuda" : bi == 3 ? "vulkan" : "cpu");
+    job.backendCli = sc::acpp::backendForChoiceId (bi);
     job.extStartSecs = s0;
     job.extStopSecs  = s1;
     job.rate         = eng.sampleRate ();

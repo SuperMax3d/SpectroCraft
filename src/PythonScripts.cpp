@@ -1102,6 +1102,29 @@ juce::String decodeProcessOutput (const char* data, size_t size)
     return juce::String (juce::CharPointer_UTF32 (u32.data ()));
 }
 
+// RunOptions::onStdoutLine: hands every complete line of bytes[from..] to cb
+// and advances `from` past it; with flushPartial, also the unterminated tail.
+static void deliverStdoutLines (const std::string& bytes, size_t& from,
+                                const std::function<void (const juce::String&)>& cb,
+                                bool flushPartial)
+{
+    if (cb == nullptr) return;
+    for (;;)
+    {
+        const size_t nl = bytes.find ('\n', from);
+        const bool tail = nl == std::string::npos;
+        if (tail && (!flushPartial || from >= bytes.size ()))
+            return;
+        size_t end = tail ? bytes.size () : nl;
+        const size_t next = tail ? bytes.size () : nl + 1;
+        if (end > from && bytes[end - 1] == '\r') --end;
+        if (end > from)
+            cb (decodeProcessOutput (bytes.data () + from, end - from));
+        from = next;
+        if (tail) return;
+    }
+}
+
 #if JUCE_WINDOWS
 
 static std::wstring toWide (const juce::String& s)
@@ -1312,12 +1335,14 @@ ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& arg
     };
 
     bool killed = false;
+    size_t linesFrom = 0;
     uint32_t lastPoll = juce::Time::getMillisecondCounter ();
     for (;;)
     {
         const DWORD w = WaitForSingleObject (pi.hProcess, 20);
         drain (outR, outBytes);
         drain (errR, errBytes);
+        deliverStdoutLines (outBytes, linesFrom, options.onStdoutLine, false);
         if (w == WAIT_OBJECT_0) break;
         if (options.timeoutMs > 0
             && juce::Time::getMillisecondCounterHiRes () - t0 >= (double) options.timeoutMs)
@@ -1347,6 +1372,7 @@ ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& arg
     // Whatever the child wrote just before exiting is still in the pipes.
     drain (outR, outBytes);
     drain (errR, errBytes);
+    deliverStdoutLines (outBytes, linesFrom, options.onStdoutLine, true);
     res.stdoutText = decodeProcessOutput (outBytes.data (), outBytes.size ());
     res.stderrText = decodeProcessOutput (errBytes.data (), errBytes.size ());
 
@@ -1632,10 +1658,12 @@ ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& arg
     };
 
     bool killed = false, lost = false;
+    size_t linesFrom = 0;
     uint32_t lastPoll = juce::Time::getMillisecondCounter ();
     for (;;)
     {
         pump (20);
+        deliverStdoutLines (outBytes, linesFrom, options.onStdoutLine, false);
         const pid_t r = waitpid (pid, &status, WNOHANG);
         if (r == pid) { reaped = true; break; }
         if (r < 0 && errno != EINTR) { reaped = true; lost = true; break; }   // ECHILD: reaped elsewhere
@@ -1668,6 +1696,7 @@ ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& arg
     while (pump (0)) {}
     close (outp[0]);
     close (errp[0]);
+    deliverStdoutLines (outBytes, linesFrom, options.onStdoutLine, true);
     res.stdoutText = decodeProcessOutput (outBytes.data (), outBytes.size ());
     res.stderrText = decodeProcessOutput (errBytes.data (), errBytes.size ());
 

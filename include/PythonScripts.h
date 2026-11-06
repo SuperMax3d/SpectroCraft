@@ -97,6 +97,11 @@ struct RunOptions
         still alive when it exits). Windows: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         which also covers SpectroCraft crashing mid-run. */
     bool killTreeOnExit = true;
+    /** Called on the running thread with each complete stdout line (without
+        its "\n" / "\r\n", empty lines skipped) while the child runs, then with
+        a final unterminated line, if any, after it exits. The full output is
+        still returned in ProcessResult::stdoutText. */
+    std::function<void (const juce::String&)> onStdoutLine;
 };
 
 struct ProcessResult

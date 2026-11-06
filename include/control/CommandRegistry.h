@@ -37,7 +37,7 @@ enum Flag : uint32_t
     NeedsUi     = 1u << 3,   // needs the open app's window (MainWindow): needs_ui in the CLI
     Destructive = 1u << 4,   // may lose data: the handler asks for params.confirm
     AiBuildOnly = 1u << 5,   // unsupported_build without SPECTRO_ENABLE_AI
-    WindowsOnly = 1u << 6,   // unsupported_platform elsewhere
+    NeedsAudioCpp = 1u << 6, // runs the audio.cpp CLI: unsupported_platform where it has no build
     NoDocSwitch = 1u << 7,   // the handler addresses ctx.doc itself: never switch the active doc
     Internal    = 1u << 8,   // diagnostics/test helpers (category "debug")
     Query       = 1u << 9,   // pure read: allowed while a mutating job runs, not journaled on success

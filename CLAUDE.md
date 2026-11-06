@@ -79,6 +79,7 @@ SC_TEST_FILTER=control build/src/SpectroCraft_artefacts/Debug/SpectroCraft --run
 pip install -e "tools/mcp[test]" && pytest tools/mcp/tests
 SPECTROCRAFT_EXE=<exe> pytest tools/mcp/tests/test_real_exe.py   # against the real --json
 SPECTROCRAFT_EXE=<exe> tools/mcp/smoke.sh /abs/file.wav          # end to end, app open (local)
+python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cpp CLI: install, super resolution, stems (~100 MB download)
 ```
 
 - `-DSPECTRO_ENABLE_AI=OFF` for a light build (no OpenVINO / whisper.cpp).

@@ -59,7 +59,7 @@ NEXT_STEP: dict[str, str] = {
     "confirm_required": "This is destructive (overwrite, unsaved changes, path outside the allowed roots). Ask the user, then resend the same call with confirm=true.",
     "needs_ui": "This command needs the open app window; it is not available in headless (--json) mode. Use the open app (sc_launch) instead of sc_headless.",
     "unsupported_build": "This SpectroCraft build was compiled without that feature (for example without AI).",
-    "unsupported_platform": "This feature is not available on this operating system (audio.cpp is Windows-only).",
+    "unsupported_platform": "This feature is not available on this operating system (audio.cpp publishes CLI builds for Windows x64, macOS and Linux x64 only).",
     "model_not_installed": "Install the model first with sc_install_model(model_id), then retry.",
     "job_not_found": "Unknown job id. List jobs with sc_jobs.",
     "shutting_down": "SpectroCraft is closing. Run sc_status to see whether another instance is available.",

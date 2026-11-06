@@ -321,20 +321,20 @@ void registerPythonCommands (CommandRegistry& r)
         P ("mode", PType::String).oneOf ({ "samAudio", "htdemucs6", "htdemucsFt" }).def ("samAudio"),
         P ("descriptions", PType::Array).items (PType::Object).describe ("samAudio: [{text, anchors:[{start, end, include}]}] (document seconds)"),
         P ("model", PType::String).describe ("Model file name (default: the first installed)"),
-        P ("backend", PType::String).oneOf ({ "cpu", "cuda", "vulkan" }).describe ("Default: ai.setDevice audiocpp, else cpu"),
+        P ("backend", PType::String).oneOf ({ "cpu", "cuda", "vulkan", "metal" }).describe ("Default: ai.setDevice audiocpp, else cpu"),
         P ("extractFromOriginal", PType::Boolean).def (true),
         P ("output", PType::String).oneOf ({ "newDoc", "replace", "append" }).def ("newDoc") });
-    r.add ({ "ai.stems.run", "Stem separation with audio.cpp (Windows), as a job", "ai",
-             st, {}, Mutates | NeedsDoc | LongRunning | WindowsOnly, {}, stemsCmd });
+    r.add ({ "ai.stems.run", "Stem separation with audio.cpp (Windows x64, macOS, Linux x64), as a job", "ai",
+             st, {}, Mutates | NeedsDoc | LongRunning | NeedsAudioCpp, {}, stemsCmd });
 
     auto sr = scope;
     sr.insert (sr.begin(), {
         P ("mode", PType::String).oneOf ({ "flashsr", "audiosr" }).def ("flashsr"),
         P ("model", PType::String).describe ("AudioSR model file name (default: the first installed)"),
-        P ("backend", PType::String).oneOf ({ "cpu", "cuda", "vulkan" }),
+        P ("backend", PType::String).oneOf ({ "cpu", "cuda", "vulkan", "metal" }).describe ("Default: ai.setDevice audiocpp, else cpu"),
         P ("output", PType::String).oneOf ({ "newDoc", "replace", "append" }).def ("newDoc") });
-    r.add ({ "ai.superRes.run", "Super resolution with audio.cpp (Windows), as a job", "ai",
-             sr, {}, Mutates | NeedsDoc | LongRunning | WindowsOnly, {}, superResCmd });
+    r.add ({ "ai.superRes.run", "Super resolution with audio.cpp (Windows x64, macOS, Linux x64), as a job", "ai",
+             sr, {}, Mutates | NeedsDoc | LongRunning | NeedsAudioCpp, {}, superResCmd });
 }
 
 } // namespace sc::control

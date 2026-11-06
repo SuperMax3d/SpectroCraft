@@ -7,9 +7,9 @@
 // run() can be called from any worker thread (the window, a control-API job,
 // a test). Committing the result to a document stays with the caller.
 //
-// The CLI is Windows-only today (sc::acpp::run* are stubs elsewhere): on
-// macOS / Linux run() fails with errorCode "unsupported_platform" after
-// validating the request; validate() itself is platform-independent.
+// The CLI runs on Windows x64, macOS (arm64 / x64) and Linux x64; on any other
+// platform run() fails with errorCode "unsupported_platform" after validating
+// the request; validate() itself is platform-independent.
 #pragma once
 
 #include <JuceHeader.h>
@@ -45,7 +45,7 @@ struct StemService
         std::vector<Description> descriptions;   // SamAudio only (blank texts are invalid)
         juce::File binary;                       // empty = sc::acpp::binaryPath()
         juce::File model;                        // .gguf file (modes 1-2) or folder (mode 3)
-        juce::String backend = "cpu";            // "cpu" | "cuda" | "vulkan"
+        juce::String backend = "cpu";            // "cpu" | "cuda" | "vulkan" | "metal"
         bool extractFromOriginal = true;         // SamAudio: false = chain on the previous residual
         double extStartSecs = 0.0;               // document time of input frame 0
         double sourceRate = 0.0;                 // rate of `input` and of the merged result
@@ -83,7 +83,7 @@ struct StemService
     /** Returns true to stop the run (the CLI process is killed). */
     using Cancel = std::function<bool ()>;
 
-    /** True where the audio.cpp CLI can actually run (Windows). */
+    /** True where audio.cpp publishes a CLI build (Windows x64, macOS, Linux x64). */
     static bool supported();
 
     /** Empty when the request can run; otherwise a user-facing reason, and

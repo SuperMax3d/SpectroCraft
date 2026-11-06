@@ -6,8 +6,9 @@
 // MessageManager call is made, so run() can be called from any worker thread.
 // Committing the result to a document stays with the caller.
 //
-// The CLI is Windows-only today: on macOS / Linux run() fails with errorCode
-// "unsupported_platform" after validating the request.
+// The CLI runs on Windows x64, macOS (arm64 / x64) and Linux x64; on any other
+// platform run() fails with errorCode "unsupported_platform" after validating
+// the request.
 #pragma once
 
 #include <JuceHeader.h>
@@ -33,7 +34,7 @@ struct SuperResService
         Mode mode = Mode::FlashSR;
         juce::File binary;                       // empty = sc::acpp::binaryPath()
         juce::File model;
-        juce::String backend = "cpu";            // "cpu" | "cuda" | "vulkan"
+        juce::String backend = "cpu";            // "cpu" | "cuda" | "vulkan" | "metal"
         double sourceRate = 0.0;                 // rate of `input`
         std::vector<std::vector<float>> input;   // one vector per channel, equal lengths
         // The tool always returns mono at its native rate (48 kHz). true:
@@ -60,6 +61,7 @@ struct SuperResService
     using Progress = std::function<void (double fraction, const juce::String& status)>;
     using Cancel   = std::function<bool ()>;
 
+    /** True where audio.cpp publishes a CLI build (Windows x64, macOS, Linux x64). */
     static bool supported();
 
     /** Empty when the request can run; otherwise a user-facing reason and a
