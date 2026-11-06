@@ -150,9 +150,12 @@ juce::String scriptSha256 (const juce::File& script);
     must be an existing *.py file inside `folder` (default scriptFolder()),
     after symbolic links are resolved. On refusal *reasonOut receives a stable
     code the caller can turn into confirm_required{reason}: "not_found",
-    "not_python" or "outside_script_folder" (also when a link leads outside). */
+    "not_python" or "outside_script_folder" (also when a link leads outside).
+    On success *resolvedOut receives the link-free path: run and hash THAT
+    file, so the check and the run see the same target. */
 bool isUnderScriptFolder (const juce::File& script, juce::String* reasonOut = nullptr,
-                          const juce::File& folder = scriptFolder());
+                          const juce::File& folder = scriptFolder(),
+                          juce::File* resolvedOut = nullptr);
 
 // ============================================================================
 // result.json: optional structured output of a script (contract version 1)

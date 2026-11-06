@@ -3687,8 +3687,12 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
                                   .getChildFile ("SpectroCraftPython");
     if (!tmpDir.exists ())
         tmpDir.createDirectory ();
+    // The counter keeps two runs started in the same millisecond (GUI + API)
+    // apart: makeExchange deletes stale files with the same stamp.
+    static std::atomic<uint32_t> runCounter { 0 };
     const juce::String stamp = juce::String ((int64_t) juce::Time::getCurrentTime ().toMilliseconds ())
-                              + "_" + juce::String ((size_t) this);
+                              + "_" + juce::String ((size_t) this)
+                              + "_" + juce::String ((int) runCounter.fetch_add (1));
     // in / out / meta / result.json (the last two outputs are each optional).
     const sc::py::ScriptExchange ex = sc::py::makeExchange (tmpDir, stamp,
                                                             (double) samples.getStart () / rate);

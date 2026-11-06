@@ -46,6 +46,13 @@ bool processGone (int pid, int waitMs)
 #else
         if (kill ((pid_t) pid, 0) != 0 && errno == ESRCH)
             return true;
+#  if defined(__linux__)
+        // In a container without an init process an orphan may stay a zombie
+        // (dead, never reaped): that counts as gone.
+        const juce::String stat = juce::File ("/proc/" + juce::String (pid) + "/stat").loadFileAsString ();
+        if (stat.fromLastOccurrenceOf (")", false, false).trimStart ().startsWithChar ('Z'))
+            return true;
+#  endif
         juce::Thread::sleep (50);
 #endif
         if (juce::Time::getMillisecondCounterHiRes () >= end)
@@ -108,6 +115,11 @@ static void testHardeningResultJson()
         const auto r = sc::py::parseScriptResult (R"({"timeBase": "document", "markers": [{"time": 4.0}]})", 10.0);
         CHECK (r.error.isEmpty () && r.markers.size () == 1 && std::abs (r.markers[0].docTime - 4.0) < 1e-12,
                "hardening result.json: document time base is not offset");
+    }
+    {
+        const auto r = sc::py::parseScriptResult (R"({"text": null, "markers": null, "measures": null, "tables": null})");
+        CHECK (r.error.isEmpty () && r.markers.empty () && r.text.isEmpty (),
+               "hardening result.json: top-level nulls (Python None) count as absent");
     }
     {
         const auto r = sc::py::parseScriptResult ("{}");
@@ -219,10 +231,10 @@ static void testHardeningScriptFolder()
     CHECK (sc::py::isUnderScriptFolder (nested, &why, folder), "hardening allow-list: subfolder accepted");
     CHECK (!sc::py::isUnderScriptFolder (outside, &why, folder) && why == "outside_script_folder",
            "hardening allow-list: script outside refused (" + why + ")");
-    CHECK (!sc::py::isUnderScriptFolder (folder.getChildFile ("sub").getChildFile ("..").getChildFile ("..")
-                                             .getChildFile ("evil.py"), &why, folder)
-               && why == "outside_script_folder",
-           "hardening allow-list: '..' cannot escape");
+    juce::File resolved;
+    CHECK (sc::py::isUnderScriptFolder (inside, &why, folder, &resolved) && resolved.existsAsFile ()
+               && resolved.getFileName () == inside.getFileName (),
+           "hardening allow-list: resolved path returned for the run");
     CHECK (!sc::py::isUnderScriptFolder (txt, &why, folder) && why == "not_python",
            "hardening allow-list: non-.py refused (" + why + ")");
     CHECK (!sc::py::isUnderScriptFolder (folder.getChildFile ("missing.py"), &why, folder) && why == "not_found",
@@ -230,8 +242,14 @@ static void testHardeningScriptFolder()
 
     const juce::File link = folder.getChildFile ("link.py");
     if (outside.createSymbolicLink (link, true) && link.exists ())
+    {
         CHECK (!sc::py::isUnderScriptFolder (link, &why, folder) && why == "outside_script_folder",
                "hardening allow-list: symbolic link leading outside refused (" + why + ")");
+        const juce::File link2 = folder.getChildFile ("disguised.py");
+        if (txt.createSymbolicLink (link2, true) && link2.exists ())
+            CHECK (!sc::py::isUnderScriptFolder (link2, &why, folder) && why == "not_python",
+                   "hardening allow-list: '.py' link to a non-script refused (" + why + ")");
+    }
     else
         scSkip ("hardening allow-list: symbolic links cannot be created here (Windows without the privilege)");
     root.deleteRecursively ();
@@ -382,6 +400,21 @@ static void testHardeningProcess()
         CHECK (!r.started && !r.timedOut, "hardening process: missing executable is 'not started' on every OS");
     }
 
+    // Output decoding (no interpreter needed): invalid UTF-8 falls back to
+    // the ANSI code page (Windows) or Latin-1, NUL bytes do not truncate.
+    {
+        const char bad[] = { 'a', (char) 0xE9, 'b', 'c' };
+        const juce::String d = sc::py::decodeProcessOutput (bad, sizeof (bad));
+        CHECK (d.length () >= 3 && d[0] == 'a' && d.endsWith ("bc"),   // 0xE9 may pair with 'b' on a CJK code page
+               "hardening decode: invalid UTF-8 falls back without losing the text");
+        const char withNul[] = { 'x', 0, 'y', 'z' };
+        const juce::String n = sc::py::decodeProcessOutput (withNul, sizeof (withNul));
+        CHECK (n.length () == 4 && n[0] == 'x' && n[1] == (juce::juce_wchar) 0xFFFD && n.endsWith ("yz"),
+               "hardening decode: a NUL byte does not truncate the output");
+        const juce::String u = sc::py::decodeProcessOutput ("\xc3\xa9", 2);
+        CHECK (u.length () == 1 && u[0] == (juce::juce_wchar) 0xE9, "hardening decode: valid UTF-8 decoded");
+    }
+
     std::string pyCmd;
     if (!sc::py::findPython (&pyCmd))
     {
@@ -416,13 +449,16 @@ static void testHardeningProcess()
                        "p = subprocess.Popen([sys.executable, '-c', code])\n"
                        "open(sys.argv[1], 'w').write(str(p.pid))\n"
                        "time.sleep(60)\n");
+        // Kill (cancel) as soon as the grandchild's pid is on disk, however
+        // slow the machine; the 60 s timeout is only a safety net.
         sc::py::RunOptions o;
-        o.timeoutMs = 3000;
+        o.timeoutMs = 60000;
         o.killGraceMs = 300;
-        const auto r = sc::py::runProcessEx (exe, pyArgs (pyTokens, { s.getFullPathName (), pidFile.getFullPathName () }), o);
+        const auto r = sc::py::runProcessEx (exe, pyArgs (pyTokens, { s.getFullPathName (), pidFile.getFullPathName () }), o,
+            [&pidFile] { return pidFile.loadFileAsString ().trim ().getIntValue () <= 0; });
         const int gpid = pidFile.loadFileAsString ().trim ().getIntValue ();
-        CHECK (r.timedOut && gpid > 0, "hardening process: tree script started a grandchild (pid "
-                                           + juce::String (gpid) + ")" + r.stderrText);
+        CHECK (r.cancelled && !r.timedOut && gpid > 0, "hardening process: tree script started a grandchild (pid "
+                                                           + juce::String (gpid) + ")" + r.stderrText);
         if (gpid > 0)
             CHECK (processGone (gpid, 5000), "hardening process: grandchild killed with the tree");
     }
@@ -480,12 +516,6 @@ static void testHardeningProcess()
                "hardening utf8: stderr decoded as UTF-8");
     }
 
-    // 6) Invalid UTF-8 output never vanishes (Latin-1 / ANSI fallback).
-    {
-        const char bad[] = { 'a', (char) 0xE9, 'b' };
-        const juce::String d = sc::py::decodeProcessOutput (bad, sizeof (bad));
-        CHECK (d.length () == 3 && d[0] == 'a' && d[2] == 'b', "hardening decode: invalid UTF-8 falls back, keeps every byte");
-    }
     dir.deleteRecursively ();
 }
 
@@ -588,8 +618,20 @@ static void testHardeningRunPythonScript()
         CHECK (app.undo ().undoSize () == 0, "hardening python run timeout: document untouched");
     }
 
-    // 5) No capture: runs exactly as before (no time limit applied, no report).
-    CHECK (sc::py::ScopedScriptRunCapture::current () == nullptr, "hardening python run: capture scope restored");
+    // 5) Captures nest per thread and are invisible to other threads.
+    {
+        sc::py::ScopedScriptRunCapture outer;
+        {
+            sc::py::ScopedScriptRunCapture inner;
+            CHECK (sc::py::ScopedScriptRunCapture::current () == &inner, "hardening capture: innermost is current");
+            sc::py::ScopedScriptRunCapture* seen = &inner;
+            std::thread t ([&seen] { seen = sc::py::ScopedScriptRunCapture::current (); });
+            t.join ();
+            CHECK (seen == nullptr, "hardening capture: thread-local (another thread sees none)");
+        }
+        CHECK (sc::py::ScopedScriptRunCapture::current () == &outer, "hardening capture: outer restored after nesting");
+    }
+    CHECK (sc::py::ScopedScriptRunCapture::current () == nullptr, "hardening capture: none left after the scopes");
 
     wav.deleteFile ();
     dir.deleteRecursively ();

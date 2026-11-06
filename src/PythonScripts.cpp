@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
@@ -281,12 +282,14 @@ static juce::String newScriptTemplateText ()
 # count (the length may differ).
 #
 # Optional structured result: write a JSON object to meta["resultJson"]
-# (output.wav then becomes optional - an analysis script may write only this):
+# (output.wav then becomes optional - an analysis script may write only this).
+# It is returned to control-API callers (python.run); this panel does not show
+# it yet. No NaN/Infinity (not JSON): use None. Format:
 #   {"version": 1,
 #    "timeBase": "input",       # "input": seconds from the start of input.wav
 #                               # "document": seconds from the start of the file
 #    "markers": [{"time": 1.5, "end": 2.0, "label": "peak"}],   # end optional
-#    "text": "free text shown to the caller",
+#    "text": "free text for the caller",
 #    "measures": {"rms_db": -12.3},                             # any JSON object
 #    "tables": [{"name": "bands", "columns": ["f", "dB"], "rows": [[1000, -3.1]]}]}
 
@@ -729,9 +732,12 @@ A script is called as:  python <script> <input.wav> <output.wav> <meta.json>
       "tables": [ {"name": "bands", "columns": ["Hz", "dB"],
                    "rows": [[1000, -20.5], [2000, -22.0]]} ]
     }
-  Every field is optional; unknown fields are ignored. A script may write
-  result.json without output.wav (analysis only). An invalid result.json
-  fails the run and leaves the document unchanged.
+  Every field is optional; unknown fields and null values are ignored. A
+  script may write result.json without output.wav (analysis only). An
+  invalid result.json fails the run and leaves the document unchanged.
+  NaN / Infinity are not JSON: write null instead (json.dump(...,
+  allow_nan=False) catches them). The result is returned to control-API
+  callers (python.run); the Python panel does not display it yet.
 - The script must exit with code 0. stdin is empty (EOF); stdout/stderr are
   captured as UTF-8.)TXT";
 }
@@ -767,14 +773,21 @@ ScriptResult parseScriptResult (const juce::String& json, double inputStartSec)
     r.present = true;
     r.raw = v;
 
-    if (obj->hasProperty ("version"))
+    // A top-level null (Python None) counts as absent, like nested ones.
+    auto has = [obj] (const char* key)
+    {
+        const juce::var& x = obj->getProperty (key);
+        return obj->hasProperty (key) && !x.isVoid () && !x.isUndefined ();
+    };
+
+    if (has ("version"))
     {
         const juce::var ver = obj->getProperty ("version");
         if (!isNumber (ver) || (double) ver != 1.0)
             return invalid ("unsupported version " + ver.toString () + " (expected 1)");
     }
 
-    if (obj->hasProperty ("timeBase"))
+    if (has ("timeBase"))
     {
         const juce::var tb = obj->getProperty ("timeBase");
         if (!tb.isString () || (tb.toString () != "input" && tb.toString () != "document"))
@@ -783,7 +796,7 @@ ScriptResult parseScriptResult (const juce::String& json, double inputStartSec)
     }
     const double offset = r.timeBase == "input" ? inputStartSec : 0.0;
 
-    if (obj->hasProperty ("markers"))
+    if (has ("markers"))
     {
         const juce::var ms = obj->getProperty ("markers");
         if (!ms.isArray ())
@@ -824,7 +837,7 @@ ScriptResult parseScriptResult (const juce::String& json, double inputStartSec)
         }
     }
 
-    if (obj->hasProperty ("text"))
+    if (has ("text"))
     {
         const juce::var t = obj->getProperty ("text");
         if (!t.isString ())
@@ -832,7 +845,7 @@ ScriptResult parseScriptResult (const juce::String& json, double inputStartSec)
         r.text = t.toString ();
     }
 
-    if (obj->hasProperty ("measures"))
+    if (has ("measures"))
     {
         const juce::var ms = obj->getProperty ("measures");
         if (ms.getDynamicObject () == nullptr || ms.isArray ())
@@ -840,7 +853,7 @@ ScriptResult parseScriptResult (const juce::String& json, double inputStartSec)
         r.measures = ms;
     }
 
-    if (obj->hasProperty ("tables"))
+    if (has ("tables"))
     {
         const juce::var ts = obj->getProperty ("tables");
         if (!ts.isArray ())
@@ -942,7 +955,8 @@ static juce::File resolveLinks (const juce::File& f)
 #endif
 }
 
-bool isUnderScriptFolder (const juce::File& script, juce::String* reasonOut, const juce::File& folder)
+bool isUnderScriptFolder (const juce::File& script, juce::String* reasonOut, const juce::File& folder,
+                          juce::File* resolvedOut)
 {
     auto refuse = [reasonOut] (const char* reason)
     {
@@ -950,6 +964,7 @@ bool isUnderScriptFolder (const juce::File& script, juce::String* reasonOut, con
         return false;
     };
     if (reasonOut != nullptr) reasonOut->clear ();
+    if (resolvedOut != nullptr) *resolvedOut = juce::File ();
 
     if (!script.existsAsFile ())
         return refuse ("not_found");
@@ -958,8 +973,13 @@ bool isUnderScriptFolder (const juce::File& script, juce::String* reasonOut, con
 
     const juce::File real    = resolveLinks (script);
     const juce::File realDir = resolveLinks (folder);
+    if (!real.existsAsFile ())
+        return refuse ("not_found");
+    if (!real.hasFileExtension ("py"))   // "x.py" linking to a non-script file
+        return refuse ("not_python");
     if (!folder.isDirectory () || !real.isAChildOf (realDir))
         return refuse ("outside_script_folder");
+    if (resolvedOut != nullptr) *resolvedOut = real;
     return true;
 }
 
@@ -1037,6 +1057,23 @@ juce::String decodeProcessOutput (const char* data, size_t size)
 {
     if (data == nullptr || size == 0)
         return {};
+
+    // A NUL byte would end the string early (JUCE strings are NUL-terminated):
+    // replace each by U+FFFD (EF BF BD in UTF-8; valid in no ANSI code page,
+    // so on that path it becomes '?' or similar, never a truncation).
+    std::string cleaned;
+    if (std::memchr (data, 0, size) != nullptr)
+    {
+        cleaned.reserve (size + 16);
+        for (size_t i = 0; i < size; ++i)
+        {
+            if (data[i] == 0) cleaned += "\xEF\xBF\xBD";
+            else              cleaned += data[i];
+        }
+        data = cleaned.data ();
+        size = cleaned.size ();
+    }
+
     const bool fitsInt = size <= (size_t) (std::numeric_limits<int>::max) ();
     if (fitsInt && juce::CharPointer_UTF8::isValidString (data, (int) size))
         return juce::String::fromUTF8 (data, (int) size);
@@ -1251,11 +1288,27 @@ ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& arg
         }
     };
 
+    // Termination is asynchronous: wait (bounded) until every process of the
+    // job is gone, so the caller can delete the exchange files they held open.
+    auto waitJobEmpty = [&] (int maxMs)
+    {
+        for (int waited = 0; inJob && waited < maxMs; waited += 10)
+        {
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info {};
+            if (!QueryInformationJobObject (job, JobObjectBasicAccountingInformation,
+                                            &info, sizeof (info), nullptr)
+                || info.ActiveProcesses == 0)
+                return;
+            Sleep (10);
+        }
+    };
+
     auto killTree = [&]
     {
         if (inJob) TerminateJobObject (job, 1);
         else       TerminateProcess (pi.hProcess, 1);
         WaitForSingleObject (pi.hProcess, 5000);
+        waitJobEmpty (3000);
     };
 
     bool killed = false;
@@ -1301,8 +1354,13 @@ ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& arg
     CloseHandle (errR);
     CloseHandle (pi.hProcess);
     CloseHandle (pi.hThread);
-    // With JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE this also ends any grandchild
-    // still running.
+    // Grandchildren left behind by a child that exited normally. (Closing a
+    // KILL_ON_JOB_CLOSE job would do it too, but asynchronously.)
+    if (!killed && options.killTreeOnExit && inJob)
+    {
+        TerminateJobObject (job, 1);
+        waitJobEmpty (3000);
+    }
     if (job != nullptr)
         CloseHandle (job);
 
@@ -1385,22 +1443,50 @@ ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& arg
         envp.push_back (v.data ());
     envp.push_back (nullptr);
 
+    // Pipes. Every end is moved above stderr (a parent started with 0/1/2
+    // closed would otherwise hand out fds the child's dup2 calls clobber),
+    // and every end is close-on-exec, set
+    // atomically where possible (pipe2 on Linux): a concurrent fork + exec
+    // in another thread must not inherit them (a leaked exec-status write end
+    // would delay our "did exec succeed" read, a leaked read end is a leak).
+    auto makePipe = [] (int fds[2]) -> bool
+    {
+#if defined(__linux__)
+        if (pipe2 (fds, O_CLOEXEC) != 0) return false;
+#else
+        if (pipe (fds) != 0) return false;
+        fcntl (fds[0], F_SETFD, FD_CLOEXEC);
+        fcntl (fds[1], F_SETFD, FD_CLOEXEC);
+#endif
+        for (int i = 0; i < 2; ++i)
+            if (fds[i] <= STDERR_FILENO)
+            {
+                const int moved = fcntl (fds[i], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+                close (fds[i]);
+                fds[i] = moved;
+            }
+        if (fds[0] < 0 || fds[1] < 0)
+        {
+            if (fds[0] >= 0) close (fds[0]);
+            if (fds[1] >= 0) close (fds[1]);
+            return false;
+        }
+        // The child dup2's its ends onto 0/1/2; dup2 clears close-on-exec
+        // on the copy, so the originals can all stay close-on-exec.
+        return true;
+    };
+
     int outp[2] = { -1, -1 };
     int errp[2] = { -1, -1 };
-    int execp[2] = { -1, -1 };   // close-on-exec: reports an exec failure to the parent
-    if (pipe (outp) != 0) return finish ();
-    if (pipe (errp) != 0) { close (outp[0]); close (outp[1]); return finish (); }
-    if (pipe (execp) != 0)
+    int execp[2] = { -1, -1 };   // reports an exec failure to the parent
+    if (!makePipe (outp)) return finish ();
+    if (!makePipe (errp)) { close (outp[0]); close (outp[1]); return finish (); }
+    if (!makePipe (execp))
     {
         close (outp[0]); close (outp[1]);
         close (errp[0]); close (errp[1]);
         return finish ();
     }
-    fcntl (execp[0], F_SETFD, FD_CLOEXEC);
-    fcntl (execp[1], F_SETFD, FD_CLOEXEC);
-    // Our read ends must not leak into children started by other threads.
-    fcntl (outp[0], F_SETFD, FD_CLOEXEC);
-    fcntl (errp[0], F_SETFD, FD_CLOEXEC);
 
     const pid_t pid = fork ();
     if (pid < 0)
@@ -1422,6 +1508,7 @@ ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& arg
         sigprocmask (SIG_SETMASK, &none, nullptr);
         signal (SIGPIPE, SIG_DFL);
 
+        // All pipe fds are > 2 here, so these dup2 calls never clobber one.
         const int devNull = open ("/dev/null", O_RDONLY);
         if (devNull >= 0)
         {
@@ -1447,10 +1534,30 @@ ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& arg
     close (errp[1]);
     close (execp[1]);
 
-    // EOF = exec succeeded (the close-on-exec end closed); data = errno.
+    // EOF = exec succeeded (the close-on-exec end closed); data = errno. The
+    // wait is bounded: should another thread's fork have inherited the write
+    // end in the tiny window before close-on-exec was set (macOS has no
+    // pipe2), the EOF would only come when that unrelated process exits.
+    // An exec failure is reported within microseconds.
     int execErr = 0;
-    ssize_t n;
-    do { n = read (execp[0], &execErr, sizeof (execErr)); } while (n < 0 && errno == EINTR);
+    ssize_t n = 0;
+    {
+        const double execDeadline = juce::Time::getMillisecondCounterHiRes () + 2000.0;
+        for (;;)
+        {
+            struct pollfd pfd { execp[0], POLLIN, 0 };
+            const int pr = poll (&pfd, 1, 20);
+            if (pr > 0)
+            {
+                do { n = read (execp[0], &execErr, sizeof (execErr)); } while (n < 0 && errno == EINTR);
+                break;
+            }
+            if (pr < 0 && errno != EINTR)
+                break;
+            if (juce::Time::getMillisecondCounterHiRes () >= execDeadline)
+                break;   // assume started; a later failure shows as exit code 127
+        }
+    }
     close (execp[0]);
     if (n == (ssize_t) sizeof (execErr))
     {

@@ -177,7 +177,6 @@ SuperResService::Result SuperResService::run (const Request& req, const Progress
             return fail ("io_error", "Could not resample the result to "
                                          + juce::String (req.sourceRate, 0) + " Hz.");
         t.assign (out.getReadPointer (0), out.getReadPointer (0) + out.getNumSamples ());
-        tracks.resize (1);   // a multi-channel result would otherwise mix two rates
         trackRate = req.sourceRate;
     }
 

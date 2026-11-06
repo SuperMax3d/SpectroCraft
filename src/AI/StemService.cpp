@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <memory>
 
 namespace sc {
 
@@ -212,15 +213,18 @@ StemService::Result StemService::run (const Request& req, const Progress& progre
 
     const double inputDur = (double) nFrames / req.sourceRate;
 
-    // Log lines are frequent: forward at most one every 300 ms.
-    auto lastUi = std::chrono::steady_clock::now () - std::chrono::milliseconds (500);
-    auto logForwarder = [&] (const juce::String& prefix)
+    // Log lines are frequent: forward at most one every 300 ms, with a fresh
+    // throttle per CLI call (like the window had), so the first line of each
+    // run always shows.
+    auto logForwarder = [&report] (const juce::String& prefix)
     {
-        return [&lastUi, &report, prefix] (const juce::String& line)
+        auto lastUi = std::make_shared<std::chrono::steady_clock::time_point> (
+            std::chrono::steady_clock::now () - std::chrono::milliseconds (500));
+        return [lastUi, &report, prefix] (const juce::String& line)
         {
             const auto now = std::chrono::steady_clock::now ();
-            if (now - lastUi < std::chrono::milliseconds (300)) return;
-            lastUi = now;
+            if (now - *lastUi < std::chrono::milliseconds (300)) return;
+            *lastUi = now;
             report (-1.0, prefix + "  |  " + line);
         };
     };
