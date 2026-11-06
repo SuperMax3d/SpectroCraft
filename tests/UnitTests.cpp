@@ -26765,6 +26765,59 @@ static void testApplyActionSteps()
     // Unknown types fail cleanly.
     CHECK (!sc::applyActionStep (app, mkStep ("bogus", juce::var()), &err), "actions: unknown type fails");
     CHECK (!err.empty (), "actions: failure message filled");
+
+    // Unknown types are never dispatched by their first letter: "sxxx" used
+    // to run silence, "dxxx" delete, "nxxx" normalize.
+    {
+        app.setSelection ({ 0.1, 0.4 });
+        const int64_t n0 = eng.numSamples();
+        const float s0 = readOneSample (eng, 0, 2000);
+        const int undo0 = (int) app.undo().undoSize();
+        for (const char* t : { "sxxx", "dxxx", "nxxx", "ixxx", "silencex" })
+        {
+            err.clear();
+            CHECK (!sc::applyActionStep (app, mkStep (t, juce::var()), &err),
+                   juce::String ("actions: look-alike type is rejected: ") + t);
+            CHECK (juce::String (err).contains ("unknown step type"),
+                   juce::String ("actions: look-alike type reports unknown: ") + t);
+        }
+        CHECK (eng.numSamples() == n0 && readOneSample (eng, 0, 2000) == s0
+                   && (int) app.undo().undoSize() == undo0,
+               "actions: rejected look-alike types left the audio untouched");
+    }
+
+    // envelope replays (it was validated and recorded, but had no case in
+    // applyActionStep): -6 dB flat over the selection halves the amplitude.
+    {
+        app.setSelection ({ 0.0, 0.0 });
+        const float s0 = readOneSample (eng, 0, 1000);
+        juce::Array<juce::var> pts;
+        pts.add (sc::makeVarObject ({ { "t", 0.0 }, { "g", -6.0206 } }));
+        pts.add (sc::makeVarObject ({ { "t", 100.0 }, { "g", -6.0206 } }));
+        const auto pe = sc::makeVarObject ({ { "points", juce::var (pts) } });
+        err.clear();
+        const bool ok = sc::applyActionStep (app, mkStep ("envelope", pe), &err);
+        CHECK (ok, "actions: envelope applies (" + juce::String (err) + ")");
+        CHECK (std::abs (readOneSample (eng, 0, 1000) - 0.5f * s0) < 1e-3f,
+               "actions: envelope -6 dB halved the samples");
+        err.clear();
+        CHECK (!sc::applyActionStep (app, mkStep ("envelope", sc::makeVarObject ({})), &err),
+               "actions: envelope without points fails");
+    }
+
+#if !(defined(SC_ENABLE_AI) && SC_ENABLE_AI)
+    // Non-AI build: noiseSuppress used to fall through to normalize().
+    {
+        app.selectAll();
+        const float s0 = readOneSample (eng, 0, 1000);
+        err.clear();
+        CHECK (!sc::applyActionStep (app, mkStep ("noiseSuppress",
+                   sc::makeVarObject ({ { "modelId", "denseunet" } })), &err),
+               "actions: noiseSuppress fails in a non-AI build");
+        CHECK (juce::String (err).contains ("no AI support"), "actions: noiseSuppress says the build has no AI");
+        CHECK (readOneSample (eng, 0, 1000) == s0, "actions: noiseSuppress did not normalize");
+    }
+#endif
 }
 
 static void testActionBatch()

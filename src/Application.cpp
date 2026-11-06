@@ -3488,6 +3488,31 @@ bool Application::splitSpectralSelectionConfigured (std::string* errOut)
 }
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+// Worker -> message thread commit hop used by the blocking AI operations.
+// Runs fn on the message thread and waits for it; runs it in place when this
+// already is the message thread or there is no MessageManager (tests, CLI).
+// The commit edits the active document (buffer, undo stack, SCTT data,
+// visibleChannels) that the message thread reads while painting, so it must
+// never run on the worker. The unbounded wait is safe only because the
+// message thread never waits on these workers (they run behind non-blocking
+// progress dialogs), the same rule as runPythonScript's commit.
+// Returns false when the message thread no longer accepts callbacks
+// (shutting down); fn's own result goes to resultOut.
+static bool commitOnMessageThread (const std::function<bool()>& fn, bool& resultOut)
+{
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
+    if (mm == nullptr || mm->isThisTheMessageThread ())
+    {
+        resultOut = fn ();
+        return true;
+    }
+    juce::WaitableEvent done;
+    if (!juce::MessageManager::callAsync ([&] { resultOut = fn (); done.signal (); }))
+        return false;
+    done.wait (-1);
+    return true;
+}
+
 bool Application::noiseSuppress (const std::string& modelId, const std::string& device,
                                  float attenLimDb, bool df3PostFilter,
                                  std::function<bool(float)> onProgress, std::string* errOut,
@@ -3559,9 +3584,17 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 
     if (!copyNoise || affected.empty ())
     {
-        if (!audioEngine().replaceSamples (samples, data,
-                                           "Noise suppressed (" + juce::String (modelId) + ")", &err))
-            return fail (err);
+        // The commit edits the active document (buffer, undo stack, mipmaps)
+        // that the message thread reads while painting: run it there, like
+        // the copyNoise branch below and runPythonScript.
+        bool replaced = false;
+        if (!commitOnMessageThread ([&] () -> bool {
+                return audioEngine().replaceSamples (samples, data,
+                           "Noise suppressed (" + juce::String (modelId) + ")", &err);
+            }, replaced))
+            return fail ("Could not apply the noise suppression (the application is shutting down).");
+        if (!replaced)
+            return fail (err.empty () ? std::string ("Could not apply the noise suppression.") : err);
         return true;
     }
 
@@ -3948,7 +3981,18 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
     if (!ok)
         return fail (err);
 
-    d->setTranscription (std::move (segs));
+    // Store the segments on the message thread (the transcription panel and
+    // the views read the document's SCTT data while painting). The document
+    // may have been closed while Whisper ran: only store into a live one.
+    bool stored = false;
+    if (!commitOnMessageThread ([&] () -> bool {
+            if (!isDocLoaded (d)) return false;
+            d->setTranscription (std::move (segs));
+            return true;
+        }, stored))
+        return fail ("Could not store the transcription (the application is shutting down).");
+    if (!stored)
+        return fail ("The document was closed during the transcription.");
     return true;
 }
 

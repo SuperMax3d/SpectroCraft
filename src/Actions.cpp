@@ -4,6 +4,9 @@
 #include "Application.h"
 #include "Actions.h"
 #include "PythonScripts.h"
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+ #include "AI/OvRuntime.h"   // resolveAiDevice + the runtime's real device list
+#endif
 
 #include <atomic>
 #include <algorithm>
@@ -422,10 +425,16 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
     if (!app.audioEngine().isFileLoaded())
         return fail ("no file is loaded");
 
+    // Unknown types must not be dispatched by their first letter ("sxxx" used
+    // to run silence): reject them before the switch.
+    if (!isKnownActionType (s.type))
+        return fail ("unknown step type \"" + s.type + "\"");
+
     switch (s.type.getCharPointer()[0])
     {
         case 's':   // silence
-            return app.silence (errOut);
+            if (s.type == kSilence)     return app.silence (errOut);
+            break;
 
         case 'f':
             if (s.type == kFadeIn)      return app.fadeIn (errOut);
@@ -433,16 +442,46 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
             if (s.type == kFilterEq)    return app.applyFilterEq (eqPointsFromJson (p), errOut);
             break;
 
+        case 'e':   // envelope (validated and recorded, but had no replay case)
+            if (s.type == kEnvelope)
+            {
+                const auto pts = envPointsFromJson (p);
+                if (pts.empty())        return fail ("envelope: no points recorded");
+                return app.applyEnvelope (pts, errOut);
+            }
+            break;
+
         case 'n':   // normalize / noise suppress
-#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
             if (s.type == kNoiseSuppress)
+            {
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+                // The step may carry an explicit "device"; otherwise the app's
+                // shared AI preference. Either way it is resolved against the
+                // devices the runtime really offers: "auto" is not an OpenVINO
+                // device name and used to reach compile_model as is.
+                const auto dv = p.getProperty ("device", juce::var());
+                const std::string pref = (dv.isString() && dv.toString().isNotEmpty())
+                                             ? dv.toString().toStdString ()
+                                             : app.aiDevicePref;
+                sc::ai::OvRuntime::instance ().init ();   // idempotent; needed for enumeration
+                const std::string device =
+                    sc::resolveAiDevice (pref, sc::ai::OvRuntime::instance ().devices ());
+                const bool autoDl = ! p.hasProperty ("autoDownload")
+                                    || (bool) p.getProperty ("autoDownload", juce::var());
                 return app.noiseSuppress (
                     p.getProperty ("modelId", juce::var()).toString().toStdString (),
-                    "auto",
+                    device,
                     (float) numParam (p, "attenLimDb", 0.0),
-                    false, nullptr, errOut);
+                    (bool) p.getProperty ("df3PostFilter", juce::var()),
+                    nullptr, errOut, autoDl,
+                    (bool) p.getProperty ("copyNoise", juce::var()));
+#else
+                // Used to fall through to normalize() silently.
+                return fail ("noiseSuppress: this build has no AI support");
 #endif
-            return app.normalize (errOut);
+            }
+            if (s.type == kNormalize)   return app.normalize (errOut);
+            break;
 
         case 'c':
             if (s.type == kChangeGain)  return app.changeGain ((float) numParam (p, "db", 0.0), errOut);
@@ -471,7 +510,8 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
             break;
 
         case 'i':   // invert
-            return app.invertSelection (errOut);
+            if (s.type == kInvert)      return app.invertSelection (errOut);
+            break;
 
         case 't':
             if (s.type == kTimeStretch)
@@ -495,7 +535,8 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
             break;
 
         case 'd':   // delete
-            return app.del (errOut);
+            if (s.type == kDelete)      return app.del (errOut);
+            break;
 
         case 'g':
             if (s.type == kGenSilence)  return app.generateSilence (numParam (p, "dur", 1.0), errOut);
