@@ -201,6 +201,7 @@ macOS 26 arm64, AppleClang, Debug, `-DSPECTRO_ENABLE_AI=OFF -DSPECTRO_ENABLE_FFM
 | Branche, commit 1, 2e exécution (`-V`) | 4747/4748 vérifications ; seul échec : le même `views#W4` instable |
 | Branche, commit 2 (correctifs de revue, `-V`) | **4760/4760**, 10/10 shards verts |
 | `SC_TEST_FILTER="regression: measures"` | 145/145 |
+| CI GitHub Actions `build.yml` sur `f0fe363` (run 42154351288, AI ON) | **windows-ai ✓, macos-ai ✓, linux-ai ✓** (MSVC, AppleClang, GCC) |
 
 Aucune régression par rapport à la base. Le seul échec observé est l'instabilité préexistante de
 `views#W4` (rendu de sélection, sans lien avec les mesures).
