@@ -28,3 +28,11 @@ desktop.ini
 # FFmpeg rebuild scratch dirs (extern/ffmpeg/build.sh)
 /extern/ffmpeg/_build/
 /extern/ffmpeg/_native/
+
+# MCP adapter (tools/mcp): local Claude Code config and Python artefacts
+/.mcp.json
+/tools/mcp/.venv/
+/tools/mcp/uv.lock
+/tools/mcp/*.egg-info/
+__pycache__/
+.pytest_cache/
