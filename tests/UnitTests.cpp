@@ -26928,6 +26928,7 @@ static void testActionsPanelPaint()
 #include "regression/app_from_tests.inc"
 #include "regression/persistence.inc"
 #include "regression/ai.inc"
+#include "regression/measures.inc"
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -27413,6 +27414,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: app_from_tests", runRegression_app_from_tests);
     SC_RUN_TEST ("regression: persistence", runRegression_persistence);
     SC_RUN_TEST ("regression: ai", runRegression_ai);
+    SC_RUN_TEST ("regression: measures", runRegression_measures);
 
 
     scReportTimings();

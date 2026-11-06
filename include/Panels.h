@@ -5,6 +5,7 @@
 #include "FilterEQ.h"
 #include "Envelope.h"
 #include "PythonScripts.h"
+#include "Measures.h"   // headless spectrum / 1/3-octave / curve computations
 
 #include <array>
 #include <atomic>
@@ -432,13 +433,11 @@ public:
     // Live curve data for the new analysis modes (one entry per visible
     // channel, same order as app.visibleChannels). x holds seconds in the
     // time-based modes and Hz in Amp vs Freq mode.
-    struct CurveData
-    {
-        std::vector<double> x;      // time (s) or frequency (Hz), per point
-        std::vector<float> ampDb;   // amplitude, dB rel. full scale (floor -160)
-        std::vector<float> freqHz;  // tracked frequency per point (time modes);
-                                     // equals x in Amp vs Freq mode
-    };
+    //   x      time (s) or frequency (Hz), per point
+    //   ampDb  amplitude, dB rel. full scale (floor -160)
+    //   freqHz tracked frequency per point (time modes); equals x in Amp vs Freq mode
+    // Same struct as the measurement module's curves (sc::measures::CurveData).
+    using CurveData = sc::measures::CurveData;
     const std::vector<CurveData>& getLiveCurves() const { return liveCurves; }
 
     // Curve snapshots (the 1..8 buttons in the new modes). Each slot stores
@@ -618,7 +617,8 @@ public:
         Butterworth bandpass weighting of order 2*`order`, and the classic +98.5 dB
         offset. Returns one value per band (27 bands) in this view's relative-dB
         level space: formatSpectralLevel() renders it as dB-SPL once a Pascal
-        full-scale value is set, reproducing the reference analyzer's numbers. */
+        full-scale value is set, reproducing the reference analyzer's numbers.
+        Implemented by sc::measures::thirdOctaveRefBands (include/Measures.h). */
     static std::vector<float> thirdOctBandsRef (const AudioEngine& eng, int ch,
                                                 double t0, double t1, int order);
 
@@ -631,7 +631,7 @@ public:
 
     // Fixed normalization floor for the stored magnitudes: independent of the
     // visible level window so zooming out never changes the curve data.
-    static constexpr double kNormFloorDb = 160.0;
+    static constexpr double kNormFloorDb = sc::measures::kNormFloorDb;
 
 private:
     Application& app;
@@ -779,31 +779,12 @@ private:
     // Core averaging computation: analyse region [t0, t1] with windows of n
     // samples at the current window type; one magnitude vector per channel in
     // chans. Shared by the live spectrum and every stored snapshot (each from
-    // its own source file's engine).
+    // its own source file's engine). Thin wrapper over
+    // sc::measures::regionSpectrumNorm (the window type comes from the combo).
+    // The curve modes call sc::measures::timeCurve / spectrumCurve directly.
     void computeRegionFrom (AudioEngine& eng, const std::vector<int>& chans,
                             double t0, double t1, int n,
                             std::vector<std::vector<float>>& outMags);
-
-    // Curve computations for the new analysis modes. `mask` is nullptr when
-    // there is no spectral selection (all bins count); otherwise only bins
-    // inside mask.contains(tSecs, fHz) contribute.
-    //
-    // Time-based modes (Freq vs Time / Amp vs Time): one point per FFT frame
-    // under [t0, t1] (fixed 2048-point Hann frames; the hop grows so that at
-    // most kMaxCurveFrames points are produced). Per point: x = frame centre
-    // time, ampDb/freqHz follow `track` (Max: strongest bin's level +
-    // frequency; Total: summed level + amplitude-weighted centroid).
-    void computeTimeCurveFrom (const AudioEngine& eng, const std::vector<int>& chans,
-                               double t0, double t1, int track,
-                               const SpectralSelection* mask,
-                               std::vector<CurveData>& out);
-
-    // Amp vs Freq mode: one point per FFT bin; ampDb is the per-bin Max or
-    // Total (summed linear magnitudes) over all frames under [t0, t1].
-    void computeSpectrumCurveFrom (const AudioEngine& eng, const std::vector<int>& chans,
-                                   double t0, double t1, int n, int windowType,
-                                   int track, const SpectralSelection* mask,
-                                   std::vector<CurveData>& out);
 
     // The actual cache refresh; recomputeIfNeeded() wraps it with the
     // deferred post-mode-change zoom fit.
