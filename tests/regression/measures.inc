@@ -100,7 +100,7 @@ static void testMeasSpectrumMatchesPanel()
             const auto& m = view.getSpectrum();
             return view.getCachedN() == c.n && m.size() == 2
                 && m[0] == res.channels[0].norm && m[1] == res.channels[1].norm;
-        });
+        }, 10000);
         CHECK (same, "measures spectrum: panel cache is bit-identical to the module" + tag);
 
         bool dbOk = true;
@@ -147,7 +147,7 @@ static void testMeasThirdOctaveMatchesPanel()
             {
                 const auto& b = view.getThirdOctMags();
                 return b.size() == 2 && b[0] == res.channels[0].relDb && b[1] == res.channels[1].relDb;
-            });
+            }, 10000);
             CHECK (same, "measures 1/3 oct: IEC bands bit-identical to the panel (win "
                    + juce::String (wt) + ", N " + juce::String (n) + ")");
         }
@@ -180,7 +180,7 @@ static void testMeasThirdOctaveMatchesPanel()
         {
             const auto& b = view.getThirdOctMags();
             return b.size() == 2 && b[0] == res.channels[0].relDb && b[1] == res.channels[1].relDb;
-        });
+        }, 10000);
         CHECK (same, "measures 1/3 oct: reference bands bit-identical to the panel (order " + juce::String (order) + ")");
         CHECK (FFTAnalysisView::thirdOctBandsRef (app.audioEngine(), 0, 0.1, 1.9, order) == res.channels[0].relDb,
                "measures 1/3 oct: FFTAnalysisView::thirdOctBandsRef forwards to the module");
@@ -257,7 +257,7 @@ static void testMeasCurvesMatchPanel()
             const bool same = scRecomputeUntil (view, [&]
             {
                 return view.curveCacheValid() && measSameCurves (view.getLiveCurves(), out);
-            });
+            }, 10000);
             CHECK (same, "measures curves: live curves bit-identical to the module (mode "
                    + juce::String (mode) + ", track " + juce::String (track) + ")");
         }
@@ -378,6 +378,27 @@ static void testMeasLevels()
     if (lc.valuesDb.size() == 96)
         CHECK (std::abs (lc.valuesDb[5] - (-9.0309)) < 0.02 && std::abs (lc.valuesDb[90] - (-23.0103)) < 0.02,
                "measures level curve: RMS follows the step (-9.03 then -23.01 dBFS)");
+    CHECK (scm::levelCurve (eng2, 0, 0.5, 0.5, 0.05, 0.01, scm::LevelKind::Rms).valuesDb.empty(),
+           "measures level curve: empty region gives no values");
+    const auto whole = scm::levelCurve (eng2, 0, 0.0, 1.0, 10.0, 0.01, scm::LevelKind::Rms);
+    CHECK (whole.valuesDb.size() == 1 && std::abs (whole.windowSec - 1.0) < 1e-12
+           && std::abs (whole.valuesDb[0] - 10.0 * std::log10 (0.5 * (0.125 + 0.005))) < 0.01,
+           "measures level curve: window longer than the region = one value over the region");
+
+    // t1 = duration must reach the last sample whatever the length
+    // ((int64_t) (duration * rate) can truncate to numSamples - 1).
+    bool endOk = true;
+    for (int64_t len = 48000; len < 48100; ++len)
+    {
+        AudioEngine e;
+        if (!measInitEngine (e, rate, { std::vector<float> ((size_t) len, 0.25f) })) { endOk = false; break; }
+        scm::LevelsParams lp;
+        lp.t0 = 0.0; lp.t1 = e.duration();
+        const auto lr = scm::levels (e, lp, nullptr);
+        if (lr.s1 != len || lr.channels.empty() || lr.channels[0].samples != len) endOk = false;
+    }
+    CHECK (endOk, "measures levels: t1 = duration includes the last sample");
+
     const auto pc = scm::levelCurve (eng2, 0, 0.0, 1.0, 0.05, 0.01, scm::LevelKind::Peak);
     CHECK (pc.valuesDb.size() == 96 && std::abs (pc.valuesDb[5] - 20.0 * std::log10 (0.5)) < 0.01,
            "measures level curve: peak kind");
@@ -487,6 +508,34 @@ static void testMeasHarmonics()
            && ra.harmonics[53].valid && !ra.harmonics[54].valid,
            "measures harmonics: anchor/N fundamental, harmonics above Nyquist flagged invalid");
 
+    // A weaker sub-harmonic peak at f0/2 must not win the auto-detection
+    // (it would explain harmonics 2, 4, 6... of itself).
+    {
+        auto xs = x;
+        const auto sub = measSine (rate, 48000, 0.5 * f0, 0.1, 0.1);
+        for (size_t i = 0; i < xs.size(); ++i) xs[i] += sub[i];
+        AudioEngine es;
+        CHECK (measInitEngine (es, rate, { xs }), "measures harmonics: sub-harmonic engine");
+        const auto specS = scm::spectrum (es, sp);
+        scm::HarmonicsParams hs;
+        const auto rs = scm::harmonics (specS, 0, hs);
+        CHECK (std::abs (rs.fundamentalHz - f0) < halfBin,
+               "measures harmonics: f0 detected despite a peak at f0/2, got " + juce::String (rs.fundamentalHz, 2));
+    }
+
+    // Silence: no THD.
+    {
+        AudioEngine e0;
+        CHECK (measInitEngine (e0, rate, { std::vector<float> (48000, 0.0f) }), "measures harmonics: silent engine");
+        const auto spec0 = scm::spectrum (e0, sp);
+        scm::HarmonicsParams h0;
+        h0.fundamentalHz = 1000.0;
+        const auto r0 = scm::harmonics (spec0, 0, h0);
+        CHECK (r0.harmonics.size() == 10 && r0.thdPercent < 0.0, "measures harmonics: no THD on silence");
+        CHECK (scm::detectFundamental (spec0.channels.empty() ? std::vector<double>() : spec0.channels[0].relDb,
+                                       rate, 8192, h0) == 0.0, "measures harmonics: no fundamental in silence");
+    }
+
     // NearestBin: the bin nearest to k * f0, level of that bin.
     scm::HarmonicsParams hn;
     hn.fundamentalHz = f0; hn.maxK = 2; hn.search = scm::HarmonicsParams::Search::NearestBin;
@@ -562,6 +611,18 @@ static void testMeasCancelAndThreads()
         for (int k = bin - 2; k <= bin + 2; ++k) best = std::max (best, ov.channels[0].relDb[(size_t) k]);
         CHECK (best > 20.0 * std::log10 (0.5 / std::sqrt (2.0)) - 1.5, "measures overlap: tone level preserved");
     }
+
+    // Invalid parameters give no channels instead of silently clamping.
+    scm::SpectrumParams bad = so;
+    bad.windowType = -1;
+    CHECK (scm::spectrum (eng, bad).channels.empty(), "measures: invalid window type rejected");
+    bad.windowType = scm::Hann; bad.fftSize = 1000;
+    CHECK (scm::spectrum (eng, bad).channels.empty(), "measures: non power-of-two FFT size rejected");
+    bad.fftSize = 1024; bad.overlap = std::numeric_limits<double>::quiet_NaN();
+    CHECK (scm::spectrum (eng, bad).channels.size() == 1, "measures: NaN overlap = panel placement");
+    scm::ThirdOctaveParams badT;
+    badT.t1 = 1.0; badT.channels = { 0 }; badT.order = 7;
+    CHECK (scm::thirdOctave (eng, badT).channels.empty(), "measures: invalid octave order rejected");
 
     CHECK (scm::windowTypeFromName ("Hanning") == scm::Hann && scm::windowTypeFromName ("rect") == scm::Rectangular
            && scm::windowTypeFromName ("hamming") == scm::Hamming && scm::windowTypeFromName ("kaiser") == -1

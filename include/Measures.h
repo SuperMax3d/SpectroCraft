@@ -180,7 +180,9 @@ namespace sc::measures
     };
 
     /** Averaged spectrum of a region: what the panel shows in FFT Linear/Log
-        mode. `cal` may be nullptr (uncalibrated). */
+        mode. `cal` may be nullptr (uncalibrated). Invalid parameters (FFT size
+        not a power of two in [2, 65536], window type outside 0..2) give a
+        result with no channels. */
     SpectrumResult spectrum (const AudioEngine& eng, const SpectrumParams& p,
                              const ScaleCalibration* cal = nullptr,
                              const ProgressFn& progress = {});
@@ -235,7 +237,9 @@ namespace sc::measures
         bool cancelled = false;
     };
 
-    /** 1/3-octave bands of a region. Reference = the panel's dB-SPL pipeline
+    /** 1/3-octave bands of a region (no channels on invalid parameters: order
+        outside {1,2,3,4,5,10,20,30,40}, bad FFT size or window type).
+        Reference = the panel's dB-SPL pipeline
         (used by the panel when the file is Pascal-calibrated); Iec = the
         panel's non-Pascal pipeline (bands summed from the averaged spectrum). */
     ThirdOctaveResult thirdOctave (const AudioEngine& eng, const ThirdOctaveParams& p,
@@ -323,7 +327,9 @@ namespace sc::measures
 
     /** RMS or peak level vs time (`measure.curve` kind "rms" / "peak"):
         windows of windowSec every hopSec from t0 (window centred times
-        t0 + windowSec/2 + i*hopSec); values in dBFS (floor -300). */
+        t0 + windowSec/2 + i*hopSec); values in dBFS (floor -300). A region
+        shorter than the window gives one value over the whole region; an
+        empty region gives none. */
     struct LevelCurve
     {
         double t0 = 0.0;               // centre time of the first value
@@ -412,7 +418,7 @@ namespace sc::measures
         double toleranceHz = 0.0;
         std::vector<Harmonic> harmonics;
         /** THD (harmonics 2..maxK vs the fundamental, power ratio) in percent;
-            < 0 when the fundamental is not valid. */
+            < 0 when the fundamental is not valid or sits on the -160 dB floor. */
         double thdPercent = -1.0;
     };
 
@@ -422,7 +428,9 @@ namespace sc::measures
 
     /** Auto-detection only: the fundamental best explaining the spectral peaks
         (candidate peaks within 40 dB of the strongest, scored by the summed
-        power of the peaks found at its multiples); 0 when there is no peak. */
+        power of the peaks found at its multiples 1..maxK, times the fraction of
+        filled slots up to the highest one found, so f0/2 or f0/3 do not win);
+        0 when there is no peak. */
     double detectFundamental (const std::vector<double>& relDb, double rate, int fftSize,
                               const HarmonicsParams& p);
 

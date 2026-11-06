@@ -72,6 +72,14 @@ static bool validFftSize (int n) noexcept
     return n >= 2 && n <= 65536 && (n & (n - 1)) == 0;
 }
 
+// Octave orders of the reference pipeline (the panel's Order combo).
+static bool validRefOrder (int order) noexcept
+{
+    for (int v : { 1, 2, 3, 4, 5, 10, 20, 30, 40 })
+        if (v == order) return true;
+    return false;
+}
+
 // Analysis window of the classic spectrum path (0 = rectangular, 1 = Hann,
 // 2 = Hamming), shared by the live spectrum, snapshots and the band ENBW.
 std::vector<float> makeAnalysisWindow (int wt, int n)
@@ -195,7 +203,7 @@ std::vector<int64_t> spectrumWindowStarts (const AudioEngine& eng, double t0, do
         return winStarts;
     }
 
-    if (overlap < 0.0)
+    if (!(overlap >= 0.0))   // negative or NaN: the panel's placement
     {
         // The panel's placement. Cap the work: at most kMaxAvgWindows windows
         // and ~4M samples.
@@ -338,13 +346,14 @@ SpectrumResult spectrum (const AudioEngine& eng, const SpectrumParams& p,
     SpectrumResult r;
     r.sampleRate = eng.sampleRate();
     r.fftSize = p.fftSize;
-    r.windowType = std::clamp (p.windowType, 0, 2);
+    r.windowType = p.windowType;
     r.absUnit = absUnitFor (cal);
     const double dur = eng.duration();
     r.t0 = std::clamp (p.t0, 0.0, std::max (0.0, dur));
     r.t1 = std::clamp (p.t1, r.t0, std::max (r.t0, dur));
-    if (!eng.isFileLoaded() || !(r.sampleRate > 0.0) || !validFftSize (p.fftSize))
-        return r;
+    if (!eng.isFileLoaded() || !(r.sampleRate > 0.0) || !validFftSize (p.fftSize)
+        || p.windowType < Rectangular || p.windowType > Hamming)
+        return r;   // invalid parameters: no channels
     r.binHz = r.sampleRate / (double) p.fftSize;
     r.enbwBins = enbwBins (r.windowType, p.fftSize);
 
@@ -509,7 +518,7 @@ ThirdOctaveResult thirdOctave (const AudioEngine& eng, const ThirdOctaveParams& 
         r.windowType = Hann;
         r.framesCap = kRefThirdOctMaxFrames;
         r.centresHz.assign (kThirdOptCentersRef, kThirdOptCentersRef + kNumThirdOptBandsRef);
-        if (p.order < 1) return r;
+        if (!validRefOrder (p.order)) return r;   // invalid parameters: no channels
         const float emptyValue = (float) kEmptyBandValue + (float) (20.0 * std::log10 (2e-5));
         for (size_t i = 0; i < chans.size(); ++i)
         {
@@ -538,9 +547,10 @@ ThirdOctaveResult thirdOctave (const AudioEngine& eng, const ThirdOctaveParams& 
     // IEC mode: bands summed from the averaged spectrum (the panel's
     // non-Pascal 1/3-octave pipeline).
     r.fftSize = p.fftSize;
-    r.windowType = std::clamp (p.windowType, 0, 2);
+    r.windowType = p.windowType;
     r.framesCap = (int) kMaxAvgWindows;
-    if (!validFftSize (p.fftSize)) return r;
+    if (!validFftSize (p.fftSize) || p.windowType < Rectangular || p.windowType > Hamming)
+        return r;   // invalid parameters: no channels
     std::vector<std::vector<float>> mags;
     bool capped = false;
     if (!regionSpectrumNorm (eng, chans, p.t0, p.t1, p.fftSize, r.windowType, mags,
@@ -751,6 +761,16 @@ void smoothSeries (std::vector<float>& v, int window)
 
 // -------------------------------------------------------------------- levels
 
+// Sample index of a time, with t >= duration mapping to the exact end of the
+// file: (int64_t) (duration * rate) can truncate to numSamples - 1 because
+// duration = numSamples / rate is rounded.
+static int64_t sampleAt (const AudioEngine& eng, double t)
+{
+    const int64_t total = eng.numSamples();
+    if (t >= eng.duration()) return total;
+    return std::clamp<int64_t> ((int64_t) (t * eng.sampleRate()), 0, total);
+}
+
 static double linToDb (double v) noexcept
 {
     return v > 0.0 ? 20.0 * std::log10 (v) : -300.0;
@@ -769,9 +789,8 @@ LevelsResult levels (const AudioEngine& eng, const LevelsParams& p,
     const int64_t total = eng.numSamples();
     r.t0 = std::clamp (p.t0, 0.0, dur);
     r.t1 = (p.t1 > p.t0) ? std::clamp (p.t1, r.t0, dur) : dur;
-    r.s0 = std::clamp<int64_t> ((int64_t) (r.t0 * r.sampleRate), 0, total);
-    r.s1 = std::clamp<int64_t> ((int64_t) (r.t1 * r.sampleRate), r.s0, total);
-    if (p.t1 <= p.t0) r.s1 = total;
+    r.s0 = sampleAt (eng, r.t0);
+    r.s1 = (p.t1 <= p.t0) ? total : std::max (r.s0, sampleAt (eng, r.t1));
 
     std::vector<int> chans;
     if (p.channels.empty())
@@ -853,21 +872,24 @@ LevelCurve levelCurve (const AudioEngine& eng, int ch, double t0, double t1,
         return c;
 
     const double dur = eng.duration();
-    const int64_t total = eng.numSamples();
     t0 = std::clamp (t0, 0.0, dur);
     t1 = std::clamp (t1, t0, dur);
-    const int64_t s0 = std::clamp<int64_t> ((int64_t) (t0 * rate), 0, total);
-    const int64_t s1 = std::clamp<int64_t> ((int64_t) (t1 * rate), s0, total);
+    const int64_t s0 = sampleAt (eng, t0);
+    const int64_t s1 = std::max (s0, sampleAt (eng, t1));
+    if (s1 <= s0) return c;   // empty region: no values
     int64_t win = std::max<int64_t> (1, (int64_t) std::llround (windowSec * rate));
     const int64_t hop = std::max<int64_t> (1, (int64_t) std::llround (hopSec * rate));
-    if (s1 - s0 < win) win = std::max<int64_t> (1, s1 - s0);   // one value over a short region
+    if (s1 - s0 < win) win = s1 - s0;   // one value over a short region
     c.windowSec = (double) win / rate;
     c.hopSec = (double) hop / rate;
     c.t0 = ((double) s0 + (double) win * 0.5) / rate;
 
-    std::vector<float> buf ((size_t) win, 0.0f);
-    const double span = (double) std::max<int64_t> (1, s1 - s0);
-    for (int64_t s = s0; s + win <= std::max (s1, s0 + win); s += hop)
+    // Each window is read in blocks, so a long window never allocates more
+    // than one block.
+    constexpr int64_t kBlock = 65536;
+    std::vector<float> buf ((size_t) std::min (win, kBlock), 0.0f);
+    const double span = (double) (s1 - s0);
+    for (int64_t s = s0; s + win <= s1; s += hop)
     {
         if (wantsCancel (progress, (double) (s - s0) / span))
         {
@@ -875,18 +897,20 @@ LevelCurve levelCurve (const AudioEngine& eng, int ch, double t0, double t1,
             c.valuesDb.clear();
             return c;
         }
-        std::fill (buf.begin(), buf.end(), 0.0f);
-        double v = 0.0;
-        if (eng.readSamples (ch, s, win, buf.data()))
+        double acc = 0.0;
+        for (int64_t pos = s; pos < s + win; pos += kBlock)
         {
-            double acc = 0.0;
-            for (float x : buf)
-                acc = (kind == LevelKind::Rms) ? acc + (double) x * x
-                                               : std::max (acc, std::abs ((double) x));
-            v = (kind == LevelKind::Rms) ? std::sqrt (acc / (double) win) : acc;
+            const int64_t cnt = std::min<int64_t> (kBlock, s + win - pos);
+            std::fill (buf.begin(), buf.begin() + (size_t) cnt, 0.0f);
+            if (!eng.readSamples (ch, pos, cnt, buf.data())) continue;   // unreadable block = silence
+            for (int64_t i = 0; i < cnt; ++i)
+            {
+                const double x = (double) buf[(size_t) i];
+                acc = (kind == LevelKind::Rms) ? acc + x * x : std::max (acc, std::abs (x));
+            }
         }
+        const double v = (kind == LevelKind::Rms) ? std::sqrt (acc / (double) win) : acc;
         c.valuesDb.push_back (linToDb (v));
-        if (s1 - s0 <= win) break;
     }
     if (progress) progress (1.0);
     return c;
@@ -951,8 +975,8 @@ std::vector<Peak> findPeaks (const std::vector<double>& x, double rate, int fftS
         return std::min (rmq[(size_t) j][(size_t) lo], rmq[(size_t) j][(size_t) (hi - (1 << j) + 1)]);
     };
 
-    const int kLo = std::max (1, p.minFreqHz > 0.0 ? (int) std::ceil (p.minFreqHz / binHz) : 1);
-    const int kHi = std::min (m - 2, p.maxFreqHz > 0.0 ? (int) std::floor (p.maxFreqHz / binHz) : m - 2);
+    const int kLo = p.minFreqHz > 0.0 ? (int) std::clamp (std::ceil (p.minFreqHz / binHz), 1.0, (double) m) : 1;
+    const int kHi = p.maxFreqHz > 0.0 ? (int) std::clamp (std::floor (p.maxFreqHz / binHz), 0.0, (double) (m - 2)) : m - 2;
     for (int k = kLo; k <= kHi; ++k)
     {
         const double v = x[(size_t) k];
@@ -1033,13 +1057,24 @@ double detectFundamental (const std::vector<double>& relDb, double rate, int fft
         const double fc = cand.freqHz;
         const double tol = harmonicTolerance (p, fc, binHz);
         double score = 0.0;
+        std::vector<bool> filled ((size_t) maxK + 1, false);
+        int highest = 0;
         for (const auto& q : pk)
         {
             const double k = std::round (q.freqHz / fc);
             if (k < 1.0 || k > (double) maxK) continue;
             if (std::abs (q.freqHz - k * fc) <= tol)
+            {
                 score += std::pow (10.0, q.relDb / 10.0);
+                filled[(size_t) k] = true;
+                highest = std::max (highest, (int) k);
+            }
         }
+        // Penalise gaps in the series: a sub-harmonic candidate (f0/2, f0/3)
+        // explains the true harmonics only on every 2nd / 3rd slot.
+        int nFilled = 0;
+        for (int k = 1; k <= highest; ++k) nFilled += filled[(size_t) k] ? 1 : 0;
+        if (highest > 0) score *= (double) nFilled / (double) highest;
         // Higher score wins; a tie keeps the lower frequency.
         if (score > bestScore * (1.0 + 1e-9)
             || (std::abs (score - bestScore) <= bestScore * 1e-9 && fc < bestF))
@@ -1137,7 +1172,9 @@ HarmonicsResult harmonics (const std::vector<double>& x, double rate, int fftSiz
             h.relToFundamentalDb = h.relDb - l1;
             if (h.k >= 2) sumPow += std::pow (10.0, h.relDb / 10.0);
         }
-        r.thdPercent = 100.0 * std::sqrt (sumPow) / std::pow (10.0, l1 / 20.0);
+        // No THD when the fundamental sits on the -160 dB floor (silence).
+        if (l1 > -kNormFloorDb + 1e-6)
+            r.thdPercent = 100.0 * std::sqrt (sumPow) / std::pow (10.0, l1 / 20.0);
     }
     return r;
 }

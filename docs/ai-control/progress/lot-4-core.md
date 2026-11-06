@@ -63,7 +63,7 @@ Rien d'autre (ni `Application.cpp`, `Actions.cpp`, `Main.cpp`, `MainWindow.cpp`,
 
 ## Tests et résultats
 
-`tests/regression/measures.inc` (« regression: measures », 9 tests, 133 vérifications) :
+`tests/regression/measures.inc` (« regression: measures », 9 tests, 145 vérifications) :
 
 - **Égalité exacte (bit à bit, `==` sur les `std::vector<float>`) panneau ↔ module** pour la même
   région et les mêmes réglages : spectre (3 fenêtres, N = 1024…8192, région multi-fenêtres,
@@ -86,7 +86,12 @@ Rien d'autre (ni `Application.cpp`, `Actions.cpp`, `Main.cpp`, `MainWindow.cpp`,
   fonctions d'avant refactorisation** (extraites de `ai-control`) au module, sur ~1 300 cas aléatoires
   (3 fréquences d'échantillonnage, N = 128…65536, 3 fenêtres, régions aléatoires dont plafonnées,
   point, fin de fichier, 3 suivis, bandes IEC, bandes de référence ordres 40/3, table d'harmoniques) :
-  **0 écart** (égalité bit à bit). Ce test temporaire n'est pas versionné (il dupliquait 400 lignes).
+  **0 écart** (égalité bit à bit). Ce test temporaire n'est pas versionné (il dupliquait 400 lignes
+  de l'ancien code, et des valeurs « dorées » ne seraient pas portables : le FFT AVX2 et le repli JUCE
+  ne donnent pas les mêmes bits). La preuve de non-régression du panneau repose donc sur cette
+  comparaison ponctuelle **et** sur les tests existants du panneau (dB-SPL, bandes, normalisation),
+  inchangés et verts ; les tests d'égalité versionnés, eux, garantissent seulement que panneau et
+  module restent branchés sur le même code.
 - **Suite complète** (macOS arm64, Debug, AI OFF, FFmpeg OFF, `ctest -j 8`) : voir la section
   « Résultats de la suite » en fin de fichier.
 - Les tests dB-SPL / 1/3 d'octave existants (`tests/UnitTests.cpp` « 1/3 octave dB-SPL »,
@@ -106,6 +111,27 @@ Rien d'autre (ni `Application.cpp`, `Actions.cpp`, `Main.cpp`, `MainWindow.cpp`,
   `int64_t` partout, comme le code d'origine).
 - `measure.probe` et `measure.spectrogramData` ne sont **pas** dans le module : ils correspondent
   déjà à des fonctions headless de `SpectralEngine` (voir la fiche).
+
+## Revue indépendante (sous-agent) et correctifs
+
+Un relecteur indépendant a confirmé le déplacement verbatim (diff des corps de fonctions) et relevé
+des défauts dans les **nouvelles** fonctions, corrigés dans le 2e commit, chacun avec un test :
+
+- `levels` / `levelCurve` : `t1 = durée` tronquait parfois au dernier échantillon près
+  (`(int64_t)(durée·fs) = N−1` pour ~7 % des longueurs) → `sampleAt()` renvoie `N` en fin de fichier ;
+- `harmonics` : THD de 300 % sur du silence → pas de THD (`< 0`) quand la fondamentale est au plancher ;
+- `levelCurve` : région vide → aucune valeur (au lieu d'un −300) ; fenêtre plus longue que la région →
+  lecture par blocs (plus d'allocation de la taille de la région) ;
+- `detectFundamental` : un pic plus faible à f0/2 l'emportait (erreur d'octave) → score pondéré par la
+  proportion d'emplacements harmoniques remplis (test : échoue sans le correctif, passe avec) ;
+- validation : type de fenêtre hors 0..2 et ordre hors {1,…,40} rejetés (résultat sans canal) au lieu
+  d'être corrigés en silence ; `overlap` NaN = placement du panneau ; bornes de fréquence énormes de
+  `findPeaks` bornées avant conversion en `int` ;
+- tests : délai de `scRecomputeUntil` porté à 10 s (machines Debug/CI lentes).
+
+Non corrigé (documenté) : les accesseurs `numSamples()/duration()/sampleRate()` d'`AudioEngine` ne
+sont pas synchronisés ; un job de mesure pendant un enregistrement ou un rechargement est une course
+formelle → c'est à la garde busy du registre de l'empêcher (voir « Durée de vie » ci-dessous).
 
 ## Fiche API pour les enveloppes `measure.*` (§6.6)
 
@@ -171,9 +197,10 @@ macOS 26 arm64, AppleClang, Debug, `-DSPECTRO_ENABLE_AI=OFF -DSPECTRO_ENABLE_FFM
 | Exécution | Résultat |
 |---|---|
 | Base (`ai-control` intact) | 1 échec : `views#W4: a 5 px repaint draws the same selection pixels as a full paint` (shard 1) ; le test « regression: views » seul repasse (33/33) → **instable sous charge, préexistant** |
-| Branche, 1re exécution | 10/10 shards verts |
-| Branche, 2e exécution (`-V`) | 4747/4748 vérifications ; seul échec : le même `views#W4` instable |
-| `SC_TEST_FILTER="regression: measures"` | 133/133 |
+| Branche, commit 1, 1re exécution | 10/10 shards verts |
+| Branche, commit 1, 2e exécution (`-V`) | 4747/4748 vérifications ; seul échec : le même `views#W4` instable |
+| Branche, commit 2 (correctifs de revue, `-V`) | **4760/4760**, 10/10 shards verts |
+| `SC_TEST_FILTER="regression: measures"` | 145/145 |
 
 Aucune régression par rapport à la base. Le seul échec observé est l'instabilité préexistante de
 `views#W4` (rendu de sélection, sans lien avec les mesures).
