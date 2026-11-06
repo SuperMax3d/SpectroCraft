@@ -142,8 +142,19 @@ Résultats locaux (macOS arm64, Debug, `-DSPECTRO_ENABLE_AI=OFF -DSPECTRO_ENABLE
   partagent `$TMPDIR/SpectroCraft/SpectroCraftTests-tmp-shardN` et s'effacent mutuellement des
   fichiers (échecs aléatoires dans des tests sans rapport). Lancer avec un `TMPDIR` privé.
 
-CI (`gh workflow run build.yml --ref ai-control-hardening`) : voir le rapport final de l'agent
-(résultats par plateforme).
+CI (`gh workflow run build.yml --ref ai-control-hardening`, `workflow_dispatch`) :
+
+- run 42162969575 sur `8a9cf6f` : **windows-ai ✓, macos-ai ✓, linux-ai ✓** (MSVC Release, AppleClang
+  Debug, GCC Debug, IA activée ; ctest 100 %).
+- Les runs précédents (`adec113`, `db710c5`) : macOS / Linux ✓, mais **Windows bloqué 30 min** dans
+  le test des services. Cause : le test donnait au service un fichier texte nommé
+  `audiocpp_cli.exe` ; `CreateProcessW` sur une image non-PE peut lever une boîte d'erreur système
+  (*hard error*) que personne ne ferme sur un runner sans écran. Le test utilise maintenant
+  `System32\where.exe` (refuse les arguments, sort aussitôt en erreur). **Conséquence produit** : un
+  `audiocpp_cli.exe` corrompu (téléchargement tronqué) peut faire la même chose dans l'app ; les
+  hash SHA-256 de l'agent « catalogue » limitent le risque, et `SetErrorMode(SEM_FAILCRITICALERRORS
+  | SEM_NOGPFAULTERRORBOX)` autour de `CreateProcessW` (ou une vérification de l'en-tête `MZ` avant
+  le lancement) serait une protection simple à ajouter dans `runProcessWithPipes`.
 
 ## Écarts
 
