@@ -3117,6 +3117,74 @@ int Application::contentAwareMarkRemovals (double percentile, std::string* errOu
     return added;
 }
 
+bool Application::contentAwareExportVariation (std::string* errOut)
+{
+    auto& eng = audioEngine ();
+    if (!eng.isFileLoaded ()) { if (errOut) *errOut = "No file loaded."; return false; }
+    FileDoc* d = doc ();
+    if (d == nullptr) { if (errOut) *errOut = "No file is open."; return false; }
+
+    const double rate = eng.sampleRate ();
+    const int nch = eng.numChannels ();
+    const int64_t total = eng.numSamples ();
+
+    juce::Range<int64_t> range = selection.isEmpty ()
+        ? juce::Range<int64_t> { 0, total }
+        : selectionSamples (*this).getIntersectionWith ({ 0, total });
+    if (range.getLength () <= 0) { if (errOut) *errOut = "Nothing to analyse."; return false; }
+
+    const size_t bytes = (size_t) nch * (size_t) range.getLength () * sizeof (float);
+    if (bytes > kCatMaxBytes)
+    { if (errOut) *errOut = "The selection is too large for content-aware analysis."; return false; }
+
+    std::vector<std::vector<float>> data;
+    if (!eng.readRange (range.getStart (), range.getLength (), data))
+    { if (errOut) *errOut = "Could not read the audio data."; return false; }
+
+    sc::cat::Analysis a;
+    if (!sc::cat::analyze (data, nch, rate, a) || a.numGaps () <= 0)
+    { if (errOut) *errOut = "The selection is too short for content-aware analysis."; return false; }
+
+    // Unique table name: CAT Variation, CAT Variation 2, ...
+    const juce::String baseName = "CAT Variation";
+    juce::String name = baseName;
+    for (int n = 2;; ++n)
+    {
+        bool taken = false;
+        for (const auto& t : d->tables)
+            if (t.name == name) { taken = true; break; }
+        if (!taken) break;
+        name = baseName + " " + juce::String (n);
+    }
+
+    sc::tables::TableData t;
+    t.name = name;
+    // One row per gap: row i sits at the centre of gap i in document time.
+    const double hopSecs = (double) a.hop / rate;
+    t.sampleRate = 1.0 / hopSecs;                       // rows per second
+    t.offsetSecs = (double) range.getStart () / rate + 0.5 * hopSecs;
+
+    sc::tables::ParamData p;
+    p.name = "Variation";
+    p.values = a.normDiff;   // per-gap normalised spectral change, [0,1]
+
+    // First palette colour unused by any existing parameter in the document.
+    std::vector<int> used;
+    for (const auto& other : d->tables)
+        for (const auto& q : other.params)
+            used.push_back (q.colorIndex);
+    int ci = 0;
+    while (ci < 12 && std::find (used.begin(), used.end (), ci) != used.end ()) ++ci;
+    p.colorIndex = ci;
+
+    t.params.push_back (std::move (p));
+    d->tables.push_back (std::move (t));
+    d->metaDirty = true;   // the tables persist with the file metadata
+    if (onTablesChanged)
+        onTablesChanged ();
+    return true;
+}
+
 bool Application::applyFilterEq (const std::vector<sc::eq::EqPoint>& pts,
                                  std::string* errOut)
 {

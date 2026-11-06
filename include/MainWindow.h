@@ -26,7 +26,7 @@ class SuperResolutionWindow;  // defined in SuperResolution.h
 class CatTimeScalePanel : public juce::Component
 {
 public:
-    enum class Mode { TimeStretch, ReduceGaps };
+    enum class Mode { TimeStretch, ReduceGaps, ExportVariation };
 
     explicit CatTimeScalePanel (double refDurationSecs);
     ~CatTimeScalePanel() override;   // joins the analysis worker, deletes the rows
@@ -46,6 +46,7 @@ public:
     double getSpeedFactor () const;   // parsed from the visible fields (> 0)
     double getPercentile () const;    // clamped to [0, 100]
     bool markOnly() const { return markOnly_ != nullptr && markOnly_->getToggleState(); }
+    bool exportVariation() const { return mode_ == Mode::ExportVariation; }
 
     juce::ComboBox* modeCombo() const { return modeCombo_; }   // unit tests
     // Row visibility (unit tests): per-mode visibility is tracked on the rows.

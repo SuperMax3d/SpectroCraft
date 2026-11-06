@@ -4757,6 +4757,7 @@ CatTimeScalePanel::CatTimeScalePanel (double refDurationSecs)
     modeCombo_ = new juce::ComboBox ("catMode");
     modeCombo_->addItem ("Time Stretch", 1);
     modeCombo_->addItem ("Reduce Gaps", 2);
+    modeCombo_->addItem ("Export Variation", 3);
 
     durRow_ = new LabeledField ("Time Duration:", formatWeightText (refDur_),
         "New length of the audio in seconds.");
@@ -4789,7 +4790,13 @@ CatTimeScalePanel::CatTimeScalePanel (double refDurationSecs)
     resultLabel_->setBounds (0, 92, kInputRowW, 18);
 
     modeCombo_->setSelectedItemIndex (0, juce::dontSendNotification);
-    modeCombo_->onChange = [this] { setMode (modeCombo_->getSelectedItemIndex() == 1 ? Mode::ReduceGaps : Mode::TimeStretch); };
+    modeCombo_->onChange = [this]
+    {
+        // getSelectedItemIndex() is 0-based: 0=Time Stretch, 1=Reduce Gaps,
+        // 2=Export Variation (the item IDs are 1/2/3).
+        const int i = modeCombo_->getSelectedItemIndex ();
+        setMode (i == 1 ? Mode::ReduceGaps : i == 2 ? Mode::ExportVariation : Mode::TimeStretch);
+    };
     durRow_->editor()->onTextChange = [this] { syncFromDuration (); };
     facRow_->editor()->onTextChange = [this] { syncFromFactor (); };
     pctRow_->editor()->onTextChange = [this] { refreshResult (); };
@@ -4843,8 +4850,9 @@ void CatTimeScalePanel::setMode (Mode m)
 {
     mode_ = m;
     const bool reduce = (m == Mode::ReduceGaps);
-    durRow_->setVisible (!reduce);
-    facRow_->setVisible (!reduce);
+    const bool exportVar = (m == Mode::ExportVariation);
+    durRow_->setVisible (!reduce && !exportVar);
+    facRow_->setVisible (!reduce && !exportVar);
     pctRow_->setVisible (reduce);
     markOnly_->setVisible (reduce);   // "mark instead of delete" only applies to gap removals
     refreshResult ();
@@ -4868,6 +4876,14 @@ void CatTimeScalePanel::refreshResult ()
 {
     if (!analysisOk_)
         return;   // keep the "Analysing ..." / error text as-is
+
+    if (mode_ == Mode::ExportVariation)
+    {
+        resultLabel_->setText ("Will write " + juce::String (analysis_.numGaps ())
+                               + " variation samples to a new table.",
+                               juce::dontSendNotification);
+        return;
+    }
 
     if (mode_ != Mode::ReduceGaps)
     {
@@ -4958,7 +4974,7 @@ void MainWindow::showContentAwareTimeScaleDialog(std::function<void(bool)> onApp
 
     const int result = w->runModalLoop ();
 
-    bool reduce = false, markOnly = false;
+    bool reduce = false, markOnly = false, exportVar = false;
     double factor = 1.0, pct = 40.0;
     if (auto* p = dynamic_cast<CatTimeScalePanel*> (w->getCustomComponent (0)))
     {
@@ -4966,9 +4982,23 @@ void MainWindow::showContentAwareTimeScaleDialog(std::function<void(bool)> onApp
         factor = p->getSpeedFactor ();
         pct = p->getPercentile ();
         markOnly = p->markOnly ();
+        exportVar = p->exportVariation ();
     }
     delete w;
     if (result != 1) { if (onApplied) onApplied (false); return; }   // cancelled
+
+    if (exportVar)
+    {
+        // Write the per-gap amount of spectral variation to a new table
+        // parameter. No audio is modified and, like mark-only, no action step
+        // is recorded.
+        std::string err;
+        if (app.contentAwareExportVariation (&err))
+            if (onApplied) onApplied (true);
+        else
+            showEditError (err);
+        return;
+    }
 
     if (reduce && markOnly)
     {

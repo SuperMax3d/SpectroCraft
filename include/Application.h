@@ -617,6 +617,15 @@ public:
         manual marker insertion this does not create an undo step. */
     int contentAwareMarkRemovals (double percentile, std::string* errOut = nullptr);
 
+    /** Content Aware Time Scale - "export variation" mode: runs the same STFT
+        gap analysis over the active range and writes the per-gap amount of
+        spectral change (normalised to [0,1]) as a single parameter in a new
+        table ("CAT Variation", numbered when one already exists). One row per
+        gap, placed at the gap centre in document time. The audio is left
+        untouched; like mark-only this does not create an undo step.
+        Returns false on error (errOut set). */
+    bool contentAwareExportVariation (std::string* errOut = nullptr);
+
     // Snapshot of the time-anchored state taken before an edit that inserts /
     // deletes / shortens / stretches timeline data: playhead and selection
     // (Application members) plus the active document's spectral selection,

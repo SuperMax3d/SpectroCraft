@@ -18435,11 +18435,12 @@ static void testCatDialog()
     CHECK (panel->getWidth () > 100 && panel->getHeight () >= 100,
           "the panel has an explicit size so its rows are visible");
 
-    // Mode drop-down: exactly the two required choices.
+    // Mode drop-down: exactly the three required choices.
     auto* combo = panel->modeCombo ();
-    CHECK (combo != nullptr && combo->getNumItems () == 2, "two modes in the drop-down");
-    if (combo != nullptr && combo->getNumItems () == 2)
-        CHECK (combo->getItemText (0) == "Time Stretch" && combo->getItemText (1) == "Reduce Gaps",
+    CHECK (combo != nullptr && combo->getNumItems () == 3, "three modes in the drop-down");
+    if (combo != nullptr && combo->getNumItems () == 3)
+        CHECK (combo->getItemText (0) == "Time Stretch" && combo->getItemText (1) == "Reduce Gaps"
+                  && combo->getItemText (2) == "Export Variation",
               "mode names as specified");
 
     // Default mode: Time Stretch -> duration + factor rows visible, percentile hidden.
@@ -18499,8 +18500,77 @@ static void testCatDialog()
     CHECK (scPumpUntil ([&] { return std::abs (panel->getPercentile () - 100.0) < 1e-9; }),
           "percentile clamped to 100");
 
+    // Export Variation hides every input row and previews the export.
+    combo->setSelectedId (3, juce::sendNotificationSync);
+    CHECK (panel->getMode () == CatTimeScalePanel::Mode::ExportVariation,
+          "mode switched to Export Variation");
+    CHECK (!panel->durationRowVisible () && !panel->factorRowVisible ()
+              && !panel->percentileRowVisible () && !panel->markOnlyVisible (),
+          "all input rows hidden in export-variation mode");
+    const bool hasExportPreview = scPumpUntil ([&] {
+        return panel->getResultText ().startsWith ("Will write");
+    }, 10000);
+    CHECK (hasExportPreview, "export-variation mode previews the sample count");
+
     delete w;
     win.reset ();
+    wav.deleteFile ();
+}
+
+static void testCatExportVariation()
+{
+    const juce::File wav = makeTempFile ("cat_export_var.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 2 * kToneRate,
+            [] (int, int64_t f, double rate) {
+                return (f >= rate / 2 && f < rate * 3 / 2)
+                    ? 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                           * 300.0 * (double) f / rate)
+                    : 0.0f;
+            }), "wrote cat wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "opened cat wav");
+
+    std::string err;
+    CHECK (app.contentAwareExportVariation (&err), "export ran: " + err);
+
+    auto& tables = app.activeTables ();
+    CHECK (tables.size () == 1, "one table added");
+    if (!tables.empty ())
+    {
+        const sc::tables::TableData& t = tables[0];
+        CHECK (t.name == "CAT Variation", "table named CAT Variation");
+        CHECK (t.params.size () == 1 && t.params[0].name == "Variation",
+              "single parameter named Variation");
+
+        // One row per gap. At 8 kHz the ~1/48 s window clamps to N=1024, hop 256.
+        const int N = 1024, H = N / 4;
+        const int expectGaps = (int) ((int64_t) (2 * kToneRate) - N) / H;
+        CHECK ((int) t.params[0].values.size () == expectGaps, "one value per gap");
+
+        // Row i sits at the centre of gap i: whole-file export starts half a hop in.
+        const double hopSecs = (double) H / kToneRate;
+        CHECK (std::abs (t.sampleRate - 1.0 / hopSecs) < 1e-9, "row rate is one per gap");
+        CHECK (std::abs (t.offsetSecs - 0.5 * hopSecs) < 1e-9,
+              "rows start at the first gap centre");
+
+        // Values are normalised to [0,1]; the tone onsets must show up strongly.
+        bool inRange = true;
+        double maxV = 0.0;
+        for (double v : t.params[0].values)
+        {
+            if (v < -1e-9 || v > 1.0 + 1e-9) inRange = false;
+            maxV = std::max (maxV, v);
+        }
+        CHECK (inRange, "variation values within [0,1]");
+        CHECK (maxV > 0.9, "the tone onsets produce strong variation");
+    }
+
+    // A second export gets a numbered name instead of overwriting the first.
+    CHECK (app.contentAwareExportVariation (&err), "second export ran: " + err);
+    CHECK (app.activeTables ().size () == 2 && app.activeTables ()[1].name == "CAT Variation 2",
+          "second table named CAT Variation 2");
+
     wav.deleteFile ();
 }
 
@@ -27324,6 +27394,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("cat effect (app)", testCatEffectApp);
     SC_RUN_TEST ("cat state remap", testCatStateRemap);
     SC_RUN_TEST ("cat dialog", testCatDialog);
+    SC_RUN_TEST ("cat export variation", testCatExportVariation);
     SC_RUN_TEST ("filter eq effect", testFilterEqEffect);
     SC_RUN_TEST ("envelope curve math", testEnvelopeCurveMath);
     SC_RUN_TEST ("env editor set point", testEnvelopeEditorSetPoint);
