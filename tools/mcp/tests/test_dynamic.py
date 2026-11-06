@@ -64,8 +64,10 @@ def test_names_are_api_safe_unique_and_not_reserved(tools):
     assert len(long.name) <= dynamic.MAX_TOOL_NAME
 
 
-def test_session_commands_excluded(tools):
-    assert "session.hello" not in {t.command for t in tools}
+def test_session_and_internal_commands_excluded(tools):
+    cmds = {t.command for t in tools}
+    assert "session.hello" not in cmds
+    assert "debug.sleep" not in cmds
 
 
 def test_envelope_and_confirm_props_added(tools):
@@ -129,7 +131,28 @@ def test_generated_schema_validates_arguments(tools):
 def test_annotations_follow_flags(tools):
     by = {t.command: t for t in tools}
     assert by["app.state"].annotations()["readOnlyHint"] is True
+    assert by["measure.levels"].read_only  # Query flag
     assert by["effect.changeGain"].annotations()["readOnlyHint"] is False
     assert by["doc.close"].annotations()["destructiveHint"] is True
     assert "confirm_required" in by["doc.close"].description
     assert "job" in by["ai.models.install"].description
+
+
+def test_real_lot0_describe():
+    """describe_lot0.json = app.describe captured from the real lot-0 build (--json, ai-control 693f3f3)."""
+    import json
+    from pathlib import Path
+
+    real = json.loads((Path(__file__).parent / "data" / "describe_lot0.json").read_text(encoding="utf-8"))
+    tools = dynamic.build_tools(real, reserved_names={"sc_state"})
+    by = {t.command: t for t in tools}
+    assert {"app.state", "step.run", "doc.saveAs", "history.undo", "job.get"} <= set(by)
+    for t in tools:
+        jsonschema.Draft202012Validator.check_schema(t.input_schema)
+        assert NAME_RE.match(t.name)
+    assert by["app.state"].read_only and not by["step.run"].read_only
+    assert by["doc.saveAs"].destructive and by["doc.saveAs"].confirm_arg is None  # its own confirm param
+    v = jsonschema.Draft202012Validator(by["step.run"].input_schema)
+    v.validate({"step": {"type": "fadeOut", "params": {}}, "select": {"start": 0.5, "end": 1.5}, "channels": [0], "doc": 1})
+    with pytest.raises(jsonschema.ValidationError):
+        v.validate({"select": "all"})  # step is required

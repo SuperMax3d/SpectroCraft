@@ -25,7 +25,7 @@ from typing import Any, Iterable
 TOOL_PREFIX = "sc_"
 MAX_TOOL_NAME = 64 - len("mcp__spectrocraft__")
 EXCLUDED_COMMANDS = frozenset({"session.hello"})  # handled by the client itself
-EXCLUDED_CATEGORIES = frozenset({"session"})
+EXCLUDED_CATEGORIES = frozenset({"session", "debug"})  # debug = Internal test helpers
 
 ENVELOPE_PROPS: dict[str, dict[str, Any]] = {
     "doc": {
@@ -60,6 +60,8 @@ class DynamicTool:
 
     @property
     def read_only(self) -> bool:
+        if "Query" in self.flags:  # the app's own "pure read" flag
+            return True
         return not ({"Mutates", "Destructive", "LongRunning"} & set(self.flags))
 
     @property
@@ -165,7 +167,8 @@ def build_tools(describe: dict[str, Any], reserved_names: Iterable[str] = ()) ->
             continue
         cid = str(cmd["id"])
         category = str(cmd.get("category") or cid.split(".")[0])
-        if cid in EXCLUDED_COMMANDS or category in EXCLUDED_CATEGORIES:
+        flags = [str(f) for f in cmd.get("flags") or []]
+        if cid in EXCLUDED_COMMANDS or category in EXCLUDED_CATEGORIES or "Internal" in flags:
             continue
         schema, wrapped = _object_schema(cmd.get("params"))
         props: dict[str, Any] = schema["properties"]
@@ -189,7 +192,7 @@ def build_tools(describe: dict[str, Any], reserved_names: Iterable[str] = ()) ->
                 title=str(cmd.get("title") or cid),
                 description=_description(cmd),
                 input_schema=schema,
-                flags=[str(f) for f in cmd.get("flags") or []],
+                flags=flags,
                 category=category,
                 envelope_args=envelope_args,
                 confirm_arg=confirm_arg,

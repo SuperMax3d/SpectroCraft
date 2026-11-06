@@ -119,6 +119,7 @@ class ControlClient:
         self._jobs: dict[str, dict[str, Any]] = {}  # job id -> {"progress","status","done"}
         self._listeners: list[Callable[[dict[str, Any]], None]] = []
         self.last_seq: int | None = None
+        self.read_only_cmds: set[str] = set(READ_ONLY_CMDS)  # extended with app.describe "Query" commands
 
         self.instance: Instance | None = None
         self.hello: dict[str, Any] | None = None
@@ -417,7 +418,7 @@ class ControlClient:
         tmo = DEFAULT_TIMEOUT_MS if timeout_ms is None else int(timeout_ms)
         wait_s = None if tmo <= 0 else tmo / 1000.0 + REPLY_GRACE_S
         if retry_if_lost is None:
-            retry_if_lost = cmd in READ_ONLY_CMDS
+            retry_if_lost = cmd in self.read_only_cmds
         last: ControlError | None = None
         for _attempt in range(2):
             self.connect()
@@ -544,7 +545,7 @@ def _identity(inst: Instance) -> tuple[int, Any, int]:
 
 
 def _done_from_job_get(job: str, got: dict[str, Any]) -> dict[str, Any]:
-    ok = got.get("state") == "done" and not got.get("error")
+    ok = bool(got["ok"]) if isinstance(got.get("ok"), bool) else (got.get("state") == "done" and not got.get("error"))
     done: dict[str, Any] = {"job": job, "ok": ok}
     if ok:
         done["result"] = got.get("result")

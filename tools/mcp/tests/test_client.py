@@ -81,7 +81,7 @@ def test_routing_by_id_out_of_order(fake, client):
     [
         ("step.run", {"step": {"type": "changeGain", "params": {}}}, "invalid_params", "step.params.db"),
         ("step.run", {"step": {"type": "envelop"}}, "invalid_params", "step.type"),
-        ("doc.save", {"path": "/tmp/x.wav"}, "confirm_required", "pass confirm:true"),
+        ("doc.saveAs", {"path": "/tmp/x.wav"}, "confirm_required", "pass confirm:true"),
         ("nope.nothing", {}, "unknown_cmd", "spectrocraft://commands"),
         ("view.zoom", {"vertical": 2}, "needs_ui", "headless"),
         ("job.get", {"job": "j-999"}, "job_not_found", "sc_jobs"),

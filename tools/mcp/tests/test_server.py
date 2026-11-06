@@ -148,6 +148,11 @@ async def test_app_errors_become_tool_errors_with_hint(fake):
         assert res.isError and "confirm_required" in _text(res) and "pass confirm:true" in _text(res)
         ok = _json(await cs.call_tool("sc_save", {"path": "/tmp/out.wav", "confirm": True}))
         assert ok["result"]["unsaved"] is False
+        saves = [r for r in fake.requests if r["cmd"].startswith("doc.save")]
+        assert [r["cmd"] for r in saves] == ["doc.saveAs", "doc.saveAs"]  # a path means doc.saveAs
+        res = await cs.call_tool("sc_save", {})
+        assert res.isError and "confirm_required" in _text(res)
+        assert fake.requests[-1]["cmd"] == "doc.save" and fake.requests[-1]["params"] == {}
         res = await cs.call_tool("sc_run_step", {"type": "fadeOut", "start": 1.0})
         assert res.isError and "both start and end" in _text(res)
 

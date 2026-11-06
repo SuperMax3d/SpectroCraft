@@ -149,6 +149,11 @@ class Bridge:
             self.describe = describe
             self._describe_identity = identity
             self._tools = tools
+            # Query commands are safe to resend after a lost connection.
+            queries = {str(c.get("id")) for c in describe.get("commands") or []
+                       if isinstance(c, dict) and "Query" in (c.get("flags") or [])}
+            if self.client is not None:
+                self.client.read_only_cmds |= queries
             changed = old != new
             if changed:
                 self.tools_dirty = True
@@ -535,14 +540,17 @@ def create_server(bridge: Bridge | None = None) -> SpectroCraftMCP:
     @mcp.tool(**_tool_kwargs(destructive=True, title="Save a document"))
     async def sc_save(
         ctx: Context,
-        path: Annotated[str | None, Field(description="Absolute target path; omit to save in place")] = None,
-        meta: Annotated[str | None, Field(description="Metadata mode: embedded, sidecar or none")] = None,
+        path: Annotated[str | None, Field(description="Absolute target path (doc.saveAs); omit to save in place (doc.save)")] = None,
+        meta: Annotated[str | None, Field(description="Metadata storage: auto (keep), embedded (RIFF chunks) or sidecar (.meta.json)")] = None,
         confirm: Annotated[bool, Field(description="REQUIRED to overwrite an existing file: ask the user first")] = False,
         doc: Doc = None,
     ) -> str:
-        """Save a document. Overwriting an existing file fails with confirm_required: ask the user, then
-        call again with confirm=true."""
-        return await run(ctx, "doc.save", _clean(path=path, meta=meta, confirm=confirm or None), doc)
+        """Save a document: in place (doc.save, always overwrites, so confirm is required) or to `path`
+        (doc.saveAs, confirm required when the target exists). Without confirm the app answers
+        confirm_required: ask the user, then call again with confirm=true."""
+        if path is None:
+            return await run(ctx, "doc.save", _clean(meta=meta, confirm=confirm or None), doc)
+        return await run(ctx, "doc.saveAs", _clean(path=path, meta=meta, confirm=confirm or None), doc)
 
     @mcp.tool(**_tool_kwargs(destructive=True, title="Close a document"))
     async def sc_close(

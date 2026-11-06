@@ -263,8 +263,10 @@ class FakeServer:
                     self.active = nid
                 self.emit("doc.opened", {"doc": nid, "path": path})
                 return {"result": {"doc": nid, "durationSec": 30.0, "channels": 4, "sampleRate": 48000, "fullyInMemory": True}}
-            if cmd == "doc.save":
+            if cmd in ("doc.save", "doc.saveAs"):
                 doc = self._doc(req)
+                if cmd == "doc.save" and "path" in p:
+                    raise AppError("invalid_params", 'unknown parameter "path"', {"path": "path", "expected": "no such parameter"})
                 if not p.get("confirm"):
                     raise AppError("confirm_required", "Target exists; resend with params.confirm=true",
                                    {"hint": "pass confirm:true, or choose a new path"})

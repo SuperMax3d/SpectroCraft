@@ -37,7 +37,7 @@ def test_job_waited_with_progress_on_stderr(fake, capsys):
 
 
 def test_error_reply_exit_1(fake, capsys):
-    assert sc_client.main(["doc.save", '{"path":"/tmp/x.wav"}']) == 1
+    assert sc_client.main(["doc.saveAs", '{"path":"/tmp/x.wav"}']) == 1
     assert "confirm_required" in capsys.readouterr().err
 
 

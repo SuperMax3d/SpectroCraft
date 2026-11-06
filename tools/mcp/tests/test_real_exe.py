@@ -43,6 +43,41 @@ def test_state_and_unknown_command_exit_codes():
     assert bad["responses"][0]["error"]["code"] == "unknown_cmd"
 
 
+def test_open_edit_undo_save(tmp_path):
+    import math
+    import struct
+    import wave
+
+    src = tmp_path / "in put.wav"  # a space in the path on purpose
+    with wave.open(str(src), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(b"".join(struct.pack("<hh", int(8000 * math.sin(i / 10)), 0) for i in range(96000)))
+    dst = tmp_path / "out.wav"
+    res = _run(
+        [
+            {"cmd": "doc.open", "params": {"path": str(src)}},
+            {"cmd": "step.run", "params": {"select": {"start": 0.5, "end": 1.5}, "channels": [0],
+                                           "step": {"type": "fadeOut", "params": {}}}},
+            {"cmd": "history.list", "params": {}},
+            {"cmd": "history.undo", "params": {}},
+            {"cmd": "history.redo", "params": {}},
+            {"cmd": "doc.saveAs", "params": {"path": str(dst)}},
+            {"cmd": "doc.saveAs", "params": {"path": str(src)}},
+        ],
+        continue_on_error=True,
+    )
+    r = res["responses"]
+    assert [x["ok"] for x in r] == [True, True, True, True, True, True, False], r
+    assert r[1]["undoDepth"] == 1 and r[1]["redoDepth"] == 0
+    assert len(r[2]["result"]["states"]) == 2
+    assert r[3]["undoDepth"] == 0 and r[3]["redoDepth"] == 1
+    assert dst.is_file() and dst.stat().st_size > 0
+    assert r[6]["error"]["code"] == "confirm_required"
+    assert res["exitCode"] == 1
+
+
 def test_step_validate():
     res = _run(
         [

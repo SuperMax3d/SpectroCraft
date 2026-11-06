@@ -1,10 +1,10 @@
 {
   "protocol": 1,
   "commands": [
-    {"id": "app.state", "aliases": [], "title": "Application state", "category": "app", "flags": [],
+    {"id": "app.state", "aliases": [], "title": "Application state", "category": "app", "flags": ["Query"],
      "params": {"type": "object", "properties": {}, "additionalProperties": false},
      "result": {"type": "object"}},
-    {"id": "app.describe", "aliases": [], "title": "Describe commands", "category": "app", "flags": [],
+    {"id": "app.describe", "aliases": [], "title": "Describe commands", "category": "app", "flags": ["Query"],
      "params": {"type": "object", "properties": {"category": {"type": "string", "description": "Only this category"}, "withSchemas": {"type": "boolean"}}, "additionalProperties": false},
      "result": {"type": "object"}},
     {"id": "session.hello", "aliases": [], "title": "Open a session", "category": "session", "flags": [],
@@ -24,12 +24,14 @@
      "params": {"type": "object", "properties": {"steps": {"type": "integer", "minimum": 1, "maximum": 64}}, "additionalProperties": false}},
     {"id": "ai.models.install", "aliases": [], "title": "Install an AI model", "category": "ai", "flags": ["LongRunning", "AiBuildOnly"],
      "params": {"type": "object", "properties": {"modelId": {"type": "string"}}, "required": ["modelId"], "additionalProperties": false}},
-    {"id": "measure.levels", "aliases": [], "title": "RMS / peak levels", "category": "measure", "flags": ["NeedsDoc"],
+    {"id": "measure.levels", "aliases": [], "title": "RMS / peak levels", "category": "measure", "flags": ["NeedsDoc", "Query"],
      "params": {"type": "object", "properties": {"start": {"type": "number", "minimum": 0}, "end": {"type": "number", "minimum": 0}, "channels": {"type": "array", "items": {"type": "integer", "minimum": 0}}}, "required": ["start", "end"], "additionalProperties": false}},
     {"id": "view.zoom", "aliases": [], "title": "Zoom", "category": "view", "flags": ["NeedsUi"],
      "params": {"type": "object", "properties": {"to": {"type": "string", "enum": ["selection", "fit", "full"]}, "factor": {"type": "number", "minimum": 0.01}, "vertical": {"type": "number"}}, "additionalProperties": false}},
     {"id": "markers.add", "aliases": [], "title": "Add a marker", "category": "markers", "flags": ["NeedsDoc"],
      "params": {"type": "object", "properties": {"name": {"type": "string"}, "start": {"type": "number", "minimum": 0}, "end": {"type": "number", "minimum": 0}, "doc": {"type": "string", "description": "a param that clashes with the envelope field"}}, "required": ["name", "start"], "additionalProperties": false}},
+    {"id": "debug.sleep", "aliases": [], "title": "Test helper: a cancellable job that sleeps", "category": "debug", "flags": ["LongRunning", "Internal"],
+     "params": {"type": "object", "properties": {"ms": {"type": "integer", "minimum": 0, "maximum": 600000, "default": 100}}, "additionalProperties": false}},
     {"id": "app.ping", "aliases": [], "title": "Ping (no params schema published)", "category": "app", "flags": []},
     {"id": "ai.transcribeWithAVeryLongCommandNameThatExceedsTheToolNameLimitOfAnthropic", "aliases": [], "title": "Long name", "category": "ai", "flags": ["LongRunning"],
      "params": {"type": "object", "properties": {"language": {"type": "string"}}, "additionalProperties": false}}
