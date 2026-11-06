@@ -60,6 +60,21 @@ bool processGone (int pid, int waitMs)
     }
 }
 
+// A real executable that exits at once with an error for any audio.cpp
+// arguments (Windows: where.exe). A fake non-PE "audiocpp_cli.exe" must not
+// be launched: CreateProcess may raise a system hard-error dialog for it,
+// which blocks a headless runner forever.
+juce::File failingCliForTest()
+{
+#if JUCE_WINDOWS
+    const juce::File w = juce::File (juce::SystemStats::getEnvironmentVariable ("SystemRoot", "C:\\Windows"))
+                             .getChildFile ("System32").getChildFile ("where.exe");
+    return w.existsAsFile () ? w : juce::File ();
+#else
+    return {};
+#endif
+}
+
 // Progress marker on stderr (unbuffered): a hang on CI shows where it is.
 void hstep (const char* what)
 {
@@ -333,9 +348,11 @@ static void testHardeningStemServiceValidation()
         int progressCalls = 0;
         SS::Result res;
         const juce::File work = dir.getChildFile ("work");
+        const juce::File cli = failingCliForTest ();
         std::thread t ([&] {
             auto r = good ();
             r.workDir = work;
+            if (cli != juce::File ()) r.binary = cli;
             // Deadline instead of "never cancel": a CLI that unexpectedly
             // starts must not hang the suite.
             const uint32_t t0 = juce::Time::getMillisecondCounter ();
@@ -344,7 +361,7 @@ static void testHardeningStemServiceValidation()
         });
         t.join ();
 #if JUCE_WINDOWS
-        // The fake binary cannot start: the run fails after writing its input.
+        // where.exe rejects the audio.cpp arguments: the run fails after writing its input.
         CHECK (!res.ok && res.errorCode == "tool_failed" && progressCalls > 0,
                "hardening stem: worker-thread run reaches the CLI (" + res.errorCode + ")");
         CHECK (work.getChildFile ("input.wav").existsAsFile () && work.getChildFile ("input_mono.wav").existsAsFile (),
@@ -391,6 +408,7 @@ static void testHardeningSuperResServiceValidation()
     std::thread t ([&] {
         auto r = good ();
         r.mode = SR::Mode::AudioSR;
+        if (failingCliForTest () != juce::File ()) r.binary = failingCliForTest ();
         const uint32_t t0 = juce::Time::getMillisecondCounter ();
         res = SR::run (r, nullptr, [t0] { return juce::Time::getMillisecondCounter () - t0 > 30000; });
     });
