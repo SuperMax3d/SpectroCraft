@@ -42,6 +42,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/SuperResolution.cpp   # audio.cpp super-resolution (FlashSR/AudioSR)
         ${CMAKE_SOURCE_DIR}/src/Recorder.cpp    # recorder plugin host (Transport > Record)
         ${CMAKE_SOURCE_DIR}/src/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
+        ${CMAKE_SOURCE_DIR}/src/AI/Sha256.cpp   # pure; also verifies the audio.cpp downloads
         ${SC_CONTROL_SOURCES}                   # AI control (registry, journal, jobs, --json)
 )
 
@@ -50,7 +51,7 @@ if (TARGET sc_openvino)
     target_sources (SpectroCraftTests PRIVATE
         ${CMAKE_SOURCE_DIR}/src/AI/OvRuntime.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/ModelManager.cpp
-        ${CMAKE_SOURCE_DIR}/src/AI/Sha256.cpp
+        ${CMAKE_SOURCE_DIR}/src/AI/ModelCatalog.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/DenseUnetModel.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/DeepFilterNetModel.cpp
         ${CMAKE_SOURCE_DIR}/src/AI/DeepFilter.cpp

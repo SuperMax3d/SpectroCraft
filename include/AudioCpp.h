@@ -19,7 +19,9 @@
 namespace sc { namespace acpp {
 
 /** Folder holding audiocpp_cli.exe and the sam-audio-*.gguf model weights:
-    %APPDATA%/SpectroCraft/models/audiocpp (created on demand). */
+    %APPDATA%/SpectroCraft/models/audiocpp (created on demand). When the
+    SC_MODELS_DIR environment variable holds an absolute folder (tests, CI),
+    <SC_MODELS_DIR>/audiocpp is used instead, on every platform. */
 juce::File dir();
 
 /** Path of the CLI binary inside dir(). */
@@ -52,7 +54,8 @@ std::vector<juce::File> listAudioSRModels(const juce::File& d = {});
 struct SuperResModelSpec
 {
     std::string file;        // e.g. "flashsr/flashsr.safetensors"
-    int64_t sizeBytes = 0;   // advertised download size (for display)
+    int64_t sizeBytes = 0;   // exact download size
+    std::string sha256;      // 64 lowercase hex chars of the file ("" = unknown)
 };
 
 /** The FlashSR model files offered for download. */
@@ -77,7 +80,13 @@ struct BinarySpec
     std::string id;          // "cpu", "cuda12.4", "cuda13.3", "vulkan"
     juce::String label;      // user-facing name
     std::string url;         // GitHub release asset URL
-    int64_t sizeBytes = 0;   // advertised download size (for display)
+    int64_t sizeBytes = 0;   // exact size of the release zip
+    std::string sha256;      // SHA-256 of the release zip ("" = unknown)
+    std::string exeSha256;   // SHA-256 of audiocpp_cli.exe inside the zip
+    int64_t exeSizeBytes = 0;
+    // Non-empty: the variant must not be installed by the model catalogue
+    // (sc::ai::ModelCatalog), with the reason. The setup dialogs still offer it.
+    std::string catalogBlocker;
 };
 
 /** The Windows x64 CLI variants offered for download. */
@@ -87,7 +96,8 @@ std::vector<BinarySpec> binaryChoices();
 struct ModelSpec
 {
     std::string file;        // e.g. "sam-audio-small-q8_0.gguf"
-    int64_t sizeBytes = 0;   // advertised download size (for display)
+    int64_t sizeBytes = 0;   // exact download size
+    std::string sha256;      // 64 lowercase hex chars of the file ("" = unknown)
 };
 
 /** The SAM-Audio GGUF models offered for download. */
@@ -95,6 +105,14 @@ std::vector<ModelSpec> modelChoices();
 
 /** Hugging Face resolve URL for one of the catalogue model files. */
 juce::String modelUrl(const juce::String& fileName);
+
+/** SHA-256 published for one of the catalogue download URLs above (binary
+    zips, SAM-Audio, FlashSR and AudioSR files); "" when the URL is unknown.
+    downloadFile() uses it when the caller passes no hash. */
+std::string knownSha256ForUrl(const std::string& url);
+
+/** Exact size published for one of the catalogue download URLs; 0 when unknown. */
+int64_t knownSizeForUrl(const std::string& url);
 
 // ---------------------------------------------------------------------------
 // Installed-binary variant marker (written when we install a binary).
@@ -113,11 +131,14 @@ void setInstalledVariant(const juce::String& variantId, const juce::File& d = {}
 /** Download url to dest via dest.part + rename. onProgress(fraction 0..1)
     returning false cancels the transfer. Returns true on success: a 2xx
     HTTP status, a complete transfer (no network error, Content-Length
-    honoured) and, when expectedBytes > 0, exactly that many bytes. Anything
-    else deletes the .part file and leaves dest untouched. */
+    honoured), when expectedBytes > 0 exactly that many bytes and, when a
+    SHA-256 is known (expectedSha256, else knownSha256ForUrl(url)), bytes
+    with exactly that digest. Anything else deletes the .part file and
+    leaves dest untouched. Windows only; elsewhere it fails with a message. */
 bool downloadFile(const std::string& url, const juce::File& dest,
                   const std::function<bool(float)>& onProgress,
-                  std::string* errOut, int64_t expectedBytes = 0);
+                  std::string* errOut, int64_t expectedBytes = 0,
+                  const std::string& expectedSha256 = {});
 
 /** Parse an HTTP Content-Length header value (64-bit); 0 when absent or
     malformed. */
@@ -128,15 +149,29 @@ int64_t parseContentLength(const char* text);
 juce::String validateDownload(int httpStatus, int64_t contentLength, int64_t expectedBytes,
                               int64_t received, bool transferError);
 
+/** Empty when actualSha256 matches expectedSha256 (or nothing is expected),
+    else the user-facing reason. Comparison is case-insensitive. */
+juce::String validateSha256(const std::string& expectedSha256, const std::string& actualSha256);
+
 /** Final step of downloadFile (platform-independent, exposed for tests):
-    validates the transfer and the bytes on disk, then renames part to dest.
-    On failure part is deleted, dest is left untouched and errOut is set. */
+    validates the transfer, the SHA-256 of the received bytes (when
+    expectedSha256 is non-empty) and the bytes on disk, then renames part to
+    dest. On failure part is deleted, dest is left untouched and errOut is set. */
 bool commitDownload(const juce::File& part, const juce::File& dest,
                     int httpStatus, int64_t contentLength, int64_t expectedBytes,
-                    int64_t received, bool transferError, std::string* errOut);
+                    int64_t received, bool transferError, std::string* errOut,
+                    const std::string& expectedSha256 = {},
+                    const std::string& actualSha256 = {});
+
+/** Streaming SHA-256 of a file, 64 lowercase hex chars; "" when the file
+    cannot be read or onProgress (fraction 0..1) returned false. */
+std::string sha256OfFile(const juce::File& f,
+                         const std::function<bool(float)>& onProgress = nullptr);
 
 /** Extract audiocpp_cli.exe from a downloaded release zip into d and record
-    the variant marker. The zip itself is deleted afterwards. */
+    the variant marker. The zip itself is deleted afterwards. When the
+    catalogue knows the executable's SHA-256 for variantId, the extracted file
+    must match it (else it is deleted and the call fails). */
 bool installBinaryFromZip(const juce::File& zipPath, const juce::String& variantId,
                           const juce::File& d = {}, std::string* errOut = nullptr);
 

@@ -76,15 +76,13 @@ static juce::File cacheDirPath()
     auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                   .getChildFile ("SpectroCraft")
                   .getChildFile ("openvino-cache");
-#if !defined(_WIN32)
-    // macOS / Linux: SC_OPENVINO_CACHE_DIR=<absolute folder> replaces it (the
-    // unit tests set it; see SC_MODELS_DIR in ModelManager.cpp).
+    // SC_OPENVINO_CACHE_DIR=<absolute folder> replaces it on every platform
+    // (the macOS / Linux unit tests set it; see SC_MODELS_DIR in ModelManager.cpp).
     {
         const juce::String env = juce::SystemStats::getEnvironmentVariable ("SC_OPENVINO_CACHE_DIR", {}).trim ();
         if (env.isNotEmpty () && juce::File::isAbsolutePath (env))
             dir = juce::File (env);
     }
-#endif
 #if SC_TESTS_EXE
     // Keep unit tests away from the user's real cache.
     dir = juce::File::getSpecialLocation (juce::File::tempDirectory)

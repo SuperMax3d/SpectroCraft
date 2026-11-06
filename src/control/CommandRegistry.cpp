@@ -412,6 +412,7 @@ CommandRegistry::CommandRegistry()
     registerJobCommands (*this);
     registerViewCommands (*this);
     registerTransportCommands (*this);
+    registerAiCommands (*this);
 }
 
 void CommandRegistry::add (Spec s)
@@ -678,7 +679,7 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
                                 && target->engine.isFileLoaded() && !target->engine.fullyInMemory();
     if (streamedDetour)
     {
-        Context jctx { app, st, ui, params, target, opts.source };
+        Context jctx { app, st, ui, params, target, opts.source, spec->id };
         Application* appP = &app;
         FileDoc* doc = target;
         Request inner = req;
@@ -722,7 +723,7 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
         DocSwitch sw (app, (spec->flags & NoDocSwitch) ? nullptr : target);
         docSwitched = sw.didSwitch();
         sc::alert::ScopedCapture capture;
-        Context ctx { app, st, ui, params, target, opts.source };
+        Context ctx { app, st, ui, params, target, opts.source, spec->id };
         ++st.invokeDepth;
         const juce::String prevSource = st.invokeSource;
         st.invokeSource = opts.source;

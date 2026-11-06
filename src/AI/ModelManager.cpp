@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -154,17 +155,17 @@ std::string fileNameFor(const ModelFileSpec& f)
 
 juce::File defaultModelRoot()
 {
-#if !defined(_WIN32)
-    // macOS / Linux: SC_MODELS_DIR=<absolute folder> replaces the models root.
-    // The unit tests use it (ctest sets it, `--run-unit-tests` defaults it to a
-    // temp folder): on macOS the per-user folders are resolved without $HOME,
-    // so redirecting HOME alone would still fill the real ~/Library.
+    // SC_MODELS_DIR=<absolute folder> replaces the models root, on every
+    // platform (Windows included), so tests, CI and scripted runs can isolate
+    // their model folder. The macOS / Linux unit tests use it (ctest sets it,
+    // `--run-unit-tests` defaults it to a temp folder): on macOS the per-user
+    // folders are resolved without $HOME, so redirecting HOME alone would
+    // still fill the real ~/Library. sc::acpp::dir() follows the same rule.
     {
         const juce::String env = juce::SystemStats::getEnvironmentVariable ("SC_MODELS_DIR", {}).trim ();
         if (env.isNotEmpty () && juce::File::isAbsolutePath (env))
             return juce::File (env);
     }
-#endif
 #if SC_TESTS_EXE
     // Unit tests must never touch the user's real model cache. The isolated
     // folder is kept between runs so the AI tests do not re-download ~170 MB
@@ -226,7 +227,98 @@ bool fileMatchesSha256(const juce::File& p, const std::string& expected)
     return digest.hexDigest () == expected;
 }
 
+// file:// sources (an offline mirror, or the unit tests' local fixtures): the
+// same contract as the network downloaders below — streamed to the .part file
+// while hashing, size and SHA-256 enforced, renamed into place only when
+// everything matched, cancellation through onProgress.
+bool localFileGet(const juce::File& src, const juce::File& destPart, const juce::File& finalDest,
+                  const std::string& expectedSha256, int64_t expectedSize,
+                  const ModelManager::ProgressFn& onProgress, std::string* errOut)
+{
+    juce::FileInputStream in (src);
+    if (in.failedToOpen ())
+    {
+        if (errOut) *errOut = "download failed: cannot read the local source file '"
+                              + src.getFullPathName ().toStdString () + "'.";
+        return false;
+    }
+    const int64_t total = in.getTotalLength ();
+
+    destPart.deleteFile ();   // FileOutputStream opens in append mode
+    Sha256 digest;
+    int64_t got = 0;
+    bool ok = false, cancelled = false, writeFailed = false;
+    {
+        juce::FileOutputStream out (destPart);
+        if (out.failedToOpen ())
+        {
+            if (errOut) *errOut = "Could not write to the models folder.";
+            return false;
+        }
+        constexpr int bufSize = 1 << 18;
+        std::unique_ptr<char[]> buf (new char[(size_t) bufSize]);
+        for (;;)
+        {
+            const int n = in.read (buf.get (), bufSize);
+            if (n <= 0) break;
+            if (!out.write (buf.get (), (size_t) n)) { writeFailed = true; break; }
+            digest.update ((const unsigned char*) buf.get (), (size_t) n);
+            got += n;
+            const int64_t denom = total > 0 ? total : expectedSize;
+            float frac = denom > 0 ? (float) ((double) got / (double) denom) : 1.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            if (onProgress && !onProgress (frac, "copying…")) { cancelled = true; break; }
+        }
+        out.flush ();
+    }
+
+    if (!cancelled)
+    {
+        if (writeFailed || destPart.getSize () != got)
+        {
+            if (errOut) *errOut = "Could not write the whole file to the models folder (disk full?).";
+        }
+        else if (expectedSize > 0 && got != expectedSize)
+        {
+            if (errOut) *errOut = "Downloaded size mismatch (" + std::to_string ((long long) got) + " of "
+                                  + std::to_string ((long long) expectedSize) + " bytes).";
+        }
+        else if (!expectedSha256.empty () && digest.hexDigest () != expectedSha256)
+        {
+            if (errOut) *errOut = "SHA-256 mismatch: the downloaded file does not match the expected checksum.";
+        }
+        else
+        {
+            finalDest.deleteFile ();
+            ok = destPart.moveFileTo (finalDest);
+            if (!ok && errOut) *errOut = "Could not move the downloaded file into place.";
+        }
+    }
+    if (!ok) destPart.deleteFile ();
+    return ok;
+}
+
+bool isFileUrl(const std::string& url)
+{
+    return juce::String (url).startsWithIgnoreCase ("file://");
+}
+
+juce::File localFileFromUrl(const std::string& url)
+{
+    return juce::URL (juce::String (url)).getLocalFile ();
+}
+
 } // namespace
+
+std::string ModelManager::fileName(const ModelFileSpec& f) { return fileNameFor (f); }
+bool ModelManager::wasVerified(const juce::File& f)   { return isKnownVerified (f); }
+void ModelManager::markVerified(const juce::File& f)  { rememberVerified (f); }
+
+void ModelManager::forgetVerified(const juce::File& f)
+{
+    std::lock_guard<std::mutex> lock (verifiedMutex());
+    verifiedFiles().erase (f.getFullPathName ());
+}
 
 // ---------------------------------------------------------------------------
 
@@ -554,6 +646,8 @@ bool ModelManager::downloadFile(const std::string& url, const juce::File& dest,
                                 ProgressFn onProgress, std::string* errOut)
 {
     const juce::File part = dest.getSiblingFile (dest.getFileName () + ".part");
+    if (isFileUrl (url))
+        return localFileGet (localFileFromUrl (url), part, dest, expectedSha256, expectedSize, onProgress, errOut);
     return wininetGet (url, part, dest, expectedSha256, expectedSize, onProgress, errOut);
 }
 
@@ -696,6 +790,8 @@ bool ModelManager::downloadFile(const std::string& url, const juce::File& dest,
     // download the same model at once never write into each other's file.
     const juce::File part = dest.getSiblingFile (dest.getFileName () + "."
                                                  + juce::String ((int) ::getpid ()) + ".part");
+    if (isFileUrl (url))
+        return localFileGet (localFileFromUrl (url), part, dest, expectedSha256, expectedSize, onProgress, errOut);
     return webStreamGet (url, part, dest, expectedSha256, expectedSize, onProgress, errOut);
 }
 

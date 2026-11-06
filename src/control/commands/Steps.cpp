@@ -10,6 +10,10 @@
 #include "Actions.h"
 #include "PythonScripts.h"
 #include "control/PathPolicy.h"
+#include "control/StepRunner.h"
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+ #include "AI/ModelCatalog.h"
+#endif
 #include <optional>
 
 namespace sc::control {
@@ -180,6 +184,17 @@ void finishOne (Application& app, const sc::ActionStep& s, juce::var& r)
     if (!(bool) r.getProperty ("ok", false)) return;
     app.recordActionStep (s.type, s.params);
     FileDoc* d = app.doc();
+    if (s.type == sc::actionTypes::kTranscribe && d != nullptr)
+    {
+        // The segments (to the client only: the journal never holds the text).
+        juce::Array<juce::var> segs;
+        for (const auto& g : d->sctt.segments)
+            segs.add (obj ({ { "start", g.startSec }, { "end", g.endSec },
+                             { "text", juce::String::fromUTF8 (g.text.c_str()) } }));
+        set (r, "segments", segs);
+        set (r, "segmentCount", segs.size());
+        set (r, "storedInDoc", true);
+    }
     const int before = (int) r.getProperty ("undoBefore", -1);
     if (d != nullptr && (int) d->undo.undoSize() != before && d->undo.canUndo())
         set (r, "description", d->undo.lastRecorded().description);
@@ -215,7 +230,32 @@ Outcome runSequence (Application& app, const std::vector<sc::ActionStep>& steps,
         juce::var r;
         if (jc != nullptr && isLongType (s.type) && s.type != sc::actionTypes::kResample)
         {
-            r = applyOne (app, s, ok, e, [jc] (float f) { jc->progress (f); return !jc->cancelled(); });   // worker; commits hop
+            sc::ActionStep step = s;
+            juce::String deviceUsed;
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+            if (s.type == sc::actionTypes::kNoiseSuppress)
+            {
+                // API calls resolve the device strictly against what the
+                // runtime really offers (initialising OpenVINO: worker only);
+                // an unavailable device is an error, never a silent fallback.
+                const auto dr = sc::ai::resolveAiDevice ("openvino",
+                                    s.params.getProperty ("device", "auto").toString().toStdString());
+                if (!dr.ok)
+                {
+                    jc->onMessageThread ([&] { restoreScope (app, restore, chansBefore); });
+                    const auto ej = dr.errorJson();
+                    return Outcome::failure (ej.getProperty ("code", err::invalidParams).toString(),
+                                             ej.getProperty ("message", {}).toString(),
+                                             ej.getProperty ("details", {}));
+                }
+                deviceUsed = juce::String (dr.device);
+                auto pc = s.params.isObject() ? juce::var (s.params.getDynamicObject()->clone().release()) : obj();
+                set (pc, "device", deviceUsed);
+                step.params = pc;
+            }
+#endif
+            r = applyOne (app, step, ok, e, [jc] (float f) { jc->progress (f); return !jc->cancelled(); });   // worker; commits hop
+            if (deviceUsed.isNotEmpty()) set (r, "deviceUsed", deviceUsed);
             if (!jc->onMessageThread ([&] { ScopedInvokeSource src (app.control(), source); finishOne (app, s, r); }))
             { shuttingDown = true; break; }
         }
@@ -303,10 +343,57 @@ bool checkScripts (Context& ctx, const std::vector<sc::ActionStep>& steps, Outco
     return true;
 }
 
+/** AI steps: known model; not installed + autoDownload:false ->
+    model_not_installed (stat only, message thread). The device preference
+    is fixed here (app setting when the step names none). */
+bool checkAiSteps (Context& ctx, std::vector<sc::ActionStep>& steps, Outcome& error)
+{
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    auto& cat = sc::ai::ModelCatalog::instance();
+    for (auto& s : steps)
+    {
+        if (!isAiType (s.type)) continue;
+        const std::string id = s.params.getProperty ("modelId", {}).toString().toStdString();
+        const auto* e = cat.find (id);
+        const auto fam = s.type == sc::actionTypes::kTranscribe ? sc::ai::family::transcribe : sc::ai::family::noiseSuppress;
+        if (e == nullptr || e->family != fam)
+        {
+            juce::StringArray ids;
+            for (const auto& c : cat.entries()) if (c.family == fam) ids.add (c.id);
+            error = invalid ("step.params.modelId", "one of [" + ids.joinIntoString (", ") + "]",
+                             "unknown " + s.type + " model \"" + juce::String (id) + "\"");
+            return false;
+        }
+        const bool autoDl = !s.params.hasProperty ("autoDownload") || (bool) s.params.getProperty ("autoDownload", true);
+        const auto st = cat.status (*e);
+        if (!st.installed && !autoDl)
+        {
+            juce::Array<juce::var> missing;
+            for (auto& m : st.missing) missing.add (juce::String (m));
+            error = Outcome::failure (err::modelNotInstalled, juce::String (id) + " is not installed",
+                                      obj ({ { "modelId", juce::String (id) }, { "missing", missing },
+                                             { "sizeBytes", (juce::int64) e->sizeBytes() },
+                                             { "hint", "call ai.models.install, or pass autoDownload:true" } }));
+            return false;
+        }
+        if (s.type == sc::actionTypes::kNoiseSuppress && !s.params.hasProperty ("device"))
+        {
+            auto pc = s.params.isObject() ? juce::var (s.params.getDynamicObject()->clone().release()) : obj();
+            set (pc, "device", juce::String (ctx.app.aiDevicePref));
+            s.params = pc;
+        }
+    }
+#else
+    juce::ignoreUnused (ctx, steps, error);
+#endif
+    return true;
+}
+
 Outcome runSteps (Context& ctx, std::vector<sc::ActionStep> steps, bool stopOnError, bool single)
 {
     Outcome bad;
     if (!checkScripts (ctx, steps, bad)) return bad;
+    if (!checkAiSteps (ctx, steps, bad)) return bad;
 
     std::optional<std::vector<int>> restore;
     const int chans = ctx.app.audioEngine().numChannels();
@@ -324,7 +411,7 @@ Outcome runSteps (Context& ctx, std::vector<sc::ActionStep> steps, bool stopOnEr
     ctx.keepDocSwitch = true;
     Application* app = &ctx.app;
     const juce::String title = single ? "Running " + steps[0].type : "Running " + juce::String ((int) steps.size()) + " steps";
-    const auto id = startJob (ctx, single ? "step.run" : "steps.run", title, true,
+    const auto id = startJob (ctx, ctx.cmd.isNotEmpty() ? ctx.cmd : juce::String (single ? "step.run" : "steps.run"), title, true,
         [app, steps, stopOnError, single, restore, chans, source = ctx.source] (JobControl& jc) {
             return runSequence (*app, steps, stopOnError, single, &jc, restore, chans, source);
         });
@@ -381,6 +468,16 @@ ParamSpec stepParam()
 }
 
 } // namespace
+
+Outcome runStepsCommand (Context& ctx, std::vector<sc::ActionStep> steps, bool stopOnError, bool single)
+{
+    return runSteps (ctx, std::move (steps), stopOnError, single);
+}
+
+std::vector<ParamSpec> stepScopeParams()
+{
+    return scopeParams();
+}
 
 void registerStepCommands (CommandRegistry& r)
 {

@@ -131,6 +131,7 @@ struct Context
     const juce::var& params;          // validated params object
     FileDoc* doc = nullptr;           // resolved target (active document during the handler)
     juce::String source;              // "cli", "api:<client>", "menu", "test"
+    juce::String cmd;                 // the command id being run (jobs and journal entries use it)
     /** Set by a handler that started a job on a non-active target: the
         document stays active afterwards (the job works on the active one). */
     bool keepDocSwitch = false;
@@ -237,5 +238,6 @@ void registerStepCommands (CommandRegistry&);
 void registerJobCommands (CommandRegistry&);
 void registerViewCommands (CommandRegistry&);
 void registerTransportCommands (CommandRegistry&);
+void registerAiCommands (CommandRegistry&);
 
 } // namespace sc::control

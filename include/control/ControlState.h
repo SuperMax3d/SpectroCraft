@@ -33,6 +33,10 @@ public:
     int invokeDepth = 0;
     juce::String invokeSource;
 
+    /** audio.cpp backend chosen with ai.setDevice (session only; the stem /
+        super-resolution commands pass it as --backend). Empty = auto. */
+    juce::String audiocppBackend;
+
     /** Stops jobs (called first by ~Application). */
     void shutdown();
 
