@@ -44,6 +44,7 @@
 #include "SpectralEngine.h"
 #include "PngWriter.h"
 #include "Settings.h"
+#include "control/JsonCli.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -820,7 +821,29 @@ public:
                 quit();
                 return;
             }
-            else if (args[i].length() > 0 && !args[i].startsWith ("--"))
+            else if (args[i] == "--json" || args[i] == "--list-commands")
+            {
+                // Headless JSON mode (AI control): one request per line in,
+                // one response per line out. See include/control/JsonCli.h.
+                const int rc = sc::control::runJsonCli (args);
+                setApplicationReturnValue (rc);
+                quit();
+                return;
+            }
+            else if (args[i] == "--measure_load_time")
+            {
+                // handled before this loop
+            }
+            else if (args[i].startsWith ("--"))
+            {
+                // Unknown flags used to be ignored silently and the UI started.
+                std::cerr << "unknown flag " << args[i].toRawUTF8()
+                          << " (see README: command-line options)\n";
+                setApplicationReturnValue (2);
+                quit();
+                return;
+            }
+            else if (args[i].length() > 0)
             {
                 const juce::File f = resolvePath (args[i]);
                 if (f.existsAsFile()) cliFiles.push_back (f);

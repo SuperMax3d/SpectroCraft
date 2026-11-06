@@ -22,6 +22,10 @@ namespace sc::alert
         std::atomic<bool> headless { false };
         std::mutex lock;
         juce::StringArray suppressed;   // "<title>: <message>", oldest first
+        // Scoped capture (control commands): while captureDepth > 0 every
+        // message is recorded in `captured` and never shown, headless or not.
+        std::atomic<int> captureDepth { 0 };
+        juce::StringArray captured;
     };
 
     inline State& state()
@@ -46,19 +50,56 @@ namespace sc::alert
         state().suppressed.clear();
     }
 
-    /** Records the message and returns true when headless (nothing is shown). */
+    /** Records the message and returns true when headless or inside a
+        ScopedCapture (nothing is shown). */
     inline bool swallow (const juce::String& title, const juce::String& message)
     {
-        if (!isHeadless())
+        const bool capturing = state().captureDepth.load() > 0;
+        if (!isHeadless() && !capturing)
             return false;
         const juce::String line = title + ": " + message.replace ("\n", " ");
         {
             std::lock_guard<std::mutex> l (state().lock);
-            state().suppressed.add (line);
+            if (isHeadless()) state().suppressed.add (line);
+            if (capturing)    state().captured.add (line);
         }
-        std::cerr << "[alert] " << line << "\n";
+        if (isHeadless())
+            std::cerr << "[alert] " << line << "\n";
         return true;
     }
+
+    /** Captures (instead of showing) every alert raised through this gate
+        while alive - a control command reports them in its response
+        ("alerts": [...]) instead of blocking on a message box. Never toggles
+        the global headless flag. Nestable; message thread. */
+    class ScopedCapture
+    {
+    public:
+        ScopedCapture()
+        {
+            std::lock_guard<std::mutex> l (state().lock);
+            start = state().captured.size();
+            state().captureDepth.fetch_add (1);
+        }
+        ~ScopedCapture()
+        {
+            std::lock_guard<std::mutex> l (state().lock);
+            if (state().captureDepth.fetch_sub (1) == 1)
+                state().captured.clear();
+        }
+        /** Alerts captured since this scope began. */
+        juce::StringArray take() const
+        {
+            std::lock_guard<std::mutex> l (state().lock);
+            juce::StringArray out;
+            for (int i = start; i < state().captured.size(); ++i)
+                out.add (state().captured[i]);
+            return out;
+        }
+    private:
+        int start = 0;
+        JUCE_DECLARE_NON_COPYABLE (ScopedCapture)
+    };
 
     inline void showMessageBoxAsync (juce::MessageBoxIconType icon,
                                      const juce::String& title, const juce::String& message,

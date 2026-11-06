@@ -20,6 +20,8 @@
 #include <thread>
 #include <condition_variable>
 
+namespace sc::control { class ControlState; }   // AI control (include/control/ControlState.h)
+
 // Result of a batch folder transcription run (see Application::batchTranscribeFolder).
 struct BatchTranscribeSummary
 {
@@ -373,6 +375,24 @@ public:
 
     /** Persists the action store to disk. */
     void saveActions();
+
+    /** AI control state of this application: session journal, jobs, UI
+        bridge (created on first use, stopped first by the destructor). */
+    sc::control::ControlState& control();
+
+    /** Saves document d to `file` (message thread, blocking): the audio plus
+        its managed metadata (embedded chunks, or the .meta.json sidecar in
+        external mode, consolidating the legacy sidecars). saveAs = true also
+        moves the document's path/name to `file` and adds it to Open Recent.
+        Non-WAV targets switch embedded metadata to external, as File > Save
+        As does. Returns false with errOut set on failure; *metaWrittenOut
+        (optional) tells whether the metadata reached the disk.
+        beginSave / completeSave are the two message-thread halves around
+        the engine's save, for callers that run the audio write on a worker. */
+    bool saveDocument (FileDoc& d, const juce::File& file, bool saveAs,
+                       std::string* errOut = nullptr, bool* metaWrittenOut = nullptr);
+    uint64_t beginSave (FileDoc& d, const juce::File& file);
+    bool completeSave (FileDoc& d, const juce::File& file, bool saveAs, uint64_t metaSnapshot);
 
     // AI feature preferences, persisted in the same store (keys ai_*).
     bool aiAutoDownload = true;          // download missing models on first use
@@ -857,6 +877,8 @@ public:
     std::function<void()> onActiveDocChanged;
 
 private:
+    std::unique_ptr<sc::control::ControlState> control_;
+
     // Lazy audio init state. audioInitThread is joined in the destructor so a
     // pending worker can never outlive the AudioDeviceManager it initialises.
     std::atomic<bool> audioInitStarted { false };

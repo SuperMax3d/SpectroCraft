@@ -47,6 +47,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/Recorder.cpp    # recorder plugin host (Transport > Record)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
         ${CMAKE_SOURCE_DIR}/tests/UnitTests.cpp
+        ${SC_CONTROL_SOURCES}                       # AI control: registry, journal, jobs, --json
 )
 
 # AI module (OpenVINO plumbing + model manager). Only compiled when the

@@ -10,6 +10,7 @@
 #include "SpectralMaskProcessor.h"
 #include "PythonScripts.h"
 #include "Resampler.h"
+#include "control/ControlState.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -352,6 +353,23 @@ void Application::saveSettings ()
 
 void Application::recordActionStep (const juce::String& type, const juce::var& params)
 {
+    // Session journal (AI control): every recorded-type edit, recording or not.
+    {
+        auto e = sc::makeVarObject ({ { "what", type },
+                                      { "params", params.isVoid () ? juce::var (new juce::DynamicObject ()) : params },
+                                      { "source", control ().currentSource () } });
+        if (FileDoc* d = doc ())
+        {
+            e.getDynamicObject ()->setProperty ("doc", d->id);
+            e.getDynamicObject ()->setProperty ("undoDepthBefore", (int) d->undo.undoSize ());
+        }
+        // Inside a control command the step is recorded after it ran and the
+        // command's own journal entry describes it (history.list joins that).
+        if (control ().invokeDepth > 0)
+            e.getDynamicObject ()->setProperty ("viaCommand", true);
+        control ().journal.append ("step", e);
+    }
+
     if (!actionRec.active || !actions.validIndex (actionRec.actionIndex)) return;
 
     sc::ActionStep s;
@@ -365,6 +383,68 @@ void Application::saveActions ()
 {
     recentStore->setValue ("actions_json", actions.toJson());
     recentStore->save ();
+}
+
+uint64_t Application::beginSave (FileDoc& d, const juce::File& file)
+{
+    if (!file.getFileExtension().equalsIgnoreCase (".wav") && d.metaMode == sc::MetaMode::Embedded)
+        d.metaMode = sc::MetaMode::External;   // non-WAV cannot carry RIFF chunks
+    // Snapshot BEFORE the audio write builds the SCMD payload: an edit made
+    // while the save runs keeps the document dirty.
+    return d.metaDirty.changeCount ();
+}
+
+bool Application::completeSave (FileDoc& d, const juce::File& file, bool saveAs, uint64_t metaSnapshot)
+{
+    if (saveAs)
+    {
+        d.file = file;
+        d.name = file.getFileName ();
+        addRecentFile (file);
+    }
+
+    // External mode: the sidecar travels with the saved file and the legacy
+    // per-category sidecars are consolidated into it.
+    bool metaWritten = true;
+    if (d.metaMode == sc::MetaMode::External)
+    {
+        metaWritten = d.writeMetaSidecar (file);
+        if (metaWritten)
+        {
+            juce::File lm (file.getFullPathName() + ".markers.json");
+            if (lm.existsAsFile()) lm.deleteFile();
+            const juce::File ls = savedSelectionsSidecarPath (file);
+            if (ls.existsAsFile()) ls.deleteFile();
+        }
+    }
+    if (metaWritten)
+        d.metaDirty.clearIfUnchangedSince (metaSnapshot);
+    return metaWritten;
+}
+
+bool Application::saveDocument (FileDoc& d, const juce::File& file, bool saveAs,
+                                std::string* errOut, bool* metaWrittenOut)
+{
+    if (metaWrittenOut != nullptr) *metaWrittenOut = false;
+    if (!d.engine.isFileLoaded ())
+    {
+        if (errOut != nullptr) *errOut = "no audio is loaded in this document";
+        return false;
+    }
+    const uint64_t snap = beginSave (d, file);
+    const bool ok = saveAs ? d.engine.saveFileAs (file) : d.engine.saveFile (file);
+    if (!ok)
+    {
+        if (errOut != nullptr)
+            *errOut = ("Could not save " + file.getFullPathName ()
+                       + " (folder not writable, file locked or disk full?)").toStdString ();
+        return false;
+    }
+    const bool metaOk = completeSave (d, file, saveAs, snap);
+    if (metaWrittenOut != nullptr) *metaWrittenOut = metaOk;
+    if (!metaOk && errOut != nullptr)
+        *errOut = "The audio was saved, but the metadata sidecar could not be written.";
+    return true;
 }
 
 void Application::saveAiSettings ()
@@ -382,8 +462,19 @@ void Application::saveAiSettings ()
 
 Application::~Application()
 {
+    // Control jobs first: their workers may still read the documents.
+    if (control_ != nullptr)
+        control_->shutdown ();
     if (audioInitThread.joinable())
         audioInitThread.join();   // never let the worker outlive this object
+    control_.reset ();
+}
+
+sc::control::ControlState& Application::control ()
+{
+    if (control_ == nullptr)
+        control_ = std::make_unique<sc::control::ControlState> (*this);
+    return *control_;
 }
 
 FileDoc* Application::doc() const
@@ -4216,6 +4307,20 @@ static void reportHistoryCleared (const char* what)
               + " (not enough memory?). The undo history was cleared.");
 }
 
+// Session journal entry for an undo / redo / history clear (AI control).
+static void journalHistory (Application& app, FileDoc* d, const char* what, int steps,
+                            const juce::String& reason)
+{
+    auto e = sc::makeVarObject ({ { "what", juce::String (what) },
+                                  { "doc", d->id },
+                                  { "undoDepth", (int) d->undo.undoSize () },
+                                  { "redoDepth", (int) d->undo.redoSize () },
+                                  { "source", app.control ().currentSource () } });
+    if (steps > 0)          e.getDynamicObject ()->setProperty ("steps", steps);
+    if (reason.isNotEmpty()) e.getDynamicObject ()->setProperty ("reason", reason);
+    app.control ().journal.append ("history", e);
+}
+
 void Application::undoSteps (int n)
 {
     FileDoc* d = doc();
@@ -4235,6 +4340,7 @@ void Application::undoSteps (int n)
             // rather than keep a corrupt undo/redo chain.
             d->undo.clear ();
             reportHistoryCleared ("Undo");
+            journalHistory (*this, d, "cleared", 0, "undo failed");
             break;
         }
         if (p.hasSideState) restorePatchSideState (d, p, false);
@@ -4245,6 +4351,7 @@ void Application::undoSteps (int n)
         syncVisibleChannelsToEngine (chBefore);
         syncActiveDoc ();
         d->engine.rebuildMipmaps();   // one rebuild for the whole jump
+        journalHistory (*this, d, "undo", done, {});
     }
 }
 
@@ -4267,6 +4374,7 @@ void Application::redoSteps (int n)
             // rather than keep a corrupt undo/redo chain.
             d->undo.clear ();
             reportHistoryCleared ("Redo");
+            journalHistory (*this, d, "cleared", 0, "redo failed");
             break;
         }
         if (p.hasSideState) restorePatchSideState (d, p, true);
@@ -4277,6 +4385,7 @@ void Application::redoSteps (int n)
         syncVisibleChannelsToEngine (chBefore);
         syncActiveDoc ();
         d->engine.rebuildMipmaps();
+        journalHistory (*this, d, "redo", done, {});
     }
 }
 

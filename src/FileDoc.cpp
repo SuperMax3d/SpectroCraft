@@ -3,8 +3,15 @@
  */
 
 #include "FileDoc.h"
+#include <atomic>
 
-FileDoc::FileDoc()
+static int nextFileDocId ()
+{
+    static std::atomic<int> counter { 0 };
+    return ++counter;   // documents may be built on worker threads (loadFileAsync)
+}
+
+FileDoc::FileDoc() : id (nextFileDocId ())
 {
     // Wire this document's engine to its own undo history, marker list and
     // transcription data so edits are recorded per file and WAV saves embed

@@ -47,6 +47,7 @@
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include "CrashTrace.h"  // crash stack traces in the test binary
 #include "StartupTrace.h"
+#include "control/StateJson.h"   // processId() for the per-process temp folder
 #include <thread>
 #include <chrono>
 #if JUCE_WINDOWS
@@ -153,9 +154,13 @@ static juce::File scTestTempDir()
     static const juce::File dir = [] {
         const auto shard = juce::SystemStats::getEnvironmentVariable ("SC_TEST_SHARD", {})
                                .upToFirstOccurrenceOf ("/", false, false).trim();
+        // The process id keeps two runs apart too (two worktrees or two
+        // checkouts testing at once on one machine used to wipe each other's
+        // "shard<k>" folder mid-run).
         auto d = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                     .getChildFile (shard.isEmpty() ? juce::String ("SpectroCraftTests-tmp")
-                                                    : "SpectroCraftTests-tmp-shard" + shard);
+                     .getChildFile ((shard.isEmpty() ? juce::String ("SpectroCraftTests-tmp")
+                                                     : "SpectroCraftTests-tmp-shard" + shard)
+                                    + "-" + juce::String (sc::control::processId()));
         d.deleteRecursively();
         d.createDirectory();
         return d;
@@ -26981,6 +26986,7 @@ static void testActionsPanelPaint()
 #include "regression/app_from_tests.inc"
 #include "regression/persistence.inc"
 #include "regression/ai.inc"
+#include "regression/control.inc"   // AI control: registry, step.run, history, --json
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -27466,6 +27472,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: app_from_tests", runRegression_app_from_tests);
     SC_RUN_TEST ("regression: persistence", runRegression_persistence);
     SC_RUN_TEST ("regression: ai", runRegression_ai);
+    SC_RUN_TEST ("regression: control", runRegression_control);
 
 
     scReportTimings();

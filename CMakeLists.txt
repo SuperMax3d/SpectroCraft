@@ -64,6 +64,20 @@ add_custom_target(sc_bump_version ALL
             -P ${CMAKE_SOURCE_DIR}/cmake/bump_version.cmake
     BYPRODUCTS ${SC_GENERATED_DIR}/Version.h ${SC_GENERATED_DIR}/SC_VERSION.txt)
 
+# AI control (docs/ai-control/RAPPORT.md §5): command registry, session
+# journal, jobs, --json CLI. Shared by the app and the console test target.
+set(SC_CONTROL_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/control/CommandRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/ControlState.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/Journal.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/JobManager.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/StateJson.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/JsonCli.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/commands/Core.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/commands/History.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/commands/Steps.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/commands/Jobs.cpp)
+
 add_subdirectory(src)
 
 enable_testing()

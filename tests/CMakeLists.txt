@@ -42,6 +42,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/SuperResolution.cpp   # audio.cpp super-resolution (FlashSR/AudioSR)
         ${CMAKE_SOURCE_DIR}/src/Recorder.cpp    # recorder plugin host (Transport > Record)
         ${CMAKE_SOURCE_DIR}/src/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
+        ${SC_CONTROL_SOURCES}                   # AI control (registry, journal, jobs, --json)
 )
 
 # AI module — same gating as the app target.
