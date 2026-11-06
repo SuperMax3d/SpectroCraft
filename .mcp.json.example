@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "spectrocraft": {
+      "command": "uv",
+      "args": ["run", "--directory", "tools/mcp", "spectrocraft-mcp"],
+      "env": {
+        "SPECTROCRAFT_EXE": "/Applications/SpectroCraft.app/Contents/MacOS/SpectroCraft",
+        "SPECTROCRAFT_LAUNCH": "ask"
+      }
+    }
+  }
+}

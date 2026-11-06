@@ -1,0 +1,693 @@
+{
+ "protocol": 1,
+ "commands": [
+  {
+   "id": "app.describe",
+   "aliases": [],
+   "title": "Describe every command (JSON Schemas of params)",
+   "category": "app",
+   "flags": [
+    "Query"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "category": {
+      "type": "string",
+      "description": "Only this domain (e.g. \"doc\")"
+     },
+     "withSchemas": {
+      "type": "boolean",
+      "description": "Include params/result schemas",
+      "default": true
+     },
+     "includeInternal": {
+      "type": "boolean",
+      "description": "Include debug helpers",
+      "default": false
+     }
+    },
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "app.state",
+   "aliases": [],
+   "title": "Application state: documents, selection, view, transport, AI, jobs",
+   "category": "app",
+   "flags": [
+    "Query"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "doc.list",
+   "aliases": [],
+   "title": "Open documents (stable ids)",
+   "category": "doc",
+   "flags": [
+    "Query"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "doc.open",
+   "aliases": [],
+   "title": "Open an audio file (or activate it when already open)",
+   "category": "doc",
+   "flags": [],
+   "params": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Absolute path of the audio file"
+     },
+     "activate": {
+      "type": "boolean",
+      "description": "Make it the active document",
+      "default": true
+     }
+    },
+    "required": [
+     "path"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "doc.activate",
+   "aliases": [],
+   "title": "Make a document the active one (the one the window shows)",
+   "category": "doc",
+   "flags": [
+    "NeedsDoc"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "doc.meta",
+   "aliases": [],
+   "title": "Document metadata bundle (markers, selections, calibration, transcription...)",
+   "category": "doc",
+   "flags": [
+    "NeedsDoc",
+    "Query"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "sections": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Keys of the bundle to return (default: all)"
+     }
+    },
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "doc.saveAs",
+   "aliases": [],
+   "title": "Save the document to a new path (audio + metadata)",
+   "category": "doc",
+   "flags": [
+    "NeedsDoc",
+    "Destructive"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Absolute target path (.wav keeps embedded metadata)"
+     },
+     "meta": {
+      "type": "string",
+      "enum": [
+       "auto",
+       "embedded",
+       "sidecar"
+      ],
+      "description": "Metadata storage: keep (auto), RIFF chunks (embedded) or .meta.json (sidecar)",
+      "default": "auto"
+     },
+     "confirm": {
+      "type": "boolean",
+      "description": "Required when the target exists"
+     }
+    },
+    "required": [
+     "path"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "doc.save",
+   "aliases": [],
+   "title": "Save the document in place (overwrites its file)",
+   "category": "doc",
+   "flags": [
+    "NeedsDoc",
+    "Destructive"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "meta": {
+      "type": "string",
+      "enum": [
+       "auto",
+       "embedded",
+       "sidecar"
+      ],
+      "default": "auto"
+     },
+     "confirm": {
+      "type": "boolean",
+      "description": "Required: the file on disk is overwritten"
+     }
+    },
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "selection.set",
+   "aliases": [
+    "select"
+   ],
+   "title": "Set the time selection (seconds) and optionally the channels edits apply to",
+   "category": "selection",
+   "flags": [
+    "NeedsDoc"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "start": {
+      "type": "number",
+      "minimum": 0.0,
+      "description": "Start (s)"
+     },
+     "end": {
+      "type": "number",
+      "minimum": 0.0,
+      "description": "End (s); end == start clears the range"
+     },
+     "channels": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 0.0
+      },
+      "description": "0-based channels edits apply to (also the visible tracks)"
+     }
+    },
+    "required": [
+     "start",
+     "end"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "selection.all",
+   "aliases": [
+    "selectAll"
+   ],
+   "title": "Select the whole file",
+   "category": "selection",
+   "flags": [
+    "NeedsDoc"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "journal.read",
+   "aliases": [],
+   "title": "Read the session journal (commands, steps, undo/redo, jobs)",
+   "category": "journal",
+   "flags": [
+    "Query"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "sinceSeq": {
+      "type": "integer",
+      "minimum": 0.0,
+      "default": 0
+     },
+     "kinds": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "command|step|history|job|meta|doc|alert"
+     },
+     "limit": {
+      "type": "integer",
+      "minimum": 1.0,
+      "maximum": 10000.0,
+      "default": 200
+     },
+     "docId": {
+      "type": "integer",
+      "minimum": 0.0,
+      "description": "Only entries of this document"
+     }
+    },
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "history.list",
+   "aliases": [],
+   "title": "Undo history of a document (+ the session journal)",
+   "category": "history",
+   "flags": [
+    "NeedsDoc",
+    "Query"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "includeJournal": {
+      "type": "boolean",
+      "default": true
+     },
+     "since": {
+      "type": "integer",
+      "minimum": 0.0,
+      "description": "Journal entries after this seq",
+      "default": 0
+     }
+    },
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "history.undo",
+   "aliases": [
+    "undo"
+   ],
+   "title": "Undo the last edit(s)",
+   "category": "history",
+   "flags": [
+    "Mutates",
+    "NeedsDoc"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "steps": {
+      "type": "integer",
+      "minimum": 1.0,
+      "maximum": 64.0,
+      "default": 1
+     }
+    },
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "history.redo",
+   "aliases": [
+    "redo"
+   ],
+   "title": "Redo the next edit(s)",
+   "category": "history",
+   "flags": [
+    "Mutates",
+    "NeedsDoc"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "steps": {
+      "type": "integer",
+      "minimum": 1.0,
+      "maximum": 64.0,
+      "default": 1
+     }
+    },
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "history.jumpTo",
+   "aliases": [],
+   "title": "Undo/redo to a history state (0 = as loaded); never discards the redo stack",
+   "category": "history",
+   "flags": [
+    "Mutates",
+    "NeedsDoc"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "state": {
+      "type": "integer",
+      "minimum": 0.0
+     }
+    },
+    "required": [
+     "state"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "step.run",
+   "aliases": [],
+   "title": "Apply one action step (any of the 20 recorded types) on an explicit range",
+   "category": "step",
+   "flags": [
+    "Mutates",
+    "NeedsDoc"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "step": {
+      "type": "object",
+      "properties": {
+       "type": {
+        "type": "string",
+        "description": "Step type, e.g. changeGain, fadeOut, envelope"
+       },
+       "params": {
+        "type": "object",
+        "description": "Step parameters (see app.describe category step)"
+       },
+       "prompt": {
+        "type": "boolean",
+        "description": "Ignored here (interactive replay only)"
+       }
+      },
+      "required": [
+       "type"
+      ],
+      "additionalProperties": false,
+      "description": "{type, params}"
+     },
+     "select": {
+      "oneOf": [
+       {
+        "type": "string",
+        "enum": [
+         "all"
+        ]
+       },
+       {
+        "type": "object",
+        "properties": {
+         "start": {
+          "type": "number",
+          "minimum": 0
+         },
+         "end": {
+          "type": "number",
+          "minimum": 0
+         }
+        },
+        "required": [
+         "start",
+         "end"
+        ],
+        "additionalProperties": false
+       }
+      ],
+      "description": "\"all\", or {start, end} in seconds (default: current selection)"
+     },
+     "channels": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 0.0
+      },
+      "description": "0-based channels the step applies to (default: the visible ones)"
+     }
+    },
+    "required": [
+     "step"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "steps.run",
+   "aliases": [],
+   "title": "Apply several action steps in order",
+   "category": "step",
+   "flags": [
+    "Mutates",
+    "NeedsDoc"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "steps": {
+      "type": "array",
+      "items": {
+       "type": "object"
+      },
+      "description": "[{type, params}, ...] - one history entry per step"
+     },
+     "select": {
+      "oneOf": [
+       {
+        "type": "string",
+        "enum": [
+         "all"
+        ]
+       },
+       {
+        "type": "object",
+        "properties": {
+         "start": {
+          "type": "number",
+          "minimum": 0
+         },
+         "end": {
+          "type": "number",
+          "minimum": 0
+         }
+        },
+        "required": [
+         "start",
+         "end"
+        ],
+        "additionalProperties": false
+       }
+      ],
+      "description": "\"all\", or {start, end} in seconds (default: current selection)"
+     },
+     "channels": {
+      "type": "array",
+      "items": {
+       "type": "integer",
+       "minimum": 0.0
+      },
+      "description": "0-based channels the step applies to (default: the visible ones)"
+     },
+     "stopOnError": {
+      "type": "boolean",
+      "default": true
+     }
+    },
+    "required": [
+     "steps"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "step.validate",
+   "aliases": [],
+   "title": "Check a step without touching any document",
+   "category": "step",
+   "flags": [
+    "Query"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "step": {
+      "type": "object",
+      "properties": {
+       "type": {
+        "type": "string",
+        "description": "Step type, e.g. changeGain, fadeOut, envelope"
+       },
+       "params": {
+        "type": "object",
+        "description": "Step parameters (see app.describe category step)"
+       },
+       "prompt": {
+        "type": "boolean",
+        "description": "Ignored here (interactive replay only)"
+       }
+      },
+      "required": [
+       "type"
+      ],
+      "additionalProperties": false,
+      "description": "{type, params}"
+     }
+    },
+    "required": [
+     "step"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "job.get",
+   "aliases": [],
+   "title": "State, progress and result of a job",
+   "category": "job",
+   "flags": [
+    "Query"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "job": {
+      "type": "string",
+      "description": "Job id (\"j-<n>\")"
+     }
+    },
+    "required": [
+     "job"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "job.cancel",
+   "aliases": [],
+   "title": "Cancel a running job (only the client that started it, unless force)",
+   "category": "job",
+   "flags": [],
+   "params": {
+    "type": "object",
+    "properties": {
+     "job": {
+      "type": "string"
+     },
+     "force": {
+      "type": "boolean",
+      "default": false
+     }
+    },
+    "required": [
+     "job"
+    ],
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  },
+  {
+   "id": "job.list",
+   "aliases": [],
+   "title": "Jobs of this session",
+   "category": "job",
+   "flags": [
+    "Query"
+   ],
+   "params": {
+    "type": "object",
+    "properties": {
+     "all": {
+      "type": "boolean",
+      "description": "Include finished jobs",
+      "default": true
+     }
+    },
+    "additionalProperties": false
+   },
+   "result": {
+    "type": "object"
+   }
+  }
+ ]
+}

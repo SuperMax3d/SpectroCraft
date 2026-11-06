@@ -126,7 +126,8 @@ bool validateStepParams (const ActionStep& s, std::string* errOut);
     Selection-based steps act on app.selection; whole-file-capable steps fall
     back to the entire file when nothing is selected. Returns false and fills
     errOut on failure. */
-bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut);
+bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut,
+                      std::function<bool(float)> onProgress = nullptr);
 
 /** Batch runner: applies `action` to every file in `inputFolder` whose
     extension matches one of `formats` (e.g. {".wav", ".mp3"}), saving each

@@ -15,6 +15,7 @@
 
 #include "WorkProgress.h"
 #include "ContentAwareTimeScale.h"
+#include "control/UiBridge.h"   // AI control: what commands may ask of this window
 
 class StemSeparationWindow;   // defined in StemSeparation.h
 class SuperResolutionWindow;  // defined in SuperResolution.h
@@ -81,7 +82,8 @@ class MainWindow : public juce::DocumentWindow,
                    private juce::KeyListener,
                    public juce::MenuBarModel,
                    public juce::Timer,
-                   public juce::FileDragAndDropTarget
+                   public juce::FileDragAndDropTarget,
+                   public sc::control::UiBridge
 {
 public:
     MainWindow (Application& app, const juce::String& name);
@@ -177,8 +179,8 @@ public:
     juce::Component* tablesSepComp()   { return tablesSep.get (); }        // unit tests
     /** Top/bottom insets (px) that keep a view's vertical scrollbar clear of its own time ruler strip. */
     static void vScrollInsetsForView (juce::Component* view, int& topInset, int& botInset);
-    void applyTimeWindow (double t0, double t1); // push one time window to BOTH views
-    void refreshAfterEdit();   // clamp ranges, repaint waveform, re-render spectral image
+    void applyTimeWindow (double t0, double t1) override; // push one time window to BOTH views
+    void refreshAfterEdit() override;   // clamp ranges, repaint waveform, re-render spectral image
     /** Applies a destructive edit (`edit` returns false and fills errOut on
         failure). If the active file is still being streamed from disk it must
         first be loaded into memory; that can take seconds for multi-GB files,
@@ -191,6 +193,13 @@ public:
     void runDestructiveEdit(std::function<bool(std::string*)> edit,
                             std::function<void(bool)> onDone = nullptr);
     void showEditError (const std::string& err);
+    /** Menu/shortcut actions that have a control command run THROUGH the
+        command registry (source "menu"): same code, refresh, recording,
+        journal and history provenance as the API (lot 6). Shows the error
+        (sync or when the job ends) unless `quiet`. effectId, when non-zero,
+        becomes the "repeat last effect" id on success. Returns ok. */
+    bool runMenuCommand (const juce::String& cmd, const juce::var& params = {}, int effectId = 0,
+                         bool quiet = false);
 
     // Play request that first guarantees the lazy audio device init has
     // completed; shows a short progress dialog if it still needs to run.
@@ -199,9 +208,29 @@ public:
     void zoomHorizontal (double factor);   // both views
     void updateScrollBars();               // keep scrollbars in sync with the views
     void zoomVerticalBoth (double factor); // waveform amplitude + spectral frequency
-    void zoomToFit();
-    void zoomToSelection();   // fit the current selection in both views
-    void zoomOutFull();       // whole file + default vertical zooms in both views
+    void zoomToFit() override;
+    void zoomToSelection() override;   // fit the current selection in both views
+    void zoomOutFull() override;       // whole file + default vertical zooms in both views
+
+    // ---- sc::control::UiBridge (AI control; never opens a modal dialog) ----
+    void zoomVertical (double factor) override;
+    bool setViewVisible (const juce::String& what, bool visible) override;
+    bool isViewVisible (const juce::String& what) const override;
+    juce::StringArray panelNames() const override;
+    bool setPanelVisibleAt (int index, bool visible) override;
+    bool isPanelOpenAt (int index) const override;
+    void* beginJobDialog (const juce::String& title, const juce::String& status) override;
+    void setJobProgress (void* handle, double progress, const juce::String& status) override;
+    const std::atomic<bool>* jobCancelFlag (void* handle) const override;
+    void endJobDialog (void* handle) override;
+    void setControlClients (int count) override;
+    void requestQuit (bool discardUnsaved) override;
+    /** Window > Allow AI control toggled: Main.cpp starts/stops the server. */
+    std::function<void (bool)> onControlToggled;
+    /** Status text of the control server for the menu tooltip / status bar. */
+    int controlClients() const { return controlClients_; }
+    /** Set by Main.cpp while the control server runs (journal polling). */
+    bool controlServerRunning = false;
     void cycleViewVisibility (bool forward);  // F9: both -> waveform -> spectrogram
     juce::Component* activeListPanel() const;  // Markers/Transcription tab content, or nullptr
     void handleFind (bool openDialog);     // Ctrl+F / F3 in the active list panel
@@ -268,6 +297,9 @@ public:
         non-prompt steps apply the recorded values directly. */
     void runAction (int index);
     void continueReplay();                       // advance to the next step
+    /** When set, action replay reports its end here (ok, message) instead of
+        the modal "finished" / "stopped" message boxes. */
+    std::function<void (bool, const juce::String&)> onReplayFinished;
     void stopReplay (const juce::String& why);  // abort with a status message
     bool isReplaying() const { return !replaySteps_.empty (); }
     /** Batch button: opens the batch-processing window for an action. */
@@ -532,6 +564,7 @@ public:
 #endif
         WindowPanelBase = 6500,   // Window menu: per-panel open/close toggles
         WindowAllowMultiple = 6700,   // Window menu: "Allow multiple instances" toggle
+        WindowAllowControl = 6701,    // Window menu: "Allow AI control (localhost)" toggle
         HelpAbout = 6000,
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
@@ -613,6 +646,7 @@ private:
     TabDragContext tabDragCtx;                 // shared state for dragging panel tabs
     DragTabBar topTabs, bottomTabs;           // left-column tab groups (draggable tabs)
     bool leftPanelsVisible = true;            // View > Left Panels toggle
+    int controlClients_ = 0;                  // AI control clients connected (status bar)
 
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)

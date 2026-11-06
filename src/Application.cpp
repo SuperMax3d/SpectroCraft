@@ -10,6 +10,7 @@
 #include "SpectralMaskProcessor.h"
 #include "PythonScripts.h"
 #include "Resampler.h"
+#include "control/ControlState.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -197,6 +198,7 @@ void Application::loadSettings ()
                                           6.0f, 72.0f);
     // Single-instance mode (Window menu): checked by default.
     settings.allowMultipleInstances = recentStore->getIntValue ("multi_instance", 1) != 0;
+    settings.controlEnabled = recentStore->getIntValue ("control_enabled", 0) != 0;
     // Track axis placement + grid lines (View menu).
     settings.trackAxisOnRight   = recentStore->getIntValue ("track_axis_right", 0) != 0;
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
@@ -304,6 +306,7 @@ void Application::saveSettings ()
     recentStore->setValue ("draw_colour", settings.drawColourARGB);
     recentStore->setValue ("draw_text_size", settings.drawTextSize);
     recentStore->setValue ("multi_instance", settings.allowMultipleInstances ? 1 : 0);
+    recentStore->setValue ("control_enabled", settings.controlEnabled ? 1 : 0);
     recentStore->setValue ("track_axis_right", settings.trackAxisOnRight ? 1 : 0);
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);
@@ -352,6 +355,27 @@ void Application::saveSettings ()
 
 void Application::recordActionStep (const juce::String& type, const juce::var& params)
 {
+    // Session journal (AI control): every recorded-type edit, recording or not.
+    {
+        auto e = sc::makeVarObject ({ { "what", type },
+                                      { "params", params.isVoid () ? juce::var (new juce::DynamicObject ()) : params },
+                                      { "source", control ().currentSource () } });
+        if (FileDoc* d = doc ())
+        {
+            e.getDynamicObject ()->setProperty ("doc", d->id);
+            e.getDynamicObject ()->setProperty ("undoDepthBefore", (int) d->undo.undoSize ());
+        }
+        // Inside a control command the step is recorded after it ran and the
+        // command's own journal entry describes it (history.list joins that).
+        if (control ().invokeDepth > 0)
+            e.getDynamicObject ()->setProperty ("viaCommand", true);
+        else
+            // A menu/dialog edit announces itself; the next recorded patch (on
+            // whatever thread runs the edit) takes its type and params.
+            sc::undoctx::setPending (sc::undoctx::Op { type, params, "menu" });
+        control ().journal.append ("step", e);
+    }
+
     if (!actionRec.active || !actions.validIndex (actionRec.actionIndex)) return;
 
     sc::ActionStep s;
@@ -365,6 +389,68 @@ void Application::saveActions ()
 {
     recentStore->setValue ("actions_json", actions.toJson());
     recentStore->save ();
+}
+
+uint64_t Application::beginSave (FileDoc& d, const juce::File& file)
+{
+    if (!file.getFileExtension().equalsIgnoreCase (".wav") && d.metaMode == sc::MetaMode::Embedded)
+        d.metaMode = sc::MetaMode::External;   // non-WAV cannot carry RIFF chunks
+    // Snapshot BEFORE the audio write builds the SCMD payload: an edit made
+    // while the save runs keeps the document dirty.
+    return d.metaDirty.changeCount ();
+}
+
+bool Application::completeSave (FileDoc& d, const juce::File& file, bool saveAs, uint64_t metaSnapshot)
+{
+    if (saveAs)
+    {
+        d.file = file;
+        d.name = file.getFileName ();
+        addRecentFile (file);
+    }
+
+    // External mode: the sidecar travels with the saved file and the legacy
+    // per-category sidecars are consolidated into it.
+    bool metaWritten = true;
+    if (d.metaMode == sc::MetaMode::External)
+    {
+        metaWritten = d.writeMetaSidecar (file);
+        if (metaWritten)
+        {
+            juce::File lm (file.getFullPathName() + ".markers.json");
+            if (lm.existsAsFile()) lm.deleteFile();
+            const juce::File ls = savedSelectionsSidecarPath (file);
+            if (ls.existsAsFile()) ls.deleteFile();
+        }
+    }
+    if (metaWritten)
+        d.metaDirty.clearIfUnchangedSince (metaSnapshot);
+    return metaWritten;
+}
+
+bool Application::saveDocument (FileDoc& d, const juce::File& file, bool saveAs,
+                                std::string* errOut, bool* metaWrittenOut)
+{
+    if (metaWrittenOut != nullptr) *metaWrittenOut = false;
+    if (!d.engine.isFileLoaded ())
+    {
+        if (errOut != nullptr) *errOut = "no audio is loaded in this document";
+        return false;
+    }
+    const uint64_t snap = beginSave (d, file);
+    const bool ok = saveAs ? d.engine.saveFileAs (file) : d.engine.saveFile (file);
+    if (!ok)
+    {
+        if (errOut != nullptr)
+            *errOut = ("Could not save " + file.getFullPathName ()
+                       + " (folder not writable, file locked or disk full?)").toStdString ();
+        return false;
+    }
+    const bool metaOk = completeSave (d, file, saveAs, snap);
+    if (metaWrittenOut != nullptr) *metaWrittenOut = metaOk;
+    if (!metaOk && errOut != nullptr)
+        *errOut = "The audio was saved, but the metadata sidecar could not be written.";
+    return true;
 }
 
 void Application::saveAiSettings ()
@@ -382,8 +468,21 @@ void Application::saveAiSettings ()
 
 Application::~Application()
 {
+    // Control jobs first: their workers may still read the documents. Any of
+    // them waiting for a message-thread commit is released by destroying_.
+    destroying_.store (true);
+    if (control_ != nullptr)
+        control_->shutdown ();
     if (audioInitThread.joinable())
         audioInitThread.join();   // never let the worker outlive this object
+    control_.reset ();
+}
+
+sc::control::ControlState& Application::control ()
+{
+    if (control_ == nullptr)
+        control_ = std::make_unique<sc::control::ControlState> (*this);
+    return *control_;
 }
 
 FileDoc* Application::doc() const
@@ -3487,7 +3586,62 @@ bool Application::splitSpectralSelectionConfigured (std::string* errOut)
     return true;
 }
 
+// Worker -> message thread commit hop used by the blocking AI operations and
+// runPythonScript. Runs fn on the message thread and waits for it; runs it in
+// place when this already is the message thread or there is no MessageManager
+// (tests, CLI). The commit edits the active document (buffer, undo stack, SCTT
+// data, visibleChannels) that the message thread reads while painting, so it
+// must never run on the worker.
+// The wait is bounded by `stop` (Application::destroying_): the message
+// thread never waits on these workers EXCEPT when it destroys the Application
+// and joins the AI-control jobs; that path sets `stop` first, the worker then
+// abandons the posted commit (which, once it runs, does nothing) instead of
+// deadlocking. Abandoning is race-free: `stop` is set on the message thread,
+// so the posted call cannot be running at that moment.
+// Returns false when the commit did not run (shutting down); fn's own result
+// goes to resultOut.
+namespace {
+struct CommitHop
+{
+    std::function<bool()> fn;
+    juce::WaitableEvent done;
+    std::atomic<bool> abandoned { false };
+    bool result = false;
+};
+}
+
+static bool commitOnMessageThread (const std::function<bool()>& fn, bool& resultOut,
+                                   const std::atomic<bool>& stop)
+{
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
+    if (mm == nullptr || mm->isThisTheMessageThread ())
+    {
+        resultOut = fn ();
+        return true;
+    }
+    if (stop.load ())
+        return false;
+    auto hop = std::make_shared<CommitHop> ();
+    hop->fn = fn;
+    if (!juce::MessageManager::callAsync ([hop] {
+            if (hop->abandoned.load ()) return;
+            hop->result = hop->fn ();
+            hop->done.signal ();
+        }))
+        return false;
+    while (!hop->done.wait (50))
+        if (stop.load ())
+        {
+            hop->abandoned.store (true);
+            if (!hop->done.wait (0)) return false;
+            break;
+        }
+    resultOut = hop->result;
+    return true;
+}
+
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+
 bool Application::noiseSuppress (const std::string& modelId, const std::string& device,
                                  float attenLimDb, bool df3PostFilter,
                                  std::function<bool(float)> onProgress, std::string* errOut,
@@ -3559,9 +3713,17 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
 
     if (!copyNoise || affected.empty ())
     {
-        if (!audioEngine().replaceSamples (samples, data,
-                                           "Noise suppressed (" + juce::String (modelId) + ")", &err))
-            return fail (err);
+        // The commit edits the active document (buffer, undo stack, mipmaps)
+        // that the message thread reads while painting: run it there, like
+        // the copyNoise branch below and runPythonScript.
+        bool replaced = false;
+        if (!commitOnMessageThread ([&] () -> bool {
+                return audioEngine().replaceSamples (samples, data,
+                           "Noise suppressed (" + juce::String (modelId) + ")", &err);
+            }, replaced, destroying_))
+            return fail ("Could not apply the noise suppression (the application is shutting down).");
+        if (!replaced)
+            return fail (err.empty () ? std::string ("Could not apply the noise suppression.") : err);
         return true;
     }
 
@@ -3600,18 +3762,8 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
     };
 
     bool committed = false;
-    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
-    if (mm == nullptr || mm->isThisTheMessageThread ())
-        committed = commit ();   // tests / CLI: already on the right thread
-    else
-    {
-        // The message thread never waits on this worker (non-blocking modal
-        // progress dialog), so waiting here cannot deadlock.
-        juce::WaitableEvent done;
-        if (!juce::MessageManager::callAsync ([&] { committed = commit (); done.signal (); }))
-            return fail ("Could not apply the noise suppression (the application is shutting down).");
-        done.wait (-1);
-    }
+    if (!commitOnMessageThread (commit, committed, destroying_))
+        return fail ("Could not apply the noise suppression (the application is shutting down).");
     if (!committed)
         return fail ("Could not apply the noise suppression.");
 
@@ -3687,13 +3839,20 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
                                   .getChildFile ("SpectroCraftPython");
     if (!tmpDir.exists ())
         tmpDir.createDirectory ();
+    // The counter keeps two runs started in the same millisecond (GUI + API)
+    // apart: makeExchange deletes stale files with the same stamp.
+    static std::atomic<uint32_t> runCounter { 0 };
     const juce::String stamp = juce::String ((int64_t) juce::Time::getCurrentTime ().toMilliseconds ())
-                              + "_" + juce::String ((size_t) this);
-    const juce::File inWav  = tmpDir.getChildFile ("in_"   + stamp + ".wav");
-    const juce::File outWav = tmpDir.getChildFile ("out_"  + stamp + ".wav");
-    const juce::File metaJ  = tmpDir.getChildFile ("meta_" + stamp + ".json");
+                              + "_" + juce::String ((size_t) this)
+                              + "_" + juce::String ((int) runCounter.fetch_add (1));
+    // in / out / meta / result.json (the last two outputs are each optional).
+    const sc::py::ScriptExchange ex = sc::py::makeExchange (tmpDir, stamp,
+                                                            (double) samples.getStart () / rate);
+    const juce::File& inWav  = ex.inWav;
+    const juce::File& outWav = ex.outWav;
+    const juce::File& metaJ  = ex.metaJson;
 
-    auto cleanup = [&] { inWav.deleteFile (); outWav.deleteFile (); metaJ.deleteFile (); };
+    auto cleanup = [&ex] { ex.cleanup (); };
 
     if (!sc::py::writeFloatWav (inWav, data, rate))
     {
@@ -3703,7 +3862,7 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
     metaJ.replaceWithText (sc::py::buildMetaJson (rate, nch, audioEngine ().duration (),
                                                   selSecs, wholeFile,
                                                   audioEngine ().getFile ().getFileName (),
-                                                  d->markers.markers ()));
+                                                  d->markers.markers (), &ex));
 
     if (!prog (0.3f)) { cleanup (); return false; }   // cancelled - silent
 
@@ -3716,36 +3875,66 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
         return fail ("No Python interpreter command was provided.");
     }
 
-    juce::StringArray scriptArgs;
-    for (int i = 1; i < cmdTokens.size (); ++i)   // extra flags, e.g. "-3"
-        scriptArgs.add (cmdTokens[i]);
-    scriptArgs.add (script.getFullPathName ());
-    scriptArgs.add (inWav.getFullPathName ());
-    scriptArgs.add (outWav.getFullPathName ());
-    scriptArgs.add (metaJ.getFullPathName ());
+    // A control-API caller (python.run) wraps this call in a
+    // ScopedScriptRunCapture: its options (timeout) apply and it receives the
+    // run report (script SHA-256, exit code, output, result.json). The GUI
+    // runs without one: no time limit, the user cancels.
+    auto* capture = sc::py::ScopedScriptRunCapture::current ();
+    const sc::py::RunOptions runOpts = capture != nullptr ? capture->options () : sc::py::RunOptions {};
 
     bool cancelled = false;
-    int rc = -1;
-    juce::String out, errText;
-    const bool started = sc::py::runProcess (cmdTokens[0].toStdString (), scriptArgs,
-        [&cancelled, prog] { if (!prog (0.5f)) { cancelled = true; return false; } return true; },
-        &rc, &out, &errText);
+    sc::py::ScriptRunReport rep = sc::py::runScript (pythonCmd, script, ex, runOpts,
+        [&cancelled, prog] { if (!prog (0.5f)) { cancelled = true; return false; } return true; });
+    if (capture != nullptr)
+        capture->setReport (rep);
+    const int rc = rep.process.exitCode;
+    const juce::String& out = rep.process.stdoutText;
+    const juce::String& errText = rep.process.stderrText;
 
-    if (!started || cancelled)
+    if (!rep.process.started || cancelled || rep.process.cancelled)
     {
         cleanup ();
-        if (cancelled) return false;   // user cancel is not a failure - silent
+        if (cancelled || rep.process.cancelled) return false;   // user cancel is not a failure - silent
         return fail ("Could not start the Python interpreter.");
     }
 
-    if (rc != 0 || !outWav.existsAsFile ())
+    auto withTail = [&out, &errText] (juce::String msg)
     {
-        cleanup ();
-        juce::String msg = "Python exited with code " + juce::String (rc);
         const juce::String tail = errText.trim ().isNotEmpty () ? errText.trim () : out.trim ();
         if (tail.isNotEmpty ())
             msg += "\n" + tail.substring (std::max (0, tail.length () - 2000));
-        return fail (msg);
+        return msg;
+    };
+
+    if (rep.process.timedOut)
+    {
+        cleanup ();
+        return fail (withTail ("The script was stopped after its "
+                               + juce::String (runOpts.timeoutMs / 1000.0, 1)
+                               + " s time limit. Nothing was changed."));
+    }
+
+    if (rc != 0)
+    {
+        cleanup ();
+        return fail (withTail ("Python exited with code " + juce::String (rc)));
+    }
+
+    if (rep.result.error.isNotEmpty ())
+    {
+        cleanup ();
+        return fail ("The script's result.json is invalid: " + rep.result.error
+                     + ". Nothing was changed.");
+    }
+
+    // out.wav is optional when the script returned a result.json (analysis
+    // scripts: markers / text / measures only, the audio stays untouched).
+    if (!outWav.existsAsFile ())
+    {
+        cleanup ();
+        if (rep.result.present)
+            return true;
+        return fail (withTail ("Python exited with code 0 but wrote neither the output WAV nor result.json."));
     }
 
     // Read the script's output back and validate it.
@@ -3873,18 +4062,10 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
     };
 
     bool ok = false;
-    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
-    if (mm == nullptr || mm->isThisTheMessageThread ())
-        ok = commit ();
-    else
+    if (!commitOnMessageThread (commit, ok, destroying_))
     {
-        juce::WaitableEvent committed;
-        if (!juce::MessageManager::callAsync ([&] { ok = commit (); committed.signal (); }))
-        {
-            cleanup ();
-            return fail ("Could not apply the script's output (the application is shutting down).");
-        }
-        committed.wait (-1);
+        cleanup ();
+        return fail ("Could not apply the script's output (the application is shutting down).");
     }
 
     if (!ok)
@@ -3893,6 +4074,8 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
         return fail (err);
     }
 
+    if (capture != nullptr)
+        capture->report ().audioChanged = true;
     cleanup ();
     return true;
 }
@@ -3948,7 +4131,18 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
     if (!ok)
         return fail (err);
 
-    d->setTranscription (std::move (segs));
+    // Store the segments on the message thread (the transcription panel and
+    // the views read the document's SCTT data while painting). The document
+    // may have been closed while Whisper ran: only store into a live one.
+    bool stored = false;
+    if (!commitOnMessageThread ([&] () -> bool {
+            if (!isDocLoaded (d)) return false;
+            d->setTranscription (std::move (segs));
+            return true;
+        }, stored, destroying_))
+        return fail ("Could not store the transcription (the application is shutting down).");
+    if (!stored)
+        return fail ("The document was closed during the transcription.");
     return true;
 }
 
@@ -4172,6 +4366,20 @@ static void reportHistoryCleared (const char* what)
               + " (not enough memory?). The undo history was cleared.");
 }
 
+// Session journal entry for an undo / redo / history clear (AI control).
+static void journalHistory (Application& app, FileDoc* d, const char* what, int steps,
+                            const juce::String& reason)
+{
+    auto e = sc::makeVarObject ({ { "what", juce::String (what) },
+                                  { "doc", d->id },
+                                  { "undoDepth", (int) d->undo.undoSize () },
+                                  { "redoDepth", (int) d->undo.redoSize () },
+                                  { "source", app.control ().currentSource () } });
+    if (steps > 0)          e.getDynamicObject ()->setProperty ("steps", steps);
+    if (reason.isNotEmpty()) e.getDynamicObject ()->setProperty ("reason", reason);
+    app.control ().journal.append ("history", e);
+}
+
 void Application::undoSteps (int n)
 {
     FileDoc* d = doc();
@@ -4191,6 +4399,7 @@ void Application::undoSteps (int n)
             // rather than keep a corrupt undo/redo chain.
             d->undo.clear ();
             reportHistoryCleared ("Undo");
+            control ().noteClearReason (d->id, "undo failed");   // journaled by pollDocuments
             break;
         }
         if (p.hasSideState) restorePatchSideState (d, p, false);
@@ -4201,6 +4410,7 @@ void Application::undoSteps (int n)
         syncVisibleChannelsToEngine (chBefore);
         syncActiveDoc ();
         d->engine.rebuildMipmaps();   // one rebuild for the whole jump
+        journalHistory (*this, d, "undo", done, {});
     }
 }
 
@@ -4223,6 +4433,7 @@ void Application::redoSteps (int n)
             // rather than keep a corrupt undo/redo chain.
             d->undo.clear ();
             reportHistoryCleared ("Redo");
+            control ().noteClearReason (d->id, "redo failed");
             break;
         }
         if (p.hasSideState) restorePatchSideState (d, p, true);
@@ -4233,6 +4444,7 @@ void Application::redoSteps (int n)
         syncVisibleChannelsToEngine (chBefore);
         syncActiveDoc ();
         d->engine.rebuildMipmaps();
+        journalHistory (*this, d, "redo", done, {});
     }
 }
 

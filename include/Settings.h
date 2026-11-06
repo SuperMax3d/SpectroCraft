@@ -98,6 +98,10 @@ struct Settings
     // the running instance and quits the second one. Checked by default.
     bool allowMultipleInstances = true;
 
+    // AI control (Window > Allow AI control (localhost)), persisted: starts
+    // the loopback control server at launch. Off by default (opt-in).
+    bool controlEnabled = false;
+
     // Track axis placement (View menu), persisted between sessions:
     // the vertical axis can sit on the right and the time ruler at the
     // bottom of both track views instead of their default left/top spots.
@@ -186,6 +190,7 @@ struct Settings
             && fftRefTime == o.fftRefTime && fftSmooth == o.fftSmooth
             && fftTrack == o.fftTrack
             && allowMultipleInstances == o.allowMultipleInstances
+            && controlEnabled == o.controlEnabled
             && trackAxisOnRight == o.trackAxisOnRight
             && trackRulerAtBottom == o.trackRulerAtBottom
             && showAmpGrid == o.showAmpGrid

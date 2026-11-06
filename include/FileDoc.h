@@ -48,6 +48,11 @@ class FileDoc
 public:
     FileDoc();
 
+    /** Stable, process-unique document id (AI control protocol "doc"):
+        never reused, unlike the index in Application::docs, which shifts
+        when a document is closed. */
+    const int id;
+
     juce::String name;                 // display name (file name)
     juce::File file;                   // full path
     AudioEngine engine;                // loaded audio (streaming or in-memory)

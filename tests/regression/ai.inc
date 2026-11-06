@@ -123,6 +123,76 @@ static void testRegAiEnsureInstalledDeletesCorruptFile()
 
     root.deleteRecursively ();
 }
+
+// Application::noiseSuppress (default branch) used to commit the result from
+// the worker thread; it now hops to the message thread like the copyNoise
+// branch. Proof: while the message thread is NOT pumped, a worker whose
+// pipeline already finished must still be waiting, with the undo stack
+// untouched; pumping then lets the commit land. Also replays the action step
+// with device "auto", which used to reach compile_model("auto") unresolved.
+static void testRegAiNoiseSuppressCommitHop()
+{
+#if defined(_MSC_VER) && defined(_DEBUG)
+    scSkip ("ns commit hop: OpenVINO does not initialise under the MSVC debug CRT");
+    return;
+#else
+    auto& mm = sc::ai::ModelManager::instance ();
+    const auto* spec = mm.find ("denseunet");
+    std::string err;
+    if (spec == nullptr || !mm.ensureInstalled (*spec, [] (float, const std::string&) { return true; }, &err))
+    {
+        scSkip ("ns commit hop: denseunet unavailable (" + juce::String (err) + ")");
+        return;
+    }
+
+    const juce::File wav = makeTempFile ("ns_commit_hop.wav");
+    writeWav (wav, 1, 48000.0, 48000, [] (int, int64_t f, double) {
+        uint32_t s = 777u + (uint32_t) f;
+        s = s * 1664525u + 1013904223u;
+        return (float) (0.05 * ((double) (s >> 8) / 16777216.0 - 1.0));
+    });
+    Application app;
+    if (!app.openFile (wav)) { CHECK (false, "ns commit hop: open"); return; }
+    app.selectAll ();
+
+    const size_t undo0 = app.undo ().undoSize ();
+    std::atomic<float> maxProgress { 0.0f };
+    std::atomic<bool> finished { false };
+    bool ok = false;
+    std::string wErr;
+    std::thread worker ([&] {
+        ok = app.noiseSuppress ("denseunet", "CPU", 0.f, false,
+                                [&] (float f) { if (f > maxProgress.load ()) maxProgress.store (f); return true; },
+                                &wErr);
+        finished.store (true);
+    });
+
+    // Wait (without pumping) until the pipeline reported completion.
+    const double deadline = juce::Time::getMillisecondCounterHiRes () + 120000.0;
+    while (!finished.load () && maxProgress.load () < 0.999f
+           && juce::Time::getMillisecondCounterHiRes () < deadline)
+        juce::Thread::sleep (5);
+    juce::Thread::sleep (300);   // time for a worker-side commit to happen, if any
+    const bool finishedWithoutPump = finished.load ();
+    CHECK (!finishedWithoutPump || !ok,
+           "ns commit hop: the worker waits for the message thread to commit");
+    CHECK (app.undo ().undoSize () == undo0,
+           "ns commit hop: nothing committed while the message thread was busy");
+
+    CHECK (scPumpUntil ([&] { return finished.load (); }, 120000), "ns commit hop: worker finished after pumping");
+    worker.join ();
+    CHECK (ok, "ns commit hop: noise suppression succeeded (" + juce::String (wErr) + ")");
+    CHECK (app.undo ().undoSize () == undo0 + 1, "ns commit hop: one undo step committed");
+
+    // Replay as an action step with device "auto" (resolved, not passed raw).
+    sc::ActionStep s;
+    s.type = "noiseSuppress";
+    s.params = sc::makeVarObject ({ { "modelId", "denseunet" }, { "device", "auto" } });
+    err.clear ();
+    CHECK (sc::applyActionStep (app, s, &err), "ns step: device auto is resolved (" + juce::String (err) + ")");
+    CHECK (app.undo ().undoSize () == undo0 + 2, "ns step: one more undo step");
+#endif
+}
 #endif   // SC_ENABLE_AI
 
 static void runRegression_ai()
@@ -132,6 +202,7 @@ static void runRegression_ai()
     testRegAiAcppCommitDownload ();
 #if defined(SC_ENABLE_AI)
     testRegAiEnsureInstalledDeletesCorruptFile ();
+    testRegAiNoiseSuppressCommitHop ();
 #else
     scSkip ("regression ai: ModelManager::ensureInstalled corrupt-file test needs an AI build (SPECTRO_ENABLE_AI)");
 #endif
