@@ -185,3 +185,22 @@ une branche d'abord. Les tests qui utilisent des FIFOs ou un script shell se sau
   `sc_export_spectrogram`, `sc_models`, `sc_devices`) suivent les paramètres des exemples §6.5-§6.6 ;
   quand ces commandes existeront en C++, aligner les noms de paramètres sur leurs `ParamSpec` (une
   différence donne `invalid_params` avec le `path` fautif, rien de silencieux).
+
+## Fusion dans `ai-control` (agent principal, 2026-11-05)
+
+- `ai-control-mcp` fusionnée à `6779c5c` (commit de fusion sur `ai-control`), sans conflit.
+- Collés : section README « Contrôle par IA (Claude Code / MCP) » (en français, comme demandé pour la
+  section, enrichie de `--json`/`--control`/sécurité) et job CI `mcp-tests` (ubuntu-24.04 + macos-15,
+  Python 3.11). `CLAUDE.md` complété : `view.*`/`transport.*` exigent le document actif, jobs sur doc non
+  actif (`activated`), périmètre de chemins.
+- Corrigé : `tools/mcp/smoke.sh` cassait sur un chemin de dépôt contenant des espaces
+  (`SC="$PY $HERE/sc_client.py"` découpé par le shell) → fonction `sc()`.
+- Vérifié sur macOS arm64 avec l'app réelle du lot 1 (Debug + IA) :
+  - `pytest tools/mcp/tests` : **98 passed, 4 skipped** ; avec `SPECTROCRAFT_EXE` = build réel :
+    **102 passed** ;
+  - `tools/mcp/smoke.sh` contre l'app lancée avec `--control` : **smoke OK** (découverte, `app.state`,
+    `doc.open`, `step.run fadeOut`, `history.list`, `history.undo`) ;
+  - bout en bout **MCP stdio** (client `mcp` 1.x ↔ `python -m spectrocraft_mcp` ↔ app réelle,
+    `SPECTROCRAFT_LAUNCH=auto`) : `sc_launch`, `sc_open`, `sc_run_step`, `sc_history`, 61 outils listés
+    dont les dynamiques (`sc_view_*`, `sc_markers_*`), `sc_markers_add`, `sc_undo`,
+    `sc_run app.quit {confirm}` : **OK**.

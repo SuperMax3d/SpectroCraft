@@ -20,7 +20,11 @@ Vocabulaire :
 
 - **docId** : identifiant entier **stable** d'un document (`sc_state`, `doc.list`). Le paramètre `doc` de
   chaque outil accepte un docId ou un chemin absolu ; absent = document actif. Ne jamais utiliser un index
-  de liste. Agir sur un document non actif le rend actif le temps de la commande (`docSwitched:true`).
+  de liste. Agir sur un document non actif le rend actif le temps de la commande (`docSwitched:true`),
+  sauf `view.*` et `transport.*` (ce que montre ou joue la fenêtre) : `invalid_params`, appeler
+  `doc.activate` d'abord. Un job (IA, Python) lancé sur un document non actif le rend actif
+  (`activated:true`). Chemins : absolus, sous le dossier personnel, le dossier des scripts ou le dossier
+  temporaire, sinon `confirm_required {reason:"outside_roots"}`.
 - **select** : plage d'une étape, `"all"` ou `{start, end}` en **secondes**. Sans `select`, la sélection
   courante de l'app est utilisée. `sc_run_step(type, params, start, end, channels)` le construit.
 - **channels** : canaux **0-based** (`[0]` = premier canal). Absent = canaux visibles.
