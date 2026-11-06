@@ -66,7 +66,7 @@ bool parseStep (const juce::var& v, const juce::String& path, sc::ActionStep& ou
                          "unknown step type \"" + out.type + "\"");
         return false;
     }
-    if (!out.params.isVoid() && !out.params.isObject())
+    if (!out.params.isVoid() && !isObj (out.params))
     {
         error = invalid (path + ".params", "object", "step params must be an object");
         return false;
@@ -97,7 +97,7 @@ bool applyScope (Context& ctx, std::optional<std::vector<int>>& restoreChannels,
     const auto sel = ctx.get ("select");
     if (sel.isString())   // "all" (validated)
         app.selectAll();
-    else if (sel.isObject())
+    else if (isObj (sel))
     {
         const double a = (double) sel.getProperty ("start", 0.0);
         const double b = (double) sel.getProperty ("end", 0.0);
@@ -250,7 +250,7 @@ Outcome runSequence (Application& app, const std::vector<sc::ActionStep>& steps,
                                              ej.getProperty ("details", {}));
                 }
                 deviceUsed = juce::String (dr.device);
-                auto pc = s.params.isObject() ? juce::var (s.params.getDynamicObject()->clone().release()) : obj();
+                auto pc = isObj (s.params) ? juce::var (s.params.getDynamicObject()->clone().release()) : obj();
                 set (pc, "device", deviceUsed);
                 step.params = pc;
             }
@@ -382,7 +382,7 @@ bool checkAiSteps (Context& ctx, std::vector<sc::ActionStep>& steps, Outcome& er
         }
         if (s.type == sc::actionTypes::kNoiseSuppress && !s.params.hasProperty ("device"))
         {
-            auto pc = s.params.isObject() ? juce::var (s.params.getDynamicObject()->clone().release()) : obj();
+            auto pc = isObj (s.params) ? juce::var (s.params.getDynamicObject()->clone().release()) : obj();
             set (pc, "device", juce::String (ctx.app.aiDevicePref));
             s.params = pc;
         }

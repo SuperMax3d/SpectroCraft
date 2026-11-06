@@ -91,6 +91,7 @@ set(SC_CONTROL_SOURCES
     ${CMAKE_SOURCE_DIR}/src/control/commands/Ai.cpp
     ${CMAKE_SOURCE_DIR}/src/control/commands/Measure.cpp
     ${CMAKE_SOURCE_DIR}/src/control/commands/Edit.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/commands/Python.cpp
     ${CMAKE_SOURCE_DIR}/src/control/PathPolicy.cpp
     ${CMAKE_SOURCE_DIR}/src/control/ControlServer.cpp)
 

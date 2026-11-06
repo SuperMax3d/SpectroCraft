@@ -769,10 +769,15 @@ public:
     // current selection, or the whole file when nothing is selected.
     // pythonCmd is the interpreter command found by sc::py::findPython
     // (e.g. "python" or "py -3"). The script receives a float32 WAV of the
-    // range plus a metadata JSON and must write back an output WAV with the
-    // same rate/channels/length; the result replaces that range in place and
-    // is undoable. onProgress reports 0..1 (excluding the final mipmap
-    // rebuild) and returning false cancels (killing the child process).
+    // range plus a metadata JSON and writes back an output WAV with the same
+    // rate/channels/length (the result replaces that range in place and is
+    // undoable) and/or a result.json (markers, text, measures, tables: see
+    // sc::py::resultContractText; out.wav is optional when result.json
+    // exists). onProgress reports 0..1 (excluding the final mipmap rebuild)
+    // and returning false cancels (killing the child's process tree). A
+    // sc::py::ScopedScriptRunCapture on the calling thread imposes its
+    // RunOptions (timeout) and receives the run report (SHA-256, exit code,
+    // outputs, result.json).
     bool runPythonScript (const juce::File& script, const juce::String& scriptText,
                           const std::string& pythonCmd,
                           std::function<bool(float)> onProgress = nullptr,

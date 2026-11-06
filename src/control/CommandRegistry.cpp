@@ -38,7 +38,7 @@ juce::var arr (std::initializer_list<juce::var> items)
 juce::var errorVar (const Error& e)
 {
     auto v = obj ({ { "code", e.code }, { "message", e.message } });
-    if (e.details.isObject()) set (v, "details", e.details);
+    if (isObj (e.details)) set (v, "details", e.details);
     return v;
 }
 
@@ -94,7 +94,7 @@ Outcome Outcome::job (const juce::String& jobId)
 
 bool Outcome::isJob() const
 {
-    return ok && result.isObject() && result.hasProperty ("job")
+    return ok && isObj (result) && result.hasProperty ("job")
            && result.getProperty ("state", {}).toString() == "running";
 }
 
@@ -106,7 +106,7 @@ juce::String Outcome::jobId() const
 static bool isNum (const juce::var& v) { return v.isInt() || v.isInt64() || v.isDouble(); }
 
 juce::var Context::get (const char* key) const { return params.getProperty (key, juce::var()); }
-bool Context::has (const char* key) const { return params.isObject() && params.hasProperty (key); }
+bool Context::has (const char* key) const { return isObj (params) && params.hasProperty (key); }
 double Context::num (const char* key, double def) const
 {
     const auto v = get (key);
@@ -277,7 +277,7 @@ static bool checkValue (const ParamSpec& p, const juce::var& v, Error& e, const 
             return true;
         }
         case PType::Object:
-            if (!v.isObject()) return fail (e, path, "object", path + " must be an object");
+            if (!isObj (v)) return fail (e, path, "object", path + " must be an object");
             if (p.properties.empty()) return true;
             return CommandRegistry::validate (p.properties, v, e, path);
         case PType::Range:
@@ -287,7 +287,7 @@ static bool checkValue (const ParamSpec& p, const juce::var& v, Error& e, const 
                 if (v.toString() == "all") return true;
                 return fail (e, path, typeName (p.type), path + " must be \"all\" or {start, end}");
             }
-            if (!v.isObject())
+            if (!isObj (v))
                 return fail (e, path, typeName (p.type), path + " must be \"all\" or {start, end}");
             std::vector<ParamSpec> se { P ("start", PType::Number).req().min (0),
                                         P ("end", PType::Number).req().min (0) };
@@ -305,7 +305,7 @@ static bool checkValue (const ParamSpec& p, const juce::var& v, Error& e, const 
 bool CommandRegistry::validate (const std::vector<ParamSpec>& params, const juce::var& value,
                                 Error& e, const juce::String& prefix)
 {
-    if (!value.isVoid() && !value.isObject())
+    if (!value.isVoid() && !isObj (value))
         return fail (e, prefix.isEmpty() ? "params" : prefix, "object", "params must be an object");
 
     if (auto* o = value.getDynamicObject())
@@ -333,7 +333,7 @@ bool CommandRegistry::validate (const std::vector<ParamSpec>& params, const juce
         }
 
     for (const auto& p : params)
-        if (p.required && !(value.isObject() && value.hasProperty (p.name)))
+        if (p.required && !(isObj (value) && value.hasProperty (p.name)))
             return fail (e, joinPath (prefix, p.name), typeName (p.type),
                          "missing required parameter \"" + joinPath (prefix, p.name) + "\"");
     return true;
@@ -373,7 +373,7 @@ juce::var CommandRegistry::minimalParams (const std::vector<ParamSpec>& params)
 
 bool Request::parse (const juce::var& v, Request& out, Error& e)
 {
-    if (!v.isObject())
+    if (!isObj (v))
         return fail (e, "", "object", "a request must be a JSON object");
     out.id = v.getProperty ("id", juce::var());
     const auto cmd = v.getProperty ("cmd", juce::var());
@@ -381,7 +381,7 @@ bool Request::parse (const juce::var& v, Request& out, Error& e)
         return fail (e, "cmd", "string", "missing \"cmd\"");
     out.cmd = cmd.toString();
     out.params = v.getProperty ("params", juce::var());
-    if (!out.params.isVoid() && !out.params.isObject())
+    if (!out.params.isVoid() && !isObj (out.params))
         return fail (e, "params", "object", "\"params\" must be an object");
     out.doc = v.getProperty ("doc", juce::var());
     if (!out.doc.isVoid() && !isNum (out.doc) && !out.doc.isString())
@@ -415,6 +415,7 @@ CommandRegistry::CommandRegistry()
     registerAiCommands (*this);
     registerMeasureCommands (*this);
     registerEditCommands (*this);
+    registerPythonCommands (*this);
 }
 
 void CommandRegistry::add (Spec s)
@@ -563,7 +564,7 @@ Outcome outcomeOf (const juce::var& r)
 
 juce::var sanitizedParams (const juce::var& params)
 {
-    if (!params.isObject()) return obj();
+    if (!isObj (params)) return obj();
     auto copy = params.getDynamicObject()->clone();
     copy->removeProperty ("token");
     return juce::var (copy.release());
@@ -719,7 +720,7 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
                     if (auto io2 = jobs.outcome (innerId)) o = *io2;
                     else o = Outcome::failure (err::jobNotFound, "inner job " + innerId + " vanished");
                 }
-                if (o.ok && o.result.isObject()) set (o.result, "materialised", true);
+                if (o.ok && isObj (o.result)) set (o.result, "materialised", true);
                 return o;
             });
         out = Outcome::job (id);

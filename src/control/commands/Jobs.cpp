@@ -16,7 +16,7 @@ Outcome getCmd (Context& ctx)
 {
     const auto id = ctx.str ("job");
     const auto inf = ctx.state.jobs.info (id);
-    if (!inf.isObject()) return notFound (id);
+    if (!isObj (inf)) return notFound (id);
     return Outcome::success (inf);
 }
 

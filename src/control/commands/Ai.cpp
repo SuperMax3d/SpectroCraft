@@ -67,7 +67,7 @@ Outcome modelJob (Context& ctx, bool install)
             return fromCatalog (install ? c.install (id, progress) : c.verify (id, progress));
         });
     auto r = Outcome::job (jobId);
-    if (install && plan.result.isObject())
+    if (install && isObj (plan.result))
         set (r.result, "sizeBytes", plan.result.getProperty ("sizeBytes", 0));
     return r;
 }
@@ -110,7 +110,7 @@ Outcome devicesCmd (Context& ctx)
     if (!ctx.flag ("init", false))
     {
         auto r = sc::ai::devicesJson (pref, false);
-        if (r.isObject() && ctx.state.audiocppBackend.isNotEmpty())
+        if (isObj (r) && ctx.state.audiocppBackend.isNotEmpty())
             set (r, "audiocppPreference", ctx.state.audiocppBackend);
         return Outcome::success (r);
     }

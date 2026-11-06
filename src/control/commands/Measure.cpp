@@ -534,7 +534,7 @@ Outcome exportSpectrogramCmd (Context& ctx)
         return Outcome::failure (err::confirmRequired, "Target exists; resend with params.confirm=true",
                                  obj ({ { "path", png.getFullPathName() }, { "hint", "pass confirm:true" } }));
     const auto ov = ctx.get ("overlays");
-    if (ov.isObject())
+    if (isObj (ov))
         for (const char* k : { "axes", "markers", "selections", "drawings" })
             if ((bool) ov.getProperty (k, false))
                 return Outcome::failure (err::needsUi,

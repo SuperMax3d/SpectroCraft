@@ -127,7 +127,7 @@ int runJsonSession (Application& app,
 
         juce::var v;
         const auto parsed = juce::JSON::parse (text, v);
-        if (parsed.failed() || !v.isObject())
+        if (parsed.failed() || !isObj (v))
         {
             writeLine (toLine (lineError ({}, err::invalidParams,
                                           "unreadable JSON: " + (parsed.failed() ? parsed.getErrorMessage()
@@ -165,7 +165,7 @@ int runJsonSession (Application& app,
             io.source = opts.source;
             resp = reg.invoke (app, req, io);
             const auto result = resp.getProperty ("result", {});
-            if ((bool) resp.getProperty ("ok", false) && result.isObject()
+            if ((bool) resp.getProperty ("ok", false) && isObj (result)
                 && result.getProperty ("state", {}).toString() == "running"
                 && result.hasProperty ("job"))
                 resp = waitForJob (app, req, resp, result.getProperty ("job", {}).toString());

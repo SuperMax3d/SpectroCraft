@@ -23,6 +23,8 @@ Généré par `SpectroCraft --list-commands --markdown` (protocole 1, expérimen
 | `ai.noiseSuppress` (alias noiseSuppress) | Mutates, NeedsDoc, LongRunning, AiBuildOnly | `modelId`*, `device`, `attenLimDb`, `df3PostFilter`, `copyNoise`, `autoDownload`, `select`, `channels` | AI noise suppression of a range, as a job (one undo step) |
 | `ai.transcribe` (alias transcribe) | Mutates, NeedsDoc, LongRunning, AiBuildOnly | `modelId`*, `language`, `translate`, `fast`, `autoDownload`, `channels` | Whisper transcription of the document (channels mixed), stored in its metadata; returns the segments |
 | `ai.batchTranscribe` | LongRunning, AiBuildOnly | `folder`*, `modelId`, `language`, `translate`, `fast`, `skipExisting`, `channel`, `autoDownload`, `metaMode`, `confirm` | Transcribe every .wav of a folder tree in place (SCTT chunk / sidecar), as a job |
+| `ai.stems.run` | Mutates, NeedsDoc, LongRunning, WindowsOnly | `mode`, `descriptions`, `model`, `backend`, `extractFromOriginal`, `output`, `select`, `channels` | Stem separation with audio.cpp (Windows), as a job |
+| `ai.superRes.run` | Mutates, NeedsDoc, LongRunning, WindowsOnly | `mode`, `model`, `backend`, `output`, `select`, `channels` | Super resolution with audio.cpp (Windows), as a job |
 
 ## app
 
@@ -147,6 +149,12 @@ Généré par `SpectroCraft --list-commands --markdown` (protocole 1, expérimen
 |---|---|---|---|
 | `meta.setMode` | NeedsDoc, ActiveDocOnly | `mode`* | Metadata storage: embedded RIFF chunks or .meta.json sidecar (migrates on disk) |
 | `meta.save` | NeedsDoc, ActiveDocOnly |  | Write the metadata only (no audio) |
+
+## python
+
+| Commande | Drapeaux | Paramètres | Description |
+|---|---|---|---|
+| `python.run` (alias python) | Mutates, NeedsDoc, LongRunning | `script`*, `timeoutMs`, `addMarkers`, `confirm`, `select`, `channels` | Run a Python script on a range (stdin closed, timeout, SHA-256 journaled, result.json returned) |
 
 ## recent
 

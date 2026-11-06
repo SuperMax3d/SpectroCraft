@@ -68,6 +68,14 @@ std::vector<TypedStep> typedSteps()
 Handler typedHandler (const juce::String& type, std::vector<juce::String> keys)
 {
     return [type, keys] (Context& ctx) {
+        // Generators: refuse a size the machine cannot hold (no silent huge allocation).
+        if (ctx.has ("dur"))
+        {
+            const double bytes = ctx.num ("dur", 0.0) * ctx.app.audioEngine().sampleRate()
+                                 * std::max (1, ctx.app.audioEngine().numChannels()) * 4.0;
+            if (bytes > 4.0 * 1024 * 1024 * 1024)
+                return invalid ("dur", "<= 4 GiB of audio", "generated audio would exceed 4 GiB");
+        }
         sc::ActionStep s;
         s.type = type;
         s.params = obj();
@@ -88,7 +96,7 @@ Handler editHandler (EditFn fn, const char* what)
         std::string e;
         // Explicit range (optional): same "select" as step.run.
         const auto sel = ctx.get ("select");
-        if (sel.isObject())
+        if (isObj (sel))
         {
             const double a = (double) sel.getProperty ("start", 0.0), b = (double) sel.getProperty ("end", 0.0);
             if (b <= a) return invalid ("select.end", "> start", "select is empty");
@@ -120,6 +128,8 @@ Outcome docNewCmd (Context& ctx)
 {
     const int ch = ctx.integer ("channels", 2);
     const double rate = ctx.num ("sampleRate", 48000.0);
+    if (ctx.num ("durationSec", 0.0) * rate * ch * 4.0 > 4.0 * 1024 * 1024 * 1024)
+        return invalid ("durationSec", "<= 4 GiB of audio", "the document would exceed 4 GiB");
     if (!ctx.app.newFile (ch, rate))
         return Outcome::failure (err::failed, "could not create the document");
     FileDoc* d = ctx.app.doc();

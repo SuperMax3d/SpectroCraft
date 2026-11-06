@@ -138,7 +138,7 @@ Outcome docMetaCmd (Context& ctx)
 {
     FileDoc& d = *ctx.doc;
     juce::var bundle = juce::JSON::parse (juce::String::fromUTF8 (d.buildMetaJson().c_str()));
-    if (!bundle.isObject()) bundle = obj();
+    if (!isObj (bundle)) bundle = obj();
     const auto sections = ctx.get ("sections");
     if (sections.isArray() && sections.size() > 0)
     {

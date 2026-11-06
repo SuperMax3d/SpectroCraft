@@ -12,7 +12,7 @@ Journal::~Journal()
 
 juce::int64 Journal::append (const juce::String& kind, juce::var entry)
 {
-    if (!entry.isObject())
+    if (!isObj (entry))
         entry = obj();
     juce::var copy;
     juce::int64 seq = 0;

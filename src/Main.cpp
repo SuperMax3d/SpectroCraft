@@ -221,6 +221,7 @@ public:
                 if (i + 2 >= args.size())
                 {
                     std::cout << "usage: --test-spectral <in.wav> <out.png> [w h t0 t1]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -240,6 +241,7 @@ public:
                 if (!engine.loadFile (in))
                 {
                     std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -261,6 +263,7 @@ public:
                 spectral.renderToPixels (engine, s, w, h, tt0, tt1, allChans, rgba);
                 const bool ok = PngWriter::writePng (out, w, h, rgba);
                 std::cout << (ok ? "wrote " : "failed to write ") << out.getFullPathName() << "\n";
+                setApplicationReturnValue (ok ? 0 : 1);
                 quit();
                 return;
             }
@@ -325,6 +328,7 @@ public:
                     {
                         std::cout << "failed to open " << a.getFullPathName() << "\n";
                         setApplicationReturnValue (1);
+                        setApplicationReturnValue (1);
                         quit();
                         return;
                     }
@@ -378,6 +382,7 @@ public:
                 if (i + 1 >= args.size())
                 {
                     std::cout << "usage: --test-load <in.wav>\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -389,6 +394,7 @@ public:
                 if (!engine.loadFile (in, [&progressCalls] (float) { ++progressCalls; }))
                 {
                     std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;   // ~AudioEngine runs here
                 }
@@ -409,6 +415,7 @@ public:
                 if (i + 2 >= args.size())
                 {
                     std::cout << "usage: --test-noise-suppression <in.wav> <out.wav> [modelId]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -422,6 +429,7 @@ public:
                 if (!engine.loadFile (in))
                 {
                     std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -436,6 +444,7 @@ public:
                     if (!engine.readSamples (c, 0, frames, data[c].data()))
                     {
                         std::cout << "failed to read audio\n";
+                        setApplicationReturnValue (1);
                         quit();
                         return;
                     }
@@ -463,12 +472,14 @@ public:
                 if (!ok)
                 {
                     std::cout << "noise suppression failed: " << err << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
 
                 const bool wrote = writeFloatWav (out, nch, rate, data);
                 std::cout << (wrote ? "wrote " : "failed to write ") << out.getFullPathName() << "\n";
+                setApplicationReturnValue (wrote ? 0 : 1);
                 quit();
                 return;
             }
@@ -479,6 +490,7 @@ public:
                 if (i + 1 >= args.size())
                 {
                     std::cout << "usage: --test-transcribe <in.wav> [modelId] [language] [fast 0|1]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -494,6 +506,7 @@ public:
                 if (!engine.loadFile (in))
                 {
                     std::cout << "failed to open " << in.getFullPathName() << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -524,6 +537,7 @@ public:
                         [&progress] (float f, const std::string&) { return progress (0.15f * f); }, &err))
                 {
                     std::cout << "model install failed: " << err << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -542,6 +556,7 @@ public:
                 if (!ok)
                 {
                     std::cout << "transcription failed: " << err << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -562,6 +577,7 @@ public:
                 if (i + 1 >= args.size())
                 {
                     std::cout << "usage: --test-batch-transcribe <folder> [modelId] [language] [skipExisting 0|1] [fast 0|1] [--translate] [--channel N] [--no-auto-download] [--meta-mode auto|embedded|external]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -627,7 +643,11 @@ public:
                     }
                 }
 
-                Application app;   // no GUI needed for the batch run
+                // No GUI needed for the batch run; an isolated settings store so a
+                // headless run never rewrites the user's SpectroCraft.recent.
+                const juce::File batchStore = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                                  .getChildFile ("SpectroCraft_test_batch_transcribe.recent");
+                Application app (batchStore);
                 BatchTranscribeSummary sum;
                 std::string err;
                 const bool ok = app.batchTranscribeFolder (
@@ -652,6 +672,7 @@ public:
                 if (!ok)
                 {
                     std::cout << "batch transcription failed: " << err << "\n";
+                    setApplicationReturnValue (1);
                     quit();
                     return;
                 }
@@ -662,6 +683,7 @@ public:
                           << "failed: "  << sum.failed  << "\n";
                 for (const auto& f : sum.failures)
                     std::cout << "  - " << f << "\n";
+                setApplicationReturnValue (sum.failed > 0 ? 1 : 0);
                 quit();
                 return;
             }
@@ -677,6 +699,7 @@ public:
                 if (i + 1 >= args.size())
                 {
                     std::cout << "usage: --test-ns-failure-alert <in.wav> [modelId] [\"fake error\"]\n";
+                    setApplicationReturnValue (2);   // usage error
                     quit();
                     return;
                 }
@@ -698,6 +721,7 @@ public:
                     if (!engine.loadFile (in))
                     {
                         std::cout << "failed to open " << in.getFullPathName() << "\n";
+                        setApplicationReturnValue (1);
                         quit();
                         return;
                     }
@@ -711,6 +735,7 @@ public:
                         if (!engine.readSamples (c, 0, frames, data[c].data()))
                         {
                             std::cout << "failed to read audio\n";
+                            setApplicationReturnValue (1);
                             quit();
                             return;
                         }

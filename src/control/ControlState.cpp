@@ -17,6 +17,11 @@ ControlState::ControlState (Application& a) : app (a)
                         { "source", inf.getProperty ("source", {}) } });
         if (inf.hasProperty ("params")) set (e, "params", inf.getProperty ("params", {}));
         if (inf.hasProperty ("doc")) set (e, "doc", (int) inf.getProperty ("doc", -1));
+        // Metadata of the result worth keeping (never text, measures or table values, §5.3).
+        const auto res = inf.getProperty ("result", {});
+        for (const char* k : { "script", "scriptSha256", "interpreter", "exitCode", "timedOut", "audioChanged",
+                               "markerCount", "markersAdded", "segmentCount", "deviceUsed", "modelId", "verified" })
+            if (res.hasProperty (k)) set (e, k, res.getProperty (k, {}));
         if (inf.hasProperty ("error"))
             set (e, "error", inf.getProperty ("error", {}).getProperty ("code", {}));
         journal.append ("job", e);
@@ -35,7 +40,7 @@ static juce::var patchEntry (const FileDoc& d, const Patch& p, const juce::Strin
                     { "ts", isoTime ((juce::int64) p.timestampMs) },
                     { "opId", p.opId }, { "source", p.source }, { "description", p.description },
                     { "undoDepth", (int) d.undo.undoSize() }, { "redoDepth", (int) d.undo.redoSize() } });
-    if (p.params.isObject()) set (e, "params", p.params);
+    if (isObj (p.params)) set (e, "params", p.params);
     return e;
 }
 

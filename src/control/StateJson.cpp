@@ -189,12 +189,12 @@ static juce::var stateOf (const Patch& p, int state, double rate, bool future,
         set (s, "ts", isoTime ((juce::int64) p.timestampMs));
         set (s, "opId", p.opId);
         set (s, "source", p.source);
-        if (p.params.isObject()) set (s, "params", p.params);
+        if (isObj (p.params)) set (s, "params", p.params);
     }
     else if (!future)
     {
         const auto op = findOp (journal, docId, state, p.description);
-        if (op.isObject())
+        if (isObj (op))
         {
             const auto k = op.getProperty ("kind", {}).toString();
             const bool isCmd = k == "command" || k == "job";

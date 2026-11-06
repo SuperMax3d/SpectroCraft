@@ -220,6 +220,9 @@ private:
 };
 
 // ---- JSON helpers --------------------------------------------------------------
+/** True for a JSON object. NOT juce::var::isObject(), which is also true for
+    arrays (and would make getDynamicObject() null: found by the fuzz test). */
+inline bool isObj (const juce::var& v) { return v.getDynamicObject() != nullptr; }
 /** Object builder: obj({{"a", 1}, {"b", "x"}}). */
 juce::var obj (std::initializer_list<std::pair<juce::String, juce::var>> props = {});
 /** Sets a property on an object var (no-op when v is not an object). */
@@ -242,5 +245,6 @@ void registerTransportCommands (CommandRegistry&);
 void registerAiCommands (CommandRegistry&);
 void registerMeasureCommands (CommandRegistry&);
 void registerEditCommands (CommandRegistry&);
+void registerPythonCommands (CommandRegistry&);
 
 } // namespace sc::control

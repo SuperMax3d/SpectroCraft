@@ -53,7 +53,7 @@ static juce::var infoOf (const JobRecord& r)
                     { "progress", r.progress.load() }, { "mutating", r.mutating },
                     { "source", r.source } });
     if (r.docId >= 0) set (v, "doc", r.docId);
-    if (r.params.isObject()) set (v, "params", r.params);
+    if (isObj (r.params)) set (v, "params", r.params);
     if (r.contentVersionBefore >= 0) set (v, "contentVersionBefore", r.contentVersionBefore);
     const double end = r.endMs.load();
     const double now = juce::Time::getMillisecondCounterHiRes();

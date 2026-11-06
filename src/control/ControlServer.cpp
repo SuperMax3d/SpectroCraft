@@ -12,6 +12,7 @@
 #include "Application.h"
 
 #include <deque>
+#include <random>
 
 #if JUCE_WINDOWS
  #ifndef NOMINMAX
@@ -32,6 +33,18 @@
 namespace sc::control {
 
 // ------------------------------------------------------------------ helpers
+
+/** 256-bit token from the OS CSPRNG (std::random_device: /dev/urandom on
+    macOS / Linux, RtlGenRandom on MSVC). juce::Uuid uses juce::Random, which
+    is not meant for secrets. */
+static juce::String makeToken()
+{
+    std::random_device rd;
+    juce::String t;
+    for (int i = 0; i < 8; ++i)
+        t << juce::String::toHexString ((juce::int64) rd()).paddedLeft ('0', 8);
+    return t;
+}
 
 static double nowMs() { return juce::Time::getMillisecondCounterHiRes(); }
 
@@ -310,7 +323,7 @@ private:
             return;
         }
         juce::var v;
-        if (juce::JSON::parse (text, v).failed() || !v.isObject())
+        if (juce::JSON::parse (text, v).failed() || !isObj (v))
         {
             respondError ({}, err::invalidParams, "unreadable JSON",
                           obj ({ { "path", "" }, { "expected", "one JSON object per line" } }));
@@ -347,7 +360,7 @@ private:
             if (client.isEmpty()) client = "client";
             setSubscriptions (req.params.getProperty ("subscribe", {}));
             auto info = dispatch (Request { req.id, "app.hello.internal", {}, {}, 10000 });
-            if (!info.isObject())
+            if (!isObj (info))
                 return;   // dispatch already answered (timeout / shutting down); still unauthenticated
             // Count what the replay will send, answer, THEN authenticate and
             // replay: no event may precede the hello response.
@@ -364,7 +377,7 @@ private:
         if (req.cmd == "session.hello")
         {
             auto info = dispatch (Request { req.id, "app.hello.internal", {}, {}, 10000 });
-            if (info.isObject()) respond (req.id, true, info);   // else: dispatch already answered
+            if (isObj (info)) respond (req.id, true, info);   // else: dispatch already answered
             return;
         }
         if (req.cmd == "events.subscribe")
@@ -478,7 +491,7 @@ ControlServer::ControlServer (Application& a, Options o)
       alive (std::make_shared<std::atomic<bool>> (false))
 {
     if (opts.token.isEmpty())
-        opts.token = juce::Uuid().toString() + juce::Uuid().toString();
+        opts.token = makeToken();
     if (opts.discoveryDir == juce::File())
         opts.discoveryDir = discoveryFolder();
 }
