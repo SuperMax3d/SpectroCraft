@@ -43,11 +43,13 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_CURRENT_SOURCE_DIR}/StemSeparation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SuperResolution.cpp   # audio.cpp super-resolution (FlashSR/AudioSR)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/StemService.cpp      # headless stem separation (audio.cpp CLI, no UI)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/SuperResService.cpp  # headless super resolution (audio.cpp CLI, no UI)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp   # standalone SHA-256 (Python script hashes, model checks)
         ${CMAKE_CURRENT_SOURCE_DIR}/Tables.cpp      # CSV table import/alignment/persistence
         ${CMAKE_CURRENT_SOURCE_DIR}/TablesTrack.cpp # dedicated tables track view
         ${CMAKE_CURRENT_SOURCE_DIR}/Recorder.cpp    # recorder plugin host (Transport > Record)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
-        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp   # pure; also verifies the audio.cpp downloads (AudioCpp.cpp)
         ${CMAKE_SOURCE_DIR}/tests/UnitTests.cpp
         ${SC_CONTROL_SOURCES}                       # AI control: registry, journal, jobs, --json
 )

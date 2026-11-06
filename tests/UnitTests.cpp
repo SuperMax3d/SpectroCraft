@@ -27002,6 +27002,7 @@ static void testActionsPanelPaint()
 #include "regression/ai_commands.inc"   // AI control lot 3: ai.* commands
 #include "regression/measures.inc"
 #include "regression/measure_commands.inc"   // AI control lot 4: measure.* commands
+#include "regression/hardening.inc"   // lot 7: Python bridge + headless stem/SR services
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -27496,6 +27497,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: ai_commands", runRegression_aiCommands);
     SC_RUN_TEST ("regression: measures", runRegression_measures);
     SC_RUN_TEST ("regression: measure_commands", runRegression_measureCommands);
+    SC_RUN_TEST ("regression: hardening", runRegression_hardening);
 
 
     scReportTimings();
