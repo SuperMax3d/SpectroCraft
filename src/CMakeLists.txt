@@ -42,6 +42,9 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_CURRENT_SOURCE_DIR}/StemSeparation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SuperResolution.cpp   # audio.cpp super-resolution (FlashSR/AudioSR)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/StemService.cpp      # headless stem separation (audio.cpp CLI, no UI)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/SuperResService.cpp  # headless super resolution (audio.cpp CLI, no UI)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp   # standalone SHA-256 (Python script hashes, model checks)
         ${CMAKE_CURRENT_SOURCE_DIR}/Tables.cpp      # CSV table import/alignment/persistence
         ${CMAKE_CURRENT_SOURCE_DIR}/TablesTrack.cpp # dedicated tables track view
         ${CMAKE_CURRENT_SOURCE_DIR}/Recorder.cpp    # recorder plugin host (Transport > Record)
@@ -56,7 +59,6 @@ if (TARGET sc_openvino)
     target_sources (SpectroCraft PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/OvRuntime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/ModelManager.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DenseUnetModel.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DeepFilterNetModel.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DeepFilter.cpp

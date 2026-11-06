@@ -3689,11 +3689,14 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
         tmpDir.createDirectory ();
     const juce::String stamp = juce::String ((int64_t) juce::Time::getCurrentTime ().toMilliseconds ())
                               + "_" + juce::String ((size_t) this);
-    const juce::File inWav  = tmpDir.getChildFile ("in_"   + stamp + ".wav");
-    const juce::File outWav = tmpDir.getChildFile ("out_"  + stamp + ".wav");
-    const juce::File metaJ  = tmpDir.getChildFile ("meta_" + stamp + ".json");
+    // in / out / meta / result.json (the last two outputs are each optional).
+    const sc::py::ScriptExchange ex = sc::py::makeExchange (tmpDir, stamp,
+                                                            (double) samples.getStart () / rate);
+    const juce::File& inWav  = ex.inWav;
+    const juce::File& outWav = ex.outWav;
+    const juce::File& metaJ  = ex.metaJson;
 
-    auto cleanup = [&] { inWav.deleteFile (); outWav.deleteFile (); metaJ.deleteFile (); };
+    auto cleanup = [&ex] { ex.cleanup (); };
 
     if (!sc::py::writeFloatWav (inWav, data, rate))
     {
@@ -3703,7 +3706,7 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
     metaJ.replaceWithText (sc::py::buildMetaJson (rate, nch, audioEngine ().duration (),
                                                   selSecs, wholeFile,
                                                   audioEngine ().getFile ().getFileName (),
-                                                  d->markers.markers ()));
+                                                  d->markers.markers (), &ex));
 
     if (!prog (0.3f)) { cleanup (); return false; }   // cancelled - silent
 
@@ -3716,36 +3719,66 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
         return fail ("No Python interpreter command was provided.");
     }
 
-    juce::StringArray scriptArgs;
-    for (int i = 1; i < cmdTokens.size (); ++i)   // extra flags, e.g. "-3"
-        scriptArgs.add (cmdTokens[i]);
-    scriptArgs.add (script.getFullPathName ());
-    scriptArgs.add (inWav.getFullPathName ());
-    scriptArgs.add (outWav.getFullPathName ());
-    scriptArgs.add (metaJ.getFullPathName ());
+    // A control-API caller (python.run) wraps this call in a
+    // ScopedScriptRunCapture: its options (timeout) apply and it receives the
+    // run report (script SHA-256, exit code, output, result.json). The GUI
+    // runs without one: no time limit, the user cancels.
+    auto* capture = sc::py::ScopedScriptRunCapture::current ();
+    const sc::py::RunOptions runOpts = capture != nullptr ? capture->options () : sc::py::RunOptions {};
 
     bool cancelled = false;
-    int rc = -1;
-    juce::String out, errText;
-    const bool started = sc::py::runProcess (cmdTokens[0].toStdString (), scriptArgs,
-        [&cancelled, prog] { if (!prog (0.5f)) { cancelled = true; return false; } return true; },
-        &rc, &out, &errText);
+    sc::py::ScriptRunReport rep = sc::py::runScript (pythonCmd, script, ex, runOpts,
+        [&cancelled, prog] { if (!prog (0.5f)) { cancelled = true; return false; } return true; });
+    if (capture != nullptr)
+        capture->setReport (rep);
+    const int rc = rep.process.exitCode;
+    const juce::String& out = rep.process.stdoutText;
+    const juce::String& errText = rep.process.stderrText;
 
-    if (!started || cancelled)
+    if (!rep.process.started || cancelled || rep.process.cancelled)
     {
         cleanup ();
-        if (cancelled) return false;   // user cancel is not a failure - silent
+        if (cancelled || rep.process.cancelled) return false;   // user cancel is not a failure - silent
         return fail ("Could not start the Python interpreter.");
     }
 
-    if (rc != 0 || !outWav.existsAsFile ())
+    auto withTail = [&out, &errText] (juce::String msg)
     {
-        cleanup ();
-        juce::String msg = "Python exited with code " + juce::String (rc);
         const juce::String tail = errText.trim ().isNotEmpty () ? errText.trim () : out.trim ();
         if (tail.isNotEmpty ())
             msg += "\n" + tail.substring (std::max (0, tail.length () - 2000));
-        return fail (msg);
+        return msg;
+    };
+
+    if (rep.process.timedOut)
+    {
+        cleanup ();
+        return fail (withTail ("The script was stopped after its "
+                               + juce::String (runOpts.timeoutMs / 1000.0, 1)
+                               + " s time limit. Nothing was changed."));
+    }
+
+    if (rc != 0)
+    {
+        cleanup ();
+        return fail (withTail ("Python exited with code " + juce::String (rc)));
+    }
+
+    if (rep.result.error.isNotEmpty ())
+    {
+        cleanup ();
+        return fail ("The script's result.json is invalid: " + rep.result.error
+                     + ". Nothing was changed.");
+    }
+
+    // out.wav is optional when the script returned a result.json (analysis
+    // scripts: markers / text / measures only, the audio stays untouched).
+    if (!outWav.existsAsFile ())
+    {
+        cleanup ();
+        if (rep.result.present)
+            return true;
+        return fail (withTail ("Python exited with code 0 but wrote neither the output WAV nor result.json."));
     }
 
     // Read the script's output back and validate it.
@@ -3893,6 +3926,8 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
         return fail (err);
     }
 
+    if (capture != nullptr)
+        capture->report ().audioChanged = true;
     cleanup ();
     return true;
 }

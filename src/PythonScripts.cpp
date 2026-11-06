@@ -1,16 +1,31 @@
 // SpectroCraft - Python script panel support.
 #include "PythonScripts.h"
 #include "MarkerManager.h"
+#include "AI/Sha256.h"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <string>
+#include <vector>
 
 #if JUCE_WINDOWS
 #  include <windows.h>
 #else
 #  include <unistd.h>
+#  include <fcntl.h>
+#  include <sys/stat.h>
 #  include <sys/wait.h>
 #  include <signal.h>
 #  include <poll.h>
 #  include <cerrno>
+#  include <climits>
+#  include <cstdlib>
 #  include <cstring>
+#  if defined(__linux__)
+#    include <sys/prctl.h>
+#  endif
+extern char** environ;
 #endif
 
 namespace sc { namespace py {
@@ -262,20 +277,37 @@ static juce::String newScriptTemplateText ()
 # Called as:  python <this file> <input.wav> <output.wav> <meta.json>
 #   input.wav  - float32 WAV of the selected range (or whole file), all channels
 #   meta.json  - sample rate, channel count, selection times, markers, ...
-# You must write output.wav with the SAME sample rate, channel count and length.
+# To change the audio, write output.wav with the SAME sample rate and channel
+# count (the length may differ).
+#
+# Optional structured result: write a JSON object to meta["resultJson"]
+# (output.wav then becomes optional - an analysis script may write only this):
+#   {"version": 1,
+#    "timeBase": "input",       # "input": seconds from the start of input.wav
+#                               # "document": seconds from the start of the file
+#    "markers": [{"time": 1.5, "end": 2.0, "label": "peak"}],   # end optional
+#    "text": "free text shown to the caller",
+#    "measures": {"rms_db": -12.3},                             # any JSON object
+#    "tables": [{"name": "bands", "columns": ["f", "dB"], "rows": [[1000, -3.1]]}]}
 
-import sys
+import json, sys
 
 )PY") + kWavIo + R"PY(
 
 
 def main():
     in_path, out_path, meta_path = sys.argv[1:4]
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
     rate, nch, x = read_wav(in_path)
 
     # TODO: process the samples here (x is a channel-interleaved float32 array)
 
     write_wav(out_path, rate, nch, x)
+
+    # Optional: return markers / text / measures as well.
+    # with open(meta["resultJson"], "w", encoding="utf-8") as f:
+    #     json.dump({"version": 1, "text": "done"}, f)
 
 
 main()
@@ -591,7 +623,8 @@ juce::StringArray splitCommand (const std::string& cmd)
 juce::String buildMetaJson (double sampleRate, int numChannels, double fileDurationSec,
                             juce::Range<double> selectionSecs, bool wholeFile,
                             const juce::String& fileName,
-                            const std::vector<Marker>& markers)
+                            const std::vector<Marker>& markers,
+                            const ScriptExchange* exchange)
 {
     auto root = new juce::DynamicObject ();
     root->setProperty ("sampleRate",        (juce::int64) sampleRate);
@@ -617,7 +650,317 @@ juce::String buildMetaJson (double sampleRate, int numChannels, double fileDurat
     }
     root->setProperty ("markers", juce::var (markerArray));
 
+    if (exchange != nullptr)
+    {
+        root->setProperty ("inputWav",       exchange->inWav.getFullPathName ());
+        root->setProperty ("outputWav",      exchange->outWav.getFullPathName ());
+        root->setProperty ("resultJson",     exchange->resultJson.getFullPathName ());
+        root->setProperty ("resultContract", resultContract ());
+    }
+
     return juce::JSON::toString (juce::var (root), true);
+}
+
+// ============================================================================
+// Exchange files
+// ============================================================================
+
+void ScriptExchange::cleanup() const
+{
+    inWav.deleteFile ();
+    outWav.deleteFile ();
+    metaJson.deleteFile ();
+    resultJson.deleteFile ();
+}
+
+ScriptExchange makeExchange (const juce::File& dir, const juce::String& stamp, double inputStartSec)
+{
+    if (!dir.exists ())
+        dir.createDirectory ();
+    ScriptExchange ex;
+    ex.inWav      = dir.getChildFile ("in_"     + stamp + ".wav");
+    ex.outWav     = dir.getChildFile ("out_"    + stamp + ".wav");
+    ex.metaJson   = dir.getChildFile ("meta_"   + stamp + ".json");
+    ex.resultJson = dir.getChildFile ("result_" + stamp + ".json");
+    ex.inputStartSec = inputStartSec;
+    ex.cleanup ();   // a stale file must never pass for this run's output
+    return ex;
+}
+
+// ============================================================================
+// result.json contract (version 1)
+// ============================================================================
+
+juce::var resultContract()
+{
+    auto c = new juce::DynamicObject ();
+    c->setProperty ("version", 1);
+    c->setProperty ("file", "Optional. Write one JSON object (UTF-8) to the path in \"resultJson\". "
+                            "When it is written, outputWav becomes optional.");
+    c->setProperty ("timeBase", "\"input\" (default: seconds from the start of inputWav) or "
+                                "\"document\" (seconds from the start of the file).");
+    c->setProperty ("markers", "[{\"time\": seconds, \"end\": seconds (optional, >= time; "
+                               "omit, null or -1 for a point), \"label\": string (optional)}]");
+    c->setProperty ("text", "string (optional)");
+    c->setProperty ("measures", "object (optional, free-form)");
+    c->setProperty ("tables", "[{\"name\": string (optional), \"columns\": [string], "
+                              "\"rows\": [[value per column]]}] (optional)");
+    return juce::var (c);
+}
+
+const char* resultContractText()
+{
+    return R"TXT(Script result contract (result.json, version 1)
+
+A script is called as:  python <script> <input.wav> <output.wav> <meta.json>
+
+- output.wav (optional): float32 WAV with the input's sample rate and channel
+  count; it replaces the processed range (its length may differ).
+- result.json (optional): a JSON object written to meta["resultJson"]:
+    {
+      "version": 1,
+      "timeBase": "input",        // or "document"; "input" = seconds from the
+                                  // start of input.wav (meta["selectionStartSec"]
+                                  // in document time)
+      "markers": [ {"time": 1.25, "end": 2.0, "label": "climb"},
+                   {"time": 3.5, "label": "click"} ],    // end optional
+      "text": "Peak level -3.1 dBFS at 1.25 s",
+      "measures": { "rms_db": -18.2, "peak_db": -3.1 },  // any JSON object
+      "tables": [ {"name": "bands", "columns": ["Hz", "dB"],
+                   "rows": [[1000, -20.5], [2000, -22.0]]} ]
+    }
+  Every field is optional; unknown fields are ignored. A script may write
+  result.json without output.wav (analysis only). An invalid result.json
+  fails the run and leaves the document unchanged.
+- The script must exit with code 0. stdin is empty (EOF); stdout/stderr are
+  captured as UTF-8.)TXT";
+}
+
+namespace {
+
+bool isNumber (const juce::var& v)
+{
+    return v.isInt () || v.isInt64 () || v.isDouble ();
+}
+
+} // namespace
+
+ScriptResult parseScriptResult (const juce::String& json, double inputStartSec)
+{
+    auto invalid = [] (const juce::String& msg)
+    {
+        ScriptResult e;
+        e.present = true;
+        e.error = msg;
+        return e;
+    };
+
+    juce::var v;
+    const juce::Result parsed = juce::JSON::parse (json, v);
+    if (parsed.failed ())
+        return invalid ("not valid JSON (" + parsed.getErrorMessage () + ")");
+    auto* obj = v.getDynamicObject ();
+    if (obj == nullptr || v.isArray ())
+        return invalid ("the top level must be a JSON object");
+
+    ScriptResult r;
+    r.present = true;
+    r.raw = v;
+
+    if (obj->hasProperty ("version"))
+    {
+        const juce::var ver = obj->getProperty ("version");
+        if (!isNumber (ver) || (double) ver != 1.0)
+            return invalid ("unsupported version " + ver.toString () + " (expected 1)");
+    }
+
+    if (obj->hasProperty ("timeBase"))
+    {
+        const juce::var tb = obj->getProperty ("timeBase");
+        if (!tb.isString () || (tb.toString () != "input" && tb.toString () != "document"))
+            return invalid ("\"timeBase\" must be \"input\" or \"document\"");
+        r.timeBase = tb.toString ();
+    }
+    const double offset = r.timeBase == "input" ? inputStartSec : 0.0;
+
+    if (obj->hasProperty ("markers"))
+    {
+        const juce::var ms = obj->getProperty ("markers");
+        if (!ms.isArray ())
+            return invalid ("\"markers\" must be an array");
+        if (ms.size () > 100000)
+            return invalid ("too many markers (" + juce::String (ms.size ()) + ", at most 100000)");
+        for (int i = 0; i < ms.size (); ++i)
+        {
+            const juce::var m = ms[i];
+            const juce::String where = "markers[" + juce::String (i) + "]";
+            if (m.getDynamicObject () == nullptr || m.isArray ())
+                return invalid (where + " must be an object");
+            const juce::var t = m.getProperty ("time", juce::var ());
+            if (!isNumber (t) || !std::isfinite ((double) t) || (double) t < 0.0)
+                return invalid (where + ".time must be a finite number >= 0");
+            ScriptMarker sm;
+            sm.time = (double) t;
+            const juce::var e = m.getProperty ("end", juce::var ());
+            if (!e.isVoid () && !e.isUndefined ())
+            {
+                if (!isNumber (e) || !std::isfinite ((double) e))
+                    return invalid (where + ".end must be a finite number");
+                const double ev = (double) e;
+                if (ev >= 0.0 && ev < sm.time)
+                    return invalid (where + ".end is before its time");
+                sm.end = ev >= 0.0 ? ev : -1.0;   // negative (e.g. -1) = point marker
+            }
+            const juce::var l = m.getProperty ("label", juce::var ());
+            if (!l.isVoid () && !l.isUndefined ())
+            {
+                if (!l.isString ())
+                    return invalid (where + ".label must be a string");
+                sm.label = l.toString ();
+            }
+            sm.docTime = sm.time + offset;
+            sm.docEnd  = sm.end >= 0.0 ? sm.end + offset : -1.0;
+            r.markers.push_back (sm);
+        }
+    }
+
+    if (obj->hasProperty ("text"))
+    {
+        const juce::var t = obj->getProperty ("text");
+        if (!t.isString ())
+            return invalid ("\"text\" must be a string");
+        r.text = t.toString ();
+    }
+
+    if (obj->hasProperty ("measures"))
+    {
+        const juce::var ms = obj->getProperty ("measures");
+        if (ms.getDynamicObject () == nullptr || ms.isArray ())
+            return invalid ("\"measures\" must be an object");
+        r.measures = ms;
+    }
+
+    if (obj->hasProperty ("tables"))
+    {
+        const juce::var ts = obj->getProperty ("tables");
+        if (!ts.isArray ())
+            return invalid ("\"tables\" must be an array");
+        for (int i = 0; i < ts.size (); ++i)
+        {
+            const juce::var t = ts[i];
+            const juce::String where = "tables[" + juce::String (i) + "]";
+            if (t.getDynamicObject () == nullptr || t.isArray ())
+                return invalid (where + " must be an object");
+            ScriptTable st;
+            const juce::var name = t.getProperty ("name", juce::var ());
+            if (!name.isVoid () && !name.isUndefined ())
+            {
+                if (!name.isString ())
+                    return invalid (where + ".name must be a string");
+                st.name = name.toString ();
+            }
+            const juce::var cols = t.getProperty ("columns", juce::var ());
+            if (!cols.isArray () || cols.size () == 0)
+                return invalid (where + ".columns must be a non-empty array of strings");
+            for (int c = 0; c < cols.size (); ++c)
+            {
+                if (!cols[c].isString ())
+                    return invalid (where + ".columns must be a non-empty array of strings");
+                st.columns.add (cols[c].toString ());
+            }
+            const juce::var rows = t.getProperty ("rows", juce::var ());
+            if (!rows.isVoid () && !rows.isUndefined ())
+            {
+                if (!rows.isArray ())
+                    return invalid (where + ".rows must be an array of arrays");
+                for (int ri = 0; ri < rows.size (); ++ri)
+                {
+                    if (!rows[ri].isArray () || rows[ri].size () != st.columns.size ())
+                        return invalid (where + ".rows[" + juce::String (ri) + "] must be an array of "
+                                        + juce::String (st.columns.size ()) + " values");
+                    st.rows.add (rows[ri]);
+                }
+            }
+            r.tables.push_back (std::move (st));
+        }
+    }
+
+    return r;
+}
+
+ScriptResult readScriptResult (const juce::File& file, double inputStartSec)
+{
+    if (!file.existsAsFile ())
+        return {};
+    if (file.getSize () > (int64_t) 16 * 1024 * 1024)
+    {
+        ScriptResult e;
+        e.present = true;
+        e.error = "larger than 16 MiB";
+        return e;
+    }
+    return parseScriptResult (file.loadFileAsString (), inputStartSec);
+}
+
+// ============================================================================
+// Script identity and location
+// ============================================================================
+
+juce::String scriptSha256 (const juce::File& script)
+{
+    juce::MemoryBlock mb;
+    if (!script.existsAsFile () || !script.loadFileAsData (mb))
+        return {};
+    return juce::String (sc::ai::sha256Hex (mb.getData (), mb.getSize ()));
+}
+
+// The file a path finally designates, symbolic links (and, on Windows,
+// junctions) resolved; the input itself when it cannot be resolved.
+static juce::File resolveLinks (const juce::File& f)
+{
+#if JUCE_WINDOWS
+    HANDLE h = CreateFileW (f.getFullPathName ().toWideCharPointer (), 0,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return f;
+    std::vector<wchar_t> buf (32768);
+    const DWORD n = GetFinalPathNameByHandleW (h, buf.data (), (DWORD) buf.size (),
+                                               FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle (h);
+    if (n == 0 || n >= (DWORD) buf.size ())
+        return f;
+    std::wstring s (buf.data (), n);
+    if (s.rfind (L"\\\\?\\UNC\\", 0) == 0)  s = L"\\\\" + s.substr (8);
+    else if (s.rfind (L"\\\\?\\", 0) == 0)  s = s.substr (4);
+    return juce::File (juce::String (s.c_str ()));
+#else
+    char buf[PATH_MAX];
+    if (realpath (f.getFullPathName ().toRawUTF8 (), buf) == nullptr)
+        return f;
+    return juce::File (juce::String::fromUTF8 (buf));
+#endif
+}
+
+bool isUnderScriptFolder (const juce::File& script, juce::String* reasonOut, const juce::File& folder)
+{
+    auto refuse = [reasonOut] (const char* reason)
+    {
+        if (reasonOut != nullptr) *reasonOut = reason;
+        return false;
+    };
+    if (reasonOut != nullptr) reasonOut->clear ();
+
+    if (!script.existsAsFile ())
+        return refuse ("not_found");
+    if (!script.hasFileExtension ("py"))
+        return refuse ("not_python");
+
+    const juce::File real    = resolveLinks (script);
+    const juce::File realDir = resolveLinks (folder);
+    if (!folder.isDirectory () || !real.isAChildOf (realDir))
+        return refuse ("outside_script_folder");
+    return true;
 }
 
 // ============================================================================
@@ -690,6 +1033,38 @@ bool readFloatWav (const juce::File& file, double* rateOut, int* nchOut,
 // Process launching
 // ============================================================================
 
+juce::String decodeProcessOutput (const char* data, size_t size)
+{
+    if (data == nullptr || size == 0)
+        return {};
+    const bool fitsInt = size <= (size_t) (std::numeric_limits<int>::max) ();
+    if (fitsInt && juce::CharPointer_UTF8::isValidString (data, (int) size))
+        return juce::String::fromUTF8 (data, (int) size);
+
+#if JUCE_WINDOWS
+    // Not UTF-8: a child that ignored PYTHONIOENCODING (or is not Python)
+    // wrote in the ANSI code page.
+    if (fitsInt)
+    {
+        const int n = MultiByteToWideChar (CP_ACP, 0, data, (int) size, nullptr, 0);
+        if (n > 0)
+        {
+            std::wstring w ((size_t) n, L'\0');
+            MultiByteToWideChar (CP_ACP, 0, data, (int) size, w.data (), n);
+            return juce::String (w.c_str ());
+        }
+    }
+#endif
+    // Latin-1: every byte maps to one code point, nothing is lost.
+    std::vector<juce::juce_wchar> u32 (size + 1, 0);
+    for (size_t i = 0; i < size; ++i)
+    {
+        const auto b = (unsigned char) data[i];
+        u32[i] = b == 0 ? (juce::juce_wchar) 0xFFFD : (juce::juce_wchar) b;
+    }
+    return juce::String (juce::CharPointer_UTF32 (u32.data ()));
+}
+
 #if JUCE_WINDOWS
 
 static std::wstring toWide (const juce::String& s)
@@ -697,33 +1072,94 @@ static std::wstring toWide (const juce::String& s)
     return std::wstring (s.toWideCharPointer ());
 }
 
-// MSVCRT-style quoting: wrap in quotes when the argument contains whitespace,
-// and double any embedded quotes.
+// Quoting that CommandLineToArgvW / the MSVC CRT (and so Python) undo
+// exactly: wrap in quotes when needed, double the backslashes that precede a
+// quote or the closing quote, escape embedded quotes.
 static std::wstring quoteArg (const juce::String& a)
 {
     const std::wstring w = toWide (a);
-    bool needsQuotes = false;
-    for (wchar_t c : w)
-        if (c == L' ' || c == L'\t' || c == L'"') { needsQuotes = true; break; }
-    if (!w.empty () && !needsQuotes) return w;
+    if (!w.empty () && w.find_first_of (L" \t\n\v\"") == std::wstring::npos)
+        return w;
     std::wstring q = L"\"";
-    for (wchar_t c : w)
+    for (size_t i = 0; ; ++i)
     {
-        if (c == L'"') q += L"\"\"";
-        else           q += c;
+        size_t nBack = 0;
+        while (i < w.size () && w[i] == L'\\') { ++i; ++nBack; }
+        if (i == w.size ())
+        {
+            q.append (nBack * 2, L'\\');
+            break;
+        }
+        if (w[i] == L'"')
+        {
+            q.append (nBack * 2 + 1, L'\\');
+            q += L'"';
+        }
+        else
+        {
+            q.append (nBack, L'\\');
+            q += w[i];
+        }
     }
-    q += L'\"';
+    q += L'"';
     return q;
 }
 
-bool runProcess (const std::string& cmd, const juce::StringArray& args,
-                 const std::function<bool ()>& shouldContinue,
-                 int* exitCodeOut, juce::String* outStdout, juce::String* outStderr)
+// The current environment as a CreateProcessW block (UTF-16, sorted by name
+// case-insensitively, double-NUL terminated), with the Python UTF-8 variables
+// forced when asked.
+static std::vector<wchar_t> buildEnvironmentBlock (bool pythonUtf8)
 {
-    // Build the command line: "exe" arg1 arg2 ...
-    juce::String cmdLine (quoteArg (juce::String (cmd)).c_str ());
+    std::vector<std::wstring> vars;
+    if (LPWCH env = GetEnvironmentStringsW ())
+    {
+        for (const wchar_t* p = env; *p != 0; p += wcslen (p) + 1)
+            vars.emplace_back (p);
+        FreeEnvironmentStringsW (env);
+    }
+    // Names may start with '=' (per-drive current directories: "=C:=C:\x").
+    auto nameOf = [] (const std::wstring& v) { return v.substr (0, v.find (L'=', 1)); };
+    auto sameName = [] (const std::wstring& a, const wchar_t* b)
+    {
+        return CompareStringOrdinal (a.c_str (), (int) a.size (), b, -1, TRUE) == CSTR_EQUAL;
+    };
+    if (pythonUtf8)
+    {
+        vars.erase (std::remove_if (vars.begin (), vars.end (), [&] (const std::wstring& v) {
+                        const std::wstring n = nameOf (v);
+                        return sameName (n, L"PYTHONUTF8") || sameName (n, L"PYTHONIOENCODING");
+                    }), vars.end ());
+        vars.emplace_back (L"PYTHONUTF8=1");
+        vars.emplace_back (L"PYTHONIOENCODING=utf-8");
+    }
+    std::stable_sort (vars.begin (), vars.end (), [&] (const std::wstring& a, const std::wstring& b) {
+        const std::wstring na = nameOf (a), nb = nameOf (b);
+        return CompareStringOrdinal (na.c_str (), (int) na.size (), nb.c_str (), (int) nb.size (), TRUE)
+               == CSTR_LESS_THAN;
+    });
+
+    std::vector<wchar_t> block;
+    for (const auto& v : vars)
+    {
+        block.insert (block.end (), v.begin (), v.end ());
+        block.push_back (0);
+    }
+    if (block.empty ())
+        block.push_back (0);
+    block.push_back (0);
+    return block;
+}
+
+ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& args,
+                            const RunOptions& options, const std::function<bool ()>& shouldContinue)
+{
+    ProcessResult res;
+    const double t0 = juce::Time::getMillisecondCounterHiRes ();
+
+    // Build the command line: "exe" arg1 arg2 ... (cmd is UTF-8).
+    std::wstring cmdLine = quoteArg (juce::String::fromUTF8 (cmd.c_str ()));
     for (const auto& a : args)
-        cmdLine << ' ' << juce::String (quoteArg (a).c_str ());
+        cmdLine += L' ' + quoteArg (a);
 
     SECURITY_ATTRIBUTES sa;
     sa.nLength = sizeof (sa);
@@ -733,35 +1169,65 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
     HANDLE outR = INVALID_HANDLE_VALUE, outW = INVALID_HANDLE_VALUE;
     HANDLE errR = INVALID_HANDLE_VALUE, errW = INVALID_HANDLE_VALUE;
     if (!CreatePipe (&outR, &outW, &sa, 1 << 16))
-        return false;
+        return res;
     if (!CreatePipe (&errR, &errW, &sa, 1 << 16))
     {
         CloseHandle (outR);
         CloseHandle (outW);
-        return false;
+        return res;
     }
     // Only the write ends belong to the child; our read ends must not be inherited.
     SetHandleInformation (outR, HANDLE_FLAG_INHERIT, 0);
     SetHandleInformation (errR, HANDLE_FLAG_INHERIT, 0);
+
+    // stdin = NUL: a script reading stdin gets EOF at once instead of
+    // blocking on (or consuming) whatever stdin SpectroCraft itself has.
+    HANDLE nulIn = CreateFileW (L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                                OPEN_EXISTING, 0, nullptr);
 
     STARTUPINFOW si {};
     si.cb = sizeof (si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = outW;
     si.hStdError  = errW;
-    si.hStdInput  = GetStdHandle (STD_INPUT_HANDLE);
+    si.hStdInput  = nulIn != INVALID_HANDLE_VALUE ? nulIn : nullptr;
 
+    // A job object holds the child and everything it starts, so a timeout or
+    // a cancel kills the whole tree (TerminateProcess alone would orphan
+    // e.g. the python.exe that the "py" launcher starts).
+    HANDLE job = CreateJobObjectW (nullptr, nullptr);
+    if (job != nullptr && options.killTreeOnExit)
+    {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li {};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject (job, JobObjectExtendedLimitInformation, &li, sizeof (li));
+    }
+
+    std::vector<wchar_t> envBlock = buildEnvironmentBlock (options.pythonUtf8);
+
+    // CREATE_SUSPENDED: the child joins the job before it can start anything.
+    // CREATE_NO_WINDOW: python.exe is a console program; without it Windows
+    // flashes a console window over the GUI for every run (output goes
+    // through the pipes anyway).
     PROCESS_INFORMATION pi {};
-    const BOOL created = CreateProcessW (nullptr, toWide (cmdLine).data (), nullptr, nullptr,
-                                         TRUE, 0, nullptr, nullptr, &si, &pi);
+    const BOOL created = CreateProcessW (nullptr, cmdLine.data (), nullptr, nullptr, TRUE,
+                                         CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                                         envBlock.data (), nullptr, &si, &pi);
     CloseHandle (outW);
     CloseHandle (errW);
+    if (nulIn != INVALID_HANDLE_VALUE)
+        CloseHandle (nulIn);
     if (!created)
     {
         CloseHandle (outR);
         CloseHandle (errR);
-        return false;   // executable not found / failed to start
+        if (job != nullptr) CloseHandle (job);
+        res.elapsedMs = juce::Time::getMillisecondCounterHiRes () - t0;
+        return res;   // executable not found / failed to start
     }
+    res.started = true;
+    const bool inJob = job != nullptr && AssignProcessToJobObject (job, pi.hProcess) != FALSE;
+    ResumeThread (pi.hThread);
 
     // The pipes are drained while the child runs: a child that writes more
     // than the pipe buffer would otherwise block forever on a full pipe while
@@ -785,7 +1251,13 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
         }
     };
 
-    int rc = -1;
+    auto killTree = [&]
+    {
+        if (inJob) TerminateJobObject (job, 1);
+        else       TerminateProcess (pi.hProcess, 1);
+        WaitForSingleObject (pi.hProcess, 5000);
+    };
+
     bool killed = false;
     uint32_t lastPoll = juce::Time::getMillisecondCounter ();
     for (;;)
@@ -794,78 +1266,201 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
         drain (outR, outBytes);
         drain (errR, errBytes);
         if (w == WAIT_OBJECT_0) break;
+        if (options.timeoutMs > 0
+            && juce::Time::getMillisecondCounterHiRes () - t0 >= (double) options.timeoutMs)
+        {
+            res.timedOut = true;
+            killed = true;
+            killTree ();
+            break;
+        }
         const uint32_t now = juce::Time::getMillisecondCounter ();
         if (now - lastPoll < 200) continue;
         lastPoll = now;
         if (shouldContinue != nullptr && !shouldContinue ())
         {
-            TerminateProcess (pi.hProcess, 1);
+            res.cancelled = true;
             killed = true;
-            WaitForSingleObject (pi.hProcess, 5000);
+            killTree ();
             break;
         }
     }
 
+    DWORD rc = (DWORD) -1;
     if (!killed)
-        GetExitCodeProcess (pi.hProcess, (DWORD*) &rc);
+        GetExitCodeProcess (pi.hProcess, &rc);
+    res.exitCode = killed ? -1 : (int) rc;
 
     // Whatever the child wrote just before exiting is still in the pipes.
     drain (outR, outBytes);
     drain (errR, errBytes);
-    if (outStdout != nullptr) *outStdout += juce::String::fromUTF8 (outBytes.data (), (int) outBytes.size ());
-    if (outStderr != nullptr) *outStderr += juce::String::fromUTF8 (errBytes.data (), (int) errBytes.size ());
+    res.stdoutText = decodeProcessOutput (outBytes.data (), outBytes.size ());
+    res.stderrText = decodeProcessOutput (errBytes.data (), errBytes.size ());
 
     CloseHandle (outR);
     CloseHandle (errR);
     CloseHandle (pi.hProcess);
     CloseHandle (pi.hThread);
+    // With JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE this also ends any grandchild
+    // still running.
+    if (job != nullptr)
+        CloseHandle (job);
 
-    if (exitCodeOut != nullptr) *exitCodeOut = rc;
-    return !killed;
+    res.elapsedMs = juce::Time::getMillisecondCounterHiRes () - t0;
+    return res;
 }
 
 #else   // POSIX
 
-bool runProcess (const std::string& cmd, const juce::StringArray& args,
-                 const std::function<bool ()>& shouldContinue,
-                 int* exitCodeOut, juce::String* outStdout, juce::String* outStderr)
+// PATH lookup done before fork(): execvp is not async-signal-safe, and the
+// child needs a custom environment (execve).
+static std::string resolveExecutable (const std::string& cmd)
 {
-    int outp[2] = { -1, -1 };
-    int errp[2] = { -1, -1 };
-    if (pipe (outp) != 0) return false;
-    if (pipe (errp) != 0) { close (outp[0]); close (outp[1]); return false; }
+    auto isExe = [] (const std::string& p)
+    {
+        struct stat st {};
+        return stat (p.c_str (), &st) == 0 && S_ISREG (st.st_mode) && access (p.c_str (), X_OK) == 0;
+    };
+    if (cmd.empty ())
+        return {};
+    if (cmd.find ('/') != std::string::npos)
+        return isExe (cmd) ? cmd : std::string ();
 
-    // Build argv before fork(): only async-signal-safe calls are allowed in
-    // the child of a multi-threaded process (no malloc / strdup there).
+    const char* pathEnv = std::getenv ("PATH");
+    const std::string path = (pathEnv != nullptr && *pathEnv != 0) ? pathEnv : "/usr/local/bin:/usr/bin:/bin";
+    size_t start = 0;
+    for (;;)
+    {
+        const size_t colon = path.find (':', start);
+        std::string dir = path.substr (start, colon == std::string::npos ? std::string::npos : colon - start);
+        if (dir.empty ()) dir = ".";
+        const std::string cand = dir + "/" + cmd;
+        if (isExe (cand))
+            return cand;
+        if (colon == std::string::npos)
+            break;
+        start = colon + 1;
+    }
+    return {};
+}
+
+ProcessResult runProcessEx (const std::string& cmd, const juce::StringArray& args,
+                            const RunOptions& options, const std::function<bool ()>& shouldContinue)
+{
+    ProcessResult res;
+    const double t0 = juce::Time::getMillisecondCounterHiRes ();
+    auto finish = [&res, t0] { res.elapsedMs = juce::Time::getMillisecondCounterHiRes () - t0; return res; };
+
+    const std::string exe = resolveExecutable (cmd);
+    if (exe.empty ())
+        return finish ();   // not found: never started
+
+    // Build argv and envp before fork(): only async-signal-safe calls are
+    // allowed in the child of a multi-threaded process (no malloc there).
     std::vector<std::string> argStore;
     argStore.push_back (cmd);
     for (const auto& a : args)
-        argStore.push_back (a.toStdString ());
+        argStore.push_back (a.toStdString ());   // UTF-8
     std::vector<char*> argv;
     for (auto& a : argStore)
         argv.push_back (a.data ());
     argv.push_back (nullptr);
+
+    std::vector<std::string> envStore;
+    for (char** e = environ; e != nullptr && *e != nullptr; ++e)
+    {
+        const std::string v (*e);
+        if (options.pythonUtf8
+            && (v.rfind ("PYTHONUTF8=", 0) == 0 || v.rfind ("PYTHONIOENCODING=", 0) == 0))
+            continue;
+        envStore.push_back (v);
+    }
+    if (options.pythonUtf8)
+    {
+        envStore.push_back ("PYTHONUTF8=1");
+        envStore.push_back ("PYTHONIOENCODING=utf-8");
+    }
+    std::vector<char*> envp;
+    for (auto& v : envStore)
+        envp.push_back (v.data ());
+    envp.push_back (nullptr);
+
+    int outp[2] = { -1, -1 };
+    int errp[2] = { -1, -1 };
+    int execp[2] = { -1, -1 };   // close-on-exec: reports an exec failure to the parent
+    if (pipe (outp) != 0) return finish ();
+    if (pipe (errp) != 0) { close (outp[0]); close (outp[1]); return finish (); }
+    if (pipe (execp) != 0)
+    {
+        close (outp[0]); close (outp[1]);
+        close (errp[0]); close (errp[1]);
+        return finish ();
+    }
+    fcntl (execp[0], F_SETFD, FD_CLOEXEC);
+    fcntl (execp[1], F_SETFD, FD_CLOEXEC);
+    // Our read ends must not leak into children started by other threads.
+    fcntl (outp[0], F_SETFD, FD_CLOEXEC);
+    fcntl (errp[0], F_SETFD, FD_CLOEXEC);
 
     const pid_t pid = fork ();
     if (pid < 0)
     {
         close (outp[0]); close (outp[1]);
         close (errp[0]); close (errp[1]);
-        return false;
+        close (execp[0]); close (execp[1]);
+        return finish ();
     }
 
-    if (pid == 0)   // child
+    if (pid == 0)   // child: async-signal-safe calls only
     {
+        setpgid (0, 0);   // own process group: the whole tree can be signalled
+#if defined(__linux__)
+        prctl (PR_SET_PDEATHSIG, SIGKILL);   // dies with the (worker thread of the) parent
+#endif
+        sigset_t none;
+        sigemptyset (&none);
+        sigprocmask (SIG_SETMASK, &none, nullptr);
+        signal (SIGPIPE, SIG_DFL);
+
+        const int devNull = open ("/dev/null", O_RDONLY);
+        if (devNull >= 0)
+        {
+            dup2 (devNull, STDIN_FILENO);
+            if (devNull != STDIN_FILENO) close (devNull);
+        }
+        else
+            close (STDIN_FILENO);
         dup2 (outp[1], STDOUT_FILENO);
         dup2 (errp[1], STDERR_FILENO);
         close (outp[0]); close (outp[1]);
         close (errp[0]); close (errp[1]);
-        execvp (argv[0], argv.data ());
+        close (execp[0]);
+
+        execve (exe.c_str (), argv.data (), envp.data ());
+        const int e = errno;
+        (void) ! write (execp[1], &e, sizeof (e));
         _exit (127);
     }
 
+    setpgid (pid, pid);   // also from here: no window where the group does not exist yet
     close (outp[1]);
     close (errp[1]);
+    close (execp[1]);
+
+    // EOF = exec succeeded (the close-on-exec end closed); data = errno.
+    int execErr = 0;
+    ssize_t n;
+    do { n = read (execp[0], &execErr, sizeof (execErr)); } while (n < 0 && errno == EINTR);
+    close (execp[0]);
+    if (n == (ssize_t) sizeof (execErr))
+    {
+        int st = 0;
+        waitpid (pid, &st, 0);
+        close (outp[0]);
+        close (errp[0]);
+        return finish ();   // could not exec: not started
+    }
+    res.started = true;
 
     // Drain the pipes while the child runs (a child that fills a pipe would
     // otherwise block forever while we wait for it to exit). Raw bytes are
@@ -903,40 +1498,144 @@ bool runProcess (const std::string& cmd, const juce::StringArray& args,
         return gotData;
     };
 
-    int rc = -1;
-    bool killed = false;
+    int status = 0;
+    bool reaped = false;
+    auto signalTree = [&] (int sig)
+    {
+        // The group outlives its leader while any member is alive; only fall
+        // back to the pid itself while it is certainly still ours (not reaped).
+        if (kill (-pid, sig) != 0 && !reaped)
+            kill (pid, sig);
+    };
+    auto killTree = [&]
+    {
+        signalTree (SIGTERM);   // let Python run its finally/atexit handlers
+        const double graceEnd = juce::Time::getMillisecondCounterHiRes () + std::max (0, options.killGraceMs);
+        while (!reaped && juce::Time::getMillisecondCounterHiRes () < graceEnd)
+        {
+            pump (10);
+            if (waitpid (pid, &status, WNOHANG) == pid) reaped = true;
+        }
+        signalTree (SIGKILL);   // stragglers and children that ignore SIGTERM
+        if (!reaped)
+        {
+            while (waitpid (pid, &status, 0) < 0 && errno == EINTR) {}
+            reaped = true;
+        }
+    };
+
+    bool killed = false, lost = false;
     uint32_t lastPoll = juce::Time::getMillisecondCounter ();
     for (;;)
     {
         pump (20);
-        pid_t r = waitpid (pid, &rc, WNOHANG);
-        if (r == pid) break;
+        const pid_t r = waitpid (pid, &status, WNOHANG);
+        if (r == pid) { reaped = true; break; }
+        if (r < 0 && errno != EINTR) { reaped = true; lost = true; break; }   // ECHILD: reaped elsewhere
+        if (options.timeoutMs > 0
+            && juce::Time::getMillisecondCounterHiRes () - t0 >= (double) options.timeoutMs)
+        {
+            res.timedOut = true;
+            killed = true;
+            killTree ();
+            break;
+        }
         const uint32_t now = juce::Time::getMillisecondCounter ();
         if (now - lastPoll < 200) continue;
         lastPoll = now;
         if (shouldContinue != nullptr && !shouldContinue ())
         {
-            kill (pid, SIGTERM);
+            res.cancelled = true;
             killed = true;
-            waitpid (pid, &rc, 0);
+            killTree ();
             break;
         }
     }
+
+    // Grandchildren left behind by a child that exited normally.
+    if (!killed && options.killTreeOnExit)
+        signalTree (SIGKILL);
 
     // Whatever the child wrote just before exiting is still in the pipes. Do
     // not wait for EOF: a grandchild may still hold the write ends open.
     while (pump (0)) {}
     close (outp[0]);
     close (errp[0]);
-    if (outStdout != nullptr) *outStdout += juce::String::fromUTF8 (outBytes.data (), (int) outBytes.size ());
-    if (outStderr != nullptr) *outStderr += juce::String::fromUTF8 (errBytes.data (), (int) errBytes.size ());
+    res.stdoutText = decodeProcessOutput (outBytes.data (), outBytes.size ());
+    res.stderrText = decodeProcessOutput (errBytes.data (), errBytes.size ());
 
-    if (WIFEXITED (rc)) rc = WEXITSTATUS (rc); else rc = -1;
-    if (exitCodeOut != nullptr) *exitCodeOut = rc;
-    return !killed;
+    res.exitCode = (!killed && !lost && WIFEXITED (status)) ? WEXITSTATUS (status) : -1;
+    return finish ();
 }
 
 #endif   // JUCE_WINDOWS
+
+bool runProcess (const std::string& cmd, const juce::StringArray& args,
+                 const std::function<bool ()>& shouldContinue,
+                 int* exitCodeOut, juce::String* outStdout, juce::String* outStderr)
+{
+    const ProcessResult r = runProcessEx (cmd, args, RunOptions {}, shouldContinue);
+    if (outStdout != nullptr) *outStdout += r.stdoutText;
+    if (outStderr != nullptr) *outStderr += r.stderrText;
+    if (exitCodeOut != nullptr) *exitCodeOut = r.exitCode;
+    return r.started && !r.cancelled && !r.timedOut;
+}
+
+// ============================================================================
+// One script run
+// ============================================================================
+
+ScriptRunReport runScript (const std::string& pythonCmd, const juce::File& script,
+                           const ScriptExchange& exchange, const RunOptions& options,
+                           const std::function<bool ()>& shouldContinue)
+{
+    ScriptRunReport rep;
+    rep.script = script;
+    rep.interpreter = juce::String::fromUTF8 (pythonCmd.c_str ());
+    rep.scriptSha256 = scriptSha256 (script);
+
+    const juce::StringArray tokens = splitCommand (pythonCmd);
+    if (tokens.isEmpty ())
+        return rep;   // process.started = false
+
+    juce::StringArray args;
+    for (int i = 1; i < tokens.size (); ++i)   // extra flags, e.g. "-3"
+        args.add (tokens[i]);
+    args.add (script.getFullPathName ());
+    args.add (exchange.inWav.getFullPathName ());
+    args.add (exchange.outWav.getFullPathName ());
+    args.add (exchange.metaJson.getFullPathName ());
+
+    // Outputs of an earlier run must never pass for this one's.
+    exchange.outWav.deleteFile ();
+    exchange.resultJson.deleteFile ();
+
+    rep.process = runProcessEx (tokens[0].toStdString (), args, options, shouldContinue);
+    if (rep.process.started && !rep.process.cancelled && !rep.process.timedOut)
+    {
+        rep.outWavPresent = exchange.outWav.existsAsFile ();
+        rep.result = readScriptResult (exchange.resultJson, exchange.inputStartSec);
+    }
+    return rep;
+}
+
+static thread_local ScopedScriptRunCapture* tlsScriptRunCapture = nullptr;
+
+ScopedScriptRunCapture::ScopedScriptRunCapture (const RunOptions& options)
+    : options_ (options), previous_ (tlsScriptRunCapture)
+{
+    tlsScriptRunCapture = this;
+}
+
+ScopedScriptRunCapture::~ScopedScriptRunCapture()
+{
+    tlsScriptRunCapture = previous_;
+}
+
+ScopedScriptRunCapture* ScopedScriptRunCapture::current()
+{
+    return tlsScriptRunCapture;
+}
 
 // ============================================================================
 // Interpreter probing + install help

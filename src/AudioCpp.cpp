@@ -556,12 +556,21 @@ static bool runProcessWithPipes(const juce::File& binary, const juce::StringArra
         return false;
     }
 
+    // Only the write ends belong to the child; our read ends must not be inherited.
+    SetHandleInformation (outR, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation (errR, HANDLE_FLAG_INHERIT, 0);
+
+    // stdin = NUL (closed for the child): the CLI never waits on, or
+    // consumes, whatever stdin SpectroCraft itself was started with.
+    HANDLE nulIn = CreateFileW (L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                                OPEN_EXISTING, 0, nullptr);
+
     STARTUPINFOW si {};
     si.cb = sizeof (si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = outW;
     si.hStdError  = errW;
-    si.hStdInput  = GetStdHandle (STD_INPUT_HANDLE);
+    si.hStdInput  = nulIn != INVALID_HANDLE_VALUE ? nulIn : nullptr;
 
     PROCESS_INFORMATION pi {};
     // CreateProcessW may modify the command line buffer, so it needs a mutable copy.
@@ -573,6 +582,8 @@ static bool runProcessWithPipes(const juce::File& binary, const juce::StringArra
                                          TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     CloseHandle (outW);
     CloseHandle (errW);
+    if (nulIn != INVALID_HANDLE_VALUE)
+        CloseHandle (nulIn);
     if (!created)
     {
         CloseHandle (outR);
