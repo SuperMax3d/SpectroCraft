@@ -35,6 +35,9 @@ public:
     std::vector<juce::var> entriesSince (juce::int64 sinceSeq) const;
 
     juce::int64 lastSeq() const;
+    /** Takes the next seq without storing an entry (non-journaled events
+        such as job.progress share the counter, so seq stays monotonic). */
+    juce::int64 reserveSeq();
     juce::int64 firstSeq() const;   // oldest seq still in the ring (0 when empty)
 
     /** JSONL mirror (lot 5). Empty = memory only. */

@@ -149,13 +149,35 @@ static void testControlRegistry()
 
         juce::Array<juce::var> chans;
         chans.add (0);
-        const auto r = ctlCall (app, "step.run",
-                                scctl::obj ({ { "step", step },
-                                              { "select", scctl::obj ({ { "start", 0.25 }, { "end", 1.25 } }) },
-                                              { "channels", chans } }),
-                                docId);
+        auto runParams = scctl::obj ({ { "step", step },
+                                       { "select", scctl::obj ({ { "start", 0.25 }, { "end", 1.25 } }) },
+                                       { "channels", chans } });
+        if (type == sc::actionTypes::kPython)
+        {
+            // The test script lives outside scriptFolder(): confirm is required.
+            CHECK (ctlCode (ctlCall (app, "step.run", runParams, docId)) == "confirm_required",
+                   "control: python script outside scriptFolder() needs confirm");
+            scctl::set (runParams, "confirm", true);
+        }
+        auto r = ctlCall (app, "step.run", runParams, docId);
         CHECK (ctlOk (r), "control: step.run applies " + type + " " + scctl::toLine (r).substring (0, 300));
         if (!ctlOk (r)) continue;
+        // AI and Python steps run as jobs (the message thread stays free).
+        const bool expectJob = type == sc::actionTypes::kTranscribe || type == sc::actionTypes::kNoiseSuppress
+                               || type == sc::actionTypes::kPython;
+        const juce::String jobId = ctlResult (r).getProperty ("job", {}).toString();
+        CHECK (expectJob == jobId.isNotEmpty(), "control: " + type + (expectJob ? " runs as a job" : " runs synchronously"));
+        if (jobId.isNotEmpty())
+        {
+            const auto inf = ctlWaitJob (app, jobId, 120000);
+            CHECK (inf.getProperty ("state", {}).toString() == "done",
+                   "control: " + type + " job done " + scctl::toLine (inf).substring (0, 300));
+            // Envelope fields as after a synchronous command, for the checks below.
+            FileDoc* d = app.doc();
+            r = scctl::obj ({ { "ok", true }, { "journalSeq", app.control().journal.lastSeq() },
+                              { "undoDepth", d != nullptr ? (int) d->undo.undoSize() : -1 },
+                              { "contentVersion", d != nullptr ? (juce::int64) d->engine.contentVersion() : 0 } });
+        }
         CHECK ((int) r.getProperty ("journalSeq", 0) > 0, "control: " + type + " envelope has journalSeq");
         CHECK (r.hasProperty ("undoDepth") && r.hasProperty ("contentVersion"),
                "control: " + type + " envelope has undo/content state");
@@ -211,6 +233,12 @@ static void testControlDocsHistory()
     CHECK (da != nullptr && da->undo.undoSize() == 1, "control: the edit landed in document a");
     CHECK (da != nullptr && std::abs (da->selection.getStart() - 0.5) < 1e-9, "control: a's own selection copy was set");
     CHECK (app.docs[1]->undo.undoSize() == 0, "control: document b is unchanged");
+
+    // Player/view commands refuse a non-active doc (they act on what the window shows).
+    CHECK (ctlCode (ctlCall (app, "transport.loop", scctl::obj ({ { "on", true } }), idA)) == "invalid_params",
+           "control: transport.* on a non-active doc refused");
+    CHECK (ctlCode (ctlCall (app, "view.set", scctl::obj ({ { "t0", 0.1 }, { "t1", 0.5 } }), idA)) == "invalid_params",
+           "control: view.* on a non-active doc refused");
 
     // selection.set on a non-active doc writes that doc's copy.
     CHECK (ctlOk (ctlCall (app, "selection.set", scctl::obj ({ { "start", 1.0 }, { "end", 1.5 } }), idA)),

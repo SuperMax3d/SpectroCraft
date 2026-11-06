@@ -85,6 +85,12 @@ juce::int64 Journal::lastSeq() const
     return nextSeq - 1;
 }
 
+juce::int64 Journal::reserveSeq()
+{
+    std::lock_guard<std::mutex> l (lock);
+    return nextSeq++;
+}
+
 juce::int64 Journal::firstSeq() const
 {
     std::lock_guard<std::mutex> l (lock);

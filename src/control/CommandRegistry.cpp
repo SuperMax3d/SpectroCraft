@@ -81,6 +81,7 @@ juce::StringArray flagNames (uint32_t f)
     if (f & WindowsOnly) s.add ("WindowsOnly");
     if (f & Internal)    s.add ("Internal");
     if (f & Query)       s.add ("Query");
+    if (f & ActiveDocOnly) s.add ("ActiveDocOnly");
     return s;
 }
 
@@ -409,6 +410,8 @@ CommandRegistry::CommandRegistry()
     registerHistoryCommands (*this);
     registerStepCommands (*this);
     registerJobCommands (*this);
+    registerViewCommands (*this);
+    registerTransportCommands (*this);
 }
 
 void CommandRegistry::add (Spec s)
@@ -519,6 +522,24 @@ public:
 
     bool didSwitch() const { return switched; }
 
+    /** Keep the target active for good (a job will work on it). */
+    void makePermanent()
+    {
+        if (!switched) return;
+        switched = false;
+        app.syncActiveDoc();
+        const int idx = app.activeDocIndex;
+        app.activeDocIndex = docIndexOf (app, original);   // let activate() save + leave the original
+        if (app.activeDocIndex >= 0)
+        {
+            app.selection = original->selection;
+            app.playhead = original->playhead;
+            app.visibleChannels = original->visibleChannels;
+            app.viewStart = viewStart; app.viewEnd = viewEnd;
+        }
+        app.activate (idx);   // full switch: views, player source, onActiveDocChanged
+    }
+
 private:
     Application& app;
     FileDoc* original;
@@ -526,6 +547,16 @@ private:
     int selectionRow = -1;
     bool switched = false;
 };
+
+/** Response envelope -> Outcome. */
+Outcome outcomeOf (const juce::var& r)
+{
+    if ((bool) r.getProperty ("ok", false))
+        return Outcome::success (r.getProperty ("result", {}));
+    const auto e = r.getProperty ("error", {});
+    return Outcome::failure (e.getProperty ("code", err::failed).toString(),
+                             e.getProperty ("message", {}).toString(), e.getProperty ("details", {}));
+}
 
 juce::var sanitizedParams (const juce::var& params)
 {
@@ -598,9 +629,18 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
         return respondError (err::noDocument, "no document is open",
                              obj ({ { "hint", "call doc.open first" } }));
 
+    if ((spec->flags & ActiveDocOnly) && target != nullptr && target != app.doc())
+        return respondError (err::invalidParams, spec->id + " acts on the active document only",
+                             obj ({ { "path", "doc" }, { "expected", "the active document" },
+                                    { "hint", "call doc.activate first" } }));
+
     if (!opts.insideJob)
     {
-        if (spec->flags & (Mutates | LongRunning))
+        // Anything that changes state waits while the window is inside a
+        // modal loop or a background operation runs: JUCE delivers callAsync
+        // inside modal loops, i.e. in the middle of a suspended menu handler
+        // or next to a worker that still uses the active document.
+        if (!(spec->flags & Query) && spec->category != "job")
         {
             if (juce::Component::getCurrentlyModalComponent() != nullptr)
                 return respondError (err::busy, "a modal dialog is open in the application",
@@ -622,11 +662,62 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
     // Document state before (envelope + journal).
     const size_t undoBefore = target != nullptr ? target->undo.undoSize() : 0;
     const size_t redoBefore = target != nullptr ? target->undo.redoSize() : 0;
+    const juce::int64 contentBefore = target != nullptr ? (juce::int64) target->engine.contentVersion() : 0;
     const int targetId = target != nullptr ? target->id : -1;
 
     Outcome out;
     juce::StringArray alerts;
-    bool docSwitched = false;
+    bool docSwitched = false, activated = false;
+
+    // RAPPORT §5.2 step 4: a mutating command on a streamed (not fully in
+    // memory) document first loads it into memory on a worker - like
+    // MainWindow::runDestructiveEdit - then runs on the message thread.
+    // (history.* never: an undoable edit has already loaded the file.)
+    const bool streamedDetour = (spec->flags & Mutates) && !opts.insideJob && target != nullptr
+                                && spec->category != "history"
+                                && target->engine.isFileLoaded() && !target->engine.fullyInMemory();
+    if (streamedDetour)
+    {
+        Context jctx { app, st, ui, params, target, opts.source };
+        Application* appP = &app;
+        FileDoc* doc = target;
+        Request inner = req;
+        if (inner.doc.isVoid()) inner.doc = target->id;   // the document being loaded, whatever is active then
+        InvokeOptions io = opts;
+        io.insideJob = true;
+        const auto id = startJob (jctx, spec->id, "Loading " + target->name + " into memory", true,
+            [appP, doc, inner, io] (JobControl& jc) -> Outcome {
+                std::string e;
+                if (!doc->engine.ensureEditable (&e, [&jc] (float f) { jc.progress (0.9 * f, "loading into memory"); },
+                                                 jc.cancelFlag()))
+                    return Outcome::failure (jc.cancelled() ? err::cancelled : err::failed, juce::String (e));
+                juce::var r;
+                if (!jc.onMessageThread ([&] {
+                        r = appP->isDocLoaded (doc)
+                                ? CommandRegistry::instance().invoke (*appP, inner, io)
+                                : obj ({ { "ok", false }, { "error", errorVar ({ err::unknownDoc, "the document was closed", {} }) } });
+                    }))
+                    return Outcome::failure (err::shuttingDown, "the application is shutting down");
+                Outcome o = outcomeOf (r);
+                // The command itself became a job (e.g. a long step): follow it.
+                if (o.isJob())
+                {
+                    const auto innerId = o.jobId();
+                    auto& jobs = appP->control().jobs;
+                    while (!jobs.isFinished (innerId))
+                    {
+                        if (jc.cancelled()) jobs.cancel (innerId);
+                        juce::Thread::sleep (20);
+                    }
+                    if (auto io2 = jobs.outcome (innerId)) o = *io2;
+                    else o = Outcome::failure (err::jobNotFound, "inner job " + innerId + " vanished");
+                }
+                if (o.ok && o.result.isObject()) set (o.result, "materialised", true);
+                return o;
+            });
+        out = Outcome::job (id);
+    }
+    else
     {
         DocSwitch sw (app, (spec->flags & NoDocSwitch) ? nullptr : target);
         docSwitched = sw.didSwitch();
@@ -650,6 +741,11 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
         st.invokeSource = prevSource;
         --st.invokeDepth;
         alerts = capture.take();
+        if (ctx.keepDocSwitch && sw.didSwitch())
+        {
+            sw.makePermanent();
+            activated = true;
+        }
     }
 
     const bool targetAlive = target != nullptr && app.isDocLoaded (target);
@@ -664,7 +760,11 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
         if (targetId >= 0) set (e, "doc", targetId);
         if (!out.ok) set (e, "error", out.error.code);
         if (out.isJob()) set (e, "job", out.jobId());
-        if (targetAlive && (spec->flags & Mutates))
+        // (A job's own "finished" entry carries the resulting undo state.)
+        // Only when the command really produced a new edit: undo/redo and
+        // commands that changed no content keep the top patch's identity.
+        if (targetAlive && (spec->flags & Mutates) && !out.isJob() && spec->category != "history"
+            && (juce::int64) target->engine.contentVersion() != contentBefore)
         {
             set (e, "undoDepth", (int) target->undo.undoSize());
             if (target->undo.canUndo())
@@ -675,6 +775,17 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
 
     if (out.ok && !out.isJob() && (spec->flags & Mutates) && ui != nullptr)
         ui->refreshAfterEdit();
+
+    // doc.changed: documents opened/closed/activated/saved, selection or view moved.
+    if (out.ok && !(spec->flags & Query)
+        && (spec->category == "doc" || spec->category == "selection" || spec->category == "view"
+            || spec->category == "markers"))
+    {
+        auto data = obj ({ { "what", spec->id }, { "source", opts.source } });
+        if (targetId >= 0) set (data, "doc", targetId);
+        if (FileDoc* a = app.doc()) set (data, "active", a->id);
+        st.emit ("doc.changed", data);
+    }
 
     auto r = obj ({ { "id", req.id }, { "ok", out.ok } });
     if (out.ok) set (r, "result", out.result.isVoid() ? obj() : out.result);
@@ -690,12 +801,13 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
         set (r, "redoDepth", (int) redoAfter);
         const bool historyCmd = spec->category == "history";
         set (r, "redoDiscarded", (!historyCmd && redoAfter < redoBefore) ? (int) (redoBefore - redoAfter) : 0);
-        set (r, "contentVersion", target->engine.contentVersion());
+        set (r, "contentVersion", (juce::int64) target->engine.contentVersion());
         set (r, "unsaved", app.docIsUnsaved (*target));
         juce::ignoreUnused (undoBefore);
     }
     if (spec->flags & Mutates) set (r, "journalSeq", st.journal.lastSeq());
     if (docSwitched) set (r, "docSwitched", true);
+    if (activated)   set (r, "activated", true);
     set (r, "durationMs", (int) ms);
     return r;
 }

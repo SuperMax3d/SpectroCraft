@@ -8,6 +8,9 @@
 #include "control/ControlState.h"
 #include "Application.h"
 #include "Actions.h"
+#include "PythonScripts.h"
+#include "control/PathPolicy.h"
+#include <optional>
 
 namespace sc::control {
 
@@ -148,30 +151,184 @@ void restoreScope (Application& app, const std::optional<std::vector<int>>& chan
     }
 }
 
-/** Runs one parsed step; returns {type, ok, description?, error?}. */
-juce::var runOne (Context& ctx, const sc::ActionStep& s, bool& ok, juce::String& errMsg)
+/** Applies one parsed step on the calling thread; returns {type, ok,
+    description?, undoDepth?, error?}. Message thread, or a job worker for
+    the long types (whose Application methods commit on the message thread). */
+juce::var applyOne (Application& app, const sc::ActionStep& s, bool& ok, juce::String& errMsg,
+                    std::function<bool(float)> onProgress = nullptr)
 {
-    Application& app = ctx.app;
     FileDoc* d = app.doc();
     const size_t undoBefore = d != nullptr ? d->undo.undoSize() : 0;
     std::string e;
-    ok = sc::applyActionStep (app, s, &e);
+    ok = sc::applyActionStep (app, s, &e, std::move (onProgress));
     auto r = obj ({ { "type", s.type }, { "ok", ok } });
-    if (ok)
-    {
-        // Same recording as the menus (no-op unless an action is recording);
-        // after success so a failed API step never lands in a user's action.
-        app.recordActionStep (s.type, s.params);
-        if (d != nullptr && d->undo.undoSize() != undoBefore && d->undo.canUndo())
-            set (r, "description", d->undo.lastRecorded().description);
-        if (d != nullptr) set (r, "undoDepth", (int) d->undo.undoSize());
-    }
-    else
+    if (!ok)
     {
         errMsg = juce::String (e);
         set (r, "error", errMsg);
     }
+    else
+        set (r, "undoBefore", (int) undoBefore);
     return r;
+}
+
+/** Message thread, after a successful step: record it like the menus do
+    (no-op unless an action is recording; after success so a failed API
+    step never lands in a user's action) and describe the new undo entry. */
+void finishOne (Application& app, const sc::ActionStep& s, juce::var& r)
+{
+    if (!(bool) r.getProperty ("ok", false)) return;
+    app.recordActionStep (s.type, s.params);
+    FileDoc* d = app.doc();
+    const int before = (int) r.getProperty ("undoBefore", -1);
+    if (d != nullptr && (int) d->undo.undoSize() != before && d->undo.canUndo())
+        set (r, "description", d->undo.lastRecorded().description);
+    if (d != nullptr) set (r, "undoDepth", (int) d->undo.undoSize());
+    if (auto* o = r.getDynamicObject()) o->removeProperty ("undoBefore");
+}
+
+/** Runs the sequence. jc == nullptr: everything on the message thread.
+    In a job: long types on the worker, everything else (and all the
+    bookkeeping) through jc->onMessageThread - the worker never edits the
+    document itself. */
+Outcome runSequence (Application& app, const std::vector<sc::ActionStep>& steps, bool stopOnError,
+                     bool single, JobControl* jc,
+                     const std::optional<std::vector<int>>& restore, int chansBefore,
+                     const juce::String& source = {})
+{
+    const double t0 = juce::Time::getMillisecondCounterHiRes();
+    juce::Array<juce::var> results;
+    int applied = 0, failedCount = 0;
+    juce::String firstError;
+    bool shuttingDown = false;
+    for (size_t i = 0; i < steps.size(); ++i)
+    {
+        const auto& s = steps[i];
+        if (jc != nullptr && jc->cancelled())
+        {
+            if (firstError.isEmpty()) firstError = "cancelled by client";
+            ++failedCount;
+            break;
+        }
+        bool ok = false;
+        juce::String e;
+        juce::var r;
+        if (jc != nullptr && isLongType (s.type) && s.type != sc::actionTypes::kResample)
+        {
+            r = applyOne (app, s, ok, e, [jc] (float f) { jc->progress (f); return !jc->cancelled(); });   // worker; commits hop
+            if (!jc->onMessageThread ([&] { ScopedInvokeSource src (app.control(), source); finishOne (app, s, r); }))
+            { shuttingDown = true; break; }
+        }
+        else if (jc != nullptr)
+        {
+            if (!jc->onMessageThread ([&] {
+                    ScopedInvokeSource src (app.control(), source);
+                    r = applyOne (app, s, ok, e);
+                    finishOne (app, s, r);
+                }))
+            { shuttingDown = true; break; }
+        }
+        else
+        {
+            r = applyOne (app, s, ok, e);
+            finishOne (app, s, r);
+        }
+        results.add (r);
+        if (ok) ++applied;
+        else
+        {
+            ++failedCount;
+            if (firstError.isEmpty()) firstError = s.type + ": " + e;
+            if (stopOnError) break;
+        }
+    }
+
+    juce::var sel;
+    auto finish = [&] {
+        restoreScope (app, restore, chansBefore);
+        sel = obj ({ { "start", app.selection.getStart() }, { "end", app.selection.getEnd() } });
+    };
+    if (jc != nullptr) { if (!shuttingDown) jc->onMessageThread (finish); }
+    else finish();
+    if (shuttingDown)
+        return Outcome::failure (err::shuttingDown, "the application is shutting down");
+
+    const int elapsed = (int) (juce::Time::getMillisecondCounterHiRes() - t0);
+    if (single)
+    {
+        if (results.isEmpty())
+            return Outcome::failure (jc != nullptr && jc->cancelled() ? err::cancelled : err::failed, firstError);
+        auto r = results[0];
+        if (!(bool) r.getProperty ("ok", false))
+            return Outcome::failure (err::failed, firstError, obj ({ { "type", steps[0].type } }));
+        set (r, "applied", steps[0].type);
+        set (r, "elapsedMs", elapsed);
+        set (r, "selection", sel);
+        return Outcome::success (r);
+    }
+    auto r = obj ({ { "applied", applied }, { "failed", failedCount }, { "results", results },
+                    { "elapsedMs", elapsed } });
+    if (failedCount > 0 && (stopOnError || results.size() < (int) steps.size()))
+        return Outcome::failure (firstError == "cancelled by client" ? err::cancelled : err::failed, firstError, r);
+    return Outcome::success (r);
+}
+
+/** python steps: absolute script inside the allowed roots; outside
+    scriptFolder() needs confirm (it runs arbitrary code). */
+bool checkScripts (Context& ctx, const std::vector<sc::ActionStep>& steps, Outcome& error)
+{
+    for (const auto& s : steps)
+    {
+        if (s.type != sc::actionTypes::kPython) continue;
+        const juce::String p = s.params.getProperty ("script", {}).toString();
+        if (!juce::File::isAbsolutePath (p))
+        {
+            error = invalid ("step.params.script", "absolute path", "python: script must be an absolute path");
+            return false;
+        }
+        const juce::File f (p);
+        const auto chk = checkPath (ctx.app, f, false, ctx.confirmed(), "script");
+        if (!chk.ok) { error = chk; return false; }
+        const juce::File folder = canonicalFile (sc::py::scriptFolder());
+        const juce::File c = canonicalFile (f);
+        if (!c.isAChildOf (folder) && !ctx.confirmed())
+        {
+            error = Outcome::failure (err::confirmRequired,
+                                      "python: the script is outside the scripts folder; resend with params.confirm=true",
+                                      obj ({ { "script", f.getFullPathName() }, { "scriptFolder", folder.getFullPathName() },
+                                             { "hint", "it runs arbitrary code: check it, then pass confirm:true" } }));
+            return false;
+        }
+    }
+    return true;
+}
+
+Outcome runSteps (Context& ctx, std::vector<sc::ActionStep> steps, bool stopOnError, bool single)
+{
+    Outcome bad;
+    if (!checkScripts (ctx, steps, bad)) return bad;
+
+    std::optional<std::vector<int>> restore;
+    const int chans = ctx.app.audioEngine().numChannels();
+    if (!applyScope (ctx, restore, bad)) return bad;
+
+    bool anyLong = false;
+    for (const auto& s : steps)
+        if (isLongType (s.type) && s.type != sc::actionTypes::kResample) anyLong = true;
+    if (!anyLong)
+        return runSequence (ctx.app, steps, stopOnError, single, nullptr, restore, chans);
+
+    // Long steps (AI, Python) run in a job: the message thread stays free
+    // (repaints, other clients' reads) and the client can follow / cancel.
+    // The job addresses the ACTIVE document: keep a temporary switch.
+    ctx.keepDocSwitch = true;
+    Application* app = &ctx.app;
+    const juce::String title = single ? "Running " + steps[0].type : "Running " + juce::String ((int) steps.size()) + " steps";
+    const auto id = startJob (ctx, single ? "step.run" : "steps.run", title, true,
+        [app, steps, stopOnError, single, restore, chans, source = ctx.source] (JobControl& jc) {
+            return runSequence (*app, steps, stopOnError, single, &jc, restore, chans, source);
+        });
+    return Outcome::job (id);
 }
 
 Outcome validateCmd (Context& ctx)
@@ -180,7 +337,8 @@ Outcome validateCmd (Context& ctx)
     Outcome bad;
     if (!parseStep (ctx.get ("step"), "step", s, bad)) return bad;
     return Outcome::success (obj ({ { "valid", true }, { "type", s.type }, { "mutates", true },
-                                    { "longRunning", isLongType (s.type) }, { "aiOnly", isAiType (s.type) } }));
+                                    { "longRunning", isLongType (s.type) && s.type != sc::actionTypes::kResample },
+                                    { "aiOnly", isAiType (s.type) } }));
 }
 
 Outcome runCmd (Context& ctx)
@@ -188,22 +346,7 @@ Outcome runCmd (Context& ctx)
     sc::ActionStep s;
     Outcome bad;
     if (!parseStep (ctx.get ("step"), "step", s, bad)) return bad;
-
-    std::optional<std::vector<int>> restore;
-    const int chans = ctx.app.audioEngine().numChannels();
-    if (!applyScope (ctx, restore, bad)) return bad;
-
-    const double t0 = juce::Time::getMillisecondCounterHiRes();
-    bool ok = false;
-    juce::String e;
-    auto r = runOne (ctx, s, ok, e);
-    restoreScope (ctx.app, restore, chans);
-    if (!ok)
-        return Outcome::failure (err::failed, s.type + ": " + e, obj ({ { "type", s.type } }));
-    set (r, "applied", s.type);
-    set (r, "elapsedMs", (int) (juce::Time::getMillisecondCounterHiRes() - t0));
-    set (r, "selection", obj ({ { "start", ctx.app.selection.getStart() }, { "end", ctx.app.selection.getEnd() } }));
-    return Outcome::success (r);
+    return runSteps (ctx, { s }, true, true);
 }
 
 Outcome runManyCmd (Context& ctx)
@@ -218,34 +361,7 @@ Outcome runManyCmd (Context& ctx)
         steps.push_back (s);
     }
     if (steps.empty()) return invalid ("steps", "non-empty array", "steps must not be empty");
-
-    std::optional<std::vector<int>> restore;
-    const int chans = ctx.app.audioEngine().numChannels();
-    Outcome bad;
-    if (!applyScope (ctx, restore, bad)) return bad;
-
-    const bool stopOnError = ctx.flag ("stopOnError", true);
-    juce::Array<juce::var> results;
-    int applied = 0, failedCount = 0;
-    juce::String firstError;
-    for (size_t i = 0; i < steps.size(); ++i)
-    {
-        bool ok = false;
-        juce::String e;
-        results.add (runOne (ctx, steps[i], ok, e));
-        if (ok) ++applied;
-        else
-        {
-            ++failedCount;
-            if (firstError.isEmpty()) firstError = steps[i].type + ": " + e;
-            if (stopOnError) break;
-        }
-    }
-    restoreScope (ctx.app, restore, chans);
-    auto r = obj ({ { "applied", applied }, { "failed", failedCount }, { "results", results } });
-    if (failedCount > 0 && stopOnError)
-        return Outcome::failure (err::failed, firstError, r);
-    return Outcome::success (r);
+    return runSteps (ctx, std::move (steps), ctx.flag ("stopOnError", true), false);
 }
 
 std::vector<ParamSpec> scopeParams()

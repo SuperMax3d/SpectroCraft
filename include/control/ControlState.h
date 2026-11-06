@@ -40,4 +40,26 @@ private:
     bool isShutDown = false;
 };
 
+struct Context;
+
+/** Message thread: edits made inside this scope (a job's commit) are
+    attributed to `source` in the journal, like edits inside invoke(). */
+struct ScopedInvokeSource
+{
+    ScopedInvokeSource (ControlState& s, const juce::String& source) : st (s), prev (s.invokeSource)
+    {
+        ++st.invokeDepth;
+        st.invokeSource = source;
+    }
+    ~ScopedInvokeSource() { st.invokeSource = prev; --st.invokeDepth; }
+    ControlState& st;
+    juce::String prev;
+};
+
+/** Starts a job for the command in ctx (message thread). With a window, the
+    job shows the app's non-blocking progress dialog (Cancel included), so
+    the menus' own "busy" checks and quit refusal see it. Returns the job id. */
+juce::String startJob (Context& ctx, const juce::String& cmd, const juce::String& title,
+                       bool mutating, JobManager::Work work);
+
 } // namespace sc::control

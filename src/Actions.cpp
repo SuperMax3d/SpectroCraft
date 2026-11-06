@@ -412,7 +412,8 @@ bool validateStepParams (const ActionStep& s, std::string* errOut)
 
 // ------------------------------------------------------------- apply one step
 
-bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut)
+bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut,
+                      std::function<bool(float)> onProgress)
 {
     auto fail = [&errOut] (const juce::String& msg) {
         if (errOut != nullptr) *errOut = msg.toStdString ();
@@ -473,7 +474,7 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
                     device,
                     (float) numParam (p, "attenLimDb", 0.0),
                     (bool) p.getProperty ("df3PostFilter", juce::var()),
-                    nullptr, errOut, autoDl,
+                    onProgress, errOut, autoDl,
                     (bool) p.getProperty ("copyNoise", juce::var()));
 #else
                 // Used to fall through to normalize() silently.
@@ -525,7 +526,7 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
                                        l.toString().toStdString (),
                                        (bool) p.getProperty ("translate", juce::var()),
                                        (bool) p.getProperty ("fast", juce::var()),
-                                       nullptr, errOut);
+                                       onProgress, errOut);
             }
 #else
             if (s.type == kTranscribe)
@@ -617,7 +618,7 @@ bool applyActionStep (Application& app, const ActionStep& s, std::string* errOut
                 return fail ("python: no Python interpreter found");
 
             const juce::String text = script.loadFileAsString ();
-            return app.runPythonScript (script, text, pyCmd, nullptr, errOut);
+            return app.runPythonScript (script, text, pyCmd, onProgress, errOut);
         }
 
         default:

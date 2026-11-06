@@ -10,6 +10,7 @@
 #include "Application.h"
 #include "Recorder.h"
 #include "StartupTrace.h"
+#include "control/ControlState.h"   // AI control: app.control().ui
 #include <thread>
 #include "WaveformView.h"
 #include "SpectralView.h"
@@ -576,6 +577,10 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
             scStart::note (juce::String ("total launch->window: T+") + juce::String (ms) + " ms");
         });
 
+    // AI control: commands may now refresh this window, drive its views and
+    // show job progress (sc::control::UiBridge).
+    app.control().ui = this;
+
     setVisible (true);
 }
 
@@ -602,6 +607,8 @@ MainWindow::~MainWindow()
     app.onTimeRangeStretched = nullptr;
     app.onTimeRangeInserted = nullptr;
     app.onPatchSideStateRestored = nullptr;
+    if (app.control().ui == this)
+        app.control().ui = nullptr;
 
     if (audioInitDialog != nullptr)
     {
@@ -2321,14 +2328,11 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
     dlg->enterModalState (false);
 
     FileDoc* d = app.doc();   // the document being saved (modal loop blocks switches)
-    if (d != nullptr && !file.getFileExtension().equalsIgnoreCase (".wav")
-        && d->metaMode == sc::MetaMode::Embedded)
-        d->metaMode = sc::MetaMode::External;   // non-WAV cannot carry RIFF chunks
-
-    // Snapshot the metadata change counter BEFORE the worker builds the SCMD
-    // payload: an edit made while the save runs (a transcription finishing,
-    // an async callback, ...) bumps it and keeps the document dirty.
-    const uint64_t metaSnapshot = d != nullptr ? d->metaDirty.changeCount () : 0;
+    // Non-WAV targets switch embedded metadata to external, and the metadata
+    // change counter is snapshotted BEFORE the worker builds the SCMD payload:
+    // an edit made while the save runs keeps the document dirty. Shared with
+    // the AI-control doc.save / doc.saveAs (Application::beginSave).
+    const uint64_t metaSnapshot = d != nullptr ? app.beginSave (*d, file) : 0;
 
     // Resolve the engine on the message thread: the worker must not look up
     // "the active document" itself.
@@ -2363,30 +2367,20 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
 
             // Save As: the document's path AND display name now follow the new
             // location (Files list, footer, unsaved-changes prompts, Open Recent).
-            if (saveAs && doc != nullptr)
+            // Path/name/Open Recent (Save As), the external-mode sidecar with
+            // the legacy per-category sidecars consolidated into it, and the
+            // metadata-dirty flag (unless the metadata changed while the save
+            // ran): Application::completeSave, shared with AI control.
+            if (doc != nullptr)
             {
-                doc->file = file;
-                doc->name = file.getFileName ();
-                app.addRecentFile (file);
-                if (mw->statusBar && doc == app.doc ())
-                    mw->statusBar->setFileName (file.getFileName ());
-                if (mw->fileListPanel) mw->fileListPanel->refresh ();
-            }
-
-            // External mode: the sidecar travels with the saved file and the
-            // legacy per-category sidecars are consolidated into it.
-            bool metaWritten = true;
-            if (doc != nullptr && doc->metaMode == sc::MetaMode::External)
-            {
-                metaWritten = doc->writeMetaSidecar (file);
-                if (metaWritten)   // only once the consolidated copy is on disk
+                const bool metaWritten = app.completeSave (*doc, file, saveAs, metaSnapshot);
+                if (saveAs)
                 {
-                    juce::File lm (file.getFullPathName() + ".markers.json");
-                    if (lm.existsAsFile()) lm.deleteFile();
-                    const juce::File ls = savedSelectionsSidecarPath (file);
-                    if (ls.existsAsFile()) ls.deleteFile();
+                    if (mw->statusBar && doc == app.doc ())
+                        mw->statusBar->setFileName (file.getFileName ());
+                    if (mw->fileListPanel) mw->fileListPanel->refresh ();
                 }
-                else
+                if (!metaWritten)
                     sc::alert::showMessageBoxAsync (juce::AlertWindow::WarningIcon,
                         "Save metadata failed",
                         "The audio was saved, but the metadata sidecar next to\n"
@@ -2394,12 +2388,6 @@ void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
                             + "\ncould not be written. Markers and selections are still unsaved.",
                         "", mw);
             }
-
-            // The save wrote the audio AND every managed metadata chunk or
-            // sidecar, so the document's state now matches its disk copy -
-            // unless the metadata changed while the save was running.
-            if (doc != nullptr && metaWritten)
-                doc->metaDirty.clearIfUnchangedSince (metaSnapshot);
 
             mw->updateTitle();
         });
@@ -2797,6 +2785,16 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     {
         app.settings.allowMultipleInstances = !app.settings.allowMultipleInstances;
         app.saveSettings ();
+        return;
+    }
+
+    // Window menu: "Allow AI control (localhost)". Persisted and applied at
+    // once (Main.cpp starts/stops the control server).
+    if (menuItemID == WindowAllowControl)
+    {
+        app.settings.controlEnabled = !app.settings.controlEnabled;
+        app.saveSettings ();
+        if (onControlToggled) onControlToggled (app.settings.controlEnabled);
         return;
     }
 
@@ -7117,6 +7115,12 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSeparator ();
         menu.addItem (WindowAllowMultiple, "Allow multiple instances", true,
                       app.settings.allowMultipleInstances);
+        // AI control (Claude Code in VS Code, scripts): loopback-only server,
+        // token in <app data>/SpectroCraft/control/<pid>.json. Off by default.
+#if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
+        menu.addItem (WindowAllowControl, "Allow AI control (localhost)", true,
+                      app.settings.controlEnabled);
+#endif
     }
     else if (menuName == "Help")
     {
@@ -7534,4 +7538,118 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     }
 
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// sc::control::UiBridge: what AI-control commands may ask of this window.
+// Every method is non-blocking (no modal loop, no FileChooser, no message box).
+// ---------------------------------------------------------------------------
+
+void MainWindow::zoomVertical (double factor)
+{
+    zoomVerticalBoth (factor);
+}
+
+bool MainWindow::setViewVisible (const juce::String& what, bool visible)
+{
+    if (what == "waveform" || what == "spectral")
+    {
+        const bool wave = what == "waveform";
+        // Hiding both views is not allowed (same rule as the View menu).
+        if (!visible && !(wave ? showSpectralView : showWaveformView))
+            return false;
+        (wave ? showWaveformView : showSpectralView) = visible;
+        resized();
+        return true;
+    }
+    if (what == "leftPanels")
+    {
+        setLeftPanelsVisible (visible);
+        return true;
+    }
+    return false;
+}
+
+bool MainWindow::isViewVisible (const juce::String& what) const
+{
+    if (what == "waveform")   return showWaveformView;
+    if (what == "spectral")   return showSpectralView;
+    if (what == "leftPanels") return leftPanelsVisible;
+    return false;
+}
+
+juce::StringArray MainWindow::panelNames() const
+{
+    juce::StringArray names;
+    for (const auto& e : leftPanelEntries())
+        names.add (e.name);
+    return names;
+}
+
+bool MainWindow::setPanelVisibleAt (int index, bool visible)
+{
+    const auto entries = leftPanelEntries();
+    if (index < 0 || index >= (int) entries.size()) return false;
+    setPanelVisible (entries[(size_t) index].id, visible);
+    return true;
+}
+
+bool MainWindow::isPanelOpenAt (int index) const
+{
+    const auto entries = leftPanelEntries();
+    if (index < 0 || index >= (int) entries.size()) return false;
+    return isPanelOpen (entries[(size_t) index].id);
+}
+
+void* MainWindow::beginJobDialog (const juce::String& title, const juce::String& status)
+{
+    // The same non-blocking progress dialog as the menus' background jobs:
+    // isBackgroundJobRunning() and systemRequestedQuit() see it unchanged.
+    auto* dlg = new WorkProgressDialog (title, status, true, this);
+    dlg->setProgress (0.0);
+    dlg->beginModal();
+    return dlg;
+}
+
+void MainWindow::setJobProgress (void* handle, double progress, const juce::String& status)
+{
+    auto* dlg = static_cast<WorkProgressDialog*> (handle);
+    if (dlg == nullptr) return;
+    dlg->setProgress (progress < 0.0 ? -1.0 : juce::jlimit (0.0, 1.0, progress));
+    if (status.isNotEmpty()) dlg->setStatusText (status);
+}
+
+const std::atomic<bool>* MainWindow::jobCancelFlag (void* handle) const
+{
+    auto* dlg = static_cast<WorkProgressDialog*> (handle);
+    return dlg != nullptr ? &dlg->cancelled : nullptr;
+}
+
+void MainWindow::endJobDialog (void* handle)
+{
+    delete static_cast<WorkProgressDialog*> (handle);   // deleting exits the modal state
+    // The job may have edited, opened or saved a document.
+    refreshAfterEdit();
+    updateTitle();
+    refreshPanels();
+}
+
+void MainWindow::setControlClients (int count)
+{
+    controlClients_ = count;
+    if (statusBar != nullptr)
+        statusBar->setControlText (count > 0 ? "AI control: " + juce::String (count)
+                                                   + (count == 1 ? " client" : " clients")
+                                             : juce::String());
+}
+
+void MainWindow::requestQuit (bool discardUnsaved)
+{
+    // Same refusals as systemRequestedQuit(), checked again now: a job or an
+    // edit may have started since app.quit was accepted.
+    if (isBackgroundJobRunning() || app.control().jobs.numRunning() > 0)
+        return;
+    if (!discardUnsaved && !app.unsavedDocNames().empty())
+        return;
+    juce::JUCEApplicationBase::quit();
 }

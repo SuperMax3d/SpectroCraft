@@ -163,6 +163,7 @@ target_link_libraries (SpectroCraft
 target_compile_definitions (SpectroCraft
     PRIVATE
         JUCE_MODAL_LOOPS_PERMITTED=1
+        SC_ENABLE_CONTROL=${SC_CONTROL_DEFINE}
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=${SC_JUCE_USE_CURL}
         JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:SpectroCraft,JUCE_PRODUCT_NAME>"

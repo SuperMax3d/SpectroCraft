@@ -7209,6 +7209,19 @@ void StatusBar::paint (juce::Graphics& g)
             leftX += w + 12;
         }
     }
+    if (!controlText_.isEmpty() && leftX < b.getWidth() - 8)
+    {
+        // AI control indicator (a client is connected to the control server).
+        g.setColour (juce::Colour::fromRGB (255, 190, 80));
+        const juce::Font f (12.0f);
+        const int w = std::min (b.getWidth() - leftX - 8,
+                                (int) juce::GlyphArrangement::getStringWidth (f, controlText_) + 8);
+        if (w > 10)
+        {
+            g.drawText (controlText_, leftX, 0, w, b.getHeight(), juce::Justification::left, false);
+            leftX += w + 12;
+        }
+    }
     if (!mouseText.isEmpty() && leftX < b.getWidth() - 8)
     {
         g.setColour (juce::Colour::fromRGB (205, 205, 215));

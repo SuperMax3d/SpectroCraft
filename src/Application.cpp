@@ -198,6 +198,7 @@ void Application::loadSettings ()
                                           6.0f, 72.0f);
     // Single-instance mode (Window menu): checked by default.
     settings.allowMultipleInstances = recentStore->getIntValue ("multi_instance", 1) != 0;
+    settings.controlEnabled = recentStore->getIntValue ("control_enabled", 0) != 0;
     // Track axis placement + grid lines (View menu).
     settings.trackAxisOnRight   = recentStore->getIntValue ("track_axis_right", 0) != 0;
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
@@ -305,6 +306,7 @@ void Application::saveSettings ()
     recentStore->setValue ("draw_colour", settings.drawColourARGB);
     recentStore->setValue ("draw_text_size", settings.drawTextSize);
     recentStore->setValue ("multi_instance", settings.allowMultipleInstances ? 1 : 0);
+    recentStore->setValue ("control_enabled", settings.controlEnabled ? 1 : 0);
     recentStore->setValue ("track_axis_right", settings.trackAxisOnRight ? 1 : 0);
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);
@@ -462,7 +464,9 @@ void Application::saveAiSettings ()
 
 Application::~Application()
 {
-    // Control jobs first: their workers may still read the documents.
+    // Control jobs first: their workers may still read the documents. Any of
+    // them waiting for a message-thread commit is released by destroying_.
+    destroying_.store (true);
     if (control_ != nullptr)
         control_->shutdown ();
     if (audioInitThread.joinable())
@@ -3578,18 +3582,32 @@ bool Application::splitSpectralSelectionConfigured (std::string* errOut)
     return true;
 }
 
-#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-// Worker -> message thread commit hop used by the blocking AI operations.
-// Runs fn on the message thread and waits for it; runs it in place when this
-// already is the message thread or there is no MessageManager (tests, CLI).
-// The commit edits the active document (buffer, undo stack, SCTT data,
-// visibleChannels) that the message thread reads while painting, so it must
-// never run on the worker. The unbounded wait is safe only because the
-// message thread never waits on these workers (they run behind non-blocking
-// progress dialogs), the same rule as runPythonScript's commit.
-// Returns false when the message thread no longer accepts callbacks
-// (shutting down); fn's own result goes to resultOut.
-static bool commitOnMessageThread (const std::function<bool()>& fn, bool& resultOut)
+// Worker -> message thread commit hop used by the blocking AI operations and
+// runPythonScript. Runs fn on the message thread and waits for it; runs it in
+// place when this already is the message thread or there is no MessageManager
+// (tests, CLI). The commit edits the active document (buffer, undo stack, SCTT
+// data, visibleChannels) that the message thread reads while painting, so it
+// must never run on the worker.
+// The wait is bounded by `stop` (Application::destroying_): the message
+// thread never waits on these workers EXCEPT when it destroys the Application
+// and joins the AI-control jobs; that path sets `stop` first, the worker then
+// abandons the posted commit (which, once it runs, does nothing) instead of
+// deadlocking. Abandoning is race-free: `stop` is set on the message thread,
+// so the posted call cannot be running at that moment.
+// Returns false when the commit did not run (shutting down); fn's own result
+// goes to resultOut.
+namespace {
+struct CommitHop
+{
+    std::function<bool()> fn;
+    juce::WaitableEvent done;
+    std::atomic<bool> abandoned { false };
+    bool result = false;
+};
+}
+
+static bool commitOnMessageThread (const std::function<bool()>& fn, bool& resultOut,
+                                   const std::atomic<bool>& stop)
 {
     auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
     if (mm == nullptr || mm->isThisTheMessageThread ())
@@ -3597,12 +3615,28 @@ static bool commitOnMessageThread (const std::function<bool()>& fn, bool& result
         resultOut = fn ();
         return true;
     }
-    juce::WaitableEvent done;
-    if (!juce::MessageManager::callAsync ([&] { resultOut = fn (); done.signal (); }))
+    if (stop.load ())
         return false;
-    done.wait (-1);
+    auto hop = std::make_shared<CommitHop> ();
+    hop->fn = fn;
+    if (!juce::MessageManager::callAsync ([hop] {
+            if (hop->abandoned.load ()) return;
+            hop->result = hop->fn ();
+            hop->done.signal ();
+        }))
+        return false;
+    while (!hop->done.wait (50))
+        if (stop.load ())
+        {
+            hop->abandoned.store (true);
+            if (!hop->done.wait (0)) return false;
+            break;
+        }
+    resultOut = hop->result;
     return true;
 }
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
 
 bool Application::noiseSuppress (const std::string& modelId, const std::string& device,
                                  float attenLimDb, bool df3PostFilter,
@@ -3682,7 +3716,7 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
         if (!commitOnMessageThread ([&] () -> bool {
                 return audioEngine().replaceSamples (samples, data,
                            "Noise suppressed (" + juce::String (modelId) + ")", &err);
-            }, replaced))
+            }, replaced, destroying_))
             return fail ("Could not apply the noise suppression (the application is shutting down).");
         if (!replaced)
             return fail (err.empty () ? std::string ("Could not apply the noise suppression.") : err);
@@ -3724,18 +3758,8 @@ bool Application::noiseSuppress (const std::string& modelId, const std::string& 
     };
 
     bool committed = false;
-    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
-    if (mm == nullptr || mm->isThisTheMessageThread ())
-        committed = commit ();   // tests / CLI: already on the right thread
-    else
-    {
-        // The message thread never waits on this worker (non-blocking modal
-        // progress dialog), so waiting here cannot deadlock.
-        juce::WaitableEvent done;
-        if (!juce::MessageManager::callAsync ([&] { committed = commit (); done.signal (); }))
-            return fail ("Could not apply the noise suppression (the application is shutting down).");
-        done.wait (-1);
-    }
+    if (!commitOnMessageThread (commit, committed, destroying_))
+        return fail ("Could not apply the noise suppression (the application is shutting down).");
     if (!committed)
         return fail ("Could not apply the noise suppression.");
 
@@ -3997,18 +4021,10 @@ bool Application::runPythonScript (const juce::File& script, const juce::String&
     };
 
     bool ok = false;
-    auto* mm = juce::MessageManager::getInstanceWithoutCreating ();
-    if (mm == nullptr || mm->isThisTheMessageThread ())
-        ok = commit ();
-    else
+    if (!commitOnMessageThread (commit, ok, destroying_))
     {
-        juce::WaitableEvent committed;
-        if (!juce::MessageManager::callAsync ([&] { ok = commit (); committed.signal (); }))
-        {
-            cleanup ();
-            return fail ("Could not apply the script's output (the application is shutting down).");
-        }
-        committed.wait (-1);
+        cleanup ();
+        return fail ("Could not apply the script's output (the application is shutting down).");
     }
 
     if (!ok)
@@ -4080,7 +4096,7 @@ bool Application::transcribe (const std::string& modelId, const std::string& lan
             if (!isDocLoaded (d)) return false;
             d->setTranscription (std::move (segs));
             return true;
-        }, stored))
+        }, stored, destroying_))
         return fail ("Could not store the transcription (the application is shutting down).");
     if (!stored)
         return fail ("The document was closed during the transcription.");

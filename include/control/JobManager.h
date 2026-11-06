@@ -33,6 +33,9 @@ public:
         thread / without a MessageManager. */
     bool onMessageThread (std::function<void()> fn);
     juce::String id() const;
+    /** The job's own cancel flag, for APIs taking const std::atomic<bool>*
+        (set by job.cancel and by shutdown). */
+    const std::atomic<bool>* cancelFlag() const;
 
 private:
     friend class JobManager;
@@ -57,6 +60,16 @@ public:
         int docId = -1;
         juce::String source;
         juce::var params;            // journal / job.get (metadata only)
+        /** Optional UI hooks (message thread): progress dialog updates, and
+            its teardown right before job.done. */
+        std::function<void (double, const juce::String&)> uiProgress;
+        std::function<void()> uiDone;
+        /** Optional extra cancel flag (the dialog's Cancel button). Must stay
+            valid until uiDone ran. */
+        const std::atomic<bool>* externalCancel = nullptr;
+        /** Content version of the target document at start (journal: the
+            job's entry carries the new undo state only if content changed). */
+        juce::int64 contentVersionBefore = -1;
     };
 
     /** Starts a job (message thread). Returns its id ("j-<n>"). */

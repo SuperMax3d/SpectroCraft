@@ -44,8 +44,9 @@ juce::var waitForJob (Application& app, const Request& req, const juce::var& sta
             break;
         }
     }
-    // Deliver the job's own completion callbacks (journal entry).
-    mm->runDispatchLoopUntil (1);
+    // Deliver the job's own completion callbacks (journal entry): the worker
+    // posts them right after marking the job finished.
+    mm->runDispatchLoopUntil (20);
 
     if (timedOut)
         return lineError (req.id, err::timeout,
@@ -79,7 +80,7 @@ juce::var waitForJob (Application& app, const Request& req, const juce::var& sta
         {
             set (r, "undoDepth", (int) d->undo.undoSize());
             set (r, "redoDepth", (int) d->undo.redoSize());
-            set (r, "contentVersion", d->engine.contentVersion());
+            set (r, "contentVersion", (juce::int64) d->engine.contentVersion());
         }
         set (r, "journalSeq", app.control().journal.lastSeq());
     }

@@ -66,6 +66,13 @@
 static int failures = 0;
 static int total = 0;
 
+// Window > "Allow AI control (localhost)" exists only with the control server built in.
+#if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
+static constexpr int kScControlMenuItems = 1;
+#else
+static constexpr int kScControlMenuItems = 0;
+#endif
+
 #define CHECK(cond, name) \
     do { ++total; if (!(cond)) { ++failures; std::cout << "FAIL: " << name << "\n"; } } while (0)
 
@@ -3992,9 +3999,10 @@ static void testClosePanelsAndWindowMenu()
         const int wIdx = windowMenuIndex (*win);
         CHECK (wIdx >= 0, "Window menu exists in the menu bar");
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        // +1: the "Allow multiple instances" toggle below the panels
+        // +1: the "Allow multiple instances" toggle below the panels, +1 "Allow
+        // AI control (localhost)" when the control server is built in
         // (the separator between them is not counted by getNumItems).
-        CHECK (wm.getNumItems () == kNumPanels + 1, "Window menu lists every panel");
+        CHECK (wm.getNumItems () == kNumPanels + 1 + kScControlMenuItems, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
         // persists it to the store file immediately.
@@ -4117,7 +4125,7 @@ static void testClosePanelsAndWindowMenu()
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == kNumPanels + 1, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == kNumPanels + 1 + kScControlMenuItems, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 0, wIdx);   // files
@@ -26987,6 +26995,7 @@ static void testActionsPanelPaint()
 #include "regression/persistence.inc"
 #include "regression/ai.inc"
 #include "regression/control.inc"   // AI control: registry, step.run, history, --json
+#include "regression/control_server.inc"   // AI control: loopback server, path roots, view/transport
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -27041,7 +27050,8 @@ static bool scIsSerialTest (const char* name)
         "copy curve alt scales", "transcription clipboard", "tables panel", "paste live repro",
         "change gain dialog", "drawing key shortcuts",
         "playback chain", "lazy audio init",
-        "regression: panels", "regression: app_from_tests"
+        "regression: panels", "regression: app_from_tests",
+        "control server"   // loopback sockets + the user's control discovery folder
     };
     for (auto* s : serial)
         if (juce::String (name) == s) return true;
@@ -27473,6 +27483,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: persistence", runRegression_persistence);
     SC_RUN_TEST ("regression: ai", runRegression_ai);
     SC_RUN_TEST ("regression: control", runRegression_control);
+    SC_RUN_TEST ("control server", runRegression_controlServer);
 
 
     scReportTimings();

@@ -1,5 +1,6 @@
 // SpectroCraft - AI control: long-running commands as jobs (see include/control/JobManager.h).
 #include "control/JobManager.h"
+#include "AlertGate.h"
 
 namespace sc::control {
 
@@ -11,6 +12,7 @@ struct JobRecord
     bool mutating = false;
     int docId = -1;
     juce::var params;
+    juce::int64 contentVersionBefore = -1;
     std::atomic<JobState> state { JobState::Running };
     std::atomic<bool> cancel { false };
     std::atomic<double> progress { 0.0 };
@@ -22,6 +24,15 @@ struct JobRecord
     Outcome outcome;
     std::thread th;
     std::function<void (const juce::String&, const juce::var&)>* progressSink = nullptr;
+    std::function<void (double, const juce::String&)> uiProgress;   // message thread
+    std::function<void()> uiDone;                                   // message thread
+    const std::atomic<bool>* externalCancel = nullptr;
+
+    /** Folds the dialog's Cancel button into the job's own flag. */
+    void pollExternalCancel()
+    {
+        if (externalCancel != nullptr && externalCancel->load()) cancel.store (true);
+    }
 };
 
 static const char* stateName (const JobRecord& r)
@@ -42,6 +53,8 @@ static juce::var infoOf (const JobRecord& r)
                     { "progress", r.progress.load() }, { "mutating", r.mutating },
                     { "source", r.source } });
     if (r.docId >= 0) set (v, "doc", r.docId);
+    if (r.params.isObject()) set (v, "params", r.params);
+    if (r.contentVersionBefore >= 0) set (v, "contentVersionBefore", r.contentVersionBefore);
     const double end = r.endMs.load();
     const double now = juce::Time::getMillisecondCounterHiRes();
     set (v, "elapsedMs", (int) ((end > 0.0 ? end : now) - r.startMs));
@@ -60,13 +73,17 @@ static juce::var infoOf (const JobRecord& r)
 
 bool JobControl::cancelled() const
 {
+    rec->pollExternalCancel();
     return rec->cancel.load() || stopping->load();
 }
 
 juce::String JobControl::id() const { return rec->id; }
 
+const std::atomic<bool>* JobControl::cancelFlag() const { return &rec->cancel; }
+
 void JobControl::progress (double p, const juce::String& status)
 {
+    rec->pollExternalCancel();
     rec->progress.store (p);
     if (status.isNotEmpty())
     {
@@ -83,13 +100,17 @@ void JobControl::progress (double p, const juce::String& status)
     if (juce::MessageManager::getInstanceWithoutCreating() == nullptr)
         return;
     juce::MessageManager::callAsync ([r, stop] {
-        if (stop->load() || r->progressSink == nullptr || ! *r->progressSink) return;
+        if (stop->load() || r->state.load() != JobState::Running) return;
         juce::var data = obj ({ { "job", r->id }, { "progress", r->progress.load() } });
+        juce::String st;
         {
             std::lock_guard<std::mutex> l (r->m);
-            if (r->status.isNotEmpty()) set (data, "status", r->status);
+            st = r->status;
         }
-        (*r->progressSink) ("job.progress", data);
+        if (st.isNotEmpty()) set (data, "status", st);
+        if (r->uiProgress) r->uiProgress (r->progress.load(), st);
+        if (r->progressSink != nullptr && *r->progressSink)
+            (*r->progressSink) ("job.progress", data);
     });
 }
 
@@ -117,7 +138,10 @@ bool JobControl::onMessageThread (std::function<void()> fn)
     call->fn = std::move (fn);
     if (!juce::MessageManager::callAsync ([call] {
             if (call->abandoned.load()) return;
-            call->fn();
+            {
+                sc::alert::ScopedCapture capture;   // a job's commit never shows a message box
+                call->fn();
+            }
             call->done.signal();
         }))
         return false;
@@ -176,8 +200,12 @@ juce::String JobManager::start (const StartInfo& info, Work work)
     rec->docId = info.docId;
     rec->source = info.source;
     rec->params = info.params;
+    rec->contentVersionBefore = info.contentVersionBefore;
     rec->startMs = juce::Time::getMillisecondCounterHiRes();
     rec->progressSink = &onEvent;
+    rec->uiProgress = info.uiProgress;
+    rec->uiDone = info.uiDone;
+    rec->externalCancel = info.externalCancel;
 
     auto stop = stopping;
     auto me = self;
@@ -213,6 +241,7 @@ juce::String JobManager::start (const StartInfo& info, Work work)
         juce::MessageManager::callAsync ([rec, stop, me] {
             if (stop->load() || *me == nullptr) return;
             JobManager& jm = **me;
+            if (rec->uiDone) { auto done = std::move (rec->uiDone); rec->uiDone = nullptr; done(); }
             const auto inf = infoOf (*rec);
             if (jm.onEvent) jm.onEvent ("job.done", inf);
             if (jm.onFinished) jm.onFinished (rec->id, inf);

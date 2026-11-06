@@ -105,6 +105,7 @@ target_compile_definitions (SpectroCraftTests
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=${SC_JUCE_USE_CURL}
         JUCE_MODAL_LOOPS_PERMITTED=1
+        SC_ENABLE_CONTROL=${SC_CONTROL_DEFINE}
         SC_TESTS_EXE=1
         SC_NO_AUDIO_DEVICE=1   # headless tests: no real output device
         SC_SOURCE_DIR="${CMAKE_SOURCE_DIR}"

@@ -45,6 +45,7 @@
 #include "PngWriter.h"
 #include "Settings.h"
 #include "control/JsonCli.h"
+#include "control/ControlServer.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -199,6 +200,17 @@ public:
         // opened after the app is up - single-instance handling below may hand
         // them to a running instance instead.
         std::vector<juce::File> cliFiles;
+        bool controlFlag = false;
+
+        // Headless JSON mode owns the whole command line (its options may
+        // come in any order): see include/control/JsonCli.h.
+        if (args.contains ("--json") || args.contains ("--list-commands"))
+        {
+            const int rc = sc::control::runJsonCli (args);
+            setApplicationReturnValue (rc);
+            quit();
+            return;
+        }
 
         for (int i = 0; i < args.size(); ++i)
         {
@@ -834,6 +846,14 @@ public:
             {
                 // handled before this loop
             }
+#if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
+            else if (args[i] == "--control")
+            {
+                // AI control: start the loopback control server whatever the
+                // setting, and never hand off to a running instance.
+                controlFlag = true;
+            }
+#endif
             else if (args[i].startsWith ("--"))
             {
                 // Unknown flags used to be ignored silently and the UI started.
@@ -852,6 +872,9 @@ public:
 
         // Single-instance mode: when "Allow multiple instances" is off, hand
         // the command-line files to a running instance and quit this one.
+        // --control skips it: the instance launched by the AI adapter must be
+        // a controllable one (it writes its own discovery file).
+        if (!controlFlag)
         {
             juce::StringArray names;
             for (const auto& f : cliFiles) names.add (f.getFullPathName());
@@ -874,6 +897,13 @@ public:
             });
         forwarder->startServer ();
 
+        // AI control server (opt-in: Window > Allow AI control, or --control).
+#if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
+        mainWindow->onControlToggled = [this] (bool on) { setControlServer (on); };
+        if (controlFlag || app->settings.controlEnabled)
+            setControlServer (true);
+#endif
+
         // Open the command-line files. Routing through MainWindow::openFile
         // gives large files their async load with a progress dialog, exactly
         // like File > Open.
@@ -883,6 +913,10 @@ public:
 
     void shutdown() override
     {
+        // Control server first: in-flight requests get shutting_down and its
+        // threads are joined while the window and documents still exist.
+        if (controlServer != nullptr) controlServer->stop ();
+        controlServer.reset ();
         if (forwarder != nullptr) forwarder->stopServer ();
         mainWindow.reset();
         app.reset();
@@ -930,6 +964,32 @@ private:
     std::unique_ptr<Application> app;
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<sc::singleinstance::Coordinator> forwarder;   // file-forwarding server
+    std::unique_ptr<sc::control::ControlServer> controlServer;    // AI control (loopback)
+
+    void setControlServer (bool on)
+    {
+        if (!on)
+        {
+            if (controlServer != nullptr) controlServer->stop ();
+            controlServer.reset ();
+            if (mainWindow != nullptr) mainWindow->setControlClients (0);
+            return;
+        }
+        if (controlServer != nullptr || app == nullptr) return;
+        controlServer = std::make_unique<sc::control::ControlServer> (*app);
+        controlServer->onClientsChanged = [this] (int n) {
+            if (mainWindow != nullptr) mainWindow->setControlClients (n);
+        };
+        juce::String err;
+        if (controlServer->start (&err))
+            std::fprintf (stderr, "[control] listening on 127.0.0.1:%d (%s)\n", controlServer->port (),
+                          controlServer->discoveryFile ().getFullPathName ().toRawUTF8 ());
+        else
+        {
+            std::fprintf (stderr, "[control] could not start: %s\n", err.toRawUTF8 ());
+            controlServer.reset ();
+        }
+    }
 };
 
 START_JUCE_APPLICATION (SpectroCraftApplication)

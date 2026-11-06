@@ -149,7 +149,7 @@ static juce::var findOp (const std::vector<juce::var>& entries, int docId, int s
         const auto& e = *it;
         if ((int) e.getProperty ("doc", -1) != docId) continue;
         const auto kind = e.getProperty ("kind", {}).toString();
-        if (kind == "command" && (bool) e.getProperty ("ok", false)
+        if ((kind == "command" || kind == "job") && (bool) e.getProperty ("ok", false)
             && (int) e.getProperty ("undoDepth", -1) == state
             && e.getProperty ("description", {}).toString() == description)
             return e;
@@ -187,7 +187,8 @@ static juce::var stateOf (const Patch& p, int state, double rate, bool future,
         const auto op = findOp (journal, docId, state, p.description);
         if (op.isObject())
         {
-            const bool isCmd = op.getProperty ("kind", {}).toString() == "command";
+            const auto k = op.getProperty ("kind", {}).toString();
+            const bool isCmd = k == "command" || k == "job";
             set (s, "opId", isCmd ? op.getProperty ("cmd", {}) : op.getProperty ("what", {}));
             set (s, "params", op.getProperty ("params", {}));
             set (s, "source", op.getProperty ("source", {}));
@@ -206,7 +207,8 @@ juce::var historyList (Application& app, FileDoc& d, bool includeJournal, juce::
     const double rate = d.engine.sampleRate();
 
     juce::Array<juce::var> states;
-    states.add (obj ({ { "state", 0 }, { "description", "Loaded " + d.name }, { "future", false } }));
+    states.add (obj ({ { "state", 0 }, { "label", "Loaded " + d.name }, { "description", "Loaded " + d.name },
+                       { "future", false } }));
     for (size_t i = 0; i < u.undoSize(); ++i)
         states.add (stateOf (u.undoAt (i), (int) i + 1, rate, false, entries, d.id));
     // The redo stack's back() is the NEXT redo: list the future in redo order.
@@ -214,7 +216,7 @@ juce::var historyList (Application& app, FileDoc& d, bool includeJournal, juce::
     for (size_t k = 0; k < u.redoSize(); ++k)
         states.add (stateOf (u.redoAt (u.redoSize() - 1 - k), cur + 1 + (int) k, rate, true, entries, d.id));
 
-    auto r = obj ({ { "doc", d.id }, { "currentState", cur },
+    auto r = obj ({ { "doc", d.id }, { "docId", d.id }, { "currentState", cur },
                     { "maxLevels", (int) ::UndoManager::kMaxLevels }, { "states", states } });
     if (includeJournal)
         set (r, "journal", journal.read (sinceSeq, {}, 500, d.id).getProperty ("entries", {}));

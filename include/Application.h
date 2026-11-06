@@ -878,6 +878,10 @@ public:
 
 private:
     std::unique_ptr<sc::control::ControlState> control_;
+    // Set first thing in the destructor: workers waiting for a message-thread
+    // commit (AI ops, Python) give up instead of deadlocking while the
+    // destructor joins the AI-control jobs.
+    std::atomic<bool> destroying_ { false };
 
     // Lazy audio init state. audioInitThread is joined in the destructor so a
     // pending worker can never outlive the AudioDeviceManager it initialises.

@@ -64,6 +64,15 @@ add_custom_target(sc_bump_version ALL
             -P ${CMAKE_SOURCE_DIR}/cmake/bump_version.cmake
     BYPRODUCTS ${SC_GENERATED_DIR}/Version.h ${SC_GENERATED_DIR}/SC_VERSION.txt)
 
+# Loopback control server + --control + Window > Allow AI control (RAPPORT
+# §9 Q14). OFF builds keep the registry, --json and action replay.
+option(SC_ENABLE_CONTROL "Build the AI-control server (localhost, opt-in at run time)" ON)
+if (SC_ENABLE_CONTROL)
+    set(SC_CONTROL_DEFINE 1)
+else()
+    set(SC_CONTROL_DEFINE 0)
+endif()
+
 # AI control (docs/ai-control/RAPPORT.md §5): command registry, session
 # journal, jobs, --json CLI. Shared by the app and the console test target.
 set(SC_CONTROL_SOURCES
@@ -76,7 +85,11 @@ set(SC_CONTROL_SOURCES
     ${CMAKE_SOURCE_DIR}/src/control/commands/Core.cpp
     ${CMAKE_SOURCE_DIR}/src/control/commands/History.cpp
     ${CMAKE_SOURCE_DIR}/src/control/commands/Steps.cpp
-    ${CMAKE_SOURCE_DIR}/src/control/commands/Jobs.cpp)
+    ${CMAKE_SOURCE_DIR}/src/control/commands/Jobs.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/commands/View.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/commands/Transport.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/PathPolicy.cpp
+    ${CMAKE_SOURCE_DIR}/src/control/ControlServer.cpp)
 
 add_subdirectory(src)
 

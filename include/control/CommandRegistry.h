@@ -40,7 +40,8 @@ enum Flag : uint32_t
     WindowsOnly = 1u << 6,   // unsupported_platform elsewhere
     NoDocSwitch = 1u << 7,   // the handler addresses ctx.doc itself: never switch the active doc
     Internal    = 1u << 8,   // diagnostics/test helpers (category "debug")
-    Query       = 1u << 9    // pure read: allowed while a mutating job runs, not journaled on success
+    Query       = 1u << 9,   // pure read: allowed while a mutating job runs, not journaled on success
+    ActiveDocOnly = 1u << 10 // acts on what the window shows (player, views): doc must be the active one
 };
 
 juce::StringArray flagNames (uint32_t flags);
@@ -130,6 +131,9 @@ struct Context
     const juce::var& params;          // validated params object
     FileDoc* doc = nullptr;           // resolved target (active document during the handler)
     juce::String source;              // "cli", "api:<client>", "menu", "test"
+    /** Set by a handler that started a job on a non-active target: the
+        document stays active afterwards (the job works on the active one). */
+    bool keepDocSwitch = false;
 
     juce::var get (const char* key) const;
     bool has (const char* key) const;
@@ -231,5 +235,7 @@ void registerCoreCommands (CommandRegistry&);
 void registerHistoryCommands (CommandRegistry&);
 void registerStepCommands (CommandRegistry&);
 void registerJobCommands (CommandRegistry&);
+void registerViewCommands (CommandRegistry&);
+void registerTransportCommands (CommandRegistry&);
 
 } // namespace sc::control
