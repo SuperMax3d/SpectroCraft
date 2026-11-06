@@ -60,6 +60,12 @@ bool processGone (int pid, int waitMs)
     }
 }
 
+// Progress marker on stderr (unbuffered): a hang on CI shows where it is.
+void hstep (const char* what)
+{
+    std::cerr << "[hardening] " << what << std::endl;
+}
+
 juce::StringArray pyArgs (const juce::StringArray& pyTokens, const juce::StringArray& rest)
 {
     juce::StringArray a;
@@ -330,8 +336,11 @@ static void testHardeningStemServiceValidation()
         std::thread t ([&] {
             auto r = good ();
             r.workDir = work;
+            // Deadline instead of "never cancel": a CLI that unexpectedly
+            // starts must not hang the suite.
+            const uint32_t t0 = juce::Time::getMillisecondCounter ();
             res = SS::run (r, [&progressCalls] (double, const juce::String&) { ++progressCalls; },
-                           [] { return false; });
+                           [t0] { return juce::Time::getMillisecondCounter () - t0 > 30000; });
         });
         t.join ();
 #if JUCE_WINDOWS
@@ -379,7 +388,12 @@ static void testHardeningSuperResServiceValidation()
     { auto r = good (); r.model = dir.getChildFile ("m");    CHECK (codeOf (r) == "model_missing",   "hardening superres: model missing"); }
 
     SR::Result res;
-    std::thread t ([&] { auto r = good (); r.mode = SR::Mode::AudioSR; res = SR::run (r); });
+    std::thread t ([&] {
+        auto r = good ();
+        r.mode = SR::Mode::AudioSR;
+        const uint32_t t0 = juce::Time::getMillisecondCounter ();
+        res = SR::run (r, nullptr, [t0] { return juce::Time::getMillisecondCounter () - t0 > 30000; });
+    });
     t.join ();
 #if JUCE_WINDOWS
     CHECK (!res.ok && res.errorCode == "tool_failed", "hardening superres: worker-thread run reaches the CLI (" + res.errorCode + ")");
@@ -425,6 +439,7 @@ static void testHardeningProcess()
     const std::string exe = pyTokens[0].toStdString ();
     const juce::File dir = hardeningDir (juce::String (juce::CharPointer_UTF8 ("process dir \xc3\xa9\xc3\xa8 \xe4\xb8\xad")));
 
+    hstep ("process: timeout");
     // 1) Timeout kills a sleeping script.
     {
         const juce::File s = dir.getChildFile ("sleep.py");
@@ -438,6 +453,7 @@ static void testHardeningProcess()
                "hardening process: killed shortly after the limit (" + juce::String (r.elapsedMs, 0) + " ms)");
     }
 
+    hstep ("process: tree kill");
     // 2) The whole tree goes: a grandchild that ignores SIGTERM dies too.
     {
         const juce::File pidFile = dir.getChildFile ("grandchild.pid");
@@ -463,6 +479,7 @@ static void testHardeningProcess()
             CHECK (processGone (gpid, 5000), "hardening process: grandchild killed with the tree");
     }
 
+    hstep ("process: cancel");
     // 3) Cancellation also kills (shouldContinue polled every 200 ms).
     {
         const juce::File s = dir.getChildFile ("sleep2.py");
@@ -474,6 +491,7 @@ static void testHardeningProcess()
                "hardening process: cancel kills the script");
     }
 
+    hstep ("process: stdin");
     // 4) stdin is the null device: reading it returns EOF at once.
     {
         const juce::File s = dir.getChildFile ("stdin.py");
@@ -486,6 +504,7 @@ static void testHardeningProcess()
                "hardening process: stdin closed, script gets EOF (" + r.stdoutText.trim () + r.stderrText + ")");
     }
 
+    hstep ("process: utf8 paths");
     // 5) UTF-8 environment + non-ASCII paths with spaces, both directions.
     {
         const juce::String accented = juce::String (juce::CharPointer_UTF8 ("d\xc3\xa2ta \xc3\xb1 \xe4\xb8\xad.txt"));
@@ -535,6 +554,7 @@ static void testHardeningRunPythonScript()
     const juce::File wav = makeTempFile ("hardening_ramp.wav");
     writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t f, double) { return float ((double) f / 8000.0) * 0.5f; });
 
+    hstep ("run: result-only");
     // 1) Analysis-only script: result.json, no out.wav. Succeeds, audio untouched.
     {
         const juce::File s = dir.getChildFile ("analyse.py");
@@ -571,6 +591,7 @@ static void testHardeningRunPythonScript()
                "hardening python run: SHA-256 of the script that ran is reported");
     }
 
+    hstep ("run: legacy");
     // 2) Existing scripts keep working (out.wav only), the capture sees the edit.
     {
         Application app;
@@ -584,6 +605,7 @@ static void testHardeningRunPythonScript()
         CHECK (app.undo ().undoSize () == 1, "hardening python run legacy: one undo step");
     }
 
+    hstep ("run: invalid result");
     // 3) Invalid result.json fails the run even when out.wav is fine.
     {
         const juce::File s = dir.getChildFile ("bad_result.py");
@@ -600,6 +622,7 @@ static void testHardeningRunPythonScript()
         CHECK (app.undo ().undoSize () == 0, "hardening python run bad: document untouched");
     }
 
+    hstep ("run: time limit");
     // 4) Time limit from the capture: the script is killed, nothing changes.
     {
         const juce::File s = dir.getChildFile ("hang.py");
@@ -618,6 +641,7 @@ static void testHardeningRunPythonScript()
         CHECK (app.undo ().undoSize () == 0, "hardening python run timeout: document untouched");
     }
 
+    hstep ("run: capture nesting");
     // 5) Captures nest per thread and are invisible to other threads.
     {
         sc::py::ScopedScriptRunCapture outer;
@@ -639,12 +663,13 @@ static void testHardeningRunPythonScript()
 
 static void runRegression_hardening()
 {
-    testHardeningResultJson ();
-    testHardeningMetaContract ();
-    testHardeningScriptHash ();
-    testHardeningScriptFolder ();
-    testHardeningStemServiceValidation ();
-    testHardeningSuperResServiceValidation ();
-    testHardeningProcess ();
-    testHardeningRunPythonScript ();
+    hstep ("result.json");         testHardeningResultJson ();
+    hstep ("meta contract");       testHardeningMetaContract ();
+    hstep ("script hash");         testHardeningScriptHash ();
+    hstep ("script folder");       testHardeningScriptFolder ();
+    hstep ("stem service");        testHardeningStemServiceValidation ();
+    hstep ("superres service");    testHardeningSuperResServiceValidation ();
+    hstep ("process");             testHardeningProcess ();
+    hstep ("runPythonScript");     testHardeningRunPythonScript ();
+    hstep ("done");
 }
