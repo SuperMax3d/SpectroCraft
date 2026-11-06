@@ -53,6 +53,11 @@ public:
     std::vector<std::unique_ptr<FileDoc>> docs;
     int activeDocIndex = -1;
 
+    // Parametric sound-source model session (the Model panel). Time references
+    // inside it follow edits of their source files through FileDoc::onTimelineEdit,
+    // wired per document by wireModelTimelineEdit().
+    std::unique_ptr<sc::model::ModelSession> modelSession;
+
     // Fallback objects used while no file is loaded. Every code path guards on
     // isFileLoaded(), so these are never actually edited or played.
     AudioEngine emptyEngine;
@@ -633,10 +638,18 @@ public:
         std::vector<DrawingItem> drawings;
         std::vector<ScttSegment> scttSegments;
         std::vector<sc::tables::TableData> tables;
+
+        // Model-session time references for the active file at capture time
+        // ("" when the session holds none): restored with the patch on undo/redo.
+        juce::String modelRefs;
     };
 
     TimeAnchoredState captureTimeAnchored () const;
     void commitTimeAnchoredToPatch (const TimeAnchoredState& before, Patch& p);
+
+    /** Connects this document's timeline-edit hook to the model session so its
+        time references follow edits of this file inside the same undo step. */
+    void wireModelTimelineEdit (FileDoc& d);
 
     /** Filter EQ: FFT-based zero-phase curve equaliser on the active spectral
         selection region, or on the time selection if there is one, or over

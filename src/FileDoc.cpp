@@ -333,6 +333,9 @@ void FileDoc::remapForDeletion (double a, double b)
     }
 
     metaDirty = true;   // markers / selections / drawings / SCTT changed on disk
+
+    if (onTimelineEdit != nullptr)
+        onTimelineEdit (*this, sc::model::ModelSession::TimelineEdit::Deletion, a, b, 0.0);
 }
 
 void FileDoc::remapForInsertion (double a, double lenSecs)
@@ -348,6 +351,9 @@ void FileDoc::remapForInsertion (double a, double lenSecs)
     warpScttSegments (sctt.segments, [&](double t) { return warpInsertion (t, a, lenSecs); });
 
     metaDirty = true;
+
+    if (onTimelineEdit != nullptr)
+        onTimelineEdit (*this, sc::model::ModelSession::TimelineEdit::Insertion, a, lenSecs, 0.0);
 }
 
 void FileDoc::remapForStretch (double a, double bOld, double bNew)
@@ -363,4 +369,7 @@ void FileDoc::remapForStretch (double a, double bOld, double bNew)
     warpScttSegments (sctt.segments, [&](double t) { return warpStretch (t, a, bOld, bNew); });
 
     metaDirty = true;
+
+    if (onTimelineEdit != nullptr)
+        onTimelineEdit (*this, sc::model::ModelSession::TimelineEdit::Stretch, a, bOld, bNew);
 }

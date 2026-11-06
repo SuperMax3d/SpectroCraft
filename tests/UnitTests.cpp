@@ -27114,6 +27114,526 @@ struct ScModalWatchdog : private juce::Timer
     double since = 0.0;
 };
 
+
+// ================= Model session (parametric sound-source models) ============
+
+static bool scNear (double a, double b, double eps = 1e-9)
+{
+    return std::abs (a - b) < eps;
+}
+
+namespace {
+/** In-memory FrameReader for the model analysis tests. */
+struct VecFrameReader : sc::model::FrameReader
+{
+    std::vector<std::vector<float>> chans;
+    double rate = 48000.0;
+
+    double sampleRate() const override { return rate; }
+    int numChannels() const override { return (int) chans.size (); }
+    int64_t numSamples() const override { return chans.empty () ? 0 : (int64_t) chans[0].size (); }
+    bool readChannel (int ch, int64_t start, int count, float* out) const override
+    {
+        if (ch < 0 || ch >= (int) chans.size ()) return false;
+        for (int i = 0; i < count; ++i)
+        {
+            const int64_t idx = start + i;
+            out[i] = (idx >= 0 && idx < (int64_t) chans[ch].size ()) ? chans[ch][(size_t) idx] : 0.0f;
+        }
+        return true;
+    }
+};
+}   // namespace
+
+static void testModelExpression()
+{
+    using sc::model::Expression;
+
+    auto resolve = [] (const juce::String& name, bool* found) -> double
+    {
+        if (found != nullptr) *found = true;
+        if (name == "P1") return 10.0;
+        if (name == "T.P2") return 4.0;
+        if (name == "P3") return 0.0;   // found, but zero: division-by-zero case
+        *found = false;
+        return 0.0;
+    };
+
+    auto ev = [&] (const juce::String& text) -> Expression::Result
+    {
+        Expression e;
+        juce::String err;
+        if (!Expression::parse (text, e, &err)) return { false, 0.0, err };
+        return e.evaluate (resolve);
+    };
+
+    auto r = ev ("2+3*4");
+    CHECK (r.ok && scNear (r.value, 14.0), "precedence: 2+3*4 = 14");
+    r = ev ("(2+3)*4");
+    CHECK (r.ok && scNear (r.value, 20.0), "parens: (2+3)*4 = 20");
+    r = ev ("-5+2");
+    CHECK (r.ok && scNear (r.value, -3.0), "unary minus: -5+2 = -3");
+    r = ev ("--5");
+    CHECK (r.ok && scNear (r.value, 5.0), "double unary minus");
+    r = ev ("10/4-1");
+    CHECK (r.ok && scNear (r.value, 1.5), "division: 10/4-1 = 1.5");
+    r = ev ("P1/2");
+    CHECK (r.ok && scNear (r.value, 5.0), "parameter value");
+    r = ev ("T.P2*2");
+    CHECK (r.ok && scNear (r.value, 8.0), "qualified parameter name");
+    r = ev ("P3+1");
+    CHECK (r.ok && scNear (r.value, 1.0), "zero-valued parameter is found");
+    r = ev ("1/P3");
+    CHECK (!r.ok && r.error.contains ("Division by zero"), "division by zero errors");
+    r = ev ("NOPE");
+    CHECK (!r.ok && r.error.contains ("not found"), "unknown parameter errors");
+
+    // Empty expression: valid, evaluates to 0.
+    Expression empty;
+    juce::String err;
+    CHECK (Expression::parse ("   ", empty, &err) && empty.empty (), "whitespace parses as empty");
+    r = empty.evaluate (resolve);
+    CHECK (r.ok && scNear (r.value, 0.0), "empty expression evaluates to 0");
+
+    // Syntax errors.
+    auto bad = [&] (const juce::String& text) { Expression e; return !Expression::parse (text, e, &err); };
+    CHECK (bad ("2+"), "dangling operator rejected");
+    CHECK (bad ("(2"), "unbalanced paren rejected");
+    CHECK (bad ("2 3"), "trailing token rejected");
+    CHECK (bad ("P1.P2.3"), "double-qualified name rejected");
+
+    // Parameter list: order of first appearance, deduplicated.
+    Expression e;
+    CHECK (Expression::parse ("P1+T.P2*P1", e), "params() source parses");
+    const auto ps = e.params();
+    CHECK ((int) ps.size () == 2 && ps[0] == "P1" && ps[1] == "T.P2", "params() dedup + order");
+}
+
+static void testModelRemapCurve()
+{
+    sc::model::RemapCurve c;   // empty -> identity
+    CHECK (scNear (c.apply (3.7), 3.7), "empty curve is identity");
+
+    c.points = {{ 0, 0 }, { 10, 20 }};
+    CHECK (scNear (c.apply (5.0), 10.0), "midpoint interpolation");
+    CHECK (scNear (c.apply (-4.0), 0.0), "clamped below the curve");
+    CHECK (scNear (c.apply (99.0), 20.0), "clamped above the curve");
+
+    c.points = {{ 3, 7 }};   // single point -> identity
+    CHECK (scNear (c.apply (1.0), 1.0), "single-point curve is identity");
+
+    // Non-uniform spacing.
+    c.points = {{ 0, 0 }, { 2, 1 }, { 10, 3 }};
+    CHECK (scNear (c.apply (1.0), 0.5), "first segment midpoint");
+    CHECK (scNear (c.apply (6.0), 2.0), "second segment midpoint");
+}
+
+static void testModelGridMapping()
+{
+    using namespace sc::model;
+
+    // Single cell: every point maps to it with weight 1.
+    {
+        auto w = bilinearWeights ({}, {}, 1, 1, 42.0, -7.0, nullptr);
+        CHECK (w.col == 0 && w.row == 0 && scNear (w.w[0], 1.0) && scNear (w.w[1] + w.w[2] + w.w[3], 0.0),
+              "single cell takes all weight");
+    }
+
+    // Two columns / two rows: xBreaks={4,6} -> nodes [3,5,7]; yBreaks={8} -> nodes [7.5,8.5].
+    {
+        CHECK (scNear (axisIndex ({ 4.0, 6.0 }, 5.0), 1.0), "centre of middle cell is node 1");
+        CHECK (scNear (axisIndex ({ 4.0, 6.0 }, 4.0), 0.5), "breakpoint sits halfway between nodes");
+        CHECK (scNear (axisIndex ({ 4.0, 6.0 }, -100.0), 0.0), "clamped below the axis");
+        CHECK (scNear (axisIndex ({ 4.0, 6.0 }, 100.0), 2.0), "clamped above the axis");
+
+        // x=5 is exactly node 1; y=7.5 is exactly the bottom node of {8}.
+        auto w = bilinearWeights ({ 4.0, 6.0 }, { 8.0 }, 3, 2, 5.0, 7.5, nullptr);
+        CHECK (w.col == 1 && w.row == 0, "rectangle anchored at the exact node");
+        CHECK (scNear (w.w[0], 1.0) && scNear (w.w[1] + w.w[2] + w.w[3], 0.0), "zero fractional weights on the node");
+
+        auto w2 = bilinearWeights ({ 4.0, 6.0 }, { 8.0 }, 3, 2, 5.0, 7.5, nullptr);
+        CHECK (scNear (w2.w[0], 1.0), "clamped to the bottom row");
+
+        // x=7 is exactly the last node (fx=1); y=9.5 clamps above the top node
+        // (fy=1) -> all weight in cell (row 1, col 2).
+        auto w3 = bilinearWeights ({ 4.0, 6.0 }, { 8.0 }, 3, 2, 7.0, 9.5, nullptr);
+        CHECK (w3.col == 1 && scNear (w3.w[3], 1.0) && scNear (w3.w[0] + w3.w[1] + w3.w[2], 0.0),
+              "clamped to the right column");
+    }
+
+    // Empty-cell renormalisation: top-left cell empty -> its weight spreads over the other three.
+    {
+        auto isEmpty = [] (int row, int col) { return row == 0 && col == 0; };
+        auto w = bilinearWeights ({ 4.0 }, { 8.0 }, 2, 2, 4.0, 8.0, isEmpty);
+        CHECK (w.col == 0 && w.row == 0, "anchor cell unchanged");
+        CHECK (scNear (w.w[0], 0.0), "empty cell gets no weight");
+        CHECK (scNear (w.w[1] + w.w[2] + w.w[3], 1.0) && scNear (w.w[1], 1.0 / 3.0),
+              "weight renormalised over the three live cells");
+
+        auto allEmpty = [] (int, int) { return true; };
+        auto w2 = bilinearWeights ({ 4.0 }, { 8.0 }, 2, 2, 4.0, 8.0, allEmpty);
+        CHECK (scNear (w2.w[0] + w2.w[1] + w2.w[2] + w2.w[3], 0.0), "all empty -> zero weights");
+    }
+
+    // No grid at all: zero weights.
+    {
+        auto w = bilinearWeights ({}, {}, 0, 0, 1.0, 1.0, nullptr);
+        CHECK (scNear (w.w[0] + w.w[1] + w.w[2] + w.w[3], 0.0), "no cells -> zero weights");
+    }
+}
+
+static void testModelResolveParam()
+{
+    using sc::model::resolveParam;
+    using sc::tables::TableData;
+    using sc::tables::ParamData;
+
+    TableData t;
+    t.name = "T";
+    t.sampleRate = 100.0;
+    ParamData p;
+    p.name = "P";
+    p.values = { 0.0, 10.0 };   // duration (n-1)/rate = 0.01 s
+    t.params.push_back (p);
+
+    bool found = false, amb = false;
+    CHECK (scNear (resolveParam ({ t }, "P", 0.0, &found), 0.0) && found, "start of domain");
+    CHECK (scNear (resolveParam ({ t }, "P", 0.005), 5.0), "midpoint interpolation");
+    CHECK (scNear (resolveParam ({ t }, "P", 0.01), 10.0), "end of domain");
+    found = false;
+    CHECK (scNear (resolveParam ({ t }, "P", -1.0, &found), 0.0) && found, "before the domain: lower endpoint held");
+    CHECK (scNear (resolveParam ({ t }, "P", 1.0), 10.0), "after the domain: upper endpoint held");
+
+    // Unqualified name in two tables: first match wins + ambiguity flag.
+    TableData t2 = t;
+    t2.name = "T2";
+    amb = false; found = false;
+    CHECK (scNear (resolveParam ({ t, t2 }, "P", 0.005, &found, &amb), 5.0) && found && amb,
+          "unqualified duplicate: first match + ambiguous");
+
+    // Qualified name resolves exactly and clears the ambiguity flag.
+    amb = true; found = false;
+    CHECK (scNear (resolveParam ({ t, t2 }, "T2.P", 0.005, &found, &amb), 5.0) && found && !amb,
+          "qualified name resolves exactly");
+
+    // Unknown parameter: not found, value 0.
+    found = true;
+    CHECK (scNear (resolveParam ({ t }, "Q", 0.0, &found), 0.0) && !found, "unknown parameter not found");
+
+    // Effective time map: docTime = offset + scale*tTable (2 s + 2x).
+    TableData t3;
+    t3.name = "T3";
+    t3.sampleRate = 100.0;
+    ParamData p3;
+    p3.name = "P";
+    p3.values = { 0.0, 10.0 };
+    p3.offsetSecs = 2.0;
+    p3.scaleTime = 2.0;
+    t3.params.push_back (p3);
+    CHECK (scNear (resolveParam ({ t3 }, "P", 2.0 + 2.0 * 0.005), 5.0), "time map inverted");
+    CHECK (scNear (resolveParam ({ t3 }, "P", 1.0), 0.0), "before the mapped domain: endpoint held");
+}
+
+static void testModelJsonRoundTrip()
+{
+    const auto dir = scTestTempDir ().getChildFile ("model_rt");
+    dir.createDirectory ();
+    const juce::File wav = dir.getChildFile ("src.wav");
+    CHECK (writeWav (wav, 2, 8000.0, 16000, [] (int ch, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * (ch == 0 ? 300.0 : 900.0) * (double) f / rate);
+    }), "test wav written");
+
+    sc::model::ModelSession s;
+    s.matchTolerancePct = 4.5;
+    s.inclusionThresholdDb = -55.0;
+    s.overSubtractToleranceDb = 2.0;
+
+    auto& h = s.addComponent ("Harmonic A", 0);
+    const auto hid = h.id;   // capture before later push_backs can reallocate the vector
+    h.comment = "first harmonic set";
+    h.xBreaks = { 5.0, 10.0 };
+    h.yBreaks = { 20.0 };
+    h.inputX.expression = "P1/10";
+    h.inputX.curve.points = {{ 0, 0 }, { 10, 5 }};
+    h.amplitudes[0].expression = "2*AMP";
+    h.cells.resize (6);
+    auto& c0 = h.cells[0];
+    c0.sourceFile = wav.getFullPathName ();
+    sc::model::HarmonicPick pk;
+    pk.freqHz = 440.0; pk.widthHz = 60.0; pk.channel = 1; pk.timeSecs = 1.5;
+    pk.fftSize = 2048; pk.windowType = 1; pk.binHz = 3.90625; pk.peakBin = 1;
+    pk.localPower = { 0.1f, 0.5f, 0.2f };
+    pk.rawPeakAmp = 0.7; pk.timeRemoved = false;
+    c0.picks.push_back (pk);
+    c0.refSpeed = 440.0; c0.refSpeedFromFirstPick = true;
+    sc::model::SubOverride so;
+    so.candidateId = "cand-1"; so.bypass = true;
+    so.overrides["X"] = "5+2";
+    c0.subtractions.push_back (so);
+
+    auto& n = s.addComponent ("Noise B", 1);
+    n.xBreaks = { 7.0 };
+    n.yBreaks = { 3.0, 9.0 };
+    n.cells.resize (6);
+    auto& nc = n.cells[1];
+    nc.sourceFile = wav.getFullPathName ();
+    nc.t0 = 0.5; nc.t1 = 1.5; nc.channel = 0; nc.fftSize = 4096; nc.windowType = 2;
+    nc.rawPower = { 0.1f, 0.2f }; nc.rawBinHz = 11.71875;
+    nc.residualPower = { 0.05f, 0.1f };
+
+    const juce::File sessionFile = dir.getChildFile ("model.json");
+    CHECK (sc::model::ModelSession::saveToFile (s, sessionFile), "save ok");
+    CHECK (sessionFile.existsAsFile (), "file exists on disk");
+
+    // Source path stored relative to the session directory.
+    const auto text = sessionFile.loadFileAsString ();
+    CHECK (text.contains ("src.wav"), "relative source path in JSON");
+    CHECK (!text.contains (wav.getFullPathName ()), "no absolute path leaked into the JSON");
+
+    sc::model::ModelSession s2;
+    juce::String err;
+    CHECK (sc::model::ModelSession::loadFromFile (s2, sessionFile, &err), juce::String ("load ok: ") + err);
+    CHECK (s2.filePath == sessionFile.getFullPathName (), "session path remembered");
+    CHECK (scNear (s2.matchTolerancePct, 4.5) && scNear (s2.inclusionThresholdDb, -55.0) && scNear (s2.overSubtractToleranceDb, 2.0),
+          "settings round-trip");
+    CHECK ((int) s2.components.size () == 2, "component count");
+
+    const auto& h2 = s2.components[0];
+    CHECK (h2.id == hid && h2.name == "Harmonic A" && h2.type == 0 && h2.comment == "first harmonic set",
+          "harmonic header round-trip");
+    CHECK ((int) h2.xBreaks.size () == 2 && scNear (h2.xBreaks[1], 10.0), "breakpoints round-trip");
+    CHECK (h2.inputX.expression == "P1/10" && (int) h2.inputX.curve.points.size () == 2
+          && scNear (h2.inputX.curve.points[1].y, 5.0), "input X + curve round-trip");
+    CHECK (h2.amplitudes[0].expression == "2*AMP", "amplitude expression round-trip");
+
+    const auto& c2 = h2.cells[0];
+    CHECK (c2.sourceFile == wav, "source path resolved back to the file");
+    CHECK ((int) c2.picks.size () == 1 && scNear (c2.picks[0].freqHz, 440.0) && scNear (c2.picks[0].timeSecs, 1.5),
+          "pick round-trip");
+    CHECK ((int) c2.picks[0].localPower.size () == 3 && std::abs (c2.picks[0].localPower[1] - 0.5f) < 1e-6,
+          "local power cache round-trip");
+    CHECK (scNear (c2.refSpeed, 440.0) && c2.refSpeedFromFirstPick, "ref speed round-trip");
+    CHECK ((int) c2.subtractions.size () == 1 && c2.subtractions[0].bypass
+          && c2.subtractions[0].overrides.at ("X") == "5+2", "subtraction override round-trip");
+
+    const auto& n2 = s2.components[1];
+    CHECK (n2.type == 1, "noise type round-trip");
+    const auto& nc2 = n2.cells[1];
+    CHECK (scNear (nc2.t0, 0.5) && scNear (nc2.t1, 1.5) && nc2.channel == 0 && nc2.fftSize == 4096 && nc2.windowType == 2,
+          "noise cell round-trip");
+    CHECK ((int) nc2.rawPower.size () == 2 && std::abs (nc2.rawPower[1] - 0.2f) < 1e-6 && scNear (nc2.rawBinHz, 11.71875),
+          "raw power cache round-trip");
+    CHECK ((int) nc2.residualPower.size () == 2 && std::abs (nc2.residualPower[0] - 0.05f) < 1e-6,
+          "residual power cache round-trip");
+
+    // A source outside the session directory is stored relative-with-.. and must
+    // still resolve back to the same file on load.
+    const juce::File otherWav = makeTempFile ("model_other.wav");
+    CHECK (writeWav (otherWav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+    {
+        return 0.25f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 100.0 * (double) f / rate);
+    }), "second wav written");
+    sc::model::ModelSession s3;
+    auto& c3 = s3.addComponent ("C", 1);
+    c3.cells.resize (1);
+    c3.cells[0].sourceFile = otherWav.getFullPathName ();
+    const juce::File f3 = dir.getChildFile ("m3.json");
+    CHECK (sc::model::ModelSession::saveToFile (s3, f3), "second save ok");
+    sc::model::ModelSession s4;
+    CHECK (sc::model::ModelSession::loadFromFile (s4, f3, &err), juce::String ("second load ok: ") + err);
+    CHECK (s4.components[0].cells[0].sourceFile == otherWav, "outside-directory source resolves back");
+
+    // Corrupt / wrong-format files are rejected with an error.
+    const juce::File bad = dir.getChildFile ("bad.json");
+    bad.replaceWithText ("{ not json }");
+    sc::model::ModelSession s5;
+    CHECK (!sc::model::ModelSession::loadFromFile (s5, bad, &err) && !err.isEmpty (), "invalid JSON rejected");
+    bad.replaceWithText ("{\"format\":\"other\",\"version\":1}");
+    CHECK (!sc::model::ModelSession::loadFromFile (s5, bad, &err), "unknown format rejected");
+
+    sessionFile.deleteFile (); f3.deleteFile (); bad.deleteFile (); wav.deleteFile (); otherWav.deleteFile ();
+}
+
+static void testModelTimelineWarp()
+{
+    const juce::File f = makeTempFile ("warp_ref.wav");   // need not exist: refs are path comparisons
+
+    auto buildSession = [&] () {
+        sc::model::ModelSession s;
+        auto& h = s.addComponent ("H", 0);
+        h.cells.resize (1);
+        auto& hc = h.cells[0];
+        hc.sourceFile = f.getFullPathName ();
+        sc::model::HarmonicPick a, b;
+        a.freqHz = 440.0; a.timeSecs = 3.0; a.sourceFile = f.getFullPathName ();
+        b.freqHz = 880.0; b.timeSecs = 2.0; b.sourceFile = f.getFullPathName ();
+        hc.picks.push_back (a); hc.picks.push_back (b);
+
+        auto& n = s.addComponent ("N", 1);
+        n.cells.resize (2);
+        auto& c1 = n.cells[0];
+        c1.sourceFile = f.getFullPathName (); c1.t0 = 1.0; c1.t1 = 3.0;
+        auto& c2 = n.cells[1];
+        c2.sourceFile = f.getFullPathName (); c2.t0 = 1.6; c2.t1 = 2.4;
+        return s;
+    };
+
+    // Deletion [1.5, 2.5)
+    {
+        auto s = buildSession ();
+        s.applyTimelineEdit (f, sc::model::ModelSession::TimelineEdit::Deletion, 1.5, 2.5);
+        const auto& hc = s.components[0].cells[0];
+        CHECK (scNear (hc.picks[0].timeSecs, 2.0) && !hc.picks[0].timeRemoved, "pick after the range shifts left");
+        CHECK (hc.picks[1].timeRemoved && scNear (hc.picks[1].timeSecs, 2.0), "inside pick flagged removed, value kept");
+        const auto& c1 = s.components[1].cells[0];
+        CHECK (scNear (c1.t0, 1.0) && scNear (c1.t1, 2.0) && !c1.detached, "straddling range warped");
+        const auto& c2 = s.components[1].cells[1];
+        CHECK (c2.detached, "fully contained range detached");
+    }
+
+    // Insertion of 0.5 s at 1.0
+    {
+        auto s = buildSession ();
+        s.applyTimelineEdit (f, sc::model::ModelSession::TimelineEdit::Insertion, 1.0, 0.5);
+        const auto& hc = s.components[0].cells[0];
+        CHECK (scNear (hc.picks[0].timeSecs, 3.5) && scNear (hc.picks[1].timeSecs, 2.5), "picks shift right");
+        const auto& c1 = s.components[1].cells[0];
+        CHECK (scNear (c1.t0, 1.5) && scNear (c1.t1, 3.5), "range shifts right");
+    }
+
+    // Stretch [1,2] -> [1,4]
+    {
+        auto s = buildSession ();
+        s.applyTimelineEdit (f, sc::model::ModelSession::TimelineEdit::Stretch, 1.0, 2.0, 4.0);
+        const auto& hc = s.components[0].cells[0];
+        CHECK (scNear (hc.picks[0].timeSecs, 7.0), "pick beyond the old end follows the new end");
+        CHECK (scNear (hc.picks[1].timeSecs, 4.0), "pick at the old end maps to the new end");
+        const auto& c1 = s.components[1].cells[0];
+        CHECK (scNear (c1.t0, 1.0) && scNear (c1.t1, 7.0), "range stretched");
+    }
+
+    // Edits to a different file leave the refs alone.
+    {
+        auto s = buildSession ();
+        const juce::File other = makeTempFile ("warp_other.wav");
+        s.applyTimelineEdit (other, sc::model::ModelSession::TimelineEdit::Deletion, 0.0, 1.0);
+        CHECK (scNear (s.components[0].cells[0].picks[0].timeSecs, 3.0), "unrelated file untouched");
+    }
+
+    // Serialise/apply round-trip per file.
+    {
+        auto s = buildSession ();
+        const auto json = s.serialiseTimeRefsFor (f);
+        CHECK (!json.isEmpty (), "refs serialised for the referenced file");
+        CHECK (s.serialiseTimeRefsFor (makeTempFile ("warp_none.wav")).isEmpty (), "no refs for an unrelated file");
+
+        // Mutate, then restore from the snapshot (which has removed=false for pick 0).
+        auto& hc = s.components[0].cells[0];
+        hc.picks[0].timeSecs = 99.0;
+        hc.picks[0].timeRemoved = true;
+        auto& c1 = s.components[1].cells[0];
+        c1.t0 = 50.0; c1.detached = true;
+
+        s.applyTimeRefsFor (f, json);
+        CHECK (scNear (hc.picks[0].timeSecs, 3.0) && !hc.picks[0].timeRemoved
+              && scNear (hc.picks[1].timeSecs, 2.0),
+              "picks restored from the snapshot");
+        CHECK (scNear (c1.t0, 1.0) && scNear (c1.t1, 3.0) && !c1.detached, "range restored from the snapshot");
+    }
+}
+
+static void testModelAnalysisDsp()
+{
+    // 1 s of a full-scale 440 Hz sine at 8 kHz.
+    VecFrameReader r;
+    r.rate = 8000.0;
+    std::vector<float> ch (8000);
+    for (int i = 0; i < 8000; ++i)
+        ch[(size_t) i] = (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (double) i / 8000.0);
+    r.chans.push_back (std::move (ch));
+
+    std::vector<float> power;
+    double binHz = 0.0;
+    CHECK (sc::model::analyseNoiseRange (r, 0, 0.0, 1.0, 1024, 1, power, binHz), "noise range analysis ok");
+    CHECK (scNear (binHz, 8000.0 / 1024.0), "bin Hz = rate/fftSize");
+    CHECK ((int) power.size () == 513, "single-sided bin count");
+
+    // Peak bin near 440 Hz: index = 440*1024/8000 = 56.32 -> bin 56 or 57.
+    int peak = -1;
+    double best = -1.0;
+    for (int k = 40; k <= 72; ++k)
+        if (power[(size_t) k] > best) { best = power[(size_t) k]; peak = k; }
+    CHECK (peak == 56 || peak == 57, "peak bin at the tone frequency");
+    // Full-scale sine -> RMS 1/sqrt(2) -> power ~0.5 in the peak bin (Hann scalloping tolerance).
+    CHECK (best > 0.3 && best < 0.62, juce::String ("peak power sane: ") + juce::String (best));
+
+    // Local peak analysis around the same tone.
+    std::vector<float> lp;
+    double lb = 0.0;
+    int pbin = -1;
+    CHECK (sc::model::analyseLocalPeak (r, 0, 0.5, 440.0, 50.0, 1024, 1, lp, lb, pbin), "local peak analysis ok");
+    CHECK ((int) lp.size () >= 17 && pbin >= 0 && pbin < (int) lp.size (), "cached window around the peak");
+    const double amp = std::sqrt (lp[(size_t) pbin]);
+    CHECK (std::abs (amp - std::sqrt (0.5)) < 0.12, juce::String ("peak amplitude ~ full-scale RMS: ") + juce::String (amp));
+
+    // Error paths.
+    CHECK (!sc::model::analyseNoiseRange (r, 5, 0.0, 1.0, 1024, 1, power, binHz), "bad channel rejected");
+    CHECK (!sc::model::analyseNoiseRange (r, 0, 1.0, 0.5, 1024, 1, power, binHz), "inverted range rejected");
+    CHECK (!sc::model::analyseLocalPeak (r, 0, 0.5, 440.0, 50.0, 1000, 1, lp, lb, pbin), "non-power-of-two FFT rejected");
+}
+
+static void testModelUndoIntegration()
+{
+    const juce::File wav = makeTempFile ("model_undo.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (double) f / rate);
+    }), "test wav written");
+
+    Application app;
+    CHECK (app.openFile (wav), "open ok");
+    auto& s = *app.modelSession;
+
+    sc::model::Component& h = s.addComponent ("H", 0);
+    h.cells.resize (1);
+    sc::model::Cell& hc = h.cells[0];
+    hc.sourceFile = wav.getFullPathName ();
+    sc::model::HarmonicPick pkA, pkB;
+    pkA.freqHz = 440.0; pkA.timeSecs = 3.0; pkA.sourceFile = wav.getFullPathName ();
+    pkB.freqHz = 880.0; pkB.timeSecs = 2.0; pkB.sourceFile = wav.getFullPathName ();
+    hc.picks.push_back (pkA); hc.picks.push_back (pkB);
+
+    sc::model::Component& n = s.addComponent ("N", 1);
+    n.cells.resize (1);
+    sc::model::Cell& nc = n.cells[0];
+    nc.sourceFile = wav.getFullPathName ();
+    nc.t0 = 1.0; nc.t1 = 3.0;
+
+    // Delete [1.5, 2.5): pkA 3.0 -> 2.0; pkB (inside) flagged removed; noise [1,3] -> [1,2].
+    app.selection = { 1.5, 2.5 };
+    std::string err;
+    CHECK (app.del (&err), juce::String ("del ok: ") + err);
+
+    CHECK (scNear (hc.picks[0].timeSecs, 2.0) && !hc.picks[0].timeRemoved, "pick after the range shifted");
+    CHECK (hc.picks[1].timeRemoved && scNear (hc.picks[1].timeSecs, 2.0), "inside pick flagged removed");
+    CHECK (scNear (nc.t0, 1.0) && scNear (nc.t1, 2.0) && !nc.detached, "straddling range warped");
+
+    // Undo: everything back to the pre-edit state.
+    app.undoStep ();
+    CHECK (scNear (hc.picks[0].timeSecs, 3.0), "undo restored pick A");
+    CHECK (!hc.picks[1].timeRemoved && scNear (hc.picks[1].timeSecs, 2.0), "undo restored pick B");
+    CHECK (scNear (nc.t0, 1.0) && scNear (nc.t1, 3.0) && !nc.detached, "undo restored the noise range");
+
+    // Redo: warped again.
+    app.redoStep ();
+    CHECK (scNear (hc.picks[0].timeSecs, 2.0), "redo re-warped pick A");
+    CHECK (hc.picks[1].timeRemoved, "redo re-flagged pick B");
+    CHECK (scNear (nc.t1, 2.0), "redo re-warped the noise range");
+
+    wav.deleteFile ();
+}
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -27413,6 +27933,15 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: app_from_tests", runRegression_app_from_tests);
     SC_RUN_TEST ("regression: persistence", runRegression_persistence);
     SC_RUN_TEST ("regression: ai", runRegression_ai);
+    // Model session (parametric sound-source models)
+    SC_RUN_TEST ("model expression", testModelExpression);
+    SC_RUN_TEST ("model remap curve", testModelRemapCurve);
+    SC_RUN_TEST ("model grid mapping", testModelGridMapping);
+    SC_RUN_TEST ("model resolve param", testModelResolveParam);
+    SC_RUN_TEST ("model json round trip", testModelJsonRoundTrip);
+    SC_RUN_TEST ("model timeline warp", testModelTimelineWarp);
+    SC_RUN_TEST ("model analysis dsp", testModelAnalysisDsp);
+    SC_RUN_TEST ("model undo integration", testModelUndoIntegration);
 
 
     scReportTimings();

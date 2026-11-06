@@ -25,6 +25,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/Panels.cpp
         ${CMAKE_SOURCE_DIR}/src/ScrollBars.cpp
         ${CMAKE_SOURCE_DIR}/src/MainWindow.cpp
+        ${CMAKE_SOURCE_DIR}/src/ModelSession.cpp   # parametric sound-source models (data model + JSON)
         ${CMAKE_SOURCE_DIR}/src/FileDoc.cpp
         ${CMAKE_SOURCE_DIR}/src/Application.cpp
         ${CMAKE_SOURCE_DIR}/src/Resampler.cpp

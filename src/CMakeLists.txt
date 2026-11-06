@@ -32,6 +32,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/Panels.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ScrollBars.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/MainWindow.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ModelSession.cpp   # parametric sound-source models (data model + JSON)
         ${CMAKE_CURRENT_SOURCE_DIR}/Resampler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FFTAvx.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ScttChunk.cpp   # SCTT RIFF chunk I/O (no AI dependency)

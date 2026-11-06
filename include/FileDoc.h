@@ -9,6 +9,7 @@
 #include "BkdkChunk.h"
 #include "FileMeta.h"
 #include "UndoManager.h"
+#include "ModelSession.h"   // TimelineEdit kind for onTimelineEdit
 
 /** FileDoc::metaDirty: a bool that also counts how often it was set. Every
     assignment of true bumps a change counter, so an asynchronous save can
@@ -135,6 +136,14 @@ public:
         a+(t-a)*(bNew-a)/(bOld-a) inside the range, t+(bNew-bOld) after it.
         Called after the audio edit has been applied. */
     void remapForStretch (double a, double bOld, double bNew);
+
+    /** Fired at the end of each remapFor* call - after every time-anchored piece
+        of this document's state has already been adjusted - so external systems
+        holding their own time references into this file can warp them inside
+        the same undo step. The Application wires it to
+        ModelSession::applyTimelineEdit (a, b[, c] use the remapFor* convention:
+        Deletion [a,b), Insertion at a length b, Stretch [a,b] -> [a,c]). */
+    std::function<void(FileDoc&, sc::model::ModelSession::TimelineEdit, double a, double b, double c)> onTimelineEdit;
 
     // ---- Unified metadata storage -----------------------------------------
     // Where this file's metadata bundle lives. Detected on load: an existing

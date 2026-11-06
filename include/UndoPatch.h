@@ -98,6 +98,12 @@ struct Patch
     // Parameter tables: their sample rows are warped by the same edits
     // (stretch / delete / insert), so undo/redo must restore them too.
     std::vector<sc::tables::TableData> oldTables, newTables;
+
+    // Model-session time references for the edited file (serialised per-file
+    // state; "" when the session holds none). Captured before the edit and
+    // re-serialised after it so undo/restore can put them back exactly.
+    bool hasModelRefs = false;
+    juce::String oldModelRefs, newModelRefs;
     static constexpr int kSnapshotSlots = 8;
     std::array<SnapshotSlotChange, kSnapshotSlots> snapshotSlots {};
     // Same for the curve snapshots stored in the Freq/Amp analysis modes.

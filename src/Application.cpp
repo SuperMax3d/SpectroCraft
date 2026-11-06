@@ -10,6 +10,7 @@
 #include "SpectralMaskProcessor.h"
 #include "PythonScripts.h"
 #include "Resampler.h"
+#include "ModelSession.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -87,6 +88,8 @@ Application::Application (const juce::File& recentStorePath)
     emptyEngine.setMarkersForSave (&emptyMarkers.markers()); // embedded as RIFF cue/adtl in WAV saves
 
     spectralEngine.setColourMap (colourMap);
+
+    modelSession = std::make_unique<sc::model::ModelSession>();
 
     // Real-time output: the player streams from the active engine's transport
     // into the default output device, so play/pause/loop actually produce sound.
@@ -405,6 +408,16 @@ bool Application::isDocLoaded (const FileDoc* d) const
     return false;
 }
 
+void Application::wireModelTimelineEdit (FileDoc& d)
+{
+    d.onTimelineEdit = [this] (FileDoc& doc, sc::model::ModelSession::TimelineEdit kind,
+                                double a, double b, double c)
+    {
+        if (modelSession != nullptr)
+            modelSession->applyTimelineEdit (doc.file, kind, a, b, c);
+    };
+}
+
 bool Application::openFile (const juce::File& file)
 {
     // Already loaded? Just make it active again.
@@ -413,6 +426,7 @@ bool Application::openFile (const juce::File& file)
         { activate (i); addRecentFile (file); return true; }
 
     auto d = std::make_unique<FileDoc>();
+    wireModelTimelineEdit (*d);
     if (!d->load (file))
         return false;
 
@@ -432,6 +446,7 @@ void Application::loadFileAsync (const juce::File& file,
     // The document is built entirely on the worker thread (pure I/O + DSP);
     // it only crosses to the message thread once fully loaded.
     auto* doc = new FileDoc();
+    wireModelTimelineEdit (*doc);
     std::thread ([doc, file, onProgress, onDone, cancel, this] {
         const bool ok = doc->load (file, onProgress, cancel);
 
@@ -2304,6 +2319,7 @@ bool Application::createDocFromMerged (sc::MergeResult& r, std::string* errOut,
     }
 
     auto d = std::make_unique<FileDoc>();
+    wireModelTimelineEdit (*d);
     if (!d->engine.initNew (r.channels, r.rate, &r.data))
     {
         if (errOut != nullptr) *errOut = "Could not create the merged document.";
@@ -2597,6 +2613,7 @@ bool Application::applySuperResolutionResult (sc::MergeResult& r, int outputMode
 bool Application::newFile (int numChans, double sampleRate)
 {
     auto d = std::make_unique<FileDoc>();
+    wireModelTimelineEdit (*d);
     if (!d->engine.initNew (numChans, sampleRate))
         return false;
 
@@ -2661,6 +2678,7 @@ bool Application::copyToNewFile (std::string* errOut)
         picked.push_back (std::move (data[(size_t) chans[(size_t) i]]));
 
     auto nd = std::make_unique<FileDoc>();
+    wireModelTimelineEdit (*nd);
     if (!nd->engine.initNew (nch, d->engine.sampleRate(), &picked))
         return fail ("Could not create the new file.");
 
@@ -4277,6 +4295,11 @@ void Application::restorePatchSideState (FileDoc* d, const Patch& p, bool isRedo
         d->drawings      = isRedo ? p.newDrawings : p.oldDrawings;
         d->sctt.segments = isRedo ? p.newScttSegs : p.oldScttSegs;
         d->tables        = isRedo ? p.newTables  : p.oldTables;
+
+        // Model-session time references follow the audio back (remapFor* does
+        // NOT run during undo/redo, so restore them straight from the patch).
+        if (p.hasModelRefs && modelSession != nullptr)
+            modelSession->applyTimeRefsFor (d->file, isRedo ? p.newModelRefs : p.oldModelRefs);
     }
 
     // The table rows moved back with the audio: refresh the Tables panel and
@@ -4303,6 +4326,8 @@ Application::TimeAnchoredState Application::captureTimeAnchored () const
         t.drawings      = d->drawings;
         t.scttSegments  = d->sctt.segments;
         t.tables        = d->tables;   // warped by the same timeline edits
+        t.modelRefs     = (modelSession != nullptr)
+            ? modelSession->serialiseTimeRefsFor (d->file) : "";
     }
     return t;
 }
@@ -4328,6 +4353,13 @@ void Application::commitTimeAnchoredToPatch (const TimeAnchoredState& before, Pa
         p.newScttSegs  = d->sctt.segments;
         p.newTables    = d->tables;   // warped by the edit that just ran
     }
+
+    // Model-session time references: old from the pre-edit capture, new from
+    // the session after remapFor* warped it (via onTimelineEdit) this step.
+    p.hasModelRefs  = true;
+    p.oldModelRefs  = before.modelRefs;
+    p.newModelRefs  = (modelSession != nullptr && d != nullptr)
+        ? modelSession->serialiseTimeRefsFor (d->file) : "";
 
     // The table rows moved with the audio: refresh the Tables panel and the
     // dedicated track so they show the warped curves immediately.
