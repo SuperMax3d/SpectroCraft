@@ -898,6 +898,36 @@ public:
                 dlg.addButton ("Cancel", 0);
                 if (dlg.runModalLoop () != 1) return;   // stay open
             }
+
+            // The model session is its own document: offer to save it before
+            // the process goes away.
+            auto* ms = app->modelSession.get ();
+            if (ms != nullptr && ms->dirty)
+            {
+                juce::AlertWindow dlg2 ("Quit SpectroCraft",
+                    "The model session has unsaved changes.\nSave it before quitting?",
+                    juce::AlertWindow::WarningIcon, mainWindow.get ());
+                dlg2.addButton ("Save...", 1);
+                dlg2.addButton ("Don't Save", 2);
+                dlg2.addButton ("Cancel", 0);
+                const int r = dlg2.runModalLoop ();
+                if (r == 0) return;   // stay open
+                if (r == 1)
+                {
+                    juce::FileChooser fc ("Save Model Session...",
+                        ms->filePath.isNotEmpty () ? juce::File (ms->filePath).getParentDirectory()
+                                                    : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
+                        "*.json", false);
+                    if (fc.browseForFileToSave (true))
+                    {
+                        juce::File t = fc.getResult ();
+                        if (!t.hasFileExtension ("json")) t = t.withFileExtension ("json");
+                        sc::model::ModelSession::saveToFile (*ms, t);
+                        ms->filePath = t.getFullPathName ();
+                        ms->dirty = false;
+                    }
+                }
+            }
         }
         quit();
     }

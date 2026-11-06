@@ -194,6 +194,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     actionsPanel  = std::make_unique<ActionsPanel> (app);
     pythonPanel   = std::make_unique<PythonPanel> (app);
     tablesPanel   = std::make_unique<TablesPanel> (app);
+    modelPanel    = std::make_unique<ModelPanel> (app);
 
     // Dedicated tables track + its separator and vertical scrollbar.
     tablesTrack   = std::make_unique<TablesTrackView> (app);
@@ -302,6 +303,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 #endif
     selectionPanel->onCloseRequested  = [this] { setPanelVisible ("selection", false); };
     drawingPanel->onCloseRequested    = [this] { setPanelVisible ("drawing", false); };
+    modelPanel->onCloseRequested      = [this] { setPanelVisible ("model", false); };
     tablesPanel->onCloseRequested     = [this] { setPanelVisible ("tables", false); };
 
     // Restore the user's saved arrangement + column geometry.
@@ -1019,6 +1021,7 @@ const char* MainWindow::panelIdFor (juce::Component* c) const
 #endif
     if (c == selectionPanel.get())      return "selection";
     if (c == drawingPanel.get())        return "drawing";
+    if (c == modelPanel.get())          return "model";
     return nullptr;
 }
 
@@ -1080,6 +1083,7 @@ std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
 #endif
         { "selection",   "Selection",          false },
         { "drawing",     "Drawing",            false },
+        { "model",       "Model",              false },
     };
 }
 
@@ -1098,6 +1102,7 @@ juce::Component* MainWindow::panelForId (const juce::String& id) const
 #endif
     if (id == "selection")   return selectionPanel.get ();
     if (id == "drawing")     return drawingPanel.get ();
+    if (id == "model")       return modelPanel.get ();
     return nullptr;
 }
 
@@ -1204,6 +1209,7 @@ void MainWindow::applySavedLeftLayout()
 #endif
         { "selection",   "Selection",           selectionPanel.get(),  false },
         { "drawing",     "Drawing",             drawingPanel.get(),    false },
+        { "model",       "Model",               modelPanel.get(),      false },
     };
 
     const juce::String saved = app.recentStore->getValue ("left_tab_layout");
@@ -1245,9 +1251,11 @@ void MainWindow::applySavedLeftLayout()
                 }
 
     // Panels missing from the saved list (e.g. added by a newer version) go to
-    // their default group.
+    // their default group - except Model, which is hidden until explicitly
+    // opened (it only appears here when an older layout already listed it).
     for (size_t e = 0; e < entries.size (); ++e)
-        if (!used[e]) addEntry (entries[e].defaultTop ? topTabs : bottomTabs, entries[e]);
+        if (!used[e] && std::string (entries[e].id) != "model")
+            addEntry (entries[e].defaultTop ? topTabs : bottomTabs, entries[e]);
 
     // Panels the user explicitly closed stay closed. (Newer-version panels not
     // in either list default to open.)

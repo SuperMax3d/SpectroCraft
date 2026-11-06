@@ -8,6 +8,7 @@
 #include "ScrollBars.h"
 #include "TablesTrack.h"
 #include "Panels.h"
+#include "ModelPanel.h"
 #include <memory>
 #include <algorithm>
 #include <atomic>
@@ -174,6 +175,7 @@ public:
     juce::Component* specVScrollBarComp() { return specVScroll.get (); }   // unit tests
     juce::Component* tablesTrackComp() { return tablesTrack.get (); }      // unit tests
     TablesPanel* tablesPanelComp() { return tablesPanel.get (); }          // unit tests
+    ModelPanel* modelPanelComp()   { return modelPanel.get (); }           // unit tests
     juce::Component* tablesSepComp()   { return tablesSep.get (); }        // unit tests
     /** Top/bottom insets (px) that keep a view's vertical scrollbar clear of its own time ruler strip. */
     static void vScrollInsetsForView (juce::Component* view, int& topInset, int& botInset);
@@ -583,6 +585,7 @@ private:
     std::unique_ptr<HistoryPanel> historyPanel;
     std::unique_ptr<ActionsPanel> actionsPanel;              // recorded actions (top group)
     std::unique_ptr<PythonPanel> pythonPanel;                 // user Python scripts (top group)
+    std::unique_ptr<ModelPanel> modelPanel;                   // parametric source models (hidden by default)
 
     // Effects > Stem Separation window (at most one open at a time).
     std::unique_ptr<StemSeparationWindow> stemWin_;

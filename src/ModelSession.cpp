@@ -456,6 +456,7 @@ namespace sc::model
         ModelInput amp;
         amp.defaultValue = 1.0;
         c.amplitudes.push_back (amp);
+        c.cells.resize ((size_t) c.numRows () * (size_t) c.numCols ());
         components.push_back (std::move (c));
         dirty = true;
         return components.back ();
@@ -953,6 +954,9 @@ namespace sc::model
         const auto* cells = v.getProperty ("cells", juce::var()).getArray();
         if (cells != nullptr)
             for (const auto& e : *cells) c.cells.push_back (cellFromVar (e, c.type, sessionDir));
+        // Defensive: keep the grid consistent with the breakpoints even if the
+        // file stored a mismatched cell count.
+        c.cells.resize ((size_t) c.numRows () * (size_t) c.numCols ());
         return c;
     }
     }   // namespace

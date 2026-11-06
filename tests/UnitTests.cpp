@@ -22,6 +22,7 @@
 #include "Panels.h"
 #include "ScrollBars.h"
 #include "MainWindow.h"
+#include "ModelPanel.h"
 #include "Resampler.h"
 #include "FFTHelpers.h"
 #include "SpectralSelection.h"
@@ -3955,9 +3956,9 @@ static void testClosePanelsAndWindowMenu()
     store.deleteFile ();   // deterministic per-run name: never trust leftovers
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    const int kNumPanels = 11;
+    const int kNumPanels = 12;   // includes the Model panel (hidden by default, always in the menu)
 #else
-    const int kNumPanels = 10;
+    const int kNumPanels = 11;   // includes the Model panel (hidden by default, always in the menu)
 #endif
 
     auto windowMenuIndex = [] (MainWindow& win) -> int
@@ -4015,6 +4016,7 @@ static void testClosePanelsAndWindowMenu()
 #endif
         ids.add ("selection");
         ids.add ("drawing");
+        ids.add ("model");      // last entry of leftPanelEntries()
         for (int i = 0; i < kNumPanels; ++i)
         {
             const bool wasOpen = win->isPanelOpen (ids[i]);
@@ -27634,6 +27636,269 @@ static void testModelUndoIntegration()
     wav.deleteFile ();
 }
 
+
+// ============================================================ Model panel (UI)
+
+static void testModelCurveEditor()
+{
+    ModelCurveEditor ed;
+    ed.setSize (400, 260);
+    ed.setRanges (0.0, 10.0, -20.0, 20.0);
+
+    // Degenerate ranges are rejected: the editor keeps its previous span.
+    ed.setRanges (5.0, 5.0, 0.0, 1.0);
+    CHECK (ed.getRangeXHi() == 10.0 && ed.getRangeYLo() == -20.0, "degenerate range rejected");
+
+    // Clicking empty space adds a point at the cursor position.
+    const int px = ed.valueToX (2.5), py = ed.valueToY (5.0);
+    ed.mouseDown (mkMouse (ed, px, py, {}));
+    auto pts = ed.getPoints ();
+    CHECK (pts.size () == 1, "click added one point");
+    // Values are pixel-quantised: allow half a pixel of error per axis.
+    const double xTol = 0.5 * (ed.getRangeXHi() - ed.getRangeXLo()) / (ed.getWidth () - 46 - 8) + 1e-9;
+    const double yTol = 0.5 * (ed.getRangeYHi() - ed.getRangeYLo()) / (ed.getHeight () - 8 - 20) + 1e-9;
+    CHECK (scNear (pts[0].x, 2.5, xTol) && scNear (pts[0].y, 5.0, yTol), "point at cursor value");
+
+    // Dragging moves the point.
+    ed.mouseDown (mkMouse (ed, px, py, {}));
+    const int nx = ed.valueToX (6.0), ny = ed.valueToY (-8.0);
+    ed.mouseDrag (mkMouse (ed, nx, ny, {}));
+    ed.mouseUp   (mkMouse (ed, nx, ny, {}));
+    pts = ed.getPoints ();
+    CHECK (scNear (pts[0].x, 6.0, xTol) && scNear (pts[0].y, -8.0, yTol), "drag moved the point");
+
+    // Double-click fires onEditPoint with the index in getPoints() order.
+    int edited = -1;
+    ed.onEditPoint = [&edited] (int i) { edited = i; };
+    const int qx = ed.valueToX (6.0), qy = ed.valueToY (-8.0);
+    ed.mouseDown (mkMouse (ed, qx, qy, {}, 2));
+    CHECK (edited == 0, "double-click callback fired with the point index");
+
+    // setPoint clamps to the visible ranges.
+    ed.setPoint (0, -5.0, 99.0);
+    pts = ed.getPoints ();
+    CHECK (pts[0].x == 0.0 && pts[0].y == 20.0, "setPoint clamped to the range");
+
+    // getPoints sorts by x and merges same-x duplicates.
+    ed.setPoints ({ { 3.0, 1.0 }, { 1.0, 2.0 }, { 3.0, 9.0 } });
+    pts = ed.getPoints ();
+    CHECK (pts.size () == 2 && scNear (pts[0].x, 1.0) && scNear (pts[1].x, 3.0), "sorted + merged");
+
+    // Right-clicking a point removes it.
+    const int rx = ed.valueToX (1.0), ry = ed.valueToY (2.0);
+    ed.mouseDown (mkMouse (ed, rx, ry, juce::ModifierKeys::rightButtonModifier));
+    CHECK (ed.getPoints ().size () == 1, "right-click removed the point");
+
+    // Clicking empty space again appends a second point in sorted order.
+    const int ax = ed.valueToX (8.0), ay = ed.valueToY (0.0);
+    ed.mouseDown (mkMouse (ed, ax, ay, {}));
+    pts = ed.getPoints ();
+    CHECK (pts.size () == 2 && scNear (pts[1].x, 8.0, xTol), "second point appended in order");
+}
+
+static void testModelPanelSession()
+{
+    const juce::File store = makeTempFile ("model_panel.recent");
+    store.deleteFile ();
+    Application app (store);
+    ModelPanel panel (app);
+    panel.setVisible (true);   // standalone component: let the list box build its rows
+    auto* s = app.modelSession.get ();
+    CHECK (s != nullptr, "application owns a model session");
+
+    // New session: clean and empty.
+    CHECK (panel.newSession (true), "new session accepted");
+    CHECK (!s->dirty && s->components.empty (), "fresh session is clean and empty");
+    CHECK (panel.numComponentsShown () == 0, "no components shown");
+
+    // Add a component via the session API; refresh lists it.
+    auto& c = s->addComponent ("Test", 0);
+    panel.refresh ();
+    panel.setSize (301, 521);   // standalone component: nudge bounds to force layout + onscreen rows
+    CHECK (panel.numComponentsShown () == 1 && panel.componentShownName (0) == "Test",
+          "component listed after refresh");
+
+    // Clicking its row selects the component and fills the editor fields.
+    // Paint-mode ListBox rows are not exposed by getComponentForRowNumber(), so
+    // walk list box -> viewport -> content to reach the RowComponent for row 0.
+    juce::Component* rc = nullptr;
+    for (auto* c : panel.componentList ().getChildren ())
+    {
+        if (auto* vp = dynamic_cast<juce::Viewport*> (c))
+        {
+            auto* content = vp->getViewedComponent ();
+            for (auto* row : content->getChildren ())
+                if (row->getY () <= 8 && 8 < row->getY () + row->getHeight ()) rc = row;
+            break;
+        }
+    }
+    CHECK (rc != nullptr, "list row component exists");
+    if (rc != nullptr)
+    {
+        rc->mouseDown (mkMouse (*rc, 12, 8, {}));
+        rc->mouseUp   (mkMouse (*rc, 12, 8, {}));
+    }
+    CHECK (panel.selectedComponentIndex () == 0, "row click selected the component");
+
+    auto* nameEd = dynamic_cast<juce::TextEditor*> (panel.findChildWithID ("modelName"));
+    CHECK (nameEd != nullptr && nameEd->getText () == "Test", "name field filled from session");
+
+    // Typing a new name commits to the session and marks it dirty.
+    if (nameEd != nullptr)
+    {
+        nameEd->setText ("Renamed");
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        CHECK (s->components[0].name == "Renamed" && s->dirty, "name edit committed + dirty");
+    }
+
+    // The type combo switches harmonic <-> noise (async change message).
+    auto* typeCombo = dynamic_cast<juce::ComboBox*> (panel.findChildWithID ("modelType"));
+    CHECK (typeCombo != nullptr, "type combo found");
+    if (typeCombo != nullptr)
+    {
+        typeCombo->setSelectedId (2);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        CHECK (s->components[0].type == 1 && s->dirty, "type switched to noise");
+    }
+
+    // The amplitude buttons grow/shrink the AMP input rows.
+    auto* addAmp = dynamic_cast<juce::TextButton*> (panel.findChildWithID ("addAmp"));
+    auto* rmAmp  = dynamic_cast<juce::TextButton*> (panel.findChildWithID ("removeAmp"));
+    CHECK (addAmp != nullptr && rmAmp != nullptr, "amp buttons found");
+    if (addAmp != nullptr)
+    {
+        addAmp->triggerClick ();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        CHECK (s->components[0].amplitudes.size () == 2, "+ AMP added an amplitude");
+        CHECK (panel.findChildWithID ("amp1") != nullptr, "second AMP expression row exists");
+    }
+    if (rmAmp != nullptr)
+    {
+        rmAmp->triggerClick ();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        CHECK (s->components[0].amplitudes.size () == 1, "- AMP removed it again");
+    }
+
+    // The X breakpoint field resizes the table and preserves overlapping cells.
+    c.xBreaks = { 1.0 };          // 2 columns x 1 row
+    c.cells.resize (2);
+    c.cells[0].t0 = 3.5; c.cells[0].t1 = 7.5;   // marker content in the first cell
+    panel.refresh ();
+    auto* xbEd = dynamic_cast<juce::TextEditor*> (panel.findChildWithID ("xBreaks"));
+    CHECK (xbEd != nullptr, "x breaks field found");
+    if (xbEd != nullptr)
+    {
+        xbEd->setText ("1, 2");   // now 3 columns
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        CHECK (c.xBreaks.size () == 2 && c.cells.size () == 3, "break edit grew the table");
+        CHECK (scNear (c.cells[0].t0, 3.5) && scNear (c.cells[1].t0, 0.0),
+              "old cell preserved, new one empty");
+    }
+
+    // The + Col / - Col buttons follow the same path.
+    auto* addCol = dynamic_cast<juce::TextButton*> (panel.findChildWithID ("addCol"));
+    auto* delCol = dynamic_cast<juce::TextButton*> (panel.findChildWithID ("delCol"));
+    CHECK (addCol != nullptr && delCol != nullptr, "col buttons found");
+    if (addCol != nullptr)
+    {
+        addCol->triggerClick ();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        CHECK (c.xBreaks.size () == 3 && c.cells.size () == 4, "+ Col appended a break");
+    }
+    if (delCol != nullptr)
+    {
+        delCol->triggerClick ();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        CHECK (c.xBreaks.size () == 2 && c.cells.size () == 3, "- Col popped the last break");
+    }
+
+    // The settings fields write through to the session.
+    auto* mp = dynamic_cast<juce::TextEditor*> (panel.findChildWithID ("matchPct"));
+    CHECK (mp != nullptr, "match % field found");
+    if (mp != nullptr)
+    {
+        mp->setText ("7.5");
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        CHECK (scNear (s->matchTolerancePct, 7.5), "match tolerance updated");
+    }
+
+    // Save: the file is written and the dirty flag clears.
+    const juce::File out = scTestTempDir ().getChildFile ("model_panel_session.json");
+    out.deleteFile ();
+    CHECK (panel.saveSessionFile (out), "session saved");
+    CHECK (!s->dirty && s->filePath == out.getFullPathName (), "save cleared dirty + recorded path");
+
+    // Open: the session state loads back from the file.
+    s->components.clear ();
+    CHECK (panel.openSessionFile (out, true), "session opened");
+    CHECK (panel.numComponentsShown () == 1 && panel.componentShownName (0) == "Renamed",
+          "opened component restored");
+
+    // Deleting a component via the session API shrinks the list after refresh.
+    s->removeComponent (0);
+    panel.refresh ();
+    CHECK (panel.numComponentsShown () == 0, "component deleted from the list");
+
+    out.deleteFile ();
+    store.deleteFile ();
+}
+
+static void testModelPanelHiddenByDefault()
+{
+    const juce::File store = makeTempFile ("model_hidden.recent");
+    store.deleteFile ();
+
+    // 1) Fresh store: Model is not open in either group.
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "model hidden test"));
+        CHECK (!win->isPanelOpen ("model"), "model panel starts closed");
+
+        // 2) Opening it puts a tab in the bottom group.
+        win->setPanelVisible ("model", true);
+        CHECK (win->isPanelOpen ("model"), "model panel opened");
+        bool inBottom = false;
+        for (int i = 0; i < win->bottomPanelTabs ()->getNumTabs (); ++i)
+            if (win->bottomPanelTabs ()->getTabContentComponent (i) == win->modelPanelComp ())
+                inBottom = true;
+        CHECK (inBottom, "model tab lives in the bottom group");
+
+        // 3) A fresh instance with the same store restores it open.
+        win.reset ();
+    }
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "model hidden test 2"));
+        CHECK (win->isPanelOpen ("model"), "opened model panel persisted");
+
+        // 4) Closing it again keeps it closed on the next launch.
+        win->setPanelVisible ("model", false);
+        CHECK (!win->isPanelOpen ("model"), "model panel closed");
+        win.reset ();
+    }
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "model hidden test 3"));
+        CHECK (!win->isPanelOpen ("model"), "closed model panel stayed closed");
+        win.reset ();
+    }
+
+    // 5) An old-style saved layout that never mentioned Model leaves it hidden.
+    {
+        juce::PropertiesFile pf (store, juce::PropertiesFile::Options());
+        pf.setValue ("left_tab_layout", "files;fft|controls");
+        pf.setValue ("left_panels_closed", "");
+        pf.save ();
+
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "model hidden test 4"));
+        CHECK (!win->isPanelOpen ("model"), "legacy layout keeps model hidden");
+    }
+
+    store.deleteFile ();
+}
+
+
 static int scRunUnitTestsImpl()
 {
     std::setvbuf (stderr, nullptr, _IONBF, 0);   // keep stderr unbuffered so crash diagnostics survive
@@ -27942,6 +28207,9 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("model timeline warp", testModelTimelineWarp);
     SC_RUN_TEST ("model analysis dsp", testModelAnalysisDsp);
     SC_RUN_TEST ("model undo integration", testModelUndoIntegration);
+    SC_RUN_TEST ("model curve editor", testModelCurveEditor);
+    SC_RUN_TEST ("model panel session", testModelPanelSession);
+    SC_RUN_TEST ("model panel hidden by default", testModelPanelHiddenByDefault);
 
 
     scReportTimings();
