@@ -61,9 +61,9 @@ bool processGone (int pid, int waitMs)
 }
 
 // A real executable that exits at once with an error for any audio.cpp
-// arguments (Windows: where.exe). A fake non-PE "audiocpp_cli.exe" must not
-// be launched: CreateProcess may raise a system hard-error dialog for it,
-// which blocks a headless runner forever.
+// arguments (Windows: where.exe; macOS / Linux: false). A fake non-PE
+// "audiocpp_cli.exe" must not be launched: CreateProcess may raise a system
+// hard-error dialog for it, which blocks a headless runner forever.
 juce::File failingCliForTest()
 {
 #if JUCE_WINDOWS
@@ -71,6 +71,9 @@ juce::File failingCliForTest()
                              .getChildFile ("System32").getChildFile ("where.exe");
     return w.existsAsFile () ? w : juce::File ();
 #else
+    for (const char* p : { "/usr/bin/false", "/bin/false" })
+        if (juce::File (p).existsAsFile ())
+            return juce::File (p);
     return {};
 #endif
 }
@@ -310,7 +313,8 @@ static void testHardeningStemServiceValidation()
     { auto r = good (); r.mode = (SS::Mode) 7;               CHECK (codeOf (r) == "invalid_mode",    "hardening stem: bad mode"); }
     { auto r = good (); r.descriptions.clear ();             CHECK (codeOf (r) == "no_description",  "hardening stem: no description"); }
     { auto r = good (); r.descriptions[0].text = "   ";      CHECK (codeOf (r) == "no_description",  "hardening stem: blank description"); }
-    { auto r = good (); r.backend = "metal";                 CHECK (codeOf (r) == "invalid_backend", "hardening stem: bad backend"); }
+    { auto r = good (); r.backend = "bogus";                 CHECK (codeOf (r) == "invalid_backend", "hardening stem: bad backend"); }
+    { auto r = good (); r.backend = "metal";                 CHECK (codeOf (r).isEmpty (),           "hardening stem: metal backend accepted"); }
     { auto r = good (); r.sourceRate = 0.0;                  CHECK (codeOf (r) == "invalid_rate",    "hardening stem: bad rate"); }
     { auto r = good (); r.extStartSecs = -1.0;               CHECK (codeOf (r) == "invalid_range",   "hardening stem: negative start"); }
     { auto r = good (); r.input.clear ();                    CHECK (codeOf (r) == "empty_input",     "hardening stem: no input"); }
@@ -360,17 +364,20 @@ static void testHardeningStemServiceValidation()
                            [t0] { return juce::Time::getMillisecondCounter () - t0 > 30000; });
         });
         t.join ();
-#if JUCE_WINDOWS
-        // where.exe rejects the audio.cpp arguments: the run fails after writing its input.
-        CHECK (!res.ok && res.errorCode == "tool_failed" && progressCalls > 0,
-               "hardening stem: worker-thread run reaches the CLI (" + res.errorCode + ")");
-        CHECK (work.getChildFile ("input.wav").existsAsFile () && work.getChildFile ("input_mono.wav").existsAsFile (),
-               "hardening stem: caller-provided work folder kept with the input files");
-#else
-        CHECK (!res.ok && res.errorCode == "unsupported_platform" && !SS::supported (),
-               "hardening stem: run() reports the unsupported platform (" + res.errorCode + ")");
-        juce::ignoreUnused (progressCalls);
-#endif
+        if (SS::supported () && cli != juce::File ())
+        {
+            // where.exe / false reject the audio.cpp arguments: the run fails after writing its input.
+            CHECK (!res.ok && res.errorCode == "tool_failed" && progressCalls > 0,
+                   "hardening stem: worker-thread run reaches the CLI (" + res.errorCode + ")");
+            CHECK (work.getChildFile ("input.wav").existsAsFile () && work.getChildFile ("input_mono.wav").existsAsFile (),
+                   "hardening stem: caller-provided work folder kept with the input files");
+        }
+        else if (!SS::supported ())
+        {
+            CHECK (!res.ok && res.errorCode == "unsupported_platform",
+                   "hardening stem: run() reports the unsupported platform (" + res.errorCode + ")");
+            juce::ignoreUnused (progressCalls);
+        }
     }
     dir.deleteRecursively ();
 }
@@ -397,7 +404,8 @@ static void testHardeningSuperResServiceValidation()
 
     CHECK (codeOf (good ()).isEmpty (), "hardening superres: valid request accepted");
     { auto r = good (); r.mode = (SR::Mode) 3;               CHECK (codeOf (r) == "invalid_mode",    "hardening superres: bad mode"); }
-    { auto r = good (); r.backend = "metal";                 CHECK (codeOf (r) == "invalid_backend", "hardening superres: bad backend"); }
+    { auto r = good (); r.backend = "bogus";                 CHECK (codeOf (r) == "invalid_backend", "hardening superres: bad backend"); }
+    { auto r = good (); r.backend = "metal";                 CHECK (codeOf (r).isEmpty (),           "hardening superres: metal backend accepted"); }
     { auto r = good (); r.sourceRate = -1.0;                 CHECK (codeOf (r) == "invalid_rate",    "hardening superres: bad rate"); }
     { auto r = good (); r.input.clear ();                    CHECK (codeOf (r) == "empty_input",     "hardening superres: no input"); }
     { auto r = good (); r.input.push_back ({ 1.0f });        CHECK (codeOf (r) == "ragged_input",    "hardening superres: ragged input"); }
@@ -413,12 +421,11 @@ static void testHardeningSuperResServiceValidation()
         res = SR::run (r, nullptr, [t0] { return juce::Time::getMillisecondCounter () - t0 > 30000; });
     });
     t.join ();
-#if JUCE_WINDOWS
-    CHECK (!res.ok && res.errorCode == "tool_failed", "hardening superres: worker-thread run reaches the CLI (" + res.errorCode + ")");
-#else
-    CHECK (!res.ok && res.errorCode == "unsupported_platform" && !SR::supported (),
-           "hardening superres: run() reports the unsupported platform (" + res.errorCode + ")");
-#endif
+    if (SR::supported () && failingCliForTest () != juce::File ())
+        CHECK (!res.ok && res.errorCode == "tool_failed", "hardening superres: worker-thread run reaches the CLI (" + res.errorCode + ")");
+    else if (!SR::supported ())
+        CHECK (!res.ok && res.errorCode == "unsupported_platform",
+               "hardening superres: run() reports the unsupported platform (" + res.errorCode + ")");
     dir.deleteRecursively ();
 }
 
@@ -679,6 +686,129 @@ static void testHardeningRunPythonScript()
     dir.deleteRecursively ();
 }
 
+// ---------------------------------------------------------------------------
+// audio.cpp CLI on macOS / Linux: a shell script stands in for audiocpp_cli
+// ---------------------------------------------------------------------------
+#if !JUCE_WINDOWS
+static void testHardeningAcppFakeCli()
+{
+    using SR = sc::SuperResService;
+    using SS = sc::StemService;
+    if (!SR::supported ())
+    {
+        scSkip ("acpp fake cli: audio.cpp has no CLI build for this platform");
+        return;
+    }
+    // A space in every path: the arguments must reach the tool intact.
+    const juce::File dir = hardeningDir ("acpp fake cli");
+    const juce::File cli = dir.getChildFile ("fake audiocpp_cli");
+    // --log style lines on stdout, then --audio copied to --out (super
+    // resolution) or to target.wav / residual.wav in --out-dir (SAM-Audio).
+    // A model path containing "hang" makes it sleep (cancellation test).
+    writeBytes (cli,
+        "#!/bin/sh\n"
+        "audio=''; out=''; outdir=''; model=''; backend=''\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    --audio) audio=\"$2\"; shift ;;\n"
+        "    --out) out=\"$2\"; shift ;;\n"
+        "    --out-dir) outdir=\"$2\"; shift ;;\n"
+        "    --model) model=\"$2\"; shift ;;\n"
+        "    --backend) backend=\"$2\"; shift ;;\n"
+        "  esac\n"
+        "  shift\n"
+        "done\n"
+        "echo \"fake progress backend=$backend\"\n"
+        "case \"$model\" in *hang*) sleep 60 ;; esac\n"
+        "[ -f \"$audio\" ] || { echo 'no input' >&2; exit 3; }\n"
+        "if [ -n \"$out\" ]; then cp \"$audio\" \"$out\" || exit 4; fi\n"
+        "if [ -n \"$outdir\" ]; then mkdir -p \"$outdir\" && cp \"$audio\" \"$outdir/target.wav\" && cp \"$audio\" \"$outdir/residual.wav\" || exit 5; fi\n"
+        "exit 0\n");
+    cli.setExecutePermission (true);
+    const juce::File model = dir.getChildFile ("flashsr.safetensors");
+    writeBytes (model, "weights");
+
+    // 1. Super resolution end to end: progress line relayed, result read back.
+    {
+        SR::Request r;
+        r.mode = SR::Mode::FlashSR;
+        r.binary = cli;
+        r.model = model;
+        r.backend = "metal";
+        r.sourceRate = 16000.0;
+        r.input.assign (1, std::vector<float> (1600, 0.25f));
+        r.workDir = dir.getChildFile ("sr work");
+        juce::StringArray statuses;
+        SR::Result res;
+        std::thread t ([&] {
+            res = SR::run (r, [&statuses] (double, const juce::String& st) { if (st.isNotEmpty ()) statuses.add (st); });
+        });
+        t.join ();
+        CHECK (res.ok && res.merged.channels == 1 && !res.merged.data.empty ()
+                   && res.merged.data[0].size () == 1600 && std::abs (res.merged.data[0][800] - 0.25f) < 1e-6f,
+               "acpp fake cli: super resolution runs the CLI and reads its output (" + res.errorCode + " "
+                   + res.detail + ")");
+        CHECK (statuses.joinIntoString ("\n").contains ("fake progress backend=metal"),
+               "acpp fake cli: --log lines reach the progress callback while it runs");
+    }
+
+    // 2. Stem separation (SAM-Audio): one run, target + residual merged.
+    {
+        const juce::File samModel = dir.getChildFile ("sam-audio-small-q8_0.gguf");
+        writeBytes (samModel, "gguf");
+        SS::Request r;
+        r.mode = SS::Mode::SamAudio;
+        r.descriptions.push_back ({ "voice", {} });
+        r.binary = cli;
+        r.model = samModel;
+        r.backend = "cpu";
+        r.sourceRate = 48000.0;
+        r.input.assign (2, std::vector<float> (4800, 0.1f));
+        SS::Result res;
+        std::thread t ([&] { res = SS::run (r); });
+        t.join ();
+        CHECK (res.ok && res.stems.size () == 2 && res.merged.channels >= 2,
+               "acpp fake cli: stem separation runs the CLI and collects target + residual ("
+                   + res.errorCode + " " + res.detail + ", " + juce::String ((int) res.stems.size ()) + " stems)");
+    }
+
+    // 3. Cancellation kills the CLI and the grandchild it started (sleep 60).
+    {
+        const juce::File hangModel = dir.getChildFile ("hang.safetensors");
+        writeBytes (hangModel, "weights");
+        SR::Request r;
+        r.mode = SR::Mode::FlashSR;
+        r.binary = cli;
+        r.model = hangModel;
+        r.sourceRate = 16000.0;
+        r.input.assign (1, std::vector<float> (1600, 0.1f));
+        const double t0 = juce::Time::getMillisecondCounterHiRes ();
+        SR::Result res;
+        std::thread t ([&] {
+            res = SR::run (r, nullptr, [t0] { return juce::Time::getMillisecondCounterHiRes () - t0 > 500.0; });
+        });
+        t.join ();
+        const double elapsed = juce::Time::getMillisecondCounterHiRes () - t0;
+        CHECK (!res.ok && res.cancelled && res.errorCode == "cancelled" && elapsed < 10000.0,
+               "acpp fake cli: cancel stops a hanging CLI (" + res.errorCode + ", "
+                   + juce::String (elapsed, 0) + " ms)");
+    }
+
+    // 4. runProcessEx streams complete lines (CRLF trimmed, empty lines skipped,
+    //    unterminated tail flushed) and still returns the whole output.
+    {
+        juce::StringArray lines;
+        sc::py::RunOptions o;
+        o.onStdoutLine = [&lines] (const juce::String& l) { lines.add (l); };
+        const auto r = sc::py::runProcessEx ("/bin/sh", { "-c", "printf 'one\\ntwo\\r\\n\\nthree'" }, o);
+        CHECK (r.started && r.exitCode == 0 && lines == juce::StringArray ("one", "two", "three")
+                   && r.stdoutText == "one\ntwo\r\n\nthree",
+               "acpp fake cli: runProcessEx onStdoutLine (" + lines.joinIntoString ("|") + ")");
+    }
+    dir.deleteRecursively ();
+}
+#endif
+
 static void runRegression_hardening()
 {
     hstep ("result.json");         testHardeningResultJson ();
@@ -687,6 +817,9 @@ static void runRegression_hardening()
     hstep ("script folder");       testHardeningScriptFolder ();
     hstep ("stem service");        testHardeningStemServiceValidation ();
     hstep ("superres service");    testHardeningSuperResServiceValidation ();
+#if !JUCE_WINDOWS
+    hstep ("acpp fake cli");       testHardeningAcppFakeCli ();
+#endif
     hstep ("process");             testHardeningProcess ();
     hstep ("runPythonScript");     testHardeningRunPythonScript ();
     hstep ("done");

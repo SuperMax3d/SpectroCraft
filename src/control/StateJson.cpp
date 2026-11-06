@@ -3,6 +3,7 @@
 #include "control/CommandRegistry.h"
 #include "control/ControlState.h"
 #include "Application.h"
+#include "AudioCpp.h"
 #include "WorkProgress.h"
 #include "Version.h"
 
@@ -48,11 +49,8 @@ juce::var helloInfo (Application& app, bool hasUi)
 #else
     const bool ai = false;
 #endif
-#if JUCE_WINDOWS
-    const bool audiocpp = true;    // the audio.cpp runner is Windows-only (src/AudioCpp.cpp)
-#else
-    const bool audiocpp = false;
-#endif
+    // A CLI build exists for this platform (Windows x64, macOS, Linux x64).
+    const bool audiocpp = sc::acpp::platformSupported();
     return obj ({ { "app", "SpectroCraft" }, { "version", appVersion() }, { "pid", processId() },
                   { "protocol", kProtocolVersion }, { "platform", platformName() },
                   { "capabilities", obj ({ { "ai", ai }, { "audiocpp", audiocpp },

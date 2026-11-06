@@ -20,21 +20,28 @@ static void testAiCommands()
     const auto list = ctlResult (ctlCall (app, "ai.models.list"));
     const auto models = list.getProperty ("models", {});
     CHECK (models.size() >= 15, "ai.models.list: >= 15 entries (" + juce::String (models.size()) + ")");
-    bool haveWhisper = false, acppLocked = true;
+    bool haveWhisper = false, anyAcppInstallable = false, runtimeForThisPlatform = false;
     for (int i = 0; i < models.size(); ++i)
     {
         const auto m = models[i];
         if (m.getProperty ("id", {}).toString() == "whisper-base")
             haveWhisper = m.getProperty ("engine", {}).toString() == "whisper"
                           && m.getProperty ("checksum", {}).toString().isNotEmpty();
-        if (m.getProperty ("engine", {}).toString() == "audiocpp" && (bool) m.getProperty ("installable", false)
-            && !m.getProperty ("platforms", {}).toString().containsIgnoreCase ("windows"))
-            acppLocked = false;
+        if (m.getProperty ("engine", {}).toString() == "audiocpp" && (bool) m.getProperty ("installable", false))
+        {
+            anyAcppInstallable = true;
+            const auto* plats = m.getProperty ("platforms", {}).getArray();
+            if (m.getProperty ("family", {}).toString() == "runtime" && plats != nullptr
+                && plats->contains (juce::String (sc::acpp::platformTag())))
+                runtimeForThisPlatform = true;
+        }
     }
     CHECK (haveWhisper, "ai.models.list: whisper-base listed with engine + checksum");
-#if !JUCE_WINDOWS
-    CHECK (acppLocked, "ai.models.list: audio.cpp assets not installable off Windows");
-#endif
+    if (sc::acpp::platformSupported())
+        CHECK (runtimeForThisPlatform, "ai.models.list: an audio.cpp CLI build installable for "
+                                           + juce::String (sc::acpp::platformTag()));
+    else
+        CHECK (!anyAcppInstallable, "ai.models.list: audio.cpp assets not installable without a CLI build");
     CHECK (ctlCode (ctlCall (app, "ai.models.install", scctl::obj ({ { "modelId", "nope" } }))) != "",
            "ai.models.install: unknown model refused");
     CHECK (ctlCode (ctlCall (app, "ai.models.remove", scctl::obj ({ { "modelId", "denseunet" } }))) == "confirm_required",

@@ -134,7 +134,7 @@ struct Settings
 
     // Stem Separation (Effects menu): last used choices, persisted per session.
     juce::String acppModel;              // selected GGUF model file name ("" = none)
-    int acppBackend = 0;                 // backend combo index: 1=Cpu 2=Cuda 3=Vulkan
+    int acppBackend = 0;                 // backend combo index: 1=Cpu 2=Cuda 3=Vulkan 4=Metal (macOS)
     bool acppExtractOriginal = true;     // "Extract from original" toggle
     int stemSepMode = 1;                 // separation mode: 1=Sam Audio 2=htdemucs_6stems 3=htdemucs_ft
     juce::String acppModel6;             // selected GGUF file name in htdemucs_6stems mode ("" = none)

@@ -68,16 +68,26 @@ static void testAudioCppCommands()
     Application app;
     const juce::File wav = ctlMakeWav ("lot7_acpp.wav", 1, 8000.0, 8000);
     ctlCall (app, "doc.open", scctl::obj ({ { "path", wav.getFullPathName() } }));
-#if JUCE_WINDOWS
-    // Windows: validation runs (no binary/model in the test environment).
-    const auto r = ctlCall (app, "ai.stems.run", scctl::obj ({ { "mode", "samAudio" },
-                                                             { "descriptions", scctl::arr ({ scctl::obj ({ { "text", "voice" } }) }) } }));
-    CHECK (ctlOk (r) || ctlCode (r) == "model_not_installed" || ctlCode (r) == "invalid_params",
-           "ai.stems.run: validated on Windows (" + ctlCode (r) + ")");
-#else
-    CHECK (ctlCode (ctlCall (app, "ai.stems.run")) == "unsupported_platform", "ai.stems.run: unsupported_platform off Windows");
-    CHECK (ctlCode (ctlCall (app, "ai.superRes.run")) == "unsupported_platform", "ai.superRes.run: unsupported_platform off Windows");
-#endif
+    if (sc::acpp::platformSupported())
+    {
+        // Validation runs (no binary/model in the test environment).
+        const auto r = ctlCall (app, "ai.stems.run", scctl::obj ({ { "mode", "samAudio" },
+                                                                 { "descriptions", scctl::arr ({ scctl::obj ({ { "text", "voice" } }) }) } }));
+        CHECK (ctlOk (r) || ctlCode (r) == "model_not_installed" || ctlCode (r) == "invalid_params",
+               "ai.stems.run: validated on " + juce::String (sc::acpp::platformTag()) + " (" + ctlCode (r) + ")");
+        const auto sr = ctlCall (app, "ai.superRes.run", scctl::obj ({ { "mode", "flashsr" }, { "backend", "metal" } }));
+        CHECK (ctlCode (sr) != "unsupported_platform",
+               "ai.superRes.run: available on " + juce::String (sc::acpp::platformTag()) + " (" + ctlCode (sr) + ")");
+        CHECK (ctlCode (ctlCall (app, "ai.superRes.run", scctl::obj ({ { "backend", "bogus" } }))) == "invalid_params",
+               "ai.superRes.run: unknown backend refused by the schema");
+    }
+    else
+    {
+        CHECK (ctlCode (ctlCall (app, "ai.stems.run")) == "unsupported_platform",
+               "ai.stems.run: unsupported_platform without a CLI build");
+        CHECK (ctlCode (ctlCall (app, "ai.superRes.run")) == "unsupported_platform",
+               "ai.superRes.run: unsupported_platform without a CLI build");
+    }
 }
 
 // 10 000 random NDJSON lines through the --json session: no crash, every

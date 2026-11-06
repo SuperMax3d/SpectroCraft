@@ -54,11 +54,7 @@ bool resampleTrack (std::vector<float>& t, double fromRate, double toRate)
 
 bool StemService::supported()
 {
-#if JUCE_WINDOWS
-    return true;
-#else
-    return false;
-#endif
+    return sc::acpp::platformSupported ();
 }
 
 std::vector<sc::acpp::Anchor> StemService::anchorsRelativeToInput (
@@ -96,8 +92,8 @@ juce::String StemService::validate (const Request& req, juce::String* codeOut)
                 return bad ("no_description", "Every description needs some text.");
     }
 
-    if (req.backend != "cpu" && req.backend != "cuda" && req.backend != "vulkan")
-        return bad ("invalid_backend", "Unknown backend '" + req.backend + "' (expected cpu, cuda or vulkan).");
+    if (!sc::acpp::isKnownBackend (req.backend))
+        return bad ("invalid_backend", "Unknown backend '" + req.backend + "' (expected cpu, cuda, vulkan or metal).");
 
     if (!std::isfinite (req.sourceRate) || req.sourceRate <= 0.0)
         return bad ("invalid_rate", "The source sample rate is invalid.");
@@ -112,7 +108,7 @@ juce::String StemService::validate (const Request& req, juce::String* codeOut)
 
     const juce::File bin = req.binary == juce::File () ? sc::acpp::binaryPath () : req.binary;
     if (!bin.existsAsFile ())
-        return bad ("binary_missing", "The audiocpp_cli.exe binary is missing.");
+        return bad ("binary_missing", "The " + sc::acpp::binaryFileName () + " binary is missing.");
 
     if (req.mode == Mode::HtDemucsFt)
     {
@@ -153,7 +149,8 @@ StemService::Result StemService::run (const Request& req, const Progress& progre
         return fail (code.toRawUTF8 (), invalid);
     if (!supported ())
         return fail ("unsupported_platform", "Stem separation failed.",
-                     "Stem Separation requires the Windows CLI binary.");
+                     "audio.cpp publishes no CLI build for this platform ("
+                     + juce::String (sc::acpp::platformTag ()) + ").");
 
     const juce::File binary = req.binary == juce::File () ? sc::acpp::binaryPath () : req.binary;
     const int mode = (int) req.mode;

@@ -10,9 +10,14 @@
 #endif
 
 #include <atomic>
+#include <cstdio>
+#include <cstring>
 #include <map>
 #include <set>
 #include <thread>
+#if !JUCE_WINDOWS
+#  include <unistd.h>   // access (X_OK)
+#endif
 
 namespace {
 
@@ -127,42 +132,271 @@ static void testRegAiCatAcppHashes()
     CHECK (sc::acpp::sha256OfFile (dest, [] (float) { return false; }).empty (), "acpp sha: cancelled hash is empty");
     CHECK (sc::acpp::sha256OfFile (dir.getChildFile ("missing")).empty (), "acpp sha: missing file hash is empty");
 
-    // installBinaryFromZip checks the extracted executable against the
-    // published hash of the variant: a fake "cpu" exe is rejected and deleted.
+    // installBinaryFromArchive checks the extracted executable against the
+    // published hash of the variant: a fake executable is rejected and deleted.
     {
+        const juce::String exeName = sc::acpp::binaryFileName ();
         const juce::File root = dir.getChildFile ("bin");
         root.createDirectory ();
-        const juce::File exeSrc = dir.getChildFile ("audiocpp_cli.exe");
+        const juce::File exeSrc = dir.getChildFile (exeName);
         regCatWrite (exeSrc, "not the real audio.cpp binary");
         const juce::File zip = dir.getChildFile ("bin.zip");
         {
             juce::ZipFile::Builder zb;
-            zb.addFile (exeSrc, 0, "audiocpp_cli.exe");
+            zb.addFile (exeSrc, 0, exeName);
             juce::FileOutputStream zo (zip);
             zb.writeToStream (zo, nullptr);
         }
-        err.clear ();
-        CHECK (!sc::acpp::installBinaryFromZip (zip, "cpu", root, &err),
-               "acpp sha: extracted exe that does not match the cpu variant is refused");
-        CHECK (!sc::acpp::binaryPath (root).exists () && sc::acpp::installedVariant (root).isEmpty ()
-                   && !root.getChildFile ("audiocpp_extract.tmp").exists (),
-               "acpp sha: refused exe not installed, no variant marker, no scratch folder");
+        // A variant this platform publishes (and therefore knows the hash of).
+        const juce::String knownVariant = bins.empty () ? juce::String () : juce::String (bins[0].id);
+        if (knownVariant.isNotEmpty ())
+        {
+            err.clear ();
+            CHECK (!sc::acpp::installBinaryFromArchive (zip, knownVariant, root, &err),
+                   "acpp sha: extracted exe that does not match the " + knownVariant + " variant is refused");
+            CHECK (!sc::acpp::binaryPath (root).exists () && sc::acpp::installedVariant (root).isEmpty ()
+                       && !root.getChildFile ("audiocpp_extract.tmp").exists (),
+                   "acpp sha: refused exe not installed, no variant marker, no scratch folder");
 
-        // A working binary already in place survives a refused archive.
-        regCatWrite (sc::acpp::binaryPath (root), "working binary");
-        sc::acpp::setInstalledVariant ("vulkan", root);
-        CHECK (!sc::acpp::installBinaryFromZip (zip, "cpu", root, &err)
-                   && sc::acpp::binaryPath (root).loadFileAsString () == "working binary"
-                   && sc::acpp::installedVariant (root) == "vulkan" && zip.existsAsFile (),
-               "acpp sha: refused archive leaves the installed binary and its variant untouched");
+            // A working binary already in place survives a refused archive.
+            regCatWrite (sc::acpp::binaryPath (root), "working binary");
+            sc::acpp::setInstalledVariant ("previous", root);
+            CHECK (!sc::acpp::installBinaryFromArchive (zip, knownVariant, root, &err)
+                       && sc::acpp::binaryPath (root).loadFileAsString () == "working binary"
+                       && sc::acpp::installedVariant (root) == "previous" && zip.existsAsFile (),
+                   "acpp sha: refused archive leaves the installed binary and its variant untouched");
+        }
 
         // Unknown variant id (no published exe hash): installed, replacing the old one.
-        CHECK (sc::acpp::installBinaryFromZip (zip, "custom", root, &err)
+        CHECK (sc::acpp::installBinaryFromArchive (zip, "custom", root, &err)
                    && sc::acpp::binaryPath (root).loadFileAsString () == "not the real audio.cpp binary"
                    && sc::acpp::installedVariant (root) == "custom" && !zip.exists ()
                    && !root.getChildFile ("audiocpp_extract.tmp").exists (),
                "acpp sha: accepted archive replaces the binary, records the variant, deletes the zip");
+
+        // Neither a zip nor a tar.gz: refused before anything is touched.
+        const juce::File junk = dir.getChildFile ("junk.bin");
+        regCatWrite (junk, "plain text, no archive");
+        err.clear ();
+        CHECK (!sc::acpp::installBinaryFromArchive (junk, "custom", root, &err)
+                   && juce::String (err).contains ("neither")
+                   && sc::acpp::binaryPath (root).loadFileAsString () == "not the real audio.cpp binary",
+               "acpp sha: an unknown archive format is refused");
     }
+    dir.deleteRecursively ();
+}
+
+// --- audio.cpp .tar.gz runtimes (macOS / Linux release layout) ----------------
+
+namespace {
+
+// One tar header: GNU magic by default, POSIX ustar (with a name prefix) on request.
+void regTarHeader (juce::MemoryOutputStream& out, const std::string& name, char type, uint64_t size,
+                   const std::string& link = {}, bool posix = false, const std::string& prefix = {})
+{
+    unsigned char h[512] = {};
+    std::memcpy (h, name.data (), std::min<size_t> (name.size (), 100));
+    std::snprintf ((char*) h + 100, 8, "%07o", 0755u);
+    std::snprintf ((char*) h + 108, 8, "%07o", 0u);
+    std::snprintf ((char*) h + 116, 8, "%07o", 0u);
+    std::snprintf ((char*) h + 124, 12, "%011llo", (unsigned long long) size);
+    std::snprintf ((char*) h + 136, 12, "%011o", 0u);
+    h[156] = (unsigned char) type;
+    std::memcpy (h + 157, link.data (), std::min<size_t> (link.size (), 100));
+    std::memcpy (h + 257, posix ? "ustar\0" "00" : "ustar  \0", 8);
+    if (posix)
+        std::memcpy (h + 345, prefix.data (), std::min<size_t> (prefix.size (), 155));
+    std::memset (h + 148, ' ', 8);
+    unsigned sum = 0;
+    for (unsigned char c : h) sum += c;
+    std::snprintf ((char*) h + 148, 8, "%06o", sum);
+    h[155] = ' ';
+    out.write (h, sizeof (h));
+}
+
+void regTarData (juce::MemoryOutputStream& out, const std::string& data)
+{
+    out.write (data.data (), data.size ());
+    const size_t pad = (512 - data.size () % 512) % 512;
+    const std::string zeros (pad, '\0');
+    out.write (zeros.data (), zeros.size ());
+}
+
+void regTarFile (juce::MemoryOutputStream& out, const std::string& name, const std::string& data)
+{
+    regTarHeader (out, name, '0', data.size ());
+    regTarData (out, data);
+}
+
+// pax "path" record: "<len> path=<value>\n", <len> counting itself.
+std::string regPaxPath (const std::string& value)
+{
+    const std::string body = " path=" + value + "\n";
+    size_t len = body.size () + 1;
+    while (std::to_string (len).size () + body.size () != len) ++len;
+    return std::to_string (len) + body;
+}
+
+void regTarEnd (juce::MemoryOutputStream& out)
+{
+    const std::string zeros (1024, '\0');
+    out.write (zeros.data (), zeros.size ());
+}
+
+void regGzipTo (const juce::File& f, const void* data, size_t size)
+{
+    f.deleteFile ();
+    juce::FileOutputStream fo (f);
+    juce::GZIPCompressorOutputStream gz (fo, 6, juce::GZIPCompressorOutputStream::windowBitsGZIP);
+    gz.write (data, size);
+    gz.flush ();
+}
+
+// What a release archive looks like (plus the header kinds GNU tar / bsdtar write).
+juce::MemoryBlock regReleaseTar (const juce::String& exeName)
+{
+    juce::MemoryOutputStream t;
+    regTarHeader (t, "./", '5', 0);
+    regTarFile (t, "./LICENSE", "license text");
+    regTarHeader (t, "./tools/", '5', 0);
+    regTarFile (t, "./tools/script.py", "print('skipped')");
+    regTarFile (t, "./model_specs/sam_audio.json", "{}");
+    regTarFile (t, "./" + exeName.toStdString (), "fake CLI executable");
+    regTarFile (t, "./libggml-base.so.0", "ggml base");
+    regTarFile (t, "./libggml.so.0.12.0", "ggml front end");
+    regTarHeader (t, "./libggml.so.0", '2', 0, "libggml.so.0.12.0");     // symlink
+    regTarHeader (t, "./libdangling.so", '2', 0, "missing.so");         // target absent: ignored
+    regTarFile (t, "./audiocpp_server", "other executable, skipped");
+    const std::string pax = regPaxPath ("libggml-cpu-a-name-long-enough-to-need-a-pax-header.so");
+    regTarHeader (t, "./PaxHeaders/x", 'x', pax.size ());
+    regTarData (t, pax);
+    regTarFile (t, "./PaxHeaders/truncated-name", "pax-named lib");
+    const std::string gnu = std::string ("libggml-vulkan-from-a-gnu-long-name.so") + '\0';
+    regTarHeader (t, "././@LongLink", 'L', gnu.size ());
+    regTarData (t, gnu);
+    regTarFile (t, "./libggml-vulkan-from-a-gnu", "gnu-named lib");
+    regTarFile (t, "./sub/libnested.so", "not top-level, skipped");
+    regTarHeader (t, "libprefixed.so", '0', 3, {}, true, "deep");   // POSIX prefix: deep/libprefixed.so
+    regTarData (t, "abc");
+    regTarEnd (t);
+    return t.getMemoryBlock ();
+}
+
+} // namespace
+
+static void testRegAiCatAcppTarGz()
+{
+    const juce::File dir = makeTempFile ("acpp_targz");
+    dir.deleteRecursively ();
+    dir.createDirectory ();
+    const juce::String exeName = sc::acpp::binaryFileName ();
+    auto has = [] (const std::vector<juce::String>& v, const juce::String& n)
+        { return std::find (v.begin (), v.end (), n) != v.end (); };
+
+    // 1. Extraction: the executable and the top-level libraries only.
+    const juce::MemoryBlock tar = regReleaseTar (exeName);
+    const juce::File archive = dir.getChildFile ("release.tar.gz");
+    regGzipTo (archive, tar.getData (), tar.getSize ());
+    const juce::File out = dir.getChildFile ("out");
+    std::string err;
+    const auto names = sc::acpp::extractRuntimeFromTarGz (archive, out, &err);
+    const std::vector<juce::String> expected { exeName, "libggml-base.so.0", "libggml.so.0.12.0", "libggml.so.0",
+        "libggml-cpu-a-name-long-enough-to-need-a-pax-header.so", "libggml-vulkan-from-a-gnu-long-name.so" };
+    bool allThere = names.size () == expected.size ();
+    for (const auto& n : expected)
+        allThere = allThere && has (names, n);
+    CHECK (allThere, "acpp tar: executable + top-level libraries extracted (pax and GNU long names honoured) ("
+                         + juce::String ((int) names.size ()) + " files" + (err.empty () ? "" : ", " + juce::String (err)) + ")");
+    CHECK (out.getChildFile (exeName).loadFileAsString () == "fake CLI executable"
+               && out.getChildFile ("libggml-cpu-a-name-long-enough-to-need-a-pax-header.so").loadFileAsString () == "pax-named lib"
+               && out.getChildFile ("libggml-vulkan-from-a-gnu-long-name.so").loadFileAsString () == "gnu-named lib",
+           "acpp tar: file contents intact");
+    CHECK (out.getChildFile ("libggml.so.0").loadFileAsString () == "ggml front end",
+           "acpp tar: a symlink between extracted files becomes a copy of its target");
+    CHECK (!out.getChildFile ("LICENSE").exists () && !out.getChildFile ("audiocpp_server").exists ()
+               && !out.getChildFile ("tools").exists () && !out.getChildFile ("model_specs").exists ()
+               && !out.getChildFile ("sub").exists () && !out.getChildFile ("deep").exists ()
+               && !out.getChildFile ("libdangling.so").exists () && !out.getChildFile ("libprefixed.so").exists (),
+           "acpp tar: tools, specs, other executables, nested and prefixed entries, dangling links skipped");
+
+    // 2. Refusals.
+    const juce::File plain = dir.getChildFile ("plain.tar.gz");
+    regCatWrite (plain, "not compressed at all");
+    err.clear ();
+    CHECK (sc::acpp::extractRuntimeFromTarGz (plain, dir.getChildFile ("o2"), &err).empty ()
+               && juce::String (err).contains (".tar.gz"),
+           "acpp tar: a file that is not gzip is refused");
+    const std::string text (2000, 'x');
+    const juce::File notTar = dir.getChildFile ("text.tar.gz");
+    regGzipTo (notTar, text.data (), text.size ());
+    err.clear ();
+    CHECK (sc::acpp::extractRuntimeFromTarGz (notTar, dir.getChildFile ("o3"), &err).empty ()
+               && juce::String (err).contains ("not a tar archive"),
+           "acpp tar: gzip content that is not tar is refused");
+    const juce::File cut = dir.getChildFile ("cut.tar.gz");
+    regGzipTo (cut, tar.getData (), tar.getSize () / 2);
+    err.clear ();
+    CHECK (sc::acpp::extractRuntimeFromTarGz (cut, dir.getChildFile ("o4"), &err).empty ()
+               && juce::String (err).contains ("truncated"),
+           "acpp tar: a truncated archive is refused");
+    {
+        juce::MemoryOutputStream t;
+        regTarFile (t, "./libggml-base.so.0", "lib only");
+        regTarEnd (t);
+        const juce::File noExe = dir.getChildFile ("noexe.tar.gz");
+        regGzipTo (noExe, t.getData (), t.getDataSize ());
+        err.clear ();
+        CHECK (sc::acpp::extractRuntimeFromTarGz (noExe, dir.getChildFile ("o5"), &err).empty ()
+                   && juce::String (err).contains (exeName),
+               "acpp tar: an archive without the executable is refused");
+    }
+
+    // 3. Install, reinstall, remove.
+    const juce::File root = dir.getChildFile ("root");
+    root.createDirectory ();
+    regCatWrite (root.getChildFile ("sam-audio-small-q8_0.gguf"), "model weights stay");
+    err.clear ();
+    CHECK (sc::acpp::installBinaryFromArchive (archive, "custom", root, &err) && !archive.exists ()
+               && sc::acpp::installedVariant (root) == "custom"
+               && sc::acpp::binaryPath (root).loadFileAsString () == "fake CLI executable"
+               && root.getChildFile ("libggml.so.0").existsAsFile ()
+               && sc::acpp::installedRuntimeLibraries (root).size () == 5
+               && !root.getChildFile ("audiocpp_extract.tmp").exists (),
+           "acpp tar: install puts the executable and its 5 libraries in place, deletes the archive ("
+               + juce::String (err) + ")");
+#if !JUCE_WINDOWS
+    CHECK (access (sc::acpp::binaryPath (root).getFullPathName ().toRawUTF8 (), X_OK) == 0,
+           "acpp tar: installed executable has its execute bit");
+#endif
+    {
+        juce::MemoryOutputStream t;
+        regTarFile (t, "./" + exeName.toStdString (), "second CLI");
+        regTarFile (t, "./libggml-base.so.0", "second base");
+        regTarEnd (t);
+        const juce::File second = dir.getChildFile ("second.tar.gz");
+        regGzipTo (second, t.getData (), t.getDataSize ());
+        err.clear ();
+        CHECK (sc::acpp::installBinaryFromArchive (second, "custom2", root, &err)
+                   && sc::acpp::binaryPath (root).loadFileAsString () == "second CLI"
+                   && root.getChildFile ("libggml-base.so.0").loadFileAsString () == "second base"
+                   && !root.getChildFile ("libggml.so.0").exists ()
+                   && !root.getChildFile ("libggml-vulkan-from-a-gnu-long-name.so").exists ()
+                   && sc::acpp::installedRuntimeLibraries (root) == juce::StringArray ("libggml-base.so.0"),
+               "acpp tar: a reinstall removes the previous variant's libraries");
+    }
+    // A damaged manifest never makes removal leave the folder.
+    const juce::File outside = dir.getChildFile ("outside.txt");
+    regCatWrite (outside, "keep me");
+    root.getChildFile ("runtime-files.txt").replaceWithText ("libggml-base.so.0\n../outside.txt\n"
+                                                             + outside.getFullPathName () + "\n" + exeName + "\n");
+    CHECK (sc::acpp::installedRuntimeLibraries (root) == juce::StringArray ("libggml-base.so.0"),
+           "acpp tar: manifest entries with a path or the executable name are ignored");
+    CHECK (sc::acpp::removeInstalledBinary (root) && !sc::acpp::binaryPath (root).exists ()
+               && !root.getChildFile ("libggml-base.so.0").exists () && !root.getChildFile ("runtime-files.txt").exists ()
+               && sc::acpp::installedVariant (root).isEmpty () && outside.existsAsFile ()
+               && root.getChildFile ("sam-audio-small-q8_0.gguf").existsAsFile (),
+           "acpp tar: removal deletes the executable, its libraries and the marker, nothing else");
+
     dir.deleteRecursively ();
 }
 
@@ -205,7 +439,9 @@ static void testRegAiCatBuiltIns()
     const size_t expected = mm.registry ().size () + sc::acpp::binaryChoices ().size ()
                           + sc::acpp::modelChoices ().size () + sc::acpp::flashSrChoices ().size ()
                           + sc::acpp::audioSRChoices ().size () + 2;   // + 2 manual htdemucs families
-    CHECK (entries.size () == expected && expected == 32, "catalog: lists all 32 known models");
+    // 28 platform-independent entries + this platform's CLI variants (Windows 4, macOS 1, Linux x64 2).
+    CHECK (entries.size () == expected && expected == 28 + sc::acpp::binaryChoices ().size (),
+           "catalog: lists all " + juce::String ((int) expected) + " known models");
 
     for (const auto& spec : mm.registry ())
     {
@@ -258,19 +494,26 @@ static void testRegAiCatBuiltIns()
     CHECK (reasonsOk, "catalog: a non-installable entry says why (and an installable one does not)");
     CHECK (acppHashed, "catalog: every downloadable audio.cpp asset is SHA-256 checked");
 
+#if JUCE_WINDOWS
     const auto* cuda = cat.find ("audiocpp-cli-cuda12.4");
     CHECK (cuda != nullptr && !cuda->installable && cuda->reasonCode == "blocked",
            "catalog: CUDA binaries blocked (their ggml DLLs are not extracted)");
-    const auto* sam = cat.find ("sam-audio-small-q8_0");
-    const auto* cpuBin = cat.find ("audiocpp-cli-cpu");
-#if JUCE_WINDOWS
-    CHECK (sam != nullptr && sam->installable && cpuBin != nullptr && cpuBin->installable,
-           "catalog: audio.cpp model + CPU binary installable on Windows");
-#else
-    CHECK (sam != nullptr && !sam->installable && sam->reasonCode == "unsupported_platform"
-               && cpuBin != nullptr && !cpuBin->installable,
-           "catalog: audio.cpp entries not installable off Windows (unsupported_platform)");
 #endif
+    const auto* sam = cat.find ("sam-audio-small-q8_0");
+    const auto bins = sc::acpp::binaryChoices ();
+    if (sc::acpp::platformSupported ())
+    {
+        const auto* firstBin = cat.find ("audiocpp-cli-" + bins[0].id);
+        CHECK (sam != nullptr && sam->installable && firstBin != nullptr && firstBin->installable
+                   && firstBin->platforms == std::vector<std::string> { sc::acpp::platformTag () },
+               "catalog: audio.cpp model + " + juce::String (bins[0].id) + " binary installable on "
+                   + juce::String (sc::acpp::platformTag ()));
+    }
+    else
+    {
+        CHECK (sam != nullptr && !sam->installable && sam->reasonCode == "unsupported_platform",
+               "catalog: audio.cpp entries not installable without a CLI build (unsupported_platform)");
+    }
     const auto* demucs = cat.find ("htdemucs-6stems");
     CHECK (demucs != nullptr && demucs->manual && !demucs->installable && demucs->checksumKind () == "none",
            "catalog: htdemucs is manual, not installable, no checksum");
@@ -348,14 +591,19 @@ static void testRegAiCatJson()
     CHECK ((juce::int64) big.getProperty ("sizeBytes", {}) == (juce::int64) 15401675328LL,
            "catalog json: sizes above 4 GB survive the round trip");
     const juce::var samQ = findModel ("sam-audio-small-q8_0");
-    CHECK (samQ.getProperty ("checksum", {}).toString () == "sha256"
-               && samQ.getProperty ("platforms", {}).getArray () != nullptr
-               && samQ.getProperty ("platforms", {})[0].toString () == "windows-x64",
-           "catalog json: audio.cpp model carries sha256 checksum + windows-x64 platform");
-    const juce::var cpuBin = findModel ("audiocpp-cli-cpu");
-    CHECK (cpuBin.getProperty ("variant", {}).toString () == "cpu"
-               && cpuBin.getProperty ("download", {}).getProperty ("sha256", {}).toString ().length () == 64,
-           "catalog json: runtime entry exposes its variant and its download hash");
+    const auto* samPlatforms = samQ.getProperty ("platforms", {}).getArray ();
+    CHECK (samQ.getProperty ("checksum", {}).toString () == "sha256" && samPlatforms != nullptr
+               && samPlatforms->size () == 4 && samPlatforms->contains ("windows-x64")
+               && samPlatforms->contains ("macos-arm64") && samPlatforms->contains ("linux-x64"),
+           "catalog json: audio.cpp model carries sha256 checksum + every CLI platform");
+    const auto bins = sc::acpp::binaryChoices ();
+    if (!bins.empty ())
+    {
+        const juce::var firstBin = findModel ("audiocpp-cli-" + bins[0].id);
+        CHECK (firstBin.getProperty ("variant", {}).toString () == juce::String (bins[0].id)
+                   && firstBin.getProperty ("download", {}).getProperty ("sha256", {}).toString ().length () == 64,
+               "catalog json: runtime entry exposes its variant and its download hash");
+    }
 
     // ai.devices
     const juce::var dev = juce::JSON::parse (juce::JSON::toString (sc::ai::devicesJson ("auto", false, root.getChildFile ("audiocpp")), true));
@@ -371,14 +619,14 @@ static void testRegAiCatJson()
                && wh.getProperty ("devices", {})[0].toString () == "CPU",
            "devices json: whisper = [CPU]");
     const juce::var ac = dev.getProperty ("audiocpp", {});
-#if JUCE_WINDOWS
-    CHECK (ac.getProperty ("available", {}).isBool () && ac.getProperty ("backends", {}).isArray (),
-           "devices json: audiocpp block");
-#else
-    CHECK (! (bool) ac.getProperty ("available", {}) && ac.getProperty ("reason", {}).toString () == "unsupported_platform"
-               && ac.getProperty ("installedVariant", {}).isVoid (),
-           "devices json: audiocpp unsupported off Windows");
-#endif
+    if (sc::acpp::platformSupported ())
+        CHECK (ac.getProperty ("available", {}).isBool () && ac.getProperty ("backends", {}).isArray ()
+                   && ac.getProperty ("platform", {}).toString () == juce::String (sc::acpp::platformTag ()),
+               "devices json: audiocpp block");
+    else
+        CHECK (! (bool) ac.getProperty ("available", {}) && ac.getProperty ("reason", {}).toString () == "unsupported_platform"
+                   && ac.getProperty ("installedVariant", {}).isVoid (),
+               "devices json: audiocpp unsupported without a CLI build");
     root.deleteRecursively ();
 }
 
@@ -436,10 +684,16 @@ static void testRegAiCatResolveDevice()
     r = resolveAiDevice ("tensorrt", "auto", cpu);
     CHECK (!r.ok && r.code == "invalid_params" && r.path == "engine", "device: unknown engine");
 
+    const std::vector<std::string> metalCpu { "metal", "cpu" };
+#if JUCE_MAC
+    const bool handPlacedOk = sc::ai::audioCppBackendsForVariant ("") == metalCpu;
+#else
+    const bool handPlacedOk = sc::ai::audioCppBackendsForVariant ("").size () == 3;
+#endif
     CHECK (sc::ai::audioCppBackendsForVariant ("cpu") == std::vector<std::string> { "cpu" }
                && sc::ai::audioCppBackendsForVariant ("cuda13.3") == std::vector<std::string> { "cuda" }
                && sc::ai::audioCppBackendsForVariant ("vulkan") == std::vector<std::string> { "vulkan" }
-               && sc::ai::audioCppBackendsForVariant ("").size () == 3,
+               && sc::ai::audioCppBackendsForVariant ("metal") == metalCpu && handPlacedOk,
            "device: audio.cpp variant -> backends");
 
     const auto okJson = resolveAiDevice ("openvino", "cpu", cpu).toJson ();
@@ -447,11 +701,10 @@ static void testRegAiCatResolveDevice()
                && okJson.getProperty ("resolved", {}).toString () == "CPU",
            "device: setDevice result json");
 
-    // Against the real lists (whisper needs no runtime; audio.cpp is Windows-only).
+    // Against the real lists (whisper needs no runtime).
     CHECK (resolveAiDevice ("whisper", "auto").ok, "device: real whisper list");
-#if !JUCE_WINDOWS
-    CHECK (resolveAiDevice ("audiocpp", "cpu").code == "unsupported_platform", "device: audio.cpp unsupported off Windows");
-#endif
+    if (!sc::acpp::platformSupported ())
+        CHECK (resolveAiDevice ("audiocpp", "cpu").code == "unsupported_platform", "device: audio.cpp unsupported without a CLI build");
 }
 
 // install / verify / remove through ModelManager, from file:// fixtures.
@@ -616,12 +869,13 @@ static void testRegAiCatAudioCppInstall()
 
     const std::string weights = "fake gguf weights for the catalogue test";
     regCatWrite (src.getChildFile ("fixture.gguf"), weights);
-    const std::string exeBytes = "fake audiocpp_cli.exe for the catalogue test";
-    regCatWrite (src.getChildFile ("audiocpp_cli.exe"), exeBytes);
+    const juce::String exeName = sc::acpp::binaryFileName ();
+    const std::string exeBytes = "fake audio.cpp CLI for the catalogue test";
+    regCatWrite (src.getChildFile (exeName), exeBytes);
     const juce::File zip = src.getChildFile ("bin.zip");
     {
         juce::ZipFile::Builder zb;
-        zb.addFile (src.getChildFile ("audiocpp_cli.exe"), 0, "audiocpp_cli.exe");
+        zb.addFile (src.getChildFile (exeName), 0, exeName);
         juce::FileOutputStream zo (zip);
         zb.writeToStream (zo, nullptr);
     }
@@ -633,7 +887,7 @@ static void testRegAiCatAudioCppInstall()
     m.family = "stems";
     m.displayName = "audio.cpp fixture";
     m.files = { { "Fixture-GGUF/fixture.gguf", "https://example.invalid/fixture.gguf", (int64_t) weights.size (), regCatSha (weights) } };
-    m.backends = { "cpu" }; m.platforms = { "windows-x64" }; m.license = "test"; m.source = "test";
+    m.backends = { "cpu" }; m.platforms = { sc::acpp::platformTag () }; m.license = "test"; m.source = "test";
     m.installable = true;
 
     sc::ai::CatalogEntry rt;
@@ -642,9 +896,9 @@ static void testRegAiCatAudioCppInstall()
     rt.family = "runtime";
     rt.displayName = "audio.cpp CLI fixture";
     rt.variant = "test";
-    rt.files = { { "audiocpp_cli.exe", {}, (int64_t) exeBytes.size (), regCatSha (exeBytes) } };
+    rt.files = { { exeName.toStdString (), {}, (int64_t) exeBytes.size (), regCatSha (exeBytes) } };
     rt.archive = { "audiocpp_bin.zip", "https://example.invalid/bin.zip", zip.getSize (), zipSha };
-    rt.backends = { "cpu" }; rt.platforms = { "windows-x64" }; rt.license = "test"; rt.source = "test";
+    rt.backends = { "cpu" }; rt.platforms = { sc::acpp::platformTag () }; rt.license = "test"; rt.source = "test";
     rt.installable = true;
 
     sc::ai::ModelManager mm (root.getChildFile ("models").getFullPathName ().toStdString ());
@@ -700,7 +954,7 @@ static void testRegAiCatAudioCppInstall()
         release.signal ();
         t.join ();
     }
-    const juce::File exe = acppRoot.getChildFile ("audiocpp_cli.exe");
+    const juce::File exe = sc::acpp::binaryPath (acppRoot);
     CHECK (out.ok && exe.loadFileAsString ().toStdString () == exeBytes
                && sc::acpp::installedVariant (acppRoot) == "test"
                && !acppRoot.getChildFile ("audiocpp_bin.zip").exists ()
@@ -733,14 +987,14 @@ static void testRegAiCatAudioCppInstall()
     CHECK (!out.ok && out.code == "failed" && juce::String (out.message).contains ("SHA-256") && !weightsFile.exists (),
            "catalog acpp: hash mismatch refused, nothing installed");
 
-    // The built-in audio.cpp entries without the hook: Windows-only.
+    // The built-in audio.cpp entries without the hook: wherever the CLI has a build.
     sc::ai::ModelCatalog builtIn (mm, acppRoot);
-#if JUCE_WINDOWS
-    CHECK (builtIn.installPlan ("sam-audio-small-q8_0").ok, "catalog acpp: built-in model installable on Windows");
-#else
-    CHECK (builtIn.install ("sam-audio-small-q8_0").code == "unsupported_platform",
-           "catalog acpp: built-in model install -> unsupported_platform off Windows");
-#endif
+    if (sc::acpp::platformSupported ())
+        CHECK (builtIn.installPlan ("sam-audio-small-q8_0").ok,
+               "catalog acpp: built-in model installable on " + juce::String (sc::acpp::platformTag ()));
+    else
+        CHECK (builtIn.install ("sam-audio-small-q8_0").code == "unsupported_platform",
+               "catalog acpp: built-in model install -> unsupported_platform without a CLI build");
     root.deleteRecursively ();
 }
 
@@ -749,6 +1003,7 @@ static void testRegAiCatAudioCppInstall()
 static void runRegression_ai_catalog()
 {
     testRegAiCatAcppHashes ();
+    testRegAiCatAcppTarGz ();
     testRegAiCatModelsDirEnv ();
 #if defined(SC_ENABLE_AI)
     testRegAiCatBuiltIns ();

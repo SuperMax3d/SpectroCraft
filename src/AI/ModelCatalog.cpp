@@ -20,7 +20,8 @@ constexpr const char* kErrUnsupportedPlatform = "unsupported_platform";
 constexpr const char* kErrModelNotInstalled   = "model_not_installed";
 constexpr const char* kErrFailed              = "failed";
 
-constexpr const char* kExeName = "audiocpp_cli.exe";
+// audiocpp_cli.exe on Windows, audiocpp_cli elsewhere.
+std::string exeName() { return sc::acpp::binaryFileName ().toStdString (); }
 
 juce::var newObject() { return juce::var (new juce::DynamicObject ()); }
 
@@ -171,14 +172,12 @@ void finaliseInstallable(CatalogEntry& e, const std::string& blocker)
         e.reason = blocker;
         return;
     }
-#if !JUCE_WINDOWS
-    if (e.engine == engine::audiocpp)
+    if (e.engine == engine::audiocpp && !sc::acpp::platformSupported ())
     {
         e.reasonCode = kErrUnsupportedPlatform;
-        e.reason = "audio.cpp downloads and runs are Windows-only (src/AudioCpp.cpp)";
+        e.reason = "audio.cpp publishes no CLI build for this platform (" + sc::acpp::platformTag () + ")";
         return;
     }
-#endif
     e.installable = true;
     e.reason.clear ();
     e.reasonCode.clear ();
@@ -284,10 +283,10 @@ std::vector<CatalogEntry> ModelCatalog::builtInEntries()
         e.family = family::runtime;
         e.displayName = "audio.cpp CLI - " + b.label.toStdString ();
         e.variant = b.id;
-        e.files = { { kExeName, {}, b.exeSizeBytes, b.exeSha256 } };
-        e.archive = { "audiocpp_bin.zip", b.url, b.sizeBytes, b.sha256 };
+        e.files = { { exeName (), {}, b.exeSizeBytes, b.exeSha256 } };
+        e.archive = { sc::acpp::archiveFileName ().toStdString (), b.url, b.sizeBytes, b.sha256 };
         e.backends = audioCppBackendsForVariant (b.id);
-        e.platforms = { "windows-x64" };
+        e.platforms = { sc::acpp::platformTag () };
         e.license = "no SPDX license declared (see https://github.com/0xShug0/audio.cpp)";
         e.source = "https://github.com/0xShug0/audio.cpp/releases/tag/v0.9.2-drama3-base-small";
         e.minFreeDiskBytes = b.sizeBytes + b.exeSizeBytes + 64 * 1024 * 1024;
@@ -304,8 +303,8 @@ std::vector<CatalogEntry> ModelCatalog::builtInEntries()
         e.family = family::stems;
         e.displayName = "SAM-Audio " + e.id.substr (std::string ("sam-audio-").size ());
         e.files = { { m.file, sc::acpp::modelUrl (m.file).toStdString (), m.sizeBytes, m.sha256 } };
-        e.backends = { "cpu", "cuda", "vulkan" };
-        e.platforms = { "windows-x64" };
+        e.backends = { "cpu", "cuda", "vulkan", "metal" };
+        e.platforms = sc::acpp::supportedPlatformTags ();
         e.license = "other (SAM license, see the model card)";
         e.source = "https://huggingface.co/audio-cpp/SAM-Audio-GGUF";
         e.minFreeDiskBytes = m.sizeBytes + 64 * 1024 * 1024;
@@ -322,8 +321,8 @@ std::vector<CatalogEntry> ModelCatalog::builtInEntries()
         e.family = family::superRes;
         e.displayName = "FlashSR super-resolution";
         e.files = { { m.file, sc::acpp::flashSrUrl (m.file).toStdString (), m.sizeBytes, m.sha256 } };
-        e.backends = { "cpu", "cuda", "vulkan" };
-        e.platforms = { "windows-x64" };
+        e.backends = { "cpu", "cuda", "vulkan", "metal" };
+        e.platforms = sc::acpp::supportedPlatformTags ();
         e.license = "Apache-2.0";
         e.source = "https://huggingface.co/YatharthS/FlashSR (shipped in the audio.cpp repository)";
         e.minFreeDiskBytes = m.sizeBytes + 64 * 1024 * 1024;
@@ -338,8 +337,8 @@ std::vector<CatalogEntry> ModelCatalog::builtInEntries()
         e.family = family::superRes;
         e.displayName = "AudioSR basic (f32)";
         e.files = { { m.file, sc::acpp::audioSRUrl (m.file).toStdString (), m.sizeBytes, m.sha256 } };
-        e.backends = { "cpu", "cuda", "vulkan" };
-        e.platforms = { "windows-x64" };
+        e.backends = { "cpu", "cuda", "vulkan", "metal" };
+        e.platforms = sc::acpp::supportedPlatformTags ();
         e.license = "other (see the model card)";
         e.source = "https://huggingface.co/audio-cpp/audio.cpp-gguf";
         e.minFreeDiskBytes = m.sizeBytes + 64 * 1024 * 1024;
@@ -359,8 +358,8 @@ std::vector<CatalogEntry> ModelCatalog::builtInEntries()
         e.displayName = m.name;
         e.folder = m.folder;
         e.manual = true;
-        e.backends = { "cpu", "cuda", "vulkan" };
-        e.platforms = { "windows-x64" };
+        e.backends = { "cpu", "cuda", "vulkan", "metal" };
+        e.platforms = sc::acpp::supportedPlatformTags ();
         e.license = "see the model's source";
         e.source = "user-installed: one or more .gguf files in <audiocppRoot>/" + std::string (m.folder);
         e.reason = "the app has no download source for it: place the .gguf file(s) in <audiocppRoot>/"
@@ -424,7 +423,7 @@ CatalogStatus ModelCatalog::status(const CatalogEntry& e) const
 
     if (isRuntime (e))
     {
-        const juce::File exe = dir.getChildFile (kExeName);
+        const juce::File exe = sc::acpp::binaryPath (dir);
         st.path = exe;
         st.installed = exe.existsAsFile () && exe.getSize () > 0
                     && sc::acpp::installedVariant (dir).toStdString () == e.variant;
@@ -434,7 +433,7 @@ CatalogStatus ModelCatalog::status(const CatalogEntry& e) const
             st.verified = ModelManager::wasVerified (exe);
         }
         else
-            st.missing.push_back (kExeName);
+            st.missing.push_back (exeName ());
         return st;
     }
 
@@ -468,8 +467,8 @@ private:
     bool _ok;
 };
 
-// The audio.cpp runtimes share one slot (audiocpp_cli.exe, variant.txt,
-// audiocpp_bin.zip): installing / removing any of them excludes the others.
+// The audio.cpp runtimes share one slot (the CLI executable and its libraries,
+// variant.txt, the release archive): installing / removing any of them excludes the others.
 std::string ModelCatalog::busyKey(const std::string& id) const
 {
     const CatalogEntry* e = find (id);
@@ -622,20 +621,19 @@ CatalogOutcome ModelCatalog::installAudioCpp(const CatalogEntry& e, const Catalo
     AudioCppDownloader download = _acppDownloader;
     if (!download)
     {
-#if JUCE_WINDOWS
+        if (!sc::acpp::platformSupported ())
+        {
+            juce::var d = newObject ();
+            set (d, "platform", str (sc::acpp::platformTag ()));
+            set (d, "supported", strArray (sc::acpp::supportedPlatformTags ()));
+            return fail (kErrUnsupportedPlatform, "audio.cpp publishes no CLI build for this platform", d);
+        }
         download = [] (const std::string& url, const juce::File& dest,
                        const std::function<bool(float)>& progress, std::string* errOut,
                        int64_t expectedBytes, const std::string& expectedSha256)
         {
             return sc::acpp::downloadFile (url, dest, progress, errOut, expectedBytes, expectedSha256);
         };
-#else
-        juce::ignoreUnused (onProgress);
-        juce::var d = newObject ();
-        set (d, "platform", str (platformName ()));
-        set (d, "see", "src/AudioCpp.cpp");
-        return fail (kErrUnsupportedPlatform, "audio.cpp downloads are Windows-only", d);
-#endif
     }
 
     const juce::File root = locationOf (e);
@@ -665,7 +663,7 @@ CatalogOutcome ModelCatalog::installAudioCpp(const CatalogEntry& e, const Catalo
 
     if (isRuntime (e))
     {
-        const juce::File exe = root.getChildFile (kExeName);
+        const juce::File exe = sc::acpp::binaryPath (root);
         const CatalogFile& exeSpec = e.files.front ();
         const std::string previous = sc::acpp::installedVariant (root).toStdString ();
 
@@ -677,7 +675,7 @@ CatalogOutcome ModelCatalog::installAudioCpp(const CatalogEntry& e, const Catalo
             return success (installedResult (e, 0));
         }
 
-        const juce::File zip = root.getChildFile (juce::String (e.archive.name));
+        const juce::File zip = root.getChildFile (juce::String (e.archive.name));   // .zip or .tar.gz
         std::string err;
         if (!download (e.archive.url, zip, progressFor ("downloading " + e.id, e.archive.sizeBytes),
                        &err, e.archive.sizeBytes, e.archive.sha256))
@@ -686,13 +684,13 @@ CatalogOutcome ModelCatalog::installAudioCpp(const CatalogEntry& e, const Catalo
             if (cancelled) return fail (kErrCancelled, "cancelled by client");
             return fail (kErrFailed, err.empty () ? "download of " + e.id + " failed" : err);
         }
-        if (onProgress) onProgress (1.0f, "extracting " + std::string (kExeName));
-        if (!sc::acpp::installBinaryFromZip (zip, juce::String (e.variant), root, &err))
+        if (onProgress) onProgress (1.0f, "extracting " + exeName ());
+        if (!sc::acpp::installBinaryFromArchive (zip, juce::String (e.variant), root, &err))
         {
             zip.deleteFile ();
-            return fail (kErrFailed, err.empty () ? "extraction of " + std::string (kExeName) + " failed" : err);
+            return fail (kErrFailed, err.empty () ? "extraction of " + exeName () + " failed" : err);
         }
-        // installBinaryFromZip already checked the executable of a built-in
+        // installBinaryFromArchive already checked the executable of a built-in
         // variant; hash it here only for other (custom) entries.
         bool builtInVariant = false;
         for (const auto& b : sc::acpp::binaryChoices ())
@@ -700,9 +698,8 @@ CatalogOutcome ModelCatalog::installAudioCpp(const CatalogEntry& e, const Catalo
         if (!builtInVariant
             && ! juce::String (sc::acpp::sha256OfFile (exe)).equalsIgnoreCase (juce::String (exeSpec.sha256)))
         {
-            exe.deleteFile ();
-            root.getChildFile ("variant.txt").deleteFile ();
-            return fail (kErrFailed, "the extracted " + std::string (kExeName)
+            sc::acpp::removeInstalledBinary (root);
+            return fail (kErrFailed, "the extracted " + exeName ()
                                      + " does not match its published SHA-256; it was deleted");
         }
         ModelManager::markVerified (exe);
@@ -799,7 +796,7 @@ CatalogOutcome ModelCatalog::verify(const std::string& id, const CatalogProgress
     {
         if (st.installed)
         {
-            todo.push_back ({ e.files.front (), dir.getChildFile (kExeName) });
+            todo.push_back ({ e.files.front (), sc::acpp::binaryPath (dir) });
             anyPresent = true;
         }
     }
@@ -945,15 +942,16 @@ CatalogOutcome ModelCatalog::remove(const std::string& id)
 
     if (isRuntime (e))
     {
-        const juce::File exe = dir.getChildFile (kExeName);
+        const juce::File exe = sc::acpp::binaryPath (dir);
         if (sc::acpp::installedVariant (dir).toStdString () != e.variant || !exe.existsAsFile ())
             return result (exe);   // this variant is not the installed one: nothing to do
         freed = exe.getSize ();
+        for (const auto& lib : sc::acpp::installedRuntimeLibraries (dir))
+            freed += dir.getChildFile (lib).getSize ();
         ModelManager::forgetVerified (exe);
-        if (!exe.deleteFile ())
+        if (!sc::acpp::removeInstalledBinary (dir))   // executable, libraries, variant.txt
             return fail (kErrFailed, "could not delete " + exe.getFullPathName ().toStdString ()
                                      + " (is it running?)");
-        dir.getChildFile ("variant.txt").deleteFile ();
         removed = true;
         return result (exe);
     }
@@ -1114,7 +1112,12 @@ std::vector<std::string> audioCppBackendsForVariant(const std::string& variant)
     if (variant == "cpu") return { "cpu" };
     if (variant.rfind ("cuda", 0) == 0) return { "cuda" };
     if (variant == "vulkan") return { "vulkan" };
+    if (variant == "metal") return { "metal", "cpu" };   // the macOS builds have both
+#if JUCE_MAC
+    if (variant.empty ()) return { "metal", "cpu" };   // hand-placed binary: a macOS build
+#else
     if (variant.empty ()) return { "cpu", "cuda", "vulkan" };   // hand-placed binary: unknown build
+#endif
     return {};
 }
 
@@ -1233,7 +1236,11 @@ std::vector<std::string> availableDevices(const std::string& engineName, bool in
         return { "CPU" };   // WhisperTranscribe.cpp: use_gpu = false
     if (engineName == engine::audiocpp)
     {
-#if JUCE_WINDOWS
+        if (!sc::acpp::platformSupported ())
+        {
+            if (noteOut) *noteOut = "audio.cpp publishes no CLI build for this platform (" + sc::acpp::platformTag () + ")";
+            return {};
+        }
         const juce::File root = audioCppRoot.getFullPathName ().isEmpty () ? sc::acpp::dir () : audioCppRoot;
         if (!sc::acpp::hasBinary (root))
         {
@@ -1241,11 +1248,6 @@ std::vector<std::string> availableDevices(const std::string& engineName, bool in
             return {};
         }
         return audioCppBackendsForVariant (sc::acpp::installedVariant (root).toStdString ());
-#else
-        juce::ignoreUnused (audioCppRoot);
-        if (noteOut) *noteOut = "audio.cpp is Windows-only";
-        return {};
-#endif
     }
     if (noteOut) *noteOut = "unknown AI engine '" + engineName + "'";
     return {};
@@ -1259,13 +1261,8 @@ DeviceResolution resolveAiDevice(const std::string& engineName, const std::strin
     if (!r.ok && available.empty () && r.path == "device")
     {
         // Say why nothing is available.
-#if !JUCE_WINDOWS
         if (engineName == engine::audiocpp)
-            r.code = kErrUnsupportedPlatform;
-#else
-        if (engineName == engine::audiocpp)
-            r.code = kErrModelNotInstalled;
-#endif
+            r.code = sc::acpp::platformSupported () ? kErrModelNotInstalled : kErrUnsupportedPlatform;
         if (!note.empty ()) r.message += ": " + note;
     }
     return r;
@@ -1331,21 +1328,24 @@ juce::var devicesJson(const std::string& openvinoPreference, bool initOpenVino, 
     // audio.cpp
     {
         juce::var o = newObject ();
-#if JUCE_WINDOWS
-        const juce::File root = audioCppRoot.getFullPathName ().isEmpty () ? sc::acpp::dir () : audioCppRoot;
-        const bool has = sc::acpp::hasBinary (root);
-        const std::string variant = sc::acpp::installedVariant (root).toStdString ();
-        set (o, "available", has);
-        set (o, "installedVariant", has ? strOrNull (variant) : juce::var ());
-        set (o, "backends", strArray (has ? audioCppBackendsForVariant (variant) : std::vector<std::string> {}));
-        if (!has) set (o, "reason", kErrModelNotInstalled);
-#else
-        juce::ignoreUnused (audioCppRoot);
-        set (o, "available", false);
-        set (o, "reason", kErrUnsupportedPlatform);
-        set (o, "installedVariant", juce::var ());
-        set (o, "backends", strArray ({}));
-#endif
+        if (sc::acpp::platformSupported ())
+        {
+            const juce::File root = audioCppRoot.getFullPathName ().isEmpty () ? sc::acpp::dir () : audioCppRoot;
+            const bool has = sc::acpp::hasBinary (root);
+            const std::string variant = sc::acpp::installedVariant (root).toStdString ();
+            set (o, "available", has);
+            set (o, "installedVariant", has ? strOrNull (variant) : juce::var ());
+            set (o, "backends", strArray (has ? audioCppBackendsForVariant (variant) : std::vector<std::string> {}));
+            if (!has) set (o, "reason", kErrModelNotInstalled);
+        }
+        else
+        {
+            set (o, "available", false);
+            set (o, "reason", kErrUnsupportedPlatform);
+            set (o, "installedVariant", juce::var ());
+            set (o, "backends", strArray ({}));
+        }
+        set (o, "platform", str (sc::acpp::platformTag ()));
         set (out, "audiocpp", o);
     }
     return out;
