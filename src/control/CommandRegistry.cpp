@@ -413,6 +413,7 @@ CommandRegistry::CommandRegistry()
     registerViewCommands (*this);
     registerTransportCommands (*this);
     registerAiCommands (*this);
+    registerMeasureCommands (*this);
 }
 
 void CommandRegistry::add (Spec s)

@@ -239,5 +239,6 @@ void registerJobCommands (CommandRegistry&);
 void registerViewCommands (CommandRegistry&);
 void registerTransportCommands (CommandRegistry&);
 void registerAiCommands (CommandRegistry&);
+void registerMeasureCommands (CommandRegistry&);
 
 } // namespace sc::control
