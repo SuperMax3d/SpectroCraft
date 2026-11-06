@@ -123,7 +123,9 @@ Résultats (macOS 26 arm64, AppleClang 21, Debug, `SPECTRO_ENABLE_AI=ON`, ctest 
   avec un `TMPDIR` privé, disparus. (b) `single instance mode` (tube nommé global) échoue parfois
   (« empty list acknowledged », « second client's forward acknowledged ») ; seul : 13/13. Dernière
   passe complète (TMPDIR privé) : 9/10 shards OK, le 10e uniquement sur ce test de tube.
-  Le CI (machines isolées) fait foi : voir le rapport final.
+  Le CI (machines isolées) fait foi.
+- **CI** `build.yml` (workflow_dispatch sur `f12f175`, run 42155383758) : `windows-ai` ✅ (MSVC Release,
+  chemins audio.cpp Windows compilés et testés), `macos-ai` ✅, `linux-ai` ✅.
 
 ## Écarts
 
