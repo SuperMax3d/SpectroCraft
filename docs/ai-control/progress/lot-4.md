@@ -6,7 +6,7 @@ equal to the panel, new levels/peaks/harmonics measures) was delivered by the pa
 
 ## Merge
 
-`ai-control-measures` merged at `8d4ace9` (trivial conflict in `tests/UnitTests.cpp`, both sides kept).
+`ai-control-measures` merged at `8cf8d01` (trivial conflict in `tests/UnitTests.cpp`, both sides kept).
 
 ## Commands (`src/control/commands/Measure.cpp`)
 

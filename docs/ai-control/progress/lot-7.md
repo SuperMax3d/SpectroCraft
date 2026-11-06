@@ -6,7 +6,7 @@ parallel agent `ai-control-hardening` (see `lot-7-core.md`).
 
 ## Merge
 
-`ai-control-hardening` merged at `db710c5`; trivial conflicts (source lists, `UnitTests.cpp`);
+`ai-control-hardening` merged at `9a32b04`; trivial conflicts (source lists, `UnitTests.cpp`);
 `Sha256.cpp` appeared twice in each target (moved out of the AI block by both agents):
 deduplicated. Comment of `Application::runPythonScript` updated (`out.wav` optional with
 `result.json`, capture).

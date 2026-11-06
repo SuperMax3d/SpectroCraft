@@ -2,8 +2,8 @@
 
 Status: **done on the Python side, tested**; end-to-end against the **running** app impossible as long as the
 control server (lot 1) does not exist. Branch `ai-control-mcp` of the fork, branched from `ai-control` =
-`76de144` (the `5a80afd` cited in the instructions is the local, unpushed version of the same docs commit:
-only one sentence of `DECISIONS.md` differs; `76de144` is the fork's, hence a conflict-free merge).
+`e04d711` (the `5a80afd` cited in the instructions is the local, unpushed version of the same docs commit:
+only one sentence of `DECISIONS.md` differs; `e04d711` is the fork's, hence a conflict-free merge).
 
 ## What was done
 
@@ -41,7 +41,7 @@ fixed/dynamic tools, routing, errors, progress, resources, `sc_launch`, `sc_head
 
 - macOS arm64, Python 3.11.15, `mcp` 1.30.0: **98 passed, 4 skipped** (the 4 `test_real_exe` tests) in ~9 s;
   same result via `pip install -e "tools/mcp[test]"` then `pytest tools/mcp/tests` from the root.
-- With `SPECTROCRAFT_EXE` = **real** build of `ai-control` `693f3f3` (lot 0, Release, `-DSPECTRO_ENABLE_AI=OFF`,
+- With `SPECTROCRAFT_EXE` = **real** build of `ai-control` `ea4e016` (lot 0, Release, `-DSPECTRO_ENABLE_AI=OFF`,
   compiled outside the repository in a temporary folder): **102 passed**; real `--json` scenario verified:
   `doc.open` → `step.run fadeOut` on 0.5–1.5 s channel 0 → `history.list` → `history.undo` →
   `history.redo` → `doc.saveAs` (file written) → `doc.saveAs` on an existing file = `confirm_required`.
@@ -188,7 +188,7 @@ a branch first. Tests that use FIFOs or a shell script are skipped on Windows.)
 
 ## Merge into `ai-control` (main agent, 2026-11-05)
 
-- `ai-control-mcp` merged at `6779c5c` (merge commit on `ai-control`), without conflict.
+- `ai-control-mcp` merged at `89acc65` (merge commit on `ai-control`), without conflict.
 - Pasted: README section "AI control (Claude Code / MCP)" (extended
   with `--json`/`--control`/security) and CI job `mcp-tests` (ubuntu-24.04 + macos-15,
   Python 3.11). `CLAUDE.md` completed: `view.*`/`transport.*` require the active document, jobs on a non-active

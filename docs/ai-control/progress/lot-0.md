@@ -4,7 +4,7 @@ Status: **done** (macOS arm64, Debug build with AI). Linux/Windows: see CI (note
 
 ## Commits
 
-1. `f1cfa62` — *Fix action-step replay defects and worker-side AI commits*: **only** the independent
+1. `ac6acbe` — *Fix action-step replay defects and worker-side AI commits*: **only** the independent
    fixes, deliverable to SuperMax3d as a separate PR (Q12):
    - `applyActionStep`: `case 'e'` (`envelope`) added;
    - `noiseSuppress` step: `device` (optional param, otherwise `app.aiDevicePref`) resolved by

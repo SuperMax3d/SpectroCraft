@@ -9,28 +9,28 @@ Linux and Windows: GitHub CI (`gh workflow run build.yml --ref ai-control`).
 
 | Lot | Status | Commits (`ai-control`) | Note |
 |---|---|---|---|
-| 0 — registry, `step.run`, journal, `--json`, fixes | **done** | `f1cfa62` (fixes only, separable PR), `693f3f3` | `lot-0.md` |
-| 1 — loopback server, jobs, `UiBridge` | **done** | `e423b9d` | `lot-1.md` (independent review + fixes) |
-| 2 — Python MCP adapter | **done** | merge `80a1f4e` (`ai-control-mcp` @ `6779c5c`), `cda3390` | `lot-2.md` |
-| 3 — AI models, devices, NS/transcription as jobs | **done** | `502128c` (merge of `ai-control-catalog` @ `23c5d28` + commands) | `lot-3-core.md`, `lot-3.md` |
-| 4 — measurements | **done** | merge `2985e97` (`ai-control-measures` @ `8d4ace9`), `a217236` | `lot-4-core.md`, `lot-4.md` |
-| 5 — persistent journal, enriched Patch, replay | **done** | `5679059` | `lot-5.md` |
-| 6 — splitting of the commands, menu migration | **partial** | `7770ce9` | `lot-6.md` (exact list of what remains) |
-| 7 — hardening, Python, flags, stems/SR | **done** (stems/SR not run: Windows) | merge `630dc66` (`ai-control-hardening` @ `db710c5`), `7fac071`, merge `3a12d55` (@ `0306a32`) | `lot-7-core.md`, `lot-7.md` |
+| 0 — registry, `step.run`, journal, `--json`, fixes | **done** | `ac6acbe` (fixes only, separable PR), `ea4e016` | `lot-0.md` |
+| 1 — loopback server, jobs, `UiBridge` | **done** | `60a978d` | `lot-1.md` (independent review + fixes) |
+| 2 — Python MCP adapter | **done** | merge `ab9708e` (`ai-control-mcp` @ `89acc65`), `9d039a9` | `lot-2.md` |
+| 3 — AI models, devices, NS/transcription as jobs | **done** | `c5f0126` (merge of `ai-control-catalog` @ `0fe3242` + commands) | `lot-3-core.md`, `lot-3.md` |
+| 4 — measurements | **done** | merge `edf7427` (`ai-control-measures` @ `8cf8d01`), `e4326f3` | `lot-4-core.md`, `lot-4.md` |
+| 5 — persistent journal, enriched Patch, replay | **done** | `9835e21` | `lot-5.md` |
+| 6 — splitting of the commands, menu migration | **partial** | `7e7e384` | `lot-6.md` (exact list of what remains) |
+| 7 — hardening, Python, flags, stems/SR | **done** (stems/SR not run: Windows) | merge `0df9103` (`ai-control-hardening` @ `9a32b04`), `f6a54e6`, merge `6bb63e2` (@ `2f3b652`) | `lot-7-core.md`, `lot-7.md` |
 
 Parallel branches merged (work by other agents; integrating them is my responsibility):
-`ai-control-mcp` @ `6779c5c`, `ai-control-catalog` @ `23c5d28`, `ai-control-measures` @ `8d4ace9`,
-`ai-control-hardening` @ `db710c5` then again @ `0306a32` (merge `3a12d55`: Windows test of the
+`ai-control-mcp` @ `89acc65`, `ai-control-catalog` @ `0fe3242`, `ai-control-measures` @ `8cf8d01`,
+`ai-control-hardening` @ `9a32b04` then again @ `2f3b652` (merge `6bb63e2`: Windows test of the
 services that runs `System32\where.exe` instead of a fake `audiocpp_cli.exe`). Fixed while integrating them: `tools/mcp/smoke.sh` (repository path
 with spaces), source lists of the `SpectroCraftTests` console target (ModelCatalog, Sha256
-duplicated), trivial conflicts in `tests/UnitTests.cpp`. Commit `502128c` is both the merge of the
+duplicated), trivial conflicts in `tests/UnitTests.cpp`. Commit `c5f0126` is both the merge of the
 catalog and the command layer of lot 3.
 
 ## Tests (macOS arm64, Debug + AI, `ctest -j 8`)
 
 | Stage | Checks |
 |---|---|
-| Baseline (`76de144`) | 4859/4859 |
+| Baseline (`e04d711`) | 4859/4859 |
 | Lot 0 | 5283/5284 (1 failure: single-instance pipe under load, see below) |
 | Lot 1 | 5482/5482 |
 | Lot 3 | 5717/5717 |
@@ -57,12 +57,12 @@ launch a modal alert "reopen windows?" that blocked the suite:
 
 | Run | Tip | windows-ai | macos-ai | linux-ai | mcp-tests |
 |---|---|---|---|---|---|
-| 42152420659 | lot 0 `693f3f3` | ✅ | ✅ | ❌ `int64_t`→`juce::var` ambiguous (fixed in lot 1) | — |
-| 42156792380 | lot 1 `e423b9d` | ✅ | ✅ | ✅ | — |
-| 42158668184 | lot 4 `a217236` | ✅ | ✅ | ✅ | ✅ ubuntu + macos |
-| 42160626670 | lot 6 `7770ce9` | ✅ | ✅ | ✅ | ✅ ubuntu + macos |
-| 42162848694 | lot 7 `7fac071` | ⏹ cancelled (stuck in the stems/SR services test, system error box; fixed by `8a9cf6f`) | ✅ | ✅ | ✅ ubuntu + macos |
-| 42164487280 | final `3a12d55` | ✅ | ✅ | ✅ | ✅ ubuntu + macos |
+| 42152420659 | lot 0 `ea4e016` | ✅ | ✅ | ❌ `int64_t`→`juce::var` ambiguous (fixed in lot 1) | — |
+| 42156792380 | lot 1 `60a978d` | ✅ | ✅ | ✅ | — |
+| 42158668184 | lot 4 `e4326f3` | ✅ | ✅ | ✅ | ✅ ubuntu + macos |
+| 42160626670 | lot 6 `7e7e384` | ✅ | ✅ | ✅ | ✅ ubuntu + macos |
+| 42162848694 | lot 7 `f6a54e6` | ⏹ cancelled (stuck in the stems/SR services test, system error box; fixed by `dcc1cbc`) | ✅ | ✅ | ✅ ubuntu + macos |
+| 42164487280 | final `6bb63e2` | ✅ | ✅ | ✅ | ✅ ubuntu + macos |
 
 ## Main deviations
 
@@ -87,7 +87,7 @@ launch a modal alert "reopen windows?" that blocked the suite:
    | SEM_NOGPFAULTERRORBOX)` around `CreateProcessW` in `runProcessWithPipes`, or checking the `MZ` header
    before launching. Not applied (out of scope, to be validated on Windows).
 3. **Pre-existing bug** fixed: History tab, future rows in the wrong order (lot 5).
-4. Fixes independent of AI control, deliverable as a separate PR: `f1cfa62` (envelope, `auto`
+4. Fixes independent of AI control, deliverable as a separate PR: `ac6acbe` (envelope, `auto`
    device, `noiseSuppress` without AI, dispatch by 1st letter, worker-side commits of `transcribe` and
    `noiseSuppress`); exit codes of `--test-*` and `--test-batch-transcribe` on the real store
    (lot 7); suite temporary folder shared between checkouts (lot 0).

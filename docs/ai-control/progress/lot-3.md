@@ -5,7 +5,7 @@ Status: **done**. Core (catalog, SHA-256, strict devices) delivered by the paral
 
 ## Merge
 
-- `ai-control-catalog` merged at `23c5d28` (CI green on all three platforms on its side).
+- `ai-control-catalog` merged at `0fe3242` (CI green on all three platforms on its side).
   Trivial conflict in `tests/UnitTests.cpp` (neighbouring `#include`/`SC_RUN_TEST` lines), resolved by
   keeping both sides.
 - Fixed while merging: the console target `SpectroCraftTests` (`tests/CMakeLists.txt`) now lists

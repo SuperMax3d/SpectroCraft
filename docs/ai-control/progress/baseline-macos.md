@@ -1,6 +1,6 @@
 # Test baseline before any change (macOS)
 
-Date: 2026-11-05. Branch `ai-control`, tip `76de144` (= SuperMax3d's `main` `8c527e3` + a docs commit).
+Date: 2026-11-05. Branch `ai-control`, tip `e04d711` (= SuperMax3d's `main` `8c527e3` + a docs commit).
 
 ## Deviation from the instructions
 

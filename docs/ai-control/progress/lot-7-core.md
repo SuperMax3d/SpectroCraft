@@ -1,7 +1,7 @@
 # Lot 7 ("core" part) — hardening of the Python bridge, `result.json`, stems / SR services
 
 Branch `ai-control-hardening` (fork `nicolasmarcotteTaintin/SpectroCraft`), created from `ai-control`
-= `76de144`. Work done in parallel with lot 0+: nothing here depends on the `CommandRegistry`;
+= `e04d711`. Work done in parallel with lot 0+: nothing here depends on the `CommandRegistry`;
 lot 7 will only have to write thin wrappers (see "To do at merge time").
 
 ## Done
@@ -144,9 +144,9 @@ Local results (macOS arm64, Debug, `-DSPECTRO_ENABLE_AI=OFF -DSPECTRO_ENABLE_FFM
 
 CI (`gh workflow run build.yml --ref ai-control-hardening`, `workflow_dispatch`):
 
-- run 42162969575 on `8a9cf6f`: **windows-ai ✓, macos-ai ✓, linux-ai ✓** (MSVC Release, AppleClang
+- run 42162969575 on `dcc1cbc`: **windows-ai ✓, macos-ai ✓, linux-ai ✓** (MSVC Release, AppleClang
   Debug, GCC Debug, AI enabled; ctest 100 %).
-- The previous runs (`adec113`, `db710c5`): macOS / Linux ✓, but **Windows stuck for 30 min** in
+- The previous runs (`4ae06bc`, `9a32b04`): macOS / Linux ✓, but **Windows stuck for 30 min** in
   the services test. Cause: the test gave the service a text file named
   `audiocpp_cli.exe`; `CreateProcessW` on a non-PE image can raise a system error box
   (*hard error*) that nobody closes on a headless runner. The test now uses
@@ -158,8 +158,8 @@ CI (`gh workflow run build.yml --ref ai-control-hardening`, `workflow_dispatch`)
 
 ## Deviations
 
-- **Base**: `76de144` (= `ai-control` on the fork) and not the requested `5a80afd`: `5a80afd` is an
-  earlier local version of the same commit (only `DECISIONS.md` differs); starting from `76de144` avoids
+- **Base**: `e04d711` (= `ai-control` on the fork) and not the requested `5a80afd`: `5a80afd` is an
+  earlier local version of the same commit (only `DECISIONS.md` differs); starting from `e04d711` avoids
   a history diverging from `ai-control`.
 - **`tests/CMakeLists.txt`** modified (not on the list): the console target `SpectroCraftTests` compiles
   `StemSeparation.cpp` / `SuperResolution.cpp`, which now call the services; without the

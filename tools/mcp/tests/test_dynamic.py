@@ -139,7 +139,7 @@ def test_annotations_follow_flags(tools):
 
 
 def test_real_lot0_describe():
-    """describe_lot0.json = app.describe captured from the real lot-0 build (--json, ai-control 693f3f3)."""
+    """describe_lot0.json = app.describe captured from the real lot-0 build (--json, ai-control ea4e016)."""
     import json
     from pathlib import Path
 

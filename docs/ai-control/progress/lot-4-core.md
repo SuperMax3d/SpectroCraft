@@ -1,7 +1,7 @@
 # Lot 4 (core) — headless measures module `sc::measures`
 
 Branch `ai-control-measures` (fork `nicolasmarcotteTaintin/SpectroCraft`), created from `ai-control`
-(`76de144`, see "Deviations"). Work of a parallel agent: it contains **no**
+(`e04d711`, see "Deviations"). Work of a parallel agent: it contains **no**
 `measure.*` command; it provides the computation, shared with the FFT panel, on top of which the main agent
 will only have to write thin wrappers when it reaches lot 4.
 
@@ -100,8 +100,8 @@ Nothing else (neither `Application.cpp`, `Actions.cpp`, `Main.cpp`, `MainWindow.
 ## Deviations
 
 - **Base**: the instructions said `ai-control` at `5a80afd`; that commit is on no branch of the fork,
-  `fork/ai-control` points to `76de144` (same message, only difference: two lines of
-  `DECISIONS.md`). Branched from `76de144` so that the merge is a fast-forward history-wise.
+  `fork/ai-control` points to `e04d711` (same message, only difference: two lines of
+  `DECISIONS.md`). Branched from `e04d711` so that the merge is a fast-forward history-wise.
 - `tests/CMakeLists.txt` modified (one line): required so that the console target
   `SpectroCraftTests` keeps linking (CI does not build it, but it exists).
 - `tests/UnitTests.cpp`: two lines instead of one (the `#include` **and** the `SC_RUN_TEST`, without which
@@ -201,7 +201,7 @@ macOS 26 arm64, AppleClang, Debug, `-DSPECTRO_ENABLE_AI=OFF -DSPECTRO_ENABLE_FFM
 | Branch, commit 1, 2nd run (`-V`) | 4747/4748 checks; only failure: the same flaky `views#W4` |
 | Branch, commit 2 (review fixes, `-V`) | **4760/4760**, 10/10 shards green |
 | `SC_TEST_FILTER="regression: measures"` | 145/145 |
-| GitHub Actions CI `build.yml` on `f0fe363` (run 42154351288, AI ON) | **windows-ai ✓, macos-ai ✓, linux-ai ✓** (MSVC, AppleClang, GCC) |
+| GitHub Actions CI `build.yml` on `52d5267` (run 42154351288, AI ON) | **windows-ai ✓, macos-ai ✓, linux-ai ✓** (MSVC, AppleClang, GCC) |
 
 No regression compared to the base. The only failure observed is the pre-existing flakiness of
 `views#W4` (selection rendering, unrelated to the measures).

@@ -1,9 +1,9 @@
 # Lot 3 — "AI models, devices" core (without the command registry)
 
-Branch `ai-control-catalog`, created from `ai-control` = `76de144` (the docs commit `5a80afd`
-given in the instructions was amended into `76de144` on the fork; the only difference: two lines of
+Branch `ai-control-catalog`, created from `ai-control` = `e04d711` (the docs commit `5a80afd`
+given in the instructions was amended into `e04d711` on the fork; the only difference: two lines of
 `DECISIONS.md`). Depends neither on `src/control/` nor on the `JobManager`: lot 0 of the main line
-(`693f3f3`) is not included, the `ai.*` wrappers remain to be written (see "Merge" below).
+(`ea4e016`) is not included, the `ai.*` wrappers remain to be written (see "Merge" below).
 
 ## Done
 
@@ -112,7 +112,7 @@ No asset was left without a hash.
   busy) via an injected downloader (`setAudioCppDownloaderForTests`), hence tested on macOS/Linux.
 
 Results (macOS 26 arm64, AppleClang 21, Debug, `SPECTRO_ENABLE_AI=ON`, ctest 8 shards):
-- base `76de144`: 10/10 ctest OK;
+- base `e04d711`: 10/10 ctest OK;
 - after the lot: 10/10 ctest OK (two full passes, before and after the review fixes);
   `regression: ai_catalog` ≈ 0.04 s.
 - `SPECTRO_ENABLE_AI=OFF` build (macOS): compiles; `regression: ai*` 43/43 (the catalog parts
@@ -124,12 +124,12 @@ Results (macOS 26 arm64, AppleClang 21, Debug, `SPECTRO_ENABLE_AI=ON`, ctest 8 s
   ("empty list acknowledged", "second client's forward acknowledged"); alone: 13/13. Last
   full pass (private TMPDIR): 9/10 shards OK, the 10th only on this pipe test.
   CI (isolated machines) is authoritative.
-- **CI** `build.yml` (workflow_dispatch on `f12f175`, run 42155383758): `windows-ai` ✅ (MSVC Release,
+- **CI** `build.yml` (workflow_dispatch on `f18d757`, run 42155383758): `windows-ai` ✅ (MSVC Release,
   audio.cpp Windows paths compiled and tested), `macos-ai` ✅, `linux-ai` ✅.
 
 ## Deviations
 
-- Base `76de144` and not `5a80afd` (see the top of the file).
+- Base `e04d711` and not `5a80afd` (see the top of the file).
 - Files outside the list touched: none, except `tests/UnitTests.cpp` (`SC_RUN_TEST` line in addition to
   the `#include`, needed to run the suite).
 - `tests/CMakeLists.txt` not modified (out of scope): the console target `SpectroCraftTests` (not
@@ -165,7 +165,7 @@ catalog; each handler is 5-15 lines.
   `Outcome::failure (r.code, r.message, r.errorJson()["details"])`; success → `app.aiDevicePref = r.requested`
   (`"auto"` or name), `persist` → `saveSettings`, result `r.toJson()` + `persisted`.
   `audiocpp` → store the backend separately (no existing setting).
-- **Actions.cpp** (lot 0, `f1cfa62`): the `noiseSuppress` step still uses the old
+- **Actions.cpp** (lot 0, `ac6acbe`): the `noiseSuppress` step still uses the old
   `sc::resolveAiDevice` (silent CPU fallback). For an API command, call
   `sc::ai::resolveAiDevice ("openvino", pref)` and fail on `!r.ok`; keep the fallback for the
   replay of recorded actions if compatibility is wanted.
