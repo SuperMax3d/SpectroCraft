@@ -6,6 +6,7 @@
 #include "Application.h"
 #include "AlertGate.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -187,8 +188,12 @@ juce::String commandsMarkdown()
        << "Généré par `SpectroCraft --list-commands --markdown` (protocole " << kProtocolVersion
        << ", expérimental). Identifiants et messages en anglais ; voir docs/ai-control/RAPPORT.md §6.\n\n";
     juce::String lastCat;
-    for (const auto& s : CommandRegistry::instance().all())
+    std::vector<const Spec*> specs;
+    for (const auto& s : CommandRegistry::instance().all()) specs.push_back (&s);
+    std::stable_sort (specs.begin(), specs.end(), [] (const Spec* a, const Spec* b) { return a->category < b->category; });
+    for (const Spec* sp : specs)
     {
+        const Spec& s = *sp;
         if (s.category != lastCat)
         {
             md << "\n## " << s.category << "\n\n| Commande | Drapeaux | Paramètres | Description |\n|---|---|---|---|\n";

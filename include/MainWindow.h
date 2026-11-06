@@ -193,6 +193,13 @@ public:
     void runDestructiveEdit(std::function<bool(std::string*)> edit,
                             std::function<void(bool)> onDone = nullptr);
     void showEditError (const std::string& err);
+    /** Menu/shortcut actions that have a control command run THROUGH the
+        command registry (source "menu"): same code, refresh, recording,
+        journal and history provenance as the API (lot 6). Shows the error
+        (sync or when the job ends) unless `quiet`. effectId, when non-zero,
+        becomes the "repeat last effect" id on success. Returns ok. */
+    bool runMenuCommand (const juce::String& cmd, const juce::var& params = {}, int effectId = 0,
+                         bool quiet = false);
 
     // Play request that first guarantees the lazy audio device init has
     // completed; shows a short progress dialog if it still needs to run.
@@ -290,6 +297,9 @@ public:
         non-prompt steps apply the recorded values directly. */
     void runAction (int index);
     void continueReplay();                       // advance to the next step
+    /** When set, action replay reports its end here (ok, message) instead of
+        the modal "finished" / "stopped" message boxes. */
+    std::function<void (bool, const juce::String&)> onReplayFinished;
     void stopReplay (const juce::String& why);  // abort with a status message
     bool isReplaying() const { return !replaySteps_.empty (); }
     /** Batch button: opens the batch-processing window for an action. */

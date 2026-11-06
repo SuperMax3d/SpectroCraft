@@ -11,6 +11,7 @@
 #include "Recorder.h"
 #include "StartupTrace.h"
 #include "control/ControlState.h"   // AI control: app.control().ui
+#include "control/CommandRegistry.h" // menu actions run through the registry
 #include <thread>
 #include "WaveformView.h"
 #include "SpectralView.h"
@@ -2085,6 +2086,12 @@ void MainWindow::stopReplay (const juce::String& why)
     replaySteps_.clear ();
     replayPos_ = 0;
     replayName_.clear ();
+    if (onReplayFinished)   // a caller that reports itself (no blocking message box)
+    {
+        auto cb = onReplayFinished;
+        cb (false, "Action \"" + name + "\" stopped: " + why);
+        return;
+    }
     if (!name.isEmpty ())
         sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
                                             "Run Action",
@@ -2099,6 +2106,12 @@ void MainWindow::continueReplay()
         replaySteps_.clear ();
         replayPos_ = 0;
         replayName_.clear ();
+        if (onReplayFinished)
+        {
+            auto cb = onReplayFinished;
+            cb (true, "Action \"" + name + "\" finished.");
+            return;
+        }
         sc::alert::showMessageBox (juce::AlertWindow::InfoIcon,
                                            "Run Action",
                                            "Action \"" + name + "\" finished.", "", this);
@@ -3007,31 +3020,20 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             break;
         case FileQuit: closeButtonPressed(); break;   // refuses while a job runs
 
-        case EditUndo: app.undoStep(); refreshAfterEdit(); break;
-        case EditRedo: app.redoStep(); refreshAfterEdit(); break;
-        case EditCut:    runDestructiveEdit ([&] (std::string* e) { return app.cut (e); }); break;
-        case EditCopy:   app.copy(); break;   // read-only; works on streamed files too
-        case EditPaste:  runDestructiveEdit ([&] (std::string* e) { return app.paste (e); }); break;
-        case EditCopyToNewFile:
-        {
-            std::string err;
-            if (!app.copyToNewFile (&err))
-                showEditError (err);
-            // Success: the new document is already active; onActiveDocChanged
-            // has synchronised the UI.
-            break;
-        }
-        case EditPasteMix: runDestructiveEdit ([&] (std::string* e) { return app.pasteMix (e); }); break;
-        case EditPasteToNewChannels:
-            runDestructiveEdit ([&] (std::string* e) { return app.pasteToNewChannels (e); });
-            break;
-        case EditDelete: app.recordActionStep (sc::actionTypes::kDelete);
-                         runDestructiveEdit ([&] (std::string* e) { return app.del (e); }); break;
-        case EditTrimSelection:
-            app.recordActionStep (sc::actionTypes::kTrim);
-            runDestructiveEdit ([&] (std::string* e) { return app.trimSelection (e); });
-            break;
-        case EditSelectAll: app.selectAll(); syncSharedState(); break;
+        // Edit menu: through the command registry (same code as the API; a
+        // streamed file is loaded into memory by the registry's job detour,
+        // behind the same progress dialog runDestructiveEdit showed).
+        case EditUndo: runMenuCommand ("history.undo", {}, 0, true); refreshAfterEdit(); break;
+        case EditRedo: runMenuCommand ("history.redo", {}, 0, true); refreshAfterEdit(); break;
+        case EditCut:    runMenuCommand ("edit.cut"); break;
+        case EditCopy:   runMenuCommand ("edit.copy", {}, 0, true); break;   // read-only; works on streamed files too
+        case EditPaste:  runMenuCommand ("edit.paste"); break;
+        case EditCopyToNewFile: runMenuCommand ("edit.copyToNewFile"); break;
+        case EditPasteMix: runMenuCommand ("edit.pasteMix"); break;
+        case EditPasteToNewChannels: runMenuCommand ("edit.pasteToNewChannels"); break;
+        case EditDelete: runMenuCommand ("edit.delete"); break;
+        case EditTrimSelection: runMenuCommand ("edit.trim"); break;
+        case EditSelectAll: runMenuCommand ("selection.all", {}, 0, true); syncSharedState(); break;
         case EditSnapToZeroCrossings:
             app.settings.snapToZeroCrossings = !app.settings.snapToZeroCrossings;
             if (app.onStateChange) app.onStateChange();   // persist the new state
@@ -3097,14 +3099,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         // Immediate effects record themselves as the "last effect" so that
         // Ctrl+Shift+F can repeat them; dialog-based effects do the same at
         // their apply points.
-        case ToolsSilence:   app.recordActionStep (sc::actionTypes::kSilence);
-                             runDestructiveEdit ([&] (std::string* e) { const bool ok = app.silence (e); if (ok) lastEffectId = ToolsSilence; return ok; }); break;
-        case ToolsFadeIn:    app.recordActionStep (sc::actionTypes::kFadeIn);
-                             runDestructiveEdit ([&] (std::string* e) { const bool ok = app.fadeIn (e); if (ok) lastEffectId = ToolsFadeIn; return ok; }); break;
-        case ToolsFadeOut:   app.recordActionStep (sc::actionTypes::kFadeOut);
-                             runDestructiveEdit ([&] (std::string* e) { const bool ok = app.fadeOut (e); if (ok) lastEffectId = ToolsFadeOut; return ok; }); break;
-        case ToolsNormalize: app.recordActionStep (sc::actionTypes::kNormalize);
-                             runDestructiveEdit ([&] (std::string* e) { const bool ok = app.normalize (e); if (ok) lastEffectId = ToolsNormalize; return ok; }); break;
+        case ToolsSilence:   runMenuCommand ("effect.silence", {}, ToolsSilence); break;
+        case ToolsFadeIn:    runMenuCommand ("effect.fadeIn", {}, ToolsFadeIn); break;
+        case ToolsFadeOut:   runMenuCommand ("effect.fadeOut", {}, ToolsFadeOut); break;
+        case ToolsNormalize: runMenuCommand ("effect.normalize", {}, ToolsNormalize); break;
         case ToolsChangeGain: showChangeGainDialog(); break;
         case ToolsResample: showResampleDialog(); break;
         case ToolsStemSeparate: showStemSeparationWindow(); break;
@@ -3127,10 +3125,8 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case ActionsBatch:
             showActionBatchWindow (actionsPanel ? actionsPanel->primaryIndex() : -1);
             break;
-        case ToolsReverse: app.recordActionStep (sc::actionTypes::kReverse);
-                           runDestructiveEdit ([&] (std::string* e) { const bool ok = app.reverse (e); if (ok) lastEffectId = ToolsReverse; return ok; }); break;
-        case ToolsInvert:      app.recordActionStep (sc::actionTypes::kInvert);
-                               runDestructiveEdit ([&] (std::string* e) { const bool ok = app.invertSelection (e); if (ok) lastEffectId = ToolsInvert; return ok; }); break;
+        case ToolsReverse: runMenuCommand ("effect.reverse", {}, ToolsReverse); break;
+        case ToolsInvert:  runMenuCommand ("effect.invert", {}, ToolsInvert); break;
         case ToolsTimeStretch: showTimeStretchDialog(); break;
         case ToolsCatTimeScale: showContentAwareTimeScaleDialog(); break;
         case ToolsFilterEq:    showFilterEqDialog(); break;
@@ -7599,4 +7595,51 @@ void MainWindow::requestQuit (bool discardUnsaved)
     if (!discardUnsaved && !app.unsavedDocNames().empty())
         return;
     juce::JUCEApplicationBase::quit();
+}
+
+// ---------------------------------------------------------------------------
+// Menu actions through the command registry (AI control lot 6).
+// ---------------------------------------------------------------------------
+bool MainWindow::runMenuCommand (const juce::String& cmd, const juce::var& params, int effectId, bool quiet)
+{
+    sc::control::InvokeOptions io;
+    io.source = "menu";
+    io.ui = this;
+    io.fromMenu = true;
+    const auto r = sc::control::CommandRegistry::instance().invoke (app, cmd, params, {}, io);
+    const bool ok = (bool) r.getProperty ("ok", false);
+    const auto res = r.getProperty ("result", {});
+    if (ok && res.hasProperty ("job") && res.getProperty ("state", {}).toString() == "running")
+    {
+        // Streamed file: the registry loads it in a job behind the progress
+        // dialog; report a failure (and the repeat-effect id) when it ends.
+        const juce::String jobId = res.getProperty ("job", {}).toString();
+        juce::Component::SafePointer<MainWindow> self (this);
+        auto check = std::make_shared<std::function<void()>>();
+        std::weak_ptr<std::function<void()>> weak = check;
+        *check = [self, jobId, effectId, quiet, weak] {
+            if (self == nullptr) return;
+            auto& jobs = self->app.control().jobs;
+            if (!jobs.isFinished (jobId))
+            {
+                if (auto again = weak.lock()) juce::Timer::callAfterDelay (100, [again] { (*again)(); });
+                return;
+            }
+            const auto o = jobs.outcome (jobId);
+            if (o && o->ok) { if (effectId != 0) self->lastEffectId = effectId; }
+            else if (o && !quiet && o->error.code != sc::control::err::cancelled)
+                self->showEditError (o->error.message.toStdString());
+        };
+        juce::Timer::callAfterDelay (100, [check] { (*check)(); });
+        return true;
+    }
+    if (ok)
+    {
+        if (effectId != 0) lastEffectId = effectId;
+        return true;
+    }
+    const auto e = r.getProperty ("error", {});
+    if (!quiet && e.getProperty ("code", {}).toString() != sc::control::err::cancelled)
+        showEditError (e.getProperty ("message", {}).toString().toStdString());
+    return false;
 }

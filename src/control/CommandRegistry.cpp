@@ -414,6 +414,7 @@ CommandRegistry::CommandRegistry()
     registerTransportCommands (*this);
     registerAiCommands (*this);
     registerMeasureCommands (*this);
+    registerEditCommands (*this);
 }
 
 void CommandRegistry::add (Spec s)
@@ -640,7 +641,7 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
                              obj ({ { "path", "doc" }, { "expected", "the active document" },
                                     { "hint", "call doc.activate first" } }));
 
-    if (!opts.insideJob)
+    if (!opts.insideJob && !opts.fromMenu)
     {
         // Anything that changes state waits while the window is inside a
         // modal loop or a background operation runs: JUCE delivers callAsync

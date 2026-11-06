@@ -178,6 +178,7 @@ struct InvokeOptions
     UiBridge* ui = nullptr;
     juce::String source = "cli";
     bool insideJob = false;          // a job worker commits a nested call: skip busy checks
+    bool fromMenu = false;           // the window's own menu/shortcut: no busy refusal (the UI already serialises)
 };
 
 class CommandRegistry
@@ -240,5 +241,6 @@ void registerViewCommands (CommandRegistry&);
 void registerTransportCommands (CommandRegistry&);
 void registerAiCommands (CommandRegistry&);
 void registerMeasureCommands (CommandRegistry&);
+void registerEditCommands (CommandRegistry&);
 
 } // namespace sc::control
