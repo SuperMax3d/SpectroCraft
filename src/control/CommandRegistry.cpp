@@ -595,6 +595,10 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
         return r;
     };
 
+    // Edits made with the mouse since the last command land in the journal
+    // first (their own history entries), then this command.
+    st.pollDocuments();
+
     const Spec* spec = find (req.cmd);
     if (spec == nullptr)
         return respondError (err::unknownCmd, "unknown command \"" + req.cmd + "\"",
@@ -724,6 +728,8 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
         DocSwitch sw (app, (spec->flags & NoDocSwitch) ? nullptr : target);
         docSwitched = sw.didSwitch();
         sc::alert::ScopedCapture capture;
+        // Patches recorded by the handler carry this command, its params and client.
+        sc::undoctx::Scoped opScope (sc::undoctx::Op { spec->id, sanitizedParams (params), opts.source });
         Context ctx { app, st, ui, params, target, opts.source, spec->id };
         ++st.invokeDepth;
         const juce::String prevSource = st.invokeSource;
@@ -762,18 +768,12 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
         if (targetId >= 0) set (e, "doc", targetId);
         if (!out.ok) set (e, "error", out.error.code);
         if (out.isJob()) set (e, "job", out.jobId());
-        // (A job's own "finished" entry carries the resulting undo state.)
-        // Only when the command really produced a new edit: undo/redo and
-        // commands that changed no content keep the top patch's identity.
-        if (targetAlive && (spec->flags & Mutates) && !out.isJob() && spec->category != "history"
-            && (juce::int64) target->engine.contentVersion() != contentBefore)
-        {
-            set (e, "undoDepth", (int) target->undo.undoSize());
-            if (target->undo.canUndo())
-                set (e, "description", target->undo.lastRecorded().description);
-        }
+        // New undo patches are journaled by pollDocuments() (below) as
+        // "history" entries that carry this command id, its params and client.
+        juce::ignoreUnused (contentBefore);
         st.journal.append ("command", e);
     }
+    st.pollDocuments();   // the patches this command recorded, opened/closed docs, metadata
 
     if (out.ok && !out.isJob() && (spec->flags & Mutates) && ui != nullptr)
         ui->refreshAfterEdit();
@@ -804,6 +804,7 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
         const bool historyCmd = spec->category == "history";
         set (r, "redoDiscarded", (!historyCmd && redoAfter < redoBefore) ? (int) (redoBefore - redoAfter) : 0);
         set (r, "contentVersion", (juce::int64) target->engine.contentVersion());
+        if (target->undo.canUndo()) set (r, "patchSeq", (juce::int64) target->undo.lastRecorded().seq);
         set (r, "unsaved", app.docIsUnsaved (*target));
         juce::ignoreUnused (undoBefore);
     }

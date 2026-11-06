@@ -225,12 +225,15 @@ public:
     // Unit-test accessors.
     int numRows() const { return (int) rows_.size(); }
     juce::String rowText (int i) const { return rows_[(size_t) i].text; }
+    /** "14:21:09  api:claude-code" for edits made through AI control; empty
+        for the load row and for edits made in the window. */
+    juce::String rowDetail (int i) const { return rows_[(size_t) i].detail; }
     bool rowIsFuture (int i) const { return rows_[(size_t) i].future; }
     int currentState() const { return currentState_; }
 
 private:
     Application& app;
-    struct Row { juce::String text; bool future = false; };
+    struct Row { juce::String text; bool future = false; juce::String detail; };
     std::vector<Row> rows_;
     int currentState_ = 0;   // number of applied actions (== undo stack size)
     int scroll_ = 0;         // first visible row

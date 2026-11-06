@@ -211,6 +211,29 @@ static void testControlServer()
     CHECK (srv.numClients() == 0 || scPumpUntil ([&] { return srv.numClients() == 0; }, 3000),
            "server: client count back to 0 after disconnect");
 
+    // --- replay: a new client asking sinceSeq 0 gets the history events again --
+    ctlOnClientThread ([&] {
+        CtlTestClient c;
+        CHECK (c.connect (port), "server replay: connects");
+        auto p = scctl::obj ({ { "token", token }, { "client", "replay" }, { "subscribe", scctl::arr ({ "history" }) },
+                               { "sinceSeq", 0 } });
+        const auto r = c.call ("session.hello", p);
+        CHECK (ctlOk (r) && (int) ctlResult (r).getProperty ("replayed", 0) >= 1, "server replay: hello reports replayed events");
+        juce::int64 lastSeq = 0;
+        bool ordered = true, gotHistory = false;
+        for (int i = 0; i < 20; ++i)
+        {
+            const auto l = c.readLine (300);
+            if (l.isEmpty()) break;
+            const auto ev = juce::JSON::parse (l);
+            const auto seq = (juce::int64) ev.getProperty ("seq", 0);
+            if (seq <= lastSeq) ordered = false;
+            lastSeq = seq;
+            if (ev.getProperty ("event", {}).toString() == "history.changed") gotHistory = true;
+        }
+        CHECK (gotHistory && ordered, "server replay: history.changed events replayed in seq order");
+    });
+
     // --- message thread busy: bounded wait, never a hang ---------------------
     {
         CtlTestClient c;

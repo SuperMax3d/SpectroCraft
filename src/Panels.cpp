@@ -724,13 +724,25 @@ void HistoryPanel::refresh()
         ::UndoManager& u = d->undo;
         // Row 0 is the state right after the file was loaded; one row per
         // recorded action follows, oldest first. Redoable actions come last.
-        rows_.push_back ({ "Loaded " + d->name, false });
+        // Only edits made through AI control get a detail (time + client):
+        // the tab looks exactly as before for edits made in the window.
+        auto detailOf = [] (const Patch& p) {
+            if (p.timestampMs <= 0 || p.source.isEmpty() || p.source == "menu") return juce::String();
+            return juce::Time (p.timestampMs).formatted ("%H:%M:%S") + "  " + p.source;
+        };
+        rows_.push_back ({ "Loaded " + d->name, false, {} });
         for (size_t i = 0; i < u.undoSize(); ++i)
             rows_.push_back ({ u.undoAt(i).description.isEmpty() ? juce::String ("Edit") : u.undoAt(i).description,
-                               false });
-        for (size_t i = 0; i < u.redoSize(); ++i)
-            rows_.push_back ({ u.redoAt(i).description.isEmpty() ? juce::String ("Edit") : u.redoAt(i).description,
-                               true });
+                               false, detailOf (u.undoAt (i)) });
+        // Future rows in redo order: the redo stack's back() is the next redo,
+        // so a click on the first future row (redoSteps(1)) re-applies the
+        // entry that row names. (Listing redoAt(0..n) showed them reversed.)
+        for (size_t k = 0; k < u.redoSize(); ++k)
+        {
+            const Patch& p = u.redoAt (u.redoSize() - 1 - k);
+            rows_.push_back ({ p.description.isEmpty() ? juce::String ("Edit") : p.description,
+                               true, detailOf (p) });
+        }
         currentState_ = (int) u.undoSize();
     }
 
@@ -854,6 +866,13 @@ void HistoryPanel::paint (juce::Graphics& g)
                                             r.getHeight());
         g.drawText (rows_[(size_t) i].text, actCol, juce::Justification::centredLeft,
                     false);
+        // Time (and origin, for edits made through AI control) on the right.
+        if (rows_[(size_t) i].detail.isNotEmpty() && actCol.getWidth() > 220)
+        {
+            g.setColour (juce::Colour::fromRGB (150, 160, 175));
+            g.drawText (rows_[(size_t) i].detail, actCol.withTrimmedLeft (actCol.getWidth() - 200),
+                        juce::Justification::centredRight, false);
+        }
     }
 }
 

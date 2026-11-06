@@ -209,7 +209,8 @@ void finishOne (Application& app, const sc::ActionStep& s, juce::var& r)
 Outcome runSequence (Application& app, const std::vector<sc::ActionStep>& steps, bool stopOnError,
                      bool single, JobControl* jc,
                      const std::optional<std::vector<int>>& restore, int chansBefore,
-                     const juce::String& source = {})
+                     const juce::String& source = {}, const juce::String& opId = {},
+                     const juce::var& opParams = {})
 {
     const double t0 = juce::Time::getMillisecondCounterHiRes();
     juce::Array<juce::var> results;
@@ -254,15 +255,18 @@ Outcome runSequence (Application& app, const std::vector<sc::ActionStep>& steps,
                 step.params = pc;
             }
 #endif
+            // The patch is recorded inside the Application's own commit hop
+            // (message thread, outside our scope): announce the operation.
+            sc::undoctx::setPending (sc::undoctx::Op { opId, opParams, source });
             r = applyOne (app, step, ok, e, [jc] (float f) { jc->progress (f); return !jc->cancelled(); });   // worker; commits hop
             if (deviceUsed.isNotEmpty()) set (r, "deviceUsed", deviceUsed);
-            if (!jc->onMessageThread ([&] { ScopedInvokeSource src (app.control(), source); finishOne (app, s, r); }))
+            if (!jc->onMessageThread ([&] { ScopedInvokeSource src (app.control(), source, opId, opParams); finishOne (app, s, r); }))
             { shuttingDown = true; break; }
         }
         else if (jc != nullptr)
         {
             if (!jc->onMessageThread ([&] {
-                    ScopedInvokeSource src (app.control(), source);
+                    ScopedInvokeSource src (app.control(), source, opId, opParams);
                     r = applyOne (app, s, ok, e);
                     finishOne (app, s, r);
                 }))
@@ -412,8 +416,9 @@ Outcome runSteps (Context& ctx, std::vector<sc::ActionStep> steps, bool stopOnEr
     Application* app = &ctx.app;
     const juce::String title = single ? "Running " + steps[0].type : "Running " + juce::String ((int) steps.size()) + " steps";
     const auto id = startJob (ctx, ctx.cmd.isNotEmpty() ? ctx.cmd : juce::String (single ? "step.run" : "steps.run"), title, true,
-        [app, steps, stopOnError, single, restore, chans, source = ctx.source] (JobControl& jc) {
-            return runSequence (*app, steps, stopOnError, single, &jc, restore, chans, source);
+        [app, steps, stopOnError, single, restore, chans, source = ctx.source, opId = ctx.cmd,
+         opParams = ctx.params] (JobControl& jc) {
+            return runSequence (*app, steps, stopOnError, single, &jc, restore, chans, source, opId, opParams);
         });
     return Outcome::job (id);
 }

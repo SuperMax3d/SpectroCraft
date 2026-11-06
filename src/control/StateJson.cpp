@@ -182,7 +182,16 @@ static juce::var stateOf (const Patch& p, int state, double rate, bool future,
     for (const auto& c : p.newData) bytes += (juce::int64) c.size() * (juce::int64) sizeof (float);
     set (s, "dataBytes", bytes);
     set (s, "future", future);
-    if (!future)
+    // Provenance stored in the patch itself (UndoManager::record, lot 5).
+    if (p.seq > 0)
+    {
+        set (s, "patchSeq", (juce::int64) p.seq);
+        set (s, "ts", isoTime ((juce::int64) p.timestampMs));
+        set (s, "opId", p.opId);
+        set (s, "source", p.source);
+        if (p.params.isObject()) set (s, "params", p.params);
+    }
+    else if (!future)
     {
         const auto op = findOp (journal, docId, state, p.description);
         if (op.isObject())

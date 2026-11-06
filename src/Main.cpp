@@ -46,6 +46,8 @@
 #include "Settings.h"
 #include "control/JsonCli.h"
 #include "control/ControlServer.h"
+#include "control/ControlState.h"
+#include "control/StateJson.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -972,7 +974,7 @@ private:
         {
             if (controlServer != nullptr) controlServer->stop ();
             controlServer.reset ();
-            if (mainWindow != nullptr) mainWindow->setControlClients (0);
+            if (mainWindow != nullptr) { mainWindow->setControlClients (0); mainWindow->controlServerRunning = false; }
             return;
         }
         if (controlServer != nullptr || app == nullptr) return;
@@ -980,10 +982,20 @@ private:
         controlServer->onClientsChanged = [this] (int n) {
             if (mainWindow != nullptr) mainWindow->setControlClients (n);
         };
+        // Persistent journal (JSON Lines, metadata only) while the server runs.
+        auto& journal = app->control().journal;
+        if (journal.file() == juce::File())
+        {
+            sc::control::Journal::pruneOldSessions (sc::control::Journal::journalFolder());
+            journal.setFile (sc::control::Journal::sessionFile (sc::control::processId()));
+        }
         juce::String err;
         if (controlServer->start (&err))
+        {
+            if (mainWindow != nullptr) mainWindow->controlServerRunning = true;
             std::fprintf (stderr, "[control] listening on 127.0.0.1:%d (%s)\n", controlServer->port (),
                           controlServer->discoveryFile ().getFullPathName ().toRawUTF8 ());
+        }
         else
         {
             std::fprintf (stderr, "[control] could not start: %s\n", err.toRawUTF8 ());

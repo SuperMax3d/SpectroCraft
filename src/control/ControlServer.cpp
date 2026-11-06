@@ -51,9 +51,9 @@ static bool tokensEqual (const juce::String& a, const juce::String& b)
 static juce::String eventForEntry (const juce::var& e)
 {
     const auto kind = e.getProperty ("kind", {}).toString();
+    // Every new undo patch, undo/redo and history clear is a "history" entry
+    // (ControlState::pollDocuments / Application::undoSteps), whoever made it.
     if (kind == "history") return "history.changed";
-    if ((kind == "command" || kind == "job") && e.hasProperty ("undoDepth")) return "history.changed";
-    if (kind == "step" && !(bool) e.getProperty ("viaCommand", false)) return "history.changed";
     if (kind == "doc") return "doc.changed";
     if (kind == "meta") return "meta.changed";
     return {};

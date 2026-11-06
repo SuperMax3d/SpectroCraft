@@ -16,25 +16,95 @@ ControlState::ControlState (Application& a) : app (a)
                         { "elapsedMs", inf.getProperty ("elapsedMs", 0) },
                         { "source", inf.getProperty ("source", {}) } });
         if (inf.hasProperty ("params")) set (e, "params", inf.getProperty ("params", {}));
-        if (inf.hasProperty ("doc"))
-        {
-            const int docId = (int) inf.getProperty ("doc", -1);
-            set (e, "doc", docId);
-            // A mutating job's resulting undo state (history.list joins on it).
-            if ((bool) inf.getProperty ("mutating", false) && (bool) inf.getProperty ("ok", false))
-                for (auto& d : app.docs)
-                    if (d->id == docId
-                        && (juce::int64) d->engine.contentVersion()
-                               != (juce::int64) inf.getProperty ("contentVersionBefore", -1))
-                    {
-                        set (e, "undoDepth", (int) d->undo.undoSize());
-                        if (d->undo.canUndo()) set (e, "description", d->undo.lastRecorded().description);
-                    }
-        }
+        if (inf.hasProperty ("doc")) set (e, "doc", (int) inf.getProperty ("doc", -1));
         if (inf.hasProperty ("error"))
             set (e, "error", inf.getProperty ("error", {}).getProperty ("code", {}));
         journal.append ("job", e);
+        pollDocuments();   // the patches the job committed, as history entries
     };
+}
+
+void ControlState::noteClearReason (int docId, const juce::String& reason)
+{
+    clearReasons[docId] = reason;
+}
+
+static juce::var patchEntry (const FileDoc& d, const Patch& p, const juce::String& what)
+{
+    auto e = obj ({ { "what", what }, { "doc", d.id }, { "patchSeq", (juce::int64) p.seq },
+                    { "ts", isoTime ((juce::int64) p.timestampMs) },
+                    { "opId", p.opId }, { "source", p.source }, { "description", p.description },
+                    { "undoDepth", (int) d.undo.undoSize() }, { "redoDepth", (int) d.undo.redoSize() } });
+    if (p.params.isObject()) set (e, "params", p.params);
+    return e;
+}
+
+void ControlState::pollDocuments()
+{
+    std::map<int, bool> alive;
+    for (auto& dp : app.docs)
+    {
+        FileDoc& d = *dp;
+        alive[d.id] = true;
+        auto& s = seen[d.id];
+        if (s.first)
+        {
+            s.first = false;
+            s.clears = d.undo.clearCount();
+            s.metaChanges = d.metaDirty.changeCount();
+            s.rate = d.engine.sampleRate();
+            // Patches already present (a document opened with history: none) start the count.
+            s.nextPatchSeq = d.undo.peekNextSeq();
+            journal.append ("doc", obj ({ { "what", "opened" }, { "doc", d.id }, { "name", d.name },
+                                          { "path", d.file == juce::File() ? juce::var() : juce::var (d.file.getFullPathName()) } }));
+            continue;
+        }
+        if (d.undo.clearCount() != s.clears)
+        {
+            s.clears = d.undo.clearCount();
+            auto it = clearReasons.find (d.id);
+            // Resample drops the history (patches address the old rate).
+            const juce::String reason = it != clearReasons.end() ? it->second
+                                      : d.engine.sampleRate() != s.rate ? juce::String ("resample")
+                                                                        : juce::String ("unknown");
+            if (it != clearReasons.end()) clearReasons.erase (it);
+            journal.append ("history", obj ({ { "what", "cleared" }, { "doc", d.id }, { "reason", reason },
+                                              { "undoDepth", (int) d.undo.undoSize() },
+                                              { "redoDepth", (int) d.undo.redoSize() } }));
+        }
+        // New patches (seq is monotonic per document; they sit on the undo stack).
+        std::vector<const Patch*> fresh;
+        for (size_t i = 0; i < d.undo.undoSize(); ++i)
+            if (d.undo.undoAt (i).seq >= s.nextPatchSeq) fresh.push_back (&d.undo.undoAt (i));
+        for (size_t i = 0; i < d.undo.redoSize(); ++i)   // recorded then undone before we looked
+            if (d.undo.redoAt (i).seq >= s.nextPatchSeq) fresh.push_back (&d.undo.redoAt (i));
+        std::sort (fresh.begin(), fresh.end(), [] (const Patch* a, const Patch* b) { return a->seq < b->seq; });
+        for (const Patch* p : fresh)
+            journal.append ("history", patchEntry (d, *p, "recorded"));
+        s.nextPatchSeq = d.undo.peekNextSeq();
+        s.rate = d.engine.sampleRate();
+
+        if (d.metaDirty.changeCount() != s.metaChanges)
+        {
+            s.metaChanges = d.metaDirty.changeCount();
+            journal.append ("meta", obj ({ { "what", "changed" }, { "doc", d.id },
+                                           { "markers", (int) d.markers.markers().size() },
+                                           { "savedSelections", (int) d.savedSelections.size() },
+                                           { "drawings", (int) d.drawings.size() },
+                                           { "tables", (int) d.tables.size() },
+                                           { "transcriptionSegments", (int) d.sctt.segments.size() },
+                                           { "metaDirty", (bool) d.metaDirty } }));
+        }
+    }
+    for (auto it = seen.begin(); it != seen.end();)
+    {
+        if (alive.count (it->first) == 0)
+        {
+            journal.append ("doc", obj ({ { "what", "closed" }, { "doc", it->first } }));
+            it = seen.erase (it);
+        }
+        else ++it;
+    }
 }
 
 ControlState::~ControlState()

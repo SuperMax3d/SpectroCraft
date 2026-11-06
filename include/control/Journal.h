@@ -40,9 +40,17 @@ public:
     juce::int64 reserveSeq();
     juce::int64 firstSeq() const;   // oldest seq still in the ring (0 when empty)
 
-    /** JSONL mirror (lot 5). Empty = memory only. */
+    /** JSON Lines mirror: every entry is also appended to this file (rotated
+        to <name>.1.jsonl beyond 64 MB). Empty = memory only. */
     void setFile (const juce::File& f);
     juce::File file() const;
+
+    /** <userApplicationDataDirectory>/SpectroCraft/journal */
+    static juce::File journalFolder();
+    /** journalFolder()/session-<pid>-<yyyy-mm-dd>.jsonl */
+    static juce::File sessionFile (int pid);
+    /** Keeps the `keep` most recent session files of the folder. */
+    static void pruneOldSessions (const juce::File& folder, int keep = 30);
 
     /** Called after every append (e.g. to broadcast an event). */
     std::function<void (const juce::var&)> onAppend;

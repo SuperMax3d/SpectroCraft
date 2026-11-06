@@ -1329,6 +1329,12 @@ void MainWindow::userTriedToCloseWindow()
 
 void MainWindow::timerCallback()
 {
+    // AI control journal: edits made with the mouse/menus become "history"
+    // entries (and history.changed events) within a tick. Only while the
+    // control server runs: nobody else reads the journal.
+    if (controlServerRunning)
+        app.control().pollDocuments();
+
     // Kick off the lazy audio device init on the first tick. The timer only
     // runs while this window is alive, so no deferred callback can outlive it.
     if (!audioInitKickedOff)

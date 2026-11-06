@@ -369,6 +369,10 @@ void Application::recordActionStep (const juce::String& type, const juce::var& p
         // command's own journal entry describes it (history.list joins that).
         if (control ().invokeDepth > 0)
             e.getDynamicObject ()->setProperty ("viaCommand", true);
+        else
+            // A menu/dialog edit announces itself; the next recorded patch (on
+            // whatever thread runs the edit) takes its type and params.
+            sc::undoctx::setPending (sc::undoctx::Op { type, params, "menu" });
         control ().journal.append ("step", e);
     }
 
@@ -4356,7 +4360,7 @@ void Application::undoSteps (int n)
             // rather than keep a corrupt undo/redo chain.
             d->undo.clear ();
             reportHistoryCleared ("Undo");
-            journalHistory (*this, d, "cleared", 0, "undo failed");
+            control ().noteClearReason (d->id, "undo failed");   // journaled by pollDocuments
             break;
         }
         if (p.hasSideState) restorePatchSideState (d, p, false);
@@ -4390,7 +4394,7 @@ void Application::redoSteps (int n)
             // rather than keep a corrupt undo/redo chain.
             d->undo.clear ();
             reportHistoryCleared ("Redo");
-            journalHistory (*this, d, "cleared", 0, "redo failed");
+            control ().noteClearReason (d->id, "redo failed");
             break;
         }
         if (p.hasSideState) restorePatchSideState (d, p, true);

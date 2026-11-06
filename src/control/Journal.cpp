@@ -37,6 +37,16 @@ juce::int64 Journal::append (const juce::String& kind, juce::var entry)
         {
             out->writeText (toLine (copy) + "\n", false, false, "\n");
             out->flush();
+            if (out->getPosition() > (juce::int64) 64 * 1024 * 1024)
+            {
+                // Rotate: <name>.1.jsonl keeps the previous 64 MB.
+                out.reset();
+                const juce::File old = jsonl.getSiblingFile (jsonl.getFileNameWithoutExtension() + ".1.jsonl");
+                old.deleteFile();
+                jsonl.moveFileTo (old);
+                auto s2 = std::make_unique<juce::FileOutputStream> (jsonl);
+                if (s2->openedOk()) out = std::move (s2);
+            }
         }
     }
     if (onAppend)
@@ -52,8 +62,26 @@ juce::var Journal::read (juce::int64 sinceSeq, const juce::StringArray& kinds,
     {
         std::lock_guard<std::mutex> l (lock);
         last = nextSeq - 1;
+        // Older than the ring (10 000 entries): read them back from the JSONL file.
+        const juce::int64 ringFirst = ring.empty() ? nextSeq : (juce::int64) ring.front().getProperty ("seq", 0);
+        if (sinceSeq + 1 < ringFirst && jsonl.existsAsFile())
+        {
+            juce::StringArray lines;
+            jsonl.readLines (lines);
+            for (const auto& ln : lines)
+            {
+                if (limit > 0 && entries.size() >= limit) break;
+                const auto e = juce::JSON::parse (ln);
+                const auto seq = (juce::int64) e.getProperty ("seq", 0);
+                if (seq <= sinceSeq || seq >= ringFirst) continue;
+                if (!kinds.isEmpty() && !kinds.contains (e.getProperty ("kind", {}).toString())) continue;
+                if (docId >= 0 && (int) e.getProperty ("doc", -1) != docId) continue;
+                entries.add (e);
+            }
+        }
         for (const auto& e : ring)
         {
+            if (limit > 0 && entries.size() >= limit) break;
             if ((juce::int64) e.getProperty ("seq", 0) <= sinceSeq) continue;
             if (!kinds.isEmpty() && !kinds.contains (e.getProperty ("kind", {}).toString())) continue;
             if (docId >= 0 && (int) e.getProperty ("doc", -1) != docId) continue;
@@ -110,6 +138,29 @@ void Journal::setFile (const juce::File& f)
         out = std::move (s);
     else
         jsonl = juce::File();
+}
+
+juce::File Journal::journalFolder()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+               .getChildFile ("SpectroCraft").getChildFile ("journal");
+}
+
+juce::File Journal::sessionFile (int pid)
+{
+    const auto t = juce::Time::getCurrentTime();
+    return journalFolder().getChildFile (juce::String::formatted ("session-%d-%04d-%02d-%02d.jsonl", pid,
+                                                                  t.getYear(), t.getMonth() + 1, t.getDayOfMonth()));
+}
+
+void Journal::pruneOldSessions (const juce::File& folder, int keep)
+{
+    auto files = folder.findChildFiles (juce::File::findFiles, false, "session-*.jsonl");
+    std::sort (files.begin(), files.end(), [] (const juce::File& a, const juce::File& b) {
+        return a.getLastModificationTime() > b.getLastModificationTime();
+    });
+    for (int i = keep; i < files.size(); ++i)
+        files.getReference (i).deleteFile();
 }
 
 juce::File Journal::file() const

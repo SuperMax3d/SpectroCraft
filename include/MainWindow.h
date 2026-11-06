@@ -222,6 +222,8 @@ public:
     std::function<void (bool)> onControlToggled;
     /** Status text of the control server for the menu tooltip / status bar. */
     int controlClients() const { return controlClients_; }
+    /** Set by Main.cpp while the control server runs (journal polling). */
+    bool controlServerRunning = false;
     void cycleViewVisibility (bool forward);  // F9: both -> waveform -> spectrogram
     juce::Component* activeListPanel() const;  // Markers/Transcription tab content, or nullptr
     void handleFind (bool openDialog);     // Ctrl+F / F3 in the active list panel

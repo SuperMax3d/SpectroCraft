@@ -4,7 +4,9 @@
 #include <JuceHeader.h>
 #include "control/Journal.h"
 #include "control/JobManager.h"
+#include "UndoManager.h"   // sc::undoctx (operation context of recorded patches)
 #include <functional>
+#include <map>
 
 class Application;
 
@@ -40,8 +42,28 @@ public:
     /** Stops jobs (called first by ~Application). */
     void shutdown();
 
+    /** Journals what changed since the last call in every document (message
+        thread): new undo patches (with their op/params/source), history
+        clears (with the last reason noted), metadata changes (markers,
+        selections...), documents opened/closed. Called by invoke(), job
+        completions, history.list and the window's timer, so edits made with
+        the mouse are journaled too. */
+    void pollDocuments();
+    /** Reason of the next history clear pollDocuments() will see. */
+    void noteClearReason (int docId, const juce::String& reason);
+
 private:
     bool isShutDown = false;
+    struct DocSeen
+    {
+        juce::int64 nextPatchSeq = 1;
+        juce::int64 clears = 0;
+        uint64_t metaChanges = 0;
+        double rate = 0.0;
+        bool first = true;
+    };
+    std::map<int, DocSeen> seen;
+    std::map<int, juce::String> clearReasons;
 };
 
 struct Context;
@@ -50,7 +72,9 @@ struct Context;
     attributed to `source` in the journal, like edits inside invoke(). */
 struct ScopedInvokeSource
 {
-    ScopedInvokeSource (ControlState& s, const juce::String& source) : st (s), prev (s.invokeSource)
+    ScopedInvokeSource (ControlState& s, const juce::String& source,
+                        const juce::String& opId = {}, const juce::var& params = {})
+        : st (s), prev (s.invokeSource), op (sc::undoctx::Op { opId, params, source })
     {
         ++st.invokeDepth;
         st.invokeSource = source;
@@ -58,6 +82,7 @@ struct ScopedInvokeSource
     ~ScopedInvokeSource() { st.invokeSource = prev; --st.invokeDepth; }
     ControlState& st;
     juce::String prev;
+    sc::undoctx::Scoped op;   // patches recorded in this scope carry opId/params/source
 };
 
 /** Starts a job for the command in ctx (message thread). With a window, the

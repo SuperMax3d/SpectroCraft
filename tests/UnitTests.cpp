@@ -26996,6 +26996,7 @@ static void testActionsPanelPaint()
 #include "regression/ai.inc"
 #include "regression/control.inc"   // AI control: registry, step.run, history, --json
 #include "regression/control_server.inc"   // AI control: loopback server, path roots, view/transport
+#include "regression/journal.inc"   // AI control lot 5: journal, enriched patches, history JSON
 #include "regression/ai_catalog.inc"
 #include "regression/ai_commands.inc"   // AI control lot 3: ai.* commands
 #include "regression/measures.inc"
@@ -27488,6 +27489,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: ai", runRegression_ai);
     SC_RUN_TEST ("regression: control", runRegression_control);
     SC_RUN_TEST ("control server", runRegression_controlServer);
+    SC_RUN_TEST ("regression: journal", runRegression_journal);
     SC_RUN_TEST ("regression: ai_catalog", runRegression_ai_catalog);
     SC_RUN_TEST ("regression: ai_commands", runRegression_aiCommands);
     SC_RUN_TEST ("regression: measures", runRegression_measures);
