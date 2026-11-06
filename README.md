@@ -817,7 +817,7 @@ plain audio file** (WAV/FLAC/AIFF) with the decoded audio.
 The FFmpeg runtime is vendored in `extern/ffmpeg/` (headers + import
 libraries) with its four prebuilt Windows x64 DLLs (~2.6 MB total:
 `avformat-61`, `avcodec-61`, `swresample-5`, `avutil-59`) in
-`bin/Release/SpectroCraft`, copied into the `SpectroCraft` subfolder next to the
+`extern/ffmpeg/bin`, copied into the `SpectroCraft` subfolder next to the
 executable at build time.
 The four DLLs are delay-loaded (`/DELAYLOAD`) so the app starts even when they
 are missing; on first use of video extraction the runtime is probed and, if
@@ -1018,9 +1018,9 @@ recorders\                <- recorder plugins (wasapi_recorder.dll)
 
 Older flat layouts with the DLLs directly beside `SpectroCraft.exe` keep working:
 Windows always searches the exe directory first, so both layouts are supported and
-the exe-directory copy wins when both are present. The repo's `bin/Release` folder
-holds the prebuilt app plus every external DLL, so downloading just that folder
-gives you a working installation.
+the exe-directory copy wins when both are present. A local build outputs this
+layout to `bin/Release` (untracked — kept locally for testing); official builds
+are published as GitHub Releases by the CI workflow.
 
 Notes:
 
@@ -1202,8 +1202,10 @@ for your microarchitecture at load time.
 ### macOS and Linux builds
 
 On macOS (arm64 or x86_64) and Linux (Ubuntu 24.04 x86_64) the same option
-fetches the runtimes at configure time instead of using the Windows DLLs of
-`bin/Release` (`cmake/ScAiRuntimes.cmake`; nothing binary is committed):
+fetches the runtimes at configure time instead of using the vendored Windows
+x64 DLLs in `extern/OpenVINO/bin`, `extern/whisper-b5454/bin` and
+`extern/ffmpeg/bin` (`cmake/ScAiRuntimes.cmake`; nothing binary is committed for
+these platforms):
 
 - **OpenVINO 2024.6.0** — Intel's official archive for the platform from
   `storage.openvinotoolkit.org`, checked against its published SHA-256
@@ -1328,11 +1330,11 @@ The failure dialog always shows the exact destination folder and the download
 URLs in a copyable text box. The **OpenVINO runtime DLLs** (`openvino.dll`,
 `openvino_intel_cpu_plugin.dll`, `openvino_ir_frontend.dll`, `tbb12.dll`) must sit
 in the `SpectroCraft` folder next to `SpectroCraft.exe` for noise suppression — they
-ship in `bin/Release/SpectroCraft` and are copied there by the CMake build. A
+are vendored in `extern/OpenVINO/bin` and copied there by the CMake build. A
 prebuilt exe without them fails gracefully; even a *partial* set (e.g. only
 `openvino.dll`) is detected and the dialog lists all four required files plus where
 to get them. Transcription needs the **whisper runtime DLLs** (`whisper.dll` plus
-12 ggml/llama DLLs — all in `bin/Release/SpectroCraft`, see
+12 ggml/llama DLLs — all vendored in `extern/whisper-b5454/bin`, see
 `extern/whisper-b5454/README.md`) in that same folder; the CMake build copies them
 there too, and a missing or incompatible set is reported with a clear error.
 
@@ -2575,10 +2577,12 @@ should agree.
 ## Project layout
 
 ```
-bin/Release             self-contained runtime folder: SpectroCraft.exe plus the
-                        SpectroCraft/ subfolder with every external DLL (FFmpeg,
-                        OpenVINO, whisper) — download this folder alone for a
-                        working install
+bin/Release             local build output (untracked): SpectroCraft.exe plus the
+                        SpectroCraft/ subfolder with every external DLL. Official
+                        builds ship as GitHub Releases from CI instead.
+extern/ffmpeg           vendored FFmpeg headers, import libs + prebuilt x64 DLLs (bin/)
+extern/OpenVINO         vendored OpenVINO headers, import lib + runtime DLLs (bin/)
+extern/whisper-b5454    vendored whisper.cpp b5454 header + runtime DLLs (bin/)
 icon1..4.ico            application icon candidates; icon4.ico is the active one
                         (PE resource + runtime WM_SETICON)
 CMakeLists.txt            root build (JUCE vendored in extern/)

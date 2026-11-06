@@ -28,7 +28,7 @@ concurrency:
 
 jobs:
   # Windows with the AI features (OpenVINO noise suppression, whisper.cpp
-  # transcription): the configuration that ships in bin/Release. The runtime
+  # transcription): the configuration shipped by the GitHub release. The runtime
   # DLLs are vendored there and copied next to the exe; model weights are not
   # shipped - the app downloads them on first use (tests download them into
   # %APPDATA%/SpectroCraft/models, cached between runs).

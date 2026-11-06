@@ -1,7 +1,8 @@
 # AI runtimes for macOS and Linux: OpenVINO 2024.6 (noise suppression) and
 # whisper.cpp b5454 (transcription). Included by the root CMakeLists.txt when
 # SPECTRO_ENABLE_AI=ON on a non-Windows host; Windows keeps its vendored DLLs
-# (extern/OpenVINO, bin/Release) and never reads this file.
+# (extern/OpenVINO/bin, extern/whisper-b5454/bin, extern/ffmpeg/bin) and never
+# reads this file.
 #
 # Nothing binary is committed: both runtimes are fetched at configure time,
 # pinned to an exact version and verified against a SHA-256 written below.

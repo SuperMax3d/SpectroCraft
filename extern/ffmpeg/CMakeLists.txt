@@ -24,9 +24,9 @@ else ()
     message(WARNING "FFmpeg runtime is only vendored for Windows x64 (MSVC); video-audio extraction is unavailable.")
 endif ()
 
-# Runtime DLLs (all four are required, they depend on each other). They live
-# in the repo's self-contained runtime folder, bin/Release/SpectroCraft.
-set(SC_FFMPEG_BIN_DIR ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft)
+# Runtime DLLs (all four are required, they depend on each other). They are
+# vendored next to the headers and import libraries in extern/ffmpeg/bin.
+set(SC_FFMPEG_BIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/bin)
 set(SC_FFMPEG_DLLS
     ${SC_FFMPEG_BIN_DIR}/avformat-61.dll
     ${SC_FFMPEG_BIN_DIR}/avcodec-61.dll
@@ -58,16 +58,17 @@ function (sc_enable_ffmpeg tgt)
         "/DELAYLOAD:avutil-59.dll")
     target_link_libraries(${tgt} PRIVATE delayimp.lib)
 
-    # The prebuilt DLLs live in the repo's self-contained runtime folder,
-    # bin/Release/SpectroCraft (the same layout that ships on GitHub with the app).
+    # The prebuilt DLLs are vendored in extern/ffmpeg/bin (hardcoded project-
+    # relative path: this function is called from src/CMakeLists.txt, where the
+    # directory-scope variable above is not visible).
     set(SC_RUNTIME_DLL_DIR $<TARGET_FILE_DIR:${tgt}>/SpectroCraft)
     add_custom_command(TARGET ${tgt} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SC_RUNTIME_DLL_DIR}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/avformat-61.dll
-            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/avcodec-61.dll
-            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/swresample-5.dll
-            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/avutil-59.dll
+            ${CMAKE_SOURCE_DIR}/extern/ffmpeg/bin/avformat-61.dll
+            ${CMAKE_SOURCE_DIR}/extern/ffmpeg/bin/avcodec-61.dll
+            ${CMAKE_SOURCE_DIR}/extern/ffmpeg/bin/swresample-5.dll
+            ${CMAKE_SOURCE_DIR}/extern/ffmpeg/bin/avutil-59.dll
             ${SC_RUNTIME_DLL_DIR}
         COMMENT "Copying FFmpeg (audio extraction) runtime DLLs to the SpectroCraft folder next to ${tgt}")
 endfunction ()

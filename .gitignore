@@ -28,3 +28,7 @@ desktop.ini
 # FFmpeg rebuild scratch dirs (extern/ffmpeg/build.sh)
 /extern/ffmpeg/_build/
 /extern/ffmpeg/_native/
+
+# Local test builds are no longer distributed via the repo (GitHub Releases
+# from CI ship them instead); keep a local build for testing.
+/bin/

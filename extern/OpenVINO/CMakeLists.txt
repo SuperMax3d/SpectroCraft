@@ -39,9 +39,10 @@ function (sc_enable_ai tgt)
     set_property (TARGET ${tgt} APPEND PROPERTY LINK_OPTIONS
         "/DELAYLOAD:openvino.dll" "delayimp.lib")
 
-    # The prebuilt runtime DLLs live in the repo's self-contained folder,
-    # bin/Release/SpectroCraft (the same layout that ships on GitHub with the
-    # app). They are deployed into a "SpectroCraft" subfolder next to the
+    # The prebuilt runtime DLLs are vendored in extern/OpenVINO/bin and
+    # extern/whisper-b5454/bin (hardcoded project-relative paths: this function
+    # is called from src/CMakeLists.txt, where sibling directory-scope variables
+    # are not visible). They are deployed into a "SpectroCraft" subfolder next to the
     # executable; the app
     # adds that folder to its process-wide DLL search path at startup (see
     # include/RuntimeDlls.h), so no installation or environment variables are
@@ -51,20 +52,20 @@ function (sc_enable_ai tgt)
     add_custom_command (TARGET ${tgt} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SC_RUNTIME_DLL_DIR}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/openvino.dll
-            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/openvino_intel_cpu_plugin.dll
-            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/openvino_ir_frontend.dll
-            ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/tbb12.dll
+            ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/openvino.dll
+            ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/openvino_intel_cpu_plugin.dll
+            ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/openvino_ir_frontend.dll
+            ${CMAKE_SOURCE_DIR}/extern/OpenVINO/bin/tbb12.dll
             ${SC_RUNTIME_DLL_DIR}
         COMMENT "Copying OpenVINO runtime DLLs to the SpectroCraft folder next to ${tgt}")
 
     # whisper.cpp b5454 prebuilt binaries (transcription, CPU-only): the C API
     # library plus ggml's per-microarchitecture backends. See
     # extern/whisper-b5454/README.md for the full set and provenance.
-    file (GLOB SC_WHISPER_DLLS ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/ggml*.dll)
+    file (GLOB SC_WHISPER_DLLS ${CMAKE_SOURCE_DIR}/extern/whisper-b5454/bin/ggml*.dll)
     list (APPEND SC_WHISPER_DLLS
-        ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/llama.dll
-        ${CMAKE_SOURCE_DIR}/bin/Release/SpectroCraft/whisper.dll)
+        ${CMAKE_SOURCE_DIR}/extern/whisper-b5454/bin/llama.dll
+        ${CMAKE_SOURCE_DIR}/extern/whisper-b5454/bin/whisper.dll)
     add_custom_command (TARGET ${tgt} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SC_WHISPER_DLLS}
             ${SC_RUNTIME_DLL_DIR}
