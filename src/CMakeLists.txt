@@ -46,6 +46,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/TablesTrack.cpp # dedicated tables track view
         ${CMAKE_CURRENT_SOURCE_DIR}/Recorder.cpp    # recorder plugin host (Transport > Record)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DfStft.cpp   # pure DSP (no OpenVINO dependency)
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp   # pure; also verifies the audio.cpp downloads (AudioCpp.cpp)
         ${CMAKE_SOURCE_DIR}/tests/UnitTests.cpp
 )
 
@@ -56,7 +57,7 @@ if (TARGET sc_openvino)
     target_sources (SpectroCraft PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/OvRuntime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/ModelManager.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/AI/ModelCatalog.cpp   # unified read model over ModelManager + sc::acpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DenseUnetModel.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DeepFilterNetModel.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/DeepFilter.cpp

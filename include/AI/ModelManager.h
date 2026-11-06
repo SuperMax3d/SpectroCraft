@@ -41,7 +41,8 @@ public:
     const std::vector<ModelSpec>& registry() const;
     const ModelSpec* find(const std::string& id) const;
 
-    // %APPDATA%/SpectroCraft/models (or the override given to the ctor).
+    // %APPDATA%/SpectroCraft/models, or $SC_MODELS_DIR when it holds an
+    // absolute folder (every platform), or the override given to the ctor.
     juce::File modelRoot() const;
     juce::File dirFor(const std::string& modelId) const;
 
@@ -58,9 +59,21 @@ public:
     // Download any missing (or size-mismatched) files. BLOCKING — call from a
     // worker thread. onProgress(fraction 0..1, statusText); returning false
     // cancels the download. Returns true when all files are present + verified.
+    // A file:// URL is copied from the local file with the same size and
+    // SHA-256 checks (offline mirror, unit-test fixtures).
     using ProgressFn = std::function<bool(float, const std::string&)>;
     bool ensureInstalled(const ModelSpec& spec, ProgressFn onProgress,
                          std::string* errOut = nullptr);
+
+    // Destination file name of a spec file (its name, else the URL basename).
+    static std::string fileName(const ModelFileSpec& f);
+
+    // Process-wide record of files whose SHA-256 matched (keyed by path, with
+    // the size + modification time seen then), shared with ModelCatalog so a
+    // file verified once is not hashed again until it changes.
+    static bool wasVerified(const juce::File& f);
+    static void markVerified(const juce::File& f);
+    static void forgetVerified(const juce::File& f);
 
 private:
     static bool downloadFile(const std::string& url, const juce::File& dest,
