@@ -2453,6 +2453,22 @@ void MainWindow::ensureVideoWindow()
         if (d == nullptr || d->selectedVideoTrack == i) return;
         d->selectedVideoTrack = i;   // transient UI state, not metadata
     };
+    // Dropping a video file on the window adds it as a new track of the active
+    // document (the spec's "drag/drop into the panel"); with no open document
+    // it is opened as one instead, like a drop on the main window.
+    videoWindow->onVideoDropped = [this] (const juce::File& f)
+    {
+        FileDoc* d = app.doc();
+        if (d == nullptr || !f.existsAsFile())
+        {   app.openFile (f); return; }
+        auto t = effectiveVideoTracks (*d);
+        sc::VideoTrackData nt;
+        nt.file = f;
+        t.push_back (std::move (nt));
+        d->selectedVideoTrack = (int) t.size() - 1;   // the new track renders above
+        d->setVideoTracks (std::move (t));
+        syncVideoWindow();
+    };
 
     // The saved layout may have the Video tab open: restore the docked state.
     if (isPanelOpen ("video"))

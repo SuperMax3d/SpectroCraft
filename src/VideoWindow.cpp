@@ -1159,7 +1159,8 @@ bool VideoWindow::isInterestedInFileDrag (const juce::StringArray& files)
 
 void VideoWindow::filesDropped (const juce::StringArray& files, int, int)
 {
+    if (onVideoDropped == nullptr) return;
     for (const auto& f : files)
-        if (sc::isVideoPictureCandidate (juce::File (f)) && onVideoDropped != nullptr)
-        {   onVideoDropped (juce::File (f)); return; }
+        if (sc::isVideoPictureCandidate (juce::File (f)))
+            onVideoDropped (juce::File (f));
 }

@@ -784,6 +784,13 @@ static void testVideoWindowMultiTrack()
            "multi-track: zoom is persisted to the displayed track's metadata");
     CHECK (app.doc()->metaDirty, "multi-track: the document is marked dirty by the change");
 
+    // Dropping another video file on the window adds it as a new track.
+    const int before = (int) app.doc()->videoTracks.size();
+    vw->filesDropped (juce::StringArray ({ f.getFullPathName() }), 0, 0);
+    CHECK (app.doc()->videoTracks.size() == before + 1
+               && app.doc()->selectedVideoTrack == before,
+           "multi-track: dropping a video file adds and selects a new track");
+
     cleanup();
 }
 
