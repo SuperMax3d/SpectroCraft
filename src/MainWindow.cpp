@@ -2617,7 +2617,7 @@ void MainWindow::repeatLastEffect()
 }
 
 // Alt+Shift+= / '+' and Alt+Shift+-: step the spectrogram's FFT size one power
-// of two along the combo's 512..65536 ladder. In Auto mode the current resolved
+// of two along the combo's 256..65536 ladder. In Auto mode the current resolved
 // size is used as the starting point and the mode switches to manual.
 void MainWindow::stepFftSize (bool up)
 {
@@ -2625,7 +2625,7 @@ void MainWindow::stepFftSize (bool up)
     const int cur = app.settings.fftAuto ? spectralView->autoFftSizeForCurrentZoom ()
                                          : app.settings.fftSize;
     const int next = up ? std::min (cur * 2, 65536) : cur / 2;
-    if (!up && next < 512) return;   // already at/below the ladder minimum
+    if (!up && next < 256) return;   // already at/below the ladder minimum
     if (next == cur) return;         // already at the top of the ladder
     app.settings.fftAuto = false;
     app.settings.fftSize = next;
@@ -3281,6 +3281,31 @@ void MainWindow::handleContextMenuAction (int id)
             break;
         case CtxAltScaleFreq:
             armRefClick (Application::RefClickTarget::AltFreq);
+            break;
+
+        // ---- FFT Size submenu + Linear/Logarithmic toggle: right-click on
+        // the spectrogram's frequency axis. Same actions as Spectral Controls.
+        case CtxFftIncrease: stepFftSize (true);  break;
+        case CtxFftReduce:   stepFftSize (false); break;
+        case CtxFftAuto:
+            app.settings.fftAuto = true;
+            if (controlsPanel)
+            {
+                controlsPanel->setFftSizeSelection (SpectralControlsPanel::kFftAutoId);
+                controlsPanel->syncAutoControls();
+                controlsPanel->resized();   // show the auto parameter rows again
+            }
+            updateAutoFftLabel ();
+            break;
+        case CtxAxisLinear:
+            if (!app.settings.logFrequency) break;
+            app.settings.logFrequency = false;
+            if (controlsPanel) controlsPanel->syncLogToggle ();
+            break;
+        case CtxAxisLog:
+            if (app.settings.logFrequency) break;
+            app.settings.logFrequency = true;
+            if (controlsPanel) controlsPanel->syncLogToggle ();
             break;
     }
 

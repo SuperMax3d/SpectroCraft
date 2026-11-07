@@ -1075,6 +1075,11 @@ public:
     bool applyDbMaxText (const juce::String& text);
     void syncLevelControls();                  // slider + editors + preview from settings
 
+    // Refreshes the Linear/Logarithmic toggle button from settings.logFrequency
+    // (used when the axis is switched via the spectrogram's frequency-axis
+    // context menu instead of clicking the panel button).
+    void syncLogToggle();
+
     // Harmonic marker controls (Spectral Controls panel, persisted between
     // sessions): two toggles plus typed fields whose values are clamped to
     // their ranges; false when rejected.

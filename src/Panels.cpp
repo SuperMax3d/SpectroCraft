@@ -5076,7 +5076,7 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         if (app.onStateChange) app.onStateChange();
     };
 
-    // 512 gives the finest frequency resolution; larger sizes give a finer
+    // 256 gives the finest frequency resolution; larger sizes give a finer
     // time resolution of the spectrogram tiles. "Auto" recomputes the size from
     // the current zoom levels on every render (see SpectralEngine::chooseFftSize);
     // its label shows the resolved size, e.g. "Auto (4096)".
@@ -5317,8 +5317,8 @@ void SpectralControlsPanel::rebuildFftSizeItems (int autoSize)
     // no change messages are sent.
     const int selId = fftSizeCombo.getSelectedId();   // 0 = nothing selected yet
     fftSizeCombo.clear (juce::dontSendNotification);
-    fftSizeCombo.addItem ("512", 512);
-    for (int n = 1024; n <= 65536; n *= 2)
+    fftSizeCombo.addItem ("256", 256);
+    for (int n = 512; n <= 65536; n *= 2)
         fftSizeCombo.addItem (juce::String (n), n);
     juce::String autoLabel = "Auto";
     if (autoSize > 0)
@@ -5516,6 +5516,12 @@ bool SpectralControlsPanel::applyDbMaxText (const juce::String& text)
     syncLevelControls();
     if (app.onStateChange) app.onStateChange();
     return true;
+}
+
+void SpectralControlsPanel::syncLogToggle()
+{
+    logToggle.setToggleState (app.settings.logFrequency, juce::dontSendNotification);
+    logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
 }
 
 void SpectralControlsPanel::syncLevelControls()

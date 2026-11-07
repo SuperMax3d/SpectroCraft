@@ -348,7 +348,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     scattered gaps are interpolated, all-text columns are ignored. Everything
     persists with the file via per-file metadata.
   - Bottom-left tab group: **Spectral Controls** (colour map + preview, dB
-    range, Log/Linear toggle, Reset, FFT size — from **512**, the finest
+    range, Log/Linear toggle, Reset, FFT size — from **256**, the finest
     frequency resolution, up to 65536; an **Auto** option at the end of that
     combo recomputes the size on every render from the current zoom levels:
     about "Target time slices:" (default 80) FFT frames across the visible time
@@ -358,7 +358,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     **Auto is on by default**, and its combo entry shows the size currently
     resolved for the zoom levels (e.g. `Auto (4096)`); picking a fixed size
     switches auto mode off, and **Alt+Shift+= / Alt+Shift+-** step the FFT size
-    up/down the 512..65536 ladder (from Auto, one step away in manual mode).
+    up/down the 256..65536 ladder (from Auto, one step away in manual mode).
+    Right-clicking the spectrogram's vertical frequency axis offers these same
+    actions in an **FFT Size** submenu: **Increase**, **Reduce** and
+    **Auto (N)** — N being the size Auto mode would resolve to at the current
+    zoom levels, selecting it switches auto mode on — followed by a checkable
+    **Linear / Logarithmic** pair that toggles the axis scale.
     The full-width **Reset** button restores every Spectral Controls setting to
     its defaults at once — Classic colour map, -120..0 dB window, log axis on,
     harmonic markers off (with 10 harmonics and N=1 configured, no numbers),
@@ -449,7 +454,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     with each band's centre value written in white between its borders,
     just inside the spectrogram on the same side as the vertical frequency
     axis (labels are skipped when a band is too thin on screen or would hit
-    a channel label). The first two default to on; **Show 1/3 Octave Grid**
+    a channel label). Nothing is drawn below the 40 Hz band: **40** is the
+    lowest label and its lower border (~35.5 Hz) the lowest grid line. The first two default to on; **Show 1/3 Octave Grid**
     defaults to off. All three are remembered between sessions and leave the
     axis labels untouched when off.
   - Main area: waveform view on top, spectral view below, separated by a
@@ -1741,7 +1747,7 @@ troubleshooting); protocol: [docs/ai-control/REPORT.md](docs/ai-control/REPORT.m
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
 | Zoom Out Full — reset the time window and both vertical ranges (Zoom Fit is menu-only now) | Ctrl+0 |
 | Vertical zoom in / out (waveform amplitude + spectral frequency) | Ctrl+Shift+= / Ctrl+Shift+- |
-| Spectrogram FFT size one step up / down the 512..65536 ladder; from Auto, switches to manual one step away | Alt+Shift+= / Alt+Shift+- |
+| Spectrogram FFT size one step up / down the 256..65536 ladder; from Auto, switches to manual one step away | Alt+Shift+= / Alt+Shift+- |
 | Toggle a channel's visibility (like the View menu items); show ONLY that channel with Shift held — pressing again while solo restores every channel | Ctrl+1..9 / Ctrl+Shift+1..9 |
 | Cycle view layout: both → waveform only → spectrogram only (reverse direction with Shift) | F9 / Shift+F9 |
 | Start/stop recording (Transport > Record; mode via Transport > Recording Options) | Shift+F10 |

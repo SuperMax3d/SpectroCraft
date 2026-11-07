@@ -173,6 +173,7 @@ public:
     double spectralFreqMax()   const { return spectralView->getFreqMax(); }
     SpectralView* spectralViewComp() { return spectralView.get (); }
     WaveformView* waveformViewComp() { return waveformView.get (); }
+    SpectralControlsPanel* controlsPanelComp() { return controlsPanel.get (); }   // unit tests
     juce::Component* waveVScrollBarComp() { return waveVScroll.get (); }   // unit tests
     juce::Component* specVScrollBarComp() { return specVScroll.get (); }   // unit tests
     juce::Component* tablesTrackComp() { return tablesTrack.get (); }      // unit tests
@@ -311,7 +312,7 @@ public:
     juce::String replayName_;
 
     /** Alt+Shift+= / '+' and Alt+Shift+-: step the spectrogram's FFT size one
-        power of two along the 512..65536 ladder. Auto mode switches to manual
+        power of two along the 256..65536 ladder. Auto mode switches to manual
         at one step away from its currently resolved size. */
     void stepFftSize (bool up);
     /** Build (but do not run modally) the Time Stretch, Filter EQ and

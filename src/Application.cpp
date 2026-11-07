@@ -167,7 +167,7 @@ static int syncThirdOctOrder (int v)
 
 void Application::loadSettings ()
 {
-    settings.fftSize       = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_size", settings.fftSize), 512, 65536);
+    settings.fftSize       = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_size", settings.fftSize), 256, 65536);
     settings.fftAuto       = recentStore->getIntValue ("fft_auto", settings.fftAuto ? 1 : 0) != 0;
     {
         const double ts = recentStore->getValue ("auto_time_slices",

@@ -6497,6 +6497,58 @@ static void testCtxZoomOutFull()
     wav.deleteFile();
 }
 
+// ------------------------------------------------- spectral axis context menu
+// Right-clicking the spectrogram's frequency axis adds an "FFT Size" submenu
+// (Increase / Reduce / Auto (N)) plus a Linear/Logarithmic toggle - the same
+// actions as Spectral Controls. Drive them via handleContextMenuAction.
+static void testSpectralAxisContextActions()
+{
+    Application app;
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "spectral axis ctx"));
+
+    // Pin the settings: a fresh Application loads persisted values from disk.
+    const bool origLog = app.settings.logFrequency;
+    app.settings.fftAuto = true;
+    app.settings.fftSize = 2048;
+    app.settings.logFrequency = false;
+
+    using enum ContextMenuIDs;
+
+    // Increase: in Auto mode it starts at the resolved auto size (no file:
+    // falls back to the default manual size) and switches to manual.
+    win->handleContextMenuAction (CtxFftIncrease);
+    CHECK (!app.settings.fftAuto && app.settings.fftSize == 4096,
+          "FFT Size > Increase steps up one power of two into manual mode");
+
+    // Reduce: back down the ladder.
+    win->handleContextMenuAction (CtxFftReduce);
+    CHECK (!app.settings.fftAuto && app.settings.fftSize == 2048,
+          "FFT Size > Reduce steps down one power of two");
+
+    // Auto: switch to auto mode and select the combo's Auto entry.
+    win->handleContextMenuAction (CtxFftAuto);
+    CHECK (app.settings.fftAuto, "FFT Size > Auto switches back to auto mode");
+    CHECK (win->controlsPanelComp()->fftSizeComboRef().getSelectedId ()
+              == SpectralControlsPanel::kFftAutoId,
+          "the Spectral Controls combo shows the Auto entry selected");
+
+    // Logarithmic / Linear toggle: flips settings.logFrequency; re-selecting
+    // the active scale is a no-op.
+    win->handleContextMenuAction (CtxAxisLog);
+    CHECK (app.settings.logFrequency, "Linear/Log > Logarithmic enables log axis");
+    win->handleContextMenuAction (CtxAxisLog);
+    CHECK (app.settings.logFrequency, "re-selecting the active scale is a no-op");
+    win->handleContextMenuAction (CtxAxisLinear);
+    CHECK (!app.settings.logFrequency, "Linear/Log > Linear disables log axis");
+
+    // Leave the persisted state as we found it (syncSharedState persists on
+    // any change of the persistent fields).
+    app.settings.fftAuto = true;
+    app.settings.fftSize = 2048;
+    app.settings.logFrequency = origLog;
+    if (app.onStateChange) app.onStateChange ();
+}
+
 // ---------------- Zoom Out Full fits the data (+10%) -----------------------
 // Frequency Analysis "Zoom Out Full" (and resetDisplayRanges) now frames the
 // displayed data: vertical axis = data min/max + 10% total margin, horizontal
@@ -8943,7 +8995,7 @@ static void testEffectShortcutsAndRepeat()
                "fade-out zeroed the selection end");
     }
 
-    // Alt+Shift+= / - : step the FFT size along the combo's 512..65536 ladder.
+    // Alt+Shift+= / - : step the FFT size along the combo's 256..65536 ladder.
     {
         const auto altShift = juce::ModifierKeys::altModifier | juce::ModifierKeys::shiftModifier;
         app.settings.fftAuto = false;
@@ -8972,12 +9024,18 @@ static void testEffectShortcutsAndRepeat()
                "Alt+Shift+= consumed at the top");
         CHECK (app.settings.fftSize == 65536, "top of the ladder is a no-op");
 
-        // At the bottom of the ladder nothing happens.
+        // Stepping down reaches the new 256 floor...
         app.settings.fftAuto = false;
         app.settings.fftSize = 512;
         CHECK (win->keyPressed (juce::KeyPress ('-', altShift, 0), nullptr),
+               "Alt+Shift+- consumed at 512");
+        CHECK (!app.settings.fftAuto && app.settings.fftSize == 256,
+               "stepping down from 512 lands on the new 256 floor");
+
+        // ...and at the bottom of the ladder nothing happens.
+        CHECK (win->keyPressed (juce::KeyPress ('-', altShift, 0), nullptr),
                "Alt+Shift+- consumed at the bottom");
-        CHECK (app.settings.fftSize == 512, "bottom of the ladder is a no-op");
+        CHECK (app.settings.fftSize == 256, "bottom of the ladder is a no-op");
     }
 
     win.reset();   // destroy the window while its MessageManager is still alive
@@ -26147,6 +26205,46 @@ static void testThirdOctaveGrid()
     CHECK (off != on && diffPixels >= 50,
           "the 1/3 octave grid overlay draws visible lines");
 
+    // Nothing is drawn below the 40 Hz band: in a low range, everything under
+    // the 40 Hz band's lower border (~35.5 Hz) must match the grid-off render
+    // while lines at/above it differ.
+    {
+        app.settings.logFrequency = false;   // exact linear mapping
+        view.setFrequencyRange (10.0, 60.0);
+        app.settings.showThirdOctaveGrid = false;
+        const auto off2 = render ();
+        app.settings.showThirdOctaveGrid = true;
+        const auto on2 = render ();
+
+        const auto rows = view.rowRects();
+        CHECK (rows.size () == 1, "single channel row for the low-range grid test");
+        if (!rows.empty ())
+        {
+            const juce::Rectangle<int> rr = rows[0];
+            const float yBorder = (float) rr.getY()
+                                  + view.freqToY (std::sqrt (31.5 * 40.0), rr.getHeight());
+
+            int diffAbove = 0, diffBelow = 0;
+            for (int y = rr.getY(); y < rr.getBottom(); ++y)
+                for (int x = 0; x < 480; ++x)
+                {
+                    const auto a = off2.getPixelAt (x, y), b = on2.getPixelAt (x, y);
+                    if (std::abs ((int) a.getRed() - (int) b.getRed()) > 8
+                        || std::abs ((int) a.getGreen() - (int) b.getGreen()) > 8)
+                    {
+                        // A +/-4 px band around the border line itself is
+                        // ignored: that is where its anti-aliasing may land.
+                        if (y < yBorder - 4.0f)       diffAbove += 1;
+                        else if (y > yBorder + 4.0f)  diffBelow += 1;
+                    }
+                }
+            CHECK (diffAbove >= 50,
+                  "grid lines are drawn at/above the 40 Hz band");
+            CHECK (diffBelow == 0,
+                  "no grid line or label below the 40 Hz band's lower border");
+        }
+    }
+
     wav.deleteFile ();
 }
 
@@ -27370,6 +27468,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("spectral dB window", testSpectralDbWindow);
     SC_RUN_TEST ("right-drag box zoom", testRightDragZoom);
     SC_RUN_TEST ("ctx menu zoom-out-full", testCtxZoomOutFull);
+    SC_RUN_TEST ("spectral axis context actions", testSpectralAxisContextActions);
     SC_RUN_TEST ("zoom-out-full fits data", testZoomOutFullFitsData);
     SC_RUN_TEST ("axis-mode change triggers zoom fit", testAxisModeChangeTriggersFit);
     SC_RUN_TEST ("stem-sep window layout + close", testStemSepWindowLayoutAndClose);

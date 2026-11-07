@@ -157,7 +157,11 @@ void SpectralView::resized() { dirty = true; imageDirty = true; }
 
 // Build and show the right-click context menu (zoom + edit actions).
 // Called from a mouse handler, so withMousePosition() lands exactly where clicked.
+// When onFreqAxis is true (right-click on the frequency axis strip) the menu
+// gains an FFT Size submenu plus the Linear/Logarithmic toggle - the same
+// actions and shortcuts as the Spectral Controls panel.
 static void showViewContextMenu (Application& app, double clickT, double clickF,
+                                 bool onFreqAxis, int autoFftSize,
                                  const std::function<void(int)>& onAction)
 {
     if (!onAction) return;
@@ -233,6 +237,27 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
         alt.addSubMenu ("Frequency", altFreq);
         m.addSeparator();
         m.addSubMenu ("Alternative Scale", alt);
+    }
+
+    // Frequency-axis extras: an "FFT Size" submenu with the size ladder
+    // (same steps and shortcuts as Alt+Shift+= / Alt+Shift+-), an "Auto (N)"
+    // entry showing the size Auto mode would resolve to, and below that a
+    // Linear/Logarithmic toggle for the axis scale.
+    if (onFreqAxis)
+    {
+        juce::PopupMenu fftMenu;
+        fftMenu.addItem (CtxFftIncrease, "Increase\tAlt+Shift+=", true, false);
+        fftMenu.addItem (CtxFftReduce,   "Reduce\tAlt+Shift+-",  true, false);
+        juce::String autoLab = "Auto";
+        if (autoFftSize > 0)
+            autoLab = "Auto (" + juce::String (autoFftSize) + ")";
+        fftMenu.addItem (CtxFftAuto, autoLab, app.settings.fftAuto);
+        fftMenu.addSeparator();
+        fftMenu.addItem (CtxAxisLinear, "Linear",      !app.settings.logFrequency);
+        fftMenu.addItem (CtxAxisLog,    "Logarithmic",  app.settings.logFrequency);
+
+        m.addSeparator();
+        m.addSubMenu ("FFT Size", fftMenu);
     }
 
     if (const int sel = m.showMenu (juce::PopupMenu::Options().withMousePosition());
@@ -733,6 +758,7 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
             if (onAxis || onContextAction)
                 showViewContextMenu (app,
                                      xToTime ((double) dragStartX), freqAtY (dragStartY),
+                                     onAxis, autoFftSizeForCurrentZoom (),
                                      [this, onAxis] (int id)
                 {
                     using enum ContextMenuIDs;
@@ -1832,6 +1858,9 @@ void SpectralView::drawThirdOctaveGrid (juce::Graphics& g)
         for (size_t i = 0; i < centres.size(); ++i)
         {
             const double fc = centres[i];
+            // Nothing is drawn below the 40 Hz band: "40" is the lowest label
+            // and its lower border (~35.5 Hz) the lowest grid line.
+            if (fc < 40.0) continue;
             const double lo = (i > 0) ? border (centres[i - 1], fc) : fMin;
             const double hi = (i + 1 < centres.size()) ? border (fc, centres[i + 1]) : fMax;
 

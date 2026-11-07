@@ -38,6 +38,13 @@ enum ContextMenuIDs : int
     CtxAltScaleTime       = 23,   // "New" time reference: arms the ref-click flow
     CtxAltScaleFreq       = 24,   // "New" frequency reference: arms the ref-click flow
     CtxCheckHarmonicRatio = 25,   // Frequency Analysis only (Freq vs Time mode)
+    // FFT Size submenu + Linear/Logarithmic toggle (right-click on the
+    // spectrogram's frequency axis; same actions as Spectral Controls).
+    CtxFftIncrease        = 30,   // Alt+Shift+= / '+'
+    CtxFftReduce          = 31,   // Alt+Shift+-
+    CtxFftAuto            = 32,   // "Auto (N)": switch to auto FFT-size mode
+    CtxAxisLinear         = 33,
+    CtxAxisLog            = 34,
     CtxAltRefTimeBase     = 100,  // + index: edit an existing time reference
     CtxAltRefFreqBase     = 200   // + index: edit an existing frequency reference
 };
