@@ -823,10 +823,10 @@ macOS). It always shows the frame at the document time:
   played by SpectroCraft itself — the picture is silent and follows it);
 - **when stopped**: the playhead (click in the spectrogram or waveform,
   Home/End, arrows, the status-bar position field);
-- **mouse hover**: with *Window > Video Follows Mouse Hover* (on by default),
-  moving the mouse left and right over the spectrogram or waveform scrubs the
-  picture to the time under the cursor, without clicking; it returns to the
-  playhead when the mouse leaves the view.
+- **mouse hover**: with *Window > Video Follows Mouse Hover* (off by default;
+  your choice is remembered), moving the mouse left and right over the
+  spectrogram or waveform scrubs the picture to the time under the cursor,
+  without clicking; it returns to the playhead when the mouse leaves the view.
 
 *Window > Video* hides or shows it; closing it keeps it closed for that file
 until reopened from the menu. Switching to a document without a video shows
@@ -835,7 +835,24 @@ until reopened from the menu. Switching to a document without a video shows
 the picture keeps following the document time. The document remembers its
 video file, so the picture still follows after *Save As* to WAV. The frame
 time is shown in the top-left corner; phone videos are displayed with their
-rotation.
+rotation. The window has the usual minimise / maximise / close buttons.
+
+Zooming and panning work like in the spectrogram:
+
+- **mouse wheel** over the picture zooms in/out about the cursor position;
+  double-click (or *Zoom Fit* from the right-click menu) fits it again;
+- **right-drag** draws a selection box that is then zoomed to fill the view,
+  like the spectrogram's region zoom; a plain right-click shows the context
+  menu (*Zoom In / Zoom Out / Zoom Fit*, *Rotate 90° CW / CCW* — the rotation
+  is remembered per file, *Always On Top*, and *Dock Panel / Undock to Window*);
+- a **zoom bar** on the right edge of the picture shows the visible part:
+  drag its edges to zoom, drag the thumb (or click in the track) to pan;
+- left-drag pans while zoomed.
+
+*Docks into the left panel* like Tables or Markers: *Dock Panel* from the
+right-click menu moves the picture into a **Video** tab of the left panel;
+*Undock to Window* (or closing that tab) brings it back to its own window.
+The picture keeps its zoom, pan and rotation either way.
 
 Pictures are decoded with the platform's own media framework, so there is no
 extra dependency (`src/VideoFrames*.{cpp,mm}`): AVFoundation (`AVAssetReader`)
@@ -1774,7 +1791,7 @@ troubleshooting); protocol: [docs/ai-control/REPORT.md](docs/ai-control/REPORT.m
 | Trim Selection (keep only the selected range; deletes everything before and after it in one undoable step) | Ctrl+T |
 | Play / Pause toggle | Space |
 | Move playhead left / right (one percent of the visible time span per press, so zooming in shrinks the step down to exactly one sample at deep zoom) | ← / → |
-| Move playhead one sample left / right | Ctrl+← / Ctrl+→ |
+| Step the playhead by one video frame (1/60 s without a video) | Ctrl+← / Ctrl+→ |
 | Select while moving the playhead (anchor = position at first Shift press; released when Shift is let go) | Shift+← / Shift+→ |
 | Fine selection, one sample per step | Ctrl+Shift+← / Ctrl+Shift+→ |
 | Move playhead and pan both views to the start / end (keeps the current zoom span) | Home / End |
@@ -2345,7 +2362,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `VideoFrames` (`src/VideoFrames.cpp`, `src/VideoFrames_mac.mm`, `src/VideoFrames_win.cpp`) | Video picture decoding for the Video window: a per-platform frame stream (AVFoundation on macOS, Media Foundation on Windows, none on Linux), `VideoDecoder::frameAt(t)` (decode forward for small forward moves, seek otherwise; skipped frames are never converted) and `VideoFramePump`, a worker thread that serves only the latest requested time and hands frames to the message thread. |
-| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible. |
+| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, right-hand zoom bar), per-file rotation and an *Always On Top* toggle from a right-click context menu; can be docked into a left-panel tab (`VideoDockHost`) or undocked back to its own window. Polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible or docked. |
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |

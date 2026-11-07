@@ -198,6 +198,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     actionsPanel  = std::make_unique<ActionsPanel> (app);
     pythonPanel   = std::make_unique<PythonPanel> (app);
     tablesPanel   = std::make_unique<TablesPanel> (app);
+    videoDockHost = std::make_unique<VideoDockHost>();
 
     // Dedicated tables track + its separator and vertical scrollbar.
     tablesTrack   = std::make_unique<TablesTrackView> (app);
@@ -696,7 +697,8 @@ void MainWindow::setupViews()
     auto onHoverTime = [this] (double t) { videoHoverTime = t; };
     waveformView->onHoverTime = onHoverTime;
     spectralView->onHoverTime = onHoverTime;
-    videoFollowHover = app.recentStore->getIntValue ("video_follow_hover", 1) != 0;
+    // Off by default for a new user; the choice is persisted once changed.
+    videoFollowHover = app.recentStore->getIntValue ("video_follow_hover", 0) != 0;
 
     controlsPanel->onResetFreq = [this] {
         if (spectralView) { spectralView->resetFrequencyRange(); spectralView->repaint(); }
@@ -1050,6 +1052,7 @@ const char* MainWindow::panelIdFor (juce::Component* c) const
 #endif
     if (c == selectionPanel.get())      return "selection";
     if (c == drawingPanel.get())        return "drawing";
+    if (c == videoDockHost.get())       return "video";
     return nullptr;
 }
 
@@ -1111,6 +1114,7 @@ std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
 #endif
         { "selection",   "Selection",          false },
         { "drawing",     "Drawing",            false },
+        { "video",       "Video",              false },
     };
 }
 
@@ -1129,6 +1133,7 @@ juce::Component* MainWindow::panelForId (const juce::String& id) const
 #endif
     if (id == "selection")   return selectionPanel.get ();
     if (id == "drawing")     return drawingPanel.get ();
+    if (id == "video")       return videoDockHost.get ();
     return nullptr;
 }
 
@@ -1161,9 +1166,26 @@ void MainWindow::setPanelVisible (const juce::String& id, bool visible)
                     bar->removeTab (i);
                     saveLeftLayout ();
                     resized();   // an emptied group must give up its space now
+                    if (id == "video" && isVideoDocked())
+                    {
+                        // Closing the docked tab sends the picture back to its
+                        // own window instead of leaving it hidden everywhere.
+                        videoWindow->undock ();
+                        videoWindow->setVisible (true);
+                        videoWindow->toFront (false);
+                    }
                     return;
                 }
         return;
+    }
+
+    if (id == "video")
+    {
+        // The tab shows the picture itself: make sure it lives in the host
+        // before the tab is added (otherwise the tab would be empty).
+        ensureVideoWindow();
+        if (!isVideoDocked())
+            videoWindow->dockTo (*videoDockHost);
     }
 
     // Reopen: insert at the canonical position among the panels that are
@@ -1235,6 +1257,7 @@ void MainWindow::applySavedLeftLayout()
 #endif
         { "selection",   "Selection",           selectionPanel.get(),  false },
         { "drawing",     "Drawing",             drawingPanel.get(),    false },
+        { "video",       "Video",               videoDockHost.get(),   false },
     };
 
     const juce::String saved = app.recentStore->getValue ("left_tab_layout");
@@ -2376,11 +2399,26 @@ void MainWindow::ensureVideoWindow()
         // closed the window on stays closed until Window > Video reopens it.
         if (videoWindow == nullptr || (! ok && noTrack))
             return;
-        if (videoWindow->getVideoFile() == videoDismissedFor || videoWindow->isVisible())
-            return;
+        if (videoWindow->getVideoFile() == videoDismissedFor || videoWindow->isVisible()
+            || videoWindow->isDocked())
+            return;   // docked: the panel already shows it
         videoWindow->setVisible (true);
         toFront (false);   // keep the keyboard on the spectrogram
     };
+
+    // Context-menu actions that reach outside the view.
+    videoWindow->view().onToggleAlwaysOnTop = [this] (bool on)
+    {
+        app.recentStore->setValue ("video_always_on_top", on ? 1 : 0);
+        if (videoWindow != nullptr) videoWindow->setAlwaysOnTop (on);
+    };
+    videoWindow->view().isAlwaysOnTop = [this]
+    {   return app.recentStore->getIntValue ("video_always_on_top", 0) != 0; };
+    videoWindow->view().onDockToggle = [this] { setVideoDocked (!isVideoDocked()); };
+
+    // The saved layout may have the Video tab open: restore the docked state.
+    if (isPanelOpen ("video"))
+        videoWindow->dockTo (*videoDockHost);
 }
 
 void MainWindow::syncVideoWindow()
@@ -2420,6 +2458,29 @@ void MainWindow::setVideoWindowVisible (bool visible)
     videoDismissedFor = juce::File();
     videoWindow->setVisible (true);
     videoWindow->toFront (true);
+}
+
+bool MainWindow::isVideoDocked() const
+{
+    return videoWindow != nullptr && videoWindow->isDocked ();
+}
+
+void MainWindow::setVideoDocked (bool docked)
+{
+    ensureVideoWindow ();
+    if (docked)
+    {
+        setPanelVisible ("video", true);          // open the tab first, then move the view in
+        videoWindow->dockTo (*videoDockHost);
+    }
+    else
+    {
+        videoWindow->undock ();                   // back into its own window
+        setPanelVisible ("video", false);         // close the tab (no-op if already closed)
+        videoDismissedFor = juce::File();
+        videoWindow->setVisible (true);
+        videoWindow->toFront (false);
+    }
 }
 
 void MainWindow::setVideoFollowHover (bool on)
@@ -2924,7 +2985,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     // Window menu: Video window and its hover-following toggle.
     if (menuItemID == WindowVideo)
     {
-        setVideoWindowVisible (! isVideoWindowVisible ());
+        if (isVideoDocked ())
+            setVideoDocked (false);   // back to the standalone window, shown
+        else
+            setVideoWindowVisible (! isVideoWindowVisible ());
         return;
     }
     if (menuItemID == WindowVideoFollowHover)
@@ -7229,14 +7293,19 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         // shows which panels are currently open.
         const auto entries = leftPanelEntries ();
         for (size_t i = 0; i < entries.size (); ++i)
+        {
+            // "Video" gets its own item below with the window controls.
+            if (juce::String (entries[i].id) == "video") continue;
             menu.addItem ((int) (WindowPanelBase + i), entries[i].name, true,
                           isPanelOpen (entries[i].id));
+        }
 
         // Video window: the picture of a video document, following the
         // playhead / playback (and the mouse over the views when enabled).
         // Listed everywhere; disabled where pictures cannot be decoded.
         menu.addSeparator ();
-        menu.addItem (WindowVideo, "Video", sc::videoDecodingAvailable (), isVideoWindowVisible ());
+        menu.addItem (WindowVideo, "Video", sc::videoDecodingAvailable (),
+                      isVideoWindowVisible () || isVideoDocked ());
         menu.addItem (WindowVideoFollowHover, "Video Follows Mouse Hover", sc::videoDecodingAvailable (),
                       videoFollowHover);
 
@@ -7539,12 +7608,22 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     {
         // Plain / Shift arrows step by one percent of the visible time span
         // per press, so zooming in makes the steps smaller until deep zoom
-        // reaches exactly one sample; Ctrl always moves exactly one sample.
+        // reaches exactly one sample. Ctrl+arrow steps by one video frame
+        // (1/fps of the active document's picture; 1/60 s without a video);
+        // Ctrl+Shift keeps the fine one-sample step for selection.
         const bool ctrl = mods.isCommandDown() || mods.isCtrlDown();
         const double minStep = 1.0 / app.audioEngine().sampleRate();
-        const double step = ctrl ? minStep
-                                 : std::max (minStep,
-                                             (app.viewEnd - app.viewStart) / 100.0);
+        double step;
+        if (ctrl && !mods.isShiftDown())
+        {
+            const double fps = (videoWindow != nullptr && videoWindow->pump().isOpen ())
+                                   ? videoWindow->pump().info().frameRate : 0.0;
+            step = (fps > 1e-6) ? 1.0 / fps : 1.0 / 60.0;
+        }
+        else if (ctrl)
+            step = minStep;
+        else
+            step = std::max (minStep, (app.viewEnd - app.viewStart) / 100.0);
         const bool right = (keyCode == juce::KeyPress::rightKey);
 
         if (mods.isShiftDown())

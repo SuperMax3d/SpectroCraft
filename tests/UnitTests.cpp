@@ -4219,9 +4219,10 @@ static void testSpectralProbe()
 // ------------------------------------------------------------------ arrow keys / Shift+arrow selection
 // Plain Left/Right moves the playhead by one percent of the visible time span
 // per press, so zooming in shrinks the steps until deep zoom reaches exactly
-// one sample; Ctrl+Left/Right always moves exactly one sample. Holding Shift
-// extends the selection from where the shift-drag started to the current
-// playhead position (in either step size).
+// one sample; Ctrl+Left/Right steps by one video frame (1/fps of the active
+// document's picture, 1/60 s without a video); Ctrl+Shift keeps the fine
+// one-sample step. Holding Shift extends the selection from where the
+// shift-drag started to the current playhead position (in either step size).
 static void testArrowKeySelection()
 {
     const juce::File wav = makeTempFile ("arrow_keys.wav");
@@ -4270,8 +4271,9 @@ static void testArrowKeySelection()
            "plain movement does not touch the selection");
 
     CHECK (pressRight (juce::ModifierKeys::commandModifier), "Ctrl+Right is handled");
-    CHECK (std::abs (app.playhead - (0.1 + coarse () + fine)) < 1e-9,
-           "Ctrl+Right moves the playhead one sample to the right");
+    // This document has no video: the frame step falls back to 1/60 s.
+    CHECK (std::abs (app.playhead - (0.1 + coarse () + 1.0 / 60.0)) < 1e-9,
+           "Ctrl+Right moves the playhead one video frame (1/60 s without a video) to the right");
 
     // Shift+Right: anchor at the current position, extend rightwards in zoom-proportional steps.
     const double anchor = app.playhead;

@@ -1,159 +1,219 @@
 /**
  * SpectroCraft - Video window
  *
- * A separate, resizable window that shows the picture of the active
- * document's video file at the document time: the playback position while
- * playing, otherwise the time under the mouse over the spectrogram /
- * waveform (when "Video Follows Mouse Hover" is on) or the playhead. The
- * sound itself is the document audio played by the AudioEngine, so the
- * picture is a silent slave of that time and stays in step with edits of
- * the selection, the playhead and the transport.
+ * A separate resizable window showing the picture of a video file in step
+ * with its audio: it polls MainWindow::videoTimeNow() at 60 Hz and asks its
+ * own sc::VideoFramePump for "the frame displayed at t". The pump decodes on
+ * a worker thread; this class only displays.
+ *
+ * The picture can also be DOCKED into the left panel (a tab like Tables):
+ * dockTo()/undock() move the single VideoView between the window and the
+ * dock host, so zoom/pan/rotation state survives the switch. While docked
+ * the standalone window stays hidden but keeps polling frames.
  */
 #pragma once
 
 #include <JuceHeader.h>
 
+#include "ScrollBars.h"
 #include "VideoFrames.h"
 
-#include <functional>
-#include <map>
-
-/** Small round-cornered icon button drawn over the picture (rotate, zoom). */
-class VideoToolButton : public juce::Button
-{
-public:
-    enum class Icon { RotateCW, ZoomIn, ZoomOut };
-    VideoToolButton (const juce::String& name, Icon i);
-    void paintButton (juce::Graphics& g, bool highlighted, bool down) override;
-
-private:
-    Icon icon;
-};
-
-/** Paints one video frame letterboxed (with the track's display rotation
-    plus the user's), the frame time and a status line. The corner buttons
-    rotate the picture by 90 degrees and zoom in / out; a drag pans the
-    zoomed picture and a double-click fits it again. */
+//==============================================================================
+/** The picture of a video file, letterboxed and centred in its plot area.
+    Zoom/pan state is per view; the frame itself comes from the owner's
+    VideoFramePump (one decoder shared by window mode and docked mode). */
 class VideoView : public juce::Component
 {
 public:
-    static constexpr float kZoomStep = 1.25f;
-    static constexpr float kMaxZoom = 8.0f;
+    static constexpr float kZoomStep = 1.25f;   // one wheel notch / menu step
+    static constexpr float kMaxZoom = 8.0f;     // hard zoom ceiling
+
+    /** Context-menu item ids (handleContextMenuId). */
+    enum { kMenuZoomIn = 1, kMenuZoomOut, kMenuZoomFit,
+           kMenuRotateCW, kMenuRotateCCW, kMenuAlwaysOnTop, kMenuDock };
 
     VideoView();
 
-    /** trackRotation: the file's own display rotation (0/90/180/270). */
-    void setFrame (const sc::VideoFrame& f, int trackRotation);
+    void setFrame (const sc::VideoFrame& frame, int trackRotationDeg);
+    /** Drops the picture (a new file is being opened). */
     void clearFrame();
-    /** Centered message shown instead of (or, when no frame, as) the picture. */
-    void setMessage (const juce::String& m);
-    /** Small notice at the bottom (e.g. audio and video lengths differ). */
-    void setNotice (const juce::String& n);
-
-    const juce::String& getMessage() const noexcept { return message; }
-    const juce::String& getNotice() const noexcept { return notice; }
-    /** Where the picture is drawn (letterboxed, zoomed, panned), empty
-        without a frame. */
-    juce::Rectangle<float> pictureBounds() const;
-
-    // ---- Corner buttons (also callable directly) ----
-    void rotateClockwise();
-    void zoomIn();
-    void zoomOut();
-    /** Back to the whole picture (zoom 1, no pan). */
-    void resetZoom();
-    float getZoom() const noexcept { return zoom; }
-    juce::Point<float> getPan() const noexcept { return pan; }
-    /** Offset of the zoomed picture from the centre, clamped so no empty band
-        opens where there is picture left (what a drag does). */
-    void setPan (juce::Point<float> p);
-    /** Rotation chosen with the button, on top of the track's (0..270). */
-    int getUserRotation() const noexcept { return userRotation; }
+    /** Sets the user's rotation directly (per-file restore); multiples of 90. */
     void setUserRotation (int degrees);
-    /** Track rotation + user rotation, 0/90/180/270. */
-    int totalRotation() const noexcept { return (trackRotation + userRotation) % 360; }
-    /** Called when the rotation button changes the user rotation. */
-    std::function<void (int)> onUserRotationChanged;
-    /** The view was resized or zoomed: the decode size may need to change. */
-    std::function<void()> onDisplaySizeChanged;
-    /** Longest side the picture can take on screen, in logical pixels
-        (view size x zoom): what the decoder must deliver for a sharp image. */
+    /** Long side in logical pixels the current zoom needs decoded. */
     int neededLongSide() const;
 
-    VideoToolButton& rotateButton() noexcept { return rotateBtn; }
-    VideoToolButton& zoomInButton() noexcept { return zoomInBtn; }
-    VideoToolButton& zoomOutButton() noexcept { return zoomOutBtn; }
+    const juce::Image* image() const noexcept { return &frame_.image; }
+    double time() const noexcept { return frame_.time; }
+    /** Total clockwise rotation: the track's plus the user's. */
+    int totalRotation() const noexcept { return (trackRot_ + userRotation_) % 360; }
+
+    // Zoom / pan ----------------------------------------------------------
+    /** The picture now: fitted bounds scaled by zoom_ about their centre and
+        shifted by pan_. Empty when there is no frame. */
+    juce::Rectangle<float> pictureBounds() const;
+    float getZoom() const noexcept { return zoom_; }
+    juce::Point<float> getPan() const noexcept { return pan_; }
+    void setPan (juce::Point<float> p);   // clamped to the picture edges
+    void zoomIn();                        // one step, keeps the centre fixed
+    void zoomOut();                       // one step; never below fit
+    void resetZoom();                     // back to fit (double-click)
+    /** Multiplies the zoom by factor so that the image point under `at`
+        stays put (mouse wheel). */
+    void zoomAt (juce::Point<float> at, float factor);
+    /** Zooms so the dragged view rectangle fills the plot area (right-drag
+        box zoom; both axes, centred on the region). */
+    void zoomToRegion (const juce::Rectangle<float>& viewRect);
+
+    // Rotation ------------------------------------------------------------
+    int getUserRotation() const noexcept { return userRotation_; }
+    void rotateClockwise();              // +90 degrees
+    void rotateCounterClockwise();       // -90 degrees
+
+    /** The right-hand zoom/pan bar (like the spectrogram's frequency bar):
+        the thumb shows the visible part of the picture height; dragging its
+        centre pans, dragging an edge zooms. */
+    ValueScrollBar* getZoomBar() noexcept { return &zoomBar_; }
+
+    // Context menu --------------------------------------------------------
+    /** Actions that reach outside the view (set by the owner); a missing
+        callback hides its menu item. */
+    std::function<void (bool)> onToggleAlwaysOnTop;
+    std::function<bool()> isAlwaysOnTop;
+    std::function<void()> onDockToggle;
+    bool docked = false;                 // menu label: "Dock Panel" / "Undock"
+
+    /** The view's size changed: the owner may want to re-decode at a new size. */
+    std::function<void()> onDisplaySizeChanged;
+    /** User rotation in degrees; the owner saves it per file. */
+    std::function<void (int)> onUserRotationChanged;
+    /** Runs one context-menu item (the popup and the tests both call this). */
+    void handleContextMenuId (int id);
 
     void paint (juce::Graphics& g) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseDrag (const juce::MouseEvent& e) override;
+    void mouseUp (const juce::MouseEvent& e) override;
     void mouseDoubleClick (const juce::MouseEvent& e) override;
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+
+    void setMessage (const juce::String& m);
+    void setNotice (const juce::String& n);
+    juce::String getMessage() const noexcept { return message_; }
+    juce::String getNotice() const noexcept { return notice_; }
 
 private:
-    juce::Rectangle<float> fittedBounds() const;   // zoom 1, centred
-    void setZoomKeepingCentre (float z);
-    void clampPan();
-    void updateButtons();
+    // The picture area: everything except the right-hand zoom/pan bar.
+    static constexpr int kBarWidth = 14;
+    juce::Rectangle<float> plotArea() const
+    {
+        const auto lb = getLocalBounds();
+        return { 0.0f, 0.0f,
+                 (float) std::max (1, lb.getWidth() - kBarWidth),
+                 (float) lb.getHeight() };
+    }
 
-    sc::VideoFrame frame;
-    int trackRotation = 0, userRotation = 0;
-    float zoom = 1.0f;
-    juce::Point<float> pan, panAtDragStart;
-    juce::String message, notice;
-    VideoToolButton rotateBtn { "Rotate 90 degrees", VideoToolButton::Icon::RotateCW };
-    VideoToolButton zoomInBtn { "Zoom in", VideoToolButton::Icon::ZoomIn };
-    VideoToolButton zoomOutBtn { "Zoom out", VideoToolButton::Icon::ZoomOut };
+    /** The frame at zoom 1: aspect kept, centred in the plot area. */
+    juce::Rectangle<float> fittedBounds() const;
+
+    void clampPan();
+    void syncZoomBar();                  // thumb <- current zoom/pan
+    void applyZoomFromBar (double lo, double hi);   // zoom/pan <- bar window
+    void showContextMenu (const juce::Point<int>& at);
+
+    sc::VideoFrame frame_;              // latest decoded picture
+    int trackRot_ = 0;                   // clockwise rotation stored in the file
+    int userRotation_ = 0;               // extra clockwise turns chosen by the user
+    float zoom_ = 1.0f;                  // 1 = fit to the view
+    juce::Point<float> pan_;             // picture offset from centre, clamped
+
+    juce::String message_;               // "No video for this document" / error
+    juce::String notice_;                 // audio/video length mismatch warning
+
+    ValueScrollBar zoomBar_;             // right-hand zoom/pan bar
+    double barRangeH_ = -1.0;            // last range passed to the bar
+
+    bool rightDrag_ = false;             // right-button box-zoom drag in flight
+    juce::Point<float> rightStart_, rightNow_;
+    juce::Point<float> dragStart_;        // left-button pan drag start (empty = none)
+
+    JUCE_DECLARE_NON_COPYABLE (VideoView)
 };
 
+//==============================================================================
+/** Tab host for a docked video view: keeps its single child filling itself. */
+class VideoDockHost : public juce::Component
+{
+public:
+    void attach (juce::Component* c)
+    {
+        if (c != nullptr && getNumChildComponents() == 0) addChildComponent (c);
+        resized();
+    }
+    juce::Component* child() const noexcept
+    {   return getNumChildComponents() > 0 ? getChildComponent (0) : nullptr; }
+
+private:
+    void resized() override
+    {
+        for (auto* c : getChildren()) c->setBounds (getLocalBounds());
+    }
+};
+
+//==============================================================================
+/** The standalone Video window. Owns the frame pump and polls the document
+    time from getTime(); the picture is shown in its VideoView, which can be
+    moved into a dock host while this window stays hidden (docked mode). */
 class VideoWindow : public juce::DocumentWindow,
                     private juce::Timer
 {
 public:
-    /** timeSource gives the document time to show (seconds); it is polled
-        at 60 Hz while the window is visible. */
-    explicit VideoWindow (std::function<double()> timeSource);
+    explicit VideoWindow (std::function<double()> getTime);
     ~VideoWindow() override;
 
-    /** Shows this file's picture (empty File = the active document has no
-        video). Re-setting the current file is a no-op. displayName is the
-        document name shown in the title. */
-    void setVideoFile (const juce::File& f, const juce::String& displayName);
-    const juce::File& getVideoFile() const noexcept { return videoFile; }
+    void setVideoFile (const juce::File& file, const juce::String& docName);
+    /** Audio length in seconds; a mismatch with the video track raises a
+        notice on the picture. */
+    void setAudioDuration (double secs);
 
-    /** Length of the document audio, to flag a mismatch with the video
-        (after edits that changed the duration). <= 0 = unknown. */
-    void setAudioDuration (double seconds);
-
-    /** Message thread: the file set by setVideoFile() finished opening.
-        ok = a picture can be shown; otherwise noTrack tells whether the file
-        merely has no video track (nothing worth showing). */
-    std::function<void (bool ok, bool noTrack)> onVideoOpened;
-    /** The user closed the window with its close button. */
-    std::function<void()> onUserClosed;
-    /** Key presses the window does not use (transport shortcuts). */
-    std::function<bool (const juce::KeyPress&)> onKeyPressed;
-
-    sc::VideoFramePump& pump() noexcept { return framePump; }
     VideoView& view() noexcept { return videoView; }
-    /** Polls the time source once (tests; the timer does it at 60 Hz). */
+    sc::VideoFramePump& pump() noexcept { return framePump; }
+    juce::File getVideoFile() const noexcept { return currentFile; }
+    /** Asks the pump for the frame at the owner's current time. */
     void pollTime();
 
+    // Docking: moves the single VideoView between this window and a host.
+    void dockTo (VideoDockHost& host);
+    void undock();
+    bool isDocked() const noexcept { return docked_; }
+    void setDocked (bool d);
+
+    /** The user closed the window (X); tests call it directly. */
     void closeButtonPressed() override;
-    bool keyPressed (const juce::KeyPress& key) override;
-    void visibilityChanged() override;
+
+    /** Called by the owner when the user closes the window (X). */
+    std::function<void()> onUserClosed;
+    /** Transport keys typed while this window has focus are forwarded here. */
+    std::function<bool (const juce::KeyPress&)> onKeyPressed;
+    /** The file finished opening: ok, and whether it simply had no picture. */
+    std::function<void (bool ok, bool noTrack)> onVideoOpened;
 
 private:
     void timerCallback() override;
-    void updateNotice();
-    void updateDecodeSize();
+    void visibilityChanged() override;
     void moved() override;
+    bool keyPressed (const juce::KeyPress& key) override;
 
-    std::function<double()> timeSource;
-    std::map<juce::String, int> rotationByFile;   // user rotation per video, this session
-    sc::VideoFramePump framePump;
+    void updateNotice();                 // audio/video length mismatch warning
+    void updateDecodeSize();             // decode at the shown size, not 4K
+
+    std::function<double()> getTime_;
     VideoView videoView;
-    juce::File videoFile;
-    juce::String docName;
-    double audioDuration = 0.0;
+    sc::VideoFramePump framePump;
+    juce::File currentFile;
+    double audioDuration_ = -1.0;        // seconds, -1 = unknown
+    bool docked_ = false;
+    std::map<juce::String, int> rotationByFile;   // user rotation per video, this session
+
+    JUCE_DECLARE_NON_COPYABLE (VideoWindow)
 };

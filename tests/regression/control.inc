@@ -82,11 +82,13 @@ static bool ctlStepParams (const juce::String& type, juce::var& params, juce::St
             skipWhy = juce::String (model) + " not installed";
             return false;
         }
+        // Set the params first: step.validate below still checks them even
+        // when the run itself is skipped on this platform/build.
+        params = scctl::obj ({ { "modelId", model }, { "autoDownload", false } });
+        if (type == kNoiseSuppress) scctl::set (params, "device", "auto");
 #if defined(_MSC_VER) && defined(_DEBUG)
         if (type == kNoiseSuppress) { skipWhy = "OpenVINO needs a Release build on Windows"; return false; }
 #endif
-        params = scctl::obj ({ { "modelId", model }, { "autoDownload", false } });
-        if (type == kNoiseSuppress) scctl::set (params, "device", "auto");
 #else
         params = scctl::obj ({ { "modelId", type == kTranscribe ? "whisper-base" : "denseunet" } });
 #endif

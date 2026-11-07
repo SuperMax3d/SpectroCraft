@@ -328,8 +328,9 @@ static void testVideoViewLayout()
     fr.time = 0.0;
     v.setFrame (fr, 0);
     auto r = v.pictureBounds();
-    CHECK (std::abs (r.getWidth() - 300.0f) < 0.5f && std::abs (r.getHeight() - 200.0f) < 0.5f
-           && std::abs (r.getCentreY() - 150.0f) < 0.5f, "video view: 3:2 frame letterboxed in a square");
+    // The plot area is the view minus the 14 px right-hand zoom/pan bar.
+    CHECK (std::abs (r.getWidth() - 286.0f) < 0.5f && std::abs (r.getHeight() - 190.67f) < 0.5f
+           && std::abs (r.getCentreY() - 150.0f) < 0.5f, "video view: 3:2 frame letterboxed in the plot area");
     v.setFrame (fr, 90);
     r = v.pictureBounds();
     CHECK (std::abs (r.getWidth() - 200.0f) < 0.5f && std::abs (r.getHeight() - 300.0f) < 0.5f,
@@ -337,56 +338,139 @@ static void testVideoViewLayout()
 
     v.setFrame (fr, 0);
 
-    // Corner buttons: hidden without a picture, rotate by 90 degrees, zoom.
-    {
-        VideoView e;
-        e.setSize (300, 300);
-        CHECK (!e.rotateButton().isVisible() && !e.zoomInButton().isVisible(),
-               "video view: no buttons without a picture");
-    }
-    CHECK (v.rotateButton().isVisible() && v.zoomInButton().isVisible() && v.zoomOutButton().isVisible(),
-           "video view: rotate / zoom buttons shown with a picture");
-    CHECK (v.rotateButton().getRight() <= 300 && v.rotateButton().getY() < 40
-           && v.zoomInButton().getRight() > v.rotateButton().getRight(),
-           "video view: buttons in the top-right corner");
+    // Rotation and zoom are driven by methods (context menu, wheel, keys).
     int notified = -1;
     v.onUserRotationChanged = [&] (int deg) { notified = deg; };
-    v.rotateButton().onClick();
+    v.rotateClockwise();
     r = v.pictureBounds();
-    CHECK (v.getUserRotation() == 90 && notified == 90, "video view: rotate button turns by 90 degrees");
+    CHECK (v.getUserRotation() == 90 && notified == 90, "video view: rotate clockwise turns by 90 degrees");
     CHECK (std::abs (r.getWidth() - 200.0f) < 0.5f && std::abs (r.getHeight() - 300.0f) < 0.5f,
            "video view: rotated picture refits (portrait)");
-    v.rotateButton().onClick(); v.rotateButton().onClick(); v.rotateButton().onClick();
+    v.rotateClockwise(); v.rotateClockwise(); v.rotateClockwise();
     CHECK (v.getUserRotation() == 0, "video view: four turns = back to 0");
+    v.rotateCounterClockwise();
+    CHECK (v.getUserRotation() == 270 && notified == 270, "video view: counter-clockwise wraps to 270");
+    v.rotateClockwise();
+    CHECK (v.getUserRotation() == 0, "video view: clockwise and counter-clockwise cancel");
     v.setFrame (fr, 90);
     CHECK (v.totalRotation() == 90, "video view: the track rotation adds to the user's");
     v.setFrame (fr, 0);
 
-    CHECK (!v.zoomOutButton().isEnabled(), "video view: zoom out disabled at fit");
-    v.zoomOutButton().onClick();
+    // Zoom in / out by one step; never below fit, capped at kMaxZoom.
+    CHECK (std::abs (v.getZoom() - 1.0f) < 1e-6f, "video view: starts at fit");
+    v.zoomOut();
     CHECK (v.getZoom() == 1.0f, "video view: zoom never goes below fit");
-    v.zoomInButton().onClick();
+    v.zoomIn();
     r = v.pictureBounds();
     CHECK (std::abs (v.getZoom() - VideoView::kZoomStep) < 1e-6f
-           && std::abs (r.getWidth() - 300.0f * VideoView::kZoomStep) < 0.5f,
+           && std::abs (r.getWidth() - 286.0f * VideoView::kZoomStep) < 0.5f,
            "video view: zoom in enlarges the picture by one step");
-    CHECK (v.zoomOutButton().isEnabled(), "video view: zoom out enabled once zoomed");
-    for (int i = 0; i < 30; ++i) v.zoomInButton().onClick();
-    CHECK (v.getZoom() == VideoView::kMaxZoom && !v.zoomInButton().isEnabled(), "video view: zoom capped");
+    for (int i = 0; i < 30; ++i) v.zoomIn();
+    CHECK (v.getZoom() == VideoView::kMaxZoom, "video view: zoom capped");
 
-    // Pan (drag) stays inside the picture: at x8 the 2400x1600 picture can
-    // move 1050 px sideways and 650 px vertically, not more.
+    // Pan (drag) stays inside the picture: at x8 the 2288x1525 picture can
+    // move 1001 px sideways and ~613 px vertically in a 286x300 plot area.
     v.setPan ({ 5000.0f, -5000.0f });
-    CHECK (std::abs (v.getPan().x - 1050.0f) < 0.5f && std::abs (v.getPan().y + 650.0f) < 0.5f,
+    CHECK (std::abs (v.getPan().x - 1001.0f) < 0.5f && std::abs (v.getPan().y + 612.7f) < 0.5f,
            "video view: pan clamped to the picture edges");
     r = v.pictureBounds();
     CHECK (std::abs (r.getX()) < 0.5f && std::abs (r.getBottom() - 300.0f) < 0.5f,
            "video view: clamped pan puts the picture edge on the view edge");
-    for (int i = 0; i < 40; ++i) v.zoomOutButton().onClick();
+    for (int i = 0; i < 40; ++i) v.zoomOut();
     CHECK (v.getZoom() == 1.0f && v.getPan().isOrigin(), "video view: back at fit, no pan left");
-    v.zoomInButton().onClick();
     v.resetZoom();
     CHECK (v.getZoom() == 1.0f, "video view: double-click / reset fits the picture again");
+
+    // Mouse wheel zooms about the cursor position.
+    {
+        juce::MouseWheelDetails wd;
+        wd.deltaY = 1.0f;
+        v.mouseWheelMove (mkMouse (v, 143, 150, {}), wd);
+        CHECK (std::abs (v.getZoom() - VideoView::kZoomStep) < 1e-6f && v.getPan().isOrigin(),
+               "video view: wheel up at the centre zooms in");
+        // Off-centre: the point under the cursor stays put (horizontal axis;
+        // at x1.25 the picture is still shorter than the plot area vertically).
+        v.resetZoom();
+        v.mouseWheelMove (mkMouse (v, 100, 150, {}), wd);
+        CHECK (std::abs (v.getPan().x - 10.75f) < 0.5f && std::abs (v.getPan().y) < 0.5f,
+               "video view: wheel zoom keeps the cursor point fixed");
+        v.resetZoom();
+    }
+
+    // Right-drag box zoom: the dragged region fills the plot area, centred.
+    {
+        const juce::ModifierKeys rmb (juce::ModifierKeys::rightButtonModifier);
+        v.mouseDown (mkMouse (v, 60, 80, rmb));
+        v.mouseDrag (mkMouse (v, 150, 140, rmb));
+        v.mouseUp   (mkMouse (v, 200, 200, rmb));
+        const float z = v.getZoom();
+        CHECK (std::abs (z - 286.0f / 140.0f) < 1e-3f, "video view: right-drag zooms to the region");
+        const auto P = v.pictureBounds();
+        // The dragged region's centre (130, 85.33 in fitted coords) now sits
+        // at the plot-area centre (143, 150).
+        CHECK (std::abs ((P.getX() + 130.0f * z) - 143.0f) < 1.0f
+               && std::abs ((P.getY() + 85.333f * z) - 150.0f) < 1.0f,
+               "video view: right-drag region centred in the plot area");
+        v.resetZoom();
+
+        // A plain right-click (no significant movement) does not zoom.
+        v.mouseDown (mkMouse (v, 60, 80, rmb));
+        v.mouseUp   (mkMouse (v, 61, 81, rmb));
+        CHECK (std::abs (v.getZoom() - 1.0f) < 1e-6f && v.getPan().isOrigin(),
+               "video view: plain right-click leaves the zoom alone");
+    }
+
+    // The right-hand bar mirrors the vertical zoom/pan and drives it back.
+    {
+        auto* bar = v.getZoomBar();
+        CHECK (bar->isVisible(), "video view: zoom bar shown with a picture");
+        const double Fh = 190.667;   // fitted height of the 96x64 frame in a 286x300 plot area
+        CHECK (std::abs ((double) bar->thumbRect().getY()) < 1.0
+               && std::abs ((double) bar->thumbRect().getBottom() - bar->getHeight()) < 1.0,
+               "video view: at fit the thumb fills the track");
+
+        const double lo = 0.25 * Fh, hi = 0.75 * Fh;
+        bar->applyWindow (lo, hi);
+        CHECK (std::abs (v.getZoom() - 300.0 / (hi - lo)) < 1e-3f,
+               "video view: the bar window sets the zoom");
+        // The visible fitted range is [lo, hi]: with this geometry that puts
+        // pan.y at zero (the picture's centre stays on screen).
+        CHECK (std::abs (v.getPan().y) < 0.5f,
+               "video view: the bar window centres its midpoint");
+
+        const double dx = 10.0;
+        const float pyBefore = v.getPan().y;
+        bar->applyWindow (lo + dx, hi + dx);
+        CHECK (std::abs (v.getZoom() - 300.0 / (hi - lo)) < 1e-3f
+               && std::abs (v.getPan().y - (pyBefore - dx * v.getZoom())) < 0.5f,
+               "video view: dragging the thumb pans without changing the zoom");
+    }
+
+    // Context-menu actions run through one handler (the popup and the tests).
+    {
+        int aot = -1;
+        int dockCalls = 0;
+        v.onToggleAlwaysOnTop = [&] (bool on) { aot = on ? 1 : 0; };
+        v.isAlwaysOnTop = [] { return false; };
+        v.handleContextMenuId (VideoView::kMenuAlwaysOnTop);
+        CHECK (aot == 1, "video view: context menu turns always-on-top on");
+        v.isAlwaysOnTop = [] { return true; };
+        v.handleContextMenuId (VideoView::kMenuAlwaysOnTop);
+        CHECK (aot == 0, "video view: context menu turns it off when already on");
+        v.onDockToggle = [&] { ++dockCalls; };
+        v.handleContextMenuId (VideoView::kMenuDock);
+        CHECK (dockCalls == 1, "video view: context menu asks the owner to dock/undock");
+        v.resetZoom();
+        v.handleContextMenuId (VideoView::kMenuRotateCW);
+        CHECK (v.getUserRotation() == 90, "video view: context menu rotates clockwise");
+        v.handleContextMenuId (VideoView::kMenuRotateCCW);
+        CHECK (v.getUserRotation() == 0, "video view: context menu rotates counter-clockwise");
+        v.handleContextMenuId (VideoView::kMenuZoomIn);
+        CHECK (std::abs (v.getZoom() - VideoView::kZoomStep) < 1e-6f,
+               "video view: context menu zooms in");
+        v.handleContextMenuId (VideoView::kMenuZoomFit);
+        CHECK (v.getZoom() == 1.0f && v.getPan().isOrigin(), "video view: context menu fits the picture");
+    }
 
     // The picture lands where pictureBounds says (rotation 0, opaque red).
     fr.image.clear (fr.image.getBounds(), juce::Colours::red);
@@ -465,8 +549,15 @@ static void testVideoWindowFollowsDocument()
     CHECK (showAt (25), "video window: picture follows the playhead (frame 25)");
 
     // Hover over the spectrogram: the picture follows the mouse, then
-    // returns to the playhead once it leaves.
+    // returns to the playhead once it leaves. The option is off by default
+    // for a new user; this test turns it on from the Window menu first.
     {
+        const juce::StringArray names = win->getMenuBarNames();
+        const int wIdx = names.indexOf ("Window");
+        CHECK (!win->isVideoFollowingHover(), "video window: hover follow off by default");
+        win->menuItemSelected (MainWindow::WindowVideoFollowHover, wIdx);
+        CHECK (win->isVideoFollowingHover(), "video window: hover follow on from the menu");
+
         hover (7 / 25.0 + 0.02);
         CHECK (std::abs (win->videoTimeNow() - 0.30) < 1e-9, "video window: hover time used");
         CHECK (showAt (7), "video window: picture follows the hover (frame 7)");
@@ -474,8 +565,6 @@ static void testVideoWindowFollowsDocument()
         CHECK (showAt (25), "video window: back to the playhead when the mouse leaves");
 
         // Turned off from the Window menu: hover is ignored (and persisted).
-        const juce::StringArray names = win->getMenuBarNames();
-        const int wIdx = names.indexOf ("Window");
         win->menuItemSelected (MainWindow::WindowVideoFollowHover, wIdx);
         CHECK (!win->isVideoFollowingHover(), "video window: hover toggle off");
         {
@@ -493,6 +582,27 @@ static void testVideoWindowFollowsDocument()
         CHECK (!vw->isVisible(), "video window: Window > Video hides it");
         win->menuItemSelected (MainWindow::WindowVideo, wIdx);
         CHECK (vw->isVisible(), "video window: Window > Video shows it again");
+
+        // Docked into the left panel like Tables; undocked back to its own window.
+        CHECK (!win->isPanelOpen ("video"), "video dock: tab closed by default");
+        win->setVideoDocked (true);
+        CHECK (win->isPanelOpen ("video") && !vw->isVisible(),
+               "video dock: in the panel, standalone window hidden");
+        CHECK (vw->view().getParentComponent() == win->getVideoDockHost(),
+               "video dock: the view lives in the host component");
+        win->setVideoDocked (false);
+        CHECK (!win->isPanelOpen ("video") && vw->isVisible(),
+               "video dock: undocked back to its own window");
+
+        // Opening the Video tab from the Window menu docks it too; closing
+        // the tab brings the picture back to its own window.
+        win->setPanelVisible ("video", true);
+        CHECK (win->isPanelOpen ("video") && !vw->isVisible()
+               && vw->view().getParentComponent() == win->getVideoDockHost(),
+               "video dock: opening the tab docks the picture");
+        win->setPanelVisible ("video", false);
+        CHECK (!win->isPanelOpen ("video") && vw->isVisible(),
+               "video dock: closing the tab brings back its own window");
     }
 
     // An edit that changes the length raises the mismatch notice.
@@ -502,9 +612,9 @@ static void testVideoWindowFollowsDocument()
     CHECK (vw->view().getNotice().isEmpty(), "video window: notice cleared when lengths agree");
 
     // Rotation chosen for this movie survives a document switch; zoom resets.
-    vw->view().rotateButton().onClick();
-    vw->view().zoomInButton().onClick();
-    CHECK (vw->view().getUserRotation() == 90, "video window: rotated by the button");
+    vw->view().rotateClockwise();
+    vw->view().zoomIn();
+    CHECK (vw->view().getUserRotation() == 90, "video window: rotated via the context-menu action");
 
     // Switching to the wav: the window stays and says there is no video.
     app.activate (0);

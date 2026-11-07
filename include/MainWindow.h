@@ -19,6 +19,7 @@
 
 class StemSeparationWindow;   // defined in StemSeparation.h
 class VideoWindow;            // defined in VideoWindow.h
+class VideoDockHost;          // defined in VideoWindow.h
 class SuperResolutionWindow;  // defined in SuperResolution.h
 
 /** Content of the "Content Aware Time Scale" dialog: a mode drop-down
@@ -163,6 +164,11 @@ public:
     void setVideoWindowVisible (bool visible);
     bool isVideoWindowVisible() const;
     VideoWindow* getVideoWindow() const noexcept { return videoWindow.get(); }
+    /** Docks the picture into the left panel (a tab like Tables) or back
+        into its own window. Docking keeps one decoder and one zoom/pan state. */
+    void setVideoDocked (bool docked);
+    bool isVideoDocked() const;
+    VideoDockHost* getVideoDockHost() const noexcept { return videoDockHost.get(); }
     /** Window > Video Follows Mouse Hover (persisted). */
     void setVideoFollowHover (bool on);
     bool isVideoFollowingHover() const noexcept { return videoFollowHover; }
@@ -628,10 +634,12 @@ private:
     std::unique_ptr<FileListPanel> fileListPanel;
     std::unique_ptr<FFTAnalysisView> fftPanel;
 
-    // Video window: created on first use, see syncVideoWindow().
+    // Video window: created on first use, see syncVideoWindow(). The dock host
+    // is the left-panel tab that holds the view while docked.
     std::unique_ptr<VideoWindow> videoWindow;
+    std::unique_ptr<VideoDockHost> videoDockHost;
     double videoHoverTime = -1.0;      // time under the mouse, -1 = not over a view
-    bool videoFollowHover = true;
+    bool videoFollowHover = false;   // off by default for a new user
     juce::File videoDismissedFor;      // closed by the user while showing this file
     void ensureVideoWindow();          // creates + wires the window once
     std::unique_ptr<SpectralControlsPanel> controlsPanel;
