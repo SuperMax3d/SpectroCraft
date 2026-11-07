@@ -611,7 +611,8 @@ static void testVideoWindowFollowsDocument()
     vw->setAudioDuration (2.0);
     CHECK (vw->view().getNotice().isEmpty(), "video window: notice cleared when lengths agree");
 
-    // Rotation chosen for this movie survives a document switch; zoom resets.
+    // Per-track picture adjustments survive a document switch: they are
+    // stored with the video track in the document's metadata.
     vw->view().rotateClockwise();
     vw->view().zoomIn();
     CHECK (vw->view().getUserRotation() == 90, "video window: rotated via the context-menu action");
@@ -623,7 +624,8 @@ static void testVideoWindowFollowsDocument()
     app.activate (1);
     CHECK (vw->getVideoFile() == f, "video window: back to the movie");
     CHECK (vw->view().getUserRotation() == 90, "video window: the movie keeps its rotation");
-    CHECK (vw->view().getZoom() == 1.0f, "video window: zoom starts at fit again");
+    CHECK (std::abs (vw->view().getZoom() - VideoView::kZoomStep) < 1e-6f,
+           "video window: the track's zoom is restored with it");
 
     // Closed by the user: switching documents does not bring it back.
     vw->closeButtonPressed();
@@ -638,6 +640,153 @@ static void testVideoWindowFollowsDocument()
     store.deleteFile();
 }
 
+// The tracks panel: ruler + one coloured band per video, drag to offset,
+// wheel zoom about the cursor, click to select, context-menu ids.
+static void testVideoTracksPanelHeadless()
+{
+    VideoTracksPanel p;
+    p.setSize (300, 20 + 4 * 26);   // ruler plus four rows
+
+    // The view fits the audio length.
+    p.setAudioDuration (10.0);
+    const auto r0 = p.getViewRange();
+    CHECK (std::abs (r0.getStart()) < 1e-9 && std::abs (r0.getEnd() - 10.0) < 1e-9,
+           "tracks panel: the view fits the audio length");
+
+    // Two tracks; the fit covers both the audio and the second track's end.
+    VideoTracksPanel::Track a, b;
+    a.file = juce::File ("/tmp/a.mp4"); a.offsetSecs = 0.0; a.durationSecs = 5.0;
+    b.file = juce::File ("/tmp/b.avi"); b.offsetSecs = 7.0; b.durationSecs = 3.0;
+    p.setTracks ({ a, b });
+    CHECK (std::abs (p.getViewRange().getEnd() - 10.0) < 1e-9,
+           "tracks panel: the fit covers audio and tracks");
+
+    // Hit-testing: inside each band, on the ruler, in the gap between them.
+    const int xa = (int) p.xForTime (2.5);   // inside A [0, 5)
+    const int xb = (int) p.xForTime (8.0);   // inside B [7, 10)
+    const int xg = (int) p.xForTime (6.0);   // gap: neither band
+    CHECK (p.trackIndexAt ({ xa, 20 + 13 }) == 0, "tracks panel: hit in the first band");
+    CHECK (p.trackIndexAt ({ xb, 20 + 26 + 13 }) == 1, "tracks panel: hit in the second band");
+    CHECK (p.trackIndexAt ({ xa, 10 }) == -1, "tracks panel: the ruler is not a track");
+    CHECK (p.trackIndexAt ({ xg, 20 + 13 }) == -1, "tracks panel: the gap between bands is empty");
+
+    // Clicking selects; clicking the ruler clears.
+    int sel = -99;
+    p.onSelectTrack = [&] (int i) { sel = i; };
+    p.mouseDown (mkMouse (p, xa, 20 + 13, {}));
+    CHECK (sel == 0 && p.getSelected() == 0, "tracks panel: a click selects the track");
+    p.mouseDown (mkMouse (p, xa, 10, {}));
+    CHECK (sel == -1 && p.getSelected() == -1, "tracks panel: a ruler click clears it");
+
+    // Dragging a band moves its offset by the dragged time.
+    double off = -99; int offIdx = -99;
+    p.onOffsetChanged = [&] (int i, double o) { offIdx = i; off = o; };
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    const int xEnd = (int) p.xForTime (4.5);
+    p.mouseDown (mkMouse (p, xa, 20 + 13, lmb));
+    p.mouseDrag (mkMouse (p, xEnd, 20 + 13, lmb));
+    p.mouseUp   (mkMouse (p, xEnd, 20 + 13, lmb));
+    CHECK (offIdx == 0 && std::abs (off - 2.0) < 0.05, "tracks panel: dragging moves the offset");
+
+    // The wheel zooms about the cursor; the time under it stays put.
+    {
+        juce::MouseWheelDetails wd;
+        wd.deltaY = 1.0f;
+        const double tBefore = p.timeAtX ((float) xa);
+        p.mouseWheelMove (mkMouse (p, xa, 20 + 13, {}), wd);
+        CHECK (p.getViewRange().getLength() < 10.0 - 1e-6, "tracks panel: wheel up zooms in");
+        CHECK (std::abs (p.timeAtX ((float) xa) - tBefore) < 1e-6,
+               "tracks panel: the cursor time stays under the cursor");
+    }
+
+    // Context-menu ids: zoom items run locally; the rest go to the owner.
+    int menuId = -99, menuIdx = -99;
+    p.onMenuItem = [&] (int id, int i) { menuId = id; menuIdx = i; };
+    p.handleContextMenuId (VideoTracksPanel::kMenuZoomFit, 1);
+    CHECK (std::abs (p.getViewRange().getEnd() - 10.0) < 1e-9 && menuId == -99,
+           "tracks panel: zoom fit runs locally");
+    p.handleContextMenuId (VideoTracksPanel::kMenuSyncAudio, 1);
+    CHECK (menuId == VideoTracksPanel::kMenuSyncAudio && menuIdx == 1,
+           "tracks panel: sync goes to the owner with its track");
+    p.handleContextMenuId (VideoTracksPanel::kMenuSolo, -1);
+    CHECK (menuId == VideoTracksPanel::kMenuSolo && menuIdx == -1,
+           "tracks panel: ruler items carry index -1");
+}
+
+// End to end: two tracks of the same movie on one document. The selected
+// track renders above while it covers the time; when it ends, the topmost
+// covering track takes over automatically.
+static void testVideoWindowMultiTrack()
+{
+    if (!sc::videoDecodingAvailable())
+    {   scSkip ("multi-track: no picture decoder on this platform"); return; }
+    const juce::File f = videoFixtureOrSkip();
+    if (!f.existsAsFile()) return;
+
+    const juce::File store = makeTempFile ("video_multitrack.recent");
+    store.deleteFile();
+    Application app (store);
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "video multitrack test"));
+
+    auto cleanup = [&] { win.reset(); store.deleteFile(); };
+
+    const juce::File wav = makeTempFile ("video_multitrack.wav");
+    writeWav (wav, 1, 48000.0, 48000, [] (int, int64_t, double) { return 0.0f; });
+    CHECK (app.openFile (wav), "multi-track: the wav opens");
+
+    if (!app.openFile (f))
+    {   scSkip ("multi-track: the .mp4 audio cannot be opened in this build"); cleanup(); return; }
+    auto* vw = win->getVideoWindow();
+    CHECK (vw != nullptr, "multi-track: window created for the movie");
+    if (vw == nullptr) { cleanup(); return; }
+
+    auto& pump = vw->pump();
+    CHECK (scPumpUntil ([&] { return pump.isOpen() || !pump.error().isEmpty(); }, 10000),
+           "multi-track: the movie opened");
+    if (!pump.isOpen())
+    {   scSkip ("multi-track: picture cannot be decoded here: " + pump.error()); cleanup(); return; }
+
+    // The auto-detected movie is one implicit track at offset 0.
+    CHECK (vw->displayedTrack() == 0, "multi-track: the implicit track is displayed");
+
+    // Materialise two tracks of the same movie: A @ 0 s [0,2), B @ -0.5 s [-0.5,1.5).
+    {
+        FileDoc* d = app.doc();
+        sc::VideoTrackData a, b;
+        a.file = f; a.offsetSecs = 0.0;
+        b.file = f; b.offsetSecs = -0.5;
+        d->setVideoTracks ({ a, b });
+    }
+
+    // Select B: it renders above A while both cover the time.
+    app.doc()->selectedVideoTrack = 1;
+    win->syncVideoWindow();
+    CHECK (vw->displayedTrack() == 1, "multi-track: the selected track wins");
+
+    auto shownIndex = [&] { return videoFrameIndexOf (pump.frame().image); };
+    app.setPlayhead (1.2);
+    vw->pollTime();
+    pump.waitIdle (10000);
+    CHECK (scPumpUntil ([&] { return shownIndex() == 42; }, 5000),
+           "multi-track: the selected track's offset is applied (frame 42 at local time 1.7 s)");
+
+    // B ends at 1.5 s while A still covers: the topmost covering track takes over.
+    app.setPlayhead (1.8);
+    CHECK (scPumpUntil ([&] { return vw->displayedTrack() == 0; }, 2000),
+           "multi-track: auto-switch when the selected track ends");
+    pump.waitIdle (10000);
+    CHECK (scPumpUntil ([&] { return shownIndex() == 45; }, 5000),
+           "multi-track: the fallback track shows its own frame (frame 45 at local time 1.8 s)");
+
+    // Per-track adjustments persist into the document through the window.
+    vw->view().zoomIn();   // fires onAdjustmentChanged -> saveDisplayedAdjustments
+    CHECK (std::abs (app.doc()->videoTracks[0].zoom - VideoView::kZoomStep) < 1e-6f,
+           "multi-track: zoom is persisted to the displayed track's metadata");
+    CHECK (app.doc()->metaDirty, "multi-track: the document is marked dirty by the change");
+
+    cleanup();
+}
+
 static void runRegression_video()
 {
     testVideoDisplayTimeRule();
@@ -648,4 +797,6 @@ static void runRegression_video()
     testVideoMovieAudio();
     testVideoViewLayout();
     testVideoWindowFollowsDocument();
+    testVideoTracksPanelHeadless();
+    testVideoWindowMultiTrack();
 }

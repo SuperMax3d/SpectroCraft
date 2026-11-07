@@ -116,6 +116,24 @@ public:
         metaDirty = true;
     }
 
+    // Video window tracks: movies attached to this document with their time
+    // offset and per-video picture adjustments (persisted with the metadata
+    // bundle). Empty = no explicit tracks; when `videoFile` is set it is then
+    // shown as a single implicit track at offset 0. `selectedVideoTrack` is
+    // transient UI state (-1 = follow the topmost available track).
+    std::vector<sc::VideoTrackData> videoTracks;
+    int selectedVideoTrack = -1;
+
+    /** Replaces the track list and marks the document metadata-dirty.
+        `newSelection` (optional pointer) updates the transient selection. */
+    void setVideoTracks (std::vector<sc::VideoTrackData> t, int* newSelection = nullptr)
+    {
+        videoTracks = std::move (t);
+        if (selectedVideoTrack >= (int) videoTracks.size()) selectedVideoTrack = -1;
+        if (newSelection != nullptr) selectedVideoTrack = *newSelection;
+        metaDirty = true;
+    }
+
     // Whisper transcription segments. Embedded mode: RIFF "SCTT" chunk inside
     // the WAV; external mode: the "transcription" key of .meta.json. Shown in
     // the Transcription panel, never in the Markers panel.
@@ -183,7 +201,8 @@ public:
     std::string buildMetaJson () const;
 
     /** Applies a parsed bundle to this document (markers, selections, scale,
-        reference calibrations, analysis settings and transcription). */
+        reference calibrations, analysis settings, video tracks and
+        transcription). */
     void applyBundle (const sc::MetaBundle& b);
 
     /** Writes "<target>.meta.json" with the current full bundle. Returns false

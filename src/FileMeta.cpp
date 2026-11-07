@@ -325,6 +325,29 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
     if (!b.tables.empty())
         root->setProperty ("tables", sc::tables::serialiseTables (b.tables, b.tablesMode));
 
+    if (!b.videoTracks.empty())
+    {
+        juce::Array<juce::var> arr;
+        for (const auto& t : b.videoTracks)
+        {
+            auto o = new juce::DynamicObject();
+            o->setProperty ("file", t.file.getFullPathName());
+            if (t.offsetSecs != 0.0)      o->setProperty ("offset", t.offsetSecs);
+            if (!t.hasDefaultAdjustments())
+            {
+                o->setProperty ("zoom", t.zoom);
+                o->setProperty ("panX", t.panX);
+                o->setProperty ("panY", t.panY);
+                o->setProperty ("rotation", t.rotation);
+                o->setProperty ("contrast", t.contrast);
+                o->setProperty ("brightness", t.brightness);
+            }
+            if (t.solo)                   o->setProperty ("solo", 1);
+            arr.add (o);
+        }
+        root->setProperty ("videoTracks", arr);
+    }
+
     auto scale = new juce::DynamicObject();
     scale->setProperty ("unit", static_cast<int> (b.scale.unit));
     scale->setProperty ("fullScaleValue", b.scale.fullScaleValue);
@@ -493,6 +516,35 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
         const juce::var tv = p.getWithDefault ("tables", juce::var());
         if (!sc::tables::parseTables (tv, out.tables, &out.tablesMode))
             return false;
+    }
+
+    out.haveVideoTracks = p.contains ("videoTracks");
+    if (out.haveVideoTracks)
+    {
+        const juce::var vv = p.getWithDefault ("videoTracks", juce::var());
+        if (vv.isArray())
+        {
+            std::vector<VideoTrackData> list;
+            for (const auto& item : *static_cast<const juce::Array<juce::var>*> (vv.getArray()))
+            {
+                const auto* o = item.getDynamicObject();
+                if (o == nullptr) continue;
+                const auto& op = o->getProperties();
+                VideoTrackData t;
+                t.file        = juce::File (op.getWithDefault ("file", juce::var()).toString());
+                t.offsetSecs  = static_cast<double> (op.getWithDefault ("offset", 0.0));
+                t.zoom        = std::max (1.0f, static_cast<float> (op.getWithDefault ("zoom", 1.0)));
+                t.panX        = static_cast<float> (op.getWithDefault ("panX", 0.0));
+                t.panY        = static_cast<float> (op.getWithDefault ("panY", 0.0));
+                t.rotation    = (((static_cast<int> (op.getWithDefault ("rotation", 0)) / 90) * 90) % 360 + 360) % 360;
+                t.contrast    = std::max (1e-3, static_cast<double> (op.getWithDefault ("contrast", 1.0)));
+                t.brightness  = std::clamp (static_cast<double> (op.getWithDefault ("brightness", 0.0)), -1.0, 1.0);
+                t.solo        = static_cast<int> (op.getWithDefault ("solo", 0)) != 0;
+                if (t.file != juce::File())
+                    list.push_back (std::move (t));
+            }
+            out.videoTracks = std::move (list);
+        }
     }
 
     out.haveScale = p.contains ("scale");

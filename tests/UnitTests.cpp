@@ -7957,7 +7957,9 @@ static void testTimeAxisTicks()
     CHECK (formatTimeTickLabel (0.2, 0.2, 1.0) == "0.2", "tenths of a second label");
     CHECK (formatTimeTickLabel (0.05, 0.05, 1.0) == "0.05", "hundredths of a second label");
     CHECK (formatTimeTickLabel (0.002, 0.002, 1.0) == "2ms", "millisecond label");
-    CHECK (formatTimeTickLabel (0.0005, 0.0005, 1.0) == "500\u00b5s", "microsecond label");
+    // fromUTF8: the app builds this suffix with juce::String::fromUTF8; a plain
+    // literal would be read as ASCII and mangle the micro sign.
+    CHECK (formatTimeTickLabel (0.0005, 0.0005, 1.0) == juce::String::fromUTF8 ("500\u00b5s"), "microsecond label");
     CHECK (formatTimeTickLabel (9.242, 0.002, 20.0) == "9.242", "ms step away from start: decimal seconds");
     CHECK (formatTimeTickLabel (12.5, 0.0005, 20.0) == "12.5000", "sub-ms step away from start: 4 digits");
     CHECK (formatTimeTickLabel (0.0, 1.0, 30.0) == "0", "origin label is plain 0 when zoomed in");
@@ -27542,6 +27544,228 @@ static void testActionsPanelPaint()
     while (!app.actions.empty ()) app.actions.removeSelected ({ 0 });
 }
 
+// ------------------------------------------------------------------
+// Multi-video tracks: metadata persistence, image adjustments, the
+// solo playback overlay and writing a video's audio into new channels.
+// ------------------------------------------------------------------
+
+static void testVideoTrackMetadata()
+{
+    sc::MetaBundle b;
+    sc::VideoTrackData t1, t2;
+    t1.file = juce::File ("/tmp/one.mp4");
+    t1.offsetSecs = 1.5;
+    t1.zoom = 2.0f;
+    t1.panX = -3.0f;
+    t1.panY = 7.0f;
+    t1.rotation = 90;
+    t1.contrast = 1.25;
+    t1.brightness = -0.2;
+    t1.solo = true;
+    t2.file = juce::File ("/tmp/two.avi");   // default adjustments, no solo
+    b.videoTracks = { t1, t2 };
+
+    CHECK (b.hasContent(), "video tracks: the bundle is non-empty with tracks");
+    const auto json = sc::serialiseBundle (b, false);
+    CHECK (json.find ("\"videoTracks\"") != std::string::npos,
+           "video tracks: serialised under videoTracks");
+
+    sc::MetaBundle p;
+    CHECK (sc::parseBundle (juce::String (json), p, nullptr) && p.haveVideoTracks
+               && p.videoTracks.size() == 2,
+           "video tracks: parsed back with both tracks");
+    if (p.videoTracks.size() == 2)
+    {
+        const auto& a = p.videoTracks[0];
+        CHECK (a.file.getFullPathName() == t1.file.getFullPathName(), "video tracks: file kept");
+        CHECK (std::abs (a.offsetSecs - 1.5) < 1e-9, "video tracks: offset kept");
+        CHECK (a.zoom == 2.0f && a.panX == -3.0f && a.panY == 7.0f, "video tracks: zoom/pan kept");
+        CHECK (a.rotation == 90, "video tracks: rotation kept");
+        CHECK (std::abs (a.contrast - 1.25) < 1e-9 && std::abs (a.brightness + 0.2) < 1e-9,
+               "video tracks: adjustments kept");
+        CHECK (a.solo, "video tracks: solo flag kept");
+        const auto& c = p.videoTracks[1];
+        CHECK (c.file.getFullPathName() == t2.file.getFullPathName(), "video tracks: second file kept");
+        CHECK (c.offsetSecs == 0.0 && c.zoom == 1.0f && c.rotation == 0 && !c.solo,
+               "video tracks: defaults kept for the second track");
+    }
+
+    // A bundle without tracks does not write the key at all.
+    sc::MetaBundle empty;
+    CHECK (!empty.hasContent(), "video tracks: no content without tracks");
+    CHECK (sc::serialiseBundle (empty, false).find ("videoTracks") == std::string::npos,
+           "video tracks: absent from the JSON when there are none");
+
+    // FileDoc level: the list survives a metadata round-trip.
+    {
+        FileDoc d1;
+        d1.setVideoTracks ({ t1 });
+        sc::MetaBundle p2;
+        CHECK (sc::parseBundle (juce::String (d1.buildScmdJson()), p2, nullptr)
+                   && p2.videoTracks.size() == 1
+                   && std::abs (p2.videoTracks[0].offsetSecs - 1.5) < 1e-9,
+               "video tracks: the document metadata carries the list");
+
+        FileDoc d2;
+        d2.applyBundle (p2);
+        CHECK (d2.videoTracks.size() == 1 && std::abs (d2.videoTracks[0].offsetSecs - 1.5) < 1e-9,
+               "video tracks: applyBundle restores the list");
+
+        // An absent key keeps the current list (merge semantics).
+        FileDoc d3;
+        sc::VideoTrackData keep;
+        keep.file = juce::File ("/tmp/keep.mp4");
+        keep.offsetSecs = 2.0;
+        d3.setVideoTracks ({ keep });
+        d3.applyBundle (sc::MetaBundle());
+        CHECK (d3.videoTracks.size() == 1 && std::abs (d3.videoTracks[0].offsetSecs - 2.0) < 1e-9,
+               "video tracks: a missing key preserves the current list");
+    }
+}
+
+static void testApplyImageAdjustments()
+{
+    // Neutral values leave every pixel untouched.
+    {
+        juce::Image img (juce::Image::ARGB, 3, 2, true);
+        for (int y = 0; y < 2; ++y)
+            for (int x = 0; x < 3; ++x)
+                img.setPixelAt (x, y, juce::Colour ((uint8) (10 * x + 40), (uint8) (20 * y + 60), 255));
+        const auto before = img.createCopy();
+        applyImageAdjustments (img, 1.0, 0.0);
+        bool same = true;
+        for (int y = 0; y < 2 && same; ++y)
+            for (int x = 0; x < 3 && same; ++x)
+                if (img.getPixelAt (x, y) != before.getPixelAt (x, y)) same = false;
+        CHECK (same, "image adjustments: neutral values are a no-op");
+    }
+
+    // Brightness +0.5 lifts black to mid-grey and leaves white alone.
+    {
+        juce::Image img (juce::Image::ARGB, 2, 1, true);
+        img.setPixelAt (0, 0, juce::Colours::black);
+        img.setPixelAt (1, 0, juce::Colours::white);
+        applyImageAdjustments (img, 1.0, 0.5);
+        CHECK (std::abs ((double) img.getPixelAt (0, 0).getRed() - 127.5) <= 1.0,
+               "image adjustments: brightness lifts black to mid-grey");
+        const auto w = img.getPixelAt (1, 0);
+        CHECK (w.getRed() == 255 && w.getGreen() == 255 && w.getBlue() == 255,
+               "image adjustments: white stays white under brightness");
+    }
+
+    // Contrast doubles the deviation from mid-grey.
+    {
+        juce::Image img (juce::Image::ARGB, 3, 1, true);
+        img.setPixelAt (0, 0, juce::Colour ((uint8) 96, (uint8) 96, (uint8) 96));
+        img.setPixelAt (1, 0, juce::Colour ((uint8) 128, (uint8) 128, (uint8) 128));
+        img.setPixelAt (2, 0, juce::Colour ((uint8) 160, (uint8) 160, (uint8) 160));
+        applyImageAdjustments (img, 2.0, 0.0);
+        CHECK (img.getPixelAt (0, 0).getRed() == 64 && img.getPixelAt (1, 0).getRed() == 128
+                   && img.getPixelAt (2, 0).getRed() == 192,
+               "image adjustments: contrast doubles the deviation from mid-grey");
+    }
+
+    // Extreme values clamp instead of wrapping.
+    {
+        juce::Image img (juce::Image::ARGB, 3, 1, true);
+        img.setPixelAt (0, 0, juce::Colours::black);
+        img.setPixelAt (1, 0, juce::Colour ((uint8) 128, (uint8) 128, (uint8) 128));
+        img.setPixelAt (2, 0, juce::Colours::white);
+        applyImageAdjustments (img, 3.0, 0.0);
+        CHECK (img.getPixelAt (0, 0).getRed() == 0 && img.getPixelAt (1, 0).getRed() == 128
+                   && img.getPixelAt (2, 0).getRed() == 255,
+               "image adjustments: extreme contrast clamps to the byte range");
+    }
+}
+
+static void testAudioEngineSoloOverlay()
+{
+    AudioEngine eng;
+    const int rate = 8000;
+    // Main document: a ramp, so main and solo samples are easy to tell apart.
+    std::vector<std::vector<float>> data (1, std::vector<float> ((size_t) rate * 2));
+    for (int i = 0; i < rate * 2; ++i) data[0][i] = float (i % 100) / 100.0f - 0.5f;
+    CHECK (eng.initNew (1, rate, &data), "solo: initNew");
+
+    // Solo source: a constant 0.9 at the same rate, starting 0.5 s into the document.
+    auto solo = std::make_shared<AudioEngine::SoloAudio>();
+    solo->rate = rate;
+    solo->offsetSecs = 0.5;
+    solo->data.resize (1);
+    solo->data[0].assign ((size_t) rate, 0.9f);   // one second of solo audio
+
+    CHECK (!eng.hasSoloAudio(), "solo: none before install");
+    eng.setSoloAudio (solo);
+    CHECK (eng.hasSoloAudio(), "solo: installed");
+
+    auto readAt = [&] (double tSecs, int n)
+    {
+        juce::AudioBuffer<float> buf (1, n);
+        juce::AudioSourceChannelInfo info (&buf, 0, n);
+        eng.setPosition (tSecs);
+        eng.getNextAudioBlock (info);
+        return buf.getSample (0, 0);
+    };
+
+    eng.play();
+    CHECK (std::abs (readAt (1.0, 8) - 0.9f) < 1e-6, "solo: the video's audio plays at its offset");
+    CHECK (std::abs (readAt (0.25, 8)) < 1e-6, "solo: silent before the solo starts");
+    CHECK (std::abs (readAt (1.75, 8)) < 1e-6, "solo: silent after the solo ends");
+
+    eng.setSoloAudio (nullptr);
+    CHECK (!eng.hasSoloAudio(), "solo: removed");
+    CHECK (std::abs (readAt (0.0, 8) + 0.5f) < 1e-6, "solo: the main audio plays again after removal");
+}
+
+static void testWriteDataToNewChannels()
+{
+    AudioEngine eng;
+    ::UndoManager um;
+    eng.setUndoManager (&um);
+    const int len = 100;
+    std::vector<std::vector<float>> data (2, std::vector<float> ((size_t) len));
+    for (int i = 0; i < len; ++i)
+    {   data[0][i] = float (i); data[1][i] = -float (i); }
+    CHECK (eng.initNew (2, 8000.0, &data), "write new channels: initNew");
+
+    std::vector<std::vector<float>> add (1, std::vector<float> (50));
+    for (int i = 0; i < 50; ++i) add[0][i] = 100.0f + float (i);
+    CHECK (eng.writeDataToNewChannels (20, add, "Copy video audio"), "write new channels: written");
+
+    CHECK (eng.numChannels () == 3, "write new channels: one channel added");
+    CHECK (eng.numSamples () == len, "write new channels: length unchanged");
+
+    std::vector<float> d ((size_t) len);
+    CHECK (eng.readSamples (2, 0, len, d.data ()), "write new channels: read the new channel");
+    bool ok = true;
+    for (int i = 0; i < len; ++i)
+    {
+        const double expect = (i >= 20 && i < 70) ? 100.0 + (double) (i - 20) : 0.0;
+        if (std::abs ((double) d[i] - expect) > 1e-6) ok = false;
+    }
+    CHECK (ok, "write new channels: the clip sits at the offset, silence elsewhere");
+
+    std::vector<float> e0 ((size_t) len);
+    CHECK (eng.readSamples (0, 0, len, e0.data ()), "write new channels: read channel 0");
+    bool ok0 = true;
+    for (int i = 0; i < len; ++i)
+        if (std::abs ((double) e0[i] - (double) i) > 1e-6) ok0 = false;
+    CHECK (ok0, "write new channels: the existing channel is untouched");
+
+    CHECK (um.depth () == 1, "write new channels: one undo step recorded");
+    Patch p;
+    CHECK (um.popUndo (p), "write new channels: pop the undo");
+    CHECK (eng.applyPatch (p, false), "write new channels: undo applied");
+    CHECK (eng.numChannels () == 2 && eng.numSamples () == len, "write new channels: back to two channels");
+
+    // Data running past the end extends the document with silence.
+    std::vector<std::vector<float>> add2 (1, std::vector<float> (60));
+    for (int i = 0; i < 60; ++i) add2[0][i] = float (i);
+    CHECK (eng.writeDataToNewChannels (80, add2, "Copy video audio"), "write new channels: past the end");
+    CHECK (eng.numSamples () == 140 && eng.numChannels () == 3,
+           "write new channels: extended to cover the clip");
+}
+
 // ---- 2026-11 audit regression tests (one fragment per subsystem)
 #include "regression/audio_engine.inc"
 #include "regression/spectral_dsp.inc"
@@ -28042,6 +28266,10 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("apply action steps", testApplyActionSteps);
     SC_RUN_TEST ("action batch", testActionBatch);
     SC_RUN_TEST ("actions panel paint", testActionsPanelPaint);
+    SC_RUN_TEST ("video track metadata", testVideoTrackMetadata);
+    SC_RUN_TEST ("image adjustments", testApplyImageAdjustments);
+    SC_RUN_TEST ("solo overlay", testAudioEngineSoloOverlay);
+    SC_RUN_TEST ("write new channels", testWriteDataToNewChannels);
 
     // 2026-11 audit regression tests
     SC_RUN_TEST ("regression: audio_engine", runRegression_audio_engine);

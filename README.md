@@ -854,6 +854,43 @@ right-click menu moves the picture into a **Video** tab of the left panel;
 *Undock to Window* (or closing that tab) brings it back to its own window.
 The picture keeps its zoom, pan and rotation either way.
 
+#### Video tracks
+
+A document can hold several video files at once. Below the picture there is a
+small **tracks panel**: a time ruler with a green band showing the length of
+the main audio (which defines the timeline), and one coloured band per video,
+drawn from its offset to its end.
+
+- **dragging** a band left/right changes that video's time offset relative to
+  the audio; the **mouse wheel** over the panel zooms in/out about the cursor
+  for fine positioning;
+- **clicking** a band selects it: that video renders above while it covers the
+current time. Clicking outside any band clears the selection and shows the
+topmost available video at the current time; when the selected video ends,
+the topmost covering one takes over automatically;
+- right-click on a **band** (or the ruler) for *Zoom In / Zoom Out / Zoom Fit*
+  — plus, on a band: *Sync based on Audio*, *Align…*, *Copy Audio to New
+  Channel(s)*, *Add Video Track…*, *Remove Track*, *Solo* and *Adjust Image*. A
+  right-click on the ruler alone shows only the three zoom items;
+- **adding** a track works from that menu or by dragging a video file onto the
+  window/panel; it joins at offset 0 (drag its band afterwards);
+- *Align…* asks for a manual time offset in seconds (negative = the video
+  starts before the audio);
+- *Sync based on Audio* runs a background job that cross-correlates the
+  video's embedded audio with the main document audio and sets the offset to
+  the best match;
+- *Copy Audio to New Channel(s)* decodes the video's own audio into new
+document channels at the track's offset (an undoable edit, like a paste);
+- **Solo** plays that video's own audio instead of the document's tracks while
+  it is solo'd; unsoloing restores normal playback;
+- *Adjust Image* opens a dialog with live **contrast** and **brightness**
+sliders plus *Apply to All*, *Reset* and *Close*. Each track keeps its own
+zoom, pan, rotation, contrast and brightness.
+
+All of this — the video file references, their offsets and per-track picture
+adjustments — is stored in the document's metadata (the `scmd` sidecar / WAV
+chunk), so a saved document reopens with the same tracks.
+
 Pictures are decoded with the platform's own media framework, so there is no
 extra dependency (`src/VideoFrames*.{cpp,mm}`): AVFoundation (`AVAssetReader`)
 on macOS, Media Foundation (`IMFSourceReader`) on Windows. A worker thread
@@ -2345,7 +2382,7 @@ Clean separation into independent components (see `include/` + `src/`):
 
 | Component | Responsibility |
 |---|---|
-| `AudioEngine` (`juce::AudioSource`) | File I/O via AudioFormatManager, streaming vs in-memory decision, sample access API, mipmap pyramid for the waveform overview, playback transport (play/pause/loop), edit primitives (`applyPatch`, silence/fade/normalize/reverse/cut/copy/paste/delete) plus `initNew` (empty or pre-filled documents with no file path yet), `readRange` and `pasteMixAt` (sum-in-place paste that appends past end-of-file), and recording append/overwrite (`appendSamples` / `overwriteSamples`) with a monotonic content version views compare to invalidate cached renders. All disk reads are mutex-protected; the UI thread never blocks on I/O. |
+| `AudioEngine` (`juce::AudioSource`) | File I/O via AudioFormatManager, streaming vs in-memory decision, sample access API, mipmap pyramid for the waveform overview, playback transport (play/pause/loop), edit primitives (`applyPatch`, silence/fade/normalize/reverse/cut/copy/paste/delete) plus `initNew` (empty or pre-filled documents with no file path yet), `readRange`, `pasteMixAt` (sum-in-place paste that appends past end-of-file) and `writeDataToNewChannels` (writes data into new channels at a sample position, extending the document with silence when it runs past the end — used by *Copy Audio to New Channel(s)*), plus a **solo playback overlay** (`setSoloAudio`: while active, the output is replaced by a decoded video track's audio played from its offset) and recording append/overwrite (`appendSamples` / `overwriteSamples`) with a monotonic content version views compare to invalidate cached renders. All disk reads are mutex-protected; the UI thread never blocks on I/O. |
 | `SpectralEngine` | Tiled multithreaded FFT: level selection from zoom, tile scheduling on a `juce::ThreadPool`, LRU cache keyed by (tile, channel, level, fftSize, hop, window). Tiles store **raw dB magnitudes**; gain/bias/dB-range/colour-map scaling is applied per pixel at render time, so changing those settings never requires recomputing tiles. Bilinear sampling into RGBA pixels, colour-map LUTs, headless PNG rendering. Never materializes more than one tile per channel at a time — multi-GB files stream through the reader tile by tile. |
 | `WaveformView` / `SpectralView` (`juce::Component`) | Pure drawing + mouse interaction; hold references to their engines and repaint on change messages. Each view holds its own time-window state and its **vertical axis/zoom level** (amplitude for the waveform, frequency range for the spectral view); at application level all horizontal changes flow through `MainWindow::applyTimeWindow`, which keeps both views on the same time range while vertical zooms stay independent. The spectral view requests tiles for its visible range only. Selection, markers and playhead are drawn as overlays *on top of* the audio in both views, so they behave identically wherever you look. |
 | `ScrollBars` (`TimeScrollBar`, `ValueScrollBar`) | Custom scrollbar components: thumb shows the displayed portion relative to the whole track; centre-drag pans, edge-drag zooms one side, click outside jumps. One horizontal time bar plus one vertical bar per view. |
@@ -2362,7 +2399,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `VideoFrames` (`src/VideoFrames.cpp`, `src/VideoFrames_mac.mm`, `src/VideoFrames_win.cpp`) | Video picture decoding for the Video window: a per-platform frame stream (AVFoundation on macOS, Media Foundation on Windows, none on Linux), `VideoDecoder::frameAt(t)` (decode forward for small forward moves, seek otherwise; skipped frames are never converted) and `VideoFramePump`, a worker thread that serves only the latest requested time and hands frames to the message thread. |
-| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, right-hand zoom bar), per-file rotation and an *Always On Top* toggle from a right-click context menu; can be docked into a left-panel tab (`VideoDockHost`) or undocked back to its own window. Polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible or docked. |
+| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, right-hand zoom bar), per-file rotation and an *Always On Top* toggle from a right-click context menu; can be docked into a left-panel tab (`VideoDockHost`) or undocked back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag to offset, wheel zoom about the cursor, click to select which track renders above (auto-switching to the topmost covering track when the selected one ends), right-click menu for sync/align/copy-audio/solo/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible or docked. |
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
@@ -2558,7 +2595,20 @@ delays the window from appearing.
     serves the latest of a burst of requests; movie audio level, frequency and
     random-access reads equal to the sequential decode; letterboxing and
     rotation; the MainWindow wiring (document video file, playhead and hover
-    following, the Window menu toggles, length notice, closed-by-user state).
+    following, the Window menu toggles, length notice, closed-by-user state);
+    multi-track: the tracks panel's fit/hit-testing/drag/wheel/menu ids,
+    selecting a track so it renders above with its offset applied, automatic
+    switch to the topmost covering track when the selected one ends, and
+    per-track zoom persistence into the document metadata.
+  - **Video track metadata & playback** (pure unit tests): `videoTracks`
+    serialisation round-trip through `sc::MetaBundle`/`FileDoc` (offsets,
+    zoom/pan/rotation, contrast/brightness, solo flag; absent key preserves
+    the current list); the image adjustment pixel math (neutral no-op,
+    brightness lift, contrast around mid-grey, clamping); the AudioEngine
+    solo overlay (a video track's audio replaces the output at its offset,
+    silent before/after, main audio returns on removal) and
+    `writeDataToNewChannels` (clip at the offset in a new channel, existing
+    channels untouched, one undo step, extension past the end).
   - **Alternative scale in the Frequency Analysis readout**: every cursor
     readout (classic snapped/plain, 1/3-octave band centre, Freq-vs-Time
     tracked frequency, Amp-vs-Freq cursor frequency) appends `| Name=value`

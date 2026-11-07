@@ -195,6 +195,7 @@ std::string FileDoc::buildScmdJson () const
     b.drawings     = drawings;
     b.tables       = tables;
     b.tablesMode   = tablesMode;
+    b.videoTracks  = videoTracks;
     b.scale        = scale;
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
@@ -212,6 +213,7 @@ std::string FileDoc::buildMetaJson () const
     b.drawings     = drawings;
     b.tables       = tables;
     b.tablesMode   = tablesMode;
+    b.videoTracks  = videoTracks;
     b.scale        = scale;
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
@@ -227,6 +229,7 @@ void FileDoc::applyBundle (const sc::MetaBundle& b)
     drawings        = b.drawings;
     tables          = b.tables;
     tablesMode      = b.tablesMode;
+    if (b.haveVideoTracks) videoTracks = b.videoTracks;   // absent key: keep current
     scale           = b.scale;
     altRef          = b.altRef;
     freqAnalysis    = b.freqAnalysis;

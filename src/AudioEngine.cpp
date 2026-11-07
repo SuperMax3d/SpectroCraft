@@ -436,6 +436,81 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             pos = ls + std::fmod (pos - ls, len);
     }
 
+    // Advance the playhead for this block up front: both fill paths below only
+    // read it, and a seek that lands while the block renders must win either way.
+    double newPos = pos + (double) n * step;
+    if (newPos >= (double) totalSamples)
+    {
+        if (looping && loopRange_.getLength() > 0)
+            newPos = loopRange_.getStart() * rate;
+        else
+        {
+            newPos = (double) totalSamples;
+            playing.store (false); // auto-stop at end of file
+        }
+    }
+    playheadFrac.compare_exchange_strong (posAtStart, newPos);
+
+    // "Solo": a video track's own audio replaces the document content while
+    // transport runs; the document clock still drives the position.
+    std::shared_ptr<const SoloAudio> soloLocal;
+    {
+        std::lock_guard<std::mutex> lk (soloMutex);
+        soloLocal = solo_;
+    }
+    if ((bool) soloLocal && soloLocal->rate > 0.0
+        && !soloLocal->data.empty() && !soloLocal->data[0].empty())
+    {
+        const double sRate = soloLocal->rate;
+        const int64_t soloLen = (int64_t) soloLocal->data[0].size();
+        // Document-sample position -> solo-sample position.
+        const double a = sRate / rate;              // solo samples per document sample
+        const double offS = soloLocal->offsetSecs * sRate;
+        const double pFirst = pos * a - offS;
+        const double pLast  = (pos + n * step) * a - offS;
+        const int64_t rs = std::max<int64_t> (0, (int64_t) std::floor (pFirst));
+        const int64_t re = std::min (soloLen, (int64_t) std::ceil (pLast) + 1);
+        const int64_t cnt = std::max<int64_t> (0, re - rs);
+
+        const int sChans = std::min (dst->getNumChannels(), (int) soloLocal->data.size());
+        auto& tmp = playTmp;
+        tmp.resize ((size_t) sChans);
+        for (int ch = 0; ch < sChans; ++ch)
+        {
+            const auto& src = soloLocal->data[(size_t) ch];
+            tmp[(size_t) ch].resize ((size_t) cnt);
+            const int64_t avail = std::max<int64_t> (0, soloLen - rs);
+            for (int64_t i = 0; i < avail && i < cnt; ++i)
+                tmp[(size_t) ch][(size_t) i] = src[(size_t) (rs + i)];   // short tail: stale data
+            if (cnt > avail)
+                std::fill (tmp[(size_t) ch].begin() + (size_t) avail, tmp[(size_t) ch].end(), 0.0f);
+        }
+
+        const float g = gain_.load();
+        for (int i = 0; i < n; ++i)
+        {
+            const double p = (pos + (double) i * step) * a - offS - (double) rs;
+            for (int ch = 0; ch < sChans; ++ch)
+            {
+                float* d = dst->getWritePointer (ch, bufferToFill.startSample);
+                if (p >= 0.0 && p < (double) cnt - 1.0)
+                {
+                    const int64_t ia = (int64_t) std::floor (p);
+                    const float fr = (float) (p - (double) ia);
+                    d[i] = (tmp[(size_t) ch][(size_t) ia] * (1.0f - fr)
+                            + tmp[(size_t) ch][(size_t) (ia + 1)] * fr) * g;
+                }
+                else
+                {
+                    d[i] = 0.0f;   // before the solo's start or past its end
+                }
+            }
+        }
+        for (int ch = sChans; ch < dst->getNumChannels(); ++ch)
+            dst->clear (ch, bufferToFill.startSample, n);
+        return;
+    }
+
     // File-sample range needed for this block.
     const int64_t baseReadStart = std::max<int64_t> (0, (int64_t) std::floor (pos));
     const int64_t baseReadEnd = std::min (totalSamples,
@@ -534,20 +609,6 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             dst->clear (ch, bufferToFill.startSample, n);
     }
 
-    double newPos = pos + (double) n * step;
-    if (newPos >= (double) totalSamples)
-    {
-        if (looping && loopRange_.getLength() > 0)
-            newPos = loopRange_.getStart() * rate;
-        else
-        {
-            newPos = (double) totalSamples;
-            playing.store (false); // auto-stop at end of file
-        }
-    }
-    // Only advance if nobody moved the playhead meanwhile (a click on the
-    // timeline during this block must not be overwritten).
-    playheadFrac.compare_exchange_strong (posAtStart, newPos);
 }
 
 // Builds the finest mipmap level in ONE sequential pass over the file.
@@ -1169,6 +1230,54 @@ bool AudioEngine::pasteToNewChannelsAt (int64_t samplePos, const juce::AudioBuff
     return true;
 }
 
+bool AudioEngine::writeDataToNewChannels (int64_t samplePos,
+                                          const std::vector<std::vector<float>>& data,
+                                          const juce::String& description,
+                                          std::string* errOut)
+{
+    if (!ensureEditable (errOut))
+        return false;
+    const int addChans = (int) data.size();
+    if (addChans <= 0 || data[0].empty())
+        return failErr (errOut, "Nothing to write.");
+    for (const auto& ch : data)
+        if ((int64_t) ch.size() != (int64_t) data[0].size())
+            return failErr (errOut, "The channels have different lengths.");
+
+    samplePos = std::clamp<int64_t> (samplePos, (int64_t) 0, totalSamples);
+    const int64_t len = (int64_t) data[0].size();
+    // Extend the document with silence when the data runs past its end.
+    const int64_t newLen = std::max<int64_t> (totalSamples, samplePos + len);
+
+    try
+    {
+        std::vector<std::vector<float>> newData ((size_t) (nchans + addChans),
+                                                 std::vector<float> ((size_t) newLen, 0.0f));
+        for (int ch = 0; ch < nchans; ++ch)
+            std::copy (buffer->getReadPointer (ch), buffer->getReadPointer (ch) + totalSamples,
+                       newData[(size_t) ch].data());   // tail stays silence
+        for (int ch = 0; ch < addChans; ++ch)
+            std::copy (data[(size_t) ch].begin(), data[(size_t) ch].end(),
+                       newData[(size_t) (nchans + ch)].data() + samplePos);
+
+        auto nb = std::make_unique<juce::AudioBuffer<float>> (nchans + addChans, (int) newLen);
+        for (int ch = 0; ch < nchans + addChans; ++ch)
+            std::copy (newData[(size_t) ch].data(), newData[(size_t) ch].data() + newLen,
+                       nb->getWritePointer (ch));
+
+        recordReplace (*this, { 0, totalSamples }, newData, description, nchans + addChans);
+        swapInBuffer (std::move (nb), nchans + addChans, newLen, rate);
+    }
+    catch (const std::bad_alloc&)
+    {
+        return failNoMemory (errOut);
+    }
+    unsaved = true;
+    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    rebuildMipmaps();
+    return true;
+}
+
 bool AudioEngine::deleteSamples (juce::Range<int64_t> samples, std::string* errOut)
 {
     if (!ensureEditable (errOut)) return false;
@@ -1477,6 +1586,18 @@ void AudioEngine::setSpectralPlaybackMask (std::shared_ptr<const SpectralSelecti
     playSel = std::move (selIn);
     if (!playSel)
         playMask.reset();   // free the state machine when masking is off
+}
+
+void AudioEngine::setSoloAudio (std::shared_ptr<const SoloAudio> s)
+{
+    std::lock_guard<std::mutex> lk (soloMutex);
+    solo_ = std::move (s);
+}
+
+bool AudioEngine::hasSoloAudio() const
+{
+    std::lock_guard<std::mutex> lk (soloMutex);
+    return (bool) solo_;
 }
 
 bool AudioEngine::fadeInSamples (juce::Range<int64_t> samples, const std::vector<int>* chans,

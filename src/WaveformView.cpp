@@ -1437,7 +1437,9 @@ juce::String formatTimeTickLabel (double t, double step, double span)
     if (t < 1.0)
     {
         if (step >= 0.001) return juce::String ((int) std::llround (t * 1000.0)) + "ms";
-        return juce::String ((int) std::llround (t * 1e6)) + "\u00b5s";   // µs
+        // fromUTF8: plain const char* literals are treated as ASCII by
+        // juce::String, which would mangle the UTF-8 micro sign (stray 'A').
+        return juce::String ((int) std::llround (t * 1e6)) + juce::String::fromUTF8 ("\u00b5s");
     }
 
     // ...otherwise decimal seconds with as many digits as the step needs.

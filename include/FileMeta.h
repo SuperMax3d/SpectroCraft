@@ -71,6 +71,34 @@ struct AltRefState
     }
 };
 
+/** One video track attached to an audio document: a movie file shown in the
+    Video window's track list, with its time offset against the document and
+    the per-video picture adjustments (zoom/pan/rotation/contrast/brightness).
+    The track's first frame is displayed at document time `offsetSecs`. */
+struct VideoTrackData
+{
+    juce::File file;            // the video file (absolute path)
+    double offsetSecs = 0.0;    // document time of the track's first frame
+
+    // Per-video picture adjustments (the Video window restores them when the
+    // track becomes the displayed one).
+    float zoom = 1.0f;
+    float panX = 0.0f, panY = 0.0f;
+    int rotation = 0;           // extra clockwise turns in degrees (x90)
+    double contrast = 1.0;      // multiplier around mid-grey
+    double brightness = 0.0;    // additive -1..+1
+
+    /** Play this track's own audio instead of the document's while it is
+        the displayed picture. */
+    bool solo = false;
+
+    bool hasDefaultAdjustments() const noexcept
+    {
+        return zoom == 1.0f && panX == 0.0f && panY == 0.0f && rotation == 0
+            && contrast == 1.0 && brightness == 0.0;
+    }
+};
+
 /** The complete per-file metadata bundle. */
 struct MetaBundle
 {
@@ -88,18 +116,25 @@ struct MetaBundle
     std::vector<sc::tables::TableData> tables;
     int tablesMode = 0;
 
+    // Video window: attached video tracks with offsets and per-video picture
+    // adjustments (see VideoTrackData). Empty = no explicit tracks; the
+    // document's auto-detected same-named movie, if any, is then shown as a
+    // single implicit track at offset 0.
+    std::vector<VideoTrackData> videoTracks;
+
     /** Set by parseBundle() when the corresponding key was present in the
         document (used to merge bundles from several sources). */
     bool haveMarkers = false, haveSelections = false, haveDrawings = false,
          haveScale = false, haveAltRef = false, haveFreqAnalysis = false,
-         haveTranscription = false, haveTables = false;
+         haveTranscription = false, haveTables = false, haveVideoTracks = false;
 
     /** True when the bundle holds anything worth persisting. */
     bool hasContent() const
     {
         return !markers.empty() || !selections.empty() || !drawings.empty()
             || scale.isCalibrated() || !altRef.isDefault()
-            || !freqAnalysis.isDefault() || !tables.empty();
+            || !freqAnalysis.isDefault() || !tables.empty()
+            || !videoTracks.empty();
     }
 };
 

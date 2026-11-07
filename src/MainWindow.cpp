@@ -2366,6 +2366,9 @@ void MainWindow::activateDocUI()
 
 // ------------------------------------------------- Video window
 
+/** The document's video tracks (see the definition below). */
+static std::vector<sc::VideoTrackData> effectiveVideoTracks (const FileDoc& d);
+
 double MainWindow::videoTimeNow() const
 {
     auto& eng = app.audioEngine();
@@ -2416,23 +2419,76 @@ void MainWindow::ensureVideoWindow()
     {   return app.recentStore->getIntValue ("video_always_on_top", 0) != 0; };
     videoWindow->view().onDockToggle = [this] { setVideoDocked (!isVideoDocked()); };
 
+    // Multi-track: per-track state is persisted into the document's metadata.
+    // The first change materialises the implicit single track as an explicit list.
+    videoWindow->onTrackAdjustmentsSaved = [this] (const sc::VideoTrackData& td)
+    {
+        FileDoc* d = app.doc();
+        if (d == nullptr || videoWindow == nullptr) return;
+        const int i = videoWindow->displayedTrack();
+        auto t = effectiveVideoTracks (*d);
+        if (i < 0 || i >= (int) t.size()) return;
+        const auto& cur = t[i];
+        if (cur.zoom == td.zoom && cur.panX == td.panX && cur.panY == td.panY
+            && cur.rotation == td.rotation && cur.solo == td.solo
+            && std::abs (cur.contrast - td.contrast) < 1e-9
+            && std::abs (cur.brightness - td.brightness) < 1e-9)
+            return;   // nothing changed: do not mark the document dirty
+        t[i] = td;
+        d->setVideoTracks (std::move (t));
+    };
+    videoWindow->onTrackOffsetChanged = [this] (int i, double off)
+    {
+        FileDoc* d = app.doc();
+        if (d == nullptr) return;
+        auto t = effectiveVideoTracks (*d);
+        if (i < 0 || i >= (int) t.size()) return;
+        if (std::abs (t[i].offsetSecs - off) < 1e-9) return;
+        t[i].offsetSecs = off;
+        d->setVideoTracks (std::move (t));
+    };
+    videoWindow->onSelectTrackChanged = [this] (int i)
+    {
+        FileDoc* d = app.doc();
+        if (d == nullptr || d->selectedVideoTrack == i) return;
+        d->selectedVideoTrack = i;   // transient UI state, not metadata
+    };
+
     // The saved layout may have the Video tab open: restore the docked state.
     if (isPanelOpen ("video"))
         videoWindow->dockTo (*videoDockHost);
+}
+
+/** The document's video tracks: the explicit list if it has one, otherwise
+    a single implicit track at offset 0 for the auto-detected `videoFile`. */
+static std::vector<sc::VideoTrackData> effectiveVideoTracks (const FileDoc& d)
+{
+    if (!d.videoTracks.empty()) return d.videoTracks;
+    if (d.videoFile != juce::File())
+    {
+        sc::VideoTrackData t;
+        t.file = d.videoFile;
+        std::vector<sc::VideoTrackData> v;
+        v.push_back (std::move (t));
+        return v;
+    }
+    return {};
 }
 
 void MainWindow::syncVideoWindow()
 {
     const FileDoc* d = app.doc();
     const juce::File vf = d != nullptr ? d->videoFile : juce::File();
+    const bool hasTracks = d != nullptr && !d->videoTracks.empty();
 
-    // Created the first time a document with a video is active (or when the
+    // Created the first time a document with video is active (or when the
     // user asks for it): audio-only sessions never pay for the window.
-    if (videoWindow == nullptr && vf == juce::File())
+    if (videoWindow == nullptr && vf == juce::File() && !hasTracks)
         return;
     ensureVideoWindow();
 
-    videoWindow->setVideoFile (vf, d != nullptr ? d->name : juce::String());
+    std::vector<sc::VideoTrackData> t = d != nullptr ? effectiveVideoTracks (*d) : std::vector<sc::VideoTrackData>();
+    videoWindow->setTracks (t, d != nullptr ? d->selectedVideoTrack : -1);
     videoWindow->setAudioDuration (app.audioEngine().isFileLoaded() ? app.audioEngine().duration() : 0.0);
 }
 

@@ -105,6 +105,24 @@ public:
         effect from the next block without restarting transport. */
     void setSpectralPlaybackMask(std::shared_ptr<const SpectralSelection> sel);
 
+    /** A pre-decoded video track's own audio (Video window "Solo"): while
+        installed, playback outputs this data instead of the document's own
+        content, read at (position - offsetSecs). The transport clock stays
+        with the document: play/stop/pause/looping and the playhead behave
+        exactly as without it. */
+    struct SoloAudio
+    {
+        std::vector<std::vector<float>> data;   // one vector per channel, equal length
+        double rate = 0.0;                      // sample rate of `data`
+        double offsetSecs = 0.0;                // document time where the solo starts
+    };
+
+    /** Installs (nullptr removes) the solo audio. Thread-safe: the audio
+        thread snapshots the pointer per block, so it can be called from the
+        message thread while playback runs. */
+    void setSoloAudio (std::shared_ptr<const SoloAudio> s);
+    bool hasSoloAudio() const;
+
     // ---- AudioSource interface (audio thread) ----
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
     void releaseResources() override;
@@ -159,6 +177,14 @@ public:
         the old channel count on undo. */
     bool pasteToNewChannelsAt (int64_t samplePos, const juce::AudioBuffer<float>& clip,
                                std::string* errOut = nullptr);
+    /** Appends data.size() brand-new channels and writes each channel's
+        samples into it starting at samplePos; the document is extended with
+        silence when the data runs past its end. Existing channels are
+        untouched. Recorded as one undoable step (description). */
+    bool writeDataToNewChannels (int64_t samplePos,
+                                 const std::vector<std::vector<float>>& data,
+                                 const juce::String& description,
+                                 std::string* errOut = nullptr);
     bool deleteSamples (juce::Range<int64_t> samples, std::string* errOut = nullptr);
     /** Keeps only the given sample range and deletes everything before and
         after it. Recorded as a single undoable patch replacing the whole
@@ -405,6 +431,11 @@ private:
     std::mutex maskMutex;
     std::shared_ptr<const SpectralSelection> playSel;
     std::shared_ptr<SpectralMask::PlaybackMask> playMask;
+
+    // Solo audio (see setSoloAudio): swapped under soloMutex; the audio thread
+    // snapshots it per block.
+    mutable std::mutex soloMutex;
+    std::shared_ptr<const SoloAudio> solo_;
 
     ::UndoManager* undo = nullptr;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks
