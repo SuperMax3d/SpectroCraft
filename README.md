@@ -2122,7 +2122,29 @@ list: a table row followed by its parameter rows.
       Selection**, **Zoom Out Full** (time + value on the data area, vertical
       only on the axis), **Select All** and **Copy Curve Data** — an
       Excel-friendly tab/CR grid with one column per visible parameter; with a
-      time selection active only the samples inside it are copied.
+      time selection active only the samples inside it are copied. With a time
+      selection active the menu also has an **Edit** submenu:
+      - **Overwrite Values...** prompts for start and stop values (a checked
+        *Constant Value* box disables the stop field and mirrors the start one)
+        and fills the target parameters' cells inside the selection with a
+        linear ramp. The defaults are the first/last existing values of the
+        first target parameter inside the selection. If the selection extends
+        beyond the table's row grid, every parameter is extended: new cells
+        outside the selection stay empty, and a front extension shifts all
+        parameters' offsets so their curves keep their document times.
+      - **Delete Values** empties the target parameters' cells inside the
+        selection; rows that become entirely empty at the very beginning or end
+        of the table are trimmed away (a front trim shifts every parameter's
+        offset so the remaining curves keep their document times). Interior
+        gaps stay.
+      - Both actions operate on the parameters selected in the Tables panel
+        (a selected table row means all its parameters) and fall back to every
+        visible parameter when nothing is selected there; each records one undo
+        step.
+    - Empty cells are drawn as a gap in the curve, never as zero: they do not
+      affect the auto-scaled axes, copy as blank fields, survive warps and
+      downsampling as gaps and round-trip through save/reload (stored as JSON
+      `null`).
     - **Ctrl+0 / Zoom Out Full** also vertically fits this strip when it is
       shown.
 - The panel's preview plot shows hover values too: moving the mouse over it

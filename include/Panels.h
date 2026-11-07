@@ -1932,6 +1932,10 @@ public:
 
     int primaryRow() const;
     std::vector<int> selectedRowIndices() const;
+    /** (tableIdx, paramIdx) pairs for the current selection: parameter rows
+        directly, and every parameter of a selected table row. Used by the
+        dedicated track's Edit menu; empty when nothing is selected. */
+    std::vector<std::pair<int, int>> selectedParamRows() const;
     int numSelectedRows() const { return table.getNumSelectedRows (); }
 
     // Context menu actions.

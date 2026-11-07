@@ -838,8 +838,9 @@ void WaveformView::drawTablesOverlay (juce::Graphics& g)
             {
                 if (!p.visible || p.alignTarget != 0 || p.values.size() < 2) continue;
 
-                double mn = p.values[0], mx = p.values[0];
-                for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
+                // Empty cells (NaN) never influence the overlay's auto-scaled axis.
+                double mn = 0.0, mx = 0.0;
+                if (!sc::tables::finiteMinMax (p.values, mn, mx)) continue;
                 const auto [off, sc] = t.effectiveTimeMap (p);
 
                 juce::Path path;
@@ -851,6 +852,8 @@ void WaveformView::drawTablesOverlay (juce::Graphics& g)
                     if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
                     const double v = sc::tables::overlayValue (
                         sc::tables::paramValueAt (t, p, tTab), p, mn, mx, 0);
+                    // Empty cells break the curve: not drawn, never treated as zero.
+                    if (!std::isfinite (v)) { started = false; continue; }
                     const float y = center + (float) ((vOffset - v) * ampPx);
                     const float x = (float) (pr.getX() + i) + 0.5f;
                     if (!started) { path.startNewSubPath (x, y); started = true; }

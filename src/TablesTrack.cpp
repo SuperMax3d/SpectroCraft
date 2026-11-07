@@ -1,6 +1,7 @@
 // SpectroCraft - Dedicated tables track: plots every visible parameter on an
 // auto-scaled value axis with vertical zoom/pan, a red playhead and hover
 // labels showing the unscaled values of curves near the cursor.
+#include <cstdlib>
 #include "TablesTrack.h"
 
 TablesTrackView::TablesTrackView (Application& appIn)
@@ -103,13 +104,17 @@ void TablesTrackView::refit()
         for (const auto& p : t.params)
         {
             if (!p.visible || p.values.empty()) continue;
-            double lo = sc::tables::dedicatedValue (p.values[0], p), hi = lo;
+            // Empty cells (NaN) never influence the auto-scaled axis.
+            double lo = 0.0, hi = 0.0;
+            bool haveP = false;
             for (double v : p.values)
-            {
-                const double m = sc::tables::dedicatedValue (v, p);
-                lo = std::min (lo, m);
-                hi = std::max (hi, m);
-            }
+                if (std::isfinite (v))
+                {
+                    const double m = sc::tables::dedicatedValue (v, p);
+                    if (!haveP) { lo = hi = m; haveP = true; }
+                    else        { lo = std::min (lo, m); hi = std::max (hi, m); }
+                }
+            if (!haveP) continue;
             if (!have) { mn = mx = lo; have = true; }
             mn = std::min (mn, lo);
             mx = std::max (mx, hi);
@@ -201,6 +206,9 @@ void TablesTrackView::paint (juce::Graphics& g)
                 if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) { started = false; continue; }
                 const double v = sc::tables::dedicatedValue (
                     sc::tables::paramValueAt (t, p, tTab), p);
+                // Empty cells break the curve: they are not drawn and never
+                // treated as zero.
+                if (!std::isfinite (v)) { started = false; continue; }
                 const int y = yForValue (v);
                 const float x = (float) (pr.getX() + i) + 0.5f;
                 if (!started) { path.startNewSubPath (x, (float) y); started = true; }
@@ -529,6 +537,19 @@ void TablesTrackView::showTrackContextMenu (bool onAxis)
     m.addItem (3, "Select All");
     m.addItem (4, "Copy Curve Data");
 
+    // Edit menu: only with an active time selection. It operates on the
+    // parameters selected in the Tables panel (or every visible parameter
+    // when nothing is selected there).
+    if (!app.selection.isEmpty())
+    {
+        const bool haveTargets = !editTargetParams ().empty ();
+        juce::PopupMenu edit;
+        edit.addItem (101, "Overwrite Values...", haveTargets);
+        edit.addItem (102, "Delete Values", haveTargets);
+        m.addSeparator ();
+        m.addSubMenu ("Edit", edit);
+    }
+
     const int id = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
     switch (id)
     {
@@ -536,6 +557,8 @@ void TablesTrackView::showTrackContextMenu (bool onAxis)
         case 2: if (onZoomOutFull) onZoomOutFull (onAxis); break;
         case 3: app.selectAll (); break;   // notifies via setSelection()
         case 4: copyCurveData (); break;
+        case 101: overwriteSelectionValues (); break;
+        case 102: deleteSelectionValues (); break;
         default: break;
     }
 }
@@ -608,6 +631,7 @@ void TablesTrackView::collectHoverLabels (int mouseX, int mouseY)
             const double tTab = (tDoc - off) / sc;
             if (tTab < 0.0 || tTab > p.duration (t.sampleRate)) continue;
             const double vRaw = sc::tables::paramValueAt (t, p, tTab);   // unscaled value
+            if (!std::isfinite (vRaw)) continue;   // empty cell: no label
             const int y = yForValue (sc::tables::dedicatedValue (vRaw, p));
             if (std::abs ((float) y - (float) mouseY) <= 8.0f)
                 hits.push_back ({ (float) y, p.name + "  " + juce::String (vRaw, valueDecimals (vRaw)),
@@ -678,7 +702,12 @@ bool TablesTrackView::copyCurveData()
         {
             const int i = first[c] + r;
             if (first[c] >= 0 && i <= last[c])
-                out += (c ? "\t" : "") + juce::String (cols[c].p->values[(size_t) i], 6);
+            {
+                const double v = cols[c].p->values[(size_t) i];
+                // Empty cells copy as blank fields, never as zero.
+                out += (c ? "\t" : "") + (std::isfinite (v) ? juce::String (v, 6)
+                                                            : juce::String());
+            }
             else
                 out += (c ? "\t" : "");
         }
@@ -686,4 +715,292 @@ bool TablesTrackView::copyCurveData()
 
     juce::SystemClipboard::copyTextToClipboard (out);
     return true;
+}
+
+// ------------------------------------------------------------------ Edit --
+
+namespace {
+
+static bool parseOverwriteValue (const juce::String& s, double& out)
+{
+    const auto t = s.trim ();
+    if (t.isEmpty ()) return false;
+    char* end = nullptr;
+    const double v = std::strtod (t.toRawUTF8 (), &end);
+    return end != nullptr && *end == 0 && std::isfinite (v);
+}
+
+/** "Overwrite Values" dialog: a linear ramp from Start to Stop over the time
+    selection. Checking Constant Value disables Stop and mirrors Start into
+    it (kept in sync while checked). */
+class OverwriteValuesWindow : public juce::DocumentWindow
+{
+public:
+    OverwriteValuesWindow (const juce::String& paramNames, double startDef, double stopDef)
+        : DocumentWindow ("Overwrite Values", juce::Colour::fromRGB (45, 45, 48),
+                          DocumentWindow::allButtons)
+    {
+        msgLabel.setFont (12.0f);
+        msgLabel.setJustificationType (juce::Justification::centredLeft);
+        msgLabel.setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+        msgLabel.setText ("Set the selected parameter(s) to a linear ramp over the time selection:\n"
+                          + paramNames, juce::dontSendNotification);
+
+        for (auto* lbl : { &startLbl, &stopLbl })
+        {
+            lbl->setFont (12.0f);
+            lbl->setColour (juce::Label::textColourId, juce::Colours::lightgrey);
+        }
+        startLbl.setText ("Start Value:", juce::dontSendNotification);
+        stopLbl.setText ("Stop Value:", juce::dontSendNotification);
+
+        for (auto* ed : { &startEd, &stopEd })
+        {
+            ed->setFont (12.0f);
+            ed->setColour (juce::TextEditor::backgroundColourId, juce::Colour::fromRGB (38, 38, 42));
+            ed->setColour (juce::TextEditor::textColourId, juce::Colours::lightgrey);
+            // Let Enter/Escape reach the OK/Cancel shortcuts even while a
+            // field has focus.
+            ed->setEscapeAndReturnKeysConsumed (false);
+        }
+        startEd.setText (juce::String (startDef, 6), juce::dontSendNotification);
+        stopEd.setText (juce::String (stopDef, 6), juce::dontSendNotification);
+
+        constantBox.setButtonText ("Constant Value");
+        constantBox.onClick = [this] { syncStopField (); };
+        startEd.onTextChange = [this] { if (constantBox.getToggleState ()) syncStopField (); };
+
+        okBtn.setButtonText ("OK");
+        cancelBtn.setButtonText ("Cancel");
+        okBtn.onClick = [this] { exitModalState (1); };
+        cancelBtn.onClick = [this] { exitModalState (-1); };
+
+        juce::Component::addAndMakeVisible (&msgLabel);
+        juce::Component::addAndMakeVisible (&startLbl);
+        juce::Component::addAndMakeVisible (&stopLbl);
+        juce::Component::addAndMakeVisible (&constantBox);
+        juce::Component::addAndMakeVisible (&startEd);
+        juce::Component::addAndMakeVisible (&stopEd);
+        juce::Component::addAndMakeVisible (&okBtn);
+        juce::Component::addAndMakeVisible (&cancelBtn);
+
+        setSize (380, 214);
+        setResizable (false, false);
+    }
+
+    juce::String startText() const { return startEd.getText (); }
+    juce::String stopText() const { return stopEd.getText (); }
+    juce::TextEditor* startEditorComp() { return &startEd; }   // unit tests
+
+private:
+    void syncStopField()
+    {
+        if (constantBox.getToggleState())
+        {
+            stopEd.setText (startEd.getText (), juce::dontSendNotification);
+            stopEd.setEnabled (false);
+        }
+        else
+            stopEd.setEnabled (true);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour::fromRGB (45, 45, 48));
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds ();
+
+        // Bottom button row (anchored to the bottom of the window).
+        const int btnH = 26;
+        auto bot = r.removeFromBottom (btnH + 10);
+        okBtn.setBounds (bot.getRight () - 74, bot.getY (), 68, btnH);
+        cancelBtn.setBounds (okBtn.getX () - 8 - 78, bot.getY (), 78, btnH);
+
+        // Message area at the top.
+        auto msgArea = r.removeFromTop (40);
+        msgLabel.setBounds (msgArea.withTrimmedLeft (10).withTrimmedRight (10));
+
+        const int rowPitch = 27;
+        const int lblW = 130;
+        auto area = r.withTrimmedLeft (10).withTrimmedRight (10);
+        startLbl.setBounds (juce::Rectangle<int> (area.getX(), area.getY (), lblW, 22));
+        stopLbl.setBounds (juce::Rectangle<int> (area.getX(), area.getY() + rowPitch, lblW, 22));
+        startEd.setBounds (juce::Rectangle<int> (area.getX() + lblW, area.getY (),
+                                                 area.getWidth () - lblW, 22));
+        stopEd.setBounds (juce::Rectangle<int> (area.getX() + lblW, area.getY() + rowPitch,
+                                                area.getWidth () - lblW, 22));
+        constantBox.setBounds (juce::Rectangle<int> (area.getX(), area.getY() + 2 * rowPitch,
+                                                     area.getWidth (), 22));
+    }
+
+    bool keyPressed (const juce::KeyPress& k) override   // this JUCE build spells it with a D
+    {
+        if (k.isKeyCode (juce::KeyPress::returnKey)) { exitModalState (1); return true; }
+        if (k.getKeyCode () == juce::KeyPress::escapeKey) { exitModalState (-1); return true; }
+        return DocumentWindow::keyPressed (k);
+    }
+
+    void userTriedToCloseWindow() override { exitModalState (-1); }
+
+    juce::Label msgLabel, startLbl, stopLbl;
+    juce::TextEditor startEd, stopEd;
+    juce::ToggleButton constantBox;
+    juce::TextButton okBtn, cancelBtn;
+
+    JUCE_DECLARE_NON_COPYABLE (OverwriteValuesWindow)
+};
+
+} // namespace
+
+std::vector<std::pair<int, int>> TablesTrackView::editTargetParams() const
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return {};
+
+    // Parameters selected in the Tables panel win; a selected table row means
+    // all of its parameters.
+    std::vector<std::pair<int, int>> out;
+    if (selectedParams)
+        for (const auto& [ti, pi] : selectedParams ())
+            if (ti >= 0 && ti < (int) d->tables.size ()
+                && pi >= 0 && pi < (int) d->tables[(size_t) ti].params.size ())
+                out.push_back ({ ti, pi });
+
+    // Fallback: every visible parameter of every visible table.
+    if (out.empty ())
+        for (int ti = 0; ti < (int) d->tables.size (); ++ti)
+            if (d->tables[(size_t) ti].visible)
+                for (int pi = 0; pi < (int) d->tables[(size_t) ti].params.size (); ++pi)
+                    if (d->tables[(size_t) ti].params[(size_t) pi].visible
+                        && !d->tables[(size_t) ti].params[(size_t) pi].values.empty ())
+                        out.push_back ({ ti, pi });
+
+    return out;
+}
+
+bool TablesTrackView::commitOverwrite (double startVal, double stopVal)
+{
+    auto* d = app.doc ();
+    if (d == nullptr || app.selection.isEmpty ()) return false;
+    const auto targets = editTargetParams ();
+    if (targets.empty ()) return false;
+
+    const double t0 = app.selection.getStart (), t1 = app.selection.getEnd ();
+
+    std::vector<Marker> oldMarkers = d->markers.markers ();
+    auto oldSavedSel = d->savedSelections;
+    Application::TimeAnchoredState oldTA = app.captureTimeAnchored ();
+
+    for (const auto& [ti, pi] : targets)
+        sc::tables::overwriteParamRange (d->tables[(size_t) ti], pi, t0, t1,
+                                         startVal, stopVal);
+
+    Patch p;
+    p.description = "Overwrote parameter values";
+    app.commitTimeAnchoredToPatch (oldTA, p);   // hasTimeAnchored + old/new tables
+    p.hasSideState = true;
+    p.oldMarkers  = std::move (oldMarkers);
+    p.newMarkers  = d->markers.markers ();
+    p.oldSavedSel = std::move (oldSavedSel);
+    p.newSavedSel = d->savedSelections;
+    d->undo.record (std::move (p));
+
+    d->metaDirty = true;
+    if (app.onTablesChanged) app.onTablesChanged ();
+    return true;
+}
+
+bool TablesTrackView::commitDelete()
+{
+    auto* d = app.doc ();
+    if (d == nullptr || app.selection.isEmpty ()) return false;
+    const auto targets = editTargetParams ();
+    if (targets.empty ()) return false;
+
+    const double t0 = app.selection.getStart (), t1 = app.selection.getEnd ();
+
+    std::vector<Marker> oldMarkers = d->markers.markers ();
+    auto oldSavedSel = d->savedSelections;
+    Application::TimeAnchoredState oldTA = app.captureTimeAnchored ();
+
+    for (const auto& [ti, pi] : targets)
+        sc::tables::deleteParamRange (d->tables[(size_t) ti], pi, t0, t1);
+
+    Patch p;
+    p.description = "Deleted parameter values";
+    app.commitTimeAnchoredToPatch (oldTA, p);   // hasTimeAnchored + old/new tables
+    p.hasSideState = true;
+    p.oldMarkers  = std::move (oldMarkers);
+    p.newMarkers  = d->markers.markers ();
+    p.oldSavedSel = std::move (oldSavedSel);
+    p.newSavedSel = d->savedSelections;
+    d->undo.record (std::move (p));
+
+    d->metaDirty = true;
+    if (app.onTablesChanged) app.onTablesChanged ();
+    return true;
+}
+
+void TablesTrackView::overwriteSelectionValues()
+{
+    auto* d = app.doc ();
+    if (d == nullptr || app.selection.isEmpty ()) return;
+    const auto targets = editTargetParams ();
+    if (targets.empty ()) return;
+
+    // Defaults: first/last existing values of the FIRST selected parameter.
+    double startDef = 0.0, stopDef = 0.0;
+    {
+        const auto& [ti, pi] = targets.front ();
+        const auto& t = d->tables[(size_t) ti];
+        const auto& p = t.params[(size_t) pi];
+        if (!sc::tables::firstValidValue (t, p, app.selection.getStart (),
+                                          app.selection.getEnd (), startDef))
+            startDef = 0.0;
+        if (!sc::tables::lastValidValue (t, p, app.selection.getStart (),
+                                         app.selection.getEnd (), stopDef))
+            stopDef = startDef;
+    }
+
+    // Name list for the dialog message (first few).
+    juce::String names;
+    int shown = 0;
+    for (const auto& [ti, pi] : targets)
+        if (++shown <= 3)
+            names += (names.isEmpty () ? "" : ", ")
+                   + d->tables[(size_t) ti].params[(size_t) pi].name;
+    if ((int) targets.size () > 3) names += " ...";
+
+    OverwriteValuesWindow dlg (names, startDef, stopDef);
+    // Centre on the main window's current position.
+    if (juce::Component* top = getTopLevelComponent ())
+        dlg.setBounds (top->getBounds ().withSize (dlg.getWidth (), dlg.getHeight ()));
+    dlg.enterModalState (false);
+    if (auto* ed = dlg.startEditorComp()) { ed->grabKeyboardFocus (); ed->selectAll (); }
+
+    const int result = dlg.runModalLoop ();
+    if (result != 1) return;
+
+    double startVal = 0.0, stopVal = 0.0;
+    if (!parseOverwriteValue (dlg.startText (), startVal)
+        || !parseOverwriteValue (dlg.stopText (), stopVal))
+    {
+        juce::AlertWindow bad ("Invalid value",
+                               "The entered text could not be read as a number.",
+                               juce::AlertWindow::WarningIcon, this);
+        bad.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        bad.enterModalState (false);
+        bad.runModalLoop ();
+        return;
+    }
+
+    commitOverwrite (startVal, stopVal);
+}
+
+void TablesTrackView::deleteSelectionValues()
+{
+    commitDelete ();
 }

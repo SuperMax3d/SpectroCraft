@@ -515,6 +515,185 @@ double paramValueAt (const TableData& t, const ParamData& p, double tTableSecs)
     return p.values[(size_t) lo] * (1.0 - frac) + p.values[(size_t) (lo + 1)] * frac;
 }
 
+// ------------------------------------------------- Selection-range edits --
+
+bool finiteMinMax (const std::vector<double>& v, double& lo, double& hi)
+{
+    bool have = false;
+    for (double x : v)
+        if (std::isfinite (x))
+        {
+            if (!have) { lo = hi = x; have = true; }
+            else       { lo = std::min (lo, x); hi = std::max (hi, x); }
+        }
+    return have;
+}
+
+void overwriteParamRange (TableData& t, int paramIdx, double t0DocSecs,
+                          double t1DocSecs, double startVal, double stopVal)
+{
+    if (paramIdx < 0 || paramIdx >= (int) t.params.size()) return;
+    auto& p = t.params[(size_t) paramIdx];
+    const double rate = t.sampleRate;
+    if (!(rate > 0.0)) return;
+
+    const double a = std::min (t0DocSecs, t1DocSecs);
+    const double b = std::max (t0DocSecs, t1DocSecs);
+    if (!(b > a)) return;
+
+    const auto [off, sc] = t.effectiveTimeMap (p);
+    if (!(sc > 1e-30)) return;
+
+    // Table-time span of the selection under p's effective map.
+    const double ta = (a - off) / sc;   // < 0 when the range starts before p
+    const double tb = (b - off) / sc;   // beyond the grid end when it overruns
+
+    int N = 0;
+    for (const auto& q : t.params)
+        N = std::max (N, (int) q.values.size());
+
+    // Rows to insert at the front so the selection start is reachable. After
+    // inserting K rows every parameter's data shifts right by K and its
+    // offset moves left by sc*K/rate, so all curves keep their doc times.
+    // -1e-9 keeps an exact integer span from rounding up to one extra row.
+    const int K = ta < 0.0 ? (int) std::ceil (-ta * rate - 1e-9) : 0;
+
+    // The grid must reach the selection end: last row index >= tb + K/rate.
+    const double needEnd = tb + (double) K / rate;
+    int Nnew = std::max (N + K, (int) std::floor (needEnd * rate) + 1);
+    if (Nnew < 2) Nnew = 2;
+
+    // Shift every parameter's data right by K and pad the new cells with NaN.
+    for (auto& q : t.params)
+    {
+        const auto [qoff, qsc] = t.effectiveTimeMap (q);
+        std::vector<double> nv ((size_t) Nnew, std::nan (""));
+        const int M = (int) q.values.size();
+        for (int i = 0; i < M && K + i < Nnew; ++i)
+            nv[(size_t) (K + i)] = q.values[(size_t) i];
+        q.values.swap (nv);
+        if (K > 0)
+            q.offsetSecs -= qsc * ((double) K / rate);
+    }
+
+    // Fill p's ramp over [a,b] in document time.
+    const double offNew = t.effectiveTimeMap (p).first;   // after the shift
+    for (int j = 0; j < Nnew; ++j)
+    {
+        const double tDoc = offNew + sc * ((double) j / rate);
+        if (tDoc >= a && tDoc <= b)
+        {
+            const double f = std::clamp ((tDoc - a) / (b - a), 0.0, 1.0);
+            p.values[(size_t) j] = startVal + (stopVal - startVal) * f;
+        }
+    }
+}
+
+void deleteParamRange (TableData& t, int paramIdx, double t0DocSecs, double t1DocSecs)
+{
+    if (paramIdx < 0 || paramIdx >= (int) t.params.size()) return;
+    auto& p = t.params[(size_t) paramIdx];
+    const double rate = t.sampleRate;
+    if (!(rate > 0.0)) return;
+
+    const double a = std::min (t0DocSecs, t1DocSecs);
+    const double b = std::max (t0DocSecs, t1DocSecs);
+    if (!(b > a)) return;
+
+    const auto [off, sc] = t.effectiveTimeMap (p);
+    if (!(sc > 1e-30)) return;
+
+    for (int j = 0; j < (int) p.values.size(); ++j)
+        if (off + sc * ((double) j / rate) >= a && off + sc * ((double) j / rate) <= b)
+            p.values[(size_t) j] = std::nan ("");
+
+    auto rowEmpty = [&t] (int j)
+    {
+        for (const auto& q : t.params)
+            if ((size_t) j < q.values.size() && std::isfinite (q.values[(size_t) j]))
+                return false;
+        return true;
+    };
+
+    // Trim leading rows that are entirely empty for every parameter.
+    int maxRows = 0;
+    for (const auto& q : t.params)
+        maxRows = std::max (maxRows, (int) q.values.size());
+    int front = 0;
+    while (front < maxRows && rowEmpty (front)) ++front;
+
+    if (front > 0)
+        for (auto& q : t.params)
+        {
+            const auto [qoff, qsc] = t.effectiveTimeMap (q);
+            const int drop = std::min (front, (int) q.values.size());
+            q.values.erase (q.values.begin (), q.values.begin () + drop);
+            if (drop > 0)
+                q.offsetSecs += qsc * ((double) drop / rate);   // keep doc times
+        }
+
+    // Trim trailing rows that are entirely empty for every parameter.
+    while (true)
+    {
+        bool anyRows = false;
+        for (const auto& q : t.params)
+            if (!q.values.empty()) { anyRows = true; break; }
+        if (!anyRows) break;
+
+        bool allEmpty = true;
+        for (const auto& q : t.params)
+            if (!q.values.empty() && std::isfinite (q.values.back()))
+                { allEmpty = false; break; }
+        if (!allEmpty) break;
+
+        for (auto& q : t.params)
+            if (!q.values.empty()) q.values.pop_back ();   // indices unchanged
+    }
+}
+
+bool firstValidValue (const TableData& t, const ParamData& p, double t0Secs,
+                      double t1Secs, double& out)
+{
+    const auto [off, sc] = t.effectiveTimeMap (p);
+    if (!(sc > 1e-30)) return false;
+    const int N = (int) p.values.size();
+    if (N == 0) return false;
+
+    const double a = std::min (t0Secs, t1Secs), b = std::max (t0Secs, t1Secs);
+    const double rate = t.sampleRate;
+    // First row whose doc time is >= a / last one <= b.
+    int jLo = (int) std::ceil (((a - off) / sc) * rate - 1e-9);
+    int jHi = (int) std::floor (((b - off) / sc) * rate + 1e-9);
+
+    for (int j = std::max (0, jLo); j <= std::min (N - 1, jHi); ++j)
+        if (std::isfinite (p.values[(size_t) j])) { out = p.values[(size_t) j]; return true; }
+    // Outward: the nearest finite value before the range.
+    for (int j = std::max (-1, std::min (N - 1, jLo) - 1); j >= 0; --j)
+        if (std::isfinite (p.values[(size_t) j])) { out = p.values[(size_t) j]; return true; }
+    return false;
+}
+
+bool lastValidValue (const TableData& t, const ParamData& p, double t0Secs,
+                    double t1Secs, double& out)
+{
+    const auto [off, sc] = t.effectiveTimeMap (p);
+    if (!(sc > 1e-30)) return false;
+    const int N = (int) p.values.size();
+    if (N == 0) return false;
+
+    const double a = std::min (t0Secs, t1Secs), b = std::max (t0Secs, t1Secs);
+    const double rate = t.sampleRate;
+    int jLo = (int) std::ceil (((a - off) / sc) * rate - 1e-9);
+    int jHi = (int) std::floor (((b - off) / sc) * rate + 1e-9);
+
+    for (int j = std::min (N - 1, jHi); j >= std::max (0, jLo); --j)
+        if (std::isfinite (p.values[(size_t) j])) { out = p.values[(size_t) j]; return true; }
+    // Outward: the nearest finite value after the range.
+    for (int j = std::min (N - 1, std::max (0, jHi) + 1); j < N; ++j)
+        if (std::isfinite (p.values[(size_t) j])) { out = p.values[(size_t) j]; return true; }
+    return false;
+}
+
 // ------------------------------------------------------------- Auto align --
 
 namespace {
@@ -698,7 +877,9 @@ juce::var serialiseTables (const std::vector<TableData>& tables, int mode)
             if (p.absolute)      po->setProperty ("abs", 1);
 
             juce::Array<juce::var> vals;
-            for (double v : p.values) vals.add (v);
+            for (double v : p.values)
+                // null marks an empty cell (NaN); plain numbers are data.
+                vals.add (std::isfinite (v) ? juce::var (v) : juce::var());
             po->setProperty ("values", vals);
             parr.add (po);
         }
@@ -779,7 +960,9 @@ bool parseTables (const juce::var& v, std::vector<TableData>& out, int* mode)
             if (vals == nullptr || vals->isEmpty()) continue;
             p.values.reserve ((size_t) vals->size());
             for (const auto& vv : *vals)
-                p.values.push_back (static_cast<double> (vv));
+                // null cells are empty values (NaN), never zero.
+                p.values.push_back (vv.isVoid () ? std::nan ("")
+                                                 : static_cast<double> (vv));
             t.params.push_back (std::move (p));
         }
         if (!t.params.empty())

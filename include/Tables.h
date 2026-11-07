@@ -175,8 +175,40 @@ bool solveValueMap (double f1, double f2, double v1, double v2,
                     double& scale, double& offset);
 
 /** Raw (unscaled) value of a parameter at table time tSecs by linear
-    interpolation; 0 outside [0, duration]. */
+    interpolation; 0 outside [0, duration]. An empty cell (NaN) interpolates
+    to NaN - emptiness never turns into zero. */
 double paramValueAt (const TableData& t, const ParamData& p, double tTableSecs);
+
+// ------------------------------------------------- Selection-range edits --
+// The dedicated track's "Edit" menu operates on document-time ranges.
+// Empty cells are NaN in values[]: they are not drawn, do not affect the
+// auto-scaled axes and survive warping/downsampling as gaps (they are never
+// treated as zero).
+
+/** Min/max over the finite entries of v; returns false when there are none. */
+bool finiteMinMax (const std::vector<double>& v, double& lo, double& hi);
+
+/** Overwrites p's values inside [t0,t1] (document time) with a linear ramp
+    from startVal to stopVal. When the range extends beyond the table's row
+    grid, every parameter is extended: new cells are empty (NaN), and for a
+    front extension all parameters' offsets shift so their existing curves
+    keep their document times. Rows outside [t0,t1] keep their values. */
+void overwriteParamRange (TableData& t, int paramIdx, double t0DocSecs,
+                          double t1DocSecs, double startVal, double stopVal);
+
+/** Marks p's cells inside [t0,t1] (document time) as empty (NaN). Rows that
+    become entirely empty at the very beginning or end of the table are
+    trimmed away (a front trim shifts every parameter's offset so the
+    remaining curves keep their document times); interior gaps stay. */
+void deleteParamRange (TableData& t, int paramIdx, double t0DocSecs, double t1DocSecs);
+
+/** First/last finite value of p whose document time lies in [t0,t1]; when no
+    such row exists the search continues outward from the range edge. Returns
+    false only if the parameter has no finite values at all. */
+bool firstValidValue (const TableData& t, const ParamData& p, double t0Secs,
+                      double t1Secs, double& out);
+bool lastValidValue  (const TableData& t, const ParamData& p, double t0Secs,
+                     double t1Secs, double& out);
 
 // ------------------------------------------------------------- Auto align --
 

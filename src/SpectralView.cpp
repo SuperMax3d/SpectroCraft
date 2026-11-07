@@ -2423,8 +2423,9 @@ void SpectralView::drawTablesOverlay (juce::Graphics& g)
             {
                 if (!p.visible || p.alignTarget != 1 || p.values.size() < 2) continue;
 
-                double mn = p.values[0], mx = p.values[0];
-                for (double v : p.values) { mn = std::min (mn, v); mx = std::max (mx, v); }
+                // Empty cells (NaN) never influence the overlay's auto-scaled axis.
+                double mn = 0.0, mx = 0.0;
+                if (!sc::tables::finiteMinMax (p.values, mn, mx)) continue;
                 const auto [off, sc] = t.effectiveTimeMap (p);
 
                 juce::Path path;

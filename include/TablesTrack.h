@@ -26,6 +26,31 @@ public:
         Returns false when there was nothing to copy. */
     bool copyCurveData();
 
+    // ------------------------------------------------------- Edit menu -----
+    /** (tableIdx, paramIdx) pairs the Edit actions operate on: the rows
+        selected in the Tables panel (a table row means all its parameters),
+        or every visible parameter of every visible table when nothing is
+        selected there. */
+    std::vector<std::pair<int, int>> editTargetParams() const;
+
+    /** Applies an Overwrite ramp over the current time selection to the
+        target parameters and records one undo step. Returns false when
+        there was nothing to do. */
+    bool commitOverwrite (double startVal, double stopVal);
+
+    /** Empties the target parameters' cells inside the current time
+        selection (trimming fully-empty boundary rows) and records one undo
+        step. Returns false when there was nothing to do. */
+    bool commitDelete();
+
+    /** "Edit > Overwrite Values...": prompts for start/stop values, then
+        commitOverwrite(). The defaults are the first/last existing values of
+        the first target parameter inside the selection. */
+    void overwriteSelectionValues();
+
+    /** "Edit > Delete Values": commitDelete() without a prompt. */
+    void deleteSelectionValues();
+
     /** Shared time window (kept in sync with the waveform/spectral views). */
     void setTimeRange (double t0, double t1);
     void setPlayhead (double tSecs);
@@ -56,6 +81,9 @@ public:
     std::function<void(double t0, double t1)> onTimeWindow;   // horizontal zoom / box-zoom time part
     std::function<void()> onZoomToSelection;
     std::function<void(bool axisOnly)> onZoomOutFull;
+    /** Set by MainWindow: the (tableIdx, paramIdx) rows selected in the
+        Tables panel; empty when nothing is selected there. */
+    std::function<std::vector<std::pair<int, int>>()> selectedParams;
     // Notified whenever the visible value window changes (wheel, drag,
     // refit, scrollbar): MainWindow uses it to keep the vertical scrollbar's
     // thumb in sync.

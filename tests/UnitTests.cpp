@@ -25382,6 +25382,335 @@ static void testTablesStretchUndoRedo()
     CHECK (sameTable (d->tables[0], warped), "redo re-applies the table warp exactly");
 }
 
+// The dedicated track's Edit menu: overwrite/delete of parameter values over
+// a time selection. Empty cells are NaN (never zero), fully-empty boundary
+// rows get trimmed, warps keep gaps empty and every operation is undoable.
+static void testTablesEditMenu()
+{
+    using namespace sc::tables;
+
+    const juce::File wav = makeTempFile ("tbl_edit_menu.wav");
+    CHECK (writeWav (wav, 1, kToneRate, 4 * kToneRate,
+            [] (int, int64_t f, double rate) { return 0.5f; }), "wrote edit menu wav");
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for tables edit menu test");
+    FileDoc* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile(); return; }
+
+    auto sameTable = [] (const TableData& a, const TableData& b)
+    {
+        if (a.name != b.name || std::abs (a.sampleRate - b.sampleRate) > 1e-12
+            || std::abs (a.offsetSecs - b.offsetSecs) > 1e-9
+            || std::abs (a.scaleTime - b.scaleTime) > 1e-9
+            || a.params.size () != b.params.size ())
+            return false;
+        for (size_t i = 0; i < a.params.size (); ++i)
+        {
+            const auto& pa = a.params[i];
+            const auto& pb = b.params[i];
+            if (pa.name != pb.name || pa.values.size () != pb.values.size ()
+                || std::abs (pa.offsetSecs - pb.offsetSecs) > 1e-9
+                || std::abs (pa.scaleTime - pb.scaleTime) > 1e-9)
+                return false;
+            for (size_t j = 0; j < pa.values.size (); ++j)
+            {
+                const bool na = std::isnan (pa.values[j]);
+                const bool nb = std::isnan (pb.values[j]);
+                if (na != nb || (!na && std::abs (pa.values[j] - pb.values[j]) > 1e-9))
+                    return false;
+            }
+        }
+        return true;
+    };
+
+    // One parameter at 100 rows/s: value = i * 0.5 (= 50*t). `rows` sets the
+    // grid length and `offsetSecs` shifts where it starts in doc time.
+    auto makeTable = [] (int rows, double offsetSecs = 0.0)
+    {
+        TableData t;
+        t.name = "t";
+        t.sampleRate = 100.0;
+        t.offsetSecs = offsetSecs;
+        ParamData p;
+        p.name = "sig";
+        for (int i = 0; i < rows; ++i)
+            p.values.push_back ((double) i * 0.5);
+        t.params.push_back (p);
+        return t;
+    };
+
+    TablesTrackView track (app);
+
+    // ------------------------------------------------- Overwrite: basic ramp --
+    d->tables.push_back (makeTable (400));
+    const TableData orig = d->tables[0];
+    app.setSelection ({ 1.0, 2.0 });
+    CHECK (track.commitOverwrite (10.0, 20.0), "overwrite applies");
+
+    {
+        const auto& pv = d->tables[0].params[0].values;
+        bool rampOk = true, outsideOk = true;
+        for (int i = 0; i < (int) pv.size (); ++i)
+        {
+            if (i >= 100 && i <= 200)
+            {
+                // Ramp from 10 at t=1 to 20 at t=2: v(i) = 10 + 10*(i/100 - 1) = i*0.1
+                if (std::abs (pv[(size_t) i] - (double) i * 0.1) > 1e-9) rampOk = false;
+            }
+            else
+            {
+                if (std::abs (pv[(size_t) i] - (double) i * 0.5) > 1e-9) outsideOk = false;
+            }
+        }
+        CHECK (rampOk, "overwrite fills the selection with a linear ramp");
+        CHECK (outsideOk, "rows outside the selection keep their values");
+
+        const TableData afterOverwrite = d->tables[0];
+        app.undoStep ();
+        CHECK (sameTable (d->tables[0], orig), "undo restores the pre-overwrite table exactly");
+        app.redoStep ();
+        CHECK (sameTable (d->tables[0], afterOverwrite), "redo re-applies the overwrite exactly");
+
+        // ------------------------------------------------- Overwrite: constant --
+        app.setSelection ({ 1.5, 2.5 });
+        CHECK (track.commitOverwrite (7.0, 7.0), "constant overwrite applies");
+        bool constOk = true;
+        for (int i = 150; i <= 250; ++i)
+            if (std::abs (d->tables[0].params[0].values[(size_t) i] - 7.0) > 1e-9) constOk = false;
+        CHECK (constOk, "constant mode fills the whole selection with one value");
+    }
+
+    // ------------------------------------------------- Overwrite: tail extension --
+    // The grid only covers [0,3) s but the file is 4 s long.
+    d->tables.push_back (makeTable (300));   // table index 1
+    app.setSelection ({ 2.5, 4.0 });
+    CHECK (track.commitOverwrite (1.0, 2.0), "tail-extension overwrite applies");
+
+    {
+        const auto& pv = d->tables[1].params[0].values;
+        CHECK ((int) pv.size () == 401, "grid extended to cover the selection end");
+        bool extOk = true;
+        for (size_t i = 0; i < pv.size (); ++i)
+        {
+            const double tDoc = (double) i / 100.0;   // offset is still 0
+            if (tDoc >= 2.5 - 1e-9 && tDoc <= 4.0 + 1e-9)
+            {
+                const double expect = 1.0 + ((tDoc - 2.5) / 1.5);   // ramp from 1 to 2
+                if (std::abs (pv[i] - expect) > 1e-9) extOk = false;
+            }
+            else
+            {
+                if (std::abs (pv[i] - (double) i * 0.5) > 1e-9) extOk = false;
+            }
+        }
+        CHECK (extOk, "tail extension fills the whole selection and keeps old rows");
+    }
+
+    // ------------------------------------------------- Overwrite: front extension --
+    // The grid starts at doc time t=1 s (table offset), so a selection that
+    // begins before it forces new leading rows.
+    d->tables.push_back (makeTable (400, 1.0));   // table index 2
+    app.setSelection ({ 0.5, 2.0 });
+    CHECK (track.commitOverwrite (3.0, 4.0), "front-extension overwrite applies");
+
+    {
+        const auto& t = d->tables[2];
+        CHECK (std::abs (t.params[0].offsetSecs + 0.5) < 1e-9,
+              "front extension shifts the parameter offset left by the inserted span");
+        const auto& pv = t.params[0].values;
+        CHECK ((int) pv.size () == 450, "grid extended with leading rows");
+        // Old row i now sits at index i+50 with the same doc time (offset -0.5).
+        bool frontOk = true;
+        for (int i = 0; i < 400 && i + 50 < (int) pv.size (); ++i)
+        {
+            const int j = i + 50;
+            if (j <= 150) continue;   // inside the overwritten selection [0.5, 2] s
+            if (std::abs (pv[(size_t) j] - (double) i * 0.5) > 1e-9) frontOk = false;
+        }
+        CHECK (frontOk, "existing rows keep their values and doc times after a front extension");
+        // The new leading rows carry the ramp: v(0.5)=3 ... v(2)=4.
+        bool leadOk = true;
+        for (size_t j = 0; j <= 150 && j < pv.size (); ++j)
+        {
+            const double tDoc = 0.5 + (double) j / 100.0;
+            if (std::abs (pv[j] - (3.0 + ((tDoc - 0.5) / 1.5))) > 1e-9) leadOk = false;
+        }
+        CHECK (leadOk, "new leading rows carry the ramp values");
+    }
+
+    // ------------------------------------------------- Delete: middle gap --
+    d->tables.push_back (makeTable (400));   // table index 3
+    app.setSelection ({ 1.5, 2.5 });
+    CHECK (track.commitDelete (), "delete applies");
+
+    {
+        const auto& t = d->tables[3];
+        const auto& pv = t.params[0].values;
+        bool gapOk = true;
+        for (size_t j = 0; j < pv.size (); ++j)
+            if ((double) j / 100.0 >= 1.5 - 1e-9 && (double) j / 100.0 <= 2.5 + 1e-9
+                && !std::isnan (pv[j]))
+                gapOk = false;
+        CHECK (gapOk, "delete empties the selection");
+        CHECK ((int) pv.size () == 400, "interior delete keeps the row count");
+
+        const TableData afterDelete = t;
+        app.undoStep ();
+        CHECK (sameTable (d->tables[3], makeTable (400)), "undo restores the pre-delete table exactly");
+        app.redoStep ();
+        CHECK (sameTable (d->tables[3], afterDelete), "redo re-applies the delete exactly");
+    }
+
+    // ------------------------------------------------- Delete: leading + trailing trim --
+    d->tables.push_back (makeTable (400));   // table index 4
+    app.setSelection ({ 0.0, 1.0 });      // first second of the table
+    CHECK (track.commitDelete (), "leading delete applies");
+    {
+        const auto& t = d->tables[4];
+        // Rows j=0..100 (tDoc in [0,1]) became empty and were trimmed away.
+        CHECK ((int) t.params[0].values.size () == 299, "fully-empty leading rows are trimmed away");
+        bool keepOk = true;
+        for (size_t j = 0; j < t.params[0].values.size (); ++j)
+            if (std::abs (t.params[0].values[j] - ((double) (j + 101)) * 0.5) > 1e-9) keepOk = false;
+        CHECK (keepOk, "remaining rows keep their values and doc times after a leading trim");
+    }
+    app.setSelection ({ 3.0, 4.0 });      // last second of the table
+    CHECK (track.commitDelete (), "trailing delete applies");
+    {
+        const auto& t = d->tables[4];
+        CHECK ((int) t.params[0].values.size () == 199, "fully-empty trailing rows are trimmed away");
+        bool keepOk = true;
+        for (size_t j = 0; j < t.params[0].values.size (); ++j)
+            if (std::abs (t.params[0].values[j] - ((double) (j + 101)) * 0.5) > 1e-9) keepOk = false;
+        CHECK (keepOk, "remaining rows are unchanged after a trailing trim");
+    }
+
+    // ------------------------------------------------- Serialisation round trip --
+    {
+        TableData t = makeTable (400);
+        for (int i = 100; i < 200; ++i)   // carve an empty gap
+            t.params[0].values[(size_t) i] = std::nan ("");
+        const int mode = 2;
+        const juce::var v = serialiseTables ({ t }, mode);
+        std::vector<TableData> back;
+        int modeBack = -1;
+        CHECK (parseTables (v, back, &modeBack), "NaN table parses");
+        CHECK (back.size () == 1 && back[0].params.size () == 1,
+              "one parameter survives the round trip");
+        if (back.size () == 1)
+        {
+            const auto& pv = back[0].params[0].values;
+            bool rtOk = (int) pv.size () == 400;
+            for (size_t i = 0; i < pv.size (); ++i)
+            {
+                if ((int) i >= 100 && (int) i < 200)
+                    rtOk = rtOk && std::isnan (pv[i]);
+                else
+                    rtOk = rtOk && std::abs (pv[i] - (double) i * 0.5) < 1e-9;
+            }
+            CHECK (rtOk, "empty cells round-trip as empty, data values unchanged");
+        }
+    }
+
+    // ------------------------------------------------- Warp keeps the gap a gap --
+    d->tables.push_back (makeTable (400));   // table index 5
+    app.setSelection ({ 1.0, 2.0 });
+    CHECK (track.commitDelete (), "gap carved before warp");
+    std::string err;
+    // -50 % tempo = half speed: the selected second doubles to ~[1,3] s.
+    CHECK (app.timeStretch (-50.0f, &err), "stretch succeeds");
+    {
+        const auto& t = d->tables[5];
+        const auto [off, sc] = t.effectiveTimeMap (t.params[0]);
+        // The gap [1,2] s now occupies ~[1,3] s: it must stay empty, never zero.
+        bool gapOk = true;
+        for (size_t j = 0; j < t.params[0].values.size (); ++j)
+        {
+            const double tDoc = off + sc * ((double) j / t.sampleRate);
+            if (tDoc >= 1.05 && tDoc <= 2.9)
+                if (!std::isnan (t.params[0].values[j])) gapOk = false;
+        }
+        CHECK (gapOk, "warping keeps the deleted gap empty");
+        // Rows well outside the warped gap keep their finite values.
+        bool finOk = true;
+        for (size_t j = 0; j < t.params[0].values.size (); ++j)
+        {
+            const double tDoc = off + sc * ((double) j / t.sampleRate);
+            if ((tDoc >= 0.2 && tDoc <= 0.8) || (tDoc >= 3.2 && tDoc <= 4.5))
+                if (!std::isfinite (t.params[0].values[j])) finOk = false;
+        }
+        CHECK (finOk, "warping keeps finite rows outside the gap intact");
+    }
+
+    // ------------------------------------------------- Target selection logic --
+    {
+        d->tables.clear ();
+        TableData t = makeTable (400);
+        ParamData p2 = t.params[0];
+        p2.name = "other";
+        t.params.push_back (p2);
+        d->tables.push_back (t);
+
+        // Nothing selected in the panel: every visible parameter is a target.
+        track.selectedParams = [] { return std::vector<std::pair<int, int>>{}; };
+        auto targets = track.editTargetParams ();
+        CHECK (targets.size () == 2 && targets[0] == std::make_pair (0, 0)
+              && targets[1] == std::make_pair (0, 1),
+              "no panel selection falls back to every visible parameter");
+
+        // Panel selection wins: only the second parameter is a target.
+        track.selectedParams = [] { return std::vector<std::pair<int, int>> { { 0, 1 } }; };
+        targets = track.editTargetParams ();
+        CHECK (targets.size () == 1 && targets[0] == std::make_pair (0, 1),
+              "panel-selected parameter rows are used as targets");
+
+        // Out-of-range pairs are dropped; an empty result falls back again.
+        track.selectedParams = [] { return std::vector<std::pair<int, int>> { { 9, 0 }, { 0, 7 } }; };
+        targets = track.editTargetParams ();
+        CHECK (targets.size () == 2, "invalid panel rows fall back to every visible parameter");
+
+        // Overwrite only touches the selected parameter.
+        app.setSelection ({ 1.0, 2.0 });
+        track.selectedParams = [] { return std::vector<std::pair<int, int>> { { 0, 1 } }; };
+        CHECK (track.commitOverwrite (9.0, 9.0), "targeted overwrite applies");
+        bool onlyTarget = true;
+        for (int i = 100; i <= 200; ++i)
+            if (std::abs (d->tables[0].params[1].values[(size_t) i] - 9.0) > 1e-9) onlyTarget = false;
+        for (int i = 100; i <= 200; ++i)
+            if (std::abs (d->tables[0].params[0].values[(size_t) i] - (double) i * 0.5) > 1e-9) onlyTarget = false;
+        CHECK (onlyTarget, "overwrite touches only the selected parameter");
+    }
+
+    // ------------------------------------------------- refit ignores empty cells --
+    {
+        d->tables.clear ();
+        TableData t;
+        t.name = "t";
+        t.sampleRate = 100.0;
+        ParamData p;
+        p.name = "sig";
+        for (double v : { 1.0, 2.0, std::nan (""), 4.0 })
+            p.values.push_back (v);
+        t.params.push_back (p);
+        d->tables.push_back (t);
+
+        TablesTrackView track2 (app);
+        track2.setBounds (0, 0, 300, 60);
+        track2.refit ();
+        const auto [lo, hi] = track2.fullRange ();
+        // Finite values only: 1..4 with 10% padding -> 0.7 .. 4.3.
+        CHECK (std::abs (lo - 0.7) < 1e-9 && std::abs (hi - 4.3) < 1e-9,
+              "refit ignores empty cells when auto-scaling");
+
+        // Painting a strip with an empty cell must not crash.
+        const juce::Image shot = track2.createComponentSnapshot (track2.getLocalBounds());
+        CHECK (shot.isValid (), "strip paints fine with empty cells");
+    }
+
+    wav.deleteFile ();
+}
+
 // Time alignment is shared at the table level: aligning one parameter of a
 // multi-parameter table re-aligns every parameter of that table together.
 static void testTablesSharedAlignment()
@@ -27661,6 +27990,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("tables solo + rename", testTablesSoloAndRename);
     SC_RUN_TEST ("tables timeline warp", testTablesTimelineWarp);
     SC_RUN_TEST ("tables stretch undo/redo", testTablesStretchUndoRedo);
+    SC_RUN_TEST ("tables edit menu", testTablesEditMenu);
     SC_RUN_TEST ("tables playhead resync", testTablesPlayheadResyncAfterReopen);
     SC_RUN_TEST ("tables shared alignment", testTablesSharedAlignment);
     SC_RUN_TEST ("tables 2pt vertical align", testTablesTwoPointVerticalAlign);

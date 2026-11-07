@@ -215,6 +215,13 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     {
         updateScrollBars ();   // keeps the scrollbar's range + thumb in sync
     };
+    // The track's Edit menu operates on whatever is selected in the Tables
+    // panel; empty selection there means "every visible parameter".
+    tablesTrack->selectedParams = [this] ()
+    {
+        return (tablesPanel != nullptr) ? tablesPanel->selectedParamRows ()
+                                        : std::vector<std::pair<int, int>>{};
+    };
 
     tablesSep     = std::make_unique<ViewSplitter>();
     tablesSep->onDrag = [this] (const juce::MouseEvent& e) { handleTablesSepDrag (e); };

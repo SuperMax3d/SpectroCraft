@@ -9244,13 +9244,14 @@ void TablesPlotView::paint (juce::Graphics& g)
     if (dur <= 0.0 || getWidth() < 10) return;
 
     // Auto-scale the value axis over all visible parameters of this table.
+    // Empty cells (NaN) never influence the range.
     double mn = 0.0, mx = 0.0;
     bool have = false;
     for (const auto& p : t.params)
     {
         if (!p.visible || p.values.empty()) continue;
-        double lo = p.values[0], hi = p.values[0];
-        for (double v : p.values) { lo = std::min (lo, v); hi = std::max (hi, v); }
+        double lo = 0.0, hi = 0.0;
+        if (!sc::tables::finiteMinMax (p.values, lo, hi)) continue;
         if (!have) { mn = mx = lo; have = true; }
         mn = std::min (mn, lo);
         mx = std::max (mx, hi);
@@ -9292,6 +9293,8 @@ void TablesPlotView::paint (juce::Graphics& g)
         {
             const double tt = ((double) i / (pr.getWidth() - 1)) * dur;
             const double v = sc::tables::paramValueAt (t, p, tt);
+            // Empty cells break the curve: not drawn, never treated as zero.
+            if (!std::isfinite (v)) { started = false; continue; }
             const float y = pr.getY() + (float) ((mx - v) / (mx - mn)) * (float) pr.getHeight();
             if (!started) { path.startNewSubPath ((float) i + 0.5f, y); started = true; }
             else          path.lineTo ((float) i + 0.5f, y);
@@ -9371,6 +9374,7 @@ void TablesPlotView::collectHoverLabels (int x, int y)
     {
         if (!p.visible || p.values.size() < 2) continue;
         const double v = sc::tables::paramValueAt (t, p, tt);   // unscaled value
+        if (!std::isfinite (v)) continue;   // empty cell: no label
         hoverLabels_.push_back ({ p.name + "  " + juce::String (v, 4),
                                   sc::tables::tableColourAt (p.colorIndex,
                                                              app.settings.tableCustomColours) });
@@ -9967,6 +9971,36 @@ std::vector<int> TablesPanel::selectedRowIndices() const
     return out;
 }
 
+std::vector<std::pair<int, int>> TablesPanel::selectedParamRows() const
+{
+    auto* d = app.doc ();
+    if (d == nullptr) return {};
+
+    std::vector<std::pair<int, int>> out;
+    for (int r : sparseRows (table.getSelectedRows ()))
+    {
+        if (r < 0 || r >= (int) rows_.size()) continue;
+        const auto ref = rows_[(size_t) r];
+        if (ref.tableIdx < 0 || ref.tableIdx >= (int) d->tables.size ()) continue;
+
+        std::vector<int> pis;
+        if (ref.paramIdx >= 0)
+            pis.push_back (ref.paramIdx);
+        else   // a table row means all of its parameters
+            for (int pi = 0; pi < (int) d->tables[(size_t) ref.tableIdx].params.size (); ++pi)
+                pis.push_back (pi);
+
+        for (int pi : pis)
+        {
+            if (pi < 0 || pi >= (int) d->tables[(size_t) ref.tableIdx].params.size ()) continue;
+            const auto key = std::make_pair (ref.tableIdx, pi);
+            if (std::find (out.begin (), out.end (), key) == out.end ())
+                out.push_back (key);   // deduplicated, selection order kept
+        }
+    }
+    return out;
+}
+
 void TablesPanel::removeSelected()
 {
     auto* d = app.doc ();
@@ -10055,7 +10089,12 @@ void TablesPanel::copySelection()
             csv += "\n" + juce::String (t.docTimeOfSample (t.params[0], r), 6);
             for (size_t i = 0; i < t.params.size(); ++i)
                 if ((size_t) r < t.params[i].values.size())
-                    csv += "\t" + juce::String (t.params[i].values[(size_t) r], 6);
+                {
+                    const double v = t.params[i].values[(size_t) r];
+                    // Empty cells copy as blank fields, never as zero.
+                    csv += "\t" + (std::isfinite (v) ? juce::String (v, 6)
+                                                     : juce::String());
+                }
         }
     }
     else
@@ -10084,7 +10123,12 @@ void TablesPanel::copySelection()
         {
             csv += "\n" + juce::String (cols[0].table->docTimeOfSample (*cols[0].param, r), 6);
             for (const auto& c : cols)
-                csv += "\t" + juce::String (c.param->values[(size_t) r], 6);
+            {
+                const double v = c.param->values[(size_t) r];
+                // Empty cells copy as blank fields, never as zero.
+                csv += "\t" + (std::isfinite (v) ? juce::String (v, 6)
+                                                 : juce::String());
+            }
         }
     }
 
@@ -10431,19 +10475,24 @@ void TablesPanel::handleDocClick (double tDocSecs, double docValue)
         if (pending_.numPoints == 2 && pi >= 0 && pi < (int) t.params.size())
         {
             auto& pp = t.params[(size_t) pi];
-            double mn = pp.values[0], mx = pp.values[0];
-            for (double v : pp.values)
-            { mn = std::min (mn, v); mx = std::max (mx, v); }
-            const double f1 = sc::tables::fittedOverlayValue (
-                sc::tables::paramValueAt (t, pp, pending_.tablePts[0]), pp, mn, mx);
-            const double f2 = sc::tables::fittedOverlayValue (
-                sc::tables::paramValueAt (t, pp, pending_.tablePts[1]), pp, mn, mx);
-            const int tgt = std::clamp (pending_.targetView, 0, 1);
-            if (!sc::tables::solveValueMap (f1, f2,
-                                            pending_.docVals[0], pending_.docVals[1],
-                                            pp.valueScale[tgt], pp.valueOffset[tgt]))
-                // Degenerate: keep the current scale and land point one exactly.
-                pp.valueOffset[tgt] = pending_.docVals[0] - pp.valueScale[tgt] * f1;
+            double mn = 0.0, mx = 0.0;
+            // Empty cells (NaN) must not distort the fitted range.
+            if (sc::tables::finiteMinMax (pp.values, mn, mx))
+            {
+                const double f1 = sc::tables::fittedOverlayValue (
+                    sc::tables::paramValueAt (t, pp, pending_.tablePts[0]), pp, mn, mx);
+                const double f2 = sc::tables::fittedOverlayValue (
+                    sc::tables::paramValueAt (t, pp, pending_.tablePts[1]), pp, mn, mx);
+                if (std::isfinite (f1) && std::isfinite (f2))
+                {
+                    const int tgt = std::clamp (pending_.targetView, 0, 1);
+                    if (!sc::tables::solveValueMap (f1, f2,
+                                                    pending_.docVals[0], pending_.docVals[1],
+                                                    pp.valueScale[tgt], pp.valueOffset[tgt]))
+                        // Degenerate: keep the current scale and land point one exactly.
+                        pp.valueOffset[tgt] = pending_.docVals[0] - pp.valueScale[tgt] * f1;
+                }
+            }
         }
 
         if (pi >= 0 && pi < (int) t.params.size())
