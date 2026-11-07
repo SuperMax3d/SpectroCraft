@@ -167,6 +167,7 @@ public:
         for (const bool advanced : { true, false })
         {
             juce::String err;
+            advancedReader = advanced;
             hr = createReader (f, advanced, noTrack, err);
             if (FAILED (hr))
             {
@@ -213,7 +214,7 @@ public:
         {
             // New output size: reconfigure the processor (it takes effect
             // with the samples read after the seek).
-            if (FAILED (configureOutput (wantW, wantH)))
+            if (FAILED (configureOutput (wantW, wantH, true)))
             {
                 canScale = false;
                 configureOutput (0, 0);
@@ -303,17 +304,24 @@ private:
         return S_OK;
     }
 
-    /** RGB32 output, at w x h when both are > 0 (advanced processor only). */
-    HRESULT configureOutput (int w, int h)
+    /** RGB32 output, at w x h when both are > 0 (advanced processor only).
+        0 x 0 = the source size: left to the reader when opening (what
+        always works), named explicitly when coming back from a scaled
+        size (resizeBack). */
+    HRESULT configureOutput (int w, int h, bool resizeBack = false)
     {
         ComPtr<IMFMediaType> want;
         HRESULT hr = MFCreateMediaType (&want);
         if (FAILED (hr)) return hr;
         want->SetGUID (MF_MT_MAJOR_TYPE, MFMediaType_Video);
         want->SetGUID (MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-        if (w > 0 && h > 0)
+        // The advanced processor keeps the last output size when the type
+        // names none: going back to the source size must say so.
+        const int fw = (w > 0 && h > 0) ? w : (resizeBack && advancedReader ? inf.width : 0);
+        const int fh = (w > 0 && h > 0) ? h : (resizeBack && advancedReader ? inf.height : 0);
+        if (fw > 0 && fh > 0)
         {
-            MFSetAttributeSize (want.Get(), MF_MT_FRAME_SIZE, (UINT32) w, (UINT32) h);
+            MFSetAttributeSize (want.Get(), MF_MT_FRAME_SIZE, (UINT32) fw, (UINT32) fh);
             MFSetAttributeRatio (want.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
         }
         hr = reader->SetCurrentMediaType ((DWORD) MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, want.Get());
@@ -348,6 +356,7 @@ private:
     Layout layout;
     VideoInfo inf;
     bool comInit = false, mfStarted = false, canScale = false;
+    bool advancedReader = false;   // reader created with advanced video processing
     int wantW = 0, wantH = 0, outW = 0, outH = 0;   // 0 = source size
 };
 

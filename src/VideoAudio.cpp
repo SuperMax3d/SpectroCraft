@@ -23,6 +23,7 @@ extern "C" {
     #undef max
     #undef min
 #endif
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -247,7 +248,15 @@ int VideoAudioReader::processFrame (AVFrame* fr, int* const* destChannels, int n
 void VideoAudioReader::seekToSample (int64 target)
 {
     AVStream* st = fmt_->streams[streamIdx_];
-    const int64_t ts = av_rescale_q (target, AVRational { 1, (int) sampleRate }, st->time_base);
+    // Seek well before the target: after a flush, transform codecs (AAC,
+    // Vorbis, Opus) rebuild their first frame without the previous frame's
+    // overlap, and a backward seek can still land just past the target
+    // (both gave wrong or missing samples on random reads of an .mp4).
+    // processFrame() drops everything decoded before the requested window.
+    constexpr int64 kSeekPreroll = 8192;
+    const int64 preroll = std::max<int64> (kSeekPreroll, (int64) st->codecpar->seek_preroll);
+    const int64 from = std::max<int64> (0, target - preroll);
+    const int64_t ts = av_rescale_q (from, AVRational { 1, (int) sampleRate }, st->time_base);
 
     if (av_seek_frame (fmt_, streamIdx_, ts, AVSEEK_FLAG_BACKWARD) < 0)
         return;   // keep the current position; decoding continues from there
