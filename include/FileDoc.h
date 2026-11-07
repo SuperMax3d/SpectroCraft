@@ -55,6 +55,11 @@ public:
 
     juce::String name;                 // display name (file name)
     juce::File file;                   // full path
+    /** Movie whose picture the Video window shows for this document: the
+        opened file when it may carry video (sc::isVideoPictureCandidate).
+        Kept when the audio is saved under another name, so the picture
+        still follows after "Save As" to WAV. */
+    juce::File videoFile;
     AudioEngine engine;                // loaded audio (streaming or in-memory)
     MarkerManager markers;             // per-file marker list
     ::UndoManager undo;                // per-file edit history

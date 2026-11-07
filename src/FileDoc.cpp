@@ -3,6 +3,7 @@
  */
 
 #include "FileDoc.h"
+#include "VideoFrames.h"   // isVideoPictureCandidate
 #include <atomic>
 
 static int nextFileDocId ()
@@ -34,6 +35,7 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
 
     file = f;
     name = f.getFileName();
+    videoFile = sc::isVideoPictureCandidate (f) ? f : juce::File();
 
     const bool isWav = f.getFileExtension().equalsIgnoreCase (".wav");
 

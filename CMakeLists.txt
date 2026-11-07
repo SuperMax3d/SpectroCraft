@@ -43,6 +43,10 @@ if (SPECTRO_ENABLE_FFMPEG AND WIN32)
     add_subdirectory(extern/ffmpeg)
 endif()
 
+# Video window: picture decoding with the platform media APIs (no extra
+# dependency), plus the AVFoundation audio reader for movies on macOS.
+include(cmake/ScVideo.cmake)
+
 # Recorder plugins (standard C ABI, see include/RecorderPlugin.h). The WASAPI
 # plugin is shipped in <exe dir>/recorders/ and picked up at startup.
 if (WIN32)

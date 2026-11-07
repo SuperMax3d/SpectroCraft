@@ -18,6 +18,7 @@
 #include "control/UiBridge.h"   // AI control: what commands may ask of this window
 
 class StemSeparationWindow;   // defined in StemSeparation.h
+class VideoWindow;            // defined in VideoWindow.h
 class SuperResolutionWindow;  // defined in SuperResolution.h
 
 /** Content of the "Content Aware Time Scale" dialog: a mode drop-down
@@ -152,6 +153,23 @@ public:
     void updateTitle();
     void setupViews();
     void activateDocUI();   // reset both views + sync panels after a doc switch
+
+    // ---- Video window (include/VideoWindow.h) ----
+    /** Points the Video window at the active document's video (creating
+        the window the first time a document with a video is active) and
+        refreshes the audio length it compares against. */
+    void syncVideoWindow();
+    /** Shows / hides the Video window (Window > Video). */
+    void setVideoWindowVisible (bool visible);
+    bool isVideoWindowVisible() const;
+    VideoWindow* getVideoWindow() const noexcept { return videoWindow.get(); }
+    /** Window > Video Follows Mouse Hover (persisted). */
+    void setVideoFollowHover (bool on);
+    bool isVideoFollowingHover() const noexcept { return videoFollowHover; }
+    /** Document time the Video window shows now (sc::videoDisplayTime). */
+    double videoTimeNow() const;
+    /** Time under the mouse over a view, -1 when outside (tests). */
+    double videoHoverTimeNow() const noexcept { return videoHoverTime; }
     juce::String statusBarFileName() const;   // name currently shown in the footer
     // The status-bar tool indicator: active spectral selection tool name,
     // overridden by Clone & Multiply picking and Move/Scale gesture hints;
@@ -567,6 +585,8 @@ public:
         WindowPanelBase = 6500,   // Window menu: per-panel open/close toggles
         WindowAllowMultiple = 6700,   // Window menu: "Allow multiple instances" toggle
         WindowAllowControl = 6701,    // Window menu: "Allow AI control (localhost)" toggle
+        WindowVideo = 6702,           // Window menu: show / hide the Video window
+        WindowVideoFollowHover = 6703,// Window menu: "Video Follows Mouse Hover" toggle
         HelpAbout = 6000,
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
@@ -607,6 +627,13 @@ private:
     // Left-side panels
     std::unique_ptr<FileListPanel> fileListPanel;
     std::unique_ptr<FFTAnalysisView> fftPanel;
+
+    // Video window: created on first use, see syncVideoWindow().
+    std::unique_ptr<VideoWindow> videoWindow;
+    double videoHoverTime = -1.0;      // time under the mouse, -1 = not over a view
+    bool videoFollowHover = true;
+    juce::File videoDismissedFor;      // closed by the user while showing this file
+    void ensureVideoWindow();          // creates + wires the window once
     std::unique_ptr<SpectralControlsPanel> controlsPanel;
     std::unique_ptr<MarkerListPanel> markersPanel;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI

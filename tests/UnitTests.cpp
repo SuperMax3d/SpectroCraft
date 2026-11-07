@@ -29,7 +29,9 @@
 #include "AI/DfStft.h"   // pure DSP, no OpenVINO dependency
 #include "ScttChunk.h"   // SCTT RIFF chunk + JSON (no AI dependency)
 #include "BkdkChunk.h"   // bkdk per-channel calibration chunk parsing
-#include "VideoAudio.h"  // video-container audio extraction (FFmpeg, Windows)
+#include "VideoAudio.h"  // video-container audio extraction (FFmpeg on Windows, AVFoundation on macOS)
+#include "VideoFrames.h" // Video window: picture decoding + frame pump
+#include "VideoWindow.h" // Video window
 #include "AudioCpp.h"     // stem-separation CLI argument building + file discovery
 #include "StemSeparation.h"   // the Effects > Stem Separation window
 #include "SuperResolution.h"  // the Effects > Super Resolution window
@@ -3999,10 +4001,11 @@ static void testClosePanelsAndWindowMenu()
         const int wIdx = windowMenuIndex (*win);
         CHECK (wIdx >= 0, "Window menu exists in the menu bar");
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        // +1: the "Allow multiple instances" toggle below the panels, +1 "Allow
-        // AI control (localhost)" when the control server is built in
-        // (the separator between them is not counted by getNumItems).
-        CHECK (wm.getNumItems () == kNumPanels + 1 + kScControlMenuItems, "Window menu lists every panel");
+        // +2: "Video" and "Video Follows Mouse Hover" below the panels, +1
+        // the "Allow multiple instances" toggle, +1 "Allow AI control
+        // (localhost)" when the control server is built in (separators are
+        // not counted by getNumItems).
+        CHECK (wm.getNumItems () == kNumPanels + 2 + 1 + kScControlMenuItems, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
         // persists it to the store file immediately.
@@ -4125,7 +4128,7 @@ static void testClosePanelsAndWindowMenu()
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == kNumPanels + 1 + kScControlMenuItems, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == kNumPanels + 2 + 1 + kScControlMenuItems, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 0, wIdx);   // files
@@ -21343,7 +21346,8 @@ static void testMergeFiles()
 }
 
 // ==============================================================================
-// Video container audio extraction (FFmpeg, Windows only).
+// Video container audio extraction (FFmpeg on Windows; the macOS gates are
+// checked here, the AVFoundation reader in regression/video.inc).
 //
 // Builds tiny AVI files by hand so no external fixtures are needed:
 //  * makePcmAvi      - stereo PCM s16le audio track (440 Hz left / 880 Hz right)
@@ -21742,6 +21746,26 @@ static void testVideoAudioExtraction()
         CHECK (win->isInterestedInFileDrag (mixed), "drag & drop accepts a batch containing .mkv");
         juce::StringArray txt;   txt.add (makeTempFile ("readme.txt").getFullPathName ());
         CHECK (!win->isInterestedInFileDrag (txt), "drag & drop rejects plain text");
+    }
+#elif defined(__APPLE__)
+    // macOS: movies are read through AVFoundation (the reader itself is
+    // checked by "regression: video"); here only the open gates.
+    {
+        const juce::String exts = sc::videoContainerExtensions();
+        CHECK (exts.contains (".mp4") && exts.contains (".mov"), "macOS: .mp4 / .mov can be opened");
+        CHECK (!exts.contains (".mkv"), "macOS: no .mkv (AVFoundation cannot read it)");
+        CHECK (!exts.contains (".m4a"), "macOS: .m4a stays with the CoreAudio format");
+        const juce::String w = MainWindow::openAudioWildcard();
+        CHECK (w.contains ("*.mp4") && w.contains ("*.mov"), "macOS: wildcard offers mp4 / mov");
+        int m4aCount = 0, pos = 0;
+        while ((pos = w.indexOf (pos + 1, "*.m4a")) >= 0) { ++m4aCount; }
+        CHECK (m4aCount == 1, "macOS: wildcard lists .m4a exactly once");
+        Application app;
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "video open gates test"));
+        juce::StringArray mov;   mov.add (makeTempFile ("movie.mov").getFullPathName ());
+        CHECK (win->isInterestedInFileDrag (mov), "macOS: drag & drop accepts .mov");
+        juce::StringArray mkv;   mkv.add (makeTempFile ("clip.mkv").getFullPathName ());
+        CHECK (!win->isInterestedInFileDrag (mkv), "macOS: drag & drop rejects .mkv");
     }
 #else
     // Visible in the summary: on this platform only the "no FFmpeg" gates run.
@@ -27204,6 +27228,7 @@ static void testActionsPanelPaint()
 #include "regression/measures.inc"
 #include "regression/measure_commands.inc"   // AI control lot 4: measure.* commands
 #include "regression/hardening.inc"   // lot 7: Python bridge + headless stem/SR services
+#include "regression/video.inc"   // Video window: picture decoding, pump, movie audio, wiring
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -27704,6 +27729,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: measures", runRegression_measures);
     SC_RUN_TEST ("regression: measure_commands", runRegression_measureCommands);
     SC_RUN_TEST ("regression: hardening", runRegression_hardening);
+    SC_RUN_TEST ("regression: video", runRegression_video);
 
 
     scReportTimings();

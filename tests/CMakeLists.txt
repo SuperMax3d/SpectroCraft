@@ -25,6 +25,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/SpectralView.cpp
         ${CMAKE_SOURCE_DIR}/src/Panels.cpp
         ${CMAKE_SOURCE_DIR}/src/ScrollBars.cpp
+        ${CMAKE_SOURCE_DIR}/src/VideoWindow.cpp   # Video window (picture follows the playhead)
         ${CMAKE_SOURCE_DIR}/src/MainWindow.cpp
         ${CMAKE_SOURCE_DIR}/src/FileDoc.cpp
         ${CMAKE_SOURCE_DIR}/src/Application.cpp
@@ -71,6 +72,9 @@ endif()
 if (TARGET sc_ffmpeg)
     sc_enable_ffmpeg (SpectroCraftTests)
 endif()
+
+# Video window (cmake/ScVideo.cmake): picture decoding + macOS movie audio.
+sc_enable_video (SpectroCraftTests)
 
 if (MSVC)
     set_source_files_properties (${CMAKE_SOURCE_DIR}/src/FFTAvx.cpp

@@ -32,6 +32,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/Actions.cpp     # recorded actions (record/replay/batch)
         ${CMAKE_CURRENT_SOURCE_DIR}/Panels.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ScrollBars.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/VideoWindow.cpp   # Video window (picture follows the playhead)
         ${CMAKE_CURRENT_SOURCE_DIR}/MainWindow.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Resampler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FFTAvx.cpp
@@ -79,6 +80,9 @@ endif()
 if (TARGET sc_ffmpeg)
     sc_enable_ffmpeg (SpectroCraft)
 endif()
+
+# Video window (cmake/ScVideo.cmake): picture decoding + macOS movie audio.
+sc_enable_video (SpectroCraft)
 
 # Application icon: icon4.ico is embedded into the exe as a proper PE resource
 # (RT_ICON + RT_GROUP_ICON) by appending an ICON statement to JUCE's generated

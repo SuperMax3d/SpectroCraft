@@ -15,8 +15,12 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 - **Formats**: WAV / AIFF / FLAC / MP3 / Ogg via JUCE AudioFormatManager
   (PCM 8/16/24/32-bit int, 32-bit float), up to 32+ channels — plus the audio
   track of video containers (.mp4/.m4a, .mkv, .avi, .webm, .mov, .wmv, .flv,
-  .ts, .wma, .ac3, ...) through a vendored minimal FFmpeg build (Windows only,
-  see **Video files** below).
+  .ts, .wma, .ac3, ...) through a vendored minimal FFmpeg build on Windows,
+  and .mp4/.mov/.m4v/.3gp through AVFoundation on macOS (see **Video files**
+  below).
+- **Video window** (Windows, macOS): the picture of a video file in its own
+  window, in step with the spectrogram — it follows playback, the playhead and,
+  optionally, the mouse hovering over the spectrogram or waveform.
 - **Recording** (Windows): capture from any recorder plugin — WASAPI capture and
   loopback devices ship out of the box, and third-party DLLs (ASIO, network,
   ...) can be dropped into `recorders/` without recompiling. The waveform and
@@ -806,9 +810,50 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 
 ## Video files
 
-On Windows, SpectroCraft can open video containers directly: the first audio
-stream is decoded and treated as a normal audio file — the video track is
-ignored entirely. Supported extensions include `.mp4`, `.m4a`, `.mov`,
+SpectroCraft opens video files as their audio: the first audio stream is
+decoded and treated as a normal audio file (spectrogram, edits, saving), and
+the picture is shown in the **Video window** (below).
+
+### Video window
+
+Opening a video file opens a separate, resizable **Video** window (Windows,
+macOS). It always shows the frame at the document time:
+
+- **while playing**: the playback position (the sound is the document audio,
+  played by SpectroCraft itself — the picture is silent and follows it);
+- **when stopped**: the playhead (click in the spectrogram or waveform,
+  Home/End, arrows, the status-bar position field);
+- **mouse hover**: with *Window > Video Follows Mouse Hover* (on by default),
+  moving the mouse left and right over the spectrogram or waveform scrubs the
+  picture to the time under the cursor, without clicking; it returns to the
+  playhead when the mouse leaves the view.
+
+*Window > Video* hides or shows it; closing it keeps it closed for that file
+until reopened from the menu. Switching to a document without a video shows
+"No video for this document". After an edit that changes the duration
+(delete, time stretch), a notice says that audio and video lengths differ:
+the picture keeps following the document time. The document remembers its
+video file, so the picture still follows after *Save As* to WAV. The frame
+time is shown in the top-left corner; phone videos are displayed with their
+rotation.
+
+Pictures are decoded with the platform's own media framework, so there is no
+extra dependency (`src/VideoFrames*.{cpp,mm}`): AVFoundation (`AVAssetReader`)
+on macOS, Media Foundation (`IMFSourceReader`) on Windows. A worker thread
+decodes the frame for the latest requested time only, so fast scrubbing never
+queues up; moving forward by less than a second decodes onward from the
+current frame (playback), anything else seeks to the previous key frame. On
+Windows, HEVC/VP9/AV1 need the codec extensions from the Microsoft Store, and
+Windows "N" editions need the Media Feature Pack (the Media Foundation DLLs are
+delay-loaded, so the app still starts without them). Linux has no Video
+window.
+
+### Audio extraction
+
+On macOS, `.mp4`, `.mov`, `.m4v`, `.3gp` and `.3g2` are read through
+AVFoundation (`src/VideoAudio_mac.mm`, any codec the system decodes: AAC, ALAC,
+PCM, ...). On Windows, SpectroCraft can open video containers directly through
+FFmpeg. Supported extensions include `.mp4`, `.m4a`, `.mov`,
 `.mkv`, `.webm`, `.avi`, `.wmv`, `.asf`, `.flv`, `.ts`/`.m2ts`, `.wma`,
 `.ac3`, `.ape`, `.tta` and more; any audio codec the bundled FFmpeg build
 knows (AAC, MP3, Vorbis, Opus, AC-3, PCM, ...) works inside those containers.
@@ -833,8 +878,8 @@ minimal **audio-only** build (demuxers + audio decoders, no video decoding,
 no encoders/filters/network) under **LGPL-2.1-or-later**, so it can be
 dynamically linked without affecting SpectroCraft's AGPL-3.0 licence — see
 `third_party/licenses/NOTICE.md` and `extern/ffmpeg/README.md`. Disable with
-`-DSPECTRO_ENABLE_FFMPEG=OFF`; on non-Windows platforms the feature is simply
-absent (the built-in JUCE formats still cover WAV/AIFF/FLAC/MP3/Ogg).
+`-DSPECTRO_ENABLE_FFMPEG=OFF`; on Linux the feature is simply absent (the
+built-in JUCE formats still cover WAV/AIFF/FLAC/MP3/Ogg).
 
 ---
 
@@ -2276,7 +2321,9 @@ Clean separation into independent components (see `include/` + `src/`):
 | `TablesTrackView` (`src/TablesTrack.cpp`) | The dedicated-tables strip: draws every visible table parameter auto-scaled into its own plot area (same width as the data views, same left-axis width), with vertical zoom/pan driven by a `ValueScrollBar`, the blue time-selection band and red playhead over it, vertical yellow marker delimiter lines (no bracket line or titles on this strip), and hover readout of each curve's unscaled value at the cursor time. |
 | `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, data tables, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
-| `VideoAudio` (`src/VideoAudio.cpp`) | Video-container audio extraction (Windows + FFmpeg only): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
+| `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
+| `VideoFrames` (`src/VideoFrames.cpp`, `src/VideoFrames_mac.mm`, `src/VideoFrames_win.cpp`) | Video picture decoding for the Video window: a per-platform frame stream (AVFoundation on macOS, Media Foundation on Windows, none on Linux), `VideoDecoder::frameAt(t)` (decode forward for small forward moves, seek otherwise; skipped frames are never converted) and `VideoFramePump`, a worker thread that serves only the latest requested time and hands frames to the message thread. |
+| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible. |
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
@@ -2464,6 +2511,15 @@ delays the window from appearing.
     WAV round-trip; a video-only AVI (no audio stream) is rejected gracefully;
     native formats keep priority on `.wav`. Without FFmpeg the registration is
     verified to be a harmless no-op.
+  - **Video window** (`tests/regression/video.inc`, fixture
+    `tests/data/video_frames_25fps.mp4`: 50 H.264 frames with B-frames, each
+    showing its index as binary bars, plus a 1 kHz AAC tone): every frame in
+    order without extra seeks, backward / long forward scrubbing, exact frame
+    boundaries, before-start / past-end, random scrubbing; the frame pump
+    serves the latest of a burst of requests; movie audio level, frequency and
+    random-access reads equal to the sequential decode; letterboxing and
+    rotation; the MainWindow wiring (document video file, playhead and hover
+    following, the Window menu toggles, length notice, closed-by-user state).
   - **Alternative scale in the Frequency Analysis readout**: every cursor
     readout (classic snapped/plain, 1/3-octave band centre, Freq-vs-Time
     tracked frequency, Amp-vs-Freq cursor frequency) appends `| Name=value`

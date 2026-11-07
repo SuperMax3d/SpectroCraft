@@ -1,5 +1,6 @@
 /**
- * SpectroCraft - Video container audio extraction (FFmpeg, Windows)
+ * SpectroCraft - Video container audio extraction (FFmpeg on Windows;
+ * AVFoundation on macOS, see VideoAudio_mac.mm)
  */
 
 #include "VideoAudio.h"
@@ -385,6 +386,24 @@ void registerVideoFormats (juce::AudioFormatManager& fm)
     fm.registerFormat (new VideoAudioFormat(), false);
 }
 
+} // namespace sc
+
+#elif defined(__APPLE__)   // macOS: AVFoundation reader (src/VideoAudio_mac.mm)
+
+namespace sc {
+juce::AudioFormat* createAvfAudioFormat();   // src/VideoAudio_mac.mm
+
+const juce::String& videoContainerExtensions()
+{
+    // What AVFoundation opens. .m4a stays with JUCE's CoreAudio format.
+    static const juce::String exts = ".mp4 .mov .m4v .3gp .3g2";
+    return exts;
+}
+
+void registerVideoFormats (juce::AudioFormatManager& fm)
+{
+    fm.registerFormat (createAvfAudioFormat(), false);
+}
 } // namespace sc
 
 #else   // !SC_ENABLE_FFMPEG — no FFmpeg available on this platform/build.

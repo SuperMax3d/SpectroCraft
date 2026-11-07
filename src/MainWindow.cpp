@@ -18,6 +18,8 @@
 #include "Panels.h"
 #include "MarkerManager.h"
 #include "VideoAudio.h"
+#include "VideoFrames.h"
+#include "VideoWindow.h"
 #include "WorkProgress.h"
 #include "StemSeparation.h"
 #include "SuperResolution.h"
@@ -592,6 +594,9 @@ using WorkProgressDialog = sc::WorkProgressDialog;
 
 MainWindow::~MainWindow()
 {
+    // The Video window polls this window for the time to show: first to go.
+    videoWindow.reset();
+
     // The Application outlives this window (tests reuse it; shutdown resets
     // the window first): uninstall every callback that captured `this`.
     app.onStateChange = nullptr;
@@ -679,6 +684,13 @@ void MainWindow::setupViews()
     waveformView->onCursorInfo = onCursorInfo;
     spectralView->onCursorInfo = onCursorInfo;
 
+    // Video window: with "Video Follows Mouse Hover" the picture shows the
+    // time under the mouse over either view (polled by the window's timer).
+    auto onHoverTime = [this] (double t) { videoHoverTime = t; };
+    waveformView->onHoverTime = onHoverTime;
+    spectralView->onHoverTime = onHoverTime;
+    videoFollowHover = app.recentStore->getIntValue ("video_follow_hover", 1) != 0;
+
     controlsPanel->onResetFreq = [this] {
         if (spectralView) { spectralView->resetFrequencyRange(); spectralView->repaint(); }
     };
@@ -731,6 +743,10 @@ void MainWindow::applyTimeWindow (double t0, double t1)
 
 void MainWindow::refreshAfterEdit()
 {
+    // The Video window flags audio / video length mismatches after edits.
+    if (videoWindow != nullptr)
+        videoWindow->setAudioDuration (app.audioEngine().isFileLoaded() ? app.audioEngine().duration() : 0.0);
+
     // Edits can change the total duration: clamp the shared time window,
     // re-clamp the selection, repaint the waveform and force a full spectral
     // re-render. The tile cache must be cleared too — tiles are keyed by sample
@@ -2308,11 +2324,102 @@ void MainWindow::activateDocUI()
         statusBar->setFileName (fn);
     }
 
+    // The Video window follows the active document (or says it has none).
+    syncVideoWindow();
+
     // Re-layout so the time scrollbar's visibility/bounds follow the new file
     // state: resized() is the only place they are set, and loading a file does
     // not otherwise resize the window (which left the bar hidden until the
     // user maximised/restored).
     resized();
+}
+
+// ------------------------------------------------- Video window
+
+double MainWindow::videoTimeNow() const
+{
+    auto& eng = app.audioEngine();
+    return sc::videoDisplayTime (eng.isPlaying(), eng.isPlaying() ? eng.position() : 0.0,
+                                 videoFollowHover, videoHoverTime, app.playhead);
+}
+
+void MainWindow::ensureVideoWindow()
+{
+    if (videoWindow != nullptr)
+        return;
+
+    videoWindow = std::make_unique<VideoWindow> ([this] { return videoTimeNow(); });
+    const juce::String state = app.recentStore->getValue ("video_window_state");
+    if (state.isNotEmpty())
+        videoWindow->restoreWindowStateFromString (state);
+
+    videoWindow->onUserClosed = [this]
+    {
+        videoDismissedFor = videoWindow->getVideoFile();
+        app.recentStore->setValue ("video_window_state", videoWindow->getWindowStateAsString());
+        app.recentStore->save();
+    };
+    // Transport keys (space, arrows, Home/End...) typed while the Video
+    // window has the focus act on the main window.
+    videoWindow->onKeyPressed = [this] (const juce::KeyPress& k) { return keyPressed (k, this); };
+    videoWindow->onVideoOpened = [this] (bool ok, bool noTrack)
+    {
+        // Show a new picture automatically, and say why there is none when
+        // the file has a video track that cannot be decoded. A file the user
+        // closed the window on stays closed until Window > Video reopens it.
+        if (videoWindow == nullptr || (! ok && noTrack))
+            return;
+        if (videoWindow->getVideoFile() == videoDismissedFor || videoWindow->isVisible())
+            return;
+        videoWindow->setVisible (true);
+        toFront (false);   // keep the keyboard on the spectrogram
+    };
+}
+
+void MainWindow::syncVideoWindow()
+{
+    const FileDoc* d = app.doc();
+    const juce::File vf = d != nullptr ? d->videoFile : juce::File();
+
+    // Created the first time a document with a video is active (or when the
+    // user asks for it): audio-only sessions never pay for the window.
+    if (videoWindow == nullptr && vf == juce::File())
+        return;
+    ensureVideoWindow();
+
+    videoWindow->setVideoFile (vf, d != nullptr ? d->name : juce::String());
+    videoWindow->setAudioDuration (app.audioEngine().isFileLoaded() ? app.audioEngine().duration() : 0.0);
+}
+
+bool MainWindow::isVideoWindowVisible() const
+{
+    return videoWindow != nullptr && videoWindow->isVisible();
+}
+
+void MainWindow::setVideoWindowVisible (bool visible)
+{
+    if (! visible)
+    {
+        if (isVideoWindowVisible())
+        {
+            app.recentStore->setValue ("video_window_state", videoWindow->getWindowStateAsString());
+            app.recentStore->save();
+            videoWindow->setVisible (false);
+        }
+        return;
+    }
+    ensureVideoWindow();   // even without a video: it then says there is none
+    syncVideoWindow();
+    videoDismissedFor = juce::File();
+    videoWindow->setVisible (true);
+    videoWindow->toFront (true);
+}
+
+void MainWindow::setVideoFollowHover (bool on)
+{
+    videoFollowHover = on;
+    app.recentStore->setValue ("video_follow_hover", on ? 1 : 0);
+    app.recentStore->save();
 }
 
 juce::String MainWindow::statusBarFileName() const
@@ -2804,6 +2911,18 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     {
         app.settings.allowMultipleInstances = !app.settings.allowMultipleInstances;
         app.saveSettings ();
+        return;
+    }
+
+    // Window menu: Video window and its hover-following toggle.
+    if (menuItemID == WindowVideo)
+    {
+        setVideoWindowVisible (! isVideoWindowVisible ());
+        return;
+    }
+    if (menuItemID == WindowVideoFollowHover)
+    {
+        setVideoFollowHover (! videoFollowHover);
         return;
     }
 
@@ -7106,6 +7225,14 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         for (size_t i = 0; i < entries.size (); ++i)
             menu.addItem ((int) (WindowPanelBase + i), entries[i].name, true,
                           isPanelOpen (entries[i].id));
+
+        // Video window: the picture of a video document, following the
+        // playhead / playback (and the mouse over the views when enabled).
+        // Listed everywhere; disabled where pictures cannot be decoded.
+        menu.addSeparator ();
+        menu.addItem (WindowVideo, "Video", sc::videoDecodingAvailable (), isVideoWindowVisible ());
+        menu.addItem (WindowVideoFollowHover, "Video Follows Mouse Hover", sc::videoDecodingAvailable (),
+                      videoFollowHover);
 
         // Instance behaviour: when unchecked, launching SpectroCraft again
         // hands its command-line files to this running instance and quits the

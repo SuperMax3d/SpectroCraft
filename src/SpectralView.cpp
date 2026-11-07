@@ -489,6 +489,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 void SpectralView::mouseDrag (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
+    reportHoverTime (e, true);
 
     // Keep the status-bar probe / brush cursor position current.
     probeX = e.x;
@@ -904,6 +905,8 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
 // Status-bar probe: time + frequency + level of that frequency under the cursor.
 void SpectralView::mouseMove (const juce::MouseEvent& e)
 {
+    reportHoverTime (e, false);
+
     // Move/Scale gesture: the live preview follows the cursor even without a
     // button held (must not depend on onCursorInfo being set).
     if (app.haveSelGestureRef ())
@@ -995,8 +998,21 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
         onCursorInfo (info);
 }
 
+void SpectralView::reportHoverTime (const juce::MouseEvent& e, bool dragging)
+{
+    if (!onHoverTime) return;
+    const auto pr = plotRect();
+    const bool loaded = app.audioEngine().isFileLoaded() && pr.getWidth() > 0;
+    const bool inside = e.x >= pr.getX() && e.x < pr.getRight()
+                        && e.y >= pr.getY() && e.y < pr.getBottom();
+    if (!loaded || (!dragging && !inside)) { onHoverTime (-1.0); return; }
+    const int x = std::clamp (e.x, pr.getX(), pr.getRight() - 1);
+    onHoverTime (std::clamp (xToTime (x), 0.0, app.audioEngine().duration()));
+}
+
 void SpectralView::mouseExit (const juce::MouseEvent&)
 {
+    if (onHoverTime) onHoverTime (-1.0);
     if (onCursorInfo) onCursorInfo ("");
 
     // Harmonic markers: hide the circles once the cursor leaves the view.
