@@ -85,7 +85,16 @@ public:
     // FileDoc::spectralSel. playSpectralSel is auto-cleared when the active
     // spectral selection disappears.
     SpectralSelMode selMode = SpectralSelMode::TimeRange;
-    double brushRadiusHz = 200.0;   // paintbrush half-width in Hz
+    // Paintbrush size as a percentage of the cursor's own frequency, on a
+    // fixed doubling ladder (1/2/4/8/16/32 %). The radius at a stroke point is
+    // pct * that point's frequency, so fine work stays possible at low
+    // frequencies where an absolute Hz width was blocky.
+    static constexpr double brushPctLadder [] = { 0.01, 0.02, 0.04, 0.08, 0.16, 0.32 };
+    int brushSizeIndex = 2;   // default: 4 %
+
+    double brushRadiusPct () const { return brushPctLadder [(size_t) brushSizeIndex]; }
+    int brushPctValue () const { return (int) std::lround (brushRadiusPct () * 100.0); }
+    void setBrushPct (double pct);   // snaps to the nearest ladder step
     bool playSpectralSel = false;
 
     // Clone & Multiply interactive picking (Selection panel): the first click
@@ -563,7 +572,7 @@ public:
                          double dtTolSecs = 0.0, double dfTolHz = 0.0);
     void removeClonePickPoint (int index);
 
-    // Paintbrush size step: x1.5 / x(1/1.5), clamped to [5 Hz, 5000 Hz].
+    // Paintbrush size step: one ladder step up/down on the % ladder.
     void stepBrushRadius (bool larger);
 
     // Mirrors the active doc's spectral selection time extent into the shared

@@ -127,20 +127,21 @@ void SpectralSelection::addPolygon (std::vector<std::pair<double, double>> ptsIn
 }
 
 void SpectralSelection::addStroke (std::vector<std::pair<double, double>> ptsIn,
-                                   double radiusHz, bool subtract, bool replace)
+                                   double radiusPct, bool subtract, bool replace)
 {
-    // Thin the path: keep a point only when it moved at least ~1 ms or 8 Hz.
-    // The first and last points are ALWAYS kept - they mark where the stroke
-    // really starts and ends (a densely sampled straight line would otherwise
-    // lose its exact endpoint if it falls within the threshold of the
-    // previous kept point).
+    // Thin the path: keep a point only when it moved at least ~1 ms or by one
+    // brush width in frequency. The first and last points are ALWAYS kept -
+    // they mark where the stroke really starts and ends (a densely sampled
+    // straight line would otherwise lose its exact endpoint if it falls within
+    // the threshold of the previous kept point).
     std::vector<std::pair<double, double>> pts;
     for (size_t i = 0; i < ptsIn.size (); ++i)
     {
         const auto& p = ptsIn[i];
         if (pts.empty () || i == ptsIn.size () - 1
             || std::abs (p.first - pts.back().first) >= 1e-3
-            || std::abs (p.second - pts.back().second) >= 8.0)
+            || std::abs (p.second - pts.back().second)
+               >= std::max (1.0, radiusPct * std::abs (p.second)))
             pts.push_back (p);
     }
     if (pts.empty()) return;
@@ -152,40 +153,52 @@ void SpectralSelection::addStroke (std::vector<std::pair<double, double>> ptsIn,
     s.kind = SpectralShape::Kind::Stroke;
     s.subtract = subtract;
     s.pts = pts;   // kept for rendering (the grid is only used by contains())
-    s.strokeRadiusHz = std::max (1.0, radiusHz);
-    s.rasteriseStroke (s.strokeRadiusHz);
+    s.strokeRadiusPct = std::max (1e-6, radiusPct);
+    s.rasteriseStroke (s.strokeRadiusPct);
     shapeList.push_back (std::move (s));
 }
 
-// Rasterises the stored pts into cols/rows/grid. Resolution is fixed in
-// absolute units (~512 columns/second, ~32 Hz/row) and capped at 4096x4096
-// cells so even hour-long strokes stay small (<= 2 MB).
-void SpectralShape::rasteriseStroke (double radiusHz)
+// Rasterises the stored pts into cols/rows/grid. Each point stamps a disc
+// whose half-width is radiusPct * its own frequency (floored at 1 Hz), so a
+// stroke painted across an octave tapers naturally instead of keeping one
+// absolute width. Time resolution is ~512 columns/second; frequency rows adapt
+// to the smallest brush disc along the path (~4 cells per radius). Capped at
+// 4096x4096 cells so even hour-long strokes stay small (<= 2 MB of bits).
+void SpectralShape::rasteriseStroke (double radiusPct)
 {
     if (kind != Kind::Stroke || pts.empty()) return;
 
+    auto radiusAt = [radiusPct] (double f) {
+        return std::max (1.0, radiusPct * std::abs (f));
+    };
+
     double tMin = 1e30, tMax = -1e30, fMin = 1e30, fMax = -1e30;
+    double rMin = 1e30, rMax = 0.0;
     for (auto& p : pts)
     {
         tMin = std::min (tMin, p.first);  tMax = std::max (tMax, p.first);
         fMin = std::min (fMin, p.second); fMax = std::max (fMax, p.second);
+        const double r = radiusAt (p.second);
+        rMin = std::min (rMin, r);
+        rMax = std::max (rMax, r);
     }
     const double tSpan = std::max (1e-3, tMax - tMin);
-    const double fSpan = std::max (8.0, fMax - fMin + 2.0 * radiusHz);
+    // Margin so the outermost brush disc is fully inside the grid.
+    const double fSpan = std::max (8.0, fMax - fMin + 2.0 * rMax);
 
     const double colSpan = std::max (1.0 / 512.0, tSpan / 4096.0);
-    const double rowHz   = std::max (32.0, fSpan / 4096.0);
-    // The grid must cover [min - margin, max + margin] with a FULL cell of
-    // margin on every side: an endpoint exactly at tMax/fMax would otherwise
-    // map to index == cols/rows and be silently dropped by setBit/contains().
+    // Resolve the smallest brush disc to ~4 rows without spending more than
+    // 4096 rows on the whole span.
+    double rowHz = std::min (fSpan / 4096.0, rMin * 0.25);
     cols = (int) std::min <double> (4096.0, std::ceil ((tSpan + colSpan) / colSpan));
-    rows = (int) std::min <double> (4096.0, std::ceil ((fSpan + rowHz) / rowHz));
+    rows = (int) std::ceil ((fSpan + rowHz) / rowHz);
+    if (rows > 4096) { rows = 4096; rowHz = fSpan / 4096.0; }   // re-cover the span
     if (cols <= 0 || rows <= 0) return;
 
     // The grid covers the path plus one brush radius of margin on every side.
     t0 = tMin - colSpan * 0.5;
     t1 = t0 + cols * colSpan;
-    f0 = fMin - radiusHz - rowHz * 0.5;
+    f0 = fMin - rMax - rowHz * 0.5;
     f1 = f0 + rows * rowHz;
 
     const size_t nBits = (size_t) cols * (size_t) rows;
@@ -198,16 +211,17 @@ void SpectralShape::rasteriseStroke (double radiusHz)
     };
 
     // Stamp one brush disc centred on (t, f): the column containing t plus
-    // every row whose centre lies within radiusHz of f.
+    // every row whose centre lies within radiusAt(f) of f.
     auto stamp = [&] (double t, double f) {
         const int c = (int) std::floor ((t - t0) / colSpan);
-        double rLo = (f - radiusHz - 0.5 * rowHz - f0) / rowHz;
-        double rHi = (f + radiusHz - 0.5 * rowHz - f0) / rowHz;
+        const double r = radiusAt (f);
+        double rLo = (f - r - 0.5 * rowHz - f0) / rowHz;
+        double rHi = (f + r - 0.5 * rowHz - f0) / rowHz;
         int r0 = (int) std::floor (rLo);
         int r1 = (int) std::ceil (rHi) - 1;
         if (r1 < r0) { r0 = r1 = (int) std::lround ((f - f0) / rowHz); }
-        for (int r = r0; r <= r1; ++r)
-            setBit (c, r);
+        for (int rr = r0; rr <= r1; ++rr)
+            setBit (c, rr);
     };
 
     // Walk each segment between consecutive points so fast drags leave no
@@ -230,8 +244,8 @@ void SpectralShape::rasteriseStroke (double radiusHz)
 }
 
 // Appends a copy of one shape with all frequencies multiplied by m. Time
-// coordinates are untouched; stroke radii scale too so the clone's thickness
-// is stretched, not just shifted.
+// coordinates are untouched; stroke radii are percentages of local frequency,
+// so the clone's thickness stretches proportionally, not just shifts.
 void SpectralSelection::appendScaledShape (const SpectralShape& sIn, double m)
 {
     if (!(m > 0.0) || !std::isfinite (m)) return;
@@ -245,11 +259,11 @@ void SpectralSelection::appendScaledShape (const SpectralShape& sIn, double m)
         case SpectralShape::Kind::Polygon:
             for (auto& p : c.pts) p.second *= m;
             break;
-        default:   // Stroke: re-stamp the scaled path at the scaled radius.
+        default:   // Stroke: re-stamp the scaled path; the percentage radius
+                  // scales with the frequencies by construction.
             for (auto& p : c.pts) p.second *= m;
-            c.strokeRadiusHz = std::max (1.0, c.strokeRadiusHz * m);
             c.cols = 0; c.rows = 0; c.grid.clear ();
-            c.rasteriseStroke (c.strokeRadiusHz);
+            c.rasteriseStroke (c.strokeRadiusPct);
             break;
     }
     shapeList.push_back (std::move (c));
@@ -336,15 +350,15 @@ SpectralSelection SpectralSelection::scaledAboutCopy (double anchorT, double anc
                     p.second = anchorF + (p.second - anchorF) * sf;
                 }
                 break;
-            default:   // Stroke: re-stamp the scaled path at the scaled radius.
+            default:   // Stroke: re-stamp the scaled path; the percentage
+                      // radius scales with the frequencies by construction.
                 for (auto& p : c.pts)
                 {
                     p.first  = anchorT + (p.first  - anchorT) * st;
                     p.second = anchorF + (p.second - anchorF) * sf;
                 }
-                c.strokeRadiusHz = std::max (1.0, c.strokeRadiusHz * sf);
                 c.cols = 0; c.rows = 0; c.grid.clear ();
-                c.rasteriseStroke (c.strokeRadiusHz);
+                c.rasteriseStroke (c.strokeRadiusPct);
                 break;
         }
         out.shapeList.push_back (std::move (c));

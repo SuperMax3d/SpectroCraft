@@ -122,7 +122,7 @@ static void testLot6Commands()
     CHECK (ctlOk (ctlCall (app, "selection.tool", scctl::obj ({ { "tool", "marquee" } })))
                && app.selMode == SpectralSelMode::Marquee, "selection.tool");
     ctlCall (app, "selection.tool", scctl::obj ({ { "tool", "timeRange" } }));
-    CHECK (ctlOk (ctlCall (app, "selection.brush", scctl::obj ({ { "radiusHz", 300 } }))) && app.brushRadiusHz == 300.0, "selection.brush");
+    CHECK (ctlOk (ctlCall (app, "selection.brush", scctl::obj ({ { "pct", 4 } }))) && app.brushPctValue () == 4, "selection.brush");
 
     // Settings: clamps, unknown key, control_* refused.
     auto ss = ctlCall (app, "settings.set", scctl::obj ({ { "values", scctl::obj ({ { "fft_size", 99999 }, { "snap_zero", true } }) } }));

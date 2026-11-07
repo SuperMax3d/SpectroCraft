@@ -45,16 +45,21 @@ struct SpectralShape
     // cols x rows cells; a set bit means the brush painted that cell.
     int cols = 0, rows = 0;
     std::vector<uint8_t> grid;
-    double strokeRadiusHz = 0.0;   // Stroke only: brush half-width used at stamp time
+    // Stroke only: brush half-width as a fraction of each point's own
+    // frequency (e.g. 0.04 = ±4 %). The radius tapers along the path, so fine
+    // work stays possible at low frequencies where an absolute Hz width was
+    // blocky.
+    double strokeRadiusPct = 0.04;
 
     bool contains (double tSecs, double fHz) const;
     // Tight bounding box in (timeSecs, freqHz) space: x/y = lower corner,
     // width/height = spans. Empty for degenerate shapes.
     juce::Rectangle<double> boundingBox() const;
 
-    // Stroke only: rasterises the stored pts into cols/rows/grid at the given
-    // brush radius (Hz). Needed before contains() can answer for a stroke.
-    void rasteriseStroke (double radiusHz);
+    // Stroke only: rasterises the stored pts into cols/rows/grid. Each point
+    // stamps a disc whose half-width is radiusPct * its own frequency (floored
+    // at 1 Hz). Needed before contains() can answer for a stroke.
+    void rasteriseStroke (double radiusPct);
 };
 
 // Sample points along a straight line between two (timeSecs, freqHz) positions.
@@ -110,15 +115,17 @@ public:
                      bool subtract, bool replace = true);
 
     // Add a paintbrush stroke: the path is rasterised into a grid at commit
-    // time. radiusHz is the brush half-width in frequency; each point paints
-    // a vertical band of that width at its time position.
+    // time. radiusPct is the brush half-width as a fraction of each point's
+    // own frequency (0.04 = ±4 %); each point paints a vertical band whose
+    // width tapers with local frequency.
     void addStroke (std::vector<std::pair<double, double>> pts,
-                    double radiusHz, bool subtract, bool replace = true);
+                    double radiusPct, bool subtract, bool replace = true);
 
     /** Returns a copy of this selection with every frequency multiplied by m
-        (time coordinates unchanged). Stroke brush radii are scaled too, so a
-        clone's thickness is stretched proportionally - not just offset.
-        Each shape keeps its additive/subtractive flag. */
+        (time coordinates unchanged). Stroke brush radii are percentages of
+        local frequency, so they scale with the clone's frequencies by
+        construction - the thickness stretches proportionally, not just the
+        offset. Each shape keeps its additive/subtractive flag. */
     SpectralSelection scaledCopy (double m) const;
 
     /** Returns a copy translated by dt seconds and df Hz (every shape).

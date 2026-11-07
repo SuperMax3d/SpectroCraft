@@ -154,7 +154,7 @@ Outcome selectionToolCmd (Context& ctx)
                             : t == "paintbrush" ? SpectralSelMode::Paintbrush : SpectralSelMode::TimeRange;
     ctx.app.setSelectionTool (m);
     if (ctx.app.onStateChange) ctx.app.onStateChange();
-    return Outcome::success (obj ({ { "tool", t }, { "brushRadiusHz", ctx.app.brushRadiusHz } }));
+    return Outcome::success (obj ({ { "tool", t }, { "brushPct", ctx.app.brushPctValue() } }));
 }
 
 Outcome clearSpectralCmd (Context& ctx)
@@ -165,12 +165,14 @@ Outcome clearSpectralCmd (Context& ctx)
 
 Outcome brushCmd (Context& ctx)
 {
-    if (ctx.has ("radiusHz"))
-        ctx.app.brushRadiusHz = std::clamp (ctx.num ("radiusHz", ctx.app.brushRadiusHz), 5.0, 5000.0);
+    // Brush size is a percentage of the cursor's own frequency, snapped to
+    // the 1/2/4/8/16/32 % ladder.
+    if (ctx.has ("pct"))
+        ctx.app.setBrushPct (ctx.num ("pct", ctx.app.brushRadiusPct () * 100.0));
     else
         ctx.app.stepBrushRadius (ctx.flag ("larger", true));
     if (ctx.app.onStateChange) ctx.app.onStateChange();
-    return Outcome::success (obj ({ { "brushRadiusHz", ctx.app.brushRadiusHz } }));
+    return Outcome::success (obj ({ { "brushPct", ctx.app.brushPctValue() } }));
 }
 
 Outcome splitCmd (Context& ctx)
@@ -455,8 +457,8 @@ void registerEditCommands (CommandRegistry& r)
              { P ("tool", PType::String).req().oneOf ({ "timeRange", "marquee", "lasso", "paintbrush" }) },
              {}, None, {}, selectionToolCmd });
     r.add ({ "selection.clearSpectral", "Clear the spectral selection", "selection", {}, {}, NeedsDoc, {}, clearSpectralCmd });
-    r.add ({ "selection.brush", "Paintbrush size", "selection",
-             { P ("radiusHz", PType::Number).range (5, 5000), P ("larger", PType::Boolean) }, {}, None, {}, brushCmd });
+    r.add ({ "selection.brush", "Paintbrush size (% of cursor frequency; snaps to the 1/2/4/8/16/32 ladder)", "selection",
+             { P ("pct", PType::Number).range (1, 32), P ("larger", PType::Boolean) }, {}, None, {}, brushCmd });
 
     r.add ({ "settings.get", "Read settings (same clamps and names as the settings store)", "settings",
              { P ("keys", PType::Array).items (PType::String) }, {}, Query, {}, settingsGetCmd });

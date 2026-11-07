@@ -12275,7 +12275,8 @@ static void testSpectralSelectionModel()
     std::vector<std::pair<double, double>> path;
     for (int i = 0; i <= 100; ++i)
         path.emplace_back ((double) i / 100.0 * 2.0, 500.0);   // t: 0..2 s at 500 Hz
-    stroke.addStroke (path, 200.0, false);
+    // 40 % of the constant 500 Hz path = a 200 Hz half-width band.
+    stroke.addStroke (path, 0.4, false);
     CHECK (!stroke.empty (), "stroke committed");
     CHECK (stroke.contains (1.0, 500.0), "stroke contains its centre line");
     CHECK (stroke.contains (1.0, 650.0), "stroke covers within brush radius");
@@ -12285,14 +12286,14 @@ static void testSpectralSelectionModel()
     // Fast-drag strokes: sparse sample points must not leave gaps between
     // them - the rasteriser interpolates along each segment.
     SpectralSelection sparse;
-    sparse.addStroke ({ { 0.0, 500.0 }, { 2.0, 500.0 } }, 20.0, false);
+    sparse.addStroke ({ { 0.0, 500.0 }, { 2.0, 500.0 } }, 0.04, false);
     bool noGapH = true;
     for (int i = 1; i < 200; ++i)
         if (!sparse.contains ((double) i / 100.0, 500.0)) { noGapH = false; break; }
     CHECK (noGapH, "horizontal stroke has no gaps between sparse samples");
 
     SpectralSelection diag;
-    diag.addStroke ({ { 0.0, 100.0 }, { 2.0, 900.0 } }, 20.0, false);
+    diag.addStroke ({ { 0.0, 100.0 }, { 2.0, 900.0 } }, 0.04, false);
     bool noGapD = true;
     for (int i = 1; i < 200; ++i)
     {
@@ -12626,7 +12627,7 @@ static void testSpectralSelectionAdjustForDeletion()
 
     // Stroke entirely after the range: shifted with grid intact.
     SpectralSelection st1;
-    st1.addStroke (straightLinePoints (7.0, 150, 9.0, 250), 50.0, false);
+    st1.addStroke (straightLinePoints (7.0, 150, 9.0, 250), 0.2, false);
     CHECK (st1.adjustForDeletion (4.0, 6.0), "stroke shifted");
     const auto& s1 = st1.shapes()[0];
     // Stroke grids carry a half-cell margin around the path, so allow slack.
@@ -12636,7 +12637,7 @@ static void testSpectralSelectionAdjustForDeletion()
 
     // Stroke straddling both edges: split into two contiguous pieces.
     SpectralSelection st2;
-    st2.addStroke (straightLinePoints (3.0, 150, 9.0, 250), 50.0, false);
+    st2.addStroke (straightLinePoints (3.0, 150, 9.0, 250), 0.2, false);
     CHECK (st2.adjustForDeletion (4.0, 6.0), "stroke split");
     int strokes = 0;
     for (const auto& s : st2.shapes()) if (s.kind == SpectralShape::Kind::Stroke) ++strokes;
@@ -12647,7 +12648,7 @@ static void testSpectralSelectionAdjustForDeletion()
 
     // Stroke fully contained: dropped.
     SpectralSelection st3;
-    st3.addStroke (straightLinePoints (4.5, 150, 5.5, 250), 50.0, false);
+    st3.addStroke (straightLinePoints (4.5, 150, 5.5, 250), 0.2, false);
     CHECK (st3.adjustForDeletion (4.0, 6.0), "contained stroke dropped");
     CHECK (st3.empty(), "selection empty after dropping the only shape");
 
@@ -19858,7 +19859,8 @@ static void testMipmapBitExact()
 
 // ------------------------------------------------- Selection panel / clone & multiply
 
-/** scaledCopy multiplies frequencies (and stroke radii) by m, time unchanged. */
+/** scaledCopy multiplies frequencies by m, time unchanged; percentage
+    stroke radii scale with the local frequency by construction. */
 static void testScaledCopy()
 {
     SpectralSelection sel;
@@ -19870,7 +19872,7 @@ static void testScaledCopy()
     std::vector<std::pair<double,double>> stroke = { {0.1, 500}, {0.2, 750},
                                                      {0.3, 1000}, {0.4, 1250},
                                                      {0.5, 1500} };
-    sel.addStroke (stroke, 250.0, false, false);         // additive stroke
+    sel.addStroke (stroke, 0.25, false, false);          // additive stroke (25 % of local freq)
 
     const SpectralSelection scaled = sel.scaledCopy (2.0);
     CHECK (scaled.count () == 3, "scaled copy keeps shape count");
@@ -19957,7 +19959,7 @@ static void testSavedSelectionsRoundTrip()
     std::vector<std::pair<double,double>> stroke = { {0.1, 500}, {0.2, 750},
                                                      {0.3, 1000}, {0.4, 1250},
                                                      {0.5, 1500} };
-    a.data.addStroke (stroke, 250.0, false, false);
+    a.data.addStroke (stroke, 0.25, false, false);
     list.push_back (std::move (a));
 
     SavedSpectralSelection b;
@@ -19980,7 +19982,7 @@ static void testSavedSelectionsRoundTrip()
     SpectralSelection orig;
     orig.addRect (0.1, 0.5, 200.0, 400.0, false, false);
     orig.addPolygon (poly, true, false);
-    orig.addStroke (stroke, 250.0, false, false);
+    orig.addStroke (stroke, 0.25, false, false);
     bool same = true;
     for (double t : { 0.15, 0.3, 0.45 })
         for (double f : { 150.0, 300.0, 450.0, 900.0, 1000.0, 2000.0 })
@@ -20327,7 +20329,7 @@ static void testSelMoveScaleGesture()
     {
         SpectralSelection sel;
         std::vector<std::pair<double, double>> line = { {0.2, 300}, {0.6, 500} };
-        sel.addStroke (line, 40.0, false);
+        sel.addStroke (line, 0.1, false);   // ~40 Hz around the line's mid frequency
 
         CHECK (sel.contains (0.4, 400.0), "original stroke covers its midpoint");
         auto tr = sel.translatedCopy (1.0, -100.0);
@@ -20718,25 +20720,26 @@ static void testClonePickToggleAndHints()
     app.endClonePick ();
     CHECK (!app.isClonePicking (), "pick session ended");
 
-    // Paintbrush radius: x1.5 steps clamped to [5 Hz, 5000 Hz].
-    app.brushRadiusHz = 200.0;
+    // Paintbrush size: % of the cursor frequency on a doubling ladder.
+    app.brushSizeIndex = 2;   // default: 4 %
+    CHECK (app.brushPctValue () == 4, "default brush is 4 %");
     app.stepBrushRadius (false);
-    CHECK (std::abs (app.brushRadiusHz - 200.0 / 1.5) < 1e-9, "brush step down x(1/1.5)");
-    app.brushRadiusHz = 20.0;
+    CHECK (app.brushPctValue () == 2, "brush step down to 2 %");
     for (int i = 0; i < 6; ++i) app.stepBrushRadius (false);
-    CHECK (std::abs (app.brushRadiusHz - 5.0) < 1e-9, "brush radius clamps at 5 Hz");
+    CHECK (app.brushPctValue () == 1, "brush clamps at the 1 % floor");
     app.stepBrushRadius (true);
-    CHECK (std::abs (app.brushRadiusHz - 7.5) < 1e-9, "step up from the floor");
-    app.brushRadiusHz = 4000.0;
+    CHECK (app.brushPctValue () == 2, "step up from the floor");
+    app.setBrushPct (30.0);
+    CHECK (app.brushPctValue () == 32, "setBrushPct snaps to the nearest step");
     app.stepBrushRadius (true);
-    CHECK (std::abs (app.brushRadiusHz - 5000.0) < 1e-9, "brush radius clamps at 5000 Hz");
+    CHECK (app.brushPctValue () == 32, "brush clamps at the 32 % ceiling");
 
     // Footer modifier hints: the pure part plus live composition.
     std::unique_ptr<MainWindow> win (new MainWindow (app, "hint test"));
     CHECK (win->applyModifierHint ("Marquee", true, false) == "Marquee  +  Add Selection",
           "SHIFT hint text");
-    CHECK (win->applyModifierHint ("Paintbrush 200 Hz", false, true)
-              == "Paintbrush 200 Hz  -  Subtract Selection",
+    CHECK (win->applyModifierHint ("Paintbrush 4%", false, true)
+              == "Paintbrush 4%  -  Subtract Selection",
           "CTRL hint text");
     const juce::String both = win->applyModifierHint ("Lasso", true, true);
     CHECK (both.contains ("Subtract Selection") && !both.contains ("Add Selection"),

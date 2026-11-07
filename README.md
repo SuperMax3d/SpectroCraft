@@ -1740,7 +1740,7 @@ troubleshooting); protocol: [docs/ai-control/REPORT.md](docs/ai-control/REPORT.m
 | Go to Time... (jump the playhead by time, sample count or any alternative-scale value) | Ctrl+G |
 | Add marker (region if selected, else point at cursor) | F2 / F8 |
 | Selection tool: Time Range / Marquee / Lasso / Paintbrush | S / M / L / P |
-| Brush radius smaller / larger (Paintbrush only) | [ / ] |
+| Brush size smaller / larger (Paintbrush only; % of cursor frequency) | [ / ] |
 | Paintbrush: straight line from the last stroke's end point to the click position (straight in linear-frequency space) | Alt+click |
 | New drawing on the spectrogram: Text / Arrow / Rectangle / Free Drawing | T / A / R / D |
 | Cancel a pending drawing creation (otherwise clears the active spectral selection) | Esc |
@@ -1908,7 +1908,7 @@ time/frequency plane and apply edits to exactly that content. The
 | Time Range (default) | S | Left-drag a time range, as before |
 | Marquee | M | Left-drag a rectangle in either view's plot area |
 | Lasso | L | Hold and drag through the vertices of the region; releasing closes the polygon (≥3 points) |
-| Paintbrush | P | Drag a freehand stroke; its width is the brush radius (Hz) |
+| Paintbrush | P | Drag a freehand stroke; its half-width is a percentage of each point's own frequency, so it tapers along the path and stays fine at low frequencies |
 
 Modifier keys while dragging: **plain = replace** the current selection,
 **Shift = add** to it, **Ctrl = subtract** from it (subtractive shapes are
@@ -1916,8 +1916,8 @@ drawn with dashed edges). With the paintbrush, **Alt+click** draws a straight
 line from the last stroke's end point to the click position; the line is
 straight in *linear-frequency* space, so on a logarithmic frequency axis it
 appears slightly curved (switching the view to a linear scale shows it as a
-perfectly straight line). Shift/Ctrl combine with Alt for add/subtract lines. The active tool and brush radius are shown in the
-status bar; while holding **Shift** or **Ctrl**, it additionally shows "Add Selection" / "Subtract Selection", so you can always see how the next drag will edit the selection. `[` / `]` change the brush radius (5–5000 Hz), and **Esc**
+perfectly straight line). Shift/Ctrl combine with Alt for add/subtract lines. The active tool and brush size are shown in the
+status bar; while holding **Shift** or **Ctrl**, it additionally shows "Add Selection" / "Subtract Selection", so you can always see how the next drag will edit the selection. `[` / `]` step the brush size through 1/2/4/8/16/32 % of the cursor's own frequency (default 4 %), and **Esc**
 clears the spectral selection without touching the time selection.
 
 **Moving / scaling an existing selection**: in the spectral view, right-click

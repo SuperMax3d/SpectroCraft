@@ -854,7 +854,7 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
                     // to the release point (see straightLinePoints()).
                     d->spectralSel.addStroke (straightLinePoints (lineAnchorT, lineAnchorF,
                                                                  lineEndT, lineEndF),
-                                              app.brushRadiusHz, toolSubtract, toolReplace);
+                                              app.brushRadiusPct (), toolSubtract, toolReplace);
                     haveLineAnchor = true;
                     lineAnchorT = lineEndT;
                     lineAnchorF = lineEndF;
@@ -863,7 +863,7 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
                 default:   // Paint
                     if (!strokePts.empty())
                     {
-                        d->spectralSel.addStroke (strokePts, app.brushRadiusHz,
+                        d->spectralSel.addStroke (strokePts, app.brushRadiusPct (),
                                                   toolSubtract, toolReplace);
                         haveLineAnchor = true;
                         lineAnchorT = strokePts.back().first;
@@ -1964,7 +1964,7 @@ void SpectralView::drawSpectralShapesOverlay (juce::Graphics& g, bool includeLiv
             else
                 live.pts = (dragMode == DragMode::Lasso) ? lassoPts : strokePts;
             if (live.kind == SpectralShape::Kind::Stroke)
-                live.rasteriseStroke (app.brushRadiusHz);   // grid needed for contains()
+                live.rasteriseStroke (app.brushRadiusPct ());   // grid needed for contains()
             haveLive = true;
         }
     }
@@ -2049,11 +2049,13 @@ void SpectralView::drawOverlays (juce::Graphics& g)
         && probeY >= pr.getY() && probeY <= pr.getBottom())
     {
         const double f = freqAtY (probeY);
+        // The brush is a percentage of the cursor's own frequency.
+        const double r = std::max (1.0, app.brushRadiusPct () * std::abs (f));
         g.setColour (juce::Colour::fromRGBA (96, 150, 255, 140));
         for (const auto& row : rowRects ())
         {
-            const double yTop = row.getY() + freqToY (f + app.brushRadiusHz, row.getHeight());
-            const double yBot = row.getY() + freqToY (std::max (0.0, f - app.brushRadiusHz), row.getHeight());
+            const double yTop = row.getY() + freqToY (f + r, row.getHeight());
+            const double yBot = row.getY() + freqToY (std::max (0.0, f - r), row.getHeight());
             g.fillRect ((float) probeX - 1.0f, (float) std::min (yTop, yBot), 2.0f,
                         (float) std::max (0.0, std::abs (yBot - yTop)));
         }

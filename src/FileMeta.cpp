@@ -139,8 +139,8 @@ static void appendSelectionObjects (const std::vector<SavedSpectralSelection>& l
                     break;
                 case SpectralShape::Kind::Polygon:
                     break;   // pts added by the common block below
-                default:   // Stroke
-                    so->setProperty ("radius", std::max (1.0, sh.strokeRadiusHz));
+                default:   // Stroke - brush size as % of local frequency.
+                    so->setProperty ("pct", sh.strokeRadiusPct);
                     break;
             }
 
@@ -224,11 +224,25 @@ static bool readSelectionObjects (const juce::var& v, std::vector<SavedSpectralS
             }
             else if (kind == "stroke")
             {
-                const double radius = std::max (1.0, static_cast<double> (sp.getWithDefault ("radius", 4.0)));
+                double frac = -1.0;   // brush half-width as a fraction of local frequency
                 std::vector<std::pair<double, double>> pts;
                 if (!readPtsArray (sp, pts) || pts.empty())
                     return false;
-                sel.data.addStroke (std::move (pts), radius, subtract, false);
+                const juce::var pv = sp.getWithDefault ("pct", juce::var());
+                if (pv.isDouble () || pv.isInt () || pv.isInt64 ())
+                    frac = static_cast<double> (pv);
+                else
+                {
+                    // Legacy format: absolute radius in Hz - convert with the
+                    // median stroke frequency so old files keep their look.
+                    const double radius = std::max (1.0, static_cast<double> (sp.getWithDefault ("radius", 4.0)));
+                    std::vector<double> fs;
+                    for (const auto& p : pts) fs.push_back (std::abs (p.second));
+                    std::sort (fs.begin (), fs.end());
+                    const double med = fs[fs.size() / 2];
+                    frac = (med > 1e-9) ? radius / med : 0.04;
+                }
+                sel.data.addStroke (std::move (pts), std::max (1e-6, frac), subtract, false);
             }
             else
                 return false;   // unknown shape kind

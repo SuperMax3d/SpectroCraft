@@ -1813,7 +1813,7 @@ juce::String MainWindow::currentModeText() const
             break;
         case SpectralSelMode::Paintbrush:
             mode = juce::String ("Paintbrush ") +
-                   juce::String ((int) std::lround (app.brushRadiusHz)) + " Hz";
+                   juce::String (app.brushPctValue ()) + "%";
             break;
         default: break;
     }
@@ -6957,8 +6957,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       app.selMode == SpectralSelMode::Lasso);
         menu.addItem (SelectionToolPaintbrush,
                       juce::String ("Paintbrush (") +
-                          juce::String ((int) std::lround (app.brushRadiusHz)) +
-                          " Hz)\tP",
+                          juce::String (app.brushPctValue ()) + "%\tP",
                       hasFile, app.selMode == SpectralSelMode::Paintbrush);
         menu.addSeparator ();
         menu.addItem (SelectionBrushSmaller, "Brush Smaller\t[", hasFile, false);

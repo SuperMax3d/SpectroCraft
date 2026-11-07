@@ -1093,7 +1093,7 @@ static uint64_t spectralMaskHash (const SpectralSelection* sel)
     {
         const int head[4] = { (int) sh.kind, sh.subtract ? 1 : 0, sh.cols, sh.rows };
         mix (head, sizeof (head));
-        mixD (sh.t0); mixD (sh.t1); mixD (sh.f0); mixD (sh.f1); mixD (sh.strokeRadiusHz);
+        mixD (sh.t0); mixD (sh.t1); mixD (sh.f0); mixD (sh.f1); mixD (sh.strokeRadiusPct);
         for (const auto& pt : sh.pts) { mixD (pt.first); mixD (pt.second); }
         if (!sh.grid.empty()) mix (sh.grid.data(), sh.grid.size());
     }

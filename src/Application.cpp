@@ -1855,8 +1855,21 @@ void Application::removeClonePickPoint (int index)
 
 void Application::stepBrushRadius (bool larger)
 {
-    brushRadiusHz = larger ? std::min (5000.0, brushRadiusHz * 1.5)
-                           : std::max (5.0, brushRadiusHz / 1.5);
+    const int n = (int) sizeof (brushPctLadder) / sizeof (brushPctLadder[0]);
+    brushSizeIndex = juce::jlimit (0, n - 1, brushSizeIndex + (larger ? 1 : -1));
+}
+
+void Application::setBrushPct (double pct)
+{
+    // Snap to the nearest ladder step.
+    int best = 0;
+    double bestD = 1e30;
+    for (size_t i = 0; i < sizeof (brushPctLadder) / sizeof (brushPctLadder[0]); ++i)
+    {
+        const double d = std::abs (pct - brushPctLadder[i] * 100.0);
+        if (d < bestD) { bestD = d; best = (int) i; }
+    }
+    brushSizeIndex = best;
 }
 
 // ---------------------------------------------------------------------------

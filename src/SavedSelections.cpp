@@ -1,5 +1,6 @@
 // SpectroCraft - named spectral selections: JSON sidecar persistence.
 #include "SavedSelections.h"
+#include <algorithm>
 #include <cmath>
 
 juce::File savedSelectionsSidecarPath (const juce::File& audioFile)
@@ -80,8 +81,9 @@ juce::String serialiseSavedSelections (const std::vector<SavedSpectralSelection>
                     }
                     s += "]";
                     break;
-                default:   // Stroke: re-stamped from pts at load time.
-                    s += ", \"radius\": " + num (std::max (1.0, sh.strokeRadiusHz));
+                default:   // Stroke: re-stamped from pts at load time. The
+                          // brush size is a percentage of local frequency.
+                    s += ", \"pct\": " + num (sh.strokeRadiusPct);
                     s += ", \"pts\": [";
                     for (size_t p = 0; p < sh.pts.size(); ++p)
                     {
@@ -212,11 +214,23 @@ bool deserialiseSavedSelections (const juce::String& json,
             }
             else if (kind == "stroke")
             {
-                double radius = 0.0;
+                double frac = -1.0;   // brush half-width as a fraction of local frequency
                 std::vector<std::pair<double, double>> pts;
-                if (!num (sp, "radius", radius) || !points (sp, pts) || pts.empty())
+                if (!points (sp, pts) || pts.empty())
                     return false;
-                sel.data.addStroke (pts, radius, subtract, false);
+                if (!num (sp, "pct", frac))
+                {
+                    // Legacy format: absolute radius in Hz. Convert with the
+                    // median stroke frequency so old files keep their look.
+                    double radius = 0.0;
+                    if (!num (sp, "radius", radius)) return false;
+                    std::vector<double> fs;
+                    for (const auto& p : pts) fs.push_back (std::abs (p.second));
+                    std::sort (fs.begin (), fs.end());
+                    const double med = fs[fs.size() / 2];
+                    frac = (med > 1e-9) ? radius / med : 0.04;
+                }
+                sel.data.addStroke (pts, std::max (1e-6, frac), subtract, false);
             }
             else
                 return false;   // unknown shape kind
