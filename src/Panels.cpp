@@ -10321,7 +10321,13 @@ void TablesPanel::showManualAlignDialog (int scopeTable, int scopeParam, int tar
     // Centre on the main window's current position instead of appearing in
     // the screen corner.
     if (juce::Component* top = getTopLevelComponent ())
-        w->setBounds (top->getBounds ().withSize (356, contentH));
+    {
+        const auto tb = top->getBounds ();
+        w->setBounds (tb.getCentreX () - 356 / 2, tb.getCentreY () - contentH / 2,
+                      356, contentH);
+    }
+    else
+        w->centreWithSize (356, contentH);
 
     bool okPressed = false;
     w->onOk = [&okPressed] { okPressed = true; };

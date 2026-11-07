@@ -727,7 +727,9 @@ static bool parseOverwriteValue (const juce::String& s, double& out)
     if (t.isEmpty ()) return false;
     char* end = nullptr;
     const double v = std::strtod (t.toRawUTF8 (), &end);
-    return end != nullptr && *end == 0 && std::isfinite (v);
+    if (end == nullptr || *end != 0 || !std::isfinite (v)) return false;
+    out = v;
+    return true;
 }
 
 /** "Overwrite Values" dialog: a linear ramp from Start to Stop over the time
@@ -975,9 +977,16 @@ void TablesTrackView::overwriteSelectionValues()
     if ((int) targets.size () > 3) names += " ...";
 
     OverwriteValuesWindow dlg (names, startDef, stopDef);
-    // Centre on the main window's current position.
+    // Centre over the main window's current position.
     if (juce::Component* top = getTopLevelComponent ())
-        dlg.setBounds (top->getBounds ().withSize (dlg.getWidth (), dlg.getHeight ()));
+    {
+        const auto tb = top->getBounds ();
+        dlg.setBounds (tb.getCentreX () - dlg.getWidth () / 2,
+                      tb.getCentreY () - dlg.getHeight () / 2,
+                      dlg.getWidth (), dlg.getHeight ());
+    }
+    else
+        dlg.centreWithSize (dlg.getWidth (), dlg.getHeight ());
     dlg.enterModalState (false);
     if (auto* ed = dlg.startEditorComp()) { ed->grabKeyboardFocus (); ed->selectAll (); }
 
@@ -992,6 +1001,15 @@ void TablesTrackView::overwriteSelectionValues()
                                "The entered text could not be read as a number.",
                                juce::AlertWindow::WarningIcon, this);
         bad.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        if (juce::Component* top = getTopLevelComponent ())
+        {
+            const auto tb = top->getBounds ();
+            bad.setBounds (tb.getCentreX () - bad.getWidth () / 2,
+                           tb.getCentreY () - bad.getHeight () / 2,
+                           bad.getWidth (), bad.getHeight ());
+        }
+        else
+            bad.centreWithSize (bad.getWidth (), bad.getHeight ());
         bad.enterModalState (false);
         bad.runModalLoop ();
         return;

@@ -3151,8 +3151,9 @@ bool Application::contentAwareTimeScale (bool reduceGaps, double percentile,
     auto oldSavedSel = d->savedSelections;
     TimeAnchoredState oldTA = captureTimeAnchored ();   // playhead/sel/spectral/drawings/SCTT
 
-    if (!eng.replaceRangeWithDifferentLength (range, newData, "Content-aware time scale"))
-        return false;   // errOut set by the engine when non-null
+    if (!eng.replaceRangeWithDifferentLength (range, newData,
+                                               "Content-aware time scale", errOut))
+        return false;   // the engine sets *errOut when non-null
 
     const double bNew = ((double) range.getStart () + (double) newData[0].size ()) / rate;
 
