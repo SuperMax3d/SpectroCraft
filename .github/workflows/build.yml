@@ -49,8 +49,10 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -A x64 -DSPECTRO_ENABLE_AI=ON
 
-      - name: Build (Release, app + fake recorder plugin)
-        run: cmake --build build --config Release --target SpectroCraft --parallel
+      # sc_wasapi_recorder is not a dependency of the app target, so it must
+      # be requested explicitly or <exe>/recorders/ ends up empty in the zip.
+      - name: Build (Release, app + WASAPI recorder plugin)
+        run: cmake --build build --config Release --target SpectroCraft --target sc_wasapi_recorder --parallel
 
       # -j 1: shards in turn, so two processes never download the same model
       # file at the same time.
