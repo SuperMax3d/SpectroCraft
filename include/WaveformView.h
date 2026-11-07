@@ -143,6 +143,9 @@ public:
     std::function<void(int)> onContextAction;
     // Status-bar probe: cursor time + amplitude under the mouse (empty clears).
     std::function<void(const juce::String&)> onCursorInfo;
+    /** Document time under the mouse while it is over the plot (moving or
+        dragging), -1 once it leaves: the Video window follows it. */
+    std::function<void(double)> onHoverTime;
 
     // Tables panel alignment flow: while set, a left click inside this view is
     // consumed as an alignment reference point and reported with its time and
@@ -223,6 +226,9 @@ public:
     static constexpr int kRulerH = 24;  // top time ruler height
 
 private:
+    // Video window: reports the time under the mouse through onHoverTime
+    // (inside the plot while moving; clamped to it while dragging).
+    void reportHoverTime (const juce::MouseEvent& e, bool dragging);
     // Absolute-coordinate row rectangles for the visible channels, spanning
     // the full component width so drags starting on the axis strip hit-test.
     std::vector<juce::Rectangle<int>> absRowRects() const;

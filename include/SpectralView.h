@@ -200,6 +200,9 @@ public:
     // Status-bar probe: cursor time + frequency + level under the mouse
     // (empty string clears it).
     std::function<void(const juce::String&)> onCursorInfo;
+    /** Document time under the mouse while it is over the plot (moving or
+        dragging), -1 once it leaves: the Video window follows it. */
+    std::function<void(double)> onHoverTime;
     // Armed scale calibration (Scale / Alternative Scale menu): fires when the
     // user places the reference point in the plot.
     std::function<void(double, double)> onRefClickPlaced;
@@ -304,6 +307,9 @@ public:
     void drawTableHoverLabels (juce::Graphics& g);
 
 private:
+    // Video window: reports the time under the mouse through onHoverTime
+    // (inside the plot while moving; clamped to it while dragging).
+    void reportHoverTime (const juce::MouseEvent& e, bool dragging);
     Application& app;   // audio data read live via app.audioEngine() (active doc)
 
     // New-drawing creation state (armed by startPendingDraw()).

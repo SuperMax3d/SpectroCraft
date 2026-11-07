@@ -242,6 +242,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
+    reportHoverTime (e, true);
 
     switch (dragMode)
     {
@@ -421,6 +422,8 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
 // Status-bar probe: time + amplitude under the cursor.
 void WaveformView::mouseMove (const juce::MouseEvent& e)
 {
+    reportHoverTime (e, false);
+
     if (!onCursorInfo) return;
     const auto pr = plotRect();
     if (e.x < pr.getX() || e.x >= pr.getRight()
@@ -504,8 +507,21 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
         onCursorInfo (tText + "   ch " + lab + ": " + vText + altText);
 }
 
+void WaveformView::reportHoverTime (const juce::MouseEvent& e, bool dragging)
+{
+    if (!onHoverTime) return;
+    const auto pr = plotRect();
+    const bool loaded = app.audioEngine().isFileLoaded() && pr.getWidth() > 0;
+    const bool inside = e.x >= pr.getX() && e.x < pr.getRight()
+                        && e.y >= pr.getY() && e.y < pr.getBottom();
+    if (!loaded || (!dragging && !inside)) { onHoverTime (-1.0); return; }
+    const int x = std::clamp (e.x, pr.getX(), pr.getRight() - 1);
+    onHoverTime (std::clamp (xToTime (x), 0.0, app.audioEngine().duration()));
+}
+
 void WaveformView::mouseExit (const juce::MouseEvent&)
 {
+    if (onHoverTime) onHoverTime (-1.0);
     if (onCursorInfo) onCursorInfo ("");
 }
 

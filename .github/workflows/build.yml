@@ -1,4 +1,8 @@
 # Build + unit tests: one AI build per platform (-DSPECTRO_ENABLE_AI=ON).
+# The app artifacts are named SpectroCraft-<os> on main and
+# SpectroCraft-<os>-<branch> elsewhere (e.g. the Video window branch:
+# SpectroCraft-windows-x64-video-viewer), so a feature build never passes
+# for a main one.
 # Windows uses the vendored runtime DLLs; macOS / Linux fetch the pinned
 # OpenVINO 2024.6 archive and whisper.cpp b5454 at configure time
 # (cmake/ScAiRuntimes.cmake). Every other dependency (JUCE, SoXR, SoundTouch,
@@ -40,6 +44,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Builds of a branch other than main publish their own artifacts
+      # (SpectroCraft-<os>-<branch>, e.g. -video-viewer), kept apart from the
+      # main builds. Characters artifact names refuse become '-'.
+      - name: Artifact name suffix
+        shell: bash
+        run: |
+          ref="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          ref="${ref//[^A-Za-z0-9._-]/-}"
+          if [ "$ref" = main ]; then suffix=""; else suffix="-$ref"; fi
+          echo "SC_ARTIFACT_SUFFIX=$suffix" >> "$GITHUB_ENV"
+          echo "artifact suffix: '$suffix'"
+
       - name: Cache AI model weights
         uses: actions/cache@v4
         with:
@@ -70,7 +86,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           # SpectroCraft.exe + OpenVINO / whisper.cpp / FFmpeg DLLs + recorders/.
-          name: SpectroCraft-windows-x64
+          name: SpectroCraft-windows-x64${{ env.SC_ARTIFACT_SUFFIX }}
           path: |
             build/src/SpectroCraft_artefacts/Release/
             !build/src/SpectroCraft_artefacts/Release/**/*.pdb
@@ -80,7 +96,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-logs-windows
+          name: ctest-logs-windows${{ env.SC_ARTIFACT_SUFFIX }}
           path: build/Testing/Temporary/
           if-no-files-found: ignore
 
@@ -98,6 +114,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Builds of a branch other than main publish their own artifacts
+      # (SpectroCraft-<os>-<branch>, e.g. -video-viewer), kept apart from the
+      # main builds. Characters artifact names refuse become '-'.
+      - name: Artifact name suffix
+        shell: bash
+        run: |
+          ref="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          ref="${ref//[^A-Za-z0-9._-]/-}"
+          if [ "$ref" = main ]; then suffix=""; else suffix="-$ref"; fi
+          echo "SC_ARTIFACT_SUFFIX=$suffix" >> "$GITHUB_ENV"
+          echo "artifact suffix: '$suffix'"
 
       - name: Cache AI runtime archives (OpenVINO, whisper.cpp sources)
         uses: actions/cache@v4
@@ -160,7 +188,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: SpectroCraft-macos-arm64
+          name: SpectroCraft-macos-arm64${{ env.SC_ARTIFACT_SUFFIX }}
           path: SpectroCraft-macos-arm64.tar.gz
           retention-days: 30
 
@@ -168,7 +196,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-logs-macos
+          name: ctest-logs-macos${{ env.SC_ARTIFACT_SUFFIX }}
           path: build/Testing/Temporary/
           if-no-files-found: ignore
 
@@ -185,6 +213,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Builds of a branch other than main publish their own artifacts
+      # (SpectroCraft-<os>-<branch>, e.g. -video-viewer), kept apart from the
+      # main builds. Characters artifact names refuse become '-'.
+      - name: Artifact name suffix
+        shell: bash
+        run: |
+          ref="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          ref="${ref//[^A-Za-z0-9._-]/-}"
+          if [ "$ref" = main ]; then suffix=""; else suffix="-$ref"; fi
+          echo "SC_ARTIFACT_SUFFIX=$suffix" >> "$GITHUB_ENV"
+          echo "artifact suffix: '$suffix'"
 
       - name: Install JUCE dependencies (+ libcurl for the model downloads)
         run: |
@@ -262,7 +302,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: SpectroCraft-linux-x64
+          name: SpectroCraft-linux-x64${{ env.SC_ARTIFACT_SUFFIX }}
           path: SpectroCraft-linux-x64.tar.gz
           retention-days: 30
 
@@ -270,7 +310,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ctest-logs-linux
+          name: ctest-logs-linux${{ env.SC_ARTIFACT_SUFFIX }}
           path: build/Testing/Temporary/
           if-no-files-found: ignore
 
