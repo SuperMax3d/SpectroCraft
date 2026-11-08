@@ -743,13 +743,15 @@ VideoAdjustDialog::VideoAdjustDialog (juce::Component* parent)
 
     contrastLbl_.setText ("Contrast", juce::NotificationType::dontSendNotification);
     brightnessLbl_.setText ("Brightness", juce::NotificationType::dontSendNotification);
-    addChildComponent (contrastLbl_);
-    addChildComponent (brightnessLbl_);
-    addChildComponent (contrast_);
-    addChildComponent (brightness_);
-    addChildComponent (applyAll_);
-    addChildComponent (reset_);
-    addChildComponent (closeBtn_);
+    // Pointers: under JUCE_DEBUG, ResizableWindow hides the base-class
+    // reference overload of addChildComponent().
+    addChildComponent (&contrastLbl_);
+    addChildComponent (&brightnessLbl_);
+    addChildComponent (&contrast_);
+    addChildComponent (&brightness_);
+    addChildComponent (&applyAll_);
+    addChildComponent (&reset_);
+    addChildComponent (&closeBtn_);
 
     centreWithSize (320, 104);
     addToDesktop ();   // only now that the members are initialised: correct caption style
@@ -992,8 +994,8 @@ void VideoWindow::switchTo (int d)
 
     if (d < 0)
     {
-        currentFile = {};
-        framePump.open ({});
+        currentFile = juce::File();
+        framePump.open (juce::File());
         videoView.clearFrame();
         videoView.setMessage ("No video for this document.");
     }
