@@ -3703,7 +3703,7 @@ static void testLeftPanelLayout()
                                             "Selection", "Drawing" };
 #endif
     const juce::StringArray defaultTop { "Files", "Frequency Analysis", "History",
-                                          "Actions", "Python", "Tables" };
+                                          "Actions", "Python", "Tables", "Video" };
     juce::StringArray expectBottom = defaultBottom;
     for (int i = 0; i < expectBottom.size (); ++i)
         if (expectBottom[i] == "Markers") { expectBottom.remove (i); break; }
@@ -3721,7 +3721,8 @@ static void testLeftPanelLayout()
         win->moveLeftPanelTab (win->bottomPanelTabs (), 1, win->topPanelTabs (), 1);
         const juce::StringArray expectTopAfterMove { "Files", "Markers",
                                                      "Frequency Analysis", "History",
-                                                     "Actions", "Python", "Tables" };
+                                                     "Actions", "Python", "Tables",
+                                                     "Video" };
         CHECK (win->topPanelTabNames () == expectTopAfterMove, "tab moved across groups");
         CHECK (win->bottomPanelTabNames () == expectBottom, "source group lost the tab");
 
@@ -3729,7 +3730,8 @@ static void testLeftPanelLayout()
         win->moveLeftPanelTab (win->topPanelTabs (), 0, win->topPanelTabs (), 2);
         const juce::StringArray expectTopFinal { "Markers", "Files",
                                                  "Frequency Analysis", "History",
-                                                 "Actions", "Python", "Tables" };
+                                                 "Actions", "Python", "Tables",
+                                                 "Video" };
         CHECK (win->topPanelTabNames () == expectTopFinal, "same-bar move");
 
         // 4) View > Left Panels toggle hides/shows the whole column.
@@ -3746,7 +3748,8 @@ static void testLeftPanelLayout()
     {
         const juce::StringArray expectTopFinal { "Markers", "Files",
                                                  "Frequency Analysis", "History",
-                                                 "Actions", "Python", "Tables" };
+                                                 "Actions", "Python", "Tables",
+                                                 "Video" };
         Application app (store);
         juce::MessageManager* mm = juce::MessageManager::getInstance();
         std::unique_ptr<MainWindow> win (new MainWindow (app, "left layout test 2"));
@@ -3775,9 +3778,9 @@ static void testCrossBarTabMove()
     store.deleteFile ();
 
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    const int kNumPanels = 11;
+    const int kNumPanels = 12;   // includes the Video tab (top group by default)
 #else
-    const int kNumPanels = 10;
+    const int kNumPanels = 11;
 #endif
 
     {
@@ -3995,7 +3998,8 @@ static void testClosePanelsAndWindowMenu()
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
             && win->isPanelOpen ("transcription")
 #endif
-            && win->isPanelOpen ("selection") && win->isPanelOpen ("drawing");
+            && win->isPanelOpen ("selection") && win->isPanelOpen ("drawing")
+            && win->isPanelOpen ("video");
         CHECK (allOpen, "all panels open by default");
 
         const int wIdx = windowMenuIndex (*win);
@@ -4059,14 +4063,15 @@ static void testClosePanelsAndWindowMenu()
         win->setPanelVisible ("history", false);
         win->setPanelVisible ("fft", false);
         {
-            const juce::StringArray expectTop1 { "Files", "Actions", "Python", "Tables" };
+            const juce::StringArray expectTop1 { "Files", "Actions", "Python",
+                                                 "Tables", "Video" };
             CHECK (win->topPanelTabNames () == expectTop1,
                   "two panels closed from the top group");
         }
         win->setPanelVisible ("history", true);   // before fft canonically
         {
             const juce::StringArray expectTop2 { "Files", "History", "Actions",
-                                                 "Python", "Tables" };
+                                                 "Python", "Tables", "Video" };
             CHECK (win->topPanelTabNames () == expectTop2,
                   "History reinserted at its canonical position");
         }
@@ -4074,7 +4079,7 @@ static void testClosePanelsAndWindowMenu()
         {
             const juce::StringArray expectTop3 { "Files", "Frequency Analysis",
                                                  "History", "Actions", "Python",
-                                                 "Tables" };
+                                                 "Tables", "Video" };
             CHECK (win->topPanelTabNames () == expectTop3,
                   "canonical top order fully restored");
         }
@@ -4102,6 +4107,7 @@ static void testClosePanelsAndWindowMenu()
         win->setPanelVisible ("actions", false);
         win->setPanelVisible ("python", false);
         win->setPanelVisible ("tables", false);
+        win->setPanelVisible ("video", false);
         CHECK (!win->topPanelTabs ()->isVisible (), "empty top group is hidden");
         CHECK (win->bottomPanelTabs ()->isVisible (), "bottom group still visible");
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 1, wIdx);   // fft

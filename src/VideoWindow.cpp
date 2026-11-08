@@ -307,8 +307,8 @@ void VideoView::showContextMenu (const juce::Point<int>& at)
     m.addSeparator();
     // fromUTF8: plain const char* literals are treated as ASCII by juce::String,
     // which would mangle the UTF-8 degree sign (stray 'A').
-    m.addItem (kMenuRotateCW, juce::String::fromUTF8 ("Rotate 90\u00B0 Clockwise"));
-    m.addItem (kMenuRotateCCW, juce::String::fromUTF8 ("Rotate 90\u00B0 Counter-Clockwise"));
+    m.addItem (kMenuRotateCW, "Rotate 90deg Clockwise");
+    m.addItem (kMenuRotateCCW, "Rotate 90deg Counter-Clockwise");
     if (onToggleAlwaysOnTop)
         m.addItem (kMenuAlwaysOnTop, "Always On Top", true, isAlwaysOnTop ? isAlwaysOnTop() : false);
     if (onDockToggle)

@@ -257,6 +257,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     topTabs.addTab ("Actions", kDarkTabBg, actionsPanel.get(), false);
     topTabs.addTab ("Python", kDarkTabBg, pythonPanel.get(), false);
     topTabs.addTab ("Tables", kDarkTabBg, tablesPanel.get(), false);
+    // New users get the Video tab in the top group; it stays empty until a
+    // document with video is active (the window then docks into it).
+    topTabs.addTab ("Video", kDarkTabBg, videoDockHost.get(), false);
     bottomTabs.addTab ("Spectral Controls", kDarkTabBg, controlsPanel.get(), false);
     bottomTabs.addTab ("Markers", kDarkTabBg, markersPanel.get(), false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -1114,7 +1117,7 @@ std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
 #endif
         { "selection",   "Selection",          false },
         { "drawing",     "Drawing",            false },
-        { "video",       "Video",              false },
+        { "video",       "Video",              true  },
     };
 }
 
@@ -1257,7 +1260,7 @@ void MainWindow::applySavedLeftLayout()
 #endif
         { "selection",   "Selection",           selectionPanel.get(),  false },
         { "drawing",     "Drawing",             drawingPanel.get(),    false },
-        { "video",       "Video",               videoDockHost.get(),   false },
+        { "video",       "Video",               videoDockHost.get(),   true  },
     };
 
     const juce::String saved = app.recentStore->getValue ("left_tab_layout");

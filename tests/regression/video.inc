@@ -515,7 +515,11 @@ static void testVideoWindowFollowsDocument()
            "video window: movie opened");
     if (!pump.isOpen())
     {   scSkip ("video window: picture cannot be decoded here: " + pump.error()); return; }
-    CHECK (vw->isVisible(), "video window: shown automatically for a new movie");
+    // New users get the Video tab in the top panel group, so a new movie
+    // shows up docked there instead of in a standalone window.
+    CHECK (win->isPanelOpen ("video") && !vw->isVisible()
+           && vw->view().getParentComponent() == win->getVideoDockHost(),
+           "video window: shown automatically in the default Video tab");
     CHECK (vw->view().getNotice().isEmpty(), "video window: audio and video lengths agree");
 
     auto shownIndex = [&] { return videoFrameIndexOf (pump.frame().image); };
@@ -577,14 +581,19 @@ static void testVideoWindowFollowsDocument()
         win->menuItemSelected (MainWindow::WindowVideoFollowHover, wIdx);
         CHECK (win->isVideoFollowingHover(), "video window: hover toggle back on");
 
-        // Window > Video hides and shows the window.
+        // While docked in its tab (the new-user default), Window > Video
+        // brings back the standalone window and closes the tab.
+        win->menuItemSelected (MainWindow::WindowVideo, wIdx);
+        CHECK (!win->isPanelOpen ("video") && vw->isVisible(),
+               "video window: Window > Video undocks to its own window");
+
+        // Then it hides and shows that window.
         win->menuItemSelected (MainWindow::WindowVideo, wIdx);
         CHECK (!vw->isVisible(), "video window: Window > Video hides it");
         win->menuItemSelected (MainWindow::WindowVideo, wIdx);
         CHECK (vw->isVisible(), "video window: Window > Video shows it again");
 
         // Docked into the left panel like Tables; undocked back to its own window.
-        CHECK (!win->isPanelOpen ("video"), "video dock: tab closed by default");
         win->setVideoDocked (true);
         CHECK (win->isPanelOpen ("video") && !vw->isVisible(),
                "video dock: in the panel, standalone window hidden");
