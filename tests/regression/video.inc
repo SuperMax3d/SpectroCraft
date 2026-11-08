@@ -590,6 +590,8 @@ static void testVideoWindowFollowsDocument()
                "video dock: in the panel, standalone window hidden");
         CHECK (vw->view().getParentComponent() == win->getVideoDockHost(),
                "video dock: the view lives in the host component");
+        CHECK (vw->view().isVisible(),
+               "video dock: the picture stays visible inside the panel");
         win->setVideoDocked (false);
         CHECK (!win->isPanelOpen ("video") && vw->isVisible(),
                "video dock: undocked back to its own window");
@@ -829,6 +831,7 @@ static void testDockedVideoReceivesFrames()
 
     CHECK (scPumpUntil ([&] { return vw->view().image() != nullptr && vw->view().image()->isValid(); }, 10000),
            "docked frames: a frame reaches the docked picture");
+    CHECK (vw->view().isVisible(), "docked frames: the picture is actually shown");
     CHECK (vw->displayedTrack() == 0, "docked frames: the implicit track is displayed");
 
     cleanup();

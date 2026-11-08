@@ -744,14 +744,14 @@ VideoAdjustDialog::VideoAdjustDialog (juce::Component* parent)
     contrastLbl_.setText ("Contrast", juce::NotificationType::dontSendNotification);
     brightnessLbl_.setText ("Brightness", juce::NotificationType::dontSendNotification);
     // Pointers: under JUCE_DEBUG, ResizableWindow hides the base-class
-    // reference overload of addChildComponent().
-    addChildComponent (&contrastLbl_);
-    addChildComponent (&brightnessLbl_);
-    addChildComponent (&contrast_);
-    addChildComponent (&brightness_);
-    addChildComponent (&applyAll_);
-    addChildComponent (&reset_);
-    addChildComponent (&closeBtn_);
+    // reference overload of addAndMakeVisible().
+    addAndMakeVisible (&contrastLbl_);
+    addAndMakeVisible (&brightnessLbl_);
+    addAndMakeVisible (&contrast_);
+    addAndMakeVisible (&brightness_);
+    addAndMakeVisible (&applyAll_);
+    addAndMakeVisible (&reset_);
+    addAndMakeVisible (&closeBtn_);
 
     centreWithSize (320, 104);
     addToDesktop ();   // only now that the members are initialised: correct caption style
@@ -800,9 +800,10 @@ VideoWindow::VideoWindow (std::function<double()> getTime)
     setResizeLimits (160, 90, 8192, 8192);
 
     // Content: the picture on top, the track list below.
+    // NB addAndMakeVisible: components start out invisible in this JUCE build.
     contentHost_ = std::make_unique<VideoContentHost>();
-    contentHost_->addChildComponent (&videoView);
-    contentHost_->addChildComponent (&tracksPanel);
+    contentHost_->addAndMakeVisible (&videoView);
+    contentHost_->addAndMakeVisible (&tracksPanel);
     setContentNonOwned (contentHost_.get(), false);
     centreWithSize (640, 360 + VideoContentHost::kPanelH);
     setWantsKeyboardFocus (true);
@@ -1130,8 +1131,8 @@ void VideoWindow::undock()
         p->removeChildComponent (&videoView);
     // Back into the content host with the picture first (resized() indexes by order).
     contentHost_->removeChildComponent (&tracksPanel);
-    contentHost_->addChildComponent (&videoView);
-    contentHost_->addChildComponent (&tracksPanel);
+    contentHost_->addAndMakeVisible (&videoView);
+    contentHost_->addAndMakeVisible (&tracksPanel);
     setDocked (false);
 }
 
