@@ -794,6 +794,46 @@ static void testVideoWindowMultiTrack()
     cleanup();
 }
 
+//==============================================================================
+// The user's flow: the Video tab is docked in the left panel while only an
+// audio document is open, then a movie is opened afterwards. Frames must
+// reach the picture living inside the panel.
+static void testDockedVideoReceivesFrames()
+{
+    if (!sc::videoDecodingAvailable())
+    {   scSkip ("docked frames: no picture decoder on this platform"); return; }
+    const juce::File f = videoFixtureOrSkip();
+    if (!f.existsAsFile()) return;
+
+    const juce::File store = makeTempFile ("video_dock_frames.recent");
+    store.deleteFile();
+    Application app (store);
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "docked frames test"));
+    auto cleanup = [&] { win.reset(); store.deleteFile(); };
+
+    const juce::File wav = makeTempFile ("video_dock_frames.wav");
+    writeWav (wav, 1, 48000.0, 48000, [] (int, int64_t, double) { return 0.0f; });
+    CHECK (app.openFile (wav), "docked frames: the wav opens");
+
+    // Dock the Video tab while no video is present yet.
+    win->setVideoDocked (true);
+    auto* vw = win->getVideoWindow();
+    CHECK (vw != nullptr && vw->isDocked(), "docked frames: docked with no video");
+    if (vw == nullptr) { cleanup(); return; }
+    CHECK (vw->view().getParentComponent() == win->getVideoDockHost(),
+           "docked frames: the picture lives in the panel host");
+
+    // Open the movie afterwards, like a drag & drop onto the main window.
+    if (!app.openFile (f))
+    {   scSkip ("docked frames: the .mp4 audio cannot be opened in this build"); cleanup(); return; }
+
+    CHECK (scPumpUntil ([&] { return vw->view().image() != nullptr && vw->view().image()->isValid(); }, 10000),
+           "docked frames: a frame reaches the docked picture");
+    CHECK (vw->displayedTrack() == 0, "docked frames: the implicit track is displayed");
+
+    cleanup();
+}
+
 static void runRegression_video()
 {
     testVideoDisplayTimeRule();
@@ -806,4 +846,5 @@ static void runRegression_video()
     testVideoWindowFollowsDocument();
     testVideoTracksPanelHeadless();
     testVideoWindowMultiTrack();
+    testDockedVideoReceivesFrames();
 }

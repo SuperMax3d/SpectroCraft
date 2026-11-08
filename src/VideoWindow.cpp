@@ -371,10 +371,9 @@ void VideoView::resized()
 
 void VideoView::mouseDown (const juce::MouseEvent& e)
 {
-    if (!frame_.image.isValid()) return;
-
     // Right button: box-zoom drag. A plain right-click (no significant
-    // movement) still shows the context menu, deferred to mouseUp.
+    // movement) still shows the context menu, deferred to mouseUp. The menu
+    // must work even without a frame yet (e.g. to undock while loading).
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
     {
         rightDrag_ = true;
@@ -382,6 +381,7 @@ void VideoView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
+    if (!frame_.image.isValid()) return;   // no picture to pan yet
     dragStart_ = e.getPosition().toFloat();
 }
 
