@@ -474,6 +474,13 @@ void VideoTracksPanel::setAudioDuration (double secs)
     repaint();
 }
 
+void VideoTracksPanel::setPlayhead (double tSecs)
+{
+    if (std::abs (tSecs - playhead_) < 0.002) return;   // no visible move yet
+    playhead_ = tSecs;
+    repaint();
+}
+
 juce::Rectangle<int> VideoTracksPanel::rowRect (int i) const
 {
     return { 0, kRulerH + i * kRowH, getWidth(), kRowH };
@@ -552,6 +559,13 @@ void VideoTracksPanel::handleContextMenuId (int id, int trackIdx)
         case kMenuZoomIn:  zoomIn(); break;
         case kMenuZoomOut: zoomOut(); break;
         case kMenuZoomFit: zoomFit(); break;
+        case kMenuAlwaysOnTop:
+            if (onToggleAlwaysOnTop)
+                onToggleAlwaysOnTop (!(isAlwaysOnTop ? isAlwaysOnTop() : false));
+            break;
+        case kMenuDock:
+            if (onDockToggle) onDockToggle ();
+            break;
         default:
             if (onMenuItem) onMenuItem (id, trackIdx);
             break;
@@ -566,6 +580,13 @@ void VideoTracksPanel::showContextMenuAt (const juce::Point<int>& at)
     m.addItem (kMenuZoomIn, "Zoom In");
     m.addItem (kMenuZoomOut, "Zoom Out");
     m.addItem (kMenuZoomFit, "Zoom Fit");
+    // Window-level actions: available from the track list too, so they stay
+    // reachable while docked even without a video loaded.
+    if (onToggleAlwaysOnTop)
+        m.addItem (kMenuAlwaysOnTop, "Always On Top", true,
+                   isAlwaysOnTop ? isAlwaysOnTop() : false);
+    if (onDockToggle)
+        m.addItem (kMenuDock, docked ? "Undock to Window" : "Dock Panel");
     if (idx >= 0 && onMenuItem)
     {
         m.addSeparator();
@@ -668,6 +689,25 @@ void VideoTracksPanel::paint (juce::Graphics& g)
         g.setFont (12.0f);
         g.drawFittedText (label, band.reduced (6, 2), juce::Justification::left, 1);
     }
+
+    // The main document's playhead: a red line from the ruler to the bottom,
+    // kept in step by the owner while playing and on every seek.
+    if (playhead_ >= 0.0)
+    {
+        const float x = xForTime (playhead_);
+        if (x >= -1.0f && x <= (float) b.getWidth() + 1.0f)
+        {
+            g.setColour (juce::Colours::red.withAlpha (0.95f));
+            g.drawLine ((int) x, 0, (int) x, b.getHeight(), 2.0f);
+        }
+    }
+
+    // Shift-drag: a yellow marker at the anchor point the band is snapping to.
+    if (dragBand_ && snapX_ >= 0.0f)
+    {
+        g.setColour (juce::Colours::yellow);
+        g.drawLine ((int) snapX_, 0, (int) snapX_, b.getHeight(), 1.0f);
+    }
 }
 
 void VideoTracksPanel::mouseDown (const juce::MouseEvent& e)
@@ -682,12 +722,18 @@ void VideoTracksPanel::mouseDown (const juce::MouseEvent& e)
         dragIdx_ = idx;
         dragStartOffset_ = tracks_[idx].offsetSecs;
         dragStartPt_ = e.getPosition();
+        snapX_ = -1.0f;
         if (selected_ != idx) setSelected (idx);
         if (onSelectTrack) onSelectTrack (idx);
     }
+    else if (e.getPosition().y < kRulerH && onSeekTime != nullptr)
+    {
+        // Clicking the time ruler moves the main playhead.
+        onSeekTime (timeAtX ((float) e.getPosition().x));
+    }
     else if (selected_ != -1 || onSelectTrack != nullptr)
     {
-        // Clicked the ruler or empty space: clear the selection.
+        // Clicked empty space below the tracks: clear the selection.
         if (selected_ != -1) setSelected (-1);
         if (onSelectTrack) onSelectTrack (-1);
     }
@@ -697,8 +743,32 @@ void VideoTracksPanel::mouseDrag (const juce::MouseEvent& e)
 {
     if (!dragBand_ || dragIdx_ < 0 || dragIdx_ >= (int) tracks_.size()) return;
 
-    const double dt = timeAtX ((float) e.getPosition().x) - timeAtX ((float) dragStartPt_.x);
-    const double off = dragStartOffset_ + dt;
+    double off = dragStartOffset_
+                 + (timeAtX ((float) e.getPosition().x) - timeAtX ((float) dragStartPt_.x));
+    snapX_ = -1.0f;
+    if (e.mods.isShiftDown() && getWidth() > 0)
+    {
+        // Shift-drag: snap to the start/end of the audio and to the
+        // begin/end of every other track.
+        std::vector<double> anchors;
+        anchors.push_back (0.0);
+        if (audioDuration_ > 0.0) anchors.push_back (audioDuration_);
+        for (int j = 0; j < (int) tracks_.size(); ++j)
+            if (j != dragIdx_)
+            {
+                anchors.push_back (tracks_[j].offsetSecs);
+                if (tracks_[j].durationSecs >= 0.0)
+                    anchors.push_back (tracks_[j].offsetSecs + tracks_[j].durationSecs);
+            }
+        const double tol = 8.0 * view_.getLength() / getWidth();   // about 8 px
+        for (const double a : anchors)
+            if (std::abs (off - a) <= tol)
+            {
+                off = a;
+                snapX_ = xForTime (a);
+                break;
+            }
+    }
     tracks_[dragIdx_].offsetSecs = off;   // local copy so the band follows at once
     repaint();
     if (onOffsetChanged) onOffsetChanged (dragIdx_, off);
@@ -708,6 +778,7 @@ void VideoTracksPanel::mouseUp (const juce::MouseEvent&)
 {
     dragBand_ = false;
     dragIdx_ = -1;
+    snapX_ = -1.0f;
 }
 
 void VideoTracksPanel::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -1119,7 +1190,11 @@ void VideoWindow::dockTo (VideoDockHost& host)
 {
     if (auto* p = videoView.getParentComponent())   // out of the content host
         p->removeChildComponent (&videoView);
-    host.attach (&videoView);          // into the panel tab
+    if (auto* p = tracksPanel.getParentComponent())
+        p->removeChildComponent (&tracksPanel);
+    // Both go into the panel tab: picture on top, track list below.
+    host.attach (&videoView);
+    host.attach (&tracksPanel);
     setDocked (true);
     setVisible (false);
 }
@@ -1129,8 +1204,9 @@ void VideoWindow::undock()
     if (!docked_) return;
     if (auto* p = videoView.getParentComponent())   // out of the dock host
         p->removeChildComponent (&videoView);
+    if (auto* p = tracksPanel.getParentComponent())
+        p->removeChildComponent (&tracksPanel);
     // Back into the content host with the picture first (resized() indexes by order).
-    contentHost_->removeChildComponent (&tracksPanel);
     contentHost_->addAndMakeVisible (&videoView);
     contentHost_->addAndMakeVisible (&tracksPanel);
     setDocked (false);
@@ -1141,6 +1217,7 @@ void VideoWindow::setDocked (bool d)
     if (docked_ == d) return;
     docked_ = d;
     videoView.docked = d;   // context-menu label: "Dock Panel" / "Undock to Window"
+    tracksPanel.docked = d;
     visibilityChanged ();   // start/stop the timer for the new mode
 }
 

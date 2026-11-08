@@ -181,7 +181,7 @@ public:
     /** Context-menu item ids (handleContextMenuId). */
     enum { kMenuZoomIn = 1, kMenuZoomOut, kMenuZoomFit, kMenuSyncAudio,
            kMenuAlign, kMenuCopyAudio, kMenuAddTrack, kMenuRemoveTrack,
-           kMenuSolo, kMenuAdjustImage };
+           kMenuSolo, kMenuAdjustImage, kMenuAlwaysOnTop, kMenuDock };
 
     VideoTracksPanel();
     ~VideoTracksPanel() override;
@@ -193,6 +193,11 @@ public:
     void setSelected (int i);            // -1 = no explicit selection
     int getSelected() const noexcept { return selected_; }
     void setAudioDuration (double secs);
+
+    /** The main document's playhead position; drawn as a red line from the
+        ruler to the bottom of the panel (-1 = hidden). */
+    void setPlayhead (double tSecs);
+    double getPlayhead() const noexcept { return playhead_; }
 
     /** The visible time range in seconds. */
     juce::Range<double> getViewRange() const noexcept { return view_; }
@@ -222,6 +227,17 @@ public:
     /** A non-zoom context-menu item was chosen: id and track index (-1 =
         ruler/empty area). */
     std::function<void(int, int)> onMenuItem;
+    /** The time ruler was clicked at this document time: move the playhead.
+        Only called when wired (the standalone window's panel always is). */
+    std::function<void(double)> onSeekTime;
+
+    // Window-level actions offered by the track list's context menu too, so
+    // they stay reachable while docked even without a video loaded. Kept in
+    // sync with VideoView's by the owner.
+    bool docked = false;
+    std::function<void(bool)> onToggleAlwaysOnTop;
+    std::function<bool()> isAlwaysOnTop;
+    std::function<void()> onDockToggle;
 
 private:
     static constexpr int kRulerH = 20;   // time ruler row height
@@ -242,29 +258,11 @@ private:
     int dragIdx_ = -1;
     double dragStartOffset_ = 0.0;
     juce::Point<int> dragStartPt_;
+    float snapX_ = -1.0f;                 // shift-drag anchor indicator (-1 = none)
     std::vector<bool> soloFlags_;
+    double playhead_ = -1.0;              // main document's cursor, secs
 
     JUCE_DECLARE_NON_COPYABLE (VideoTracksPanel)
-};
-
-//==============================================================================
-/** Tab host for a docked video view: keeps its single child filling itself. */
-class VideoDockHost : public juce::Component
-{
-public:
-    void attach (juce::Component* c)
-    {
-        if (c != nullptr && getNumChildComponents() == 0) addChildComponent (c);
-        resized();
-    }
-    juce::Component* child() const noexcept
-    {   return getNumChildComponents() > 0 ? getChildComponent (0) : nullptr; }
-
-private:
-    void resized() override
-    {
-        for (auto* c : getChildren()) c->setBounds (getLocalBounds());
-    }
 };
 
 //==============================================================================
@@ -309,6 +307,35 @@ private:
         auto* list = getChildComponent (1);
         pic->setBounds (0, 0, getWidth(), std::max (1, h - kPanelH));
         list->setBounds (0, h - kPanelH, getWidth(), kPanelH);
+    }
+};
+
+/** Tab host for a docked video window: the picture on top and the track
+    list below, mirroring VideoContentHost's layout. */
+class VideoDockHost : public juce::Component
+{
+public:
+    void attach (juce::Component* c)
+    {
+        if (c != nullptr && !isParentOf (c)) addChildComponent (c);
+        resized();
+    }
+    juce::Component* child() const noexcept
+    {   return getNumChildComponents() > 0 ? getChildComponent (0) : nullptr; }
+
+private:
+    void resized() override
+    {
+        if (getNumChildComponents() >= 2)
+        {
+            const int h = getHeight();
+            auto* pic  = getChildComponent (0);
+            auto* list = getChildComponent (1);
+            pic->setBounds (0, 0, getWidth(), std::max (1, h - VideoContentHost::kPanelH));
+            list->setBounds (0, h - VideoContentHost::kPanelH, getWidth(), VideoContentHost::kPanelH);
+        }
+        else
+            for (auto* c : getChildren()) c->setBounds (getLocalBounds());
     }
 };
 

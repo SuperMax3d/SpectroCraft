@@ -597,8 +597,15 @@ static void testVideoWindowFollowsDocument()
         win->setVideoDocked (true);
         CHECK (win->isPanelOpen ("video") && !vw->isVisible(),
                "video dock: in the panel, standalone window hidden");
-        CHECK (vw->view().getParentComponent() == win->getVideoDockHost(),
+        auto* host = win->getVideoDockHost();
+        CHECK (vw->view().getParentComponent() == host,
                "video dock: the view lives in the host component");
+        const int ph = VideoContentHost::kPanelH;
+        CHECK (vw->getTracksPanel().getParentComponent() == host
+                   && vw->getTracksPanel().getBounds()
+                          == juce::Rectangle<int> (0, host->getHeight() - ph,
+                                                   host->getWidth(), ph),
+               "video dock: the track list sits below the picture in the panel");
         CHECK (vw->view().isVisible(),
                "video dock: the picture stays visible inside the panel");
         win->setVideoDocked (false);
@@ -681,13 +688,18 @@ static void testVideoTracksPanelHeadless()
     CHECK (p.trackIndexAt ({ xa, 10 }) == -1, "tracks panel: the ruler is not a track");
     CHECK (p.trackIndexAt ({ xg, 20 + 13 }) == -1, "tracks panel: the gap between bands is empty");
 
-    // Clicking selects; clicking the ruler clears.
-    int sel = -99;
+    // Clicking selects; clicking the time ruler moves the main playhead;
+    // empty space below the tracks still clears the selection.
+    int sel = -99; double seekT = -1.0;
     p.onSelectTrack = [&] (int i) { sel = i; };
+    p.onSeekTime = [&] (double t) { seekT = t; };
     p.mouseDown (mkMouse (p, xa, 20 + 13, {}));
     CHECK (sel == 0 && p.getSelected() == 0, "tracks panel: a click selects the track");
     p.mouseDown (mkMouse (p, xa, 10, {}));
-    CHECK (sel == -1 && p.getSelected() == -1, "tracks panel: a ruler click clears it");
+    CHECK (std::abs (seekT - p.timeAtX ((float) xa)) < 1e-9 && sel == 0,
+           "tracks panel: a ruler click moves the playhead");
+    p.mouseDown (mkMouse (p, xg, 20 + 3 * 26 + 5, {}));   // empty row below the two bands
+    CHECK (sel == -1 && p.getSelected() == -1, "tracks panel: empty space still clears it");
 
     // Dragging a band moves its offset by the dragged time.
     double off = -99; int offIdx = -99;
@@ -698,6 +710,61 @@ static void testVideoTracksPanelHeadless()
     p.mouseDrag (mkMouse (p, xEnd, 20 + 13, lmb));
     p.mouseUp   (mkMouse (p, xEnd, 20 + 13, lmb));
     CHECK (offIdx == 0 && std::abs (off - 2.0) < 0.05, "tracks panel: dragging moves the offset");
+
+    // Shift-drag snaps to the audio start/end and other tracks' edges;
+    // plain dragging keeps its raw offset.
+    {
+        VideoTracksPanel::Track c, d;
+        c.file = juce::File ("/tmp/c.mp4"); c.offsetSecs = 0.0; c.durationSecs = 5.0;
+        d.file = juce::File ("/tmp/d.avi"); d.offsetSecs = 7.0; d.durationSecs = 3.0;
+        p.setTracks ({ c, d });   // refits to [0, 10]
+
+        const juce::ModifierKeys shiftLmb (juce::ModifierKeys::leftButtonModifier
+                                           | juce::ModifierKeys::shiftModifier);
+        double off2 = -99; int offIdx2 = -99;
+        p.onOffsetChanged = [&] (int i, double o) { offIdx2 = i; off2 = o; };
+
+        const int xD = (int) p.xForTime (8.5);   // inside D [7, 10)
+        // Raw offset lands ~0.2 s short of C's end at 5.0: within the snap range.
+        p.mouseDown (mkMouse (p, xD, 20 + 26 + 13, shiftLmb));
+        p.mouseDrag (mkMouse (p, (int) p.xForTime (6.7), 20 + 26 + 13, shiftLmb));
+        CHECK (offIdx2 == 1 && std::abs (off2 - 5.0) < 1e-9,
+               "tracks panel: shift-drag snaps to another track's end");
+
+        // D now sits at [5, 8): grab it there; the raw offset lands ~0.1 s
+        // before the start of the audio: within the snap range for 0.
+        const int xD3 = (int) p.xForTime (6.5);
+        p.mouseDown (mkMouse (p, xD3, 20 + 26 + 13, shiftLmb));
+        p.mouseDrag (mkMouse (p, (int) p.xForTime (1.4), 20 + 26 + 13, shiftLmb));
+        CHECK (std::abs (off2 - 0.0) < 1e-9, "tracks panel: shift-drag snaps to the start");
+
+        // Without Shift the same drag keeps its raw offset (~5.2 s).
+        const int xD2 = (int) p.xForTime (1.5);   // D now sits at [0, 3)
+        p.mouseDown (mkMouse (p, xD2, 20 + 26 + 13, lmb));
+        p.mouseDrag (mkMouse (p, (int) p.xForTime (6.7), 20 + 26 + 13, lmb));
+        CHECK (std::abs (off2 - 5.2) < 0.05 && std::abs (off2 - 5.0) > 1e-9,
+               "tracks panel: plain dragging does not snap");
+    }
+
+    // The main playhead is drawn as a red line from the ruler to the bottom.
+    p.setPlayhead (1.25);
+    CHECK (std::abs (p.getPlayhead() - 1.25) < 1e-9, "tracks panel: the playhead is stored");
+    {
+        juce::Image img (juce::Image::RGB, 300, 20 + 4 * 26, true);
+        juce::Graphics g (img);
+        p.paint (g);
+        const int x = (int) p.xForTime (1.25);
+        auto px = [&] (int xx, int yy) -> std::pair<int, int>   // (R, G); bytes are B,G,R[,A]
+        {
+            juce::Image::BitmapData bd (img, juce::Image::BitmapData::readWrite);
+            const uint8_t* q = bd.getPixelPointer (xx, yy);
+            return { (int) q[2], (int) q[1] };
+        };
+        CHECK (px (x, 5).first > 200 && px (x, 5).second < 80,
+               "tracks panel: the playhead line is red in the ruler");
+        CHECK (px (x, 100).first > 200 && px (x, 100).second < 80,
+               "tracks panel: the playhead line reaches the bottom of the panel");
+    }
 
     // The wheel zooms about the cursor; the time under it stays put.
     {
@@ -722,6 +789,19 @@ static void testVideoTracksPanelHeadless()
     p.handleContextMenuId (VideoTracksPanel::kMenuSolo, -1);
     CHECK (menuId == VideoTracksPanel::kMenuSolo && menuIdx == -1,
            "tracks panel: ruler items carry index -1");
+
+    // Window-level actions are offered by the track list's context menu too.
+    bool aot = false; int aotCalls = 0, dockToggles = 0;
+    p.docked = true;
+    p.isAlwaysOnTop = [&] { return aot; };
+    p.onToggleAlwaysOnTop = [&] (bool on) { aotCalls++; aot = on; };
+    p.onDockToggle = [&] { dockToggles++; };
+    p.handleContextMenuId (VideoTracksPanel::kMenuAlwaysOnTop, -1);
+    CHECK (aotCalls == 1 && aot, "tracks panel: always-on-top toggles on");
+    p.handleContextMenuId (VideoTracksPanel::kMenuAlwaysOnTop, -1);
+    CHECK (aotCalls == 2 && !aot, "tracks panel: always-on-top toggles off again");
+    p.handleContextMenuId (VideoTracksPanel::kMenuDock, -1);
+    CHECK (dockToggles == 1, "tracks panel: dock/undock goes to the owner");
 }
 
 // End to end: two tracks of the same movie on one document. The selected
@@ -831,8 +911,15 @@ static void testDockedVideoReceivesFrames()
     auto* vw = win->getVideoWindow();
     CHECK (vw != nullptr && vw->isDocked(), "docked frames: docked with no video");
     if (vw == nullptr) { cleanup(); return; }
-    CHECK (vw->view().getParentComponent() == win->getVideoDockHost(),
+    auto* host = win->getVideoDockHost();
+    CHECK (vw->view().getParentComponent() == host,
            "docked frames: the picture lives in the panel host");
+    const int ph = VideoContentHost::kPanelH;
+    CHECK (vw->getTracksPanel().getParentComponent() == host
+               && vw->getTracksPanel().getBounds()
+                      == juce::Rectangle<int> (0, host->getHeight() - ph,
+                                               host->getWidth(), ph),
+           "docked frames: the track list is in the panel too");
 
     // Open the movie afterwards, like a drag & drop onto the main window.
     if (!app.openFile (f))

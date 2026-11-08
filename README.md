@@ -850,9 +850,10 @@ Zooming and panning work like in the spectrogram:
 - left-drag pans while zoomed.
 
 *Docks into the left panel* like Tables or Markers: *Dock Panel* from the
-right-click menu moves the picture into a **Video** tab of the left panel;
-*Undock to Window* (or closing that tab) brings it back to its own window.
-The picture keeps its zoom, pan and rotation either way.
+right-click menu moves the picture **and the tracks panel below it** into a
+**Video** tab of the left panel; *Undock to Window* (or closing that tab)
+brings them back to their own window. The picture keeps its zoom, pan and
+rotation either way.
 
 #### Video tracks
 
@@ -862,16 +863,23 @@ the main audio (which defines the timeline), and one coloured band per video,
 drawn from its offset to its end.
 
 - **dragging** a band left/right changes that video's time offset relative to
-  the audio; the **mouse wheel** over the panel zooms in/out about the cursor
-  for fine positioning;
+  the audio; hold **Shift while dragging** and the offset snaps to 0 s, to the
+  end of the main audio, or to the start/end of another video track (a yellow
+  marker shows the anchor); the **mouse wheel** over the panel zooms in/out
+  about the cursor for fine positioning;
+- a red **playhead line** runs from the ruler to the bottom of the panel and
+  follows the main playhead while playing and on every seek; clicking the
+  time ruler moves the main playhead to that time;
 - **clicking** a band selects it: that video renders above while it covers the
 current time. Clicking outside any band clears the selection and shows the
 topmost available video at the current time; when the selected video ends,
 the topmost covering one takes over automatically;
-- right-click on a **band** (or the ruler) for *Zoom In / Zoom Out / Zoom Fit*
-  — plus, on a band: *Sync based on Audio*, *Align…*, *Copy Audio to New
-  Channel(s)*, *Add Video Track…*, *Remove Track*, *Solo* and *Adjust Image*. A
-  right-click on the ruler alone shows only the three zoom items;
+- right-click on a **band** (or the ruler) for *Zoom In / Zoom Out / Zoom Fit*,
+  *Always On Top* and *Dock Panel / Undock to Window* — plus, on a band:
+  *Sync based on Audio*, *Align…*, *Copy Audio to New Channel(s)*,
+  *Add Video Track…*, *Remove Track*, *Solo* and *Adjust Image*. The window
+  items work from the tracks panel too, so they stay reachable while docked
+  even without a video loaded;
 - **adding** a track works from that menu or by dragging a video file onto the
   window/panel; it joins at offset 0 (drag its band afterwards);
 - *Align…* asks for a manual time offset in seconds (negative = the video
@@ -2399,7 +2407,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `VideoFrames` (`src/VideoFrames.cpp`, `src/VideoFrames_mac.mm`, `src/VideoFrames_win.cpp`) | Video picture decoding for the Video window: a per-platform frame stream (AVFoundation on macOS, Media Foundation on Windows, none on Linux), `VideoDecoder::frameAt(t)` (decode forward for small forward moves, seek otherwise; skipped frames are never converted) and `VideoFramePump`, a worker thread that serves only the latest requested time and hands frames to the message thread. |
-| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, right-hand zoom bar), per-file rotation and an *Always On Top* toggle from a right-click context menu; can be docked into a left-panel tab (`VideoDockHost`) or undocked back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag to offset, wheel zoom about the cursor, click to select which track renders above (auto-switching to the topmost covering track when the selected one ends), right-click menu for sync/align/copy-audio/solo/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible or docked. |
+| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, right-hand zoom bar), per-file rotation and an *Always On Top* toggle from a right-click context menu; can be docked into a left-panel tab (`VideoDockHost`, picture on top and tracks panel below) or undocked back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag to offset (Shift-drag snaps to 0 s / audio end / other track edges), wheel zoom about the cursor, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel; right-click menu for sync/align/copy-audio/solo/adjust-image plus *Always On Top* and dock/undock. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible or docked. |
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |

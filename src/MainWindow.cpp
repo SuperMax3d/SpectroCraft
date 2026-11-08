@@ -476,6 +476,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (waveformView) waveformView->setPlayhead (t);
         if (spectralView) spectralView->setPlayhead (t);
         if (tablesTrack) tablesTrack->setPlayhead (t);
+        if (videoWindow) videoWindow->getTracksPanel().setPlayhead (t);
         // A single click in either view re-analyses the spectrum: centred on
         // the cursor when there is no selection, averaged over the whole
         // selection when one exists.
@@ -1442,6 +1443,7 @@ void MainWindow::timerCallback()
     waveformView->setPlayhead (pos);
     spectralView->setPlayhead (pos);
     if (tablesTrack) tablesTrack->setPlayhead (pos);   // keep the dedicated track in step
+    if (videoWindow) videoWindow->getTracksPanel().setPlayhead (pos);
     if (statusBar) statusBar->setPlayhead (pos);
 }
 
@@ -2389,6 +2391,10 @@ void MainWindow::ensureVideoWindow()
     if (state.isNotEmpty())
         videoWindow->restoreWindowStateFromString (state);
 
+    // The saved "Always on top" state applies immediately, not only when it
+    // is toggled from a context menu.
+    videoWindow->setAlwaysOnTop (app.recentStore->getIntValue ("video_always_on_top", 0) != 0);
+
     videoWindow->onUserClosed = [this]
     {
         videoDismissedFor = videoWindow->getVideoFile();
@@ -2421,6 +2427,19 @@ void MainWindow::ensureVideoWindow()
     videoWindow->view().isAlwaysOnTop = [this]
     {   return app.recentStore->getIntValue ("video_always_on_top", 0) != 0; };
     videoWindow->view().onDockToggle = [this] { setVideoDocked (!isVideoDocked()); };
+
+    // The track list offers the same window-level actions (and a ruler seek),
+    // so they stay reachable while docked even without a video loaded.
+    auto& vtp = videoWindow->getTracksPanel();
+    vtp.onToggleAlwaysOnTop = [this] (bool on)
+    {
+        app.recentStore->setValue ("video_always_on_top", on ? 1 : 0);
+        if (videoWindow != nullptr) videoWindow->setAlwaysOnTop (on);
+    };
+    vtp.isAlwaysOnTop = [this]
+    {   return app.recentStore->getIntValue ("video_always_on_top", 0) != 0; };
+    vtp.onDockToggle = [this] { setVideoDocked (!isVideoDocked()); };
+    vtp.onSeekTime = [this] (double t) { app.setPlayhead (t); };
 
     // Multi-track: per-track state is persisted into the document's metadata.
     // The first change materialises the implicit single track as an explicit list.
