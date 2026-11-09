@@ -641,7 +641,23 @@ private:
     double videoHoverTime = -1.0;      // time under the mouse, -1 = not over a view
     bool videoFollowHover = false;   // off by default for a new user
     juce::File videoDismissedFor;      // closed by the user while showing this file
+    std::shared_ptr<AudioEngine::SoloAudio> videoSoloCache;   // decoded solo track audio (reused across offset changes)
+    juce::File videoSoloCacheFor;                          // which file it belongs to
     void ensureVideoWindow();          // creates + wires the window once
+
+    // Video track context-menu actions (ids from VideoTracksPanel).
+    void handleVideoTrackMenu (int id, int idx);
+    void showVideoAlignDialog (int idx);      // manual time offset
+    void showVideoAdjustDialog (int idx);     // live contrast/brightness dialog
+    void startVideoAutoSync (int idx);        // background NCC job -> sets the offset
+    void copyVideoAudioToChannels (int idx);  // decode video audio into new channels
+    void addVideoTrackFromPicker();           // File > ... picker, adds a track at 0
+    void removeVideoTrack (int idx);
+    void toggleVideoSolo (int idx);
+    /** Recomputes the engine's solo playback from the active document's
+        video tracks (decodes the soloed track's own audio). Called on doc
+        switch and after any offset/solo change. */
+    void refreshVideoSolo();
     std::unique_ptr<SpectralControlsPanel> controlsPanel;
     std::unique_ptr<MarkerListPanel> markersPanel;
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI

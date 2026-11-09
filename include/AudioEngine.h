@@ -60,6 +60,11 @@ public:
     // Uses the in-memory buffer if present, otherwise streams from the file.
     bool readSamples (int channel, int64_t start, int64_t count, float* dest) const;
 
+    /** Creates a reader for any format this engine can open (including video
+        containers when their audio is decodable). Null if unsupported. The
+        caller owns the result; safe to call from worker threads. */
+    std::unique_ptr<juce::AudioFormatReader> createReaderFor (const juce::File& file) const;
+
     /** Grows an in-memory document by numFrames frames and copies interleaved
         float32 data into it (used while recording). Returns false for
         streaming documents or bad arguments. Mipmaps are refreshed with a

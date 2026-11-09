@@ -279,9 +279,14 @@ public:
     std::function<void(double, double)> onValuesChanged;   // contrast, brightness
     std::function<void()> onApplyToAll;
     std::function<void()> onReset;
+    /** The dialog was closed (Close button or the window X); the creator owns
+        its lifetime and should delete it from here. */
+    std::function<void()> onClose;
 
 private:
     void resized() override;
+    void userTriedToCloseWindow() override { closeNow(); }
+    void closeNow();
 
     juce::Label contrastLbl_, brightnessLbl_;
     juce::Slider contrast_, brightness_;

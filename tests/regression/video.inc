@@ -933,6 +933,230 @@ static void testDockedVideoReceivesFrames()
     cleanup();
 }
 
+// ---------------------------------------------------------------------------
+// "Sync based on Audio": the two-stage correlation math (platform-independent).
+
+static void testVideoSyncMath()
+{
+    // decimateTo: length and averaging.
+    {
+        std::vector<float> in;
+        const int n = 48000;   // 1 s @ 48 kHz, constant 0.5
+        in.assign ((size_t) n, 0.5f);
+        auto out = sc::decimateTo (in, 48000.0, 2000.0);
+        CHECK (std::abs ((double) out.size () - 2000) <= 1, "sync math: decimation length");
+        bool allHalf = true;
+        for (float v : out)
+            if (v != 0.5f) { allHalf = false; break; }
+        CHECK (allHalf, "sync math: box averaging preserves constants");
+
+        auto same = sc::decimateTo (in, 48000.0, 96000.0);
+        CHECK (same.size () == in.size (), "sync math: no decimation when outRate >= inRate");
+    }
+
+    // LCG noise: deterministic and non-periodic, so NCC peaks only at the true lag.
+    auto makeNoise = [] (int64_t n, uint32_t seed)
+    {
+        std::vector<float> v ((size_t) n);
+        uint32_t s = seed;
+        for (auto& x : v)
+        {
+            s = s * 1664525u + 1013904223u;
+            x = (float) ((int32_t) (s >> 8)) / 2147483648.0f * 0.5f;
+        }
+        return v;
+    };
+
+    const double rate = 48000.0;
+    // doc: 8 s of noise; vid: an exact copy of doc[2.5 .. 5.5]. The true lag
+    // sits on the coarse grid (step >= 0.5 s), where white noise correlates.
+    {
+        auto doc = makeNoise ((int64_t) (8 * rate), 12345u);
+        const int64_t off = (int64_t) std::llround (2.5 * rate);
+        std::vector<float> vid (doc.begin () + off, doc.begin () + off + (int64_t) (3 * rate));
+
+        auto docDs = sc::decimateTo (doc, rate, 2000.0);
+        auto vidDs = sc::decimateTo (vid, rate, 2000.0);
+        double step = 0.0;
+        const double coarse = sc::videoSyncCoarse (docDs, vidDs, &step);
+        CHECK (!std::isnan (coarse) && step > 0.0, "sync math: coarse finds the lag");
+        CHECK (std::abs (coarse - 2.5) <= step + 1e-9, "sync math: coarse within one grid step");
+
+        // Fine stage with exactly the windows the handler builds.
+        const double sA = std::max (0.0, coarse - step);
+        const double eB = std::min (8.0, coarse + 5.0 + step);
+        std::vector<float> docWin (doc.begin () + (int64_t) std::llround (sA * rate),
+                                   doc.begin () + (int64_t) std::llround (eB * rate));
+        const double vEnd = std::min (3.0, 5.0 + step);
+        std::vector<float> vidWin (vid.begin (), vid.begin () + (int64_t) std::llround (vEnd * rate));
+        const double fine = sc::videoSyncFine (docWin, rate, sA, vidWin, rate, coarse, step);
+        CHECK (!std::isnan (fine), "sync math: fine stage refines");
+        CHECK (std::abs (fine - 2.5) <= 3.0 / rate + 1e-9, "sync math: fine within a few samples");
+    }
+
+    // Negative lag: the video starts before the audio.
+    {
+        auto vid = makeNoise ((int64_t) (4 * rate), 777u);
+        const int64_t shift = (int64_t) std::llround (1.0 * rate);   // on the coarse grid
+        std::vector<float> doc ((size_t) vid.size (), 0.0f);
+        for (int64_t i = 0; i + shift < (int64_t) vid.size (); ++i)
+            doc[(size_t) i] = vid[(size_t) (i + shift)];
+
+        auto docDs = sc::decimateTo (doc, rate, 2000.0);
+        auto vidDs = sc::decimateTo (vid, rate, 2000.0);
+        double step = 0.0;
+        const double coarse = sc::videoSyncCoarse (docDs, vidDs, &step);
+        CHECK (!std::isnan (coarse) && std::abs (coarse + 1.0) <= step + 1e-9,
+               "sync math: negative lag found coarsely");
+
+        const double sA = std::max (0.0, coarse - step);
+        const double eB = std::min (4.0, coarse + 5.0 + step);
+        std::vector<float> docWin (doc.begin () + (int64_t) std::llround (sA * rate),
+                                   doc.begin () + (int64_t) std::llround (eB * rate));
+        const double vEnd = std::min (4.0, 5.0 + step);
+        std::vector<float> vidWin (vid.begin (), vid.begin () + (int64_t) std::llround (vEnd * rate));
+        const double fine = sc::videoSyncFine (docWin, rate, sA, vidWin, rate, coarse, step);
+        CHECK (!std::isnan (fine) && std::abs (fine + 1.0) <= 3.0 / rate + 1e-9,
+               "sync math: negative lag refined");
+    }
+
+    // Independent noise must not correlate.
+    {
+        auto a = sc::decimateTo (makeNoise ((int64_t) (8 * rate), 1u), rate, 2000.0);
+        auto b = sc::decimateTo (makeNoise ((int64_t) (3 * rate), 2u), rate, 2000.0);
+        CHECK (std::isnan (sc::videoSyncCoarse (a, b)), "sync math: uncorrelated -> NaN");
+    }
+
+    // A silent document carries no alignment information.
+    {
+        std::vector<float> a ((size_t) (8 * 2000), 0.0f);
+        auto b = sc::decimateTo (makeNoise ((int64_t) (3 * rate), 9u), rate, 2000.0);
+        CHECK (std::isnan (sc::videoSyncCoarse (a, b)), "sync math: silence -> NaN");
+    }
+}
+
+// End to end: the track context-menu actions wired through MainWindow.
+// (Regression: onTrackMenuAction was declared but never assigned, so every
+// one of these items did nothing.)
+static void testVideoTrackMenuActions()
+{
+    if (!sc::videoDecodingAvailable())
+    {   scSkip ("track menu: no picture decoder on this platform"); return; }
+    const juce::File f = videoFixtureOrSkip();
+    if (!f.existsAsFile()) return;
+    if (!sc::videoContainerExtensions().contains (".mp4"))
+    {   scSkip ("track menu: the .mp4 audio cannot be opened in this build"); return; }
+
+    const juce::File store = makeTempFile ("video_trackmenu.recent");
+    store.deleteFile();
+    Application app (store);
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "video track menu test"));
+
+    auto cleanup = [&] { win.reset (); store.deleteFile (); };
+
+    const juce::File wav = makeTempFile ("video_trackmenu.wav");
+    writeWav (wav, 1, 48000.0, 96000, [] (int, int64_t, double) { return 0.0f; });
+    CHECK (app.openFile (wav), "track menu: the wav opens");
+
+    // The silent wav stays the document; the movie is only a video track.
+    FileDoc* d = app.doc ();
+    auto& eng = app.audioEngine ();
+    sc::VideoTrackData first;
+    first.file = f;
+    d->setVideoTracks ({ first }, nullptr);
+    win->syncVideoWindow();
+
+    auto* vw = win->getVideoWindow();
+    CHECK (vw != nullptr, "track menu: window created for the track");
+    if (vw == nullptr) { cleanup (); return; }
+
+    // The root-cause fix itself: MainWindow wires the track-menu callback.
+    CHECK (vw->onTrackMenuAction != nullptr, "track menu: onTrackMenuAction is wired");
+
+    auto& p = vw->getTracksPanel();
+
+    // Solo: toggles the flag and installs / removes the engine's solo audio.
+    p.handleContextMenuId (VideoTracksPanel::kMenuSolo, 0);
+    CHECK (!d->videoTracks.empty () && d->videoTracks[0].solo,
+           "track menu: solo toggles the track flag");
+    CHECK (eng.hasSoloAudio (), "track menu: solo audio installed for playback");
+
+    p.handleContextMenuId (VideoTracksPanel::kMenuSolo, 0);
+    CHECK (!d->videoTracks.empty () && !d->videoTracks[0].solo,
+           "track menu: solo toggles off again");
+    CHECK (!eng.hasSoloAudio (), "track menu: solo audio removed");
+
+    // Remove track: the list shrinks and no implicit track is resurrected.
+    {
+        std::vector<sc::VideoTrackData> t;
+        sc::VideoTrackData a; a.file = f;
+        sc::VideoTrackData b;
+        b.file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                     .getChildFile ("video_trackmenu_second.mp4");
+        t.push_back (a);
+        t.push_back (b);
+        d->setVideoTracks (t, nullptr);
+        CHECK (d->videoTracks.size () == 2, "track menu: two tracks set");
+
+        p.handleContextMenuId (VideoTracksPanel::kMenuRemoveTrack, 1);
+        CHECK (d->videoTracks.size () == 1 && d->videoTracks[0].file == f,
+               "track menu: remove drops the second track");
+        CHECK (d->videoFile == juce::File (), "track menu: no implicit track resurrected");
+
+        p.handleContextMenuId (VideoTracksPanel::kMenuRemoveTrack, 0);
+        CHECK (d->videoTracks.empty () && d->videoFile == juce::File (),
+               "track menu: removing the last track leaves none");
+    }
+
+    // Copy audio to new channels: decodes the movie's own audio into fresh
+    // channels at the track's offset (the fixture is a 1 kHz sine, ~2 s).
+    {
+        std::vector<sc::VideoTrackData> t;
+        sc::VideoTrackData a; a.file = f;
+        t.push_back (a);
+        d->setVideoTracks (t, nullptr);
+
+        const int oldN = eng.numChannels ();
+        p.handleContextMenuId (VideoTracksPanel::kMenuCopyAudio, 0);
+        CHECK (scPumpUntil ([&] { return sc::WorkProgressDialog::numActive () == 0; }, 30000),
+               "track menu: the copy job finished in time");
+        CHECK (eng.numChannels () == oldN + 1, "track menu: one new channel added");
+
+        const int64_t n = eng.numSamples ();
+        std::vector<float> mid ((size_t) 48000), tail ((size_t) 48000);
+        CHECK (eng.readSamples (1, 24000, 48000, mid.data ()), "track menu: new channel readable");
+        double peak = 0.0;
+        for (float v : mid) peak = std::max (peak, (double) std::abs (v));
+        CHECK (peak > 0.3, "track menu: the movie's audio landed in the new channel");
+
+        if (n > 96000 + 48000)
+        {
+            CHECK (eng.readSamples (1, n - 48000, 48000, tail.data ()), "track menu: tail readable");
+            double tailPeak = 0.0;
+            for (float v : tail) tailPeak = std::max (tailPeak, (double) std::abs (v));
+            CHECK (tailPeak < 1e-6, "track menu: silence after the movie's audio ends");
+        }
+    }
+
+    // Sync based on Audio against a silent document: no correlation, so the
+    // offset stays put and an alert is raised (swallowed in headless mode).
+    {
+        sc::alert::clearSuppressedMessages ();
+        p.handleContextMenuId (VideoTracksPanel::kMenuSyncAudio, 0);
+        CHECK (scPumpUntil ([&] { return sc::WorkProgressDialog::numActive () == 0; }, 30000),
+               "track menu: the sync job finished in time");
+        const auto tracks = d->videoTracks;
+        CHECK (!tracks.empty () && std::abs (tracks[0].offsetSecs) < 1e-9,
+               "track menu: no correlation leaves the offset unchanged");
+        bool sawAlert = false;
+        for (const auto& m : sc::alert::suppressedMessages ())
+            if (m.startsWith ("Sync based on Audio:")) { sawAlert = true; break; }
+        CHECK (sawAlert, "track menu: the failed sync explains itself");
+    }
+
+    cleanup ();
+}
+
 static void runRegression_video()
 {
     testVideoDisplayTimeRule();
@@ -946,4 +1170,6 @@ static void runRegression_video()
     testVideoTracksPanelHeadless();
     testVideoWindowMultiTrack();
     testDockedVideoReceivesFrames();
+    testVideoSyncMath();
+    testVideoTrackMenuActions();
 }

@@ -18,6 +18,7 @@
 #include "Panels.h"
 #include "MarkerManager.h"
 #include "VideoAudio.h"
+#include "Resampler.h"
 #include "VideoFrames.h"
 #include "VideoWindow.h"
 #include "WorkProgress.h"
@@ -2359,8 +2360,11 @@ void MainWindow::activateDocUI()
         statusBar->setFileName (fn);
     }
 
-    // The Video window follows the active document (or says it has none).
+    // The Video window follows the active document (or says it has none),
+    // and solo playback is recomputed for its tracks (cleared when the new
+    // doc has no soloed video track).
     syncVideoWindow();
+    refreshVideoSolo ();
 
     // Re-layout so the time scrollbar's visibility/bounds follow the new file
     // state: resized() is the only place they are set, and loading a file does
@@ -2440,6 +2444,10 @@ void MainWindow::ensureVideoWindow()
     {   return app.recentStore->getIntValue ("video_always_on_top", 0) != 0; };
     vtp.onDockToggle = [this] { setVideoDocked (!isVideoDocked()); };
     vtp.onSeekTime = [this] (double t) { app.setPlayhead (t); };
+    videoWindow->onTrackMenuAction = [this] (int id, int idx)
+    {
+        handleVideoTrackMenu (id, idx);
+    };
 
     // Multi-track: per-track state is persisted into the document's metadata.
     // The first change materialises the implicit single track as an explicit list.
@@ -2512,6 +2520,620 @@ static std::vector<sc::VideoTrackData> effectiveVideoTracks (const FileDoc& d)
     }
     return {};
 }
+
+// ------------------------------------------------- Video track menu actions
+
+/** Parses a decimal field (same rules as the tables' manual-align dialog). */
+static bool videoParseDouble (const juce::String& s, double& out)
+{
+    const auto t = s.trim();
+    if (t.isEmpty()) return false;
+    bool haveDigit = false;
+    for (char16_t c : t)
+    {
+        if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')
+        {   haveDigit = haveDigit || (c >= '0' && c <= '9'); continue; }
+        break;
+    }
+    if (!haveDigit) return false;
+    const double v = t.getDoubleValue();
+    if (!std::isfinite ((float) v)) return false;
+    out = v;
+    return true;
+}
+
+/** Reads one channel of a reader as float, in chunks. Only slot `ch` gets a
+    destination; the others stay null so the reader skips them. */
+static bool readChannelFloat (juce::AudioFormatReader& r, int ch, int64_t len,
+                              std::vector<float>& out)
+{
+    out.resize ((size_t) len);
+    float* stackPtrs[64] = {};
+    std::vector<float*> heapPtrs;
+    const int chunk = 1 << 20;   // ~4 MB per pass
+    for (int64_t off = 0; off < len; off += chunk)
+    {
+        const int n = (int) std::min<int64_t> ((int64_t) chunk, len - off);
+        float** ptrs = stackPtrs;
+        if (ch >= 64)
+        {
+            heapPtrs.assign ((size_t) ch + 1, nullptr);
+            ptrs = heapPtrs.data ();
+        }
+        ptrs[ch] = out.data () + off;
+        if (!r.read (ptrs, ch + 1, off, n)) return false;
+    }
+    return true;
+}
+
+/** Streams one channel of a reader down to ~2 kHz (box decimation), so even
+    multi-hour files occupy only a few MB. */
+static bool readChannelDecimated (juce::AudioFormatReader& r, int ch, double inRate,
+                                  std::vector<float>& out)
+{
+    const int64_t len = r.lengthInSamples;
+    if (inRate <= 0.0 || len <= 0) return false;
+    float* stackPtrs[64] = {};
+    std::vector<float*> heapPtrs;
+    const int chunk = 1 << 22;   // ~16 MB per pass at float32
+    for (int64_t off = 0; off < len; off += chunk)
+    {
+        const int n = (int) std::min<int64_t> ((int64_t) chunk, len - off);
+        std::vector<float> part ((size_t) n);
+        float** ptrs = stackPtrs;
+        if (ch >= 64)
+        {
+            heapPtrs.assign ((size_t) ch + 1, nullptr);
+            ptrs = heapPtrs.data ();
+        }
+        ptrs[ch] = part.data ();
+        if (!r.read (ptrs, ch + 1, off, n)) return false;
+        const auto ds = sc::decimateTo (part, inRate, 2000.0);
+        out.insert (out.end (), ds.begin (), ds.end ());
+    }
+    return true;
+}
+
+void MainWindow::handleVideoTrackMenu (int id, int idx)
+{
+    if (app.doc () == nullptr || videoWindow == nullptr) return;
+    const auto tracks = effectiveVideoTracks (*app.doc());
+    if (idx < 0 || idx >= (int) tracks.size ()) return;
+
+    switch (id)
+    {
+        case VideoTracksPanel::kMenuAlign:       showVideoAlignDialog (idx); break;
+        case VideoTracksPanel::kMenuAdjustImage: showVideoAdjustDialog (idx); break;
+        case VideoTracksPanel::kMenuSyncAudio:   startVideoAutoSync (idx); break;
+        case VideoTracksPanel::kMenuCopyAudio:   copyVideoAudioToChannels (idx); break;
+        case VideoTracksPanel::kMenuAddTrack:    addVideoTrackFromPicker (); break;
+        case VideoTracksPanel::kMenuRemoveTrack: removeVideoTrack (idx); break;
+        case VideoTracksPanel::kMenuSolo:   toggleVideoSolo (idx); break;
+        default: break;   // window-level items are handled by the panel itself
+    }
+}
+
+void MainWindow::showVideoAlignDialog (int idx)
+{
+    FileDoc* d = app.doc();
+    if (d == nullptr || videoWindow == nullptr) return;
+    auto tracks = effectiveVideoTracks (*d);
+    if (idx < 0 || idx >= (int) tracks.size ()) return;
+
+    auto* w = new ManualAlignWindow ("Align Video Track", "Manual Alignment:");
+    w->addRow ("Time offset (s)",
+               "Document time where this video's first frame sits (+ = later, - = the video starts before the audio).",
+               juce::String (tracks[idx].offsetSecs, 4));
+
+    // Size the window from its rows: message area + row pitch per field + buttons.
+    const int contentH = 26 + w->numRows () * 27 + 10 + 26;
+    w->setSize (356, contentH);
+    w->setResizable (false, false);
+
+    // Centre on the main window's current position instead of appearing in
+    // the screen corner.
+    if (juce::Component* top = getTopLevelComponent ())
+    {
+        const auto tb = top->getBounds ();
+        w->setBounds (tb.getCentreX () - 356 / 2, tb.getCentreY () - contentH / 2,
+                      356, contentH);
+    }
+    else
+        w->centreWithSize (356, contentH);
+
+    bool okPressed = false;
+    w->onOk = [&okPressed] { okPressed = true; };
+    w->enterModalState (false);
+    // Child order: message, OK, Cancel, then label/editor pairs per row -
+    // focus the first editor so a plain Enter accepts the defaults.
+    if (w->getNumChildComponents () > 4)
+    {
+        auto* first = dynamic_cast<juce::TextEditor*> (w->getChildComponent (4));
+        if (first != nullptr) first->grabKeyboardFocus();
+    }
+    const int result = w->runModalLoop ();
+    juce::String offText;
+    if (result == 1 && okPressed)
+        offText = w->rowText (0);
+    delete w;
+
+    bool changed = false;
+    if (!offText.isEmpty())
+    {
+        double off = tracks[idx].offsetSecs;
+        if (videoParseDouble (offText, off))
+        {
+            tracks[idx].offsetSecs = off;
+            changed = true;
+        }
+    }
+    if (changed)
+    {
+        d->setVideoTracks (std::move (tracks));
+        syncVideoWindow();
+        refreshVideoSolo ();   // the offset moved: solo audio must follow it
+    }
+}
+
+void MainWindow::showVideoAdjustDialog (int idx)
+{
+    FileDoc* d = app.doc();
+    if (d == nullptr || videoWindow == nullptr) return;
+    auto tracks = effectiveVideoTracks (*d);
+    if (idx < 0 || idx >= (int) tracks.size ()) return;
+
+    auto* dlg = new VideoAdjustDialog (this);
+    dlg->setValues (tracks[idx].contrast, tracks[idx].brightness);
+    dlg->onValuesChanged = [this] (double c, double b)
+    {
+        if (videoWindow != nullptr) videoWindow->setAdjustmentsLive (c, b);
+    };
+    dlg->onApplyToAll = [this]
+    {
+        FileDoc* dd = app.doc();
+        if (dd == nullptr || videoWindow == nullptr) return;
+        auto t = effectiveVideoTracks (*dd);
+        const double c = videoWindow->getContrast ();
+        const double b = videoWindow->getBrightness ();
+        for (auto& q : t)
+        {
+            q.contrast = c;
+            q.brightness = b;
+        }
+        dd->setVideoTracks (std::move (t));
+    };
+    dlg->onReset = [this]
+    {
+        if (videoWindow != nullptr) videoWindow->setAdjustmentsLive (1.0, 0.0);
+    };
+    dlg->onClose = [this, dlg]
+    {
+        // Persist the displayed track's adjustments before deleting the dialog.
+        FileDoc* dd = app.doc();
+        if (dd != nullptr && videoWindow != nullptr)
+        {
+            const int i = videoWindow->displayedTrack ();
+            auto t = effectiveVideoTracks (*dd);
+            if (i >= 0 && i < (int) t.size ())
+            {
+                t[i].contrast = videoWindow->getContrast ();
+                t[i].brightness = videoWindow->getBrightness ();
+                dd->setVideoTracks (std::move (t));
+            }
+        }
+        delete dlg;
+    };
+    dlg->setVisible (true);
+}
+
+void MainWindow::startVideoAutoSync (int idx)
+{
+    FileDoc* d = app.doc();
+    if (d == nullptr || videoWindow == nullptr) return;
+    auto tracks = effectiveVideoTracks (*d);
+    if (idx < 0 || idx >= (int) tracks.size ()) return;
+
+    const juce::File vf = tracks[idx].file;
+    auto& eng = app.audioEngine();
+    if (!eng.isFileLoaded () || !vf.existsAsFile())
+    {
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Sync based on Audio",
+                                   "The document needs a loaded audio file and the video must exist.",
+                                   "", this);
+        return;
+    }
+
+    auto* dlg = new WorkProgressDialog ("Syncing video to audio",
+                                        "Cross-correlating " + vf.getFileName() + " ...",
+                                        true, this);
+    dlg->setProgress (0.0);
+    dlg->beginModal ();
+
+    std::thread ([this, idx, vf, dlg] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v)
+        {
+            if (v != 1.0 && v - lastSent < 0.02) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+
+        double bestOffset = std::nan ("");
+        std::string err;
+        {
+            auto reader = app.audioEngine().createReaderFor (vf);
+            if (reader == nullptr)
+                err = "The video has no decodable audio track.";
+            else if (reader->numChannels < 1 || reader->lengthInSamples <= 0)
+                err = "The video's audio stream is empty.";
+            else
+            {
+                // Coarse stage: both first channels box-decimated to ~2 kHz.
+                std::vector<float> docDs, vidDs;
+                if (!readChannelDecimated (*reader, 0, reader->sampleRate, vidDs))
+                    err = "Could not read the video's audio.";
+                else
+                {
+                    const int64_t dLen = app.audioEngine().numSamples();
+                    const double dRate = app.audioEngine().sampleRate();
+                    // Stream the document channel in chunks and decimate it.
+                    const int chunk = 1 << 22;
+                    for (int64_t off = 0; off < dLen; off += chunk)
+                    {
+                        const int n = (int) std::min<int64_t> ((int64_t) chunk, dLen - off);
+                        std::vector<float> part ((size_t) n);
+                        if (!app.audioEngine().readSamples (0, off, n, part.data()))
+                        {
+                            err = "Could not read the document's audio.";
+                            break;
+                        }
+                        const auto ds = sc::decimateTo (part, dRate, 2000.0);
+                        docDs.insert (docDs.end (), ds.begin (), ds.end ());
+                    }
+                }
+
+                if (err.empty())
+                {
+                    double step = 0.0;
+                    const double coarseLag = sc::videoSyncCoarse (docDs, vidDs, &step);
+                    sendProgress (0.5);
+                    if (!std::isnan (coarseLag) && step > 0.0)
+                    {
+                        // Fine stage: full-rate windows around the best lag.
+                        const double dRate = app.audioEngine().sampleRate();
+                        const int64_t dLen = app.audioEngine().numSamples();
+                        const double vDur = (double) reader->lengthInSamples / reader->sampleRate;
+                        const double w2 = std::min (5.0, std::max (1.0, std::min ((double) dLen / dRate, vDur) * 0.9));
+
+                        const double sA = std::max (0.0, coarseLag - step);
+                        const double eB = std::min ((double) dLen / dRate, coarseLag + w2 + step);
+                        const int64_t nDoc = (int64_t) std::llround ((eB - sA) * dRate);
+                        std::vector<float> docWin;
+                        docWin.resize ((size_t) nDoc, 0.0f);
+                        if (!app.audioEngine().readSamples (0,
+                                (int64_t) std::llround (sA * dRate), nDoc, docWin.data()))
+                            err = "Could not read the document's audio.";
+
+                        std::vector<float> vidWin;
+                        if (err.empty())
+                        {
+                            const double vEnd = std::min (vDur, w2 + step);
+                            if (!readChannelFloat (*reader, 0,
+                                    (int64_t) std::llround (vEnd * reader->sampleRate), vidWin))
+                                err = "Could not read the video's audio.";
+                        }
+
+                        if (err.empty())
+                        {
+                            const double fineLag = sc::videoSyncFine (docWin, dRate, sA,
+                                                                     vidWin, reader->sampleRate,
+                                                                     coarseLag, step);
+                            bestOffset = std::isnan (fineLag) ? coarseLag : fineLag;
+                        }
+                    }
+                    else if (std::isnan (coarseLag))
+                        err = "No correlation found: the video's audio does not match the document.";
+                }
+            }
+        }
+
+        const bool cancelled = dlg->cancelled.load ();
+        juce::MessageManager::callAsync ([this, idx, dlg, bestOffset, err, cancelled] {
+            delete dlg;
+            if (cancelled || app.doc () == nullptr)
+                return;
+            auto tracks = effectiveVideoTracks (*app.doc());
+            // The track may have been removed while the job ran.
+            if (idx >= (int) tracks.size ())
+            {
+                if (!err.empty())
+                    sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
+                                               "Sync based on Audio", err, "", this);
+                return;
+            }
+            if (!std::isnan (bestOffset))
+            {
+                tracks[(size_t) idx].offsetSecs = bestOffset;
+                app.doc()->setVideoTracks (std::move (tracks));
+                syncVideoWindow();
+                refreshVideoSolo ();
+            }
+            else if (!err.empty())
+                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
+                                           "Sync based on Audio", err, "", this);
+        });
+    }).detach ();
+}
+
+void MainWindow::copyVideoAudioToChannels (int idx)
+{
+    FileDoc* d = app.doc();
+    if (d == nullptr || videoWindow == nullptr) return;
+    auto tracks = effectiveVideoTracks (*d);
+    if (idx < 0 || idx >= (int) tracks.size ()) return;
+
+    const juce::File vf = tracks[idx].file;
+    const double offsetSecs = tracks[idx].offsetSecs;
+    auto& eng = app.audioEngine();
+    if (!eng.isFileLoaded () || !vf.existsAsFile())
+    {
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Copy Audio to New Channel(s)",
+                                   "The document needs a loaded audio file and the video must exist.",
+                                   "", this);
+        return;
+    }
+
+    const int oldN = eng.numChannels ();   // only channels added by this job get shown
+
+    auto* dlg = new WorkProgressDialog ("Copying video audio",
+                                        "Reading " + vf.getFileName() + " ...",
+                                        true, this);
+    dlg->setProgress (0.0);
+    dlg->beginModal ();
+
+    std::thread ([this, oldN, vf, offsetSecs, dlg] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v)
+        {
+            if (v != 1.0 && v - lastSent < 0.02) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+
+        std::vector<std::vector<float>> data;
+        double outRate = 0.0;
+        int64_t samplePos = 0;
+        std::string err;
+        {
+            auto reader = app.audioEngine().createReaderFor (vf);
+            if (reader == nullptr)
+                err = "The video has no decodable audio track.";
+            else if (reader->numChannels < 1 || reader->lengthInSamples <= 0)
+                err = "The video's audio stream is empty.";
+            else
+            {
+                const int nch = reader->numChannels;
+                const int64_t len = reader->lengthInSamples;
+                const double vRate = reader->sampleRate;
+                // Cap the decode so a huge movie cannot exhaust memory
+                // (~256 MB ≈ 90 min of stereo @ 48 kHz).
+                if ((size_t) nch * (size_t) len * sizeof (float) > (size_t) 256 * 1024 * 1024)
+                    err = (juce::String ("The video's audio is too long to copy (~")
+                           + juce::String (((double) nch * (double) len * 4.0) / 1048576.0, 0)
+                           + " MB needed).").toStdString ();
+                else
+                {
+                    juce::AudioBuffer<float> buf (nch, (int) std::min<int64_t> (len, (int64_t) INT_MAX));
+                    const int chunk = 1 << 20;   // frames per pass
+                    for (int64_t off = 0; err.empty () && off < len; off += chunk)
+                    {
+                        const int n = (int) std::min<int64_t> ((int64_t) chunk, len - off);
+                        float* stackDest[64] = {};
+                        std::vector<float*> heapDest;
+                        if (nch > 64)
+                            heapDest.assign ((size_t) nch, nullptr);
+                        for (int ch = 0; ch < nch; ++ch)
+                            (nch <= 64 ? stackDest[ch] : heapDest[(size_t) ch])
+                                = buf.getWritePointer (ch, (int) off);
+                        float** destPtr = nullptr;
+                        if (nch <= 64) destPtr = stackDest;
+                        else if (!heapDest.empty ()) destPtr = &heapDest[0];
+                        if (destPtr == nullptr || !reader->read (destPtr, nch, off, n))
+                            err = "Could not read the video's audio.";
+                        sendProgress (0.5 * (double) (off + n) / (double) len);
+                    }
+
+                    if (err.empty())
+                    {
+                        const double dRate = app.audioEngine().sampleRate();
+                        outRate = dRate;
+                        if (std::abs (vRate - dRate) > 1e-9)
+                        {
+                            juce::AudioBuffer<float> rs;
+                            std::atomic<bool> cancelFlag { false };
+                            auto progress = [&cancelFlag, dlg, &sendProgress] (float v)
+                            {
+                                if (dlg->cancelled.load ())
+                                    cancelFlag.store (true);
+                                else
+                                    sendProgress (0.5 + 0.4 * (double) v);
+                            };
+                            if (!sc::Resampler::resample (buf, vRate, dRate, rs, progress,
+                                                         &cancelFlag))
+                                err = "Could not resample the video's audio.";
+                            else
+                            {
+                                data.resize ((size_t) rs.getNumChannels());
+                                for (int ch = 0; ch < rs.getNumChannels(); ++ch)
+                                    data[(size_t) ch].assign (rs.getReadPointer (ch),
+                                                              rs.getReadPointer (ch) + rs.getNumSamples());
+                            }
+                        }
+                        else
+                        {
+                            data.resize ((size_t) nch);
+                            for (int ch = 0; ch < nch; ++ch)
+                                data[(size_t) ch].assign (buf.getReadPointer (ch),
+                                                          buf.getReadPointer (ch) + len);
+                        }
+                    }
+                }
+
+                if (err.empty())
+                {
+                    samplePos = (int64_t) std::llround (offsetSecs * outRate);
+                    if (samplePos < 0)
+                        err = "The track starts before the document; align it first.";
+                    else if (!app.audioEngine().writeDataToNewChannels (
+                                 samplePos, data,
+                                 "Video audio: " + vf.getFileName(), &err))
+                        ;   // writeDataToNewChannels filled in err
+                }
+            }
+        }
+
+        const bool cancelled = dlg->cancelled.load ();
+        juce::MessageManager::callAsync ([this, oldN, dlg, cancelled] {
+            delete dlg;
+            if (cancelled || app.doc () == nullptr)
+                return;
+            // Make the freshly added channels visible.
+            auto& eng2 = app.audioEngine();
+            const int n = eng2.numChannels ();
+            for (int ch = oldN; ch < n; ++ch)
+                if (!app.isChannelVisible (ch))
+                    app.visibleChannels.push_back (ch);
+            std::sort (app.visibleChannels.begin (), app.visibleChannels.end ());
+            refreshAfterEdit ();
+        });
+    }).detach ();
+}
+
+void MainWindow::addVideoTrackFromPicker ()
+{
+    FileDoc* d = app.doc();
+    if (d == nullptr || videoWindow == nullptr) return;
+
+    const juce::String exts = sc::videoContainerExtensions ();
+    juce::FileChooser fc ("Add a video track...",
+                          juce::File(),
+                          exts.isEmpty () ? "mp4|mov|m4v|3gp|avi|mkv|webm" : exts);
+    if (!fc.browseForFileToOpen ())
+        return;
+
+    const juce::File f = fc.getResult ();
+    auto t = effectiveVideoTracks (*d);
+    sc::VideoTrackData nt;
+    nt.file = f;
+    t.push_back (std::move (nt));
+    d->selectedVideoTrack = (int) t.size () - 1;   // the new track renders above
+    d->setVideoTracks (std::move (t));
+    syncVideoWindow();
+}
+
+void MainWindow::removeVideoTrack (int idx)
+{
+    FileDoc* d = app.doc();
+    if (d == nullptr || videoWindow == nullptr) return;
+    auto tracks = effectiveVideoTracks (*d);
+    if (idx < 0 || idx >= (int) tracks.size ()) return;
+
+    int sel = d->selectedVideoTrack;
+    tracks.erase (tracks.begin () + idx);
+    if (sel == idx)
+        sel = std::min (idx, (int) tracks.size () - 1);   // fall back to the next track (or -1)
+    else if (sel > idx)
+        --sel;
+
+    d->videoFile = juce::File();   // do not resurrect an implicit track from it
+    d->setVideoTracks (std::move (tracks), &sel);
+    syncVideoWindow();
+    refreshVideoSolo ();
+}
+
+void MainWindow::toggleVideoSolo (int idx)
+{
+    FileDoc* d = app.doc();
+    if (d == nullptr || videoWindow == nullptr) return;
+    auto tracks = effectiveVideoTracks (*d);
+    if (idx < 0 || idx >= (int) tracks.size ()) return;
+
+    tracks[idx].solo = !tracks[idx].solo;
+    d->setVideoTracks (std::move (tracks));
+    syncVideoWindow();          // refresh the menu checkmark + panel state
+    refreshVideoSolo ();        // start/stop solo playback accordingly
+}
+
+void MainWindow::refreshVideoSolo ()
+{
+    FileDoc* d = app.doc();
+    auto& eng = app.audioEngine();
+
+    std::vector<sc::VideoTrackData> tracks;
+    int soloIdx = -1;
+    if (d != nullptr)
+    {
+        tracks = effectiveVideoTracks (*d);
+        for (int i = 0; i < (int) tracks.size (); ++i)
+            if (tracks[(size_t) i].solo)
+                soloIdx = (d->selectedVideoTrack >= 0 && d->selectedVideoTrack < (int) tracks.size ()
+                           && tracks[(size_t) d->selectedVideoTrack].solo)
+                             ? d->selectedVideoTrack : i;
+    }
+
+    if (soloIdx < 0 || !eng.isFileLoaded ())
+    {
+        videoSoloCache.reset ();
+        videoSoloCacheFor = juce::File();
+        eng.setSoloAudio (nullptr);
+        return;
+    }
+
+    const sc::VideoTrackData& tr = tracks[(size_t) soloIdx];
+
+    if (videoSoloCache == nullptr || videoSoloCacheFor != tr.file)
+    {
+        // Decode the track's own audio at its native rate. Capped so a huge
+        // movie cannot exhaust memory (~128 MB = 45 min of stereo @ 48 kHz).
+        const size_t capBytes = (size_t) 128 * 1024 * 1024;
+        std::shared_ptr<AudioEngine::SoloAudio> fresh;
+        try
+        {
+            auto reader = eng.createReaderFor (tr.file);
+            if (reader == nullptr || reader->numChannels < 1 || reader->lengthInSamples <= 0)
+                throw juce::String ("The video has no decodable audio track.");
+            const int64_t len = reader->lengthInSamples;
+            const size_t need = (size_t) reader->numChannels * (size_t) len * sizeof (float);
+            if (need > capBytes)
+                throw juce::String ("The video's audio is too long to solo (~"
+                                    + juce::String ((double) need / 1048576.0, 0) + " MB needed).");
+            fresh = std::make_shared<AudioEngine::SoloAudio>();
+            fresh->rate = reader->sampleRate;
+            fresh->data.resize ((size_t) reader->numChannels);
+            for (int ch = 0; ch < reader->numChannels; ++ch)
+                if (!readChannelFloat (*reader, ch, len, fresh->data[(size_t) ch]))
+                    throw juce::String ("Could not read the video's audio.");
+        }
+        catch (const std::bad_alloc&)
+        {
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Solo",
+                                       "Not enough memory to decode this video's audio.", "", this);
+            return;
+        }
+        catch (const juce::String& msg)
+        {
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Solo", msg, "", this);
+            return;
+        }
+
+        videoSoloCache = std::move (fresh);
+        videoSoloCacheFor = tr.file;
+    }
+
+    videoSoloCache->offsetSecs = tr.offsetSecs;   // the engine maps it onto the doc clock
+    eng.setSoloAudio (videoSoloCache);
+}
+
 
 void MainWindow::syncVideoWindow()
 {

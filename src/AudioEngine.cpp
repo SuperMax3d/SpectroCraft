@@ -225,6 +225,14 @@ bool AudioEngine::readSamples (int channel, int64_t start, int64_t count, float*
     return true;
 }
 
+std::unique_ptr<juce::AudioFormatReader> AudioEngine::createReaderFor (const juce::File& file) const
+{
+    // The format manager is read-only after construction; createReaderFor just
+    // probes each registered format, so this is safe off the message thread.
+    std::unique_ptr<juce::AudioFormatReader> r (fm->createReaderFor (file));
+    return r;
+}
+
 static void deinterleaveInto (float* dst, const float* interleaved, int ch, int nchans,
                               int64_t numFrames)
 {

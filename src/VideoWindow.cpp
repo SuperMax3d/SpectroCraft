@@ -810,7 +810,7 @@ VideoAdjustDialog::VideoAdjustDialog (juce::Component* parent)
     closeBtn_.setButtonText ("Close");
     applyAll_.onClick = [this] { if (onApplyToAll) onApplyToAll (); };
     reset_.onClick = [this] { if (onReset) onReset (); };
-    closeBtn_.onClick = [this] { setVisible (false); };
+    closeBtn_.onClick = [this] { closeNow (); };
 
     contrastLbl_.setText ("Contrast", juce::NotificationType::dontSendNotification);
     brightnessLbl_.setText ("Brightness", juce::NotificationType::dontSendNotification);
@@ -844,6 +844,12 @@ void VideoAdjustDialog::setValues (double contrast, double brightness)
 {
     if (std::abs (contrast - contrast_.getValue()) > 1e-9) contrast_.setValue (contrast);
     if (std::abs (brightness - brightness_.getValue()) > 1e-9) brightness_.setValue (brightness);
+}
+
+void VideoAdjustDialog::closeNow()
+{
+    setVisible (false);
+    if (onClose) onClose ();
 }
 
 //==============================================================================

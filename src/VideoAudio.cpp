@@ -431,3 +431,132 @@ void registerVideoFormats (juce::AudioFormatManager& fm)
 } // namespace sc
 
 #endif
+
+// ---------------------------------------------------------------------------
+// "Sync based on Audio": two-stage normalized cross-correlation. Pure math on
+// decoded float channels - platform independent (FFmpeg, AVFoundation or a
+// test-generated vector all feed the same code).
+
+namespace sc {
+
+std::vector<float> decimateTo (const std::vector<float>& in, double inRate,
+                               double outRate)
+{
+    if (in.empty() || outRate >= inRate) return in;
+    const double ratio = inRate / outRate;
+    const int64_t nOut = (int64_t) std::floor ((double) in.size() / ratio);
+    std::vector<float> out ((size_t) nOut, 0.0f);
+    for (int64_t i = 0; i < nOut; ++i)
+    {
+        const int64_t a = (int64_t) std::floor ((double) i * ratio);
+        const int64_t b = (int64_t) std::ceil ((double) (i + 1) * ratio);
+        if (b <= a)
+        {   out[(size_t) i] = in[(size_t) std::min (a, (int64_t) in.size () - 1)]; continue; }
+        double s = 0.0;
+        int n = 0;
+        for (int64_t j = std::max<int64_t> (0, a); j < std::min<int64_t> ((int64_t) in.size (), b); ++j)
+        {   s += in[(size_t) j]; ++n; }
+        out[(size_t) i] = n > 0 ? (float) (s / n) : 0.0f;
+    }
+    return out;
+}
+
+namespace
+{
+/** Pearson correlation of two equal-length segments (-1e308 when either is
+    silent: a flat segment carries no alignment information). */
+double pearsonSeg (const float* a, const float* b, int64_t n)
+{
+    if (n < 8) return -1e308;
+    double ma = 0.0, mb = 0.0;
+    for (int64_t i = 0; i < n; ++i) { ma += a[i]; mb += b[i]; }
+    ma /= (double) n; mb /= (double) n;
+    double num = 0.0, da = 0.0, db = 0.0;
+    for (int64_t i = 0; i < n; ++i)
+    {
+        const double x = a[i] - ma, y = b[i] - mb;
+        num += x * y; da += x * x; db += y * y;
+    }
+    if (da <= 1e-12 || db <= 1e-12) return -1e308;
+    return num / std::sqrt (da * db);
+}
+
+constexpr double kSyncDecimRate = 2000.0;   // coarse stage resolution, Hz
+} // namespace
+
+double videoSyncCoarse (const std::vector<float>& docDs, const std::vector<float>& vidDs,
+                        double* stepOut)
+{
+    if (stepOut != nullptr) *stepOut = 0.0;
+    if (docDs.size() < 64 || vidDs.size() < 64) return std::nan ("");
+
+    const int64_t Dn = (int64_t) docDs.size(), Vn = (int64_t) vidDs.size();
+    const double Ds = (double) Dn / kSyncDecimRate, Vs = (double) Vn / kSyncDecimRate;
+
+    // Coarse grid: the video's start may sit anywhere from -Vs to +Ds.
+    const double span = Ds + Vs;
+    const double step = std::max (0.5, span / 400.0);
+    if (stepOut != nullptr) *stepOut = step;
+
+    // Correlation window: up to 3 s of overlap, at least a few samples.
+    const int64_t Wn = std::min<int64_t> ((int64_t) (3.0 * kSyncDecimRate),
+                                         std::max<int64_t> (16, (int64_t) (std::min (Ds, Vs) * 0.9 * kSyncDecimRate)));
+
+    double best = -1e308, bestLag = 0.0;
+    for (double L = -Vs; L <= Ds + step * 0.5; L += step)
+    {
+        // Overlap of doc [max(0,L) .. min(D, L+V)] with vid [max(0,-L) .. ].
+        const double s = std::max (0.0, L);
+        const double e = std::min (Ds, L + Vs);
+        if (e - s < 0.016) continue;   // less than ~32 samples: no information
+        const int64_t i0 = (int64_t) std::llround (s * kSyncDecimRate);
+        const int64_t j0 = (int64_t) std::llround (std::max (0.0, -L) * kSyncDecimRate);
+        const int64_t n  = std::min<int64_t> (Wn, (int64_t) std::floor ((e - s) * kSyncDecimRate));
+        if (i0 + n > Dn || j0 + n > Vn) continue;
+        const double r = pearsonSeg (docDs.data () + i0, vidDs.data () + j0, n);
+        if (r > best) { best = r; bestLag = L; }
+    }
+
+    if (best < 0.15) return std::nan ("");   // nothing correlates meaningfully
+    return bestLag;
+}
+
+double videoSyncFine (const std::vector<float>& docWin, double docRate,
+                      double docWinStart,
+                      const std::vector<float>& vidWin, double vidRate,
+                      double coarseLag, double step)
+{
+    if (docRate <= 0.0 || vidRate <= 0.0 || step <= 0.0
+        || docWin.empty() || vidWin.empty())
+        return std::nan ("");
+
+    const int64_t Dn = (int64_t) docWin.size(), Vn = (int64_t) vidWin.size();
+    // Document times covered by the two windows.
+    const double dLo = docWinStart, dHi = docWinStart + (double) Dn / docRate;
+    const double vHi = (double) Vn / vidRate;
+
+    // Fine grid: ~1/64 of the coarse step, never coarser than one sample.
+    const double fStep = std::max (1.0 / docRate, step / 64.0);
+    const int64_t Wn = std::min<int64_t> ((int64_t) (5.0 * docRate),
+                                         std::max<int64_t> (8,
+                                             (int64_t) (std::min (dHi, vHi) * 0.9 * docRate)));
+
+    double best = -1e308, bestLag = coarseLag;
+    for (double L = coarseLag - step; L <= coarseLag + step + fStep * 0.5; L += fStep)
+    {
+        // Overlap of doc [max(dLo,L) .. min(dHi, L+vHi)] with vid [max(vLo,-L) .. ].
+        const double s = std::max (dLo, L);
+        const double e = std::min (dHi, L + vHi);
+        if (e - s < 8.0 / docRate) continue;
+        const int64_t i0 = (int64_t) std::llround ((s - dLo) * docRate);
+        const int64_t j0 = (int64_t) std::llround ((s - L) * vidRate);   // s >= L always
+        const int64_t n  = std::min<int64_t> (Wn, (int64_t) std::floor ((e - s) * docRate));
+        if (i0 + n > Dn || j0 + n > Vn) continue;
+        const double r = pearsonSeg (docWin.data () + i0, vidWin.data () + j0, n);
+        if (r > best) { best = r; bestLag = L; }
+    }
+
+    return best < 0.15 ? std::nan ("") : bestLag;
+}
+
+} // namespace sc

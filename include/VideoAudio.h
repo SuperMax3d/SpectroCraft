@@ -35,4 +35,30 @@ void registerVideoFormats (juce::AudioFormatManager&);
     the engine can actually open. */
 const juce::String& videoContainerExtensions();
 
+// ---------------------------------------------------------------------------
+// "Sync based on Audio": two-stage normalized cross-correlation of a video's
+// own audio against the document's audio (platform-independent math).
+
+/** Box-decimates `in` from `inRate` to ~`outRate` Hz (averaging, no aliasing
+    tricks). Returns `in` unchanged when outRate >= inRate. */
+std::vector<float> decimateTo (const std::vector<float>& in, double inRate,
+                               double outRate);
+
+/** Coarse stage: normalized cross-correlation of two ~2 kHz-decimated
+    channels (`docDs` = the document's first channel, `vidDs` = the video's).
+    Returns the document time at which the video's start best sits (seconds;
+    negative = the video starts before the audio) and, via stepOut, the grid
+    step used. NaN when no lag has a meaningful correlation. */
+double videoSyncCoarse (const std::vector<float>& docDs, const std::vector<float>& vidDs,
+                        double* stepOut = nullptr);
+
+/** Fine stage: refines `coarseLag` at full rate over +/- one coarse step.
+    `docWin` is the document's first channel starting at document time
+    `docWinStart`; `vidWin` is the video's own audio from its start. Returns
+    the refined lag in seconds, or NaN when nothing correlates. */
+double videoSyncFine (const std::vector<float>& docWin, double docRate,
+                      double docWinStart,
+                      const std::vector<float>& vidWin, double vidRate,
+                      double coarseLag, double step);
+
 } // namespace sc
