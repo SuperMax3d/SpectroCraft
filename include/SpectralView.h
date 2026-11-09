@@ -433,6 +433,8 @@ private:
     // 1/3 octave band overlay (View > Show 1/3 Octave Grid): thin white
     // dashed lines at each IEC 61260-1 band border plus the band's centre
     // frequency written in white between them, on the axis side of the plot.
+    // Lines fade out as a band's on-screen height shrinks below ~12 px and
+    // stop entirely below 5 px, so a fully zoomed-out view stays uncluttered.
     void drawThirdOctaveGrid (juce::Graphics& g);
     void drawOverlays (juce::Graphics& g);
 

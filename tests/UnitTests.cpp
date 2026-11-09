@@ -26611,6 +26611,54 @@ static void testThirdOctaveGrid()
         }
     }
 
+    // Zoom density control: as bands compress on screen the grid must fade
+    // out and stop entirely below 5 px per band, instead of drawing a dense
+    // mess of dashed lines when fully zoomed out.
+    {
+        app.settings.logFrequency = true;   // uniform band heights in log scale
+        view.setSettings (app.settings);   // the view keeps its own copy
+        view.setSize (480, 120);
+
+        auto diffCount = [&] () -> int
+        {
+            app.settings.showThirdOctaveGrid = false;
+            const auto offR = render ();
+            app.settings.showThirdOctaveGrid = true;
+            const auto onR = render ();
+            int n = 0;
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < 480; ++x)
+                    if (offR.getPixelAt (x, y) != onR.getPixelAt (x, y)) ++n;
+            return n;
+        };
+
+        // The on-screen height of the 100 Hz band (borders at sqrt(80*100)
+        // and sqrt(100*125) Hz) for the current range.
+        auto bandHeight = [&] () -> float
+        {
+            const auto rows = view.rowRects();
+            if (rows.empty ()) return -1.0f;
+            const juce::Rectangle<int> rr = rows[0];
+            auto yOf = [&] (double f) { return (float) rr.getY() + view.freqToY (f, rr.getHeight()); };
+            return std::abs (yOf (std::sqrt (100.0 * 125.0)) - yOf (std::sqrt (80.0 * 100.0)));
+        };
+
+        // Mid-zoom: the bands land inside the fade zone (5..12 px) and must
+        // still be drawn, just with reduced opacity.
+        view.setFrequencyRange (40.0, 540.0);
+        const float hMid = bandHeight ();
+        CHECK (hMid > 5.0f && hMid < 12.0f, "mid-zoom band height is inside the fade zone");
+        CHECK (diffCount () > 0, "bands in the fade zone still draw grid lines");
+
+        // Fully zoomed out over the whole Nyquist range: every band compresses
+        // below the stop threshold and nothing may be drawn.
+        view.setFrequencyRange (2.0, 4000.0);
+        const float hZoom = bandHeight ();
+        CHECK (hZoom > 0.0f && hZoom < 5.0f,
+              "fully zoomed-out band height is below the stop threshold");
+        CHECK (diffCount () == 0, "below the stop threshold the grid draws nothing");
+    }
+
     wav.deleteFile ();
 }
 

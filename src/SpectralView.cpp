@@ -1880,15 +1880,23 @@ void SpectralView::drawThirdOctaveGrid (juce::Graphics& g)
             const double lo = (i > 0) ? border (centres[i - 1], fc) : fMin;
             const double hi = (i + 1 < centres.size()) ? border (fc, centres[i + 1]) : fMax;
 
+            // On-screen band height in pixels. Fully zoomed out, the bands
+            // compress to a few pixels and the dashed borders alias into a
+            // dense mess: fade the grid as the height shrinks and stop drawing
+            // it below 5 px per band so it recedes instead of cluttering.
+            const float h = std::abs (yOf (hi) - yOf (lo));
+            if (h < 5.0f) continue;
+            const float fade = std::clamp ((h - 5.0f) / (12.0f - 5.0f), 0.0f, 1.0f);
+
             // Thin delicate white dashed lines at the band borders.
-            g.setColour (juce::Colour::fromRGBA (255, 255, 255, 70));
+            g.setColour (juce::Colour::fromRGBA (255, 255, 255, (int) std::lround (70.0 * fade)));
             g.drawDashedLine (juce::Line<float> (x0, yOf (lo), x1, yOf (lo)), dash, 2, 1.0f);
             g.drawDashedLine (juce::Line<float> (x0, yOf (hi), x1, yOf (hi)), dash, 2, 1.0f);
 
             // Centre value between the borders; skip it when the band is too
             // thin on screen or would collide with the channel label.
             const float yc = yOf (fc);
-            if (std::abs (yOf (lo) - yOf (hi)) < 14.0f) continue;
+            if (h < 14.0f) continue;
             if ((float) yc < rr.getY() + 8.0f || (float) yc > rr.getBottom() - 2.0f)
                 continue;
             if (hasChanLabel && std::abs (yc - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
