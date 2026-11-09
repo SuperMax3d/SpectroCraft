@@ -980,6 +980,17 @@ public:
                     mainWindow.get ());
                 dlg.addButton ("Yes, Quit", 1);
                 dlg.addButton ("Cancel", 0);
+
+                // Activate and raise the dialog before entering the modal loop.
+                // If our process does not hold the foreground when the dialog is
+                // created (another app or instance was active), SetFocus inside
+                // enterModalState() silently fails and the window appears without
+                // activation; the user's first click on "Yes, Quit" then only
+                // activates it and can be swallowed by Windows, so they have to
+                // click twice. We still hold input rights (the user just clicked X
+                // or File > Quit), so BringWindowToTop via toFront() activates it.
+                dlg.toFront (true);
+
                 if (dlg.runModalLoop () != 1) return;   // stay open
             }
         }

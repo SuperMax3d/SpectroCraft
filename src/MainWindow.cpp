@@ -2486,23 +2486,29 @@ void MainWindow::ensureVideoWindow()
     // Dropping a video file on the window adds it as a new track of the active
     // document (the spec's "drag/drop into the panel"); with no open document
     // it is opened as one instead, like a drop on the main window.
-    videoWindow->onVideoDropped = [this] (const juce::File& f)
-    {
-        FileDoc* d = app.doc();
-        if (d == nullptr || !f.existsAsFile())
-        {   app.openFile (f); return; }
-        auto t = effectiveVideoTracks (*d);
-        sc::VideoTrackData nt;
-        nt.file = f;
-        t.push_back (std::move (nt));
-        d->selectedVideoTrack = (int) t.size() - 1;   // the new track renders above
-        d->setVideoTracks (std::move (t));
-        syncVideoWindow();
-    };
+    videoWindow->onVideoDropped = [this] (const juce::File& f) { addVideoTrackFromFile (f); };
+    // The docked picture/track list accepts the same drops: JUCE resolves drag
+    // targets from the deepest component, so while docked this host wins over
+    // MainWindow's "open as document" handler for drops on the video area.
+    videoDockHost->onVideoDropped = [this] (const juce::File& f) { addVideoTrackFromFile (f); };
 
     // The saved layout may have the Video tab open: restore the docked state.
     if (isPanelOpen ("video"))
         videoWindow->dockTo (*videoDockHost);
+}
+
+void MainWindow::addVideoTrackFromFile (const juce::File& f)
+{
+    FileDoc* d = app.doc();
+    if (d == nullptr || !f.existsAsFile())
+    {   app.openFile (f); return; }
+    auto t = effectiveVideoTracks (*d);
+    sc::VideoTrackData nt;
+    nt.file = f;
+    t.push_back (std::move (nt));
+    d->selectedVideoTrack = (int) t.size() - 1;   // the new track renders above
+    d->setVideoTracks (std::move (t));
+    syncVideoWindow();
 }
 
 /** The document's video tracks: the explicit list if it has one, otherwise

@@ -312,7 +312,7 @@ void VideoView::showContextMenu (const juce::Point<int>& at)
     if (onToggleAlwaysOnTop)
         m.addItem (kMenuAlwaysOnTop, "Always On Top", true, isAlwaysOnTop ? isAlwaysOnTop() : false);
     if (onDockToggle)
-        m.addItem (kMenuDock, docked ? "Undock to Window" : "Dock Panel");
+        m.addItem (kMenuDock, docked ? "Undock Panel" : "Dock Panel");
 
     const int id = m.showMenu (juce::PopupMenu::Options ()
                                    .withTargetComponent (this)
@@ -586,7 +586,7 @@ void VideoTracksPanel::showContextMenuAt (const juce::Point<int>& at)
         m.addItem (kMenuAlwaysOnTop, "Always On Top", true,
                    isAlwaysOnTop ? isAlwaysOnTop() : false);
     if (onDockToggle)
-        m.addItem (kMenuDock, docked ? "Undock to Window" : "Dock Panel");
+        m.addItem (kMenuDock, docked ? "Undock Panel" : "Dock Panel");
     if (idx >= 0 && onMenuItem)
     {
         m.addSeparator();
@@ -809,7 +809,14 @@ VideoAdjustDialog::VideoAdjustDialog (juce::Component* parent)
     reset_.setButtonText ("Reset");
     closeBtn_.setButtonText ("Close");
     applyAll_.onClick = [this] { if (onApplyToAll) onApplyToAll (); };
-    reset_.onClick = [this] { if (onReset) onReset (); };
+    reset_.onClick = [this]
+    {
+        // Reset the sliders too, so the dialog reflects what was applied. Each
+        // setValue fires onValuesChanged -> live update of the video.
+        contrast_.setValue (1.0);
+        brightness_.setValue (0.0);
+        if (onReset) onReset ();
+    };
     closeBtn_.onClick = [this] { closeNow (); };
 
     contrastLbl_.setText ("Contrast", juce::NotificationType::dontSendNotification);
@@ -908,25 +915,7 @@ VideoWindow::VideoWindow (std::function<double()> getTime)
         updateNotice();
         if (onVideoOpened) onVideoOpened (ok, framePump.hasNoVideoTrack());
     };
-    framePump.onFrame = [this]
-    {
-        const auto& fr0 = framePump.frame();
-        if (!fr0.image.isValid())
-        {   videoView.setFrame (fr0, 0); return; }
-
-        int rot = framePump.info().rotation;
-        if (displayed_ >= 0 && displayed_ < (int) tracks_.size()) rot += tracks_[displayed_].rotation;
-
-        const bool neutral = std::abs (contrast_ - 1.0) < 1e-6 && std::abs (brightness_) < 1e-6;
-        if (neutral)
-            videoView.setFrame (fr0, rot);
-        else
-        {
-            auto fr = fr0;   // copy: the pump's frame must stay untouched
-            applyImageAdjustments (fr.image, contrast_, brightness_);
-            videoView.setFrame (fr, rot);
-        }
-    };
+    framePump.onFrame = [this] { redrawCurrentFrame(); };
 
     videoView.onDisplaySizeChanged = [this] { updateDecodeSize(); };
     videoView.onUserRotationChanged = [this] (int) { saveDisplayedAdjustments (); };
@@ -1106,7 +1095,27 @@ void VideoWindow::applyTrackAdjustments (int i)
     videoView.setUserRotation (td.rotation);
     contrast_ = td.contrast;
     brightness_ = td.brightness;
-    pollTime();   // re-decode the current frame so new adjustments apply at once
+    redrawCurrentFrame();   // show the current picture with this track's values at once
+    pollTime();             // request the frame for this track's offset (no-op if same time)
+}
+
+void VideoWindow::redrawCurrentFrame()
+{
+    const auto& fr0 = framePump.frame();
+    if (!fr0.image.isValid()) return;   // nothing delivered yet: the view shows its message
+
+    int rot = framePump.info().rotation;
+    if (displayed_ >= 0 && displayed_ < (int) tracks_.size()) rot += tracks_[displayed_].rotation;
+
+    const bool neutral = std::abs (contrast_ - 1.0) < 1e-6 && std::abs (brightness_) < 1e-6;
+    if (neutral)
+        videoView.setFrame (fr0, rot);
+    else
+    {
+        auto fr = fr0;   // copy: the pump's frame must stay untouched
+        applyImageAdjustments (fr.image, contrast_, brightness_);
+        videoView.setFrame (fr, rot);
+    }
 }
 
 void VideoWindow::saveDisplayedAdjustments()
@@ -1130,7 +1139,7 @@ void VideoWindow::setAdjustmentsLive (double contrast, double brightness)
         tracks_[displayed_].brightness = brightness;
         saveDisplayedAdjustments();   // persist for this track
     }
-    pollTime();   // re-decode the current frame with the new values
+    redrawCurrentFrame();   // re-apply to the current frame (works while paused)
 }
 
 void VideoWindow::updateNotice()
@@ -1222,7 +1231,7 @@ void VideoWindow::setDocked (bool d)
 {
     if (docked_ == d) return;
     docked_ = d;
-    videoView.docked = d;   // context-menu label: "Dock Panel" / "Undock to Window"
+    videoView.docked = d;   // context-menu label: "Dock Panel" / "Undock Panel"
     tracksPanel.docked = d;
     visibilityChanged ();   // start/stop the timer for the new mode
 }

@@ -96,7 +96,7 @@ public:
     std::function<void (bool)> onToggleAlwaysOnTop;
     std::function<bool()> isAlwaysOnTop;
     std::function<void()> onDockToggle;
-    bool docked = false;                 // menu label: "Dock Panel" / "Undock"
+    bool docked = false;                 // menu label: "Dock Panel" / "Undock Panel"
 
     /** The view's size changed: the owner may want to re-decode at a new size. */
     std::function<void()> onDisplaySizeChanged;
@@ -317,7 +317,7 @@ private:
 
 /** Tab host for a docked video window: the picture on top and the track
     list below, mirroring VideoContentHost's layout. */
-class VideoDockHost : public juce::Component
+class VideoDockHost : public juce::Component, public juce::FileDragAndDropTarget
 {
 public:
     void attach (juce::Component* c)
@@ -327,6 +327,27 @@ public:
     }
     juce::Component* child() const noexcept
     {   return getNumChildComponents() > 0 ? getChildComponent (0) : nullptr; }
+
+    /** A video file dropped on the docked picture/track list is added as a new track. */
+    std::function<void (const juce::File&)> onVideoDropped;
+
+    // FileDragAndDropTarget: JUCE resolves drag targets from the deepest
+    // component under the cursor, so while docked this host wins over
+    // MainWindow's "open as document" handler for drops on the video area.
+    bool isInterestedInFileDrag (const juce::StringArray& files) override
+    {
+        for (const auto& f : files)
+            if (sc::isVideoPictureCandidate (juce::File (f))) return true;
+        return false;
+    }
+
+    void filesDropped (const juce::StringArray& files, int, int) override
+    {
+        if (onVideoDropped == nullptr) return;
+        for (const auto& f : files)
+            if (sc::isVideoPictureCandidate (juce::File (f)))
+                onVideoDropped (juce::File (f));
+    }
 
 private:
     void resized() override
@@ -382,6 +403,10 @@ public:
 
     /** Asks the pump for the frame at the owner's current time. */
     void pollTime();
+    /** Re-renders the last delivered frame with the current adjustments and
+        rotation. Works while paused, where request() would deduplicate the
+        same time and no new frame (and no repaint) would arrive. */
+    void redrawCurrentFrame();
     /** Re-evaluates which track is displayed and switches files if needed. */
     void refreshDisplayed();
 

@@ -644,6 +644,9 @@ private:
     std::shared_ptr<AudioEngine::SoloAudio> videoSoloCache;   // decoded solo track audio (reused across offset changes)
     juce::File videoSoloCacheFor;                          // which file it belongs to
     void ensureVideoWindow();          // creates + wires the window once
+    /** Adds a video file as a new track of the active document (or opens it
+        as a document when none is open). Used for drops on the video area. */
+    void addVideoTrackFromFile (const juce::File& f);
 
     // Video track context-menu actions (ids from VideoTracksPanel).
     void handleVideoTrackMenu (int id, int idx);
