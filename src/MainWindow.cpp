@@ -1,8 +1,12 @@
 /**
  * SpectroCraft - Main Window Implementation
- * Layout: menu bar on top; left column with two tab groups
- *   (top: Files | Frequency Analysis, bottom: Spectral Controls | Markers);
- * main area: waveform view on top, spectral view below.
+ * Layout: menu bar on top (workspace switcher on its right), status bar at the
+ * bottom, and in between the docking workspace (include/Docking.h): panel
+ * groups with tabs - the Editor (waveform view on top, spectral view below)
+ * among them - that can be rearranged, docked anywhere or undocked into
+ * floating windows. The default workspace keeps the classic arrangement: a
+ * left column with two groups (Files | Frequency Analysis ... above,
+ * Spectral Controls | Markers ... below) beside the Editor.
  */
 
 #include "MainWindow.h"
@@ -32,9 +36,6 @@
 #include "IconData.h"
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include <algorithm>
-
-// Dark tab background matching the panel backgrounds (Panels.cpp).
-static const juce::Colour kDarkTabBg (45, 45, 48);
 
 namespace
 {
@@ -154,14 +155,45 @@ static void applyWindowIcon (void* hwndPtr)
 // default bluish scheme colour so those areas blend with the tracks.
 static juce::Colour mainWindowBackground () { return juce::Colour::fromRGB (32, 32, 36); }
 
+namespace
+{
+/** The Editor panel of the docking workspace: hosts the waveform and
+    spectral views, their scrollbars and the dedicated tables track, which
+    MainWindow::layoutEditor() places whenever the panel is resized. */
+class EditorPanel : public juce::Component
+{
+public:
+    std::function<void()> onResized;
+    void resized() override { if (onResized) onResized(); }
+    void paint (juce::Graphics& g) override { g.fillAll (mainWindowBackground ()); }
+};
+
+/** Name prompt for the workspace commands (none in headless test runs). */
+juce::String promptForWorkspaceName (const juce::String& title, const juce::String& initial)
+{
+    if (sc::alert::isHeadless ())
+        return {};
+    juce::AlertWindow dlg (title, "Workspace name:", juce::AlertWindow::NoIcon);
+    dlg.addTextEditor ("name", initial);
+    dlg.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    auto* ed = dlg.getTextEditor ("name");
+    dlg.enterModalState (false);
+    if (ed != nullptr)
+    {
+        ed->grabKeyboardFocus ();
+        ed->selectAll ();
+    }
+    const int r = dlg.runModalLoop ();
+    return (r == 1 && ed != nullptr) ? ed->getText ().trim () : juce::String ();
+}
+} // namespace
+
 MainWindow::MainWindow (Application& appIn, const juce::String& name)
     : DocumentWindow (name,
                       mainWindowBackground (),
                       DocumentWindow::allButtons),
-      app (appIn),
-      tabDragCtx (),
-      topTabs (juce::TabbedButtonBar::TabsAtTop, &tabDragCtx),
-      bottomTabs (juce::TabbedButtonBar::TabsAtTop, &tabDragCtx)
+      app (appIn)
 {
     setUsingNativeTitleBar (true);
     setResizable (true, true);
@@ -252,19 +284,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         historyPanel->refresh();
     };
 
-    topTabs.addTab ("Files", kDarkTabBg, fileListPanel.get(), false);
-    topTabs.addTab ("Frequency Analysis", kDarkTabBg, fftPanel.get(), false);
-    topTabs.addTab ("History", kDarkTabBg, historyPanel.get(), false);
-    topTabs.addTab ("Actions", kDarkTabBg, actionsPanel.get(), false);
-    topTabs.addTab ("Python", kDarkTabBg, pythonPanel.get(), false);
-    topTabs.addTab ("Tables", kDarkTabBg, tablesPanel.get(), false);
-    // New users get the Video tab in the top group; it stays empty until a
-    // document with video is active (the window then docks into it).
-    topTabs.addTab ("Video", kDarkTabBg, videoDockHost.get(), false);
-    bottomTabs.addTab ("Spectral Controls", kDarkTabBg, controlsPanel.get(), false);
-    bottomTabs.addTab ("Markers", kDarkTabBg, markersPanel.get(), false);
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-    bottomTabs.addTab ("Transcription", kDarkTabBg, transcriptionPanel.get(), false);
     if (transcriptionPanel)
     {
         transcriptionPanel->onRunRequested = [this] { showTranscribeDialog (); };
@@ -277,21 +297,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
                                           sc::makeVarObject ({ { "script", f.getFullPathName() } }));
                                       runPythonScriptAsync (f, t);
                                   };
-    bottomTabs.addTab ("Selection", kDarkTabBg, selectionPanel.get(), false);
-    bottomTabs.addTab ("Drawing", kDarkTabBg, drawingPanel.get(), false);
-    // Frequency Analysis is the default tab in the top group.
-    topTabs.setCurrentTabIndex (1, false);
-    bottomTabs.setCurrentTabIndex (0, false);
 
-    // Drag-and-drop reordering of the panel tabs: within a group or across
-    // groups. The arrangement is persisted by saveLeftLayout().
-    tabDragCtx.bars = { &topTabs, &bottomTabs };
-    tabDragCtx.onMove = [this] (juce::TabbedComponent* from, int fi,
-                                juce::TabbedComponent* to, int ii)
-                        { moveLeftPanelTab (from, fi, to, ii); };
-
-    // Right-click "Close Panel" in each left-column panel (the Window menu
-    // offers the same toggles for every panel).
+    // Right-click "Close Panel" in each panel (the Window menu offers the
+    // same toggles for every panel, the tab menus too).
     fileListPanel->onCloseRequested   = [this] { setPanelVisible ("files", false); };
     fftPanel->onCloseRequested        = [this] { setPanelVisible ("fft", false); };
     historyPanel->onCloseRequested    = [this] { setPanelVisible ("history", false); };
@@ -320,35 +328,89 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     drawingPanel->onCloseRequested    = [this] { setPanelVisible ("drawing", false); };
     tablesPanel->onCloseRequested     = [this] { setPanelVisible ("tables", false); };
 
-    // Restore the user's saved arrangement + column geometry.
-    applySavedLeftLayout();
-    leftPanelW = std::clamp ((int) app.recentStore->getIntValue ("left_panel_w", leftPanelW), 220, 4000);
-    topRatio   = std::clamp (app.recentStore->getIntValue ("top_ratio_mil",
-                                                          (int) std::lround (topRatio * 1000.0)) / 1000.0,
-                             0.15, 0.85);
-    leftPanelsVisible = app.recentStore->getIntValue ("left_panels_visible", 1) != 0;
+    // ---- Docking workspace ----------------------------------------------
+    // Every panel lives in a group of the dock tree, the Editor (the views,
+    // placed by layoutEditor()) included. The arrangement is the active
+    // workspace's layout (Window > Workspaces, or the bar right of the menu).
+    {
+        auto ed = std::make_unique<EditorPanel> ();
+        ed->onResized = [this] { layoutEditor (); };
+        editorPanel_ = std::move (ed);
+    }
+    dock_ = std::make_unique<sc::dock::DockManager> ();
+    dock_->getMainWindow = [this] () -> juce::Component* { return this; };
+    dock_->registerPanel ({ "editor", "Editor", editorPanel_.get (), false, 900, 600 });
+    for (const auto& e : leftPanelEntries ())
+        if (auto* c = panelForId (e.id))
+            dock_->registerPanel ({ e.id, e.name, c, true, 340, 300 });
+    // A panel with no remembered place joins its default group (the one of
+    // Frequency Analysis or Spectral Controls).
+    for (const auto& e : leftPanelEntries ())
+    {
+        const juce::String id (e.id);
+        dock_->setDefaultBuddy (id, e.defaultTop ? (id == "fft" ? "files" : "fft")
+                                                 : (id == "controls" ? "markers" : "controls"));
+    }
+    dock_->onLayoutChanged = [this]
+    {
+        if (dockLoading_) return;
+        dockLayoutDirty_ = true;   // saved by the timer shortly after
+        dockLayoutDirtyAt_ = juce::Time::getMillisecondCounter ();
+        updateVideoDockLabels ();
+    };
+    dock_->onPanelOpenChanged = [this] (const juce::String& id, bool open) { handlePanelOpenChanged (id, open); };
+    // Shortcuts typed in a floating panel window, and files dropped on one,
+    // act on the main window.
+    dock_->onUnhandledKey = [this] (const juce::KeyPress& k) { return keyPressed (k, this); };
+    dock_->isInterestedInFiles = [this] (const juce::StringArray& f) { return isInterestedInFileDrag (f); };
+    dock_->onFilesDropped = [this] (const juce::StringArray& f) { filesDropped (f, 0, 0); };
+    juce::Component::addAndMakeVisible (dock_->mainArea ());
 
-    juce::Component::addAndMakeVisible (&topTabs);
-    juce::Component::addAndMakeVisible (&bottomTabs);
+    // Workspaces: the built-in arrangements plus the user's own, each with
+    // its saved layout and its live modifications (restored at startup).
+    workspaces_.load  = [this] (const juce::String& k) { return app.recentStore->getValue (k); };
+    workspaces_.store = [this] (const juce::String& k, const juce::String& v)
+    {
+        app.recentStore->setValue (k, v);
+        app.recentStore->save ();
+    };
+    workspaces_.setBuiltIns (builtInWorkspaces ());
+    workspaces_.restore ();
+    {
+        juce::var layout = workspaces_.layoutFor (workspaces_.activeId ());
+        // First start after the update: keep the arrangement of the former
+        // two-group left column (tab order, closed panels, sizes).
+        if (app.recentStore->getValue ("dock_workspaces_v1").isEmpty ()
+            && app.recentStore->getValue ("left_tab_layout").isNotEmpty ())
+        {
+            layout = legacyLeftLayout ();
+            workspaces_.setCurrent (workspaces_.activeId (), layout);
+        }
+        applyDockLayout (layout);
+    }
+
+    workspaceBar_ = std::make_unique<sc::dock::WorkspaceBar> ();
+    workspaceBar_->getItems = [this]
+    {
+        std::vector<std::pair<juce::String, juce::String>> items;
+        for (const auto& e : workspaces_.entries ())
+            items.emplace_back (e.id, e.name);
+        return items;
+    };
+    workspaceBar_->getActive = [this] { return workspaces_.activeId (); };
+    workspaceBar_->onSelect = [this] (const juce::String& id) { switchWorkspace (id); };
+    workspaceBar_->buildMenu = [this] (juce::PopupMenu& m, const juce::String& clicked)
+    {
+        workspaceMenuTarget_ = clicked;
+        buildWorkspaceMenu (m, clicked);
+    };
+    workspaceBar_->onMenuResult = [this] (int id) { handleWorkspaceCommand (id, workspaceMenuTarget_); };
+    juce::Component::addAndMakeVisible (workspaceBar_.get ());
 
     splitter = std::make_unique<ViewSplitter>();
     splitter->onDrag = [this] (const juce::MouseEvent& e) { handleSplitterDrag (e); };
     splitter->setTooltip ("Drag to adjust the height of the waveform and spectrogram views.");
-    juce::Component::addAndMakeVisible (splitter.get());
-
-    // Draggable dividers: vertical one between the left panel column and the
-    // main area, horizontal one between the two tab groups.
-    leftSplitter = std::make_unique<ViewSplitter>();
-    leftSplitter->vertical = true;
-    leftSplitter->onDrag = [this] (const juce::MouseEvent& e) { handleLeftSplitterDrag (e); };
-    leftSplitter->onRelease = [this] () { saveLeftLayout (); };
-    leftSplitter->setTooltip ("Drag to adjust the width of the left panel column.");
-    topSplitter = std::make_unique<ViewSplitter>();
-    topSplitter->onDrag = [this] (const juce::MouseEvent& e) { handleTopSplitterDrag (e); };
-    topSplitter->onRelease = [this] () { saveLeftLayout (); };
-    topSplitter->setTooltip ("Drag to adjust the height of the top tab group.");
-    juce::Component::addAndMakeVisible (leftSplitter.get());
-    juce::Component::addAndMakeVisible (topSplitter.get());
+    editorPanel_->addAndMakeVisible (splitter.get());
 
     // Zoom/pan scrollbars: time bar at the bottom.
     timeBar     = std::make_unique<TimeScrollBar>();
@@ -384,9 +446,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // shows the tip of whichever TooltipClient component is under the cursor.
     tooltipWindow = std::make_unique<juce::TooltipWindow> (nullptr, 600);
 
-    juce::Component::addAndMakeVisible (timeBar.get());
-    juce::Component::addAndMakeVisible (waveVScroll.get());
-    juce::Component::addAndMakeVisible (specVScroll.get());
+    editorPanel_->addAndMakeVisible (timeBar.get());
+    editorPanel_->addAndMakeVisible (waveVScroll.get());
+    editorPanel_->addAndMakeVisible (specVScroll.get());
 
     lastSyncedColourMap = app.colourMap;
     lastSyncedSettings  = app.settings;   // baseline for the settings-save trigger
@@ -607,6 +669,10 @@ using WorkProgressDialog = sc::WorkProgressDialog;
 
 MainWindow::~MainWindow()
 {
+    // A pending arrangement change (saves are debounced by the timer).
+    if (dockLayoutDirty_)
+        saveDockLayout ();
+
     // The Video window polls this window for the time to show: first to go.
     videoWindow.reset();
 
@@ -644,14 +710,14 @@ void MainWindow::setupViews()
     waveformView = std::make_unique<WaveformView> (app);
     spectralView = std::make_unique<SpectralView> (app);
 
-    juce::Component::addAndMakeVisible (waveformView.get());
-    juce::Component::addAndMakeVisible (spectralView.get());
+    editorPanel_->addAndMakeVisible (waveformView.get());
+    editorPanel_->addAndMakeVisible (spectralView.get());
 
     // Dedicated tables track strip + its separator and vertical scrollbar.
     // Hidden unless the Tables panel is in "Dedicated track" mode.
-    juce::Component::addAndMakeVisible (tablesTrack.get());
-    juce::Component::addAndMakeVisible (tablesSep.get());
-    juce::Component::addAndMakeVisible (tablesVScroll.get());
+    editorPanel_->addAndMakeVisible (tablesTrack.get());
+    editorPanel_->addAndMakeVisible (tablesSep.get());
+    editorPanel_->addAndMakeVisible (tablesVScroll.get());
 
     // Both views always show the SAME time window: when either one changes its
     // range (zoom/pan/fit), applyTimeWindow() pushes it to both views and keeps
@@ -787,7 +853,16 @@ void MainWindow::refreshAfterEdit()
 void MainWindow::resized()
 {
     auto bounds = getLocalBounds();
-    menuBar.setBounds (bounds.removeFromTop (24));
+    auto menuRow = bounds.removeFromTop (24);
+    menuBar.setBounds (menuRow);
+    // Workspace switcher at the right end of the menu bar row (Adobe-style),
+    // over the menu bar's empty part (added after it: painted above it) so
+    // the menu bar's background shows through.
+    if (workspaceBar_ != nullptr)
+    {
+        const int w = std::min (workspaceBar_->idealWidth (), std::max (0, menuRow.getWidth () / 2));
+        workspaceBar_->setBounds (menuRow.removeFromRight (w));
+    }
 
     // Status bar at the very bottom, full window width. (resized() can run
     // from setUsingNativeTitleBar() during construction, before these members
@@ -795,54 +870,22 @@ void MainWindow::resized()
     if (statusBar)
         statusBar->setBounds (bounds.removeFromBottom (20));
 
+    // Everything in between is the docking workspace; the Editor panel is
+    // one of its groups.
+    if (dock_ != nullptr)
+        dock_->mainArea ().setBounds (bounds);
+
+    // The Editor's layout also depends on app state (open files, view
+    // toggles, the tables track): callers run resized() to refresh it.
+    layoutEditor ();
+}
+
+void MainWindow::layoutEditor()
+{
+    if (editorPanel_ == nullptr)
+        return;
     const bool haveFile = app.audioEngine().isFileLoaded();
-
-    // Left panel column with the two tab groups and draggable dividers:
-    // a vertical one between the column and the main area, a horizontal one
-    // between the top and bottom tab groups. The whole column can be hidden
-    // from View > Left Panels to focus on the tracks.
-    // A tab group with no open panels takes no space; the other bar fills
-    // the whole column when one of them is empty.
-    const bool topEmpty = topTabs.getNumTabs () == 0;
-    const bool botEmpty = bottomTabs.getNumTabs () == 0;
-    const bool showLeft = leftPanelsVisible;
-    topTabs.setVisible (showLeft && !topEmpty);
-    bottomTabs.setVisible (showLeft && !botEmpty);
-    if (leftSplitter) leftSplitter->setVisible (showLeft);
-
-    auto rest = bounds;
-    if (showLeft)
-    {
-        const int splitW = 6;
-        const int leftW = std::clamp (leftPanelW, 220,
-                                      std::max (221, (int) (rest.getWidth() * 0.6)));
-        auto leftArea = rest.removeFromLeft (leftW + splitW);
-        if (leftSplitter)
-            leftSplitter->setBounds (leftArea.getRight() - splitW, leftArea.getY(),
-                                     splitW, leftArea.getHeight());
-
-        auto col = juce::Rectangle<int> (leftArea.getX(), leftArea.getY(),
-                                         leftW, leftArea.getHeight());
-        const int topH = (int) std::lround (col.getHeight() * topRatio);
-        if (topEmpty || botEmpty)
-        {
-            if (!topEmpty) topTabs.setBounds (col);
-            else           bottomTabs.setBounds (col);
-            if (topSplitter) topSplitter->setVisible (false);
-        }
-        else
-        {
-            topTabs.setBounds (col.removeFromTop (topH));
-            col.removeFromTop (splitW);   // strip for the horizontal divider
-            bottomTabs.setBounds (col);
-            if (topSplitter)
-            {
-                topSplitter->setVisible (true);
-                topSplitter->setBounds (leftArea.getX(), leftArea.getY() + topH,
-                                        leftW, splitW);
-            }
-        }
-    }
+    auto rest = editorPanel_->getLocalBounds ();
 
     // Main area: waveform on top, draggable splitter, spectral below; a time
     // scrollbar along the bottom and one vertical scrollbar per view on its
@@ -1003,38 +1046,15 @@ void MainWindow::resized()
     updateAutoFftLabel();
 }
 
-void MainWindow::handleLeftSplitterDrag (const juce::MouseEvent& e)
-{
-    if (!e.eventComponent) return;
-    const auto winTL = localPointToGlobal (juce::Point<int> (0, 0));
-    const auto g = e.eventComponent->localPointToGlobal (
-        juce::Point<int> ((int) e.position.x, (int) e.position.y));
-    const double xInWindow = (double) g.x - (double) winTL.x;
-    leftPanelW = std::clamp ((int) xInWindow - 6, 220,
-                            std::max (221, (int) (getWidth() * 0.6)));
-    resized();
-}
-
-void MainWindow::handleTopSplitterDrag (const juce::MouseEvent& e)
-{
-    if (!e.eventComponent) return;
-    const auto winTL = localPointToGlobal (juce::Point<int> (0, 0));
-    const auto g = e.eventComponent->localPointToGlobal (
-        juce::Point<int> ((int) e.position.x, (int) e.position.y));
-    const double yInWindow = (double) g.y - (double) winTL.y;
-    const double colH = std::max (10.0, (double) getHeight() - 24.0 - 20.0);
-    topRatio = std::clamp ((yInWindow - 24.0) / colH, 0.15, 0.85);
-    resized();
-}
-
 void MainWindow::handleTablesSepDrag (const juce::MouseEvent& e)
 {
-    if (!e.eventComponent || !tablesTrack) return;
-    const auto winTL = localPointToGlobal (juce::Point<int> (0, 0));
+    if (!e.eventComponent || !tablesTrack || !editorPanel_) return;
+    // tablesSepAnchorY is in Editor panel coordinates (layoutEditor()).
+    const auto edTL = editorPanel_->localPointToGlobal (juce::Point<int> (0, 0));
     const auto g = e.eventComponent->localPointToGlobal (
         juce::Point<int> ((int) e.position.x, (int) e.position.y));
-    const double yInWindow = (double) g.y - (double) winTL.y;
-    const double h = std::clamp (yInWindow - tablesSepAnchorY, 30.0,
+    const double yInEditor = (double) g.y - (double) edTL.y;
+    const double h = std::clamp (yInEditor - tablesSepAnchorY, 30.0,
                                  tablesSepRefH * 0.8);
     tablesTrackRatio = std::clamp (h / tablesSepRefH, 0.05, 0.6);
     resized();
@@ -1061,48 +1081,11 @@ const char* MainWindow::panelIdFor (juce::Component* c) const
     return nullptr;
 }
 
-void MainWindow::moveLeftPanelTab (juce::TabbedComponent* from, int fromIndex,
-                                   juce::TabbedComponent* to, int insertIndex)
-{
-    if (!from || !to) return;
-    const int nFrom = from->getNumTabs ();
-    if (fromIndex < 0 || fromIndex >= nFrom) return;
-
-    if (from == to)
-    {
-        // moveTab() indexes the list AFTER removal: dropping one slot to the
-        // right therefore lands at insertIndex - 1.
-        int target = (insertIndex > fromIndex) ? insertIndex - 1 : insertIndex;
-        target = std::clamp (target, 0, nFrom - 1);
-        if (target == fromIndex) return;
-        from->moveTab (fromIndex, target);
-    }
-    else
-    {
-        const juce::String name   = from->getTabNames().getReference (fromIndex);
-        const juce::Colour colour = from->getTabBackgroundColour (fromIndex);
-        juce::Component* content  = from->getTabContentComponent (fromIndex);
-        if (!content) return;
-
-        insertIndex = std::clamp (insertIndex, 0, to->getNumTabs ());
-        const int remaining = nFrom - 1;
-        from->removeTab (fromIndex);
-        to->addTab (name, colour, content, false, insertIndex);
-
-        // Keep both bars in a sensible selected state: the moved tab becomes
-        // active in its new bar, and if any tabs remain behind, the neighbour
-        // that slid into the vacated slot takes over there.
-        to->setCurrentTabIndex (insertIndex, false);
-        if (remaining > 0)
-            from->setCurrentTabIndex (std::min (fromIndex, remaining - 1), false);
-    }
-
-    saveLeftLayout ();
-}
-
-// Canonical list of the left-column panels: id, tab name and which group it
-// starts in. The Window menu, setPanelVisible() and layout persistence all
-// iterate this list, so a new panel only needs one entry here.
+// Canonical list of the closable panels: id, tab name and which group of the
+// default workspace's left column it starts in (top / bottom). The Window
+// menu, the docking registration, the AI-control panel list and the default
+// layouts iterate this list, so a new panel only needs one entry here (the
+// Editor is registered separately: it cannot be closed).
 std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
 {
     return {
@@ -1125,6 +1108,7 @@ std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
 
 juce::Component* MainWindow::panelForId (const juce::String& id) const
 {
+    if (id == "editor")      return editorPanel_.get ();
     if (id == "files")       return fileListPanel.get ();
     if (id == "fft")         return fftPanel.get ();
     if (id == "history")     return historyPanel.get ();
@@ -1144,203 +1128,445 @@ juce::Component* MainWindow::panelForId (const juce::String& id) const
 
 bool MainWindow::isPanelOpen (const juce::String& id) const
 {
-    juce::Component* comp = panelForId (id);
-    if (!comp) return false;
-    for (int i = 0; i < topTabs.getNumTabs (); ++i)
-        if (topTabs.getTabContentComponent (i) == comp) return true;
-    for (int i = 0; i < bottomTabs.getNumTabs (); ++i)
-        if (bottomTabs.getTabContentComponent (i) == comp) return true;
-    return false;
+    return dock_ != nullptr && dock_->isOpen (id);
 }
 
 void MainWindow::setPanelVisible (const juce::String& id, bool visible)
 {
-    const auto entries = leftPanelEntries ();
-    int idx = -1;
-    for (size_t i = 0; i < entries.size (); ++i)
-        if (juce::String (entries[i].id) == id) { idx = (int) i; break; }
-    if (idx < 0 || isPanelOpen (id) == visible) return;
-
-    if (!visible)
-    {
-        // Remove the tab from whichever bar currently holds it.
-        for (auto* bar : { &topTabs, &bottomTabs })
-            for (int i = 0; i < bar->getNumTabs (); ++i)
-                if (bar->getTabContentComponent (i) == panelForId (id))
-                {
-                    bar->removeTab (i);
-                    saveLeftLayout ();
-                    resized();   // an emptied group must give up its space now
-                    if (id == "video" && isVideoDocked())
-                    {
-                        // Closing the docked tab sends the picture back to its
-                        // own window instead of leaving it hidden everywhere.
-                        videoWindow->undock ();
-                        videoWindow->setVisible (true);
-                        videoWindow->toFront (false);
-                    }
-                    return;
-                }
+    if (dock_ == nullptr || dock_->panel (id) == nullptr || isPanelOpen (id) == visible)
         return;
-    }
-
-    if (id == "video")
-    {
-        // The tab shows the picture itself: make sure it lives in the host
-        // before the tab is added (otherwise the tab would be empty).
-        ensureVideoWindow();
-        if (!isVideoDocked())
-            videoWindow->dockTo (*videoDockHost);
-    }
-
-    // Reopen: insert at the canonical position among the panels that are
-    // currently open in this panel's default group, so reopening restores a
-    // natural order without fighting user drags.
-    juce::TabbedComponent& bar = entries[(size_t) idx].defaultTop ? topTabs : bottomTabs;
-    int insertAt = 0;
-    for (int i = 0; i < idx; ++i)
-    {
-        juce::Component* c = panelForId (entries[i].id);
-        if (!c) continue;
-        bool inThisBar = false;
-        for (int t = 0; t < bar.getNumTabs (); ++t)
-            if (bar.getTabContentComponent (t) == c) { inThisBar = true; break; }
-        if (inThisBar) ++insertAt;
-    }
-    bar.addTab (entries[(size_t) idx].name, kDarkTabBg, panelForId (id), false, insertAt);
-    saveLeftLayout ();
-    resized();   // a previously empty group must take its space back now
+    if (visible)
+        dock_->openPanel (id);    // back where it was, else in its default group
+    else
+        dock_->closePanel (id);   // the Video panel then hands its picture back
+                                  // to the Video window (handlePanelOpenChanged)
 }
 
-void MainWindow::saveLeftLayout()
+juce::StringArray MainWindow::panelGroupTitles (const juce::String& id) const
 {
-    auto idsFor = [this] (juce::TabbedComponent& bar) -> juce::String
-    {
-        juce::String s;
-        for (int i = 0; i < bar.getNumTabs (); ++i)
-        {
-            const char* id = panelIdFor (bar.getTabContentComponent (i));
-            if (!id) continue;
-            if (s.isNotEmpty()) s << ";";
-            s << id;
-        }
-        return s;
-    };
-
-    // Explicit closed list: panels missing from left_tab_layout could be new
-    // ones added by a newer version, so "closed" must be stored separately.
-    juce::String closed;
-    for (const auto& e : leftPanelEntries ())
-        if (!isPanelOpen (e.id))
-        {
-            if (closed.isNotEmpty()) closed << ";";
-            closed << e.id;
-        }
-
-    app.recentStore->setValue ("left_tab_layout", idsFor (topTabs) + "|" + idsFor (bottomTabs));
-    app.recentStore->setValue ("left_panels_closed", closed);
-    app.recentStore->setValue ("left_panel_w", leftPanelW);
-    app.recentStore->setValue ("top_ratio_mil", (int) std::lround (topRatio * 1000.0));
-    app.recentStore->setValue ("left_panels_visible", leftPanelsVisible ? 1 : 0);
-    app.recentStore->save ();
+    juce::StringArray titles;
+    if (dock_ != nullptr)
+        for (const auto& t : dock_->groupTabs (id))
+            if (const auto* d = dock_->panel (t))
+                titles.add (d->title);
+    return titles;
 }
 
-void MainWindow::applySavedLeftLayout()
+void MainWindow::saveDockLayout()
 {
-    struct Entry { const char* id; juce::String name; juce::Component* comp; bool defaultTop; };
-    std::vector<Entry> entries = {
-        { "files",       "Files",              fileListPanel.get(),  true  },
-        { "fft",         "Frequency Analysis", fftPanel.get(),       true  },
-        { "history",     "History",            historyPanel.get(),   true  },
-        { "actions",     "Actions",            actionsPanel.get(),   true  },
-        { "python",      "Python",             pythonPanel.get(),    true  },
-        { "tables",      "Tables",             tablesPanel.get(),    true  },
-        { "controls",    "Spectral Controls",  controlsPanel.get(),  false },
-        { "markers",     "Markers",            markersPanel.get(),   false },
-#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
-        { "transcription","Transcription",     transcriptionPanel.get(), false },
-#endif
-        { "selection",   "Selection",           selectionPanel.get(),  false },
-        { "drawing",     "Drawing",             drawingPanel.get(),    false },
-        { "video",       "Video",               videoDockHost.get(),   true  },
-    };
+    if (dock_ == nullptr || dockLoading_)
+        return;
+    dockLayoutDirty_ = false;
+    workspaces_.setCurrent (workspaces_.activeId (), dock_->saveLayout ());
+    workspaces_.persist ();
+}
 
-    const juce::String saved = app.recentStore->getValue ("left_tab_layout");
-    if (saved.isEmpty()) return;   // first run: keep the default order
-
-    std::vector<std::string> wanted[2];
-    auto addGroup = [&wanted] (const juce::String& s, int which)
+void MainWindow::applyDockLayout (const juce::var& layout)
+{
     {
-        int start = 0;
-        while (start <= s.length ())
+        const juce::ScopedValueSetter<bool> loading (dockLoading_, true);
+        if (! dock_->loadLayout (layout))
+            dock_->loadLayout (builtInWorkspaceLayout ("default"));
+    }
+    // The Video panel shows the picture itself once the window exists.
+    if (videoWindow != nullptr)
+    {
+        if (dock_->isOpen ("video"))
         {
-            const int semi = s.indexOfChar (start, ';');
-            const juce::String tok = (semi < 0 ? s.substring (start) : s.substring (start, semi)).trim ();
-            if (!tok.isEmpty()) wanted[which].push_back (tok.toStdString());
-            if (semi < 0) break;
-            start = semi + 1;
+            if (! isVideoDocked ())
+                videoWindow->dockTo (*videoDockHost);
         }
-    };
-    const int sep = saved.indexOfChar ('|');
-    addGroup (sep < 0 ? saved : saved.substring (0, sep), 0);
-    if (sep >= 0) addGroup (saved.substring (sep + 1), 1);
-
-    topTabs.clearTabs ();
-    bottomTabs.clearTabs ();
-
-    std::vector<bool> used (entries.size (), false);
-    auto addEntry = [&](juce::TabbedComponent& bar, const Entry& e)
-    {
-        bar.addTab (e.name, kDarkTabBg, e.comp, false);
-    };
-
-    for (int g = 0; g < 2; ++g)
-        for (const auto& id : wanted[g])
-            for (size_t e = 0; e < entries.size (); ++e)
-                if (!used[e] && std::string (entries[e].id) == id)
-                {
-                    used[e] = true;
-                    addEntry (g == 0 ? topTabs : bottomTabs, entries[e]);
-                }
-
-    // Panels missing from the saved list (e.g. added by a newer version) go to
-    // their default group.
-    for (size_t e = 0; e < entries.size (); ++e)
-        if (!used[e]) addEntry (entries[e].defaultTop ? topTabs : bottomTabs, entries[e]);
-
-    // Panels the user explicitly closed stay closed. (Newer-version panels not
-    // in either list default to open.)
-    const juce::StringArray closedIds = juce::StringArray::fromTokens (
-        app.recentStore->getValue ("left_panels_closed"), ";", "");
-    for (const auto& cid : closedIds)
-    {
-        juce::Component* comp = panelForId (cid);
-        if (!comp) continue;
-        for (auto* bar : { &topTabs, &bottomTabs })
+        else if (isVideoDocked ())
         {
-            int i = 0;
-            while (i < bar->getNumTabs () && bar->getTabContentComponent (i) != comp)
-                ++i;
-            if (i < bar->getNumTabs ()) bar->removeTab (i);
+            videoWindow->undock ();
+            videoWindow->setVisible (true);
         }
     }
+    dockLayoutDirty_ = false;
+    updateVideoDockLabels ();
+    resized ();
+}
 
-    // Frequency Analysis is the default tab in the top group when present.
-    int fftIdx = -1;
-    for (int i = 0; i < topTabs.getNumTabs (); ++i)
-        if (topTabs.getTabContentComponent (i) == fftPanel.get()) { fftIdx = i; break; }
-    if (topTabs.getNumTabs () > 0)
-        topTabs.setCurrentTabIndex (fftIdx >= 0 ? fftIdx : 0, false);
-    if (bottomTabs.getNumTabs () > 0)
-        bottomTabs.setCurrentTabIndex (0, false);
+void MainWindow::handlePanelOpenChanged (const juce::String& id, bool open)
+{
+    if (id == "video" && ! dockLoading_)
+    {
+        if (open)
+        {
+            // The tab shows the picture itself: move the view into the host.
+            ensureVideoWindow ();
+            if (! isVideoDocked ())
+                videoWindow->dockTo (*videoDockHost);
+        }
+        else if (isVideoDocked ())
+        {
+            // Closing the docked tab sends the picture back to its own
+            // window instead of leaving it hidden everywhere.
+            videoWindow->undock ();
+            videoWindow->setVisible (true);
+            videoWindow->toFront (false);
+        }
+    }
+    updateVideoDockLabels ();
+}
+
+void MainWindow::updateVideoDockLabels()
+{
+    if (videoWindow == nullptr || dock_ == nullptr)
+        return;
+    // The video menus offer "Undock Panel" while the picture is docked in
+    // the main window, "Dock Panel" in a floating panel or its own window.
+    const bool inMain = isVideoDocked () && dock_->isOpen ("video") && ! dock_->isFloating ("video");
+    videoWindow->view ().docked = inMain;
+    videoWindow->getTracksPanel ().docked = inMain;
+}
+
+void MainWindow::toggleVideoDock()
+{
+    if (! isVideoDocked () || ! dock_->isOpen ("video"))
+        setVideoDocked (true);                 // own window -> panel
+    else if (dock_->isFloating ("video"))
+        dock_->dockPanelBack ("video");        // floating panel -> main window
+    else
+        dock_->floatPanel ("video");           // main window -> floating panel
+    updateVideoDockLabels ();
+}
+
+bool MainWindow::areLeftPanelsVisible() const
+{
+    return dock_ == nullptr || dock_->mainArea ().maximizedUid == 0;
 }
 
 void MainWindow::setLeftPanelsVisible (bool visible)
 {
-    if (leftPanelsVisible == visible) return;
-    leftPanelsVisible = visible;
-    resized();
-    saveLeftLayout ();
+    // View > Panels (Ctrl+Shift+Enter): hiding the panels maximises the
+    // Editor's group (Adobe's maximised frame); showing them restores all.
+    if (dock_ == nullptr || visible == areLeftPanelsVisible ())
+        return;
+    if (visible)
+    {
+        dock_->restoreMaximized ();
+        return;
+    }
+    const auto loc = dock_->locate ("editor");
+    if (loc.area == &dock_->mainArea ())
+        dock_->toggleMaximize (loc.group->uid);
+}
+
+void MainWindow::toggleMaximizePanelGroup()
+{
+    if (dock_ == nullptr)
+        return;
+    // The group under the mouse, else the focused one.
+    const auto mouse = juce::Desktop::getMousePosition ();
+    for (auto* area : dock_->areas ())
+        if (area->isShowing () && area->getScreenBounds ().contains (mouse))
+            if (auto* g = area->groupAt (area->getLocalPoint (nullptr, mouse)))
+            {
+                dock_->toggleMaximize (g->getUid ());
+                return;
+            }
+    if (dock_->focusedGroup () != 0)
+        dock_->toggleMaximize (dock_->focusedGroup ());
+}
+
+void MainWindow::activeWindowStatusChanged()
+{
+    juce::DocumentWindow::activeWindowStatusChanged ();
+    // Floating panel windows behave like tool windows of this one: when it
+    // comes to the front they come back above it.
+    if (dock_ != nullptr && isActiveWindow ())
+        dock_->bringFloatingWindowsToFront ();
+}
+
+// ------------------------------------------------- Workspaces
+
+namespace
+{
+juce::var dockGroup (std::initializer_list<const char*> tabs, const char* active = nullptr)
+{
+    auto* o = new juce::DynamicObject ();
+    juce::Array<juce::var> t;
+    for (const auto* id : tabs)
+        t.add (juce::String (id));
+    o->setProperty ("tabs", t);
+    o->setProperty ("active", juce::String (active != nullptr ? active : *tabs.begin ()));
+    return juce::var (o);
+}
+
+juce::var dockSplit (bool horizontal, std::initializer_list<std::pair<juce::var, double>> kids)
+{
+    auto* o = new juce::DynamicObject ();
+    o->setProperty ("split", horizontal ? "h" : "v");
+    juce::Array<juce::var> c, w;
+    for (const auto& [node, weight] : kids)
+    {
+        c.add (node);
+        w.add (weight);
+    }
+    o->setProperty ("children", c);
+    o->setProperty ("weights", w);
+    return juce::var (o);
+}
+
+juce::var dockLayout (const juce::var& main, const juce::StringArray& closed = {},
+                      const juce::String& maximized = {})
+{
+    auto* o = new juce::DynamicObject ();
+    o->setProperty ("version", 1);
+    o->setProperty ("main", main);
+    o->setProperty ("floating", juce::Array<juce::var> ());
+    juce::Array<juce::var> c;
+    for (const auto& id : closed)
+        c.add (id);
+    o->setProperty ("closed", c);
+    if (maximized.isNotEmpty ())
+        o->setProperty ("maximized", maximized);
+    return juce::var (o);
+}
+} // namespace
+
+// The built-in workspaces. Panels a build does not have (Transcription
+// without AI) are skipped when a layout is applied.
+juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
+{
+    if (id == "editing")
+        // Editor in the middle, files / history and markers on the left,
+        // spectral tools on the right, tables and video below the Editor.
+        return dockLayout (dockSplit (true, {
+            { dockSplit (false, {
+                  { dockGroup ({ "files", "history", "actions", "python" }), 0.5 },
+                  { dockGroup ({ "markers", "transcription", "selection" }), 0.5 } }), 0.2 },
+            { dockSplit (false, {
+                  { dockGroup ({ "editor" }), 0.74 },
+                  { dockGroup ({ "tables", "video" }), 0.26 } }), 0.57 },
+            { dockSplit (false, {
+                  { dockGroup ({ "controls", "drawing" }), 0.55 },
+                  { dockGroup ({ "fft" }), 0.45 } }), 0.23 } }));
+
+    if (id == "analysis")
+        // A wide Frequency Analysis beside the Editor, three groups below.
+        return dockLayout (dockSplit (false, {
+            { dockSplit (true, {
+                  { dockGroup ({ "editor" }), 0.6 },
+                  { dockGroup ({ "fft" }), 0.4 } }), 0.66 },
+            { dockSplit (true, {
+                  { dockGroup ({ "controls", "selection", "drawing" }), 0.34 },
+                  { dockGroup ({ "markers", "transcription", "history" }), 0.33 },
+                  { dockGroup ({ "tables", "files", "actions", "python", "video" }), 0.33 } }), 0.34 } }));
+
+    if (id == "video")
+        // The picture large above the Editor.
+        return dockLayout (dockSplit (true, {
+            { dockSplit (false, {
+                  { dockGroup ({ "files", "history", "actions", "python", "tables" }), 0.5 },
+                  { dockGroup ({ "markers", "transcription", "selection", "drawing" }), 0.5 } }), 0.2 },
+            { dockSplit (false, {
+                  { dockSplit (true, {
+                        { dockGroup ({ "video" }), 0.55 },
+                        { dockGroup ({ "controls", "fft" }), 0.45 } }), 0.46 },
+                  { dockGroup ({ "editor" }), 0.54 } }), 0.8 } }));
+
+    // "default": the classic arrangement - a left column with two groups
+    // beside the Editor.
+    return dockLayout (dockSplit (true, {
+        { dockSplit (false, {
+              { dockGroup ({ "files", "fft", "history", "actions", "python", "tables", "video" }, "fft"), 0.52 },
+              { dockGroup ({ "controls", "markers", "transcription", "selection", "drawing" }), 0.48 } }), 0.245 },
+        { dockGroup ({ "editor" }), 0.755 } }));
+}
+
+std::vector<sc::dock::Workspaces::Entry> MainWindow::builtInWorkspaces() const
+{
+    std::vector<sc::dock::Workspaces::Entry> list;
+    for (const auto& [id, name] : { std::pair<const char*, const char*> { "default", "Default" },
+                                    { "editing", "Editing" },
+                                    { "analysis", "Analysis" },
+                                    { "video", "Video" } })
+    {
+        sc::dock::Workspaces::Entry e;
+        e.id = id;
+        e.name = name;
+        e.builtIn = true;
+        e.saved = builtInWorkspaceLayout (id);
+        list.push_back (e);
+    }
+    return list;
+}
+
+juce::var MainWindow::legacyLeftLayout() const
+{
+    // Settings of the former left column: "top ids|bottom ids", the closed
+    // panels, the column width and the top group's share of its height.
+    auto ids = [] (const juce::String& s)
+    {
+        auto a = juce::StringArray::fromTokens (s, ";", "");
+        a.trim ();
+        a.removeEmptyStrings ();
+        return a;
+    };
+    const juce::String saved = app.recentStore->getValue ("left_tab_layout");
+    const int sep = saved.indexOfChar ('|');
+    const juce::StringArray closed = ids (app.recentStore->getValue ("left_panels_closed"));
+    juce::StringArray top = ids (sep < 0 ? saved : saved.substring (0, sep));
+    juce::StringArray bottom = ids (sep < 0 ? juce::String () : saved.substring (sep + 1));
+    for (const auto& id : closed)
+    {
+        top.removeString (id);
+        bottom.removeString (id);
+    }
+
+    const int leftW = std::clamp (app.recentStore->getIntValue ("left_panel_w", 340), 220, 4000);
+    const double topRatio = std::clamp (app.recentStore->getIntValue ("top_ratio_mil", 520) / 1000.0, 0.15, 0.85);
+    const double leftShare = std::clamp ((double) leftW / 1400.0, 0.1, 0.6);
+
+    auto group = [] (const juce::StringArray& tabs, const juce::String& preferred)
+    {
+        auto* o = new juce::DynamicObject ();
+        juce::Array<juce::var> t;
+        for (const auto& id : tabs)
+            t.add (id);
+        o->setProperty ("tabs", t);
+        o->setProperty ("active", tabs.contains (preferred) ? preferred : tabs[0]);
+        return juce::var (o);
+    };
+
+    juce::var column;
+    if (! top.isEmpty () && ! bottom.isEmpty ())
+        column = dockSplit (false, { { group (top, "fft"), topRatio }, { group (bottom, "controls"), 1.0 - topRatio } });
+    else if (! top.isEmpty ())
+        column = group (top, "fft");
+    else if (! bottom.isEmpty ())
+        column = group (bottom, "controls");
+
+    const juce::var main = column.isVoid () ? dockGroup ({ "editor" })
+                                            : dockSplit (true, { { column, leftShare }, { dockGroup ({ "editor" }), 1.0 - leftShare } });
+    const bool panelsHidden = app.recentStore->getIntValue ("left_panels_visible", 1) == 0;
+    return dockLayout (main, closed, panelsHidden ? "editor" : "");
+}
+
+void MainWindow::switchWorkspace (const juce::String& id)
+{
+    if (workspaces_.find (id) == nullptr || id == workspaces_.activeId ())
+        return;
+    saveDockLayout ();   // the workspace we leave keeps its modifications
+    workspaces_.setActiveId (id);
+    applyDockLayout (workspaces_.layoutFor (id));
+    workspaces_.persist ();
+    if (workspaceBar_ != nullptr)
+        workspaceBar_->repaint ();
+}
+
+void MainWindow::resetWorkspace()
+{
+    const auto id = workspaces_.activeId ();
+    workspaces_.resetCurrent (id);
+    applyDockLayout (workspaces_.layoutFor (id));
+    workspaces_.persist ();
+}
+
+void MainWindow::saveWorkspaceChanges()
+{
+    saveDockLayout ();
+    workspaces_.saveCurrentAsSaved (workspaces_.activeId ());
+    workspaces_.persist ();
+}
+
+juce::String MainWindow::saveWorkspaceAs (const juce::String& name)
+{
+    if (name.trim ().isEmpty () || dock_ == nullptr)
+        return {};
+    const auto id = workspaces_.add (name.trim (), dock_->saveLayout ());
+    workspaces_.setActiveId (id);
+    workspaces_.persist ();
+    resized ();   // the workspace bar grows
+    if (workspaceBar_ != nullptr)
+        workspaceBar_->repaint ();
+    return id;
+}
+
+bool MainWindow::deleteWorkspace (const juce::String& id)
+{
+    const bool wasActive = id == workspaces_.activeId ();
+    if (! workspaces_.remove (id))
+        return false;
+    if (wasActive)
+        applyDockLayout (workspaces_.layoutFor (workspaces_.activeId ()));
+    workspaces_.persist ();
+    resized ();
+    if (workspaceBar_ != nullptr)
+        workspaceBar_->repaint ();
+    return true;
+}
+
+bool MainWindow::renameWorkspace (const juce::String& id, const juce::String& name)
+{
+    if (! workspaces_.rename (id, name))
+        return false;
+    workspaces_.persist ();
+    resized ();
+    if (workspaceBar_ != nullptr)
+        workspaceBar_->repaint ();
+    return true;
+}
+
+void MainWindow::buildWorkspaceMenu (juce::PopupMenu& m, const juce::String& clickedId)
+{
+    const auto& entries = workspaces_.entries ();
+    for (size_t i = 0; i < entries.size () && i < 48; ++i)
+        m.addItem (WindowWorkspaceBase + (int) i, entries[i].name, true,
+                   entries[i].id == workspaces_.activeId ());
+    m.addSeparator ();
+    m.addItem (WindowWsReset, "Reset to Saved Layout");
+    m.addItem (WindowWsSaveChanges, "Save Changes to this Workspace");
+    m.addItem (WindowWsSaveAs, "Save as New Workspace...");
+    const auto* target = workspaces_.find (clickedId.isNotEmpty () ? clickedId : workspaces_.activeId ());
+    m.addSeparator ();
+    m.addItem (WindowWsRename, "Rename Workspace...", target != nullptr);
+    m.addItem (WindowWsDelete, "Delete Workspace", target != nullptr && ! target->builtIn);
+}
+
+void MainWindow::handleWorkspaceCommand (int menuId, const juce::String& clickedId)
+{
+    const juce::String target = clickedId.isNotEmpty () ? clickedId : workspaces_.activeId ();
+    if (menuId >= WindowWorkspaceBase && menuId < WindowWorkspaceBase + 48)
+    {
+        const auto i = (size_t) (menuId - WindowWorkspaceBase);
+        if (i < workspaces_.entries ().size ())
+            switchWorkspace (workspaces_.entries ()[i].id);
+        return;
+    }
+    if (menuId == WindowWsReset)       { resetWorkspace (); return; }
+    if (menuId == WindowWsSaveChanges) { saveWorkspaceChanges (); return; }
+    if (menuId == WindowWsSaveAs)
+    {
+        const auto name = promptForWorkspaceName ("Save as New Workspace",
+                                                  "Workspace " + juce::String ((int) workspaces_.entries ().size () + 1));
+        if (name.isNotEmpty ())
+            saveWorkspaceAs (name);
+        return;
+    }
+    if (menuId == WindowWsRename)
+    {
+        if (const auto* e = workspaces_.find (target))
+        {
+            const auto name = promptForWorkspaceName ("Rename Workspace", e->name);
+            if (name.isNotEmpty ())
+                renameWorkspace (target, name);
+        }
+        return;
+    }
+    if (menuId == WindowWsDelete)
+    {
+        const auto* e = workspaces_.find (target);
+        if (e == nullptr || e->builtIn)
+            return;
+        if (! sc::alert::isHeadless ()
+            && ! juce::AlertWindow::showOkCancelBox (juce::AlertWindow::QuestionIcon, "Delete Workspace",
+                                                     "Delete the workspace \"" + e->name + "\"?", "Delete", "Cancel", this))
+            return;
+        deleteWorkspace (target);
+    }
 }
 
 void MainWindow::handleSplitterDrag (const juce::MouseEvent& e)
@@ -1381,6 +1607,17 @@ void MainWindow::userTriedToCloseWindow()
 
 void MainWindow::timerCallback()
 {
+    // Docking: save the arrangement shortly after the last change (a gap
+    // drag or a burst of tab clicks writes the settings once).
+    if (dockLayoutDirty_ && juce::Time::getMillisecondCounter () - dockLayoutDirtyAt_ > 400)
+        saveDockLayout ();
+    // Floating panel windows go away with the minimised main window.
+    if (dock_ != nullptr && isMinimised () != floatersHiddenForMinimise_)
+    {
+        floatersHiddenForMinimise_ = isMinimised ();
+        dock_->setFloatingWindowsVisible (! floatersHiddenForMinimise_);
+    }
+
     // AI control journal: edits made with the mouse/menus become "history"
     // entries (and history.changed events) within a tick. Only while the
     // control server runs: nobody else reads the journal.
@@ -2430,7 +2667,7 @@ void MainWindow::ensureVideoWindow()
     };
     videoWindow->view().isAlwaysOnTop = [this]
     {   return app.recentStore->getIntValue ("video_always_on_top", 0) != 0; };
-    videoWindow->view().onDockToggle = [this] { setVideoDocked (!isVideoDocked()); };
+    videoWindow->view().onDockToggle = [this] { toggleVideoDock (); };
 
     // The track list offers the same window-level actions (and a ruler seek),
     // so they stay reachable while docked even without a video loaded.
@@ -2442,7 +2679,7 @@ void MainWindow::ensureVideoWindow()
     };
     vtp.isAlwaysOnTop = [this]
     {   return app.recentStore->getIntValue ("video_always_on_top", 0) != 0; };
-    vtp.onDockToggle = [this] { setVideoDocked (!isVideoDocked()); };
+    vtp.onDockToggle = [this] { toggleVideoDock (); };
     vtp.onSeekTime = [this] (double t) { app.setPlayhead (t); };
     videoWindow->onTrackMenuAction = [this] (int id, int idx)
     {
@@ -2495,6 +2732,7 @@ void MainWindow::ensureVideoWindow()
     // The saved layout may have the Video tab open: restore the docked state.
     if (isPanelOpen ("video"))
         videoWindow->dockTo (*videoDockHost);
+    updateVideoDockLabels ();
 }
 
 void MainWindow::addVideoTrackFromFile (const juce::File& f)
@@ -3685,7 +3923,20 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         return;
     }
 
-    // Window menu: toggle a left-column panel open/closed.
+    // Window > Workspaces (also the workspace bar's menu) and maximise.
+    if ((menuItemID >= WindowWorkspaceBase && menuItemID < WindowWorkspaceBase + 48)
+        || (menuItemID >= WindowWsReset && menuItemID <= WindowWsDelete))
+    {
+        handleWorkspaceCommand (menuItemID);
+        return;
+    }
+    if (menuItemID == WindowMaximizeGroup)
+    {
+        toggleMaximizePanelGroup ();
+        return;
+    }
+
+    // Window menu: toggle a panel open/closed.
     if (menuItemID >= WindowPanelBase && menuItemID < WindowPanelBase + 16)
     {
         const auto entries = leftPanelEntries ();
@@ -3831,7 +4082,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 
     if (menuItemID == ViewShowLeftPanels)
     {
-        setLeftPanelsVisible (!leftPanelsVisible);
+        setLeftPanelsVisible (!areLeftPanelsVisible ());
         return;
     }
 
@@ -7486,12 +7737,8 @@ void MainWindow::runTranscriptionAsync (const std::string& modelId, const std::s
                 if (transcriptionPanel)
                 {
                     transcriptionPanel->refresh ();
-                    for (int i = 0; i < bottomTabs.getNumTabs (); ++i)
-                        if (bottomTabs.getTabContentComponent (i) == transcriptionPanel.get ())
-                        {
-                            bottomTabs.setCurrentTabIndex (i, false);
-                            break;
-                        }
+                    if (dock_ != nullptr && dock_->isOpen ("transcription"))
+                        dock_->showPanel ("transcription");
                 }
             }
 
@@ -7885,7 +8132,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ViewShowWaveform, "Waveform View", true, showWaveformView);
         menu.addItem (ViewShowSpectral, "Spectrogram View", true, showSpectralView);
         menu.addItem (ViewShowAllChannels, "Show All Channels", app.audioEngine().isFileLoaded(), false);
-        menu.addItem (ViewShowLeftPanels, "Left Panels\tCtrl+Shift+Enter", true, leftPanelsVisible);
+        menu.addItem (ViewShowLeftPanels, "Panels\tCtrl+Shift+Enter", true, areLeftPanelsVisible ());
         menu.addSeparator();
         // Track axis placement: the vertical axis can sit on the right and
         // the time ruler at the bottom of both track views. The choices are
@@ -8011,8 +8258,16 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     }
     else if (menuName == "Window")
     {
-        // One entry per left-column panel, in canonical order; a checkmark
-        // shows which panels are currently open.
+        // Workspaces (also offered by the bar right of the menu) and the
+        // maximised panel group (` key, or double-click a tab).
+        juce::PopupMenu ws;
+        buildWorkspaceMenu (ws, {});
+        menu.addSubMenu ("Workspaces", ws);
+        menu.addItem (WindowMaximizeGroup, "Maximize Panel Group\t`", true, false);
+        menu.addSeparator ();
+
+        // One entry per panel, in canonical order; a checkmark shows which
+        // panels are currently open (wherever they are docked or floating).
         const auto entries = leftPanelEntries ();
         for (size_t i = 0; i < entries.size (); ++i)
         {
@@ -8066,10 +8321,9 @@ juce::StringArray MainWindow::getMenuBarNames()
 // the two tab bars (they are draggable between them).
 juce::Component* MainWindow::activeListPanel() const
 {
-    // Either tab group may show a searchable panel (Markers, Transcription):
-    // prefer the one holding the keyboard focus, then any visible one (bottom
-    // group first). Taking the bottom group's tab blindly left Ctrl+F / F3
-    // dead whenever Markers sat on top and another tab was active below.
+    // Any group may show a searchable panel (Markers, Transcription): prefer
+    // the one holding the keyboard focus, then any one shown as its group's
+    // active tab (main window first, then floating windows).
     const auto searchable = [this] (const juce::Component* c)
     {
         if (c == nullptr) return false;
@@ -8079,13 +8333,17 @@ juce::Component* MainWindow::activeListPanel() const
 #endif
         return false;
     };
-    juce::Component* const bottom = bottomTabs.getCurrentContentComponent ();
-    juce::Component* const top    = topTabs.getCurrentContentComponent ();
-    for (auto* c : { bottom, top })
+    std::vector<juce::Component*> shown;
+    if (dock_ != nullptr)
+        for (auto* g : dock_->allGroups ())
+            if (const auto* d = dock_->panel (g->activeTab ()))
+                if (d->content != nullptr)
+                    shown.push_back (d->content);
+    for (auto* c : shown)
         if (searchable (c) && c->hasKeyboardFocus (true)) return c;
-    for (auto* c : { bottom, top })
+    for (auto* c : shown)
         if (searchable (c)) return c;
-    return bottom != nullptr ? bottom : top;
+    return nullptr;
 }
 
 // Ctrl+F / F3: search the active list panel. With no query set yet, open the
@@ -8139,11 +8397,25 @@ void MainWindow::handleFindPrevious ()
 
 bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
 {
+    // Esc while a panel is being dragged cancels the drag (and nothing else).
+    if (key.getKeyCode() == juce::KeyPress::escapeKey && dock_ != nullptr && dock_->isDragging ())
+    {
+        dock_->cancelDrag ();
+        return true;
+    }
     // Esc cancels a pending Tables-panel click alignment.
     if (key.getKeyCode() == juce::KeyPress::escapeKey
         && tablesPanel != nullptr && tablesPanel->hasPendingAlignment())
     {
         tablesPanel->cancelPendingAlignment();
+        return true;
+    }
+    // ` (backtick): maximise / restore the panel group under the mouse, as
+    // in Adobe applications. Text fields consume the key before it gets here.
+    if (key.getTextCharacter() == '`' && ! key.getModifiers().isCommandDown()
+        && ! key.getModifiers().isAltDown())
+    {
+        toggleMaximizePanelGroup ();
         return true;
     }
     // Ctrl+Tab / Ctrl+Shift+Tab cycles through the loaded files.
@@ -8227,7 +8499,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     // "Show harmonics CTRL+H"). Global, like the other shortcuts.
     if (key == juce::KeyPress ('h', juce::ModifierKeys::commandModifier, 0)) { toggleHarmonicMarkers (); return true; }
     // Ctrl+Shift+Enter toggles the left panel column.
-    if (key == juce::KeyPress (juce::KeyPress::returnKey, juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { setLeftPanelsVisible (!leftPanelsVisible); return true; }
+    if (key == juce::KeyPress (juce::KeyPress::returnKey, juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)) { setLeftPanelsVisible (!areLeftPanelsVisible ()); return true; }
     if (key == juce::KeyPress ('w', juce::ModifierKeys::commandModifier, 0)) { handleCloseFile(); return true; }
     // Shortcuts announced by the File / Transport menus.
     if (key == juce::KeyPress ('q', juce::ModifierKeys::commandModifier, 0)) { closeButtonPressed(); return true; }
@@ -8496,7 +8768,7 @@ bool MainWindow::setViewVisible (const juce::String& what, bool visible)
     }
     if (what == "leftPanels")
     {
-        setLeftPanelsVisible (visible);
+        setLeftPanelsVisible (visible);   // false: the Editor's group is maximised
         return true;
     }
     return false;
@@ -8506,7 +8778,7 @@ bool MainWindow::isViewVisible (const juce::String& what) const
 {
     if (what == "waveform")   return showWaveformView;
     if (what == "spectral")   return showSpectralView;
-    if (what == "leftPanels") return leftPanelsVisible;
+    if (what == "leftPanels") return areLeftPanelsVisible ();
     return false;
 }
 

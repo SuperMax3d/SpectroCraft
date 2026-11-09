@@ -272,7 +272,9 @@ static void testViewsClippedSelectionPaint()
     // The anti-aliased polygon border, on the other hand, is rasterised by the
     // native renderer (CoreGraphics on macOS), whose edge coverage differs by
     // 1-2 levels between a full and a clipped/offset snapshot (measured: 10
-    // border pixels, none with the border stroke disabled). Tolerate that.
+    // border pixels, none with the border stroke disabled), and by up to 6
+    // levels at other view sizes (the Editor panel of the docking workspace:
+    // 1032 x 316 px). Tolerate that, far below a mask pixel's 20+ levels.
     int diff = 0;
     for (int y = 0; y < sv->getHeight (); ++y)
         for (int dx = 0; dx < 5; ++dx)
@@ -282,7 +284,7 @@ static void testViewsClippedSelectionPaint()
                                       std::abs ((int) a.getGreen () - (int) b.getGreen ()),
                                       std::abs ((int) a.getBlue ()  - (int) b.getBlue ()),
                                       std::abs ((int) a.getAlpha () - (int) b.getAlpha ()) });
-            if (d > 4) ++diff;
+            if (d > 8) ++diff;
         }
     CHECK (diff == 0, "views#W4: a 5 px repaint draws the same selection pixels as a full paint");
 }

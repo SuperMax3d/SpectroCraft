@@ -24,6 +24,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/WaveformView.cpp
         ${CMAKE_SOURCE_DIR}/src/SpectralView.cpp
         ${CMAKE_SOURCE_DIR}/src/Panels.cpp
+        ${CMAKE_SOURCE_DIR}/src/Docking.cpp       # Adobe-style docking workspace
         ${CMAKE_SOURCE_DIR}/src/ScrollBars.cpp
         ${CMAKE_SOURCE_DIR}/src/VideoWindow.cpp   # Video window (picture follows the playhead)
         ${CMAKE_SOURCE_DIR}/src/MainWindow.cpp
@@ -98,6 +99,7 @@ target_include_directories (SpectroCraftTests PRIVATE ${CMAKE_SOURCE_DIR}/includ
 
 target_link_libraries (SpectroCraftTests
     PRIVATE
+        sc_dock_fonts   # embedded Source Sans 3 (docking workspace UI font)
         soxr         # SoXR resampler (LGPL-2.1), same engine Audacity uses
         soundtouch   # SoundTouch tempo change (LGPL-2.1)
         juce::juce_audio_basics

@@ -31,6 +31,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/PythonScripts.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Actions.cpp     # recorded actions (record/replay/batch)
         ${CMAKE_CURRENT_SOURCE_DIR}/Panels.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Docking.cpp       # Adobe-style docking workspace (panel groups, floating windows)
         ${CMAKE_CURRENT_SOURCE_DIR}/ScrollBars.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoWindow.cpp   # Video window (picture follows the playhead)
         ${CMAKE_CURRENT_SOURCE_DIR}/MainWindow.cpp
@@ -150,6 +151,7 @@ target_include_directories (SpectroCraft PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 target_link_libraries (SpectroCraft
     PRIVATE
+        sc_dock_fonts   # embedded Source Sans 3 (docking workspace UI font)
         soxr         # SoXR resampler (LGPL-2.1), same engine Audacity uses
         soundtouch   # SoundTouch tempo change (LGPL-2.1), same engine as Audacity
         juce::juce_audio_basics

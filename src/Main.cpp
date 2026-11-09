@@ -40,6 +40,7 @@
 #include "StartupTrace.h"
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include "MainWindow.h"
+#include "Docking.h"   // sc::dock::DockLookAndFeel (Adobe-style UI font and colours)
 #include "RuntimeDlls.h"
 #include "SpectralEngine.h"
 #include "PngWriter.h"
@@ -139,6 +140,12 @@ public:
 
     void initialise (const juce::String& commandLine) override
     {
+        // Adobe-style look for the whole app: Source Sans 3 UI font, neutral
+        // dark greys, dark popup menus (include/Docking.h). Installed before
+        // any window exists; the unit tests run with it as well.
+        lookAndFeel = std::make_unique<sc::dock::DockLookAndFeel>();
+        juce::LookAndFeel::setDefaultLookAndFeel (lookAndFeel.get());
+
 #if defined (_WIN32)
         // Bundled runtime DLLs live in the SpectroCraft subfolder next to this
         // executable; add it to the process DLL search path before anything
@@ -947,6 +954,8 @@ public:
         if (forwarder != nullptr) forwarder->stopServer ();
         mainWindow.reset();
         app.reset();
+        juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
+        lookAndFeel.reset();
     }
 
     void systemRequestedQuit() override
@@ -999,6 +1008,7 @@ public:
     void anotherInstanceStarted (const juce::String&) override {}
 
 private:
+    std::unique_ptr<sc::dock::DockLookAndFeel> lookAndFeel;   // outlives every window
     std::unique_ptr<Application> app;
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<sc::singleinstance::Coordinator> forwarder;   // file-forwarding server
