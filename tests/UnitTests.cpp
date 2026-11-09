@@ -27573,10 +27573,8 @@ static void testActionsPanelPaint()
             return n;
         };
 
-        // An empty band has none; a short name like "Beta" lights ~28 pixels
-        // in the UI font (Source Sans 3, narrower than the system font).
-        CHECK (countBright (row0) > 15, "row text drawn in the first row band");
-        CHECK (countBright (row1) > 15, "row text drawn in the second row band");
+        CHECK (countBright (row0) > 30, "row text drawn in the first row band");
+        CHECK (countBright (row1) > 30, "row text drawn in the second row band");
 
         // Selecting a row paints it with the marker-style blue highlight.
         juce::SparseSet<int> sel;

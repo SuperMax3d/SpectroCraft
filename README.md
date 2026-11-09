@@ -466,8 +466,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       closed between sessions; a reopened panel goes back to its former
       group, in its former tab order, or — when that group is gone — to a new
       group on the side of the one it sat next to.
-    - The interface uses **Source Sans 3**, Adobe's open-source UI typeface
-      (embedded, SIL OFL 1.1), with neutral dark greys and dark menus.
+    - The panel chrome (tab strips, menu bar, workspace bar, popup menus)
+      uses **Source Sans 3**, Adobe's open-source UI typeface (embedded,
+      SIL OFL 1.1); the whole interface uses neutral dark greys, dark menus
+      and dark table headers. Panel contents keep the system font.
   - Per-channel display selection lives in the **View menu**: one checkable item
     per channel ("Channel 1", "Channel 2", …, with a **Ctrl+(Shift)+N** shortcut
     hint on items 1–9) that toggles each channel independently for any number of

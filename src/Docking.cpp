@@ -212,17 +212,15 @@ DockLookAndFeel::DockLookAndFeel()
     setColour (juce::TableHeaderComponent::highlightColourId,  juce::Colour (0xff3d3d3d));
 }
 
-juce::Typeface::Ptr DockLookAndFeel::getTypefaceForFont (const juce::Font& f)
-{
-    if (f.getTypefaceName() == juce::Font::getDefaultSansSerifFontName())
-        if (auto tf = f.isBold() ? style::semiboldTypeface() : style::regularTypeface())
-            return tf;
-    return juce::LookAndFeel_V4::getTypefaceForFont (f);
-}
-
 juce::Font DockLookAndFeel::getPopupMenuFont()
 {
     return style::uiFont (16.0f);
+}
+
+juce::Font DockLookAndFeel::getMenuBarFont (juce::MenuBarComponent& menuBar, int, const juce::String&)
+{
+    // Same family as the workspace bar sharing the menu bar's row.
+    return style::uiFont (std::max (13.0f, (float) menuBar.getHeight() * 0.64f));
 }
 
 //==============================================================================

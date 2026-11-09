@@ -76,14 +76,19 @@ namespace style
     const juce::Colour windowBorder    { 0xff3c3c3c };
 }
 
-/** LookAndFeel_V4 (dark scheme) with the Adobe-like UI font and dark popup
-    menus. Installed as the application's default look and feel. */
+/** LookAndFeel_V4 with neutral dark greys, dark popup menus and table
+    headers, and the Adobe-like UI font (Source Sans 3) in the menu bar and
+    popup menus. Installed as the application's default look and feel.
+    The rest of the UI keeps the system font: small text (12 px labels) in
+    Source Sans renders too thin on Windows and Linux, which do not darken
+    glyphs the way macOS does. The docking chrome (tab strips, workspace bar,
+    floating title strips) uses style::uiFont() directly. */
 class DockLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
     DockLookAndFeel();
-    juce::Typeface::Ptr getTypefaceForFont (const juce::Font&) override;
     juce::Font getPopupMenuFont() override;
+    juce::Font getMenuBarFont (juce::MenuBarComponent&, int itemIndex, const juce::String& itemText) override;
 };
 
 //==============================================================================
