@@ -666,6 +666,151 @@ static void dockTest_floatingEdgeCases()
         scSkip ("dock edge: floating windows are not on screen (z-order checks)");
 }
 
+// ---------------------------------------------------------------- resize handles
+
+/** Gap grab zones (the gap and 4 px into each neighbour, cursor = what a
+    press does), the floating windows' wider resize edges and their
+    minimise / maximise buttons, the menu fonts and the editor splitter's
+    hover cursor. */
+static void dockTest_resizeHandles()
+{
+    progress ("docking: resize handles, window buttons, menu fonts");
+    namespace st = sc::dock::style;
+    using Cur = juce::MouseCursor;
+    DockFixture f;
+    auto& main = f.dock.mainArea ();
+    CHECK (f.load (R"({"main":{"split":"h","children":[{"tabs":["a"]},{"split":"v","children":[{"tabs":["b"]},{"tabs":["c"]}],"weights":[0.5,0.5]}],"weights":[0.5,0.5]},"closed":["d","e","f"]})"),
+           "dock grab: layout loaded");
+    auto* ga = dockGroupOf (f.dock, "a");
+    auto* gb = dockGroupOf (f.dock, "b");
+    if (ga == nullptr || gb == nullptr)
+    {
+        CHECK (false, "dock grab: groups found");
+        return;
+    }
+
+    // The vertical gap right of a: [x0, x0 + kGap), grabbed kGapGrab px into
+    // each neighbour, not further.
+    const int x0 = ga->getRight ();
+    const int y = gb->getY () + 40;
+    CHECK (main.isOverGap ({ x0 + 1, y }), "dock grab: inside the gap");
+    CHECK (main.isOverGap ({ x0 - st::kGapGrab, y }) && main.isOverGap ({ x0 + st::kGap + st::kGapGrab - 1, y }),
+           "dock grab: 4 px into each neighbour");
+    CHECK (! main.isOverGap ({ x0 - st::kGapGrab - 1, y }) && ! main.isOverGap ({ x0 + st::kGap + st::kGapGrab, y }),
+           "dock grab: not further");
+
+    // The band goes to the dock area: the group gives it up, the content
+    // keeps the rest. (getComponentAt skips invisible components, and the
+    // fixture's area is not on screen.)
+    main.setVisible (true);
+    const juce::Point<int> band (x0 - 2, y), inside (x0 - 8, y);
+    CHECK (! ga->hitTest (band.x - ga->getX (), band.y - ga->getY ()) && ga->hitTest (inside.x - ga->getX (), inside.y - ga->getY ()),
+           "dock grab: the group gives up only the band");
+    CHECK (main.getComponentAt (band) == &main && main.getComponentAt (inside) != &main,
+           "dock grab: a press in the band reaches the dock area");
+
+    // The cursor is what a press there does, whatever event came first.
+    CHECK (main.cursorTypeAt (band) == Cur::LeftRightResizeCursor && main.cursorTypeAt (inside) == Cur::NormalCursor,
+           "dock grab: left-right arrow over the band only");
+    const int yb = gb->getBottom ();   // horizontal gap between b and c
+    CHECK (main.cursorTypeAt ({ gb->getX () + 30, yb - 3 }) == Cur::UpDownResizeCursor
+               && main.cursorTypeAt ({ gb->getX () + 30, yb + st::kGap + 2 }) == Cur::UpDownResizeCursor,
+           "dock grab: up-down arrow on both sides of a horizontal gap");
+
+    // Dragging from the band (outside the visible gap) resizes, and the
+    // arrow stays until the release.
+    const int wA = ga->getWidth ();
+    main.mouseDown (mkMouse (main, band.x, band.y, {}));
+    main.mouseDrag (mkMouse (main, band.x + 60, band.y, {}));
+    CHECK (std::abs (ga->getWidth () - (wA + 60)) <= 1, "dock grab: a drag from the band resizes ("
+           + juce::String (wA) + " -> " + juce::String (ga->getWidth ()) + ")");
+    CHECK (main.cursorTypeAt ({ 5, 5 }) == Cur::LeftRightResizeCursor, "dock grab: the arrow stays during the drag");
+    main.mouseUp (mkMouse (main, band.x + 60, band.y, {}));
+    CHECK (main.cursorTypeAt ({ 5, 5 }) == Cur::NormalCursor, "dock grab: normal cursor again after the release");
+
+    // ---- floating window: 8 px resize edges, the look unchanged
+    f.dock.floatPanel ("c", juce::Rectangle<int> (220, 240, 320, 220));
+    auto* fw = f.dock.floatingWindow (0);
+    CHECK (fw != nullptr, "dock window: floating window opened");
+    if (fw == nullptr)
+        return;
+    CHECK (fw->getBorderThickness ().getLeft () == st::kWindowGrab && fw->getContentComponentBorder ().getLeft () == st::kWindowFrame,
+           "dock window: 8 px resize zone, 4 px frame");
+    {
+        const int my = fw->getHeight () / 2;
+        auto* edge = fw->getComponentAt (juce::Point<int> (st::kWindowGrab - 2, my));
+        auto* content = fw->getComponentAt (juce::Point<int> (st::kWindowGrab + 2, my));
+        CHECK (dynamic_cast<juce::ResizableBorderComponent*> (edge) != nullptr,
+               "dock window: 6 px inside the edge is the resize border");
+        CHECK (content != nullptr && dynamic_cast<juce::ResizableBorderComponent*> (content) == nullptr,
+               "dock window: 10 px inside is the content");
+        auto* bottom = fw->getComponentAt (juce::Point<int> (fw->getWidth () / 2, fw->getHeight () - 6));
+        CHECK (dynamic_cast<juce::ResizableBorderComponent*> (bottom) != nullptr, "dock window: and along the bottom");
+    }
+
+    // The title strip's buttons: minimise, maximise, close (18 px each).
+    auto* strip = fw->getContentComponent () != nullptr ? fw->getContentComponent ()->getChildComponent (0) : nullptr;
+    CHECK (strip != nullptr && strip->getHeight () == st::kTitleStripH, "dock window: title strip found");
+    if (strip == nullptr)
+        return;
+    auto click = [strip] (int fromRight)
+    {
+        const int x = strip->getWidth () - fromRight * 18 + 9;
+        strip->mouseDown (mkMouse (*strip, x, 8, {}));
+        strip->mouseUp (mkMouse (*strip, x, 8, {}));
+    };
+    const auto normal = fw->getBounds ();
+    const auto* display = juce::Desktop::getInstance ().getDisplays ().getDisplayForRect (fw->getScreenBounds ());
+
+    click (2);   // maximise
+    CHECK (fw->isMaximised () && ! fw->isResizable () && display != nullptr
+               && fw->getBounds ().getWidth () >= display->userBounds.toNearestInt ().getWidth () - 2,
+           "dock window: Maximise fills the work area, without resize edges");
+    {
+        const auto saved = f.dock.saveLayout ()["floating"][0];
+        const auto area = sc::dock::FloatingWindow::areaBoundsForWindow (normal);
+        CHECK (std::abs ((int) saved["w"] - area.getWidth ()) <= 2 && std::abs ((int) saved["h"] - area.getHeight ()) <= 2,
+               "dock window: the layout keeps the normal size of a maximised window");
+    }
+    click (2);   // restore
+    CHECK (! fw->isMaximised () && fw->isResizable () && fw->getBounds () == normal, "dock window: Restore brings the bounds back");
+
+    click (3);   // minimise
+    CHECK (fw->isCollapsed () && fw->getHeight () == st::kTitleStripH + 2 * st::kWindowFrame && ! fw->area ().isVisible (),
+           "dock window: Minimise collapses to the title strip");
+    {
+        const auto saved = f.dock.saveLayout ()["floating"][0];
+        CHECK (std::abs ((int) saved["h"] - sc::dock::FloatingWindow::areaBoundsForWindow (normal).getHeight ()) <= 2,
+               "dock window: the layout keeps the normal height of a collapsed window");
+    }
+    click (3);   // restore
+    CHECK (! fw->isCollapsed () && fw->getHeight () == normal.getHeight () && fw->area ().isVisible (),
+           "dock window: the same button brings the panels back");
+
+    // Double-click the strip: maximise; dragging it then restores the size.
+    strip->mouseDoubleClick (mkMouse (*strip, 30, 8, {}, 2));
+    CHECK (fw->isMaximised (), "dock window: double-click on the strip maximises");
+    strip->mouseDown (mkMouse (*strip, 40, 8, {}));
+    strip->mouseDrag (mkMouse (*strip, 90, 40, {}));
+    CHECK (! fw->isMaximised () && fw->getWidth () == normal.getWidth () && fw->getHeight () == normal.getHeight (),
+           "dock window: dragging a maximised window restores its size");
+    strip->mouseUp (mkMouse (*strip, 90, 40, {}));
+
+    // ---- menu fonts and the editor's splitter
+    sc::dock::DockLookAndFeel lf;
+    juce::MenuBarComponent bar;
+    bar.setSize (600, 24);
+    CHECK (std::abs (lf.getPopupMenuFont ().getHeight () - 17.0f) < 0.01f
+               && std::abs (lf.getMenuBarFont (bar, 0, "File").getHeight () - 16.8f) < 0.01f,
+           "dock fonts: popup menus 17, menu bar 0.7 x its height");
+    CHECK (st::kTabTextH == 16.0f && st::kTabStripH == 30, "dock fonts: tab titles 16 in a 30 px strip");
+
+    ViewSplitter hs, vs;
+    vs.vertical = true;
+    CHECK (hs.getMouseCursor () == Cur (Cur::UpDownResizeCursor) && vs.getMouseCursor () == Cur (Cur::LeftRightResizeCursor),
+           "editor splitter: the resize arrow on hover, not only once pressed");
+}
+
 static void runRegression_docking()
 {
     dockTest_zoneGeometry();
@@ -676,4 +821,5 @@ static void runRegression_docking()
     dockTest_workspaces();
     dockTest_legacyLayout();
     dockTest_editorAndVideo();
+    dockTest_resizeHandles();
 }
