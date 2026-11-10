@@ -40,6 +40,52 @@ static void testJournal()
                "journal: session file name");
     }
 
+    // --- 2 MB rotation: entries older than the ring come back from the .1 part ------
+    {
+        const juce::File f = makeTempFile ("journal_rotate.jsonl");
+        scctl::Journal j;
+        j.setFile (f);
+        const juce::String pad = juce::String::repeatedString ("p", 180);
+        const int n = (int) scctl::Journal::kCapacity + 2000;
+        for (int i = 0; i < n; ++i)
+            j.append ("command", scctl::obj ({ { "cmd", "x" }, { "i", i }, { "pad", pad } }));
+        const juce::File older = f.getSiblingFile (f.getFileNameWithoutExtension() + ".1.jsonl");
+        CHECK (older.existsAsFile() && f.getSize() <= scctl::Journal::kRotateBytes + 1024
+                   && older.getSize() <= scctl::Journal::kRotateBytes + 1024,
+               "journal: rotates at 2 MB, the previous part kept");
+        const auto e = j.read (0, {}, 5).getProperty ("entries", {});
+        CHECK (e.size() == 5 && (int) e[0].getProperty ("seq", 0) == 1,
+               "journal: entries older than the ring are read back from the rotated part");
+    }
+
+    // --- pruning keeps whole sessions (a session and its .1 part) -------------------
+    {
+        const juce::File dir = makeTempFile ("journal_prune");
+        dir.createDirectory();
+        const auto now = juce::Time::getCurrentTime();
+        auto make = [&] (const juce::String& name, int ageMinutes) {
+            const juce::File f = dir.getChildFile (name);
+            f.replaceWithText ("{}\n");
+            f.setLastModificationTime (now - juce::RelativeTime::minutes (ageMinutes));
+        };
+        // Odd pids above 999990: no such process (and never a Windows pid).
+        const juce::String own = "session-" + juce::String (scctl::processId()) + "-2026-10-30.jsonl";
+        make (own, 60);
+        make ("session-999991-2026-11-01.jsonl", 50);
+        make ("session-999993-2026-11-02.jsonl", 40);
+        make ("session-999993-2026-11-02.1.jsonl", 41);
+        make ("session-999995-2026-11-03.1.jsonl", 31);
+        make ("session-999995-2026-11-03.jsonl", 30);
+        scctl::Journal::pruneOldSessions (dir, 2);
+        CHECK (!dir.getChildFile ("session-999991-2026-11-01.jsonl").existsAsFile()
+                   && dir.getChildFile ("session-999993-2026-11-02.jsonl").existsAsFile()
+                   && dir.getChildFile ("session-999993-2026-11-02.1.jsonl").existsAsFile()
+                   && dir.getChildFile ("session-999995-2026-11-03.1.jsonl").existsAsFile(),
+               "journal: pruning keeps the newest sessions with their rotated part");
+        CHECK (dir.getChildFile (own).existsAsFile(), "journal: the journal of a running instance is never pruned");
+        CHECK (scctl::Journal::kKeepSessions == 5, "journal: 5 sessions kept by default");
+    }
+
     // --- patches carry their provenance ---------------------------------------------
     Application app;
     const juce::File wav = ctlMakeWav ("journal_doc.wav", 2, 8000.0, 16000);

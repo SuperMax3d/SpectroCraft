@@ -40,8 +40,15 @@ public:
     juce::int64 reserveSeq();
     juce::int64 firstSeq() const;   // oldest seq still in the ring (0 when empty)
 
+    /** Size at which the JSON Lines mirror rotates to <name>.1.jsonl (the
+        previous part is kept; read() reads both). Same per-file budget as the
+        diagnostic log (docs/diagnostics.md). */
+    static constexpr juce::int64 kRotateBytes = 2 * 1024 * 1024;
+    /** Sessions kept by pruneOldSessions() (each up to two files). */
+    static constexpr int kKeepSessions = 5;
+
     /** JSON Lines mirror: every entry is also appended to this file (rotated
-        to <name>.1.jsonl beyond 64 MB). Empty = memory only. */
+        to <name>.1.jsonl beyond kRotateBytes). Empty = memory only. */
     void setFile (const juce::File& f);
     juce::File file() const;
 
@@ -49,8 +56,9 @@ public:
     static juce::File journalFolder();
     /** journalFolder()/session-<pid>-<yyyy-mm-dd>.jsonl */
     static juce::File sessionFile (int pid);
-    /** Keeps the `keep` most recent session files of the folder. */
-    static void pruneOldSessions (const juce::File& folder, int keep = 30);
+    /** Keeps the files of the `keep` most recent sessions of the folder
+        (a session and its rotated .1 part count as one). */
+    static void pruneOldSessions (const juce::File& folder, int keep = kKeepSessions);
 
     /** Called after every append (e.g. to broadcast an event). */
     std::function<void (const juce::var&)> onAppend;

@@ -38,9 +38,9 @@ juce::int64 Journal::append (const juce::String& kind, juce::var entry)
         {
             out->writeText (toLine (copy) + "\n", false, false, "\n");
             out->flush();
-            if (out->getPosition() > (juce::int64) 64 * 1024 * 1024)
+            if (out->getPosition() > kRotateBytes)
             {
-                // Rotate: <name>.1.jsonl keeps the previous 64 MB.
+                // Rotate: <name>.1.jsonl keeps the previous part.
                 out.reset();
                 const juce::File old = jsonl.getSiblingFile (jsonl.getFileNameWithoutExtension() + ".1.jsonl");
                 old.deleteFile();
@@ -67,12 +67,21 @@ juce::var Journal::read (juce::int64 sinceSeq, const juce::StringArray& kinds,
     {
         std::lock_guard<std::mutex> l (lock);
         last = nextSeq - 1;
-        // Older than the ring (10 000 entries): read them back from the JSONL file.
+        // Older than the ring (10 000 entries): read them back from the JSONL
+        // file, the part before the last rotation first.
         const juce::int64 ringFirst = ring.empty() ? nextSeq : (juce::int64) ring.front().getProperty ("seq", 0);
-        if (sinceSeq + 1 < ringFirst && jsonl.existsAsFile())
+        if (sinceSeq + 1 < ringFirst && jsonl != juce::File())
         {
             juce::StringArray lines;
-            jsonl.readLines (lines);
+            const juce::File older = jsonl.getSiblingFile (jsonl.getFileNameWithoutExtension() + ".1.jsonl");
+            if (older.existsAsFile())
+                older.readLines (lines);
+            if (jsonl.existsAsFile())
+            {
+                juce::StringArray current;
+                jsonl.readLines (current);
+                lines.addArray (current);
+            }
             for (const auto& ln : lines)
             {
                 if (limit > 0 && entries.size() >= limit) break;
@@ -164,8 +173,25 @@ void Journal::pruneOldSessions (const juce::File& folder, int keep)
     std::sort (files.begin(), files.end(), [] (const juce::File& a, const juce::File& b) {
         return a.getLastModificationTime() > b.getLastModificationTime();
     });
-    for (int i = keep; i < files.size(); ++i)
-        files.getReference (i).deleteFile();
+    // Newest first: a session's rotated part (<name>.1.jsonl) goes with it.
+    juce::StringArray keptSessions;
+    for (auto& f : files)
+    {
+        const juce::String session = f.getFileName().replace (".1.jsonl", ".jsonl");
+        if (keptSessions.contains (session))
+            continue;
+        if (keptSessions.size() < keep)
+        {
+            keptSessions.add (session);
+            continue;
+        }
+        // session-<pid>-<date>[.1].jsonl: an instance still running keeps writing it.
+        const int pid = f.getFileName().fromFirstOccurrenceOf ("session-", false, false)
+                            .upToFirstOccurrenceOf ("-", false, false).getIntValue();
+        if (sc::diag::isProcessAlive (pid))
+            continue;
+        f.deleteFile();
+    }
 }
 
 juce::File Journal::file() const
