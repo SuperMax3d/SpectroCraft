@@ -16,6 +16,7 @@ build options, model weights) is in `third_party/licenses/NOTICE.md`.
 | SoX Resampler library (SoXR) — Copyright (c) 2007-18 robs@users.sourceforge.net | 0.1.3 | LGPL-2.1-or-later | `extern/soxr/LICENCE`, `extern/soxr/COPYING.LGPL`, `extern/soxr/AUTHORS` | https://sourceforge.net/projects/soxr/ |
 | Intel Distribution of OpenVINO Toolkit runtime (openvino, CPU plugin, IR frontend, oneTBB redistributables) | 2024.6 | Apache-2.0 | `extern/OpenVINO/licensing/LICENSE`, `extern/OpenVINO/licensing/Apache_license.txt`, `extern/OpenVINO/licensing/redist.txt` | https://github.com/openvinotoolkit/openvino |
 | whisper.cpp prebuilt binaries (whisper, ggml, ggml-base, ggml-cpu-*, llama) — Copyright (c) Georgi Gerganov and the whisper.cpp / ggml contributors | b5454 | MIT | `extern/whisper-b5454/README.md` (licence section) | https://github.com/ggml-org/whisper.cpp |
+| Source Sans 3 typeface (Regular, Semibold; embedded as the UI font) — Copyright 2010-2024 Adobe, with Reserved Font Name 'Source' | 3.052 | SIL Open Font License 1.1 | `third_party/licenses/SourceSans3-OFL.md` | https://github.com/adobe-fonts/source-sans |
 
 ## Code ported from third-party projects
 
@@ -42,4 +43,5 @@ stay under their upstream terms:
   `extern/soundtouch/LICENSE.txt`, `extern/soxr/COPYING.LGPL`
 - Apache License 2.0: `extern/OpenVINO/licensing/Apache_license.txt`
 - GNU GPL v3: `third_party/licenses/GPL-3.0-intel-deepfilternet.txt`
+- SIL Open Font License 1.1: `third_party/licenses/SourceSans3-OFL.md`
 - GNU AGPL v3: `LICENSE`

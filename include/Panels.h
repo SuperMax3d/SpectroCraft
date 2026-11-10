@@ -53,10 +53,16 @@ public:
         }
     }
 
+    // The resize arrow as soon as the mouse is over the bar, not only once
+    // it is pressed: the cursor says what a press does.
+    juce::MouseCursor getMouseCursor() override
+    {
+        return vertical ? juce::MouseCursor::LeftRightResizeCursor
+                        : juce::MouseCursor::UpDownResizeCursor;
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
-        setMouseCursor (vertical ? juce::MouseCursor::LeftRightResizeCursor
-                                 : juce::MouseCursor::UpDownResizeCursor);
         if (onDrag) onDrag (e);
     }
 
@@ -67,72 +73,11 @@ public:
 
     void mouseUp (const juce::MouseEvent&) override
     {
-        setMouseCursor (juce::MouseCursor::NormalCursor);
         if (onRelease) onRelease ();
     }
 
 private:
     JUCE_DECLARE_NON_COPYABLE (ViewSplitter)
-};
-
-// ------------------------------------------------- Draggable left-panel tabs
-
-/** Shared state for dragging panel tabs between/within the two left-column
-    tab bars. MainWindow registers both bars and receives move requests.
-*/
-struct TabDragContext
-{
-    std::vector<juce::TabbedComponent*> bars;   // every bar that participates
-    /** Move a tab from (from, fromIndex) to position insertIndex in `to`
-        (insertIndex is an index into the destination's CURRENT list).
-    */
-    std::function<void (juce::TabbedComponent* from, int fromIndex,
-                        juce::TabbedComponent* to, int insertIndex)> onMove;
-};
-
-/** A tab button that can be dragged to a new position - within its own bar or
-    into any other bar registered in the same TabDragContext. A plain click
-    still selects the tab as usual.
-*/
-class DragTabButton : public juce::TabBarButton
-{
-public:
-    DragTabButton (const juce::String& name, juce::TabbedButtonBar& ownerBar,
-                   juce::TabbedComponent* ownerTabbed, TabDragContext* ctx);
-    ~DragTabButton() override;
-
-    // Public so headless unit tests can drive a full drag sequence.
-    void mouseDown (const juce::MouseEvent&) override;
-    void mouseDrag (const juce::MouseEvent&) override;
-    void mouseUp   (const juce::MouseEvent&) override;
-
-private:
-
-    TabDragContext* context = nullptr;
-    juce::TabbedComponent* ownerTabbed_ = nullptr;
-    bool dragArmed = false;     // button pressed, waiting for the movement threshold
-    bool dragging  = false;     // a live drag is in progress
-    juce::Point<float> startLocalPos;
-    juce::Component* ghost = nullptr;   // owned; follows the cursor while dragging
-
-    void beginDrag();
-    void endDrag (const juce::MouseEvent&);
-    static DragTabButton* findHovered (TabDragContext* ctx, const juce::Point<int>& globalPos);
-
-    JUCE_DECLARE_NON_COPYABLE (DragTabButton)
-};
-
-/** A TabbedComponent whose tabs are DragTabButtons. */
-class DragTabBar : public juce::TabbedComponent
-{
-public:
-    DragTabBar (juce::TabbedButtonBar::Orientation orientation, TabDragContext* ctx);
-
-protected:
-    juce::TabBarButton* createTabButton (const juce::String& tabName, int tabIndex) override;
-
-private:
-    TabDragContext* context = nullptr;
 };
 
 // ---------------------------------------------------------------- Files panel

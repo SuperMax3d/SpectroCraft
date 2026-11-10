@@ -8,6 +8,7 @@
 #include "ScrollBars.h"
 #include "TablesTrack.h"
 #include "Panels.h"
+#include "Docking.h"   // Adobe-style docking workspace (panel groups, floating windows)
 #include <memory>
 #include <algorithm>
 #include <atomic>
@@ -268,23 +269,37 @@ public:
     /** The armed flow received its reference point: prompts for the value
         and applies the resulting scale. */
     void handleRefClickPlaced (double tSecs, double fHz);
-    /** Moves a left-panel tab from (from, fromIndex) to position insertIndex in
-        `to` - within the same bar or across bars. Persists the new layout.
-    */
-    void moveLeftPanelTab (juce::TabbedComponent* from, int fromIndex,
-                           juce::TabbedComponent* to, int insertIndex);
-    void saveLeftLayout();                    // persist tab order + column geometry
-    void applySavedLeftLayout();              // restore a persisted arrangement at startup
-    void setLeftPanelsVisible (bool visible); // View > Left Panels toggle
-    bool areLeftPanelsVisible() const { return leftPanelsVisible; }
-    juce::StringArray topPanelTabNames() const { return topTabs.getTabNames (); }
-    juce::StringArray bottomPanelTabNames() const { return bottomTabs.getTabNames (); }
-    juce::TabbedComponent* topPanelTabs() { return &topTabs; }
-    juce::TabbedComponent* bottomPanelTabs() { return &bottomTabs; }
+    // ---- Docking workspace (include/Docking.h) ----------------------------
+    // Every panel - the Editor (waveform + spectrogram) included - lives in a
+    // panel group of the dock tree; panels are dragged between groups, docked
+    // on any side, undocked into floating windows. Named workspaces keep
+    // whole arrangements (Window > Workspaces and the bar right of the menu).
+    sc::dock::DockManager& dockManager() noexcept { return *dock_; }
+    sc::dock::Workspaces& workspaces() noexcept { return workspaces_; }
+    juce::Component* editorPanelComp() const noexcept { return editorPanel_.get(); }
+    sc::dock::WorkspaceBar* workspaceBarComp() const noexcept { return workspaceBar_.get(); }
+    /** Tabs of the group holding a panel, as shown (titles), empty if closed. */
+    juce::StringArray panelGroupTitles (const juce::String& id) const;
+    void saveDockLayout();                    // persist the arrangement now
+    /** Applies a workspace: its current (modified) layout, else its saved one. */
+    void switchWorkspace (const juce::String& id);
+    void resetWorkspace();                    // Window > Workspaces > Reset to Saved Layout
+    void saveWorkspaceChanges();              // ... > Save Changes to this Workspace
+    juce::String saveWorkspaceAs (const juce::String& name);   // ... > Save as New Workspace (new id)
+    bool deleteWorkspace (const juce::String& id);
+    bool renameWorkspace (const juce::String& id, const juce::String& name);
+    /** The built-in layout of a workspace id ("default", "editing", ...). */
+    juce::var builtInWorkspaceLayout (const juce::String& id) const;
+    /** ` (backtick): maximise / restore the panel group under the mouse
+        (else the focused one). */
+    void toggleMaximizePanelGroup();
+    void setLeftPanelsVisible (bool visible); // View > Panels: false = Editor maximised
+    bool areLeftPanelsVisible() const;
 
     // Window menu + per-panel "Close Panel" support: open/close state of the
-    // left-column panels. `id` is one of files/fft/history/python/
-    // controls/markers/transcription/selection.
+    // panels. `id` is one of files/fft/history/python/controls/markers/
+    // transcription/selection/drawing/tables/actions/video (and "editor",
+    // which cannot be closed).
     bool isPanelOpen (const juce::String& id) const;
     void setPanelVisible (const juce::String& id, bool visible);
     juce::Component* panelForId (const juce::String& id) const;   // unit tests
@@ -531,8 +546,6 @@ public:
                                std::function<void(bool)> onDone = nullptr);
 
     void handleSplitterDrag (const juce::MouseEvent& e);      // waveform/spectral divider
-    void handleLeftSplitterDrag (const juce::MouseEvent& e);  // left column / main area
-    void handleTopSplitterDrag (const juce::MouseEvent& e);   // top tabs / bottom tabs
     void handleTablesSepDrag (const juce::MouseEvent& e);     // dedicated tables track divider
     const char* panelIdFor (juce::Component*) const;          // stable id for a panel component
     struct LeftPanelEntry { const char* id; juce::String name; bool defaultTop; };
@@ -593,6 +606,13 @@ public:
         WindowAllowControl = 6701,    // Window menu: "Allow AI control (localhost)" toggle
         WindowVideo = 6702,           // Window menu: show / hide the Video window
         WindowVideoFollowHover = 6703,// Window menu: "Video Follows Mouse Hover" toggle
+        WindowWorkspaceBase = 6600,   // Window > Workspaces: switch to workspace i (up to 48)
+        WindowWsReset = 6650,         // Window > Workspaces > Reset to Saved Layout
+        WindowWsSaveChanges = 6651,   // ... > Save Changes to this Workspace
+        WindowWsSaveAs = 6652,        // ... > Save as New Workspace...
+        WindowWsRename = 6653,        // ... > Rename Workspace...
+        WindowWsDelete = 6654,        // ... > Delete Workspace
+        WindowMaximizeGroup = 6655,   // Window > Maximize Panel Group (`)
         HelpAbout = 6000,
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
@@ -614,12 +634,8 @@ private:
     std::unique_ptr<SpectralView> spectralView;
     std::unique_ptr<ViewSplitter> splitter;   // draggable divider between the views
     double splitRatio = 0.55;                 // fraction of main area used by waveform
-    int tablesSepAnchorY = 0;                 // strip top (window coords) for the drag handler
+    int tablesSepAnchorY = 0;                 // strip top (Editor panel coords) for the drag handler
     double tablesSepRefH = 1.0;               // reference height for tablesTrackRatio
-    std::unique_ptr<ViewSplitter> leftSplitter;  // vertical divider: left column | main area
-    int leftPanelW = 340;                     // width of the left panel column (px)
-    std::unique_ptr<ViewSplitter> topSplitter;   // horizontal divider between tab groups
-    double topRatio = 0.52;                   // fraction of left column used by top tabs
     bool showWaveformView = true, showSpectralView = true;  // View menu visibility
     ColourMap lastSyncedColourMap;            // to detect colour-map changes
     Settings lastSyncedSettings;              // baseline for the settings-save trigger
@@ -699,10 +715,31 @@ private:
     // implementing juce::TooltipClient once this exists).
     std::unique_ptr<juce::TooltipWindow> tooltipWindow;
 
-    TabDragContext tabDragCtx;                 // shared state for dragging panel tabs
-    DragTabBar topTabs, bottomTabs;           // left-column tab groups (draggable tabs)
-    bool leftPanelsVisible = true;            // View > Left Panels toggle
     int controlClients_ = 0;                  // AI control clients connected (status bar)
+
+    // ---- Docking workspace -------------------------------------------------
+    // Declared last: destroyed first, while the panel contents they show
+    // (owned above) still exist.
+    void layoutEditor();                      // place the views inside the Editor panel
+    void handlePanelOpenChanged (const juce::String& id, bool open);
+    void updateVideoDockLabels();             // "Undock Panel" / "Dock Panel" in the video menus
+    void toggleVideoDock();                   // the video menus' Dock / Undock Panel item
+    void applyDockLayout (const juce::var& layout);
+    juce::var legacyLeftLayout() const;       // arrangement saved by the old two-group column
+    std::vector<sc::dock::Workspaces::Entry> builtInWorkspaces() const;
+    void buildWorkspaceMenu (juce::PopupMenu& m, const juce::String& clickedId);
+    void handleWorkspaceCommand (int menuId, const juce::String& clickedId = {});
+    void activeWindowStatusChanged() override;   // floating panel windows stay above this one
+
+    sc::dock::Workspaces workspaces_;
+    std::unique_ptr<juce::Component> editorPanel_;          // waveform + spectrogram + scrollbars
+    std::unique_ptr<sc::dock::WorkspaceBar> workspaceBar_;  // right of the menu bar
+    std::unique_ptr<sc::dock::DockManager> dock_;
+    bool dockLayoutDirty_ = false;            // save pending (debounced in the timer)
+    juce::uint32 dockLayoutDirtyAt_ = 0;
+    bool dockLoading_ = false;                // applying a layout: no persistence / video side effects
+    bool floatersHiddenForMinimise_ = false;  // floating panel windows hidden with this one
+    juce::String workspaceMenuTarget_;        // workspace right-clicked in the bar
 
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)

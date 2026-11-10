@@ -128,7 +128,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   so you place the arrowhead first and pull the shaft back; **Esc** cancels a
   pending creation. Drawings persist with the file
   via [per-file metadata](#per-file-metadata), exactly like selections.
-- **Classic DAW waveform-editor layout**:
+- **Classic DAW waveform-editor layout** (the *Default* workspace; every
+  panel can be moved, docked anywhere or undocked — see *Docking workspace*
+  below):
   - Top-left tab group: **Files** (lists every loaded file with its sample
     rate, channel count and duration — plus its scale calibration when set;
     double-click a row to make it active, right-click for Activate / Close /
@@ -416,18 +418,64 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - **Drawing**: a table of user annotations drawn over the spectrogram — text,
     arrows, rectangles and freehand strokes with per-item comments and
     visibility; see [Drawing panel](#drawing-panel) below.
-  - **Draggable panel tabs**: drag any tab to reorder the panels within its
-    group, or drop it onto a tab of the other group to move it across — e.g.
-    put Markers next to Frequency Analysis. The arrangement (plus the column
-    width and the top/bottom split) is remembered between sessions.
-  - **View > Left Panels** hides all left panels at once so you can focus on
-    the tracks; toggle it again to bring them back.
-  - Individual panels can be closed with a right-click **Close Panel** menu
-    item (on any panel, including its list rows where applicable). The
-    **Window** menu lists every left-column panel with a checkmark and opens
-    or closes each one; a group whose last panel is closed gives up its space
-    so the other tab bar fills the whole column. Closed panels stay closed
-    between sessions (reopening inserts them back at their default position).
+  - **Docking workspace (Adobe-style)**: every panel — the **Editor**
+    (waveform + spectrogram) included — sits in a *panel group* with text
+    tabs, and the groups can be arranged freely:
+    - **Drag a tab** onto another group: a drop overlay splits that group into
+      a centre rectangle (*add as a tab*) and four trapezoids (*dock left /
+      right / top / bottom* of it); the zone under the cursor turns violet and
+      the dragged panel, shown as a translucent thumbnail, snaps onto it like
+      a magnet. Drop on a **tab strip** to insert the tab at the white caret,
+      or on the thin band along an **edge of the window** to dock the panel
+      along that whole edge. Dragging the **empty part of a tab strip** moves
+      the whole group. While a panel is dragged (or held down for a moment)
+      it turns half-transparent; **Esc** cancels the drag.
+    - **Undock**: drop a panel outside the window (or hold **Ctrl** — **Cmd**
+      on macOS — while dropping), or choose **Undock Panel** from the tab's
+      right-click menu or from the **≡** panel menu next to the active tab. It
+      becomes a floating window, moved by its top strip (it snaps to screen
+      edges and to the other windows) and resized by its borders (an 8 px
+      zone along each edge); other panels can be docked into it the same
+      way. The strip's buttons **minimise** the window to the strip itself
+      (the same button brings the panels back), **maximise** it to the work
+      area of its screen (double-click the strip does the same; dragging a
+      maximised window restores its size) and close it. **Dock Panel**
+      returns a floating panel to where it was docked. Closing a floating
+      window closes its panels (the Editor docks back instead); floating
+      windows come back above the main window when it is activated and hide
+      while it is minimised.
+    - The tab menu (right-click a tab, or **≡**) also has **Close Panel**,
+      **Close Other Panels in Group** and *Panel Group Settings* (**Close /
+      Undock / Maximize Panel Group**). **Double-click a tab** or press **`**
+      (backtick) to maximise the group under the mouse, again to restore it.
+      When the tabs do not fit, the **>>** button lists the hidden ones.
+    - Drag the **gaps** between groups to resize them: the 4 px gap and 4 px
+      into each neighbour grab it, and the resize arrow shows exactly where a
+      press resizes. Double-click a gap to share the space equally between
+      its two neighbours.
+    - **Workspaces**: *Default* (the classic left column beside the Editor),
+      *Editing*, *Analysis* and *Video* are listed at the right end of the
+      menu bar and in **Window > Workspaces**. Each workspace keeps its own
+      modifications; **Reset to Saved Layout** goes back to its saved
+      arrangement, **Save Changes to this Workspace** updates that, and
+      **Save as New Workspace...**, **Rename Workspace...** and **Delete
+      Workspace** manage your own (right-click a name in the bar for the same
+      menu). The whole arrangement, floating windows included, is restored at
+      the next launch; the first launch after the update keeps the
+      arrangement of the former two-group left column.
+    - **View > Panels** (Ctrl+Shift+Enter) maximises the Editor's group to
+      hide every other panel, and brings them back.
+    - Individual panels can be closed from the tab menu or with the
+      right-click **Close Panel** item inside them (on any panel, including
+      its list rows where applicable). The **Window** menu lists every panel
+      with a checkmark and opens or closes each one. Closed panels stay
+      closed between sessions; a reopened panel goes back to its former
+      group, in its former tab order, or — when that group is gone — to a new
+      group on the side of the one it sat next to.
+    - The panel chrome (tab strips, menu bar, workspace bar, popup menus)
+      uses **Source Sans 3**, Adobe's open-source UI typeface (embedded,
+      SIL OFL 1.1); the whole interface uses neutral dark greys, dark menus
+      and dark table headers. Panel contents keep the system font.
   - Per-channel display selection lives in the **View menu**: one checkable item
     per channel ("Channel 1", "Channel 2", …, with a **Ctrl+(Shift)+N** shortcut
     hint on items 1–9) that toggles each channel independently for any number of
@@ -844,16 +892,18 @@ Zooming and panning work like in the spectrogram:
 - **right-drag** draws a selection box that is then zoomed to fill the view,
   like the spectrogram's region zoom; a plain right-click shows the context
   menu (*Zoom In / Zoom Out / Zoom Fit*, *Rotate 90° CW / CCW* — the rotation
-  is remembered per file, *Always On Top*, and *Dock Panel / Undock to Window*);
+  is remembered per file, *Always On Top*, and *Dock Panel / Undock Panel*);
 - a **zoom bar** on the right edge of the picture shows the visible part:
   drag its edges to zoom, drag the thumb (or click in the track) to pan;
 - left-drag pans while zoomed.
 
-*Docks into the left panel* like Tables or Markers: *Dock Panel* from the
-right-click menu moves the picture **and the tracks panel below it** into a
-**Video** tab of the left panel; *Undock to Window* (or closing that tab)
-brings them back to their own window. The picture keeps its zoom, pan and
-rotation either way.
+*Docks as a panel* like Tables or Markers: *Dock Panel* from the right-click
+menu moves the picture **and the tracks panel below it** into the **Video**
+panel of the docking workspace (a tab of the top-left group by default).
+There, *Undock Panel* turns it into a floating panel window (*Dock Panel*
+brings it back), and closing the Video panel (or *Window > Video* while it is
+docked) brings the picture back to its own Video window. The picture keeps
+its zoom, pan and rotation either way.
 
 #### Video tracks
 
@@ -875,7 +925,7 @@ current time. Clicking outside any band clears the selection and shows the
 topmost available video at the current time; when the selected video ends,
 the topmost covering one takes over automatically;
 - right-click on a **band** (or the ruler) for *Zoom In / Zoom Out / Zoom Fit*,
-  *Always On Top* and *Dock Panel / Undock to Window* — plus, on a band:
+  *Always On Top* and *Dock Panel / Undock Panel* — plus, on a band:
   *Sync based on Audio*, *Align…*, *Copy Audio to New Channel(s)*,
   *Add Video Track…*, *Remove Track*, *Solo* and *Adjust Image*. The window
   items work from the tracks panel too, so they stay reachable while docked
@@ -1870,7 +1920,9 @@ troubleshooting); protocol: [docs/ai-control/REPORT.md](docs/ai-control/REPORT.m
 | Split Spectral Selection Execute — runs the configured split (needs an active spectral selection); first time per file open opens the configuration instead | F12 |
 | Refresh spectrogram (Spectral Controls > Refresh: discard every cached tile and re-render all tracks) | F5 |
 | Toggle spectrogram harmonic markers (Spectral Controls > "Show harmonics") | Ctrl+H |
-| Toggle the left panels column (View > Left Panels) | Ctrl+Shift+Enter |
+| Show / hide the panels around the Editor (View > Panels: maximises the Editor's group) | Ctrl+Shift+Enter |
+| Maximise / restore the panel group under the mouse (also: double-click a tab) | ` (backtick) |
+| While dragging a panel: cancel the drag / undock instead of docking | Esc / hold Ctrl (Cmd on macOS) |
 
 Keyboard focus follows the mouse: clicking either view puts keyboard focus on
 that view, so ←/→ and Shift+←/→ work immediately after any click inside a plot.
@@ -1881,8 +1933,9 @@ the standard Windows behaviour for arrow keys while focused; click back into a
 view to return playhead control.
 
 Menus: **File, Edit, Selection, Transport, Effects, View, Window, Help** (the
-Window menu opens/closes the individual left-column panels and carries the
-**Allow multiple instances** toggle — see above). The Edit menu has a
+Window menu holds the **Workspaces** submenu and **Maximize Panel Group**,
+opens/closes the individual panels and carries the **Allow multiple
+instances** toggle — see above). The Edit menu has a
 checkable **Snap to Zero Crossings** toggle (**off by default**): when on,
 dragging out a new time selection snaps both edges to the nearest zero
 crossing of the first visible channel (within ±50 ms), so cuts and effects
@@ -2407,10 +2460,11 @@ Clean separation into independent components (see `include/` + `src/`):
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `VideoFrames` (`src/VideoFrames.cpp`, `src/VideoFrames_mac.mm`, `src/VideoFrames_win.cpp`) | Video picture decoding for the Video window: a per-platform frame stream (AVFoundation on macOS, Media Foundation on Windows, none on Linux), `VideoDecoder::frameAt(t)` (decode forward for small forward moves, seek otherwise; skipped frames are never converted) and `VideoFramePump`, a worker thread that serves only the latest requested time and hands frames to the message thread. |
-| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, right-hand zoom bar), per-file rotation and an *Always On Top* toggle from a right-click context menu; can be docked into a left-panel tab (`VideoDockHost`, picture on top and tracks panel below) or undocked back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag to offset (Shift-drag snaps to 0 s / audio end / other track edges), wheel zoom about the cursor, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel; right-click menu for sync/align/copy-audio/solo/adjust-image plus *Always On Top* and dock/undock. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible or docked. |
+| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, right-hand zoom bar), per-file rotation and an *Always On Top* toggle from a right-click context menu; can be docked as the Video panel of the docking workspace (`VideoDockHost`, picture on top and tracks panel below; floating or in the main window) or sent back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag to offset (Shift-drag snaps to 0 s / audio end / other track edges), wheel zoom about the cursor, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel; right-click menu for sync/align/copy-audio/solo/adjust-image plus *Always On Top* and dock/undock. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible or docked. |
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
-| `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Classic DAW-style layout (left tab groups + waveform/spectral main area + scrollbars), menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
+| `Docking` (`src/Docking.cpp`: `DockManager`, `DockArea`, `GroupComponent`, `FloatingWindow`, `Workspaces`, `WorkspaceBar`, `DockLookAndFeel`) | Adobe-style docking workspace, independent of the rest of the app: a tree of horizontal / vertical splits of *panel groups* per dock area (the main window's and one per floating window); panels are registered with an id and a content component they do not own. Drag sessions (translucent ghost window snapping onto the hovered zone, Esc / Ctrl handling), the trapezoid drop overlay, tab strips with the ≡ panel menu and >> overflow, gap resizing, maximise, floating windows with magnetic moves, the memory of where closed / undocked panels go back, the JSON layout (`saveLayout` / `loadLayout`) and named workspaces with saved + current layouts. Components a drop removes are hidden at once and deleted asynchronously, so a group may be retired from inside its own mouse handler. `DockLookAndFeel` (the app's default look and feel) embeds Source Sans 3. |
+| `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Docking workspace host (menu bar with the workspace switcher on its right, the main dock area, status bar); the **Editor** panel holds the waveform/spectral views + scrollbars + dedicated tables track (`layoutEditor()`); registers every panel, the built-in workspaces and the migration of the old two-group column; menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
 
 Threading model: the UI thread only draws and dispatches; FFT tiles are computed
 on a pool sized to hardware threads; file reads happen on the reader under a

@@ -99,6 +99,18 @@ set(SC_CONTROL_SOURCES
     ${CMAKE_SOURCE_DIR}/src/control/PathPolicy.cpp
     ${CMAKE_SOURCE_DIR}/src/control/ControlServer.cpp)
 
+# UI font of the docking workspace (src/Docking.cpp): Source Sans 3, Adobe's
+# open-source UI family (SIL OFL 1.1, third_party/licenses/SourceSans3-OFL.md),
+# embedded so the panels look the same on every platform. Linked by the app
+# and the console test target.
+juce_add_binary_data (sc_dock_fonts
+    HEADER_NAME DockFonts.h
+    NAMESPACE DockFonts
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/resources/fonts/SourceSans3-Regular.ttf
+        ${CMAKE_SOURCE_DIR}/resources/fonts/SourceSans3-Semibold.ttf)
+set_target_properties (sc_dock_fonts PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 add_subdirectory(src)
 
 enable_testing()
