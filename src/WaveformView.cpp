@@ -5,6 +5,7 @@
  */
 
 #include "WaveformView.h"
+#include "Diagnostics.h"
 #include <algorithm>
 #include <cmath>
 
@@ -637,6 +638,7 @@ void WaveformView::panByTime (double dt)
 
 void WaveformView::paint (juce::Graphics& g)
 {
+    sc::diag::ScopedPaint diagPaint ("waveform", getWidth(), getHeight());   // paint.slow above 50 ms
     const auto bounds = getLocalBounds();
     g.fillAll (juce::Colour::fromRGB (30, 30, 30));
 

@@ -30,6 +30,13 @@
  *       Prints the OpenVINO devices available on this machine.
  *   --generate-test-files [dir]
  *   --run-unit-tests
+ *       With SC_DIAG_LOG_DIR=<folder> the suite writes a diagnostic log there
+ *       (ctest sets it per shard; CI uploads it when a shard fails).
+ * Normal start options:
+ *   --diag-log   diagnostic log for this session (docs/diagnostics.md), as
+ *                Window > Diagnostic Log does; SC_DIAG_LOG=1 or
+ *                SC_DIAG_LOG_DIR=<folder> do the same. It records the startup
+ *                phase timings too ("startup" event).
  */
 
 #include <JuceHeader.h>
@@ -49,6 +56,7 @@
 #include "control/ControlServer.h"
 #include "control/ControlState.h"
 #include "control/StateJson.h"
+#include "Diagnostics.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
     #include "AI/ModelManager.h"
@@ -63,8 +71,9 @@
 extern int scRunUnitTests();
 extern bool scGenerateTestFiles (const juce::String& dir);
 
-// T0 for --measure_load_time: fires as soon as this module's static init runs,
-// i.e. right after the process image and imported DLLs have been loaded.
+// T0 of the startup timings (include/StartupTrace.h): fires as soon as this
+// module's static init runs, i.e. right after the process image and imported
+// DLLs have been loaded.
 namespace { struct StartTrace { StartTrace() { scStart::begin(); } } startTrace; }
 
 // juce::File(String) asserts on relative paths, so resolve them against the
@@ -128,6 +137,9 @@ public:
     {
 #if defined (_WIN32)
         scCrash::install(); // trace real crashes; pass through driver FATAL_APP_EXIT events
+        // ... and append a crash report to the diagnostic log folder when the
+        // log is on (folded into the next session's session.unclean event).
+        scCrash::g_onCrash = &sc::diag::writeWindowsCrash;
 #if JUCE_DEBUG
         scInvalidParam::install();  // symbolize CRT/_STL_VERIFY failures (debug only)
 #endif
@@ -190,26 +202,12 @@ public:
                 args.add (cur);
         }
 
-        // --measure_load_time: record startup phase timings in a log file.
-        // Must be armed before the Application ctor runs, since audio device
-        // initialisation is the dominant startup cost.
-        for (int i = 0; i < args.size(); ++i)
-            if (args[i] == "--measure_load_time")
-            {
-                const juce::File preferred = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
-                                                 .getParentDirectory()
-                                                 .getChildFile ("SpectroCraft_load_time.log");
-                const juce::File log = scStart::enable (preferred, SC_VERSION_STRING);
-                std::printf ("load-time measurement enabled, log: %s\n",
-                             log.getFullPathName().toRawUTF8());
-                std::fflush (stdout);
-            }
-
         // Audio files passed on the command line are collected here and
         // opened after the app is up - single-instance handling below may hand
         // them to a running instance instead.
         std::vector<juce::File> cliFiles;
         bool controlFlag = false;
+        bool diagFlag = false;
 
         // Headless JSON mode owns the whole command line (its options may
         // come in any order): see include/control/JsonCli.h.
@@ -852,7 +850,22 @@ public:
                               tmp.getChildFile ("SpectroCraftTests-openvino-cache").getFullPathName ().toRawUTF8 (), 0);
                 }
 #endif
+                // ctest gives each shard a log folder (tests/CMakeLists.txt):
+                // CI uploads it with the other test logs when a shard fails.
+                // No freeze watchdog: the tests block the message thread on purpose.
+                const juce::String diagDir = juce::SystemStats::getEnvironmentVariable ("SC_DIAG_LOG_DIR", {}).trim ();
+                if (diagDir.isNotEmpty ())
+                {
+                    sc::diag::Config dc;
+                    dc.folder = juce::File::getCurrentWorkingDirectory ().getChildFile (diagDir);
+                    dc.reason = "tests";
+                    dc.watchdog = false;
+                    dc.appVersion = SC_VERSION_STRING;
+                    sc::diag::start (dc);
+                }
                 const int rc = scRunUnitTests();
+                if (sc::diag::isRunning ())
+                    sc::diag::stop ();
                 std::cout << (rc == 0 ? "all unit tests passed\n" : "unit tests FAILED\n");
                 setApplicationReturnValue (rc == 0 ? 0 : 1);   // usable from scripts / CI
                 quit();
@@ -876,9 +889,9 @@ public:
                 quit();
                 return;
             }
-            else if (args[i] == "--measure_load_time")
+            else if (args[i] == "--diag-log")
             {
-                // handled before this loop
+                diagFlag = true;   // diagnostic log for this session (not saved)
             }
 #if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
             else if (args[i] == "--control")
@@ -938,6 +951,20 @@ public:
             setControlServer (true);
 #endif
 
+        // Diagnostic log (opt-in: Window > Diagnostic Log, --diag-log,
+        // SC_DIAG_LOG=1 or SC_DIAG_LOG_DIR).
+        mainWindow->onDiagToggled = [this] (bool on) { setDiagnostics (on, "setting"); };
+        {
+            const juce::String envOn = juce::SystemStats::getEnvironmentVariable ("SC_DIAG_LOG", {}).trim ();
+            const juce::String envDir = juce::SystemStats::getEnvironmentVariable ("SC_DIAG_LOG_DIR", {}).trim ();
+            const bool env = (envOn.isNotEmpty () && envOn != "0") || envDir.isNotEmpty ();
+            if (diagFlag || env || app->settings.diagLogEnabled)
+                setDiagnostics (true, diagFlag ? "flag" : env ? "env" : "setting");
+        }
+        // The "startup" event (phase timings) is posted once the window has
+        // been shown (MainWindow, scStart::report).
+        scStart::state.files = (int) cliFiles.size ();
+
         // Open the command-line files. Routing through MainWindow::openFile
         // gives large files their async load with a progress dialog, exactly
         // like File > Open.
@@ -947,13 +974,21 @@ public:
 
     void shutdown() override
     {
+        // The dispatch loop has ended: no heartbeat any more, so the freeze
+        // watchdog would take the teardown for a hang.
+        sc::diag::stopFreezeWatchdog ();
         // Control server first: in-flight requests get shutting_down and its
         // threads are joined while the window and documents still exist.
         if (controlServer != nullptr) controlServer->stop ();
         controlServer.reset ();
         if (forwarder != nullptr) forwarder->stopServer ();
+        // The diagnostic log keeps recording the teardown but stops asking
+        // the window and the documents (about to go) for samples.
+        sc::diag::setSampler (nullptr);
+        sc::diag::setHeaderProvider (nullptr);
         mainWindow.reset();
         app.reset();
+        sc::diag::stop ();   // session.end: a clean exit (no session.unclean next time)
         juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
         lookAndFeel.reset();
     }
@@ -1013,6 +1048,96 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<sc::singleinstance::Coordinator> forwarder;   // file-forwarding server
     std::unique_ptr<sc::control::ControlServer> controlServer;    // AI control (loopback)
+
+    // ---- Diagnostic log (src/Diagnostics.cpp) ------------------------------
+    juce::String lastAudioDev;
+    double lastAudioRate = 0.0;
+    int lastAudioBlock = 0, lastXruns = -1;
+
+    void setDiagnostics (bool on, const juce::String& reason)
+    {
+        if (!on)
+        {
+            sc::diag::stop ();
+            return;
+        }
+        sc::diag::Config c;
+        c.reason = reason;
+        c.appVersion = SC_VERSION_STRING;
+        const juce::String dirEnv = juce::SystemStats::getEnvironmentVariable ("SC_DIAG_LOG_DIR", {}).trim ();
+        if (dirEnv.isNotEmpty ())
+            c.folder = juce::File::getCurrentWorkingDirectory ().getChildFile (dirEnv);
+        sc::diag::setHeaderProvider ([this] (juce::DynamicObject& h) { describeForDiagnostics (h); });
+        sc::diag::setSampler ([this] (bool) { sampleAudioForDiagnostics (); });
+        lastAudioDev = {};
+        lastXruns = -1;
+        if (!sc::diag::start (c))
+            std::fprintf (stderr, "[diag] could not write the diagnostic log in %s\n",
+                          sc::diag::folder ().getFullPathName ().toRawUTF8 ());
+    }
+
+    // Extra session.start fields: the state a reader needs to understand the
+    // events (no user name, no machine name).
+    void describeForDiagnostics (juce::DynamicObject& h)
+    {
+        if (app != nullptr)
+        {
+            h.setProperty ("docs", app->numDocs ());
+            h.setProperty ("fft", app->settings.fftSize);
+            h.setProperty ("aiControl", app->settings.controlEnabled);
+            h.setProperty ("multiInstance", app->settings.allowMultipleInstances);
+            h.setProperty ("audioOutput", Application::audioOutputDisabled () ? "disabled" : "default device");
+        }
+        if (mainWindow != nullptr)
+        {
+            const auto& ws = mainWindow->workspaces ();
+            const auto* e = ws.find (ws.activeId ());
+            h.setProperty ("ws", e != nullptr ? e->name : ws.activeId ());
+            h.setProperty ("floating", mainWindow->dockManager ().numFloatingWindows ());
+        }
+       #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+        h.setProperty ("aiBuild", true);
+       #else
+        h.setProperty ("aiBuild", false);
+       #endif
+    }
+
+    // Once a second (message thread): audio device changes, dropouts (xruns)
+    // and the callback load while playing. Never touches the audio thread.
+    void sampleAudioForDiagnostics ()
+    {
+        if (app == nullptr || !app->audioDeviceReady () || app->audioDevice == nullptr)
+            return;
+        auto* dev = app->audioDevice->getCurrentAudioDevice ();
+        if (dev == nullptr)
+            return;
+        const juce::String name = dev->getName ();
+        const double rate = dev->getCurrentSampleRate ();
+        const int block = dev->getCurrentBufferSizeSamples ();
+        const int xruns = dev->getXRunCount ();   // -1: not reported by this driver
+        if (name != lastAudioDev || juce::roundToInt (rate) != juce::roundToInt (lastAudioRate) || block != lastAudioBlock)
+        {
+            lastAudioDev = name;
+            lastAudioRate = rate;
+            lastAudioBlock = block;
+            lastXruns = xruns;
+            sc::diag::event ("audio.device", sc::diag::Level::info,
+                             { { "dev", name }, { "type", dev->getTypeName () }, { "sr", rate }, { "block", block },
+                               { "out", dev->getActiveOutputChannels ().countNumberOfSetBits () },
+                               { "latencyMs", juce::roundToInt (1000.0 * dev->getOutputLatencyInSamples () / juce::jmax (1.0, rate)) },
+                               { "xruns", xruns >= 0 ? juce::var ("reported") : juce::var ("not reported") } });
+            return;
+        }
+        const double load = app->audioDevice->getCpuUsage ();
+        const bool playing = app->audioEngine ().isPlaying ();
+        if (xruns >= 0 && lastXruns >= 0 && xruns > lastXruns)
+            sc::diag::event ("audio.xrun", sc::diag::Level::warn,
+                             { { "n", xruns - lastXruns }, { "total", xruns }, { "block", block }, { "sr", rate },
+                               { "load", std::round (load * 1000.0) / 1000.0 }, { "playing", playing } });
+        lastXruns = xruns;
+        if (playing)
+            sc::diag::recordAudioLoad (load);
+    }
 
     void setControlServer (bool on)
     {

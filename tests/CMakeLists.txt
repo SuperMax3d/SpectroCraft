@@ -25,6 +25,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/SpectralView.cpp
         ${CMAKE_SOURCE_DIR}/src/Panels.cpp
         ${CMAKE_SOURCE_DIR}/src/Docking.cpp       # Adobe-style docking workspace
+        ${CMAKE_SOURCE_DIR}/src/Diagnostics.cpp   # opt-in diagnostic log
         ${CMAKE_SOURCE_DIR}/src/ScrollBars.cpp
         ${CMAKE_SOURCE_DIR}/src/VideoWindow.cpp   # Video window (picture follows the playhead)
         ${CMAKE_SOURCE_DIR}/src/MainWindow.cpp
@@ -230,11 +231,17 @@ set_tests_properties (unit_tests_claims_reset PROPERTIES FIXTURES_SETUP sc_claim
 set_tests_properties (unit_tests_claims_mkdir PROPERTIES FIXTURES_SETUP sc_claims
                                                          FIXTURES_REQUIRED sc_claims_clean)
 
+# Diagnostic log of each shard (docs/diagnostics.md): crashes, killed threads,
+# alerts and the commands before them. Under Testing/Temporary so CI uploads
+# it with the other test logs when a shard fails.
+set (SC_TEST_DIAG_DIR "${CMAKE_BINARY_DIR}/Testing/Temporary/diag")
+
 math (EXPR SC_LAST_SHARD "${SC_TEST_SHARDS} - 1")
 foreach (k RANGE 0 ${SC_LAST_SHARD})
     set (env ${SC_TEST_ENV_COMMON}
         "SC_TEST_SHARD=${k}/${SC_TEST_SHARDS}"
-        "SC_TEST_CLAIM_DIR=${SC_TEST_CLAIM_DIR}")
+        "SC_TEST_CLAIM_DIR=${SC_TEST_CLAIM_DIR}"
+        "SC_DIAG_LOG_DIR=${SC_TEST_DIAG_DIR}/shard${k}")
     if (NOT k EQUAL 0)
         # Only shard 0 (which runs the serial tests, including the ones that
         # need a real output device) may open the audio device.
@@ -269,7 +276,7 @@ endforeach()
 # Opt-in so a plain `ctest -j` does not run everything twice.
 option (SC_TEST_REGISTER_SERIAL "Also register unit_tests_serial (whole suite, one process)" OFF)
 if (SC_TEST_REGISTER_SERIAL)
-set (serial_env ${SC_TEST_ENV_COMMON})
+set (serial_env ${SC_TEST_ENV_COMMON} "SC_DIAG_LOG_DIR=${SC_TEST_DIAG_DIR}/serial")
 if (NOT WIN32)
     set (home "${CMAKE_CURRENT_BINARY_DIR}/test-home/serial")
     file (MAKE_DIRECTORY "${home}")

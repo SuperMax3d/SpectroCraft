@@ -109,6 +109,11 @@ struct Settings
     // the loopback control server at launch. Off by default (opt-in).
     bool controlEnabled = false;
 
+    // Diagnostic log (Window > Diagnostic Log),
+    // persisted: local JSON Lines file of errors, freezes and slow operations
+    // (src/Diagnostics.cpp, docs/diagnostics.md). Off by default (opt-in).
+    bool diagLogEnabled = false;
+
     // Track axis placement (View menu), persisted between sessions:
     // the vertical axis can sit on the right and the time ruler at the
     // bottom of both track views instead of their default left/top spots.
@@ -198,6 +203,7 @@ struct Settings
             && fftTrack == o.fftTrack
             && allowMultipleInstances == o.allowMultipleInstances
             && controlEnabled == o.controlEnabled
+            && diagLogEnabled == o.diagLogEnabled
             && trackAxisOnRight == o.trackAxisOnRight
             && trackRulerAtBottom == o.trackRulerAtBottom
             && showAmpGrid == o.showAmpGrid

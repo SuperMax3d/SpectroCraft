@@ -231,7 +231,7 @@ int runJsonCli (const juce::StringArray& args)
         else if (a == "--use-user-settings") userSettings = true;
         else if (a == "--list-commands")     listCommands = true;
         else if (a == "--markdown")          markdown = true;
-        else if (a.startsWith ("--") && a != "--measure_load_time")
+        else if (a.startsWith ("--"))
         {
             std::cerr << "unknown flag " << a << " in --json mode\n";
             return 2;

@@ -32,6 +32,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/Actions.cpp     # recorded actions (record/replay/batch)
         ${CMAKE_CURRENT_SOURCE_DIR}/Panels.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Docking.cpp       # Adobe-style docking workspace (panel groups, floating windows)
+        ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics.cpp   # opt-in diagnostic log for AI-assisted support
         ${CMAKE_CURRENT_SOURCE_DIR}/ScrollBars.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoWindow.cpp   # Video window (picture follows the playhead)
         ${CMAKE_CURRENT_SOURCE_DIR}/MainWindow.cpp

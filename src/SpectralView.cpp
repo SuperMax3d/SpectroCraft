@@ -7,6 +7,7 @@
  */
 
 #include "SpectralView.h"
+#include "Diagnostics.h"
 #include "WaveformView.h"   // niceTimeStep / formatTimeTickLabel (shared ruler style)
 #include "AudioEngine.h"
 #include "MarkerManager.h"
@@ -1339,6 +1340,7 @@ void SpectralView::zoomFreqAtY (float y, double factor)
 
 void SpectralView::paint (juce::Graphics& g)
 {
+    sc::diag::ScopedPaint diagPaint ("spectral", getWidth(), getHeight());   // paint.slow above 50 ms
     const auto bounds = getLocalBounds();
     g.fillAll (juce::Colours::black);
 

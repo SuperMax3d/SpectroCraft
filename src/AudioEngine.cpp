@@ -3,6 +3,7 @@
  */
 
 #include "AudioEngine.h"
+#include "Diagnostics.h"
 #include "FilterEQ.h"
 #include "TimeStretch.h"
 #include "VideoAudio.h"
@@ -2485,6 +2486,26 @@ bool AudioEngine::commitSavedFile (const juce::TemporaryFile& temp, const juce::
 }
 
 bool AudioEngine::saveFile (const juce::File& file) const
+{
+    // Diagnostic log: every save (Save, Save As, export through the engine)
+    // ends here; the path is written in clear (internal use).
+    const double diagT0 = sc::diag::enabled() ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+    const bool ok = saveFileImpl (file);
+    if (diagT0 > 0.0)
+    {
+        const double ms = juce::Time::getMillisecondCounterHiRes() - diagT0;
+        sc::diag::event ("file.save", !ok ? sc::diag::Level::error
+                                      : ms > 5000.0 ? sc::diag::Level::warn : sc::diag::Level::info,
+                         { { "path", file.getFullPathName() },
+                           { "fmt", file.getFileExtension().trimCharactersAtStart (".").toLowerCase() },
+                           { "ok", ok }, { "ch", nchans },
+                           { "sizeMb", ok ? juce::var (std::round ((double) file.getSize() / (1024.0 * 102.4)) / 10.0) : juce::var() },
+                           { "durMs", juce::roundToInt (ms) } });
+    }
+    return ok;
+}
+
+bool AudioEngine::saveFileImpl (const juce::File& file) const
 {
     if (!hasFile)
         return false;

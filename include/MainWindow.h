@@ -178,6 +178,7 @@ public:
     /** Time under the mouse over a view, -1 when outside (tests). */
     double videoHoverTimeNow() const noexcept { return videoHoverTime; }
     juce::String statusBarFileName() const;   // name currently shown in the footer
+    bool statusBarShowsDiagLog() const;        // footer "Diagnostic log" indicator
     // The status-bar tool indicator: active spectral selection tool name,
     // overridden by Clone & Multiply picking and Move/Scale gesture hints;
     // while a shape-drawing tool is active, holding SHIFT appends "Add
@@ -254,6 +255,33 @@ public:
     void requestQuit (bool discardUnsaved) override;
     /** Window > Allow AI control toggled: Main.cpp starts/stops the server. */
     std::function<void (bool)> onControlToggled;
+    /** Window > Diagnostic Log toggled (after the setting was
+        saved): Main.cpp starts/stops the log (src/Diagnostics.cpp). */
+    std::function<void (bool)> onDiagToggled;
+    /** Turns the diagnostic log on (after explaining what it records, unless
+        headless) or off, and persists the choice. */
+    void toggleDiagnosticLog();
+    /** A link showing the folder's path; a click opens the folder (created
+        first) in the Finder / Explorer. */
+    static std::unique_ptr<juce::HyperlinkButton> makeDiagFolderLink (const juce::File& folder);
+    /** The dialog toggleDiagnosticLog() shows first: what is recorded, the
+        folder link, Turn On / Cancel. The link outlives the window (the
+        AlertWindow does not own its custom components). */
+    struct DiagLogDialog
+    {
+        std::unique_ptr<juce::HyperlinkButton> link;   // declared first: destroyed last
+        std::unique_ptr<juce::AlertWindow> window;
+    };
+    static DiagLogDialog makeDiagLogDialog (juce::Component* centreAround);
+    static const juce::String kDiagLogDialogText;
+    /** Help > Create Support Bundle...: lists the files, asks where to save
+        the zip. writeSupportBundleTo() is the part without dialogs. */
+    void showSupportBundleDialog();
+    bool writeSupportBundleTo (const juce::File& zip, juce::String* error = nullptr);
+    /** Help > Copy Diagnostic Summary: markdown (<= 30 KB) to the clipboard. */
+    void copyDiagnosticSummary();
+    /** "<Menu> > <item text>" of a menu bar item, for the diagnostic log. */
+    juce::String menuItemDescription (int menuItemID, int topLevelMenuIndex);
     /** Status text of the control server for the menu tooltip / status bar. */
     int controlClients() const { return controlClients_; }
     /** Set by Main.cpp while the control server runs (journal polling). */
@@ -606,6 +634,7 @@ public:
         WindowAllowControl = 6701,    // Window menu: "Allow AI control (localhost)" toggle
         WindowVideo = 6702,           // Window menu: show / hide the Video window
         WindowVideoFollowHover = 6703,// Window menu: "Video Follows Mouse Hover" toggle
+        WindowDiagLog = 6704,         // Window menu: "Diagnostic Log" toggle
         WindowWorkspaceBase = 6600,   // Window > Workspaces: switch to workspace i (up to 48)
         WindowWsReset = 6650,         // Window > Workspaces > Reset to Saved Layout
         WindowWsSaveChanges = 6651,   // ... > Save Changes to this Workspace
@@ -614,6 +643,9 @@ public:
         WindowWsDelete = 6654,        // ... > Delete Workspace
         WindowMaximizeGroup = 6655,   // Window > Maximize Panel Group (`)
         HelpAbout = 6000,
+        HelpOpenDiagFolder = 6010,    // Help > Open Diagnostic Log Folder
+        HelpCopyDiagSummary = 6011,   // Help > Copy Diagnostic Summary
+        HelpSupportBundle = 6012,     // Help > Create Support Bundle...
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
         RecentBase = 9000,     // File > Open Recent items: RecentBase + index

@@ -4,7 +4,9 @@
 
 #include "FileDoc.h"
 #include "VideoFrames.h"   // isVideoPictureCandidate
+#include "Diagnostics.h"
 #include <atomic>
+#include <cmath>
 
 static int nextFileDocId ()
 {
@@ -27,11 +29,26 @@ FileDoc::FileDoc() : id (nextFileDocId ())
     markers.onChange = [this] { metaDirty = true; };
 }
 
+static double diagMb (juce::int64 bytes) { return std::round ((double) bytes / (1024.0 * 102.4)) / 10.0; }
+
 bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
                     const std::atomic<bool>* cancel)
 {
+    // Diagnostic log: the path is written once here (doc.open), later events
+    // refer to the document id.
+    const double diagT0 = sc::diag::enabled() ? juce::Time::getMillisecondCounterHiRes() : 0.0;
     if (!engine.loadFile (f, onProgress, cancel))
+    {
+        if (diagT0 > 0.0)
+        {
+            const bool cancelled = cancel != nullptr && cancel->load();
+            sc::diag::event ("file.load", cancelled ? sc::diag::Level::info : sc::diag::Level::error,
+                             { { "path", f.getFullPathName() }, { "ok", false }, { "cancelled", cancelled },
+                               { "exists", f.existsAsFile() }, { "sizeMb", diagMb (f.getSize()) },
+                               { "durMs", juce::roundToInt (juce::Time::getMillisecondCounterHiRes() - diagT0) } });
+        }
         return false;
+    }
 
     file = f;
     name = f.getFileName();
@@ -184,6 +201,20 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
     // The restore() calls above fired the marker onChange hook while loading;
     // a freshly loaded document matches its own disk state, so start clean.
     metaDirty = false;
+
+    if (diagT0 > 0.0)
+    {
+        const double ms = juce::Time::getMillisecondCounterHiRes() - diagT0;
+        sc::diag::event ("doc.open", ms > 5000.0 ? sc::diag::Level::warn : sc::diag::Level::info,
+                         { { "doc", id }, { "path", f.getFullPathName() },
+                           { "fmt", f.getFileExtension().trimCharactersAtStart (".").toLowerCase() },
+                           { "ch", engine.numChannels() }, { "sr", engine.sampleRate() },
+                           { "durS", std::round (engine.duration() * 10.0) / 10.0 },
+                           { "sizeMb", diagMb (f.getSize()) },
+                           { "mode", juce::String (engine.fullyInMemory() ? "memory" : "stream") },
+                           { "meta", juce::String (metaMode == sc::MetaMode::External ? "external" : "embedded") },
+                           { "video", videoFile != juce::File() }, { "durMs", juce::roundToInt (ms) } });
+    }
     return true;
 }
 

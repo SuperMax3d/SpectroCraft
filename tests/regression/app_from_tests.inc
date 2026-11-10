@@ -296,37 +296,6 @@ static void testAppRegNoAudioDeviceSwitch()
     else        appRegSetEnv ("SC_NO_AUDIO_DEVICE", nullptr);
 }
 
-/** --measure_load_time: the fallback log folder (used when the preferred
-    path is not writable) was hard-wired to the user's app-data folder, so the
-    test of that path had to back up and restore the user's real log. It can
-    now be injected (enable()'s fallbackDir argument, or SC_STARTUP_TRACE_DIR). */
-static void testAppRegStartupTraceFallbackDir()
-{
-    progress ("regression app-from-tests: startup trace fallback folder is injectable");
-    const auto savedState = scStart::state;
-    const juce::File dir = scTestTempDir ().getChildFile ("reg_t4_trace_fallback");
-    dir.deleteRecursively ();
-    CHECK (dir.createDirectory ().wasOk (), "trace fallback: temp folder created");
-    const juce::File bad = scTestTempDir ().getChildFile ("reg_t4_no_such_dir").getChildFile ("trace.log");
-
-    const juce::File used = scStart::enable (bad, nullptr, dir);
-    CHECK (used == dir.getChildFile ("SpectroCraft_load_time.log"), "trace fallback: explicit folder used");
-    CHECK (used == scStart::fallbackLogFile (dir), "trace fallback: fallbackLogFile names the same file");
-    CHECK (used.loadFileAsString ().contains ("==== SpectroCraft load-time measurement ===="),
-           "trace fallback: header written to the injected folder");
-    scStart::disable ();
-
-    const juce::String oldEnv = juce::SystemStats::getEnvironmentVariable ("SC_STARTUP_TRACE_DIR", "\x01");
-    appRegSetEnv ("SC_STARTUP_TRACE_DIR", dir.getFullPathName ().toRawUTF8 ());
-    CHECK (scStart::fallbackLogFile () == dir.getChildFile ("SpectroCraft_load_time.log"),
-           "trace fallback: SC_STARTUP_TRACE_DIR selects the folder");
-    if (oldEnv != "\x01") appRegSetEnv ("SC_STARTUP_TRACE_DIR", oldEnv.toRawUTF8 ());
-    else                  appRegSetEnv ("SC_STARTUP_TRACE_DIR", nullptr);
-
-    scStart::state = savedState;
-    dir.deleteRecursively ();
-}
-
 static void runRegression_app_from_tests()
 {
     testAppRegReadSamplesAtEnd ();
@@ -336,5 +305,4 @@ static void runRegression_app_from_tests()
     testAppRegStemSepRowsDeleted ();
     testAppRegOwningAlertWindow ();
     testAppRegNoAudioDeviceSwitch ();
-    testAppRegStartupTraceFallbackDir ();
 }

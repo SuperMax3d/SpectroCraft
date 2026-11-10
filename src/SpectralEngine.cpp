@@ -15,6 +15,7 @@
 
 #include "SpectralEngine.h"
 #include "Settings.h"
+#include "Diagnostics.h"
 #include "PngWriter.h"
 #include "FFTHelpers.h"
 #include <algorithm>
@@ -375,6 +376,12 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
         }
     }
 
+    // Diagnostic log: cache hits, and the time this call spends computing
+    // its misses (lock-free counters, aggregated per minute).
+    const double diagT0 = sc::diag::enabled() ? juce::Time::getMillisecondCounterHiRes() : 0.0;
+    if (diagT0 > 0.0 && w->chunks.empty())
+        sc::diag::recordTiles (0.0, 0, (int) jobs.size(), s.fftSize);
+
     // Compute all chunks in parallel (disjoint frame ranges -> no data locks).
     if (!w->chunks.empty())
     {
@@ -413,6 +420,9 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
         work();
         if (w->done.load() < (int) w->chunks.size())
             w->finished.wait (-1);
+        if (diagT0 > 0.0)
+            sc::diag::recordTiles (juce::Time::getMillisecondCounterHiRes() - diagT0, (int) w->missTiles.size(),
+                                   (int) (jobs.size() - w->missTiles.size()), s.fftSize);
 
         // Publish completed tiles into the cache and link them to their jobs.
         // If cancelled while computing, do NOT publish: the tiles may be

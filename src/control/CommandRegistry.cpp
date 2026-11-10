@@ -417,6 +417,7 @@ CommandRegistry::CommandRegistry()
     registerMeasureCommands (*this);
     registerEditCommands (*this);
     registerPythonCommands (*this);
+    registerDiagCommands (*this);
 }
 
 void CommandRegistry::add (Spec s)
@@ -730,6 +731,7 @@ juce::var CommandRegistry::invoke (Application& app, const Request& req, const I
     {
         DocSwitch sw (app, (spec->flags & NoDocSwitch) ? nullptr : target);
         docSwitched = sw.didSwitch();
+        sc::diag::ScopedActivity activity ("cmd " + spec->id);
         sc::alert::ScopedCapture capture;
         // Patches recorded by the handler carry this command, its params and client.
         sc::undoctx::Scoped opScope (sc::undoctx::Op { spec->id, sanitizedParams (params), opts.source });
