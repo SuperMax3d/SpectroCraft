@@ -21,6 +21,7 @@ class StemSeparationWindow;   // defined in StemSeparation.h
 class VideoWindow;            // defined in VideoWindow.h
 class VideoDockHost;          // defined in VideoWindow.h
 class SuperResolutionWindow;  // defined in SuperResolution.h
+namespace sc { struct VideoAudioInfo; }   // defined in VideoAudio.h
 
 /** Content of the "Content Aware Time Scale" dialog: a mode drop-down
     (Time Stretch / Reduce Gaps) plus the fields for the selected mode. The
@@ -125,6 +126,28 @@ public:
 
     void openFile (const juce::File& file);   // routes large files to the async path
     void openFileWithProgress (const juce::File& file);  // background load + progress dialog
+
+    // ---- Large videos: "Extract Audio Only" ----
+    // Opening a video bigger than largeVideoBytes from the interface (File >
+    // Open, drag & drop, Open Recent, command line) asks first: extract only
+    // its audio into a WAV file and open that, open the video as usual, or
+    // cancel. AI control (doc.open) never asks.
+    enum class LargeVideoChoice { extractAudio, openVideo, cancel };
+    /** 200 MB, the size from which files load with a progress dialog. Tests
+        lower it. */
+    juce::int64 largeVideoBytes = 200ll * 1024 * 1024;
+    /** True for a file that gets the question: a video (an extension that
+        can carry a picture) whose audio this build reads, bigger than minBytes. */
+    static bool isLargeVideo (const juce::File& file, juce::int64 minBytes);
+    /** Replaces the question dialog (tests). Unset and headless: openVideo,
+        i.e. the behaviour without the question. */
+    std::function<LargeVideoChoice (const juce::File& video, const sc::VideoAudioInfo& audio)> askLargeVideo;
+    /** Replaces the save dialog that picks the WAV file (tests). An empty
+        File cancels. */
+    std::function<juce::File (const juce::File& suggested)> chooseExtractedAudioFile;
+    /** Writes the audio of `video` into `wav` on a worker thread, then opens
+        the WAV file, under one progress dialog with Cancel. */
+    void extractAudioThenOpen (const juce::File& video, const juce::File& wav);
     void runSaveAsync (const juce::File& file, bool saveAs);      // background save + dialog
     void exportSpectralAsync (const juce::File& file,
                               const SpectralView::SpectralExportOptions& opts = {});
@@ -608,6 +631,11 @@ public:
 
 private:
     Application& app;
+
+    /** openFile() for a large video: asks, then extracts the audio or does
+        nothing. False when the file should be opened as usual. */
+    bool offerAudioOnly (const juce::File& video);
+    LargeVideoChoice showLargeVideoDialog (const juce::File& video, const sc::VideoAudioInfo& audio);
 
     juce::MenuBarComponent menuBar;
     std::unique_ptr<WaveformView> waveformView;

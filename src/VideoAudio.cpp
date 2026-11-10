@@ -5,6 +5,9 @@
 
 #include "VideoAudio.h"
 
+#include <algorithm>
+#include <memory>
+
 #if defined(SC_ENABLE_FFMPEG) && SC_ENABLE_FFMPEG
 
 extern "C" {
@@ -557,6 +560,118 @@ double videoSyncFine (const std::vector<float>& docWin, double docRate,
     }
 
     return best < 0.15 ? std::nan ("") : bestLag;
+}
+
+} // namespace sc
+
+// ---------------------------------------------------------------------------
+// "Extract Audio Only": a video's audio track written to a WAV file. Reads
+// through the same formats as AudioEngine (native ones first, then the video
+// containers), so the WAV holds exactly what opening the video would show.
+
+namespace sc {
+
+namespace
+{
+std::unique_ptr<juce::AudioFormatReader> openVideoAudioReader (const juce::File& video)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    registerVideoFormats (fm);
+    std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (video));
+    if (r != nullptr && (r->numChannels == 0 || r->sampleRate <= 0.0))
+        r.reset();
+    return r;
+}
+} // namespace
+
+bool probeVideoAudio (const juce::File& video, VideoAudioInfo& out)
+{
+    out = {};
+    const auto r = openVideoAudioReader (video);
+    if (r == nullptr || r->lengthInSamples <= 0)
+        return false;
+    out.channels = (int) r->numChannels;
+    out.sampleRate = r->sampleRate;
+    out.frames = r->lengthInSamples;
+    return true;
+}
+
+bool extractAudioToWav (const juce::File& video, const juce::File& wav,
+                        std::function<void (float)> onProgress,
+                        const std::atomic<bool>* cancel, juce::String* error)
+{
+    const auto fail = [error] (const juce::String& why)
+    {
+        if (error != nullptr) *error = why;
+        return false;
+    };
+
+    const auto reader = openVideoAudioReader (video);
+    if (reader == nullptr)
+        return fail ("SpectroCraft cannot read an audio track in " + video.getFileName() + ".");
+    const int numChannels = (int) reader->numChannels;
+    const juce::int64 total = reader->lengthInSamples;
+    if (total <= 0)
+        return fail ("The audio track of " + video.getFileName() + " is empty.");
+
+    const juce::File folder = wav.getParentDirectory();
+    if (! folder.isDirectory())
+        return fail ("The folder " + folder.getFullPathName() + " does not exist.");
+
+    // Next to the target (same volume: the final move is a rename) and hidden,
+    // like the engine's own saves. Deleted by its destructor unless moved.
+    juce::TemporaryFile temp (wav, juce::TemporaryFile::useHiddenFile);
+    auto fileStream = std::make_unique<juce::FileOutputStream> (temp.getFile());
+    if (fileStream->failedToOpen())
+        return fail ("Cannot write in " + folder.getFullPathName()
+                     + ". Check that the folder is writable.");
+    std::unique_ptr<juce::OutputStream> stream (std::move (fileStream));   // the writer takes it
+
+    juce::WavAudioFormat wavFormat;
+    const auto options = juce::AudioFormatWriterOptions {}
+                             .withSampleRate (reader->sampleRate)
+                             .withNumChannels (numChannels)
+                             .withBitsPerSample (32)
+                             .withSampleFormat (juce::AudioFormatWriterOptions::SampleFormat::floatingPoint);
+    auto writer = wavFormat.createWriterFor (stream, options);
+    if (writer == nullptr)
+        return fail ("Cannot create a WAV file for " + juce::String (numChannels)
+                     + " channels at " + juce::String (reader->sampleRate) + " Hz.");
+
+    // ~5 s per block at 48 kHz: fine-grained progress and cancel, and the
+    // FFmpeg reader's per-call seek costs nothing next to the block.
+    constexpr int kBlock = 1 << 18;
+    juce::AudioBuffer<float> block (numChannels, kBlock);
+    for (juce::int64 pos = 0; pos < total; pos += kBlock)
+    {
+        if (cancel != nullptr && cancel->load())
+            return fail ("Cancelled.");
+        const int n = (int) std::min<juce::int64> (kBlock, total - pos);
+        if (! reader->read (&block, 0, n, pos, true, true))
+            return fail ("Could not decode the audio of " + video.getFileName() + " at "
+                         + juce::String ((double) pos / reader->sampleRate, 1) + " s.");
+        if (! writer->writeFromAudioSampleBuffer (block, 0, n))
+            return fail ("Could not write " + wav.getFileName() + ". Is the disk full?");
+        if (onProgress)
+            onProgress ((float) ((double) (pos + n) / (double) total));
+    }
+
+    // The writer completes the header (RIFF or RF64) when it is destroyed and
+    // does not report errors there: read the file back before it replaces
+    // the target.
+    writer.reset();
+    {
+        std::unique_ptr<juce::AudioFormatReader> check (
+            wavFormat.createReaderFor (temp.getFile().createInputStream().release(), true));
+        if (check == nullptr || (int) check->numChannels != numChannels
+            || check->lengthInSamples != total)
+            return fail ("The WAV file was not written completely. Is the disk full?");
+    }
+    if (! temp.overwriteTargetFileWithTemporary())
+        return fail ("Could not replace " + wav.getFullPathName()
+                     + ". Is it open in another program?");
+    return true;
 }
 
 } // namespace sc

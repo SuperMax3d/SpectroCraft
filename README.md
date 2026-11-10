@@ -814,6 +814,25 @@ SpectroCraft opens video files as their audio: the first audio stream is
 decoded and treated as a normal audio file (spectrogram, edits, saving), and
 the picture is shown in the **Video window** (below).
 
+### Large videos: Extract Audio Only
+
+Opening a video **larger than 200 MB** (*File > Open*, drag & drop, *Open
+Recent*, the command line) first asks what to do. The question gives the
+audio track's length, channels and sample rate, and the size of the WAV file:
+
+- **Extract Audio Only…** saves the audio track as a WAV file (32-bit float,
+  the decoded samples unchanged, like *Save As* WAV) and opens that file
+  instead, without the picture. A save dialog picks the file; it suggests the
+  video's name next to the video, or the Music folder when that folder is
+  read-only. One progress dialog covers the extraction and the opening;
+  cancelling the extraction leaves no partial file. The video is not changed.
+- **Open Video** opens it as usual, with its picture.
+- **Cancel** opens nothing.
+
+The WAV file opens and reads faster than the video (no compressed audio to
+decode on every jump), which matters for long recordings. Opening a video
+through AI control (`doc.open`) never asks.
+
 ### Video window
 
 Opening a video file opens a separate, resizable **Video** window (Windows,

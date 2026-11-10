@@ -2011,6 +2011,10 @@ void MainWindow::openFile (const juce::File& file)
         if (app.docs[(size_t) i]->file == file)
         { app.activate (i); return; }
 
+    // A large video: offer to open only its audio, extracted into a WAV file.
+    if (isLargeVideo (file, largeVideoBytes) && offerAudioOnly (file))
+        return;
+
     if (file.getSize() > kLargeFileBytes)
     {
         openFileWithProgress (file);
@@ -3232,6 +3236,190 @@ void MainWindow::handleFileOpen()
 
     if (chooser.browseForFileToOpen())
         openFile (chooser.getResult());
+}
+
+// ---- Large videos: "Extract Audio Only" ------------------------------------
+
+bool MainWindow::isLargeVideo (const juce::File& file, juce::int64 minBytes)
+{
+    if (! sc::isVideoPictureCandidate (file))
+        return false;
+    // Only containers whose audio this build reads (Windows has a picture
+    // decoder for .m4v but no FFmpeg audio entry for it; Linux has neither).
+    static const juce::StringArray readable =
+        juce::StringArray::fromTokens (sc::videoContainerExtensions(), " ", "");
+    return readable.contains (file.getFileExtension().toLowerCase()) && file.getSize() > minBytes;
+}
+
+// "1 h 05 min", "4 min 07 s", "12 s"
+static juce::String describeDuration (double secs)
+{
+    const int s = juce::jmax (1, juce::roundToInt (secs));
+    if (s >= 3600)
+        return juce::String (s / 3600) + " h " + juce::String ((s % 3600) / 60).paddedLeft ('0', 2) + " min";
+    if (s >= 60)
+        return juce::String (s / 60) + " min " + juce::String (s % 60).paddedLeft ('0', 2) + " s";
+    return juce::String (s) + " s";
+}
+
+// "1 h 32 min, stereo, 48 kHz"
+static juce::String describeVideoAudio (const sc::VideoAudioInfo& a)
+{
+    const juce::String channels = a.channels == 1 ? juce::String ("mono")
+                                : a.channels == 2 ? juce::String ("stereo")
+                                                  : juce::String (a.channels) + " channels";
+    const double khz = a.sampleRate / 1000.0;
+    const juce::String rate = std::abs (khz - std::round (khz)) < 0.05 ? juce::String (juce::roundToInt (khz))
+                                                                       : juce::String (khz, 1);
+    return describeDuration (a.durationSecs()) + ", " + channels + ", " + rate + " kHz";
+}
+
+MainWindow::LargeVideoChoice MainWindow::showLargeVideoDialog (const juce::File& video,
+                                                               const sc::VideoAudioInfo& audio)
+{
+    juce::AlertWindow dlg ("Large Video",
+        "\"" + video.getFileName() + "\" is a large video file ("
+            + juce::File::descriptionOfSizeInBytes (video.getSize()) + ").\n\n"
+            "Extract Audio Only saves its audio (" + describeVideoAudio (audio)
+            + ") as a WAV file of about " + juce::File::descriptionOfSizeInBytes (audio.wavBytes())
+            + " and opens that file instead, without the picture. The video file is not changed.\n\n"
+              "Open Video opens it as usual, with its picture in the Video window.",
+        juce::MessageBoxIconType::QuestionIcon, this);
+    dlg.addButton ("Extract Audio Only...", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Open Video", 2);
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    dlg.toFront (true);
+    switch (dlg.runModalLoop())
+    {
+        case 1:  return LargeVideoChoice::extractAudio;
+        case 2:  return LargeVideoChoice::openVideo;
+        default: return LargeVideoChoice::cancel;
+    }
+}
+
+bool MainWindow::offerAudioOnly (const juce::File& video)
+{
+    sc::VideoAudioInfo audio;
+    if (! sc::probeVideoAudio (video, audio))
+        return false;   // no audio track this build reads: the normal open reports it
+
+    const LargeVideoChoice choice = askLargeVideo ? askLargeVideo (video, audio)
+                                  : sc::alert::isHeadless() ? LargeVideoChoice::openVideo
+                                                            : showLargeVideoDialog (video, audio);
+    if (choice == LargeVideoChoice::openVideo)
+        return false;
+    if (choice == LargeVideoChoice::cancel)
+        return true;
+
+    // Next to the video by default, under the same name (in Music when that
+    // folder is read-only: a mounted disc image, a network share...).
+    juce::File folder = video.getParentDirectory();
+    if (! folder.hasWriteAccess())
+        folder = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    const juce::File suggested = folder.getChildFile (video.getFileNameWithoutExtension() + ".wav");
+    juce::File wav;
+    if (chooseExtractedAudioFile)
+        wav = chooseExtractedAudioFile (suggested);
+    else if (! sc::alert::isHeadless())
+    {
+        juce::FileChooser chooser ("Save the Audio of " + video.getFileName() + " As",
+                                   suggested, "*.wav", kUseNativeFileChooser);
+        if (chooser.browseForFileToSave (true))
+            wav = chooser.getResult();
+    }
+    if (wav == juce::File())
+        return true;   // cancelled: nothing is opened
+
+    // The chooser asked before replacing the name as typed: a name typed
+    // without the extension gets it here, so that file needs asking too.
+    if (! wav.hasFileExtension ("wav"))
+    {
+        wav = wav.withFileExtension ("wav");
+        if (wav.existsAsFile() && ! sc::alert::isHeadless())
+        {
+            juce::AlertWindow ask ("Extract Audio Only",
+                                   wav.getFileName() + " already exists. Do you want to replace it?",
+                                   juce::MessageBoxIconType::QuestionIcon, this);
+            ask.addButton ("Replace", 1);
+            ask.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+            ask.toFront (true);   // or Windows may take the first click for an activation
+            if (ask.runModalLoop() != 1)
+                return true;
+        }
+    }
+
+    // Replacing a file a document reads from would pull it from under it.
+    for (const auto& d : app.docs)
+        if (d->file == wav)
+        {
+            sc::alert::showMessageBox (juce::MessageBoxIconType::WarningIcon, "Extract Audio Only",
+                                       wav.getFileName() + " is open in SpectroCraft. Close it first, "
+                                       "or choose another name.", "", this);
+            return true;
+        }
+
+    // The whole file is written next to the target before it replaces it.
+    const juce::int64 freeBytes = wav.getParentDirectory().getBytesFreeOnVolume();
+    const juce::int64 needed = audio.wavBytes() + 16ll * 1024 * 1024;
+    if (freeBytes > 0 && freeBytes < needed)
+    {
+        sc::alert::showMessageBox (juce::MessageBoxIconType::WarningIcon, "Extract Audio Only",
+            "Not enough free space for the WAV file: it needs about "
+                + juce::File::descriptionOfSizeInBytes (audio.wavBytes()) + ", and "
+                + juce::File::descriptionOfSizeInBytes (freeBytes) + " are free on that disk.",
+            "", this);
+        return true;
+    }
+
+    extractAudioThenOpen (video, wav);
+    return true;
+}
+
+void MainWindow::extractAudioThenOpen (const juce::File& video, const juce::File& wav)
+{
+    // One dialog for both halves: extract (worker thread below), then open
+    // the WAV file like any large file (Application::loadFileAsync). Cancel
+    // during the extraction leaves no WAV file; during the opening, the
+    // complete WAV file stays on disk.
+    auto* dlg = new WorkProgressDialog ("Extract Audio Only",
+                                        "Extracting the audio of " + video.getFileName() + " ...",
+                                        true, this);
+    dlg->beginModal();
+    juce::Component::SafePointer<MainWindow> self (this);
+
+    std::thread ([self, dlg, video, wav] {
+        juce::String err;
+        const bool ok = sc::extractAudioToWav (video, wav,
+            [dlg] (float frac) {
+                juce::MessageManager::callAsync ([dlg, frac] { dlg->setProgress ((double) frac); });
+            },
+            &dlg->cancelled, &err);
+
+        juce::MessageManager::callAsync ([self, dlg, ok, err, wav] {
+            if (self == nullptr || ! ok)
+            {
+                const bool cancelled = dlg->cancelled.load();
+                delete dlg;
+                if (self != nullptr && ! cancelled)
+                    sc::alert::showMessageBox (juce::MessageBoxIconType::WarningIcon,
+                                               "Extract Audio Only", err, "", self.getComponent());
+                return;
+            }
+            dlg->setStatusText ("Opening " + wav.getFileName() + " ...");
+            dlg->setProgress (0.0);
+            self->app.loadFileAsync (wav,
+                [dlg] (float frac) {
+                    juce::MessageManager::callAsync ([dlg, frac] { dlg->setProgress ((double) frac); });
+                },
+                [self, dlg, wav] (bool opened) {
+                    const bool cancelled = dlg->cancelled.load();
+                    delete dlg;
+                    if (! opened && ! cancelled && self != nullptr)
+                        self->showOpenFailed (wav);
+                },
+                &dlg->cancelled);
+        });
+    }).detach();
 }
 
 // Save on a background thread with a progress dialog so writing large files

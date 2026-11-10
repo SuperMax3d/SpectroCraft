@@ -15,6 +15,9 @@
 
 #include <JuceHeader.h>
 
+#include <atomic>
+#include <functional>
+
 namespace sc {
 
 #if defined(SC_ENABLE_FFMPEG) && SC_ENABLE_FFMPEG
@@ -34,6 +37,41 @@ void registerVideoFormats (juce::AudioFormatManager&);
     The File Open dialog and drag & drop use this so they always match what
     the engine can actually open. */
 const juce::String& videoContainerExtensions();
+
+// ---------------------------------------------------------------------------
+// "Extract Audio Only": the audio track of a (large) video written to a WAV
+// file, which is then opened instead of the video (MainWindow offers it when
+// a video bigger than 200 MB is opened). Platform-independent: it reads
+// through the same formats as the engine.
+
+/** The audio track of a video file, as SpectroCraft reads it. */
+struct VideoAudioInfo
+{
+    int channels = 0;
+    double sampleRate = 0.0;
+    juce::int64 frames = 0;
+
+    double durationSecs() const noexcept { return sampleRate > 0.0 ? (double) frames / sampleRate : 0.0; }
+    /** Size of the WAV file extractAudioToWav writes (32-bit float samples
+        plus a few KB of header). */
+    juce::int64 wavBytes() const noexcept { return frames * (juce::int64) channels * 4 + 4096; }
+};
+
+/** Reads the format of the file's audio track (opens it, decodes nothing
+    worth mentioning). False when this build cannot read its audio. */
+bool probeVideoAudio (const juce::File& video, VideoAudioInfo& out);
+
+/** Writes the audio track of `video` to `wav`: 32-bit float WAV (the decoded
+    samples unchanged; RF64 past 4 GB), the same format as Save As WAV. The
+    data goes to a temporary file next to `wav` that replaces it only once
+    complete: a failure or a cancel leaves no partial file and an existing
+    `wav` untouched. onProgress (0..1) is called from the calling thread;
+    run it on a worker thread. On failure *error says why ("Cancelled." for a
+    cancel). */
+bool extractAudioToWav (const juce::File& video, const juce::File& wav,
+                        std::function<void (float)> onProgress = nullptr,
+                        const std::atomic<bool>* cancel = nullptr,
+                        juce::String* error = nullptr);
 
 // ---------------------------------------------------------------------------
 // "Sync based on Audio": two-stage normalized cross-correlation of a video's

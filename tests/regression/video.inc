@@ -1157,6 +1157,189 @@ static void testVideoTrackMenuActions()
     cleanup ();
 }
 
+// "Extract Audio Only" (sc::extractAudioToWav): any file the engine reads,
+// written as a 32-bit float WAV through a temporary file. A WAV source runs
+// on every platform and spans several 2^18-frame blocks.
+static void testExtractAudioToWav()
+{
+    const juce::File dir = makeTempFile ("extract_audio");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    const auto filesIn = [&dir] { return dir.findChildFiles (juce::File::findFiles, false, "*").size(); };
+
+    const int64_t frames = 600000;   // 2 full blocks and a partial one
+    const auto value = [] (int ch, int64_t i, double) { return (float) ((i * 7 + ch * 13) % 2001 - 1000) / 1024.0f; };
+    const juce::File src = dir.getChildFile ("source.wav");
+    CHECK (writeWav (src, 2, 44100.0, frames, value), "extract audio: source written");
+
+    sc::VideoAudioInfo info;
+    CHECK (sc::probeVideoAudio (src, info) && info.channels == 2 && info.sampleRate == 44100.0
+               && info.frames == frames,
+           "extract audio: probe reads channels, rate and length");
+    CHECK (info.wavBytes() == frames * 2 * 4 + 4096 && std::abs (info.durationSecs() - frames / 44100.0) < 1e-9,
+           "extract audio: size and duration estimates");
+
+    const juce::File out = dir.getChildFile ("out.wav");
+    std::vector<float> progress;
+    juce::String err;
+    CHECK (sc::extractAudioToWav (src, out, [&progress] (float p) { progress.push_back (p); }, nullptr, &err),
+           "extract audio: written (" + err + ")");
+    CHECK (progress.size() == 3 && progress.front() > 0.0f && std::is_sorted (progress.begin(), progress.end())
+               && progress.back() == 1.0f,
+           "extract audio: progress once per block, rising to 1 (" + juce::String ((int) progress.size()) + " calls)");
+    CHECK (filesIn() == 2, "extract audio: no temporary file left next to the WAV");
+
+    {
+        juce::WavAudioFormat wavFormat;
+        std::unique_ptr<juce::AudioFormatReader> r (wavFormat.createReaderFor (out.createInputStream().release(), true));
+        CHECK (r != nullptr && r->usesFloatingPointData && r->bitsPerSample == 32 && r->numChannels == 2
+                   && r->sampleRate == 44100.0 && r->lengthInSamples == frames,
+               "extract audio: 32-bit float WAV, same channels, rate and length");
+        if (r != nullptr)
+        {
+            juce::AudioBuffer<float> all (2, (int) frames);
+            r->read (&all, 0, (int) frames, 0, true, true);
+            int bad = 0;
+            for (int ch = 0; ch < 2; ++ch)
+                for (int64_t i = 0; i < frames; ++i)
+                    if (all.getSample (ch, (int) i) != value (ch, i, 0.0)) ++bad;
+            CHECK (bad == 0, "extract audio: every sample unchanged, across the block boundaries ("
+                   + juce::String (bad) + " differ)");
+        }
+    }
+
+    // Cancel after the first block: an existing target is left as it was and
+    // no temporary file remains.
+    const juce::File keep = dir.getChildFile ("keep.wav");
+    CHECK (keep.replaceWithText ("previous content"), "extract audio: existing target written");
+    std::atomic<bool> cancel { false };
+    err.clear();
+    CHECK (!sc::extractAudioToWav (src, keep, [&cancel] (float) { cancel = true; }, &cancel, &err)
+               && err == "Cancelled.",
+           "extract audio: a cancel stops it (" + err + ")");
+    CHECK (keep.loadFileAsString() == "previous content" && filesIn() == 3,
+           "extract audio: after a cancel the target is untouched and no temporary file is left");
+
+    // What cannot work says why, and writes nothing.
+    const juce::File notAudio = dir.getChildFile ("not_audio.mp4");
+    notAudio.replaceWithText ("not a movie");
+    err.clear();
+    CHECK (!sc::extractAudioToWav (notAudio, dir.getChildFile ("x.wav"), nullptr, nullptr, &err)
+               && err.contains ("cannot read an audio track") && !dir.getChildFile ("x.wav").exists(),
+           "extract audio: an unreadable file is refused (" + err + ")");
+    CHECK (!sc::probeVideoAudio (notAudio, info) && info.channels == 0, "extract audio: probe fails on it too");
+    err.clear();
+    CHECK (!sc::extractAudioToWav (src, dir.getChildFile ("missing").getChildFile ("x.wav"), nullptr, nullptr, &err)
+               && err.contains ("does not exist"),
+           "extract audio: a missing folder is refused (" + err + ")");
+
+    dir.deleteRecursively();
+}
+
+// Opening a large video from the interface: the question, the save dialog and
+// the extracted WAV opened in place of the video (test hooks stand in for
+// both dialogs).
+static void testLargeVideoAudioOnly()
+{
+    if (!sc::videoDecodingAvailable() || !sc::videoContainerExtensions().contains (".mp4"))
+    {   scSkip ("large video: no .mp4 picture and audio support in this build"); return; }
+    const juce::File f = videoFixtureOrSkip();
+    if (!f.existsAsFile()) return;
+
+    const juce::File dir = makeTempFile ("large_video");
+    dir.deleteRecursively();
+    dir.createDirectory();
+
+    // Which files get the question: a video whose audio is read, bigger than
+    // the threshold.
+    CHECK (MainWindow::isLargeVideo (f, 0) && !MainWindow::isLargeVideo (f, f.getSize()),
+           "large video: the .mp4 fixture counts only when bigger than the threshold");
+    const juce::File plainWav = dir.getChildFile ("plain.wav");
+    writeWav (plainWav, 1, 48000.0, 4800, [] (int, int64_t, double) { return 0.0f; });
+    CHECK (!MainWindow::isLargeVideo (plainWav, 0), "large video: never for a WAV");
+    CHECK (!MainWindow::isLargeVideo (dir.getChildFile ("song.m4a"), 0), "large video: never for an audio-only container");
+
+    const juce::File store = makeTempFile ("large_video.recent");
+    store.deleteFile();
+    Application app (store);
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "large video test"));
+    CHECK (win->largeVideoBytes == 200ll * 1024 * 1024, "large video: 200 MB by default");
+
+    // The 2 s fixture is a small video: opened without a question.
+    int asked = 0;
+    sc::VideoAudioInfo seen;
+    auto answer = MainWindow::LargeVideoChoice::cancel;
+    win->askLargeVideo = [&] (const juce::File&, const sc::VideoAudioInfo& a) { ++asked; seen = a; return answer; };
+    win->openFile (f);
+    CHECK (asked == 0 && app.numDocs() == 1 && app.doc()->videoFile == f, "large video: a small video opens without asking");
+    app.closeDoc (0);
+
+    win->largeVideoBytes = 0;   // from here on the fixture counts as large
+
+    // Cancel: nothing opens. The question describes the audio track.
+    win->openFile (f);
+    CHECK (asked == 1 && app.numDocs() == 0, "large video: Cancel opens nothing");
+    CHECK (seen.channels == 1 && seen.sampleRate == 48000.0 && std::abs (seen.frames - 96000) <= 2048,
+           "large video: the question gets the audio track's format");
+
+    // Extract Audio Only, then the save dialog is cancelled: nothing opens,
+    // and the WAV was suggested next to the video under its name.
+    answer = MainWindow::LargeVideoChoice::extractAudio;
+    juce::File suggested;
+    win->chooseExtractedAudioFile = [&] (const juce::File& s) { suggested = s; return juce::File(); };
+    win->openFile (f);
+    CHECK (suggested == f.getSiblingFile (f.getFileNameWithoutExtension() + ".wav") && app.numDocs() == 0,
+           "large video: the WAV is suggested next to the video; cancelling the save dialog opens nothing");
+
+    // A file name typed without the extension gets .wav; the WAV opens in
+    // place of the video, without its picture.
+    const juce::File out = dir.getChildFile ("extracted.wav");
+    win->chooseExtractedAudioFile = [&] (const juce::File&) { return dir.getChildFile ("extracted"); };
+    win->openFile (f);
+    CHECK (scPumpUntil ([&] { return app.numDocs() == 1 && sc::WorkProgressDialog::numActive() == 0; }, 30000),
+           "large video: the extracted WAV opens");
+    const FileDoc* d = app.doc();
+    CHECK (d != nullptr && d->file == out && d->videoFile == juce::File() && out.existsAsFile(),
+           "large video: the document is the WAV file, with no picture");
+    CHECK (d != nullptr && d->engine.numChannels() == 1 && d->engine.sampleRate() == 48000.0
+               && d->engine.numSamples() == seen.frames,
+           "large video: the WAV holds the whole audio track");
+    CHECK (win->getVideoWindow() == nullptr || win->getVideoWindow()->getVideoFile() == juce::File(),
+           "large video: the Video window shows no picture for it");
+    CHECK (!app.recentFiles.empty() && app.recentFiles.front() == out, "large video: the WAV goes to Open Recent");
+
+    // Extracting onto the WAV that is open is refused (it would be replaced
+    // under its document).
+    sc::alert::clearSuppressedMessages();
+    win->chooseExtractedAudioFile = [&] (const juce::File&) { return out; };
+    win->openFile (f);
+    CHECK (app.numDocs() == 1 && sc::WorkProgressDialog::numActive() == 0
+               && sc::alert::suppressedMessages().joinIntoString ("\n").contains ("is open in SpectroCraft"),
+           "large video: not onto a WAV that is open");
+
+    // Open Video: the usual open, with the picture.
+    answer = MainWindow::LargeVideoChoice::openVideo;
+    win->openFile (f);
+    CHECK (app.numDocs() == 2 && app.doc()->file == f && app.doc()->videoFile == f,
+           "large video: Open Video opens it as before");
+
+    // Back to a video that is already open: no question.
+    asked = 0;
+    app.activate (0);
+    win->openFile (f);
+    CHECK (asked == 0 && app.doc()->file == f, "large video: switching back to an open video does not ask");
+
+    // No hook, headless: the video opens as it did before the question existed.
+    while (app.numDocs() > 0) app.closeDoc (0);
+    win->askLargeVideo = nullptr;
+    win->openFile (f);
+    CHECK (app.numDocs() == 1 && app.doc()->file == f, "large video: headless without an answer opens the video");
+
+    win.reset();
+    store.deleteFile();
+    dir.deleteRecursively();
+}
+
 static void runRegression_video()
 {
     testVideoDisplayTimeRule();
@@ -1165,6 +1348,8 @@ static void runRegression_video()
     testVideoDecoder4k();
     testVideoFramePump();
     testVideoMovieAudio();
+    testExtractAudioToWav();
+    testLargeVideoAudioOnly();
     testVideoViewLayout();
     testVideoWindowFollowsDocument();
     testVideoTracksPanelHeadless();
