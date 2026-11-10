@@ -51,7 +51,11 @@ namespace style
     juce::Typeface::Ptr semiboldTypeface();
     juce::Font uiFont (float height, bool semibold = false);
 
-    constexpr int kTabStripH   = 28;   // tab strip at the top of every panel group
+    constexpr int kTabStripH   = 30;   // tab strip at the top of every panel group
+    /** Tab titles, the workspace bar and the dragged panel's title. A JUCE
+        height (ascent + descent): a 12.1 px body in Source Sans 3, the size
+        of the popup menus. The strip keeps 7 px above and below the text. */
+    constexpr float kTabTextH  = 16.0f;
     constexpr int kGap         = 4;    // dark gap between groups (also a resizer)
     constexpr int kOuterMargin = 4;    // margin around a dock area
     constexpr int kMinGroupW   = 120;

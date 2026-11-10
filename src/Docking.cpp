@@ -448,7 +448,7 @@ public:
         }
 
         // Title as the active tab of the ghost.
-        const auto font = style::uiFont (14.0f);
+        const auto font = style::uiFont (style::kTabTextH);
         g.setFont (font);
         g.setColour (style::tabTextActive);
         const auto strip = juce::Rectangle<float> (b.getX() + 10.0f, b.getY(), b.getWidth() - 20.0f, stripH);
@@ -569,7 +569,7 @@ void GroupComponent::layoutTabs()
     if (n == nullptr || n->tabs.isEmpty())
         return;
 
-    const auto font = style::uiFont (14.0f);
+    const auto font = style::uiFont (style::kTabTextH);
     const int padX = 9, menuW = 14, chevW = 20, left = 4;
     const int count = n->tabs.size();
     const int active = juce::jlimit (0, count - 1, n->active);
@@ -667,7 +667,7 @@ void GroupComponent::paint (juce::Graphics& g)
         return;
 
     const bool focused = mgr_.focusedGroup() == uid_;
-    const auto font = style::uiFont (14.0f);
+    const auto font = style::uiFont (style::kTabTextH);
     g.setFont (font);
     const int padX = 9, menuW = 14;
 
@@ -3359,7 +3359,7 @@ namespace
 {
 constexpr int kWsPad = 11;
 constexpr int kWsChevW = 22;
-juce::Font workspaceFont() { return style::uiFont (14.0f); }
+juce::Font workspaceFont() { return style::uiFont (style::kTabTextH); }
 }
 
 int WorkspaceBar::idealWidth() const
