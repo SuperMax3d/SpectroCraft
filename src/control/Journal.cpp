@@ -1,6 +1,7 @@
 // SpectroCraft - AI control: append-only session journal (see include/control/Journal.h).
 #include "control/Journal.h"
 #include "control/CommandRegistry.h"
+#include "Diagnostics.h"
 
 namespace sc::control {
 
@@ -51,6 +52,10 @@ juce::int64 Journal::append (const juce::String& kind, juce::var entry)
     }
     if (onAppend)
         onAppend (copy);
+    // Opt-in diagnostic log: commands, jobs and steps become breadcrumbs
+    // whether or not the control server runs (onAppend belongs to it).
+    if (sc::diag::enabled())
+        sc::diag::noteJournalEntry (copy);
     return seq;
 }
 

@@ -5,6 +5,7 @@
 #include "Application.h"
 #include "AlertGate.h"
 #include "AudioCpp.h"
+#include "Diagnostics.h"
 #include "ContentAwareTimeScale.h"
 #include "Recorder.h"
 #include "StartupTrace.h"
@@ -200,6 +201,7 @@ void Application::loadSettings ()
     // Single-instance mode (Window menu): checked by default.
     settings.allowMultipleInstances = recentStore->getIntValue ("multi_instance", 1) != 0;
     settings.controlEnabled = recentStore->getIntValue ("control_enabled", 0) != 0;
+    settings.diagLogEnabled = recentStore->getIntValue ("diag_log_enabled", 0) != 0;
     // Track axis placement + grid lines (View menu).
     settings.trackAxisOnRight   = recentStore->getIntValue ("track_axis_right", 0) != 0;
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
@@ -309,6 +311,7 @@ void Application::saveSettings ()
     recentStore->setValue ("draw_text_size", settings.drawTextSize);
     recentStore->setValue ("multi_instance", settings.allowMultipleInstances ? 1 : 0);
     recentStore->setValue ("control_enabled", settings.controlEnabled ? 1 : 0);
+    recentStore->setValue ("diag_log_enabled", settings.diagLogEnabled ? 1 : 0);
     recentStore->setValue ("track_axis_right", settings.trackAxisOnRight ? 1 : 0);
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);
@@ -944,6 +947,9 @@ void Application::closeDoc (int index)
     endClonePick ();   // a picking session belongs to the doc being closed
     cancelSelGesture ();
     FileDoc& d = *docs[(size_t) index];
+    if (sc::diag::enabled())
+        sc::diag::event ("doc.close", sc::diag::Level::info,
+                         { { "doc", d.id }, { "unsaved", docIsUnsaved (d) } });
 
     const bool wasActive = (index == activeDocIndex);
     if (wasActive) syncActiveDoc ();

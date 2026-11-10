@@ -4,6 +4,7 @@
 
 #include "Panels.h"
 #include "AlertGate.h"
+#include "Diagnostics.h"
 #include "WaveformView.h"   // formatFooterTime / parseTimeText (shared time text)
 #include "FFTHelpers.h"
 #include "OwningAlertWindow.h"   // dialogs with new-ed custom components
@@ -1804,6 +1805,7 @@ void FFTAnalysisView::resized()
 
 void FFTAnalysisView::paint (juce::Graphics& g)
 {
+    sc::diag::ScopedPaint diagPaint ("fft", getWidth(), getHeight());   // paint.slow above 50 ms
     const auto fullBounds = getLocalBounds();
     g.fillAll (juce::Colours::black);
 
@@ -6613,6 +6615,23 @@ void StatusBar::paint (juce::Graphics& g)
         if (w > 10)
         {
             g.drawText (controlText_, leftX, 0, w, b.getHeight(), juce::Justification::left, false);
+            leftX += w + 12;
+        }
+    }
+    if (diagActive_ && leftX < b.getWidth() - 8)
+    {
+        // Diagnostic log on: a small green dot (graphics, not a glyph) and a
+        // short label, so the user always knows the log is being written.
+        const juce::String label ("Diagnostic log");
+        const juce::Font f (12.0f);
+        const int w = std::min (b.getWidth() - leftX - 8,
+                                (int) juce::GlyphArrangement::getStringWidth (f, label) + 20);
+        if (w > 30)
+        {
+            g.setColour (juce::Colour::fromRGB (110, 200, 130));
+            g.fillEllipse (juce::Rectangle<float> ((float) leftX, b.getHeight() * 0.5f - 3.0f, 6.0f, 6.0f));
+            g.setColour (juce::Colour::fromRGB (175, 205, 180));
+            g.drawText (label, leftX + 10, 0, w - 10, b.getHeight(), juce::Justification::left, false);
             leftX += w + 12;
         }
     }

@@ -4006,9 +4006,9 @@ static void testClosePanelsAndWindowMenu()
         // +2: the "Workspaces" submenu and "Maximize Panel Group" above the
         // panels, +2: "Video" and "Video Follows Mouse Hover" below them, +1
         // the "Allow multiple instances" toggle, +1 "Allow AI control
-        // (localhost)" when the control server is built in (separators are
-        // not counted by getNumItems).
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems, "Window menu lists every panel");
+        // (localhost)" when the control server is built in, +1 "Diagnostic
+        // Log for AI Support" (separators are not counted by getNumItems).
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems + 1, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
         // persists it to the store file immediately.
@@ -4142,7 +4142,7 @@ static void testClosePanelsAndWindowMenu()
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems + 1, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 0, wIdx);   // files
@@ -27841,6 +27841,7 @@ static void testWriteDataToNewChannels()
 #include "regression/hardening.inc"   // lot 7: Python bridge + headless stem/SR services
 #include "regression/video.inc"   // Video window: picture decoding, pump, movie audio, wiring
 #include "regression/docking.inc"   // docking workspace: groups, drop zones, floating windows, workspaces
+#include "regression/diagnostics.inc"   // opt-in diagnostic log for AI support
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -28348,6 +28349,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: hardening", runRegression_hardening);
     SC_RUN_TEST ("regression: video", runRegression_video);
     SC_RUN_TEST ("regression: docking", runRegression_docking);
+    SC_RUN_TEST ("regression: diagnostics", runRegression_diagnostics);
 
 
     scReportTimings();

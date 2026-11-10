@@ -3,6 +3,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "Diagnostics.h"
 #include <atomic>
 
 namespace sc {
@@ -19,7 +20,9 @@ public:
     // between units of work and deletes the dialog.
     WorkProgressDialog (const juce::String& title, const juce::String& message,
                         bool withCancel = false, Component* centreAround = nullptr)
-        : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon, centreAround)
+        : juce::AlertWindow (title, message, juce::AlertWindow::NoIcon, centreAround),
+          diagTitle (title),
+          diagStartMs (sc::diag::enabled() ? juce::Time::getMillisecondCounterHiRes() : 0.0)
     {
         // Use the AlertWindow's own progress bar so its layout code accounts
         // for it: when setStatusText() changes the message, updateLayout()
@@ -74,6 +77,17 @@ public:
     ~WorkProgressDialog() override
     {
         numActiveRef().fetch_sub (1);
+        // Diagnostic log: one "work" event per long operation (title, time
+        // the dialog stayed open, cancelled or not). Short ones stay in the
+        // flight recorder.
+        if (diagStartMs > 0.0 && sc::diag::enabled())
+        {
+            const double ms = juce::Time::getMillisecondCounterHiRes() - diagStartMs;
+            sc::diag::event ("work", ms >= 30000.0 ? sc::diag::Level::warn
+                                     : ms >= 500.0 ? sc::diag::Level::info : sc::diag::Level::debug,
+                             { { "title", diagTitle }, { "durMs", juce::roundToInt (ms) },
+                               { "cancelled", cancelled.load() } });
+        }
     }
 
     // Set by the Cancel button / ESC; the worker thread checks it between
@@ -128,6 +142,8 @@ private:
 
     double progressValue = 0.0;
     bool hasCancel = false;
+    juce::String diagTitle;
+    double diagStartMs = 0.0;
 };
 
 } // namespace sc

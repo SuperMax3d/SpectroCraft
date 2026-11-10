@@ -246,5 +246,6 @@ void registerAiCommands (CommandRegistry&);
 void registerMeasureCommands (CommandRegistry&);
 void registerEditCommands (CommandRegistry&);
 void registerPythonCommands (CommandRegistry&);
+void registerDiagCommands (CommandRegistry&);
 
 } // namespace sc::control

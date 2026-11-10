@@ -382,6 +382,10 @@ namespace scCrash
 
     static volatile long s_handled = 0;
 
+    // Optional extra report (Main.cpp: the diagnostic log's crash file,
+    // src/Diagnostics.cpp). Called once, after the stderr trace.
+    static void (*g_onCrash) (unsigned long code) = nullptr;
+
     static LONG WINAPI seHandler (EXCEPTION_POINTERS* info)
     {
         const DWORD code = info->ExceptionRecord->ExceptionCode;
@@ -476,6 +480,8 @@ namespace scCrash
 
             dumpOtherThreads();
             printStack (info->ContextRecord);
+            if (g_onCrash != nullptr)
+                g_onCrash (code);
         }
         TerminateProcess (GetCurrentProcess(), 3);
         return EXCEPTION_EXECUTE_HANDLER;
@@ -492,6 +498,8 @@ namespace scCrash
                           info->ExceptionRecord->ExceptionCode, GetCurrentThreadId());
             dumpOtherThreads();
             printStack (info->ContextRecord);
+            if (g_onCrash != nullptr)
+                g_onCrash (info->ExceptionRecord->ExceptionCode);
         }
         TerminateProcess (GetCurrentProcess(), 3);
         return EXCEPTION_EXECUTE_HANDLER;

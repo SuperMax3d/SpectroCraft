@@ -1755,6 +1755,9 @@ SpectroCraft.exe --measure_load_time        :: launch the GUI normally, but reco
                                            :: writable); each run adds one block with a
                                            :: timestamp, version and per-phase T+ms lines,
                                            :: ending in "total launch->window".
+SpectroCraft.exe --diag-log                 :: launch the GUI with the diagnostic log on for this
+                                           :: session (see "Diagnostic log for AI support");
+                                           :: SC_DIAG_LOG=1 or SC_DIAG_LOG_DIR=<folder> do the same
 SpectroCraft.exe --run-action <actionName> <inputFile> <outputFile>
                                            :: runs a recorded action (see the Actions panel)
                                               on one file headlessly and saves the
@@ -1859,6 +1862,31 @@ the control server.
 Details: [docs/ai-control/mcp.md](docs/ai-control/mcp.md) (macOS/Windows/Linux installation,
 troubleshooting); protocol: [docs/ai-control/REPORT.md](docs/ai-control/REPORT.md) §6; progress:
 [docs/ai-control/progress/](docs/ai-control/progress/).
+
+---
+
+## Diagnostic log for AI support
+
+*Window > Diagnostic Log for AI Support* (off by default, saved) keeps a small local log that an AI
+assistant or support can read to find performance problems and bugs. It records the errors and
+warnings shown, crashes, interface freezes, audio dropouts, slow operations (file loads and saves,
+spectrogram tiles, paints, commands, long jobs), and short breadcrumbs: the commands and menu items
+used and the files opened. It never records audio, transcribed text, table values, scripts or the
+AI control token, and nothing is sent anywhere. File paths are written in clear (internal use).
+The status bar shows *Diagnostic log* while it runs.
+
+- Files: JSON Lines in `<application data>/SpectroCraft/diagnostics` (macOS
+  `~/Library/SpectroCraft/diagnostics`, Linux `~/.config/SpectroCraft/diagnostics`, Windows
+  `%APPDATA%\SpectroCraft\diagnostics`), 2 MB per file, 5 files at most.
+- *Help > Open Diagnostic Log Folder*, *Help > Copy Diagnostic Summary* (Markdown, 30 KB at most, to
+  paste into a chat) and *Help > Create Support Bundle...* (zip of the logs, crash reports and a
+  summary, listed before it is saved).
+- With *Allow AI control*, `diag.summary` and `diag.tail` (MCP tools `sc_diag_summary`,
+  `sc_diag_tail`) let Claude Code read the log of the open app.
+- A crash, a force quit or a killed thread is reported at the next start (`session.unclean`).
+- `--diag-log`, `SC_DIAG_LOG=1` or `SC_DIAG_LOG_DIR=<folder>` turn it on for one session.
+
+Schema, events and limits: [docs/diagnostics.md](docs/diagnostics.md).
 
 ---
 
@@ -2458,6 +2486,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `Docking` (`src/Docking.cpp`: `DockManager`, `DockArea`, `GroupComponent`, `FloatingWindow`, `Workspaces`, `WorkspaceBar`, `DockLookAndFeel`) | Adobe-style docking workspace, independent of the rest of the app: a tree of horizontal / vertical splits of *panel groups* per dock area (the main window's and one per floating window); panels are registered with an id and a content component they do not own. Drag sessions (translucent ghost window snapping onto the hovered zone, Esc / Ctrl handling), the trapezoid drop overlay, tab strips with the ≡ panel menu and >> overflow, gap resizing, maximise, floating windows with magnetic moves, the memory of where closed / undocked panels go back, the JSON layout (`saveLayout` / `loadLayout`) and named workspaces with saved + current layouts. Components a drop removes are hidden at once and deleted asynchronously, so a group may be retired from inside its own mouse handler. `DockLookAndFeel` (the app's default look and feel) embeds Source Sans 3. |
+| `Diagnostics` (`src/Diagnostics.cpp`, `sc::diag`) | Opt-in diagnostic log for AI support (docs/diagnostics.md): `event()` posts into a bounded queue (one atomic load when off); a writer thread cleans, collapses, rate-limits and writes JSON Lines with size rotation; a flight recorder of debug events written after an error; a freeze watchdog thread fed by a message-thread heartbeat; per-minute aggregates (spectrogram tiles, audio load, memory); crash reports from signal / terminate handlers (Windows: `CrashTrace.h`); summary, tail and support bundle for *Help* and the `diag.*` commands. Hooks: `sc::alert` observer, the AI control journal, `FileDoc::load`, `AudioEngine::saveFile`, `SpectralEngine::getTiles`, the views' `paint()`, `WorkProgressDialog`. |
 | `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Docking workspace host (menu bar with the workspace switcher on its right, the main dock area, status bar); the **Editor** panel holds the waveform/spectral views + scrollbars + dedicated tables track (`layoutEditor()`); registers every panel, the built-in workspaces and the migration of the old two-group column; menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
 
 Threading model: the UI thread only draws and dispatches; FFT tiles are computed
@@ -2815,6 +2844,18 @@ delays the window from appearing.
     crashes (the old forward-iteration child delete double-freed the last row);
     the description rows stack downward below the hint line, nothing at window
     level overlaps, and the window expands downward with each new stem.
+  - **Diagnostic log** (`tests/regression/diagnostics.inc`): off by default and
+    silent while off; the versioned session header without the home folder;
+    levels and the flight recorder written after an error; secrets redacted,
+    content keys dropped (also nested), long strings cut; identical events
+    collapsed with a repeat count; the 60/min rate limit with `diag.dropped`;
+    the size budget (rotation, oldest files deleted, a header in every part);
+    a crash report and an abandoned session reported at the next start; killed
+    threads through `juce::Logger`; breadcrumbs from commands, documents, saves,
+    failed loads and message boxes (with hints); slow paints, spectrogram tile
+    and audio load aggregates; `diag.tail` / `diag.summary` and the support
+    bundle; the Window / Help items and the status bar indicator; a 2.3 s
+    freeze reported as `ui.hang` then `ui.stall`; the cost while off and on.
 - `tests/data/` — generated fixtures (regenerate with `--generate-test-files`):
   - `tone_1s_mono.wav`, `tone_10s_stereo.wav` (ch0 = 400 Hz, ch1 = 600 Hz),
     `sweep_10s_mono.wav` (100→5100 Hz), `noise_10s_8ch.wav`,

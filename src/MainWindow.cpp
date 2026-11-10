@@ -16,6 +16,7 @@
 #include "StartupTrace.h"
 #include "control/ControlState.h"   // AI control: app.control().ui
 #include "control/CommandRegistry.h" // menu actions run through the registry
+#include "Diagnostics.h"               // opt-in diagnostic log (Window / Help menus)
 #include <thread>
 #include "WaveformView.h"
 #include "SpectralView.h"
@@ -1159,6 +1160,13 @@ void MainWindow::saveDockLayout()
     dockLayoutDirty_ = false;
     workspaces_.setCurrent (workspaces_.activeId (), dock_->saveLayout ());
     workspaces_.persist ();
+    if (sc::diag::enabled ())
+    {
+        const auto* ws = workspaces_.find (workspaces_.activeId ());
+        sc::diag::event ("ui.layout", sc::diag::Level::info,
+                         { { "ws", ws != nullptr ? ws->name : workspaces_.activeId () },
+                           { "floating", dock_->numFloatingWindows () } });
+    }
 }
 
 void MainWindow::applyDockLayout (const juce::var& layout)
@@ -1668,6 +1676,7 @@ void MainWindow::timerCallback()
         }
         statusBar->setRecording (recNow);
         statusBar->setModeText (mode);
+        statusBar->setDiagActive (sc::diag::enabled ());
     }
 
     // The Frequency Analysis panel follows the playhead while playing.
@@ -3450,6 +3459,11 @@ void MainWindow::setVideoFollowHover (bool on)
     app.recentStore->save();
 }
 
+bool MainWindow::statusBarShowsDiagLog() const
+{
+    return statusBar != nullptr && statusBar->diagActive ();
+}
+
 juce::String MainWindow::statusBarFileName() const
 {
     return statusBar ? statusBar->getFileName() : juce::String();
@@ -3916,6 +3930,22 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
 {
     using enum MenuIDs;
 
+    // Diagnostic log: the item is a breadcrumb, and what a freeze happened
+    // "during" while its handler runs.
+    juce::String diagItem;
+    if (sc::diag::enabled ())
+    {
+        diagItem = menuItemDescription (menuItemID, topLevelMenuIndex);
+        sc::diag::noteMenu (diagItem);
+    }
+    const sc::diag::ScopedActivity diagActivity ("menu " + diagItem);
+
+    if (menuItemID == WindowDiagLog)
+    {
+        toggleDiagnosticLog ();
+        return;
+    }
+
     // Recording Device submenu: RecDeviceBase + pluginIndex*1000 + deviceIndex.
     if (menuItemID >= RecDeviceBase && menuItemID < RecDeviceEnd)
     {
@@ -4298,7 +4328,137 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case HelpAbout:
             showAboutDialog (this);
             break;
+        case HelpOpenDiagFolder:
+        {
+            const juce::File dir = sc::diag::folder ();
+            dir.createDirectory ();
+            if (! sc::alert::isHeadless ())   // never launch the file browser from the tests
+                dir.startAsProcess ();
+            break;
+        }
+        case HelpCopyDiagSummary: copyDiagnosticSummary (); break;
+        case HelpSupportBundle:   showSupportBundleDialog (); break;
     }
+}
+
+juce::String MainWindow::menuItemDescription (int menuItemID, int topLevelMenuIndex)
+{
+    // Only the menu the item came from is rebuilt (the Transport menu lists
+    // recording devices: rebuilding every menu would cost more).
+    const auto names = getMenuBarNames ();
+    if (juce::isPositiveAndBelow (topLevelMenuIndex, names.size ()))
+    {
+        const auto menu = getMenuForIndex (topLevelMenuIndex, names[topLevelMenuIndex]);
+        for (juce::PopupMenu::MenuItemIterator it (menu, true); it.next ();)
+            if (it.getItem ().itemID == menuItemID)
+                return names[topLevelMenuIndex] + " > "
+                       + it.getItem ().text.upToFirstOccurrenceOf ("\t", false, false).trim ();
+    }
+    return "menu item " + juce::String (menuItemID);
+}
+
+void MainWindow::toggleDiagnosticLog ()
+{
+    if (sc::diag::enabled ())
+    {
+        app.settings.diagLogEnabled = false;
+        app.saveSettings ();
+        if (onDiagToggled) onDiagToggled (false);
+        return;
+    }
+    if (! sc::alert::isHeadless ())
+    {
+        // Say what is recorded before the first byte is written.
+        juce::AlertWindow dlg ("Diagnostic Log for AI Support",
+            "SpectroCraft will keep a small log on this computer to help an AI assistant "
+            "(or support) find performance problems and bugs.\n\n"
+            "Recorded: the errors and warnings you see, crashes, interface freezes, audio "
+            "dropouts, slow operations, the commands and menus you use, and the files you "
+            "open (with their paths).\n"
+            "Never recorded: audio, transcribed text, table values, scripts, the AI control token.\n\n"
+            "Nothing is sent anywhere. The files stay in\n" + sc::diag::folder ().getFullPathName ()
+                + "\n(10 MB at most). Help > Copy Diagnostic Summary or Create Support Bundle "
+                  "prepares what you choose to share.",
+            juce::MessageBoxIconType::InfoIcon, this);
+        dlg.addButton ("Turn On", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        dlg.toFront (true);
+        if (dlg.runModalLoop () != 1)
+            return;
+    }
+    app.settings.diagLogEnabled = true;
+    app.saveSettings ();
+    if (onDiagToggled) onDiagToggled (true);
+}
+
+void MainWindow::copyDiagnosticSummary ()
+{
+    const auto md = sc::diag::summaryMarkdown (30 * 1024);
+    juce::SystemClipboard::copyTextToClipboard (md);
+    sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Diagnostic Summary Copied",
+        "The summary (" + juce::String (juce::jmax (1, (int) md.getNumBytesAsUTF8 () / 1024))
+            + " KB) is in the clipboard: paste it into a chat with your AI assistant."
+            + (sc::diag::enabled () ? juce::String ()
+                                    : juce::String ("\n\nThe diagnostic log is off: turn it on with Window > "
+                                                    "Diagnostic Log for AI Support, then reproduce the problem.")),
+        "", this);
+}
+
+bool MainWindow::writeSupportBundleTo (const juce::File& zip, juce::String* error)
+{
+    if (! sc::diag::writeSupportBundle (zip, error))
+        return false;
+    sc::diag::event ("diag.bundle", sc::diag::Level::info,
+                     { { "path", zip.getFullPathName () }, { "sizeKb", (int) (zip.getSize () / 1024) } });
+    return true;
+}
+
+void MainWindow::showSupportBundleDialog ()
+{
+    const auto files = sc::diag::bundleFiles ();
+    if (files.isEmpty ())
+    {
+        sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Create Support Bundle",
+            "There is no diagnostic log yet. Turn it on with Window > Diagnostic Log for AI Support, "
+            "reproduce the problem, then create the bundle.", "", this);
+        return;
+    }
+    if (sc::alert::isHeadless ())
+        return;   // the tests call writeSupportBundleTo() directly
+
+    // Preview: exactly what the zip will contain.
+    juce::String text ("The zip will contain:\n\n");
+    juce::int64 total = 0;
+    for (const auto& f : files)
+    {
+        text << "  " << f.getFileName () << "  (" << juce::String (juce::jmax ((juce::int64) 1, f.getSize () / 1024)) << " KB)\n";
+        total += f.getSize ();
+    }
+    text << "  summary.md, README.txt\n"
+         << "(" << juce::String (juce::jmax ((juce::int64) 1, total / 1024)) << " KB of logs in all)\n\n"
+         << "It includes file paths, commands, timings and error messages; never audio, transcribed "
+            "text, table values, scripts or the AI control token. Nothing is sent: you choose where "
+            "to save it and whom to give it to.";
+    juce::AlertWindow dlg ("Create Support Bundle", text, juce::MessageBoxIconType::InfoIcon, this);
+    dlg.addButton ("Save Bundle...", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    dlg.toFront (true);
+    if (dlg.runModalLoop () != 1)
+        return;
+
+    const auto now = juce::Time::getCurrentTime ();
+    const juce::File initial = juce::File::getSpecialLocation (juce::File::userDesktopDirectory)
+        .getChildFile ("SpectroCraft-support-" + now.formatted ("%Y%m%d-%H%M") + ".zip");
+    juce::FileChooser chooser ("Save the support bundle", initial, "*.zip");
+    if (! chooser.browseForFileToSave (true))
+        return;
+    const juce::File zip = chooser.getResult ().withFileExtension ("zip");
+    juce::String error;
+    if (writeSupportBundleTo (zip, &error))
+        zip.revealToUser ();
+    else
+        sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Create Support Bundle",
+                                        error, "", this);
 }
 
 // Zoom the shared time window around its centre (applies to both views).
@@ -8298,10 +8458,19 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (WindowAllowControl, "Allow AI control (localhost)", true,
                       app.settings.controlEnabled);
 #endif
+        // Diagnostic log for AI support: local file of errors, freezes and
+        // slow operations (docs/diagnostics.md). Off by default.
+        menu.addItem (WindowDiagLog, "Diagnostic Log for AI Support", true, sc::diag::enabled ());
     }
     else if (menuName == "Help")
     {
         menu.addItem (HelpAbout, "About SpectroCraft", true, false);
+        // Diagnostic log (Window > Diagnostic Log for AI Support): what to
+        // give an AI assistant or support. Nothing is ever sent.
+        menu.addSeparator ();
+        menu.addItem (HelpOpenDiagFolder, "Open Diagnostic Log Folder", true, false);
+        menu.addItem (HelpCopyDiagSummary, "Copy Diagnostic Summary", true, false);
+        menu.addItem (HelpSupportBundle, "Create Support Bundle...", true, false);
     }
 
     return menu;

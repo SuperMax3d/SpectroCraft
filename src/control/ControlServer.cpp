@@ -10,6 +10,7 @@
 #include "control/JsonCli.h"     // kMaxLineBytes
 #include "control/StateJson.h"
 #include "Application.h"
+#include "Diagnostics.h"
 
 #include <deque>
 #include <random>
@@ -492,6 +493,7 @@ ControlServer::ControlServer (Application& a, Options o)
 {
     if (opts.token.isEmpty())
         opts.token = makeToken();
+    sc::diag::addSecret (opts.token);   // never written to the diagnostic log
     if (opts.discoveryDir == juce::File())
         opts.discoveryDir = discoveryFolder();
 }

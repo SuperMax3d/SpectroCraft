@@ -450,6 +450,7 @@ private:
     const std::string* saveBkdkPayload = nullptr;       // raw "bkdk" chunk to preserve
 
     void clearMipmaps();
+    bool saveFileImpl (const juce::File& file) const;   // saveFile() without the diagnostic event
     bool saveWavWithMarkers (const juce::File& file) const;
     bool commitSavedFile (const juce::TemporaryFile& temp, const juce::File& file) const;
 

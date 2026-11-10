@@ -2090,6 +2090,14 @@ public:
     }
     juce::String getControlText() const { return controlText_; }
 
+    // Diagnostic log indicator (Window > Diagnostic Log for AI Support): a
+    // small dot and "Diagnostic log" while the log is being written.
+    void setDiagActive (bool on)
+    {
+        if (on != diagActive_) { diagActive_ = on; repaint(); }
+    }
+    bool diagActive() const { return diagActive_; }
+
     // Live recording indicator: while true, a solid red dot is drawn just
     // before the mode text. The dot is graphics, not a "\u25CF" character,
     // because that glyph is missing from some system fonts and corrupted
@@ -2121,6 +2129,7 @@ private:
 
     juce::String mouseText, playPart, fileName, ratePart, modeText;
     juce::String controlText_;
+    bool diagActive_ = false;  // diagnostic log indicator
     bool recActive_ = false;   // red dot before the mode text while recording
     bool selVisible_ = false, posVisible_ = false, rightFits_ = true;
     double curStart = 0.0, curStop = 0.0, curPos = 0.0;

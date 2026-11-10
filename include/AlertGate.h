@@ -34,6 +34,22 @@ namespace sc::alert
         return s;
     }
 
+    /** Sees every message box raised through this gate, shown or swallowed:
+        the diagnostic log (src/Diagnostics.cpp) records it. Any thread. */
+    using Observer = void (*) (int iconType, const juce::String& title, const juce::String& message);
+    inline std::atomic<Observer>& observer()
+    {
+        static std::atomic<Observer> o { nullptr };
+        return o;
+    }
+
+    inline void notifyObserver (juce::MessageBoxIconType icon, const juce::String& title,
+                                const juce::String& message)
+    {
+        if (auto o = observer().load())
+            o ((int) icon, title, message);
+    }
+
     inline void setHeadless (bool on)   { state().headless = on; }
     inline bool isHeadless()            { return state().headless.load(); }
 
@@ -107,6 +123,7 @@ namespace sc::alert
                                      juce::Component* associatedComponent = nullptr,
                                      juce::ModalComponentManager::Callback* callback = nullptr)
     {
+        notifyObserver (icon, title, message);
         if (swallow (title, message))
         {
             if (callback != nullptr)
@@ -126,6 +143,7 @@ namespace sc::alert
                                 const juce::String& buttonText = {},
                                 juce::Component* associatedComponent = nullptr)
     {
+        notifyObserver (icon, title, message);
         if (swallow (title, message))
             return;
         juce::AlertWindow::showMessageBox (icon, title, message, buttonText, associatedComponent);
