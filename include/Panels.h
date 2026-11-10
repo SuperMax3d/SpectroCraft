@@ -53,10 +53,16 @@ public:
         }
     }
 
+    // The resize arrow as soon as the mouse is over the bar, not only once
+    // it is pressed: the cursor says what a press does.
+    juce::MouseCursor getMouseCursor() override
+    {
+        return vertical ? juce::MouseCursor::LeftRightResizeCursor
+                        : juce::MouseCursor::UpDownResizeCursor;
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
-        setMouseCursor (vertical ? juce::MouseCursor::LeftRightResizeCursor
-                                 : juce::MouseCursor::UpDownResizeCursor);
         if (onDrag) onDrag (e);
     }
 
@@ -67,7 +73,6 @@ public:
 
     void mouseUp (const juce::MouseEvent&) override
     {
-        setMouseCursor (juce::MouseCursor::NormalCursor);
         if (onRelease) onRelease ();
     }
 

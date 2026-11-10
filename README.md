@@ -434,19 +434,25 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       on macOS — while dropping), or choose **Undock Panel** from the tab's
       right-click menu or from the **≡** panel menu next to the active tab. It
       becomes a floating window, moved by its top strip (it snaps to screen
-      edges and to the other windows) and resized by its borders; other
-      panels can be docked into it the same way. **Dock Panel** returns a
-      floating panel to where it was docked. Closing a floating window closes
-      its panels (the Editor docks back instead); floating windows come back
-      above the main window when it is activated and hide while it is
-      minimised.
+      edges and to the other windows) and resized by its borders (an 8 px
+      zone along each edge); other panels can be docked into it the same
+      way. The strip's buttons **minimise** the window to the strip itself
+      (the same button brings the panels back), **maximise** it to the work
+      area of its screen (double-click the strip does the same; dragging a
+      maximised window restores its size) and close it. **Dock Panel**
+      returns a floating panel to where it was docked. Closing a floating
+      window closes its panels (the Editor docks back instead); floating
+      windows come back above the main window when it is activated and hide
+      while it is minimised.
     - The tab menu (right-click a tab, or **≡**) also has **Close Panel**,
       **Close Other Panels in Group** and *Panel Group Settings* (**Close /
       Undock / Maximize Panel Group**). **Double-click a tab** or press **`**
       (backtick) to maximise the group under the mouse, again to restore it.
       When the tabs do not fit, the **>>** button lists the hidden ones.
-    - Drag the **gaps** between groups to resize them; double-click a gap to
-      share the space equally between its two neighbours.
+    - Drag the **gaps** between groups to resize them: the 4 px gap and 4 px
+      into each neighbour grab it, and the resize arrow shows exactly where a
+      press resizes. Double-click a gap to share the space equally between
+      its two neighbours.
     - **Workspaces**: *Default* (the classic left column beside the Editor),
       *Editing*, *Analysis* and *Video* are listed at the right end of the
       menu bar and in **Window > Workspaces**. Each workspace keeps its own

@@ -212,15 +212,18 @@ DockLookAndFeel::DockLookAndFeel()
     setColour (juce::TableHeaderComponent::highlightColourId,  juce::Colour (0xff3d3d3d));
 }
 
+// The sizes of JUCE's defaults (popup 17, menu bar 0.7 x its height): Source
+// Sans 3 reads smaller than the system font at the same JUCE height, so the
+// menus stay a little smaller than before the docking workspace.
 juce::Font DockLookAndFeel::getPopupMenuFont()
 {
-    return style::uiFont (16.0f);
+    return style::uiFont (17.0f);
 }
 
 juce::Font DockLookAndFeel::getMenuBarFont (juce::MenuBarComponent& menuBar, int, const juce::String&)
 {
     // Same family as the workspace bar sharing the menu bar's row.
-    return style::uiFont (std::max (13.0f, (float) menuBar.getHeight() * 0.64f));
+    return style::uiFont (std::max (13.0f, (float) menuBar.getHeight() * 0.7f));
 }
 
 //==============================================================================
@@ -509,6 +512,13 @@ void GroupComponent::FocusTracker::mouseDown (const juce::MouseEvent&)
 Node* GroupComponent::node() const
 {
     return findNode (area_.root.get(), uid_);
+}
+
+bool GroupComponent::hitTest (int x, int y)
+{
+    if (area_.isOverGap (getPosition() + juce::Point<int> (x, y)))
+        return false;
+    return juce::Component::hitTest (x, y);
 }
 
 juce::Rectangle<int> GroupComponent::stripBounds() const
@@ -1109,10 +1119,31 @@ GroupComponent* DockArea::groupAt (juce::Point<int> p) const
 
 const DockArea::Gap* DockArea::gapAt (juce::Point<int> p) const
 {
+    // The visible gap plus kGapGrab px into each neighbour, across the gap
+    // only: the neighbours' hitTest hands that band to this component.
     for (const auto& g : gaps_)
-        if (g.r.expanded (1).contains (p))
+        if ((g.horizontal ? g.r.expanded (style::kGapGrab, 0) : g.r.expanded (0, style::kGapGrab)).contains (p))
             return &g;
     return nullptr;
+}
+
+bool DockArea::isOverGap (juce::Point<int> p) const
+{
+    return gapAt (p) != nullptr;
+}
+
+juce::MouseCursor::StandardCursorType DockArea::cursorTypeAt (juce::Point<int> p) const
+{
+    if (dragIndex_ >= 0)
+        return dragHorizontal_ ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::UpDownResizeCursor;
+    if (const auto* gap = gapAt (p))
+        return gap->horizontal ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::UpDownResizeCursor;
+    return juce::MouseCursor::NormalCursor;
+}
+
+juce::MouseCursor DockArea::getMouseCursor()
+{
+    return cursorTypeAt (getMouseXYRelative());
 }
 
 void DockArea::paint (juce::Graphics& g)
@@ -1124,23 +1155,6 @@ void DockArea::paint (juce::Graphics& g)
         g.setFont (style::uiFont (15.0f));
         g.drawText ("Drag a panel here", getLocalBounds(), juce::Justification::centred);
     }
-}
-
-void DockArea::mouseMove (const juce::MouseEvent& e)
-{
-    if (e.eventComponent != this)
-        return;
-    if (const auto* gap = gapAt (e.getPosition()))
-        setMouseCursor (gap->horizontal ? juce::MouseCursor::LeftRightResizeCursor
-                                        : juce::MouseCursor::UpDownResizeCursor);
-    else
-        setMouseCursor (juce::MouseCursor::NormalCursor);
-}
-
-void DockArea::mouseExit (const juce::MouseEvent& e)
-{
-    if (e.eventComponent == this && dragIndex_ < 0)
-        setMouseCursor (juce::MouseCursor::NormalCursor);
 }
 
 void DockArea::mouseDown (const juce::MouseEvent& e)
@@ -1157,6 +1171,7 @@ void DockArea::mouseDown (const juce::MouseEvent& e)
 
     dragSplit_ = gap->splitUid;
     dragIndex_ = gap->index;
+    dragHorizontal_ = gap->horizontal;
     dragStart_ = gap->horizontal ? e.getPosition().x : e.getPosition().y;
     dragWeightSum_ = split->weights[(size_t) gap->index] + split->weights[(size_t) gap->index + 1];
 
@@ -1242,12 +1257,29 @@ void DockArea::mouseDoubleClick (const juce::MouseEvent& e)
 //==============================================================================
 // FloatingWindow
 
-class FloatingWindow::TitleStrip : public juce::Component
+class FloatingWindow::TitleStrip : public juce::Component,
+                                   public juce::TooltipClient
 {
 public:
     explicit TitleStrip (FloatingWindow& w) : owner (w) {}
 
-    juce::Rectangle<int> closeBounds() const { return { getWidth() - 18, 0, 18, getHeight() }; }
+    enum Button { none = 0, minimise, maximise, close };
+    static constexpr int kButtonW = 18;
+
+    /** The three buttons at the right end: minimise, maximise, close. */
+    juce::Rectangle<int> buttonBounds (Button b) const
+    {
+        const int fromRight = b == close ? 1 : b == maximise ? 2 : 3;
+        return { getWidth() - fromRight * kButtonW, 0, kButtonW, getHeight() };
+    }
+
+    Button buttonAt (juce::Point<int> p) const
+    {
+        for (auto b : { minimise, maximise, close })
+            if (buttonBounds (b).contains (p))
+                return b;
+        return none;
+    }
 
     void paint (juce::Graphics& g) override
     {
@@ -1259,20 +1291,65 @@ public:
             for (int i = -5; i <= 5; ++i)
                 g.fillRect (cx + i * 4 + (row == 1 ? 2 : 0), 5 + row * 3, 2, 2);
 
-        const auto cr = closeBounds().toFloat().withSizeKeepingCentre (8.0f, 8.0f);
-        g.setColour (hoverClose ? juce::Colours::white : juce::Colour (0xff9a9a9a));
-        g.drawLine ({ cr.getTopLeft(), cr.getBottomRight() }, 1.3f);
-        g.drawLine ({ cr.getBottomLeft(), cr.getTopRight() }, 1.3f);
+        const auto colourFor = [this] (Button b) { return hover == b ? juce::Colours::white : juce::Colour (0xff9a9a9a); };
+
+        // Minimise: a bar; collapsed, a chevron (show the panels again).
+        {
+            const auto r = buttonBounds (minimise).toFloat().withSizeKeepingCentre (8.0f, 8.0f);
+            g.setColour (colourFor (minimise));
+            if (owner.isCollapsed())
+            {
+                juce::Path p;
+                p.startNewSubPath (r.getX(), r.getY() + 2.0f);
+                p.lineTo (r.getCentreX(), r.getBottom() - 2.0f);
+                p.lineTo (r.getRight(), r.getY() + 2.0f);
+                g.strokePath (p, juce::PathStrokeType (1.3f));
+            }
+            else
+                g.fillRect (juce::Rectangle<float> (r.getX(), r.getBottom() - 1.8f, r.getWidth(), 1.3f));
+        }
+        // Maximise: a square; maximised, two overlapping squares (restore).
+        {
+            const auto r = buttonBounds (maximise).toFloat().withSizeKeepingCentre (8.0f, 8.0f);
+            g.setColour (colourFor (maximise));
+            if (owner.isMaximised())
+            {
+                g.drawRect (r.withTrimmedTop (2.0f).withTrimmedRight (2.0f), 1.1f);
+                g.fillRect (juce::Rectangle<float> (r.getX() + 2.0f, r.getY(), r.getWidth() - 2.0f, 1.1f));
+                g.fillRect (juce::Rectangle<float> (r.getRight() - 1.1f, r.getY(), 1.1f, r.getHeight() - 2.0f));
+            }
+            else
+                g.drawRect (r, 1.1f);
+        }
+        // Close: a cross.
+        {
+            const auto r = buttonBounds (close).toFloat().withSizeKeepingCentre (8.0f, 8.0f);
+            g.setColour (colourFor (close));
+            g.drawLine ({ r.getTopLeft(), r.getBottomRight() }, 1.3f);
+            g.drawLine ({ r.getBottomLeft(), r.getTopRight() }, 1.3f);
+        }
+    }
+
+    juce::String getTooltip() override
+    {
+        switch (buttonAt (getMouseXYRelative()))
+        {
+            case minimise: return owner.isCollapsed() ? "Restore" : "Minimise";
+            case maximise: return owner.isMaximised() ? "Restore" : "Maximise";
+            case close:    return "Close";
+            case none:     break;
+        }
+        return {};
     }
 
     void mouseMove (const juce::MouseEvent& e) override
     {
-        const bool h = closeBounds().contains (e.getPosition());
-        if (h != hoverClose) { hoverClose = h; repaint(); }
+        const auto h = buttonAt (e.getPosition());
+        if (h != hover) { hover = h; repaint(); }
     }
     void mouseExit (const juce::MouseEvent&) override
     {
-        if (hoverClose) { hoverClose = false; repaint(); }
+        if (hover != none) { hover = none; repaint(); }
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -1280,13 +1357,20 @@ public:
         moved = false;
         if (e.mods.isPopupMenu())
         {
-            pressedClose = false;
+            pressed = none;
             showMenu();
             return;
         }
-        pressedClose = closeBounds().contains (e.getPosition());
+        pressed = buttonAt (e.getPosition());
         startWindowPos = owner.getScreenPosition();
         startMouse = e.getScreenPosition();
+    }
+
+    /** Double-click the strip: maximise / restore, like a title bar. */
+    void mouseDoubleClick (const juce::MouseEvent& e) override
+    {
+        if (! e.mods.isPopupMenu() && buttonAt (e.getPosition()) == none)
+            owner.setMaximised (! owner.isMaximised());
     }
 
     /** Right-click: dock every panel of the window back, or close it. */
@@ -1316,19 +1400,34 @@ public:
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
-        if (pressedClose || e.mods.isPopupMenu())
+        if (pressed != none || e.mods.isPopupMenu())
             return;
+        if (! moved && owner.isMaximised())
+        {
+            // Dragging a maximised window: back to its former size, with the
+            // mouse at the same place along the strip.
+            const double along = (double) e.x / (double) std::max (1, getWidth());
+            owner.setMaximised (false);
+            const int stripW = std::max (1, owner.getWidth() - 2 * style::kWindowFrame);
+            startWindowPos = { e.getScreenX() - style::kWindowFrame - juce::roundToInt (along * stripW),
+                               e.getScreenY() - style::kWindowFrame - e.y };
+            startMouse = e.getScreenPosition();
+        }
         moved = true;
         owner.moveWithMagnet (startWindowPos + (e.getScreenPosition() - startMouse));
     }
 
     void mouseUp (const juce::MouseEvent& e) override
     {
-        if (pressedClose)
+        const auto b = pressed;
+        pressed = none;
+        if (b != none)
         {
-            pressedClose = false;
-            if (closeBounds().contains (e.getPosition()))
-                owner.userTriedToCloseWindow();   // last statement: may retire the window
+            if (buttonAt (e.getPosition()) != b)
+                return;
+            if (b == minimise)      owner.setCollapsed (! owner.isCollapsed());
+            else if (b == maximise) owner.setMaximised (! owner.isMaximised());
+            else                    owner.userTriedToCloseWindow();   // last statement: may retire the window
             return;
         }
         if (moved)
@@ -1336,24 +1435,42 @@ public:
     }
 
     FloatingWindow& owner;
-    bool hoverClose = false, pressedClose = false, moved = false;
+    Button hover = none, pressed = none;
+    bool moved = false;
     juce::Point<int> startWindowPos, startMouse;
 };
 
 class FloatingWindow::Holder : public juce::Component
 {
 public:
-    Holder (TitleStrip& t, DockArea& a) : title (t), area (a)
+    Holder (FloatingWindow& w, TitleStrip& t, DockArea& a) : owner (w), title (t), area (a)
     {
         addAndMakeVisible (title);
         addAndMakeVisible (area);
     }
+
+    /** While the window can be resized, the band along its edges (between
+        the frame and the resize zone) goes to the resize border behind this
+        component; the title strip's buttons stay whole. */
+    bool hitTest (int x, int y) override
+    {
+        if (owner.isResizable())
+        {
+            const int band = style::kWindowGrab - style::kWindowFrame;
+            const bool overButtons = x >= getWidth() - 3 * TitleStrip::kButtonW && y < style::kTitleStripH;
+            if (x < band || x >= getWidth() - band || y >= getHeight() - band || (y < band && ! overButtons))
+                return false;
+        }
+        return juce::Component::hitTest (x, y);
+    }
+
     void resized() override
     {
         auto r = getLocalBounds();
         title.setBounds (r.removeFromTop (style::kTitleStripH));
         area.setBounds (r);
     }
+    FloatingWindow& owner;
     TitleStrip& title;
     DockArea& area;
 };
@@ -1364,7 +1481,7 @@ FloatingWindow::FloatingWindow (DockManager& m)
       area_ (m, false)
 {
     title_ = std::make_unique<TitleStrip> (*this);
-    holder_ = std::make_unique<Holder> (*title_, area_);
+    holder_ = std::make_unique<Holder> (*this, *title_, area_);
     setUsingNativeTitleBar (false);
     setResizable (true, false);
     setResizeLimits (200, 140, 10000, 10000);
@@ -1379,9 +1496,93 @@ FloatingWindow::~FloatingWindow()
 
 juce::Rectangle<int> FloatingWindow::windowBoundsForArea (juce::Rectangle<int> a)
 {
-    const int border = 4;
+    const int border = style::kWindowFrame;
     return { a.getX() - border, a.getY() - style::kTitleStripH - border,
              a.getWidth() + 2 * border, a.getHeight() + style::kTitleStripH + 2 * border };
+}
+
+juce::Rectangle<int> FloatingWindow::areaBoundsForWindow (juce::Rectangle<int> w)
+{
+    const int border = style::kWindowFrame;
+    return { w.getX() + border, w.getY() + style::kTitleStripH + border,
+             w.getWidth() - 2 * border, w.getHeight() - style::kTitleStripH - 2 * border };
+}
+
+juce::BorderSize<int> FloatingWindow::getBorderThickness() const
+{
+    return juce::BorderSize<int> (isResizable() ? style::kWindowGrab : style::kWindowFrame);
+}
+
+juce::BorderSize<int> FloatingWindow::getContentComponentBorder() const
+{
+    return juce::BorderSize<int> (style::kWindowFrame);
+}
+
+void FloatingWindow::setMaximised (bool shouldBeMaximised)
+{
+    if (shouldBeMaximised == maximised_)
+        return;
+    if (shouldBeMaximised)
+    {
+        if (collapsed_)
+            setCollapsed (false);
+        const auto& displays = juce::Desktop::getInstance().getDisplays();
+        const auto* display = displays.getDisplayForRect (getScreenBounds());
+        if (display == nullptr)
+            display = displays.getPrimaryDisplay();
+        if (display == nullptr)
+            return;
+        restoreBounds_ = getBounds();
+        maximised_ = true;
+        setResizable (false, false);
+        setBounds (display->userBounds.toNearestInt());
+    }
+    else
+    {
+        maximised_ = false;
+        setResizable (true, false);
+        setBounds (restoreBounds_);
+    }
+    if (title_ != nullptr)
+        title_->repaint();
+    mgr_.geometryChanged();
+}
+
+void FloatingWindow::setCollapsed (bool shouldBeCollapsed)
+{
+    if (shouldBeCollapsed == collapsed_)
+        return;
+    if (shouldBeCollapsed)
+    {
+        if (maximised_)
+            setMaximised (false);
+        restoreHeight_ = getHeight();
+        collapsed_ = true;
+        area_.setVisible (false);
+        setResizable (false, false);
+        setResizeLimits (200, collapsedHeight(), 10000, 10000);
+        setSize (getWidth(), collapsedHeight());
+    }
+    else
+    {
+        collapsed_ = false;
+        setResizeLimits (200, 140, 10000, 10000);
+        setResizable (true, false);
+        setSize (getWidth(), std::max (140, restoreHeight_));
+        area_.setVisible (true);
+    }
+    if (title_ != nullptr)
+        title_->repaint();
+    mgr_.geometryChanged();
+}
+
+juce::Rectangle<int> FloatingWindow::normalBounds() const
+{
+    if (maximised_)
+        return restoreBounds_;
+    if (collapsed_)
+        return getBounds().withHeight (std::max (140, restoreHeight_));
+    return getBounds();
 }
 
 int FloatingWindow::getDesktopWindowStyleFlags() const
@@ -1996,7 +2197,11 @@ void DockManager::remember (const juce::String& id)
 
     if (m.floating)
     {
-        m.floatBounds = loc.area->getScreenBounds();
+        // The normal size of a maximised or collapsed window, not its current one.
+        auto* fw = dynamic_cast<FloatingWindow*> (loc.area->getTopLevelComponent());
+        m.floatBounds = fw != nullptr && (fw->isMaximised() || fw->isCollapsed())
+                            ? FloatingWindow::areaBoundsForWindow (fw->normalBounds())
+                            : loc.area->getScreenBounds();
     }
     else
     {
@@ -3003,8 +3208,10 @@ juce::var DockManager::saveLayout() const
     {
         if (f->area().root == nullptr) continue;
         auto* fo = new juce::DynamicObject();
-        const auto b = f->area().isShowing() ? f->area().getScreenBounds()
-                                             : f->getBounds().withTrimmedTop (style::kTitleStripH + 4).reduced (4, 0).withTrimmedBottom (4);
+        // A maximised or collapsed window keeps its normal size in the layout.
+        const auto b = f->area().isShowing() && ! f->isMaximised() && ! f->isCollapsed()
+                           ? f->area().getScreenBounds()
+                           : FloatingWindow::areaBoundsForWindow (f->normalBounds());
         fo->setProperty ("x", b.getX());
         fo->setProperty ("y", b.getY());
         fo->setProperty ("w", b.getWidth());

@@ -57,12 +57,15 @@ namespace style
         of the popup menus. The strip keeps 7 px above and below the text. */
     constexpr float kTabTextH  = 16.0f;
     constexpr int kGap         = 4;    // dark gap between groups (also a resizer)
+    constexpr int kGapGrab     = 4;    // ... grabbed this far into each neighbour too (12 px in all)
     constexpr int kOuterMargin = 4;    // margin around a dock area
     constexpr int kMinGroupW   = 120;
     constexpr int kMinGroupH   = 80;
     constexpr int kAreaEdgeBand = 12;  // drop band along a dock area's left / right / bottom edge
     constexpr int kAreaTopBand  = 7;   // ... and its top edge (over the top groups' tab strips)
     constexpr int kTitleStripH = 16;   // drag strip at the top of a floating window
+    constexpr int kWindowFrame = 4;    // frame of a floating window around its content
+    constexpr int kWindowGrab  = 8;    // its resize zone: the frame plus the content's outer band
     constexpr float kCorner    = 4.0f;
 
     const juce::Colour appBackground   { 0xff141414 };
@@ -211,6 +214,9 @@ public:
     void paint (juce::Graphics&) override;
     void paintOverChildren (juce::Graphics&) override;
     void resized() override;
+    /** False along a gap beside the group: that band resizes the gap, so
+        the dock area receives it (the panel content gives up a few pixels). */
+    bool hitTest (int x, int y) override;
     void mouseMove (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -275,12 +281,21 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
-    void mouseMove (const juce::MouseEvent&) override;
-    void mouseExit (const juce::MouseEvent&) override;
+    /** Asked by JUCE at every mouse event: the cursor always matches what a
+        press there would do (cursorTypeAt), even when the mouse entered the
+        gap without moving inside it. */
+    juce::MouseCursor getMouseCursor() override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
+
+    /** A point (local coordinates) in a gap's grab zone: the gap plus
+        style::kGapGrab px into each neighbour. */
+    bool isOverGap (juce::Point<int>) const;
+    /** Resize arrow over a gap's grab zone (and during a gap drag), the
+        normal cursor elsewhere. */
+    juce::MouseCursor::StandardCursorType cursorTypeAt (juce::Point<int>) const;
 
     /** Minimum size of a subtree along each axis (gap resizing, min window). */
     static juce::Point<int> minimumSize (const Node*);
@@ -298,6 +313,7 @@ private:
 
     // gap drag
     int dragSplit_ = 0, dragIndex_ = -1, dragStart_ = 0;
+    bool dragHorizontal_ = false;
     int dragSizeA_ = 0, dragSizeB_ = 0;
     double dragWeightSum_ = 0.0;
 
@@ -305,8 +321,9 @@ private:
 };
 
 //==============================================================================
-/** A floating panel window: a thin drag strip with a close button above its
-    own dock area. Moving it snaps to screen edges and to other windows. */
+/** A floating panel window: a thin drag strip with minimise, maximise and
+    close buttons above its own dock area. Moving it snaps to screen edges
+    and to other windows. */
 class FloatingWindow : public juce::ResizableWindow,
                        public juce::FileDragAndDropTarget
 {
@@ -335,14 +352,42 @@ public:
         within a few pixels to screen edges and other windows ("magnet"). */
     void moveWithMagnet (juce::Point<int> pos);
 
+    /** The resize zone (style::kWindowGrab) is wider than the frame around
+        the content (style::kWindowFrame): the content lets the band
+        between them through to the resize border. */
+    juce::BorderSize<int> getBorderThickness() const override;
+    juce::BorderSize<int> getContentComponentBorder() const override;
+
+    /** Maximise: fill the work area of the window's screen (no resize
+        edges, like a maximised OS window); off restores the former bounds.
+        Moving the title strip of a maximised window restores it first. */
+    void setMaximised (bool);
+    bool isMaximised() const noexcept { return maximised_; }
+    /** Minimise: collapse to the title strip (it stays on screen, the same
+        button brings the panels back). A floating panel has no taskbar
+        button, so an OS minimise could leave it out of reach on Windows. */
+    void setCollapsed (bool);
+    bool isCollapsed() const noexcept { return collapsed_; }
+    /** The window's bounds when neither maximised nor collapsed: what the
+        layout saves. */
+    juce::Rectangle<int> normalBounds() const;
+    /** Dock area screen bounds for a window of the given bounds (the
+        inverse of windowBoundsForArea). */
+    static juce::Rectangle<int> areaBoundsForWindow (juce::Rectangle<int> windowBounds);
+
 private:
     class TitleStrip;
     class Holder;
+
+    int collapsedHeight() const noexcept { return style::kTitleStripH + 2 * style::kWindowFrame; }
 
     DockManager& mgr_;
     DockArea area_;
     std::unique_ptr<TitleStrip> title_;
     std::unique_ptr<Holder> holder_;
+    bool maximised_ = false, collapsed_ = false;
+    juce::Rectangle<int> restoreBounds_;   // before maximising
+    int restoreHeight_ = 0;                // before collapsing
 
     JUCE_DECLARE_NON_COPYABLE (FloatingWindow)
 };
