@@ -1,9 +1,10 @@
-# Diagnostic log for AI-assisted support
+# Diagnostic log
 
 SpectroCraft can keep a small local log of what went wrong in a session: errors and warnings the
-user saw, crashes, interface freezes, audio dropouts, slow operations, and short breadcrumbs of
-what the user did just before. An AI assistant (Claude Code through the MCP adapter, or a chat)
-reads it to find performance problems and bugs. Code: `include/Diagnostics.h`,
+user saw, crashes, interface freezes, audio dropouts, slow operations, the startup phase timings,
+and short breadcrumbs of what the user did just before. Support reads it to find performance
+problems and bugs, directly or through an AI tool (Claude Code reads it through the MCP adapter,
+see *Reading it back*). Code: `include/Diagnostics.h`,
 `src/Diagnostics.cpp`. Tests: `tests/regression/diagnostics.inc`.
 
 ## Turning it on
@@ -12,7 +13,7 @@ The log is **off by default**. Any of these turns it on:
 
 | How | Scope |
 |---|---|
-| *Window > Diagnostic Log for AI Support* | Saved (`diag_log_enabled`), applied at once. The first time, a dialog says what is recorded. |
+| *Window > Diagnostic Log* | Saved (`diag_log_enabled`), applied at once. A dialog first says what is recorded, with a link that opens the log folder. |
 | `SpectroCraft --diag-log` | This session only. |
 | `SC_DIAG_LOG=1` | This session only. |
 | `SC_DIAG_LOG_DIR=<folder>` | This session only, files in `<folder>`. |
@@ -90,7 +91,8 @@ with `"part": n`.
 | `session.start` | info | Header (above). |
 | `session.end` | info | `durS`, `errors`, `warnings`, `counts` per event, `worst`: the 10 slowest events. Only written on a clean exit or when the log is turned off. |
 | `session.unclean` | error | `prevSid`, `prevStarted`, `prevFile`, `lastEvent` (the last line the previous session wrote), and with a crash report `cause` (its first line) and `crash` (its lines). |
-| `startup` | info | `ms` from process start to the window, `files` given on the command line. |
+| `startup` | info | Posted once the main window has been shown (+150 ms): `ms` from process start, `files` given on the command line, `phases`: `{phase: ms since process start}` in order (`before-audio-device-create`, `after-audio-device-create`, `before-properties-file`, `after-properties-file`, `before-setup-views`, `after-setup-views`, `end-of-MainWindow-ctor`, `window-shown(+150ms)`). Only when the log is on at launch: turn it on, then restart. Replaces the former `--measure_load_time` option and its `SpectroCraft_load_time.log`. |
+| `startup.phase` | info | A phase marked after `startup` (`phase`, `ms`): the audio device opened in the background (`audio-device-ready(async)`, or `audio-device-disabled(SC_NO_AUDIO_DEVICE)`). |
 | `diag.dropped` | warn | `counts` dropped by the rate limit, `queueFull`. |
 | `diag.bundle` | info | A support bundle was written (`path`, `sizeKb`). |
 

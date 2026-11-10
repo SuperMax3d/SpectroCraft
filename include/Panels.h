@@ -2095,7 +2095,7 @@ public:
     }
     juce::String getControlText() const { return controlText_; }
 
-    // Diagnostic log indicator (Window > Diagnostic Log for AI Support): a
+    // Diagnostic log indicator (Window > Diagnostic Log): a
     // small dot and "Diagnostic log" while the log is being written.
     void setDiagActive (bool on)
     {

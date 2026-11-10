@@ -255,12 +255,25 @@ public:
     void requestQuit (bool discardUnsaved) override;
     /** Window > Allow AI control toggled: Main.cpp starts/stops the server. */
     std::function<void (bool)> onControlToggled;
-    /** Window > Diagnostic Log for AI Support toggled (after the setting was
+    /** Window > Diagnostic Log toggled (after the setting was
         saved): Main.cpp starts/stops the log (src/Diagnostics.cpp). */
     std::function<void (bool)> onDiagToggled;
     /** Turns the diagnostic log on (after explaining what it records, unless
         headless) or off, and persists the choice. */
     void toggleDiagnosticLog();
+    /** A link showing the folder's path; a click opens the folder (created
+        first) in the Finder / Explorer. */
+    static std::unique_ptr<juce::HyperlinkButton> makeDiagFolderLink (const juce::File& folder);
+    /** The dialog toggleDiagnosticLog() shows first: what is recorded, the
+        folder link, Turn On / Cancel. The link outlives the window (the
+        AlertWindow does not own its custom components). */
+    struct DiagLogDialog
+    {
+        std::unique_ptr<juce::HyperlinkButton> link;   // declared first: destroyed last
+        std::unique_ptr<juce::AlertWindow> window;
+    };
+    static DiagLogDialog makeDiagLogDialog (juce::Component* centreAround);
+    static const juce::String kDiagLogDialogText;
     /** Help > Create Support Bundle...: lists the files, asks where to save
         the zip. writeSupportBundleTo() is the part without dialogs. */
     void showSupportBundleDialog();
@@ -621,7 +634,7 @@ public:
         WindowAllowControl = 6701,    // Window menu: "Allow AI control (localhost)" toggle
         WindowVideo = 6702,           // Window menu: show / hide the Video window
         WindowVideoFollowHover = 6703,// Window menu: "Video Follows Mouse Hover" toggle
-        WindowDiagLog = 6704,         // Window menu: "Diagnostic Log for AI Support" toggle
+        WindowDiagLog = 6704,         // Window menu: "Diagnostic Log" toggle
         WindowWorkspaceBase = 6600,   // Window > Workspaces: switch to workspace i (up to 48)
         WindowWsReset = 6650,         // Window > Workspaces > Reset to Saved Layout
         WindowWsSaveChanges = 6651,   // ... > Save Changes to this Workspace

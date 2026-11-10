@@ -34,8 +34,9 @@
  *       (ctest sets it per shard; CI uploads it when a shard fails).
  * Normal start options:
  *   --diag-log   diagnostic log for this session (docs/diagnostics.md), as
- *                Window > Diagnostic Log for AI Support does; SC_DIAG_LOG=1
- *                or SC_DIAG_LOG_DIR=<folder> do the same.
+ *                Window > Diagnostic Log does; SC_DIAG_LOG=1 or
+ *                SC_DIAG_LOG_DIR=<folder> do the same. It records the startup
+ *                phase timings too ("startup" event).
  */
 
 #include <JuceHeader.h>
@@ -63,7 +64,6 @@
     #include "AI/WhisperPipeline.h"
 #endif
 #include <vector>
-#include <chrono>
 #include <cmath>
 #include <exception>
 
@@ -71,8 +71,9 @@
 extern int scRunUnitTests();
 extern bool scGenerateTestFiles (const juce::String& dir);
 
-// T0 for --measure_load_time: fires as soon as this module's static init runs,
-// i.e. right after the process image and imported DLLs have been loaded.
+// T0 of the startup timings (include/StartupTrace.h): fires as soon as this
+// module's static init runs, i.e. right after the process image and imported
+// DLLs have been loaded.
 namespace { struct StartTrace { StartTrace() { scStart::begin(); } } startTrace; }
 
 // juce::File(String) asserts on relative paths, so resolve them against the
@@ -200,21 +201,6 @@ public:
             if (!cur.isEmpty())
                 args.add (cur);
         }
-
-        // --measure_load_time: record startup phase timings in a log file.
-        // Must be armed before the Application ctor runs, since audio device
-        // initialisation is the dominant startup cost.
-        for (int i = 0; i < args.size(); ++i)
-            if (args[i] == "--measure_load_time")
-            {
-                const juce::File preferred = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
-                                                 .getParentDirectory()
-                                                 .getChildFile ("SpectroCraft_load_time.log");
-                const juce::File log = scStart::enable (preferred, SC_VERSION_STRING);
-                std::printf ("load-time measurement enabled, log: %s\n",
-                             log.getFullPathName().toRawUTF8());
-                std::fflush (stdout);
-            }
 
         // Audio files passed on the command line are collected here and
         // opened after the app is up - single-instance handling below may hand
@@ -903,10 +889,6 @@ public:
                 quit();
                 return;
             }
-            else if (args[i] == "--measure_load_time")
-            {
-                // handled before this loop
-            }
             else if (args[i] == "--diag-log")
             {
                 diagFlag = true;   // diagnostic log for this session (not saved)
@@ -969,22 +951,19 @@ public:
             setControlServer (true);
 #endif
 
-        // Diagnostic log for AI support (opt-in: Window > Diagnostic Log for
-        // AI Support, --diag-log, SC_DIAG_LOG=1 or SC_DIAG_LOG_DIR).
+        // Diagnostic log (opt-in: Window > Diagnostic Log, --diag-log,
+        // SC_DIAG_LOG=1 or SC_DIAG_LOG_DIR).
         mainWindow->onDiagToggled = [this] (bool on) { setDiagnostics (on, "setting"); };
         {
             const juce::String envOn = juce::SystemStats::getEnvironmentVariable ("SC_DIAG_LOG", {}).trim ();
             const juce::String envDir = juce::SystemStats::getEnvironmentVariable ("SC_DIAG_LOG_DIR", {}).trim ();
             const bool env = (envOn.isNotEmpty () && envOn != "0") || envDir.isNotEmpty ();
             if (diagFlag || env || app->settings.diagLogEnabled)
-            {
                 setDiagnostics (true, diagFlag ? "flag" : env ? "env" : "setting");
-                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds> (
-                                    std::chrono::steady_clock::now () - scStart::state.t0).count ();
-                sc::diag::event ("startup", sc::diag::Level::info,
-                                 { { "ms", (juce::int64) ms }, { "files", (int) cliFiles.size () } });
-            }
         }
+        // The "startup" event (phase timings) is posted once the window has
+        // been shown (MainWindow, scStart::report).
+        scStart::state.files = (int) cliFiles.size ();
 
         // Open the command-line files. Routing through MainWindow::openFile
         // gives large files their async load with a progress dialog, exactly

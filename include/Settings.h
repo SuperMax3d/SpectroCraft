@@ -109,7 +109,7 @@ struct Settings
     // the loopback control server at launch. Off by default (opt-in).
     bool controlEnabled = false;
 
-    // Diagnostic log for AI support (Window > Diagnostic Log for AI Support),
+    // Diagnostic log (Window > Diagnostic Log),
     // persisted: local JSON Lines file of errors, freezes and slow operations
     // (src/Diagnostics.cpp, docs/diagnostics.md). Off by default (opt-in).
     bool diagLogEnabled = false;

@@ -7,6 +7,7 @@
 #include <JuceHeader.h>
 #include <array>
 #include <cstring>
+#include <fstream>
 #include <set>
 #include <ctime>
 #include "Application.h"
@@ -4007,7 +4008,7 @@ static void testClosePanelsAndWindowMenu()
         // panels, +2: "Video" and "Video Follows Mouse Hover" below them, +1
         // the "Allow multiple instances" toggle, +1 "Allow AI control
         // (localhost)" when the control server is built in, +1 "Diagnostic
-        // Log for AI Support" (separators are not counted by getNumItems).
+        // Log" (separators are not counted by getNumItems).
         CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems + 1, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
@@ -23102,63 +23103,30 @@ static void testAudioCppCli()
 
 static void testStartupTrace()
 {
-    const juce::File log = makeTempFile ("startup_trace.log");
-    log.deleteFile();
-
     // The trace state is process-global (the app's own startup T0): restore it
-    // when done so this test leaves nothing behind for later tests.
+    // when done so this test leaves nothing behind for later tests. The
+    // "startup" event it feeds is checked in regression/diagnostics.inc.
     const scStart::State savedState = scStart::state;
 
     scStart::begin();
-    const juce::File used = scStart::enable (log, SC_VERSION_STRING);
-    CHECK (scStart::isEnabled (), "enable turns measurement on");
-    CHECK (used == log, "writable preferred path is used");
-
-    const int64 a = scStart::mark ("phase-a");
+    CHECK (scStart::elapsedMs () >= 0 && scStart::phases ().getDynamicObject ()->getProperties ().isEmpty (),
+           "begin arms the clock with no phase recorded");
+    const juce::int64 a = scStart::mark ("phase-a");
     std::this_thread::sleep_for (std::chrono::milliseconds (2));   // >= 1 ms apart
-    const int64 b = scStart::mark ("phase-b");
+    const juce::int64 b = scStart::mark ("phase-b");
+    scStart::mark ("phase-a");   // marked again (a second window): keeps its first time
     CHECK (a >= 0 && b > a, "marks are monotonically increasing");
 
-    scStart::note ("custom-note-line");
+    const auto ph = scStart::phases ();
+    const auto& props = ph.getDynamicObject ()->getProperties ();
+    CHECK (props.size () == 2 && props.getName (0).toString () == "phase-a"
+               && (juce::int64) ph["phase-a"] == a && (juce::int64) ph["phase-b"] == b,
+           "phases in the order marked, a repeated phase keeps its first time");
 
-    const juce::String content = log.loadFileAsString();
-    CHECK (content.contains ("==== SpectroCraft load-time measurement ===="),
-          "header block written");
-    CHECK (content.contains ("[startup] phase-a: T+"), "phase-a line written");
-    CHECK (content.contains ("[startup] phase-b: T+"), "phase-b line written");
-    CHECK (content.contains ("custom-note-line"), "note line written");
-    // The log carries the build's bumped version, not JUCE's ProjectInfo default.
-    CHECK (content.contains ("version: " SC_VERSION_STRING), "version line carries SC_VERSION_STRING");
+    scStart::state.armed = false;
+    CHECK (scStart::mark ("phase-c") < 0 && scStart::elapsedMs () < 0, "nothing is timed before begin()");
 
-    scStart::disable();
-    const int64 c = scStart::mark ("phase-c");
-    CHECK (c < 0, "disabled mark returns -1");
-    CHECK (!log.loadFileAsString().contains ("phase-c"),
-          "disabled mark writes nothing to the log");
-
-    // Unwritable preferred path falls back to a fallback folder. In the app
-    // that is the user's profile (~/Library on macOS); the test injects its
-    // own folder so the real SpectroCraft_load_time.log is never touched.
-    {
-        const juce::File fbDir = scTestTempDir().getChildFile ("startup_fallback");
-        fbDir.createDirectory();
-        const juce::File bad = scTestTempDir()
-                                   .getChildFile ("sc_missing_dir_xyz")
-                                   .getChildFile ("trace.log");
-        const juce::File fallback = scStart::enable (bad, nullptr, fbDir);
-        CHECK (fallback != bad, "unwritable path is rejected");
-        CHECK (fallback == fbDir.getChildFile ("SpectroCraft_load_time.log"),
-               "falls back to <fallback dir>/SpectroCraft_load_time.log");
-        CHECK (fallback.loadFileAsString().contains ("==== SpectroCraft load-time measurement ===="),
-              "fallback log receives the header block");
-        CHECK (scStart::isEnabled (), "re-enable works after disable");
-        scStart::disable();
-        fbDir.deleteRecursively();
-    }
-
-    scStart::disable();
     scStart::state = savedState;
-    log.deleteFile();
 }
 
 // Lazy audio device init: startup must not open the WASAPI device; async init
@@ -27841,7 +27809,7 @@ static void testWriteDataToNewChannels()
 #include "regression/hardening.inc"   // lot 7: Python bridge + headless stem/SR services
 #include "regression/video.inc"   // Video window: picture decoding, pump, movie audio, wiring
 #include "regression/docking.inc"   // docking workspace: groups, drop zones, floating windows, workspaces
-#include "regression/diagnostics.inc"   // opt-in diagnostic log for AI support
+#include "regression/diagnostics.inc"   // opt-in diagnostic log
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose

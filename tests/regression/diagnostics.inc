@@ -443,6 +443,49 @@ static void diagTest_breadcrumbs()
     sc::diag::stop();
 }
 
+// Startup phase timings (include/StartupTrace.h), merged into the log: one
+// "startup" event with the phases once the window is shown, a phase marked
+// later as its own "startup.phase" event.
+static void diagTest_startup()
+{
+    progress ("diagnostics: startup phase timings");
+    using namespace scdiagtest;
+    const scStart::State saved = scStart::state;   // the process's own startup trace
+
+    const juce::File dir = freshDir ("diag_startup");
+    CHECK (sc::diag::start (config (dir)), "diag: start (startup)");
+    scStart::begin();
+    scStart::state.files = 2;
+    scStart::mark ("before-audio-device-create");
+    scStart::mark ("after-setup-views");
+    scStart::mark ("window-shown(+150ms)");
+    scStart::report();
+    scStart::report();                             // posted once only
+    scStart::mark ("audio-device-ready(async)");   // after the report
+    sc::diag::flush();
+
+    const auto evs = readAll (dir);
+    CHECK (count (evs, "startup") == 1, "diag: one startup event");
+    const auto st = first (evs, "startup");
+    const auto phases = st.getProperty ("phases", {});
+    CHECK ((int) st.getProperty ("files", -1) == 2 && (int) st.getProperty ("ms", -1) >= 0
+               && phases.hasProperty ("before-audio-device-create") && phases.hasProperty ("window-shown(+150ms)")
+               && ! phases.hasProperty ("audio-device-ready(async)"),
+           "diag: startup carries the phases marked so far and the command-line files");
+    const auto late = first (evs, "startup.phase");
+    CHECK (late.getProperty ("phase", {}).toString() == "audio-device-ready(async)" && (int) late.getProperty ("ms", -1) >= 0,
+           "diag: a phase marked after the report gets its own event");
+    sc::diag::stop();
+
+    // Log off: nothing is posted, nothing is written.
+    const auto linesAfterStop = readAll (dir).size();   // + session.end
+    scStart::begin();
+    scStart::report();
+    CHECK (! sc::diag::isRunning() && readAll (dir).size() == linesAfterStop, "diag: report() with the log off writes nothing");
+
+    scStart::state = saved;
+}
+
 static void diagTest_readBackAndBundle()
 {
     progress ("diagnostics: summary, diag.tail / diag.summary, support bundle");
@@ -577,7 +620,7 @@ static void diagTest_menusAndStall()
     };
     {
         const auto wm = win->getMenuForIndex (wIdx, "Window");
-        const auto* item = findItem (wm, "Diagnostic Log for AI Support");
+        const auto* item = findItem (wm, "Diagnostic Log");
         CHECK (item != nullptr && !item->isTicked && !app.settings.diagLogEnabled,
                "diag: Window menu item, unchecked by default");
         const auto hm = win->getMenuForIndex (hIdx, "Help");
@@ -586,11 +629,24 @@ static void diagTest_menusAndStall()
                "diag: Help menu actions");
     }
 
+    // The dialog shown before the log starts (headless runs skip it): no AI
+    // wording, the folder as a link that opens it.
+    {
+        auto d = MainWindow::makeDiagLogDialog (nullptr);
+        CHECK (d.window != nullptr && d.window->getName() == "Diagnostic Log" && d.window->getNumButtons() == 2,
+               "diag dialog: titled Diagnostic Log, Turn On / Cancel");
+        CHECK (! MainWindow::kDiagLogDialogText.containsIgnoreCase ("AI ") && ! MainWindow::kDiagLogDialogText.containsIgnoreCase ("assistant"),
+               "diag dialog: no AI assistant wording");
+        CHECK (d.link != nullptr && d.link->getButtonText() == sc::diag::folder().getFullPathName()
+                   && d.link->onClick != nullptr && d.link->getParentComponent() == d.window.get(),
+               "diag dialog: the folder path is a link inside the dialog");
+    }
+
     win->menuItemSelected (MainWindow::WindowDiagLog, wIdx);   // headless: no explanation dialog
     CHECK (sc::diag::enabled() && app.settings.diagLogEnabled, "diag: the Window item turns the log on and saves it");
     {
         const auto wm = win->getMenuForIndex (wIdx, "Window");
-        const auto* item = findItem (wm, "Diagnostic Log for AI Support");
+        const auto* item = findItem (wm, "Diagnostic Log");
         CHECK (item != nullptr && item->isTicked, "diag: the item is checked while the log runs");
     }
     scPumpUntil ([&] { return win->statusBarShowsDiagLog(); }, 3000);   // the window's 30 Hz timer
@@ -669,6 +725,7 @@ static void runRegression_diagnostics()
     diagTest_contentPolicy();
     diagTest_uncleanAndCrash();
     diagTest_breadcrumbs();
+    diagTest_startup();
     diagTest_readBackAndBundle();
     diagTest_menusAndStall();
     diagTest_cost();

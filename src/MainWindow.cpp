@@ -650,11 +650,12 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     scStart::mark ("end-of-MainWindow-ctor");
     // Proxy for "window visible": the first paint happens shortly after the
     // window is shown, so a short delay gives a stable end-to-end number.
-    if (scStart::isEnabled())
-        juce::Timer::callAfterDelay (150, [] {
-            const int64 ms = scStart::mark ("window-shown(+150ms)");
-            scStart::note (juce::String ("total launch->window: T+") + juce::String (ms) + " ms");
-        });
+    // The first window of the process then posts the "startup" event to the
+    // diagnostic log (when it is on).
+    juce::Timer::callAfterDelay (150, [] {
+        scStart::mark ("window-shown(+150ms)");
+        scStart::report ();
+    });
 
     // AI control: commands may now refresh this window, drive its views and
     // show job progress (sc::control::UiBridge).
@@ -4357,6 +4358,50 @@ juce::String MainWindow::menuItemDescription (int menuItemID, int topLevelMenuIn
     return "menu item " + juce::String (menuItemID);
 }
 
+// The diagnostic log folder as a link: a click opens it in the Finder /
+// Explorer (created first: nothing is written before the log is on).
+std::unique_ptr<juce::HyperlinkButton> MainWindow::makeDiagFolderLink (const juce::File& folder)
+{
+    auto link = std::make_unique<juce::HyperlinkButton> (folder.getFullPathName (), juce::URL ());
+    link->setName ({});   // an AlertWindow writes a custom component's name above it
+    link->setFont (juce::Font (juce::FontOptions (15.0f)), false, juce::Justification::centredLeft);
+    link->setColour (juce::HyperlinkButton::textColourId, juce::Colour (0xff4ea1f5));
+    link->setTooltip ("Open " + folder.getFullPathName ());
+    link->onClick = [folder]
+    {
+        folder.createDirectory ();
+        folder.startAsProcess ();
+    };
+    const int w = juce::GlyphArrangement::getStringWidthInt (juce::Font (juce::FontOptions (15.0f)), folder.getFullPathName ());
+    link->setSize (juce::jlimit (120, 560, w + 12), 24);
+    return link;
+}
+
+const juce::String MainWindow::kDiagLogDialogText =
+    "SpectroCraft will keep a small log on this computer to help find performance "
+    "problems and bugs.\n\n"
+    "Recorded: the errors and warnings you see, crashes, interface freezes, audio "
+    "dropouts, slow operations and the startup time, the commands and menus you use, "
+    "and the files you open (with their paths).\n"
+    "Never recorded: audio, transcribed text, table values, scripts, access tokens.\n\n"
+    "Nothing is sent anywhere. The files stay in this folder (10 MB at most), and "
+    "Help > Copy Diagnostic Summary or Create Support Bundle prepares what you choose "
+    "to share:";
+
+// Says what is recorded before the first byte is written, with a link that
+// opens the folder the files go to.
+MainWindow::DiagLogDialog MainWindow::makeDiagLogDialog (juce::Component* centreAround)
+{
+    DiagLogDialog d;
+    d.link = makeDiagFolderLink (sc::diag::folder ());
+    d.window = std::make_unique<juce::AlertWindow> ("Diagnostic Log", kDiagLogDialogText,
+                                                    juce::MessageBoxIconType::InfoIcon, centreAround);
+    d.window->addCustomComponent (d.link.get ());
+    d.window->addButton ("Turn On", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    d.window->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    return d;
+}
+
 void MainWindow::toggleDiagnosticLog ()
 {
     if (sc::diag::enabled ())
@@ -4368,22 +4413,9 @@ void MainWindow::toggleDiagnosticLog ()
     }
     if (! sc::alert::isHeadless ())
     {
-        // Say what is recorded before the first byte is written.
-        juce::AlertWindow dlg ("Diagnostic Log for AI Support",
-            "SpectroCraft will keep a small log on this computer to help an AI assistant "
-            "(or support) find performance problems and bugs.\n\n"
-            "Recorded: the errors and warnings you see, crashes, interface freezes, audio "
-            "dropouts, slow operations, the commands and menus you use, and the files you "
-            "open (with their paths).\n"
-            "Never recorded: audio, transcribed text, table values, scripts, the AI control token.\n\n"
-            "Nothing is sent anywhere. The files stay in\n" + sc::diag::folder ().getFullPathName ()
-                + "\n(10 MB at most). Help > Copy Diagnostic Summary or Create Support Bundle "
-                  "prepares what you choose to share.",
-            juce::MessageBoxIconType::InfoIcon, this);
-        dlg.addButton ("Turn On", 1, juce::KeyPress (juce::KeyPress::returnKey));
-        dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-        dlg.toFront (true);
-        if (dlg.runModalLoop () != 1)
+        auto dlg = makeDiagLogDialog (this);
+        dlg.window->toFront (true);
+        if (dlg.window->runModalLoop () != 1)
             return;
     }
     app.settings.diagLogEnabled = true;
@@ -4397,10 +4429,10 @@ void MainWindow::copyDiagnosticSummary ()
     juce::SystemClipboard::copyTextToClipboard (md);
     sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Diagnostic Summary Copied",
         "The summary (" + juce::String (juce::jmax (1, (int) md.getNumBytesAsUTF8 () / 1024))
-            + " KB) is in the clipboard: paste it into a chat with your AI assistant."
+            + " KB) is in the clipboard, ready to paste into a support request."
             + (sc::diag::enabled () ? juce::String ()
                                     : juce::String ("\n\nThe diagnostic log is off: turn it on with Window > "
-                                                    "Diagnostic Log for AI Support, then reproduce the problem.")),
+                                                    "Diagnostic Log, then reproduce the problem.")),
         "", this);
 }
 
@@ -4419,7 +4451,7 @@ void MainWindow::showSupportBundleDialog ()
     if (files.isEmpty ())
     {
         sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Create Support Bundle",
-            "There is no diagnostic log yet. Turn it on with Window > Diagnostic Log for AI Support, "
+            "There is no diagnostic log yet. Turn it on with Window > Diagnostic Log, "
             "reproduce the problem, then create the bundle.", "", this);
         return;
     }
@@ -8458,15 +8490,15 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (WindowAllowControl, "Allow AI control (localhost)", true,
                       app.settings.controlEnabled);
 #endif
-        // Diagnostic log for AI support: local file of errors, freezes and
+        // Diagnostic log: local file of errors, freezes and
         // slow operations (docs/diagnostics.md). Off by default.
-        menu.addItem (WindowDiagLog, "Diagnostic Log for AI Support", true, sc::diag::enabled ());
+        menu.addItem (WindowDiagLog, "Diagnostic Log", true, sc::diag::enabled ());
     }
     else if (menuName == "Help")
     {
         menu.addItem (HelpAbout, "About SpectroCraft", true, false);
-        // Diagnostic log (Window > Diagnostic Log for AI Support): what to
-        // give an AI assistant or support. Nothing is ever sent.
+        // Diagnostic log (Window > Diagnostic Log): what to give
+        // support. Nothing is ever sent.
         menu.addSeparator ();
         menu.addItem (HelpOpenDiagFolder, "Open Diagnostic Log Folder", true, false);
         menu.addItem (HelpCopyDiagSummary, "Copy Diagnostic Summary", true, false);

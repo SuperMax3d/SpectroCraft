@@ -1,135 +1,113 @@
-// SpectroCraft - optional startup timing measurement (--measure_load_time).
+// SpectroCraft - startup phase timings, kept in memory and written to the
+// diagnostic log ("startup" event, docs/diagnostics.md) when it is on.
 //
-// scStart::begin() is called from a static initializer in Main.cpp, i.e. as soon
-// as the process image and its imported DLLs are loaded (T0). Individual phases
-// call scStart::mark(); nothing is emitted until enable() is called with the
-// --measure_load_time command-line option, so the normal startup path pays only
-// a single boolean check per phase.
+// scStart::begin() runs from a static initializer in Main.cpp (T0: the process
+// image and its DLLs are loaded). Phases call scStart::mark(): a clock read and
+// an append to a short list, no I/O. Once the main window has been shown,
+// scStart::report() posts one "startup" event with every phase so far; a phase
+// marked after that (the audio device, opened in the background) posts its own
+// "startup.phase" event.
 
 #pragma once
 
-#include <cstdint>
-#include <cstdio>
+#include "Diagnostics.h"
+
 #include <chrono>
-#include <fstream>
-#include "JuceHeader.h"
+#include <mutex>
+#include <vector>
 
 namespace scStart {
 
-    // Shared measurement state (C++17 inline variable: one instance across all
-    // translation units).
+    struct Phase
+    {
+        const char* name;   // a string literal
+        juce::int64 ms;     // since T0
+    };
+
     struct State
     {
         std::chrono::steady_clock::time_point t0;
         bool armed = false;
-        bool enabled = false;
-        juce::File logFile;
-
-        void emit (const juce::String& line) const
-        {
-            std::fprintf (stderr, "%s\n", line.toRawUTF8());
-            std::fflush (stderr);
-            if (enabled && logFile != juce::File())
-            {
-                // append mode: creates the file on first use
-                std::ofstream out (logFile.getFullPathName().toStdString(), std::ios::app);
-                if (out)
-                    out << line.toStdString() << "\n";
-            }
-        }
+        std::vector<Phase> phases;   // in the order marked, at most kMaxPhases
+        bool reported = false;       // report() ran
+        int files = 0;               // files given on the command line
     };
 
-    inline State state;
+    constexpr size_t kMaxPhases = 64;
 
-    // Arm (or re-arm) the T0 clock. Safe to call more than once; tests use it
-    // to start a fresh measurement session.
+    // C++17 inline variables: one instance across all translation units.
+    inline State state;
+    inline std::mutex lock;          // phases may be marked from a worker thread
+
+    /** Starts (or restarts, in tests) the T0 clock with no phase recorded. */
     inline void begin()
     {
+        const std::lock_guard<std::mutex> l (lock);
         state.t0 = std::chrono::steady_clock::now();
         state.armed = true;
+        state.phases.clear();
+        state.reported = false;
     }
 
-    inline bool isEnabled() noexcept
+    /** Milliseconds since T0, -1 before begin(). */
+    inline juce::int64 elapsedMs()
     {
-        return state.enabled;
-    }
-
-    inline void disable()
-    {
-        state.enabled = false;
-    }
-
-    // Record a phase and append "[startup] <phase>: T+<ms> ms" to stderr and
-    // the log file (when enabled). Returns elapsed milliseconds since T0, or -1
-    // when measurement is off.
-    inline int64 mark (const char* phase)
-    {
-        if (!state.enabled || !state.armed)
+        if (! state.armed)
             return -1;
+        return std::chrono::duration_cast<std::chrono::milliseconds> (
+                   std::chrono::steady_clock::now() - state.t0).count();
+    }
 
-        const int64 ms = std::chrono::duration_cast<std::chrono::milliseconds>
-                            (std::chrono::steady_clock::now() - state.t0).count();
-        state.emit (juce::String ("[startup] ") + phase + ": T+" + juce::String (ms) + " ms");
+    /** Records a phase (any thread). Returns its time since T0, -1 before
+        begin(). After report(), also posts a "startup.phase" event. */
+    inline juce::int64 mark (const char* phase)
+    {
+        if (! state.armed)
+            return -1;
+        const auto ms = elapsedMs();
+        bool late = false;
+        {
+            const std::lock_guard<std::mutex> l (lock);
+            if (state.phases.size() < kMaxPhases)
+                state.phases.push_back ({ phase, ms });
+            late = state.reported;
+        }
+        if (late && sc::diag::enabled())
+            sc::diag::event ("startup.phase", sc::diag::Level::info,
+                             { { "phase", juce::String (phase) }, { "ms", ms } });
         return ms;
     }
 
-    // Append an arbitrary line to the log file (and stderr) when enabled.
-    inline void note (const juce::String& text)
+    /** {"<phase>": ms, ...} in the order marked; a phase marked again (a
+        second window, in tests) keeps its first time. */
+    inline juce::var phases()
     {
-        state.emit (text);
+        auto* o = new juce::DynamicObject();
+        const std::lock_guard<std::mutex> l (lock);
+        for (const auto& p : state.phases)
+            if (! o->hasProperty (p.name))
+                o->setProperty (p.name, p.ms);
+        return juce::var (o);
     }
 
-    // Fallback log used when the preferred path is not writable:
-    // <dir>/SpectroCraft_load_time.log, where <dir> is, in order, `fallbackDir`
-    // when given, the SC_STARTUP_TRACE_DIR environment variable when set (a
-    // relative value is taken from the current directory), otherwise the
-    // user's app-data folder. The override lets tests exercise the fallback
-    // without touching the user's real log.
-    inline juce::File fallbackLogFile (const juce::File& fallbackDir = {})
+    /** The main window has been shown: posts the "startup" event once, when
+        the diagnostic log is on (launch to now in ms, the phases, the number
+        of command-line files). */
+    inline void report()
     {
-        juce::File dir = fallbackDir;
-        if (dir == juce::File())
         {
-            const juce::String env = juce::SystemStats::getEnvironmentVariable ("SC_STARTUP_TRACE_DIR", {}).trim();
-            if (env.isNotEmpty())
-                dir = juce::File::getCurrentWorkingDirectory().getChildFile (env);
+            const std::lock_guard<std::mutex> l (lock);
+            if (state.reported)
+                return;
+            state.reported = true;
         }
-        if (dir == juce::File())
-            dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory);
-        return dir.getChildFile ("SpectroCraft_load_time.log");
-    }
-
-    // Turn on measurement and write a per-run header block to the log file.
-    // The preferred path is used when writable, otherwise fallbackLogFile
-    // (fallbackDir) is used instead. Returns the actual log file in use.
-    // `version` is the build's SC_VERSION_STRING (generated/Version.h, bumped
-    // on every build). It is passed in rather than included here so the TUs
-    // that include this header are not all rebuilt on every version bump.
-    inline juce::File enable (const juce::File& preferredLog, const char* version = nullptr,
-                              const juce::File& fallbackDir = {})
-    {
-        if (!state.armed)
-            begin();
-
-        juce::File log = preferredLog;
-        {
-            std::ofstream probe (log.getFullPathName().toStdString(), std::ios::app);
-            if (!probe)
-                log = fallbackLogFile (fallbackDir);
-        }
-
-        state.enabled = true;
-        state.logFile = log;
-
-        const juce::String exePath = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
-                                         .getFullPathName();
-        note ("==== SpectroCraft load-time measurement ====");
-        note ("time: " + juce::Time::getCurrentTime().toString (true, true));
-        note ("version: " + juce::String (version != nullptr ? version : "unknown"));
-        note ("exe: " + exePath);
-        note ("log: " + log.getFullPathName());
-        note ("note: T0 = static init complete (a few ms after process start)");
-        return log;
+        if (! sc::diag::enabled())
+            return;
+        auto* o = new juce::DynamicObject();
+        o->setProperty ("ms", elapsedMs());
+        o->setProperty ("files", state.files);
+        o->setProperty ("phases", phases());
+        sc::diag::eventObject ("startup", sc::diag::Level::info, juce::var (o));
     }
 
 }   // namespace scStart
