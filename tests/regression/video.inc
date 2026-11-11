@@ -330,10 +330,10 @@ static void testVideoViewLayout()
     auto r = v.pictureBounds();
     // The plot area is the view minus the 14 px right-hand zoom/pan bar.
     CHECK (std::abs (r.getWidth() - 286.0f) < 0.5f && std::abs (r.getHeight() - 190.67f) < 0.5f
-           && std::abs (r.getCentreY() - 150.0f) < 0.5f, "video view: 3:2 frame letterboxed in the plot area");
+           && std::abs (r.getCentreY() - 143.0f) < 0.5f, "video view: 3:2 frame letterboxed in the plot area");
     v.setFrame (fr, 90);
     r = v.pictureBounds();
-    CHECK (std::abs (r.getWidth() - 200.0f) < 0.5f && std::abs (r.getHeight() - 300.0f) < 0.5f,
+    CHECK (std::abs (r.getWidth() - 190.67f) < 0.5f && std::abs (r.getHeight() - 286.0f) < 0.5f,
            "video view: rotated 90 degrees -> portrait area");
 
     v.setFrame (fr, 0);
@@ -344,7 +344,7 @@ static void testVideoViewLayout()
     v.rotateClockwise();
     r = v.pictureBounds();
     CHECK (v.getUserRotation() == 90 && notified == 90, "video view: rotate clockwise turns by 90 degrees");
-    CHECK (std::abs (r.getWidth() - 200.0f) < 0.5f && std::abs (r.getHeight() - 300.0f) < 0.5f,
+    CHECK (std::abs (r.getWidth() - 190.67f) < 0.5f && std::abs (r.getHeight() - 286.0f) < 0.5f,
            "video view: rotated picture refits (portrait)");
     v.rotateClockwise(); v.rotateClockwise(); v.rotateClockwise();
     CHECK (v.getUserRotation() == 0, "video view: four turns = back to 0");
@@ -369,12 +369,12 @@ static void testVideoViewLayout()
     CHECK (v.getZoom() == VideoView::kMaxZoom, "video view: zoom capped");
 
     // Pan (drag) stays inside the picture: at x8 the 2288x1525 picture can
-    // move 1001 px sideways and ~613 px vertically in a 286x300 plot area.
+    // move 1001 px sideways and ~620 px vertically in a 286x286 plot area.
     v.setPan ({ 5000.0f, -5000.0f });
-    CHECK (std::abs (v.getPan().x - 1001.0f) < 0.5f && std::abs (v.getPan().y + 612.7f) < 0.5f,
+    CHECK (std::abs (v.getPan().x - 1001.0f) < 0.5f && std::abs (v.getPan().y + 619.7f) < 0.5f,
            "video view: pan clamped to the picture edges");
     r = v.pictureBounds();
-    CHECK (std::abs (r.getX()) < 0.5f && std::abs (r.getBottom() - 300.0f) < 0.5f,
+    CHECK (std::abs (r.getX()) < 0.5f && std::abs (r.getBottom() - 286.0f) < 0.5f,
            "video view: clamped pan puts the picture edge on the view edge");
     for (int i = 0; i < 40; ++i) v.zoomOut();
     CHECK (v.getZoom() == 1.0f && v.getPan().isOrigin(), "video view: back at fit, no pan left");
@@ -385,13 +385,13 @@ static void testVideoViewLayout()
     {
         juce::MouseWheelDetails wd;
         wd.deltaY = 1.0f;
-        v.mouseWheelMove (mkMouse (v, 143, 150, {}), wd);
+        v.mouseWheelMove (mkMouse (v, 143, 143, {}), wd);
         CHECK (std::abs (v.getZoom() - VideoView::kZoomStep) < 1e-6f && v.getPan().isOrigin(),
                "video view: wheel up at the centre zooms in");
         // Off-centre: the point under the cursor stays put (horizontal axis;
         // at x1.25 the picture is still shorter than the plot area vertically).
         v.resetZoom();
-        v.mouseWheelMove (mkMouse (v, 100, 150, {}), wd);
+        v.mouseWheelMove (mkMouse (v, 100, 143, {}), wd);
         CHECK (std::abs (v.getPan().x - 10.75f) < 0.5f && std::abs (v.getPan().y) < 0.5f,
                "video view: wheel zoom keeps the cursor point fixed");
         v.resetZoom();
@@ -406,10 +406,10 @@ static void testVideoViewLayout()
         const float z = v.getZoom();
         CHECK (std::abs (z - 286.0f / 140.0f) < 1e-3f, "video view: right-drag zooms to the region");
         const auto P = v.pictureBounds();
-        // The dragged region's centre (130, 85.33 in fitted coords) now sits
-        // at the plot-area centre (143, 150).
+        // The dragged region's centre (130, 92.33 in fitted coords) now sits
+        // at the plot-area centre (143, 143).
         CHECK (std::abs ((P.getX() + 130.0f * z) - 143.0f) < 1.0f
-               && std::abs ((P.getY() + 85.333f * z) - 150.0f) < 1.0f,
+               && std::abs ((P.getY() + 92.333f * z) - 143.0f) < 1.0f,
                "video view: right-drag region centred in the plot area");
         v.resetZoom();
 
@@ -424,14 +424,14 @@ static void testVideoViewLayout()
     {
         auto* bar = v.getZoomBar();
         CHECK (bar->isVisible(), "video view: zoom bar shown with a picture");
-        const double Fh = 190.667;   // fitted height of the 96x64 frame in a 286x300 plot area
+        const double Fh = 190.667;   // fitted height of the 96x64 frame in a 286x286 plot area
         CHECK (std::abs ((double) bar->thumbRect().getY()) < 1.0
                && std::abs ((double) bar->thumbRect().getBottom() - bar->getHeight()) < 1.0,
                "video view: at fit the thumb fills the track");
 
         const double lo = 0.25 * Fh, hi = 0.75 * Fh;
         bar->applyWindow (lo, hi);
-        CHECK (std::abs (v.getZoom() - 300.0 / (hi - lo)) < 1e-3f,
+        CHECK (std::abs (v.getZoom() - 286.0 / (hi - lo)) < 1e-3f,
                "video view: the bar window sets the zoom");
         // The visible fitted range is [lo, hi]: with this geometry that puts
         // pan.y at zero (the picture's centre stays on screen).
@@ -441,25 +441,39 @@ static void testVideoViewLayout()
         const double dx = 10.0;
         const float pyBefore = v.getPan().y;
         bar->applyWindow (lo + dx, hi + dx);
-        CHECK (std::abs (v.getZoom() - 300.0 / (hi - lo)) < 1e-3f
+        CHECK (std::abs (v.getZoom() - 286.0 / (hi - lo)) < 1e-3f
                && std::abs (v.getPan().y - (pyBefore - dx * v.getZoom())) < 0.5f,
                "video view: dragging the thumb pans without changing the zoom");
     }
 
+    // The bottom bar mirrors the vertical one on the horizontal axis.
+    {
+        v.resetZoom();
+        auto* hbar = v.getHZoomBar();
+        CHECK (hbar->isVisible(), "video view: the horizontal bar is shown with a picture");
+        const double Fw = 286.0;   // at fit the frame width fills the plot area
+        CHECK (std::abs ((double) hbar->thumbRect().getX()) < 1.0
+               && std::abs ((double) hbar->thumbRect().getRight() - hbar->getWidth()) < 1.0,
+               "video view: at fit the horizontal thumb fills the track");
+
+        const double lo = 0.25 * Fw, hi = 0.75 * Fw;
+        hbar->applyWindow (lo, hi);
+        CHECK (std::abs (v.getZoom() - 286.0 / (hi - lo)) < 1e-3f,
+               "video view: the horizontal bar window sets the zoom");
+        CHECK (std::abs (v.getPan().x) < 0.5f && std::abs (v.getPan().y) < 0.5f,
+               "video view: the horizontal bar centres its midpoint and leaves pan.y alone");
+
+        const double dx = 10.0;
+        const float pxBefore = v.getPan().x;
+        hbar->applyWindow (lo + dx, hi + dx);
+        CHECK (std::abs (v.getZoom() - 286.0 / (hi - lo)) < 1e-3f
+               && std::abs (v.getPan().x - (pxBefore - dx * v.getZoom())) < 0.5f,
+               "video view: dragging the horizontal thumb pans without changing the zoom");
+        v.resetZoom();
+    }
+
     // Context-menu actions run through one handler (the popup and the tests).
     {
-        int aot = -1;
-        int dockCalls = 0;
-        v.onToggleAlwaysOnTop = [&] (bool on) { aot = on ? 1 : 0; };
-        v.isAlwaysOnTop = [] { return false; };
-        v.handleContextMenuId (VideoView::kMenuAlwaysOnTop);
-        CHECK (aot == 1, "video view: context menu turns always-on-top on");
-        v.isAlwaysOnTop = [] { return true; };
-        v.handleContextMenuId (VideoView::kMenuAlwaysOnTop);
-        CHECK (aot == 0, "video view: context menu turns it off when already on");
-        v.onDockToggle = [&] { ++dockCalls; };
-        v.handleContextMenuId (VideoView::kMenuDock);
-        CHECK (dockCalls == 1, "video view: context menu asks the owner to dock/undock");
         v.resetZoom();
         v.handleContextMenuId (VideoView::kMenuRotateCW);
         CHECK (v.getUserRotation() == 90, "video view: context menu rotates clockwise");
@@ -600,14 +614,20 @@ static void testVideoWindowFollowsDocument()
         auto* host = win->getVideoDockHost();
         CHECK (vw->view().getParentComponent() == host,
                "video dock: the view lives in the host component");
-        const int ph = VideoContentHost::kPanelH;
-        CHECK (vw->getTracksPanel().getParentComponent() == host
-                   && vw->getTracksPanel().getBounds()
-                          == juce::Rectangle<int> (0, host->getHeight() - ph,
-                                                   host->getWidth(), ph),
-               "video dock: the track list sits below the picture in the panel");
-        CHECK (vw->view().isVisible(),
-               "video dock: the picture stays visible inside the panel");
+        const int hw = host->getWidth(), hh = host->getHeight();
+        auto& list = vw->getTracksPanel();
+        CHECK (list.getParentComponent() == host && list.isVisible()
+                   && list.getBounds().getY() + list.getHeight() == hh
+                   && list.getWidth() == hw,
+               "video dock: the track list sits at the bottom of the panel");
+        auto* sep = host->getChildComponent (2);
+        CHECK (sep != nullptr && sep->isVisible()
+                   && sep->getBounds() == juce::Rectangle<int> (0, list.getY() - VideoContentHost::kSplitH,
+                                                               hw, VideoContentHost::kSplitH),
+               "video dock: the separator sits above the track list");
+        CHECK (vw->view().isVisible()
+                   && vw->view().getBounds() == juce::Rectangle<int> (0, 0, hw, sep != nullptr ? sep->getY() : hh),
+               "video dock: the picture fills the rest of the panel");
         win->setVideoDocked (false);
         CHECK (!win->isPanelOpen ("video") && vw->isVisible(),
                "video dock: undocked back to its own window");
@@ -621,6 +641,33 @@ static void testVideoWindowFollowsDocument()
         win->setPanelVisible ("video", false);
         CHECK (!win->isPanelOpen ("video") && vw->isVisible(),
                "video dock: closing the tab brings back its own window");
+
+        // The Window menu's Dock / Undock Video Panel items drive the same
+        // cycle that used to live in the picture's right-click menu.
+        auto menuDockLabel = [&] () -> juce::String
+        {
+            const auto wm = win->getMenuForIndex (wIdx, "Window");
+            for (juce::PopupMenu::MenuItemIterator it (wm, true); it.next ();)
+                if (it.getItem().itemID == MainWindow::WindowVideoToggleDock)
+                    return it.getItem().text;
+            return juce::String();
+        };
+        CHECK (menuDockLabel () == "Dock Video Panel",
+               "video dock: Window menu offers Dock Video Panel while standalone");
+        win->menuItemSelected (MainWindow::WindowVideoToggleDock, wIdx);
+        CHECK (win->isPanelOpen ("video") && !vw->isVisible()
+                   && vw->view().getParentComponent () == win->getVideoDockHost(),
+               "video dock: the Window item docks it into the panel");
+        CHECK (menuDockLabel () == "Undock Video Panel",
+               "video dock: the Window item now offers Undock Video Panel");
+        win->menuItemSelected (MainWindow::WindowVideoToggleDock, wIdx);
+        CHECK (win->isPanelOpen ("video") && !vw->isVisible(),
+               "video dock: undocking floats it instead of hiding it");
+        win->menuItemSelected (MainWindow::WindowVideoToggleDock, wIdx);
+        CHECK (win->isPanelOpen ("video") && !vw->isVisible()
+                   && vw->view().getParentComponent () == win->getVideoDockHost(),
+               "video dock: docking back from the float");
+        win->setVideoDocked (false);   // restore the standalone state
     }
 
     // An edit that changes the length raises the mismatch notice.
@@ -790,18 +837,6 @@ static void testVideoTracksPanelHeadless()
     CHECK (menuId == VideoTracksPanel::kMenuSolo && menuIdx == -1,
            "tracks panel: ruler items carry index -1");
 
-    // Window-level actions are offered by the track list's context menu too.
-    bool aot = false; int aotCalls = 0, dockToggles = 0;
-    p.docked = true;
-    p.isAlwaysOnTop = [&] { return aot; };
-    p.onToggleAlwaysOnTop = [&] (bool on) { aotCalls++; aot = on; };
-    p.onDockToggle = [&] { dockToggles++; };
-    p.handleContextMenuId (VideoTracksPanel::kMenuAlwaysOnTop, -1);
-    CHECK (aotCalls == 1 && aot, "tracks panel: always-on-top toggles on");
-    p.handleContextMenuId (VideoTracksPanel::kMenuAlwaysOnTop, -1);
-    CHECK (aotCalls == 2 && !aot, "tracks panel: always-on-top toggles off again");
-    p.handleContextMenuId (VideoTracksPanel::kMenuDock, -1);
-    CHECK (dockToggles == 1, "tracks panel: dock/undock goes to the owner");
 }
 
 // End to end: two tracks of the same movie on one document. The selected
@@ -914,11 +949,11 @@ static void testDockedVideoReceivesFrames()
     auto* host = win->getVideoDockHost();
     CHECK (vw->view().getParentComponent() == host,
            "docked frames: the picture lives in the panel host");
-    const int ph = VideoContentHost::kPanelH;
-    CHECK (vw->getTracksPanel().getParentComponent() == host
-               && vw->getTracksPanel().getBounds()
-                      == juce::Rectangle<int> (0, host->getHeight() - ph,
-                                               host->getWidth(), ph),
+    const int hw = host->getWidth(), hh = host->getHeight();
+    auto& list = vw->getTracksPanel();
+    CHECK (list.getParentComponent() == host && list.isVisible()
+               && list.getBounds().getY() + list.getHeight() == hh
+               && list.getWidth() == hw,
            "docked frames: the track list is in the panel too");
 
     // Open the movie afterwards, like a drag & drop onto the main window.
@@ -1157,6 +1192,219 @@ static void testVideoTrackMenuActions()
     cleanup ();
 }
 
+// ---------------------------------------------------------------------------
+// Picture adjustments must not compound: re-rendering the same frame with the
+// same settings gives identical pixels. The old shallow copy adjusted the
+// pump's frame in place, so every redraw deepened the effect and reset could
+// never recover it. The fixture's first frame is all black; brightness lifts
+// it to mid-grey once - a compounding render would lift it again.
+static void testVideoAdjustmentNoCompounding()
+{
+    if (!sc::videoDecodingAvailable())
+    {   scSkip ("adjust compounding: no picture decoder on this platform"); return; }
+    const juce::File f = videoFixtureOrSkip();
+    if (!f.existsAsFile()) return;
+
+    const juce::File store = makeTempFile ("video_adjust.recent");
+    store.deleteFile();
+    Application app (store);
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "adjust compounding test"));
+    auto cleanup = [&] { win.reset(); store.deleteFile(); };
+
+    if (!app.openFile (f))
+    {   scSkip ("adjust compounding: the .mp4 audio cannot be opened in this build"); cleanup(); return; }
+    auto* vw = win->getVideoWindow();
+    CHECK (vw != nullptr, "adjust compounding: the window was created");
+    if (vw == nullptr) { cleanup(); return; }
+    vw->view().setSize (480, 360);   // the headless window's content stays unsized
+
+    CHECK (scPumpUntil ([&] { return vw->view().image() != nullptr && vw->view().image()->isValid(); }, 10000),
+           "adjust compounding: a frame reached the view");
+    const auto P = vw->view().pictureBounds();
+    if (!vw->view().image() || !vw->view().image()->isValid() || P.isEmpty()) { cleanup(); return; }
+
+    // Sample points across the picture (the transport is stopped, so this
+    // frame stays put while we re-render it).
+    std::vector<std::pair<int, int>> pts;
+    for (int i = 1; i < 4; ++i)
+        for (int j = 1; j < 4; ++j)
+            pts.push_back ({ (int) P.getX() + i * (int) P.getWidth() / 4,
+                             (int) P.getY() + j * (int) P.getHeight() / 4 });
+
+    auto sample = [&]
+    {
+        const juce::Image snap = vw->view().createComponentSnapshot (vw->view().getLocalBounds(), true, 1.0f);
+        std::vector<int> v;
+        for (const auto& p : pts)
+            v.push_back (snap.getPixelAt (p.first, p.second).getRed());
+        return v;
+    };
+
+    const auto base = sample();
+    vw->setAdjustmentsLive (1.0, 0.5);   // brightness +0.5: black -> mid-grey
+    const auto once = sample();
+    CHECK (once != base, "adjust compounding: the adjustment changes the picture");
+
+    // Re-rendering the same frame with the same settings must not deepen it.
+    vw->redrawCurrentFrame ();
+    vw->redrawCurrentFrame ();
+    CHECK (sample() == once, "adjust compounding: repeated renders keep the same pixels");
+
+    // Reset recovers the original picture exactly.
+    vw->setAdjustmentsLive (1.0, 0.0);
+    CHECK (sample() == base, "adjust compounding: reset restores the unadjusted frame");
+
+    cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// The picture/track-list split: a draggable separator keeps its ratio across
+// resizes, and the corner button collapses/expands the track list.
+static void testVideoHostSplitAndCollapse()
+{
+    VideoContentHost host;
+    VideoView v;
+    VideoTracksPanel p;
+    TrackSplitter s;
+    host.addAndMakeVisible (v);
+    host.addAndMakeVisible (p);
+    host.addAndMakeVisible (s);
+    host.setSize (300, 400);   // triggers the first layout
+
+    CHECK (p.getBounds() == juce::Rectangle<int> (0, 400 - VideoContentHost::kPanelH, 300, VideoContentHost::kPanelH),
+           "host split: first layout uses the preferred track height");
+    CHECK (s.getBounds() == juce::Rectangle<int> (0, 400 - VideoContentHost::kPanelH - VideoContentHost::kSplitH,
+                                                  300, VideoContentHost::kSplitH),
+           "host split: the separator sits above the track list");
+    CHECK (v.getBounds() == juce::Rectangle<int> (0, 0, 300, 400 - VideoContentHost::kPanelH - VideoContentHost::kSplitH),
+           "host split: the picture fills the rest");
+
+    // Dragging the separator down by 50 px shrinks the track list; the
+    // picture takes the freed space.
+    host.applySplitDelta (50.0);
+    CHECK (p.getHeight() == VideoContentHost::kPanelH - 50,
+           "host split: dragging down shrinks the tracks");
+    CHECK (v.getHeight() == 400 - p.getHeight() - VideoContentHost::kSplitH,
+           "host split: the picture takes the freed space");
+
+    // The ratio survives a resize of the host.
+    const double share = (double) p.getHeight() / 400.0;
+    host.setSize (300, 800);
+    CHECK (std::abs ((double) p.getHeight() - std::llround (800.0 * share)) <= 1.0,
+           "host split: the ratio is kept across resizes");
+
+    // Collapse hides the tracks and the separator; expand brings them back.
+    host.setTracksCollapsed (true);
+    CHECK (! p.isVisible() && ! s.isVisible() && host.isTracksCollapsed(),
+           "host collapse: tracks and separator hidden");
+    CHECK (v.getBounds() == juce::Rectangle<int> (0, 0, 300, 800),
+           "host collapse: the picture fills the whole host");
+    host.setTracksCollapsed (false);
+    CHECK (p.isVisible() && s.isVisible() && ! host.isTracksCollapsed(),
+           "host expand: tracks and separator are back");
+
+    // The corner button reports its click to the owner.
+    int clicks = 0;
+    CollapseToggle c;
+    c.onClick = [&] { ++clicks; };
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    c.mouseDown (mkMouse (c, 7, 7, lmb));
+    c.mouseUp   (mkMouse (c, 7, 7, lmb));
+    CHECK (clicks == 1, "collapse button: a click fires the callback");
+}
+
+// ---------------------------------------------------------------------------
+// The track list's scrollbars: the time bar always mirrors the view; the row
+// bar appears only when the rows overflow and drives the vertical offset.
+static void testVideoTracksPanelScrollbars()
+{
+    VideoTracksPanel p;
+    std::vector<VideoTracksPanel::Track> ts;
+    for (int i = 0; i < 8; ++i)
+    {
+        VideoTracksPanel::Track t;
+        t.file = juce::File ("/tmp/t" + juce::String (i) + ".mp4");
+        t.offsetSecs = i * 1.0;
+        t.durationSecs = 2.0;
+        ts.push_back (t);
+    }
+
+    p.setAudioDuration (10.0);
+    p.setSize (300, 124);
+    CHECK (!p.getVScroll()->isVisible(), "track scroll: no row bar while the rows fit");
+
+    p.setTracks (ts);   // refits to [0, max(audio, tracks)] = [0, 10]
+    const auto vr = p.getViewRange();
+    CHECK (std::abs (vr.getStart()) < 1e-9 && std::abs (vr.getEnd() - 10.0) < 1e-9,
+           "track scroll: the fit covers all tracks");
+
+    // Eight rows need 208 px but only 92 are available: the row bar appears.
+    CHECK (p.getVScroll()->isVisible(), "track scroll: the row bar appears when rows overflow");
+    const int avail = p.getHeight() - VideoTracksPanel::kBarW - VideoTracksPanel::kRulerH;
+    CHECK (avail == 92, "track scroll: the available row height is as expected");
+
+    // The time bar mirrors the fitted extent and the current view.
+    auto* hsb = p.getHScroll();
+    CHECK (hsb->isVisible(), "track scroll: the time bar is shown");
+    const auto th = hsb->thumbRect();
+    CHECK (th.getWidth() > 0 && th.getX() >= 0, "track scroll: the time thumb spans the view");
+
+    // Dragging the row bar down by one row shows the next rows.
+    const double rowsTotal = 8 * VideoTracksPanel::kRowH;   // 208 px of rows
+    CHECK (std::abs (p.getScrollY()) < 1e-9, "track scroll: starts at the top");
+    p.getVScroll()->applyWindow (rowsTotal - (VideoTracksPanel::kRowH + avail), rowsTotal - VideoTracksPanel::kRowH);
+    CHECK (std::abs (p.getScrollY() - VideoTracksPanel::kRowH) < 1e-9,
+           "track scroll: the bar drives the row offset");
+
+    // Hit-testing follows the scrolled rows.
+    const int xa = (int) p.xForTime (1.5);   // inside track 1 [1, 3)
+    CHECK (p.trackIndexAt ({ xa, VideoTracksPanel::kRulerH + 13 }) == 1,
+           "track scroll: hit-testing accounts for the offset");
+
+    // Fewer rows than fit hide the row bar again and reset the offset.
+    p.setTracks ({ ts[0], ts[1] });
+    CHECK (!p.getVScroll()->isVisible() && std::abs (p.getScrollY()) < 1e-9,
+           "track scroll: the row bar hides again when the rows fit");
+}
+
+// ---------------------------------------------------------------------------
+// Saving a document opened from a video file must keep the reference to that
+// video in the metadata bundle (as one materialised track), so reopening the
+// saved .wav brings the picture back.
+static void testVideoImplicitTrackPersisted()
+{
+    FileDoc d;
+    CHECK (d.buildScmdJson().empty(), "implicit track: nothing to embed without content");
+
+    d.videoFile = juce::File ("/tmp/movie.mp4");
+    const std::string json = d.buildScmdJson();
+    CHECK (!json.empty(), "implicit track: the video reference makes the bundle worth embedding");
+
+    sc::MetaBundle b;
+    CHECK (sc::parseBundle (juce::String (json), b, nullptr), "implicit track: the bundle parses back");
+    CHECK (b.haveVideoTracks && b.videoTracks.size () == 1
+               && b.videoTracks[0].file == d.videoFile
+               && std::abs (b.videoTracks[0].offsetSecs) < 1e-9,
+           "implicit track: one materialised track with the video file");
+
+    // An explicit list is never duplicated by the implicit track.
+    sc::VideoTrackData t;
+    t.file = juce::File ("/tmp/other.mp4");
+    d.videoTracks.push_back (t);
+    const std::string json2 = d.buildScmdJson();
+    sc::MetaBundle b2;
+    CHECK (sc::parseBundle (juce::String (json2), b2, nullptr)
+               && b2.videoTracks.size () == 1 && b2.videoTracks[0].file == t.file,
+           "implicit track: explicit tracks are kept as-is");
+
+    // The external .meta.json form carries the same materialisation.
+    const std::string meta = d.buildMetaJson();
+    sc::MetaBundle b3;
+    CHECK (sc::parseBundle (juce::String (meta), b3, nullptr)
+               && b3.videoTracks.size () == 1 && b3.videoTracks[0].file == t.file,
+           "implicit track: the meta.json form matches");
+}
+
 static void runRegression_video()
 {
     testVideoDisplayTimeRule();
@@ -1170,6 +1418,10 @@ static void runRegression_video()
     testVideoTracksPanelHeadless();
     testVideoWindowMultiTrack();
     testDockedVideoReceivesFrames();
+    testVideoAdjustmentNoCompounding();
+    testVideoHostSplitAndCollapse();
+    testVideoTracksPanelScrollbars();
+    testVideoImplicitTrackPersisted();
     testVideoSyncMath();
     testVideoTrackMenuActions();
 }

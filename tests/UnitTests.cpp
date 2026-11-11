@@ -4005,11 +4005,11 @@ static void testClosePanelsAndWindowMenu()
         CHECK (wIdx >= 0, "Window menu exists in the menu bar");
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
         // +2: the "Workspaces" submenu and "Maximize Panel Group" above the
-        // panels, +2: "Video" and "Video Follows Mouse Hover" below them, +1
-        // the "Allow multiple instances" toggle, +1 "Allow AI control
-        // (localhost)" when the control server is built in, +1 "Diagnostic
-        // Log" (separators are not counted by getNumItems).
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems + 1, "Window menu lists every panel");
+        // panels, +3: "Video", "Dock/Undock Video Panel" and "Video Follows
+        // Mouse Hover" below them, +1 the "Allow multiple instances" toggle,
+        // +1 "Allow AI control (localhost)" when the control server is built
+        // in, +1 "Diagnostic Log" (separators are not counted by getNumItems).
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 3 + 1 + kScControlMenuItems + 1, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
         // persists it to the store file immediately.
@@ -4143,7 +4143,7 @@ static void testClosePanelsAndWindowMenu()
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems + 1, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 3 + 1 + kScControlMenuItems + 1, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 0, wIdx);   // files
@@ -22502,11 +22502,16 @@ static void testDedicatedTrackMarkerLines()
     // A full-height vertical line: far more yellow pixels than a neighbour
     // column (the parameter curve contributes equally to both).
     const int yTop = 1, yBot = H - 1;
-    CHECK (yellowCount (xP, yTop, yBot) > 0.8 * (yBot - yTop),
+    // The drawn line sits at lround of the same mapping; allow +/-1 px so
+    // sub-pixel alignment of the strip width cannot flip the result.
+    auto lineNear = [&] (int x) { return std::max ({ yellowCount (x - 1, yTop, yBot),
+                                                    yellowCount (x,     yTop, yBot),
+                                                    yellowCount (x + 1, yTop, yBot) }); };
+    CHECK (lineNear (xP) > 0.8 * (yBot - yTop),
           "point marker draws a full-height vertical line on the strip");
-    CHECK (yellowCount (xA, yTop, yBot) > 0.8 * (yBot - yTop),
+    CHECK (lineNear (xA) > 0.8 * (yBot - yTop),
           "region start edge draws a vertical line on the strip");
-    CHECK (yellowCount (xB, yTop, yBot) > 0.8 * (yBot - yTop),
+    CHECK (lineNear (xB) > 0.8 * (yBot - yTop),
           "region end edge draws a vertical line on the strip");
 
     // No horizontal bracket line: in the rows just below the top edge only

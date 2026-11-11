@@ -635,6 +635,7 @@ public:
         WindowVideo = 6702,           // Window menu: show / hide the Video window
         WindowVideoFollowHover = 6703,// Window menu: "Video Follows Mouse Hover" toggle
         WindowDiagLog = 6704,         // Window menu: "Diagnostic Log" toggle
+        WindowVideoToggleDock = 6705, // Window menu: Dock / Undock the Video panel
         WindowWorkspaceBase = 6600,   // Window > Workspaces: switch to workspace i (up to 48)
         WindowWsReset = 6650,         // Window > Workspaces > Reset to Saved Layout
         WindowWsSaveChanges = 6651,   // ... > Save Changes to this Workspace
@@ -754,7 +755,6 @@ private:
     // (owned above) still exist.
     void layoutEditor();                      // place the views inside the Editor panel
     void handlePanelOpenChanged (const juce::String& id, bool open);
-    void updateVideoDockLabels();             // "Undock Panel" / "Dock Panel" in the video menus
     void toggleVideoDock();                   // the video menus' Dock / Undock Panel item
     void applyDockLayout (const juce::var& layout);
     juce::var legacyLeftLayout() const;       // arrangement saved by the old two-group column

@@ -572,25 +572,40 @@ static void dockTest_editorAndVideo()
                "dock editor: closing the floating window docks the Editor back");
     }
 
-    // The video menus' Dock / Undock Panel item follows the picture.
+    // "Always on Top" lives in the floating panel-group menu: the manager
+    // finds the window hosting a group through floaterForGroup.
     if (! sc::videoDecodingAvailable ())
-        scSkip ("dock editor: no video decoder in this build (video panel labels)");
+        scSkip ("dock editor: no video decoder in this build (always-on-top)");
     else
     {
         win->setVideoDocked (true);
         auto* vw = win->getVideoWindow ();
-        CHECK (vw != nullptr && vw->view ().docked, "dock video: in the main window the menu offers Undock Panel");
-        if (vw != nullptr && vw->view ().onDockToggle)
+        CHECK (vw != nullptr, "dock aot: the video window exists");
+
+        auto* vg = dockGroupOf (dock, "video");
+        const int uid = vg != nullptr ? vg->getUid() : 0;
+        CHECK (dock.floaterForGroup (uid) == nullptr,
+               "dock aot: no floater while the group is in the main window");
+
+        dock.floatPanel ("video", juce::Rectangle<int> (100, 100, 420, 300));
+        // Floating re-creates the group node with a fresh uid: locate it again.
+        const auto loc = dock.locate ("video");
+        auto* fw = loc.group != nullptr ? dock.floaterForGroup (loc.group->uid) : nullptr;
+        CHECK (fw != nullptr && dock.isFloating ("video"),
+               "dock aot: the floater hosts the floating group");
+
+        if (fw != nullptr)
         {
-            vw->view ().onDockToggle ();   // Undock Panel
-            CHECK (dock.isFloating ("video") && ! vw->view ().docked
-                       && vw->view ().getParentComponent () == win->getVideoDockHost (),
-                   "dock video: Undock Panel floats the panel, the menu then offers Dock Panel");
-            vw->view ().onDockToggle ();   // Dock Panel
-            dock.flushRetired ();
-            CHECK (win->isPanelOpen ("video") && ! dock.isFloating ("video") && vw->view ().docked,
-                   "dock video: Dock Panel brings it back to the main window");
+            fw->setAlwaysOnTop (true);
+            CHECK (fw->isAlwaysOnTop (), "dock aot: always-on-top turns on");
+            fw->setAlwaysOnTop (false);
+            CHECK (! fw->isAlwaysOnTop (), "dock aot: always-on-top turns off again");
         }
+
+        dock.dockPanelBack ("video");
+        dock.flushRetired ();
+        CHECK (win->isPanelOpen ("video") && ! dock.isFloating ("video"),
+               "dock aot: docking back removes the floater");
     }
     win.reset ();
     store.deleteFile ();

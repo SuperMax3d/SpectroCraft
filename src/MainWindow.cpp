@@ -357,7 +357,6 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (dockLoading_) return;
         dockLayoutDirty_ = true;   // saved by the timer shortly after
         dockLayoutDirtyAt_ = juce::Time::getMillisecondCounter ();
-        updateVideoDockLabels ();
     };
     dock_->onPanelOpenChanged = [this] (const juce::String& id, bool open) { handlePanelOpenChanged (id, open); };
     // Shortcuts typed in a floating panel window, and files dropped on one,
@@ -1192,7 +1191,6 @@ void MainWindow::applyDockLayout (const juce::var& layout)
         }
     }
     dockLayoutDirty_ = false;
-    updateVideoDockLabels ();
     resized ();
 }
 
@@ -1216,18 +1214,6 @@ void MainWindow::handlePanelOpenChanged (const juce::String& id, bool open)
             videoWindow->toFront (false);
         }
     }
-    updateVideoDockLabels ();
-}
-
-void MainWindow::updateVideoDockLabels()
-{
-    if (videoWindow == nullptr || dock_ == nullptr)
-        return;
-    // The video menus offer "Undock Panel" while the picture is docked in
-    // the main window, "Dock Panel" in a floating panel or its own window.
-    const bool inMain = isVideoDocked () && dock_->isOpen ("video") && ! dock_->isFloating ("video");
-    videoWindow->view ().docked = inMain;
-    videoWindow->getTracksPanel ().docked = inMain;
 }
 
 void MainWindow::toggleVideoDock()
@@ -1238,7 +1224,6 @@ void MainWindow::toggleVideoDock()
         dock_->dockPanelBack ("video");        // floating panel -> main window
     else
         dock_->floatPanel ("video");           // main window -> floating panel
-    updateVideoDockLabels ();
 }
 
 bool MainWindow::areLeftPanelsVisible() const
@@ -2669,27 +2654,8 @@ void MainWindow::ensureVideoWindow()
         toFront (false);   // keep the keyboard on the spectrogram
     };
 
-    // Context-menu actions that reach outside the view.
-    videoWindow->view().onToggleAlwaysOnTop = [this] (bool on)
-    {
-        app.recentStore->setValue ("video_always_on_top", on ? 1 : 0);
-        if (videoWindow != nullptr) videoWindow->setAlwaysOnTop (on);
-    };
-    videoWindow->view().isAlwaysOnTop = [this]
-    {   return app.recentStore->getIntValue ("video_always_on_top", 0) != 0; };
-    videoWindow->view().onDockToggle = [this] { toggleVideoDock (); };
-
-    // The track list offers the same window-level actions (and a ruler seek),
-    // so they stay reachable while docked even without a video loaded.
+    // The track list's ruler seeks the main playhead.
     auto& vtp = videoWindow->getTracksPanel();
-    vtp.onToggleAlwaysOnTop = [this] (bool on)
-    {
-        app.recentStore->setValue ("video_always_on_top", on ? 1 : 0);
-        if (videoWindow != nullptr) videoWindow->setAlwaysOnTop (on);
-    };
-    vtp.isAlwaysOnTop = [this]
-    {   return app.recentStore->getIntValue ("video_always_on_top", 0) != 0; };
-    vtp.onDockToggle = [this] { toggleVideoDock (); };
     vtp.onSeekTime = [this] (double t) { app.setPlayhead (t); };
     videoWindow->onTrackMenuAction = [this] (int id, int idx)
     {
@@ -2742,7 +2708,6 @@ void MainWindow::ensureVideoWindow()
     // The saved layout may have the Video tab open: restore the docked state.
     if (isPanelOpen ("video"))
         videoWindow->dockTo (*videoDockHost);
-    updateVideoDockLabels ();
 }
 
 void MainWindow::addVideoTrackFromFile (const juce::File& f)
@@ -3993,6 +3958,11 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             setVideoDocked (false);   // back to the standalone window, shown
         else
             setVideoWindowVisible (! isVideoWindowVisible ());
+        return;
+    }
+    if (menuItemID == WindowVideoToggleDock)
+    {
+        toggleVideoDock ();
         return;
     }
     if (menuItemID == WindowVideoFollowHover)
@@ -8475,6 +8445,11 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addSeparator ();
         menu.addItem (WindowVideo, "Video", sc::videoDecodingAvailable (),
                       isVideoWindowVisible () || isVideoDocked ());
+        // Docking the picture into / out of the docking workspace used to be
+        // in the video's right-click menu; it lives here now.
+        menu.addItem (WindowVideoToggleDock,
+                      isVideoDocked () ? "Undock Video Panel" : "Dock Video Panel",
+                      sc::videoDecodingAvailable (), false);
         menu.addItem (WindowVideoFollowHover, "Video Follows Mouse Hover", sc::videoDecodingAvailable (),
                       videoFollowHover);
 

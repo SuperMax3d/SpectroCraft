@@ -902,12 +902,19 @@ void GroupComponent::showPanelMenu (int tabIndex, std::optional<juce::Point<int>
         if (! c) allClosable = false;
     }
 
-    enum { kClose = 1, kUndock, kDock, kCloseOthers, kCloseGroup, kUndockGroup, kMaximize };
+    enum { kClose = 1, kUndock, kDock, kAlwaysOnTop, kCloseOthers, kCloseGroup,
+           kUndockGroup, kMaximize };
     juce::PopupMenu m;
     m.addItem (kClose, "Close Panel", closable);
     m.addItem (kUndock, "Undock Panel", ! (floating && alone));
     if (floating)
+    {
         m.addItem (kDock, "Dock Panel");
+        // Only meaningful for a floating window: keep it above all others.
+        auto* fl = mgr_.floaterForGroup (uid_);
+        m.addItem (kAlwaysOnTop, "Always on Top", true,
+                   fl != nullptr && fl->isAlwaysOnTop());
+    }
     m.addItem (kCloseOthers, "Close Other Panels in Group", othersClosable);
     juce::PopupMenu groupMenu;
     groupMenu.addItem (kCloseGroup, "Close Panel Group", allClosable);
@@ -924,7 +931,8 @@ void GroupComponent::showPanelMenu (int tabIndex, std::optional<juce::Point<int>
     juce::Component::SafePointer<GroupComponent> safe (this);
     DockManager* mgr = &mgr_;
     const int uid = uid_;
-    m.showMenuAsync (opts, [safe, mgr, id, uid] (int r)
+    FloatingWindow* fl = floating ? mgr_.floaterForGroup (uid) : nullptr;
+    m.showMenuAsync (opts, [safe, mgr, id, uid, fl] (int r)
     {
         if (safe == nullptr || r == 0)
             return;
@@ -933,6 +941,9 @@ void GroupComponent::showPanelMenu (int tabIndex, std::optional<juce::Point<int>
             case kClose:       mgr->closePanel (id); break;
             case kUndock:      mgr->floatPanel (id); break;
             case kDock:        mgr->dockPanelBack (id); break;
+            case kAlwaysOnTop:
+                if (fl != nullptr) fl->setAlwaysOnTop (! fl->isAlwaysOnTop());
+                break;
             case kCloseOthers: mgr->closeOthersInGroup (id); break;
             case kCloseGroup:  mgr->closeGroup (uid); break;
             case kUndockGroup: mgr->floatGroup (uid); break;
@@ -1548,6 +1559,13 @@ void FloatingWindow::setMaximised (bool shouldBeMaximised)
     mgr_.geometryChanged();
 }
 
+void FloatingWindow::setAlwaysOnTop (bool on)
+{
+    if (alwaysOnTop_ == on) return;
+    alwaysOnTop_ = on;
+    juce::Component::setAlwaysOnTop (on);   // the peer sets / clears WS_EX_TOPMOST
+}
+
 void FloatingWindow::setCollapsed (bool shouldBeCollapsed)
 {
     if (shouldBeCollapsed == collapsed_)
@@ -1790,6 +1808,14 @@ Node* DockManager::findGroup (int uid, DockArea** areaOut) const
             if (areaOut != nullptr) *areaOut = a;
             return n;
         }
+    return nullptr;
+}
+
+FloatingWindow* DockManager::floaterForGroup (int uid) const
+{
+    for (const auto& f : floaters_)
+        if (findNode (f->area().root.get(), uid) != nullptr)
+            return f.get();
     return nullptr;
 }
 

@@ -368,6 +368,10 @@ public:
         button, so an OS minimise could leave it out of reach on Windows. */
     void setCollapsed (bool);
     bool isCollapsed() const noexcept { return collapsed_; }
+
+    /** Keep the window above all other windows (WS_EX_TOPMOST). */
+    void setAlwaysOnTop (bool on);
+    bool isAlwaysOnTop() const noexcept { return alwaysOnTop_; }
     /** The window's bounds when neither maximised nor collapsed: what the
         layout saves. */
     juce::Rectangle<int> normalBounds() const;
@@ -385,7 +389,7 @@ private:
     DockArea area_;
     std::unique_ptr<TitleStrip> title_;
     std::unique_ptr<Holder> holder_;
-    bool maximised_ = false, collapsed_ = false;
+    bool maximised_ = false, collapsed_ = false, alwaysOnTop_ = false;
     juce::Rectangle<int> restoreBounds_;   // before maximising
     int restoreHeight_ = 0;                // before collapsing
 
@@ -419,6 +423,8 @@ public:
     /** Every group of every area, main area first. */
     std::vector<Node*> allGroups() const;
     Node* findGroup (int uid, DockArea** areaOut = nullptr) const;
+    /** The floating window holding this group (nullptr when docked). */
+    FloatingWindow* floaterForGroup (int uid) const;
     /** Screen bounds of the panel's content while open and showing. */
     juce::Rectangle<int> panelScreenBounds (const juce::String& id) const;
 

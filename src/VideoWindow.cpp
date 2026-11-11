@@ -3,6 +3,7 @@
  */
 #include <JuceHeader.h>
 
+#include "AlertGate.h"
 #include "VideoWindow.h"
 
 //==============================================================================
@@ -48,6 +49,9 @@ VideoView::VideoView()
     setOpaque (true);
     addAndMakeVisible (zoomBar_);
     zoomBar_.onChange = [this] (double lo, double hi) { applyZoomFromBar (lo, hi); };
+    addAndMakeVisible (hzoomBar_);
+    hzoomBar_.onChange = [this] (double lo, double hi) { applyHZoomFromBar (lo, hi); };
+    addAndMakeVisible (collapseBtn_);
 }
 
 void VideoView::setMessage (const juce::String& m)
@@ -238,7 +242,9 @@ void VideoView::syncZoomBar()
     if (F.isEmpty())
     {
         zoomBar_.setVisible (false);
+        hzoomBar_.setVisible (false);
         barRangeH_ = -1.0;
+        barRangeW_ = -1.0;
         return;
     }
     zoomBar_.setVisible (true);
@@ -256,6 +262,18 @@ void VideoView::syncZoomBar()
     const double top = std::clamp (double((A.getY() - P.getY()) / zoom_), 0.0, fh);
     const double bot = std::clamp (double((A.getBottom() - P.getY()) / zoom_), 0.0, fh);
     zoomBar_.setWindow (top, bot);
+
+    // ... and the same for the picture width on the bottom bar.
+    hzoomBar_.setVisible (true);
+    const double fw = (double) F.getWidth();
+    if (fw != barRangeW_)
+    {
+        barRangeW_ = fw;
+        hzoomBar_.setDuration (fw);   // horizontal time-style bar: [0, fitted width]
+    }
+    const double left  = std::clamp (double((A.getX() - P.getX()) / zoom_), 0.0, fw);
+    const double right = std::clamp (double((A.getRight() - P.getX()) / zoom_), 0.0, fw);
+    hzoomBar_.setWindow (left, right);
 }
 
 void VideoView::applyZoomFromBar (double lo, double hi)
@@ -275,6 +293,22 @@ void VideoView::applyZoomFromBar (double lo, double hi)
     if (onAdjustmentChanged) onAdjustmentChanged ();
 }
 
+void VideoView::applyHZoomFromBar (double lo, double hi)
+{
+    const auto A = plotArea();
+    const auto F = fittedBounds();
+    if (F.isEmpty() || hi <= lo) return;
+
+    // Mirror of applyZoomFromBar for the picture width.
+    zoom_ = (float) std::min ((double) A.getWidth() / (hi - lo), (double) kMaxZoom);
+    const double mid = 0.5 * (lo + hi);
+    pan_.x = (float) (A.getCentreX() - mid * zoom_ - F.getCentreX() + 0.5 * F.getWidth() * zoom_);
+    clampPan();
+    syncZoomBar();
+    repaint();
+    if (onAdjustmentChanged) onAdjustmentChanged ();
+}
+
 void VideoView::handleContextMenuId (int id)
 {
     switch (id)
@@ -284,22 +318,13 @@ void VideoView::handleContextMenuId (int id)
         case kMenuZoomFit:    resetZoom(); break;
         case kMenuRotateCW:   rotateClockwise(); break;
         case kMenuRotateCCW:  rotateCounterClockwise(); break;
-        case kMenuAlwaysOnTop:
-            if (onToggleAlwaysOnTop)
-                onToggleAlwaysOnTop (!(isAlwaysOnTop ? isAlwaysOnTop() : false));
-            break;
-        case kMenuDock:
-            if (onDockToggle) onDockToggle ();
-            break;
         default: break;
     }
 }
 
 void VideoView::showContextMenu (const juce::Point<int>& at)
 {
-    // Headless test views have no owner callbacks and must not enter a modal loop.
-    if (!onDockToggle && !onToggleAlwaysOnTop) return;
-
+    if (sc::alert::isHeadless ()) return;   // no native menu in test runs
     juce::PopupMenu m;
     m.addItem (kMenuZoomIn, "Zoom In");
     m.addItem (kMenuZoomOut, "Zoom Out");
@@ -309,10 +334,6 @@ void VideoView::showContextMenu (const juce::Point<int>& at)
     // which would mangle the UTF-8 degree sign (stray 'A').
     m.addItem (kMenuRotateCW, "Rotate 90deg Clockwise");
     m.addItem (kMenuRotateCCW, "Rotate 90deg Counter-Clockwise");
-    if (onToggleAlwaysOnTop)
-        m.addItem (kMenuAlwaysOnTop, "Always On Top", true, isAlwaysOnTop ? isAlwaysOnTop() : false);
-    if (onDockToggle)
-        m.addItem (kMenuDock, docked ? "Undock Panel" : "Dock Panel");
 
     const int id = m.showMenu (juce::PopupMenu::Options ()
                                    .withTargetComponent (this)
@@ -364,7 +385,9 @@ void VideoView::paint (juce::Graphics& g)
 
 void VideoView::resized()
 {
-    zoomBar_.setBounds (getWidth() - kBarWidth, 0, kBarWidth, getHeight());
+    zoomBar_.setBounds (getWidth() - kBarWidth, 0, kBarWidth, std::max (1, getHeight() - kBarHeight));
+    hzoomBar_.setBounds (0, getHeight() - kBarHeight, std::max (1, getWidth() - kBarWidth), kBarHeight);
+    collapseBtn_.setBounds (getWidth() - kBarWidth, getHeight() - kBarHeight, kBarWidth, kBarHeight);
     clampPan();
     if (onDisplaySizeChanged) onDisplaySizeChanged ();
 }
@@ -429,6 +452,22 @@ void VideoView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWhee
 VideoTracksPanel::VideoTracksPanel()
 {
     setOpaque (true);
+    addAndMakeVisible (hScroll_);
+    addAndMakeVisible (vScroll_);
+    vScroll_.setVisible (false);   // only when the rows overflow
+    hScroll_.onChange = [this] (double t0, double t1)
+    {
+        view_ = { t0, t1 };
+        syncScrollbars();
+        repaint();
+    };
+    vScroll_.onChange = [this] (double lo, double hi)
+    {
+        const double total = std::max ((double) rowsHeight(), (double) rowsAvail());
+        scrollY_ = std::clamp (total - hi, 0.0, total);
+        syncScrollbars();   // normalises the window back to a fixed size
+        repaint();
+    };
 }
 
 VideoTracksPanel::~VideoTracksPanel() = default;
@@ -481,23 +520,33 @@ void VideoTracksPanel::setPlayhead (double tSecs)
     repaint();
 }
 
+// The ruler/rows area: everything except the bottom time bar and, when it is
+// visible, the right-hand row scrollbar.
+int VideoTracksPanel::contentWidth() const
+{
+    return std::max (1, getWidth() - (vScroll_.isVisible() ? kBarW : 0));
+}
+
+int VideoTracksPanel::rowsHeight() const { return (int) tracks_.size() * kRowH; }
+int VideoTracksPanel::rowsAvail() const   { return std::max (0, getHeight() - kBarW - kRulerH); }
+
 juce::Rectangle<int> VideoTracksPanel::rowRect (int i) const
 {
-    return { 0, kRulerH + i * kRowH, getWidth(), kRowH };
+    return { 0, kRulerH + i * kRowH, contentWidth(), kRowH };
 }
 
 double VideoTracksPanel::timeAtX (float x) const
 {
     const double span = view_.getLength();
     if (span <= 0.0 || getWidth() <= 0) return view_.getStart();
-    return view_.getStart() + ((double) x / (double) getWidth()) * span;
+    return view_.getStart() + ((double) x / (double) contentWidth()) * span;
 }
 
 float VideoTracksPanel::xForTime (double t) const
 {
     const double span = view_.getLength();
     if (span <= 0.0 || getWidth() <= 0) return 0.0f;
-    return (float) ((t - view_.getStart()) / span * (double) getWidth());
+    return (float) ((t - view_.getStart()) / span * (double) contentWidth());
 }
 
 void VideoTracksPanel::zoomFit()
@@ -510,6 +559,7 @@ void VideoTracksPanel::zoomFit()
     }
     if (hi <= lo) hi = lo + 1.0;
     view_ = { lo, hi };
+    syncScrollbars();
 }
 
 void VideoTracksPanel::zoomAbout (double tSecs, double factor)
@@ -532,6 +582,7 @@ void VideoTracksPanel::zoomAbout (double tSecs, double factor)
     const double frac = (tSecs - view_.getStart()) / span;
     const double lo = tSecs - frac * newSpan;
     view_ = { lo, lo + newSpan };
+    syncScrollbars();
     repaint();
 }
 
@@ -540,15 +591,15 @@ void VideoTracksPanel::zoomOut() { zoomAbout (0.5 * (view_.getStart() + view_.ge
 
 int VideoTracksPanel::trackIndexAt (const juce::Point<int>& p) const
 {
-    if (p.y < kRulerH || p.x < 0 || p.x >= getWidth()) return -1;
-    const int row = (p.y - kRulerH) / kRowH;
+    if (p.y < kRulerH || p.x < 0 || p.x >= contentWidth()) return -1;
+    const int row = (p.y - kRulerH + (int) std::lround (scrollY_)) / kRowH;
     if (row < 0 || row >= (int) tracks_.size()) return -1;
 
     const auto& t = tracks_[row];
     double endT = view_.getEnd();
     if (t.durationSecs >= 0.0) endT = std::min (endT, t.offsetSecs + t.durationSecs);
     const float x1 = std::max (0.0f, xForTime (t.offsetSecs));
-    const float x2 = std::min ((float) getWidth(), xForTime (endT));
+    const float x2 = std::min ((float) contentWidth(), xForTime (endT));
     return (p.x >= (int) x1 && p.x < (int) x2) ? row : -1;
 }
 
@@ -559,13 +610,6 @@ void VideoTracksPanel::handleContextMenuId (int id, int trackIdx)
         case kMenuZoomIn:  zoomIn(); break;
         case kMenuZoomOut: zoomOut(); break;
         case kMenuZoomFit: zoomFit(); break;
-        case kMenuAlwaysOnTop:
-            if (onToggleAlwaysOnTop)
-                onToggleAlwaysOnTop (!(isAlwaysOnTop ? isAlwaysOnTop() : false));
-            break;
-        case kMenuDock:
-            if (onDockToggle) onDockToggle ();
-            break;
         default:
             if (onMenuItem) onMenuItem (id, trackIdx);
             break;
@@ -574,19 +618,13 @@ void VideoTracksPanel::handleContextMenuId (int id, int trackIdx)
 
 void VideoTracksPanel::showContextMenuAt (const juce::Point<int>& at)
 {
+    if (sc::alert::isHeadless ()) return;   // no native menu in test runs
     const int idx = trackIndexAt (at);
 
     juce::PopupMenu m;
     m.addItem (kMenuZoomIn, "Zoom In");
     m.addItem (kMenuZoomOut, "Zoom Out");
     m.addItem (kMenuZoomFit, "Zoom Fit");
-    // Window-level actions: available from the track list too, so they stay
-    // reachable while docked even without a video loaded.
-    if (onToggleAlwaysOnTop)
-        m.addItem (kMenuAlwaysOnTop, "Always On Top", true,
-                   isAlwaysOnTop ? isAlwaysOnTop() : false);
-    if (onDockToggle)
-        m.addItem (kMenuDock, docked ? "Undock Panel" : "Dock Panel");
     if (idx >= 0 && onMenuItem)
     {
         m.addSeparator();
@@ -644,12 +682,55 @@ void VideoTracksPanel::paintRuler (juce::Graphics& g, const juce::Rectangle<int>
     }
 }
 
+// Keeps the two scrollbars in step with the view and the row overflow.
+void VideoTracksPanel::syncScrollbars()
+{
+    const int w = getWidth(), h = getHeight();
+    if (w <= 0 || h <= 0) return;
+
+    // Horizontal: the fitted extent, windowed by the current time view.
+    double lo = 0.0, hi = audioDuration_;
+    for (const auto& t : tracks_)
+    {
+        lo = std::min (lo, t.offsetSecs);
+        if (t.durationSecs >= 0.0) hi = std::max (hi, t.offsetSecs + t.durationSecs);
+    }
+    if (hi <= lo) hi = lo + 1.0;
+    hScroll_.setDuration (hi - lo);
+    hScroll_.setWindow (std::clamp (view_.getStart(), lo, hi),
+                        std::clamp (view_.getEnd(),   lo, hi));
+
+    // Vertical: rows below the ruler; ValueScrollBar is inverted (max at top).
+    const int avail = rowsAvail();
+    vScroll_.setVisible (rowsHeight() > avail);
+    if (!vScroll_.isVisible())
+        scrollY_ = 0.0;
+    else
+    {
+        const double total = std::max ((double) rowsHeight(), (double) avail);
+        scrollY_ = std::clamp (scrollY_, 0.0, total - avail);
+        vScroll_.setRange (0.0, total);
+        vScroll_.setWindow (total - (scrollY_ + avail), total - scrollY_);
+    }
+
+    const bool needV = vScroll_.isVisible();
+    hScroll_.setBounds (0, h - kBarW, w - (needV ? kBarW : 0), kBarW);
+    if (needV)
+        vScroll_.setBounds (w - kBarW, 0, kBarW, std::max (1, h - kBarW));
+}
+
+void VideoTracksPanel::resized()
+{
+    syncScrollbars();   // may toggle the row scrollbar's visibility
+    repaint();
+}
+
 void VideoTracksPanel::paint (juce::Graphics& g)
 {
     const auto b = getLocalBounds();
     g.fillAll (juce::Colour::fromRGB (28, 32, 38));
 
-    paintRuler (g, juce::Rectangle<int> (0, 0, std::max (1, b.getWidth()), kRulerH));
+    paintRuler (g, juce::Rectangle<int> (0, 0, contentWidth(), kRulerH));
 
     static const juce::Colour trackColours[] = {
         juce::Colour::fromRGB (70, 130, 255),   // blue
@@ -661,19 +742,24 @@ void VideoTracksPanel::paint (juce::Graphics& g)
         juce::Colour::fromRGB (255, 120, 160),  // pink
         juce::Colour::fromRGB (150, 170, 90) }; // olive
 
+    // Rows scroll vertically below the pinned ruler.
+    const int yOff = (int) std::lround (scrollY_);
+    const auto rowsArea = juce::Rectangle<int> (0, kRulerH, contentWidth(),
+                                                std::max (1, b.getHeight() - kBarW - kRulerH));
     for (int i = 0; i < (int) tracks_.size(); ++i)
     {
-        const auto row = rowRect (i);
-        if (row.isEmpty()) continue;
+        const auto row = rowRect (i).withY (rowRect (i).getY() - yOff);
+        if (!row.intersects (rowsArea)) continue;
+        const auto vis = row.getIntersection (rowsArea);   // the visible part of this row
         const auto& tr = tracks_[i];
 
         double endT = view_.getEnd();
         if (tr.durationSecs >= 0.0) endT = std::min (endT, tr.offsetSecs + tr.durationSecs);
         const float x1 = std::max (0.0f, xForTime (tr.offsetSecs));
-        const float x2 = std::min ((float) b.getWidth(), xForTime (endT));
+        const float x2 = std::min ((float) contentWidth(), xForTime (endT));
         if (x2 <= x1 + 1e-3f) continue;   // band off-screen
 
-        auto band = juce::Rectangle<int> ((int) x1, row.getY(), (int) (x2 - x1), row.getHeight());
+        auto band = juce::Rectangle<int> ((int) x1, vis.getY(), (int) (x2 - x1), vis.getHeight());
         const auto col = trackColours[i % 8];
         // The selected band is drawn at full opacity; the white border marks it.
         g.setColour (selected_ == i ? col : col.withAlpha (0.85f));
@@ -698,7 +784,7 @@ void VideoTracksPanel::paint (juce::Graphics& g)
         if (x >= -1.0f && x <= (float) b.getWidth() + 1.0f)
         {
             g.setColour (juce::Colours::red.withAlpha (0.95f));
-            g.drawLine ((int) x, 0, (int) x, b.getHeight(), 2.0f);
+            g.drawLine ((int) x, 0, (int) x, b.getHeight() - kBarW, 2.0f);
         }
     }
 
@@ -706,12 +792,16 @@ void VideoTracksPanel::paint (juce::Graphics& g)
     if (dragBand_ && snapX_ >= 0.0f)
     {
         g.setColour (juce::Colours::yellow);
-        g.drawLine ((int) snapX_, 0, (int) snapX_, b.getHeight(), 1.0f);
+        g.drawLine ((int) snapX_, 0, (int) snapX_, b.getHeight() - kBarW, 1.0f);
     }
 }
 
 void VideoTracksPanel::mouseDown (const juce::MouseEvent& e)
 {
+    // The scrollbar strips belong to the scrollbars, not the tracks.
+    if (e.getPosition().y >= getHeight() - kBarW || e.getPosition().x >= contentWidth())
+        return;
+
     if (e.mods.isRightButtonDown() && !e.mods.isLeftButtonDown())
     {   showContextMenuAt (e.getPosition()); return; }
 
@@ -891,6 +981,7 @@ VideoWindow::VideoWindow (std::function<double()> getTime)
     contentHost_ = std::make_unique<VideoContentHost>();
     contentHost_->addAndMakeVisible (&videoView);
     contentHost_->addAndMakeVisible (&tracksPanel);
+    contentHost_->addAndMakeVisible (&splitter_);
     setContentNonOwned (contentHost_.get(), false);
     centreWithSize (640, 360 + VideoContentHost::kPanelH);
     setWantsKeyboardFocus (true);
@@ -942,6 +1033,13 @@ VideoWindow::VideoWindow (std::function<double()> getTime)
         if (onTrackMenuAction) onTrackMenuAction (id, idx);
     };
 
+    splitter_.onDrag = [this] (double dyPx)
+    {
+        if (docked_ && dockHost_ != nullptr) dockHost_->applySplitDelta (dyPx);
+        else contentHost_->applySplitDelta (dyPx);
+    };
+    videoView.onToggleCollapse = [this] { setTracksCollapsed (! tracksCollapsed_); };
+
     updateDecodeSize();   // before the first open: a 4K movie never decodes at 4K for a small window
 
     // Only now that requiredButtons is initialised does the peer compute the
@@ -965,6 +1063,7 @@ VideoWindow::~VideoWindow()
     {
         contentHost_->removeChildComponent (&videoView);
         contentHost_->removeChildComponent (&tracksPanel);
+        contentHost_->removeChildComponent (&splitter_);
     }
     clearContentComponent ();
     contentHost_.reset();   // safe now: no children left to dangle
@@ -1116,6 +1215,10 @@ void VideoWindow::redrawCurrentFrame()
     else
     {
         auto fr = fr0;   // copy: the pump's frame must stay untouched
+        // juce::Image copies share their pixel buffer: break the link before
+        // adjusting, or slider moves would re-adjust an already adjusted (and
+        // saturated) frame and never get back to the original.
+        fr.image = fr.image.createCopy();
         applyImageAdjustments (fr.image, contrast_, brightness_);
         videoView.setFrame (fr, rot);
     }
@@ -1210,9 +1313,13 @@ void VideoWindow::dockTo (VideoDockHost& host)
         p->removeChildComponent (&videoView);
     if (auto* p = tracksPanel.getParentComponent())
         p->removeChildComponent (&tracksPanel);
+    if (auto* p = splitter_.getParentComponent())
+        p->removeChildComponent (&splitter_);
     // Both go into the panel tab: picture on top, track list below.
     host.attach (&videoView);
     host.attach (&tracksPanel);
+    host.attach (&splitter_);
+    dockHost_ = &host;
     setDocked (true);
     setVisible (false);
 }
@@ -1224,9 +1331,13 @@ void VideoWindow::undock()
         p->removeChildComponent (&videoView);
     if (auto* p = tracksPanel.getParentComponent())
         p->removeChildComponent (&tracksPanel);
+    if (auto* p = splitter_.getParentComponent())
+        p->removeChildComponent (&splitter_);
     // Back into the content host with the picture first (resized() indexes by order).
     contentHost_->addAndMakeVisible (&videoView);
     contentHost_->addAndMakeVisible (&tracksPanel);
+    contentHost_->addAndMakeVisible (&splitter_);
+    dockHost_ = nullptr;
     setDocked (false);
 }
 
@@ -1234,9 +1345,17 @@ void VideoWindow::setDocked (bool d)
 {
     if (docked_ == d) return;
     docked_ = d;
-    videoView.docked = d;   // context-menu label: "Dock Panel" / "Undock Panel"
-    tracksPanel.docked = d;
     visibilityChanged ();   // start/stop the timer for the new mode
+}
+
+void VideoWindow::setTracksCollapsed (bool c)
+{
+    if (tracksCollapsed_ == c) return;
+    tracksCollapsed_ = c;
+    videoView.setCollapseState (c);
+    VideoHostBase* host = docked_ ? static_cast<VideoHostBase*> (dockHost_)
+                                 : static_cast<VideoHostBase*> (contentHost_.get());
+    if (host != nullptr) host->setTracksCollapsed (c);
 }
 
 void VideoWindow::updateDecodeSize()

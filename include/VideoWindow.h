@@ -36,6 +36,73 @@ void applyImageAdjustments (juce::Image& image, double contrast, double brightne
 /** The picture of a video file, letterboxed and centred in its plot area.
     Zoom/pan state is per view; the frame itself comes from the owner's
     VideoFramePump (one decoder shared by window mode and docked mode). */
+/** The little square button where the video's two scrollbars meet: it hides
+    or reveals the track list below. Its two chevrons point down while the
+    tracks are visible and up when they are hidden. */
+class CollapseToggle : public juce::Component
+{
+public:
+    CollapseToggle() = default;   // the non-copyable macro suppresses the implicit one
+    bool collapsed = false;
+    std::function<void()> onClick;
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour::fromRGB (38, 42, 50));
+        g.setColour (juce::Colours::white.withAlpha (0.75f));
+        juce::Path p;
+        const float cy = getHeight() * 0.5f;
+        for (float cx : { getWidth() * 0.28f, getWidth() * 0.72f })
+            if (! collapsed)
+            {   // pointing down: a click hides the tracks
+                p.addLineSegment (juce::Line<float> ({ cx - 3.0f, cy - 2.0f }, { cx, cy + 2.0f }), 1.4f);
+                p.addLineSegment (juce::Line<float> ({ cx, cy + 2.0f }, { cx + 3.0f, cy - 2.0f }), 1.4f);
+            }
+            else
+            {   // pointing up: a click reveals them again
+                p.addLineSegment (juce::Line<float> ({ cx - 3.0f, cy + 2.0f }, { cx, cy - 2.0f }), 1.4f);
+                p.addLineSegment (juce::Line<float> ({ cx, cy - 2.0f }, { cx + 3.0f, cy + 2.0f }), 1.4f);
+            }
+        g.strokePath (p, juce::PathStrokeType (1.4f));
+    }
+
+    void mouseDown (const juce::MouseEvent&) override { if (onClick != nullptr) onClick (); }
+
+private:
+    JUCE_DECLARE_NON_COPYABLE (CollapseToggle)
+};
+
+/** The draggable separator between the video picture and its track list. */
+class TrackSplitter : public juce::Component
+{
+public:
+    TrackSplitter() = default;   // the non-copyable macro suppresses the implicit one
+    /** Fired while dragging; argument = vertical delta in pixels since
+        mouseDown (positive = down = shorter track area). */
+    std::function<void(double)> onDrag;
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colour::fromRGB (24, 26, 30));
+        g.setColour (juce::Colour::fromRGB (96, 102, 114));
+        const int cy = getHeight() / 2;
+        for (int x = getWidth() / 4; x + 3 < getWidth(); x += 8)
+            g.drawLine (x, cy, x + 3, cy);
+    }
+
+    juce::MouseCursor getMouseCursor() override { return juce::MouseCursor::UpDownResizeCursor; }
+
+private:
+    void mouseDown (const juce::MouseEvent& e) override { dragStartY_ = e.getPosition().y; }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (onDrag != nullptr) onDrag ((double) e.getPosition().y - dragStartY_);
+    }
+
+    float dragStartY_ = 0.0f;
+    JUCE_DECLARE_NON_COPYABLE (TrackSplitter)
+};
+
 class VideoView : public juce::Component
 {
 public:
@@ -44,7 +111,7 @@ public:
 
     /** Context-menu item ids (handleContextMenuId). */
     enum { kMenuZoomIn = 1, kMenuZoomOut, kMenuZoomFit,
-           kMenuRotateCW, kMenuRotateCCW, kMenuAlwaysOnTop, kMenuDock };
+           kMenuRotateCW, kMenuRotateCCW };
 
     VideoView();
 
@@ -89,14 +156,16 @@ public:
         the thumb shows the visible part of the picture height; dragging its
         centre pans, dragging an edge zooms. */
     ValueScrollBar* getZoomBar() noexcept { return &zoomBar_; }
+    /** The horizontal pan/zoom bar along the bottom edge (mirrors the
+        vertical one for the picture width). */
+    TimeScrollBar* getHZoomBar() noexcept { return &hzoomBar_; }
 
     // Context menu --------------------------------------------------------
     /** Actions that reach outside the view (set by the owner); a missing
         callback hides its menu item. */
-    std::function<void (bool)> onToggleAlwaysOnTop;
-    std::function<bool()> isAlwaysOnTop;
-    std::function<void()> onDockToggle;
-    bool docked = false;                 // menu label: "Dock Panel" / "Undock Panel"
+    std::function<void()> onToggleCollapse;   // corner button: hide/show tracks
+    /** Sets the corner button's chevron direction (owner keeps it in sync). */
+    void setCollapseState (bool c) { collapseBtn_.collapsed = c; collapseBtn_.repaint(); }
 
     /** The view's size changed: the owner may want to re-decode at a new size. */
     std::function<void()> onDisplaySizeChanged;
@@ -121,14 +190,16 @@ public:
     juce::String getNotice() const noexcept { return notice_; }
 
 private:
-    // The picture area: everything except the right-hand zoom/pan bar.
+    // The picture area: everything except the two zoom/pan bars and the
+    // corner button where they meet.
     static constexpr int kBarWidth = 14;
+    static constexpr int kBarHeight = 14;
     juce::Rectangle<float> plotArea() const
     {
         const auto lb = getLocalBounds();
         return { 0.0f, 0.0f,
                  (float) std::max (1, lb.getWidth() - kBarWidth),
-                 (float) lb.getHeight() };
+                 (float) std::max (1, lb.getHeight() - kBarHeight) };
     }
 
     /** The frame at zoom 1: aspect kept, centred in the plot area. */
@@ -137,6 +208,7 @@ private:
     void clampPan();
     void syncZoomBar();                  // thumb <- current zoom/pan
     void applyZoomFromBar (double lo, double hi);   // zoom/pan <- bar window
+    void applyHZoomFromBar (double lo, double hi);  // ... for the bottom bar
     void showContextMenu (const juce::Point<int>& at);
 
     sc::VideoFrame frame_;              // latest decoded picture
@@ -148,8 +220,11 @@ private:
     juce::String message_;               // "No video for this document" / error
     juce::String notice_;                 // audio/video length mismatch warning
 
-    ValueScrollBar zoomBar_;             // right-hand zoom/pan bar
-    double barRangeH_ = -1.0;            // last range passed to the bar
+    ValueScrollBar zoomBar_;             // right-hand vertical zoom-pan bar
+    TimeScrollBar hzoomBar_;             // bottom horizontal zoom-pan bar
+    double barRangeH_ = -1.0;            // last range passed to the vertical bar
+    double barRangeW_ = -1.0;            // ... and to the horizontal one
+    CollapseToggle collapseBtn_;          // corner button (hide/show tracks)
 
     bool rightDrag_ = false;             // right-button box-zoom drag in flight
     juce::Point<float> rightStart_, rightNow_;
@@ -181,7 +256,12 @@ public:
     /** Context-menu item ids (handleContextMenuId). */
     enum { kMenuZoomIn = 1, kMenuZoomOut, kMenuZoomFit, kMenuSyncAudio,
            kMenuAlign, kMenuCopyAudio, kMenuAddTrack, kMenuRemoveTrack,
-           kMenuSolo, kMenuAdjustImage, kMenuAlwaysOnTop, kMenuDock };
+           kMenuSolo, kMenuAdjustImage };
+
+    /** Layout metrics (public: the regression tests drive them directly). */
+    static constexpr int kRulerH = 20;   // time ruler row height
+    static constexpr int kRowH = 26;     // one track row height
+    static constexpr int kBarW = 12;     // scrollbar thickness (both axes)
 
     VideoTracksPanel();
     ~VideoTracksPanel() override;
@@ -207,6 +287,13 @@ public:
     double timeAtX (float x) const;
     float xForTime (double t) const;
 
+    /** The horizontal time bar (bottom edge) and the vertical row scroll
+        (right edge); both mirror the current view/scroll state. */
+    TimeScrollBar* getHScroll() noexcept { return &hScroll_; }
+    ValueScrollBar* getVScroll() noexcept { return &vScroll_; }
+    /** Vertical offset of the first visible row, in pixels. */
+    double getScrollY() const noexcept { return scrollY_; }
+
     /** The track whose band contains the point (-1 = ruler or empty area). */
     int trackIndexAt (const juce::Point<int>& p) const;
 
@@ -215,6 +302,7 @@ public:
     void handleContextMenuId (int id, int trackIdx);
 
     // Public like VideoView's: the regression tests drive them directly.
+    void resized() override;
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
@@ -231,21 +319,17 @@ public:
         Only called when wired (the standalone window's panel always is). */
     std::function<void(double)> onSeekTime;
 
-    // Window-level actions offered by the track list's context menu too, so
-    // they stay reachable while docked even without a video loaded. Kept in
-    // sync with VideoView's by the owner.
-    bool docked = false;
-    std::function<void(bool)> onToggleAlwaysOnTop;
-    std::function<bool()> isAlwaysOnTop;
-    std::function<void()> onDockToggle;
+
 
 private:
-    static constexpr int kRulerH = 20;   // time ruler row height
-    static constexpr int kRowH = 26;     // one track row height
     static constexpr double kZoomStep = 1.5;
 
     juce::Rectangle<int> rowRect (int i) const;
+    int contentWidth() const;             // ruler/rows area width
+    int rowsHeight() const;               // all rows' total height, px
+    int rowsAvail() const;                // height available for rows, px
     void zoomAbout (double tSecs, double factor);
+    void syncScrollbars();               // bars <- current view/scroll state
     void showContextMenuAt (const juce::Point<int>& at);
     void paintRuler (juce::Graphics& g, const juce::Rectangle<int>& r) const;
 
@@ -261,6 +345,9 @@ private:
     float snapX_ = -1.0f;                 // shift-drag anchor indicator (-1 = none)
     std::vector<bool> soloFlags_;
     double playhead_ = -1.0;              // main document's cursor, secs
+    TimeScrollBar hScroll_;               // bottom time bar (pan/zoom the view)
+    ValueScrollBar vScroll_;              // right row scroll (vertical offset)
+    double scrollY_ = 0.0;                // first visible row's top, px
 
     JUCE_DECLARE_NON_COPYABLE (VideoTracksPanel)
 };
@@ -296,28 +383,87 @@ private:
 };
 
 /**==========================================================================
- * Content of the standalone window: picture on top, track list below.
+ * Shared layout for both video hosts: picture on top, a draggable separator,
+ * the track list below. The track area starts at kPanelH and follows the
+ * separator drag as a ratio of the host height; it can be collapsed.
  */
-class VideoContentHost : public juce::Component
+class VideoHostBase : public juce::Component
 {
 public:
-    static constexpr int kPanelH = 20 + 4 * 26;   // ruler + four track rows
+    static constexpr int kPanelH = 20 + 4 * 26;   // ruler + four track rows (initial)
+    static constexpr int kSplitH = 6;             // separator thickness
 
-private:
-    void resized() override
+    /** Hide/reveal the track list and its separator. */
+    void setTracksCollapsed (bool c)
+    {
+        if (tracksCollapsed_ != c) { tracksCollapsed_ = c; applyLayout(); }
+    }
+    bool isTracksCollapsed() const noexcept { return tracksCollapsed_; }
+
+    /** Separator drag delta in pixels (positive = down = shorter track area). */
+    void applySplitDelta (double dyPx)
+    {
+        if (tracksCollapsed_) return;
+        const int h = getHeight();
+        if (h <= 0) return;
+        // Dragging down grows the picture and shrinks the track area.
+        const int nh = juce::jlimit (kMinTrackH, std::max (kMinTrackH, h - kSplitH - kMinPicH),
+                                     currentTrackHeight() - (int) std::lround (dyPx));
+        trackShare_ = (double) nh / (double) h;
+        applyLayout();
+    }
+
+protected:
+    static constexpr int kMinTrackH = 60;   // smallest usable track area
+    static constexpr int kMinPicH = 80;     // ... and picture area
+
+    double trackShare_ = -1.0;              // < 0 until the separator is dragged
+
+    int currentTrackHeight() const
+    {
+        const int h = getHeight();
+        if (trackShare_ < 0.0) return std::min (kPanelH, std::max (kMinTrackH, h / 2));
+        return (int) std::lround (trackShare_ * h);
+    }
+
+    void applyLayout()
     {
         if (getNumChildComponents() < 2) return;
-        const int h = getHeight();
         auto* pic  = getChildComponent (0);
         auto* list = getChildComponent (1);
-        pic->setBounds (0, 0, getWidth(), std::max (1, h - kPanelH));
-        list->setBounds (0, h - kPanelH, getWidth(), kPanelH);
+        auto* sep  = getNumChildComponents() > 2 ? getChildComponent (2) : nullptr;
+        const int w = getWidth(), h = getHeight();
+        if (tracksCollapsed_)
+        {
+            pic->setBounds (0, 0, w, h);
+            list->setVisible (false);
+            if (sep != nullptr) sep->setVisible (false);
+            return;
+        }
+        const int trackH = juce::jlimit (kMinTrackH,
+                                         std::max (kMinTrackH, h - kSplitH - kMinPicH),
+                                         currentTrackHeight());
+        pic->setBounds (0, 0, w, std::max (1, h - kSplitH - trackH));
+        if (sep != nullptr)
+        {   sep->setVisible (true); sep->setBounds (0, h - kSplitH - trackH, w, kSplitH); }
+        list->setVisible (true);
+        list->setBounds (0, h - trackH, w, trackH);
     }
+
+private:
+    bool tracksCollapsed_ = false;
 };
 
-/** Tab host for a docked video window: the picture on top and the track
-    list below, mirroring VideoContentHost's layout. */
-class VideoDockHost : public juce::Component, public juce::FileDragAndDropTarget
+/** Content of the standalone window: picture on top, separator, tracks below. */
+class VideoContentHost : public VideoHostBase
+{
+private:
+    void resized() override { applyLayout(); }
+};
+
+/** Tab host for a docked video window: same layout as the standalone one,
+    plus dropped-video handling. */
+class VideoDockHost : public VideoHostBase, public juce::FileDragAndDropTarget
 {
 public:
     void attach (juce::Component* c)
@@ -352,14 +498,7 @@ public:
 private:
     void resized() override
     {
-        if (getNumChildComponents() >= 2)
-        {
-            const int h = getHeight();
-            auto* pic  = getChildComponent (0);
-            auto* list = getChildComponent (1);
-            pic->setBounds (0, 0, getWidth(), std::max (1, h - VideoContentHost::kPanelH));
-            list->setBounds (0, h - VideoContentHost::kPanelH, getWidth(), VideoContentHost::kPanelH);
-        }
+        if (getNumChildComponents() >= 2) applyLayout();
         else
             for (auto* c : getChildren()) c->setBounds (getLocalBounds());
     }
@@ -423,6 +562,10 @@ public:
     bool isDocked() const noexcept { return docked_; }
     void setDocked (bool d);
 
+    /** Collapse/expand the track list and its separator (both hosts). */
+    void setTracksCollapsed (bool c);
+    bool isTracksCollapsed() const noexcept { return tracksCollapsed_; }
+
     /** The user closed the window (X); tests call it directly. */
     void closeButtonPressed() override;
 
@@ -469,10 +612,13 @@ private:
     std::unique_ptr<VideoContentHost> contentHost_;
     VideoView videoView;
     VideoTracksPanel tracksPanel;
+    TrackSplitter splitter_;             // between the picture and the track list
     sc::VideoFramePump framePump;
     juce::File currentFile;
     double audioDuration_ = -1.0;        // seconds, -1 = unknown
     bool docked_ = false;
+    VideoDockHost* dockHost_ = nullptr;   // host while docked (null when standalone)
+    bool tracksCollapsed_ = false;        // collapse state shared by both hosts
 
     std::vector<sc::VideoTrackData> tracks_;   // the document's video tracks
     int selected_ = -1;                        // explicit selection (-1 = auto)

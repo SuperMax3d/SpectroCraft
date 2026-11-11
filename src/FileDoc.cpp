@@ -227,6 +227,10 @@ std::string FileDoc::buildScmdJson () const
     b.tables       = tables;
     b.tablesMode   = tablesMode;
     b.videoTracks  = videoTracks;
+    // A document opened from a video file has one implicit track: materialise
+    // it so saving as .wav keeps the reference and the video reappears on reopen.
+    if (b.videoTracks.empty() && videoFile != juce::File())
+        b.videoTracks.push_back ({ videoFile });
     b.scale        = scale;
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
@@ -245,6 +249,8 @@ std::string FileDoc::buildMetaJson () const
     b.tables       = tables;
     b.tablesMode   = tablesMode;
     b.videoTracks  = videoTracks;
+    if (b.videoTracks.empty() && videoFile != juce::File())
+        b.videoTracks.push_back ({ videoFile });
     b.scale        = scale;
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
