@@ -582,7 +582,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   duration); **double-click a row to make that file active** — it is loaded
   into the tracks/views and its markers appear in the marker list. Each file
   remembers its own playhead position, selection range, visible channels,
-  markers and undo history; switching files restores all of them.
+  time zoom (the waveform/spectrogram window), markers and undo history;
+  switching files restores all of them.
   **Ctrl+Tab / Ctrl+Shift+Tab** cycles through the loaded files (forward /
   backwards). Closing a file (right-click → Close, File → Close, or
   Ctrl+W / Ctrl+F4 for the active one) removes it from the list. The live frequency analysis always

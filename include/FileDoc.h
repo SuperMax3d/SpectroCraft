@@ -69,6 +69,12 @@ public:
     SpectralSelection spectralSel;     // per-file spectral (time x frequency) selection
     std::vector<int> visibleChannels;  // sorted channel indices to display
 
+    // Time window remembered while this document is open (seconds): switching
+    // away and back restores the zoom instead of fitting the whole file.
+    // viewEnd < 0 means "never zoomed" -> full file on restore.
+    double viewStart = 0.0;
+    double viewEnd = -1.0;
+
     /** True once the user has opened "Split Spectral Selection Configuration"
         for this file. Per-file-open state: Execute uses the saved split
         configuration only after it was configured at least once per open;

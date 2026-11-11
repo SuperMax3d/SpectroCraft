@@ -4196,6 +4196,61 @@ static void testHomeEndPans()
     wav.deleteFile ();
 }
 
+// ------------------------------------------------------- per-doc zoom memory
+// Switching between open files must restore each file's remembered time
+// window in both views instead of fitting the whole file again.
+static void testDocSwitchKeepsZoom()
+{
+    const juce::File wavA = makeTempFile ("zoommem_a.wav");
+    writeWav (wavA, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); });   // 2 s
+    const juce::File wavB = makeTempFile ("zoommem_b.wav");
+    writeWav (wavB, 1, 8000.0, 8000, [] (int, int64_t f, double rate)
+             { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 300.0 * (double) f / rate); });   // 1 s
+
+    Application app;
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "doc zoom memory test"));
+    win->openFile (wavA);
+    CHECK (app.numDocs () == 1 && app.activeDocIndex == 0, "file A loaded");
+    win->openFile (wavB);
+    CHECK (app.numDocs () == 2 && app.activeDocIndex == 1, "file B loaded and active");
+
+    // Zoom A in on [0.5, 1.5]...
+    app.activate (0);
+    win->applyTimeWindow (0.5, 1.5);
+    CHECK (std::abs (app.viewStart - 0.5) < 1e-6 && std::abs (app.viewEnd - 1.5) < 1e-6,
+           "A zoomed to [0.5, 1.5]");
+
+    // ...switch to B: its own full-file window...
+    app.activate (1);
+    CHECK (std::abs (app.viewStart) < 1e-6 && std::abs (app.viewEnd - 1.0) < 1e-6,
+           "B shows the whole file");
+
+    // ...and back to A: the remembered zoom comes back in both views.
+    app.activate (0);
+    CHECK (std::abs (app.viewStart - 0.5) < 1e-6 && std::abs (app.viewEnd - 1.5) < 1e-6,
+           "A's time window restored on switch");
+    CHECK (std::abs (win->waveformTimeStart () - 0.5) < 1e-6
+               && std::abs (win->waveformTimeEnd () - 1.5) < 1e-6,
+           "the waveform view shows A's remembered window");
+    CHECK (std::abs (win->spectralViewComp ()->getViewStart () - 0.5) < 1e-6
+               && std::abs (win->spectralViewComp ()->getViewEnd () - 1.5) < 1e-6,
+           "the spectral view shows A's remembered window");
+
+    // Ctrl+Tab / Ctrl+Shift+Tab cycle the open files forward and backwards.
+    win->keyPressed (juce::KeyPress (juce::KeyPress::tabKey, juce::ModifierKeys::commandModifier, 0), nullptr);
+    CHECK (app.activeDocIndex == 1, "Ctrl+Tab moves to the next file");
+    win->keyPressed (juce::KeyPress (juce::KeyPress::tabKey,
+                                     juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0), nullptr);
+    CHECK (app.activeDocIndex == 0, "Ctrl+Shift+Tab moves back to the previous file");
+
+    win.reset();
+    wavA.deleteFile ();
+    wavB.deleteFile ();
+}
+
 // ------------------------------------------------------- spectral point probe
 // SpectralView's cursor readout probes the tile cache for the dB level at an
 // exact time/frequency; a steady tone must give a strong peak on its own
@@ -9568,6 +9623,22 @@ static void testMultiFileSupport()
     CHECK (app.activeDocIndex == 0, "cycle forward moves to previous doc");
     app.cycleActiveDoc (true);   // A -> B (wrap)
     CHECK (app.activeDocIndex == 1, "cycle wraps around the list");
+    // Backwards wraps the other way.
+    app.cycleActiveDoc (false);   // B -> A
+    CHECK (app.activeDocIndex == 0, "cycle backwards moves to previous doc");
+    app.cycleActiveDoc (false);   // A -> B (wrap)
+    CHECK (app.activeDocIndex == 1, "backwards cycle wraps around the list");
+
+    // The time window is remembered per doc while files stay open: zoom A in,
+    // switch to B and back - A's zoom must come back.
+    app.activate (0);
+    app.viewStart = 0.5; app.viewEnd = 1.5;
+    app.activate (1);   // leaves A with its window saved; B is full file
+    CHECK (std::abs (app.viewStart) < 1e-9 && std::abs (app.viewEnd - 1.0) < 1e-9,
+          "switching away leaves the session on B's full file");
+    app.activate (0);   // A's remembered window is restored
+    CHECK (std::abs (app.viewStart - 0.5) < 1e-9 && std::abs (app.viewEnd - 1.5) < 1e-9,
+          "A's remembered time window is restored on switch");
 
     // Markers are per-file.
     app.activate (0);
@@ -28067,6 +28138,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("cross bar tab move", testCrossBarTabMove);
     SC_RUN_TEST ("spectral refresh on doc switch", testSpectralRefreshOnDocSwitch);
     SC_RUN_TEST ("home/end panning", testHomeEndPans);
+    SC_RUN_TEST ("doc switch keeps zoom", testDocSwitchKeepsZoom);
     SC_RUN_TEST ("spectral probe", testSpectralProbe);
     SC_RUN_TEST ("arrow key selection", testArrowKeySelection);
     SC_RUN_TEST ("ctrl+number channels", testCtrlNumberChannelToggle);

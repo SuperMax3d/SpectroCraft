@@ -2538,18 +2538,24 @@ void MainWindow::openFileWithProgress (const juce::File& file)
 
 void MainWindow::activateDocUI()
 {
-    // Reset both views to the whole file with default zoom levels, then push
-    // the document's playhead/selection/channels/markers into all panels and
-    // views. Works for a freshly opened file, a switched-to file (restoring
+    // Restore this doc's remembered time window (Application::activate() put
+    // it into app.viewStart/viewEnd; whole file for a fresh or never-zoomed
+    // doc), reset the amplitude and frequency axes to their defaults, then
+    // push the document's playhead/selection/channels/markers into all panels
+    // and views. Works for a freshly opened file, a switched-to file (restoring
     // its remembered state) and the "no files left" case.
-    if (waveformView) waveformView->fitAll();
+    if (waveformView)
+    {
+        waveformView->resetVerticalZoom();
+        waveformView->setViewRange (app.viewStart, app.viewEnd);
+    }
     if (spectralView)
     {
-        spectralView->fitAll();
+        spectralView->setViewRange (app.viewStart, app.viewEnd);
         spectralView->resetFrequencyRange();
-        // fitAll() only repaints when the time window actually changed - two
-        // files of identical duration would leave the previous file's tiles on
-        // screen. Application::activate() already cleared the tile cache, so
+        // setViewRange() only repaints when the time window actually changed -
+        // two files of identical duration would leave the previous file's tiles
+        // on screen. Application::activate() already cleared the tile cache, so
         // force a re-render from the newly active engine.
         spectralView->invalidateImage();
     }

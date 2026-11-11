@@ -649,8 +649,24 @@ void Application::activate (int index)
         altFreqRefs.push_back (a);
     }
 
-    viewStart = 0.0;
-    viewEnd = std::max (d->engine.duration(), 1e-6);
+    // Restore this doc's remembered time window (full file when it never
+    // zoomed, or the saved range no longer fits after a length-changing edit).
+    const double dur = std::max (d->engine.duration(), 1e-6);
+    if (d->viewEnd > d->viewStart + 1e-9)
+    {
+        viewStart = std::clamp (d->viewStart, 0.0, dur);
+        viewEnd   = std::clamp (d->viewEnd, viewStart, dur);
+        if (viewEnd <= viewStart + 1e-9)
+        {
+            viewStart = 0.0;
+            viewEnd = dur;
+        }
+    }
+    else
+    {
+        viewStart = 0.0;
+        viewEnd = dur;
+    }
 
     sourcePlayer.setSource (&d->engine);
     d->engine.setPosition (d->playhead);
@@ -674,6 +690,8 @@ void Application::syncActiveDoc()
     d->selection = selection;
     d->playhead = playhead;
     d->visibleChannels = visibleChannels;
+    d->viewStart = viewStart;   // keep the per-doc zoom in step with the session
+    d->viewEnd = viewEnd;
 }
 
 void Application::inheritSessionMeta (FileDoc& d)
