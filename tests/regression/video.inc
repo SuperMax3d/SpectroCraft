@@ -1,6 +1,6 @@
 // Video window: picture decoding (VideoFrames), the background frame pump,
 // movie audio on macOS (AVFoundation) and the MainWindow wiring (the
-// picture follows playback, the playhead and the mouse hover).
+// picture follows playback and the playhead).
 // Included by tests/UnitTests.cpp; uses its helpers (CHECK, scSkip,
 // scPumpUntil, findTestDataFile, makeTempFile, writeWav...).
 //
@@ -545,8 +545,8 @@ static void testVideoWindowFollowsDocument()
     };
 
     // The test window is on screen: a real mouse resting over it would feed
-    // hover times. Keep the MainWindow's hover callback (the wiring under
-    // test) and detach the views from the real mouse while it runs.
+    // hover times. Keep the MainWindow's hover callback and detach the views
+    // from the real mouse while this runs.
     auto* sv = win->spectralViewComp();
     auto* wv = win->waveformViewComp();
     CHECK (sv != nullptr && sv->onHoverTime != nullptr, "video window: spectrogram reports hover");
@@ -566,34 +566,9 @@ static void testVideoWindowFollowsDocument()
            + juce::String ((int) win->isShowing()) + ")");
     CHECK (showAt (25), "video window: picture follows the playhead (frame 25)");
 
-    // Hover over the spectrogram: the picture follows the mouse, then
-    // returns to the playhead once it leaves. The option is off by default
-    // for a new user; this test turns it on from the Window menu first.
     {
         const juce::StringArray names = win->getMenuBarNames();
         const int wIdx = names.indexOf ("Window");
-        CHECK (!win->isVideoFollowingHover(), "video window: hover follow off by default");
-        win->menuItemSelected (MainWindow::WindowVideoFollowHover, wIdx);
-        CHECK (win->isVideoFollowingHover(), "video window: hover follow on from the menu");
-
-        hover (7 / 25.0 + 0.02);
-        CHECK (std::abs (win->videoTimeNow() - 0.30) < 1e-9, "video window: hover time used");
-        CHECK (showAt (7), "video window: picture follows the hover (frame 7)");
-        hover (-1.0);
-        CHECK (showAt (25), "video window: back to the playhead when the mouse leaves");
-
-        // Turned off from the Window menu: hover is ignored (and persisted).
-        win->menuItemSelected (MainWindow::WindowVideoFollowHover, wIdx);
-        CHECK (!win->isVideoFollowingHover(), "video window: hover toggle off");
-        {
-            juce::PropertiesFile s2 (store, juce::PropertiesFile::Options());
-            CHECK (s2.getIntValue ("video_follow_hover", 1) == 0, "video window: hover toggle persisted");
-        }
-        hover (7 / 25.0 + 0.02);
-        CHECK (std::abs (win->videoTimeNow() - 1.02) < 1e-9, "video window: hover ignored when off");
-        hover (-1.0);
-        win->menuItemSelected (MainWindow::WindowVideoFollowHover, wIdx);
-        CHECK (win->isVideoFollowingHover(), "video window: hover toggle back on");
 
         // While docked in its tab (the new-user default), Window > Video
         // brings back the standalone window and closes the tab.
@@ -883,6 +858,13 @@ static void testVideoWindowMultiTrack()
         b.file = f; b.offsetSecs = -0.5;
         d->setVideoTracks ({ a, b });
     }
+
+    // No selection: the topmost covering track wins (index 0 is drawn first).
+    app.doc()->selectedVideoTrack = -1;
+    win->syncVideoWindow();
+    app.setPlayhead (1.2);
+    CHECK (scPumpUntil ([&] { return vw->displayedTrack() == 0; }, 2000),
+           "multi-track: without a selection the topmost covering track wins");
 
     // Select B: it renders above A while both cover the time.
     app.doc()->selectedVideoTrack = 1;

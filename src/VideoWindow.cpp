@@ -52,6 +52,7 @@ VideoView::VideoView()
     addAndMakeVisible (hzoomBar_);
     hzoomBar_.onChange = [this] (double lo, double hi) { applyHZoomFromBar (lo, hi); };
     addAndMakeVisible (collapseBtn_);
+    collapseBtn_.onClick = [this] { if (onToggleCollapse) onToggleCollapse (); };
 }
 
 void VideoView::setMessage (const juce::String& m)
@@ -318,7 +319,11 @@ void VideoView::handleContextMenuId (int id)
         case kMenuZoomFit:    resetZoom(); break;
         case kMenuRotateCW:   rotateClockwise(); break;
         case kMenuRotateCCW:  rotateCounterClockwise(); break;
-        default: break;
+        default:
+            // The displayed track's actions (see showContextMenu).
+            if (onTrackMenuAction != nullptr && getDisplayedTrack != nullptr)
+                onTrackMenuAction (id, getDisplayedTrack());
+            break;
     }
 }
 
@@ -334,6 +339,21 @@ void VideoView::showContextMenu (const juce::Point<int>& at)
     // which would mangle the UTF-8 degree sign (stray 'A').
     m.addItem (kMenuRotateCW, "Rotate 90deg Clockwise");
     m.addItem (kMenuRotateCCW, "Rotate 90deg Counter-Clockwise");
+
+    // The track responsible for this picture gets its own actions here too:
+    // right-clicking the image offers the same items as right-clicking that
+    // track's band, applied to it.
+    const int idx = getDisplayedTrack != nullptr ? getDisplayedTrack () : -1;
+    if (idx >= 0 && onTrackMenuAction != nullptr)
+    {
+        m.addSeparator();
+        m.addItem (VideoTracksPanel::kMenuSyncAudio, "Sync based on Audio");
+        m.addItem (VideoTracksPanel::kMenuAlign, "Align...");
+        m.addItem (VideoTracksPanel::kMenuCopyAudio, "Copy Audio to New Channel(s)...");
+        m.addItem (VideoTracksPanel::kMenuAddTrack, "Add Video Track...");
+        m.addItem (VideoTracksPanel::kMenuRemoveTrack, "Remove Track");
+        m.addItem (VideoTracksPanel::kMenuAdjustImage, "Adjust Image...");
+    }
 
     const int id = m.showMenu (juce::PopupMenu::Options ()
                                    .withTargetComponent (this)
@@ -633,8 +653,6 @@ void VideoTracksPanel::showContextMenuAt (const juce::Point<int>& at)
         m.addItem (kMenuCopyAudio, "Copy Audio to New Channel(s)...");
         m.addItem (kMenuAddTrack, "Add Video Track...");
         m.addItem (kMenuRemoveTrack, "Remove Track");
-        const bool solo = idx < (int) soloFlags_.size() && soloFlags_[idx];
-        m.addItem (kMenuSolo, "Solo", true, solo);
         m.addItem (kMenuAdjustImage, "Adjust Image...");
     }
 
@@ -1039,6 +1057,11 @@ VideoWindow::VideoWindow (std::function<double()> getTime)
         else contentHost_->applySplitDelta (dyPx);
     };
     videoView.onToggleCollapse = [this] { setTracksCollapsed (! tracksCollapsed_); };
+    videoView.getDisplayedTrack = [this] { return displayedTrack (); };
+    videoView.onTrackMenuAction = [this] (int id, int idx)
+    {
+        if (onTrackMenuAction) onTrackMenuAction (id, idx);
+    };
 
     updateDecodeSize();   // before the first open: a 4K movie never decodes at 4K for a small window
 
@@ -1055,6 +1078,8 @@ VideoWindow::~VideoWindow()
     videoView.onDisplaySizeChanged = nullptr;
     videoView.onUserRotationChanged = nullptr;
     videoView.onAdjustmentChanged = nullptr;
+    videoView.getDisplayedTrack = nullptr;
+    videoView.onTrackMenuAction = nullptr;
     tracksPanel.onSelectTrack = nullptr;
     tracksPanel.onOffsetChanged = nullptr;
     tracksPanel.onMenuItem = nullptr;
@@ -1124,10 +1149,12 @@ int VideoWindow::displayedTrackAt (double tSecs) const
 {
     if (tracks_.empty()) return -1;
 
+    // The bands are drawn with index 0 on top: the first covering track is
+    // the topmost visible one and wins when nothing else is selected.
     int topmostCovered = -1;
     for (size_t i = 0; i < tracks_.size(); ++i)
         if (coversTime (tracks_[i].offsetSecs, durationOf (durations_, tracks_[i].file), tSecs))
-            topmostCovered = (int) i;
+        {   topmostCovered = (int) i; break; }
 
     if (selected_ >= 0 && selected_ < (int) tracks_.size()
         && coversTime (tracks_[selected_].offsetSecs, durationOf (durations_, tracks_[selected_].file), tSecs))

@@ -466,10 +466,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       arrangement of the former two-group left column.
     - **View > Panels** (Ctrl+Shift+Enter) maximises the Editor's group to
       hide every other panel, and brings them back.
-    - Individual panels can be closed from the tab menu or with the
-      right-click **Close Panel** item inside them (on any panel, including
-      its list rows where applicable). The **Window** menu lists every panel
-      with a checkmark and opens or closes each one. Closed panels stay
+    - Individual panels can be closed from their tab menu (**≡**) or the
+      **Window** menu, which lists every panel with a checkmark and opens or
+      closes each one. Closed panels stay
       closed between sessions; a reopened panel goes back to its former
       group, in its former tab order, or — when that group is gone — to a new
       group on the side of the one it sat next to.
@@ -871,11 +870,7 @@ macOS). It always shows the frame at the document time:
 - **while playing**: the playback position (the sound is the document audio,
   played by SpectroCraft itself — the picture is silent and follows it);
 - **when stopped**: the playhead (click in the spectrogram or waveform,
-  Home/End, arrows, the status-bar position field);
-- **mouse hover**: with *Window > Video Follows Mouse Hover* (off by default;
-  your choice is remembered), moving the mouse left and right over the
-  spectrogram or waveform scrubs the picture to the time under the cursor,
-  without clicking; it returns to the playhead when the mouse leaves the view.
+  Home/End, arrows, the status-bar position field).
 
 *Window > Video* hides or shows it; closing it keeps it closed for that file
 until reopened from the menu. Switching to a document without a video shows
@@ -893,7 +888,8 @@ Zooming and panning work like in the spectrogram:
 - **right-drag** draws a selection box that is then zoomed to fill the view,
   like the spectrogram's region zoom; a plain right-click shows the context
   menu (*Zoom In / Zoom Out / Zoom Fit*, *Rotate 90° CW / CCW* — the rotation
-  is remembered per file);
+  is remembered per file), followed by the actions of the track currently
+  shown in the picture (see below);
 - **zoom bars** on the right and bottom edges of the picture show the
   visible part, one per axis: drag their edges to zoom, drag the thumb (or
   click in the track) to pan;
@@ -911,9 +907,9 @@ tab menu. The picture keeps its zoom, pan and rotation either way.
 
 Between the picture and the tracks panel sits a thin **draggable separator**:
 drag it to change their ratio (resizing the window keeps it). The little
-two-arrow button in the corner where the scrollbars meet collapses the
-tracks area away — the picture then fills the whole window — and expands it
-again.
+double-chevron button in the corner where the scrollbars meet (the workspace
+bar's chevron, rotated 90°) collapses the tracks area away — the picture then
+fills the whole window — and expands it again.
 
 #### Video tracks
 
@@ -936,8 +932,9 @@ topmost available video at the current time; when the selected video ends,
 the topmost covering one takes over automatically;
 - right-click on a **band** (or the ruler) for *Zoom In / Zoom Out / Zoom Fit*
   — plus, on a band: *Sync based on Audio*, *Align…*,
-  *Copy Audio to New Channel(s)*, *Add Video Track…*, *Remove Track*, *Solo*
-  and *Adjust Image*;
+  *Copy Audio to New Channel(s)*, *Add Video Track…*, *Remove Track* and
+  *Adjust Image*; right-clicking the picture offers those same actions for
+  the track currently shown in it;
 - when the tracks or the timeline outgrow the panel, **scrollbars** appear
   at its right and bottom edges (the ruler stays pinned to the top);
 - **adding** a track works from that menu or by dragging a video file onto the
@@ -949,8 +946,6 @@ the topmost covering one takes over automatically;
   the best match;
 - *Copy Audio to New Channel(s)* decodes the video's own audio into new
 document channels at the track's offset (an undoable edit, like a paste);
-- **Solo** plays that video's own audio instead of the document's tracks while
-  it is solo'd; unsoloing restores normal playback;
 - *Adjust Image* opens a dialog with live **contrast** and **brightness**
 sliders plus *Apply to All*, *Reset* and *Close*. Each track keeps its own
 zoom, pan, rotation, contrast and brightness.
@@ -2214,7 +2209,7 @@ harmonics of whatever is currently selected.
   from the list.
 - Right-clicking a row offers **Recall**, **Edit...**, **Delete Selected**,
   **Clone Harmonics by Numbers...**, **Clone Harmonics by Mouse** /
-  **Stop Picking**, **Fit View to Selected** and **Close Panel**. Double-clicking
+  **Stop Picking** and **Fit View to Selected**. Double-clicking
   a row recalls it the same way.
 - **Clone Harmonics by Numbers...** opens a dialog for frequency multipliers
   such as `0.5, 2, 5` — additive clones of every shape in the current
@@ -2237,9 +2232,9 @@ The **Drawing** tab in the left panel lists user annotations drawn on top of
 the spectrogram: **Text**, **Arrow**, **Rectangle** and **Free Drawing**.
 
 - The table shows each item's type and a free-text **Comment**; right-clicking
-  a row offers **Edit...** (text/comment, colour, line width, text size),
-  **Delete Selected** and **Close Panel**. Double-clicking a row fits it into
-  view the same way as selecting it.
+  a row offers **Edit...** (text/comment, colour, line width, text size) and
+  **Delete Selected**. Double-clicking a row fits it into view the same way as
+  selecting it.
 - The first column is an eye icon that toggles *that* drawing's visibility;
   the **Show** button at the top of the panel is the master switch for all of
   them. Hidden items stay in the list but are not drawn on the spectrogram.
@@ -2292,7 +2287,7 @@ list: a table row followed by its parameter rows.
   (prompts for the new name of the item under the mouse), **Down sample...**
   (prompts for a new rate in Hz, default 10 — rows are *removed only*, keeping
   every Nth row so the density is at most that rate; no interpolation and no
-  added data) and **Close Panel**. Excel-style multi-selection applies: plain
+  added data). Excel-style multi-selection applies: plain
   click, Ctrl/Cmd+click toggle, Shift+click range.
 - The dropdown at the top picks where visible parameters are drawn:
   - **Overlay on Waveform** — parameters whose alignment target is *Waveform*
@@ -2511,7 +2506,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `VideoFrames` (`src/VideoFrames.cpp`, `src/VideoFrames_mac.mm`, `src/VideoFrames_win.cpp`) | Video picture decoding for the Video window: a per-platform frame stream (AVFoundation on macOS, Media Foundation on Windows, none on Linux), `VideoDecoder::frameAt(t)` (decode forward for small forward moves, seek otherwise; skipped frames are never converted) and `VideoFramePump`, a worker thread that serves only the latest requested time and hands frames to the message thread. |
-| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, vertical + horizontal zoom bars), per-file rotation. Docks as the Video panel of the docking workspace (`VideoDockHost`, picture on top and tracks panel below, draggable separator between them, corner button collapses the tracks area; floating or in the main window) via **Window > Dock/Undock Video Panel** or *Dock/Undock Panel* from the tab menu once docked/floating (*Always on Top* in a floating group's tab menu), and can be sent back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag to offset (Shift-drag snaps to 0 s / audio end / other track edges), wheel zoom about the cursor, right/bottom scrollbars when content overflows, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel; right-click menu for sync/align/copy-audio/solo/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else hover time when enabled, else playhead) at 60 Hz while visible or docked. |
+| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, vertical + horizontal zoom bars), per-file rotation. Docks as the Video panel of the docking workspace (`VideoDockHost`, picture on top and tracks panel below, draggable separator between them, corner button collapses the tracks area; floating or in the main window) via **Window > Dock/Undock Video Panel** or *Dock/Undock Panel* from the tab menu once docked/floating (*Always on Top* in a floating group's tab menu), and can be sent back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag to offset (Shift-drag snaps to 0 s / audio end / other track edges), wheel zoom about the cursor, right/bottom scrollbars when content overflows, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel; right-click menu on a band — or on the picture, targeting the currently displayed track — for sync/align/copy-audio/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else playhead) at 60 Hz while visible or docked. |
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `Docking` (`src/Docking.cpp`: `DockManager`, `DockArea`, `GroupComponent`, `FloatingWindow`, `Workspaces`, `WorkspaceBar`, `DockLookAndFeel`) | Adobe-style docking workspace, independent of the rest of the app: a tree of horizontal / vertical splits of *panel groups* per dock area (the main window's and one per floating window); panels are registered with an id and a content component they do not own. Drag sessions (translucent ghost window snapping onto the hovered zone, Esc / Ctrl handling), the trapezoid drop overlay, tab strips with the ≡ panel menu and >> overflow, gap resizing, maximise, floating windows with magnetic moves, the memory of where closed / undocked panels go back, the JSON layout (`saveLayout` / `loadLayout`) and named workspaces with saved + current layouts. Components a drop removes are hidden at once and deleted asynchronously, so a group may be retired from inside its own mouse handler. `DockLookAndFeel` (the app's default look and feel) embeds Source Sans 3. |

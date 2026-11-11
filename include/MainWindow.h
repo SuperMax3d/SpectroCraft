@@ -170,10 +170,7 @@ public:
     void setVideoDocked (bool docked);
     bool isVideoDocked() const;
     VideoDockHost* getVideoDockHost() const noexcept { return videoDockHost.get(); }
-    /** Window > Video Follows Mouse Hover (persisted). */
-    void setVideoFollowHover (bool on);
-    bool isVideoFollowingHover() const noexcept { return videoFollowHover; }
-    /** Document time the Video window shows now (sc::videoDisplayTime). */
+    /** Document time the Video window shows now. */
     double videoTimeNow() const;
     /** Time under the mouse over a view, -1 when outside (tests). */
     double videoHoverTimeNow() const noexcept { return videoHoverTime; }
@@ -633,7 +630,6 @@ public:
         WindowAllowMultiple = 6700,   // Window menu: "Allow multiple instances" toggle
         WindowAllowControl = 6701,    // Window menu: "Allow AI control (localhost)" toggle
         WindowVideo = 6702,           // Window menu: show / hide the Video window
-        WindowVideoFollowHover = 6703,// Window menu: "Video Follows Mouse Hover" toggle
         WindowDiagLog = 6704,         // Window menu: "Diagnostic Log" toggle
         WindowVideoToggleDock = 6705, // Window menu: Dock / Undock the Video panel
         WindowWorkspaceBase = 6600,   // Window > Workspaces: switch to workspace i (up to 48)
@@ -688,7 +684,6 @@ private:
     std::unique_ptr<VideoWindow> videoWindow;
     std::unique_ptr<VideoDockHost> videoDockHost;
     double videoHoverTime = -1.0;      // time under the mouse, -1 = not over a view
-    bool videoFollowHover = false;   // off by default for a new user
     juce::File videoDismissedFor;      // closed by the user while showing this file
     std::shared_ptr<AudioEngine::SoloAudio> videoSoloCache;   // decoded solo track audio (reused across offset changes)
     juce::File videoSoloCacheFor;                          // which file it belongs to

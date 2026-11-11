@@ -49,21 +49,23 @@ public:
     void paint (juce::Graphics& g) override
     {
         g.fillAll (juce::Colour::fromRGB (38, 42, 50));
+        // The workspace bar's double chevron (drawChevron in Docking.cpp),
+        // rotated 90 degrees clockwise to point down while the tracks are
+        // shown (a click collapses them) and 90 degrees counter-clockwise to
+        // point up when they are hidden.
         g.setColour (juce::Colours::white.withAlpha (0.75f));
-        juce::Path p;
-        const float cy = getHeight() * 0.5f;
-        for (float cx : { getWidth() * 0.28f, getWidth() * 0.72f })
-            if (! collapsed)
-            {   // pointing down: a click hides the tracks
-                p.addLineSegment (juce::Line<float> ({ cx - 3.0f, cy - 2.0f }, { cx, cy + 2.0f }), 1.4f);
-                p.addLineSegment (juce::Line<float> ({ cx, cy + 2.0f }, { cx + 3.0f, cy - 2.0f }), 1.4f);
-            }
-            else
-            {   // pointing up: a click reveals them again
-                p.addLineSegment (juce::Line<float> ({ cx - 3.0f, cy + 2.0f }, { cx, cy - 2.0f }), 1.4f);
-                p.addLineSegment (juce::Line<float> ({ cx, cy - 2.0f }, { cx + 3.0f, cy + 2.0f }), 1.4f);
-            }
-        g.strokePath (p, juce::PathStrokeType (1.4f));
+        const float cx = getWidth() * 0.5f, cy = getHeight() * 0.5f;
+        g.addTransform (juce::AffineTransform::rotation (collapsed ? -1.5708f : 1.5708f,
+                                                         cx, cy));
+        for (int k = 0; k < 2; ++k)
+        {
+            const float x0 = cx - 4.0f + (float) k * 4.0f;
+            juce::Path p;
+            p.startNewSubPath (x0, cy - 3.5f);
+            p.lineTo (x0 + 3.0f, cy);
+            p.lineTo (x0, cy + 3.5f);
+            g.strokePath (p, juce::PathStrokeType (1.4f));
+        }
     }
 
     void mouseDown (const juce::MouseEvent&) override { if (onClick != nullptr) onClick (); }
@@ -164,6 +166,12 @@ public:
     /** Actions that reach outside the view (set by the owner); a missing
         callback hides its menu item. */
     std::function<void()> onToggleCollapse;   // corner button: hide/show tracks
+    /** The track index currently shown in this picture (-1 = none). The
+        right-click menu offers that track's actions below the picture ones. */
+    std::function<int()> getDisplayedTrack;
+    /** Runs one of the displayed track's context-menu items (id, trackIdx),
+        mirroring VideoTracksPanel::onMenuItem. */
+    std::function<void (int, int)> onTrackMenuAction;
     /** Sets the corner button's chevron direction (owner keeps it in sync). */
     void setCollapseState (bool c) { collapseBtn_.collapsed = c; collapseBtn_.repaint(); }
 
@@ -537,7 +545,7 @@ public:
     /** The track currently shown (-1 = none). */
     int displayedTrack() const noexcept { return displayed_; }
     /** Which track covers document time t: the explicit selection if it is
-        in range, else the topmost (last) available track. -1 = none. */
+        in range, else the topmost (first) available track. -1 = none. */
     int displayedTrackAt (double tSecs) const;
 
     /** Asks the pump for the frame at the owner's current time. */

@@ -299,8 +299,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
                                       runPythonScriptAsync (f, t);
                                   };
 
-    // Right-click "Close Panel" in each panel (the Window menu offers the
-    // same toggles for every panel, the tab menus too).
+    // Panels close from their ≡ tab menu or the Window menu.
     fileListPanel->onCloseRequested   = [this] { setPanelVisible ("files", false); };
     fftPanel->onCloseRequested        = [this] { setPanelVisible ("fft", false); };
     historyPanel->onCloseRequested    = [this] { setPanelVisible ("history", false); };
@@ -764,13 +763,11 @@ void MainWindow::setupViews()
     waveformView->onCursorInfo = onCursorInfo;
     spectralView->onCursorInfo = onCursorInfo;
 
-    // Video window: with "Video Follows Mouse Hover" the picture shows the
-    // time under the mouse over either view (polled by the window's timer).
+    // The views report the time under the mouse over either view; kept for
+    // the status-bar probes and the tests (the Video window no longer follows it).
     auto onHoverTime = [this] (double t) { videoHoverTime = t; };
     waveformView->onHoverTime = onHoverTime;
     spectralView->onHoverTime = onHoverTime;
-    // Off by default for a new user; the choice is persisted once changed.
-    videoFollowHover = app.recentStore->getIntValue ("video_follow_hover", 0) != 0;
 
     controlsPanel->onResetFreq = [this] {
         if (spectralView) { spectralView->resetFrequencyRange(); spectralView->repaint(); }
@@ -2613,8 +2610,7 @@ static std::vector<sc::VideoTrackData> effectiveVideoTracks (const FileDoc& d);
 double MainWindow::videoTimeNow() const
 {
     auto& eng = app.audioEngine();
-    return sc::videoDisplayTime (eng.isPlaying(), eng.isPlaying() ? eng.position() : 0.0,
-                                 videoFollowHover, videoHoverTime, app.playhead);
+    return eng.isPlaying () ? eng.position () : app.playhead;
 }
 
 void MainWindow::ensureVideoWindow()
@@ -3418,13 +3414,6 @@ void MainWindow::setVideoDocked (bool docked)
     }
 }
 
-void MainWindow::setVideoFollowHover (bool on)
-{
-    videoFollowHover = on;
-    app.recentStore->setValue ("video_follow_hover", on ? 1 : 0);
-    app.recentStore->save();
-}
-
 bool MainWindow::statusBarShowsDiagLog() const
 {
     return statusBar != nullptr && statusBar->diagActive ();
@@ -3965,12 +3954,6 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         toggleVideoDock ();
         return;
     }
-    if (menuItemID == WindowVideoFollowHover)
-    {
-        setVideoFollowHover (! videoFollowHover);
-        return;
-    }
-
     // Window menu: "Allow AI control (localhost)". Persisted and applied at
     // once (Main.cpp starts/stops the control server).
     if (menuItemID == WindowAllowControl)
@@ -8450,8 +8433,6 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (WindowVideoToggleDock,
                       isVideoDocked () ? "Undock Video Panel" : "Dock Video Panel",
                       sc::videoDecodingAvailable (), false);
-        menu.addItem (WindowVideoFollowHover, "Video Follows Mouse Hover", sc::videoDecodingAvailable (),
-                      videoFollowHover);
 
         // Instance behaviour: when unchecked, launching SpectroCraft again
         // hands its command-line files to this running instance and quits the

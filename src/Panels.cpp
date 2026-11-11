@@ -169,14 +169,11 @@ void FileListPanel::showFileMenu (int row)
     // Brand-new documents have no folder to open yet.
     m.addItem (4, "Open Containing Folder",
                !d.file.getFullPathName().isEmpty(), false);
-    m.addSeparator();
-    m.addItem (5, "Close Panel");
     const int r = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (r == 1) activateDoc (row);
     else if (r == 2) closeDoc (row);
     else if (r == 3) showScaleDialog (row);
     else if (r == 4) openContainingFolder (row);
-    else if (r == 5 && onCloseRequested) onCloseRequested();
 }
 
 // Field name for channel ch's full-scale editor in the scale dialog.
@@ -321,25 +318,11 @@ void FileListPanel::showScaleDialog (int row)
     delete dlg;
 }
 
-// Right-click "Close Panel" menu shared by every left-column panel. Returns
-// true when the user picked the item.
-static bool showClosePanelMenu()
-{
-    juce::PopupMenu m;
-    m.addItem (1, "Close Panel");
-    return m.showMenu (juce::PopupMenu::Options().withMousePosition()) == 1;
-}
-
 void FileListPanel::mouseDown (const juce::MouseEvent& e)
 {
     if (!e.mods.isRightButtonDown()) return;
     const int row = rowAt ((int) e.x, (int) e.y);
-    if (row < 0)
-    {
-        // Empty area below the list: offer to close the panel itself.
-        if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
-        return;
-    }
+    if (row < 0) return;   // empty area below the list
     showFileMenu (row);
 }
 
@@ -594,11 +577,9 @@ int HistoryPanel::rowAt (int x, int y) const
 
 void HistoryPanel::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.mods.isRightButtonDown())
-    {
-        if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
-        return;
-    }
+    // The right-click "Close Panel" menu is gone; panels close from the tab
+    // menu or the Window menu.
+    if (e.mods.isRightButtonDown()) return;
     const int r = rowAt (e.x, e.y);
     if (r < 0 || !onJumpToState) return;
     onJumpToState (r);   // MainWindow performs the jump and refreshes everything
@@ -3512,9 +3493,6 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
         m.addItem (CtxCheckHarmonicRatio, "Check Harmonic Ratio",
                    haveCurveData, harmonicRatioActive_);
     }
-    m.addSeparator();
-    m.addItem (101, "Close Panel");
-
     const int sel = m.showMenu (juce::PopupMenu::Options ().withMousePosition());
     switch (sel)
     {
@@ -3544,9 +3522,6 @@ void FFTAnalysisView::showContextMenu (bool onLevelAxis, bool onFreqAxis, int cl
             break;
         case CtxCheckHarmonicRatio:
             setHarmonicRatioMode (!harmonicRatioActive_);
-            break;
-        case 101:
-            if (onCloseRequested) onCloseRequested();
             break;
     }
 }
@@ -5235,11 +5210,10 @@ void SpectralControlsPanel::resized()
     }
 }
 
-// Right-click on empty panel area: offer to close the panel.
-void SpectralControlsPanel::mouseDown (const juce::MouseEvent& e)
+// The right-click "Close Panel" menu is gone; panels close from the tab
+// menu or the Window menu.
+void SpectralControlsPanel::mouseDown (const juce::MouseEvent&)
 {
-    if (!e.mods.isRightButtonDown()) return;
-    if (showClosePanelMenu() && onCloseRequested) onCloseRequested();
 }
 
 void SpectralControlsPanel::paint (juce::Graphics& g)
@@ -6111,8 +6085,6 @@ void MarkerListPanel::showMarkerContextMenu()
     m.addItem (9, "Delete Selected", table.getNumSelectedRows () > 0);
     m.addItem (8, "Fit View to Selected", table.getNumSelectedRows () > 0);
     m.addItem (3, "Find...\tCtrl+F");
-    m.addSeparator();
-    m.addItem (7, "Close Panel");
 
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (id == 1)
@@ -6129,7 +6101,6 @@ void MarkerListPanel::showMarkerContextMenu()
         fitViewToSelected ();
     else if (id == 3)
         showFindDialog();
-    else if (id == 7 && onCloseRequested) onCloseRequested();
 }
 
 // useOSNativeDialogBox = false: the native Win32 IFileDialog is unavailable on some
@@ -7308,8 +7279,6 @@ void TranscriptionPanel::mouseDown (const juce::MouseEvent& e)
     m.addItem (3, "Copy All");
     m.addItem (4, "Paste");
     m.addItem (6, "Find...\tCtrl+F");
-    m.addSeparator();
-    m.addItem (5, "Close Panel");
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (id == 1)
         addEntry();
@@ -7321,8 +7290,6 @@ void TranscriptionPanel::mouseDown (const juce::MouseEvent& e)
         pasteFromClipboard();
     else if (id == 6)
         showFindDialog ();
-    else if (id == 5 && onCloseRequested)
-        onCloseRequested();
 }
 
 void TranscriptionPanel::refresh()
@@ -7738,7 +7705,6 @@ void SelectionPanel::showLoadContextMenu()
     m.addItem (21, app.isClonePicking () ? "Stop Picking" : "Clone Harmonics by Mouse", hasLive);
     m.addSeparator();
     m.addItem (30, "Fit View to Selected", nSel > 0);
-    m.addItem (1, "Close Panel");
 
     const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (id == 10)
@@ -7753,7 +7719,6 @@ void SelectionPanel::showLoadContextMenu()
         toggleClonePick ();
     else if (id == 30)
         fitViewToSelected ();
-    else if (id == 1 && onCloseRequested) onCloseRequested();
 }
 
 bool SelectionPanel::loadSelectionsFromFile (const juce::File& f)
@@ -8087,19 +8052,16 @@ PythonPanel::PythonPanel (Application& appIn, const juce::File& folder)
     refreshScripts ();
 }
 
-// Right-click menu: "Reset to original" for built-in example scripts, plus
-// the usual "Close Panel".
+// Right-click menu: "Reset to original" for built-in example scripts.
 void PythonPanel::mouseDown (const juce::MouseEvent& e)
 {
     if (!e.mods.isRightButtonDown()) return;
     juce::PopupMenu m;
-    const int resetId = 1, closeId = 2;
+    const int resetId = 1;
     if (canResetCurrentScript ())
         m.addItem (resetId, "Reset to original");
-    m.addItem (closeId, "Close Panel");
     const int sel = m.showMenu (juce::PopupMenu::Options().withMousePosition());
     if (sel == resetId) confirmResetToOriginal ();
-    else if (sel == closeId && onCloseRequested) onCloseRequested ();
 }
 
 bool PythonPanel::canResetCurrentScript () const
@@ -8787,8 +8749,7 @@ void DrawingPanel::showContextMenu (int)
     m.addSeparator ();
     m.addItem (30, "Edit...", nSel > 0);
     m.addItem (31, "Delete Selected", nSel > 0);
-    m.addSeparator ();
-    m.addItem (40, "Close Panel");
+
 
     const int id = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
     if (id == 10)      { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Text); }
@@ -8798,7 +8759,6 @@ void DrawingPanel::showContextMenu (int)
     else if (id == 20) toggleShowAll ();
     else if (id == 30) showEditDialog (primaryRow ());
     else if (id == 31) deleteSelected ();
-    else if (id == 40) requestClose ();
 }
 
 void DrawingPanel::showEditDialog (int row)
@@ -10628,8 +10588,7 @@ void TablesPanel::showContextMenu (int row)
         m.addSubMenu ("Align", align);
     }
 
-    m.addSeparator ();
-    m.addItem (5, "Close Panel");
+
 
     const int id = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
     switch (id)
@@ -10686,7 +10645,6 @@ void TablesPanel::showContextMenu (int row)
             }
             break;
         }
-        case 5: requestClose (); break;
         case 6: renamePrimaryTable (); break;
         case 7: renamePrimaryParameter (); break;
         case 8: downsamplePrimaryTable (); break;
@@ -10953,8 +10911,7 @@ void ActionsPanel::showContextMenu ()
     m.addItem (1, "Remove Selected", hasSel, false);
     m.addItem (2, "Rename",          hasSel, false);
     m.addItem (3, "Edit",            hasSel, false);
-    m.addSeparator ();
-    m.addItem (4, "Close Panel");
+
 
     switch (m.showMenu (juce::PopupMenu::Options().withMousePosition()))
     {
@@ -11005,10 +10962,6 @@ void ActionsPanel::showContextMenu ()
             w->setVisible (true);
             break;
         }
-
-        case 4:
-            requestClose();
-            break;
 
         default:
             break;

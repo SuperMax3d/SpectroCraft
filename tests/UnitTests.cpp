@@ -3963,8 +3963,8 @@ static void testSpectralRefreshOnDocSwitch()
 }
 
 // ------------------------------------------------- Close Panel + Window menu
-// Every left-column panel offers right-click "Close Panel"; the Window menu
-// lists all panels with checkmarks and toggles them. Closed state persists.
+// Panels close through their own requestClose() wiring (the ≡ tab menu or
+// the Window menu); closed state persists.
 static void testClosePanelsAndWindowMenu()
 {
     const juce::File store = makeTempFile ("close_panel.recent");
@@ -4005,11 +4005,11 @@ static void testClosePanelsAndWindowMenu()
         CHECK (wIdx >= 0, "Window menu exists in the menu bar");
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
         // +2: the "Workspaces" submenu and "Maximize Panel Group" above the
-        // panels, +3: "Video", "Dock/Undock Video Panel" and "Video Follows
-        // Mouse Hover" below them, +1 the "Allow multiple instances" toggle,
+        // panels, +2: "Video" and "Dock/Undock Video Panel" below them,
+        // +1 the "Allow multiple instances" toggle,
         // +1 "Allow AI control (localhost)" when the control server is built
         // in, +1 "Diagnostic Log" (separators are not counted by getNumItems).
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 3 + 1 + kScControlMenuItems + 1, "Window menu lists every panel");
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems + 1, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
         // persists it to the store file immediately.
@@ -4143,7 +4143,7 @@ static void testClosePanelsAndWindowMenu()
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 3 + 1 + kScControlMenuItems + 1, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems + 1, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 0, wIdx);   // files
