@@ -59,6 +59,12 @@ std::vector<juce::File> listDemucs6Models(const juce::File& d = {});
 /** The htdemucs_ft model directory (d/htdemucs_ft) when it exists and holds at least one .gguf file; an empty File otherwise. */
 juce::File demucsFtModelDir(const juce::File& d = {});
 
+/** All *.gguf model files in d/HTDemucs-WhineHiss-v1-GGUF (the htdemucs-whine-hiss_v1 family), sorted by name. */
+std::vector<juce::File> listWhineHissModels(const juce::File& d = {});
+
+/** All *.gguf model files in d/HTDemucs-WhineHiss-ClickBump-v1-GGUF (the htdemucs-whine-hiss-click-bump_v1 family), sorted by name. */
+std::vector<juce::File> listWhineHissClickBumpModels(const juce::File& d = {});
+
 // ---------------------------------------------------------------------------
 // Super Resolution (FlashSR / AudioSR) support.
 // ---------------------------------------------------------------------------
@@ -153,6 +159,22 @@ std::vector<ModelSpec> modelChoices();
 
 /** Hugging Face resolve URL for one of the catalogue model files. */
 juce::String modelUrl(const juce::String& fileName);
+
+/** One downloadable htdemucs engine model from the Super3dMax Hugging Face
+    repos (htdemucs-whine-hiss_v1 and htdemucs-whine-hiss-click-bump_v1). */
+struct DemucsEngineSpec
+{
+    int mode = 0;          // StemService::Mode id: 4 or 5
+    std::string file;      // gguf file name inside the family folder
+    int64_t sizeBytes = 0; // exact download size
+    std::string sha256;    // 64 lowercase hex chars of the file ("" = unknown)
+};
+
+/** The htdemucs engine models offered for download, in mode then name order. */
+std::vector<DemucsEngineSpec> demucsEngineChoices();
+
+/** Hugging Face resolve URL for one of the demucsEngineChoices() files. */
+juce::String demucsEngineUrl(const juce::String& fileName);
 
 /** SHA-256 published for one of the catalogue download URLs above (binary
     zips, SAM-Audio, FlashSR and AudioSR files); "" when the URL is unknown.

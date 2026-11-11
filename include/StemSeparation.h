@@ -53,7 +53,7 @@ public:
     juce::Component* rowsHostForTest() { return &rowsHost_; }
     juce::ComboBox* modeComboForTest() { return &modeCombo_; }
     juce::ComboBox* outputComboForTest() { return &outputCombo_; }
-    int selectedModeId() const { return modeCombo_.getSelectedItemIndex () + 1; }   // 1=Sam Audio 2/3=htdemucs
+    int selectedModeId() const { return modeCombo_.getSelectedItemIndex () + 1; }   // 1=Sam Audio 2-5=htdemucs
     bool demucsMode() const { return modeCombo_.getSelectedItemIndex () >= 1; }
 
     // Called by the DescRow buttons (a separate class), so these are public.
@@ -91,7 +91,7 @@ private:
     juce::TextEditor startEdit_, endEdit_;
     juce::TextButton selectAllBtn_;
     juce::Label modeLbl_;
-    juce::ComboBox modeCombo_;           // 1=Sam Audio 2=htdemucs_6stems 3=htdemucs_ft
+    juce::ComboBox modeCombo_;           // 1=Sam Audio 2-5=htdemucs families
     juce::Label modelLbl_, backendLbl_, descLbl_;
     juce::ComboBox modelCombo_;
     juce::ComboBox backendCombo_;

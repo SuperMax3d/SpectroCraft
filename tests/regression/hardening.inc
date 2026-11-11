@@ -310,7 +310,12 @@ static void testHardeningStemServiceValidation()
     juce::String code;
     CHECK (SS::validate (good (), &code).isEmpty () && code.isEmpty (), "hardening stem: valid request accepted");
 
-    { auto r = good (); r.mode = (SS::Mode) 7;               CHECK (codeOf (r) == "invalid_mode",    "hardening stem: bad mode"); }
+    { auto r = good (); r.mode = (SS::Mode) 6;               CHECK (codeOf (r) == "invalid_mode",    "hardening stem: bad mode"); }
+    { auto r = good (); r.mode = SS::Mode::HtWhineHiss;      CHECK (codeOf (r).isEmpty (),           "hardening stem: whine-hiss mode accepted"); }
+    { auto r = good (); r.mode = SS::Mode::HtWhineHissClickBump;
+        CHECK (codeOf (r).isEmpty (), "hardening stem: whine-hiss-click-bump mode accepted"); }
+    { auto r = good (); r.mode = SS::Mode::HtWhineHiss; r.model = dir.getChildFile ("m");
+        CHECK (codeOf (r) == "model_missing", "hardening stem: whine-hiss model missing"); }
     { auto r = good (); r.descriptions.clear ();             CHECK (codeOf (r) == "no_description",  "hardening stem: no description"); }
     { auto r = good (); r.descriptions[0].text = "   ";      CHECK (codeOf (r) == "no_description",  "hardening stem: blank description"); }
     { auto r = good (); r.backend = "bogus";                 CHECK (codeOf (r) == "invalid_backend", "hardening stem: bad backend"); }
@@ -321,6 +326,7 @@ static void testHardeningStemServiceValidation()
     { auto r = good (); r.input[1].resize (10);              CHECK (codeOf (r) == "ragged_input",    "hardening stem: ragged input"); }
     { auto r = good (); r.binary = dir.getChildFile ("x");   CHECK (codeOf (r) == "binary_missing",  "hardening stem: binary missing"); }
     { auto r = good (); r.model = dir.getChildFile ("m");    CHECK (codeOf (r) == "model_missing",   "hardening stem: model missing"); }
+    { auto r = good (); r.mode = SS::Mode::HtDemucs6;        CHECK (codeOf (r).isEmpty (),           "hardening stem: htdemucs_6stems mode accepted"); }
     { auto r = good (); r.mode = SS::Mode::HtDemucsFt;       CHECK (codeOf (r) == "model_missing",   "hardening stem: ft model must be a folder"); }
     {
         auto r = good ();
@@ -380,6 +386,110 @@ static void testHardeningStemServiceValidation()
         }
     }
     dir.deleteRecursively ();
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end htdemucs-whine-hiss separation against the real audio.cpp CLI.
+// Skipped unless the binary and at least one model per new mode are installed
+// locally - CI never has them, so this only runs on dev machines (the models
+// come from the Stem Separation window's Download... dialog).
+// ---------------------------------------------------------------------------
+static void testHardeningStemDemucsE2E()
+{
+    using SS = sc::StemService;
+    if (!SS::supported ()) { scSkip ("hardening stem e2e: unsupported platform"); return; }
+    const auto whList   = sc::acpp::listWhineHissModels ();
+    const auto whcbList = sc::acpp::listWhineHissClickBumpModels ();
+    if (!sc::acpp::hasBinary () || whList.empty () || whcbList.empty ())
+    { scSkip ("hardening stem e2e: audio.cpp binary or htdemucs-whine-hiss models not installed"); return; }
+
+    // 2 s of a 440 Hz tone at 48 kHz, one vector per channel.
+    const double rate = 48000.0;
+    const int64_t n = (int64_t) std::llround (2.0 * rate);
+    auto makeInput = [&] (int nch) {
+        std::vector<std::vector<float>> in;
+        for (int c = 0; c < nch; ++c)
+        {
+            std::vector<float> ch ((size_t) n, 0.0f);
+            for (int64_t i = 0; i < n; ++i)
+                ch[(size_t) i] = 0.2f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                  * 440.0 * (double) i / rate);
+            in.push_back (std::move (ch));
+        }
+        return in;
+    };
+
+    auto runMode = [&] (SS::Mode mode, const juce::File& model, int nch, SS::Result& res)
+    {
+        SS::Request r;
+        r.mode = mode;
+        r.model = model;
+        r.backend = "cpu";
+        r.sourceRate = rate;
+        r.extStartSecs = 0.0;
+        r.input = makeInput (nch);
+        // Deadline so a wedged CLI cannot hang the suite.
+        const uint32_t t0 = juce::Time::getMillisecondCounter ();
+        res = SS::run (r, nullptr, [t0] { return juce::Time::getMillisecondCounter () - t0 > 600000; });
+    };
+
+    // Mono: duplicated to L=R for the CLI, every stem comes back mono.
+    SS::Result resM;
+    runMode (SS::Mode::HtWhineHiss, whList[0], 1, resM);
+    CHECK (resM.ok, "hardening stem e2e: mono whine-hiss run ok"
+           + (resM.ok ? juce::String () : " (" + resM.errorCode + ": " + resM.error + ")"));
+    if (resM.ok)
+    {
+        CHECK (resM.stems.size () == 2, "hardening stem e2e: mono run gives two stems");
+        bool hasWhine = false, hasHiss = false;
+        for (const auto& s : resM.stems)
+        {
+            CHECK (s.channels == 1 && s.frames > 0,
+                   "hardening stem e2e: mono-run stem '" + s.name + "' is mono with audio");
+            if (s.name.toLowerCase ().contains ("whine")) hasWhine = true;
+            if (s.name.toLowerCase ().contains ("hiss"))  hasHiss = true;
+        }
+        CHECK (hasWhine && hasHiss, "hardening stem e2e: mono run produced whine + hiss stems");
+    }
+
+    // Stereo: a single CLI run and the stems stay stereo.
+    SS::Result resS;
+    runMode (SS::Mode::HtWhineHiss, whList[0], 2, resS);
+    CHECK (resS.ok, "hardening stem e2e: stereo whine-hiss run ok"
+           + (resS.ok ? juce::String () : " (" + resS.errorCode + ": " + resS.error + ")"));
+    if (resS.ok)
+        for (const auto& s : resS.stems)
+            CHECK (s.channels == 2 && s.frames > 0,
+                   "hardening stem e2e: stereo-run stem '" + s.name + "' stays stereo");
+
+    // Four channels: one duplicated-stereo run per source channel; every stem
+    // is mono and prefixed with its channel number.
+    SS::Result res4;
+    runMode (SS::Mode::HtWhineHiss, whList[0], 4, res4);
+    CHECK (res4.ok, "hardening stem e2e: 4-channel whine-hiss run ok"
+           + (res4.ok ? juce::String () : " (" + res4.errorCode + ": " + res4.error + ")"));
+    if (res4.ok)
+    {
+        CHECK (res4.stems.size () == 8, "hardening stem e2e: 4-channel run gives eight stems");
+        for (const auto& s : res4.stems)
+            CHECK (s.channels == 1 && s.frames > 0
+                   && (s.name.startsWith ("ch1_") || s.name.startsWith ("ch2_")
+                       || s.name.startsWith ("ch3_") || s.name.startsWith ("ch4_")),
+                   "hardening stem e2e: per-channel stem '" + s.name + "' is mono and prefixed");
+    }
+
+    // Mode 5 (whine/hiss/click/bump): a mono run gives four mono stems.
+    SS::Result resM5;
+    runMode (SS::Mode::HtWhineHissClickBump, whcbList[0], 1, resM5);
+    CHECK (resM5.ok, "hardening stem e2e: mono click-bump run ok"
+           + (resM5.ok ? juce::String () : " (" + resM5.errorCode + ": " + resM5.error + ")"));
+    if (resM5.ok)
+    {
+        CHECK (resM5.stems.size () == 4, "hardening stem e2e: mode-5 mono run gives four stems");
+        for (const auto& s : resM5.stems)
+            CHECK (s.channels == 1 && s.frames > 0,
+                   "hardening stem e2e: mode-5 stem '" + s.name + "' is mono with audio");
+    }
 }
 
 static void testHardeningSuperResServiceValidation()
@@ -816,6 +926,7 @@ static void runRegression_hardening()
     hstep ("script hash");         testHardeningScriptHash ();
     hstep ("script folder");       testHardeningScriptFolder ();
     hstep ("stem service");        testHardeningStemServiceValidation ();
+    hstep ("stem demucs e2e");     testHardeningStemDemucsE2E ();
     hstep ("superres service");    testHardeningSuperResServiceValidation ();
 #if !JUCE_WINDOWS
     hstep ("acpp fake cli");       testHardeningAcppFakeCli ();

@@ -148,7 +148,7 @@ struct StemSeparationWindow::RunJob
     double extStopSecs = 0.0;
     double rate = 48000.0;
     juce::String resultName;          // suggested name for the new document
-    int mode = 1;                     // 1=Sam Audio 2=htdemucs_6stems 3=htdemucs_ft
+    int mode = 1;                     // 1=Sam Audio 2-5=htdemucs families
     int outputMode = 1;               // 1=new file 2=overwrite current 3=append to current
     FileDoc* docAtStart = nullptr;    // the active document when Run was clicked
 };
@@ -243,7 +243,9 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     modeCombo_.addItem ("Sam Audio", 1);
     modeCombo_.addItem ("htdemucs_6stems", 2);
     modeCombo_.addItem ("htdemucs_ft", 3);
-    modeCombo_.setSelectedItemIndex (std::clamp (app_.settings.stemSepMode, 1, 3) - 1,
+    modeCombo_.addItem ("htdemucs-whine-hiss_v1", 4);
+    modeCombo_.addItem ("htdemucs-whine-hiss-click-bump_v1", 5);
+    modeCombo_.setSelectedItemIndex (std::clamp (app_.settings.stemSepMode, 1, 5) - 1,
                                      juce::dontSendNotification);
     modeCombo_.onChange = [this]
     {
@@ -272,6 +274,10 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
             app_.settings.acppModel = (t == "(no models installed)") ? juce::String () : t;
         else if (selectedModeId () == 2)
             app_.settings.acppModel6 = (t == "(no models installed)") ? juce::String () : t;
+        else if (selectedModeId () == 4)
+            app_.settings.acppModelWH = (t == "(no models installed)") ? juce::String () : t;
+        else if (selectedModeId () == 5)
+            app_.settings.acppModelWHCB = (t == "(no models installed)") ? juce::String () : t;
         app_.saveSettings ();
         refreshStatusIdle ();
     };
@@ -434,12 +440,30 @@ void StemSeparationWindow::refreshModelList()
             modelCombo_.setSelectedItemIndex (pos, juce::dontSendNotification);
         }
     }
-    else   // htdemucs_ft: the whole folder is one "model".
+    else if (selectedModeId () == 3)   // htdemucs_ft: the whole folder is one "model".
     {
         if (sc::acpp::demucsFtModelDir () == juce::File ())
             addPlaceholder ();
         else
             modelCombo_.addItem ("htdemucs_ft", 1);
+    }
+    else   // htdemucs-whine-hiss_v1 / -click-bump_v1: one .gguf file each.
+    {
+        const auto models = (selectedModeId () == 4 ? sc::acpp::listWhineHissModels ()
+                                                    : sc::acpp::listWhineHissClickBumpModels ());
+        if (models.empty ())
+            addPlaceholder ();
+        else
+        {
+            for (size_t i = 0; i < models.size (); ++i)
+                modelCombo_.addItem (models[i].getFileName (), (int) i + 1);
+            int pos = 0;
+            const juce::String saved = (selectedModeId () == 4 ? app_.settings.acppModelWH
+                                                               : app_.settings.acppModelWHCB);
+            for (size_t i = 0; i < models.size (); ++i)
+                if (models[i].getFileName() == saved) { pos = (int) i; break; }
+            modelCombo_.setSelectedItemIndex (pos, juce::dontSendNotification);
+        }
     }
 
     if (modelCombo_.getSelectedItemIndex () < 0)
@@ -462,7 +486,11 @@ void StemSeparationWindow::refreshStatusIdle()
     else if (demucs && !hasModel)
         s = (selectedModeId () == 2
              ? "No htdemucs_6stems model found - place a .gguf file in the HTDemucs-6stems-GGUF folder."
-             : "The htdemucs_ft model folder is not installed - create it with at least one .gguf file.");
+             : selectedModeId () == 4
+               ? "No htdemucs-whine-hiss_v1 model found - use Download... or place a .gguf file in the HTDemucs-WhineHiss-v1-GGUF folder."
+               : selectedModeId () == 5
+                 ? "No htdemucs-whine-hiss-click-bump_v1 model found - use Download... or place a .gguf file in the HTDemucs-WhineHiss-ClickBump-v1-GGUF folder."
+                 : "The htdemucs_ft model folder is not installed - create it with at least one .gguf file.");
     else if (!demucs && !hasModel)
         s = "No SAM-Audio model found in the models folder - use Download...";
     else
@@ -767,13 +795,36 @@ void StemSeparationWindow::removeDesc(int index)
 void StemSeparationWindow::openDownloadDialog()
 {
     const bool needBinary = !sc::acpp::hasBinary ();
-    bool needModel  = sc::acpp::listModels ().empty ();
-    if (!needBinary && !needModel)
-        needModel = true;   // everything installed: offer downloading another model
+
+    // Downloadable models of the currently selected mode. The htdemucs_6stems
+    // and htdemucs_ft families have no download catalogue - their .gguf files
+    // are placed in their folders manually (the status line says where).
+    struct ModelRow { std::string file; juce::String folder; int64_t sizeBytes = 0; juce::String url; };
+    std::vector<ModelRow> modelRows;
+    const int modeId = selectedModeId ();
+    if (modeId == 1)
+    {
+        for (const auto& m : sc::acpp::modelChoices ())
+            modelRows.push_back ({ m.file, {}, m.sizeBytes, sc::acpp::modelUrl (m.file) });
+    }
+    else if (modeId == 4 || modeId == 5)
+    {
+        for (const auto& m : sc::acpp::demucsEngineChoices ())
+            if (m.mode == modeId)
+                modelRows.push_back ({ m.file,
+                                       modeId == 4 ? juce::String ("HTDemucs-WhineHiss-v1-GGUF")
+                                                   : juce::String ("HTDemucs-WhineHiss-ClickBump-v1-GGUF"),
+                                       m.sizeBytes, sc::acpp::demucsEngineUrl (m.file) });
+    }
 
     // Owning: the Label/ComboBox rows below are added with new.
-    sc::OwningAlertWindow dlg ("Stem Separation setup", "", juce::AlertWindow::NoIcon, this);
-    dlg.addButton ("Download", 1, {});
+    const bool offerDownload = needBinary || !modelRows.empty ();
+    sc::OwningAlertWindow dlg ("Stem Separation setup",
+        offerDownload ? juce::String ()
+                      : "Nothing to download for the current mode.\nThe htdemucs_6stems / htdemucs_ft models are placed manually in their folders.",
+        juce::AlertWindow::NoIcon, this);
+    if (offerDownload)
+        dlg.addButton ("Download", 1, {});
     dlg.addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
 
     // getCustomComponent() indexes only addCustomComponent() calls, in order.
@@ -795,16 +846,18 @@ void StemSeparationWindow::openDownloadDialog()
         customSlot += 2;
     }
 
-    if (needModel)
+    if (!modelRows.empty ())
     {
         auto* lbl = new juce::Label();
-        lbl->setText ("SAM-Audio model:", juce::dontSendNotification);
+        lbl->setText (modeId == 1 ? "SAM-Audio model:"
+                                  : modeId == 4 ? "htdemucs-whine-hiss_v1 model:"
+                                                : "htdemucs-whine-hiss-click-bump_v1 model:",
+                     juce::dontSendNotification);
         dlg.addCustomComponent (lbl);   // slot customSlot
         auto* cb = new juce::ComboBox ();
-        const auto choices = sc::acpp::modelChoices ();
-        for (size_t i = 0; i < choices.size (); ++i)
-            cb->addItem (juce::String (choices[i].file) + "   ("
-                         + juce::String ((double) choices[i].sizeBytes / 1.0e9, 2) + " GB)",
+        for (size_t i = 0; i < modelRows.size (); ++i)
+            cb->addItem (juce::String (modelRows[i].file) + "   ("
+                         + juce::String ((double) modelRows[i].sizeBytes / 1.0e6, 1) + " MB)",
                          (int) i + 1);
         // This JUCE build uses 0-based combo positions.
         cb->setSelectedItemIndex (0, juce::dontSendNotification);
@@ -831,7 +884,7 @@ void StemSeparationWindow::openDownloadDialog()
     prog->beginModal ();
 
     const juce::File root = sc::acpp::dir ();
-    std::thread ([this, guard = alive_, prog, needBinary, needModel,
+    std::thread ([this, guard = alive_, prog, needBinary, modelRows,
                   binaryChoice, modelChoice, root] {
         auto setStatus = [prog] (const juce::String& s)
             { juce::MessageManager::callAsync ([prog, s] { prog->setStatusText (s); }); };
@@ -870,18 +923,20 @@ void StemSeparationWindow::openDownloadDialog()
             }
         }
 
-        if (ok && needModel)
+        if (ok && !modelRows.empty ())
         {
-            const auto choices = sc::acpp::modelChoices ();
-            const size_t i = (size_t) std::min (std::max (1, modelChoice), (int) choices.size ()) - 1;
-            const juce::File dest = root.getChildFile (choices[i].file);
+            const size_t i = (size_t) std::min (std::max (1, modelChoice), (int) modelRows.size ()) - 1;
+            juce::File destDir = root;
+            if (!modelRows[i].folder.isEmpty ())
+                destDir = destDir.getChildFile (modelRows[i].folder);
+            const juce::File dest = destDir.getChildFile (modelRows[i].file);
 
             lastSent = -1.0;
-            setStatus ("Downloading " + choices[i].file + "...");
-            ok = sc::acpp::downloadFile (sc::acpp::modelUrl (choices[i].file).toStdString (),
+            setStatus ("Downloading " + modelRows[i].file + "...");
+            ok = sc::acpp::downloadFile (modelRows[i].url.toStdString (),
                                          dest,
                 [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err,
-                choices[i].sizeBytes);
+                modelRows[i].sizeBytes);
             if (!ok && !prog->cancelled.load ())
                 setStatus ("Download failed: " + juce::String (err));
         }
@@ -910,7 +965,7 @@ void StemSeparationWindow::startRun()
     if (!eng.isFileLoaded())
     { statusLabel_.setText ("Load a file first.", juce::dontSendNotification); return; }
 
-    const int modeId = selectedModeId ();   // 1=Sam Audio, 2/3=htdemucs
+    const int modeId = selectedModeId ();   // 1=Sam Audio, 2-5=htdemucs families
     const bool demucs = modeId >= 2;
 
     // Collect the descriptions to run (Sam Audio only - the htdemucs modes
@@ -937,12 +992,19 @@ void StemSeparationWindow::startRun()
 
     // Resolve the model for the selected mode.
     juce::File model;
-    if (demucs && modeId == 2)
+    if (demucs && modeId != 3)
     {
-        const auto models = sc::acpp::listDemucs6Models ();
+        const auto models = (modeId == 2 ? sc::acpp::listDemucs6Models ()
+                              : modeId == 4 ? sc::acpp::listWhineHissModels ()
+                                            : sc::acpp::listWhineHissClickBumpModels ());
+        const juce::String missingMsg = (modeId == 2
+            ? "The htdemucs_6stems model is not installed - place a .gguf file in the HTDemucs-6stems-GGUF folder."
+            : modeId == 4
+              ? "The htdemucs-whine-hiss_v1 model is not installed - use Download... or place a .gguf file in the HTDemucs-WhineHiss-v1-GGUF folder."
+              : "The htdemucs-whine-hiss-click-bump_v1 model is not installed - use Download... or place a .gguf file in the HTDemucs-WhineHiss-ClickBump-v1-GGUF folder.");
         const int mi = modelCombo_.getSelectedItemIndex ();   // 0-based position
         if (models.empty () || mi < 0 || mi >= (int) models.size ())
-        { statusLabel_.setText ("The htdemucs_6stems model is not installed - place a .gguf file in the HTDemucs-6stems-GGUF folder.", juce::dontSendNotification); return; }
+        { statusLabel_.setText (missingMsg, juce::dontSendNotification); return; }
         model = models[(size_t) mi];
     }
     else if (demucs && modeId == 3)
@@ -1026,7 +1088,9 @@ void StemSeparationWindow::runWorker(std::unique_ptr<RunJob> job)
 
         req.mode = (j.mode == 2 ? sc::StemService::Mode::HtDemucs6
                     : j.mode == 3 ? sc::StemService::Mode::HtDemucsFt
-                                  : sc::StemService::Mode::SamAudio);
+                    : j.mode == 4 ? sc::StemService::Mode::HtWhineHiss
+                                  : j.mode == 5 ? sc::StemService::Mode::HtWhineHissClickBump
+                                                : sc::StemService::Mode::SamAudio);
         for (const auto& d : j.descs)
             req.descriptions.push_back ({ d.text, d.anchors });
         req.model = j.model;

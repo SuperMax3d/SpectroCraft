@@ -1542,6 +1542,15 @@ folder and every file becomes a track. These families require a 44.1 kHz input,
 so the extracted range is resampled to 44.1 kHz first when the source rate differs
 (the stems are resampled back afterwards). In these modes the description area of
 the dialog is hidden entirely.
+- **htdemucs-whine-hiss_v1** / **htdemucs-whine-hiss-click-bump_v1** — plain
+separation with a single `.gguf` model from the Super3dMax HuggingFace repos,
+aimed at whine + hiss (and click + bump) artifacts. Like the other htdemucs
+families they need 44.1 kHz stereo input: a mono range is duplicated to L=R and
+every stem comes back downmixed to mono; a file with more than two channels is
+processed channel by channel, each source channel as its own duplicated-stereo run
+and every stem coming back as one mono track named `ch<i>_<stem>`. The model for
+these modes can be fetched from the dialog's **Download…** button. In these modes
+the description area of the dialog is hidden entirely.
 
 ### Getting the binary and models
 
@@ -1565,17 +1574,24 @@ cancel):
   The archive is extracted into the models folder, the executable checked
   against its own published SHA-256, and a variant marker is written so the
   dialog knows what you have.
-- **Models** — any number of `sam-audio-*.gguf` weights from
+- **Models** — for Sam Audio mode, any number of `sam-audio-*.gguf` weights from
   [audio-cpp/SAM-Audio-GGUF](https://huggingface.co/audio-cpp/SAM-Audio-GGUF/tree/main)
   (small/base/large in q8_0/bf16/f32). The model dropdown lists every `.gguf`
   found, so you can install more manually and they appear automatically.
-- **htdemucs models** — for the two htdemucs modes: `htdemucs_6stems` uses any
-  `.gguf` file placed in `<models>/audiocpp/HTDemucs-6stems-GGUF/`
-  (the model dropdown lists them), and `htdemucs_ft` uses the folder
-  `<models>/audiocpp/htdemucs_ft/`, which must contain at
-  least one `.gguf` file. These are not offered by the downloader — install them
-  manually (e.g. `htdemucs-6stems-q8_0.gguf`, 42 MB, from
+- **htdemucs models** — `htdemucs_6stems` uses any `.gguf` file placed in
+  `<models>/audiocpp/HTDemucs-6stems-GGUF/`, and `htdemucs_ft` uses the folder
+  `<models>/audiocpp/htdemucs_ft/`, which must contain at least one `.gguf`
+  file. These two are not offered by the downloader — install them manually (e.g.
+  `htdemucs-6stems-q8_0.gguf`, 42 MB, from
   [audio-cpp/audio.cpp-gguf](https://huggingface.co/audio-cpp/audio.cpp-gguf/tree/main/HTDemucs-6stems-GGUF)).
+  The whine-hiss modes are offered by the downloader: **htdemucs-whine-hiss_v1**
+  takes any `.gguf` from `<models>/audiocpp/HTDemucs-WhineHiss-v1-GGUF/` (fetched
+  from [Super3dMax/htdemucs-whine-hiss_v1](https://huggingface.co/Super3dMax/htdemucs-whine-hiss_v1),
+  ~84 MB f16 or ~99 MB q8_0) and **htdemucs-whine-hiss-click-bump_v1** takes any
+  `.gguf` from `<models>/audiocpp/HTDemucs-WhineHiss-ClickBump-v1-GGUF/` (fetched
+  from [Super3dMax/htdemucs-whine-hiss-click-bump_v1](https://huggingface.co/Super3dMax/htdemucs-whine-hiss-click-bump_v1),
+  ~62 MB q8_0 or ~84 MB f16). The model dropdown lists every `.gguf` found in the
+  folder, so you can install more manually and they appear automatically.
 
 Everything lives in `<models>/audiocpp/`, where `<models>` is
 `%APPDATA%\SpectroCraft\models` (Windows), `~/Library/SpectroCraft/models` (macOS)
@@ -1595,9 +1611,10 @@ both *Cpu* and *Metal*).
 2. For each description, `audiocpp_cli.exe` runs with
    `--task s2s --family sam_audio`, the chosen model and backend, the text,
    optional anchor ranges and an output directory; its log lines stream into
-   the progress dialog (cancellable). In htdemucs modes a single
+   the progress dialog (cancellable). In htdemucs modes a
    `--task sep --family htdemucs[_6stems]` run is made instead — no text or
-   anchors.
+   anchors: one per source channel when the file has more than two channels,
+   and mono input is duplicated to L=R first (the stems are downmixed back).
 3. The tool's `target.wav` (the described element) and `residual.wav`
    (everything else) are read back, resampled to the source rate if needed and
    padded to equal length. With several descriptions only the LAST residual is

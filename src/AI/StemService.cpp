@@ -80,7 +80,7 @@ juce::String StemService::validate (const Request& req, juce::String* codeOut)
     if (codeOut != nullptr) codeOut->clear ();
 
     const int m = (int) req.mode;
-    if (m < 1 || m > 3)
+    if (m < 1 || m > 5)
         return bad ("invalid_mode", "Unknown stem separation mode " + juce::String (m) + ".");
 
     if (req.mode == Mode::SamAudio)
@@ -117,9 +117,22 @@ juce::String StemService::validate (const Request& req, juce::String* codeOut)
     }
     else if (!req.model.existsAsFile ())
     {
-        return bad ("model_missing", req.mode == Mode::HtDemucs6
-            ? "The htdemucs_6stems model is not installed - place a .gguf file in the HTDemucs-6stems-GGUF folder."
-            : "The SAM-Audio model file is missing.");
+        juce::String msg;
+        switch (req.mode)
+        {
+            case Mode::HtDemucs6:
+                msg = "The htdemucs_6stems model is not installed - place a .gguf file in the HTDemucs-6stems-GGUF folder.";
+                break;
+            case Mode::HtWhineHiss:
+                msg = "The htdemucs-whine-hiss_v1 model is not installed - place a .gguf file in the HTDemucs-WhineHiss-v1-GGUF folder (or use Download...).";
+                break;
+            case Mode::HtWhineHissClickBump:
+                msg = "The htdemucs-whine-hiss-click-bump_v1 model is not installed - place a .gguf file in the HTDemucs-WhineHiss-ClickBump-v1-GGUF folder (or use Download...).";
+                break;
+            default:
+                msg = "The SAM-Audio model file is missing.";
+        }
+        return bad ("model_missing", msg);
     }
     return {};
 }
@@ -188,8 +201,9 @@ StemService::Result StemService::run (const Request& req, const Progress& progre
     }
     const std::vector<std::vector<float>>& inData = resampled.empty () ? req.input : resampled;
 
-    if (!sc::py::writeFloatWav (tmpIn, inData, writeRate))
-        return fail ("io_error", "Could not write the temporary input file.");
+    // The input float WAV is written by each branch below: the SAM-Audio
+    // family writes the extraction as-is, the htdemucs families write a
+    // stereo version (mono duplicated to L=R, or one per source channel).
 
     // Subsequent descriptions must work on a single mono track rather than
     // the whole multichannel extraction. Write a downmixed copy once when
@@ -205,8 +219,9 @@ StemService::Result StemService::run (const Request& req, const Progress& progre
             return fail ("io_error", "Could not write the temporary mono input file.");
         haveMonoCopy = true;
     }
-    resampled.clear ();
-    resampled.shrink_to_fit ();
+    // NB: `inData` may reference `resampled`; it must stay alive until the end
+    // of run() (the branches below keep writing from it). It is freed when the
+    // local goes out of scope.
 
     const double inputDur = (double) nFrames / req.sourceRate;
 
@@ -245,48 +260,93 @@ StemService::Result StemService::run (const Request& req, const Progress& progre
 
     if (mode >= 2)
     {
-        // Plain separation task: a single CLI call with no description or
+        // Plain separation task: one CLI call per run with no description or
         // anchors. The tool writes one named .wav file per stem into outDir.
         const juce::String family = (mode == 2 ? "htdemucs_6stems" : "htdemucs");
-        report (0.0, "Running " + family + "...");
 
-        const juce::File outDir = work.dir.getChildFile ("sep");
-        sc::acpp::RunResult rr;
-        std::string err;
-        const bool ok = sc::acpp::runSepTask (binary, family, req.model, req.backend, tmpIn, outDir,
-                                              keepGoing, logForwarder ("Running " + family), &rr, &err);
-        if (!ok)
+        // The htdemucs families need stereo input: a mono range is duplicated
+        // to L=R and every stem comes back downmixed to mono; more than two
+        // channels are processed channel by channel, each source channel as
+        // its own duplicated-stereo run (stems named "ch<i>_<stem>").
+        const int nSrc = (int) inData.size ();
+        struct OneRun { juce::File inWav; juce::File outDir; bool toMono; juce::String prefix; };
+        std::vector<OneRun> runs;
+        if (nSrc > 2)
+            for (int ch = 0; ch < nSrc; ++ch)
+                runs.push_back ({ work.dir.getChildFile ("input_ch" + juce::String (ch + 1) + ".wav"),
+                                  work.dir.getChildFile ("sep").getChildFile ("ch" + juce::String (ch + 1)),
+                                  true, "ch" + juce::String (ch + 1) + "_" });
+        else if (nSrc == 1)
+            runs.push_back ({ tmpIn, work.dir.getChildFile ("sep"), true, {} });
+        else
+            runs.push_back ({ tmpIn, work.dir.getChildFile ("sep"), false, {} });
+
+        for (size_t ri = 0; ri < runs.size (); ++ri)
         {
-            if (rr.cancelled)
-                return fail ("cancelled", "Run cancelled.");
-            return fail ("tool_failed", "Stem separation failed.", failureDetail (rr, err));
-        }
+            const auto& one = runs[ri];
+            const juce::String what = "Running " + family
+                + (runs.size () > 1 ? " (channel " + juce::String ((int) ri + 1) + "/" + juce::String (runs.size ()) + ")"
+                                     : "...");
+            report ((double) ri / (double) runs.size (), what);
 
-        // Collect every stem wav in the output folder, sorted by name so
-        // the track order is stable across runs.
-        std::vector<juce::File> stems;
-        for (auto entry : juce::RangedDirectoryIterator (outDir, false))
-            if (entry.getFile ().hasFileExtension ("wav"))
-                stems.push_back (entry.getFile ());
-        std::sort (stems.begin (), stems.end (),
-                   [] (const juce::File& a, const juce::File& b) {
-                       return a.getFileName ().toLowerCase () < b.getFileName ().toLowerCase (); });
-        if (stems.empty ())
-            return fail ("no_output", "The tool produced no stem files in " + outDir.getFullPathName ());
+            // This run's stereo input: the source channels as-is, a mono
+            // channel duplicated to L=R, or one source channel duplicated.
+            std::vector<std::vector<float>> inWavData;
+            if (nSrc > 2)
+                { inWavData.push_back (inData[ri]); inWavData.push_back (inData[ri]); }
+            else if (nSrc == 1)
+                { inWavData.push_back (inData[0]); inWavData.push_back (inData[0]); }
+            else
+                inWavData = inData;
+            if (!sc::py::writeFloatWav (one.inWav, inWavData, writeRate))
+                return fail ("io_error", "Could not write the temporary input file.");
 
-        for (const auto& f : stems)
-        {
-            double tRate = 0.0;
-            int nchT = 0;
-            std::vector<std::vector<float>> tData;
-            if (!sc::py::readFloatWav (f, &tRate, &nchT, tData))
-                return fail ("io_error", "Could not read the tool's output file " + f.getFileName () + ".");
-            addStem (f.getFileNameWithoutExtension (), f, tRate, tData);
+            sc::acpp::RunResult rr;
+            std::string err;
+            const bool ok = sc::acpp::runSepTask (binary, family, req.model, req.backend, one.inWav, one.outDir,
+                                                  keepGoing, logForwarder (what), &rr, &err);
+            if (!ok)
+            {
+                if (rr.cancelled)
+                    return fail ("cancelled", "Run cancelled.");
+                return fail ("tool_failed", "Stem separation failed.", failureDetail (rr, err));
+            }
+
+            // Collect every stem wav in the output folder, sorted by name so
+            // the track order is stable across runs.
+            std::vector<juce::File> stems;
+            for (auto entry : juce::RangedDirectoryIterator (one.outDir, false))
+                if (entry.getFile ().hasFileExtension ("wav"))
+                    stems.push_back (entry.getFile ());
+            std::sort (stems.begin (), stems.end (),
+                       [] (const juce::File& a, const juce::File& b) {
+                           return a.getFileName ().toLowerCase () < b.getFileName ().toLowerCase (); });
+            if (stems.empty ())
+                return fail ("no_output", "The tool produced no stem files in " + one.outDir.getFullPathName ());
+
+            for (const auto& f : stems)
+            {
+                double tRate = 0.0;
+                int nchT = 0;
+                std::vector<std::vector<float>> tData;
+                if (!sc::py::readFloatWav (f, &tRate, &nchT, tData))
+                    return fail ("io_error", "Could not read the tool's output file " + f.getFileName () + ".");
+                // Mono sources and per-channel runs come back as mono tracks.
+                if (one.toMono && tData.size () > 1)
+                {
+                    std::vector<std::vector<float>> mono;
+                    mono.push_back (sc::acpp::downmixToMono (tData));
+                    tData = std::move (mono);
+                }
+                addStem (one.prefix + f.getFileNameWithoutExtension (), f, tRate, tData);
+            }
         }
         report (1.0, {});
     }
     else
     {
+        if (!sc::py::writeFloatWav (tmpIn, inData, writeRate))
+            return fail ("io_error", "Could not write the temporary input file.");
         const int N = (int) req.descriptions.size ();
         juce::File prevResidual;
 

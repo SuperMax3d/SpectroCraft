@@ -6785,13 +6785,15 @@ static void testStemSepModeOutputCombos()
     CHECK (dlg != nullptr, "stem separation window opened for mode test");
     if (dlg == nullptr) return;
 
-    // Mode combo: three families with Sam Audio as the default.
+    // Mode combo: five families with Sam Audio as the default.
     juce::ComboBox* mode = dlg->modeComboForTest ();
-    CHECK (mode != nullptr && mode->getNumItems () == 3, "mode combo has three items");
+    CHECK (mode != nullptr && mode->getNumItems () == 5, "mode combo has five items");
     if (mode == nullptr) return;
     CHECK (mode->getItemText (0) == "Sam Audio", "mode item 1 is Sam Audio");
     CHECK (mode->getItemText (1) == "htdemucs_6stems", "mode item 2 is htdemucs_6stems");
     CHECK (mode->getItemText (2) == "htdemucs_ft", "mode item 3 is htdemucs_ft");
+    CHECK (mode->getItemText (3) == "htdemucs-whine-hiss_v1", "mode item 4 is htdemucs-whine-hiss_v1");
+    CHECK (mode->getItemText (4) == "htdemucs-whine-hiss-click-bump_v1", "mode item 5 is htdemucs-whine-hiss-click-bump_v1");
     CHECK (dlg->selectedModeId () == 1, "Sam Audio mode by default");
 
     // Output combo: three destinations with copy-to-new-file as the default.
@@ -6825,7 +6827,7 @@ static void testStemSepModeOutputCombos()
     // + settings write) has run before the checks: an async notification
     // followed by a 5 ms pump was not reliably delivered.
     const int heightSam = dlg->getHeight();
-    for (int m = 2; m <= 3; ++m)
+    for (int m = 2; m <= 5; ++m)
     {
         mode->setSelectedItemIndex (m - 1, juce::sendNotificationSync);
         CHECK (dlg->selectedModeId () == m, "mode switch to " + juce::String (m));
@@ -6836,7 +6838,7 @@ static void testStemSepModeOutputCombos()
     }
     {
         Application reread (store);
-        CHECK (reread.settings.stemSepMode == 3, "mode 3 persisted to the settings file");
+        CHECK (reread.settings.stemSepMode == 5, "mode 5 persisted to the settings file");
     }
 
     // Back to Sam Audio: the description area is back and nothing overlaps.
@@ -6845,7 +6847,7 @@ static void testStemSepModeOutputCombos()
     CHECK (dlg->getHeight() == heightSam, "window regains its Sam Audio height");
     CHECK (noOverlap (dlg), "no overlapping controls after switching back");
 
-    // The mode choice persists in the settings (the file held 3 just before).
+    // The mode choice persists in the settings (the file held 5 just before).
     CHECK (app.settings.stemSepMode == 1, "mode persisted to settings");
     {
         Application reread (store);

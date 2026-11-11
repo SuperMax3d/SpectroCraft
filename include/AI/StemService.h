@@ -28,7 +28,12 @@ struct StemService
     {
         SamAudio   = 1,   // text-prompted target / residual (one CLI run per description)
         HtDemucs6  = 2,   // htdemucs_6stems: plain separation, one .wav per named stem
-        HtDemucsFt = 3    // htdemucs (fine-tuned): same, model is a folder of .gguf files
+        HtDemucsFt = 3,   // htdemucs (fine-tuned): same, model is a folder of .gguf files
+                           // all need stereo input (mono duplicated to L=R)
+        HtWhineHiss          = 4,  // htdemucs-whine-hiss_v1: whine + hiss stems
+                                   // (single .gguf file, Super3dMax HF repo)
+        HtWhineHissClickBump = 5   // htdemucs-whine-hiss-click-bump_v1:
+                                   // whine/hiss/click/bump stems (single .gguf file)
     };
 
     /** One SAM-Audio description. Anchor times are DOCUMENT seconds; run()
@@ -44,7 +49,7 @@ struct StemService
         Mode mode = Mode::SamAudio;
         std::vector<Description> descriptions;   // SamAudio only (blank texts are invalid)
         juce::File binary;                       // empty = sc::acpp::binaryPath()
-        juce::File model;                        // .gguf file (modes 1-2) or folder (mode 3)
+        juce::File model;                        // .gguf file (modes 1, 2, 4, 5) or folder (mode 3)
         juce::String backend = "cpu";            // "cpu" | "cuda" | "vulkan" | "metal"
         bool extractFromOriginal = true;         // SamAudio: false = chain on the previous residual
         double extStartSecs = 0.0;               // document time of input frame 0
@@ -92,7 +97,14 @@ struct StemService
         ragged_input, invalid_rate, invalid_range. Checks files on disk. */
     static juce::String validate (const Request& req, juce::String* codeOut = nullptr);
 
-    /** BLOCKING - call from a worker thread. Never touches the UI. */
+    /** BLOCKING - call from a worker thread. Never touches the UI.
+
+        The htdemucs families need stereo input: a mono range is duplicated to
+        L=R for the run and every stem comes back downmixed to mono; a file
+        with more than two channels is processed channel by channel (each
+        source channel duplicated to its own stereo run) and every stem comes
+        back as one mono track named "ch<i>_<stem>". Stereo input runs once
+        and the stems stay stereo. */
     static Result run (const Request& req, const Progress& progress = nullptr,
                        const Cancel& cancel = nullptr);
 

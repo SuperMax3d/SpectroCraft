@@ -129,6 +129,32 @@ juce::File demucsFtModelDir(const juce::File& d)
     return {};
 }
 
+namespace {
+std::vector<juce::File> listGgufIn(const juce::File& d, const juce::String& folder)
+{
+    std::vector<juce::File> out;
+    const juce::File root = (d.getFullPathName().isEmpty() ? dir().getChildFile (folder) : d);
+    if (!root.isDirectory()) return out;
+    for (auto entry : juce::RangedDirectoryIterator (root, false))
+        if (entry.getFile().hasFileExtension ("gguf"))
+            out.push_back (entry.getFile());
+    std::sort (out.begin (), out.end (),
+               [] (const juce::File& a, const juce::File& b) {
+                   return a.getFileName().toLowerCase() < b.getFileName().toLowerCase (); });
+    return out;
+}
+} // namespace
+
+std::vector<juce::File> listWhineHissModels(const juce::File& d)
+{
+    return listGgufIn (d, "HTDemucs-WhineHiss-v1-GGUF");
+}
+
+std::vector<juce::File> listWhineHissClickBumpModels(const juce::File& d)
+{
+    return listGgufIn (d, "HTDemucs-WhineHiss-ClickBump-v1-GGUF");
+}
+
 juce::File flashSrModelFile(const juce::File& d)
 {
     const juce::File f = (d.getFullPathName().isEmpty() ? dir() : d)
@@ -328,6 +354,33 @@ juce::String modelUrl(const juce::String& fileName)
     return "https://huggingface.co/audio-cpp/SAM-Audio-GGUF/resolve/main/" + fileName;
 }
 
+std::vector<DemucsEngineSpec> demucsEngineChoices()
+{
+    // Super3dMax htdemucs engine models on Hugging Face. SHA-256 = the Git LFS
+    // object id published by Hugging Face (queried 2026-11-24).
+    std::vector<DemucsEngineSpec> v;
+    DemucsEngineSpec m1 { 4, "htdemucs-whine-hiss_v1_f16.gguf", 84049984,
+                          "af739e14eecf0903a684d95fe5e868d3bbd3d774ec9f26dbeaa8ad8210eedfa4" };
+    DemucsEngineSpec m2 { 4, "htdemucs-whine-hiss_v1_q8_0.gguf", 98655680,
+                          "59031888e16fd282fc25f510dc0a5b299dba625d31cf9ca9ddfdb77a72f4a3e7" };
+    DemucsEngineSpec m3 { 5, "htdemucs-whine-hiss-click-bump_v1-q8_0.gguf", 61940768,
+                          "b0f532ac6e5f373aeb11fa0df73253251e133832d9c8b9942dc58f50bc5b4388" };
+    DemucsEngineSpec m4 { 5, "htdemucs-whine-hiss-click-bump_v1_f16.gguf", 84059264,
+                          "773560cfafd273fcb5590626e2220f521bb0fc1cbd0d18b5296061de21bdfcae" };
+    v.push_back (m1); v.push_back (m2);
+    v.push_back (m3); v.push_back (m4);
+    return v;
+}
+
+juce::String demucsEngineUrl(const juce::String& fileName)
+{
+    // The two families live in their own repos, named after the model.
+    const juce::String repo = fileName.startsWith ("htdemucs-whine-hiss_v1")
+                                  ? "htdemucs-whine-hiss_v1"
+                                  : "htdemucs-whine-hiss-click-bump_v1";
+    return "https://huggingface.co/Super3dMax/" + repo + "/resolve/main/" + fileName;
+}
+
 namespace {
 struct KnownAsset { std::string url, sha256; int64_t sizeBytes = 0; };
 
@@ -342,6 +395,8 @@ std::vector<KnownAsset> knownAssets()
         v.push_back ({ flashSrUrl (m.file).toStdString (), m.sha256, m.sizeBytes });
     for (const auto& m : audioSRChoices ())
         v.push_back ({ audioSRUrl (m.file).toStdString (), m.sha256, m.sizeBytes });
+    for (const auto& m : demucsEngineChoices ())
+        v.push_back ({ demucsEngineUrl (m.file).toStdString (), m.sha256, m.sizeBytes });
     return v;
 }
 } // namespace

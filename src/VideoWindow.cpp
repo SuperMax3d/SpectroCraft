@@ -795,7 +795,10 @@ VideoAdjustDialog::VideoAdjustDialog (juce::Component* parent)
     (void) parent;
     setUsingNativeTitleBar (true);
     setResizable (false, false);
-    setResizeLimits (320, 104, 320, 104);
+    // Generous margins: on some systems the native frame can eat a few
+    // logical pixels of the client area; with only 4px below the button row
+    // that used to crop the buttons. Keep >=16px around the content.
+    setResizeLimits (332, 116, 332, 116);
 
     contrast_.setRange (0.0, 2.0, 0.01);
     contrast_.setValue (1.0);
@@ -831,7 +834,7 @@ VideoAdjustDialog::VideoAdjustDialog (juce::Component* parent)
     addAndMakeVisible (&reset_);
     addAndMakeVisible (&closeBtn_);
 
-    centreWithSize (320, 104);
+    centreWithSize (332, 116);
     addToDesktop ();   // only now that the members are initialised: correct caption style
 }
 

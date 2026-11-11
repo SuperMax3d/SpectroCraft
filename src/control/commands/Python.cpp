@@ -185,10 +185,15 @@ Outcome stemsCmd (Context& ctx)
     sc::StemService::Request req;
     const juce::String mode = ctx.str ("mode", "samAudio");
     req.mode = mode == "htdemucs6" ? sc::StemService::Mode::HtDemucs6
-             : mode == "htdemucsFt" ? sc::StemService::Mode::HtDemucsFt : sc::StemService::Mode::SamAudio;
+             : mode == "htdemucsFt" ? sc::StemService::Mode::HtDemucsFt
+             : mode == "whineHiss" ? sc::StemService::Mode::HtWhineHiss
+             : mode == "whineHissClickBump" ? sc::StemService::Mode::HtWhineHissClickBump
+             : sc::StemService::Mode::SamAudio;
     const juce::String model = ctx.str ("model");
     req.model = req.mode == sc::StemService::Mode::SamAudio ? pickModel (sc::acpp::listModels(), model)
               : req.mode == sc::StemService::Mode::HtDemucs6 ? pickModel (sc::acpp::listDemucs6Models(), model)
+              : req.mode == sc::StemService::Mode::HtWhineHiss ? pickModel (sc::acpp::listWhineHissModels(), model)
+              : req.mode == sc::StemService::Mode::HtWhineHissClickBump ? pickModel (sc::acpp::listWhineHissClickBumpModels(), model)
               : sc::acpp::demucsFtModelDir();
     req.backend = ctx.str ("backend", ctx.state.audiocppBackend.isNotEmpty() ? ctx.state.audiocppBackend : juce::String ("cpu"));
     req.extractFromOriginal = ctx.flag ("extractFromOriginal", true);
@@ -318,7 +323,7 @@ void registerPythonCommands (CommandRegistry& r)
 
     auto st = scope;
     st.insert (st.begin(), {
-        P ("mode", PType::String).oneOf ({ "samAudio", "htdemucs6", "htdemucsFt" }).def ("samAudio"),
+        P ("mode", PType::String).oneOf ({ "samAudio", "htdemucs6", "htdemucsFt", "whineHiss", "whineHissClickBump" }).def ("samAudio").describe ("Separation family; whineHiss / whineHissClickBump need stereo input (mono is duplicated, >2 channels run per channel)"),
         P ("descriptions", PType::Array).items (PType::Object).describe ("samAudio: [{text, anchors:[{start, end, include}]}] (document seconds)"),
         P ("model", PType::String).describe ("Model file name (default: the first installed)"),
         P ("backend", PType::String).oneOf ({ "cpu", "cuda", "vulkan", "metal" }).describe ("Default: ai.setDevice audiocpp, else cpu"),

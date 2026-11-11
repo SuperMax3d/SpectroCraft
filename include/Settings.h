@@ -149,7 +149,10 @@ struct Settings
     int acppBackend = 0;                 // backend combo index: 1=Cpu 2=Cuda 3=Vulkan 4=Metal (macOS)
     bool acppExtractOriginal = true;     // "Extract from original" toggle
     int stemSepMode = 1;                 // separation mode: 1=Sam Audio 2=htdemucs_6stems 3=htdemucs_ft
+                                          // 4=htdemucs-whine-hiss_v1 5=htdemucs-whine-hiss-click-bump_v1
     juce::String acppModel6;             // selected GGUF file name in htdemucs_6stems mode ("" = none)
+    juce::String acppModelWH;            // selected GGUF file name in htdemucs-whine-hiss_v1 mode ("" = none)
+    juce::String acppModelWHCB;          // selected GGUF file name in htdemucs-whine-hiss-click-bump_v1 mode ("" = none)
     int stemSepOutputMode = 1;           // result handling: 1=new file 2=overwrite current 3=append to current
     int superResMode = 1;                // super-resolution family: 1=FlashSR 2=AudioSR
     juce::String superResModel;          // selected model file name ("" = none)
@@ -217,6 +220,7 @@ struct Settings
             && exportAxes == o.exportAxes && exportMarkers == o.exportMarkers
             && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings
             && stemSepMode == o.stemSepMode && acppModel6 == o.acppModel6
+            && acppModelWH == o.acppModelWH && acppModelWHCB == o.acppModelWHCB
             && stemSepOutputMode == o.stemSepOutputMode
             && superResMode == o.superResMode && superResModel == o.superResModel
             && superResOutputMode == o.superResOutputMode
