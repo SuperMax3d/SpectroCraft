@@ -11116,6 +11116,84 @@ static void testRenderToPixelsCancel()
     CHECK (rgba2.size() == (size_t) 256 * 128 * 4, "render output size correct");
 }
 
+
+// When the FFT window is smaller than the base hop, frames must still overlap
+// (no sample may fall between analysis windows), and transients must line up
+// with their true time position in the rendered image instead of appearing
+// half a window early.
+static void testSpectralTransientAlignment()
+{
+    const double rate = 48000.0;
+
+    // --- Gap coverage: a click at every offset inside one hop period must be
+    // visible when fftSize < hopSize (level 0 clamps the effective hop to N/4).
+    {
+        const juce::File cw = makeTempFile ("spec_click.wav");
+        writeWav (cw, 1, rate, 960000, [] (int, int64_t, double) { return 0.0f; });
+        AudioEngine ce;
+        CHECK (ce.loadFile (cw), "load click base");
+
+        Settings s;
+        s.fftSize = 256; s.hopSize = 512; s.windowType = 1;
+        SpectralEngine sp;
+        sp.setColourMap (ColourMap::Classic);
+
+        int invisible = 0;
+        for (int off = 0; off < 512; off += 8)
+        {
+            ce.replaceSamples (juce::Range<int64_t> (100000 + off, 100001 + off),
+                               std::vector<std::vector<float>> { { 1.0f } }, "click");
+            const float m = sp.probeMagnitude (ce, 0, (100000.0 + off) / rate, 2000.0, s, 0);
+            if (m < -80.0f) ++invisible;   // the floor is ~-240 dB: clearly missing
+        }
+        CHECK (invisible == 0, "no sample falls between analysis windows at N=256");
+        cw.deleteFile ();
+    }
+
+    // --- Time alignment: a rendered click must peak near its true time position
+    // (frames are displayed centred on their analysis window), for both small
+    // and default FFT sizes. The bright column is ~N samples wide; its peak
+    // lands within half an effective hop of the click.
+    auto checkAlignment = [] (SpectralEngine& sp, const AudioEngine& eng,
+                              int fftSize, int tolPx) -> bool
+    {
+        Settings s;
+        s.fftSize = fftSize; s.hopSize = 512; s.windowType = 1;
+        const int W = 1024, H = 64;
+        std::vector<uint8_t> rgba;
+        if (!sp.renderToPixels (eng, s, W, H, 0.0, 1.0, { 0 }, rgba)) return false;
+
+        int bestX = -1, bestLum = -1;
+        for (int x = 0; x < W; ++x)
+            for (int y = 0; y < H; ++y)
+            {
+                const size_t o = ((size_t) y * W + x) * 4;
+                const int lum = (int) rgba[o] + (int) rgba[o + 1] + (int) rgba[o + 2];
+                if (lum > bestLum) { bestLum = lum; bestX = x; }
+            }
+
+        // The click sits at sample 15000 of 48000 -> pixel 0.3125 * W.
+        const int expectX = (int) std::lround (15000.0 / 48000.0 * W);
+        return bestLum > 60 && std::abs (bestX - expectX) <= tolPx;
+    };
+
+    {
+        const juce::File iw = makeTempFile ("spec_impulse.wav");
+        writeWav (iw, 1, rate, 48000, [] (int, int64_t f, double)
+                  { return f == 15000 ? 1.0f : 0.0f; });
+        AudioEngine ie;
+        CHECK (ie.loadFile (iw), "load impulse");
+
+        SpectralEngine sp;
+        sp.setColourMap (ColourMap::Classic);
+        // N=256: effective hop 64 -> peak within ~32 samples (~1 px).
+        CHECK (checkAlignment (sp, ie, 256, 4), "click column aligns at fftSize=256");
+        // Default N=2048: hop 512 -> peak within ~256 samples (~5 px).
+        CHECK (checkAlignment (sp, ie, 2048, 12), "click column aligns at default fftSize");
+        iw.deleteFile ();
+    }
+}
+
 // Regression: after a resample the Frequency Analysis panel's cached spectrum
 // must be invalidated by the sample-rate change alone — same file pointer and
 // same time region, so without the rate key recomputeIfNeeded() would keep
@@ -26707,6 +26785,37 @@ static void testThirdOctaveGrid()
     wav.deleteFile ();
 }
 
+// The band number labels must appear in every 1/3-octave band that has room
+// for them: centred when possible, nudged clear of the channel label (L/R or
+// "N") on collision, and dropped only when no position fits.
+static void testThirdOctaveLabelPlacement()
+{
+    const juce::Rectangle<int> row (0, 100, 480, 200);   // centre at y = 200
+    const float labH = 12.0f;
+
+    CHECK (SpectralView::thirdOctaveLabelY (150.0f, 140.0f, 160.0f, row, false, labH) == 150.0f,
+          "label stays centred when it fits between the borders");
+
+    CHECK (!SpectralView::thirdOctaveLabelY (150.0f, 146.0f, 154.0f, row, false, labH),
+          "no label when the band is thinner than the text");
+
+    // Centre collides with the channel label at the row centre: nudged clear.
+    const auto nudged = SpectralView::thirdOctaveLabelY (200.0f, 180.0f, 220.0f, row, true, labH);
+    CHECK (nudged && (*nudged + labH * 0.5f <= 192.0f || *nudged - labH * 0.5f >= 208.0f),
+          "colliding label is nudged clear of the channel label");
+    if (nudged)
+        CHECK (*nudged - labH * 0.5f >= 180.0f && *nudged + labH * 0.5f <= 220.0f,
+              "nudge position stays between the band borders");
+
+    // A short band centred on the channel label: neither centre nor nudge fits.
+    CHECK (!SpectralView::thirdOctaveLabelY (200.0f, 192.0f, 208.0f, row, true, labH),
+          "no position for a short band sitting on the channel label");
+
+    // Near the row edge: dropped when it would spill outside the row.
+    CHECK (!SpectralView::thirdOctaveLabelY (103.0f, 97.0f, 109.0f, row, false, labH),
+          "label not drawn when it spills past the row edge");
+}
+
 // ------------------------------------------------------- menu bar order
 static void testMenuBarOrder()
 {
@@ -28198,6 +28307,8 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("replace range len", testReplaceRangeDifferentLength);
     SC_RUN_TEST ("resample cancel", testResampleCancel);
     SC_RUN_TEST ("render cancel", testRenderToPixelsCancel);
+    SC_RUN_TEST ("spectral transient alignment", testSpectralTransientAlignment);
+    SC_RUN_TEST ("third octave label placement", testThirdOctaveLabelPlacement);
     SC_RUN_TEST ("fft view rate change", testFFTAnalysisRateChange);
     SC_RUN_TEST ("fft harmonic references", testFFTHarmonicReferences);
     SC_RUN_TEST ("fft harmonic dialog fields", testFFTHarmonicDialogFields);

@@ -6,6 +6,7 @@
 #include "Settings.h"
 #include "MarkerManager.h"
 #include <array>
+#include <optional>
 #include <utility>
 #include <vector>
 #include <functional>
@@ -281,6 +282,15 @@ public:
     // The preferred 1/3 octave centre frequencies inside [fMin, fMax] Hz,
     // ascending: {1, 1.25, 1.6, 2, 2.5, 3.15, 4, 5, 6.3, 8} x 10^m.
     static std::vector<double> thirdOctaveCentres (double fMin, double fMax);
+
+    // On-screen y position of the band label for a 1/3-octave band whose centre
+    // sits at `yc` between borders [topY, botY], inside row `row`. The label
+    // (`labH` px tall) is centred on the returned value; when its centre would
+    // collide with the channel label (L/R or "N") it is nudged just clear of it.
+    // Returns nullopt if no position fits between the borders/row edges.
+    static std::optional<float> thirdOctaveLabelY (float yc, float topY, float botY,
+                                                   const juce::Rectangle<int>& row,
+                                                   bool hasChanLabel, float labH);
 
     // Plot area (below the top time ruler, starting at kLeftAxisWidth so it
     // aligns with the waveform view).
