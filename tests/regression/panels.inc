@@ -655,6 +655,190 @@ static void regrPanels_fileListCloseAsks()
     wav.deleteFile ();
 }
 
+
+// ------------------------------------------------- Tables plot + footer
+
+// The Tables preview plot: the playhead as a red line in the table's own
+// time, a click / drag moves the playhead (unless a click-based alignment
+// still needs plot points), and the list/plot splitter.
+static void regrPanels_tablesPlotPlayheadAndSplitter()
+{
+    progress ("regression panels: Tables plot playhead, click/drag to seek, splitter");
+    const juce::File store = makeTempFile ("tables_plot.recent");
+    store.deleteFile ();
+    const juce::File wav = makeTempFile ("tables_plot.wav");
+    writeWav (wav, 1, 8000.0, 20 * 8000, [] (int, int64_t, double) { return 0.0f; });
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "tables plot: the wav opens");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) { wav.deleteFile (); return; }
+        sc::tables::TableData t; std::string err;
+        juce::String csv ("time_s,v\n");
+        for (int i = 0; i <= 10; ++i) csv << i << "," << (i * i) << "\n";   // 1 row/s, 10 s
+        CHECK (sc::tables::importTable ("T", csv, t, &err), "tables plot: the table imports");
+        t.offsetSecs = 2.0;   // the table starts 2 s into the document
+        d->tables.push_back (std::move (t));
+
+        TablesPanel panel (app);
+        panel.setSize (300, 400);
+        panel.refresh ();
+        auto& plot = panel.plotView ();
+        CHECK (plot.focusTableIndex () == 0 && std::abs (plot.tableDuration () - 10.0) < 1e-9,
+               "tables plot: the plot shows the table");
+        CHECK (std::abs (plot.docToTableTime (5.0) - 3.0) < 1e-9
+               && std::abs (plot.tableToDocTime (3.0) - 5.0) < 1e-9,
+               "tables plot: document <-> table time through the table's offset");
+        const int x6 = (int) std::floor (plot.tableTimeToX (6.0));
+        CHECK (std::abs (plot.xToTableTime (x6) - 6.0) < 10.0 / plot.getWidth (),
+               "tables plot: column <-> table time round trip");
+
+        // The playhead line.
+        plot.setPlayhead (5.0);
+        const int px = plot.playheadX ();
+        CHECK (px == (int) std::floor (plot.tableTimeToX (3.0)), "tables plot: the playhead sits at table time 3 s");
+        {
+            juce::Image img (juce::Image::RGB, plot.getWidth (), plot.getHeight (), true);
+            juce::Graphics g (img);
+            plot.paint (g);
+            const auto c = img.getPixelAt (px, plot.getHeight () / 3);
+            CHECK (c.getRed () > 200 && c.getGreen () < 80 && c.getBlue () < 80,
+                   "tables plot: the playhead is drawn as a red line");
+        }
+        plot.setPlayhead (1.0);   // before the table starts
+        CHECK (plot.playheadX () == -1, "tables plot: no line while the playhead is outside the table");
+
+        // A click moves the playhead; dragging keeps moving it.
+        const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+        plot.mouseDown (mkMouse (plot, x6, 30, lmb));
+        CHECK (std::abs (app.playhead - plot.tableToDocTime (plot.xToTableTime (x6))) < 1e-9
+               && std::abs (app.playhead - 8.0) < 0.1,
+               "tables plot: a click moves the playhead there (table 6 s = document 8 s)");
+        const int x4 = (int) std::floor (plot.tableTimeToX (4.0));
+        plot.mouseDrag (mkMouse (plot, x4, 30, lmb));
+        CHECK (std::abs (app.playhead - 6.0) < 0.1, "tables plot: dragging moves the playhead along");
+        plot.mouseUp (mkMouse (plot, x4, 30, lmb));
+
+        // A click-based alignment that needs plot points takes the click.
+        panel.startPointAlign (1, 0, -1, 0);
+        const double before = app.playhead;
+        plot.mouseDown (mkMouse (plot, x6, 30, lmb));
+        plot.mouseDrag (mkMouse (plot, x4, 30, lmb));
+        CHECK (std::abs (app.playhead - before) < 1e-12 && panel.hasPendingAlignment (),
+               "tables plot: a pending alignment takes the click, the playhead stays");
+        plot.mouseUp (mkMouse (plot, x4, 30, lmb));
+        // Its plot point taken, the alignment waits for the waveform click:
+        // the plot is free again, click and drag alike.
+        plot.mouseDown (mkMouse (plot, x6, 30, lmb));
+        CHECK (std::abs (app.playhead - 8.0) < 0.1 && panel.hasPendingAlignment (),
+               "tables plot: once the plot point is taken, a click seeks again");
+        plot.mouseDrag (mkMouse (plot, x4, 30, lmb));
+        CHECK (std::abs (app.playhead - 6.0) < 0.1, "tables plot: ... and so does the drag that follows");
+        plot.mouseUp (mkMouse (plot, x4, 30, lmb));
+        panel.cancelPendingAlignment ();
+
+        // A focused parameter's own offset composes with the table's.
+        app.doc ()->tables[0].params[0].offsetSecs = 1.0;
+        plot.setFocusParamIndex (0);
+        CHECK (std::abs (plot.docToTableTime (5.0) - 2.0) < 1e-9,
+               "tables plot: the focused parameter's own alignment maps the playhead");
+        plot.setFocusParamIndex (-1);
+
+        // The splitter between the list and the plot.
+        auto& sp = panel.plotSplitter ();
+        auto& list = panel.listTable ();
+        CHECK (sp.getY () == list.getBottom () && sp.getBottom () == plot.getY (),
+               "tables splitter: sits between the list and the plot");
+        const int plotH0 = plot.getHeight (), listH0 = list.getHeight ();
+        sp.mouseDown (mkMouse (sp, 10, 3, lmb));
+        sp.mouseDrag (mkMouse (sp, 10, 3 - 40, lmb));   // 40 px up
+        sp.mouseUp (mkMouse (sp, 10, 3 - 40, lmb));
+        CHECK (plot.getHeight () == plotH0 + 40 && list.getHeight () == listH0 - 40
+               && sp.getBottom () == plot.getY (),
+               "tables splitter: dragging up gives the plot 40 px");
+        CHECK (app.recentStore->getIntValue ("tables_plot_height", -1) == plotH0 + 40,
+               "tables splitter: the height is saved");
+        sp.mouseDown (mkMouse (sp, 10, 3, lmb));
+        sp.mouseDrag (mkMouse (sp, 10, 3 + 1000, lmb));   // far down
+        sp.mouseUp (mkMouse (sp, 10, 3 + 1000, lmb));
+        CHECK (plot.getHeight () == 50, "tables splitter: the plot keeps a minimum height");
+        sp.mouseDown (mkMouse (sp, 10, 3, lmb));
+        sp.mouseDrag (mkMouse (sp, 10, 3 - 1000, lmb));   // far up
+        sp.mouseUp (mkMouse (sp, 10, 3 - 1000, lmb));
+        CHECK (list.getHeight () >= 40, "tables splitter: the list keeps a minimum height");
+        const int saved = plot.getHeight ();
+
+        TablesPanel again (app);
+        again.setSize (300, 400);
+        CHECK (again.plotView ().getHeight () == saved, "tables splitter: a new panel restores the height");
+    }
+    wav.deleteFile ();
+    store.deleteFile ();
+}
+
+// The footer's channel numbers: one per channel, dim when hidden, red when
+// muted; a click reports the channel (Ctrl/Cmd included).
+static void regrPanels_statusBarChannelNumbers()
+{
+    progress ("regression panels: footer channel numbers");
+    StatusBar sb;
+    sb.setSize (900, 22);
+    sb.setFileName ("take.wav");
+    sb.setSampleRate (48000.0);
+    sb.setChannels (4, { 0, 2, 3 }, { false, false, true });
+    const auto chips = sb.channelChipRects ();
+    CHECK (chips.size () == 4 && sb.channelChipLabel (0) == "1" && sb.channelChipLabel (3) == "4",
+           "footer channels: one number per channel, from 1");
+    CHECK (sb.channelChipShown (0) && !sb.channelChipShown (1) && sb.channelChipMuted (2)
+           && !sb.channelChipMuted (0), "footer channels: shown / muted flags");
+
+    {
+        juce::Image img (juce::Image::RGB, 900, 22, true);
+        juce::Graphics g (img);
+        sb.paint (g);
+        // Brightest text pixel inside each number.
+        auto brightest = [&] (int i)
+        {
+            juce::Colour best (0, 0, 0);
+            for (int y = chips[(size_t) i].getY (); y < chips[(size_t) i].getBottom (); ++y)
+                for (int x = chips[(size_t) i].getX (); x < chips[(size_t) i].getRight (); ++x)
+                {
+                    const auto c = img.getPixelAt (x, y);
+                    if (c.getRed () + c.getGreen () + c.getBlue () > best.getRed () + best.getGreen () + best.getBlue ())
+                        best = c;
+                }
+            return best;
+        };
+        const auto shown = brightest (0), hidden = brightest (1), muted = brightest (2);
+        CHECK (shown.getBrightness () > 0.75f && hidden.getBrightness () < 0.6f,
+               "footer channels: a hidden channel's number is darker");
+        CHECK (muted.getRed () > 200 && muted.getGreen () < 130, "footer channels: a muted channel's number is red");
+    }
+
+    int clicked = -1;
+    bool withCmd = false;
+    sb.onChannelClicked = [&] (int ch, bool cmd) { clicked = ch; withCmd = cmd; };
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    const juce::ModifierKeys cmdLmb (juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::commandModifier);
+    sb.mouseDown (mkMouse (sb, chips[1].getCentreX (), chips[1].getCentreY (), lmb));
+    CHECK (clicked == 1 && !withCmd, "footer channels: a click reports the channel");
+    sb.mouseDown (mkMouse (sb, chips[3].getCentreX (), chips[3].getCentreY (), cmdLmb));
+    CHECK (clicked == 3 && withCmd, "footer channels: Ctrl/Cmd+click is reported as such");
+    clicked = -1;
+    sb.mouseDown (mkMouse (sb, 3, 11, lmb));
+    CHECK (clicked == -1, "footer channels: a click elsewhere reports nothing");
+
+    sb.setChannels (2, { 0, 1 }, {});
+    CHECK (sb.channelChipRects ().size () == 2 && sb.channelChipLabel (0) == "L" && sb.channelChipLabel (1) == "R",
+           "footer channels: a stereo file shows L and R, like the tracks");
+    sb.setChannels (0, {}, {});
+    CHECK (sb.channelChipRects ().empty (), "footer channels: none without a file");
+    sb.setChannels (64, {}, {});
+    CHECK (!sb.channelChipRects ().empty () && sb.channelChipRects ().size () < 64
+           && sb.channelChipRects ().back ().getRight () < sb.getWidth (),
+           "footer channels: only the numbers that fit are drawn");
+}
+
 static void runRegression_panels()
 {
     regrPanels_pythonAddDialog();
@@ -667,4 +851,6 @@ static void runRegression_panels()
     regrPanels_markerDocSwitch();
     regrPanels_markerPasteTimes();
     regrPanels_fileListCloseAsks();
+    regrPanels_tablesPlotPlayheadAndSplitter();
+    regrPanels_statusBarChannelNumbers();
 }

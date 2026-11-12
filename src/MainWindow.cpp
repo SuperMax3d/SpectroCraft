@@ -169,6 +169,7 @@ public:
     void paint (juce::Graphics& g) override { g.fillAll (mainWindowBackground ()); }
 };
 
+
 /** Name prompt for the workspace commands (none in headless test runs). */
 juce::String promptForWorkspaceName (const juce::String& title, const juce::String& initial)
 {
@@ -478,6 +479,22 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // shared state (Application clamps it to the file and notifies the views).
     if (statusBar)
         statusBar->onPositionEdited = [this] (double t) { app.setPlayhead (t); };
+    // The footer's channel numbers show/hide a channel; Ctrl+click (Cmd on
+    // macOS) shows only that one, and again on the lone visible one shows
+    // them all (the View > Channel N rules).
+    if (statusBar)
+        statusBar->onChannelClicked = [this] (int ch, bool only)
+        {
+            if (ch < 0 || ch >= app.audioEngine().numChannels()) return;
+            if (only && app.visibleChannels.size() == 1 && app.visibleChannels[0] == ch)
+            {   showEveryChannel(); return; }
+            if (only)
+                app.visibleChannels = { ch };
+            else
+                app.toggleChannelVisible (ch);
+            app.syncActiveDoc ();   // keep the active document's copy in step
+            syncSharedState();
+        };
 
     // Panels can ask for a time range to be shown in both views (e.g.
     // double-clicking a marker or a stored selection).
@@ -538,6 +555,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (waveformView) waveformView->setPlayhead (t);
         if (spectralView) spectralView->setPlayhead (t);
         if (tablesTrack) tablesTrack->setPlayhead (t);
+        if (tablesPanel) tablesPanel->plotView().setPlayhead (t);
         if (videoWindow) videoWindow->getTracksPanel().setPlayhead (t);
         // A single click in either view re-analyses the spectrum: centred on
         // the cursor when there is no selection, averaged over the whole
@@ -1673,6 +1691,7 @@ void MainWindow::timerCallback()
     waveformView->setPlayhead (pos);
     spectralView->setPlayhead (pos);
     if (tablesTrack) tablesTrack->setPlayhead (pos);   // keep the dedicated track in step
+    if (tablesPanel) tablesPanel->plotView().setPlayhead (pos);   // ... and the Tables preview plot
     if (videoWindow) videoWindow->getTracksPanel().setPlayhead (pos);
     if (statusBar) statusBar->setPlayhead (pos);
 }
@@ -2156,6 +2175,7 @@ void MainWindow::syncSharedState()
         if (specVScroll && specVScroll->isLogarithmic () != spectralView->isLogFrequency ())
             updateScrollBars ();
     }
+    if (tablesPanel) tablesPanel->plotView().setPlayhead (app.playhead);
     if (tablesTrack)
     {
         tablesTrack->setPlayhead (app.playhead);
@@ -2195,6 +2215,9 @@ void MainWindow::syncSharedState()
                                    app.audioEngine().sampleRate());
         statusBar->setSelection (app.selection.getStart(), app.selection.getEnd());
         statusBar->setPlayhead (app.playhead);
+        // Channel numbers: dim when hidden, red when muted.
+        statusBar->setChannels (app.audioEngine().isFileLoaded() ? app.audioEngine().numChannels() : 0,
+                                app.visibleChannels, app.audioEngine().mutedChannels());
 
         // Active spectral tool indicator + live SHIFT/CTRL selection hint.
         statusBar->setModeText (currentModeText());
@@ -2633,6 +2656,16 @@ void MainWindow::ensureVideoWindow()
     // is toggled from a context menu.
     videoWindow->setAlwaysOnTop (app.recentStore->getIntValue ("video_always_on_top", 0) != 0);
 
+    // The picture's Upscaling choice (context menu) is remembered between
+    // sessions; Lanczos until the user picks another one.
+    videoWindow->view().setUpscaling (
+        sc::videoUpscalingFromName (app.recentStore->getValue ("video_upscaling", "Lanczos")));
+    videoWindow->view().onUpscalingChanged = [this] (sc::VideoUpscaling m)
+    {
+        app.recentStore->setValue ("video_upscaling", sc::videoUpscalingName (m));
+        app.recentStore->save();
+    };
+
     videoWindow->onUserClosed = [this]
     {
         videoDismissedFor = videoWindow->getVideoFile();
@@ -2691,6 +2724,20 @@ void MainWindow::ensureVideoWindow()
         if (std::abs (t[i].offsetSecs - off) < 1e-9) return;
         t[i].offsetSecs = off;
         d->setVideoTracks (std::move (t));
+    };
+    // A band dragged up/down: the document's track list takes the new order
+    // (saved with its metadata; the top track wins where tracks overlap).
+    videoWindow->onTrackMoved = [this] (int from, int to)
+    {
+        FileDoc* d = app.doc();
+        if (d == nullptr) return;
+        auto t = effectiveVideoTracks (*d);
+        const int n = (int) t.size();
+        if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+        moveVideoTrack (t, from, to);
+        int sel = videoTrackIndexAfterMove (d->selectedVideoTrack, from, to);
+        d->setVideoTracks (std::move (t), &sel);
+        refreshVideoSolo ();   // a soloed track keeps playing under its new index
     };
     videoWindow->onSelectTrackChanged = [this] (int i)
     {
@@ -4011,7 +4058,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             syncSharedState();
         }
         else
+        {
             app.toggleChannelVisible (ch);
+            syncSharedState();   // views and footer channel numbers follow
+        }
         return;
     }
 
@@ -8755,7 +8805,10 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
                 }
             }
             else
+            {
                 app.toggleChannelVisible (ch);
+                syncSharedState();   // views and footer channel numbers follow
+            }
             return true;
         }
     }

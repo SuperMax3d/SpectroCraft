@@ -25,6 +25,7 @@
 
 #include "ScrollBars.h"
 #include "VideoFrames.h"
+#include "VideoScaler.h"
 #include "FileMeta.h"
 
 //==============================================================================
@@ -111,9 +112,13 @@ public:
     static constexpr float kZoomStep = 1.25f;   // one wheel notch / menu step
     static constexpr float kMaxZoom = 8.0f;     // hard zoom ceiling
 
-    /** Context-menu item ids (handleContextMenuId). */
+    /** Context-menu item ids (handleContextMenuId). The displayed track's
+        actions use kMenuTrackActionBase + a VideoTracksPanel menu id, so they
+        never collide with the picture's own items. */
     enum { kMenuZoomIn = 1, kMenuZoomOut, kMenuZoomFit,
-           kMenuRotateCW, kMenuRotateCCW };
+           kMenuRotateCW, kMenuRotateCCW,
+           kMenuUpscaleLanczos = 20, kMenuUpscaleBicubic, kMenuUpscaleNearest,
+           kMenuTrackActionBase = 100 };
 
     VideoView();
 
@@ -153,6 +158,17 @@ public:
     int getUserRotation() const noexcept { return userRotation_; }
     void rotateClockwise();              // +90 degrees
     void rotateCounterClockwise();       // -90 degrees
+
+    // Upscaling -----------------------------------------------------------
+    /** How the picture is resampled to the screen (context menu >
+        Upscaling). Lanczos by default; the owner restores the saved choice
+        and persists changes through onUpscalingChanged. */
+    void setUpscaling (sc::VideoUpscaling m);
+    sc::VideoUpscaling getUpscaling() const noexcept { return upscaling_; }
+    /** The user picked another method in the context menu. */
+    std::function<void (sc::VideoUpscaling)> onUpscalingChanged;
+    /** The scaler (tests: thread count, weight-table reuse). */
+    sc::VideoScaler& scaler() noexcept { return scaler_; }
 
     /** The right-hand zoom/pan bar (like the spectrogram's frequency bar):
         the thumb shows the visible part of the picture height; dragging its
@@ -236,18 +252,61 @@ private:
 
     bool rightDrag_ = false;             // right-button box-zoom drag in flight
     juce::Point<float> rightStart_, rightNow_;
-    juce::Point<float> dragStart_;        // left-button pan drag start (empty = none)
+    bool panDrag_ = false;               // left-button pan drag in flight
+    juce::Point<float> lastDragPos_;     // pointer at the previous pan-drag event
+
+    // Scaled picture: the visible part of the frame resampled to physical
+    // screen pixels. Rebuilt only when the frame, the geometry or the method
+    // changes (a repaint for the rubber band or the bars reuses it).
+    void paintPicture (juce::Graphics& g);
+    sc::VideoUpscaling upscaling_ = sc::VideoUpscaling::lanczos;
+    sc::VideoScaler scaler_;
+    juce::Image scaled_;
+    struct ScaledKey
+    {
+        juce::Image frame;               // holds the frame's pixels: no address reuse
+        int rotation = 0;
+        juce::Rectangle<double> area;
+        int width = 0, height = 0;
+        sc::VideoUpscaling method = sc::VideoUpscaling::lanczos;
+    } scaledKey_;
 
     JUCE_DECLARE_NON_COPYABLE (VideoView)
 };
 
 //==============================================================================
+/** Index of an element after the element at `from` moved to position `to`
+    (the elements in between shift by one to make room); -1 stays -1. Shared
+    by the track list, the Video window and MainWindow, which all keep
+    per-track indexes (selection, displayed track). */
+inline int videoTrackIndexAfterMove (int idx, int from, int to) noexcept
+{
+    if (idx < 0 || from == to) return idx;
+    if (idx == from) return to;
+    if (from < to && idx > from && idx <= to) return idx - 1;
+    if (to < from && idx >= to && idx < from) return idx + 1;
+    return idx;
+}
+
+/** Moves v[from] to position `to`, shifting the elements in between. */
+template <typename T>
+void moveVideoTrack (std::vector<T>& v, int from, int to)
+{
+    const int n = (int) v.size();
+    if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+    if (from < to) std::rotate (v.begin() + from, v.begin() + from + 1, v.begin() + to + 1);
+    else           std::rotate (v.begin() + to, v.begin() + from, v.begin() + from + 1);
+}
+
+//==============================================================================
 /** The track list under the picture: a time ruler with a green band for the
-    main audio's length, and one coloured band per attached video. Bands can
-    be dragged left/right to change their offset; the wheel zooms the whole
-    timeline about the cursor; clicking a band selects it (clicking empty
-    space clears the selection); right-click shows the track context menu
-    (on the ruler/empty area: only the zoom items). */
+    main audio's length, and one coloured band per attached video. Dragging a
+    band left/right changes its offset; dragging it up/down changes the track
+    order (the direction of the first few pixels decides, so a reorder never
+    nudges the offset); the wheel zooms the whole timeline about the cursor;
+    clicking a band selects it (clicking empty space clears the selection);
+    right-click shows the track context menu (on the ruler/empty area: only
+    the zoom items). */
 class VideoTracksPanel : public juce::Component
 {
 public:
@@ -270,6 +329,10 @@ public:
     static constexpr int kRulerH = 20;   // time ruler row height
     static constexpr int kRowH = 26;     // one track row height
     static constexpr int kBarW = 12;     // scrollbar thickness (both axes)
+    /** Pixels a band must travel before a drag picks its axis (offset or
+        order). A single track has no order to change: its drag moves the
+        offset from the first pixel, as before. */
+    static constexpr int kDragAxisThreshold = 4;
 
     VideoTracksPanel();
     ~VideoTracksPanel() override;
@@ -304,6 +367,12 @@ public:
 
     /** The track whose band contains the point (-1 = ruler or empty area). */
     int trackIndexAt (const juce::Point<int>& p) const;
+    /** The row a band dragged up/down to height y would move to (clamped to
+        the existing rows; the ruler counts as the first row). */
+    int rowForY (int y) const;
+    /** While a band is being dragged up/down: the row it would move to on
+        release (-1 = no reorder drag in flight). */
+    int pendingDropRow() const noexcept { return dragAxis_ == DragAxis::order ? dropRow_ : -1; }
 
     /** Runs one context-menu item for `trackIdx` (-1 = ruler/empty area);
         the popup and the tests both call this. */
@@ -320,6 +389,11 @@ public:
     // Owner callbacks (message thread).
     std::function<void(int)> onSelectTrack;            // -1 = clear selection
     std::function<void(int, double)> onOffsetChanged;  // index, new offset secs
+    /** A band was dragged up/down and dropped on another row: the track at
+        `from` now sits at `to` (the panel has already reordered its own
+        copy, selection included). Index 0 is the top row, the one drawn
+        above the others where tracks overlap in time. */
+    std::function<void(int from, int to)> onTrackMoved;
     /** A non-zoom context-menu item was chosen: id and track index (-1 =
         ruler/empty area). */
     std::function<void(int, int)> onMenuItem;
@@ -346,10 +420,20 @@ private:
     double audioDuration_ = 0.0;
     juce::Range<double> view_{ 0.0, 1.0 };   // visible time range (seconds)
 
-    bool dragBand_ = false;               // band-offset drag in flight
+    void paintBand (juce::Graphics& g, int i, const juce::Rectangle<int>& rowArea,
+                    float alpha) const;
+
+    // A band drag first waits for kDragAxisThreshold pixels, then sticks to
+    // one axis: left/right = offset, up/down = track order.
+    enum class DragAxis { undecided, time, order };
+
+    bool dragBand_ = false;               // band drag in flight (either axis)
     int dragIdx_ = -1;
     double dragStartOffset_ = 0.0;
     juce::Point<int> dragStartPt_;
+    DragAxis dragAxis_ = DragAxis::undecided;
+    int dropRow_ = -1;                    // reorder target row while dragging up/down
+    int dragNowY_ = 0;                    // pointer height during a reorder drag
     float snapX_ = -1.0f;                 // shift-drag anchor indicator (-1 = none)
     std::vector<bool> soloFlags_;
     double playhead_ = -1.0;              // main document's cursor, secs
@@ -591,6 +675,9 @@ public:
     std::function<void(int)> onSelectTrackChanged;
     /** A band was dragged to a new offset: index and seconds. */
     std::function<void(int, double)> onTrackOffsetChanged;
+    /** A band was dragged to another row: the track at `from` now sits at
+        `to` (this window has already reordered its own list). */
+    std::function<void(int from, int to)> onTrackMoved;
     /** The displayed track's picture adjustments changed; the updated data
         is passed back for persistence. */
     std::function<void(const sc::VideoTrackData&)> onTrackAdjustmentsSaved;

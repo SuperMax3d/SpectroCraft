@@ -344,10 +344,165 @@ static void testViewsScrollBars()
            "views#W8: value bar jump works below its minimum span");
 }
 
+
+//==============================================================================
+// Channel numbers in the tracks: a click mutes/unmutes the channel (number in
+// red, data darker), Ctrl/Cmd+click solos it, and again on the lone playing
+// channel unmutes them all. The footer's numbers show/hide channels.
+static juce::Point<int> viewsFindChannelLabel (const std::function<int (juce::Point<int>)>& at,
+                                               int w, int h, int ch)
+{
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            if (at ({ x, y }) == ch) return { x, y };
+    return { -1, -1 };
+}
+
+static void testViewsChannelMuteAndFooter()
+{
+    progress ("regression views: channel numbers mute/solo; footer numbers show/hide");
+    const juce::File store = makeTempFile ("views_mute.recent");
+    store.deleteFile ();
+    const juce::File wav = makeTempFile ("views_mute.wav");
+    writeWav (wav, 4, 8000.0, 8000, [] (int, int64_t f, double)
+        { return (float) (0.8 * std::sin ((double) f * 0.05)); });
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "views mute"));
+        CHECK (app.openFile (wav), "channel mute: open a 4-channel wav");
+        WaveformView* wv = win->waveformViewComp ();
+        SpectralView* sv = win->spectralViewComp ();
+        StatusBar* sb = win->statusBarComp ();
+        auto& eng = app.audioEngine ();
+        if (wv == nullptr || sv == nullptr || sb == nullptr || app.doc () == nullptr)
+        {   CHECK (false, "channel mute: views exist"); win.reset (); wav.deleteFile (); return; }
+        if (wv->getWidth () < 100 || wv->getHeight () < 80)
+            wv->setSize (800, 400);
+        if (sv->getWidth () < 100 || sv->getHeight () < 80)
+            sv->setSize (800, 400);
+
+        const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+        const juce::ModifierKeys cmdLmb (juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::commandModifier);
+        const auto w2 = viewsFindChannelLabel ([&] (juce::Point<int> q) { return wv->channelAtLabel (q); },
+                                               wv->getWidth (), wv->getHeight (), 1);
+        CHECK (w2.x >= 0, "channel mute: the waveform's channel 2 number can be clicked");
+        if (w2.x >= 0)
+        {
+            wv->mouseDown (mkMouse (*wv, w2.x, w2.y, lmb));
+            wv->mouseUp (mkMouse (*wv, w2.x, w2.y, lmb));
+            CHECK (eng.isChannelMuted (1) && !eng.isChannelMuted (0) && !eng.isChannelMuted (2),
+                   "channel mute: a click mutes channel 2 only");
+            CHECK (sb->channelChipMuted (1) && !sb->channelChipMuted (0),
+                   "channel mute: the footer shows channel 2 muted");
+
+            // Painted: the muted row is darker and its number red.
+            const juce::Image shot = wv->createComponentSnapshot (wv->getLocalBounds ());
+            auto rowPeak = [&] (int ch)
+            {
+                // Brightest pixel of the plot part of a channel row; rows are
+                // found from their label positions.
+                const auto lab = viewsFindChannelLabel ([&] (juce::Point<int> q) { return wv->channelAtLabel (q); },
+                                                        wv->getWidth (), wv->getHeight (), ch);
+                const auto pr = wv->plotRect ();
+                float peak = 0.0f;
+                for (int y = std::max (pr.getY (), lab.y - 12); y < std::min (pr.getBottom (), lab.y + 12); ++y)
+                    for (int x = pr.getX () + 10; x < pr.getRight () - 10; x += 2)
+                        peak = std::max (peak, shot.getPixelAt (x, y).getBrightness ());
+                return peak;
+            };
+            const float mutedPeak = rowPeak (1), livePeak = rowPeak (0);
+            CHECK (livePeak > 0.3f && mutedPeak < livePeak * 0.7f,
+                   "channel mute: the muted channel's waveform is drawn darker ("
+                   + juce::String (mutedPeak, 2) + " vs " + juce::String (livePeak, 2) + ")");
+            bool redLabel = false;
+            for (int y = w2.y - 9; y <= w2.y + 9 && !redLabel; ++y)
+                for (int x = std::max (0, w2.x - 12); x <= w2.x + 12; ++x)
+                {
+                    const auto c = shot.getPixelAt (x, y);
+                    if (c.getRed () > 200 && c.getGreen () < 120 && c.getBlue () < 120) { redLabel = true; break; }
+                }
+            CHECK (redLabel, "channel mute: the muted channel's number is red");
+
+            wv->mouseDown (mkMouse (*wv, w2.x, w2.y, lmb));
+            CHECK (!eng.isChannelMuted (1), "channel mute: a second click unmutes it");
+
+            // Ctrl/Cmd+click: solo, then again on the lone playing channel: all play.
+            wv->mouseDown (mkMouse (*wv, w2.x, w2.y, cmdLmb));
+            CHECK (!eng.isChannelMuted (1) && eng.isChannelMuted (0) && eng.isChannelMuted (2)
+                   && eng.isChannelMuted (3), "channel mute: Ctrl/Cmd+click solos channel 2");
+            wv->mouseDown (mkMouse (*wv, w2.x, w2.y, cmdLmb));
+            CHECK (!eng.isChannelMuted (0) && !eng.isChannelMuted (1) && !eng.isChannelMuted (2)
+                   && !eng.isChannelMuted (3), "channel mute: again on the lone playing channel unmutes all");
+
+            // A double-click on a number is two toggles, never a "fit whole file".
+            const double v0 = win->waveformTimeStart (), v1 = win->waveformTimeEnd ();
+            wv->setViewRange (0.25, 0.5);
+            wv->mouseDoubleClick (mkMouse (*wv, w2.x, w2.y, lmb, 2));
+            CHECK (std::abs (wv->getViewStart () - 0.25) < 1e-9 && std::abs (wv->getViewEnd () - 0.5) < 1e-9,
+                   "channel mute: a double-click on a number does not zoom");
+            wv->setViewRange (v0, v1);
+        }
+
+        // The spectrogram's numbers do the same.
+        const auto s3 = viewsFindChannelLabel ([&] (juce::Point<int> q) { return sv->channelAtLabel (q); },
+                                               sv->getWidth (), sv->getHeight (), 2);
+        CHECK (s3.x >= 0, "channel mute: the spectrogram's channel 3 number can be clicked");
+        if (s3.x >= 0)
+        {
+            sv->mouseDown (mkMouse (*sv, s3.x, s3.y, lmb));
+            sv->mouseUp (mkMouse (*sv, s3.x, s3.y, lmb));
+            CHECK (eng.isChannelMuted (2) && !eng.isChannelMuted (1), "channel mute: the spectrogram mutes channel 3");
+            sv->mouseDown (mkMouse (*sv, s3.x, s3.y, lmb));
+            sv->mouseUp (mkMouse (*sv, s3.x, s3.y, lmb));
+            CHECK (!eng.isChannelMuted (2), "channel mute: ... and unmutes it");
+
+            // The widened click target stays in the axis strip: the plot's
+            // first columns, level with the number, still belong to the plot.
+            const juce::Point<int> plotEdge (sv->plotRect ().getX () + 1, s3.y);
+            CHECK (sv->channelAtLabel (plotEdge) == -1, "channel mute: the plot edge is not a channel number");
+            sv->mouseDown (mkMouse (*sv, plotEdge.x, plotEdge.y, lmb));
+            sv->mouseUp (mkMouse (*sv, plotEdge.x, plotEdge.y, lmb));
+            CHECK (!eng.isChannelMuted (2), "channel mute: a click at the plot edge mutes nothing");
+        }
+        if (w2.x >= 0)
+            CHECK (wv->channelAtLabel ({ wv->plotRect ().getX () + 1, w2.y }) == -1,
+                   "channel mute: the waveform's plot edge is not a channel number");
+
+        // Footer: a click hides/shows a channel; Ctrl/Cmd+click shows only it.
+        const auto chips = sb->channelChipRects ();
+        CHECK (chips.size () == 4, "channel footer: four channel numbers");
+        if (chips.size () == 4)
+        {
+            sb->mouseDown (mkMouse (*sb, chips[3].getCentreX (), chips[3].getCentreY (), lmb));
+            CHECK (!app.isChannelVisible (3) && app.isChannelVisible (0) && !sb->channelChipShown (3),
+                   "channel footer: a click hides channel 4 (number dimmed)");
+            sb->mouseDown (mkMouse (*sb, chips[3].getCentreX (), chips[3].getCentreY (), lmb));
+            CHECK (app.isChannelVisible (3) && sb->channelChipShown (3), "channel footer: a second click shows it again");
+            sb->mouseDown (mkMouse (*sb, chips[1].getCentreX (), chips[1].getCentreY (), cmdLmb));
+            CHECK (app.visibleChannels == std::vector<int> { 1 }, "channel footer: Ctrl/Cmd+click shows only channel 2");
+            CHECK (app.doc ()->visibleChannels == std::vector<int> { 1 }, "channel footer: the document keeps it");
+            sb->mouseDown (mkMouse (*sb, chips[1].getCentreX (), chips[1].getCentreY (), cmdLmb));
+            CHECK (app.visibleChannels.size () == 4, "channel footer: again on the lone visible channel shows all");
+
+            // The other ways to show/hide a channel update the numbers too.
+            win->keyPressed (juce::KeyPress ('4', juce::ModifierKeys::commandModifier, 0), nullptr);
+            CHECK (!app.isChannelVisible (3) && !sb->channelChipShown (3),
+                   "channel footer: Ctrl+4 dims channel 4's number");
+            win->menuItemSelected (MainWindow::MenuIDs::ChannelBase + 3, 0);
+            CHECK (app.isChannelVisible (3) && sb->channelChipShown (3),
+                   "channel footer: View > Channel 4 shows it again");
+        }
+        win.reset ();
+    }
+    wav.deleteFile ();
+    store.deleteFile ();
+}
+
 static void runRegression_views()
 {
     testViewsExportSnapshot();
     testViewsExportLayout();
     testViewsClippedSelectionPaint();
     testViewsScrollBars();
+    testViewsChannelMuteAndFooter();
 }

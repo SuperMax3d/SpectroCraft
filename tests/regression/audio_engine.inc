@@ -482,6 +482,75 @@ static void testAeContentVersionFollowsEdits ()
     CHECK (eng.contentVersion () > v, "content version: close bumps");
 }
 
+
+// Channel mutes (channel numbers in the tracks): a muted channel's output is
+// silent, the others untouched; a mono file's mute silences every output.
+static void testAeChannelMute()
+{
+    progress ("regression audio-engine: muted channels play silence");
+    AudioEngine eng;
+    std::vector<std::vector<float>> data (3, std::vector<float> (4000));
+    for (int ch = 0; ch < 3; ++ch)
+        for (int i = 0; i < 4000; ++i)
+            data[(size_t) ch][(size_t) i] = aeChanValue (ch, i);
+    CHECK (eng.initNew (3, 48000.0, &data), "mute: 3-channel document");
+    eng.setChannelMuted (1, true);
+    CHECK (eng.isChannelMuted (1) && !eng.isChannelMuted (0) && !eng.isChannelMuted (2)
+           && !eng.isChannelMuted (7) && !eng.isChannelMuted (-1), "mute: flags per channel");
+
+    eng.prepareToPlay (256, 48000.0);
+    eng.play ();
+    juce::AudioBuffer<float> out (3, 256);
+    juce::AudioSourceChannelInfo info (&out, 0, 256);
+    eng.getNextAudioBlock (info);
+    bool silent = true, others = true;
+    for (int i = 0; i < 200; ++i)
+    {
+        silent = silent && out.getSample (1, i) == 0.0f;
+        others = others && std::abs (out.getSample (0, i) - aeChanValue (0, i)) < 1e-5f
+                        && std::abs (out.getSample (2, i) - aeChanValue (2, i)) < 1e-5f;
+    }
+    CHECK (silent && others, "mute: the muted channel is silent, the others play");
+
+    eng.setChannelMuted (1, false);
+    CHECK (eng.mutedChannels ().empty (), "mute: unmuting the last one leaves an empty list");
+    eng.getNextAudioBlock (info);   // the next 256 samples
+    bool back = true;
+    for (int i = 0; i < 200; ++i)
+        back = back && std::abs (out.getSample (1, i) - aeChanValue (1, 256 + i)) < 1e-5f;
+    CHECK (back, "mute: unmuted, the channel plays again at once");
+
+    eng.setMutedChannels ({ true, false, true });
+    eng.closeFile ();
+    CHECK (eng.mutedChannels ().empty () && !eng.isChannelMuted (0), "mute: closing the file clears the mutes");
+
+    // Mono: one channel feeds every output, so its mute silences them all.
+    AudioEngine mono;
+    std::vector<std::vector<float>> md (1, std::vector<float> (4000, 0.5f));
+    CHECK (mono.initNew (1, 48000.0, &md), "mute: mono document");
+    mono.setChannelMuted (0, true);
+    mono.prepareToPlay (256, 48000.0);
+    mono.play ();
+    juce::AudioBuffer<float> o2 (2, 256);
+    juce::AudioSourceChannelInfo i2 (&o2, 0, 256);
+    mono.getNextAudioBlock (i2);
+    CHECK (o2.getMagnitude (0, 0, 256) == 0.0f && o2.getMagnitude (1, 0, 256) == 0.0f,
+           "mute: a muted mono file is silent on every output");
+
+    // ... also while a video track's own (stereo) audio is soloed.
+    auto solo = std::make_shared<AudioEngine::SoloAudio> ();
+    solo->data.assign (2, std::vector<float> (48000, 0.25f));
+    solo->rate = 48000.0;
+    mono.setSoloAudio (solo);
+    mono.getNextAudioBlock (i2);
+    CHECK (o2.getMagnitude (0, 0, 256) == 0.0f && o2.getMagnitude (1, 0, 256) == 0.0f,
+           "mute: a muted mono document silences a soloed stereo video too");
+    mono.setChannelMuted (0, false);
+    mono.getNextAudioBlock (i2);
+    CHECK (o2.getMagnitude (1, 0, 256) > 0.2f, "mute: unmuted, the soloed video plays on both outputs");
+    mono.setSoloAudio (nullptr);
+}
+
 static void runRegression_audio_engine()
 {
     testAeStreamedReadHonoursChannel ();
@@ -493,4 +562,5 @@ static void runRegression_audio_engine()
     testAeRf64Save ();
     testAeAtomicSave ();
     testAeContentVersionFollowsEdits ();
+    testAeChannelMute ();
 }

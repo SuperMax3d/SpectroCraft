@@ -73,6 +73,8 @@ void VideoView::clearFrame()
 {
     // A new picture starts whole: the zoom/pan of the previous file is gone.
     frame_ = {};
+    scaledKey_ = {};   // let go of the old frame's pixels
+    scaled_ = {};
     zoom_ = 1.0f;
     pan_ = {};
     syncZoomBar();
@@ -310,8 +312,22 @@ void VideoView::applyHZoomFromBar (double lo, double hi)
     if (onAdjustmentChanged) onAdjustmentChanged ();
 }
 
+void VideoView::setUpscaling (sc::VideoUpscaling m)
+{
+    if (m == upscaling_) return;
+    upscaling_ = m;
+    repaint();   // the cached picture no longer matches (its key holds the method)
+}
+
 void VideoView::handleContextMenuId (int id)
 {
+    auto pickUpscaling = [this] (sc::VideoUpscaling m)
+    {
+        const bool changed = m != upscaling_;
+        setUpscaling (m);
+        if (changed && onUpscalingChanged) onUpscalingChanged (m);
+    };
+
     switch (id)
     {
         case kMenuZoomIn:     zoomIn(); break;
@@ -319,10 +335,14 @@ void VideoView::handleContextMenuId (int id)
         case kMenuZoomFit:    resetZoom(); break;
         case kMenuRotateCW:   rotateClockwise(); break;
         case kMenuRotateCCW:  rotateCounterClockwise(); break;
+        case kMenuUpscaleLanczos: pickUpscaling (sc::VideoUpscaling::lanczos); break;
+        case kMenuUpscaleBicubic: pickUpscaling (sc::VideoUpscaling::bicubic); break;
+        case kMenuUpscaleNearest: pickUpscaling (sc::VideoUpscaling::nearest); break;
         default:
-            // The displayed track's actions (see showContextMenu).
-            if (onTrackMenuAction != nullptr && getDisplayedTrack != nullptr)
-                onTrackMenuAction (id, getDisplayedTrack());
+            // The displayed track's actions (see showContextMenu): their ids
+            // are offset so they never alias the picture's own items.
+            if (id > kMenuTrackActionBase && onTrackMenuAction != nullptr && getDisplayedTrack != nullptr)
+                onTrackMenuAction (id - kMenuTrackActionBase, getDisplayedTrack());
             break;
     }
 }
@@ -340,19 +360,27 @@ void VideoView::showContextMenu (const juce::Point<int>& at)
     m.addItem (kMenuRotateCW, "Rotate 90deg Clockwise");
     m.addItem (kMenuRotateCCW, "Rotate 90deg Counter-Clockwise");
 
+    // How the picture is resampled to the screen; remembered across sessions.
+    juce::PopupMenu up;
+    up.addItem (kMenuUpscaleLanczos, "Lanczos", true, upscaling_ == sc::VideoUpscaling::lanczos);
+    up.addItem (kMenuUpscaleBicubic, "Bicubic", true, upscaling_ == sc::VideoUpscaling::bicubic);
+    up.addItem (kMenuUpscaleNearest, "Nearest", true, upscaling_ == sc::VideoUpscaling::nearest);
+    m.addSubMenu ("Upscaling", up);
+
     // The track responsible for this picture gets its own actions here too:
     // right-clicking the image offers the same items as right-clicking that
     // track's band, applied to it.
     const int idx = getDisplayedTrack != nullptr ? getDisplayedTrack () : -1;
     if (idx >= 0 && onTrackMenuAction != nullptr)
     {
+        auto trackItem = [] (int panelId) { return (int) kMenuTrackActionBase + panelId; };
         m.addSeparator();
-        m.addItem (VideoTracksPanel::kMenuSyncAudio, "Sync based on Audio");
-        m.addItem (VideoTracksPanel::kMenuAlign, "Align...");
-        m.addItem (VideoTracksPanel::kMenuCopyAudio, "Copy Audio to New Channel(s)...");
-        m.addItem (VideoTracksPanel::kMenuAddTrack, "Add Video Track...");
-        m.addItem (VideoTracksPanel::kMenuRemoveTrack, "Remove Track");
-        m.addItem (VideoTracksPanel::kMenuAdjustImage, "Adjust Image...");
+        m.addItem (trackItem (VideoTracksPanel::kMenuSyncAudio), "Sync based on Audio");
+        m.addItem (trackItem (VideoTracksPanel::kMenuAlign), "Align...");
+        m.addItem (trackItem (VideoTracksPanel::kMenuCopyAudio), "Copy Audio to New Channel(s)...");
+        m.addItem (trackItem (VideoTracksPanel::kMenuAddTrack), "Add Video Track...");
+        m.addItem (trackItem (VideoTracksPanel::kMenuRemoveTrack), "Remove Track");
+        m.addItem (trackItem (VideoTracksPanel::kMenuAdjustImage), "Adjust Image...");
     }
 
     const int id = m.showMenu (juce::PopupMenu::Options ()
@@ -361,25 +389,64 @@ void VideoView::showContextMenu (const juce::Point<int>& at)
     if (id != 0) handleContextMenuId (id);
 }
 
+void VideoView::paintPicture (juce::Graphics& g)
+{
+    const auto P = pictureBounds();
+    const auto visible = P.getIntersection (plotArea());
+    if (visible.isEmpty()) return;
+
+    const int rot = totalRotation();
+    const bool quarter = rot == 90 || rot == 270;
+    const double iw = frame_.image.getWidth(), ih = frame_.image.getHeight();
+
+    // The visible part of the picture in physical pixels (2 per point on a
+    // Retina / 200 % display), snapped to whole pixels: the scaler renders
+    // exactly that many and the result is drawn 1:1.
+    const double k = std::max (1.0, (double) g.getInternalContext().getPhysicalPixelScaleFactor());
+    const int x0 = (int) std::lround (visible.getX() * k), x1 = (int) std::lround (visible.getRight() * k);
+    const int y0 = (int) std::lround (visible.getY() * k), y1 = (int) std::lround (visible.getBottom() * k);
+    if (x1 <= x0 || y1 <= y0) return;
+
+    // Those pixels in the coordinates of the picture as displayed (turned),
+    // in source pixels.
+    const double sx = (quarter ? ih : iw) / (double) P.getWidth();
+    const double sy = (quarter ? iw : ih) / (double) P.getHeight();
+    const juce::Rectangle<double> area ((x0 / k - P.getX()) * sx, (y0 / k - P.getY()) * sy,
+                                        (x1 - x0) / k * sx, (y1 - y0) / k * sy);
+
+    auto& key = scaledKey_;
+    const bool fresh = key.frame == frame_.image && key.rotation == rot && key.area == area
+                       && key.width == x1 - x0 && key.height == y1 - y0 && key.method == upscaling_
+                       && scaled_.isValid();
+    if (!fresh)
+    {
+        if (!scaler_.render (frame_.image, rot, area, x1 - x0, y1 - y0, upscaling_, scaled_))
+        {
+            key = {};
+            return;
+        }
+        key.frame = frame_.image;
+        key.rotation = rot;
+        key.area = area;
+        key.width = x1 - x0;
+        key.height = y1 - y0;
+        key.method = upscaling_;
+    }
+
+    // One image pixel per physical pixel, on the physical pixel grid: nearest
+    // sampling copies it unchanged (the quality is already in the pixels).
+    g.setImageResamplingQuality (juce::Graphics::lowResamplingQuality);
+    g.drawImageTransformed (scaled_, juce::AffineTransform::scale ((float) (1.0 / k))
+                                         .translated ((float) (x0 / k), (float) (y0 / k)), false);
+}
+
 void VideoView::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colours::black);
 
     if (frame_.image.isValid())
     {
-        const auto r = pictureBounds();
-        const int rot = totalRotation();
-        const float iw = (float) frame_.image.getWidth(), ih = (float) frame_.image.getHeight();
-        const bool quarter = rot == 90 || rot == 270;
-        const float s = r.getWidth() / (quarter ? ih : iw);
-        // Draw the image unrotated, then rotate/scale/translate it into place.
-        const auto t = juce::AffineTransform::translation (-iw * 0.5f, -ih * 0.5f)
-                           .rotated ((float) rot * juce::MathConstants<float>::pi / 180.0f)
-                           .scaled (s)
-                           .translated (r.getCentreX(), r.getCentreY());
-        g.setImageResamplingQuality (zoom_ > 2.0f ? juce::Graphics::lowResamplingQuality
-                                                 : juce::Graphics::mediumResamplingQuality);
-        g.drawImageTransformed (frame_.image, t, false);
+        paintPicture (g);
     }
     else if (!message_.isEmpty())
     {
@@ -425,7 +492,8 @@ void VideoView::mouseDown (const juce::MouseEvent& e)
     }
 
     if (!frame_.image.isValid()) return;   // no picture to pan yet
-    dragStart_ = e.getPosition().toFloat();
+    panDrag_ = true;
+    lastDragPos_ = e.getPosition().toFloat();
 }
 
 void VideoView::mouseDrag (const juce::MouseEvent& e)
@@ -436,8 +504,18 @@ void VideoView::mouseDrag (const juce::MouseEvent& e)
         repaint();
         return;
     }
-    if (frame_.image.isValid() && dragStart_ != juce::Point<float>())
-        setPan (pan_ + (e.getPosition().toFloat() - dragStart_));
+    if (!panDrag_ || !frame_.image.isValid()) return;
+
+    // Only the movement since the previous event: the picture follows the
+    // pointer one to one. (Adding the whole distance from the mouse-down
+    // point on every event made the pan accelerate and lag behind a change of
+    // direction.) Incremental steps also mean that after hitting a picture
+    // edge, reversing moves the picture back at once.
+    const auto pos = e.getPosition().toFloat();
+    const auto delta = pos - lastDragPos_;
+    lastDragPos_ = pos;
+    if (delta.isOrigin()) return;
+    setPan (pan_ + delta);
 }
 
 void VideoView::mouseUp (const juce::MouseEvent& e)
@@ -454,7 +532,7 @@ void VideoView::mouseUp (const juce::MouseEvent& e)
         repaint();
         return;
     }
-    dragStart_ = {};
+    panDrag_ = false;
 }
 
 void VideoView::mouseDoubleClick (const juce::MouseEvent& e)
@@ -609,6 +687,14 @@ void VideoTracksPanel::zoomAbout (double tSecs, double factor)
 void VideoTracksPanel::zoomIn()  { zoomAbout (0.5 * (view_.getStart() + view_.getEnd()), 1.0 / kZoomStep); }
 void VideoTracksPanel::zoomOut() { zoomAbout (0.5 * (view_.getStart() + view_.getEnd()), kZoomStep); }
 
+int VideoTracksPanel::rowForY (int y) const
+{
+    if (tracks_.empty()) return -1;
+    const double fromTop = (double) (y - kRulerH) + scrollY_;
+    const int row = (int) std::floor (fromTop / (double) kRowH);
+    return std::clamp (row, 0, (int) tracks_.size() - 1);
+}
+
 int VideoTracksPanel::trackIndexAt (const juce::Point<int>& p) const
 {
     if (p.y < kRulerH || p.x < 0 || p.x >= contentWidth()) return -1;
@@ -743,13 +829,9 @@ void VideoTracksPanel::resized()
     repaint();
 }
 
-void VideoTracksPanel::paint (juce::Graphics& g)
+void VideoTracksPanel::paintBand (juce::Graphics& g, int i, const juce::Rectangle<int>& rowArea,
+                                  float alpha) const
 {
-    const auto b = getLocalBounds();
-    g.fillAll (juce::Colour::fromRGB (28, 32, 38));
-
-    paintRuler (g, juce::Rectangle<int> (0, 0, contentWidth(), kRulerH));
-
     static const juce::Colour trackColours[] = {
         juce::Colour::fromRGB (70, 130, 255),   // blue
         juce::Colour::fromRGB (240, 160, 60),   // orange
@@ -760,38 +842,69 @@ void VideoTracksPanel::paint (juce::Graphics& g)
         juce::Colour::fromRGB (255, 120, 160),  // pink
         juce::Colour::fromRGB (150, 170, 90) }; // olive
 
+    const auto& tr = tracks_[(size_t) i];
+    double endT = view_.getEnd();
+    if (tr.durationSecs >= 0.0) endT = std::min (endT, tr.offsetSecs + tr.durationSecs);
+    const float x1 = std::max (0.0f, xForTime (tr.offsetSecs));
+    const float x2 = std::min ((float) contentWidth(), xForTime (endT));
+    if (x2 <= x1 + 1e-3f) return;   // band off-screen
+
+    auto band = juce::Rectangle<int> ((int) x1, rowArea.getY(), (int) (x2 - x1), rowArea.getHeight());
+    const auto col = trackColours[i % 8];
+    // The selected band is drawn at full opacity; the white border marks it.
+    g.setColour ((selected_ == i ? col : col.withAlpha (0.85f)).withMultipliedAlpha (alpha));
+    g.fillRect (band);
+
+    if ((int) soloFlags_.size() > i && soloFlags_[(size_t) i])
+    {   g.setColour (juce::Colours::yellow.withMultipliedAlpha (alpha)); g.fillRect (band.removeFromTop (3)); }
+    if (selected_ == i)
+    {   g.setColour (juce::Colours::white.withMultipliedAlpha (alpha)); g.drawRect (band, 2); }
+
+    const juce::String label = tr.file.getFileName() + "  @" + juce::String (tr.offsetSecs, 2) + " s";
+    g.setColour (juce::Colours::white.withAlpha (0.9f * alpha));
+    g.setFont (12.0f);
+    g.drawFittedText (label, band.reduced (6, 2), juce::Justification::left, 1);
+}
+
+void VideoTracksPanel::paint (juce::Graphics& g)
+{
+    const auto b = getLocalBounds();
+    g.fillAll (juce::Colour::fromRGB (28, 32, 38));
+
+    paintRuler (g, juce::Rectangle<int> (0, 0, contentWidth(), kRulerH));
+
     // Rows scroll vertically below the pinned ruler.
     const int yOff = (int) std::lround (scrollY_);
     const auto rowsArea = juce::Rectangle<int> (0, kRulerH, contentWidth(),
                                                 std::max (1, b.getHeight() - kBarW - kRulerH));
+    auto shownRow = [this, yOff] (int i) { return rowRect (i).withY (rowRect (i).getY() - yOff); };
+
+    // While a band is dragged up/down its row is drawn faded: the band itself
+    // follows the pointer (below) and a white line shows where it will land.
+    const bool reordering = dragBand_ && dragAxis_ == DragAxis::order
+                            && dragIdx_ >= 0 && dragIdx_ < (int) tracks_.size();
     for (int i = 0; i < (int) tracks_.size(); ++i)
     {
-        const auto row = rowRect (i).withY (rowRect (i).getY() - yOff);
+        const auto row = shownRow (i);
         if (!row.intersects (rowsArea)) continue;
-        const auto vis = row.getIntersection (rowsArea);   // the visible part of this row
-        const auto& tr = tracks_[i];
+        // Only the visible part of the row is painted.
+        paintBand (g, i, row.getIntersection (rowsArea), (reordering && i == dragIdx_) ? 0.35f : 1.0f);
+    }
 
-        double endT = view_.getEnd();
-        if (tr.durationSecs >= 0.0) endT = std::min (endT, tr.offsetSecs + tr.durationSecs);
-        const float x1 = std::max (0.0f, xForTime (tr.offsetSecs));
-        const float x2 = std::min ((float) contentWidth(), xForTime (endT));
-        if (x2 <= x1 + 1e-3f) continue;   // band off-screen
-
-        auto band = juce::Rectangle<int> ((int) x1, vis.getY(), (int) (x2 - x1), vis.getHeight());
-        const auto col = trackColours[i % 8];
-        // The selected band is drawn at full opacity; the white border marks it.
-        g.setColour (selected_ == i ? col : col.withAlpha (0.85f));
-        g.fillRect (band);
-
-        if ((int) soloFlags_.size() > i && soloFlags_[i])
-        {   g.setColour (juce::Colours::yellow); g.fillRect (band.removeFromTop (3)); }
-        if (selected_ == i)
-        {   g.setColour (juce::Colours::white); g.drawRect (band, 2); }
-
-        const juce::String label = tr.file.getFileName() + "  @" + juce::String (tr.offsetSecs, 2) + " s";
-        g.setColour (juce::Colours::white.withAlpha (0.9f));
-        g.setFont (12.0f);
-        g.drawFittedText (label, band.reduced (6, 2), juce::Justification::left, 1);
+    if (reordering)
+    {
+        if (dropRow_ >= 0 && dropRow_ != dragIdx_)
+        {
+            // Moving up lands above the target row, moving down below it.
+            const auto target = shownRow (dropRow_);
+            const int ly = dropRow_ < dragIdx_ ? target.getY() : target.getBottom();
+            g.setColour (juce::Colours::white);
+            g.fillRect (0, juce::jlimit (rowsArea.getY(), std::max (rowsArea.getY(), rowsArea.getBottom() - 3), ly - 1),
+                        contentWidth(), 3);
+        }
+        const auto ghost = shownRow (dragIdx_).translated (0, dragNowY_ - dragStartPt_.y)
+                                              .getIntersection (rowsArea);
+        if (!ghost.isEmpty()) paintBand (g, dragIdx_, ghost, 0.8f);
     }
 
     // The main document's playhead: a red line from the ruler to the bottom,
@@ -830,6 +943,9 @@ void VideoTracksPanel::mouseDown (const juce::MouseEvent& e)
         dragIdx_ = idx;
         dragStartOffset_ = tracks_[idx].offsetSecs;
         dragStartPt_ = e.getPosition();
+        // A lone track has no order to change: offset from the first pixel.
+        dragAxis_ = tracks_.size() > 1 ? DragAxis::undecided : DragAxis::time;
+        dropRow_ = -1;
         snapX_ = -1.0f;
         if (selected_ != idx) setSelected (idx);
         if (onSelectTrack) onSelectTrack (idx);
@@ -850,6 +966,26 @@ void VideoTracksPanel::mouseDown (const juce::MouseEvent& e)
 void VideoTracksPanel::mouseDrag (const juce::MouseEvent& e)
 {
     if (!dragBand_ || dragIdx_ < 0 || dragIdx_ >= (int) tracks_.size()) return;
+
+    const auto pos = e.getPosition();
+    if (dragAxis_ == DragAxis::undecided)
+    {
+        // The first few pixels pick the axis, then it stays: a reorder never
+        // nudges the offset and an offset drag never reorders.
+        const int dx = std::abs (pos.x - dragStartPt_.x);
+        const int dy = std::abs (pos.y - dragStartPt_.y);
+        if (std::max (dx, dy) < kDragAxisThreshold) return;
+        dragAxis_ = dy > dx ? DragAxis::order : DragAxis::time;
+        if (dragAxis_ == DragAxis::order) setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+    }
+
+    if (dragAxis_ == DragAxis::order)
+    {
+        dragNowY_ = pos.y;
+        dropRow_ = rowForY (pos.y);
+        repaint();
+        return;
+    }
 
     double off = dragStartOffset_
                  + (timeAtX ((float) e.getPosition().x) - timeAtX ((float) dragStartPt_.x));
@@ -884,9 +1020,32 @@ void VideoTracksPanel::mouseDrag (const juce::MouseEvent& e)
 
 void VideoTracksPanel::mouseUp (const juce::MouseEvent&)
 {
+    const bool reorder = dragBand_ && dragAxis_ == DragAxis::order;
+    const int from = dragIdx_, to = dropRow_;
     dragBand_ = false;
     dragIdx_ = -1;
+    dragAxis_ = DragAxis::undecided;
+    dropRow_ = -1;
     snapX_ = -1.0f;
+    if (reorder) setMouseCursor (juce::MouseCursor::NormalCursor);
+
+    const int n = (int) tracks_.size();
+    if (reorder && from >= 0 && from < n && to >= 0 && to < n && from != to)
+    {
+        // Reorder our own copy first so the list shows the result at once;
+        // the owner then pushes the same order back (setTracks keeps the
+        // view: same files, same lengths, no refit).
+        moveVideoTrack (tracks_, from, to);
+        if ((int) soloFlags_.size() == n)
+        {   // vector<bool>: plain erase/insert rather than rotate on proxies
+            const bool flag = soloFlags_[(size_t) from];
+            soloFlags_.erase (soloFlags_.begin() + from);
+            soloFlags_.insert (soloFlags_.begin() + to, flag);
+        }
+        selected_ = videoTrackIndexAfterMove (selected_, from, to);
+        if (onTrackMoved) onTrackMoved (from, to);
+    }
+    repaint();
 }
 
 void VideoTracksPanel::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -1050,6 +1209,18 @@ VideoWindow::VideoWindow (std::function<double()> getTime)
     {
         if (onTrackMenuAction) onTrackMenuAction (id, idx);
     };
+    tracksPanel.onTrackMoved = [this] (int from, int to)
+    {
+        const int n = (int) tracks_.size();
+        if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+        moveVideoTrack (tracks_, from, to);
+        selected_ = videoTrackIndexAfterMove (selected_, from, to);
+        // Same track, new index: switchTo() must not see a change of track.
+        displayed_ = videoTrackIndexAfterMove (displayed_, from, to);
+        syncPanelDurations();
+        refreshDisplayed();   // the order decides which covering track is on top
+        if (onTrackMoved) onTrackMoved (from, to);
+    };
 
     splitter_.onDrag = [this] (double dyPx)
     {
@@ -1083,6 +1254,7 @@ VideoWindow::~VideoWindow()
     tracksPanel.onSelectTrack = nullptr;
     tracksPanel.onOffsetChanged = nullptr;
     tracksPanel.onMenuItem = nullptr;
+    tracksPanel.onTrackMoved = nullptr;
 
     if (contentHost_ != nullptr)
     {

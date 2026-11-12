@@ -103,6 +103,19 @@ public:
     void setLoopRange (juce::Range<double>); juce::Range<double> loopRange() const { return loopRange_; }
     void setGain (float); float gain() const { return gain_.load(); }
 
+    /** Playback mute per channel (a click on a channel number in the
+        tracks): a muted channel's output is silent; the picture stays. Part
+        of this document's session state, not saved with the file. Message
+        thread; the audio thread picks the change up at the next block.
+        Channels past the end of the list are not muted. */
+    void setChannelMuted (int ch, bool muted);
+    bool isChannelMuted (int ch) const noexcept
+    {
+        return ch >= 0 && ch < (int) muted_.size() && muted_[(size_t) ch];
+    }
+    void setMutedChannels (std::vector<bool> muted);
+    const std::vector<bool>& mutedChannels() const noexcept { return muted_; }
+
     /** "Play Spectral Selection": when a non-null selection is installed,
         playback passes through an STFT mask that zeros every (t,f) bin outside
         it. nullptr restores normal playback. Thread-safe: the audio thread
@@ -441,6 +454,16 @@ private:
     // snapshots it per block.
     mutable std::mutex soloMutex;
     std::shared_ptr<const SoloAudio> solo_;
+
+    // Channel mutes: muted_ is the message thread's copy; the audio thread
+    // snapshots mutedForAudio_ (swapped under muteMutex, null when nothing is
+    // muted) once per block and silences those outputs.
+    std::vector<bool> muted_;
+    mutable std::mutex muteMutex;
+    std::shared_ptr<const std::vector<uint8_t>> mutedForAudio_;
+    /** Silences the outputs of muted channels; monoToAll: one file channel
+        feeds every output, so its mute silences them all. */
+    void applyChannelMutes (const juce::AudioSourceChannelInfo& info, bool monoToAll) const;
 
     ::UndoManager* undo = nullptr;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks

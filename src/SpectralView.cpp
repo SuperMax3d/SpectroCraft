@@ -270,6 +270,15 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
+    // A click on a channel number mutes/unmutes that channel; Ctrl+click
+    // (Cmd+click on macOS, where Ctrl+click is the context menu) solos it.
+    if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
+        if (const int ch = channelAtLabel (e.getPosition()); ch >= 0)
+        {
+            app.clickChannelMute (ch, e.mods.isCommandDown());
+            return;
+        }
+
     // Tables panel alignment flow: a left click is consumed as the reference
     // point in this view and reported to the panel. The second value is the
     // fitted [-1,+1] position of the clicked frequency - the same domain
@@ -1055,6 +1064,9 @@ void SpectralView::mouseDoubleClick (const juce::MouseEvent& e)
     // Only left-button double-clicks select; middle/right are pan/menu buttons.
     if (!e.mods.isLeftButtonDown() || !app.audioEngine().isFileLoaded())
         return;
+    // Two quick clicks on a channel number are two mute toggles, not a zoom.
+    if (channelAtLabel (e.getPosition()) >= 0)
+        return;
 
     // A move/scale gesture click must not also trigger "fit whole file": the
     // applying second click of a quick click-click sequence would otherwise
@@ -1235,7 +1247,7 @@ SpectralView::PngExportJob SpectralView::preparePngExport (const juce::File& fil
                     g.fillRect (0, 0, kLeftAxisWidth, H);
                 drawFrequencyRuler (g);
                 drawTimeRuler (g);
-                drawChannelLabels (g);
+                drawChannelLabels (g, false);   // an export never carries the mute state
             }
 
             if (opts.selections)
@@ -1389,6 +1401,16 @@ void SpectralView::paint (juce::Graphics& g)
                      juce::Rectangle<float> ((float) pr.getX(), (float) pr.getY(),
                                              (float) w, (float) h),
                      juce::RectanglePlacement::fillDestination);
+
+        // Muted channels (click on their number) are drawn darker; the
+        // cached picture itself stays as rendered.
+        const auto rows = rowRects ();
+        for (size_t r = 0; r < rows.size() && r < channels.size(); ++r)
+            if (app.audioEngine().isChannelMuted (channels[r]))
+            {
+                g.setColour (juce::Colours::black.withAlpha (0.55f));
+                g.fillRect (pr.getX(), rows[r].getY(), pr.getWidth(), rows[r].getHeight());
+            }
     }
 
     // Opaque ruler background so the labels stay readable over the spectrum.
@@ -2256,26 +2278,53 @@ void SpectralView::estimateTextExtent (int px, int py, const juce::String& text,
 // Channel labels on the left of each track: "L"/"R" for stereo files,
 // channel numbers otherwise. Shown even when a single channel is visible so
 // the axis always says which track it is.
-void SpectralView::drawChannelLabels (juce::Graphics& g)
+void SpectralView::drawChannelLabels (juce::Graphics& g, bool showMuteState)
 {
     const auto rows = rowRects ();
     g.setFont (10.0f);
-    for (size_t r = 0; r < rows.size(); ++r)
+    for (size_t r = 0; r < rows.size() && r < channels.size(); ++r)
     {
         const int ch = channels[r];
         const auto& rr = rows[r];
-        const juce::String lab = (app.audioEngine().numChannels() == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
-        g.setColour (juce::Colour::fromRGB (190, 190, 190));
-        if (axisOnRight())
-            // Right edge of the axis strip: keeps the channel label clear of
-            // the frequency tick labels that start at its left edge.
-            g.drawText (lab, layoutWidth() - kLeftAxisWidth + 4,
-                        rr.getY() + rr.getHeight() / 2 - 8, kLeftAxisWidth - 6, 16,
-                        juce::Justification::centredRight, false);
-        else
-            g.drawText (lab, 4, rr.getY() + rr.getHeight() / 2 - 8, kLeftAxisWidth - 6, 16,
-                       juce::Justification::centredRight, false);
+        const bool muted = showMuteState && app.audioEngine().isChannelMuted (ch);
+        g.setColour (muted ? juce::Colour::fromRGB (255, 80, 80) : juce::Colour::fromRGB (190, 190, 190));
+        // Centred in a slightly wider box: never clipped by a metrics difference.
+        g.drawText (channelLabel (ch), channelLabelBounds (ch, rr.getY() + rr.getHeight() / 2).expanded (4, 0),
+                    juce::Justification::centred, false);
     }
+}
+
+juce::String SpectralView::channelLabel (int ch) const
+{
+    return app.audioEngine().numChannels() == 2 ? juce::String (ch == 0 ? "L" : "R")
+                                                : juce::String (ch + 1);
+}
+
+juce::Rectangle<int> SpectralView::channelLabelBounds (int ch, int centreY) const
+{
+    const juce::Font f (juce::FontOptions (10.0f));   // the label's g.setFont (10.0f)
+    const int textW = (int) std::ceil (juce::GlyphArrangement::getStringWidth (f, channelLabel (ch)));
+    // Right edge of the axis strip in both placements: clear of the
+    // frequency tick labels on the other side of the strip.
+    const int right = axisOnRight() ? layoutWidth() - 2 : kLeftAxisWidth - 2;
+    return { right - textW, centreY - 8, textW, 16 };
+}
+
+int SpectralView::channelAtLabel (juce::Point<int> p) const
+{
+    // Only inside the axis strip: the widened target must never take clicks
+    // from the plot next to it.
+    if (!app.audioEngine().isFileLoaded() || !onAxisX (p.x)) return -1;
+    const auto rows = rowRects ();
+    for (size_t r = 0; r < rows.size() && r < channels.size(); ++r)
+    {
+        const auto& rr = rows[r];
+        const auto text = channelLabelBounds (channels[r], rr.getY() + rr.getHeight() / 2);
+        // A comfortable target around the small text.
+        if (text.withSizeKeepingCentre (std::max (text.getWidth() + 8, 18), 18).contains (p))
+            return channels[r];
+    }
+    return -1;
 }
 
 void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)

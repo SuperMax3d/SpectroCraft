@@ -1387,6 +1387,525 @@ static void testVideoImplicitTrackPersisted()
            "implicit track: the meta.json form matches");
 }
 
+
+//==============================================================================
+// Left-drag pan: the picture follows the pointer one to one. The old code
+// added the whole distance since the mouse-down point on every event, so the
+// pan sped up and lagged behind a change of direction.
+static void testVideoViewPanFollowsPointer()
+{
+    progress ("video view: a left-drag pans the picture one to one");
+    VideoView v;
+    v.setSize (300, 300);
+    sc::VideoFrame fr;
+    fr.image = juce::Image (juce::Image::ARGB, 96, 64, true);
+    fr.time = 0.0;
+    v.setFrame (fr, 0);
+    for (int i = 0; i < 8; ++i) v.zoomIn();   // x5.96: room to pan both ways
+    v.setPan ({ 0.0f, 0.0f });
+
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    v.mouseDown (mkMouse (v, 100, 100, lmb));
+    v.mouseDrag (mkMouse (v, 110, 100, lmb));
+    CHECK (std::abs (v.getPan().x - 10.0f) < 1e-3f && std::abs (v.getPan().y) < 1e-3f,
+           "video pan: 10 px of drag move the picture 10 px");
+    v.mouseDrag (mkMouse (v, 120, 104, lmb));
+    CHECK (std::abs (v.getPan().x - 20.0f) < 1e-3f && std::abs (v.getPan().y - 4.0f) < 1e-3f,
+           "video pan: the picture stays under the pointer (no acceleration)");
+    v.mouseDrag (mkMouse (v, 115, 104, lmb));
+    CHECK (std::abs (v.getPan().x - 15.0f) < 1e-3f,
+           "video pan: turning back moves the picture back at once");
+    v.mouseUp (mkMouse (v, 115, 104, lmb));
+
+    // Against an edge: the picture stops there, and turning back moves it
+    // back immediately (no dead zone to unwind first).
+    v.setPan ({ 1.0e6f, 0.0f });
+    const float maxX = v.getPan().x;
+    CHECK (maxX > 50.0f, "video pan: the zoomed picture has room to pan");
+    v.setPan ({ maxX - 5.0f, 0.0f });
+    v.mouseDown (mkMouse (v, 100, 100, lmb));
+    v.mouseDrag (mkMouse (v, 160, 100, lmb));   // 60 px, only 5 px of room
+    CHECK (std::abs (v.getPan().x - maxX) < 1e-3f, "video pan: stops at the picture edge");
+    v.mouseDrag (mkMouse (v, 150, 100, lmb));   // 10 px back
+    CHECK (std::abs (v.getPan().x - (maxX - 10.0f)) < 1e-3f,
+           "video pan: after the edge, turning back moves at once");
+    v.mouseUp (mkMouse (v, 150, 100, lmb));
+
+    // A drag that started without a picture never pans.
+    v.clearFrame();
+    v.mouseDown (mkMouse (v, 100, 100, lmb));
+    v.setFrame (fr, 0);
+    v.mouseDrag (mkMouse (v, 150, 100, lmb));
+    CHECK (v.getPan().isOrigin(), "video pan: no pan from a drag started before the picture");
+    v.mouseUp (mkMouse (v, 150, 100, lmb));
+}
+
+//==============================================================================
+// Dragging a band up/down reorders the tracks; left/right keeps moving the
+// offset. The first pixels pick the axis, so a reorder never nudges the
+// offset.
+static void testVideoTracksReorderDrag()
+{
+    progress ("video tracks: dragging a band up/down changes the track order");
+    CHECK (videoTrackIndexAfterMove (0, 0, 2) == 2 && videoTrackIndexAfterMove (1, 0, 2) == 0
+           && videoTrackIndexAfterMove (2, 0, 2) == 1 && videoTrackIndexAfterMove (3, 0, 2) == 3
+           && videoTrackIndexAfterMove (-1, 0, 2) == -1,
+           "video reorder: indexes after a move down");
+    CHECK (videoTrackIndexAfterMove (2, 2, 0) == 0 && videoTrackIndexAfterMove (0, 2, 0) == 1
+           && videoTrackIndexAfterMove (1, 2, 0) == 2 && videoTrackIndexAfterMove (3, 2, 0) == 3,
+           "video reorder: indexes after a move up");
+    {
+        std::vector<int> v { 10, 11, 12, 13 };
+        moveVideoTrack (v, 0, 2);
+        CHECK ((v == std::vector<int> { 11, 12, 10, 13 }), "video reorder: move down");
+        moveVideoTrack (v, 2, 0);
+        CHECK ((v == std::vector<int> { 10, 11, 12, 13 }), "video reorder: move up restores");
+        moveVideoTrack (v, 1, 9);
+        CHECK ((v == std::vector<int> { 10, 11, 12, 13 }), "video reorder: out-of-range target ignored");
+    }
+
+    VideoTracksPanel p;
+    p.setSize (300, VideoTracksPanel::kRulerH + 4 * VideoTracksPanel::kRowH + VideoTracksPanel::kBarW);
+    p.setAudioDuration (10.0);
+    VideoTracksPanel::Track a, b, c;
+    a.file = juce::File ("/tmp/sc_reorder_a.mp4"); a.durationSecs = 10.0;
+    b.file = juce::File ("/tmp/sc_reorder_b.mp4"); b.durationSecs = 10.0;
+    c.file = juce::File ("/tmp/sc_reorder_c.mp4"); c.durationSecs = 10.0;
+    p.setTracks ({ a, b, c });
+
+    int movedFrom = -1, movedTo = -1, offsetCalls = 0;
+    p.onTrackMoved = [&] (int f, int t) { movedFrom = f; movedTo = t; };
+    p.onOffsetChanged = [&] (int, double) { ++offsetCalls; };
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    const int x = (int) p.xForTime (5.0);
+    const int row0 = VideoTracksPanel::kRulerH + VideoTracksPanel::kRowH / 2;
+    const int row2 = row0 + 2 * VideoTracksPanel::kRowH;
+
+    p.mouseDown (mkMouse (p, x, row0, lmb));
+    p.mouseDrag (mkMouse (p, x + 1, row0 + 2, lmb));   // under the threshold
+    CHECK (p.pendingDropRow() == -1 && offsetCalls == 0 && p.getTracks()[0].offsetSecs == 0.0,
+           "video reorder: a tiny move picks no axis yet");
+    p.mouseDrag (mkMouse (p, x + 2, row2, lmb));       // mostly vertical
+    CHECK (p.pendingDropRow() == 2 && offsetCalls == 0 && p.getTracks()[0].offsetSecs == 0.0,
+           "video reorder: a vertical drag targets the third row and keeps the offset");
+    {
+        // While dragging, a white line marks where the band lands (below row 2).
+        juce::Image img (juce::Image::RGB, p.getWidth(), p.getHeight(), true);
+        juce::Graphics g (img);
+        p.paint (g);
+        const int ly = VideoTracksPanel::kRulerH + 3 * VideoTracksPanel::kRowH;
+        const auto c0 = img.getPixelAt (p.getWidth() - 20, ly);
+        CHECK (c0.getRed() > 230 && c0.getGreen() > 230 && c0.getBlue() > 230,
+               "video reorder: the insertion line is drawn below the target row");
+    }
+    p.mouseUp (mkMouse (p, x + 2, row2, lmb));
+    CHECK (movedFrom == 0 && movedTo == 2, "video reorder: released on row 2 -> track 0 moves to 2");
+    CHECK (p.getTracks()[0].file == b.file && p.getTracks()[1].file == c.file
+           && p.getTracks()[2].file == a.file, "video reorder: the list shows the new order");
+    CHECK (p.getSelected() == 2, "video reorder: the moved track stays selected");
+    CHECK (p.pendingDropRow() == -1, "video reorder: nothing pending after the release");
+
+    // Dropped back on its own row: no move.
+    movedFrom = -1;
+    p.mouseDown (mkMouse (p, x, row2, lmb));
+    p.mouseDrag (mkMouse (p, x, row2 + 8, lmb));
+    p.mouseUp (mkMouse (p, x, row2 + 8, lmb));
+    CHECK (movedFrom == -1, "video reorder: dropping on the same row changes nothing");
+
+    // A mostly horizontal drag moves the offset only.
+    p.mouseDown (mkMouse (p, x, row0, lmb));
+    p.mouseDrag (mkMouse (p, x + 40, row0 + 6, lmb));
+    p.mouseUp (mkMouse (p, x + 40, row0 + 6, lmb));
+    CHECK (movedFrom == -1 && offsetCalls > 0 && p.getTracks()[0].offsetSecs > 0.5,
+           "video reorder: a horizontal drag moves the offset, not the order");
+
+    // A lone track has no order to change: its offset follows from the first pixel.
+    VideoTracksPanel q;
+    q.setSize (300, VideoTracksPanel::kRulerH + 4 * VideoTracksPanel::kRowH + VideoTracksPanel::kBarW);
+    q.setAudioDuration (10.0);
+    q.setTracks ({ a });
+    double off = -1.0;
+    q.onOffsetChanged = [&] (int, double o) { off = o; };
+    q.mouseDown (mkMouse (q, x, row0, lmb));
+    q.mouseDrag (mkMouse (q, x + 2, row0 + 1, lmb));
+    q.mouseUp (mkMouse (q, x + 2, row0 + 1, lmb));
+    CHECK (off > 0.0 && off < 0.2, "video reorder: a single track's offset moves from the first pixel");
+}
+
+//==============================================================================
+// The reorder reaches the document (no picture decoder needed: the files do
+// not even exist, only the list matters).
+static void testVideoTrackReorderSavedInDocument()
+{
+    progress ("video tracks: a reorder reaches the document's track list");
+    const juce::File store = makeTempFile ("video_reorder.recent");
+    store.deleteFile();
+    const juce::File wav = makeTempFile ("video_reorder.wav");
+    writeWav (wav, 1, 48000.0, 48000, [] (int, int64_t, double) { return 0.0f; });
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "video reorder test"));
+        CHECK (app.openFile (wav), "video reorder doc: the wav opens");
+        FileDoc* d = app.doc();
+        if (d != nullptr)
+        {
+            sc::VideoTrackData a, b, c;
+            a.file = juce::File ("/tmp/sc_reorder_doc_a.mp4");
+            b.file = juce::File ("/tmp/sc_reorder_doc_b.mp4"); b.offsetSecs = 0.25;
+            c.file = juce::File ("/tmp/sc_reorder_doc_c.mp4"); c.offsetSecs = 0.5;
+            d->setVideoTracks ({ a, b, c });
+            win->syncVideoWindow();
+            auto* vw = win->getVideoWindow();
+            CHECK (vw != nullptr, "video reorder doc: the window exists for the tracks");
+            if (vw != nullptr)
+            {
+                auto& p = vw->getTracksPanel();
+                p.setSize (300, VideoTracksPanel::kRulerH + 4 * VideoTracksPanel::kRowH + VideoTracksPanel::kBarW);
+                const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+                const int x = (int) p.xForTime (0.75);   // every band covers it
+                const int row0 = VideoTracksPanel::kRulerH + VideoTracksPanel::kRowH / 2;
+                const int row2 = row0 + 2 * VideoTracksPanel::kRowH;
+                d->metaDirty = false;
+                p.mouseDown (mkMouse (p, x, row2, lmb));   // selects track 2 (c)
+                p.mouseDrag (mkMouse (p, x, row0, lmb));
+                p.mouseUp (mkMouse (p, x, row0, lmb));
+                CHECK (d->videoTracks.size() == 3 && d->videoTracks[0].file == c.file
+                       && d->videoTracks[1].file == a.file && d->videoTracks[2].file == b.file,
+                       "video reorder doc: the document holds the new order");
+                CHECK (std::abs (d->videoTracks[0].offsetSecs - 0.5) < 1e-12,
+                       "video reorder doc: the moved track keeps its offset");
+                CHECK (d->selectedVideoTrack == 0, "video reorder doc: the selection follows the track");
+                CHECK ((bool) d->metaDirty, "video reorder doc: the new order is saved with the file");
+            }
+        }
+        win.reset();
+    }
+    wav.deleteFile();
+    store.deleteFile();
+}
+
+//==============================================================================
+static juce::Image videoScalerRandomImage (int w, int h, int seed)
+{
+    juce::Random rnd (seed);
+    juce::Image img (juce::Image::ARGB, w, h, false);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            img.setPixelAt (x, y, juce::Colour ((juce::uint8) rnd.nextInt (256), (juce::uint8) rnd.nextInt (256),
+                                                (juce::uint8) rnd.nextInt (256), (juce::uint8) 255));
+    return img;
+}
+
+static bool videoScalerSamePixels (const juce::Image& a, const juce::Image& b)
+{
+    if (a.getWidth() != b.getWidth() || a.getHeight() != b.getHeight()) return false;
+    for (int y = 0; y < a.getHeight(); ++y)
+        for (int x = 0; x < a.getWidth(); ++x)
+            if (a.getPixelAt (x, y).getARGB() != b.getPixelAt (x, y).getARGB()) return false;
+    return true;
+}
+
+// Kernels, exactness (identity, rotation, nearest blocks, constants, ramps),
+// weight reuse and multi-threading of the picture scaler.
+static void testVideoScaler()
+{
+    progress ("video scaler: kernels, identity, rotation, nearest, ramps, threads");
+    using sc::VideoUpscaling;
+    const VideoUpscaling all[] = { VideoUpscaling::lanczos, VideoUpscaling::bicubic, VideoUpscaling::nearest };
+
+    for (const auto m : { VideoUpscaling::lanczos, VideoUpscaling::bicubic })
+    {
+        bool zeros = true;
+        for (int k = 1; k <= 4; ++k)
+            zeros = zeros && std::abs (sc::videoScalerKernel (m, k)) < 1e-9
+                          && std::abs (sc::videoScalerKernel (m, -k)) < 1e-9;
+        CHECK (std::abs (sc::videoScalerKernel (m, 0.0) - 1.0) < 1e-12 && zeros,
+               "video scaler: " + sc::videoUpscalingName (m) + " is 1 at 0 and 0 at the other integers");
+    }
+    CHECK (std::abs (sc::videoScalerKernel (VideoUpscaling::lanczos, 0.5) - 0.607927) < 1e-5
+           && sc::videoScalerKernel (VideoUpscaling::lanczos, 3.0) == 0.0,
+           "video scaler: Lanczos a = 3");
+    CHECK (std::abs (sc::videoScalerKernel (VideoUpscaling::bicubic, 0.5) - 0.575) < 1e-12
+           && std::abs (sc::videoScalerKernel (VideoUpscaling::bicubic, 1.5) + 0.075) < 1e-12,
+           "video scaler: Bicubic A = -0.6 (swscale's default)");
+    for (const auto m : all)
+        CHECK (sc::videoUpscalingFromName (sc::videoUpscalingName (m)) == m,
+               "video scaler: name round trip " + sc::videoUpscalingName (m));
+    CHECK (sc::videoUpscalingFromName ("nearest") == VideoUpscaling::nearest
+           && sc::videoUpscalingFromName ("bogus") == VideoUpscaling::lanczos,
+           "video scaler: names are case-insensitive, unknown = Lanczos");
+
+    // 1:1 gives the picture back for every method.
+    const juce::Image src = videoScalerRandomImage (13, 9, 1234);
+    for (const auto m : all)
+    {
+        sc::VideoScaler s;
+        juce::Image out;
+        const bool ok = s.render (src, 0, { 0.0, 0.0, 13.0, 9.0 }, 13, 9, m, out);
+        CHECK (ok && videoScalerSamePixels (out, src),
+               "video scaler: 1:1 is the identity (" + sc::videoUpscalingName (m) + ")");
+    }
+
+    // Quarter turns: exactly the picture turned clockwise.
+    for (const int rot : { 90, 180, 270 })
+    {
+        const bool quarter = rot != 180;
+        const int wd = quarter ? 9 : 13, hd = quarter ? 13 : 9;
+        juce::Image expected (juce::Image::ARGB, wd, hd, false);
+        for (int v = 0; v < hd; ++v)
+            for (int u = 0; u < wd; ++u)
+            {
+                int x = u, y = v;
+                if (rot == 90)       { x = v;          y = 9 - 1 - u; }
+                else if (rot == 180) { x = 13 - 1 - u; y = 9 - 1 - v; }
+                else                 { x = 13 - 1 - v; y = u; }
+                expected.setPixelAt (u, v, src.getPixelAt (x, y));
+            }
+        for (const auto m : { VideoUpscaling::lanczos, VideoUpscaling::nearest })
+        {
+            sc::VideoScaler s;
+            juce::Image out;
+            s.render (src, rot, { 0.0, 0.0, (double) wd, (double) hd }, wd, hd, m, out);
+            CHECK (videoScalerSamePixels (out, expected),
+                   "video scaler: " + juce::String (rot) + " degrees = the picture turned clockwise ("
+                   + sc::videoUpscalingName (m) + ")");
+        }
+    }
+
+    // Nearest x4: blocks of the source pixels.
+    {
+        sc::VideoScaler s;
+        juce::Image out;
+        s.render (src, 0, { 0.0, 0.0, 13.0, 9.0 }, 52, 36, VideoUpscaling::nearest, out);
+        bool blocks = true;
+        for (int y = 0; y < 36 && blocks; ++y)
+            for (int x = 0; x < 52; ++x)
+                if (out.getPixelAt (x, y).getARGB() != src.getPixelAt (x / 4, y / 4).getARGB()) { blocks = false; break; }
+        CHECK (blocks, "video scaler: Nearest x4 repeats each source pixel 4x4");
+    }
+
+    // A flat colour stays exactly flat (normalised weights, no ringing).
+    {
+        juce::Image flat (juce::Image::ARGB, 8, 6, false);
+        flat.clear (flat.getBounds(), juce::Colour (100, 150, 200));
+        for (const auto m : all)
+        {
+            sc::VideoScaler s;
+            juce::Image out;
+            s.render (flat, 0, { 0.7, 0.3, 5.1, 4.2 }, 37, 29, m, out);
+            bool same = true;
+            for (int y = 0; y < out.getHeight() && same; ++y)
+                for (int x = 0; x < out.getWidth(); ++x)
+                    if (out.getPixelAt (x, y) != juce::Colour (100, 150, 200)) { same = false; break; }
+            CHECK (same, "video scaler: a flat colour stays flat (" + sc::videoUpscalingName (m) + ")");
+        }
+    }
+
+    // A linear ramp enlarged x3.7 stays a ramp inside (the filters interpolate).
+    {
+        juce::Image ramp (juce::Image::ARGB, 40, 4, false);
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 40; ++x)
+                ramp.setPixelAt (x, y, juce::Colour ((juce::uint8) (6 * x), (juce::uint8) (6 * x), (juce::uint8) (6 * x)));
+        const int outW = 148;   // 40 * 3.7
+        for (const auto m : { VideoUpscaling::lanczos, VideoUpscaling::bicubic })
+        {
+            sc::VideoScaler s;
+            juce::Image out;
+            s.render (ramp, 0, { 0.0, 0.0, 40.0, 4.0 }, outW, 8, m, out);
+            double worst = 0.0;
+            for (int i = 20; i < outW - 20; ++i)
+            {
+                const double c = (i + 0.5) * 40.0 / outW - 0.5;   // source position of pixel i
+                worst = std::max (worst, std::abs (out.getPixelAt (i, 4).getRed() - 6.0 * c));
+            }
+            CHECK (worst <= 2.0, "video scaler: a ramp stays linear (" + sc::videoUpscalingName (m)
+                                 + ", worst " + juce::String (worst, 2) + ")");
+        }
+    }
+
+    // A step: the filters make a smooth edge, Nearest keeps it hard.
+    {
+        juce::Image step (juce::Image::ARGB, 8, 2, false);
+        for (int x = 0; x < 8; ++x)
+            for (int y = 0; y < 2; ++y)
+                step.setPixelAt (x, y, x < 4 ? juce::Colours::black : juce::Colours::white);
+        auto greys = [&] (VideoUpscaling m)
+        {
+            sc::VideoScaler s;
+            juce::Image out;
+            s.render (step, 0, { 0.0, 0.0, 8.0, 2.0 }, 64, 4, m, out);
+            int n = 0;
+            for (int x = 0; x < 64; ++x)
+            {
+                const int r = out.getPixelAt (x, 1).getRed();
+                if (r > 20 && r < 235) ++n;
+            }
+            return n;
+        };
+        CHECK (greys (VideoUpscaling::nearest) == 0, "video scaler: Nearest keeps the edge hard");
+        CHECK (greys (VideoUpscaling::lanczos) >= 4 && greys (VideoUpscaling::bicubic) >= 4,
+               "video scaler: Lanczos / Bicubic make a smooth edge");
+    }
+
+    // The same geometry reuses the weight tables; a pan only rebuilds one axis.
+    {
+        sc::VideoScaler s;
+        juce::Image out;
+        s.render (src, 0, { 1.0, 1.0, 8.0, 6.0 }, 40, 30, VideoUpscaling::lanczos, out);
+        const int builds = s.weightTableBuilds();
+        s.render (src, 0, { 1.0, 1.0, 8.0, 6.0 }, 40, 30, VideoUpscaling::lanczos, out);
+        CHECK (s.weightTableBuilds() == builds, "video scaler: the same geometry reuses its weights");
+        s.render (src, 0, { 1.5, 1.0, 8.0, 6.0 }, 40, 30, VideoUpscaling::lanczos, out);
+        CHECK (s.weightTableBuilds() == builds + 1, "video scaler: a horizontal pan rebuilds one axis");
+    }
+
+    // Worker threads give exactly the single-threaded result (up and down).
+    {
+        const juce::Image big = videoScalerRandomImage (160, 120, 99);
+        for (const auto m : all)
+            for (const auto& [ow, oh] : { std::pair<int, int> { 700, 500 }, std::pair<int, int> { 53, 41 } })
+            {
+                sc::VideoScaler one, many;
+                one.setMaxWorkerThreads (0);
+                many.setMaxWorkerThreads (3);
+                juce::Image a, b;
+                one.render (big, 90, { 3.25, 2.5, 110.0, 150.0 }, ow, oh, m, a);
+                many.render (big, 90, { 3.25, 2.5, 110.0, 150.0 }, ow, oh, m, b);
+                CHECK (videoScalerSamePixels (a, b), "video scaler: threads change nothing ("
+                       + sc::videoUpscalingName (m) + ", " + juce::String (ow) + "x" + juce::String (oh) + ")");
+            }
+    }
+
+    // Bad input is refused, the output left alone.
+    {
+        sc::VideoScaler s;
+        juce::Image out;
+        CHECK (!s.render (juce::Image(), 0, { 0.0, 0.0, 1.0, 1.0 }, 4, 4, VideoUpscaling::lanczos, out)
+               && !s.render (src, 0, { 0.0, 0.0, 0.0, 1.0 }, 4, 4, VideoUpscaling::lanczos, out)
+               && !s.render (src, 0, { 0.0, 0.0, 1.0, 1.0 }, 0, 4, VideoUpscaling::lanczos, out)
+               && !out.isValid(),
+               "video scaler: invalid input is refused");
+    }
+}
+
+//==============================================================================
+// The picture's Upscaling submenu, the scaled painting, and the track
+// actions' menu ids (they used to alias the rotate items).
+static void testVideoViewUpscaling()
+{
+    progress ("video view: Upscaling menu, scaled painting, track-action ids");
+    VideoView v;
+    v.setSize (300, 300);
+    CHECK (v.getUpscaling() == sc::VideoUpscaling::lanczos, "video upscaling: Lanczos by default");
+    int changes = 0;
+    auto last = sc::VideoUpscaling::lanczos;
+    v.onUpscalingChanged = [&] (sc::VideoUpscaling m) { ++changes; last = m; };
+    v.handleContextMenuId (VideoView::kMenuUpscaleBicubic);
+    CHECK (v.getUpscaling() == sc::VideoUpscaling::bicubic && changes == 1
+           && last == sc::VideoUpscaling::bicubic, "video upscaling: the menu picks Bicubic");
+    v.handleContextMenuId (VideoView::kMenuUpscaleBicubic);
+    CHECK (changes == 1, "video upscaling: picking the current method again notifies nothing");
+    v.setUpscaling (sc::VideoUpscaling::nearest);
+    CHECK (changes == 1 && v.getUpscaling() == sc::VideoUpscaling::nearest,
+           "video upscaling: restoring a saved method does not notify");
+
+    // Track actions in the picture's menu run the action, never a rotation.
+    sc::VideoFrame fr;
+    fr.image = juce::Image (juce::Image::ARGB, 8, 8, true);
+    fr.time = 0.0;
+    v.setFrame (fr, 0);
+    int actId = -1, actIdx = -1;
+    v.getDisplayedTrack = [] { return 3; };
+    v.onTrackMenuAction = [&] (int id, int idx) { actId = id; actIdx = idx; };
+    v.handleContextMenuId (VideoView::kMenuTrackActionBase + VideoTracksPanel::kMenuSyncAudio);
+    CHECK (actId == VideoTracksPanel::kMenuSyncAudio && actIdx == 3 && v.getUserRotation() == 0,
+           "video menu: 'Sync based on Audio' runs the track action, no rotation");
+    v.handleContextMenuId (VideoView::kMenuTrackActionBase + VideoTracksPanel::kMenuAlign);
+    CHECK (actId == VideoTracksPanel::kMenuAlign && v.getUserRotation() == 0,
+           "video menu: 'Align...' runs the track action, no rotation");
+    actId = -1;
+    v.handleContextMenuId (VideoView::kMenuRotateCW);
+    CHECK (v.getUserRotation() == 90 && actId == -1, "video menu: the rotate item only rotates");
+    v.setUserRotation (0);
+
+    // Painting an 8x8 checkerboard at x8: the screen shows about one source
+    // pixel boundary. Nearest keeps the two colours, the filters blend them.
+    juce::Image checker (juce::Image::ARGB, 8, 8, false);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            checker.setPixelAt (x, y, ((x + y) & 1) ? juce::Colours::white : juce::Colours::black);
+    fr.image = checker;
+    v.setFrame (fr, 0);
+    for (int i = 0; i < 12; ++i) v.zoomIn();
+    auto greys = [&] (sc::VideoUpscaling m)
+    {
+        v.setUpscaling (m);
+        juce::Image img (juce::Image::RGB, 300, 300, true);
+        {
+            juce::Graphics g (img);
+            v.paint (g);
+        }
+        int n = 0;
+        for (int y = 0; y < 286; y += 2)
+            for (int x = 0; x < 286; x += 2)
+            {
+                const int r = img.getPixelAt (x, y).getRed();
+                if (r > 25 && r < 230) ++n;
+            }
+        return n;
+    };
+    CHECK (greys (sc::VideoUpscaling::nearest) == 0, "video upscaling: Nearest paints the raw pixels");
+    CHECK (greys (sc::VideoUpscaling::lanczos) > 500, "video upscaling: Lanczos paints smooth transitions");
+    CHECK (greys (sc::VideoUpscaling::bicubic) > 500, "video upscaling: Bicubic paints smooth transitions");
+    const int builds = v.scaler().weightTableBuilds();
+    {
+        juce::Image img (juce::Image::RGB, 300, 300, true);
+        juce::Graphics g (img);
+        v.paint (g);
+    }
+    CHECK (v.scaler().weightTableBuilds() == builds, "video upscaling: a plain repaint reuses the scaled picture");
+}
+
+//==============================================================================
+// The Upscaling choice is kept in the settings store across sessions.
+static void testVideoUpscalingRemembered()
+{
+    progress ("video view: the Upscaling choice is remembered between sessions");
+    const juce::File store = makeTempFile ("video_upscaling.recent");
+    store.deleteFile();
+    const juce::File wav = makeTempFile ("video_upscaling.wav");
+    writeWav (wav, 1, 48000.0, 4800, [] (int, int64_t, double) { return 0.0f; });
+    {
+        Application app (store);
+        app.recentStore->setValue ("video_upscaling", "Bicubic");
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "video upscaling test"));
+        CHECK (app.openFile (wav), "video upscaling: the wav opens");
+        if (FileDoc* d = app.doc())
+        {
+            sc::VideoTrackData t;
+            t.file = juce::File ("/tmp/sc_upscaling_missing.mp4");
+            d->setVideoTracks ({ t });
+            win->syncVideoWindow();
+        }
+        auto* vw = win->getVideoWindow();
+        CHECK (vw != nullptr && vw->view().getUpscaling() == sc::VideoUpscaling::bicubic,
+               "video upscaling: the saved choice is restored");
+        if (vw != nullptr)
+            vw->view().handleContextMenuId (VideoView::kMenuUpscaleNearest);
+        CHECK (app.recentStore->getValue ("video_upscaling") == "Nearest",
+               "video upscaling: a new choice is saved at once");
+        win.reset();
+    }
+    {
+        Application app2 (store);
+        CHECK (app2.recentStore->getValue ("video_upscaling") == "Nearest",
+               "video upscaling: the next session reads it back");
+    }
+    wav.deleteFile();
+    store.deleteFile();
+}
+
 static void runRegression_video()
 {
     testVideoDisplayTimeRule();
@@ -1406,4 +1925,10 @@ static void runRegression_video()
     testVideoImplicitTrackPersisted();
     testVideoSyncMath();
     testVideoTrackMenuActions();
+    testVideoViewPanFollowsPointer();
+    testVideoTracksReorderDrag();
+    testVideoTrackReorderSavedInDocument();
+    testVideoScaler();
+    testVideoViewUpscaling();
+    testVideoUpscalingRemembered();
 }
