@@ -6549,6 +6549,23 @@ void StatusBar::paint (juce::Graphics& g)
             leftX += w + 12;
         }
     }
+    // Channel numbers: dim = hidden, red = muted; a click shows/hides one.
+    if (const auto chips = channelChipRects(); !chips.empty())
+    {
+        g.setFont (11.0f);
+        for (size_t i = 0; i < chips.size(); ++i)
+        {
+            const bool shown = i < chanShown_.size() && chanShown_[i];
+            const bool muted = i < chanMuted_.size() && chanMuted_[i];
+            g.setColour (shown ? juce::Colour::fromRGB (72, 74, 84) : juce::Colour::fromRGB (52, 52, 56));
+            g.fillRoundedRectangle (chips[i].toFloat(), 3.0f);
+            g.setColour (muted ? (shown ? juce::Colour::fromRGB (255, 90, 90) : juce::Colour::fromRGB (150, 70, 70))
+                               : (shown ? juce::Colour::fromRGB (235, 235, 240) : juce::Colour::fromRGB (110, 110, 120)));
+            g.drawText (channelChipLabel ((int) i), chips[i], juce::Justification::centred, false);
+        }
+        leftX = chips.back().getRight() + 12;
+        g.setFont (12.0f);
+    }
     if (!modeText.isEmpty() && leftX < b.getWidth() - 8)
     {
         // Live recording indicator: a solid red dot drawn as graphics so it
@@ -6648,6 +6665,83 @@ void StatusBar::paint (juce::Graphics& g)
                         juce::Justification::right, false);
         }
     }
+}
+
+int StatusBar::fileAndRateEnd() const
+{
+    // Same measurements as the start of paint().
+    const int W = getWidth();
+    const juce::Font f (juce::FontOptions (12.0f));
+    int leftX = 6;
+    if (!fileName.isEmpty())
+    {
+        const int w = std::min (W / 2 - leftX,
+                                (int) juce::GlyphArrangement::getStringWidth (f, fileName) + 8);
+        if (w > 10) leftX += w + 12;
+    }
+    if (!ratePart.isEmpty() && leftX < W - 8)
+    {
+        const int w = std::min (W / 2 + 60 - leftX,
+                                (int) juce::GlyphArrangement::getStringWidth (f, ratePart) + 8);
+        if (w > 10) leftX += w + 12;
+    }
+    return leftX;
+}
+
+void StatusBar::setChannels (int count, const std::vector<int>& visible, const std::vector<bool>& muted)
+{
+    count = std::max (0, count);
+    std::vector<bool> shown ((size_t) count, false), mut ((size_t) count, false);
+    for (const int ch : visible)
+        if (ch >= 0 && ch < count) shown[(size_t) ch] = true;
+    for (int ch = 0; ch < count && ch < (int) muted.size(); ++ch)
+        mut[(size_t) ch] = muted[(size_t) ch];
+    if (count == chanCount_ && shown == chanShown_ && mut == chanMuted_) return;
+    chanCount_ = count;
+    chanShown_ = std::move (shown);
+    chanMuted_ = std::move (mut);
+    repaint();
+}
+
+juce::String StatusBar::channelChipLabel (int ch) const
+{
+    return chanCount_ == 2 ? juce::String (ch == 0 ? "L" : "R") : juce::String (ch + 1);
+}
+
+std::vector<juce::Rectangle<int>> StatusBar::channelChipRects() const
+{
+    std::vector<juce::Rectangle<int>> r;
+    if (chanCount_ <= 0) return r;
+    int x = fileAndRateEnd();
+    // Never under the editable fields on the right (or past the edge): the
+    // numbers that do not fit are left out.
+    const int limit = rightFits_ ? computeRightLayout (getWidth()).selLabelX - 8 : getWidth() - 8;
+    const juce::Font f (juce::FontOptions (11.0f));   // paint's g.setFont (11.0f)
+    const int h = std::max (12, getHeight() - 6);
+    const int y = (getHeight() - h) / 2;
+    for (int ch = 0; ch < chanCount_; ++ch)
+    {
+        const int w = std::max (16, (int) std::ceil (juce::GlyphArrangement::getStringWidth (f, channelChipLabel (ch))) + 8);
+        if (x + w > limit) break;
+        r.push_back ({ x, y, w, h });
+        x += w + 3;
+    }
+    return r;
+}
+
+int StatusBar::channelChipAt (juce::Point<int> p) const
+{
+    const auto chips = channelChipRects();
+    for (size_t i = 0; i < chips.size(); ++i)
+        if (chips[i].expanded (1, 2).contains (p)) return (int) i;
+    return -1;
+}
+
+void StatusBar::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu()) return;
+    const int ch = channelChipAt (e.getPosition());
+    if (ch >= 0 && onChannelClicked) onChannelClicked (ch, e.mods.isCommandDown());
 }
 
 void StatusBar::setSelection (double t0, double t1)
@@ -9009,6 +9103,56 @@ void TablesPlotView::setFocusTableIndex (int idx)
     repaint();
 }
 
+void TablesPlotView::setFocusParamIndex (int idx)
+{
+    if (idx == focusParam_) return;
+    focusParam_ = idx;
+    repaint();   // the playhead may map elsewhere under that parameter's alignment
+}
+
+juce::Rectangle<int> TablesPlotView::plotRect() const
+{
+    const int axisH = 14;   // time labels at the bottom
+    return { 2, 2, std::max (1, getWidth() - 4), std::max (1, getHeight() - 4 - axisH) };
+}
+
+std::pair<double, double> TablesPlotView::focusTimeMap() const
+{
+    auto* d = app.doc ();
+    if (d == nullptr || focusIdx_ < 0 || focusIdx_ >= (int) d->tables.size ()) return { 0.0, 1.0 };
+    const auto& t = d->tables[(size_t) focusIdx_];
+    if (focusParam_ >= 0 && focusParam_ < (int) t.params.size())
+        return t.effectiveTimeMap (t.params[(size_t) focusParam_]);
+    return { t.offsetSecs, t.scaleTime };
+}
+
+double TablesPlotView::docToTableTime (double docSecs) const
+{
+    const auto [off, scale] = focusTimeMap();
+    return std::abs (scale) > 1e-12 ? (docSecs - off) / scale : docSecs - off;
+}
+
+double TablesPlotView::tableToDocTime (double tTableSecs) const
+{
+    const auto [off, scale] = focusTimeMap();
+    return off + scale * tTableSecs;
+}
+
+int TablesPlotView::playheadX() const
+{
+    const double dur = tableDuration();
+    if (playheadDoc_ < 0.0 || dur <= 0.0) return -1;
+    const double t = docToTableTime (playheadDoc_);
+    if (!(t >= 0.0 && t <= dur)) return -1;   // outside this table's time span
+    return (int) std::floor (tableTimeToX (t));
+}
+
+void TablesPlotView::setPlayhead (double docSecs)
+{
+    playheadDoc_ = docSecs;
+    if (playheadX() != shownPlayheadX_) repaint();   // only when the line moves
+}
+
 double TablesPlotView::tableDuration() const
 {
     auto* d = app.doc ();
@@ -9016,15 +9160,28 @@ double TablesPlotView::tableDuration() const
     return d->tables[(size_t) focusIdx_].duration();
 }
 
+// Column centre i of the curves area shows table time i / (width - 1) * dur.
 double TablesPlotView::xToTableTime (int x) const
 {
     const double dur = tableDuration();
-    if (dur <= 0.0 || getWidth() <= 1) return 0.0;
-    return std::clamp ((double) x / (double) getWidth(), 0.0, 1.0) * dur;
+    const auto pr = plotRect();
+    if (dur <= 0.0 || pr.getWidth() <= 1) return 0.0;
+    return std::clamp (((double) x - pr.getX()) / (double) (pr.getWidth() - 1), 0.0, 1.0) * dur;
+}
+
+float TablesPlotView::tableTimeToX (double tTableSecs) const
+{
+    const double dur = tableDuration();
+    const auto pr = plotRect();
+    if (dur <= 0.0 || pr.getWidth() <= 1) return (float) pr.getX();
+    return (float) (pr.getX() + 0.5 + tTableSecs / dur * (double) (pr.getWidth() - 1));
 }
 
 void TablesPlotView::paint (juce::Graphics& g)
 {
+    // Recorded even when the plot ends up empty, so setPlayhead() only
+    // repaints when the line would actually move.
+    shownPlayheadX_ = playheadX();
     const auto bounds = getLocalBounds();
     g.fillAll (juce::Colour::fromRGB (24, 24, 28));
     g.setColour (juce::Colour::fromRGB (70, 70, 80));
@@ -9062,7 +9219,7 @@ void TablesPlotView::paint (juce::Graphics& g)
     mn -= pad; mx += pad;
 
     const int axisH = 14;   // time labels at the bottom
-    const auto pr = juce::Rectangle<int> (2, 2, getWidth() - 4, getHeight() - 4 - axisH);
+    const auto pr = plotRect();
     const int nLab = 4;
 
     // Grid like the Frequency Analysis graph: vertical lines at the time-label
@@ -9097,8 +9254,9 @@ void TablesPlotView::paint (juce::Graphics& g)
             // Empty cells break the curve: not drawn, never treated as zero.
             if (!std::isfinite (v)) { started = false; continue; }
             const float y = pr.getY() + (float) ((mx - v) / (mx - mn)) * (float) pr.getHeight();
-            if (!started) { path.startNewSubPath ((float) i + 0.5f, y); started = true; }
-            else          path.lineTo ((float) i + 0.5f, y);
+            const float x = (float) (pr.getX() + i) + 0.5f;   // = tableTimeToX (tt)
+            if (!started) { path.startNewSubPath (x, y); started = true; }
+            else          path.lineTo (x, y);
         }
         g.setColour (sc::tables::tableColourAt (p.colorIndex, app.settings.tableCustomColours));
         g.strokePath (path, juce::PathStrokeType (1.6f));
@@ -9112,6 +9270,14 @@ void TablesPlotView::paint (juce::Graphics& g)
                     juce::Rectangle<int> (pr.getX() + pr.getWidth() * i / nLab - 18,
                                           getHeight() - axisH + 1, 36, 12),
                     juce::Justification::centred, true);
+
+    // The document playhead in this table's time: a red line like the one in
+    // the tracks, following playback and every click that moves it.
+    if (shownPlayheadX_ >= 0)
+    {
+        g.setColour (juce::Colours::red.withAlpha (0.95f));
+        g.fillRect (shownPlayheadX_, pr.getY(), 2, pr.getHeight());
+    }
 
     // Delicate white vertical cursor line, like the Frequency Analysis graph.
     if (hoverPos_.x >= pr.getX() && hoverPos_.x <= pr.getRight())
@@ -9143,9 +9309,28 @@ void TablesPlotView::paint (juce::Graphics& g)
 
 void TablesPlotView::mouseDown (const juce::MouseEvent& e)
 {
+    pointGesture_ = false;
     if (!e.mods.isLeftButtonDown() || e.mods.isRightButtonDown()) return;
     if (onPointClicked && tableDuration() > 0.0)
+    {
+        pointGesture_ = true;
         onPointClicked (xToTableTime (e.x));
+    }
+}
+
+void TablesPlotView::mouseDrag (const juce::MouseEvent& e)
+{
+    hoverPos_ = { e.x, e.y };   // the value readout follows the drag too
+    collectHoverLabels (e.x, e.y);
+    repaint();
+    // Only the drag of a press that was reported (same gesture, same rule).
+    if (pointGesture_ && onPointDragged && tableDuration() > 0.0)
+        onPointDragged (xToTableTime (e.x));
+}
+
+void TablesPlotView::mouseUp (const juce::MouseEvent&)
+{
+    pointGesture_ = false;
 }
 
 void TablesPlotView::mouseMove (const juce::MouseEvent& e)
@@ -9641,12 +9826,49 @@ TablesPanel::TablesPanel (Application& appIn)
     masterShowBtn.onClick = [this] { app.setShowAllTables (!app.showAllTables); };
     masterShowBtn.onShiftClick = [this] (const juce::MouseEvent&) { toggleAllVisibility (); };
 
-    plot.onPointClicked = [this] (double tTab) { handlePlotClick (tTab); };
+    // A click in the plot feeds a click-based alignment that still needs
+    // plot points; otherwise it moves the playhead there. Decided once per
+    // gesture: the drag that follows obeys the same rule (dragging scrubs).
+    plot.onPointClicked = [this] (double tTab)
+    {
+        plotGestureSeeks_ = !(havePending_ && (int) pending_.tablePts.size() < pending_.numPoints);
+        if (plotGestureSeeks_)
+            seekToTableTime (tTab);
+        else
+            handlePlotClick (tTab);
+    };
+    plot.onPointDragged = [this] (double tTab)
+    {
+        if (plotGestureSeeks_) seekToTableTime (tTab);
+    };
+
+    // The splitter trades height between the list and the plot; the chosen
+    // plot height is remembered between sessions.
+    if (app.recentStore != nullptr)
+        plotHeight_ = app.recentStore->getIntValue ("tables_plot_height", -1);
+    splitter.onDrag = [this] (int dy)
+    {
+        if (splitDragBase_ < 0) splitDragBase_ = effectivePlotHeight();
+        // Dragging down shortens the plot; never <= 0 (that means "default").
+        plotHeight_ = std::max (1, splitDragBase_ - dy);
+        resized();
+        plotHeight_ = effectivePlotHeight();   // store what the limits allowed
+    };
+    splitter.onDragEnd = [this]
+    {
+        splitDragBase_ = -1;
+        if (app.recentStore != nullptr && plotHeight_ > 0)
+        {
+            app.recentStore->setValue ("tables_plot_height", plotHeight_);
+            app.recentStore->save();
+        }
+    };
 
     addAndMakeVisible (&masterShowBtn);
     addAndMakeVisible (&modeCombo);
     addAndMakeVisible (&statusLabel);
     addAndMakeVisible (&table);
+    addAndMakeVisible (&splitter);
     addAndMakeVisible (&plot);
 
     table.setMultipleSelectionEnabled (true);
@@ -9704,9 +9926,11 @@ void TablesPanel::refresh()
     masterShowBtn.repaint ();
     modeCombo.setSelectedItemIndex (app.tablesMode(), juce::dontSendNotification);
 
-    // The preview follows the primary selected row's table.
+    // The preview follows the primary selected row's table (its parameter's
+    // own alignment, if it is a parameter row, maps the playhead).
     const int pr = primaryRow();
     plot.setFocusTableIndex (pr >= 0 ? rows_[(size_t) pr].tableIdx : -1);
+    plot.setFocusParamIndex (pr >= 0 ? rows_[(size_t) pr].paramIdx : -1);
 
     updateStatus ();
     table.repaint ();
@@ -9742,7 +9966,9 @@ void TablesPanel::onRowClicked (int row, const juce::MouseEvent& e)
     }
 
     // Keep the preview on the newly primary row's table.
-    plot.setFocusTableIndex (rows_[(size_t) std::clamp (row, 0, (int) rows_.size() - 1)].tableIdx);
+    const auto& focusRow = rows_[(size_t) std::clamp (row, 0, (int) rows_.size() - 1)];
+    plot.setFocusTableIndex (focusRow.tableIdx);
+    plot.setFocusParamIndex (focusRow.paramIdx);
 }
 
 TablesPanel::RowRef TablesPanel::rowRef (int row) const
@@ -10203,6 +10429,7 @@ void TablesPanel::startPointAlign (int numPoints, int scopeTable, int scopeParam
     havePending_ = true;
 
     plot.setFocusTableIndex (scopeTable);
+    plot.setFocusParamIndex (scopeParam);
     updateStatus ();
 }
 
@@ -10681,9 +10908,35 @@ void TablesPanel::resized()
 
     statusLabel.setBounds (6, 28, r.getWidth () - 12, 16);
 
-    const int plotH = std::max (70, r.getHeight () / 4);
-    table.setBounds (6, 46, r.getWidth () - 12, r.getHeight () - 46 - plotH - 8);
+    // List, splitter (the 6 px gap), plot.
+    const int plotH = effectivePlotHeight();
+    table.setBounds (6, 46, r.getWidth () - 12, std::max (0, r.getHeight () - 46 - plotH - 8));
+    splitter.setBounds (6, r.getHeight () - plotH - 8, r.getWidth () - 12, 6);
     plot.setBounds (6, r.getHeight () - plotH - 2, r.getWidth () - 12, plotH);
+}
+
+int TablesPanel::effectivePlotHeight() const
+{
+    constexpr int kMinPlotH = 50, kMinListH = 40;
+    const int h = getHeight ();
+    const int want = plotHeight_ > 0 ? plotHeight_ : std::max (70, h / 4);
+    // Room left under the header rows for the list and the 6 px splitter.
+    const int maxPlot = std::max (kMinPlotH, h - 46 - 8 - kMinListH);
+    return std::clamp (want, kMinPlotH, maxPlot);
+}
+
+void TablesPanel::seekToTableTime (double tTableSecs)
+{
+    app.setPlayhead (plot.tableToDocTime (tTableSecs));   // clamps to the file; updates every view
+}
+
+void TablesSplitter::paint (juce::Graphics& g)
+{
+    // A short dotted grip in the middle; the cursor says the rest.
+    g.setColour (juce::Colour::fromRGB (96, 102, 114));
+    const int cy = getHeight () / 2, cx = getWidth () / 2;
+    for (int i = -2; i <= 2; ++i)
+        g.fillRect (cx + i * 8 - 2, cy, 4, 1);
 }
 
 

@@ -35,6 +35,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/Diagnostics.cpp   # opt-in diagnostic log for AI-assisted support
         ${CMAKE_CURRENT_SOURCE_DIR}/ScrollBars.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoWindow.cpp   # Video window (picture follows the playhead)
+        ${CMAKE_CURRENT_SOURCE_DIR}/VideoScaler.cpp   # Video picture scaling (Lanczos / Bicubic / Nearest)
         ${CMAKE_CURRENT_SOURCE_DIR}/MainWindow.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Resampler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FFTAvx.cpp
@@ -133,6 +134,10 @@ endif()
 add_dependencies (SpectroCraft sc_patch_generated)
 endif()   # Windows resources.rc
 
+# Video picture scaler core: its own library, compiled optimised in every
+# configuration (see src/videoscale/CMakeLists.txt).
+add_subdirectory (videoscale)
+
 # AVX2 FFT: compile this one translation unit with /arch:AVX2 on MSVC so the
 # intrinsics are available; runtime CPUID dispatch falls back to scalar otherwise.
 if (MSVC)
@@ -153,6 +158,7 @@ target_include_directories (SpectroCraft PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries (SpectroCraft
     PRIVATE
         sc_dock_fonts   # embedded Source Sans 3 (docking workspace UI font)
+        sc_video_scaler_core   # Video picture scaling (optimised in every configuration)
         soxr         # SoXR resampler (LGPL-2.1), same engine Audacity uses
         soundtouch   # SoundTouch tempo change (LGPL-2.1), same engine as Audacity
         juce::juce_audio_basics

@@ -421,6 +421,15 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   - **Docking workspace (Adobe-style)**: every panel — the **Editor**
     (waveform + spectrogram) included — sits in a *panel group* with text
     tabs, and the groups can be arranged freely:
+    - The Editor has **one tab per open file**, titled with the file's name
+      (*Editor* while no file is open; a new, never saved file shows its
+      display name; *Save As* renames the tab). Each file opened joins the
+      Editor's group as a new tab; clicking a tab makes that file the active
+      one, and switching files any other way (Files panel, Ctrl+Tab) brings
+      its tab to the front. All the tabs share one waveform/spectrogram,
+      which moves into the active file's tab: a file tab dragged to another
+      group or window shows the file's name there until it is clicked. Files
+      are closed as before (File > Close, the Files panel).
     - **Drag a tab** onto another group: a drop overlay splits that group into
       a centre rectangle (*add as a tab*) and four trapezoids (*dock left /
       right / top / bottom* of it); the zone under the cursor turns violet and
@@ -484,6 +493,19 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     repeating the same solo click restores every channel, and solo-clicking a
     different channel switches the solo to it. The keyboard shortcuts
     Ctrl+Shift+1..9 behave the same way.
+  - **Channel numbers** in the tracks (the "1", "2"… or "L"/"R" labels in the
+    axis strip) mute playback: a click **mutes/unmutes** that channel — its
+    number turns red and its waveform/spectrogram is drawn darker, and its
+    output is silent while playing. **Ctrl+click** (Cmd+click on macOS, where
+    Ctrl+click opens the context menu) plays **only** that channel (every
+    other one muted); doing it again on the lone playing channel unmutes them
+    all. Hidden channels count like the others. The mutes belong to the
+    document for the session (not saved with the file).
+  - The **status bar** shows every channel number of the file next to its
+    sample rate: dimmed while the channel is hidden, red while it is muted.
+    A click shows/hides that channel (like *View > Channel N*); Ctrl+click
+    (Cmd+click on macOS) shows only that channel, and again on the lone
+    visible channel shows them all.
   - The View menu also has **Waveform View / Spectrogram View** visibility
     toggles; at least one view is always kept visible — hiding the last one is
     refused and the remaining view takes the whole main area.
@@ -894,7 +916,15 @@ Zooming and panning work like in the spectrogram:
 - **zoom bars** on the right and bottom edges of the picture show the
   visible part, one per axis: drag their edges to zoom, drag the thumb (or
   click in the track) to pan;
-- left-drag pans while zoomed.
+- left-drag pans while zoomed: the picture follows the pointer one to one;
+- **Upscaling** (right-click menu): how the picture is resampled to the
+  screen — *Lanczos* (default, windowed sinc with 6 taps per axis, the kernel
+  of FFmpeg's swscale `SWS_LANCZOS`), *Bicubic* (cubic convolution, A = −0.6,
+  swscale's `SWS_BICUBIC` default) or *Nearest* (the raw pixels, blocky when
+  enlarged). The choice is remembered between sessions. Only the part of the
+  picture on screen is resampled, straight to physical screen pixels, on
+  several threads (`src/videoscale/`): a few milliseconds per frame even full
+  screen on a Retina display.
 
 *Docks as a panel* like Tables or Markers: **Window > Dock Video Panel**
 moves the picture **and the tracks panel below it** into the **Video**
@@ -924,6 +954,11 @@ drawn from its offset to its end.
   end of the main audio, or to the start/end of another video track (a yellow
   marker shows the anchor); the **mouse wheel** over the panel zooms in/out
   about the cursor for fine positioning;
+- **dragging** a band **up or down** moves the track to another row (a white
+  line shows where it lands): the order is saved with the document, and the
+  top row renders above the others where tracks overlap in time. The first
+  few pixels of a drag decide its direction, so reordering never nudges an
+  offset (a lone track's band moves its offset from the first pixel);
 - a red **playhead line** runs from the ruler to the bottom of the panel and
   follows the main playhead while playing and on every seek; clicking the
   time ruler moves the main playhead to that time;
@@ -2357,6 +2392,14 @@ list: a table row followed by its parameter rows.
 - The panel's preview plot shows hover values too: moving the mouse over it
   lists every visible parameter of the focused table at that table time, in
   each one's colour (unscaled values).
+- The preview plot draws the **playhead** as a red line at the matching table
+  time (through the table's alignment, and the selected parameter's own when
+  a parameter row is selected); it follows playback and every seek, and is
+  hidden while the playhead lies outside the table. **Clicking** in the plot
+  moves the playhead to that time, and dragging keeps moving it — except
+  while a 1/2-point alignment is waiting for its plot clicks.
+- A **draggable separator** between the table list and the preview plot
+  trades height between them; the plot height is remembered between sessions.
 - **Align** (parameter row): Waveform / Spectrogram / Dedicated submenus with
   Manual / 1 Point / 2 Points options. *Manual* opens a dialog whose fields are
   described by explanatory labels above them: the time offset/scale of the
@@ -2507,12 +2550,13 @@ Clean separation into independent components (see `include/` + `src/`):
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `VideoFrames` (`src/VideoFrames.cpp`, `src/VideoFrames_mac.mm`, `src/VideoFrames_win.cpp`) | Video picture decoding for the Video window: a per-platform frame stream (AVFoundation on macOS, Media Foundation on Windows, none on Linux), `VideoDecoder::frameAt(t)` (decode forward for small forward moves, seek otherwise; skipped frames are never converted) and `VideoFramePump`, a worker thread that serves only the latest requested time and hands frames to the message thread. |
-| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, vertical + horizontal zoom bars), per-file rotation. Docks as the Video panel of the docking workspace (`VideoDockHost`, picture on top and tracks panel below, draggable separator between them, corner button collapses the tracks area; floating or in the main window) via **Window > Dock/Undock Video Panel** or *Dock/Undock Panel* from the tab menu once docked/floating (*Always on Top* in a floating group's tab menu), and can be sent back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag to offset (Shift-drag snaps to 0 s / audio end / other track edges), wheel zoom about the cursor, right/bottom scrollbars when content overflows, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel; right-click menu on a band — or on the picture, targeting the currently displayed track — for sync/align/copy-audio/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else playhead) at 60 Hz while visible or docked. |
+| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, vertical + horizontal zoom bars, left-drag pan one to one), per-file rotation, *Upscaling* (Lanczos / Bicubic / Nearest, see `VideoScaler`). Docks as the Video panel of the docking workspace (`VideoDockHost`, picture on top and tracks panel below, draggable separator between them, corner button collapses the tracks area; floating or in the main window) via **Window > Dock/Undock Video Panel** or *Dock/Undock Panel* from the tab menu once docked/floating (*Always on Top* in a floating group's tab menu), and can be sent back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag left/right to offset (Shift-drag snaps to 0 s / audio end / other track edges) or up/down to reorder the tracks (axis picked by the first pixels; the top row renders above), wheel zoom about the cursor, right/bottom scrollbars when content overflows, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel; right-click menu on a band — or on the picture, targeting the currently displayed track — for sync/align/copy-audio/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else playhead) at 60 Hz while visible or docked. |
+| `VideoScaler` (`src/VideoScaler.cpp`, `src/videoscale/VideoScalerCore.cpp`) | Picture scaling for the Video window: the visible part of the frame resampled to physical screen pixels with Lanczos (a = 3), Bicubic (A = −0.6) or Nearest — swscale's kernels, stretched when shrinking, weights normalised — separable, weights cached per geometry, rows split across up to 3 worker threads, 4-wide SIMD (SSE2 / NEON), quarter turns folded into the pixel reads. The core is plain C++ in its own library (`sc_video_scaler_core`), compiled optimised in every configuration, Debug included. |
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
 | `Docking` (`src/Docking.cpp`: `DockManager`, `DockArea`, `GroupComponent`, `FloatingWindow`, `Workspaces`, `WorkspaceBar`, `DockLookAndFeel`) | Adobe-style docking workspace, independent of the rest of the app: a tree of horizontal / vertical splits of *panel groups* per dock area (the main window's and one per floating window); panels are registered with an id and a content component they do not own. Drag sessions (translucent ghost window snapping onto the hovered zone, Esc / Ctrl handling), the trapezoid drop overlay, tab strips with the ≡ panel menu and >> overflow, gap resizing, maximise, floating windows with magnetic moves, the memory of where closed / undocked panels go back, the JSON layout (`saveLayout` / `loadLayout`) and named workspaces with saved + current layouts. Components a drop removes are hidden at once and deleted asynchronously, so a group may be retired from inside its own mouse handler. `DockLookAndFeel` (the app's default look and feel) embeds Source Sans 3. |
 | `Diagnostics` (`src/Diagnostics.cpp`, `sc::diag`) | Opt-in diagnostic log (docs/diagnostics.md): `event()` posts into a bounded queue (one atomic load when off); a writer thread cleans, collapses, rate-limits and writes JSON Lines with size rotation; a flight recorder of debug events written after an error; a freeze watchdog thread fed by a message-thread heartbeat; per-minute aggregates (spectrogram tiles, audio load, memory); crash reports from signal / terminate handlers (Windows: `CrashTrace.h`); summary, tail and support bundle for *Help* and the `diag.*` commands. Hooks: `sc::alert` observer, the AI control journal, `FileDoc::load`, `AudioEngine::saveFile`, `SpectralEngine::getTiles`, the views' `paint()`, `WorkProgressDialog`. |
-| `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Docking workspace host (menu bar with the workspace switcher on its right, the main dock area, status bar); the **Editor** panel holds the waveform/spectral views + scrollbars + dedicated tables track (`layoutEditor()`); registers every panel, the built-in workspaces and the migration of the old two-group column; menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
+| `MainWindow` (`DocumentWindow` + `MenuBarModel` + `Timer` + `FileDragAndDropTarget`) | Docking workspace host (menu bar with the workspace switcher on its right, the main dock area, status bar); the **Editor** panel holds the waveform/spectral views + scrollbars + dedicated tables track (`layoutEditor()`), one tab per open document (`syncEditorTabs()`: the permanent `editor` panel plus an `editor-<docId>` panel per other document, all sharing the views, which move into the active document's tab); registers every panel, the built-in workspaces and the migration of the old two-group column; menus, keyboard shortcuts (incl. Space play/pause, Home/End, F8 marker), drag & drop (plain = open each file; **Shift** = merge menu with sequence/parallel options into the current or a new file), playhead animation timer and view-range state sync between views/panels. |
 
 Threading model: the UI thread only draws and dispatches; FFT tiles are computed
 on a pool sized to hardware threads; file reads happen on the reader under a

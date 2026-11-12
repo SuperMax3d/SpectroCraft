@@ -190,6 +190,11 @@ public:
         return rulerAtBottom() ? y >= getHeight() - kRulerH : y < kRulerH;
     }
 
+    /** The channel whose number label (left of its row, "L"/"R" for stereo)
+        is at p, -1 when none. A click there mutes/unmutes the channel's
+        playback; Ctrl+click (Cmd+click on macOS) solos it. */
+    int channelAtLabel (juce::Point<int> p) const;
+
     /** Label for the zero line (amplitude 0) per vertical scale mode:
         "-inf" in dB, "0.000" in Normalized, "0" in Wav Units / sample mode.
         Exposed for unit tests. */
@@ -235,6 +240,11 @@ private:
     // Visible row index containing absolute y (-1 outside the plot); gaps map
     // to the row below, like the cursor probe.
     int rowAtY (int y) const;
+    // Channel label text ("L"/"R" for stereo, else the 1-based number) and
+    // where it is drawn for a row centred at centreY: the outer edge of the
+    // axis strip, clear of the tick labels next to the plot.
+    juce::String channelLabel (int ch) const;
+    juce::Rectangle<int> channelLabelBounds (int ch, int centreY) const;
 
     Application& app;   // audio data read live via app.audioEngine() (active doc)
     bool showTimeRuler = true;   // stacked dual view: only one view draws it

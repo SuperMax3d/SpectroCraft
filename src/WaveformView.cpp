@@ -117,6 +117,42 @@ static void showViewContextMenu (Application& app,
         onAction (sel);
 }
 
+juce::String WaveformView::channelLabel (int ch) const
+{
+    return app.audioEngine().numChannels() == 2 ? juce::String (ch == 0 ? "L" : "R")
+                                                : juce::String (ch + 1);
+}
+
+juce::Rectangle<int> WaveformView::channelLabelBounds (int ch, int centreY) const
+{
+    const juce::Font f (juce::FontOptions (10.0f));   // the label's g.setFont (10.0f)
+    const int textW = (int) std::ceil (juce::GlyphArrangement::getStringWidth (f, channelLabel (ch)));
+    // Axis on the left: its outer edge (the dB/zero tick labels hug the
+    // plot). Axis on the right: its right edge (the ticks start at its left).
+    const int x = axisOnRight() ? getWidth() - 2 - textW : 2;
+    return { x, centreY - 8, textW, 16 };
+}
+
+int WaveformView::channelAtLabel (juce::Point<int> p) const
+{
+    // Only inside the axis strip: the widened target must never take clicks
+    // from the plot next to it.
+    if (!app.audioEngine().isFileLoaded() || !onAxisX (p.x)) return -1;
+    const auto rows = absRowRects();
+    int r = 0;
+    for (int ch = 0; ch < app.audioEngine().numChannels() && r < (int) rows.size(); ++ch)
+    {
+        if (ch >= (int) chanVis.size() || !chanVis[(size_t) ch]) continue;
+        const auto& rr = rows[(size_t) r++];
+        const int centre = (int) ((float) rr.getY() + (float) rr.getHeight() * 0.5f);
+        // A comfortable target around the small text.
+        const auto text = channelLabelBounds (ch, centre);
+        if (text.withSizeKeepingCentre (std::max (text.getWidth() + 8, 18), 18).contains (p))
+            return ch;
+    }
+    return -1;
+}
+
 std::vector<juce::Rectangle<int>> WaveformView::absRowRects() const
 {
     const auto pr = plotRect();
@@ -144,6 +180,16 @@ int WaveformView::rowAtY (int y) const
 void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
+
+    // A click on a channel number mutes/unmutes that channel; Ctrl+click
+    // (Cmd+click on macOS, where Ctrl+click is the context menu) solos it.
+    if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
+        if (const int ch = channelAtLabel (e.getPosition()); ch >= 0)
+        {
+            dragMode = DragMode::None;
+            app.clickChannelMute (ch, e.mods.isCommandDown());
+            return;
+        }
 
     // Tables panel alignment flow: a left click is consumed as the reference
     // point in this view and reported to the panel. The second value is the
@@ -546,6 +592,9 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
     // Only left-button double-clicks select; middle/right are pan/menu buttons.
     if (!e.mods.isLeftButtonDown() || !app.audioEngine().isFileLoaded())
         return;
+    // Two quick clicks on a channel number are two mute toggles, not a zoom.
+    if (channelAtLabel (e.getPosition()) >= 0)
+        return;
 
     // Double-clicking a marker sets the selection to its range.
     const auto pr = plotRect();
@@ -682,22 +731,22 @@ void WaveformView::paint (juce::Graphics& g)
             g.drawHorizontalLine ((int) zeroY, (float) pr.getX(), (float) pr.getRight());
         paintChannel (g, ch, chanY, chanH, center, amp);
 
+        // A muted channel (click on its number) is drawn darker.
+        const bool muted = app.audioEngine().isChannelMuted (ch);
+        if (muted)
+        {
+            g.setColour (juce::Colours::black.withAlpha (0.55f));
+            g.fillRect (pr.getX(), chanY, pr.getWidth(), chanH);
+        }
+
         // Channel label on the left of every track: "L"/"R" for stereo files,
         // channel numbers otherwise. Shown even when a single channel is
-        // visible so the axis always says which track it is.
-        const juce::String lab = (chans == 2) ? (ch == 0 ? "L" : "R") : juce::String (ch + 1);
+        // visible so the axis always says which track it is; red when muted.
         g.setFont (10.0f);
-        g.setColour (juce::Colour::fromRGB (190, 190, 190));
-        if (axisOnRight())
-            // Right edge of the axis strip: keeps the channel label clear of
-            // the dB tick labels that start at its left edge.
-            g.drawText (lab, getWidth() - kLeftAxisWidth + 4, (int) center - 8,
-                       kLeftAxisWidth - 6, 16, juce::Justification::centredRight, false);
-        else
-            // Outer edge of the axis strip: keeps the channel label clear of
-            // the dB/zero tick labels that hug the plot edge.
-            g.drawText (lab, 2, (int) center - 8, kLeftAxisWidth - 4, 16,
-                       juce::Justification::centredLeft, false);
+        g.setColour (muted ? juce::Colour::fromRGB (255, 80, 80) : juce::Colour::fromRGB (190, 190, 190));
+        // Centred in a slightly wider box: never clipped by a metrics difference.
+        g.drawText (channelLabel (ch), channelLabelBounds (ch, (int) center).expanded (4, 0),
+                    juce::Justification::centred, false);
         ++row;
     }
 

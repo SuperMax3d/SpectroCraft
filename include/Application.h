@@ -829,6 +829,13 @@ public:
     bool isChannelVisible (int ch) const;
     void toggleChannelVisible (int ch);
 
+    /** Playback mute from a click on a channel number in the tracks: a plain
+        click toggles channel ch; `solo` (Ctrl+click, Cmd+click on macOS)
+        mutes every other channel and unmutes ch - or unmutes them all when
+        ch was already the only channel playing. Hidden channels count like
+        the others (they still play). Notifies onStateChange. */
+    void clickChannelMute (int ch, bool solo);
+
     // Add a marker: region spanning the current selection if there is one,
     // otherwise a point marker at the cursor.
     int addMarkerAtCursor();

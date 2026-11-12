@@ -201,6 +201,14 @@ public:
     juce::Component* specVScrollBarComp() { return specVScroll.get (); }   // unit tests
     juce::Component* tablesTrackComp() { return tablesTrack.get (); }      // unit tests
     TablesPanel* tablesPanelComp() { return tablesPanel.get (); }          // unit tests
+    StatusBar* statusBarComp() { return statusBar.get (); }                // unit tests
+    /** The Editor tab (dock panel id) showing a document, empty when none
+        (unit tests). */
+    juce::String editorTabOfDoc (int docId) const
+    {
+        const auto it = editorTabOfDoc_.find (docId);
+        return it != editorTabOfDoc_.end() ? it->second : juce::String();
+    }
     juce::Component* tablesSepComp()   { return tablesSep.get (); }        // unit tests
     /** Top/bottom insets (px) that keep a view's vertical scrollbar clear of its own time ruler strip. */
     static void vScrollInsetsForView (juce::Component* view, int& topInset, int& botInset);
@@ -760,6 +768,16 @@ private:
 
     sc::dock::Workspaces workspaces_;
     std::unique_ptr<juce::Component> editorPanel_;          // waveform + spectrogram + scrollbars
+    // One Editor tab per open document, titled with its file name. The
+    // permanent "editor" panel holds one document ("Editor" when none is
+    // open); every other document gets an "editor-<FileDoc::id>" panel in the
+    // same group. They all share editorPanel_ (the views), which moves into
+    // the active document's tab. Declared before dock_: destroyed after it.
+    std::map<juce::String, std::unique_ptr<juce::Component>> editorSlots_;   // panel id -> tab content
+    std::map<int, juce::String> editorTabOfDoc_;                             // FileDoc::id -> panel id
+    void syncEditorTabs();             // tabs <- open documents; views -> the active one's tab
+    void refreshEditorTabTitles();     // tab titles <- file names (cheap: after Save As...)
+    void activateDocById (int docId);  // a document's tab was clicked
     std::unique_ptr<sc::dock::WorkspaceBar> workspaceBar_;  // right of the menu bar
     std::unique_ptr<sc::dock::DockManager> dock_;
     bool dockLayoutDirty_ = false;            // save pending (debounced in the timer)

@@ -169,6 +169,51 @@ public:
     void paint (juce::Graphics& g) override { g.fillAll (mainWindowBackground ()); }
 };
 
+/** One Editor tab: there is one per open document (MainWindow::
+    syncEditorTabs). They share the single EditorPanel, which sits in the tab
+    of the active document. A tab of another document that shows anyway (moved
+    to another group) names its file, and a click there makes it active. */
+class EditorSlot : public juce::Component
+{
+public:
+    juce::String fileName;
+    std::function<void()> onActivate;
+
+    void resized() override
+    {
+        for (auto* c : getChildren())
+            c->setBounds (getLocalBounds());
+    }
+    void childrenChanged() override { repaint(); }
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (mainWindowBackground ());
+        if (getNumChildComponents() > 0)
+            return;
+        g.setColour (juce::Colours::white.withAlpha (0.6f));
+        g.setFont (14.0f);
+        g.drawFittedText (fileName + "\nClick to show it here.", getLocalBounds().reduced (16),
+                          juce::Justification::centred, 4);
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (getNumChildComponents() == 0 && ! e.mods.isPopupMenu() && onActivate)
+            onActivate();
+    }
+};
+
+/** Tab title of a document: its file name (the display name until it has
+    one: a new, never saved document). */
+juce::String editorTabTitle (const FileDoc& d)
+{
+    const juce::File f = d.engine.getFile();
+    if (f.getFullPathName().isNotEmpty())
+        return f.getFileName();
+    if (d.file.getFullPathName().isNotEmpty())
+        return d.file.getFileName();
+    return d.name.isNotEmpty() ? d.name : juce::String ("Untitled");
+}
+
 /** Name prompt for the workspace commands (none in headless test runs). */
 juce::String promptForWorkspaceName (const juce::String& title, const juce::String& initial)
 {
@@ -336,10 +381,25 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         auto ed = std::make_unique<EditorPanel> ();
         ed->onResized = [this] { layoutEditor (); };
         editorPanel_ = std::move (ed);
+        // The permanent Editor tab; the views move between document tabs.
+        auto slot = std::make_unique<EditorSlot> ();
+        slot->onActivate = [this]
+        {
+            for (const auto& [docId, pid] : editorTabOfDoc_)
+                if (pid == "editor") { activateDocById (docId); return; }
+        };
+        slot->addAndMakeVisible (editorPanel_.get ());
+        editorSlots_["editor"] = std::move (slot);
     }
     dock_ = std::make_unique<sc::dock::DockManager> ();
     dock_->getMainWindow = [this] () -> juce::Component* { return this; };
-    dock_->registerPanel ({ "editor", "Editor", editorPanel_.get (), false, 900, 600 });
+    dock_->registerPanel ({ "editor", "Editor", editorSlots_["editor"].get (), false, 900, 600 });
+    // A click on a document's Editor tab makes that document the active one.
+    dock_->onActiveTabChanged = [this] (const juce::String& id)
+    {
+        for (const auto& [docId, pid] : editorTabOfDoc_)
+            if (pid == id) { activateDocById (docId); return; }
+    };
     for (const auto& e : leftPanelEntries ())
         if (auto* c = panelForId (e.id))
             dock_->registerPanel ({ e.id, e.name, c, true, 340, 300 });
@@ -478,6 +538,22 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // shared state (Application clamps it to the file and notifies the views).
     if (statusBar)
         statusBar->onPositionEdited = [this] (double t) { app.setPlayhead (t); };
+    // The footer's channel numbers show/hide a channel; Ctrl+click (Cmd on
+    // macOS) shows only that one, and again on the lone visible one shows
+    // them all (the View > Channel N rules).
+    if (statusBar)
+        statusBar->onChannelClicked = [this] (int ch, bool only)
+        {
+            if (ch < 0 || ch >= app.audioEngine().numChannels()) return;
+            if (only && app.visibleChannels.size() == 1 && app.visibleChannels[0] == ch)
+            {   showEveryChannel(); return; }
+            if (only)
+                app.visibleChannels = { ch };
+            else
+                app.toggleChannelVisible (ch);
+            app.syncActiveDoc ();   // keep the active document's copy in step
+            syncSharedState();
+        };
 
     // Panels can ask for a time range to be shown in both views (e.g.
     // double-clicking a marker or a stored selection).
@@ -538,6 +614,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (waveformView) waveformView->setPlayhead (t);
         if (spectralView) spectralView->setPlayhead (t);
         if (tablesTrack) tablesTrack->setPlayhead (t);
+        if (tablesPanel) tablesPanel->plotView().setPlayhead (t);
         if (videoWindow) videoWindow->getTracksPanel().setPlayhead (t);
         // A single click in either view re-analyses the spectrum: centred on
         // the cursor when there is no selection, averaged over the whole
@@ -644,6 +721,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
             }
         }
     }
+
+    // Documents opened before this window existed get their Editor tabs.
+    syncEditorTabs ();
 
     scStart::mark ("end-of-MainWindow-ctor");
     // Proxy for "window visible": the first paint happens shortly after the
@@ -1187,6 +1267,8 @@ void MainWindow::applyDockLayout (const juce::var& layout)
             videoWindow->setVisible (true);
         }
     }
+    // The active document's Editor tab shows again, with the views in it.
+    syncEditorTabs ();
     dockLayoutDirty_ = false;
     resized ();
 }
@@ -1673,6 +1755,7 @@ void MainWindow::timerCallback()
     waveformView->setPlayhead (pos);
     spectralView->setPlayhead (pos);
     if (tablesTrack) tablesTrack->setPlayhead (pos);   // keep the dedicated track in step
+    if (tablesPanel) tablesPanel->plotView().setPlayhead (pos);   // ... and the Tables preview plot
     if (videoWindow) videoWindow->getTracksPanel().setPlayhead (pos);
     if (statusBar) statusBar->setPlayhead (pos);
 }
@@ -2156,6 +2239,7 @@ void MainWindow::syncSharedState()
         if (specVScroll && specVScroll->isLogarithmic () != spectralView->isLogFrequency ())
             updateScrollBars ();
     }
+    if (tablesPanel) tablesPanel->plotView().setPlayhead (app.playhead);
     if (tablesTrack)
     {
         tablesTrack->setPlayhead (app.playhead);
@@ -2195,6 +2279,9 @@ void MainWindow::syncSharedState()
                                    app.audioEngine().sampleRate());
         statusBar->setSelection (app.selection.getStart(), app.selection.getEnd());
         statusBar->setPlayhead (app.playhead);
+        // Channel numbers: dim when hidden, red when muted.
+        statusBar->setChannels (app.audioEngine().isFileLoaded() ? app.audioEngine().numChannels() : 0,
+                                app.visibleChannels, app.audioEngine().mutedChannels());
 
         // Active spectral tool indicator + live SHIFT/CTRL selection hint.
         statusBar->setModeText (currentModeText());
@@ -2536,6 +2623,118 @@ void MainWindow::openFileWithProgress (const juce::File& file)
         &dlg->cancelled);
 }
 
+// ------------------------------------------------- Editor tabs (one per document)
+
+void MainWindow::activateDocById (int docId)
+{
+    for (int i = 0; i < (int) app.docs.size (); ++i)
+        if (app.docs[(size_t) i]->id == docId)
+        {
+            if (i != app.activeDocIndex)
+                app.activate (i);   // -> activateDocUI -> syncEditorTabs
+            return;
+        }
+}
+
+void MainWindow::refreshEditorTabTitles()
+{
+    if (dock_ == nullptr)
+        return;
+    bool editorHasDoc = false;
+    for (const auto& d : app.docs)
+    {
+        const auto it = editorTabOfDoc_.find (d->id);
+        if (it == editorTabOfDoc_.end ())
+            continue;
+        const juce::String title = editorTabTitle (*d);
+        dock_->setPanelTitle (it->second, title);
+        if (const auto sit = editorSlots_.find (it->second); sit != editorSlots_.end ())
+            if (auto* slot = dynamic_cast<EditorSlot*> (sit->second.get ()))
+                if (slot->fileName != title) { slot->fileName = title; slot->repaint (); }
+        editorHasDoc = editorHasDoc || it->second == "editor";
+    }
+    if (! editorHasDoc)
+        dock_->setPanelTitle ("editor", "Editor");
+}
+
+void MainWindow::syncEditorTabs()
+{
+    if (dock_ == nullptr || editorPanel_ == nullptr)
+        return;
+
+    // Tabs of closed documents go (the views leave with their slot, if
+    // there, and come back below).
+    for (auto it = editorTabOfDoc_.begin (); it != editorTabOfDoc_.end ();)
+    {
+        const int docId = it->first;
+        const bool open = std::any_of (app.docs.begin (), app.docs.end (),
+                                       [docId] (const auto& d) { return d->id == docId; });
+        if (open) { ++it; continue; }
+        if (it->second != "editor")
+        {
+            dock_->unregisterPanel (it->second);
+            editorSlots_.erase (it->second);
+        }
+        it = editorTabOfDoc_.erase (it);
+    }
+
+    // The permanent Editor tab always holds a document while any is open:
+    // the active one takes it over (its own extra tab goes).
+    const FileDoc* active = app.doc ();
+    const bool editorTaken = std::any_of (editorTabOfDoc_.begin (), editorTabOfDoc_.end (),
+                                          [] (const auto& kv) { return kv.second == "editor"; });
+    if (! editorTaken && active != nullptr)
+    {
+        if (const auto own = editorTabOfDoc_.find (active->id); own != editorTabOfDoc_.end ())
+        {
+            dock_->unregisterPanel (own->second);
+            editorSlots_.erase (own->second);
+        }
+        editorTabOfDoc_[active->id] = "editor";
+    }
+
+    // New documents: a tab of their own in the Editor's group, after the
+    // ones already there (a maximised Editor group stays maximised).
+    for (const auto& d : app.docs)
+    {
+        if (editorTabOfDoc_.count (d->id) != 0)
+            continue;
+        const juce::String pid = "editor-" + juce::String (d->id);
+        auto slot = std::make_unique<EditorSlot> ();
+        const int docId = d->id;
+        slot->onActivate = [this, docId] { activateDocById (docId); };
+        dock_->registerPanel ({ pid, editorTabTitle (*d), slot.get (), false, 900, 600 });
+        dock_->setDefaultBuddy (pid, "editor");
+        editorSlots_[pid] = std::move (slot);
+        editorTabOfDoc_[docId] = pid;
+        dock_->openPanelAsTabOf (pid, "editor");
+    }
+    refreshEditorTabTitles ();
+
+    // The views go to the active document's tab, which becomes the visible
+    // tab of its group.
+    juce::String target ("editor");
+    if (active != nullptr)
+        if (const auto t = editorTabOfDoc_.find (active->id); t != editorTabOfDoc_.end ())
+            target = t->second;
+    const auto targetSlot = editorSlots_.find (target);
+    if (auto* slot = targetSlot != editorSlots_.end () ? targetSlot->second.get () : nullptr)
+    {
+        if (editorPanel_->getParentComponent () != slot)
+        {
+            slot->addAndMakeVisible (editorPanel_.get ());
+            editorPanel_->setBounds (slot->getLocalBounds ());
+        }
+        const auto loc = dock_->locate (target);
+        if (loc.area != nullptr && loc.group->active != loc.index)
+            dock_->setActiveTab (loc.group->uid, loc.index);
+    }
+    // Other slots now show their placeholder text.
+    for (auto& [pid, slot] : editorSlots_)
+        if (pid != target && slot != nullptr)
+            slot->repaint ();
+}
+
 void MainWindow::activateDocUI()
 {
     // Restore this doc's remembered time window (Application::activate() put
@@ -2601,6 +2800,9 @@ void MainWindow::activateDocUI()
     syncVideoWindow();
     refreshVideoSolo ();
 
+    // One Editor tab per open document; the views sit in the active one's.
+    syncEditorTabs ();
+
     // Re-layout so the time scrollbar's visibility/bounds follow the new file
     // state: resized() is the only place they are set, and loading a file does
     // not otherwise resize the window (which left the bar hidden until the
@@ -2632,6 +2834,16 @@ void MainWindow::ensureVideoWindow()
     // The saved "Always on top" state applies immediately, not only when it
     // is toggled from a context menu.
     videoWindow->setAlwaysOnTop (app.recentStore->getIntValue ("video_always_on_top", 0) != 0);
+
+    // The picture's Upscaling choice (context menu) is remembered between
+    // sessions; Lanczos until the user picks another one.
+    videoWindow->view().setUpscaling (
+        sc::videoUpscalingFromName (app.recentStore->getValue ("video_upscaling", "Lanczos")));
+    videoWindow->view().onUpscalingChanged = [this] (sc::VideoUpscaling m)
+    {
+        app.recentStore->setValue ("video_upscaling", sc::videoUpscalingName (m));
+        app.recentStore->save();
+    };
 
     videoWindow->onUserClosed = [this]
     {
@@ -2691,6 +2903,20 @@ void MainWindow::ensureVideoWindow()
         if (std::abs (t[i].offsetSecs - off) < 1e-9) return;
         t[i].offsetSecs = off;
         d->setVideoTracks (std::move (t));
+    };
+    // A band dragged up/down: the document's track list takes the new order
+    // (saved with its metadata; the top track wins where tracks overlap).
+    videoWindow->onTrackMoved = [this] (int from, int to)
+    {
+        FileDoc* d = app.doc();
+        if (d == nullptr) return;
+        auto t = effectiveVideoTracks (*d);
+        const int n = (int) t.size();
+        if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+        moveVideoTrack (t, from, to);
+        int sel = videoTrackIndexAfterMove (d->selectedVideoTrack, from, to);
+        d->setVideoTracks (std::move (t), &sel);
+        refreshVideoSolo ();   // a soloed track keeps playing under its new index
     };
     videoWindow->onSelectTrackChanged = [this] (int i)
     {
@@ -3819,6 +4045,9 @@ void MainWindow::updateTitle()
     // setName() updates the native window caption; Component::setTitle() only
     // sets the accessibility title and leaves the caption unchanged.
     setName (title);
+
+    // The Editor tabs carry the file names too (Save As renames one).
+    refreshEditorTabTitles ();
 }
 
 juce::String MainWindow::buildAboutText()
@@ -4011,7 +4240,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             syncSharedState();
         }
         else
+        {
             app.toggleChannelVisible (ch);
+            syncSharedState();   // views and footer channel numbers follow
+        }
         return;
     }
 
@@ -8755,7 +8987,10 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
                 }
             }
             else
+            {
                 app.toggleChannelVisible (ch);
+                syncSharedState();   // views and footer channel numbers follow
+            }
             return true;
         }
     }

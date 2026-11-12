@@ -28,6 +28,7 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/Diagnostics.cpp   # opt-in diagnostic log
         ${CMAKE_SOURCE_DIR}/src/ScrollBars.cpp
         ${CMAKE_SOURCE_DIR}/src/VideoWindow.cpp   # Video window (picture follows the playhead)
+        ${CMAKE_SOURCE_DIR}/src/VideoScaler.cpp   # Video picture scaling (JUCE side)
         ${CMAKE_SOURCE_DIR}/src/MainWindow.cpp
         ${CMAKE_SOURCE_DIR}/src/FileDoc.cpp
         ${CMAKE_SOURCE_DIR}/src/Application.cpp
@@ -101,6 +102,7 @@ target_include_directories (SpectroCraftTests PRIVATE ${CMAKE_SOURCE_DIR}/includ
 target_link_libraries (SpectroCraftTests
     PRIVATE
         sc_dock_fonts   # embedded Source Sans 3 (docking workspace UI font)
+        sc_video_scaler_core   # Video picture scaling core
         soxr         # SoXR resampler (LGPL-2.1), same engine Audacity uses
         soundtouch   # SoundTouch tempo change (LGPL-2.1)
         juce::juce_audio_basics

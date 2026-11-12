@@ -2100,6 +2100,28 @@ void Application::toggleChannelVisible (int ch)
     syncActiveDoc ();   // keep the active document's copy in step
 }
 
+void Application::clickChannelMute (int ch, bool solo)
+{
+    auto& eng = audioEngine ();
+    const int n = eng.numChannels ();
+    if (ch < 0 || ch >= n)
+        return;
+    if (!solo)
+        eng.setChannelMuted (ch, !eng.isChannelMuted (ch));
+    else
+    {
+        bool onlyThisPlays = !eng.isChannelMuted (ch);
+        for (int c = 0; c < n && onlyThisPlays; ++c)
+            if (c != ch && !eng.isChannelMuted (c))
+                onlyThisPlays = false;
+        // Solo again on the lone playing channel = everything plays again.
+        std::vector<bool> m ((size_t) n, !onlyThisPlays);
+        m[(size_t) ch] = false;
+        eng.setMutedChannels (std::move (m));
+    }
+    if (onStateChange) onStateChange ();   // channel numbers and tracks repaint
+}
+
 int Application::addMarkerAtCursor()
 {
     juce::String name = "Marker " + juce::String ((int) markers().count() + 1).paddedLeft ('0', 2);

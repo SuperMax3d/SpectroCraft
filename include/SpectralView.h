@@ -257,6 +257,10 @@ public:
     {
         return axisOnRight() ? x >= getWidth() - kLeftAxisWidth : x < kLeftAxisWidth;
     }
+    /** The channel whose number label (axis strip, row centre) is at p, -1
+        when none. A click there mutes/unmutes the channel's playback;
+        Ctrl+click (Cmd+click on macOS) solos it. */
+    int channelAtLabel (juce::Point<int> p) const;
     bool onRulerY (int y) const
     {
         if (!showOwnTimeRuler) return false;   // stacked: the waveform's ruler covers it
@@ -306,7 +310,13 @@ public:
     void drawTimeSelectionOverlay (juce::Graphics& g);
     void drawSpectralShapesOverlay (juce::Graphics& g, bool includeLivePreview);
     void drawMarkersOverlay (juce::Graphics& g);
-    void drawChannelLabels (juce::Graphics& g);
+    // showMuteState: muted channels' labels in red (live view; exports
+    // never carry the mute state).
+    void drawChannelLabels (juce::Graphics& g, bool showMuteState = true);
+    // Where a channel's label is drawn for a row centred at centreY (right
+    // edge of the axis strip, next to the plot).
+    juce::Rectangle<int> channelLabelBounds (int ch, int centreY) const;
+    juce::String channelLabel (int ch) const;
     void drawTablesOverlay (juce::Graphics& g);
 
     // Hover value labels for the table overlay curves (spectrogram mode):

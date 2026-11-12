@@ -1733,32 +1733,89 @@ private:
 };
 
 /** Preview plot at the bottom of the Tables panel: shows one focused table's
-    parameters on its own time axis. A left click reports the clicked table
-    time in seconds (used by the 1/2-point alignment flow). */
+    parameters on its own time axis, with the document playhead as a red
+    line. A left click reports the clicked table time in seconds: the panel
+    feeds it to a pending 1/2-point alignment, or moves the playhead there
+    (dragging keeps moving it). */
 class TablesPlotView : public juce::Component
 {
 public:
     explicit TablesPlotView (Application& appIn);
 
     std::function<void(double tTableSecs)> onPointClicked;
+    /** Left-button drag: the table time now under the mouse. */
+    std::function<void(double tTableSecs)> onPointDragged;
 
     void setFocusTableIndex (int idx);   // -1 = nothing to show
+    /** The parameter whose own time alignment maps the playhead (the
+        primary selected row); -1 = the table's alignment alone. */
+    void setFocusParamIndex (int idx);
     int focusTableIndex() const { return focusIdx_; }
+    int focusParamIndex() const { return focusParam_; }
+    /** Plot column <-> table time; the same mapping draws the curves. */
     double xToTableTime (int x) const;
+    float tableTimeToX (double tTableSecs) const;
     /** Duration of the focused table in seconds (0 when none). */
     double tableDuration() const;
 
+    /** Document time <-> time of the focused table (docTime = offset +
+        scale * tableTime, the table's alignment composed with the focused
+        parameter's). Identity when nothing is focused. */
+    double docToTableTime (double docSecs) const;
+    double tableToDocTime (double tTableSecs) const;
+
+    /** The document playhead (seconds): drawn as a red line where it falls
+        inside the focused table. Repaints only when the line moves. */
+    void setPlayhead (double docSecs);
+    double getPlayhead() const { return playheadDoc_; }
+    /** Column of the playhead line, or -1 when it is not drawn. */
+    int playheadX() const;
+
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;   // hover value readout
     void mouseExit (const juce::MouseEvent&) override;
 
 private:
     Application& app;
     int focusIdx_ = -1;
+    int focusParam_ = -1;
+    double playheadDoc_ = -1.0;
+    int shownPlayheadX_ = -1;          // column computed at the last paint (change detection)
+    bool pointGesture_ = false;        // a left-button press reported through onPointClicked
     juce::Point<int> hoverPos_ {-1, -1};
     std::vector<std::pair<juce::String, juce::Colour>> hoverLabels_;
+    juce::Rectangle<int> plotRect() const;   // curves area (time labels below)
+    std::pair<double, double> focusTimeMap() const;   // {offset, scale}
     void collectHoverLabels (int x, int y);
+};
+
+/** The horizontal bar between the Tables panel's list and its preview
+    plot: dragging it trades height between the two. */
+class TablesSplitter : public juce::Component
+{
+public:
+    TablesSplitter() = default;   // the non-copyable macro suppresses the implicit one
+    /** Fired while dragging: vertical distance in pixels since mouseDown
+        (positive = down = a shorter plot). */
+    std::function<void (int)> onDrag;
+    /** Fired on release (the panel persists the new height). */
+    std::function<void()> onDragEnd;
+
+    void paint (juce::Graphics& g) override;
+    juce::MouseCursor getMouseCursor() override { return juce::MouseCursor::UpDownResizeCursor; }
+    void mouseDown (const juce::MouseEvent& e) override { dragStartY_ = e.getScreenY(); }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (onDrag != nullptr) onDrag (e.getScreenY() - dragStartY_);
+    }
+    void mouseUp (const juce::MouseEvent&) override { if (onDragEnd != nullptr) onDragEnd(); }
+
+private:
+    int dragStartY_ = 0;
+    JUCE_DECLARE_NON_COPYABLE (TablesSplitter)
 };
 
 /** Modal colour picker for one table parameter's colour square. Shows the
@@ -1936,6 +1993,7 @@ public:
     // Accessors for headless unit tests.
     juce::TableListBox& listTable() { return table; }
     TablesPlotView& plotView() { return plot; }
+    TablesSplitter& plotSplitter() { return splitter; }
     EyeButton& masterShowButton() { return masterShowBtn; }
     void simulateCellClick (int row, int columnId, const juce::MouseEvent& e)
     {
@@ -1970,6 +2028,13 @@ private:
     juce::ComboBox modeCombo;            // Overlay on Waveform / Spectrogram / Dedicated track
     juce::Label statusLabel;             // pending-alignment hints + import errors
     TablesPlotView plot;
+    TablesSplitter splitter;             // between the list and the plot (drag = heights)
+    int plotHeight_ = -1;                // plot height chosen with the splitter (-1 = default)
+    int splitDragBase_ = -1;             // plot height when the current drag started
+    bool plotGestureSeeks_ = false;      // the current plot click/drag moves the playhead
+    int effectivePlotHeight() const;     // plotHeight_ (or the default) within the limits
+    /** Moves the playhead to a time of the focused table (plot click/drag). */
+    void seekToTableTime (double tTableSecs);
 
     std::vector<RowRef> rows_;           // row index -> (table, param)
     FileDoc* listDoc = nullptr;          // doc whose tables the current rows belong to
@@ -2113,10 +2178,32 @@ public:
     }
     bool recordingIndicator() const { return recActive_; }
 
+    // Left side, after the sample rate: one number per channel of the active
+    // file, labelled like the tracks ("L"/"R" for stereo). Hidden channels
+    // (View > Channel N) are drawn dim, muted ones red. count 0 = no file.
+    void setChannels (int count, const std::vector<int>& visible, const std::vector<bool>& muted);
+    /** A channel number was clicked: the channel and whether Ctrl (Cmd on
+        macOS) was held. MainWindow shows/hides that channel. */
+    std::function<void (int ch, bool commandDown)> onChannelClicked;
+    /** The channel number at p, -1 when none (mouseDown, tests). */
+    int channelChipAt (juce::Point<int> p) const;
+    /** Where the channel numbers are drawn, one per channel that fits. */
+    std::vector<juce::Rectangle<int>> channelChipRects() const;
+    juce::String channelChipLabel (int ch) const;
+    bool channelChipShown (int ch) const { return ch >= 0 && ch < (int) chanShown_.size() && chanShown_[(size_t) ch]; }
+    bool channelChipMuted (int ch) const { return ch >= 0 && ch < (int) chanMuted_.size() && chanMuted_[(size_t) ch]; }
+    void mouseDown (const juce::MouseEvent& e) override;
+
     // TextEditor::Listener: normalise a field when it loses focus.
     void textEditorFocusLost (juce::TextEditor& ed) override;
 
 private:
+    // x where the channel numbers start: after the file name and the sample
+    // rate, measured exactly as paint() lays them out.
+    int fileAndRateEnd() const;
+    int chanCount_ = 0;
+    std::vector<bool> chanShown_, chanMuted_;
+
     void applyFieldVisibility();
     void commitField (juce::TextEditor& ed);
     void reformatField (juce::TextEditor& ed);

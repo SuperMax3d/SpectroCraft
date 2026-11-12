@@ -165,6 +165,7 @@ void AudioEngine::closeFile()
         hasFile = false;
     }
     clearMipmaps();
+    setMutedChannels ({});   // a closed file leaves no muted channel behind
     currentFile = juce::File();
     nchans = 0; totalSamples = 0; rate = 44100.0; durationSecs = 0.0;
     hasFile = false; unsaved = false;
@@ -396,6 +397,49 @@ void AudioEngine::setLoopRange (juce::Range<double> r)
 
 void AudioEngine::setGain (float g) { gain_ = std::clamp<float> (g, 0.0f, 1.0f); }
 
+void AudioEngine::setChannelMuted (int ch, bool muted)
+{
+    if (ch < 0 || isChannelMuted (ch) == muted) return;
+    auto m = muted_;
+    if ((int) m.size() <= ch) m.resize ((size_t) ch + 1, false);
+    m[(size_t) ch] = muted;
+    setMutedChannels (std::move (m));
+}
+
+void AudioEngine::setMutedChannels (std::vector<bool> muted)
+{
+    while (!muted.empty() && !muted.back()) muted.pop_back();   // trailing "not muted" is implied
+    muted_ = std::move (muted);
+
+    std::shared_ptr<const std::vector<uint8_t>> forAudio;
+    if (!muted_.empty())
+        forAudio = std::make_shared<const std::vector<uint8_t>> (muted_.begin(), muted_.end());
+    const std::lock_guard<std::mutex> lk (muteMutex);
+    mutedForAudio_ = std::move (forAudio);
+}
+
+void AudioEngine::applyChannelMutes (const juce::AudioSourceChannelInfo& info, bool monoToAll) const
+{
+    std::shared_ptr<const std::vector<uint8_t>> m;
+    {
+        const std::lock_guard<std::mutex> lk (muteMutex);
+        m = mutedForAudio_;
+    }
+    if (m == nullptr) return;   // nothing muted: the common case
+    auto* dst = info.buffer;
+    const int outs = dst->getNumChannels();
+    if (monoToAll)
+    {
+        if (!m->empty() && (*m)[0] != 0)
+            for (int ch = 0; ch < outs; ++ch)
+                dst->clear (ch, info.startSample, info.numSamples);
+        return;
+    }
+    for (int ch = 0; ch < outs && ch < (int) m->size(); ++ch)
+        if ((*m)[(size_t) ch] != 0)
+            dst->clear (ch, info.startSample, info.numSamples);
+}
+
 void AudioEngine::prepareToPlay (int, double sampleRate)
 {
     // The device tells us its actual output rate. When it differs from the
@@ -517,6 +561,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         }
         for (int ch = sChans; ch < dst->getNumChannels(); ++ch)
             dst->clear (ch, bufferToFill.startSample, n);
+        // A mono document's single channel stands for every output here too.
+        applyChannelMutes (bufferToFill, nchans == 1);
         return;
     }
 
@@ -618,6 +664,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
             dst->clear (ch, bufferToFill.startSample, n);
     }
 
+    // Muted channels (channel numbers in the tracks) are silent.
+    applyChannelMutes (bufferToFill, nchans == 1 && chans == 1);
 }
 
 // Builds the finest mipmap level in ONE sequential pass over the file.
