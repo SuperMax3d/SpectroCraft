@@ -826,6 +826,144 @@ static void dockTest_resizeHandles()
            "editor splitter: the resize arrow on hover, not only once pressed");
 }
 
+
+// One Editor tab per open document, titled with its file name, in the
+// Editor's group; the views follow the active document; a tab click (or a
+// click in a tab moved elsewhere) activates its document.
+static void dockTest_editorTabsPerDocument()
+{
+    progress ("docking: one Editor tab per open document, named after its file");
+    const juce::File store = makeTempFile ("dock_editor_tabs.recent");
+    store.deleteFile ();
+    const juce::File fa = makeTempFile ("tabs_first.wav"), fb = makeTempFile ("tabs_second.wav"),
+                     fc = makeTempFile ("tabs_third.wav"), fs = makeTempFile ("tabs_saved_as.wav");
+    for (const auto& f : { fa, fb, fc })
+        writeWav (f, 1, 8000.0, 8000, [] (int, int64_t i, double) { return (float) (0.3 * std::sin ((double) i * 0.1)); });
+    fs.deleteFile ();
+    {
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "editor tabs"));
+        auto& dock = win->dockManager ();
+        auto title = [&] (const juce::String& pid) { const auto* d = dock.panel (pid); return d != nullptr ? d->title : juce::String ("<none>"); };
+        auto viewsIn = [&] (const juce::String& pid)
+        {
+            const auto* d = dock.panel (pid);
+            return d != nullptr && win->editorPanelComp ()->getParentComponent () == d->content;
+        };
+        auto activeTabOfGroup = [&] (const juce::String& pid)
+        {
+            const auto loc = dock.locate (pid);
+            return loc.group != nullptr ? loc.group->activeTab () : juce::String ();
+        };
+        auto indexOfDoc = [&] (int docId)
+        {
+            for (int i = 0; i < (int) app.docs.size (); ++i)
+                if (app.docs[(size_t) i]->id == docId) return i;
+            return -1;
+        };
+
+        CHECK (dock.groupTabs ("editor") == juce::StringArray ("editor") && title ("editor") == "Editor"
+               && viewsIn ("editor"), "editor tabs: without a file, one tab called Editor");
+
+        CHECK (app.openFile (fa), "editor tabs: first file opens");
+        const int idA = app.doc ()->id;
+        CHECK (title ("editor") == fa.getFileName () && win->editorTabOfDoc (idA) == "editor",
+               "editor tabs: the Editor tab takes the file's name");
+
+        CHECK (app.openFile (fb), "editor tabs: second file opens");
+        const int idB = app.doc ()->id;
+        const juce::String tabB = win->editorTabOfDoc (idB);
+        CHECK (tabB.isNotEmpty () && tabB != "editor"
+               && dock.groupTabs ("editor") == juce::StringArray (juce::String ("editor"), tabB),
+               "editor tabs: a second file gets its own tab in the same group");
+        CHECK (title (tabB) == fb.getFileName (), "editor tabs: ... named after it");
+        CHECK (viewsIn (tabB) && activeTabOfGroup ("editor") == tabB,
+               "editor tabs: the views show the new file, in its tab");
+
+        // A click on the first tab activates the first file.
+        {
+            const auto loc = dock.locate ("editor");
+            dock.setActiveTab (loc.group->uid, loc.group->tabs.indexOf ("editor"));
+        }
+        CHECK (app.doc () != nullptr && app.doc ()->id == idA && viewsIn ("editor"),
+               "editor tabs: clicking a tab makes its file the active one");
+
+        // Switching files another way (Files panel, Ctrl+Tab) shows its tab.
+        app.activate (indexOfDoc (idB));
+        CHECK (activeTabOfGroup ("editor") == tabB && viewsIn (tabB), "editor tabs: switching files shows its tab");
+
+        CHECK (app.openFile (fc), "editor tabs: third file opens");
+        const int idC = app.doc ()->id;
+        const juce::String tabC = win->editorTabOfDoc (idC);
+        CHECK (dock.groupTabs ("editor") == juce::StringArray (juce::String ("editor"), tabB, tabC),
+               "editor tabs: three files, three tabs, in opening order");
+
+        // Save As renames the tab.
+        if (FileDoc* dc = app.doc ())
+        {
+            CHECK (app.saveDocument (*dc, fs, true), "editor tabs: save as");
+            if (app.onStateChange) app.onStateChange ();
+            CHECK (title (tabC) == fs.getFileName (), "editor tabs: Save As renames the tab");
+        }
+
+        // Closing a file removes its tab.
+        app.activate (indexOfDoc (idB));
+        app.closeFile ();
+        CHECK (dock.panel (tabB) == nullptr && dock.groupTabs ("editor") == juce::StringArray (juce::String ("editor"), tabC),
+               "editor tabs: closing a file removes its tab");
+
+        // Closing the file of the permanent tab: the active file takes it over.
+        app.activate (indexOfDoc (idA));
+        app.closeFile ();
+        const juce::String nowC = win->editorTabOfDoc (idC);
+        CHECK (dock.groupTabs ("editor") == juce::StringArray ("editor") && nowC == "editor"
+               && title ("editor") == fs.getFileName () && dock.panel (tabC) == nullptr && viewsIn ("editor"),
+               "editor tabs: the remaining file moves into the Editor tab");
+
+        app.closeFile ();
+        CHECK (app.doc () == nullptr && title ("editor") == "Editor" && viewsIn ("editor"),
+               "editor tabs: no file left, the tab is the Editor again");
+
+        // A maximised Editor group (View > Panels off) stays maximised.
+        win->setLeftPanelsVisible (false);
+        CHECK (app.openFile (fa) && app.openFile (fb), "editor tabs: two files reopen");
+        CHECK (! win->areLeftPanelsVisible () && dock.isMaximized (dock.locate ("editor").group->uid)
+               && dock.groupTabs ("editor").size () == 2,
+               "editor tabs: opening files keeps the Editor maximised");
+        win->setLeftPanelsVisible (true);
+
+        // A tab moved to its own group names its file until clicked.
+        const int idB2 = app.doc ()->id;
+        const juce::String tabB2 = win->editorTabOfDoc (idB2);
+        app.activate (indexOfDoc (idB2) == 0 ? 1 : 0);   // the other file
+        {
+            const auto loc = dock.locate ("editor");
+            CHECK (dock.movePanel (tabB2, *loc.area, loc.group->uid, sc::dock::Zone::right),
+                   "editor tabs: a file tab moves to a group of its own");
+        }
+        CHECK (dock.locate (tabB2).group != dock.locate ("editor").group, "editor tabs: ... beside the Editor");
+        if (const auto* d = dock.panel (tabB2); d != nullptr && d->content != nullptr)
+        {
+            auto* slot = d->content;
+            CHECK (slot->getNumChildComponents () == 0, "editor tabs: a tab whose file is not active holds no views");
+            slot->mouseDown (mkMouse (*slot, 10, 10, juce::ModifierKeys (juce::ModifierKeys::leftButtonModifier)));
+            CHECK (app.doc () != nullptr && app.doc ()->id == idB2 && viewsIn (tabB2),
+                   "editor tabs: a click in it makes its file active, the views move there");
+        }
+
+        // Switching workspaces keeps the active file's tab in front.
+        win->switchWorkspace ("editing");
+        CHECK (activeTabOfGroup (win->editorTabOfDoc (app.doc ()->id)) == win->editorTabOfDoc (app.doc ()->id)
+               && viewsIn (win->editorTabOfDoc (app.doc ()->id)),
+               "editor tabs: after a workspace switch the active file's tab shows the views");
+        win->switchWorkspace ("default");
+        win.reset ();
+    }
+    for (const auto& f : { fa, fb, fc, fs })
+        f.deleteFile ();
+    store.deleteFile ();
+}
+
 static void runRegression_docking()
 {
     dockTest_zoneGeometry();
@@ -837,4 +975,5 @@ static void runRegression_docking()
     dockTest_legacyLayout();
     dockTest_editorAndVideo();
     dockTest_resizeHandles();
+    dockTest_editorTabsPerDocument();
 }

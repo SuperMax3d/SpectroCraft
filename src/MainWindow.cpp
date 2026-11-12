@@ -169,6 +169,50 @@ public:
     void paint (juce::Graphics& g) override { g.fillAll (mainWindowBackground ()); }
 };
 
+/** One Editor tab: there is one per open document (MainWindow::
+    syncEditorTabs). They share the single EditorPanel, which sits in the tab
+    of the active document. A tab of another document that shows anyway (moved
+    to another group) names its file, and a click there makes it active. */
+class EditorSlot : public juce::Component
+{
+public:
+    juce::String fileName;
+    std::function<void()> onActivate;
+
+    void resized() override
+    {
+        for (auto* c : getChildren())
+            c->setBounds (getLocalBounds());
+    }
+    void childrenChanged() override { repaint(); }
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (mainWindowBackground ());
+        if (getNumChildComponents() > 0)
+            return;
+        g.setColour (juce::Colours::white.withAlpha (0.6f));
+        g.setFont (14.0f);
+        g.drawFittedText (fileName + "\nClick to show it here.", getLocalBounds().reduced (16),
+                          juce::Justification::centred, 4);
+    }
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (getNumChildComponents() == 0 && ! e.mods.isPopupMenu() && onActivate)
+            onActivate();
+    }
+};
+
+/** Tab title of a document: its file name (the display name until it has
+    one: a new, never saved document). */
+juce::String editorTabTitle (const FileDoc& d)
+{
+    const juce::File f = d.engine.getFile();
+    if (f.getFullPathName().isNotEmpty())
+        return f.getFileName();
+    if (d.file.getFullPathName().isNotEmpty())
+        return d.file.getFileName();
+    return d.name.isNotEmpty() ? d.name : juce::String ("Untitled");
+}
 
 /** Name prompt for the workspace commands (none in headless test runs). */
 juce::String promptForWorkspaceName (const juce::String& title, const juce::String& initial)
@@ -337,10 +381,25 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         auto ed = std::make_unique<EditorPanel> ();
         ed->onResized = [this] { layoutEditor (); };
         editorPanel_ = std::move (ed);
+        // The permanent Editor tab; the views move between document tabs.
+        auto slot = std::make_unique<EditorSlot> ();
+        slot->onActivate = [this]
+        {
+            for (const auto& [docId, pid] : editorTabOfDoc_)
+                if (pid == "editor") { activateDocById (docId); return; }
+        };
+        slot->addAndMakeVisible (editorPanel_.get ());
+        editorSlots_["editor"] = std::move (slot);
     }
     dock_ = std::make_unique<sc::dock::DockManager> ();
     dock_->getMainWindow = [this] () -> juce::Component* { return this; };
-    dock_->registerPanel ({ "editor", "Editor", editorPanel_.get (), false, 900, 600 });
+    dock_->registerPanel ({ "editor", "Editor", editorSlots_["editor"].get (), false, 900, 600 });
+    // A click on a document's Editor tab makes that document the active one.
+    dock_->onActiveTabChanged = [this] (const juce::String& id)
+    {
+        for (const auto& [docId, pid] : editorTabOfDoc_)
+            if (pid == id) { activateDocById (docId); return; }
+    };
     for (const auto& e : leftPanelEntries ())
         if (auto* c = panelForId (e.id))
             dock_->registerPanel ({ e.id, e.name, c, true, 340, 300 });
@@ -662,6 +721,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
             }
         }
     }
+
+    // Documents opened before this window existed get their Editor tabs.
+    syncEditorTabs ();
 
     scStart::mark ("end-of-MainWindow-ctor");
     // Proxy for "window visible": the first paint happens shortly after the
@@ -1205,6 +1267,8 @@ void MainWindow::applyDockLayout (const juce::var& layout)
             videoWindow->setVisible (true);
         }
     }
+    // The active document's Editor tab shows again, with the views in it.
+    syncEditorTabs ();
     dockLayoutDirty_ = false;
     resized ();
 }
@@ -2559,6 +2623,118 @@ void MainWindow::openFileWithProgress (const juce::File& file)
         &dlg->cancelled);
 }
 
+// ------------------------------------------------- Editor tabs (one per document)
+
+void MainWindow::activateDocById (int docId)
+{
+    for (int i = 0; i < (int) app.docs.size (); ++i)
+        if (app.docs[(size_t) i]->id == docId)
+        {
+            if (i != app.activeDocIndex)
+                app.activate (i);   // -> activateDocUI -> syncEditorTabs
+            return;
+        }
+}
+
+void MainWindow::refreshEditorTabTitles()
+{
+    if (dock_ == nullptr)
+        return;
+    bool editorHasDoc = false;
+    for (const auto& d : app.docs)
+    {
+        const auto it = editorTabOfDoc_.find (d->id);
+        if (it == editorTabOfDoc_.end ())
+            continue;
+        const juce::String title = editorTabTitle (*d);
+        dock_->setPanelTitle (it->second, title);
+        if (const auto sit = editorSlots_.find (it->second); sit != editorSlots_.end ())
+            if (auto* slot = dynamic_cast<EditorSlot*> (sit->second.get ()))
+                if (slot->fileName != title) { slot->fileName = title; slot->repaint (); }
+        editorHasDoc = editorHasDoc || it->second == "editor";
+    }
+    if (! editorHasDoc)
+        dock_->setPanelTitle ("editor", "Editor");
+}
+
+void MainWindow::syncEditorTabs()
+{
+    if (dock_ == nullptr || editorPanel_ == nullptr)
+        return;
+
+    // Tabs of closed documents go (the views leave with their slot, if
+    // there, and come back below).
+    for (auto it = editorTabOfDoc_.begin (); it != editorTabOfDoc_.end ();)
+    {
+        const int docId = it->first;
+        const bool open = std::any_of (app.docs.begin (), app.docs.end (),
+                                       [docId] (const auto& d) { return d->id == docId; });
+        if (open) { ++it; continue; }
+        if (it->second != "editor")
+        {
+            dock_->unregisterPanel (it->second);
+            editorSlots_.erase (it->second);
+        }
+        it = editorTabOfDoc_.erase (it);
+    }
+
+    // The permanent Editor tab always holds a document while any is open:
+    // the active one takes it over (its own extra tab goes).
+    const FileDoc* active = app.doc ();
+    const bool editorTaken = std::any_of (editorTabOfDoc_.begin (), editorTabOfDoc_.end (),
+                                          [] (const auto& kv) { return kv.second == "editor"; });
+    if (! editorTaken && active != nullptr)
+    {
+        if (const auto own = editorTabOfDoc_.find (active->id); own != editorTabOfDoc_.end ())
+        {
+            dock_->unregisterPanel (own->second);
+            editorSlots_.erase (own->second);
+        }
+        editorTabOfDoc_[active->id] = "editor";
+    }
+
+    // New documents: a tab of their own in the Editor's group, after the
+    // ones already there (a maximised Editor group stays maximised).
+    for (const auto& d : app.docs)
+    {
+        if (editorTabOfDoc_.count (d->id) != 0)
+            continue;
+        const juce::String pid = "editor-" + juce::String (d->id);
+        auto slot = std::make_unique<EditorSlot> ();
+        const int docId = d->id;
+        slot->onActivate = [this, docId] { activateDocById (docId); };
+        dock_->registerPanel ({ pid, editorTabTitle (*d), slot.get (), false, 900, 600 });
+        dock_->setDefaultBuddy (pid, "editor");
+        editorSlots_[pid] = std::move (slot);
+        editorTabOfDoc_[docId] = pid;
+        dock_->openPanelAsTabOf (pid, "editor");
+    }
+    refreshEditorTabTitles ();
+
+    // The views go to the active document's tab, which becomes the visible
+    // tab of its group.
+    juce::String target ("editor");
+    if (active != nullptr)
+        if (const auto t = editorTabOfDoc_.find (active->id); t != editorTabOfDoc_.end ())
+            target = t->second;
+    const auto targetSlot = editorSlots_.find (target);
+    if (auto* slot = targetSlot != editorSlots_.end () ? targetSlot->second.get () : nullptr)
+    {
+        if (editorPanel_->getParentComponent () != slot)
+        {
+            slot->addAndMakeVisible (editorPanel_.get ());
+            editorPanel_->setBounds (slot->getLocalBounds ());
+        }
+        const auto loc = dock_->locate (target);
+        if (loc.area != nullptr && loc.group->active != loc.index)
+            dock_->setActiveTab (loc.group->uid, loc.index);
+    }
+    // Other slots now show their placeholder text.
+    for (auto& [pid, slot] : editorSlots_)
+        if (pid != target && slot != nullptr)
+            slot->repaint ();
+}
+
 void MainWindow::activateDocUI()
 {
     // Restore this doc's remembered time window (Application::activate() put
@@ -2623,6 +2799,9 @@ void MainWindow::activateDocUI()
     // doc has no soloed video track).
     syncVideoWindow();
     refreshVideoSolo ();
+
+    // One Editor tab per open document; the views sit in the active one's.
+    syncEditorTabs ();
 
     // Re-layout so the time scrollbar's visibility/bounds follow the new file
     // state: resized() is the only place they are set, and loading a file does
@@ -3866,6 +4045,9 @@ void MainWindow::updateTitle()
     // setName() updates the native window caption; Component::setTitle() only
     // sets the accessibility title and leaves the caption unchanged.
     setName (title);
+
+    // The Editor tabs carry the file names too (Save As renames one).
+    refreshEditorTabTitles ();
 }
 
 juce::String MainWindow::buildAboutText()

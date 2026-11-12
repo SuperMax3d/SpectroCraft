@@ -409,6 +409,12 @@ public:
     void registerPanel (PanelDesc);
     const PanelDesc* panel (const juce::String& id) const;
     juce::StringArray panelIds() const;   // registration order
+    /** Changes a panel's tab title (its tab strip re-lays out). */
+    void setPanelTitle (const juce::String& id, const juce::String& title);
+    /** Forgets a panel (one per document, for instance): taken out of the
+        layout first when open - even when not closable - its content
+        detached and its remembered spot dropped. */
+    void unregisterPanel (const juce::String& id);
 
     DockArea& mainArea() noexcept { return *mainArea_; }
     const DockArea& mainArea() const noexcept { return *mainArea_; }
@@ -436,6 +442,11 @@ public:
     void openPanel (const juce::String& id);
     /** Open + make the tab active + focus its group. */
     void showPanel (const juce::String& id);
+    /** Opens a closed panel as a tab of the group holding `mateId` (at
+        insertIndex, -1 = last) and makes it that group's active tab. Unlike
+        openPanel(), a maximised group stays maximised. Falls back to
+        openPanel() when mateId is not open. */
+    void openPanelAsTabOf (const juce::String& id, const juce::String& mateId, int insertIndex = -1);
     void closePanel (const juce::String& id);
     void closeOthersInGroup (const juce::String& id);
     void closeGroup (int groupUid);
@@ -474,6 +485,9 @@ public:
     // --------------------------------------------------------------- callbacks
     std::function<void()> onLayoutChanged;                        // persist
     std::function<void (const juce::String&, bool)> onPanelOpenChanged;   // id, open
+    /** setActiveTab() changed a group's active tab (tab click, overflow
+        menu, showPanel...): the panel id now shown. Not while loading. */
+    std::function<void (const juce::String&)> onActiveTabChanged;
     std::function<bool (const juce::KeyPress&)> onUnhandledKey;  // keys typed in floating windows
     std::function<bool (const juce::StringArray&)> isInterestedInFiles;
     std::function<void (const juce::StringArray&)> onFilesDropped;

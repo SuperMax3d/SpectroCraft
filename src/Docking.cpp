@@ -1734,6 +1734,44 @@ void DockManager::registerPanel (PanelDesc d)
     panels_.push_back (std::move (d));
 }
 
+void DockManager::setPanelTitle (const juce::String& id, const juce::String& title)
+{
+    for (auto& p : panels_)
+        if (p.id == id)
+        {
+            if (p.title == title)
+                return;
+            p.title = title;
+            const auto loc = locate (id);
+            if (loc.area != nullptr)
+                if (auto* gc = loc.area->componentFor (loc.group->uid))
+                    gc->refresh();   // tab widths follow the text
+            for (auto& f : floaters_)
+                f->repaint();
+            return;
+        }
+}
+
+void DockManager::unregisterPanel (const juce::String& id)
+{
+    if (panel (id) == nullptr)
+        return;
+    if (drag_ != nullptr && drag_->ids.contains (id))
+        cancelDrag();
+    if (isOpen (id))
+    {
+        detach (id);
+        detachContent (id);
+        removeEmptyFloaters();
+        layoutChanged();
+    }
+    memory_.erase (id);
+    buddies_.erase (id);
+    panels_.erase (std::remove_if (panels_.begin(), panels_.end(),
+                                   [&id] (const PanelDesc& p) { return p.id == id; }),
+                   panels_.end());
+}
+
 const PanelDesc* DockManager::panel (const juce::String& id) const
 {
     for (auto& p : panels_)
@@ -1903,10 +1941,14 @@ void DockManager::setActiveTab (int groupUid, int index)
     if (g == nullptr || ! g->isGroup() || ! juce::isPositiveAndBelow (index, g->tabs.size()) || g->active == index)
         return;
     g->active = index;
+    const juce::String shown = g->tabs[index];
     if (auto* gc = area->componentFor (groupUid))
         gc->refresh();
     if (! loading_ && onLayoutChanged)
         onLayoutChanged();
+    // Last: the callback may change the layout (g may not survive it).
+    if (! loading_ && onActiveTabChanged)
+        onActiveTabChanged (shown);
 }
 
 bool DockManager::isMaximized (int groupUid) const
@@ -2467,6 +2509,24 @@ void DockManager::openPanel (const juce::String& id)
     layoutChanged();
     if (focusUid != 0)
         setFocusedGroup (focusUid);
+    notifyOpen (id, true);
+}
+
+void DockManager::openPanelAsTabOf (const juce::String& id, const juce::String& mateId, int insertIndex)
+{
+    if (isOpen (id) || panel (id) == nullptr)
+        return;
+    const auto loc = locate (mateId);
+    if (loc.area == nullptr)
+    {
+        openPanel (id);
+        return;
+    }
+    const int at = insertIndex < 0 ? loc.group->tabs.size()
+                                   : juce::jlimit (0, loc.group->tabs.size(), insertIndex);
+    loc.group->tabs.insert (at, id);
+    loc.group->active = at;
+    layoutChanged();
     notifyOpen (id, true);
 }
 
