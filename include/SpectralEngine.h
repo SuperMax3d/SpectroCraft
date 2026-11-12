@@ -94,6 +94,20 @@ public:
         return level;
     }
 
+    // Effective frame hop at mipmap level `level`: the configured hop doubled
+    // per level. Level 0 is additionally clamped to fftSize/4 when the FFT
+    // window is smaller than that, so frames always overlap and no sample can
+    // fall between analysis windows (short transients in such gaps would be
+    // invisible). Coarser levels keep their sparse mipmap hops: beyond one
+    // FFT window per pixel column sub-pixel transients cannot be resolved.
+    static int effectiveHop (int level, const Settings& s)
+    {
+        int hop = s.hopSize << level;
+        if (level == 0 && hop > s.fftSize / 4)
+            hop = std::max (1, s.fftSize / 4);
+        return hop;
+    }
+
     /** Auto FFT-size mode: balances time resolution against frequency
         resolution from the current zoom levels.
 

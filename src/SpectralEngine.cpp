@@ -282,7 +282,7 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
     if (cancel != nullptr && cancel->load())
         return out;   // cancelled before any work: nothing to cache
 
-    const int hop = s.hopSize << level;
+    const int hop = effectiveHop (level, s);
     const int64_t tileSamples = (int64_t) kFramesPerTile * hop;
 
     const int64_t firstTile = startSample / tileSamples;
@@ -480,14 +480,16 @@ float SpectralEngine::probeMagnitude (const AudioEngine& engine, int channel,
     auto tiles = getTiles (engine, channel, pos, pos + 1, level, s);
     if (tiles.empty()) return -300.0f;
 
-    const int hop = s.hopSize << level;
+    const int hop = effectiveHop (level, s);
     const int bin = (int) std::clamp ((double) std::llround (freqHz * s.fftSize / rate),
                                       0.0, (double) (tiles.front()->numBins - 1));
 
     float best = -300.0f;
     for (const auto& tile : tiles)
     {
-        const double frameF = ((double) pos - (double) tile->startSample) / hop;
+        // Frames are displayed centred on their analysis window, so probe the
+        // frames whose windows straddle `pos` (same convention as renderToPixels).
+        const double frameF = ((double) pos - (double) tile->startSample - 0.5 * s.fftSize) / hop;
         for (int f = (int) std::floor (frameF); f <= (int) std::ceil (frameF); ++f)
             best = std::max (best, tile->get (f, bin));
     }
@@ -516,7 +518,7 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
     // Choose level so one frame ~ one pixel column
     const double samplesPerPixel = (double) (s1 - s0) / width;
     const int level = pickMipLevel (samplesPerPixel, s.hopSize);
-    const int hop = s.hopSize << level;
+    const int hop = effectiveHop (level, s);
 
     // Gather tiles per channel
     std::vector<std::vector<std::shared_ptr<SpectralTile>>> perCh;
@@ -605,7 +607,10 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
         for (int x = 0; x < width; ++x)
         {
             const int64_t sample = s0 + (int64_t) (((double) x + 0.5) / width * (s1 - s0));
-            const double frame = (double) (sample - firstTileStart) / hop;
+            // Frames are displayed centred on their analysis window: a pixel at
+            // time t shows the spectrum of the window centred on t, so transients
+            // line up with the waveform instead of appearing early.
+            const double frame = ((double) (sample - firstTileStart) - 0.5 * s.fftSize) / hop;
 
             double v = -300.0;
             for (auto& tiles : perCh)

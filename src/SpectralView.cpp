@@ -1820,6 +1820,33 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
     }
 }
 
+std::optional<float> SpectralView::thirdOctaveLabelY (float yc, float topY, float botY,
+                                                      const juce::Rectangle<int>& row,
+                                                      bool hasChanLabel, float labH)
+{
+    auto fits = [&] (float cy) -> bool
+    {
+        const float t = cy - labH * 0.5f, b = cy + labH * 0.5f;
+        if (t < topY || b > botY) return false;              // inside the band
+        if (t < row.getY() || b > row.getBottom()) return false;   // inside the row
+        const float c = (float) row.getY() + row.getHeight() * 0.5f;
+        if (hasChanLabel && t < c + 8.0f && b > c - 8.0f)
+            return false;                                    // clear of L/R / "N"
+        return true;
+    };
+
+    if (fits (yc)) return yc;
+
+    // The centre collides with the channel label: try just above, then below.
+    const float c = (float) row.getY() + row.getHeight() * 0.5f;
+    if (hasChanLabel && std::abs (yc - c) < 8.0f + labH * 0.5f)
+    {
+        if (fits (c - (8.0f + labH * 0.5f))) return c - (8.0f + labH * 0.5f);
+        if (fits (c + (8.0f + labH * 0.5f))) return c + (8.0f + labH * 0.5f);
+    }
+    return std::nullopt;
+}
+
 std::vector<double> SpectralView::thirdOctaveCentres (double fMin, double fMax)
 {
     // IEC 61260-1 preferred centre frequencies: {1, 1.25, 1.6, 2, 2.5,
@@ -1866,6 +1893,7 @@ void SpectralView::drawThirdOctaveGrid (juce::Graphics& g)
     const bool hasChanLabel = (channels.size() > 1 || app.audioEngine().numChannels() == 2);
 
     g.setFont (9.0f);
+    const float labH = g.getCurrentFont().getHeight();
     static const float dash[] = { 4.0f, 3.0f };
 
     for (const auto& rr : rowRects())
@@ -1895,14 +1923,12 @@ void SpectralView::drawThirdOctaveGrid (juce::Graphics& g)
             g.drawDashedLine (juce::Line<float> (x0, yOf (lo), x1, yOf (lo)), dash, 2, 1.0f);
             g.drawDashedLine (juce::Line<float> (x0, yOf (hi), x1, yOf (hi)), dash, 2, 1.0f);
 
-            // Centre value between the borders; skip it when the band is too
-            // thin on screen or would collide with the channel label.
+            // Centre value between the borders; nudge it clear of the channel
+            // label when needed and drop it only if no position fits.
             const float yc = yOf (fc);
-            if (h < 14.0f) continue;
-            if ((float) yc < rr.getY() + 8.0f || (float) yc > rr.getBottom() - 2.0f)
-                continue;
-            if (hasChanLabel && std::abs (yc - ((float) rr.getY() + rr.getHeight() * 0.5f)) < 10.0f)
-                continue;
+            const auto labY = thirdOctaveLabelY (yc, yOf (hi), yOf (lo), rr,
+                                                 hasChanLabel, labH);
+            if (!labY) continue;
 
             juce::String lab;
             if (fc >= 1000.0)
@@ -1916,7 +1942,8 @@ void SpectralView::drawThirdOctaveGrid (juce::Graphics& g)
                 lab = juce::String ((int) std::lround (fc));
 
             g.setColour (juce::Colours::white);
-            g.drawText (lab, (int) labelX, (int) yc - 7, labelW, 12,
+            g.drawText (lab, (int) labelX, (int) std::lround (*labY - labH * 0.5f), labelW,
+                        (int) std::ceil (labH),
                         axisOnRight() ? juce::Justification::bottomRight
                                       : juce::Justification::bottomLeft,
                         false);
