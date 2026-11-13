@@ -618,6 +618,13 @@ void VideoTracksPanel::setPlayhead (double tSecs)
     repaint();
 }
 
+void VideoTracksPanel::setSelection (const juce::Range<double>& s)
+{
+    if (s == selection_) return;
+    selection_ = s;
+    repaint();
+}
+
 // The ruler/rows area: everything except the bottom time bar and, when it is
 // visible, the right-hand row scrollbar.
 int VideoTracksPanel::contentWidth() const
@@ -905,6 +912,26 @@ void VideoTracksPanel::paint (juce::Graphics& g)
         const auto ghost = shownRow (dragIdx_).translated (0, dragNowY_ - dragStartPt_.y)
                                               .getIntersection (rowsArea);
         if (!ghost.isEmpty()) paintBand (g, dragIdx_, ghost, 0.8f);
+    }
+
+    // The shared time selection: the same translucent blue band with light-
+    // blue edges as the waveform/spectral views, under the playhead line.
+    if (!selection_.isEmpty())
+    {
+        const float x1 = xForTime (selection_.getStart());
+        const float x2 = xForTime (selection_.getEnd());
+        const float lo = std::max (0.0f, x1);
+        const float hi = std::min ((float) b.getWidth(), x2);
+        if (hi > lo)
+        {
+            g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
+            g.fillRect (lo, 0.0f, hi - lo, (float) (b.getHeight() - kBarW));
+            g.setColour (juce::Colour::fromRGB (96, 150, 255));
+            if (x1 >= 0.0f && x1 <= (float) b.getWidth())
+                g.drawVerticalLine (x1, 0.0f, (float) (b.getHeight() - kBarW));
+            if (x2 >= 0.0f && x2 <= (float) b.getWidth())
+                g.drawVerticalLine (x2, 0.0f, (float) (b.getHeight() - kBarW));
+        }
     }
 
     // The main document's playhead: a red line from the ruler to the bottom,

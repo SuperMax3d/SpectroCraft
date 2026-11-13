@@ -12711,6 +12711,66 @@ static void testStraightLinePoints()
     CHECK (!dpts.empty (), "zero-length line has points");
 }
 
+// A committed spectral selection moves the playhead to its start, exactly as
+// the time-selection tool does; a degenerate drag that only clears the
+// selection leaves the playhead alone.
+static void testSpectralSelPlayheadJump()
+{
+    const juce::File wav = makeTempFile ("spec_sel_playhead.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for playhead jump test");
+    auto* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    SpectralView view (app);
+    view.setSize (256, 128);
+    view.setViewRange (0.0, 4.0);
+    view.setVisibleChannels ({ 0 });
+    view.setSettings (app.settings);
+
+    app.selMode = SpectralSelMode::Marquee;
+    const auto pr = view.plotRect();
+    const int x1 = (int) view.timeToX (1.0);
+    const int x2 = (int) view.timeToX (2.5);
+    // A marquee needs a real time AND frequency span: drag diagonally.
+    const int yTop = pr.getY() + 20, yBot = pr.getBottom() - 20;
+
+    app.setPlayhead (3.5);
+    CHECK (std::abs (app.playhead - 3.5) < 1e-9, "playhead sits elsewhere before the drag");
+
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    view.mouseDown (mkMouse (view, x1, yTop, lmb));
+    view.mouseDrag (mkMouse (view, x2, yBot, lmb));
+    view.mouseUp   (mkMouse (view, x2, yBot, lmb));
+
+    CHECK (!d->spectralSel.empty (), "marquee drag committed a spectral selection");
+    const auto ext = d->spectralSel.timeExtent();
+    CHECK (ext.getLength() > 1.0, "the committed selection spans the dragged range");
+    CHECK (std::abs (app.selection.getStart() - ext.getStart()) < 1e-9,
+           "the shared time selection mirrors the spectral range");
+    CHECK (std::abs (app.playhead - app.selection.getStart()) < 1e-9,
+           "playhead jumped to the start of the selection");
+
+    // A plain click in a tool mode clears the selection; nothing is selected,
+    // so the playhead must not move.
+    const double phBefore = app.playhead;
+    view.mouseDown (mkMouse (view, x2, yBot, lmb));
+    view.mouseUp   (mkMouse (view, x2, yBot, lmb));
+    CHECK (d->spectralSel.empty (), "a degenerate drag clears the spectral selection");
+    CHECK (app.selection.isEmpty(), "the mirrored time range is cleared too");
+    CHECK (std::abs (app.playhead - phBefore) < 1e-9,
+           "clearing a selection does not move the playhead");
+
+    app.selMode = SpectralSelMode::TimeRange;
+    wav.deleteFile ();
+}
+
 // ALT+click in paintbrush mode draws a straight line from the last stroke's
 // end point to the click position. The line is interpolated linearly in
 // (time, frequency) space - i.e. it stays straight on a LINEAR frequency
@@ -25166,6 +25226,112 @@ static void testTablesOverlayAndPicker()
 //==============================================================================
 // Parameter Align targets: the chosen view (waveform / spectrogram /
 // dedicated) is recorded on the parameter and gates which overlay draws it.
+// The Tables preview plot carries the shared time selection as a blue band,
+// mapped through the focused table's own alignment exactly like its curves.
+static void testTablesPlotSelectionBand()
+{
+    const juce::File wav = makeTempFile ("tbl_plot_sel.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t, double) { return 0.5f; });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for the plot selection band");
+    auto* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    std::string err;
+    juce::String csv = "alpha\n";
+    for (int i = 0; i < 200; ++i) csv += juce::String ((double) i / 199.0, 4) + "\n";
+    CHECK (app.addTableFromCsv ("T1", csv, &err), "table imported");
+
+    TablesPlotView plot (app);
+    plot.setSize (256, 128);
+    plot.setFocusTableIndex (0);
+    plot.setFocusParamIndex (-1);
+    const double dur = plot.tableDuration();
+    CHECK (dur > 0.0, "the imported table has a duration");
+
+    const int yMid = 60;   // inside the curves area of a 256x128 view
+
+    juce::Image base (juce::Image::ARGB, 256, 128, true);
+    { juce::Graphics g0 (base); plot.paint (g0); }   // no selection yet
+
+    app.setSelection ({ dur * 0.25, dur * 0.75 });
+    plot.setSelection (app.selection);
+
+    juce::Image img (juce::Image::ARGB, 256, 128, true);
+    { juce::Graphics g (img); plot.paint (g); }
+
+    auto blueShift = [] (const juce::Colour& px, const juce::Colour& under)
+    { return (px.getBlue() - px.getRed()) - (under.getBlue() - under.getRed()) > 40; };
+
+    const int xIn  = (int) plot.tableTimeToX (dur * 0.5);   // inside the band
+    const int xLow = (int) plot.tableTimeToX (dur * 0.1);   // before it
+    const int xHi  = (int) plot.tableTimeToX (dur * 0.9);   // after it
+    CHECK (blueShift (img.getPixelAt (xIn, yMid), base.getPixelAt (xIn, yMid)),
+           "preview plot: the band tints the curves area");
+    CHECK (img.getPixelAt (xLow, yMid) == base.getPixelAt (xLow, yMid),
+           "preview plot: nothing changes before the band");
+    CHECK (img.getPixelAt (xHi, yMid) == base.getPixelAt (xHi, yMid),
+           "preview plot: nothing changes after the band");
+
+    // Clearing the selection restores the plain render.
+    app.setSelection ({ 0.0, 0.0 });
+    plot.setSelection (app.selection);
+    juce::Image cleared (juce::Image::ARGB, 256, 128, true);
+    { juce::Graphics g2 (cleared); plot.paint (g2); }
+    CHECK (cleared.getPixelAt (xIn, yMid) == base.getPixelAt (xIn, yMid),
+           "preview plot: the band is gone after clearing");
+
+    wav.deleteFile ();
+}
+
+// Pasting (or importing) a table must select it in the list and draw its
+// plot, without the user clicking the new row.
+static void testTablesPasteAutoSelect()
+{
+    const juce::File wav = makeTempFile ("tbl_paste_sel.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t, double) { return 0.5f; });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for the paste selection test");
+    auto* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    std::string err;
+    juce::String csv = "alpha\n";
+    for (int i = 0; i < 200; ++i) csv += juce::String ((double) i / 199.0, 4) + "\n";
+    CHECK (app.addTableFromCsv ("T1", csv, &err), "first table imported");
+
+    TablesPanel panel (app);
+    panel.setSize (320, 420);
+    app.onTablesChanged = [&panel] { panel.refresh(); };   // as MainWindow wires it
+    panel.refresh();
+
+    CHECK (panel.numSelectedRows() == 1 && panel.isTableRow (panel.primaryRow()),
+           "the first table's row is selected at first");
+    CHECK (panel.plotView().focusTableIndex() == 0, "the preview starts on the first table");
+
+    setClipboardText ("beta,gamma\n1,2\n3,4\n5,6\n7,8\n");
+    panel.pasteToNewTable();
+    CHECK (app.activeTables().size() == 2, "paste created the second table");
+    if (app.activeTables().size() == 2)
+    {
+        CHECK (app.activeTables()[1].name == "Clipboard", "pasted table named Clipboard");
+        CHECK (panel.numSelectedRows() == 1 && panel.isTableRow (panel.primaryRow()),
+               "the pasted table's row is the only selection");
+        const auto pr = panel.rowRef (panel.primaryRow());
+        CHECK (pr.tableIdx == 1 && pr.paramIdx < 0,
+               "the new table's row became the primary row");
+        CHECK (panel.plotView().focusTableIndex() == 1,
+               "the preview points at the pasted table without a click");
+        CHECK (panel.plotView().focusParamIndex() == -1,
+               "the preview shows the whole pasted table");
+    }
+
+    app.onTablesChanged = nullptr;
+    wav.deleteFile ();
+}
+
 static void testTablesAlignTarget()
 {
     const juce::File wav = makeTempFile ("tables_align.wav");
@@ -25187,6 +25353,10 @@ static void testTablesAlignTarget()
     auto& p0 = d->tables[0].params[0];
     p0.colorIndex = 3;   // green: absent from the classic spectral map
     CHECK (p0.alignTarget == 0, "new parameter defaults to the waveform overlay");
+    // Both parameters normalise to the very same diagonal curve, so the second
+    // would be painted exactly over the first. Keep it hidden: every colour
+    // check below is about alpha alone.
+    d->tables[0].params[1].visible = false;
 
     TablesPanel panel (app);
     panel.setSize (320, 420);
@@ -25218,6 +25388,25 @@ static void testTablesAlignTarget()
             }
         return n;
     };
+
+    // --- Switching the display mode re-targets every parameter -------------
+    // A freshly imported parameter targets the waveform; choosing "Overlay on
+    // Spectrogram" must show it without opening each parameter's Manual dialog.
+    p0.alignTarget = 0;   // as if the user had never aligned it
+    app.setTablesMode (1);
+    CHECK (p0.alignTarget == 1,
+           "switching to spectrogram overlay re-targets the parameters");
+    {
+        SpectralView sv (app);
+        sv.setSize (256, 128);
+        sv.setViewRange (0.0, 0.5);
+        sv.setVisibleChannels ({ 0 });
+        sv.setSettings (app.settings);
+        juce::Image img (juce::Image::ARGB, 256, 128, true);
+        { juce::Graphics g (img); sv.paint (g); }
+        CHECK (countGreen (img) > 0,
+              "the mode switch alone makes the curve appear on the spectrogram");
+    }
 
     // --- SpectralView draws it in spectrogram-overlay mode -----------------
     app.setTablesMode (1);
@@ -28518,6 +28707,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("python scripts", testPythonScripts);
     SC_RUN_TEST ("spectral selection model", testSpectralSelectionModel);
     SC_RUN_TEST ("selection render hole", testSpectralSelectionRenderHole);
+    SC_RUN_TEST ("spectral selection playhead jump", testSpectralSelPlayheadJump);
     SC_RUN_TEST ("straight line points", testStraightLinePoints);
     SC_RUN_TEST ("alt-click straight line", testAltClickStraightLine);
     SC_RUN_TEST ("scaled copy", testScaledCopy);
@@ -28630,6 +28820,8 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("tables playhead resync", testTablesPlayheadResyncAfterReopen);
     SC_RUN_TEST ("tables shared alignment", testTablesSharedAlignment);
     SC_RUN_TEST ("tables 2pt vertical align", testTablesTwoPointVerticalAlign);
+    SC_RUN_TEST ("tables plot selection band", testTablesPlotSelectionBand);
+    SC_RUN_TEST ("tables paste auto select", testTablesPasteAutoSelect);
     SC_RUN_TEST ("track v-pan behaviour", testTrackVPanBehaviour);
     SC_RUN_TEST ("tables colour picker dialog", testTablesColourPickerDialog);
     SC_RUN_TEST ("paste live repro", testPasteLiveRepro);

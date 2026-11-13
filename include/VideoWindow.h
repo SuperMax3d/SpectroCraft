@@ -350,6 +350,11 @@ public:
     void setPlayhead (double tSecs);
     double getPlayhead() const noexcept { return playhead_; }
 
+    /** The shared time selection in seconds, drawn as a blue band like the
+        waveform/spectral views. Empty range = no band. */
+    void setSelection (const juce::Range<double>& s);
+    juce::Range<double> getSelection() const noexcept { return selection_; }
+
     /** The visible time range in seconds. */
     juce::Range<double> getViewRange() const noexcept { return view_; }
     void zoomIn();                       // one step about the centre
@@ -437,6 +442,7 @@ private:
     float snapX_ = -1.0f;                 // shift-drag anchor indicator (-1 = none)
     std::vector<bool> soloFlags_;
     double playhead_ = -1.0;              // main document's cursor, secs
+    juce::Range<double> selection_;       // shared time selection (empty = none)
     TimeScrollBar hScroll_;               // bottom time bar (pan/zoom the view)
     ValueScrollBar vScroll_;              // right row scroll (vertical offset)
     double scrollY_ = 0.0;                // first visible row's top, px

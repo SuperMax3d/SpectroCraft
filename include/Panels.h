@@ -1768,6 +1768,10 @@ public:
         inside the focused table. Repaints only when the line moves. */
     void setPlayhead (double docSecs);
     double getPlayhead() const { return playheadDoc_; }
+
+    /** The shared time selection in document seconds, drawn as a blue band
+        through the focused table's alignment map. Empty = no band. */
+    void setSelection (const juce::Range<double>& s);
     /** Column of the playhead line, or -1 when it is not drawn. */
     int playheadX() const;
 
@@ -1783,6 +1787,7 @@ private:
     int focusIdx_ = -1;
     int focusParam_ = -1;
     double playheadDoc_ = -1.0;
+    juce::Range<double> selectionDoc_;   // shared time selection (empty = none)
     int shownPlayheadX_ = -1;          // column computed at the last paint (change detection)
     bool pointGesture_ = false;        // a left-button press reported through onPointClicked
     juce::Point<int> hoverPos_ {-1, -1};
@@ -1945,6 +1950,9 @@ public:
     void downsamplePrimaryTable();
     void copySelection();
     void pasteToNewTable();
+    /** Selects only the given table's row in the list and points the
+        preview plot at it. */
+    void selectTable (int tableIdx);
     /** Colour picker dialog for one parameter (double-click on its square).
         Single clicks only cycle the palette - never open this. */
     void showColourPicker (int tableIdx, int paramIdx);

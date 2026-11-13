@@ -9153,6 +9153,13 @@ void TablesPlotView::setPlayhead (double docSecs)
     if (playheadX() != shownPlayheadX_) repaint();   // only when the line moves
 }
 
+void TablesPlotView::setSelection (const juce::Range<double>& s)
+{
+    if (s == selectionDoc_) return;
+    selectionDoc_ = s;
+    repaint();
+}
+
 double TablesPlotView::tableDuration() const
 {
     auto* d = app.doc ();
@@ -9277,6 +9284,34 @@ void TablesPlotView::paint (juce::Graphics& g)
     {
         g.setColour (juce::Colours::red.withAlpha (0.95f));
         g.fillRect (shownPlayheadX_, pr.getY(), 2, pr.getHeight());
+    }
+
+    // The shared time selection in this table's own time (through the focused
+    // parameter's alignment map): the same translucent blue band with light-
+    // blue edges as the waveform/spectral views.
+    if (!selectionDoc_.isEmpty())
+    {
+        const double dur = tableDuration();
+        if (dur > 0.0)
+        {
+            const double s0 = docToTableTime (selectionDoc_.getStart());
+            const double s1 = docToTableTime (selectionDoc_.getEnd());
+            const float x1 = tableTimeToX (std::clamp (std::min (s0, s1), 0.0, dur));
+            const float x2 = tableTimeToX (std::clamp (std::max (s0, s1), 0.0, dur));
+            if (x2 > x1)
+            {
+                g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
+                const float lo = std::max ((float) pr.getX(), x1);
+                const float hi = std::min ((float) pr.getRight(), x2);
+                if (hi > lo)
+                    g.fillRect (lo, (float) pr.getY(), hi - lo, (float) pr.getHeight());
+                g.setColour (juce::Colour::fromRGB (96, 150, 255));
+                if (x1 >= (float) pr.getX() && x1 <= (float) pr.getRight())
+                    g.drawVerticalLine (x1, (float) pr.getY(), (float) pr.getBottom());
+                if (x2 >= (float) pr.getX() && x2 <= (float) pr.getRight())
+                    g.drawVerticalLine (x2, (float) pr.getY(), (float) pr.getBottom());
+            }
+        }
     }
 
     // Delicate white vertical cursor line, like the Frequency Analysis graph.
@@ -9931,6 +9966,7 @@ void TablesPanel::refresh()
     const int pr = primaryRow();
     plot.setFocusTableIndex (pr >= 0 ? rows_[(size_t) pr].tableIdx : -1);
     plot.setFocusParamIndex (pr >= 0 ? rows_[(size_t) pr].paramIdx : -1);
+    plot.setSelection (app.selection);   // the blue band follows the shared selection
 
     updateStatus ();
     table.repaint ();
@@ -10167,7 +10203,37 @@ void TablesPanel::pasteToNewTable()
     const juce::String text = tablesGetClipboardText ();
     std::string err;
     if (!app.addTableFromCsv ("Clipboard", text, &err))
+    {
         statusLabel.setText ("Import failed: " + juce::String (err), juce::dontSendNotification);
+        return;
+    }
+    // The new table is the last one: select it in the list and point the
+    // preview at it so its plot shows without a click. addTableFromCsv has
+    // already notified the panel in the app; make sure the rows are current
+    // first so this also works when nothing else is listening.
+    auto* d = app.doc ();
+    if (d == nullptr || d->tables.empty()) return;
+    const int newIdx = (int) d->tables.size() - 1;
+    bool listed = false;
+    for (const auto& r : rows_)
+        if (r.tableIdx == newIdx && r.paramIdx < 0) listed = true;
+    if (!listed) refresh();
+    selectTable (newIdx);
+}
+
+void TablesPanel::selectTable (int tableIdx)
+{
+    for (int i = 0; i < (int) rows_.size(); ++i)
+        if (rows_[(size_t) i].tableIdx == tableIdx && rows_[(size_t) i].paramIdx < 0)
+        {
+            anchorRow = i;
+            juce::SparseSet<int> sel;
+            sel.addRange ({ i, i + 1 });
+            table.setSelectedRows (sel, juce::sendNotification);
+            plot.setFocusTableIndex (tableIdx);
+            plot.setFocusParamIndex (-1);
+            return;
+        }
 }
 
 // ================================================== Manual alignment window

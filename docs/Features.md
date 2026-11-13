@@ -338,12 +338,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     each parameter additionally carries its own unique palette colour square
     (click cycles it, double-click opens a preset picker). Tables are created
     by dragging CSV files onto the
-    window or via right-click **Paste to new table**; right-click also offers
+    window or via right-click **Paste to new table** — either way the new table
+    is selected in the list and its plot is drawn at once, no click needed;
+    right-click also offers
     **Remove Selected**, **Copy** (CSV) and **Downsample...** (rows/second).
     The top dropdown chooses where visible parameters are drawn: overlay on
     the waveform, overlay on the spectrogram (both auto-fit each parameter's
-    range so curves stay visible), or a dedicated resizable track with its own
+    range so curves stay visible; switching the choice re-targets every
+    parameter to the new view, so imported tables show up without a manual
+    alignment first), or a dedicated resizable track with its own
     vertical zoom/pan scrollbar plus the blue selection band and red playhead.
+    The panel's own preview plot carries the same blue selection band.
     Tables and individual
     parameters can be time-aligned manually, by picking one/two points on the
     panel's preview plot plus the waveform/spectrogram (two points also
@@ -962,6 +967,10 @@ drawn from its offset to its end.
 - a red **playhead line** runs from the ruler to the bottom of the panel and
   follows the main playhead while playing and on every seek; clicking the
   time ruler moves the main playhead to that time;
+- the **current time selection** is shown across the ruler and every row as the
+  same translucent blue band with light-blue edges used by the waveform,
+  spectral and Tables views, so the same selection is visible wherever you are
+  working;
 - **clicking** a band selects it: that video renders above while it covers the
 current time. Clicking outside any band clears the selection and shows the
 topmost available video at the current time; when the selected video ends,
@@ -2162,6 +2171,13 @@ perfectly straight line). Shift/Ctrl combine with Alt for add/subtract lines. Th
 status bar; while holding **Shift** or **Ctrl**, it additionally shows "Add Selection" / "Subtract Selection", so you can always see how the next drag will edit the selection. `[` / `]` step the brush size through 1/2/4/8/16/32 % of the cursor's own frequency (default 4 %), and **Esc**
 clears the spectral selection without touching the time selection.
 
+Releasing the drag commits the shape, mirrors its time extent into the normal
+time selection (so time-based effects apply to exactly that stretch) and moves
+the **playhead to the start** of the selection — like the time-selection tool,
+pressing Space then plays from where the selected region begins. A drag too
+small to define a shape only clears the selection and leaves the playhead where
+it was.
+
 **Moving / scaling an existing selection**: in the spectral view, right-click
 on the current spectral selection and choose **Move Selection** or **Scale
 Selection**. The first click sets a reference point (shown with the same round
@@ -2325,7 +2341,12 @@ list: a table row followed by its parameter rows.
   every Nth row so the density is at most that rate; no interpolation and no
   added data). Excel-style multi-selection applies: plain
   click, Ctrl/Cmd+click toggle, Shift+click range.
-- The dropdown at the top picks where visible parameters are drawn:
+- The dropdown at the top picks where visible parameters are drawn. Switching
+  it re-targets every parameter to the newly chosen view, so a table you just
+  imported shows up in the spectrogram overlay immediately - no need to open
+  each parameter's Align → **Manual…** dialog. (You can still give a parameter
+  its own target afterwards from the Align submenu; the dedicated track shows
+  every visible parameter whatever the target.)
   - **Overlay on Waveform** — parameters whose alignment target is *Waveform*
     are drawn over the waveform view. Each parameter's raw range is first
     fitted into [-1,+1] (so the curve is visible regardless of the data's
@@ -2398,6 +2419,10 @@ list: a table row followed by its parameter rows.
   hidden while the playhead lies outside the table. **Clicking** in the plot
   moves the playhead to that time, and dragging keeps moving it — except
   while a 1/2-point alignment is waiting for its plot clicks.
+- The preview plot also draws the **current time selection** as a translucent
+  blue band with light-blue edges — the same band the waveform, spectral and
+  dedicated-track views show — mapped through the very same alignment as its
+  curves and the playhead line.
 - A **draggable separator** between the table list and the preview plot
   trades height between them; the plot height is remembered between sessions.
 - **Align** (parameter row): Waveform / Spectrogram / Dedicated submenus with
@@ -2550,7 +2575,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `VideoFrames` (`src/VideoFrames.cpp`, `src/VideoFrames_mac.mm`, `src/VideoFrames_win.cpp`) | Video picture decoding for the Video window: a per-platform frame stream (AVFoundation on macOS, Media Foundation on Windows, none on Linux), `VideoDecoder::frameAt(t)` (decode forward for small forward moves, seek otherwise; skipped frames are never converted) and `VideoFramePump`, a worker thread that serves only the latest requested time and hands frames to the message thread. |
-| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, vertical + horizontal zoom bars, left-drag pan one to one), per-file rotation, *Upscaling* (Lanczos / Bicubic / Nearest, see `VideoScaler`). Docks as the Video panel of the docking workspace (`VideoDockHost`, picture on top and tracks panel below, draggable separator between them, corner button collapses the tracks area; floating or in the main window) via **Window > Dock/Undock Video Panel** or *Dock/Undock Panel* from the tab menu once docked/floating (*Always on Top* in a floating group's tab menu), and can be sent back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag left/right to offset (Shift-drag snaps to 0 s / audio end / other track edges) or up/down to reorder the tracks (axis picked by the first pixels; the top row renders above), wheel zoom about the cursor, right/bottom scrollbars when content overflows, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel; right-click menu on a band — or on the picture, targeting the currently displayed track — for sync/align/copy-audio/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else playhead) at 60 Hz while visible or docked. |
+| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, vertical + horizontal zoom bars, left-drag pan one to one), per-file rotation, *Upscaling* (Lanczos / Bicubic / Nearest, see `VideoScaler`). Docks as the Video panel of the docking workspace (`VideoDockHost`, picture on top and tracks panel below, draggable separator between them, corner button collapses the tracks area; floating or in the main window) via **Window > Dock/Undock Video Panel** or *Dock/Undock Panel* from the tab menu once docked/floating (*Always on Top* in a floating group's tab menu), and can be sent back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag left/right to offset (Shift-drag snaps to 0 s / audio end / other track edges) or up/down to reorder the tracks (axis picked by the first pixels; the top row renders above), wheel zoom about the cursor, right/bottom scrollbars when content overflows, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel, with the shared time selection painted over the ruler and rows as the usual blue band; right-click menu on a band — or on the picture, targeting the currently displayed track — for sync/align/copy-audio/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else playhead) at 60 Hz while visible or docked. |
 | `VideoScaler` (`src/VideoScaler.cpp`, `src/videoscale/VideoScalerCore.cpp`) | Picture scaling for the Video window: the visible part of the frame resampled to physical screen pixels with Lanczos (a = 3), Bicubic (A = −0.6) or Nearest — swscale's kernels, stretched when shrinking, weights normalised — separable, weights cached per geometry, rows split across up to 3 worker threads, 4-wide SIMD (SSE2 / NEON), quarter turns folded into the pixel reads. The core is plain C++ in its own library (`sc_video_scaler_core`), compiled optimised in every configuration, Debug included. |
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |

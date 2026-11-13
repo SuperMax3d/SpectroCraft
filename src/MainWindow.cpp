@@ -2239,7 +2239,12 @@ void MainWindow::syncSharedState()
         if (specVScroll && specVScroll->isLogarithmic () != spectralView->isLogFrequency ())
             updateScrollBars ();
     }
-    if (tablesPanel) tablesPanel->plotView().setPlayhead (app.playhead);
+    if (tablesPanel)
+    {
+        tablesPanel->plotView().setPlayhead (app.playhead);
+        tablesPanel->plotView().setSelection (app.selection);   // blue band in the preview plot
+    }
+    if (videoWindow) videoWindow->getTracksPanel().setSelection (app.selection);
     if (tablesTrack)
     {
         tablesTrack->setPlayhead (app.playhead);
@@ -2871,6 +2876,7 @@ void MainWindow::ensureVideoWindow()
     // The track list's ruler seeks the main playhead.
     auto& vtp = videoWindow->getTracksPanel();
     vtp.onSeekTime = [this] (double t) { app.setPlayhead (t); };
+    vtp.setSelection (app.selection);   // a freshly shown panel carries the current selection
     videoWindow->onTrackMenuAction = [this] (int id, int idx)
     {
         handleVideoTrackMenu (id, idx);

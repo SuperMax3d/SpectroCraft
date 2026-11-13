@@ -1720,8 +1720,17 @@ int Application::tablesMode() const
 void Application::setTablesMode (int mode)
 {
     FileDoc* d = doc ();
-    if (d == nullptr || d->tablesMode == std::clamp (mode, 0, 2)) return;
-    d->tablesMode = std::clamp (mode, 0, 2);
+    const int m = std::clamp (mode, 0, 2);
+    if (d == nullptr || d->tablesMode == m) return;
+    d->tablesMode = m;
+    // The overlay views draw only the parameters whose target matches the
+    // active mode: re-target every parameter on a switch so all curves appear
+    // in the newly chosen view without per-parameter manual alignment. (The
+    // dedicated track shows everything regardless of target.)
+    if (m <= 1)
+        for (auto& t : d->tables)
+            for (auto& p : t.params)
+                p.alignTarget = m;
     d->metaDirty = true;   // the display mode persists with the file metadata
     if (onTablesChanged)
         onTablesChanged ();

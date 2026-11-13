@@ -814,6 +814,57 @@ static void testVideoTracksPanelHeadless()
 
 }
 
+// The shared time selection is drawn as a translucent blue band across the
+// ruler and every row, the same style the waveform and spectral views use.
+static void testVideoTracksSelectionBand()
+{
+    VideoTracksPanel p;
+    p.setSize (300, p.kRulerH + 2 * p.kRowH);
+    p.setAudioDuration (10.0);
+
+    VideoTracksPanel::Track a;
+    a.file = juce::File ("/tmp/a.mp4"); a.offsetSecs = 0.0; a.durationSecs = 5.0;
+    p.setTracks ({ a });
+
+    const int h = p.getHeight();
+    juce::Image base (juce::Image::ARGB, 300, h, true);
+    { juce::Graphics g0 (base); p.paint (g0); }   // no selection yet
+
+    p.setSelection ({ 2.0, 4.0 });
+    CHECK (p.getSelection() == juce::Range<double> (2.0, 4.0),
+           "tracks panel: the selection is remembered");
+
+    juce::Image img (juce::Image::ARGB, 300, h, true);
+    { juce::Graphics g (img); p.paint (g); }
+
+    // The fill is RGBA(70,130,255,80): it pulls the pixel towards blue. The
+    // comparison is against the identical no-selection render, so whatever the
+    // ruler or a band paints underneath does not matter.
+    auto blueShift = [] (const juce::Colour& px, const juce::Colour& under)
+    { return (px.getBlue() - px.getRed()) - (under.getBlue() - under.getRed()) > 40; };
+
+    const int xIn  = (int) p.xForTime (3.0);   // inside [2, 4] s
+    const int xOut = (int) p.xForTime (6.0);   // outside it
+    // Row 2 is empty (one track only): the fill lands on the dark background.
+    // Row 1 holds track A, whose colour is the very same blue as the fill, so
+    // blending it changes nothing measurable - the ruler proves that row too.
+    const int yRow = p.kRulerH + p.kRowH + 13;
+    CHECK (blueShift (img.getPixelAt (xIn, 5), base.getPixelAt (xIn, 5)),
+           "tracks panel: the ruler is tinted inside the selection");
+    CHECK (blueShift (img.getPixelAt (xIn, yRow), base.getPixelAt (xIn, yRow)),
+           "tracks panel: the rows are tinted inside the selection");
+    CHECK (img.getPixelAt (xOut, yRow) == base.getPixelAt (xOut, yRow),
+           "tracks panel: nothing changes outside the selection");
+
+    // Clearing removes the band: the render is identical to the baseline again.
+    p.setSelection ({});
+    CHECK (p.getSelection().isEmpty(), "tracks panel: an empty range clears the selection");
+    juce::Image cleared (juce::Image::ARGB, 300, h, true);
+    { juce::Graphics g2 (cleared); p.paint (g2); }
+    CHECK (cleared.getPixelAt (xIn, yRow) == base.getPixelAt (xIn, yRow),
+           "tracks panel: the band is gone after clearing");
+}
+
 // End to end: two tracks of the same movie on one document. The selected
 // track renders above while it covers the time; when it ends, the topmost
 // covering track takes over automatically.
@@ -1917,6 +1968,7 @@ static void runRegression_video()
     testVideoViewLayout();
     testVideoWindowFollowsDocument();
     testVideoTracksPanelHeadless();
+    testVideoTracksSelectionBand();
     testVideoWindowMultiTrack();
     testDockedVideoReceivesFrames();
     testVideoAdjustmentNoCompounding();

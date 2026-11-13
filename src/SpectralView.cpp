@@ -898,6 +898,10 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
             // no-op, fire no notification and leave the Selection panel with
             // stale button states (e.g. Save disabled after a plain replace-drag).
             app.refreshSpectralSelectionUI ();
+            // Like the time-selection tool, jump to the committed selection's
+            // start so playback begins where the selected region does.
+            if (app.selection.getLength() > 1e-9)
+                app.setPlayhead (app.selection.getStart());
             selection = app.selection;
             setSpectralSelectionChanged ();
         }
