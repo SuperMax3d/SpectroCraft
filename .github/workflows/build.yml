@@ -88,19 +88,26 @@ jobs:
       # the archive contains, and the build folder also holds test logs and
       # probe executables that are not part of a release.
       - name: Assemble the Windows archive payload
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          src=build/src/SpectroCraft_artefacts/Release
-          out=build/release-payload
-          rm -rf "$out"
-          mkdir -p "$out"
-          cp "$src/SpectroCraft.exe" "$out/"
-          cp -r "$src/SpectroCraft" "$out/SpectroCraft"
-          cp -r "$src/recorders" "$out/recorders"
-          find "$out" -name '*.pdb' -delete
-          test -f "$out/SpectroCraft/spectrocraft-updater.exe"
-          echo "payload:"; ls -R "$out"
+          $ErrorActionPreference = "Stop"
+          $src = "build/src/SpectroCraft_artefacts/Release"
+          $out = "build/release-payload"
+          if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item -LiteralPath "$src/SpectroCraft.exe" -Destination "$out/SpectroCraft.exe"
+          Copy-Item -LiteralPath "$src/SpectroCraft" -Destination "$out/SpectroCraft" -Recurse
+          Copy-Item -LiteralPath "$src/recorders" -Destination "$out/recorders" -Recurse
+          Get-ChildItem -LiteralPath $out -Recurse -Filter *.pdb | Remove-Item -Force
+          if (-not (Test-Path -LiteralPath "$out/SpectroCraft/spectrocraft-updater.exe")) {
+            throw "spectrocraft-updater.exe is missing from the payload"
+          }
+          Write-Output "payload:"
+          Get-ChildItem -LiteralPath $out -Recurse -File | ForEach-Object { $_.FullName }
+
+      # PowerShell rather than bash: MSYS resolves a bare "SpectroCraft" to the
+      # SpectroCraft.exe next to it, so copying the SpectroCraft/ folder after
+      # the exe fails with "cannot overwrite non-directory".
 
       # update-manifest.json + its Ed25519 signature: the app verifies the
       # signature with the key built into it (include/Updates.h) before it
@@ -110,7 +117,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/make_update_manifest.py \
+          # `python`, not `python3`: the Windows runner's Python is reachable as
+          # python (the macOS / Linux jobs use python3).
+          python tools/make_update_manifest.py \
             --dir build/release-payload \
             --out build/update-manifest.json \
             --version-file build/generated/SC_VERSION.txt
