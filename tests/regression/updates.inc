@@ -217,13 +217,20 @@ static void updTest_assets()
     const juce::String os = scupd::platformToken(), arch = scupd::archToken();
     CHECK (os.isNotEmpty() && arch.isNotEmpty(), "platform/arch tokens exist");
 
+    // A platform token that is never the one running the test: hard-coding
+    // macos-arm64 as "another platform" made this fixture mean "this platform"
+    // on macOS, where the exact-name fallback then won over the last-resort
+    // rule.
+    const juce::String other = (os == "macos" && arch == "arm64") ? "linux-x64"
+                                                                   : "macos-arm64";
+
     scupd::ReleaseInfo rel;
     rel.version = "1.0.2300";
     rel.tag = "v1.0.2300";
     rel.assets.add (mkAsset ("update-manifest.json", 4096));
     rel.assets.add (mkAsset ("update-manifest.json.sig", 65));
     rel.assets.add (mkAsset ("SpectroCraft-" + os + "-" + arch + ".zip"));            // old name
-    rel.assets.add (mkAsset ("SpectroCraft-macos-arm64.zip"));                        // another platform
+    rel.assets.add (mkAsset ("SpectroCraft-" + other + ".zip"));                      // another platform
     rel.assets.add (mkAsset ("SpectroCraft-1.0.2300-" + os + "-" + arch + ".zip"));  // preferred
 
     const auto* picked = scupd::pickAsset (rel);
@@ -242,7 +249,7 @@ static void updTest_assets()
     scupd::ReleaseInfo odd;
     odd.version = "1.0.2300";
     odd.assets.add (mkAsset ("SpectroCraft-" + os + "-" + arch + "-portable.zip"));
-    odd.assets.add (mkAsset ("SpectroCraft-macos-arm64.zip"));
+    odd.assets.add (mkAsset ("SpectroCraft-" + other + ".zip"));
     const auto* oddPick = scupd::pickAsset (odd);
     CHECK (oddPick != nullptr && oddPick->name.endsWith ("-portable.zip"),
            "pickAsset accepts a name containing both tokens as a last resort");
