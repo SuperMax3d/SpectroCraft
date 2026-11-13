@@ -263,7 +263,10 @@ bool httpGetString (const juce::String& url, juce::String& bodyOut, juce::String
     if (transferError) { errOut = "the connection was interrupted."; return false; }
     if (body.empty()) { errOut = "empty response."; return false; }
 
-    bodyOut = juce::String (body.data(), body.size());
+    // The response is UTF-8 (release notes contain em dashes and the like), so
+    // it must be decoded as UTF-8: the plain const char* constructor asserts
+    // that the bytes are ASCII.
+    bodyOut = juce::String::fromUTF8 (body.data(), (int) body.size());
     return true;
 }
 
@@ -330,7 +333,7 @@ bool httpGetString (const juce::String& url, juce::String& bodyOut, juce::String
         if (body.size() > (size_t) kMaxStringBytes) { errOut = "the response is larger than 4 MB."; return false; }
     }
     if (body.empty()) { errOut = "empty response."; return false; }
-    bodyOut = juce::String (body.data(), body.size());
+    bodyOut = juce::String::fromUTF8 (body.data(), (int) body.size());
     return true;
 }
 
