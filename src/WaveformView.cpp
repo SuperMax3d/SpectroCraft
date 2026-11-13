@@ -13,6 +13,26 @@
 // speed, matching the amplitude-axis grab pan).
 static constexpr double kPanSpeedFactor = 0.5;
 
+// Waveform drawing thresholds.
+//   * Up to kPolylineSamplesPerColumn samples per pixel column the true sample
+//     shape is drawn as a connected polyline.
+//   * A mipmap block wider than the column it fills (more than
+//     kMaxMipOversample columns) would draw a staircase of block-wide steps:
+//     the raw samples are read instead so every column gets its real min/max.
+//     kMaxRawColumnSamples bounds that read (a coarse mipmap is then accepted).
+//   * At most kSampleDotMaxSamples samples in the view every sample also gets a
+//     draggable dot (WaveformView::kSampleDotMaxSamples).
+static constexpr double kPolylineSamplesPerColumn = 4.0;
+static constexpr double kMaxMipOversample = 2.0;
+static constexpr int64_t kMaxRawColumnSamples = 4000000;
+
+// Sample dots: radius, grab radius, and the highlighted (hovered / dragged)
+// sample's ring.
+static constexpr float kDotRadius = 2.6f;
+static constexpr float kDotGrabPx = 7.0f;
+static constexpr float kDotRingRadius = 5.5f;
+
+
 WaveformView::WaveformView (Application& appIn)
     : app (appIn)   // audio data is read live via app.audioEngine() (active doc)
 {
@@ -241,6 +261,39 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
                             && !e.mods.isMiddleButtonDown() && onAxisX (e.x);
     const bool onTimeRuler = onRulerY (e.y);
 
+    // Any press that is not a sample grab ends the sample-level interaction:
+    // drop a highlight left over by a hover, a zoom or a pan.
+    if (! sampleDotsVisible() && hoverSampleIdx >= 0)
+    {
+        hoverSampleIdx = -1;
+        hoverSampleCh = -1;
+    }
+
+    // Deep zoom (sample dots): a left press on a dot grabs that sample. The
+    // drag previews its new amplitude and mouseUp writes it as one edit. A
+    // press that misses every dot keeps the normal seek / drag-to-select.
+    if (e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown() && !e.mods.isMiddleButtonDown()
+        && !leftOnAxis && !onTimeRuler && sampleDotsVisible())
+    {
+        const int64_t idx = sampleIndexAtX (e.x);
+        const int ch = channelAtRowY (e.y);
+        double v = 0.0;
+        if (idx >= 0 && ch >= 0
+            && std::abs ((double) e.x - (double) sampleDotXFor (idx)) <= (double) kDotGrabPx
+            && sampleValue (ch, idx, v))
+        {
+            dragMode = DragMode::SampleEdit;
+            editSampleIdx = idx;
+            editSampleCh = ch;
+            editPreviewVal = (float) v;
+            editOriginalVal = (float) v;
+            hoverSampleIdx = idx;
+            hoverSampleCh = ch;
+            repaint();
+            return;
+        }
+    }
+
     if (!leftOnAxis)
     {
         // Clicking anywhere in the plot moves the playhead to that position
@@ -278,8 +331,12 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     }
     else if (e.mods.isMiddleButtonDown() || e.mods.isRightButtonDown())
     {
+        // Middle-drag pans both axes: the shared time window horizontally and
+        // this view's amplitude window vertically. Both use the same
+        // half-speed incremental scheme as the axis strips (see mouseDrag).
         dragMode = DragMode::Pan;
         panLastX = e.x;
+        panLastY = e.y;
     }
 
     // Push the new playhead/selection to both views.
@@ -320,6 +377,8 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
                 panByTime (-(e.x - panLastX) * kPanSpeedFactor
                            * (viewEnd - viewStart) / (double) pr.getWidth());
             panLastX = e.x;
+            // A middle grab pans x and y together; a ruler drag is time-only.
+            if (dragMode == DragMode::Pan) panAmplitudeByCursorY (e.y);
             break;
         }
         case DragMode::VPan:
@@ -332,11 +391,18 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
             // reversing direction responds immediately instead of ratcheting
             // in the first drag's direction (deltas eaten by the +/-2 clamp do
             // not accumulate).
-            const double ampPx = rowAmpPx();
-            vOffset = std::clamp (vOffset + 0.5 * (e.y - panLastY) / ampPx, -2.0, 2.0);
-            panLastY = e.y;
-            dirty = true;
-            if (onVerticalZoomChanged) onVerticalZoomChanged();
+            panAmplitudeByCursorY (e.y);
+            break;
+        }
+        case DragMode::SampleEdit:
+        {
+            // Live preview: the dot (and the polyline through it) follows the
+            // cursor; the file is only written on mouseUp, so the whole drag
+            // is a single undoable step.
+            const double v = ampValueAtY (e.y, editSampleCh);
+            const float nv = (float) std::clamp (v, -1.0e6, 1.0e6);
+            if (std::abs ((double) nv - (double) editPreviewVal) < 1e-12) break;
+            editPreviewVal = nv;
             repaint();
             break;
         }
@@ -456,6 +522,35 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
         zoomRect = {};
         repaint();
     }
+    else if (dragMode == DragMode::SampleEdit)
+    {
+        const int64_t idx = editSampleIdx;
+        const int ch = editSampleCh;
+        const float v = editPreviewVal;
+        editSampleIdx = -1;
+        editSampleCh = -1;
+        if (idx >= 0 && ch >= 0)
+        {
+            if (std::abs ((double) v - (double) editOriginalVal) < 1e-9)
+            {
+                // Nothing was moved: the press was a click, so it seeks like
+                // any other click instead of doing nothing at all.
+                const double t = (double) idx / app.audioEngine().sampleRate ();
+                app.setPlayhead (t);
+                setPlayhead (t);
+            }
+            else
+            {
+                std::string err;
+                if (!app.setSampleValue (ch, idx, v, &err) && ! err.empty () && onEditError)
+                    onEditError (juce::String (err));
+                if (app.onStateChange) app.onStateChange ();   // mipmaps changed
+            }
+            hoverSampleIdx = idx;   // stay highlighted after the drop
+            hoverSampleCh = ch;
+            repaint();
+        }
+    }
     else if (dragMode == DragMode::Select && app.selection.getLength() <= 1e-6)
     {
         app.setSelection ({ 0, 0 }); // plain click clears the selection
@@ -470,6 +565,7 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
 void WaveformView::mouseMove (const juce::MouseEvent& e)
 {
     reportHoverTime (e, false);
+    updateHoverSample (e.x, e.y);
 
     if (!onCursorInfo) return;
     const auto pr = plotRect();
@@ -570,6 +666,11 @@ void WaveformView::mouseExit (const juce::MouseEvent&)
 {
     if (onHoverTime) onHoverTime (-1.0);
     if (onCursorInfo) onCursorInfo ("");
+    if (dragMode != DragMode::SampleEdit)
+    {
+        hoverSampleIdx = -1;
+        hoverSampleCh = -1;
+    }
 }
 
 void WaveformView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
@@ -681,6 +782,21 @@ void WaveformView::panByTime (double dt)
     const double w = viewEnd - viewStart;
     const double ns = std::clamp (viewStart + dt, 0.0, std::max (0.0, dur - w));
     setWindow (ns, ns + w);
+}
+
+void WaveformView::panAmplitudeByCursorY (int y)
+{
+    // Half-speed grab: content follows the cursor at 0.5 px per cursor pixel.
+    // The delta is measured from the last delivered position and that anchor
+    // always advances to the cursor, so reversing direction responds
+    // immediately instead of unwinding the deltas an edge clamp swallowed.
+    const double ampPx = rowAmpPx();
+    if (ampPx > 1e-9)
+        vOffset = std::clamp (vOffset + kPanSpeedFactor * (y - panLastY) / ampPx, -2.0, 2.0);
+    panLastY = y;
+    dirty = true;
+    if (onVerticalZoomChanged) onVerticalZoomChanged();
+    repaint();
 }
 
 // ------------------------------------------------------------------- painting
@@ -980,39 +1096,83 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
 
     const float rowTop = (float) chanY, rowBottom = (float) (chanY + chanH);
 
-    // When zoomed in to roughly one-to-few samples per pixel column, draw the
-    // individual samples as a connected polyline so the true sample shape is
-    // visible instead of blocky min/max columns (classic DAW sample-level view).
-    const double samplesPerColumn = (double) (s1 - s0) / w;
-    if (samplesPerColumn <= 4.0)
-    {
-        const int64_t n = s1 - s0;
-        std::vector<float> buf ((size_t) n);
-        if (!app.audioEngine().readSamples (ch, s0, n, buf.data()))
-            return;
-
-        juce::Path path;
-        bool started = false;
-        for (int64_t i = 0; i < n; ++i)
-        {
-            const float x = (float) pr.getX() + ((float) (i + 0.5) / (float) n) * (float) w;
-            const float y = std::clamp ((float) (center + (vOffset - buf[i]) * amp), rowTop, rowBottom);
-            if (!started) { path.startNewSubPath (x, y); started = true; }
-            else           path.lineTo (x, y);
-        }
-        g.strokePath (path, juce::PathStrokeType (1.0f));
-        return;
-    }
-
-    // Initialise to centre so out-of-range columns render as a flat line
-    std::vector<float> tops ((size_t) w, center), bots ((size_t) w, center);
+    const int64_t n = s1 - s0;
+    const double samplesPerColumn = (double) n / (double) w;
 
     // Pick the finest mipmap level that still covers >= samples per column
     const AudioEngine::MipLevel* best = nullptr;
     for (const auto& lv : app.audioEngine().mipmaps())
         if ((double) lv.factor >= samplesPerColumn) { best = &lv; break; }
 
-    if (best && ch < (int) best->min.size() && !best->min[ch].empty())
+    // A block coarser than the column it is drawn into is a lie about the shape:
+    // every column in the block repeats the same min/max, which reads as a
+    // staircase of block-wide steps. That happens as soon as the view is finer
+    // than the finest level can describe (samplesPerColumn < baseFactor), so the
+    // raw samples are read whenever the chosen block is more than
+    // kMaxMipOversample columns wide - the visible range is short there, so the
+    // read is cheap and the outline is exact per column.
+    const RenderMode mode = chooseRenderMode (n, w, best != nullptr ? best->factor : -1);
+
+    if (mode != RenderMode::Mipmap)
+    {
+        std::vector<float> buf ((size_t) n);
+        if (!app.audioEngine().readSamples (ch, s0, n, buf.data()))
+            return;
+
+        // Live preview of a sample being dragged (see DragMode::SampleEdit):
+        // the polyline and the dots show the new value before it is written.
+        if (editSampleIdx >= s0 && editSampleIdx < s1 && ch == editSampleCh)
+            buf[(size_t) (editSampleIdx - s0)] = editPreviewVal;
+
+        // Zoomed in to roughly one-to-few samples per pixel column: draw the
+        // individual samples as a connected polyline so the true sample shape is
+        // visible instead of blocky min/max columns (classic DAW sample view).
+        if (mode == RenderMode::Polyline)
+        {
+            juce::Path path;
+            bool started = false;
+            for (int64_t i = 0; i < n; ++i)
+            {
+                const float x = (float) pr.getX() + ((float) (i + 0.5) / (float) n) * (float) w;
+                const float y = std::clamp ((float) (center + (vOffset - buf[i]) * amp), rowTop, rowBottom);
+                if (!started) { path.startNewSubPath (x, y); started = true; }
+                else           path.lineTo (x, y);
+            }
+            g.strokePath (path, juce::PathStrokeType (1.0f));
+
+            if (n <= kSampleDotMaxSamples)
+                paintSampleDots (g, ch, chanY, chanH, center, amp, buf, s0, s1);
+            return;
+        }
+
+        // Exact min/max per column straight from the file.
+        std::vector<float> tops ((size_t) w, center), bots ((size_t) w, center);
+        for (int x = 0; x < w; ++x)
+        {
+            const int64_t a = (int64_t) ((double) x / w * n);
+            const int64_t b = std::max (a + 1, (int64_t) ((double) (x + 1) / w * n));
+            float mn = buf[(size_t) a], mx = buf[(size_t) a];
+            for (int64_t i = a; i < b && i < n; ++i)
+            {
+                mn = std::min (mn, buf[(size_t) i]);
+                mx = std::max (mx, buf[(size_t) i]);
+            }
+            tops[x] = center + (vOffset - mx) * amp;
+            bots[x] = center + (vOffset - mn) * amp;
+        }
+
+        // Envelope x-coordinates are relative to the plot area: shift by kAxisW.
+        g.saveState();
+        g.addTransform (juce::AffineTransform::translation ((float) pr.getX(), 0.0f));
+        fillEnvelope (g, tops, bots, rowTop, rowBottom);
+        g.restoreState();
+        return;
+    }
+
+    // Initialise to centre so out-of-range columns render as a flat line
+    std::vector<float> tops ((size_t) w, center), bots ((size_t) w, center);
+
+    if (ch < (int) best->min.size() && !best->min[ch].empty())
     {
         const int64_t f = best->factor;
         for (int x = 0; x < w; ++x)
@@ -1026,34 +1186,207 @@ void WaveformView::paintChannel (juce::Graphics& g, int ch, int chanY, int chanH
             bots[x] = center + (vOffset - mn) * amp;
         }
     }
-    else
-    {
-        // Zoomed in past finest level: read raw samples (O(n) total)
-        const int64_t n = s1 - s0;
-        std::vector<float> buf ((size_t) n);
-        if (!app.audioEngine().readSamples (ch, s0, n, buf.data()))
-            return;
-
-        for (int x = 0; x < w; ++x)
-        {
-            const int64_t a = (int64_t) ((double) x / w * n);
-            const int64_t b = std::max (a + 1, (int64_t) ((double) (x + 1) / w * n));
-            float mn = 0.0f, mx = 0.0f;
-            for (int64_t i = a; i < b && i < n; ++i)
-            {
-                mn = std::min (mn, buf[i]);
-                mx = std::max (mx, buf[i]);
-            }
-            tops[x] = center + (vOffset - mx) * amp;
-            bots[x] = center + (vOffset - mn) * amp;
-        }
-    }
 
     // Envelope x-coordinates are relative to the plot area: shift by kAxisW.
     g.saveState();
     g.addTransform (juce::AffineTransform::translation ((float) pr.getX(), 0.0f));
     fillEnvelope (g, tops, bots, rowTop, rowBottom);
     g.restoreState();
+}
+
+// --------------------------------------------------------------------------- sample dots
+
+WaveformView::RenderMode WaveformView::chooseRenderMode (int64_t n, int plotWidth,
+                                                          int64_t finestFactor)
+{
+    if (n <= 0 || plotWidth <= 0) return RenderMode::Mipmap;
+    const double samplesPerColumn = (double) n / (double) plotWidth;
+    if (samplesPerColumn <= kPolylineSamplesPerColumn) return RenderMode::Polyline;
+    const bool coarse = finestFactor < 0
+        || (double) finestFactor > samplesPerColumn * kMaxMipOversample;
+    if (coarse && n <= kMaxRawColumnSamples) return RenderMode::ExactColumns;
+    return RenderMode::Mipmap;
+}
+
+bool WaveformView::sampleDotsVisible() const
+{
+    if (!app.audioEngine().isFileLoaded() || getWidth() <= 0)
+        return false;
+    const auto pr = plotRect();
+    const double rate = app.audioEngine().sampleRate();
+    const int64_t s0 = std::max ((int64_t) 0, (int64_t) (viewStart * rate));
+    const int64_t s1 = std::min (app.audioEngine().numSamples(), (int64_t) (viewEnd * rate));
+    const int64_t n = s1 - s0;
+    return n > 0 && n <= kSampleDotMaxSamples
+        && (double) n / (double) std::max (1, pr.getWidth()) <= kPolylineSamplesPerColumn;
+}
+
+int64_t WaveformView::sampleIndexAtX (int x) const
+{
+    if (!sampleDotsVisible()) return -1;
+    const auto pr = plotRect();
+    const int w = std::max (1, pr.getWidth());
+    if (x < pr.getX() || x >= pr.getRight()) return -1;
+    const double rate = app.audioEngine().sampleRate();
+    const int64_t s0 = std::max ((int64_t) 0, (int64_t) (viewStart * rate));
+    const int64_t s1 = std::min (app.audioEngine().numSamples(), (int64_t) (viewEnd * rate));
+    const int64_t n = s1 - s0;
+    if (n <= 0) return -1;
+    const double fx = ((double) x - (double) pr.getX() + 0.5) / (double) w;   // 0..1 across the plot
+    const int64_t i = (int64_t) std::llround (fx * (double) n - 0.5);
+    if (i < 0 || i >= n) return -1;
+    return s0 + i;
+}
+
+float WaveformView::sampleDotXFor (int64_t idx) const
+{
+    if (!app.audioEngine().isFileLoaded()) return -1.0f;
+    const auto pr = plotRect();
+    const int w = std::max (1, pr.getWidth());
+    const double rate = app.audioEngine().sampleRate();
+    const int64_t s0 = std::max ((int64_t) 0, (int64_t) (viewStart * rate));
+    const int64_t s1 = std::min (app.audioEngine().numSamples(), (int64_t) (viewEnd * rate));
+    const int64_t n = s1 - s0;
+    if (n <= 0 || idx < s0 || idx >= s1) return -1.0f;
+    return (float) pr.getX() + ((float) (idx - s0) + 0.5f) / (float) n * (float) w;
+}
+
+int WaveformView::channelAtRowY (int y) const
+{
+    const auto pr = plotRect();
+    if (y < pr.getY() || y >= pr.getBottom()) return -1;
+    const int chans = app.audioEngine().numChannels();
+    int visCount = 0;
+    for (int ch = 0; ch < chans; ++ch)
+        if (ch < (int) chanVis.size() && chanVis[ch]) ++visCount;
+    if (visCount <= 0) return -1;
+    const auto rows = channelRowRects (pr.getWidth(), pr.getHeight(), visCount);
+    int row = 0;
+    for (int r = 0; r < visCount; ++r)
+        if (y >= pr.getY() + rows[(size_t) r].getY())
+            row = r;
+    int ch = -1, r = 0;
+    for (int c = 0; c < chans && ch < 0; ++c)
+        if (c < (int) chanVis.size() && chanVis[c])
+        {
+            if (r == row) ch = c;
+            ++r;
+        }
+    return ch;
+}
+
+double WaveformView::ampValueAtY (int y, int ch) const
+{
+    const auto pr = plotRect();
+    const int chans = app.audioEngine().numChannels();
+    if (ch < 0 || ch >= chans) return 0.0;
+    int visCount = 0, rowOfCh = -1;
+    for (int c = 0; c < chans; ++c)
+        if (c < (int) chanVis.size() && chanVis[c])
+        {
+            if (c == ch) rowOfCh = visCount;
+            ++visCount;
+        }
+    if (rowOfCh < 0 || visCount <= 0) return 0.0;
+    const auto rows = channelRowRects (pr.getWidth(), pr.getHeight(), visCount);
+    const auto& rr = rows[(size_t) rowOfCh];
+    const float center = pr.getY() + rr.getY() + rr.getHeight() * 0.5f;
+    const float ampPx = rr.getHeight() * 0.45f * (float) vZoom;
+    if (ampPx <= 1e-6f) return 0.0;
+    return vOffset + ((double) center - (double) y) / (double) ampPx;
+}
+
+bool WaveformView::sampleValue (int ch, int64_t idx, double& out) const
+{
+    if (ch < 0 || ch >= app.audioEngine().numChannels()) return false;
+    if (idx < 0 || idx >= app.audioEngine().numSamples()) return false;
+    if (idx == editSampleIdx && ch == editSampleCh) { out = editPreviewVal; return true; }
+    float v = 0.0f;
+    if (!app.audioEngine().readSamples (ch, idx, 1, &v)) return false;
+    out = v;
+    return true;
+}
+
+void WaveformView::paintSampleDots (juce::Graphics& g, int ch, int chanY, int chanH,
+                                    float center, float amp, const std::vector<float>& buf,
+                                    int64_t s0, int64_t s1)
+{
+    const auto pr = plotRect();
+    const int w = std::max (1, pr.getWidth());
+    const int64_t n = s1 - s0;
+    if (n <= 0 || n > kSampleDotMaxSamples) return;
+
+    const float rowTop = (float) chanY, rowBottom = (float) (chanY + chanH);
+    const juce::Colour col = juce::Colour::fromRGB (0, 212, 170);   // the curve colour
+    g.setColour (col);
+
+    auto dotY = [&] (int64_t i) -> float
+    {
+        return std::clamp ((float) (center + (vOffset - buf[(size_t) i]) * amp), rowTop, rowBottom);
+    };
+    auto dotX = [&] (int64_t i) -> float { return sampleDotXFor (s0 + i); };
+
+    auto circle = [] (juce::Point<float> c, float r) -> juce::Rectangle<float>
+    {
+        return { c.x - r, c.y - r, r + r, r + r };
+    };
+
+    // One filled dot per sample, in the curve colour.
+    for (int64_t i = 0; i < n; ++i)
+        g.fillEllipse (circle ({ dotX (i), dotY (i) }, kDotRadius));
+
+    // The sample under the cursor (or being dragged): a slightly larger hollow
+    // ring so the file's own value stays visible inside it.
+    const int64_t hi = (editSampleIdx >= s0 && editSampleIdx < s1 && ch == editSampleCh)
+                     ? editSampleIdx
+                     : ((hoverSampleIdx >= s0 && hoverSampleIdx < s1 && ch == hoverSampleCh)
+                            ? hoverSampleIdx : -1);
+    if (hi < 0) return;
+
+    const juce::Point<float> c { dotX (hi - s0), dotY (hi - s0) };
+    g.setColour (col);
+    g.fillEllipse (circle (c, kDotRingRadius + 1.5f));
+    g.setColour (juce::Colour::fromRGB (18, 22, 24));   // plot background: hollow inside
+    g.fillEllipse (circle (c, kDotRingRadius - 1.0f));
+
+    // Value of the highlighted sample, in the same green as the curve.
+    double v = buf[(size_t) (hi - s0)];
+    if (hi == editSampleIdx && ch == editSampleCh) v = editPreviewVal;
+    juce::String txt;
+    switch (app.waveVScaleMode)
+    {
+        case 1:
+            txt = (std::abs (v) > 1e-9)
+                    ? juce::String (20.0 * std::log10 (std::abs (v)), 2) + " dB"
+                    : "-inf dB";
+            break;
+        case 2:
+            txt = juce::String (v, 4);
+            break;
+        default:
+            txt = ScaleCalibration::formatLinearValue (v, app.scale(), ch);
+            break;
+    }
+
+    const juce::Font f { juce::FontOptions (12.0f) };
+    const int px = juce::GlyphArrangement::getStringWidthInt (f, txt) + 8;
+    float tx = c.x + kDotRingRadius + 6.0f;
+    if (tx + (float) px > (float) pr.getRight()) tx = c.x - kDotRingRadius - 6.0f - (float) px;
+    const float ty = std::clamp (c.y - 22.0f, rowTop, rowBottom - 16.0f);
+    g.setColour (col);
+    g.setFont (f);
+    g.drawText (txt, juce::Rectangle<float> (tx, ty, (float) px, 15.0f),
+                juce::Justification::centredLeft, false);
+}
+
+void WaveformView::updateHoverSample (int x, int y)
+{
+    const int64_t idx = sampleIndexAtX (x);
+    const int ch = idx < 0 ? -1 : channelAtRowY (y);
+    if (idx == hoverSampleIdx && ch == hoverSampleCh) return;
+    hoverSampleIdx = idx;
+    hoverSampleCh = ch;
+    repaint();
 }
 
 void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce::Rectangle<int>>& rows,

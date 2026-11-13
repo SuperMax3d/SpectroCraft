@@ -114,6 +114,12 @@ struct Settings
     // (src/Diagnostics.cpp, docs/diagnostics.md). Off by default (opt-in).
     bool diagLogEnabled = false;
 
+    // Help > Check for Updates (docs/updates.md), persisted: when checked, the
+    // app also looks for a new release at startup - at most once a day, and
+    // only if the last check found nothing newer. Off by default (opt-in); the
+    // menu item works either way.
+    bool checkUpdatesAtStartup = false;
+
     // Track axis placement (View menu), persisted between sessions:
     // the vertical axis can sit on the right and the time ruler at the
     // bottom of both track views instead of their default left/top spots.
@@ -207,6 +213,7 @@ struct Settings
             && allowMultipleInstances == o.allowMultipleInstances
             && controlEnabled == o.controlEnabled
             && diagLogEnabled == o.diagLogEnabled
+            && checkUpdatesAtStartup == o.checkUpdatesAtStartup
             && trackAxisOnRight == o.trackAxisOnRight
             && trackRulerAtBottom == o.trackRulerAtBottom
             && showAmpGrid == o.showAmpGrid

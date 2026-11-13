@@ -488,8 +488,12 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
     }
     else if (e.mods.isMiddleButtonDown() || e.mods.isRightButtonDown())
     {
+        // Middle-drag pans both axes: the shared time window horizontally and
+        // the frequency window vertically, both at half cursor speed like the
+        // axis strips.
         dragMode = DragMode::Pan;
         panLastX = e.x;
+        panLastY = e.y;
     }
 
     // Push the new playhead/selection to both views.
@@ -611,6 +615,8 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
                 panByTime (-(e.x - panLastX) * kPanSpeedFactor
                            * (viewEnd - viewStart) / (double) pr.getWidth());
             panLastX = e.x;
+            // A middle grab pans x and y together.
+            panFrequencyByCursorY (e.y);
             break;
         }
         case DragMode::TimePan:
@@ -625,56 +631,9 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
             break;
         }
         case DragMode::VPan:
-        {
-            // Incremental half-speed grab, same feel as the waveform view's
-            // axis drag: content follows the cursor at 0.5 px per cursor
-            // pixel and the delta is measured from the last delivered
-            // position, so reversing direction responds immediately (deltas
-            // eaten by an edge pin do not accumulate). Log axes shift in log
-            // space (half a step = square root of the full-step ratio) so
-            // the zoom level is preserved.
-            const auto rows = rowRects ();
-            if (!rows.empty())
-            {
-                juce::Rectangle<int> row = rows.front();
-                for (const auto& rr : rows)
-                    if (rr.contains (dragStartX, dragStartY)) { row = rr; break; }
-
-                const int dy = e.y - panLastY;
-                panLastY = e.y;
-                if (dy != 0 && row.getHeight() > 0)
-                {
-                    const double nyq = app.audioEngine().sampleRate() * 0.5;
-                    if (settings_.logFrequency && freqMin > 1e-9)
-                    {
-                        // Full-step ratio between the previous and current
-                        // cursor positions, clamped to the row so a cursor
-                        // outside it cannot run away.
-                        const float yPrev = std::clamp ((float) (panLastY - dy),
-                                                       (float) row.getY(), (float) row.getBottom());
-                        const float yNow  = std::clamp ((float) panLastY,
-                                                       (float) row.getY(), (float) row.getBottom());
-                        const double Rfull = yToFreq ((float) (yPrev - row.getY()), row.getHeight())
-                                           / yToFreq ((float) (yNow  - row.getY()), row.getHeight());
-                        const double R = std::sqrt (std::max (1e-30, Rfull));
-                        double lo2 = freqMin * R, hi2 = freqMax * R;
-                        if (lo2 < 1.0) lo2 = 1.0;          // pin the bottom edge
-                        else if (hi2 > nyq) hi2 = nyq;     // pin the top edge
-                        setFrequencyRange (lo2, hi2);
-                    }
-                    else
-                    {
-                        // yToFreq is linear in pixels: half the per-pixel step.
-                        const double dFull = (freqMax - freqMin) * (double) dy / row.getHeight();
-                        double lo2 = freqMin + 0.5 * dFull, hi2 = freqMax + 0.5 * dFull;
-                        if (lo2 < 1.0) lo2 = 1.0;          // pin the bottom edge
-                        else if (hi2 > nyq) hi2 = nyq;     // pin the top edge
-                        setFrequencyRange (lo2, hi2);
-                    }
-                }
-            }
+            // Frequency-axis drag: the same half-speed grab, log-aware.
+            panFrequencyByCursorY (e.y);
             break;
-        }
         case DragMode::ZoomDrag:
         {
             const int x = std::clamp (e.x, 0, getWidth());
@@ -1319,6 +1278,51 @@ void SpectralView::panByTime (double dt)
     const double w = viewEnd - viewStart;
     const double ns = std::clamp (viewStart + dt, 0.0, std::max (0.0, dur - w));
     setWindow (ns, ns + w);
+}
+
+void SpectralView::panFrequencyByCursorY (int y)
+{
+    // Incremental half-speed grab, same feel as the waveform view's axis
+    // drag: content follows the cursor at 0.5 px per cursor pixel and the
+    // delta is measured from the last delivered position, so reversing
+    // direction responds immediately (deltas eaten by an edge pin do not
+    // accumulate). Log axes shift in log space (half a step = square root of
+    // the full-step ratio) so the zoom level is preserved.
+    const auto rows = rowRects ();
+    if (rows.empty()) { panLastY = y; return; }
+
+    juce::Rectangle<int> row = rows.front();
+    for (const auto& rr : rows)
+        if (rr.contains (dragStartX, dragStartY)) { row = rr; break; }
+
+    const int dy = y - panLastY;
+    panLastY = y;
+    if (dy == 0 || row.getHeight() <= 0) return;
+
+    const double nyq = app.audioEngine().sampleRate() * 0.5;
+    if (settings_.logFrequency && freqMin > 1e-9)
+    {
+        // Full-step ratio between the previous and current cursor positions,
+        // clamped to the row so a cursor outside it cannot run away.
+        const float yPrev = std::clamp ((float) (y - dy), (float) row.getY(), (float) row.getBottom());
+        const float yNow  = std::clamp ((float) y,        (float) row.getY(), (float) row.getBottom());
+        const double Rfull = yToFreq ((float) (yPrev - row.getY()), row.getHeight())
+                           / yToFreq ((float) (yNow  - row.getY()), row.getHeight());
+        const double R = std::sqrt (std::max (1e-30, Rfull));
+        double lo2 = freqMin * R, hi2 = freqMax * R;
+        if (lo2 < 1.0) lo2 = 1.0;          // pin the bottom edge
+        else if (hi2 > nyq) hi2 = nyq;     // pin the top edge
+        setFrequencyRange (lo2, hi2);
+    }
+    else
+    {
+        // yToFreq is linear in pixels: half the per-pixel step.
+        const double dFull = (freqMax - freqMin) * (double) dy / row.getHeight();
+        double lo2 = freqMin + kPanSpeedFactor * dFull, hi2 = freqMax + kPanSpeedFactor * dFull;
+        if (lo2 < 1.0) lo2 = 1.0;          // pin the bottom edge
+        else if (hi2 > nyq) hi2 = nyq;     // pin the top edge
+        setFrequencyRange (lo2, hi2);
+    }
 }
 
 void SpectralView::zoomFreqAtY (float y, double factor)

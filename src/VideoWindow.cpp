@@ -654,7 +654,7 @@ float VideoTracksPanel::xForTime (double t) const
     return (float) ((t - view_.getStart()) / span * (double) contentWidth());
 }
 
-void VideoTracksPanel::zoomFit()
+std::pair<double, double> VideoTracksPanel::fitRange() const
 {
     double lo = 0.0, hi = audioDuration_;
     for (const auto& t : tracks_)
@@ -663,7 +663,12 @@ void VideoTracksPanel::zoomFit()
         if (t.durationSecs >= 0.0) hi = std::max (hi, t.offsetSecs + t.durationSecs);
     }
     if (hi <= lo) hi = lo + 1.0;
-    view_ = { lo, hi };
+    return { lo, hi };
+}
+
+void VideoTracksPanel::zoomFit()
+{
+    view_ = { fitRange().first, fitRange().second };
     syncScrollbars();
 }
 
@@ -977,10 +982,16 @@ void VideoTracksPanel::mouseDown (const juce::MouseEvent& e)
         if (selected_ != idx) setSelected (idx);
         if (onSelectTrack) onSelectTrack (idx);
     }
-    else if (e.getPosition().y < kRulerH && onSeekTime != nullptr)
+    else if (e.getPosition().y < kRulerH)
     {
-        // Clicking the time ruler moves the main playhead.
-        onSeekTime (timeAtX ((float) e.getPosition().x));
+        // Clicking the time ruler moves the main playhead; dragging from it
+        // selects a time range instead (see mouseDrag). The press itself still
+        // seeks, so a plain click behaves exactly as before.
+        rulerDrag_ = true;
+        rulerSelecting_ = false;
+        rulerStartPt_ = e.getPosition();
+        rulerStartTime_ = timeAtX ((float) e.getPosition().x);
+        if (onSeekTime != nullptr) onSeekTime (rulerStartTime_);
     }
     else if (selected_ != -1 || onSelectTrack != nullptr)
     {
@@ -992,6 +1003,28 @@ void VideoTracksPanel::mouseDown (const juce::MouseEvent& e)
 
 void VideoTracksPanel::mouseDrag (const juce::MouseEvent& e)
 {
+    if (rulerDrag_)
+    {
+        const auto pos = e.getPosition();
+        if (! rulerSelecting_
+            && std::abs (pos.x - rulerStartPt_.x) < kDragAxisThreshold) return;
+        rulerSelecting_ = true;
+
+        // The band follows the cursor from the press point, clamped to what
+        // the panel knows about (the audio and the tracks' ends); the owner
+        // clamps it to the document as well.
+        const double t1 = timeAtX ((float) pos.x);
+        const auto [fitLo, fitHi] = fitRange();
+        const double a = std::clamp (std::min (rulerStartTime_, t1), fitLo, fitHi);
+        const double b = std::clamp (std::max (rulerStartTime_, t1), fitLo, fitHi);
+        if (b <= a) return;
+
+        selection_ = { a, b };   // drawn like the waveform/spectral band at once
+        repaint();
+        if (onSelectTimeRange) onSelectTimeRange (selection_);
+        return;
+    }
+
     if (!dragBand_ || dragIdx_ < 0 || dragIdx_ >= (int) tracks_.size()) return;
 
     const auto pos = e.getPosition();
@@ -1047,6 +1080,9 @@ void VideoTracksPanel::mouseDrag (const juce::MouseEvent& e)
 
 void VideoTracksPanel::mouseUp (const juce::MouseEvent&)
 {
+    rulerDrag_ = false;
+    rulerSelecting_ = false;
+
     const bool reorder = dragBand_ && dragAxis_ == DragAxis::order;
     const int from = dragIdx_, to = dropRow_;
     dragBand_ = false;

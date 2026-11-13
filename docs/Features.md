@@ -182,7 +182,14 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     the frequency/level window — in Freq vs Time the vertical axis is
     frequency), dragging that starts on an axis zooms only that axis,
     left-dragging the bottom axis pans the time
-    window, and the right-click menu's checkable **Zoom Fit** fits both windows
+    window, **middle-dragging anywhere in the plot pans both axes at once** —
+    the horizontal range (time in the curve modes, frequency in FFT Linear / FFT
+    Log / 1/3 Octave / Amp vs Freq) and the vertical one (level, or frequency in
+    Freq vs Time) — at half cursor speed with the same incremental scheme as the
+    waveform and spectrogram: the step is measured from the previous cursor
+    position, an edge clamp never leaves a dead zone and reversing responds at
+    once. In the log frequency axis the pan works in log space so the zoom level
+    is preserved. The right-click menu's checkable **Zoom Fit** fits both windows
     to every displayed curve (live + shown stored curves) — while checked,
     each new time selection zoom-fits automatically; any manual zoom (pan,
     box or wheel) turns auto-fit off, and switching axis modes resets it to on.
@@ -599,14 +606,18 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 - **Save / Save As / Export Spectral** also run on background threads behind a
   modal dialog with an indeterminate spinning bar, so multi-second writes never
   freeze the window (and no stale wait cursor is left behind afterwards).
-- **Application icon**: `icon4.ico` (project root; candidates `icon1.ico`
-  …`icon4.ico` are kept in the repo) is embedded into the exe as
+- **Application icon**: `src/Icons/icon4.ico` (the candidates `icon1.ico` …
+  `icon4.ico` all live in `src/Icons/`; `icon1.ico` is the previous design) is
+  embedded into the exe as
   a proper PE resource (`RT_ICON` + `RT_GROUP_ICON`) — an `ICON` statement is
   appended to JUCE's generated `.rc` at build time by
   `cmake/patch_generated.cmake` — so Windows Explorer and the taskbar show it.
   The same icon is additionally applied to the main window at startup via
   `CreateIconFromResourceEx` + `WM_SETICON` (from `include/IconData.h`) as a
-  fallback for the title bar and Alt-Tab.
+  fallback for the title bar and Alt-Tab. `include/IconData.h` is the byte
+  array of that same file: after changing the icon, run
+  `python3 tools/make_icon_data.py` so the resource and the runtime icon stay
+  the same picture.
 - **Multi-file support**: any number of files can be open at once. The **Files**
   tab lists every loaded file with its properties (sample rate, channel count,
   duration); **double-click a row to make that file active** — it is loaded
@@ -924,7 +935,9 @@ Zooming and panning work like in the spectrogram:
 - **zoom bars** on the right and bottom edges of the picture show the
   visible part, one per axis: drag their edges to zoom, drag the thumb (or
   click in the track) to pan;
-- left-drag pans while zoomed: the picture follows the pointer one to one;
+- left-drag or **middle-drag** pans while zoomed: the picture follows the
+  pointer one to one, measured from the previous cursor position, so hitting a
+  picture edge never leaves a dead zone to unwind and reversing responds at once;
 - **Upscaling** (right-click menu): how the picture is resampled to the
   screen — *Lanczos* (default, windowed sinc with 6 taps per axis, the kernel
   of FFmpeg's swscale `SWS_LANCZOS`), *Bicubic* (cubic convolution, A = −0.6,
@@ -969,7 +982,10 @@ drawn from its offset to its end.
   offset (a lone track's band moves its offset from the first pixel);
 - a red **playhead line** runs from the ruler to the bottom of the panel and
   follows the main playhead while playing and on every seek; clicking the
-  time ruler moves the main playhead to that time;
+  time ruler moves the main playhead to that time, and **dragging on the ruler**
+  selects that time range (the same 4-pixel threshold the waveform's ruler and
+  the dedicated track's axis use), which appears everywhere the selection is
+  drawn;
 - the **current time selection** is shown across the ruler and every row as the
   same translucent blue band with light-blue edges used by the waveform,
   spectral and Tables views, so the same selection is visible wherever you are
@@ -2003,6 +2019,8 @@ Schema, events and limits: [docs/diagnostics.md](docs/diagnostics.md).
 | Cycle view layout: both → waveform only → spectrogram only (reverse direction with Shift) | F9 / Shift+F9 |
 | Start/stop recording (Transport > Record; mode via Transport > Recording Options) | Shift+F10 |
 | Change Gain... (dB dialog on the selection or whole file) | Ctrl+Shift+G |
+| Raise / lower the current selection by 6 dB, shaped as an ease-in / hold / ease-out envelope (works on a spectral selection too; needs a selection, otherwise the key is ignored) | + / - |
+| Same, 1 dB steps | Shift + / Shift - |
 | Normalize (selection peak to full scale) | Ctrl+Shift+N |
 | Fade In / Fade Out (on the time selection, or whole file when none) | Ctrl+Shift+I / Ctrl+Shift+O |
 | Filter EQ... (graphical curve equalizer dialog) | Ctrl+Shift+E |
@@ -2056,7 +2074,16 @@ right away; it also has a -60..+24 dB slider kept two-way synced with the box �
 dragging rewrites the field, typing moves the slider clamped to its range,
 and OK applies whatever is in the field; it multiplies the selection by
 10^(dB/20)) — all applied only to
-the currently visible channels. The View menu has **Zoom to Selection** / **Zoom Out Full**, checkable
+the currently visible channels.
+
+**Quick gain on a selection (+ / -)**: with a time or spectral selection active,
+**+** and **-** raise or lower it by 6 dB (**Shift + / Shift -** for 1 dB). The
+change is not a flat gain: it is applied as an envelope — a raised-cosine ramp up
+to the full gain over the first 25% of the selection, that gain held through the
+middle, and a mirror ramp back to 0 dB over the last 25% — so a boost never
+starts or ends with an audible step at the selection edges. On a spectral
+selection only the masked content moves, as with the other masked effects. Every
+press is one undoable step; with no selection the keys do nothing. The View menu has **Zoom to Selection** / **Zoom Out Full**, checkable
 **Waveform View / Spectrogram View** items (at least one always stays visible)
 and one checkable item per channel with its keyboard shortcut shown as a hint
 (**Ctrl+(Shift)+1..9**: Ctrl+N toggles the channel, Ctrl+Shift+N shows only it);
@@ -2076,10 +2103,11 @@ Mouse (waveform *and* spectral views):
 | Gesture | Action |
 |---|---|
 | Click | Move the playhead to that position in **both** views (selection drags start from it) |
+| **Deep zoom (waveform only, fewer than 60 samples in view)** | Every sample is drawn as a round dot in the curve colour. **Hovering** a dot marks it with a slightly larger hollow ring and prints its value next to it in the same green (in the current vertical scale: Wav Units / dB / Normalized, also in the status-bar probe). **Press and drag a dot** sets that sample's amplitude to the value under the cursor: the dot follows the cursor while dragging and the file is written when you release, so one drag is one undoable step. A press that misses every dot behaves like a normal click (seek / drag-select); releasing a dot without having moved it seeks to that sample and records nothing. The neighbouring samples are never touched |
 | Left-drag | Select a time range. With several visible channels the selection rectangle is clipped to the **channel row it started on** — dragging over another channel does not paint over it (Select All, marker double-clicks and typed footer ranges span all rows) |
 | Left-drag on the amplitude/frequency axis strip (left or right) | **Vertical pan**: drag up/down to shift the amplitude window (waveform) or frequency window (spectral, log-aware). The content follows the cursor at half speed; panning against a range limit pins that edge and keeps the span. Does not move the playhead |
 | Left-drag on the time ruler (top or bottom) | Pan the shared time window at half cursor speed (same as middle-drag); does not create a selection |
-| Middle-drag | Pan the shared time window (both views stay in sync). The content follows the cursor at half speed; panning against a file edge pins that edge, and reversing direction responds immediately (no dead zone) |
+| Middle-drag | **Pan both axes at once**: the shared time window horizontally (both views stay in sync) and the amplitude window (waveform) or frequency window (spectral) vertically, from anywhere in the plot. The content follows the cursor at half speed on both axes; panning against a file edge or range limit pins that edge and keeps the span, and reversing direction responds immediately (no dead zone) |
 | Right-drag a region | **Box zoom**: dragging on the track zooms **both** axes at once — time from the box's horizontal span, amplitude (waveform) or frequency (spectral) from its vertical span. With several visible channels the box's vertical extent is clipped to the **channel row it started on**, and the vertical zoom factor is measured against that single row's data height (so a multi-channel file zooms exactly like a single channel would). Dragging that starts on an axis zooms only that axis: the amplitude/frequency axis strip (left or right) → vertical range, the time ruler strip (top or bottom of whichever view draws it) → time range. A rubber-band rectangle is shown while dragging |
 | Right-click | Context menu: Zoom to Selection, Zoom Out Full, Select All (Ctrl+A), Cut / Copy / Paste / Delete, plus a **Scale** submenu (time axis Time/Time Offset.../Sample; vertical axis Wav Units/dB/Normalized in the waveform, Hz/Custom... in the spectrogram; and Alternative Scale Time/Frequency submenus with named reference entries in both views). On the **amplitude/frequency axis strip** (on either side), "Zoom Out Full" resets that view's *vertical* range (amplitude/frequency) instead of the time window. In the spectral view, right-clicking **on the current spectral selection** additionally offers **Move Selection** and **Scale Selection** |
 | Mouse wheel over the plot / time ruler | Horizontal zoom around the cursor (both views) |
@@ -2092,6 +2120,24 @@ Selecting a time range in *either* view applies the selection to **both**
 views at once. A drag-selection remembers the channel row it started on and
 is drawn clipped to that row in both views; selections created elsewhere
 (Select All, marker double-clicks, footer fields, keyboard) span every row.
+
+### How the waveform draws at each zoom
+
+The waveform picks between three drawing levels according to how many samples
+fall in one pixel column of the plot:
+
+| Zoom | What is drawn |
+|---|---|
+| A pyramid block still fits inside one column | Filled min/max envelope columns taken from the min/max pyramid built when the file is opened |
+| A pyramid block would be **wider** than the column it fills | The same filled columns, but each column's min/max is computed **from the file itself** |
+| Up to 4 samples per column | The samples joined as a polyline (the true sample shape) |
+| Fewer than 60 samples in the whole view | The polyline **plus one dot per sample** (see the gesture table above) |
+
+The second level is what keeps a deep zoom smooth: a pyramid block coarser than
+the column it is drawn into repeats the same min/max across several columns,
+which reads as a staircase of block-wide steps. As soon as that would happen the
+exact per-column values are read from the file instead — cheap, because the view
+is short there. The pyramid is only used where it still resolves the picture.
 
 ### Axis scales (right-click → Scale)
 
@@ -2370,9 +2416,13 @@ list: a table row followed by its parameter rows.
     time. The strip is separated from the data views by a draggable splitter
     (like the waveform/spectrogram one): dragging it up or down resizes the
     track.
-    - **Left-drag on the value axis** pans vertically with the content
-      following the cursor (like the waveform/spectrogram axes); left-drag in
-      the data area makes a time selection. The **wheel over the value axis**
+    - **Left-drag on the value axis** pans vertically: the content follows the
+      cursor at half speed, an edge clamp never leaves a dead zone and
+      reversing responds at once (like the waveform/spectrogram axes); left-drag
+      in the data area makes a time selection. **Middle-drag in the data area**
+      pans *both* axes at once — the shared time window horizontally and the
+      value window vertically, both at half cursor speed with the same
+      incremental scheme. The **wheel over the value axis**
       zooms vertically around the cursor, while the **wheel anywhere else in
       the strip** zooms *horizontally* around the cursor (the shared time
       window — exactly like the other tracks). Axis labels and hover values
@@ -2420,8 +2470,19 @@ list: a table row followed by its parameter rows.
   time (through the table's alignment, and the selected parameter's own when
   a parameter row is selected); it follows playback and every seek, and is
   hidden while the playhead lies outside the table. **Clicking** in the plot
-  moves the playhead to that time, and dragging keeps moving it — except
-  while a 1/2-point alignment is waiting for its plot clicks.
+  moves the playhead to that time. A **left-drag** past the usual 4-pixel
+  threshold instead **selects that time range** in the document (mapped back
+  through the same alignment the curves use), like the waveform and the
+  dedicated track; the playhead stays where the press put it. While a 1/2-point
+  alignment is waiting for its plot clicks its gestures keep scrubbing as
+  before, so the alignment is not disturbed.
+- The preview plot can be panned and zoomed independently of the document's
+  view: **middle-drag** grabs both axes (table time horizontally, value range
+  vertically) at half cursor speed with the same incremental scheme as the
+  other views — reversing responds at once — the **wheel** zooms the time axis
+  around the cursor and **Shift + wheel** the value axis, and a **double-click**
+  puts the whole table back with the auto-fitted value range. The windows never
+  grow past the data, so the pan always has something to move.
 - The preview plot also draws the **current time selection** as a translucent
   blue band with light-blue edges — the same band the waveform, spectral and
   dedicated-track views show — mapped through the very same alignment as its
@@ -2578,7 +2639,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |
 | `VideoFrames` (`src/VideoFrames.cpp`, `src/VideoFrames_mac.mm`, `src/VideoFrames_win.cpp`) | Video picture decoding for the Video window: a per-platform frame stream (AVFoundation on macOS, Media Foundation on Windows, none on Linux), `VideoDecoder::frameAt(t)` (decode forward for small forward moves, seek otherwise; skipped frames are never converted) and `VideoFramePump`, a worker thread that serves only the latest requested time and hands frames to the message thread. |
-| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, vertical + horizontal zoom bars, left-drag pan one to one), per-file rotation, *Upscaling* (Lanczos / Bicubic / Nearest, see `VideoScaler`). Docks as the Video panel of the docking workspace (`VideoDockHost`, picture on top and tracks panel below, draggable separator between them, corner button collapses the tracks area; floating or in the main window) via **Window > Dock/Undock Video Panel** or *Dock/Undock Panel* from the tab menu once docked/floating (*Always on Top* in a floating group's tab menu), and can be sent back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag left/right to offset (Shift-drag snaps to 0 s / audio end / other track edges) or up/down to reorder the tracks (axis picked by the first pixels; the top row renders above), wheel zoom about the cursor, right/bottom scrollbars when content overflows, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead, which is drawn as a red line from the ruler to the bottom of the panel, with the shared time selection painted over the ruler and rows as the usual blue band; right-click menu on a band — or on the picture, targeting the currently displayed track — for sync/align/copy-audio/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else playhead) at 60 Hz while visible or docked. |
+| `VideoWindow` (`src/VideoWindow.cpp`) | The separate Video window: letterboxed picture with the track rotation, frame time, audio/video length notice; zoom/pan (wheel about the cursor, right-drag region box, double-click fit, vertical + horizontal zoom bars, left- or middle-drag pan one to one — the picture follows the pointer from the previous cursor position, so an edge never leaves a dead zone and reversing responds at once), per-file rotation, *Upscaling* (Lanczos / Bicubic / Nearest, see `VideoScaler`). Docks as the Video panel of the docking workspace (`VideoDockHost`, picture on top and tracks panel below, draggable separator between them, corner button collapses the tracks area; floating or in the main window) via **Window > Dock/Undock Video Panel** or *Dock/Undock Panel* from the tab menu once docked/floating (*Always on Top* in a floating group's tab menu), and can be sent back to its own window. Below the picture, `VideoTracksPanel` shows one band per video track of the document (green ruler band = main audio length): drag left/right to offset (Shift-drag snaps to 0 s / audio end / other track edges) or up/down to reorder the tracks (axis picked by the first pixels; the top row renders above), wheel zoom about the cursor, right/bottom scrollbars when content overflows, click a band to select which video renders above (auto-switching to the topmost covering track when the selected one ends); clicking the time ruler seeks the main playhead and dragging it selects that time range (a drag past the usual 4-pixel threshold, like the other time axes); the playhead is drawn as a red line from the ruler to the bottom of the panel, with the shared time selection painted over the ruler and rows as the usual blue band; right-click menu on a band — or on the picture, targeting the currently displayed track — for sync/align/copy-audio/adjust-image. Per-track zoom/pan/rotation/contrast/brightness and offsets live in `FileDoc::videoTracks` (`sc::VideoTrackData`, serialised under `videoTracks` in the document metadata). Polls the document time from `MainWindow::videoTimeNow()` (playback position, else playhead) at 60 Hz while visible or docked. |
 | `VideoScaler` (`src/VideoScaler.cpp`, `src/videoscale/VideoScalerCore.cpp`) | Picture scaling for the Video window: the visible part of the frame resampled to physical screen pixels with Lanczos (a = 3), Bicubic (A = −0.6) or Nearest — swscale's kernels, stretched when shrinking, weights normalised — separable, weights cached per geometry, rows split across up to 3 worker threads, 4-wide SIMD (SSE2 / NEON), quarter turns folded into the pixel reads. The core is plain C++ in its own library (`sc_video_scaler_core`), compiled optimised in every configuration, Debug included. |
 | `SingleInstance` (`src/SingleInstance.cpp`) | Single-instance coordination behind the Window > **Allow multiple instances** toggle: reads/persists the setting straight from disk at startup, detects a running instance via a named mutex (Windows), and forwards command-line files to it over a small named-pipe server that every running instance hosts (length-prefixed UTF-8 paths + acknowledgement byte). The second instance quits after the hand-off; if no instance answers it opens the files itself. |
 | `Application` | Owns the document list (`std::vector<std::unique_ptr<FileDoc>>`) and the active-document index; exposes the active doc's engine/markers/undo through accessors (empty fallback objects while no file is loaded); handles open/activate/close/cycle, keeps the mirrored UI state (selection/playhead/channels) in sync with the active document, wires edit actions to undo. Also owns the app-level clipboard (shared across files), and implements `newFile`, `copyToNewFile` (visible-channel-limited, spectral-selection-masked), `pasteMix`, the merge entry points (`mergeFilesIntoActiveDoc`, `createDocFromMerged`) and metadata-only persistence (`saveActiveDocMeta`) plus the unsaved-state queries (`docIsUnsaved`, `unsavedDocNames`) that back the quit / Close All prompts. |
@@ -2684,6 +2745,18 @@ delays the window from appearing.
   - **Change Gain**: +6 dB scales the selected samples by exactly 10^(dB/20),
     leaves everything outside the selection untouched, and undo restores the
     original level.
+  - **Quick gain (+ / - keys, `Application::boostSelectionGain`)**: the applied
+    gain is 0 dB at both selection edges, reaches the requested value at 25% of
+    the range, holds through the middle (measured peak-by-peak on audio), ramps
+    with a raised cosine rather than a straight line, and a 1 dB step gains
+    exactly 1 dB; outside the selection nothing changes, a spectral selection
+    boosts only the masked band (the out-of-band tone is untouched), no selection
+    means no edit, and undo restores the original audio.
+  - **Sample-level waveform**: which zoom uses the sample polyline, the exact
+    per-column read, or the min/max pyramid; per-sample dots appear only below
+    60 visible samples; a click hits the sample whose dot it lands on; the drag
+    previews the new amplitude while the file is untouched and writes it on
+    release (neighbours unchanged); undo restores the sample.
   - **Change Gain dialog**: on open the dB field already has keyboard focus
     with its initial "0.0" fully selected (so typing replaces it immediately)
     while Enter/Escape still trigger OK/Cancel; the slider below the box is
@@ -2996,8 +3069,9 @@ bin/Release             local build output (untracked): SpectroCraft.exe plus th
 extern/ffmpeg           vendored FFmpeg headers, import libs + prebuilt x64 DLLs (bin/)
 extern/OpenVINO         vendored OpenVINO headers, import lib + runtime DLLs (bin/)
 extern/whisper-b5454    vendored whisper.cpp b5454 header + runtime DLLs (bin/)
-icon1..4.ico            application icon candidates; icon4.ico is the active one
-                        (PE resource + runtime WM_SETICON)
+src/Icons/icon1..4.ico    application icon candidates; src/Icons/icon4.ico is the active one
+                        (PE resource + runtime WM_SETICON; include/IconData.h is
+                        generated from it by tools/make_icon_data.py)
 CMakeLists.txt            root build (JUCE vendored in extern/)
 include/                  component headers (incl. RecorderPlugin.h plugin ABI)
 plugins/wasapi/           WASAPI recorder DLL source (deployed to <exe>/recorders/)

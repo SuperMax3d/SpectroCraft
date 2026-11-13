@@ -8139,6 +8139,125 @@ static void testTimePanSpeedAndReversal()
     wav.deleteFile();
 }
 
+// ---------------- Middle-drag pans both axes (waveform / spectrogram / FFT) --
+// One scheme everywhere: half cursor speed, the delta measured from the last
+// delivered cursor position (that anchor always advances), so a clamp never
+// leaves a hidden offset to unwind and reversing direction responds at once.
+static void testMiddleDragPanBothAxes()
+{
+    const juce::File wav = makeTempFile ("mid_pan.wav");
+    writeWav (wav, 1, 44100.0, 44100 * 8, [] (int, int64_t f, double rate)
+    { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                      * 440.0 * (double) f / rate); });
+
+    Application app;
+    CHECK (app.audioEngine().loadFile (wav), "load wav for the middle-drag test");
+    CHECK (std::abs (app.audioEngine().duration() - 8.0) < 1e-6, "the test file is 8 s long");
+    const double nyq = app.audioEngine().sampleRate() * 0.5;
+    const juce::ModifierKeys mmb (juce::ModifierKeys::middleButtonModifier);
+
+    // --- Waveform: time and amplitude together -----------------------------
+    {
+        WaveformView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (2.0, 6.0);
+        view.setVisibleChannels ({ 0 });
+        CHECK (std::abs (view.getVerticalOffset()) < 1e-12,
+               "the amplitude window starts centred on zero");
+        const double ampPx = view.rowAmpPx();
+
+        view.mouseDown (mkMouse (view, 230, 100, mmb));
+        view.mouseDrag (mkMouse (view, 230, 140, mmb));   // dy = +40 px, no x movement
+        CHECK (std::abs (view.getViewStart() - 2.0) < 1e-9,
+               "a purely vertical middle-drag does not pan time");
+        CHECK (std::abs (view.getVerticalOffset() - 0.5 * 40.0 / ampPx) < 1e-9,
+               "middle-drag pans the amplitude axis at half cursor speed");
+
+        view.mouseDrag (mkMouse (view, 230, 100, mmb));   // straight back
+        CHECK (std::abs (view.getVerticalOffset()) < 1e-9,
+               "reversing the vertical middle-drag responds immediately");
+
+        // Both axes in one drag: x moves the time window, y the amplitude.
+        view.mouseDrag (mkMouse (view, 270, 120, mmb));   // dx = +40, dy = +20
+        const double dt = 40.0 * 0.5 * 4.0 / 340.0;       // plot width 340 px
+        CHECK (std::abs (view.getViewStart() - (2.0 - dt)) < 1e-9,
+               "middle-drag pans time and amplitude in the same gesture");
+        CHECK (std::abs (view.getVerticalOffset() - 0.5 * 20.0 / ampPx) < 1e-9,
+               "the amplitude part keeps its own half-speed step");
+        view.mouseUp (mkMouse (view, 270, 120, mmb));
+    }
+
+    // --- Spectrogram: time and frequency together --------------------------
+    {
+        SpectralView view (app);
+        view.setSize (400, 200);
+        view.setViewRange (2.0, 6.0);
+        view.setVisibleChannels ({ 0 });
+        view.setFrequencyRange (1000.0, 5000.0);   // away from the 0 / Nyquist pins
+        const double fLo0 = view.getFreqMin(), fHi0 = view.getFreqMax();
+
+        view.mouseDown (mkMouse (view, 230, 100, mmb));
+        view.mouseDrag (mkMouse (view, 230, 140, mmb));   // down: content follows the cursor
+        CHECK (view.getFreqMin() > fLo0 && view.getFreqMax() > fHi0,
+               "middle-drag pans the frequency axis with the cursor");
+
+        view.mouseDrag (mkMouse (view, 230, 100, mmb));
+        CHECK (std::abs (view.getFreqMin() - fLo0) < 1e-3 && std::abs (view.getFreqMax() - fHi0) < 1e-3,
+               "reversing the spectral vertical middle-drag responds immediately");
+
+        view.mouseDrag (mkMouse (view, 400, 100, mmb));   // dx = +170 -> -1.0 s, half speed
+        CHECK (std::abs (view.getViewStart() - 1.0) < 1e-9,
+               "spectral middle-drag still pans time at half cursor speed");
+        view.mouseUp (mkMouse (view, 400, 100, mmb));
+    }
+
+    // --- Frequency Analysis graph: both axes from the plot area ------------
+    {
+        FFTAnalysisView view (app);
+        view.setSize (400, 300);
+        view.setAxisMode (0);   // "FFT Linear": horizontal Hz, vertical dB
+        const double fl0 = view.getFreqLo(), fh0 = view.getFreqHi();
+        const double dbT0 = view.getDbTop(), dbB0 = view.getDbBottom();
+
+        view.mouseDown (mkMouse (view, 200, 150, mmb));
+
+        // Horizontal step, measured through the view's own mapping: half of it.
+        // Drag toward whichever side has room, so the test never measures a
+        // clamp instead of the pan (the window is pinned at 0 Hz and Nyquist).
+        const int xFrom = 200;
+        const int xTo   = (fl0 - 0.0) >= (nyq - fh0) ? 240 : 160;
+        const double fPrev = view.xToFreq (xFrom), fNow = view.xToFreq (xTo);
+        view.mouseDrag (mkMouse (view, xTo, 150, mmb));
+        const double dHz = 0.5 * (fPrev - fNow);
+        CHECK (dHz > 0 ? (view.getFreqLo() > fl0 && view.getFreqHi() > fh0)
+                       : (view.getFreqLo() < fl0 && view.getFreqHi() < fh0),
+               "middle-drag pans the frequency range with the cursor");
+        CHECK (std::abs (view.getFreqLo() - (fl0 + dHz)) < 1e-6
+               && std::abs (view.getFreqHi() - (fh0 + dHz)) < 1e-6,
+               "the horizontal step is exactly half the cursor step");
+        CHECK (std::abs (view.getDbTop() - dbT0) < 1e-9 && std::abs (view.getDbBottom() - dbB0) < 1e-9,
+               "a purely horizontal drag does not move the level axis");
+
+        // Vertical step: dragging up moves the curves up (the window down),
+        // away from the 0 dB clamp at the top.
+        const double dbPrev = view.yToLevel (150.0f), dbNow = view.yToLevel (110.0f);
+        view.mouseDrag (mkMouse (view, 160, 110, mmb));
+        CHECK (std::abs (view.getDbTop() - (dbT0 + 0.5 * (dbPrev - dbNow))) < 1e-6
+               && std::abs (view.getDbBottom() - (dbB0 + 0.5 * (dbPrev - dbNow))) < 1e-6,
+               "the vertical step is half the cursor step and follows the cursor");
+
+        // Reverse both axes: they come back at once.
+        view.mouseDrag (mkMouse (view, xFrom, 150, mmb));
+        CHECK (std::abs (view.getFreqLo() - fl0) < 1e-6 && std::abs (view.getFreqHi() - fh0) < 1e-6,
+               "reversing the horizontal middle-drag responds immediately");
+        CHECK (std::abs (view.getDbTop() - dbT0) < 1e-6 && std::abs (view.getDbBottom() - dbB0) < 1e-6,
+               "reversing the vertical middle-drag responds immediately");
+        view.mouseUp (mkMouse (view, 200, 150, mmb));
+    }
+
+    wav.deleteFile ();
+}
+
 // ---------------- Time axis adaptive ticks ----------------
 // The time ruler picks a "nice" step at every zoom level: sub-second / ms /
 // us values when zoomed in, and compact minute/hour labels when zoomed out on
@@ -12924,6 +13043,274 @@ static float toneAmp (const std::vector<float>& x, size_t from, size_t to,
 }
 
 // ------------------------------------------------- masked gain + zero-out
+
+// ---------------- Sample-level waveform: exact drawing, dots, drag edit ----
+// Deep zoom has three drawing levels (see the thresholds at the top of
+// WaveformView.cpp): the sample polyline, exact per-column min/max read
+// straight from the file, and the min/max pyramid. The pyramid only draws the
+// truth when its block is no wider than the column it fills; below that the
+// exact read takes over, which is what removes the blocky intermediate zoom.
+static void testSampleLevelWaveformDrawingAndEditing()
+{
+    using RM = WaveformView::RenderMode;
+    const int W = 340;                       // plot width of a 400 px view
+
+    CHECK (WaveformView::chooseRenderMode (4 * W, W, 16) == RM::Polyline,
+           "up to 4 samples per column draws the sample polyline");
+    // 2000 samples over 340 columns = 5.9 samples/column. The finest level of
+    // a 1 M-sample file has factor 16: 16-sample blocks in 5.9-sample columns,
+    // i.e. a staircase about 3 columns wide. The exact read replaces it.
+    CHECK (WaveformView::chooseRenderMode (2000, W, 16) == RM::ExactColumns,
+           "a mipmap block wider than its column is replaced by exact columns");
+    CHECK (WaveformView::chooseRenderMode (3000, W, 16) == RM::Mipmap,
+           "a level that still resolves the column is kept (16 <= 2 x 8.8)");
+    CHECK (WaveformView::chooseRenderMode (200000, W, 16) == RM::Mipmap,
+           "wide views keep using the pyramid");
+    CHECK (WaveformView::chooseRenderMode (100000, W, -1) == RM::ExactColumns,
+           "no covering level reads the file directly");
+
+    // --- Per-sample dots, hover readout and dragging a sample ------------
+    const double rate = 44100.0;
+    const juce::File wav = makeTempFile ("sample_dots.wav");
+    writeWav (wav, 1, rate, (int64_t) (rate * 8.0),
+              [] (int, int64_t f, double r)
+              { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                * 100.0 * (double) f / r); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for the sample-dot test");
+
+    WaveformView view (app);
+    view.setSize (400, 200);
+    view.setVisibleChannels ({ 0 });
+
+    const int64_t i0 = 44100;                                  // 1.0 s
+    const double tA = (double) i0 / rate;
+    view.setViewRange (tA, (double) (i0 + 40) / rate);
+    CHECK (view.sampleDotsVisible(), "40 samples in view -> one dot per sample");
+    view.setViewRange (tA, (double) (i0 + 61) / rate);
+    CHECK (!view.sampleDotsVisible(), "61 samples in view -> no per-sample dots");
+    view.setViewRange (tA, (double) (i0 + 59) / rate);
+    CHECK (view.sampleDotsVisible(), "59 samples in view -> dots");
+    view.setViewRange (tA, (double) (i0 + 40) / rate);
+
+    const int64_t idx = i0 + 10;
+    const float dx = view.sampleDotXFor (idx);
+    CHECK (dx > 0.0f, "a visible sample has a dot position");
+    CHECK (view.sampleIndexAtX ((int) std::lround (dx)) == idx, "a click on a dot hits that sample");
+    CHECK (view.sampleIndexAtX (20) == -1, "a click left of the plot hits no sample");
+    CHECK (view.sampleDotXFor (i0 - 1) < 0.0f, "a sample outside the view has no dot");
+
+    // Hovering a dot highlights exactly that sample.
+    view.mouseMove (mkMouse (view, (int) std::lround (dx), 100, {}));
+    CHECK (view.getHoveredSample() == idx && view.getHoveredSampleChannel() == 0,
+           "hovering a dot highlights that sample");
+
+    double shown = 0.0;
+    CHECK (view.sampleValue (0, idx, shown), "the highlighted sample's value is known");
+    float fileV = 0.0f, nbV = 0.0f;
+    app.audioEngine().readSamples (0, idx, 1, &fileV);
+    app.audioEngine().readSamples (0, idx + 1, 1, &nbV);
+    CHECK (std::abs (shown - (double) fileV) < 1e-6, "the readout shows the file's value");
+
+    // Drag the dot to a new amplitude: the value under the cursor is what the
+    // sample gets, and only that sample.
+    const auto pr = view.plotRect();
+    const double centerY = (double) pr.getY() + (double) pr.getHeight() * 0.5;
+    const double ampPx = view.rowAmpPx();
+    const double target = 0.25;
+    const int yTarget = (int) std::lround (centerY - (target - view.getVerticalOffset()) * ampPx);
+    // The cursor lands on an integer pixel, so the value the drag delivers is
+    // the one that pixel maps to - within half a pixel of the target.
+    const double want = view.ampValueAtY (yTarget, 0);
+    CHECK (std::abs (want - target) < 0.01,
+           "ampValueAtY inverts the drawing mapping");
+
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    view.mouseDown (mkMouse (view, (int) std::lround (dx), 100, lmb));
+    CHECK (view.getHoveredSample() == idx, "grabbing a dot keeps it highlighted");
+    view.mouseDrag (mkMouse (view, (int) std::lround (dx), yTarget, lmb));
+
+    double preview = 0.0;
+    view.sampleValue (0, idx, preview);
+    CHECK (std::abs (preview - want) < 1e-3, "the drag previews the new amplitude");
+    float during = 0.0f;
+    app.audioEngine().readSamples (0, idx, 1, &during);
+    CHECK (std::abs ((double) during - (double) fileV) < 1e-6,
+           "nothing is written while the drag is still running");
+
+    view.mouseUp (mkMouse (view, (int) std::lround (dx), yTarget, lmb));
+    float after = 0.0f, nbAfter = 0.0f;
+    app.audioEngine().readSamples (0, idx, 1, &after);
+    app.audioEngine().readSamples (0, idx + 1, 1, &nbAfter);
+    CHECK (std::abs ((double) after - want) < 1e-3, "dropping the dot sets that sample's amplitude");
+    CHECK (std::abs ((double) nbAfter - (double) nbV) < 1e-9, "neighbouring samples are untouched");
+
+    CHECK (app.undo().canUndo(), "a sample edit is one undoable step");
+    app.undoStep ();
+    float back = 0.0f;
+    app.audioEngine().readSamples (0, idx, 1, &back);
+    CHECK (std::abs ((double) back - (double) fileV) < 1e-9, "undo restores the sample");
+
+    // A press on a dot that never moves it is a click: it seeks to that sample
+    // and records nothing.
+    const int undoBefore = (int) app.undo().undoSize();
+    app.setPlayhead (0.0);
+    view.mouseDown (mkMouse (view, (int) std::lround (dx), 100, lmb));
+    view.mouseUp   (mkMouse (view, (int) std::lround (dx), 100, lmb));
+    CHECK (std::abs (app.playhead - (double) idx / rate) < 1e-6,
+           "a click on a dot seeks to it instead of doing nothing");
+    CHECK ((int) app.undo().undoSize() == undoBefore, "a click on a dot is not an edit");
+
+    // A press that misses every dot keeps the normal click-to-seek behaviour.
+    view.setViewRange (tA, tA + 4.0);
+    CHECK (!view.sampleDotsVisible(), "a wide view is not in sample mode");
+    view.mouseDown (mkMouse (view, 200, 100, lmb));
+    CHECK (view.getHoveredSample() == -1, "no sample highlight outside sample mode");
+    view.mouseUp (mkMouse (view, 200, 100, lmb));
+
+    wav.deleteFile();
+}
+
+// ---------------- +/- selection gain with an ease-in / ease-out ------------
+// The gain is shaped like an envelope: raised-cosine ramps over the first and
+// the last quarter of the range, full gain in between (sc::env::rampedGainDbAt,
+// used by Application::boostSelectionGain from the +/- keys).
+static void testSelectionGainBoostEnvelope()
+{
+    const double G = 6.0;
+    CHECK (std::abs (sc::env::rampedGainDbAt (0, 1000, G, 0.25)) < 1e-3,
+           "the boost starts at 0 dB");
+    CHECK (std::abs (sc::env::rampedGainDbAt (250, 1000, G, 0.25) - G) < 1e-6,
+           "full gain reached at 25% of the range");
+    CHECK (std::abs (sc::env::rampedGainDbAt (500, 1000, G, 0.25) - G) < 1e-6,
+           "gain held through the middle");
+    CHECK (std::abs (sc::env::rampedGainDbAt (749, 1000, G, 0.25) - G) < 1e-6,
+           "gain held until 75% of the range");
+    CHECK (std::abs (sc::env::rampedGainDbAt (999, 1000, G, 0.25)) < 0.05,
+           "back to 0 dB at the end");
+    CHECK (std::abs (sc::env::rampedGainDbAt (100, 1000, G, 0.25)
+                     - sc::env::rampedGainDbAt (899, 1000, G, 0.25)) < 1e-9,
+           "ease-in and ease-out are mirror images");
+    bool rising = true;
+    double prev = -1.0;
+    for (int i = 0; i <= 250; ++i)
+    {
+        const double g = sc::env::rampedGainDbAt (i, 1000, G, 0.25);
+        if (g < prev - 1e-12) rising = false;
+        prev = g;
+    }
+    CHECK (rising, "the ease-in never dips");
+    // A quarter into the ramp a straight line would already be at 25% of the
+    // gain; the raised-cosine is at 14.6% and reaches the hold with zero slope.
+    const double quarter = sc::env::rampedGainDbAt (62, 1000, G, 0.25);
+    CHECK (quarter > G * 0.05 && quarter < G * 0.2,
+           "raised-cosine ramp, not a straight line (no corner at the hold)");
+    CHECK (sc::env::rampedGainDbAt (500, 1000, 0.0, 0.25) == 0.0, "0 dB changes nothing");
+
+    // --- Applied to a time selection --------------------------------------
+    const double rate = 44100.0;
+    const juce::File wav = makeTempFile ("boost_sel.wav");
+    writeWav (wav, 1, rate, (int64_t) (rate * 6.0),
+              [] (int, int64_t f, double r)
+              { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                * 1000.0 * (double) f / r); });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for the boost test");
+
+    auto peakIn = [&] (double a, double b) -> double
+    {
+        const int64_t iA = (int64_t) (a * rate), iB = (int64_t) (b * rate);
+        std::vector<float> buf ((size_t) (iB - iA));
+        if (!app.audioEngine().readSamples (0, iA, iB - iA, buf.data())) return -1.0;
+        double mx = 0.0;
+        for (float v : buf) mx = std::max (mx, (double) std::abs (v));
+        return mx;
+    };
+
+    const double base = peakIn (0.5, 0.9);
+    CHECK (std::abs (base - 0.5) < 1e-3, "reference peak before any edit");
+
+    CHECK (!app.boostSelectionGain (G), "no selection -> nothing to boost");
+    CHECK (std::abs (peakIn (0.5, 0.9) - base) < 1e-9, "a refused boost changes nothing");
+
+    app.setSelection ({ 1.0, 3.0 });
+    CHECK (app.boostSelectionGain (G), "+ applies the boost");
+
+    const double full = 0.5 * std::pow (10.0, G / 20.0);          // 0.5 -> 1.995x
+    CHECK (peakIn (1.00, 1.05) < base * 1.10, "ease-in begins at unity");
+    CHECK (peakIn (1.45, 1.55) > full * 0.97, "full gain reached at 25%");
+    CHECK (std::abs (peakIn (1.90, 2.10) - full) < full * 0.02, "held through the middle");
+    CHECK (peakIn (2.45, 2.55) > full * 0.97, "held until 75%");
+    CHECK (peakIn (2.95, 2.999) < base * 1.10, "eased back to unity at the end");
+    CHECK (std::abs (peakIn (3.05, 3.5) - base) < 1e-3, "outside the selection unchanged");
+    CHECK (std::abs (peakIn (0.10, 0.40) - base) < 1e-3, "before the selection unchanged");
+
+    bool audioRises = true;
+    double last = 0.0;
+    for (int k = 0; k < 5; ++k)
+    {
+        const double p = peakIn (1.0 + 0.1 * k, 1.05 + 0.1 * k);
+        if (p < last) audioRises = false;
+        last = p;
+    }
+    CHECK (audioRises, "the applied ease-in rises monotonically");
+
+    bool audioFalls = true;
+    last = 1e9;
+    for (int k = 0; k < 5; ++k)
+    {
+        const double p = peakIn (2.5 + 0.1 * k, 2.55 + 0.1 * k);
+        if (p > last) audioFalls = false;
+        last = p;
+    }
+    CHECK (audioFalls, "the applied ease-out falls monotonically");
+
+    CHECK (app.undo().canUndo(), "the boost is one undoable step");
+    app.undoStep ();
+    CHECK (std::abs (peakIn (1.90, 2.10) - base) < 1e-3, "undo restores the original audio");
+
+    // Shift step: 1 dB instead of 6.
+    CHECK (app.boostSelectionGain (1.0), "1 dB step applies");
+    const double full1 = 0.5 * std::pow (10.0, 1.0 / 20.0);
+    CHECK (std::abs (peakIn (1.90, 2.10) - full1) < full1 * 0.02,
+           "1 dB step gains exactly 1 dB");
+    app.undoStep ();
+
+    // --- Applied to a spectral selection: only the masked band moves ------
+    const juce::File wav2 = makeTempFile ("boost_spec.wav");
+    writeWav (wav2, 1, rate, (int64_t) (rate * 6.0),
+              [] (int, int64_t f, double r)
+              { return 0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                * 1000.0 * (double) f / r)
+                     + 0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                * 6000.0 * (double) f / r); });
+    Application app2;
+    CHECK (app2.openFile (wav2), "open two-tone wav for the spectral boost");
+    app2.doc()->spectralSel.addRect (1.0, 3.0, 800.0, 1500.0, false, true);
+    CHECK (app2.hasSpectralSelection(), "spectral selection set");
+
+    // Measure inside the selection, in the flat part of the envelope (the
+    // selection spans 1.0-3.0 s, so 2.0-2.5 s is 50-75% of it).
+    std::vector<float> buf ((size_t) (rate * 0.5));
+    app2.audioEngine().readSamples (0, (int64_t) (2.0 * rate), (int64_t) (rate * 0.5), buf.data());
+    const float inA = toneAmp (buf, 0, buf.size(), 1000.0, rate);
+    const float outA = toneAmp (buf, 0, buf.size(), 6000.0, rate);
+    CHECK (inA > 0.2f && outA > 0.2f, "both tones present before the edit");
+
+    CHECK (app2.boostSelectionGain (G), "spectral boost applies");
+    app2.audioEngine().readSamples (0, (int64_t) (2.0 * rate), (int64_t) (rate * 0.5), buf.data());
+    const float inB = toneAmp (buf, 0, buf.size(), 1000.0, rate);
+    const float outB = toneAmp (buf, 0, buf.size(), 6000.0, rate);
+    // 6 dB is a factor 1.995 in amplitude.
+    CHECK (inB > inA * 1.8 && inB < inA * 2.25, "the masked tone is boosted by ~6 dB");
+    CHECK (std::abs (outB - outA) < outA * 0.25, "the tone outside the band is left alone");
+
+    wav.deleteFile();
+    wav2.deleteFile();
+}
+
 
 // ------------------------------------------------------- deletion side state
 // Deleting a time range must also adjust the non-audio state of that file:
@@ -25357,6 +25744,111 @@ static void testTablesPlotSelectionBand()
     wav.deleteFile ();
 }
 
+// The preview plot selects a time range from a left-drag, zooms with the
+// wheel, and pans both axes with the middle button (half cursor speed, the
+// delta measured from the last delivered position, so reversing responds at
+// once) - the same scheme as the waveform, spectrogram and dedicated track.
+static void testTablesPlotSelectZoomPan()
+{
+    const juce::File wav = makeTempFile ("plot_pan.wav");
+    writeWav (wav, 1, 44100.0, 44100 * 8, [] (int, int64_t, double) { return 0.25f; });
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for the preview plot test");
+    auto* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    std::string err;
+    juce::String csv = "alpha\n";
+    for (int i = 0; i < 200; ++i) csv += juce::String ((double) i / 199.0, 4) + "\n";
+    CHECK (app.addTableFromCsv ("T1", csv, &err), "table imported for the preview plot test");
+
+    TablesPanel panel (app);
+    panel.setSize (400, 420);
+    panel.refresh ();
+    auto& plot = panel.plotView ();
+    plot.setSize (400, 200);
+    plot.setFocusTableIndex (0);
+    plot.setFocusParamIndex (-1);   // no row alignment: table time = document time
+    const double dur = plot.tableDuration ();
+    CHECK (dur > 0.0, "the imported table has a duration");
+
+    {
+        const auto v = plot.getViewTime ();
+        CHECK (std::abs (v.first) < 1e-12 && std::abs (v.second - dur) < 1e-12,
+               "the plot shows the whole table until something zooms it");
+    }
+
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    const juce::ModifierKeys mmb (juce::ModifierKeys::middleButtonModifier);
+
+    // --- A left-drag selects a time range (document seconds: with no
+    //     alignment the table's time maps to the document's one-to-one) ------
+    const double tA = plot.xToTableTime (120), tB = plot.xToTableTime (260);
+    plot.mouseDown (mkMouse (plot, 120, 100, lmb));
+    plot.mouseDrag (mkMouse (plot, 260, 100, lmb));
+    plot.mouseUp   (mkMouse (plot, 260, 100, lmb));
+    const auto sel = app.selection;
+    CHECK (sel.getLength() > 0.0, "a drag on the preview plot selects a time range");
+    CHECK (std::abs (sel.getStart() - std::min (tA, tB)) < 1e-9
+        && std::abs (sel.getEnd()   - std::max (tA, tB)) < 1e-9,
+        "the selection matches the dragged span, in document seconds");
+
+    // A plain click still only moves the playhead.
+    app.setSelection ({});
+    plot.mouseDown (mkMouse (plot, 150, 100, lmb));
+    plot.mouseUp   (mkMouse (plot, 150, 100, lmb));
+    CHECK (app.selection.isEmpty(), "a click does not select a range");
+
+    // --- Wheel zoom, then the middle-drag moves the zoomed window ----------
+    const juce::MouseWheelDetails zoomIn { 0.0f, -1.0f, false, false, false };
+    plot.mouseWheelMove (mkMouse (plot, 200, 100, lmb), zoomIn);
+    auto v = plot.getViewTime ();
+    CHECK (v.second - v.first < dur - 1e-9, "the wheel zooms the time axis");
+    CHECK (v.first >= 0.0 && v.second <= dur + 1e-12, "the zoom stays inside the table");
+
+    const double span = v.second - v.first;
+    // The expected step comes from the view's own mapping, not from a guessed
+    // geometry: half of what the cursor covers in those pixels.
+    const double perPx = plot.xToTableTime (201) - plot.xToTableTime (200);
+    const double halfStep = 40.0 * 0.5 * perPx;
+    plot.mouseDown (mkMouse (plot, 200, 100, mmb));
+    plot.mouseDrag (mkMouse (plot, 160, 100, mmb));   // dx = -40 -> window forward in time
+    const auto v1 = plot.getViewTime ();
+    CHECK (std::abs ((v1.second - v1.first) - span) < 1e-9, "panning keeps the window width");
+    CHECK (std::abs (v1.first - (v.first + halfStep)) < 1e-9,
+           "middle-drag pans the table time at half cursor speed");
+
+    plot.mouseDrag (mkMouse (plot, 240, 100, mmb));   // straight back and past
+    const auto v2 = plot.getViewTime ();
+    CHECK (std::abs (v2.first - (v.first - halfStep)) < 1e-9,
+           "reversing the middle-drag responds immediately, no dead zone");
+
+    // Vertical half of the same gesture, after zooming the value axis.
+    const juce::ModifierKeys shl (juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier);
+    const auto vr0 = plot.getValueRange ();
+    plot.mouseWheelMove (mkMouse (plot, 200, 100, shl), zoomIn);
+    const auto vr1 = plot.getValueRange ();
+    CHECK (vr1.second - vr1.first < vr0.second - vr0.first - 1e-9,
+           "Shift + wheel zooms the value axis");
+    const double perPxV = plot.yToValue (101.0f) - plot.yToValue (100.0f);
+    plot.mouseDrag (mkMouse (plot, 240, 140, mmb));   // dy = +40 -> window up
+    const auto vr2 = plot.getValueRange ();
+    const double vStep = 40.0 * 0.5 * perPxV;
+    CHECK (std::abs (vr2.first - (vr1.first + vStep)) < 1e-9
+        && std::abs (vr2.second - (vr1.second + vStep)) < 1e-9,
+        "middle-drag pans the value axis at half cursor speed");
+    plot.mouseUp (mkMouse (plot, 240, 140, mmb));
+
+    // Double-click puts the whole table back.
+    plot.mouseDoubleClick (mkMouse (plot, 200, 100, lmb));
+    const auto v3 = plot.getViewTime ();
+    CHECK (std::abs (v3.first) < 1e-12 && std::abs (v3.second - dur) < 1e-12,
+           "double-click resets the view to the whole table");
+
+    wav.deleteFile ();
+}
+
 // Pasting (or importing) a table must select it in the list and draw its
 // plot, without the user clicking the new row.
 static void testTablesPasteAutoSelect()
@@ -26428,17 +26920,34 @@ static void testTablesTwoPointVerticalAlign()
     track.mouseUp   (mkMouse (track, x2, 30, lmb));
     CHECK (app.selection.isEmpty(), "plain click clears the selection");
 
-    // Middle-drag pans the shared time window.
+    // Middle-drag pans BOTH axes at half cursor speed, like the waveform and
+    // spectral views: the shared time window and the value window together.
     const juce::ModifierKeys mmb (juce::ModifierKeys::middleButtonModifier);
     double winT0 = -1.0, winT1 = -1.0;
     track.onTimeWindow = [&] (double a, double b) { winT0 = a; winT1 = b; };
+    const int plotW = 300 - kLeftAxisWidth;   // plotRect() width of the 300 px track
     track.mouseDown (mkMouse (track, 150, 30, mmb));
-    track.mouseDrag (mkMouse (track, 120, 30, mmb));
+    track.mouseDrag (mkMouse (track, 120, 30, mmb));   // dx = -30 px -> +0.5*30/plotW * 2 s
     track.mouseUp   (mkMouse (track, 120, 30, mmb));
     CHECK (std::abs ((winT1 - winT0) - 2.0) < 1e-9, "pan keeps the window width");
-    const double expectShift = track.timeAtX (150) - track.timeAtX (120);
-    CHECK (winT0 > 0.0 && std::abs (winT0 - expectShift) < 1e-9,
-          "dragging left moves the window forward in time");
+    const double halfShift = 30.0 * 0.5 * 2.0 / (double) plotW;
+    CHECK (winT0 > 0.0 && std::abs (winT0 - halfShift) < 1e-9,
+          "middle-drag pans the shared window at half cursor speed");
+
+    // Reversing responds at once (no dead zone), and the vertical axis moves
+    // with the same drag. The owner would apply each delivered window back to
+    // the view, so do that here before the next gesture.
+    track.setTimeRange (winT0, winT1);
+    const auto vr0 = track.visibleRange ();
+    track.mouseDown (mkMouse (track, 120, 30, mmb));
+    track.mouseDrag (mkMouse (track, 140, 40, mmb));   // dx = +20 -> back, dy = +10 -> down
+    const double back = 20.0 * 0.5 * 2.0 / (double) plotW;
+    CHECK (std::abs (winT0 - (halfShift - back)) < 1e-9,
+          "reversing the middle-drag responds immediately");
+    const auto vr1 = track.visibleRange ();
+    CHECK (vr1.second > vr0.second && vr1.first > vr0.first,
+           "middle-drag pans the value axis with the cursor");
+    track.mouseUp (mkMouse (track, 140, 40, mmb));
 
     wav.deleteFile ();
 }
@@ -26506,9 +27015,9 @@ static void testTrackVPanBehaviour()
         // with the cursor (matching the waveform/spectrogram axis drags).
         track.mouseDown (mkMouse (track, 30, 20, lmb));
         track.mouseDrag (mkMouse (track, 30, 60, lmb));
-        const double dv = 40.0 * 2.0 / 80.0;   // dy * span / plot height
+        const double dv = 40.0 * 0.5 * 2.0 / 80.0;   // half the cursor step: dy * 0.5 * span / plot height
         CHECK (std::abs (lo - (-1.0 + dv)) < 1e-9 && std::abs (hi - (1.0 + dv)) < 1e-9,
-               "dragging down on the track axis moves content down");
+               "dragging down on the track axis moves content down, at half cursor speed");
 
         // Back up: returns exactly to the original window.
         track.mouseDrag (mkMouse (track, 30, 20, lmb));
@@ -28433,6 +28942,7 @@ static void testWriteDataToNewChannels()
 #include "regression/video.inc"   // Video window: picture decoding, pump, movie audio, wiring
 #include "regression/docking.inc"   // docking workspace: groups, drop zones, floating windows, workspaces
 #include "regression/diagnostics.inc"   // opt-in diagnostic log
+#include "regression/updates.inc"       // automatic updates: Ed25519/SHA, manifest, staging (docs/updates.md)
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -28715,6 +29225,9 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("super-res mode/output combos", testSuperResModeOutputCombos);
     SC_RUN_TEST ("super-res apply output modes", testSuperResApplyOutputModes);
     SC_RUN_TEST ("time-pan speed + reversal", testTimePanSpeedAndReversal);
+    SC_RUN_TEST ("middle-drag pans both axes", testMiddleDragPanBothAxes);
+    SC_RUN_TEST ("sample-level waveform draw + edit", testSampleLevelWaveformDrawingAndEditing);
+    SC_RUN_TEST ("selection gain boost envelope (+/-)", testSelectionGainBoostEnvelope);
     SC_RUN_TEST ("axis pan + log ticks", testAxisPanAndLogTicks);
     SC_RUN_TEST ("time axis ticks", testTimeAxisTicks);
     SC_RUN_TEST ("time text formatting", testTimeFormatting);
@@ -28901,6 +29414,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("tables shared alignment", testTablesSharedAlignment);
     SC_RUN_TEST ("tables 2pt vertical align", testTablesTwoPointVerticalAlign);
     SC_RUN_TEST ("tables plot selection band", testTablesPlotSelectionBand);
+    SC_RUN_TEST ("tables plot select zoom pan", testTablesPlotSelectZoomPan);
     SC_RUN_TEST ("tables paste auto select", testTablesPasteAutoSelect);
     SC_RUN_TEST ("track v-pan behaviour", testTrackVPanBehaviour);
     SC_RUN_TEST ("tables colour picker dialog", testTablesColourPickerDialog);
@@ -28949,6 +29463,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: video", runRegression_video);
     SC_RUN_TEST ("regression: docking", runRegression_docking);
     SC_RUN_TEST ("regression: diagnostics", runRegression_diagnostics);
+    SC_RUN_TEST ("regression: updates", runRegression_updates);
 
 
     scReportTimings();

@@ -114,6 +114,12 @@ set_target_properties (sc_dock_fonts PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(src)
 
+# The updater (spectrocraft-updater.exe): a plain C++20 console program with no
+# JUCE dependency, so it can finish an update after the app has quit
+# (updater/CMakeLists.txt, docs/updates.md). Compiled on every platform; only
+# the Windows archive ships it, and only the Windows build offers the menu item.
+add_subdirectory(updater)
+
 enable_testing()
 add_subdirectory(tests)
 

@@ -87,3 +87,8 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   `tests/regression/control.inc`), run by `--run-unit-tests`; ctest splits them into shards.
 - AI control code: `include/control/`, `src/control/` (command registry, `--json`, server);
   per-lot handoff notes: `docs/ai-control/progress/`.
+- Auto-update (Windows): `include/Updates.h` + `src/Updates.cpp` (GitHub lookup, signed manifest,
+  download/stage), `include/Ed25519.h` + `src/Ed25519.cpp` (signature), `updater/`
+  (`spectrocraft-updater`, a plain C++20 console program built as its own target and shipped inside
+  the release archive), keys in `tools/updates/`, manifest generator `tools/make_update_manifest.py`.
+  Flow and release requirements: `docs/updates.md`; tests: `SC_TEST_FILTER=updates`.

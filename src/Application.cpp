@@ -202,6 +202,8 @@ void Application::loadSettings ()
     settings.allowMultipleInstances = recentStore->getIntValue ("multi_instance", 1) != 0;
     settings.controlEnabled = recentStore->getIntValue ("control_enabled", 0) != 0;
     settings.diagLogEnabled = recentStore->getIntValue ("diag_log_enabled", 0) != 0;
+    // Help > Check for Updates: also look once a day at startup (off by default).
+    settings.checkUpdatesAtStartup = recentStore->getIntValue ("check_updates_startup", 0) != 0;
     // Track axis placement + grid lines (View menu).
     settings.trackAxisOnRight   = recentStore->getIntValue ("track_axis_right", 0) != 0;
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
@@ -314,6 +316,7 @@ void Application::saveSettings ()
     recentStore->setValue ("multi_instance", settings.allowMultipleInstances ? 1 : 0);
     recentStore->setValue ("control_enabled", settings.controlEnabled ? 1 : 0);
     recentStore->setValue ("diag_log_enabled", settings.diagLogEnabled ? 1 : 0);
+    recentStore->setValue ("check_updates_startup", settings.checkUpdatesAtStartup ? 1 : 0);
     recentStore->setValue ("track_axis_right", settings.trackAxisOnRight ? 1 : 0);
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);
@@ -3039,6 +3042,55 @@ bool Application::changeGain (float gainDb, std::string* errOut)
 
     if (selection.getLength() <= 0) return true;
     return audioEngine().gainSamples (selectionSamples (*this), gainDb, &visibleChans (*this), errOut);
+}
+
+bool Application::boostSelectionGain (double gainDb, std::string* errOut)
+{
+    // A 0 dB boost must leave the file bit-exact: no edit, no undo entry.
+    if (!std::isfinite (gainDb) || std::abs (gainDb) < 1e-9) return true;
+    if (!audioEngine().isFileLoaded ()) return false;
+
+    // Same target rule as the other effects: the spectral selection's sample
+    // range when one is active, otherwise the time selection. The envelope is
+    // shaped over that whole range, so the ease in/out follows the selection.
+    if (hasSpectralSelection ())
+        return applyMaskedEffect (*this, "Boosted spectral selection",
+                                  [gainDb] (float* d, int len)
+                                  { sc::env::applyRampedGain (d, len, gainDb, 0.25); },
+                                  errOut);
+
+    AudioEngine& eng = audioEngine ();
+    const auto range = selectionSamples (*this)
+                           .getIntersectionWith ({ 0, eng.numSamples () });
+    if (range.getLength () <= 0) return false;   // nothing selected to boost
+
+    const int len = (int) range.getLength ();
+    applyPerSample (eng, range,
+                    [gainDb, len] (float v, int i, int)
+                    { return v * (float) std::pow (10.0,
+                          sc::env::rampedGainDbAt (i, len, gainDb, 0.25) * 0.05); },
+                    &visibleChans (*this), "Boosted selection");
+    return true;
+}
+
+bool Application::setSampleValue (int channel, int64_t sampleIndex, float value,
+                                  std::string* errOut)
+{
+    AudioEngine& eng = audioEngine ();
+    if (!eng.isFileLoaded ()) { if (errOut) *errOut = "No audio loaded."; return false; }
+    if (channel < 0 || channel >= eng.numChannels ()) { if (errOut) *errOut = "Invalid channel."; return false; }
+    if (sampleIndex < 0 || sampleIndex >= eng.numSamples ()) { if (errOut) *errOut = "Sample out of range."; return false; }
+    if (!std::isfinite (value)) { if (errOut) *errOut = "Invalid sample value."; return false; }
+
+    float old = 0.0f;
+    if (eng.readSamples (channel, sampleIndex, 1, &old) && old == value)
+        return true;   // unchanged: no undo entry, no "unsaved" flag
+
+    const std::vector<int> chans { channel };
+    applyPerSample (eng, { sampleIndex, sampleIndex + 1 },
+                    [value] (float, int, int) { return value; },
+                    &chans, "Edited sample");
+    return true;
 }
 
 // ------------------------------------------------- Invert / Time Stretch / Filter EQ

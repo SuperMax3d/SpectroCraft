@@ -405,6 +405,11 @@ public:
     /** The time ruler was clicked at this document time: move the playhead.
         Only called when wired (the standalone window's panel always is). */
     std::function<void(double)> onSeekTime;
+    /** A drag that started on the time ruler selected a time range (document
+        seconds). The panel already draws the band; the owner applies the range
+        to the document so every other view shows it too. Only called when
+        wired. */
+    std::function<void(juce::Range<double>)> onSelectTimeRange;
 
 
 
@@ -415,6 +420,8 @@ private:
     int contentWidth() const;             // ruler/rows area width
     int rowsHeight() const;               // all rows' total height, px
     int rowsAvail() const;                // height available for rows, px
+    /** [start, end] the fit would show: the audio and every known track. */
+    std::pair<double, double> fitRange() const;
     void zoomAbout (double tSecs, double factor);
     void syncScrollbars();               // bars <- current view/scroll state
     void showContextMenuAt (const juce::Point<int>& at);
@@ -440,6 +447,13 @@ private:
     int dropRow_ = -1;                    // reorder target row while dragging up/down
     int dragNowY_ = 0;                    // pointer height during a reorder drag
     float snapX_ = -1.0f;                 // shift-drag anchor indicator (-1 = none)
+
+    // A drag that starts on the time ruler selects a time range once it has
+    // moved kDragAxisThreshold pixels; a plain click only seeks (mouseDown).
+    bool rulerDrag_ = false;
+    bool rulerSelecting_ = false;
+    juce::Point<int> rulerStartPt_;
+    double rulerStartTime_ = 0.0;
     std::vector<bool> soloFlags_;
     double playhead_ = -1.0;              // main document's cursor, secs
     juce::Range<double> selection_;       // shared time selection (empty = none)

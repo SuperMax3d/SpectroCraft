@@ -43,6 +43,17 @@ bool isFlatCurve (const std::vector<EnvPoint>& pts);
                   t = i / rate seconds relative to the range start. */
 void applyEnvelope (float* data, int len, double rate, const std::vector<EnvPoint>& pts);
 
+/** Ramped gain (dB) for a whole-range boost/cut with an ease-in and an
+    ease-out: position `i` of a range of `len` samples, `easeFraction` of the
+    range on each side (clamped to 0.5). The ramps are raised-cosine curves,
+    so the gain leaves and reaches 0 with zero slope and there is no corner
+    where the flat middle begins. `easeFraction <= 0` means a flat `gainDb`.
+    Used by the +/- selection gain shortcut (see Application::boostSelectionGain). */
+double rampedGainDbAt (int i, int len, double gainDb, double easeFraction = 0.25);
+
+/** Applies rampedGainDbAt() to one mono channel in place. */
+void applyRampedGain (float* data, int len, double gainDb, double easeFraction = 0.25);
+
 /** A named preset curve (times in absolute seconds). */
 struct EnvPreset
 {

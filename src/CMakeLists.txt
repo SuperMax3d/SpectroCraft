@@ -50,6 +50,8 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/StemService.cpp      # headless stem separation (audio.cpp CLI, no UI)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/SuperResService.cpp  # headless super resolution (audio.cpp CLI, no UI)
         ${CMAKE_CURRENT_SOURCE_DIR}/AI/Sha256.cpp   # standalone SHA-256 (Python script hashes, model checks)
+        ${CMAKE_CURRENT_SOURCE_DIR}/Ed25519.cpp     # standalone SHA-512 + Ed25519 (signed update manifest)
+        ${CMAKE_CURRENT_SOURCE_DIR}/Updates.cpp     # Help > Check for Updates (GitHub release, verify, stage)
         ${CMAKE_CURRENT_SOURCE_DIR}/Tables.cpp      # CSV table import/alignment/persistence
         ${CMAKE_CURRENT_SOURCE_DIR}/TablesTrack.cpp # dedicated tables track view
         ${CMAKE_CURRENT_SOURCE_DIR}/Recorder.cpp    # recorder plugin host (Transport > Record)

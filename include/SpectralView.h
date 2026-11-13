@@ -37,7 +37,9 @@ public:
     void paint (juce::Graphics& g) override;
     void resized() override;
 
-    // Mouse interaction: left-drag = select, middle-drag = pan,
+    // Mouse interaction: left-drag = select, middle-drag = pan BOTH axes
+    // (time horizontally, frequency vertically; half cursor speed, same feel
+    // as dragging the axis strips),
     // right-drag = box-zoom (drag on the track -> BOTH axes: time from the
     // box's x span + frequency from its y span; drag starting on the left
     // frequency axis -> vertical only; drag starting on the top time ruler
@@ -483,6 +485,10 @@ private:
                              juce::Colour edgeCol);
     void zoomAtX (int x, double factor);
     void panByTime (double dt);
+    /** Half-speed vertical grab measured from the last delivered cursor y
+        (panLastY advances), shared by the frequency-axis drag and the
+        middle-drag. Log axes shift in log space. */
+    void panFrequencyByCursorY (int y);
     void zoomFreqAtY (float y, double factor);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectralView)

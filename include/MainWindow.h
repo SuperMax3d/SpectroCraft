@@ -23,6 +23,8 @@ class VideoWindow;            // defined in VideoWindow.h
 class VideoDockHost;          // defined in VideoWindow.h
 class SuperResolutionWindow;  // defined in SuperResolution.h
 
+namespace sc { namespace update { struct ReleaseInfo; struct AssetInfo; } }   // docs/updates.md
+
 /** Content of the "Content Aware Time Scale" dialog: a mode drop-down
     (Time Stretch / Reduce Gaps) plus the fields for the selected mode. The
     whole block is one custom component so rows can be shown/hidden per mode.
@@ -291,6 +293,37 @@ public:
     int controlClients() const { return controlClients_; }
     /** Set by Main.cpp while the control server runs (journal polling). */
     bool controlServerRunning = false;
+
+    // ------------------------------------------------------------------ updates
+    // Help > Check for Updates (docs/updates.md). Windows only: the archive
+    // layout, the updater and the menu item are Windows-specific for now.
+    /** Fetch the latest GitHub release and compare it with this build. With
+        automatic = true (the startup check) nothing newer, an unreachable
+        GitHub or a declined version stays silent; only the diagnostic log may
+        mention it. */
+    void checkForUpdates (bool automatic = false);
+    /** The startup check, when Help > Check for Updates at Startup is on:
+        at most once a day, and never about a version already declined. */
+    void maybeCheckForUpdatesAtStartup();
+    /** Called after a start the updater asked for (--finish-update): reports
+        what it did (update-result.json) and removes the files it left behind. */
+    void reportFinishedUpdate();
+    /** True while a release lookup or an update job is in flight. */
+    std::atomic<bool> updateCheckRunning { false };
+
+private:
+    /** The "a new version is available" dialog: [Update Now] starts the
+        download, [Later] remembers the version so the startup check does not
+        offer the same one again. */
+    void offerUpdate (const sc::update::ReleaseInfo& rel, const juce::String& current,
+                      bool automatic);
+    /** Download, verify and stage the release, then start the updater and
+        quit (docs/updates.md). */
+    void startUpdate (const sc::update::ReleaseInfo& rel, const sc::update::AssetInfo& asset,
+                      const sc::update::AssetInfo& manifestAsset,
+                      const sc::update::AssetInfo& sigAsset);
+
+public:
     void cycleViewVisibility (bool forward);  // F9: both -> waveform -> spectrogram
     juce::Component* activeListPanel() const;  // Markers/Transcription tab content, or nullptr
     void handleFind (bool openDialog);     // Ctrl+F / F3 in the active list panel
@@ -651,6 +684,8 @@ public:
         HelpOpenDiagFolder = 6010,    // Help > Open Diagnostic Log Folder
         HelpCopyDiagSummary = 6011,   // Help > Copy Diagnostic Summary
         HelpSupportBundle = 6012,     // Help > Create Support Bundle...
+        HelpCheckUpdates = 6013,      // Help > Check for Updates...
+        HelpCheckUpdatesAtStartup = 6014, // ... submenu: also check at startup
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
         RecentBase = 9000,     // File > Open Recent items: RecentBase + index

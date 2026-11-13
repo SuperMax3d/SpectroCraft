@@ -474,6 +474,13 @@ public:
     float freqToY (double fHz) const;
     double yToFreq (float y) const;
 
+    // Half-speed incremental pan shared by the middle-drag: the delta is
+    // measured from the last delivered cursor position (panLastX/panLastY
+    // advance), so an edge clamp never accumulates and reversing direction
+    // responds immediately - the same scheme as the waveform/spectral views.
+    void panHorizontalByCursorX (int x);
+    void panVerticalByCursorY (int y);
+
     // Grid/label helpers shared between the classic and curve modes.
     void buildFreqAxisTicks (std::vector<double>& freqTicks,
                              std::vector<std::pair<double, bool>>& subTicks,
@@ -616,10 +623,12 @@ private:
     bool haveCurveView_ = false;
 
     // Interaction state for axis panning / box zooming.
-    enum class DragMode { None, PanFreq, PanLevel, PanFreqV, PanTime, ZoomDrag };
+    enum class DragMode { None, PanFreq, PanLevel, PanFreqV, PanTime, PanXY, ZoomDrag };
     // PanFreqV: vertical frequency panning in Freq vs Time mode.
+    // PanXY: middle-drag, both axes at once (half cursor speed).
     DragMode dragMode = DragMode::None;
     int dragStartX = 0, dragStartY = 0;
+    int panLastX = 0, panLastY = 0;   // last delivered cursor position while panning
     juce::Rectangle<int> zoomRect;
     bool haveZoomRect = false;
 
@@ -1745,6 +1754,22 @@ public:
     std::function<void(double tTableSecs)> onPointClicked;
     /** Left-button drag: the table time now under the mouse. */
     std::function<void(double tTableSecs)> onPointDragged;
+    /** A left-drag on the graph or its time axis selected a time range, in
+        **document** seconds (this plot's alignment map applied). The owner
+        applies it to the document, which draws the band here as well. Not
+        used while a click-based alignment is in progress: those gestures keep
+        consuming the plot's clicks and a drag still just scrubs. */
+    std::function<void(juce::Range<double>)> onSelectTimeRange;
+    /** Set by the TablesPanel while a click-based alignment needs this plot. */
+    void setAlignmentPending (bool p) { alignmentPending_ = p; }
+
+    /** What the plot currently shows (tests, docs): the table-time window and
+        the effective value range. With no pan/zoom these are the whole table
+        and the auto-fitted value range. */
+    std::pair<double, double> getViewTime() const;
+    std::pair<double, double> getValueRange() const;
+    /** Back to the whole table and the auto value range (double-click). */
+    void resetView();
 
     void setFocusTableIndex (int idx);   // -1 = nothing to show
     /** The parameter whose own time alignment maps the playhead (the
@@ -1755,6 +1780,8 @@ public:
     /** Plot column <-> table time; the same mapping draws the curves. */
     double xToTableTime (int x) const;
     float tableTimeToX (double tTableSecs) const;
+    /** Value under a plot y, of the range currently drawn (unit tests). */
+    double yToValue (float y) const;
     /** Duration of the focused table in seconds (0 when none). */
     double tableDuration() const;
 
@@ -1779,6 +1806,8 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;   // reset the view
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
     void mouseMove (const juce::MouseEvent&) override;   // hover value readout
     void mouseExit (const juce::MouseEvent&) override;
 
@@ -1790,6 +1819,33 @@ private:
     juce::Range<double> selectionDoc_;   // shared time selection (empty = none)
     int shownPlayheadX_ = -1;          // column computed at the last paint (change detection)
     bool pointGesture_ = false;        // a left-button press reported through onPointClicked
+    bool alignmentPending_ = false;    // a click-based alignment owns the plot's clicks
+
+    // A left-drag that moved past this many pixels selects a time range
+    // instead of scrubbing (the threshold the dedicated track uses too).
+    static constexpr int kSelectDragPx = 4;
+    bool selectDrag_ = false;
+    int pressX_ = 0, pressY_ = 0;
+    double pressTTab_ = 0.0;           // table time under the press
+
+    // Middle-drag: pan both axes at half cursor speed, measured from the last
+    // delivered position (the anchors advance, so a clamped edge never leaves
+    // a dead zone to unwind) - the scheme the waveform/spectral views use.
+    bool panDrag_ = false;
+    int panLastX_ = 0, panLastY_ = 0;
+
+    // Panned view: table-time window and value range. An empty window and
+    // !haveVal_ mean "the whole table" / "the auto-fitted range", which is
+    // what the plot shows until something is dragged.
+    double viewT0_ = 0.0, viewT1_ = 0.0;
+    double valLo_ = 0.0, valHi_ = 0.0;
+    bool haveVal_ = false;
+
+    /** Table-time window currently shown: {start, end} (whole table when none). */
+    std::pair<double, double> viewWindow() const;
+    /** Auto-fitted value range over the visible parameters (unpadded). */
+    bool autoValueRange (double& lo, double& hi) const;
+    void panViewByCursor (int x, int y);
     juce::Point<int> hoverPos_ {-1, -1};
     std::vector<std::pair<juce::String, juce::Colour>> hoverLabels_;
     juce::Rectangle<int> plotRect() const;   // curves area (time labels below)

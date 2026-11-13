@@ -716,8 +716,16 @@ static void regrPanels_tablesPlotPlayheadAndSplitter()
                "tables plot: a click moves the playhead there (table 6 s = document 8 s)");
         const int x4 = (int) std::floor (plot.tableTimeToX (4.0));
         plot.mouseDrag (mkMouse (plot, x4, 30, lmb));
-        CHECK (std::abs (app.playhead - 6.0) < 0.1, "tables plot: dragging moves the playhead along");
+        // A drag past the threshold now selects that span instead of scrubbing
+        // (the waveform's behaviour): the playhead stays where the press put it
+        // and the document gets the range, in document seconds.
+        CHECK (std::abs (app.playhead - 8.0) < 0.1,
+               "tables plot: a drag leaves the playhead where the click put it");
+        CHECK (std::abs (app.selection.getStart() - 6.0) < 0.1
+            && std::abs (app.selection.getEnd() - 8.0) < 0.1,
+               "tables plot: dragging selects the dragged span (table 4..6 s = document 6..8 s)");
         plot.mouseUp (mkMouse (plot, x4, 30, lmb));
+        app.setSelection ({});
 
         // A click-based alignment that needs plot points takes the click.
         panel.startPointAlign (1, 0, -1, 0);

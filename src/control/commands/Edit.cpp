@@ -222,6 +222,7 @@ std::vector<SettingKey> settingKeys()
         { "fft_track", PType::Integer, [] (const Settings& s) { return juce::var (s.fftTrack); },
           [] (Settings& s, const juce::var& v) { s.fftTrack = std::clamp ((int) v, 0, 2); return juce::var (s.fftTrack); } },
         b ("multi_instance", &Settings::allowMultipleInstances),
+        b ("check_updates_startup", &Settings::checkUpdatesAtStartup),   // docs/updates.md
         b ("track_axis_right", &Settings::trackAxisOnRight),
         b ("track_ruler_bottom", &Settings::trackRulerAtBottom),
         b ("show_amp_grid", &Settings::showAmpGrid),

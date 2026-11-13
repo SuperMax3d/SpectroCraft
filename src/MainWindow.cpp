@@ -17,6 +17,7 @@
 #include "control/ControlState.h"   // AI control: app.control().ui
 #include "control/CommandRegistry.h" // menu actions run through the registry
 #include "Diagnostics.h"               // opt-in diagnostic log (Window / Help menus)
+#include "Updates.h"                  // Help > Check for Updates (docs/updates.md)
 #include <thread>
 #include "WaveformView.h"
 #include "SpectralView.h"
@@ -842,6 +843,11 @@ void MainWindow::setupViews()
     };
     waveformView->onCursorInfo = onCursorInfo;
     spectralView->onCursorInfo = onCursorInfo;
+    // A refused sample-dot edit (read-only file, ...) goes to the status bar.
+    waveformView->onEditError = [this] (const juce::String& s)
+    {
+        if (statusBar) statusBar->setMouseInfo (s);
+    };
 
     // The views report the time under the mouse over either view; kept for
     // the status-bar probes and the tests (the Video window no longer follows it).
@@ -2873,9 +2879,15 @@ void MainWindow::ensureVideoWindow()
         toFront (false);   // keep the keyboard on the spectrogram
     };
 
-    // The track list's ruler seeks the main playhead.
+    // The track list's ruler seeks the main playhead; dragging on it selects a
+    // time range in the document - the same click-vs-drag split the data
+    // tracks use (docs/Features.md).
     auto& vtp = videoWindow->getTracksPanel();
     vtp.onSeekTime = [this] (double t) { app.setPlayhead (t); };
+    vtp.onSelectTimeRange = [this] (const juce::Range<double>& r)
+    {
+        app.setSelection (r);   // clamped to the file; every view shows it
+    };
     vtp.setSelection (app.selection);   // a freshly shown panel carries the current selection
     videoWindow->onTrackMenuAction = [this] (int id, int idx)
     {
@@ -4536,6 +4548,13 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         }
         case HelpCopyDiagSummary: copyDiagnosticSummary (); break;
         case HelpSupportBundle:   showSupportBundleDialog (); break;
+        case HelpCheckUpdates:    checkForUpdates (false); break;
+        case HelpCheckUpdatesAtStartup:
+            // Help > Check for Updates at Startup: the same lookup once a day
+            // when the app starts (docs/updates.md).
+            app.settings.checkUpdatesAtStartup = !app.settings.checkUpdatesAtStartup;
+            app.saveSettings();
+            break;
     }
 }
 
@@ -4689,6 +4708,470 @@ void MainWindow::showSupportBundleDialog ()
         sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Create Support Bundle",
                                         error, "", this);
 }
+
+// ==========================================================================
+// Help > Check for Updates (docs/updates.md)
+// ==========================================================================
+//
+// The flow, and why it is split the way it is:
+//
+//   1. look up the latest GitHub release and compare versions;
+//   2. download the manifest + its signature first (a few KB): a release that
+//      is not signed with the key built into the app fails before ~100 MB of
+//      archive has been fetched;
+//   3. download the archive, then unpack it to a staging folder while hashing
+//      every file against the manifest - nothing in the install folder has
+//      been touched yet, so a failure or a Cancel leaves the running app alone;
+//   4. start spectrocraft-updater.exe from the staging folder and quit: the
+//      updater waits for this process to disappear, swaps the files (SpectroCraft.exe
+//      cannot be overwritten while it runs), writes update-result.json and
+//      starts the app again with --finish-update, where reportFinishedUpdate()
+//      tells the user what happened.
+//
+// Windows only: the archive layout and the updater are Windows-specific, and
+// so is this wiring. src/Updates.cpp itself compiles everywhere.
+
+#if JUCE_WINDOWS
+
+namespace {
+
+/** The release notes as plain text: an AlertWindow has no clickable links and
+    no markdown, so emphasis and link targets are removed and long notes are
+    cut. The full notes stay on the release page. */
+juce::String updateNotesPreview (const juce::String& notes)
+{
+    juce::String s = notes.replace ("\r\n", "\n").replace ("\r", "\n");
+    s = s.replace ("*", "");
+
+    for (int from = 0;;)
+    {
+        const int open = s.indexOf (from, "[");
+        if (open < 0) break;
+        const int close = s.indexOf (open, "]");
+        if (close < 0) break;
+        int end = close + 1;
+        if (end < s.length() && s[end] == '(')
+        {
+            const int closeParen = s.indexOf (end, ")");
+            if (closeParen >= 0) end = closeParen + 1;
+        }
+        s = s.substring (0, open) + s.substring (open + 1, close) + s.substring (end);
+        from = open + juce::jmax (1, close - open);   // never stuck on "[]"
+    }
+
+    s = s.trim();
+    if (s.length() > 1400) s = s.substring (0, 1400) + "\n...";
+    return s;
+}
+
+juce::String megabytes (juce::int64 bytes)
+{
+    if (bytes <= 0) return "? MB";
+    return juce::String ((double) bytes / (1024.0 * 1024.0), 1) + " MB";
+}
+
+} // namespace
+
+void MainWindow::checkForUpdates (bool automatic)
+{
+    if (updateCheckRunning.exchange (true)) return;   // one lookup at a time
+
+    const juce::String current = SC_VERSION_STRING;
+    const juce::String skipped = app.recentStore != nullptr
+                               ? app.recentStore->getValue ("update_skipped_version")
+                               : juce::String();
+
+    // "At most once a day" is measured from the attempt, not from a success:
+    // an offline startup must not retry on every launch.
+    if (app.recentStore != nullptr)
+    {
+        app.recentStore->setValue ("update_last_check_ms",
+                                   (juce::int64) juce::Time::getCurrentTime().toMilliseconds());
+        app.recentStore->save();
+    }
+
+    juce::Component::SafePointer<MainWindow> self (this);
+    std::thread ([this, self, automatic, current, skipped] {
+        sc::update::ReleaseInfo rel;
+        juce::String err;
+        const bool ok = sc::update::fetchLatestRelease (rel, err);
+
+        juce::MessageManager::callAsync ([self, automatic, current, skipped, ok, rel, err] {
+            if (self == nullptr) return;
+            self->updateCheckRunning = false;
+
+            if (! ok)
+            {
+                if (automatic)
+                {
+                    // A startup check must never interrupt or nag.
+                    sc::diag::event ("update", sc::diag::Level::debug,
+                                     { { "result", "lookup_failed" }, { "error", err } });
+                    return;
+                }
+                sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
+                    "Check for Updates",
+                    "The update check did not work:\n\n" + err
+                    + "\n\nNothing was changed.", "", self.getComponent());
+                return;
+            }
+
+            if (sc::update::compareVersions (rel.version, current) <= 0)
+            {
+                if (automatic) return;   // nothing new: stay silent
+                sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon,
+                    "Check for Updates",
+                    "You are using the newest release (" + current + ").\n\n"
+                    "Releases are listed at " + sc::update::kReleasesUrl + ".",
+                    "", self.getComponent());
+                return;
+            }
+
+            if (automatic && skipped == rel.version)
+                return;   // the user already said "Later" about this version
+
+            self->offerUpdate (rel, current, automatic);
+        });
+    }).detach();
+}
+
+void MainWindow::offerUpdate (const sc::update::ReleaseInfo& rel, const juce::String& current,
+                              bool automatic)
+{
+    const sc::update::AssetInfo* asset = sc::update::pickAsset (rel);
+    if (asset == nullptr)
+    {
+        sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
+            "Check for Updates",
+            "Release " + rel.tag + " has no archive for "
+            + sc::update::platformToken() + " " + sc::update::archToken() + ".\n\n"
+            + "The release page has the files it does publish: " + rel.pageUrl + ".",
+            "", this);
+        return;
+    }
+
+    const sc::update::AssetInfo* manifestAsset =
+        sc::update::findAsset (rel, sc::update::kManifestName);
+    const sc::update::AssetInfo* sigAsset =
+        sc::update::findAsset (rel, sc::update::kManifestSigName);
+    if (manifestAsset == nullptr || sigAsset == nullptr)
+    {
+        sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
+            "Check for Updates",
+            "Release " + rel.tag + " has no signed update manifest, so this version "
+            "cannot be installed automatically.\n\nInstall it by hand from " + rel.pageUrl
+            + ": download the archive and replace the files in this folder.",
+            "", this);
+        return;
+    }
+
+    const juce::String title = rel.title.isNotEmpty() ? rel.title : ("SpectroCraft " + rel.version);
+    juce::String text = title + " is available (you are using " + current + ").\n\n";
+    const juce::String notes = updateNotesPreview (rel.notes);
+    if (notes.isNotEmpty()) text += notes + "\n\n";
+    text += "Download: " + asset->name + " (" + megabytes (asset->size) + ").\n";
+    text += "SpectroCraft closes while the files are replaced, then starts again.\n";
+    text += "Unsaved files are not saved by the update - save them first.";
+
+    juce::AlertWindow dlg ("A new version is available", text,
+                           juce::MessageBoxIconType::InfoIcon, this);
+    dlg.addButton ("Update Now", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Later", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    dlg.toFront (true);
+    if (dlg.runModalLoop () != 1)
+    {
+        // Remember the refusal: the startup check must not offer the same
+        // version again (a newer one will be offered as usual).
+        if (app.recentStore != nullptr)
+        {
+            app.recentStore->setValue ("update_skipped_version", rel.version);
+            app.recentStore->save();
+        }
+        if (automatic && sc::diag::enabled())
+            sc::diag::event ("update", sc::diag::Level::debug,
+                             { { "result", "deferred" }, { "version", rel.version } });
+        return;
+    }
+
+    startUpdate (rel, *asset, *manifestAsset, *sigAsset);
+}
+
+void MainWindow::startUpdate (const sc::update::ReleaseInfo& rel, const sc::update::AssetInfo& asset,
+                              const sc::update::AssetInfo& manifestAsset,
+                              const sc::update::AssetInfo& sigAsset)
+{
+    if (isBackgroundJobRunning() || app.control().jobs.numRunning() > 0)
+    {
+        sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Update",
+            "Another job is running. Wait for it to finish, then start the update "
+            "again.", "", this);
+        return;
+    }
+
+    const juce::File install = sc::update::installDir();
+    if (! sc::update::dirIsWritable (install))
+    {
+        sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Update",
+            "SpectroCraft is running from a folder it may not write to:\n\n"
+            + install.getFullPathName() + "\n\n"
+            "Copy the program to a folder you own (Desktop, Documents…) and start "
+            "it from there; the update replaces the files in that folder.",
+            "", this);
+        return;
+    }
+
+    const juce::String version = rel.version;
+    const juce::String current = SC_VERSION_STRING;
+
+    auto* dlg = new WorkProgressDialog ("Installing SpectroCraft " + version,
+                                        "Downloading the update manifest…", true, this);
+    dlg->setProgress (0.0);
+    dlg->beginModal();
+    updateCheckRunning = true;
+
+    juce::Component::SafePointer<MainWindow> self (this);
+    std::thread ([self, dlg, rel, asset, manifestAsset, sigAsset, install, version, current] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v)
+        {
+            if (v != 1.0 && v - lastSent < 0.02) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+        // Stages: manifest 0.02, signature 0.05, archive 0.05..0.85, unpack
+        // and hash 0.85..1.0. A cancel stops at the stage it is in.
+        auto stageProgress = [&sendProgress] (double from, double to, double frac) {
+            sendProgress (from + (to - from) * juce::jlimit (0.0, 1.0, frac));
+        };
+
+        const juce::File tmp = sc::update::updateTempDir();
+        const juce::File staging = tmp.getChildFile ("staging");
+
+        juce::String err;
+        bool cancelled = false;
+        sc::update::Manifest manifest;
+
+        // A leftover from an earlier attempt is thrown away: the plan and the
+        // staged files always belong to the release being installed now.
+        tmp.deleteRecursively();
+        tmp.createDirectory();
+
+        // 1. manifest + signature (a few KB, so a bad release fails early).
+        juce::String manifestText, sigText;
+        if (err.isEmpty() && ! dlg->cancelled.load())
+        {
+            if (! sc::update::httpGetString (manifestAsset.url, manifestText, err))
+                err = "Could not download " + manifestAsset.name + ": " + err;
+            else
+                stageProgress (0.0, 0.02, 1.0);
+        }
+        if (err.isEmpty() && ! dlg->cancelled.load())
+        {
+            if (! sc::update::httpGetString (sigAsset.url, sigText, err))
+                err = "Could not download " + sigAsset.name + ": " + err;
+            else
+                stageProgress (0.02, 0.05, 1.0);
+        }
+        if (err.isEmpty())
+        {
+            if (! sc::update::parseManifest (manifestText, manifest, err))
+                err = "The update manifest is not usable: " + err;
+        }
+        if (err.isEmpty() && ! sc::update::verifyManifestSignature (manifestText, sigText, err))
+            err = "The update manifest could not be verified: " + err;
+        if (err.isEmpty() && sc::update::compareVersions (manifest.version, version) != 0)
+            err = "The manifest belongs to version " + manifest.version
+                + ", not to the release " + version + " it was published with.";
+        if (err.isEmpty() && sc::update::compareVersions (manifest.version, current) <= 0)
+            err = "The manifest describes version " + manifest.version
+                + ", which is not newer than the " + current + " you are using.";
+
+        // 2. the archive.
+        const juce::File zip = tmp.getChildFile (asset.name);
+        if (err.isEmpty() && ! dlg->cancelled.load())
+        {
+            if (! sc::update::httpGetToFile (asset.url, zip,
+                    [&] (double frac, const juce::String& stage)
+                    {
+                        stageProgress (0.05, 0.85, frac);
+                        juce::MessageManager::callAsync ([dlg, stage] { dlg->setStatusText (stage); });
+                        return ! dlg->cancelled.load();
+                    }, err))
+            {
+                if (dlg->cancelled.load()) cancelled = true;
+                else err = "Could not download the update: " + err;
+            }
+        }
+        else if (err.isEmpty())
+            cancelled = true;
+
+        // 3. unpack to the staging folder, hashing every file.
+        if (err.isEmpty() && ! cancelled)
+        {
+            if (! sc::update::unzipAndVerify (zip, staging, manifest,
+                    [&] (double frac, const juce::String& stage)
+                    {
+                        stageProgress (0.85, 1.0, frac);
+                        juce::MessageManager::callAsync ([dlg, stage] { dlg->setStatusText (stage); });
+                        return ! dlg->cancelled.load();
+                    }, err))
+            {
+                if (dlg->cancelled.load()) cancelled = true;
+                else err = "The downloaded archive does not match the manifest: " + err;
+            }
+        }
+
+        // 4. the plan the updater reads, and the updater itself.
+        if (err.isEmpty() && ! cancelled && ! sc::update::writeUpdatePlan (staging, manifest, err))
+            err = "Could not prepare the update: " + err;
+
+        const juce::File updater = err.isEmpty() && ! cancelled
+                                 ? sc::update::findUpdaterBinary (staging) : juce::File();
+        if (err.isEmpty() && ! updater.existsAsFile())
+            err = "The archive does not contain spectrocraft-updater, so the "
+                  "files cannot be replaced while SpectroCraft is running.";
+
+        const bool cancelledNow = dlg->cancelled.load();
+        juce::MessageManager::callAsync ([self, dlg, err, cancelled, cancelledNow,
+                                         staging, updater, install, version] {
+            delete dlg;
+            if (self == nullptr) return;
+            self->updateCheckRunning = false;
+
+            if (! err.isEmpty() || cancelled || cancelledNow)
+            {
+                // Nothing in the install folder was touched; drop the download.
+                sc::update::updateTempDir().deleteRecursively();
+                if (cancelled || cancelledNow)
+                {
+                    sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Update",
+                        "The update was cancelled. Nothing was changed.", "", self.getComponent());
+                }
+                else
+                {
+                    sc::diag::event ("update", sc::diag::Level::warn,
+                                     { { "result", "failed" }, { "version", version },
+                                       { "error", err } });
+                    sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Update",
+                        "The update was not installed:\n\n" + err
+                        + "\n\nSpectroCraft is still version " + SC_VERSION_STRING
+                        + "; nothing in this folder was changed.", "", self.getComponent());
+                }
+                return;
+            }
+
+            // Everything is verified and staged. Only now does the app ask to
+            // close: the updater cannot replace SpectroCraft.exe while it runs.
+            const auto unsaved = self->app.unsavedDocNames();
+            if (! unsaved.empty())
+            {
+                juce::String list;
+                for (const auto& n : unsaved)
+                {
+                    if (! list.isEmpty()) list += "\n";
+                    list += "  " + n;
+                }
+                juce::AlertWindow dlg2 ("Install the update", "SpectroCraft has to close "
+                    "to replace its own files. These files have unsaved changes:\n\n" + list
+                    + "\n\nSave them first (File > Save All) or continue without saving.",
+                    juce::MessageBoxIconType::WarningIcon, self.getComponent());
+                dlg2.addButton ("Close and update", 1, juce::KeyPress (juce::KeyPress::returnKey));
+                dlg2.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+                dlg2.toFront (true);
+                if (dlg2.runModalLoop () != 1)
+                {
+                    sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Update",
+                        "Cancelled. The verified files stay staged; nothing in this "
+                        "folder was changed.", "", self.getComponent());
+                    return;
+                }
+            }
+
+            juce::String launchErr;
+            if (! sc::update::launchUpdater (updater, install, staging,
+                                             juce::File::getSpecialLocation (
+                                                 juce::File::currentExecutableFile), launchErr))
+            {
+                sc::update::updateTempDir().deleteRecursively();
+                sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Update",
+                    "The update could not be started:\n\n" + launchErr
+                    + "\n\nSpectroCraft is still version " + SC_VERSION_STRING + ".", "",
+                    self.getComponent());
+                return;
+            }
+
+            sc::diag::event ("update", sc::diag::Level::info,
+                             { { "result", "installing" }, { "from", SC_VERSION_STRING },
+                               { "to", version } });
+            // The updater takes over from here: it waits for this process to
+            // exit, swaps the files and starts the new version with
+            // --finish-update. requestQuit refuses while a job runs.
+            self->requestQuit (true);
+        });
+    }).detach ();
+}
+
+void MainWindow::maybeCheckForUpdatesAtStartup()
+{
+    if (! app.settings.checkUpdatesAtStartup || app.recentStore == nullptr) return;
+
+    const juce::int64 last = app.recentStore->getValue ("update_last_check_ms").getLargeIntValue();
+    const juce::int64 now = (juce::int64) juce::Time::getCurrentTime().toMilliseconds();
+    if (last > 0 && now - last < 24LL * 3600 * 1000) return;   // once a day
+
+    checkForUpdates (true);
+}
+
+void MainWindow::reportFinishedUpdate()
+{
+    const juce::File install = sc::update::installDir();
+    sc::update::UpdateResult res;
+    if (! sc::update::readUpdateResult (install, res)) return;   // nothing to report
+
+    // What the updater could not remove itself: the .old backups (one of them
+    // is the updater's own running image) and the staging folder.
+    std::thread ([res] {
+        for (const auto& p : res.oldFiles) juce::File (p).deleteFile();
+        for (const auto& p : res.cleanupDirs) juce::File (p).deleteRecursively();
+        sc::update::updateTempDir().deleteRecursively();
+    }).detach();
+
+    if (res.success)
+    {
+        sc::diag::event ("update", sc::diag::Level::info,
+                         { { "result", "installed" }, { "version", res.version },
+                           { "files", (int) res.replaced.size() } });
+        if (sc::alert::isHeadless()) return;
+        sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Updated",
+            "SpectroCraft " + res.version + " is installed.\n\n"
+            + juce::String ((int) res.replaced.size()) + " files were replaced.",
+            "", this);
+        return;
+    }
+
+    juce::String text = "The update could not be completed.\n\n";
+    if (res.reason.isNotEmpty()) text += res.reason + "\n";
+    if (res.failedFile.isNotEmpty()) text += "File: " + res.failedFile + "\n";
+    text += "\nSpectroCraft is still the version you had before (" + juce::String (SC_VERSION_STRING)
+         + "); the files that were already swapped were put back.";
+    sc::diag::event ("update", sc::diag::Level::warn,
+                     { { "result", "install_failed" }, { "version", res.version },
+                       { "error", res.reason }, { "file", res.failedFile } });
+    if (sc::alert::isHeadless()) return;
+    sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Update failed",
+                                    text, "", this);
+}
+
+#else   // ! JUCE_WINDOWS: the menu item is not offered; see docs/updates.md.
+
+void MainWindow::checkForUpdates (bool) {}
+void MainWindow::offerUpdate (const sc::update::ReleaseInfo&, const juce::String&, bool) {}
+void MainWindow::startUpdate (const sc::update::ReleaseInfo&, const sc::update::AssetInfo&,
+                              const sc::update::AssetInfo&, const sc::update::AssetInfo&) {}
+void MainWindow::maybeCheckForUpdatesAtStartup() {}
+void MainWindow::reportFinishedUpdate() {}
+
+#endif
 
 // Zoom the shared time window around its centre (applies to both views).
 void MainWindow::zoomHorizontal (double factor)
@@ -8680,6 +9163,14 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (HelpOpenDiagFolder, "Open Diagnostic Log Folder", true, false);
         menu.addItem (HelpCopyDiagSummary, "Copy Diagnostic Summary", true, false);
         menu.addItem (HelpSupportBundle, "Create Support Bundle...", true, false);
+#if JUCE_WINDOWS
+        // Automatic updates (docs/updates.md): the Windows archive layout, the
+        // updater program and this menu item are Windows-only for now.
+        menu.addSeparator ();
+        menu.addItem (HelpCheckUpdates, "Check for Updates...", true, false);
+        menu.addItem (HelpCheckUpdatesAtStartup, "Check for Updates at Startup", true,
+                     app.settings.checkUpdatesAtStartup);
+#endif
     }
 
     return menu;
@@ -8852,6 +9343,28 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
         const int kc = key.getKeyCode();
         if (kc == '=' || kc == '+') { stepFftSize (true);  return true; }
         if (kc == '-')              { stepFftSize (false); return true; }
+    }
+    // Plain + / - raise or lower the current selection by 6 dB; Shift + / -
+    // by 1 dB. The change is shaped like an envelope - it eases in over the
+    // first 25% of the selection, holds, and eases back to 0 over the last 25%
+    // (Application::boostSelectionGain), so a boost never clicks at the edges.
+    // Works on a spectral selection too (only the masked content moves).
+    {
+        const int kc = key.getKeyCode();
+        const bool plus  = kc == '+' || kc == '=' || key.getTextCharacter() == '+';
+        const bool minus = kc == '-' || key.getTextCharacter() == '-';
+        const auto m = key.getModifiers();
+        if ((plus || minus) && ! m.isAltDown() && ! m.isCommandDown() && ! m.isCtrlDown())
+        {
+            // Nothing to shape: leave the key to whatever has focus.
+            if (! app.audioEngine().isFileLoaded ()) return false;
+            if (! app.hasSpectralSelection () && app.selection.getLength () <= 0)
+                return false;
+            const double db = m.isShiftDown () ? 1.0 : 6.0;
+            runDestructiveEdit ([&] (std::string* e)
+            { return app.boostSelectionGain (plus ? db : -db, e); });
+            return true;
+        }
     }
     // Shift+F10 starts/stops recording (Transport > Record). Plain F10 is
     // left free for the OS / other tools.

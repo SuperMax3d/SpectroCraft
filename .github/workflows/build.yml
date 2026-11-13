@@ -67,8 +67,10 @@ jobs:
 
       # sc_wasapi_recorder is not a dependency of the app target, so it must
       # be requested explicitly or <exe>/recorders/ ends up empty in the zip.
-      - name: Build (Release, app + WASAPI recorder plugin)
-        run: cmake --build build --config Release --target SpectroCraft --target sc_wasapi_recorder --parallel
+      # spectrocraft-updater likewise: it is copied into <exe>/SpectroCraft/
+      # (updater/CMakeLists.txt) and is part of the archive.
+      - name: Build (Release, app + WASAPI recorder plugin + updater)
+        run: cmake --build build --config Release --target SpectroCraft --target sc_wasapi_recorder --target spectrocraft-updater --parallel
 
       # -j 1: shards in turn, so two processes never download the same model
       # file at the same time.
@@ -81,15 +83,63 @@ jobs:
         timeout-minutes: 30
         run: python tools/acpp_e2e.py --exe build/src/SpectroCraft_artefacts/Release/SpectroCraft.exe --variant cpu --backend cpu
 
+      # The archive payload is assembled on purpose instead of zipping the whole
+      # build folder: the update manifest below must describe exactly the files
+      # the archive contains, and the build folder also holds test logs and
+      # probe executables that are not part of a release.
+      - name: Assemble the Windows archive payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          src=build/src/SpectroCraft_artefacts/Release
+          out=build/release-payload
+          rm -rf "$out"
+          mkdir -p "$out"
+          cp "$src/SpectroCraft.exe" "$out/"
+          cp -r "$src/SpectroCraft" "$out/SpectroCraft"
+          cp -r "$src/recorders" "$out/recorders"
+          find "$out" -name '*.pdb' -delete
+          test -f "$out/SpectroCraft/spectrocraft-updater.exe"
+          echo "payload:"; ls -R "$out"
+
+      # update-manifest.json + its Ed25519 signature: the app verifies the
+      # signature with the key built into it (include/Updates.h) before it
+      # unpacks anything (docs/updates.md). gh_release*.py uploads both files
+      # as release assets, next to the archive.
+      - name: Update manifest (generate + sign)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/make_update_manifest.py \
+            --dir build/release-payload \
+            --out build/update-manifest.json \
+            --version-file build/generated/SC_VERSION.txt
+          build/src/SpectroCraft_artefacts/Release/SpectroCraft/spectrocraft-updater.exe \
+            --sign tools/updates/ed25519.key build/update-manifest.json build/update-manifest.json.sig
+          # The same check the app makes before it unpacks anything. The unit
+          # test (tests/regression/updates.inc) additionally asserts that this
+          # key file's public key is the one built into the app.
+          build/src/SpectroCraft_artefacts/Release/SpectroCraft/spectrocraft-updater.exe \
+            --verify tools/updates/ed25519.key build/update-manifest.json build/update-manifest.json.sig
+
       - name: Upload app (Windows x64, Release)
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          # SpectroCraft.exe + OpenVINO / whisper.cpp / FFmpeg DLLs + recorders/.
+          # SpectroCraft.exe + SpectroCraft/ (OpenVINO / whisper.cpp / FFmpeg
+          # DLLs + spectrocraft-updater.exe) + recorders/.
           name: SpectroCraft-windows-x64${{ env.SC_ARTIFACT_SUFFIX }}
+          path: build/release-payload/
+          retention-days: 30
+
+      - name: Upload update manifest (Windows x64)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-manifest-windows${{ env.SC_ARTIFACT_SUFFIX }}
           path: |
-            build/src/SpectroCraft_artefacts/Release/
-            !build/src/SpectroCraft_artefacts/Release/**/*.pdb
+            build/update-manifest.json
+            build/update-manifest.json.sig
           retention-days: 30
 
       - name: Upload test logs

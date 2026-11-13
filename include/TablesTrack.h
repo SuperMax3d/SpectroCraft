@@ -3,7 +3,8 @@
 // a strip above the waveform/spectrogram that plots every visible parameter
 // on its own auto-scaled value axis. Vertical zoom/pan like the other tracks,
 // red playhead, hover labels showing unscaled values near the curves, left-drag
-// time selection (like the waveform) and middle-drag horizontal panning.
+// time selection (like the waveform) and middle-drag panning of both axes
+// (time + value, half cursor speed).
 #include <JuceHeader.h>
 #include "Application.h"
 
@@ -100,6 +101,9 @@ private:
     void collectHoverLabels (int mouseX, int mouseY);
     bool onAxisX (int x) const;
     void showTrackContextMenu (bool onAxis);
+    /** Half-speed vertical grab measured from the last delivered cursor y
+        (panLastY advances), shared by the value-axis drag and the middle-drag. */
+    void panValueByCursorY (int y);
 
     Application& app;
     double t0 = 0.0, t1 = 1.0;      // shared time window
@@ -108,11 +112,11 @@ private:
     double fitMin = -1.0, fitMax = 1.0;   // full auto-fit range
     juce::Range<double> selShown { 0.0, 0.0 };
 
-    enum class DragMode { None, VPan, ZoomAxis, ZoomBox, Select, HPan };
+    enum class DragMode { None, VPan, ZoomAxis, ZoomBox, Select, PanXY };
     DragMode dragMode = DragMode::None;
     int dragStartX = 0, dragStartY = 0;
     double dragVMin = 0.0, dragVMax = 0.0;
-    double dragT0 = 0.0, dragT1 = 1.0;   // time window at the start of an HPan
+    int panLastX = 0, panLastY = 0;   // last delivered cursor position while panning
     bool haveRubberBand = false;
     juce::Rectangle<int> rubberRect;
 

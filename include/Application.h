@@ -609,6 +609,18 @@ public:
     // Multiply the selection by 10^(gainDb/20) on the visible channels.
     bool changeGain (float gainDb, std::string* errOut = nullptr);
 
+    /** Boost or cut the current selection (spectral selection when present,
+        otherwise the time selection) by `gainDb`, shaped as an envelope: the
+        gain eases in over the first 25% of the range, holds, and eases back
+        to 0 over the last 25% (sc::env::rampedGainDbAt). One undoable step.
+        Returns false when there is no selection to shape. */
+    bool boostSelectionGain (double gainDb, std::string* errOut = nullptr);
+
+    /** Write a single sample's amplitude (waveform sample-dot drag). One
+        undoable step; no-op (returns true) when the value is unchanged. */
+    bool setSampleValue (int channel, int64_t sampleIndex, float value,
+                         std::string* errOut = nullptr);
+
     /** Invert: negates every sample in the active spectral selection region,
         or in the time selection if there is one, or over the whole file when
         nothing is selected. One undoable step. */

@@ -73,9 +73,38 @@ bool isFlatCurve (const std::vector<EnvPoint>& pts)
     return true;
 }
 
+namespace {
+/** Raised-cosine ease: 0 at u = 0, 1 at u = 1, zero slope at both ends. */
+double easeCurve (double u) { return 0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * u); }
+} // namespace
+
+double rampedGainDbAt (int i, int len, double gainDb, double easeFraction)
+{
+    if (len <= 0 || !std::isfinite (gainDb) || gainDb == 0.0) return 0.0;
+    const double e = std::clamp (easeFraction, 0.0, 0.5);
+    if (e <= 0.0) return gainDb;
+
+    // Position in the range as 0..1 (sample centres, so a short range still
+    // reaches the full gain in its middle).
+    const double t = ((double) i + 0.5) / (double) len;
+    double k;
+    if (t < e)             k = easeCurve (t / e);              // ease in 0 -> 1
+    else if (t > 1.0 - e)  k = easeCurve ((1.0 - t) / e);     // ease out 1 -> 0
+    else                   k = 1.0;                           // hold
+    return gainDb * k;
+}
+
+void applyRampedGain (float* data, int len, double gainDb, double easeFraction)
+{
+    if (data == nullptr || len <= 0 || gainDb == 0.0) return;
+    for (int i = 0; i < len; ++i)
+        data[(size_t) i] *= (float) std::pow (10.0, rampedGainDbAt (i, len, gainDb, easeFraction) * 0.05);
+}
+
 void applyEnvelope (float* data, int len, double rate, const std::vector<EnvPoint>& pts)
 {
     if (data == nullptr || len <= 0 || rate <= 0.0) return;
+
     for (int i = 0; i < len; ++i)
     {
         const double g = gainAt (pts, (double) i / rate);

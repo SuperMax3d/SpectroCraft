@@ -208,6 +208,7 @@ public:
         std::vector<juce::File> cliFiles;
         bool controlFlag = false;
         bool diagFlag = false;
+        bool finishUpdateFlag = false;   // started by spectrocraft-updater (docs/updates.md)
 
         // Headless JSON mode owns the whole command line (its options may
         // come in any order): see include/control/JsonCli.h.
@@ -893,6 +894,12 @@ public:
             {
                 diagFlag = true;   // diagnostic log for this session (not saved)
             }
+            else if (args[i] == "--finish-update")
+            {
+                // The updater swapped the files and started this new version;
+                // reportFinishedUpdate() says what it did (update-result.json).
+                finishUpdateFlag = true;
+            }
 #if defined(SC_ENABLE_CONTROL) && SC_ENABLE_CONTROL
             else if (args[i] == "--control")
             {
@@ -970,6 +977,25 @@ public:
         // like File > Open.
         for (const auto& f : cliFiles)
             mainWindow->openFile (f);
+
+        // Automatic updates (docs/updates.md, Windows only). Both happen after
+        // the window is up and the files have been handed to the loader, so an
+        // update dialog never competes with the startup or a large open.
+#if JUCE_WINDOWS
+        if (finishUpdateFlag)
+        {
+            juce::Component::SafePointer<MainWindow> mw (mainWindow.get());
+            juce::Timer::callAfterDelay (700, [mw] { if (mw != nullptr) mw->reportFinishedUpdate(); });
+        }
+        else
+        {
+            // The optional once-a-day check (Help > Check for Updates at
+            // Startup): silent unless something newer is found.
+            juce::Component::SafePointer<MainWindow> mw (mainWindow.get());
+            juce::Timer::callAfterDelay (4000,
+                [mw] { if (mw != nullptr) mw->maybeCheckForUpdatesAtStartup(); });
+        }
+#endif
     }
 
     void shutdown() override

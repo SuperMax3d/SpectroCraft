@@ -720,6 +720,27 @@ static void testVideoTracksPanelHeadless()
     p.mouseDown (mkMouse (p, xa, 10, {}));
     CHECK (std::abs (seekT - p.timeAtX ((float) xa)) < 1e-9 && sel == 0,
            "tracks panel: a ruler click moves the playhead");
+
+    // Dragging on the ruler - the panel's time axis - selects that time range,
+    // like the waveform's ruler and the dedicated track's axis. A plain click
+    // still only seeks, and neither gesture moves the view.
+    double selA = 1e9, selB = -1.0;
+    p.onSelectTimeRange = [&] (const juce::Range<double>& r) { selA = r.getStart(); selB = r.getEnd(); };
+    const auto rBefore = p.getViewRange();
+    const int xr1 = (int) p.xForTime (3.0), xr2 = (int) p.xForTime (6.0);
+    seekT = -1.0;
+    p.mouseDown (mkMouse (p, xr1, 10, {}));
+    p.mouseUp   (mkMouse (p, xr1, 10, {}));
+    CHECK (selA > 1e8, "tracks panel: a ruler click does not select a range");
+    p.mouseDown (mkMouse (p, xr1, 10, {}));
+    p.mouseDrag (mkMouse (p, xr2, 10, {}));
+    p.mouseUp   (mkMouse (p, xr2, 10, {}));
+    CHECK (std::abs (selA - 3.0) < 1e-6 && std::abs (selB - 6.0) < 1e-6,
+           "tracks panel: dragging the ruler selects the dragged time range");
+    const auto rAfter = p.getViewRange();
+    CHECK (std::abs (rAfter.getStart() - rBefore.getStart()) < 1e-9
+        && std::abs (rAfter.getEnd() - rBefore.getEnd()) < 1e-9,
+           "tracks panel: selecting on the ruler does not move the view");
     p.mouseDown (mkMouse (p, xg, 20 + 3 * 26 + 5, {}));   // empty row below the two bands
     CHECK (sel == -1 && p.getSelected() == -1, "tracks panel: empty space still clears it");
 

@@ -4,6 +4,11 @@
 #include <cstdlib>
 #include "TablesTrack.h"
 
+// Grab-and-drag pans at half cursor speed, exactly like the waveform and
+// spectral views (kPanSpeedFactor there), so the dedicated track behaves the
+// same as the tracks above and below it.
+static constexpr double kPanSpeedFactor = 0.5;
+
 TablesTrackView::TablesTrackView (Application& appIn)
     : app (appIn)
 {
@@ -57,6 +62,26 @@ void TablesTrackView::applyValueWindow (double lo, double hi)
     vMax = hi;
     repaint();
     if (onValueWindowChanged) onValueWindowChanged (vMin, vMax);
+}
+
+void TablesTrackView::panValueByCursorY (int y)
+{
+    // Half-speed grab: content follows the cursor (drag down -> the data moves
+    // down). The delta is measured from the last delivered position and that
+    // anchor always advances, so reversing direction responds immediately
+    // instead of unwinding the steps a range limit swallowed - the same scheme
+    // as the waveform/spectral vertical axes.
+    if (vMax > vMin)
+    {
+        const auto pr = plotRect();
+        if (pr.getHeight() > 0)
+        {
+            const double dv = kPanSpeedFactor * (double) (y - panLastY)
+                            * (vMax - vMin) / (double) pr.getHeight();
+            applyValueWindow (vMin + dv, vMax + dv);
+        }
+    }
+    panLastY = y;
 }
 
 juce::Rectangle<int> TablesTrackView::plotRect() const
@@ -336,6 +361,7 @@ void TablesTrackView::mouseDown (const juce::MouseEvent& e)
             dragMode = DragMode::VPan;
             dragVMin = vMin;
             dragVMax = vMax;
+            panLastY = e.y;   // the incremental half-speed anchor (see panValueByCursorY)
             return;
         }
 
@@ -349,13 +375,16 @@ void TablesTrackView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    // Middle button: horizontal time pan of the shared window.
+    // Middle button: grab-and-drag pan of BOTH axes - the shared time window
+    // horizontally and the value window vertically. Half cursor speed and
+    // measured from the last delivered position, like the other views: an edge
+    // clamp never accumulates hidden offset, so reversing responds immediately.
     if (e.mods.isMiddleButtonDown() && !e.mods.isLeftButtonDown()
         && !e.mods.isRightButtonDown())
     {
-        dragMode = DragMode::HPan;
-        dragT0 = t0;
-        dragT1 = t1;
+        dragMode = DragMode::PanXY;
+        panLastX = e.x;
+        panLastY = e.y;
         return;
     }
 
@@ -369,15 +398,10 @@ void TablesTrackView::mouseDrag (const juce::MouseEvent& e)
     switch (dragMode)
     {
         case DragMode::VPan:
-        {
-            if (vMax <= vMin) break;
             // Vertical pan: content follows the cursor (drag down -> the data
             // moves down), matching the waveform/spectrogram axis drags.
-            const auto pr = plotRect();
-            const double dv = ((double) e.y - (double) dragStartY) * (vMax - vMin) / pr.getHeight();
-            applyValueWindow (dragVMin + dv, dragVMax + dv);
+            panValueByCursorY (e.y);
             break;
-        }
 
         case DragMode::Select:
         {
@@ -389,15 +413,20 @@ void TablesTrackView::mouseDrag (const juce::MouseEvent& e)
             break;
         }
 
-        case DragMode::HPan:
+        case DragMode::PanXY:
         {
-            // Horizontal pan: dragging left moves the window forward in time.
+            // Middle-drag: time and value at once, both at half cursor speed
+            // with the delta measured from the last delivered cursor position
+            // (the anchors advance), so reversing direction responds at once
+            // instead of unwinding what a clamp swallowed.
             const auto pr = plotRect();
-            if (onTimeWindow && t1 > t0)
-            {
-                const double dt = ((double) dragStartX - (double) e.x) * (t1 - t0) / pr.getWidth ();
-                onTimeWindow (dragT0 + dt, dragT1 + dt);
-            }
+            if (onTimeWindow && t1 > t0 && pr.getWidth() > 0)
+                onTimeWindow (t0 - (e.x - panLastX) * kPanSpeedFactor
+                              * (t1 - t0) / (double) pr.getWidth(),
+                              t1 - (e.x - panLastX) * kPanSpeedFactor
+                              * (t1 - t0) / (double) pr.getWidth());
+            panLastX = e.x;
+            panValueByCursorY (e.y);
             break;
         }
 
@@ -507,16 +536,8 @@ void TablesTrackView::mouseUp (const juce::MouseEvent& e)
             break;
         }
 
-        case DragMode::HPan:
-        {
-            const auto pr = plotRect();
-            if (onTimeWindow && t1 > t0)
-            {
-                const double dt = ((double) dragStartX - (double) e.x) * (t1 - t0) / pr.getWidth ();
-                onTimeWindow (dragT0 + dt, dragT1 + dt);
-            }
-            break;
-        }
+        case DragMode::PanXY:
+            break;   // every step was already delivered by mouseDrag
 
         default: break;   // VPan ends silently
     }

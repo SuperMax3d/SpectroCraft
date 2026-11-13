@@ -408,6 +408,11 @@ void FileListPanel::paint (juce::Graphics& g)
 // taken from the selection and the drawing.
 namespace measures = sc::measures;
 
+// Grab-and-drag pans at half cursor speed, like the waveform/spectral views
+// (kPanSpeedFactor there): content follows the cursor at 0.5 px per cursor
+// pixel so a wide window stays controllable.
+static constexpr double kPanSpeedFactor = 0.5;
+
 const double* FFTAnalysisView::thirdOctCentres() noexcept { return measures::iecThirdOctCentres(); }
 int FFTAnalysisView::numThirdOctBands() noexcept { return measures::numIecThirdOctBands(); }
 
@@ -3798,6 +3803,86 @@ void FFTAnalysisView::clearAllStoredCurves()
         for (int i = 0; i < 8; ++i) clearSnapshotSlot (i);
 }
 
+void FFTAnalysisView::panHorizontalByCursorX (int x)
+{
+    // Half-speed grab of the horizontal range: the delta comes from the
+    // previous delivered cursor position and that anchor always advances, so
+    // the limits below never leave a dead zone to unwind when the drag
+    // reverses. Same scheme as the waveform/spectral middle-drag.
+    const auto plot = plotBounds();
+    if (plot.getWidth() > 0)
+    {
+        if (isTimeAxisMode ())
+        {
+            const double d = kPanSpeedFactor * (xToTime (panLastX) - xToTime (x));
+            curveViewT0_ += d;
+            curveViewT1_ += d;
+            if (curveViewT0_ < cachedT0) { curveViewT1_ += (cachedT0 - curveViewT0_); curveViewT0_ = cachedT0; }
+            if (curveViewT1_ > cachedT1) { curveViewT0_ -= (curveViewT1_ - cachedT1); curveViewT1_ = cachedT1; }
+            userChangedDisplayRange ();
+        }
+        else if (axisMode_ == 1)
+        {
+            // Log axis: pan in log space (half the full cursor step = square
+            // root of the ratio between the two cursor positions), so the zoom
+            // level is preserved.
+            const double fPrev = xToFreq (panLastX), fNow = xToFreq (x);
+            if (fPrev > 0.0 && fNow > 0.0)
+            {
+                const double R = std::sqrt (std::max (1e-30, fPrev / fNow));
+                fLo_ *= R;
+                fHi_ *= R;
+            }
+            const double nyq = app.audioEngine().sampleRate() * 0.5;
+            if (fLo_ < 1.0) { fHi_ += (1.0 - fLo_); fLo_ = 1.0; }
+            if (fHi_ > nyq) { fLo_ -= (fHi_ - nyq); fHi_ = nyq; }
+            userChangedDisplayRange ();
+        }
+        else
+        {
+            const double d = kPanSpeedFactor * (xToFreq (panLastX) - xToFreq (x));
+            fLo_ += d;
+            fHi_ += d;
+            const double nyq = app.audioEngine().sampleRate() * 0.5;
+            if (fLo_ < 0.0) { fHi_ -= fLo_; fLo_ = 0.0; }
+            if (fHi_ > nyq) { fLo_ -= (fHi_ - nyq); fHi_ = nyq; }
+            userChangedDisplayRange ();
+        }
+    }
+    panLastX = x;
+}
+
+void FFTAnalysisView::panVerticalByCursorY (int y)
+{
+    // Half-speed grab of the vertical range: level (dB) in every mode except
+    // Freq vs Time, where the vertical axis is frequency (or a harmonic
+    // ratio). Content follows the cursor: dragging down moves the curves down.
+    const auto plot = plotBounds();
+    if (plot.getHeight() > 0)
+    {
+        if (axisMode_ == 3)
+        {
+            const double d = kPanSpeedFactor * (yToFreq ((float) panLastY) - yToFreq ((float) y));
+            fLo_ += d;
+            fHi_ += d;
+            const double vMax = harmonicRatioUsable() ? 1024.0
+                                                      : app.audioEngine().sampleRate() * 0.5;
+            if (fLo_ < 0.0) { fHi_ -= fLo_; fLo_ = 0.0; }
+            if (fHi_ > vMax) { fLo_ -= (fHi_ - vMax); fHi_ = vMax; }
+            userChangedDisplayRange ();
+        }
+        else
+        {
+            const double d = kPanSpeedFactor * (yToLevel ((float) panLastY) - yToLevel ((float) y));
+            dbTop_ += d;
+            dbBottom_ += d;
+            if (dbTop_ > 40.0) { dbBottom_ -= (dbTop_ - 40.0); dbTop_ = 40.0; }
+            if (dbBottom_ < -240.0) { dbTop_ += (-240.0 - dbBottom_); dbBottom_ = -240.0; }
+        }
+    }
+    panLastY = y;
+}
+
 void FFTAnalysisView::mouseDown (const juce::MouseEvent& e)
 {
     const auto plot = plotBounds();
@@ -3812,7 +3897,22 @@ void FFTAnalysisView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    if (!e.mods.isLeftButtonDown() || e.mods.isRightButtonDown()) return;
+    if (!e.mods.isLeftButtonDown() || e.mods.isRightButtonDown())
+    {
+        if (e.mods.isMiddleButtonDown() && !e.mods.isRightButtonDown())
+        {
+            // Middle-drag pans both axes at once: the horizontal range (time
+            // in the curve modes, frequency in the classic ones) and the
+            // vertical one (level, or frequency in Freq vs Time), both at half
+            // cursor speed with the same scheme as the axis strips.
+            dragMode = DragMode::PanXY;
+            dragStartX = e.x;
+            dragStartY = e.y;
+            panLastX = e.x;
+            panLastY = e.y;
+        }
+        return;
+    }
 
     // Left-drag on the bottom axis pans the horizontal range (frequency in
     // the classic modes, the time view window in the time-based curve modes);
@@ -3894,6 +3994,17 @@ void FFTAnalysisView::mouseDrag (const juce::MouseEvent& e)
             userChangedDisplayRange ();
             if (curveViewT0_ < cachedT0) { curveViewT1_ -= curveViewT0_; curveViewT0_ = cachedT0; }
             if (curveViewT1_ > cachedT1) { curveViewT0_ -= (curveViewT1_ - cachedT1); curveViewT1_ = cachedT1; }
+            repaint();
+            break;
+        }
+        case DragMode::PanXY:
+        {
+            // Middle-drag: both axes, half speed, the delta measured from the
+            // last delivered cursor position (the anchor advances), so a
+            // clamped edge never accumulates hidden offset and reversing
+            // responds at once.
+            panHorizontalByCursorX (e.x);
+            panVerticalByCursorY (e.y);
             repaint();
             break;
         }
@@ -9104,6 +9215,7 @@ void TablesPlotView::setFocusTableIndex (int idx)
 {
     if (idx == focusIdx_) return;
     focusIdx_ = idx;
+    resetView();   // another table: another duration and another value range
     repaint();
 }
 
@@ -9111,7 +9223,159 @@ void TablesPlotView::setFocusParamIndex (int idx)
 {
     if (idx == focusParam_) return;
     focusParam_ = idx;
+    resetView();   // this parameter's alignment maps the playhead elsewhere
     repaint();   // the playhead may map elsewhere under that parameter's alignment
+}
+
+// ----------------------------------------------------------------- view state
+std::pair<double, double> TablesPlotView::viewWindow() const
+{
+    const double dur = tableDuration();
+    if (dur <= 0.0) return { 0.0, 0.0 };
+    // No pan yet (or the table changed under an old window): the whole table.
+    if (! (viewT1_ > viewT0_) || viewT0_ < 0.0 || viewT1_ > dur) return { 0.0, dur };
+    return { viewT0_, viewT1_ };
+}
+
+bool TablesPlotView::autoValueRange (double& lo, double& hi) const
+{
+    // Auto-scale the value axis over all visible parameters of this table.
+    // Empty cells (NaN) never influence the range. 10% padding, like the plot
+    // has always drawn.
+    double mn = 0.0, mx = 0.0;
+    bool have = false;
+    auto* d = app.doc ();
+    if (d == nullptr || focusIdx_ < 0 || focusIdx_ >= (int) d->tables.size ()) return false;
+    for (const auto& p : d->tables[(size_t) focusIdx_].params)
+    {
+        if (!p.visible || p.values.empty()) continue;
+        double a = 0.0, b = 0.0;
+        if (!sc::tables::finiteMinMax (p.values, a, b)) continue;
+        if (!have) { mn = mx = a; have = true; }
+        mn = std::min (mn, a);
+        mx = std::max (mx, b);
+    }
+    if (!have || !(mx >= mn)) return false;
+    const double pad = std::max ((mx - mn) * 0.1, 1e-9);
+    lo = mn - pad;
+    hi = mx + pad;
+    return true;
+}
+
+std::pair<double, double> TablesPlotView::getViewTime() const { return viewWindow(); }
+
+std::pair<double, double> TablesPlotView::getValueRange() const
+{
+    double lo, hi;
+    if (! autoValueRange (lo, hi)) return { 0.0, 0.0 };
+    if (haveVal_ && valHi_ > valLo_) return { valLo_, valHi_ };
+    return { lo, hi };
+}
+
+void TablesPlotView::resetView()
+{
+    viewT0_ = viewT1_ = 0.0;
+    valLo_ = valHi_ = 0.0;
+    haveVal_ = false;
+    selectDrag_ = false;
+    panDrag_ = false;
+}
+
+double TablesPlotView::yToValue (float y) const
+{
+    double mn, mx;
+    if (! autoValueRange (mn, mx)) return 0.0;
+    if (haveVal_ && valHi_ > valLo_) { mn = valLo_; mx = valHi_; }
+    const auto pr = plotRect();
+    if (pr.getHeight() <= 1 || ! (mx > mn)) return mn;
+    return mn + ((double) y - (double) pr.getY()) / (double) pr.getHeight() * (mx - mn);
+}
+
+void TablesPlotView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    // Zoom the axis under the cursor: wheel = table time, Shift + wheel = the
+    // value axis. The window never grows past the data, which is what makes
+    // the middle-drag above able to move it at all.
+    static constexpr double kZoomStep = 1.25;   // same direction as the other views: wheel down = zoom out
+
+    const double dur = tableDuration();
+    const auto pr = plotRect();
+    if (dur <= 0.0 || pr.getWidth() <= 2 || pr.getHeight() <= 2) return;
+    const double factor = wheel.deltaY > 0 ? kZoomStep : (1.0 / kZoomStep);
+
+    if (e.mods.isShiftDown())
+    {
+        double lo, hi;
+        if (! autoValueRange (lo, hi) || ! (hi > lo)) return;
+        double vlo = lo, vhi = hi;
+        if (haveVal_ && valHi_ > valLo_) { vlo = valLo_; vhi = valHi_; }
+        const double c = yToValue ((float) e.y);
+        double n0 = c - (c - vlo) * factor;
+        double n1 = c + (vhi - c) * factor;
+        if (n1 - n0 > hi - lo) { n0 = lo; n1 = hi; }
+        if (n1 - n0 < (hi - lo) * 1e-6) return;
+        if (n0 < lo) { n1 += (lo - n0); n0 = lo; }
+        if (n1 > hi) { n0 -= (n1 - hi); n1 = hi; }
+        valLo_ = n0; valHi_ = n1; haveVal_ = true;
+        repaint();
+        return;
+    }
+
+    auto [v0, v1] = viewWindow();
+    const double c = xToTableTime (e.x);
+    double n0 = c - (c - v0) * factor;
+    double n1 = c + (v1 - c) * factor;
+    if (n1 - n0 > dur) { n0 = 0.0; n1 = dur; }
+    if (n1 - n0 < dur * 1e-6) return;
+    if (n0 < 0.0) { n1 -= n0; n0 = 0.0; }
+    if (n1 > dur) { n0 -= (n1 - dur); n1 = dur; }
+    viewT0_ = n0; viewT1_ = n1;
+    repaint();
+}
+
+void TablesPlotView::panViewByCursor (int x, int y)
+{
+    // Half-speed grab of both axes: the delta comes from the previous
+    // delivered cursor position and that anchor always advances, so the clamps
+    // below never leave a dead zone to unwind when the drag reverses - the
+    // same scheme as the waveform/spectral/dedicated-track middle-drag.
+    static constexpr double kPanSpeedFactor = 0.5;
+
+    const double dur = tableDuration();
+    const auto pr = plotRect();
+
+    if (dur > 0.0 && pr.getWidth() > 1)
+    {
+        auto [v0, v1] = viewWindow();
+        const double span = v1 - v0;
+        const double d = kPanSpeedFactor * (double) (panLastX_ - x) * span / (double) (pr.getWidth() - 1);
+        if (d != 0.0)
+        {
+            v0 += d; v1 += d;
+            if (v0 < 0.0) { v1 -= v0; v0 = 0.0; }
+            if (v1 > dur) { v0 -= (v1 - dur); v1 = dur; }
+            viewT0_ = v0; viewT1_ = v1;
+        }
+    }
+    panLastX_ = x;
+
+    double lo, hi;
+    if (autoValueRange (lo, hi) && hi > lo && pr.getHeight() > 1)
+    {
+        double vlo = lo, vhi = hi;
+        if (haveVal_ && valHi_ > valLo_) { vlo = valLo_; vhi = valHi_; }
+        const double d = kPanSpeedFactor * (double) (y - panLastY_) * (vhi - vlo)
+                       / (double) pr.getHeight();
+        if (d != 0.0)
+        {
+            vlo += d; vhi += d;
+            if (vlo < lo) { vhi += (lo - vlo); vlo = lo; }
+            if (vhi > hi) { vlo -= (vhi - hi); vhi = hi; }
+            valLo_ = vlo; valHi_ = vhi; haveVal_ = true;
+        }
+    }
+    panLastY_ = y;
+    repaint();
 }
 
 juce::Rectangle<int> TablesPlotView::plotRect() const
@@ -9147,7 +9411,8 @@ int TablesPlotView::playheadX() const
     const double dur = tableDuration();
     if (playheadDoc_ < 0.0 || dur <= 0.0) return -1;
     const double t = docToTableTime (playheadDoc_);
-    if (!(t >= 0.0 && t <= dur)) return -1;   // outside this table's time span
+    const auto [v0, v1] = viewWindow();
+    if (!(t >= v0 && t <= v1)) return -1;   // outside the window being drawn
     return (int) std::floor (tableTimeToX (t));
 }
 
@@ -9171,21 +9436,24 @@ double TablesPlotView::tableDuration() const
     return d->tables[(size_t) focusIdx_].duration();
 }
 
-// Column centre i of the curves area shows table time i / (width - 1) * dur.
+// Column centre i of the curves area shows the table time at that column of
+// the current view window (the whole table until something is panned).
 double TablesPlotView::xToTableTime (int x) const
 {
-    const double dur = tableDuration();
+    const auto [v0, v1] = viewWindow();
+    const double span = v1 - v0;
     const auto pr = plotRect();
-    if (dur <= 0.0 || pr.getWidth() <= 1) return 0.0;
-    return std::clamp (((double) x - pr.getX()) / (double) (pr.getWidth() - 1), 0.0, 1.0) * dur;
+    if (span <= 0.0 || pr.getWidth() <= 1) return v0;
+    return v0 + std::clamp (((double) x - pr.getX()) / (double) (pr.getWidth() - 1), 0.0, 1.0) * span;
 }
 
 float TablesPlotView::tableTimeToX (double tTableSecs) const
 {
-    const double dur = tableDuration();
+    const auto [v0, v1] = viewWindow();
+    const double span = v1 - v0;
     const auto pr = plotRect();
-    if (dur <= 0.0 || pr.getWidth() <= 1) return (float) pr.getX();
-    return (float) (pr.getX() + 0.5 + tTableSecs / dur * (double) (pr.getWidth() - 1));
+    if (span <= 0.0 || pr.getWidth() <= 1) return (float) pr.getX();
+    return (float) (pr.getX() + 0.5 + (tTableSecs - v0) / span * (double) (pr.getWidth() - 1));
 }
 
 void TablesPlotView::paint (juce::Graphics& g)
@@ -9212,22 +9480,18 @@ void TablesPlotView::paint (juce::Graphics& g)
     const double dur = t.duration();
     if (dur <= 0.0 || getWidth() < 10) return;
 
-    // Auto-scale the value axis over all visible parameters of this table.
-    // Empty cells (NaN) never influence the range.
+    // Value axis: the auto-scaled range of every visible parameter (empty
+    // cells never influence it), or the window a middle-drag moved - which is
+    // always kept inside that range.
     double mn = 0.0, mx = 0.0;
-    bool have = false;
-    for (const auto& p : t.params)
-    {
-        if (!p.visible || p.values.empty()) continue;
-        double lo = 0.0, hi = 0.0;
-        if (!sc::tables::finiteMinMax (p.values, lo, hi)) continue;
-        if (!have) { mn = mx = lo; have = true; }
-        mn = std::min (mn, lo);
-        mx = std::max (mx, hi);
-    }
-    if (!have) return;
-    const double pad = std::max ((mx - mn) * 0.1, 1e-9);
-    mn -= pad; mx += pad;
+    if (! autoValueRange (mn, mx)) return;
+    if (haveVal_ && valHi_ > valLo_) { mn = valLo_; mx = valHi_; }
+
+    // Horizontal: the table-time window a middle-drag moved, otherwise the
+    // whole table.
+    const auto [viewT0, viewT1] = viewWindow();
+    const double viewSpan = viewT1 - viewT0;
+    if (viewSpan <= 0.0) return;
 
     const int axisH = 14;   // time labels at the bottom
     const auto pr = plotRect();
@@ -9260,7 +9524,7 @@ void TablesPlotView::paint (juce::Graphics& g)
         bool started = false;
         for (int i = 0; i < pr.getWidth(); ++i)
         {
-            const double tt = ((double) i / (pr.getWidth() - 1)) * dur;
+            const double tt = viewT0 + ((double) i / (pr.getWidth() - 1)) * viewSpan;
             const double v = sc::tables::paramValueAt (t, p, tt);
             // Empty cells break the curve: not drawn, never treated as zero.
             if (!std::isfinite (v)) { started = false; continue; }
@@ -9273,11 +9537,11 @@ void TablesPlotView::paint (juce::Graphics& g)
         g.strokePath (path, juce::PathStrokeType (1.6f));
     }
 
-    // Time axis: a few labels in seconds.
+    // Time axis: a few labels in seconds, of the window currently shown.
     g.setFont (9.0f);
     g.setColour (juce::Colours::grey);
     for (int i = 0; i <= nLab; ++i)
-        g.drawText (juce::String (dur * ((double) i / nLab), 2),
+        g.drawText (juce::String (viewT0 + viewSpan * ((double) i / nLab), 2),
                     juce::Rectangle<int> (pr.getX() + pr.getWidth() * i / nLab - 18,
                                           getHeight() - axisH + 1, 36, 12),
                     juce::Justification::centred, true);
@@ -9300,8 +9564,8 @@ void TablesPlotView::paint (juce::Graphics& g)
         {
             const double s0 = docToTableTime (selectionDoc_.getStart());
             const double s1 = docToTableTime (selectionDoc_.getEnd());
-            const float x1 = tableTimeToX (std::clamp (std::min (s0, s1), 0.0, dur));
-            const float x2 = tableTimeToX (std::clamp (std::max (s0, s1), 0.0, dur));
+            const float x1 = tableTimeToX (std::clamp (std::min (s0, s1), viewT0, viewT1));
+            const float x2 = tableTimeToX (std::clamp (std::max (s0, s1), viewT0, viewT1));
             if (x2 > x1)
             {
                 g.setColour (juce::Colour::fromRGBA (70, 130, 255, 80));
@@ -9349,27 +9613,89 @@ void TablesPlotView::paint (juce::Graphics& g)
 void TablesPlotView::mouseDown (const juce::MouseEvent& e)
 {
     pointGesture_ = false;
+    selectDrag_ = false;
+    panDrag_ = false;
+
+    // Middle button: grab-and-drag pan of both axes (table time + value
+    // range), half cursor speed, same scheme as the other views' middle-drag.
+    if (e.mods.isMiddleButtonDown() && ! e.mods.isLeftButtonDown()
+        && ! e.mods.isRightButtonDown())
+    {
+        if (tableDuration() <= 0.0) return;
+        panDrag_ = true;
+        panLastX_ = e.x;
+        panLastY_ = e.y;
+        return;
+    }
+
     if (!e.mods.isLeftButtonDown() || e.mods.isRightButtonDown()) return;
-    if (onPointClicked && tableDuration() > 0.0)
+    if (tableDuration() <= 0.0) return;
+
+    pressX_ = e.x;
+    pressY_ = e.y;
+    pressTTab_ = xToTableTime (e.x);
+
+    // The press is reported as before (it moves the playhead, or feeds a
+    // click-based alignment); what a following drag does depends on whether an
+    // alignment owns this plot (see mouseDrag).
+    if (onPointClicked)
     {
         pointGesture_ = true;
-        onPointClicked (xToTableTime (e.x));
+        onPointClicked (pressTTab_);
     }
 }
 
 void TablesPlotView::mouseDrag (const juce::MouseEvent& e)
 {
+    if (panDrag_)
+    {
+        // Panning: the value readout is about the cursor, not the view, so it
+        // is dropped while the grab is active.
+        hoverPos_ = { -1, -1 };
+        hoverLabels_.clear ();
+        panViewByCursor (e.x, e.y);
+        return;
+    }
+
     hoverPos_ = { e.x, e.y };   // the value readout follows the drag too
     collectHoverLabels (e.x, e.y);
     repaint();
+
     // Only the drag of a press that was reported (same gesture, same rule).
-    if (pointGesture_ && onPointDragged && tableDuration() > 0.0)
-        onPointDragged (xToTableTime (e.x));
+    if (! pointGesture_ || tableDuration() <= 0.0) return;
+
+    if (! alignmentPending_)
+    {
+        // No alignment waiting: a drag selects a time range, like the waveform
+        // and the dedicated track. A plain click (or a drag that never left
+        // the threshold) just leaves the playhead where the press put it.
+        if (! selectDrag_ && std::abs (e.x - pressX_) < kSelectDragPx) return;
+        selectDrag_ = true;
+
+        const double a = pressTTab_, b = xToTableTime (e.x);
+        const double d0 = tableToDocTime (std::min (a, b));
+        const double d1 = tableToDocTime (std::max (a, b));
+        if (onSelectTimeRange && std::abs (d1 - d0) > 1e-12)
+            onSelectTimeRange ({ std::min (d0, d1), std::max (d0, d1) });
+        return;
+    }
+
+    // A click-based alignment owns the gesture: dragging scrubs to the exact
+    // point, as it always has.
+    if (onPointDragged) onPointDragged (xToTableTime (e.x));
 }
 
 void TablesPlotView::mouseUp (const juce::MouseEvent&)
 {
     pointGesture_ = false;
+    selectDrag_ = false;
+    panDrag_ = false;
+}
+
+void TablesPlotView::mouseDoubleClick (const juce::MouseEvent&)
+{
+    resetView();   // the whole table again, auto-scaled vertically
+    repaint();
 }
 
 void TablesPlotView::mouseMove (const juce::MouseEvent& e)
@@ -9879,6 +10205,12 @@ TablesPanel::TablesPanel (Application& appIn)
     plot.onPointDragged = [this] (double tTab)
     {
         if (plotGestureSeeks_) seekToTableTime (tTab);
+    };
+    // A drag on the preview plot (or its time axis) selects a time range in
+    // the document; the plot draws the band like every other view.
+    plot.onSelectTimeRange = [this] (const juce::Range<double>& r)
+    {
+        app.setSelection (r);   // clamped to the file; every view shows it
     };
 
     // The splitter trades height between the list and the plot; the chosen
@@ -10500,6 +10832,7 @@ void TablesPanel::startPointAlign (int numPoints, int scopeTable, int scopeParam
 
     plot.setFocusTableIndex (scopeTable);
     plot.setFocusParamIndex (scopeParam);
+    plot.setAlignmentPending (true);   // the plot's clicks belong to this gesture
     updateStatus ();
 }
 
@@ -10605,6 +10938,7 @@ void TablesPanel::handleDocClick (double tDocSecs, double docValue)
 
     havePending_ = false;
     pending_ = PendingAlign {};
+    plot.setAlignmentPending (false);   // the plot selects again
     if (app.onArmTableAlignClick) app.onArmTableAlignClick (-1);   // disarm the views
     if (d != nullptr) d->metaDirty = true;   // alignment persists with the metadata
     refresh ();
@@ -10615,6 +10949,7 @@ void TablesPanel::cancelPendingAlignment()
 {
     havePending_ = false;
     pending_ = PendingAlign {};
+    plot.setAlignmentPending (false);
     if (app.onArmTableAlignClick) app.onArmTableAlignClick (-1);   // disarm the views
     updateStatus ();
 }

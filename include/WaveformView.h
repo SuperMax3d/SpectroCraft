@@ -18,12 +18,13 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    // Mouse interaction: left-drag = select, middle-drag = pan,
-    // right-drag = box-zoom (drag on the track -> BOTH axes: time from the
-    // box's x span + amplitude from its y span; drag starting on the left
-    // amplitude axis -> vertical only; drag starting on the top time ruler
-    // -> horizontal only), plain right-click = context menu,
-    // wheel over the plot or time ruler = horizontal zoom at cursor,
+    // Mouse interaction: left-drag = select, middle-drag = pan BOTH axes
+    // (time horizontally, amplitude vertically; half cursor speed, same feel
+    // as dragging the axis strips), right-drag = box-zoom (drag on the track
+    // -> BOTH axes: time from the box's x span + amplitude from its y span;
+    // drag starting on the left amplitude axis -> vertical only; drag starting
+    // on the top time ruler -> horizontal only), plain right-click = context
+    // menu, wheel over the plot or time ruler = horizontal zoom at cursor,
     // wheel over the left amplitude axis (or Shift+wheel) = vertical zoom,
     // double-click = fit whole file. Clicking moves the playhead.
     void mouseDown (const juce::MouseEvent& e) override;
@@ -143,6 +144,9 @@ public:
     std::function<void(int)> onContextAction;
     // Status-bar probe: cursor time + amplitude under the mouse (empty clears).
     std::function<void(const juce::String&)> onCursorInfo;
+    /** A sample-dot edit (setting one sample's amplitude) that the app refused:
+        the reason goes here (status bar). */
+    std::function<void(const juce::String&)> onEditError;
     /** Document time under the mouse while it is over the plot (moving or
         dragging), -1 once it leaves: the Video window follows it. */
     std::function<void(double)> onHoverTime;
@@ -156,6 +160,42 @@ public:
     double getViewEnd() const { return viewEnd; }
     double xToTime (int x) const;
     double timeToX (double t) const;
+
+    /** Which drawing path a zoom takes (see the thresholds at the top of
+        WaveformView.cpp). Exposed so the tests can pin the zoom levels where
+        the exact per-sample drawing takes over from the min/max mipmaps.
+        @param samplesInView samples between the view's start and end
+        @param plotWidth     plot width in pixels (the number of columns)
+        @param finestFactor  factor of the mipmap level covering this zoom,
+                             or -1 when no level covers it. */
+    enum class RenderMode { Polyline, ExactColumns, Mipmap };
+    static RenderMode chooseRenderMode (int64_t samplesInView, int plotWidth,
+                                        int64_t finestFactor);
+
+    // ---- Sample-level view (deep zoom) -------------------------------------------------
+    // Below kSampleDotMaxSamples visible samples the waveform is drawn as one
+    // dot per sample; a dot can be dragged to set that sample's amplitude and
+    // the sample under the mouse is highlighted with its value.
+    static constexpr int64_t kSampleDotMaxSamples = 60;
+    /** True when the visible range is short enough to draw/edit single samples. */
+    bool sampleDotsVisible() const;
+    /** Sample index whose dot sits nearest to a pixel column (-1 when the view
+        is not in sample-dot mode or the file is not loaded). */
+    int64_t sampleIndexAtX (int x) const;
+    /** Channel whose row contains an absolute y (-1 outside the plot). */
+    int channelAtRowY (int y) const;
+    /** x of a sample's dot - the same mapping the dots are drawn with, and the
+        inverse of sampleIndexAtX() (-1 when the index is outside the view). */
+    float sampleDotXFor (int64_t idx) const;
+    /** Amplitude value at a pixel y inside a channel's row - the inverse of the
+        mapping paintChannel() draws with (same as the cursor probe). */
+    double ampValueAtY (int y, int ch) const;
+    /** Value of a sample as it is currently drawn (the live drag preview while
+        that sample is being dragged). False when out of range. */
+    bool sampleValue (int ch, int64_t idx, double& out) const;
+    /** Sample highlighted under the mouse / being dragged (-1 when none). */
+    int64_t getHoveredSample() const { return hoverSampleIdx; }
+    int getHoveredSampleChannel() const { return hoverSampleCh; }
 
     // Axis/ruler placement (View menu): the vertical axis sits on the left by
     // default and can be moved to the right; the time ruler sits at the top
@@ -259,7 +299,7 @@ private:
     bool dirty = true;
 
     // Interaction state
-    enum class DragMode { None, Select, Pan, VPan, TimePan, ZoomDrag };
+    enum class DragMode { None, Select, Pan, VPan, TimePan, ZoomDrag, SampleEdit };
     DragMode dragMode = DragMode::None;
     int dragStartX = 0;
     int dragStartY = 0;
@@ -268,6 +308,22 @@ private:
     int panLastY = 0;   // last delivered cursor y during vertical-axis panning
     juce::Rectangle<int> zoomRect;   // right-drag box-zoom rubber band
     bool haveZoomRect = false;
+
+    // Sample-dot interaction (deep zoom, see kSampleDotMaxSamples).
+    int64_t hoverSampleIdx = -1;   // sample under the cursor: larger hollow ring
+    int hoverSampleCh = -1;
+    int64_t editSampleIdx = -1;    // sample being dragged
+    int editSampleCh = -1;
+    float editPreviewVal = 0.0f;   // live value while dragging (committed on mouseUp)
+    float editOriginalVal = 0.0f;  // its value when the grab began (a no-move press is a seek)
+
+    // Sample under the cursor, if any (dot mode only); updates the highlight.
+    void updateHoverSample (int x, int y);
+    // Draws the per-sample dots of one channel's visible range and the
+    // highlighted sample's value readout.
+    void paintSampleDots (juce::Graphics& g, int ch, int chanY, int chanH,
+                          float center, float amp, const std::vector<float>& buf,
+                          int64_t s0, int64_t s1);
 
     // Single path for all time-window changes: updates state and notifies
     // MainWindow with the new range.
@@ -278,6 +334,10 @@ private:
             viewStart = t0;
             viewEnd = t1;
             dirty = true;
+            // The sample highlight follows a cursor position, not a window: a
+            // zoom or a pan would leave it on a different sample.
+            hoverSampleIdx = -1;
+            hoverSampleCh = -1;
             repaint();
             if (onChange) onChange (viewStart, viewEnd);
         }
@@ -291,6 +351,9 @@ private:
                             const std::vector<int>& rowChans);
     void zoomAtX (int x, double factor);
     void panByTime (double dt);
+    /** Half-speed vertical grab measured from the last delivered cursor y
+        (panLastY advances), shared by the axis drag and the middle-drag. */
+    void panAmplitudeByCursorY (int y);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaveformView)
 };
