@@ -132,6 +132,13 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
         tablesMode = scmdB.tablesMode;
     }
 
+    // Video tracks: unified > SCMD. A document opened from a video file has
+    // no explicit list and falls back to its implicit `videoFile` track.
+    if (unifiedB.haveVideoTracks)
+        videoTracks = unifiedB.videoTracks;
+    else if (scmdB.haveVideoTracks)
+        videoTracks = scmdB.videoTracks;
+
     // Scale / reference calibrations / analysis settings: unified > SCMD.
     scale        = unifiedB.haveScale        ? unifiedB.scale
                    : (scmdB.haveScale        ? scmdB.scale        : ScaleCalibration {});

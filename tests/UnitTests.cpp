@@ -27829,6 +27829,59 @@ static void testVideoTrackMetadata()
         CHECK (d3.videoTracks.size() == 1 && std::abs (d3.videoTracks[0].offsetSecs - 2.0) < 1e-9,
                "video tracks: a missing key preserves the current list");
     }
+
+    // Load path (regression): videoTracks stored in the .meta.json sidecar or
+    // embedded SCMD chunk must be restored when the document loads - they used
+    // to be parsed but never applied, so saved tracks silently vanished.
+    {
+        const juce::File root = scTestTempDir()
+                                .getChildFile ("sc_vid_meta_load_"
+                                    + juce::String ((int) juce::Time::getCurrentTime().getMilliseconds()));
+        root.deleteRecursively();
+        CHECK (root.createDirectory(), "video tracks load: temp dir created");
+
+        const auto writeTone = [] (const juce::File& f)
+        {
+            return writeWav (f, 1, 8000.0, 4000, [] (int, int64_t s, double rate)
+                             { return 0.5f * std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * s / rate); });
+        };
+
+        // External .meta.json sidecar.
+        const auto wav = root.getChildFile ("a.wav");
+        CHECK (writeTone (wav), "video tracks load: wav written");
+
+        FileDoc d1;
+        d1.setVideoTracks ({ t1 });
+        CHECK (d1.writeMetaSidecar (wav), "video tracks load: sidecar written");
+
+        FileDoc d2;
+        CHECK (d2.load (wav), "video tracks load: document loaded next to its sidecar");
+        CHECK (d2.videoTracks.size() == 1, "video tracks load: the list came back from the sidecar");
+        if (d2.videoTracks.size() == 1)
+            CHECK (d2.videoTracks[0].file.getFullPathName() == t1.file.getFullPathName()
+                       && std::abs (d2.videoTracks[0].offsetSecs - 1.5) < 1e-9,
+                   "video tracks load: file and offset restored");
+
+        // Embedded SCMD chunk: save the list into a fresh wav, reload it.
+        const auto wav2 = root.getChildFile ("b.wav");
+        CHECK (writeTone (wav2), "video tracks load: second wav written");
+
+        FileDoc d3;
+        CHECK (d3.load (wav2), "video tracks load: second document loaded");
+        d3.setVideoTracks ({ t1 });
+        const auto saved = root.getChildFile ("b_saved.wav");
+        CHECK (d3.engine.saveFile (saved), "video tracks load: wav saved with the list embedded");
+
+        FileDoc d4;
+        CHECK (d4.load (saved), "video tracks load: saved wav reloaded");
+        CHECK (d4.videoTracks.size() == 1, "video tracks load: the list came back from the SCMD chunk");
+        if (d4.videoTracks.size() == 1)
+            CHECK (d4.videoTracks[0].file.getFullPathName() == t1.file.getFullPathName()
+                       && std::abs (d4.videoTracks[0].offsetSecs - 1.5) < 1e-9,
+                   "video tracks load: file and offset restored from the chunk");
+
+        root.deleteRecursively();
+    }
 }
 
 static void testApplyImageAdjustments()
