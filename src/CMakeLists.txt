@@ -87,7 +87,7 @@ endif()
 # Video window (cmake/ScVideo.cmake): picture decoding + macOS movie audio.
 sc_enable_video (SpectroCraft)
 
-# Application icon: icon4.ico is embedded into the exe as a proper PE resource
+# Application icon: src/Icons/icon4.ico is embedded into the exe as a proper PE resource
 # (RT_ICON + RT_GROUP_ICON) by appending an ICON statement to JUCE's generated
 # resources.rc in sc_patch_generated below. This makes Windows Explorer and the
 # taskbar show the app icon without any runtime help. MainWindow additionally
@@ -119,10 +119,10 @@ add_custom_command (
             -DRC_FILE=${SC_RC_FILE}
             -DVERSION_FILE=${CMAKE_BINARY_DIR}/generated/SC_VERSION.txt
             -DSTAMP_FILE=${CMAKE_BINARY_DIR}/generated/generated_patched.stamp
-            -DICON_FILE=${CMAKE_SOURCE_DIR}/icon4.ico
+            -DICON_FILE=${CMAKE_SOURCE_DIR}/src/Icons/icon4.ico
             -P ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake
     DEPENDS ${SC_RC_FILE} ${CMAKE_BINARY_DIR}/generated/SC_VERSION.txt
-            ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake ${CMAKE_SOURCE_DIR}/icon4.ico
+            ${CMAKE_SOURCE_DIR}/cmake/patch_generated.cmake ${CMAKE_SOURCE_DIR}/src/Icons/icon4.ico
     COMMENT "Applying bumped version to generated resources.rc")
 add_custom_target (sc_patch_generated
     DEPENDS ${CMAKE_BINARY_DIR}/generated/generated_patched.stamp)
