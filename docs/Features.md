@@ -508,9 +508,10 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     document for the session (not saved with the file).
   - The **status bar** shows every channel number of the file next to its
     sample rate: dimmed while the channel is hidden, red while it is muted.
-    A click shows/hides that channel (like *View > Channel N*); Ctrl+click
-    (Cmd+click on macOS) shows only that channel, and again on the lone
-    visible channel shows them all.
+    A click shows/hides that channel (like *View > Channel N*); **Ctrl/Shift+click**
+    (Cmd+click on macOS) shows **only** that channel — the same solo rule as the
+    channel list and the track numbers — and repeating it on the lone visible
+    channel shows them all again.
   - The View menu also has **Waveform View / Spectrogram View** visibility
     toggles; at least one view is always kept visible — hiding the last one is
     refused and the remaining view takes the whole main area.
@@ -527,7 +528,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     horizontal grey grid lines inside the data tracks - the dB amplitude
     levels in each waveform track (plus a line at amplitude 0, labelled
     **-inf** in dB mode, **0.000** in Normalized and **0** in Wav Units) and
-    the frequency tick lines in each spectrogram track. The third overlays
+    the frequency tick lines in each spectrogram track. The waveform grid lines
+    are semi-transparent, so a quiet signal drawn along the zero line is not
+    hidden behind them. The third overlays
     thin delicate white dashed lines at the borders of the IEC 61260-1 1/3
     octave bands (centres 1, 1.25, 1.6, 2, 2.5, 3.15, 4, 5, 6.3, 8 × 10ⁿ Hz)
     with each band's centre value written in white between its borders,
@@ -2901,8 +2904,9 @@ delays the window from appearing.
     default, and toggling it persists to disk immediately.
   - **Waveform zero line**: the per-mode zero-line labels ("0" / "-inf" /
     "0.000") and a headless paint check that with the amplitude grid on the row
-    centre carries the grey zero line while with it off only the (60,60,60)
-    divider shows - drawn at amplitude zero so it follows the vertical
+    centre carries the semi-transparent grey zero line (measured as a blend with
+    the (60,60,60) divider it covers, not an opaque colour) while with it off
+    only the divider shows - drawn at amplitude zero so it follows the vertical
     pan/zoom instead of staying fixed at the row middle.
   - **Track v-pan behaviour**: a left-drag on the waveform's amplitude axis
     follows the cursor in both directions (drag down then back up restores the

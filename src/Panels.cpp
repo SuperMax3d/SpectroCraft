@@ -6741,7 +6741,11 @@ void StatusBar::mouseDown (const juce::MouseEvent& e)
 {
     if (e.mods.isPopupMenu()) return;
     const int ch = channelChipAt (e.getPosition());
-    if (ch >= 0 && onChannelClicked) onChannelClicked (ch, e.mods.isCommandDown());
+    // Ctrl/Cmd or Shift asks for "only this channel" - the same modifier the
+    // channel list and the track numbers use for soloing.
+    const bool solo = e.mods.isCommandDown () || e.mods.isCtrlDown ()
+                      || e.mods.isShiftDown ();
+    if (ch >= 0 && onChannelClicked) onChannelClicked (ch, solo);
 }
 
 void StatusBar::setSelection (double t0, double t1)

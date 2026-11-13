@@ -817,13 +817,17 @@ static void regrPanels_statusBarChannelNumbers()
 
     int clicked = -1;
     bool withCmd = false;
-    sb.onChannelClicked = [&] (int ch, bool cmd) { clicked = ch; withCmd = cmd; };
+    sb.onChannelClicked = [&] (int ch, bool solo) { clicked = ch; withCmd = solo; };
     const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
     const juce::ModifierKeys cmdLmb (juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::commandModifier);
+    const juce::ModifierKeys shiftLmb (juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier);
     sb.mouseDown (mkMouse (sb, chips[1].getCentreX (), chips[1].getCentreY (), lmb));
     CHECK (clicked == 1 && !withCmd, "footer channels: a click reports the channel");
     sb.mouseDown (mkMouse (sb, chips[3].getCentreX (), chips[3].getCentreY (), cmdLmb));
-    CHECK (clicked == 3 && withCmd, "footer channels: Ctrl/Cmd+click is reported as such");
+    CHECK (clicked == 3 && withCmd, "footer channels: Ctrl/Cmd+click is reported as a solo");
+    clicked = -1;
+    sb.mouseDown (mkMouse (sb, chips[2].getCentreX (), chips[2].getCentreY (), shiftLmb));
+    CHECK (clicked == 2 && withCmd, "footer channels: Shift+click is reported as a solo too");
     clicked = -1;
     sb.mouseDown (mkMouse (sb, 3, 11, lmb));
     CHECK (clicked == -1, "footer channels: a click elsewhere reports nothing");

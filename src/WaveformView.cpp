@@ -1080,7 +1080,10 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
         const float ampScale = rr.getHeight() * 0.45f * (float) vZoom;
 
         // The grey horizontal grid lines can be hidden from the View menu;
-        // the axis labels below are unaffected.
+        // the axis labels below are unaffected. They are semi-transparent: a
+        // quiet signal draws a thin band right along the zero line, and an
+        // opaque grid line there hid the signal completely.
+        const juce::Colour gridCol = juce::Colour::fromRGBA (48, 48, 48, 150);
         if (app.settings.showAmpGrid)
         {
             for (double dB : levels)
@@ -1092,7 +1095,7 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
                     // both are shifted by the vertical offset.
                     const float y = center + (float) ((vOffset - sign * a) * ampScale);
                     if (y < pr.getY() || y > pr.getBottom()) continue;
-                    g.setColour (juce::Colour::fromRGB (48, 48, 48));
+                    g.setColour (gridCol);
                     g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
                 }
             }
@@ -1103,7 +1106,7 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
                 const float y = center + (float) (vOffset * ampScale);
                 if (y >= pr.getY() && y <= pr.getBottom())
                 {
-                    g.setColour (juce::Colour::fromRGB (48, 48, 48));
+                    g.setColour (gridCol);
                     g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
                 }
             }

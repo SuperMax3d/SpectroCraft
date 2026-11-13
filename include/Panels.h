@@ -2190,9 +2190,9 @@ public:
     // file, labelled like the tracks ("L"/"R" for stereo). Hidden channels
     // (View > Channel N) are drawn dim, muted ones red. count 0 = no file.
     void setChannels (int count, const std::vector<int>& visible, const std::vector<bool>& muted);
-    /** A channel number was clicked: the channel and whether Ctrl (Cmd on
-        macOS) was held. MainWindow shows/hides that channel. */
-    std::function<void (int ch, bool commandDown)> onChannelClicked;
+    /** A channel number was clicked: the channel and whether a solo modifier
+        (Ctrl / Cmd / Shift) was held. MainWindow shows/hides that channel. */
+    std::function<void (int ch, bool soloRequested)> onChannelClicked;
     /** The channel number at p, -1 when none (mouseDown, tests). */
     int channelChipAt (juce::Point<int> p) const;
     /** Where the channel numbers are drawn, one per channel that fits. */

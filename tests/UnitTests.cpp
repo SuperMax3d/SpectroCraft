@@ -4419,6 +4419,76 @@ static void testArrowKeySelection()
     wav.deleteFile();
 }
 
+// ------------------------------------------------- Footer channel solo click
+// Shift+click (as well as Ctrl/Cmd+click) on a channel number in the footer
+// shows ONLY that channel; the same click on the already soloed channel brings
+// every channel back. A plain click keeps toggling one channel.
+static void testFooterChannelSoloClick()
+{
+    const juce::File wav = makeTempFile ("footer_chan_solo.wav");
+    writeWav (wav, 4, 8000.0, 4000, [] (int ch, int64_t, double)
+              { return 0.2f * (float) (ch + 1); });
+
+    Application app;
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "footer channel solo test"));
+    win->setSize (1400, 900);
+    win->openFile (wav);
+    auto* sb = win->statusBarComp ();
+    CHECK (sb != nullptr && app.audioEngine().numChannels () == 4,
+           "footer solo: a 4-channel file and a footer are available");
+    if (sb == nullptr || app.audioEngine().numChannels () != 4)
+    { win.reset(); wav.deleteFile (); return; }
+
+    const auto chips = sb->channelChipRects ();
+    CHECK (chips.size () == 4, "footer draws one number per channel");
+    if (chips.size () != 4) { win.reset(); wav.deleteFile (); return; }
+
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+    const juce::ModifierKeys shiftLmb (juce::ModifierKeys::leftButtonModifier
+                                       | juce::ModifierKeys::shiftModifier);
+    const juce::ModifierKeys cmdLmb (juce::ModifierKeys::leftButtonModifier
+                                     | juce::ModifierKeys::commandModifier);
+    auto click = [&] (int ch, juce::ModifierKeys m)
+    {
+        const auto& r = chips[(size_t) ch];
+        sb->mouseDown (mkMouse (*sb, r.getCentreX (), r.getCentreY (), m));
+    };
+    auto soloed = [&] (int ch) { return app.visibleChannels.size () == 1
+                                      && app.visibleChannels[0] == ch; };
+
+    // A plain click still toggles that one channel.
+    click (1, lmb);
+    CHECK (app.visibleChannels.size () == 3 && !app.isChannelVisible (1),
+           "footer solo: a plain click hides the channel");
+    click (1, lmb);
+    CHECK (app.visibleChannels.size () == 4, "footer solo: clicking again shows it");
+
+    // Shift+click solos.
+    click (2, shiftLmb);
+    CHECK (soloed (2), "footer solo: Shift+click shows only that channel");
+    // The same click on the lone visible channel restores them all.
+    click (2, shiftLmb);
+    CHECK (app.visibleChannels.size () == 4,
+           "footer solo: Shift+click again on the soloed channel shows all");
+
+    // Ctrl/Cmd+click behaves identically (unchanged behaviour).
+    click (0, cmdLmb);
+    CHECK (soloed (0), "footer solo: Ctrl/Cmd+click still solos");
+    click (0, cmdLmb);
+    CHECK (app.visibleChannels.size () == 4, "footer solo: Ctrl/Cmd+click again shows all");
+
+    // From a partial view, soloing keeps only the clicked channel.
+    app.visibleChannels = { 0, 2 };
+    app.syncActiveDoc ();
+    click (3, shiftLmb);
+    CHECK (soloed (3), "footer solo: Shift+click solos even from a partial view");
+    click (3, shiftLmb);
+    CHECK (app.visibleChannels.size () == 4, "footer solo: and brings them all back");
+
+    win.reset();   // destroy the window while its MessageManager is still alive
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------- Ctrl+number channel toggle
 // Ctrl+1..9 toggles a channel's visibility like the View menu items;
 // Ctrl+Shift+1..9 shows ONLY that channel (solo), matching the menu's
@@ -23080,9 +23150,11 @@ static void testTrackAxisPlacement()
     CHECK (!app.settings.showDedicatedTrackGrid,
           "dedicated track grid toggled off via the menu");
 
-    // Waveform: with the grid on, row 0's upper 0 dB line lands exactly on
-    // (48,48,48); hidden it falls back to the plain background. Row 0 is
-    // y=24..159 (height 135): centre 91.5, ampScale 60.75 -> line at 30.75.
+    // Waveform: with the grid on, row 0's upper 0 dB line at y=30 changes that
+    // pixel; hidden, it does not. The line is semi-transparent now (so a quiet
+    // signal is not hidden behind it), so the check compares the two identical
+    // renders instead of a fixed colour. Row 0 is y=24..159 (height 135):
+    // centre 91.5, ampScale 60.75 -> line at 30.75.
     {
         app.settings.showAmpGrid = true;   // the menu toggles left it off
         wv.repaint ();
@@ -23090,10 +23162,10 @@ static void testTrackAxisPlacement()
         app.settings.showAmpGrid = false;
         wv.repaint ();
         const auto imgOff = wv.createComponentSnapshot (wv.getLocalBounds());
-        CHECK (imgOn.getPixelAt (200, 30) == juce::Colour::fromRGB (48, 48, 48),
-              "amp grid line drawn");
-        CHECK (imgOff.getPixelAt (200, 30) != juce::Colour::fromRGB (48, 48, 48),
-              "amp grid line hidden");
+        CHECK (imgOn.getPixelAt (200, 30) != imgOff.getPixelAt (200, 30),
+              "amp grid line drawn when shown, absent when hidden");
+        CHECK (imgOn.getPixelAt (200, 30) != juce::Colour::fromRGB (48, 48, 48),
+              "amp grid line is semi-transparent, not the opaque grey");
     }
 
     // Spectrogram: hiding the frequency grid removes only thin lines.
@@ -26933,8 +27005,15 @@ static void testWaveformZeroLine()
 
     app.settings.showAmpGrid = true;
     const auto pOn = centrePixel();
-    CHECK (std::abs ((int) pOn.getRed() - 48) <= 2 && std::abs ((int) pOn.getGreen() - 48) <= 2,
-          "with grid the zero line (48,48,48) is drawn at amplitude 0");
+    // The grid line is semi-transparent (alpha 150/255) so a flat signal is
+    // not hidden behind it: over the (60,60,60) row line it blends to ~53.
+    const int want = (int) std::lround (60.0 + (48.0 - 60.0) * (150.0 / 255.0));
+    CHECK (std::abs ((int) pOn.getRed() - want) <= 3
+           && std::abs ((int) pOn.getGreen() - want) <= 3
+           && std::abs ((int) pOn.getBlue() - want) <= 3,
+          "with grid the semi-transparent zero line is drawn at amplitude 0");
+    CHECK (pOn.getRed() > 48 && pOn.getRed() < 60,
+          "the grid line blends with what it covers instead of hiding it");
 
     wav.deleteFile();
 }
@@ -28608,6 +28687,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("spectral probe", testSpectralProbe);
     SC_RUN_TEST ("arrow key selection", testArrowKeySelection);
     SC_RUN_TEST ("ctrl+number channels", testCtrlNumberChannelToggle);
+    SC_RUN_TEST ("footer channel solo click", testFooterChannelSoloClick);
     SC_RUN_TEST ("F9 view cycle", testF9ViewCycle);
     SC_RUN_TEST ("no view tooltips", testNoViewTooltips);
     SC_RUN_TEST ("open recent files", testOpenRecentFiles);
