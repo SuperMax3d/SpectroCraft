@@ -195,4 +195,74 @@ bool Resampler::resampleAndRemix (const juce::AudioBuffer<float>& in,
     return mixChannels (tmp, weights, out, nullptr);
 }
 
+std::vector<std::vector<double>> remixFillWeights (RemixFill mode, int outChans,
+                                                   int inChans, bool shift, bool ctrl)
+{
+    std::vector<std::vector<double>> w ((size_t) outChans,
+                                        std::vector<double> ((size_t) inChans, 0.0));
+    const int rows = std::max (1, outChans);
+    switch (mode)
+    {
+        case RemixFill::Default:   // identity when the count is unchanged,
+            for (int r = 0; r < outChans; ++r)                     // otherwise each output averages all inputs.
+                for (int c = 0; c < inChans; ++c)
+                    w[(size_t) r][(size_t) c] = (outChans == inChans)
+                                                 ? (r == c ? 1.0 : 0.0)
+                                                 : 1.0 / (double) inChans;
+            break;
+
+        case RemixFill::Identity:
+            for (int r = 0; r < outChans; ++r)
+            {
+                // Plain: the square diagonal (extra outputs stay silent).
+                // Shift: the rectangle's diagonal - one evenly spaced input per output.
+                int c = shift ? std::min (inChans - 1, r * inChans / rows) : r;
+                if (ctrl)
+                    c = inChans - 1 - c;   // mirror left-right (anti-diagonal for a square)
+                if (c >= 0 && c < inChans)
+                    w[(size_t) r][(size_t) c] = 1.0;
+            }
+            break;
+
+        case RemixFill::Merge:
+            if (!shift)
+            {
+                for (int r = 0; r < outChans; ++r)
+                    for (int c = 0; c < inChans; ++c)
+                        w[(size_t) r][(size_t) c] = 1.0 / (double) inChans;
+            }
+            else
+            {
+                // Merge by channel groups: output r averages its own contiguous slice
+                // of the inputs ([r*in/out, (r+1)*in/out)) - pairs when halved.
+                for (int r = 0; r < outChans; ++r)
+                {
+                    const int a = std::min (inChans - 1, r * inChans / rows);
+                    const int b = std::min (inChans, (r + 1) * inChans / rows) - 1;
+                    if (b < a)
+                        continue;   // empty slice: silent output
+                    const double v = 1.0 / (double) (b - a + 1);
+                    for (int c = a; c <= b; ++c)
+                        w[(size_t) r][(size_t) c] = v;
+                }
+            }
+            break;
+
+        case RemixFill::Ones:
+            for (int r = 0; r < outChans; ++r)
+                for (int c = 0; c < inChans; ++c)
+                    w[(size_t) r][(size_t) c] = 1.0;
+            break;
+
+        case RemixFill::Zeros:
+            break;
+    }
+    return w;
+}
+
+std::vector<std::vector<double>> defaultRemixWeights (int outChans, int inChans)
+{
+    return remixFillWeights (RemixFill::Default, outChans, inChans);
+}
+
 } // namespace sc

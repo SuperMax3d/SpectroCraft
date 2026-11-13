@@ -42,4 +42,23 @@ public:
     static int64_t estimateOutputFrames (int64_t inFrames, double oldRate, double newRate);
 };
 
+/** Fill patterns for the resample dialog's remix-matrix buttons. */
+enum class RemixFill { Default, Identity, Merge, Ones, Zeros };
+
+/** Builds the weight matrix (outChans rows x inChans columns) for one fill pattern.
+    The shift/ctrl flags only affect Identity and Merge:
+      Identity + shift : ones along the rectangle's diagonal - output r takes input
+                         floor(r * inChans / outChans), i.e. evenly spaced inputs (a plain
+                         identity when the matrix is square).
+      Identity + ctrl  : mirrors the pattern left-right (the anti-diagonal for a square
+                         matrix).
+      Merge    + shift : merges by channel groups - each output averages its own contiguous
+                         slice of the inputs ([r*in/out, (r+1)*in/out)); pairs when the count
+                         is halved. */
+std::vector<std::vector<double>> remixFillWeights (RemixFill mode, int outChans, int inChans,
+                                                   bool shift = false, bool ctrl = false);
+
+/** Default mix matrix: identity when the channel count is unchanged, otherwise each output averages all inputs. */
+std::vector<std::vector<double>> defaultRemixWeights (int outChans, int inChans);
+
 } // namespace sc

@@ -5457,38 +5457,6 @@ juce::String formatWeightText (double v)
     return juce::String (v, 4).trimCharactersAtEnd ("0").trimCharactersAtEnd (".");
 }
 
-/** Fill patterns for the remix-matrix buttons (see RemixFillButtons). */
-enum class RemixFill { Default, Identity, Merge, Ones, Zeros };
-
-/** Builds the weight matrix for one of the fill patterns. */
-std::vector<std::vector<double>> remixFillWeights (RemixFill mode,
-                                                   int outChans, int inChans)
-{
-    std::vector<std::vector<double>> w ((size_t) outChans,
-                                        std::vector<double> ((size_t) inChans, 0.0));
-    for (int r = 0; r < outChans; ++r)
-        for (int c = 0; c < inChans; ++c)
-            switch (mode)
-            {
-                case RemixFill::Default:   // identity when the count is unchanged,
-                    w[(size_t) r][(size_t) c] = (outChans == inChans)             // otherwise each output averages all inputs.
-                                                 ? (r == c ? 1.0 : 0.0)
-                                                 : 1.0 / (double) inChans;
-                    break;
-                case RemixFill::Identity:  w[(size_t) r][(size_t) c] = (r == c) ? 1.0 : 0.0; break;
-                case RemixFill::Merge:     w[(size_t) r][(size_t) c] = 1.0 / (double) inChans; break;
-                case RemixFill::Ones:      w[(size_t) r][(size_t) c] = 1.0; break;
-                case RemixFill::Zeros:     w[(size_t) r][(size_t) c] = 0.0; break;
-            }
-    return w;
-}
-
-/** Default mix matrix (used when the channel count changes). */
-std::vector<std::vector<double>> defaultRemixWeights (int outChans, int inChans)
-{
-    return remixFillWeights (RemixFill::Default, outChans, inChans);
-}
-
 /** Divides every row by its sum (zero rows stay silence). */
 std::vector<std::vector<double>> normaliseRemixWeights (
     const std::vector<std::vector<double>>& weights)
@@ -5637,7 +5605,7 @@ public:
             // OK/Cancel buttons) and grow/shrink the window to match.
             const int oldBottom = grid->getBottom();
             const int oldH = grid->getHeight();
-            grid->rebuild (outChans, defaultRemixWeights (outChans, inChans));
+            grid->rebuild (outChans, sc::defaultRemixWeights (outChans, inChans));
             const int delta = grid->getHeight() - oldH;
             if (delta != 0)
             {
@@ -5798,23 +5766,31 @@ private:
 class RemixFillButtons : public juce::Component
 {
 public:
-    /** Called with the pattern index (0..4, see RemixFill) on a click. */
-    std::function<void(int)> onFill;
+    /** Called on a click with the pattern index (0..4, see sc::RemixFill) and the
+        modifier keys held at the moment of the click (only Identity and Merge have variants). */
+    std::function<void(int, bool shift, bool ctrl)> onFill;
 
     RemixFillButtons()
     {
         const char* texts[5] = { "Default", "Identity", "Merge", "Ones", "Zeros" };
         const char* tips[5]  = {
             "The default mix: identity when the channel count is unchanged, otherwise each output averages all inputs.",
-            "Put 1 on the diagonal and 0 elsewhere - output N takes input N directly (extra outputs stay silent).",
-            "Split every input equally onto every output - e.g. mono becomes identical stereo channels.",
+            "Put 1 on the diagonal and 0 elsewhere - output N takes input N directly (extra outputs stay silent). Shift+click puts ones along the rectangle's diagonal (one evenly spaced input per output); Ctrl+click mirrors the pattern left-right.",
+            "Split every input equally onto every output - e.g. mono becomes identical stereo channels. Shift+click merges by channel groups instead: each output averages its own contiguous slice of the inputs (pairs when the count is halved).",
             "Put 1 in every cell; rows are normalised to sum to 1 when applied, so all inputs mix equally into every output.",
             "Put 0 everywhere - every output channel will be silent." };
         for (int i = 0; i < 5; ++i)
         {
             auto* b = new juce::TextButton (texts[i], tips[i]);
             const int mode = i;
-            b->onClick = [this, mode] { if (onFill != nullptr) onFill (mode); };
+            b->onClick = [this, mode]
+            {
+                if (onFill == nullptr) return;
+                // Modifier keys held at the moment of the click (Shift/Ctrl variants).
+                const auto mods = juce::ModifierKeys::getCurrentModifiers ();
+                onFill (mode, mods.isShiftDown (),
+                        mods.isCtrlDown () || mods.isCommandDown ());
+            };
             addAndMakeVisible (b);
             buttons_.push_back (b);
         }
@@ -7112,17 +7088,18 @@ juce::AlertWindow* MainWindow::createResampleDialog()
     w->addCustomComponent (chansRow);
 
     auto* grid = new RemixGrid (curChans);
-    grid->rebuild (curChans, defaultRemixWeights (curChans, curChans));
+    grid->rebuild (curChans, sc::defaultRemixWeights (curChans, curChans));
     // AlertWindow draws a named custom component's name above it.
     grid->setName ("Mix weights per output channel (each row is normalised to sum to 1):");
 
     // Fill buttons between the input rows and the matrix. Add order defines
     // the vertical stacking, so this goes in before the grid.
     auto* fillRow = new RemixFillButtons();
-    fillRow->onFill = [grid, curChans] (int mode)
+    fillRow->onFill = [grid, curChans] (int mode, bool shift, bool ctrl)
     {
-        grid->setWeights (remixFillWeights ((RemixFill) mode,
-                                             grid->numRows(), curChans));
+        grid->setWeights (sc::remixFillWeights ((sc::RemixFill) mode,
+                                                 grid->numRows(), curChans,
+                                                 shift, ctrl));
     };
     fillRow->setSize (kFillRowW, kFillRowH);
     w->addCustomComponent (fillRow);

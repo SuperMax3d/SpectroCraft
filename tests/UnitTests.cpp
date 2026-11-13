@@ -4709,6 +4709,121 @@ static void testResampleDialogFillButtons()
     wav.deleteFile();
 }
 
+// Fill patterns for the remix matrix, including the Shift/Ctrl variants:
+// rectangular identity diagonal, mirrored identity and group merge.
+static void testRemixFillPatterns()
+{
+    auto cell = [] (const std::vector<std::vector<double>>& w, int r, int c)
+    { return w[(size_t) r][(size_t) c]; };
+
+    // Plain Identity: the square diagonal; extra outputs stay silent.
+    {
+        const auto w = sc::remixFillWeights (sc::RemixFill::Identity, 2, 4);
+        CHECK (cell (w, 0, 0) == 1.0 && cell (w, 1, 1) == 1.0,
+               "identity: ones on the square diagonal");
+        CHECK (cell (w, 0, 1) == 0.0 && cell (w, 0, 2) == 0.0 && cell (w, 0, 3) == 0.0
+              && cell (w, 1, 0) == 0.0 && cell (w, 1, 2) == 0.0 && cell (w, 1, 3) == 0.0,
+               "identity: zeros off the diagonal");
+    }
+
+    // Shift+Identity: ones along the rectangle's diagonal (4 inputs -> 2 outputs).
+    {
+        const auto w = sc::remixFillWeights (sc::RemixFill::Identity, 2, 4, true, false);
+        CHECK (cell (w, 0, 0) == 1.0 && cell (w, 0, 1) == 0.0
+              && cell (w, 0, 2) == 0.0 && cell (w, 0, 3) == 0.0,
+               "shift identity: row 0 takes input 1");
+        CHECK (cell (w, 1, 0) == 0.0 && cell (w, 1, 1) == 0.0
+              && cell (w, 1, 2) == 1.0 && cell (w, 1, 3) == 0.0,
+               "shift identity: row 1 takes input 3");
+    }
+
+    // Ctrl+Identity: the pattern mirrored left-right.
+    {
+        const auto w = sc::remixFillWeights (sc::RemixFill::Identity, 2, 4, false, true);
+        CHECK (cell (w, 0, 3) == 1.0 && cell (w, 0, 0) == 0.0
+              && cell (w, 0, 1) == 0.0 && cell (w, 0, 2) == 0.0,
+               "ctrl identity: row 0 takes input 4");
+        CHECK (cell (w, 1, 2) == 1.0 && cell (w, 1, 0) == 0.0
+              && cell (w, 1, 1) == 0.0 && cell (w, 1, 3) == 0.0,
+               "ctrl identity: row 1 takes input 3");
+    }
+
+    // Ctrl+Shift+Identity: the rectangle's diagonal mirrored left-right.
+    {
+        const auto w = sc::remixFillWeights (sc::RemixFill::Identity, 2, 4, true, true);
+        CHECK (cell (w, 0, 3) == 1.0 && cell (w, 0, 0) == 0.0
+              && cell (w, 0, 1) == 0.0 && cell (w, 0, 2) == 0.0,
+               "ctrl+shift identity: row 0 takes input 4");
+        CHECK (cell (w, 1, 1) == 1.0 && cell (w, 1, 0) == 0.0
+              && cell (w, 1, 2) == 0.0 && cell (w, 1, 3) == 0.0,
+               "ctrl+shift identity: row 1 takes input 2");
+    }
+
+    // On a square matrix shift is the plain identity and ctrl the anti-diagonal.
+    {
+        const auto ws = sc::remixFillWeights (sc::RemixFill::Identity, 3, 3, true, false);
+        const auto wp = sc::remixFillWeights (sc::RemixFill::Identity, 3, 3);
+        CHECK (ws == wp, "shift identity on a square equals the plain identity");
+
+        const auto wc = sc::remixFillWeights (sc::RemixFill::Identity, 3, 3, false, true);
+        bool anti = true;
+        for (int r = 0; r < 3 && anti; ++r)
+            for (int c = 0; c < 3; ++c)
+                if (wc[(size_t) r][(size_t) c] != (r + c == 2 ? 1.0 : 0.0)) { anti = false; break; }
+        CHECK (anti, "ctrl identity on a square is the anti-diagonal");
+    }
+
+    // Plain Merge: every output averages all inputs.
+    {
+        const auto w = sc::remixFillWeights (sc::RemixFill::Merge, 2, 4);
+        bool q = true;
+        for (int r = 0; r < 2 && q; ++r)
+            for (int c = 0; c < 4; ++c)
+                if (w[(size_t) r][(size_t) c] != 0.25) { q = false; break; }
+        CHECK (q, "merge: every cell is 1/4");
+    }
+
+    // Shift+Merge: merge by channel pairs (4 inputs -> 2 outputs).
+    {
+        const auto w = sc::remixFillWeights (sc::RemixFill::Merge, 2, 4, true, false);
+        CHECK (cell (w, 0, 0) == 0.5 && cell (w, 0, 1) == 0.5
+              && cell (w, 0, 2) == 0.0 && cell (w, 0, 3) == 0.0,
+               "shift merge: row 0 averages inputs 1-2");
+        CHECK (cell (w, 1, 0) == 0.0 && cell (w, 1, 1) == 0.0
+              && cell (w, 1, 2) == 0.5 && cell (w, 1, 3) == 0.5,
+               "shift merge: row 1 averages inputs 3-4");
+    }
+
+    // Shift+Merge on a square is the identity; uneven splits stay contiguous.
+    {
+        const auto ws = sc::remixFillWeights (sc::RemixFill::Merge, 3, 3, true, false);
+        const auto wp = sc::remixFillWeights (sc::RemixFill::Identity, 3, 3);
+        CHECK (ws == wp, "shift merge on a square equals the identity");
+
+        const auto w = sc::remixFillWeights (sc::RemixFill::Merge, 2, 5, true, false);
+        double s0 = 0.0, s1 = 0.0;
+        for (int c = 0; c < 5; ++c) { s0 += w[(size_t) 0][(size_t) c]; s1 += w[(size_t) 1][(size_t) c]; }
+        CHECK (std::abs (s0 - 1.0) < 1e-9 && std::abs (s1 - 1.0) < 1e-9,
+               "shift merge: each row still sums to 1");
+        CHECK (cell (w, 0, 0) == 0.5 && cell (w, 0, 1) == 0.5 && cell (w, 0, 2) == 0.0,
+               "shift merge uneven: row 0 takes inputs 1-2");
+        const double t = 1.0 / 3.0;
+        CHECK (cell (w, 1, 0) == 0.0 && cell (w, 1, 2) == t
+              && cell (w, 1, 3) == t && cell (w, 1, 4) == t,
+               "shift merge uneven: row 1 takes inputs 3-5");
+    }
+
+    // The other patterns ignore the modifier keys.
+    {
+        const auto a = sc::remixFillWeights (sc::RemixFill::Ones, 2, 3);
+        const auto b = sc::remixFillWeights (sc::RemixFill::Ones, 2, 3, true, true);
+        CHECK (a == b, "ones ignores the modifier keys");
+        const auto z1 = sc::remixFillWeights (sc::RemixFill::Zeros, 2, 3);
+        const auto z2 = sc::remixFillWeights (sc::RemixFill::Zeros, 2, 3, true, true);
+        CHECK (z1 == z2, "zeros ignores the modifier keys");
+    }
+}
+
 // ------------------------------------------------- F9 view-layout cycle
 // F9 cycles both -> waveform only -> spectrogram only -> both; Shift+F9 runs
 // the same cycle backwards. At least one view is always visible.
@@ -28467,6 +28582,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("alt scale multi-ref + go-to", testAltScaleMultiRef);
     SC_RUN_TEST ("resample remix", testResampleRemix);
     SC_RUN_TEST ("resample dialog fill buttons", testResampleDialogFillButtons);
+    SC_RUN_TEST ("remix fill patterns", testRemixFillPatterns);
     SC_RUN_TEST ("paste to new channels", testPasteToNewChannels);
     SC_RUN_TEST ("channel row geometry", testChannelRowGeometry);
     SC_RUN_TEST ("merge files", testMergeFiles);
