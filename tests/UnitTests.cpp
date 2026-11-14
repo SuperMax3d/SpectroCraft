@@ -1808,6 +1808,18 @@ static void testHistoryPanelPaint()
 
     HistoryPanel panel (app);
     panel.setSize (300, 200);
+    /* The panel reads its colours from the LookAndFeel of the window it lives
+       in, like every other table. Give it the app's palette here so the check
+       is about the panel and not about whichever LookAndFeel the harness
+       happened to have installed - which is why this test passed in one run and
+       failed in another. */
+    static juce::LookAndFeel_V4 appLf;
+    appLf.setColour (juce::ListBox::backgroundColourId, juce::Colour (0xff1e1e1e));
+    appLf.setColour (juce::ListBox::outlineColourId,    juce::Colour (0xff1d1d1d));
+    appLf.setColour (juce::TableHeaderComponent::backgroundColourId, juce::Colour (0xff303030));
+    appLf.setColour (juce::TableHeaderComponent::textColourId,       juce::Colour (0xffd2d2d2));
+    appLf.setColour (juce::TableHeaderComponent::outlineColourId,    juce::Colour (0xff1d1d1d));
+    panel.setLookAndFeel (&appLf);
     panel.refresh();
     CHECK (panel.numRows() == 3, "three history rows");
     CHECK (panel.currentState() == 2, "current state is the last row");
@@ -1826,11 +1838,12 @@ static void testHistoryPanelPaint()
 
     // Regression: the current row's highlight used to be drawn with fillAll(),
     // which painted over the whole panel and hid every earlier row + the header.
-    // Styling matches the Actions table (LookAndFeel_V4 dark scheme):
-    // body RGB(38,50,56); header = 60% white over it ~ RGB(168,173,175);
-    // current-row highlight RGB(60,80,120).
-    CHECK (colNear (290, 34, 38, 50, 56), "rows above the current one keep the dark blue-green background");
-    CHECK (colNear (150, 12, 168, 173, 175), "header area is light grey and not covered by the highlight");
+    // Styling matches every other table in the app (the shared dark palette):
+    // list body 0xff1e1e1e, header 0xff303030, current-row highlight
+    // RGB(60,80,120). The header sample is taken at y = 2, above the header
+    // text, so it measures the band and not a glyph.
+    CHECK (colNear (290, 34, 30, 30, 30), "rows above the current one keep the shared table body colour");
+    CHECK (colNear (150, 2, 48, 48, 48), "header area is the shared header grey and not covered by the highlight");
     CHECK (colNear (290, 74, 60, 80, 120), "current row band carries the blue highlight");
 
     // Past rows must still show bright text.
