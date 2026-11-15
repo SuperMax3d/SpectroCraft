@@ -620,19 +620,22 @@ void HistoryPanel::paint (juce::Graphics& g)
        background and the header comes from the shared LookAndFeel's table
        header colours (the ones a TableListBox uses), not from a palette of
        its own. */
-    auto& lf = juce::LookAndFeel::getDefaultLookAndFeel();
-    const juce::Colour headBg = lf.findColour (juce::TableHeaderComponent::backgroundColourId);
-    const juce::Colour headTx = lf.findColour (juce::TableHeaderComponent::textColourId);
-    const juce::Colour headLine = lf.findColour (juce::TableHeaderComponent::outlineColourId);
+    /* findColour, not the global default: the panel takes the colours of the
+       window it lives in (the app installs its dark table palette there), and a
+       test can give the panel its own LookAndFeel without touching the global
+       one. */
+    const juce::Colour headBg   = findColour (juce::TableHeaderComponent::backgroundColourId);
+    const juce::Colour headTx   = findColour (juce::TableHeaderComponent::textColourId);
+    const juce::Colour headLine = findColour (juce::TableHeaderComponent::outlineColourId);
 
     g.fillAll (juce::Colour::fromRGB (45, 45, 48));
 
     // The list itself uses the same body colour and outline as every other
     // table in the app (a TableListBox paints with these LookAndFeel colours).
     const auto listAreaR = listArea ();
-    g.setColour (lf.findColour (juce::ListBox::backgroundColourId));
+    g.setColour (findColour (juce::ListBox::backgroundColourId));
     g.fillRect (listAreaR);
-    g.setColour (lf.findColour (juce::ListBox::outlineColourId));
+    g.setColour (findColour (juce::ListBox::outlineColourId));
     g.drawRect (listAreaR, 1);
 
     // Header row with the two column titles; applied-count stays right.

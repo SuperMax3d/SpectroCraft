@@ -1808,6 +1808,18 @@ static void testHistoryPanelPaint()
 
     HistoryPanel panel (app);
     panel.setSize (300, 200);
+    /* The panel reads its colours from the LookAndFeel of the window it lives
+       in, like every other table. Give it the app's palette here so the check
+       is about the panel and not about whichever LookAndFeel the harness
+       happened to have installed - which is why this test passed in one run and
+       failed in another. */
+    static juce::LookAndFeel_V4 appLf;
+    appLf.setColour (juce::ListBox::backgroundColourId, juce::Colour (0xff1e1e1e));
+    appLf.setColour (juce::ListBox::outlineColourId,    juce::Colour (0xff1d1d1d));
+    appLf.setColour (juce::TableHeaderComponent::backgroundColourId, juce::Colour (0xff303030));
+    appLf.setColour (juce::TableHeaderComponent::textColourId,       juce::Colour (0xffd2d2d2));
+    appLf.setColour (juce::TableHeaderComponent::outlineColourId,    juce::Colour (0xff1d1d1d));
+    panel.setLookAndFeel (&appLf);
     panel.refresh();
     CHECK (panel.numRows() == 3, "three history rows");
     CHECK (panel.currentState() == 2, "current state is the last row");
@@ -1826,18 +1838,21 @@ static void testHistoryPanelPaint()
 
     // Regression: the current row's highlight used to be drawn with fillAll(),
     // which painted over the whole panel and hid every earlier row + the header.
-    // The body and header take the shared LookAndFeel's list / table header
-    // colours (like every other table); current-row highlight RGB(60,80,120).
-    auto& lf = juce::LookAndFeel::getDefaultLookAndFeel();
-    const juce::Colour body = juce::Colour::fromRGB (45, 45, 48)
-                                  .overlaidWith (lf.findColour (juce::ListBox::backgroundColourId));
-    const juce::Colour head = lf.findColour (juce::TableHeaderComponent::backgroundColourId);
+    /* The body and header take the shared LookAndFeel's list / table header
+       colours, like every other table - so the expected values are read from
+       the LookAndFeel the panel was given above, not written out here, and not
+       from the global default (which is whichever one another test happened to
+       leave installed). Current-row highlight RGB(60,80,120). The header sample
+       is taken at y = 2, above the header text, so it measures the band and
+       not a glyph. */
+    const juce::Colour body = appLf.findColour (juce::ListBox::backgroundColourId);
+    const juce::Colour head = appLf.findColour (juce::TableHeaderComponent::backgroundColourId);
     CHECK (std::abs ((int) body.getRed() - 60) + std::abs ((int) body.getGreen() - 80)
                + std::abs ((int) body.getBlue() - 120) > 48,
            "the list background differs from the current-row highlight (the checks below mean something)");
     CHECK (colNear (290, 34, body.getRed(), body.getGreen(), body.getBlue()),
            "rows above the current one keep the list background");
-    CHECK (colNear (150, 12, head.getRed(), head.getGreen(), head.getBlue()),
+    CHECK (colNear (150, 2, head.getRed(), head.getGreen(), head.getBlue()),
            "header area keeps the table header colour and is not covered by the highlight");
     CHECK (colNear (290, 74, 60, 80, 120), "current row band carries the blue highlight");
 
