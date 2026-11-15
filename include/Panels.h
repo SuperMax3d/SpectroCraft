@@ -1074,7 +1074,7 @@ public:
         currently resolved size (e.g. "Auto (4096)"); pass 0 for a plain
         "Auto" label. The current selection is preserved and no change
         messages are sent. */
-    void rebuildFftSizeItems (int autoSize);
+    void rebuildFftSizeItems (int autoSize, std::array<int, 3> multiResSizes = { 0, 0, 0 });
 
     // Selects an FFT-size combo item without sending change messages.
     void setFftSizeSelection (int id);

@@ -5214,7 +5214,8 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
                              "frequency resolution but render more slowly. 'Auto' picks the size "
                              "from the current time/frequency zoom levels on every render. "
                              "'Multi-resolution' uses a long window for low frequencies and a short "
-                             "one for high frequencies (sharper transients); it takes about twice "
+                             "one for high frequencies (sharper transients); its sizes, shown in "
+                             "brackets, grow when you zoom in frequency. It takes about twice "
                              "the time and five times the memory of a single 2048 size.");
     autoSlicesEdit.setTooltip ("Auto FFT size - target time slices: how many FFT frames to fit across "
                                "the visible time range. Higher values give finer time resolution but "
@@ -5279,7 +5280,7 @@ void SpectralControlsPanel::refresh()
     logToggle.setButtonText (app.settings.logFrequency ? "Logarithmic" : "Linear");
 }
 
-void SpectralControlsPanel::rebuildFftSizeItems (int autoSize)
+void SpectralControlsPanel::rebuildFftSizeItems (int autoSize, std::array<int, 3> multiResSizes)
 {
     // This JUCE build has no setItemText(), so the Auto label is refreshed by
     // rebuilding the small item list. The current selection is preserved and
@@ -5293,7 +5294,7 @@ void SpectralControlsPanel::rebuildFftSizeItems (int autoSize)
     if (autoSize > 0)
         autoLabel = juce::String ("Auto (") + juce::String (autoSize) + ")";
     fftSizeCombo.addItem (autoLabel, kFftAutoId);
-    fftSizeCombo.addItem ("Multi-resolution", kFftMultiResId);
+    fftSizeCombo.addItem (SpectralEngine::multiResLabel (multiResSizes), kFftMultiResId);
     if (selId != 0)
         fftSizeCombo.setSelectedId (selId, juce::dontSendNotification);
 }
