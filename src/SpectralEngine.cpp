@@ -484,8 +484,9 @@ float SpectralEngine::probeMagnitude (const AudioEngine& engine, int channel,
     if (s.fftMultiRes)
     {
         // Same blend as the picture: the readout matches what is drawn.
-        const auto sizes = multiResFftSizes (rate);
-        const auto w = multiResWeights (freqHz, rate);
+        const double zoom = multiResZoom (s, rate);
+        const auto sizes = multiResFftSizes (rate, zoom);
+        const auto w = multiResWeights (freqHz, rate, zoom);
         double v = 0.0, best = -300.0;
         for (int k = 0; k < 3; ++k)
         {
@@ -539,29 +540,58 @@ double rowFrequency (int y, int height, const Settings& s, double rate)
 }
 } // namespace
 
-std::array<int, 3> SpectralEngine::multiResFftSizes (double sampleRate)
+std::array<int, 3> SpectralEngine::multiResFftSizes (double sampleRate, double freqZoom)
 {
     // 512 samples at 48 kHz = 10.7 ms; the nearest power of two in log terms.
-    const double target = std::max (1.0, sampleRate) * 512.0 / 48000.0;
-    const int order = std::clamp ((int) std::lround (std::log2 (target)), 7, 12);   // 128..4096
+    const double base = std::max (1.0, sampleRate) * 512.0 / 48000.0;
+    const int baseOrder = std::clamp ((int) std::lround (std::log2 (base)), 7, 12);   // 128..4096
+    // Zooming in lengthens every window, up to N = 1024 (16N = 16384, Auto's
+    // longest) unless the sample rate alone already asks for more.
+    const double zoom = std::max (1.0, std::isfinite (freqZoom) ? freqZoom : 1.0);
+    const int order = std::clamp ((int) std::lround (std::log2 (base * zoom)),
+                                  baseOrder, std::max (baseOrder, 10));
     const int n = 1 << order;
     return { n, n * 4, n * 16 };
 }
 
-std::array<double, 3> SpectralEngine::multiResWeights (double freqHz, double sampleRate)
+double SpectralEngine::multiResZoom (const Settings& s, double sampleRate)
 {
-    const auto n = multiResFftSizes (sampleRate);
-    // Above 20 * rate / M a window of M samples separates partials 5% apart.
-    const double fLongToMid  = 20.0 * sampleRate / n[1];
-    const double fMidToShort = 20.0 * sampleRate / n[0];   // 4x higher: the ramps never overlap
-    auto above = [freqHz] (double fc)
-    {   // 0 below fc/sqrt(2), 1 above fc*sqrt(2), linear in log2(f) between
-        if (!(freqHz > 0.0)) return 0.0;
-        return std::clamp (std::log2 (freqHz / fc) + 0.5, 0.0, 1.0);
+    const double nyq = std::max (1.0, sampleRate * 0.5);
+    const double refLo = 20.0, refHi = std::min (20000.0, nyq);
+    const double lo = std::max (1.0, (double) s.minFrequency);
+    const double hi = std::min (nyq, (double) s.maxFrequency);
+    if (!(hi > lo) || !(refHi > refLo))
+        return 1.0;
+    const double zoom = s.logFrequency ? std::log (refHi / refLo) / std::log (hi / lo)
+                                       : (refHi - refLo) / (hi - lo);
+    return std::isfinite (zoom) ? std::max (1.0, zoom) : 1.0;
+}
+
+std::array<double, 3> SpectralEngine::multiResWeights (double freqHz, double sampleRate,
+                                                       double freqZoom)
+{
+    if (!(freqHz > 0.0))
+        return { 0.0, 0.0, 1.0 };
+    const auto n = multiResFftSizes (sampleRate, freqZoom);
+    const double zoom = std::max (1.0, std::isfinite (freqZoom) ? freqZoom : 1.0);
+    // Window this frequency asks for: bins 5% of f apart, finer when zoomed in.
+    const double need = 20.0 * sampleRate * zoom / freqHz;
+    auto longer = [need] (int shorter)
+    {   // share of the longer size of a pair: 0 while the shorter one meets the
+        // need with a half-octave margin, 1 from a half octave past it
+        return std::clamp (std::log2 (need / (double) shorter) + 0.5, 0.0, 1.0);
     };
-    const double upper = above (fMidToShort);
-    const double midUp = above (fLongToMid);
-    return { upper, midUp - upper, 1.0 - midUp };
+    const double atLeastMid = longer (n[0]);
+    const double atLeastLong = longer (n[1]);   // 4x further: the ramps never overlap
+    return { 1.0 - atLeastMid, atLeastMid - atLeastLong, atLeastLong };
+}
+
+juce::String SpectralEngine::multiResLabel (const std::array<int, 3>& sizes)
+{
+    if (sizes[0] <= 0)
+        return "Multi-resolution";
+    return "Multi-resolution (" + juce::String (sizes[0]) + "-" + juce::String (sizes[1])
+           + "-" + juce::String (sizes[2]) + ")";
 }
 
 bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& s,
@@ -608,14 +638,15 @@ bool SpectralEngine::renderToDb (const AudioEngine& engine, const Settings& s,
         // size with no share anywhere in the visible frequency range (e.g. the
         // long window when zoomed into the treble) is not computed at all.
         const double rate = engine.sampleRate();
-        const auto sizes = multiResFftSizes (rate);
+        const double zoom = multiResZoom (s, rate);
+        const auto sizes = multiResFftSizes (rate, zoom);
         // Each size only renders the rows where it has a share: the weights
         // follow the frequency monotonically, so those rows are one band.
         std::vector<std::array<double, 3>> rowW ((size_t) height);
         std::array<int, 3> yBegin { height, height, height }, yEnd { 0, 0, 0 };
         for (int y = 0; y < height; ++y)
         {
-            rowW[(size_t) y] = multiResWeights (rowFrequency (y, height, s, rate), rate);
+            rowW[(size_t) y] = multiResWeights (rowFrequency (y, height, s, rate), rate, zoom);
             for (size_t k = 0; k < 3; ++k)
                 if (rowW[(size_t) y][k] > 0.0)
                 {

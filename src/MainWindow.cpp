@@ -4226,12 +4226,14 @@ void MainWindow::updateAutoFftLabel()
 {
     if (!controlsPanel || !spectralView) return;
     const int n = spectralView->autoFftSizeForCurrentZoom ();
+    const auto multi = spectralView->multiResSizesForCurrentZoom ();   // issue #22
     juce::String label = "Auto";   // no file / un-laid-out view: plain "Auto"
     if (n > 0)
         label = "Auto (" + juce::String (n) + ")";
+    label += "|" + SpectralEngine::multiResLabel (multi);
     if (label == autoFftLabel_) return;
     autoFftLabel_ = label;
-    controlsPanel->rebuildFftSizeItems (n);
+    controlsPanel->rebuildFftSizeItems (n, multi);
 }
 
 void MainWindow::vScrollInsetsForView (Application& app, juce::Component* view,

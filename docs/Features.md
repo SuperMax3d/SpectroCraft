@@ -380,11 +380,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     the upper range keep the short window's sharpness. Each frequency uses the
     shortest window whose bins are at most 5% of it apart (a window of M
     samples takes over above 20 × rate / M: 469 Hz and 1875 Hz at 48 kHz),
-    blended over one octave around each crossover. The level readout under the
+    blended over one octave around each crossover. Like Auto it follows the
+    frequency zoom: zoomed in N times (in the axis' own log or linear scale,
+    compared with 20 Hz–20 kHz), each frequency asks for bins N times finer and
+    the three sizes grow with it, up to 1024 / 4096 / 16384 (Auto's longest),
+    so a zoomed view keeps the detail per pixel of the default one. The combo
+    entry shows the sizes in use, e.g. `Multi-resolution (512-2048-8192)`, and
+    so does the frequency axis' FFT Size submenu. The level readout under the
     mouse uses the same blend. Tones read the same level in every band; broad
     noise reads about 6 dB lower per band towards the bass, since a 4x longer
     window spreads it over 4x more bins. Each size only draws the rows where
-    it has a share, and a view zoomed entirely above the upper crossover only
+    it has a share, and a view of the upper part of the spectrum only
     computes the short window. Measured on an Apple M2 (Debug build, one
     1600 × 300 row of a 48 kHz file, log 20 Hz–20 kHz): a repaint takes about
     1.5x the time of a single size, a new view (empty tile cache) 2–2.5x that

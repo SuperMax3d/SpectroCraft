@@ -130,21 +130,37 @@ public:
                               int heightPixels, double minFreqHz, double maxFreqHz,
                               double targetTimeSlices = 80.0, double binsPerPixel = 1.25);
 
-    /** Multi-resolution mode (Settings::fftMultiRes, issue #17): the picture
-        is drawn from three FFT sizes, N, 4N and 16N with N the power of two
-        closest to 10.7 ms of audio (512 / 2048 / 8192 at 48 kHz), returned
-        shortest first. N is kept within 128..4096. */
-    static std::array<int, 3> multiResFftSizes (double sampleRate);
+    /** Multi-resolution mode (Settings::fftMultiRes, issues #17 and #22): the
+        picture is drawn from three FFT sizes, N, 4N and 16N, returned shortest
+        first. N is the power of two closest to 10.7 ms of audio times the
+        frequency zoom (512 / 2048 / 8192 at 48 kHz in the default view).
+        Zooming in lengthens the windows up to Auto's longest (16384 at
+        48 kHz): N stays within 128..4096 and never grows past 1024 because of
+        the zoom alone (a high sample rate may start above it). */
+    static std::array<int, 3> multiResFftSizes (double sampleRate, double freqZoom = 1.0);
+
+    /** How far the frequency axis of `s` is zoomed in, compared with the
+        default 20 Hz..20 kHz view (clipped to Nyquist), in the axis' own
+        scale (log or linear); 1 when not zoomed in. Multi-resolution sizes
+        and crossovers follow it, so a zoomed view keeps the detail per pixel
+        of the default one. */
+    static double multiResZoom (const Settings& s, double sampleRate);
 
     /** Share of each multi-resolution size (same order as multiResFftSizes)
-        at a frequency; the three add up to 1. Each frequency takes the
-        shortest window that still separates partials 5% apart: a window of
-        M samples has bins rate/M apart, so it takes over above 20 * rate / M.
-        Around each crossover the two sizes blend over one octave (linear in
-        log frequency), so no seam shows. Low notes therefore come from the
-        long window (fine frequency detail), transients in the upper range from
-        the short one (sharp in time). */
-    static std::array<double, 3> multiResWeights (double freqHz, double sampleRate);
+        at a frequency; the three add up to 1. Each frequency asks for bins at
+        most 5% of it apart, divided by the zoom (finer when zoomed in), i.e.
+        a window of about 20 * rate * zoom / f samples, and takes the size
+        that meets it: the short one where it suffices, the middle one, then
+        the long one. Around each switch the two sizes blend over one octave
+        (linear in log frequency), so no seam shows. Low notes therefore come
+        from the long window (fine frequency detail), transients in the upper
+        range from the short one (sharp in time). */
+    static std::array<double, 3> multiResWeights (double freqHz, double sampleRate,
+                                                  double freqZoom = 1.0);
+
+    /** Combo / menu label: "Multi-resolution (512-2048-8192)", or plain
+        "Multi-resolution" when the sizes are not known (zeros). */
+    static juce::String multiResLabel (const std::array<int, 3>& sizes);
 
     // Probe the magnitude (dB, e.g. -120..0) at an exact time/frequency point.
     // Pass the mipmap level the view is currently displaying so the tiles are

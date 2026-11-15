@@ -145,6 +145,10 @@ public:
         panel's "Auto (N)" combo label and the Alt+Shift +/- shortcuts. */
     int autoFftSizeForCurrentZoom() const;
 
+    /** The three sizes Multi-resolution uses at the current frequency zoom
+        (issue #22), for the "Multi-resolution (x-y-z)" labels. */
+    std::array<int, 3> multiResSizesForCurrentZoom() const;
+
     // Renders one frame into `img` using the view's current state (unit tests).
     bool renderSpectralContentForTest (juce::Image& img, const Settings& rs)
     { return renderSpectralContent (img, rs); }

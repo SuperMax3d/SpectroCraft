@@ -163,6 +163,7 @@ void SpectralView::resized() { dirty = true; imageDirty = true; }
 // actions and shortcuts as the Spectral Controls panel.
 static void showViewContextMenu (Application& app, double clickT, double clickF,
                                  bool onFreqAxis, int autoFftSize,
+                                 const std::array<int, 3>& multiResSizes,
                                  const std::function<void(int)>& onAction)
 {
     if (!onAction) return;
@@ -222,7 +223,8 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
         if (autoFftSize > 0)
             autoLab = "Auto (" + juce::String (autoFftSize) + ")";
         fftMenu.addItem (CtxFftAuto, autoLab, app.settings.fftAuto && !app.settings.fftMultiRes);
-        fftMenu.addItem (CtxFftMultiRes, "Multi-resolution", true, app.settings.fftMultiRes);
+        fftMenu.addItem (CtxFftMultiRes, SpectralEngine::multiResLabel (multiResSizes), true,
+                         app.settings.fftMultiRes);
         fftMenu.addSeparator();
         fftMenu.addItem (CtxAxisLinear, "Linear",      !app.settings.logFrequency);
         fftMenu.addItem (CtxAxisLog,    "Logarithmic",  app.settings.logFrequency);
@@ -745,6 +747,7 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
                 showViewContextMenu (app,
                                      xToTime ((double) dragStartX), freqAtY (dragStartY),
                                      onAxis, autoFftSizeForCurrentZoom (),
+                                     multiResSizesForCurrentZoom (),
                                      [this, onAxis] (int id)
                 {
                     using enum ContextMenuIDs;
@@ -1539,6 +1542,15 @@ int SpectralView::autoFftSizeForCurrentZoom() const
                                           h, freqMin, freqMax,
                                           settings_.autoTargetTimeSlices,
                                           settings_.autoBinsPerPixel);
+}
+
+std::array<int, 3> SpectralView::multiResSizesForCurrentZoom() const
+{
+    const double rate = app.audioEngine().isFileLoaded() ? app.audioEngine().sampleRate() : 48000.0;
+    Settings s = settings_;
+    s.minFrequency = (float) std::max (1.0, freqMin);
+    s.maxFrequency = (float) std::min (rate * 0.5, freqMax);
+    return SpectralEngine::multiResFftSizes (rate, SpectralEngine::multiResZoom (s, rate));
 }
 
 bool SpectralView::renderSpectralContent (juce::Image& img, const Settings& rs,
