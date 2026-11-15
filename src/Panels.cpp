@@ -225,6 +225,8 @@ juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
     // One shared unit for all channels...
     dlg->addComboBox ("unit", { "None", "Volts", "Pascal", "g" }, "Units:");
     auto* unitCombo = dlg->getComboBoxComponent ("unit");
+    if (unitCombo != nullptr)
+        unitCombo->setTooltip ("Physical unit the samples are shown in.");
 
     // ...and one full-scale field per channel.
     const int nch = std::max (1, d.engine.numChannels());
@@ -233,6 +235,10 @@ juce::AlertWindow* FileListPanel::createScaleDialog (FileDoc& d)
             scaleFieldId (ch),
             d.scale.fullScaleFor (ch) > 0.0 ? juce::String (d.scale.fullScaleFor (ch)) : "1.0",
             "Full scale ch" + juce::String (ch + 1) + ":");
+    for (int ch = 0; ch < nch; ++ch)
+        if (auto* e = dlg->getTextEditor (scaleFieldId (ch)))
+            e->setTooltip ("Value, in the chosen unit, of a full-scale sample (1.0) on channel "
+                           + juce::String (ch + 1) + ".");
 
     if (unitCombo == nullptr || dlg->getTextEditor (scaleFieldId (0)) == nullptr)
     {
@@ -3655,6 +3661,11 @@ juce::AlertWindow* FFTAnalysisView::createSetHarmonicDialog ()
     // frequency under the cursor and follows the mouse while active.
     w->addTextEditor ("Harmonic number of the mouse:", "1");
     w->addTextEditor ("Number of harmonics to show:", "10");
+    if (auto* e = w->getTextEditor ("Harmonic number of the mouse:"))
+        e->setTooltip ("Which harmonic the mouse points at: 1 = the fundamental, 2 = the "
+                       "first overtone, and so on.");
+    if (auto* e = w->getTextEditor ("Number of harmonics to show:"))
+        e->setTooltip ("How many harmonics get a vertical line.");
     for (const char* name : { "Harmonic number of the mouse:",
                               "Number of harmonics to show:" })
         if (auto* editor = w->getTextEditor (name))
@@ -4373,6 +4384,10 @@ void FFTAnalysisView::copySpectrumToClipboard()
 
 ToneListEditor::Row::Row()
 {
+    freq.setTooltip ("Frequency of this tone, in Hz.");
+    amp.setTooltip ("Amplitude of this tone, 0 to 1 (1 = full scale). The tones are added "
+                    "together.");
+    clear.setTooltip ("Empty this tone slot.");
     addAndMakeVisible (&freq);
     addAndMakeVisible (&amp);
     addAndMakeVisible (&clear);
@@ -4403,6 +4418,7 @@ ToneListEditor::ToneListEditor()
 
     addBtn.setButtonText ("Add Tone");
     addBtn.onClick = [this] { addRow (440.0, 0.5f); };
+    addBtn.setTooltip ("Fill the next empty slot with a 440 Hz tone.");
     addAndMakeVisible (&addBtn);
     setSize (width (), height());
 }
@@ -6555,6 +6571,10 @@ StatusBar::StatusBar()
     addChildComponent (stopEdit);
     addChildComponent (lenEdit);
     addChildComponent (posEdit);
+    startEdit.setTooltip ("Selection start. Type a time to move it.");
+    stopEdit.setTooltip ("Selection end. Type a time to move it.");
+    lenEdit.setTooltip ("Selection length. Type a duration to change the end.");
+    posEdit.setTooltip ("Playhead position. Type a time to move the playhead.");
 
     // Live editing: every parseable change is applied straight away, so a
     // pasted value takes effect without pressing Enter. Unparseable partial
@@ -8215,6 +8235,9 @@ void SelectionPanel::showCloneNumbersDialog()
 
     // This JUCE build's addTextEditor returns void; fetch the editor by name.
     dlg.addTextEditor ("mults", "2, 3", "Multipliers:");
+    if (auto* e = dlg.getTextEditor ("mults"))
+        e->setTooltip ("Frequency multipliers separated by commas: each one adds a copy of the "
+                       "selection at that multiple of its frequencies.");
     auto* ed = dlg.getTextEditor ("mults");
     dlg.addButton ("Clone", 1, juce::KeyPress (juce::KeyPress::returnKey));
     dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -8291,6 +8314,14 @@ PythonPanel::PythonPanel (Application& appIn, const juce::File& folder)
     addBtn.onClick     = [this] { showAddDialog (); };
     removeBtn.onClick  = [this] { confirmRemove (); };
     runBtn.onClick     = [this] { requestRun (); };
+
+    scriptBox.setTooltip ("Python scripts in your script folder. Your edits are saved when you "
+                          "switch to another script.");
+    addBtn.setTooltip ("Create a new script from a template.");
+    removeBtn.setTooltip ("Delete the selected script file.");
+    runBtn.setTooltip ("Run the script on the selection, or on the whole file when nothing "
+                       "is selected (undoable).");
+    editor.setTooltip ("Script text. Right-click the panel to reset a built-in example.");
 
     refreshScripts ();
 }
@@ -8617,6 +8648,7 @@ static juce::Colour showColourPickerDialog (juce::Colour initial)
         s->setValue ((double) inits[i]);
         s->setSize (240, 20);
         s->setName (names[i]);   // AlertWindow draws this as a label above the slider
+        s->setTooltip (juce::String (names[i]) + " part of the ink colour, 0 to 255.");
         w.addCustomComponent (s);
         sliders.push_back (s);
     }
@@ -8801,6 +8833,7 @@ DrawingPanel::DrawingPanel (Application& appIn)
     const juce::String widthTip ("Line width in pixels for new arrows, rectangles and freehand strokes.");
     const juce::String sizeTip  ("Font size in points for new text items.");
     showAllBtn.setTooltip ("Show or hide all drawings of this file.");
+    deleteBtn.setTooltip ("Delete the drawings selected in the list.");
     widthSlider.setTooltip (widthTip);
     widthLab.setTooltip (widthTip);
     colourBtn.setTooltip ("Ink colour used by new drawings.");
@@ -9049,6 +9082,7 @@ void DrawingPanel::showEditDialog (int row)
         s->setValue ((double) inits[i]);
         s->setSize (240, 20);
         s->setName (names[i]);   // AlertWindow draws this as a label above the slider
+        s->setTooltip (juce::String (names[i]) + " part of the ink colour, 0 to 255.");
         dlg.addCustomComponent (s);
         sliders.push_back (s);
     }
@@ -9058,6 +9092,7 @@ void DrawingPanel::showEditDialog (int row)
     widthSl->setValue ((double) it.widthPx);
     widthSl->setSize (240, 20);
     widthSl->setName ("Width");
+    widthSl->setTooltip ("Line width of this drawing, in pixels.");
     dlg.addCustomComponent (widthSl);
 
     auto* sizeSl = new juce::Slider ();
@@ -9065,6 +9100,7 @@ void DrawingPanel::showEditDialog (int row)
     sizeSl->setValue ((double) it.textSize);
     sizeSl->setSize (240, 20);
     sizeSl->setName ("Text size");
+    sizeSl->setTooltip ("Font size of this drawing's text, in points.");
     dlg.addCustomComponent (sizeSl);
 
     auto updateSwatch = [&] ()
@@ -9829,6 +9865,15 @@ TablesColourDialog::TablesColourDialog (const juce::String& title, int currentId
     okBtn_.onClick = [this] { doOk (); };
     cancelBtn_.onClick = [this] { doCancel (); };
 
+    newBtn_.setTooltip ("Add a custom colour, starting from the selected one.");
+    deleteBtn_.setTooltip ("Delete the selected custom colour (the 12 built-in colours stay).");
+    resetBtn_.setTooltip ("Delete every custom colour.");
+    rEd_.setTooltip ("Red, 0 to 255 (custom colours only).");
+    gEd_.setTooltip ("Green, 0 to 255 (custom colours only).");
+    bEd_.setTooltip ("Blue, 0 to 255 (custom colours only).");
+    okBtn_.setTooltip ("Use the selected colour.");
+    cancelBtn_.setTooltip ("Close without changing the colour.");
+
     juce::Component::addAndMakeVisible (&grid_);
     juce::Component::addAndMakeVisible (&newBtn_);
     juce::Component::addAndMakeVisible (&deleteBtn_);
@@ -10224,6 +10269,10 @@ TablesPanel::TablesPanel (Application& appIn)
 
     masterShowBtn.onClick = [this] { app.setShowAllTables (!app.showAllTables); };
     masterShowBtn.onShiftClick = [this] (const juce::MouseEvent&) { toggleAllVisibility (); };
+    masterShowBtn.setTooltip ("Show or hide the tables of this file in the views. Shift-click "
+                              "shows (or hides) every table and parameter.");
+    modeCombo.setTooltip ("Where the tables are drawn: over the waveform, over the "
+                          "spectrogram, or in a track of their own.");
 
     // A click in the plot feeds a click-based alignment that still needs
     // plot points; otherwise it moves the playhead there. Decided once per
@@ -10577,6 +10626,23 @@ void TablesPanel::pasteToNewTable()
         statusLabel.setText ("Import failed: " + juce::String (err), juce::dontSendNotification);
         return;
     }
+    selectNewestTable ();
+}
+
+void TablesPanel::tableFromSpectralSelection()
+{
+    std::string err;
+    if (!app.addTableFromSpectralSelection (&err))
+    {
+        statusLabel.setText ("Table from Spectral Selection: " + juce::String (err),
+                             juce::dontSendNotification);
+        return;
+    }
+    selectNewestTable ();
+}
+
+void TablesPanel::selectNewestTable()
+{
     // The new table is the last one: select it in the list and point the
     // preview at it so its plot shows without a click. addTableFromCsv has
     // already notified the panel in the app; make sure the rows are current
@@ -10621,6 +10687,8 @@ ManualAlignWindow::ManualAlignWindow (const juce::String& title, const juce::Str
     cancelBtn.setButtonText ("Cancel");
     okBtn.onClick = [this] { if (onOk) onOk (); exitModalState (1); };
     cancelBtn.onClick = [this] { exitModalState (-1); };
+    okBtn.setTooltip ("Apply these values (Enter).");
+    cancelBtn.setTooltip ("Close without changing anything (Esc).");
 
     juce::Component::addAndMakeVisible (&msgLabel);
     juce::Component::addAndMakeVisible (&okBtn);
@@ -11195,6 +11263,9 @@ void TablesPanel::showContextMenu (int row)
 
     juce::PopupMenu m;
     m.addItem (1, "Paste to new table");
+    // Frequency Analysis > Freq vs Time (Absolute) of the spectral selection,
+    // straight into a new table: no panel, no clipboard.
+    m.addItem (9, "Table from Spectral Selection", app.hasSpectralSelection ());
     m.addSeparator ();
     m.addItem (2, "Remove Selected", nSel > 0);
     if (nSel > 0)
@@ -11260,6 +11331,7 @@ void TablesPanel::showContextMenu (int row)
     switch (id)
     {
         case 1: pasteToNewTable (); break;
+        case 9: tableFromSpectralSelection (); break;
         case 2: removeSelected (); break;
         case 3: copySelection (); break;
         case 4:
@@ -11450,6 +11522,11 @@ ActionsPanel::ActionsPanel (Application& a) : app (a)
     recordBtn.onClick = [this] { handleRecord (); };
     runBtn.onClick = [this] { handleRun (); };
     batchBtn.onClick = [this] { handleBatch (); };
+
+    newBtn.setTooltip ("Create an empty action.");
+    recordBtn.setTooltip ("Start or stop recording your edits as steps of the selected action.");
+    runBtn.setTooltip ("Replay the selected action on the current file (Ctrl/Cmd+Shift+P).");
+    batchBtn.setTooltip ("Run the selected action on every matching file of a folder.");
 
     // Same table style as the marker list: light header with Name/Size columns.
     auto& header = table.getHeader();
@@ -11802,6 +11879,9 @@ ActionEditWindow::ActionEditWindow (Application& a, int index)
     cancelBtn.setButtonText ("Cancel");
     okBtn.onClick = [this] { okClicked (); };
     cancelBtn.onClick = [this] { if (onCloseRequested) onCloseRequested (); };
+    editor.setTooltip ("The action as JSON: its name and its list of steps.");
+    okBtn.setTooltip ("Check the JSON and save the action.");
+    cancelBtn.setTooltip ("Close without saving.");
 
     juce::Component::addAndMakeVisible (&editor);
     juce::Component::addAndMakeVisible (&errorLabel);
@@ -11938,6 +12018,19 @@ ActionBatchWindow::ActionBatchWindow (Application& a, int actionIndex)
     browseOutBtn.onClick = [this] { browseOutput (); };
     runBtn.onClick = [this] { runClicked (); };
     closeBtn.onClick = [this] { tryClose (); };
+
+    inputField.setTooltip ("Folder holding the files to process.");
+    outputField.setTooltip ("Folder the processed files are written to.");
+    browseInBtn.setTooltip ("Choose the input folder.");
+    browseOutBtn.setTooltip ("Choose the output folder.");
+    sameOutBox.setTooltip ("Write each processed file next to its source.");
+    subfoldersBox.setTooltip ("Also process the files in the subfolders of the input folder.");
+    formatsField.setTooltip ("File patterns to process, separated by semicolons, e.g. "
+                             "\"*.wav; *.mp3\".");
+    renameField.setTooltip ("Name of each output file. %Filename% is the source file name "
+                            "without its extension.");
+    runBtn.setTooltip ("Process every matching file. Your open files are not touched.");
+    closeBtn.setTooltip ("Close this window.");
 
     juce::Component::addAndMakeVisible (&inputLbl);
     juce::Component::addAndMakeVisible (&inputField);

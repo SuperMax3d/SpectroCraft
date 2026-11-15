@@ -3,6 +3,7 @@
 // alignment, overlays on the waveform/spectrogram and a dedicated track.
 #include <JuceHeader.h>
 #include <vector>
+#include <functional>
 
 namespace sc::tables
 {
@@ -95,8 +96,11 @@ void parseCustomColours (const juce::String& text, std::vector<juce::Colour>& ou
 
 /** Splits CSV/TSV text into a grid of fields. Handles quoted fields (with
     embedded separators), comma AND tab column separators, CRLF/LF line
-    endings and trims surrounding spaces. */
-std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text);
+    endings and trims surrounding spaces. One pass over the UTF-8 bytes.
+    `progress`, when set, gets the fraction of the text read (about once per
+    MiB) and cancels the parse by returning false: the grid comes back empty. */
+std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text,
+                                                     const std::function<bool (double)>& progress = {});
 
 /** True when the cell parses as a number or true/false (i.e. is data). */
 bool cellIsData (const juce::String& s, double* out = nullptr);
@@ -116,10 +120,15 @@ bool cellIsData (const juce::String& s, double* out = nullptr);
     parameter. The table is fitted to the uniform-grid model with
     sampleRate = (rows-1)/span and offsetSecs = start; when `docDurationSecs`
     is >= 0 and the start lies beyond it, the whole span is shifted so that
-    the table starts at 0. */
+    the table starts at 0.
+
+    `progress` (any thread: the import touches no shared state) gets the
+    fraction done, 0..1, and cancels by returning false: the import then
+    fails with "cancelled". */
 bool importTable (const juce::String& name, const juce::String& csvText,
                   TableData& out, std::string* errOut = nullptr,
-                  double docDurationSecs = -1.0);
+                  double docDurationSecs = -1.0,
+                  const std::function<bool (double)>& progress = {});
 
 /** Decimates every parameter so the table holds at most `newRateHz` rows per
     second: keeps every ceil(oldRate/newRate)th row - pure removal, no

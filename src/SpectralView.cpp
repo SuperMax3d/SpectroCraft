@@ -2393,6 +2393,13 @@ juce::Rectangle<int> SpectralView::channelLabelBounds (int ch, int centreY) cons
     return { x, centreY - 10, textW, 20 };
 }
 
+juce::String SpectralView::getTooltip()
+{
+    if (app.audioEngine().isFileLoaded() && channelAtLabel (getMouseXYRelative()) >= 0)
+        return "Click to mute or unmute this channel; Ctrl+click (Cmd+click on macOS) solos it.";
+    return juce::SettableTooltipClient::getTooltip();
+}
+
 int SpectralView::channelAtLabel (juce::Point<int> p) const
 {
     // Only inside the axis strip: the widened target must never take clicks

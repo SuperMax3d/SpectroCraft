@@ -11,6 +11,12 @@
 #include <list>
 #include <cstdint>
 
+// Frames of the tiles getTiles() returns are CENTRED on startSample + f*hopSize
+// (standard STFT "center" convention): the analysis window of frame f spans
+// [startSample + f*hop - fftSize/2, startSample + f*hop + fftSize/2), with the
+// samples outside the document read as zeros. Every displayed time therefore
+// has a frame centred near it, the first and last fftSize/2 samples included.
+// computeTile() frames instead START at startSample + f*hop (raw data export).
 class SpectralTile
 {
 public:
@@ -153,17 +159,21 @@ public:
     void setMaxCacheBytes (size_t bytes);
 
     // Exposed for unit tests / diagnostics. Returns dB magnitudes (no gain/bias/dB scaling).
+    // Frame f's window starts at startSample + f*hopSize (not centred).
     std::shared_ptr<SpectralTile> computeTile (const AudioEngine& engine, int channel,
                                                int64_t startSample, int64_t numSamples,
                                                int fftSize, int hopSize, int windowType) const;
 
 private:
-    // Fill tile->mag for frames [frameStart, frameStart+frameCount). Called from
-    // pool jobs on disjoint ranges of the same tile (no locking needed).
+    // Fill tile->mag for frames [frameStart, frameStart+frameCount). Frame f's
+    // window starts at tileStartSample + f*hopSize + windowOffset (-fftSize/2
+    // for centred frames); samples before 0 or past the end read as zeros.
+    // Called from pool jobs on disjoint ranges of the same tile (no locking needed).
     void computeFrames (SpectralTile& tile, const AudioEngine& engine,
                         int channel, int64_t tileStartSample,
                         int frameStart, int frameCount,
-                        int fftSize, int hopSize, int windowType) const;
+                        int fftSize, int hopSize, int windowType,
+                        int64_t windowOffset) const;
     ColourMap colourMap_ = ColourMap::Classic;
     std::array<uint8_t, 256 * 4> lut_ = buildColourLUT (ColourMap::Classic);
 

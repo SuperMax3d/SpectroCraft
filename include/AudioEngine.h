@@ -104,7 +104,7 @@ public:
     void setGain (float); float gain() const { return gain_.load(); }
 
     /** Playback mute per channel (a click on a channel number in the
-        tracks): a muted channel's output is silent; the picture stays. Part
+        tracks): a muted channel is left out of playback; the picture stays. Part
         of this document's session state, not saved with the file. Message
         thread; the audio thread picks the change up at the next block.
         Channels past the end of the list are not muted. */
@@ -115,6 +115,16 @@ public:
     }
     void setMutedChannels (std::vector<bool> muted);
     const std::vector<bool>& mutedChannels() const noexcept { return muted_; }
+
+    /** Playback routing: channel ch plays on output ch, and when the device
+        has fewer outputs than the file has channels, the extra ones fold
+        onto output ch % numOutputs so every channel stays audible (2
+        outputs, 4 channels: 1 and 3 left, 2 and 4 right). -1 without
+        outputs. A mono file plays on every output. */
+    static int playbackOutputFor (int channel, int numOutputs) noexcept;
+    /** Gain of each channel folded onto `output`: 1 / the number of channels
+        sharing it, so their sum cannot clip (1 when it has a single one). */
+    static float playbackFoldGain (int output, int numChannels, int numOutputs) noexcept;
 
     /** "Play Spectral Selection": when a non-null selection is installed,
         playback passes through an STFT mask that zeros every (t,f) bin outside
@@ -457,13 +467,11 @@ private:
 
     // Channel mutes: muted_ is the message thread's copy; the audio thread
     // snapshots mutedForAudio_ (swapped under muteMutex, null when nothing is
-    // muted) once per block and silences those outputs.
+    // muted) once per block and leaves those channels out of the mix.
     std::vector<bool> muted_;
     mutable std::mutex muteMutex;
     std::shared_ptr<const std::vector<uint8_t>> mutedForAudio_;
-    /** Silences the outputs of muted channels; monoToAll: one file channel
-        feeds every output, so its mute silences them all. */
-    void applyChannelMutes (const juce::AudioSourceChannelInfo& info, bool monoToAll) const;
+    std::shared_ptr<const std::vector<uint8_t>> mutesForAudio() const;   // the audio thread's snapshot
 
     ::UndoManager* undo = nullptr;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks

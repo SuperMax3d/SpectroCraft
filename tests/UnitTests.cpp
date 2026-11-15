@@ -1838,12 +1838,22 @@ static void testHistoryPanelPaint()
 
     // Regression: the current row's highlight used to be drawn with fillAll(),
     // which painted over the whole panel and hid every earlier row + the header.
-    // Styling matches every other table in the app (the shared dark palette):
-    // list body 0xff1e1e1e, header 0xff303030, current-row highlight
-    // RGB(60,80,120). The header sample is taken at y = 2, above the header
-    // text, so it measures the band and not a glyph.
-    CHECK (colNear (290, 34, 30, 30, 30), "rows above the current one keep the shared table body colour");
-    CHECK (colNear (150, 2, 48, 48, 48), "header area is the shared header grey and not covered by the highlight");
+    /* The body and header take the shared LookAndFeel's list / table header
+       colours, like every other table - so the expected values are read from
+       the LookAndFeel the panel was given above, not written out here, and not
+       from the global default (which is whichever one another test happened to
+       leave installed). Current-row highlight RGB(60,80,120). The header sample
+       is taken at y = 2, above the header text, so it measures the band and
+       not a glyph. */
+    const juce::Colour body = appLf.findColour (juce::ListBox::backgroundColourId);
+    const juce::Colour head = appLf.findColour (juce::TableHeaderComponent::backgroundColourId);
+    CHECK (std::abs ((int) body.getRed() - 60) + std::abs ((int) body.getGreen() - 80)
+               + std::abs ((int) body.getBlue() - 120) > 48,
+           "the list background differs from the current-row highlight (the checks below mean something)");
+    CHECK (colNear (290, 34, body.getRed(), body.getGreen(), body.getBlue()),
+           "rows above the current one keep the list background");
+    CHECK (colNear (150, 2, head.getRed(), head.getGreen(), head.getBlue()),
+           "header area keeps the table header colour and is not covered by the highlight");
     CHECK (colNear (290, 74, 60, 80, 120), "current row band carries the blue highlight");
 
     // Past rows must still show bright text.
@@ -4017,11 +4027,12 @@ const int kNumPanels = 9;
         CHECK (wIdx >= 0, "Window menu exists in the menu bar");
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
         // +2: the "Workspaces" submenu and "Maximize Panel Group" above the
-        // panels, +2: "Video" and "Dock/Undock Video Panel" below them,
+        // panels, +1: "Video" listed with them (after Drawing, issue #10),
         // +1 the "Allow multiple instances" toggle,
         // +1 "Allow AI control (localhost)" when the control server is built
-        // in, +1 "Diagnostic Log" (separators are not counted by getNumItems).
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems + 1, "Window menu lists every panel");
+        // in (separators are not counted by getNumItems). The Diagnostic Log
+        // toggle moved to the Help menu (issue #11).
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + kScControlMenuItems, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
         // persists it to the store file immediately.
@@ -4156,7 +4167,7 @@ const int kNumPanels = 9;
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 2 + 1 + kScControlMenuItems + 1, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + kScControlMenuItems, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 4, wIdx);   // tables
@@ -10050,6 +10061,46 @@ static void testMultiFileSupport()
     wavB.deleteFile();
 }
 
+// Closing the active file when files follow it: activate() must not treat the
+// file that shifted into its index as the one being left (it used to save the
+// closed file's selection into it and, since #9, paint the views - still
+// bound to the destroyed file - into a tab picture).
+static void testCloseActiveMiddleFile()
+{
+    const juce::File wavs[3] = { makeTempFile ("close_mid_a.wav"), makeTempFile ("close_mid_b.wav"),
+                                 makeTempFile ("close_mid_c.wav") };
+    for (const auto& f : wavs)
+        writeWav (f, 1, 8000.0, 16000, [] (int, int64_t i, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (double) i / rate); });
+
+    Application app;
+    for (const auto& f : wavs)
+        CHECK (app.openFile (f), "close middle: open " + f.getFileName ());
+    if (app.numDocs () != 3) return;
+    const int idC = app.docs[2]->id;
+
+    app.activate (2);
+    app.setSelection ({ 0.1, 0.2 });   // C's own selection
+    app.activate (1);
+    app.setSelection ({ 1.0, 1.5 });   // B's
+
+    int beforeChange = 0;
+    app.onBeforeActiveDocChange = [&] { ++beforeChange; };
+    app.closeFile ();                  // closes B; C shifts into index 1
+    app.onBeforeActiveDocChange = nullptr;
+
+    CHECK (app.numDocs () == 2 && beforeChange == 0,
+           "close middle: no 'doc being left' callback for a file that is already gone");
+    const FileDoc* c = nullptr;
+    for (int i = 0; i < app.numDocs (); ++i)
+        if (app.docs[(size_t) i]->id == idC) c = app.docs[(size_t) i].get ();
+    CHECK (c != nullptr && std::abs (c->selection.getStart () - 0.1) < 1e-9
+               && std::abs (c->selection.getEnd () - 0.2) < 1e-9,
+           "close middle: the next file keeps its own selection");
+
+    for (const auto& f : wavs) f.deleteFile ();
+}
+
 // ------------------------------------------------- Version auto-increment
 // Every build bumps VERSION.txt and regenerates generated/Version.h (About box)
 // plus sc_version.rc (exe file properties). This pins down that the baked-in
@@ -11516,6 +11567,110 @@ static void testSpectralTransientAlignment()
         // Default N=2048: hop 512 -> peak within ~256 samples (~5 px).
         CHECK (checkAlignment (sp, ie, 2048, 12), "click column aligns at default fftSize");
         iw.deleteFile ();
+    }
+}
+
+// Frames are centred on their analysis window, so the windows of the frames
+// shown at the first and last fftSize/2 samples reach past the document: they
+// must be zero-padded and computed, not left dark (42.7 ms at N=4096 / 48 kHz).
+// The same holds right after a tile boundary when the view starts
+// mid-document, and at the coarser mipmap levels.
+static void testSpectralEdgeCoverage()
+{
+    const double rate = 48000.0;
+    const int len = 3 * 48000;
+    std::vector<std::vector<float>> tone (1, std::vector<float> ((size_t) len));
+    for (int i = 0; i < len; ++i)
+        tone[0][(size_t) i] = 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                                       * 1000.0 * (double) i / rate);
+    AudioEngine te;
+    CHECK (te.initNew (1, rate, &tone), "edge coverage: tone document");
+
+    // Number of columns where the 1 kHz row is dark (no frame found there).
+    // Linear 0..2 kHz axis: 1 kHz sits on the middle rows.
+    auto darkColumns = [] (SpectralEngine& sp, const AudioEngine& eng, const Settings& s,
+                           double t0, double t1, int W) -> int
+    {
+        const int H = 64;
+        std::vector<uint8_t> rgba;
+        if (!sp.renderToPixels (eng, s, W, H, t0, t1, { 0 }, rgba)) return W;
+        int dark = 0;
+        for (int x = 0; x < W; ++x)
+        {
+            int best = 0;
+            for (int y = H / 2 - 3; y <= H / 2 + 2; ++y)
+            {
+                const size_t o = ((size_t) y * W + x) * 4;
+                best = std::max (best, (int) rgba[o] + (int) rgba[o + 1] + (int) rgba[o + 2]);
+            }
+            if (best < 60) ++dark;
+        }
+        return dark;
+    };
+
+    for (const int n : { 4096, 8192, 2048 })
+    {
+        Settings s;
+        s.fftSize = n; s.hopSize = 512; s.windowType = 1; s.fftAuto = false;
+        s.logFrequency = false; s.minFrequency = 0.0f; s.maxFrequency = 2000.0f;
+        s.dbMinDb = -60.0f; s.dbMaxDb = 0.0f;
+        SpectralEngine sp;
+        sp.setColourMap (ColourMap::Classic);
+        const juce::String tag = " (N=" + juce::String (n) + ")";
+        const double dur = (double) len / rate;
+
+        // 200 ms at 400 px: level 0, the first N/2 samples are 43..171 px.
+        CHECK (darkColumns (sp, te, s, 0.0, 0.2, 400) == 0, "first N/2 samples rendered" + tag);
+        CHECK (darkColumns (sp, te, s, dur - 0.2, dur, 400) == 0, "last N/2 samples rendered" + tag);
+
+        // View starting just after the first level-0 tile boundary: its first
+        // frames are centred in the previous tile's range.
+        const double tb = (double) SpectralEngine::kFramesPerTile * SpectralEngine::effectiveHop (0, s) / rate;
+        CHECK (darkColumns (sp, te, s, tb + 0.002, tb + 0.202, 400) == 0,
+               "view starting after a tile boundary has no dark left edge" + tag);
+
+        // Whole document at 64 px: a coarser mipmap level (hop 2048).
+        CHECK (darkColumns (sp, te, s, 0.0, dur, 64) == 0, "first/last columns rendered at a coarse level" + tag);
+
+        const float p0 = sp.probeMagnitude (te, 0, 0.0, 1000.0, s, 0);
+        const float p1 = sp.probeMagnitude (te, 0, dur, 1000.0, s, 0);
+        CHECK (p0 > -30.0f && p1 > -30.0f, "probe reads the tone at the very first/last sample" + tag
+                                           + ", got " + juce::String (p0, 1) + " / " + juce::String (p1, 1) + " dB");
+    }
+
+    // A click inside the first N/2 samples lands at its true time, not where
+    // the first uncentred window would have shown it (N/2 later).
+    std::vector<std::vector<float>> click (1, std::vector<float> ((size_t) 48000, 0.0f));
+    click[0][600] = 1.0f;
+    AudioEngine ce;
+    CHECK (ce.initNew (1, rate, &click), "edge coverage: click document");
+    for (const int n : { 4096, 8192 })
+    {
+        Settings s;
+        s.fftSize = n; s.hopSize = 512; s.windowType = 1; s.fftAuto = false;
+        SpectralEngine sp;
+        // Grayscale: brightness grows with the level (Classic's R+G+B does
+        // not, so its brightest pixel need not be the loudest frame). The
+        // click reads ~-63 dB (N=4096) / ~-69 dB (N=8192) and neighbouring
+        // frames differ by < 0.5 dB at N=8192: a 12 dB window keeps them
+        // apart once quantised to 8 bits (the default 120 dB does not).
+        sp.setColourMap (ColourMap::Grayscale);
+        s.dbMinDb = -72.0f; s.dbMaxDb = -60.0f;
+        const int W = 480, H = 64;   // 0.1 s: 10 samples per pixel
+        std::vector<uint8_t> rgba;
+        CHECK (sp.renderToPixels (ce, s, W, H, 0.0, 0.1, { 0 }, rgba), "render early click");
+        int bestX = -1, bestLum = -1;
+        for (int x = 0; x < W; ++x)
+            for (int y = 0; y < H; ++y)
+            {
+                const size_t o = ((size_t) y * W + x) * 4;
+                const int lum = (int) rgba[o] + (int) rgba[o + 1] + (int) rgba[o + 2];
+                if (lum > bestLum) { bestLum = lum; bestX = x; }
+            }
+        // Peak within half a hop (256 samples, ~26 px) of sample 600 (x = 60).
+        CHECK (bestLum > 60 && std::abs (bestX - 60) <= 26,
+               "click in the first N/2 samples aligns (N=" + juce::String (n) + "), x="
+               + juce::String (bestX));
     }
 }
 
@@ -24926,6 +25081,76 @@ static void testF5RefreshShortcut()
 
 // ---------------- Tables panel: import / transforms / alignment --------------
 
+// Issue #14: big CSVs (Max: 67 MB, 52k rows x 136 columns) import in one
+// pass with progress and Cancel; the byte-level parser keeps every field,
+// multi-byte characters included.
+static void testTablesImportLargeCsv()
+{
+    using namespace sc::tables;
+
+    // Multi-byte names, quoted fields with commas and escaped quotes, CRLF,
+    // tabs: the same fields the code-point parser produced.
+    {
+        const juce::String text = juce::String::fromUTF8 (
+            "Time,\"Pression, \xc3\xa9tage \"\"2\"\"\",\xe2\x88\x86T \xf0\x9f\x8e\xb5\r\n"
+            "0.0,1.5,-2\r\n0.5,\" 2.5 \",-3e-1\n1.0\t3.5\t4\n");
+        const auto grid = parseCsvGrid (text);
+        CHECK (grid.size () == 4 && grid[0].size () == 3
+               && grid[0][1] == juce::String::fromUTF8 ("Pression, \xc3\xa9tage \"2\"")
+               && grid[0][2] == juce::String::fromUTF8 ("\xe2\x88\x86T \xf0\x9f\x8e\xb5")
+               && grid[2][1] == "2.5" && grid[3][2] == "4",
+               "#14: byte-level parse keeps quoted, escaped and multi-byte fields");
+        TableData t;
+        CHECK (importTable ("utf8", text, t) && t.params.size () == 2
+               && t.params[0].name == juce::String::fromUTF8 ("Pression, \xc3\xa9tage \"2\"")
+               && t.params[1].values.size () == 3 && std::abs (t.params[1].values[1] + 0.3) < 1e-12,
+               "#14: ... and imports them as before (time column, names, values)");
+    }
+
+    // ~3 MB, 136 columns: one pass. The old parser walked the text from its
+    // start for every character (hours at this size); allow a slow machine.
+    juce::String big;
+    {
+        juce::MemoryOutputStream mo;
+        mo << "Time";
+        for (int c = 1; c <= 135; ++c) mo << ",P" << c;
+        for (int r = 0; r < 2500; ++r)
+        {
+            mo << "\n" << juce::String ((double) r * 0.01, 3);
+            for (int c = 1; c <= 135; ++c)
+                mo << "," << juce::String (std::sin ((double) r * 0.01 * (double) c), 5);
+        }
+        mo << "\n";
+        big = mo.toString ();
+    }
+    std::vector<double> fractions;
+    TableData bt;
+    const double t0 = juce::Time::getMillisecondCounterHiRes ();
+    const bool ok = importTable ("big", big, bt, nullptr, -1.0,
+                                 [&] (double f) { fractions.push_back (f); return true; });
+    const double ms = juce::Time::getMillisecondCounterHiRes () - t0;
+    CHECK (ok && bt.params.size () == 135 && bt.params[134].values.size () == 2500
+           && std::abs (bt.sampleRate - 100.0) < 1e-6,
+           "#14: a " + juce::String (big.getNumBytesAsUTF8 () / 1024) + " KiB, 136-column CSV imports whole");
+    CHECK (ms < 10000.0, "#14: ... in one pass (" + juce::String (ms, 0) + " ms)");
+    CHECK (std::abs (bt.params[6].values[1234] - std::sin (12.34 * 7.0)) < 1e-4,
+           "#14: ... with the right value in the right cell");
+    bool rising = ! fractions.empty () && fractions.front () >= 0.0 && fractions.back () <= 1.0;
+    for (size_t i = 1; i < fractions.size (); ++i)
+        rising = rising && fractions[i] >= fractions[i - 1];
+    CHECK (rising && fractions.size () > 3, "#14: progress reported, rising, within 0..1");
+
+    // Cancel: during the parse and during the conversion.
+    for (const double stopAt : { 0.2, 0.7 })
+    {
+        TableData ct;
+        std::string err;
+        CHECK (! importTable ("c", big, ct, &err, -1.0, [stopAt] (double f) { return f < stopAt; })
+               && err == "cancelled",
+               "#14: Cancel stops the import (at " + juce::String (stopAt) + ")");
+    }
+}
+
 static void testTablesImport()
 {
     using namespace sc::tables;
@@ -29273,6 +29498,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("fft view persistence", testFFTViewPersistence);
     SC_RUN_TEST ("batched undo/redo", testBatchedUndoRedo);
     SC_RUN_TEST ("multi-file support", testMultiFileSupport);
+    SC_RUN_TEST ("close active middle file", testCloseActiveMiddleFile);
     SC_RUN_TEST ("resampler (soxr)", testResampler);
     SC_RUN_TEST ("load cancel", testLoadCancel);
     SC_RUN_TEST ("large in-memory load", testLargeInMemoryLoad);
@@ -29282,6 +29508,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("resample cancel", testResampleCancel);
     SC_RUN_TEST ("render cancel", testRenderToPixelsCancel);
     SC_RUN_TEST ("spectral transient alignment", testSpectralTransientAlignment);
+    SC_RUN_TEST ("spectral edge coverage", testSpectralEdgeCoverage);
     SC_RUN_TEST ("third octave label placement", testThirdOctaveLabelPlacement);
     SC_RUN_TEST ("fft view rate change", testFFTAnalysisRateChange);
     SC_RUN_TEST ("fft harmonic references", testFFTHarmonicReferences);
@@ -29423,6 +29650,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("zoom fit auto mode", testZoomFitAutoMode);
     SC_RUN_TEST ("F5 refresh shortcut", testF5RefreshShortcut);
     SC_RUN_TEST ("tables import rules", testTablesImport);
+    SC_RUN_TEST ("tables import large csv", testTablesImportLargeCsv);
     SC_RUN_TEST ("tables downsample + transforms", testTablesDownsampleAndTransforms);
     SC_RUN_TEST ("tables auto align lag", testTablesAutoAlignLag);
     SC_RUN_TEST ("tables serialise/parse", testTablesSerialiseParse);

@@ -583,6 +583,23 @@ public:
         error message when the import fails. */
     bool addTableFromCsv (const juce::String& name, const juce::String& csvText,
                           std::string* errOut = nullptr);
+    /** Second half of addTableFromCsv(): adds a table already imported
+        (sc::tables::importTable, e.g. on a worker thread) to the document
+        with this FileDoc::id - colours no other parameter uses, metadata
+        dirty, onTablesChanged when it is the active one. False with a
+        message when that document is no longer open. */
+    bool addImportedTable (int docId, sc::tables::TableData&& table,
+                           std::string* errOut = nullptr);
+    /** Tables > Table from Spectral Selection (issue #15): what the Frequency
+        Analysis panel's Freq vs Time mode copies (Absolute time, its Track and
+        Smoothing settings, the spectral selection as the bin mask, the visible
+        channels) over the spectral selection's time extent, imported as a new
+        table without going through the panel or the clipboard. Returns false
+        with a message when there is no spectral selection. */
+    bool addTableFromSpectralSelection (std::string* errOut = nullptr);
+    /** The tab-separated text behind addTableFromSpectralSelection(), empty
+        (with a message) when there is nothing to analyse. */
+    juce::String freqVsTimeCsv (std::string* errOut = nullptr) const;
     /** The active document's tables (empty vector when no file is open). */
     std::vector<sc::tables::TableData>& activeTables();
     int  tablesMode() const;
@@ -954,6 +971,10 @@ public:
     // Set by MainWindow: fired after open/switch/close so the UI can adapt
     // (reset views to the new file, push its state into every panel).
     std::function<void()> onActiveDocChanged;
+    // Set by MainWindow: fired by activate() while the views still show the
+    // document being left (before any state switches), so its Editor tab can
+    // keep a picture of it.
+    std::function<void()> onBeforeActiveDocChange;
 
 private:
     std::unique_ptr<sc::control::ControlState> control_;

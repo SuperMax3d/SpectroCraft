@@ -1924,7 +1924,7 @@ juce::String summaryMarkdown (int maxBytes)
     if (events.empty())
     {
         md << (enabled() ? "The diagnostic log is on but has no events yet.\n"
-                         : "No diagnostic log found. Turn it on with Window > Diagnostic Log, "
+                         : "No diagnostic log found. Turn it on with Help > Diagnostic Log, "
                            "reproduce the problem, then copy the summary again.\n");
         return md;
     }

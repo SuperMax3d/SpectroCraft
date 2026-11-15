@@ -497,7 +497,7 @@ static void diagTest_readBackAndBundle()
     {
         const auto r = ctlCall (app, "diag.summary");
         CHECK (ctlOk (r) && !(bool) ctlResult (r).getProperty ("enabled", true)
-                   && ctlResult (r).getProperty ("hint", {}).toString().contains ("Window > Diagnostic Log"),
+                   && ctlResult (r).getProperty ("hint", {}).toString().contains ("Help > Diagnostic Log"),
                "diag.summary: says how to turn the log on");
     }
     CHECK (sc::diag::start (config (dir)), "diag: start (read back)");
@@ -619,14 +619,33 @@ static void diagTest_menusAndStall()
         return nullptr;
     };
     {
+        // Issue #11: the toggle lives in the Help menu, next to the folder,
+        // summary and bundle actions; the Window menu no longer lists it.
         const auto wm = win->getMenuForIndex (wIdx, "Window");
-        const auto* item = findItem (wm, "Diagnostic Log");
-        CHECK (item != nullptr && !item->isTicked && !app.settings.diagLogEnabled,
-               "diag: Window menu item, unchecked by default");
+        CHECK (findItem (wm, "Diagnostic Log") == nullptr, "diag: not in the Window menu");
         const auto hm = win->getMenuForIndex (hIdx, "Help");
+        const auto* item = findItem (hm, "Diagnostic Log");
+        CHECK (item != nullptr && !item->isTicked && !app.settings.diagLogEnabled,
+               "diag: Help menu item, unchecked by default");
         CHECK (findItem (hm, "Open Diagnostic Log Folder") != nullptr && findItem (hm, "Copy Diagnostic Summary") != nullptr
                    && findItem (hm, "Create Support Bundle...") != nullptr,
                "diag: Help menu actions");
+
+        // Issue #12: Help > Show Tooltips, on by default, turns every tip
+        // off (no tooltip window) and back on, and is remembered.
+        const auto* tips = findItem (hm, "Show Tooltips");
+        CHECK (tips != nullptr && tips->isTicked && app.settings.showTooltips && win->tooltipsActive (),
+               "tooltips: Help > Show Tooltips, checked by default");
+        win->menuItemSelected (MainWindow::HelpShowTooltips, hIdx);
+        const auto hmOff = win->getMenuForIndex (hIdx, "Help");
+        CHECK (! app.settings.showTooltips && ! win->tooltipsActive ()
+                   && findItem (hmOff, "Show Tooltips") != nullptr && ! findItem (hmOff, "Show Tooltips")->isTicked
+                   && app.recentStore->getIntValue ("show_tooltips", 1) == 0,
+               "tooltips: unchecked, no tooltip shows, and the choice is saved");
+        win->menuItemSelected (MainWindow::HelpShowTooltips, hIdx);
+        CHECK (app.settings.showTooltips && win->tooltipsActive ()
+                   && app.recentStore->getIntValue ("show_tooltips", 0) == 1,
+               "tooltips: checked again, they show again");
     }
 
     // The dialog shown before the log starts (headless runs skip it): no AI
@@ -642,11 +661,11 @@ static void diagTest_menusAndStall()
                "diag dialog: the folder path is a link inside the dialog");
     }
 
-    win->menuItemSelected (MainWindow::WindowDiagLog, wIdx);   // headless: no explanation dialog
-    CHECK (sc::diag::enabled() && app.settings.diagLogEnabled, "diag: the Window item turns the log on and saves it");
+    win->menuItemSelected (MainWindow::HelpDiagLog, hIdx);   // headless: no explanation dialog
+    CHECK (sc::diag::enabled() && app.settings.diagLogEnabled, "diag: the Help item turns the log on and saves it");
     {
-        const auto wm = win->getMenuForIndex (wIdx, "Window");
-        const auto* item = findItem (wm, "Diagnostic Log");
+        const auto hm = win->getMenuForIndex (hIdx, "Help");
+        const auto* item = findItem (hm, "Diagnostic Log");
         CHECK (item != nullptr && item->isTicked, "diag: the item is checked while the log runs");
     }
     scPumpUntil ([&] { return win->statusBarShowsDiagLog(); }, 3000);   // the window's 30 Hz timer
@@ -684,8 +703,8 @@ static void diagTest_menusAndStall()
     evs = readAll (dir);
     CHECK (last (evs, "ui.menu").getProperty ("item", {}).toString() == "Help > Open Diagnostic Log Folder",
            "diag: menu items become ui.menu breadcrumbs");
-    win->menuItemSelected (MainWindow::WindowDiagLog, wIdx);
-    CHECK (!sc::diag::enabled() && !app.settings.diagLogEnabled, "diag: the Window item turns the log off and saves it");
+    win->menuItemSelected (MainWindow::HelpDiagLog, hIdx);
+    CHECK (!sc::diag::enabled() && !app.settings.diagLogEnabled, "diag: the Help item turns the log off and saves it");
     scPumpUntil ([&] { return !win->statusBarShowsDiagLog(); }, 3000);
     CHECK (!win->statusBarShowsDiagLog(), "diag: no footer indicator when off");
     win.reset();

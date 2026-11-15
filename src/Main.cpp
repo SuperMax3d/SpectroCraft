@@ -34,7 +34,7 @@
  *       (ctest sets it per shard; CI uploads it when a shard fails).
  * Normal start options:
  *   --diag-log   diagnostic log for this session (docs/diagnostics.md), as
- *                Window > Diagnostic Log does; SC_DIAG_LOG=1 or
+ *                Help > Diagnostic Log does; SC_DIAG_LOG=1 or
  *                SC_DIAG_LOG_DIR=<folder> do the same. It records the startup
  *                phase timings too ("startup" event).
  */
@@ -958,7 +958,7 @@ public:
             setControlServer (true);
 #endif
 
-        // Diagnostic log (opt-in: Window > Diagnostic Log, --diag-log,
+        // Diagnostic log (opt-in: Help > Diagnostic Log, --diag-log,
         // SC_DIAG_LOG=1 or SC_DIAG_LOG_DIR).
         mainWindow->onDiagToggled = [this] (bool on) { setDiagnostics (on, "setting"); };
         {

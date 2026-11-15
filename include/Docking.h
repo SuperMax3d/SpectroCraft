@@ -183,7 +183,9 @@ private:
 
 //==============================================================================
 /** The tab strip + frame of one panel group; shows the active panel's content. */
-class GroupComponent : public juce::Component, private juce::Timer
+class GroupComponent : public juce::Component,
+                       public juce::TooltipClient,
+                       private juce::Timer
 {
 public:
     GroupComponent (DockManager&, DockArea&, int uid);
@@ -223,6 +225,8 @@ public:
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
+    /** Tooltip of the tab strip part under the mouse (tab, menu icon, overflow). */
+    juce::String getTooltip() override;
 
 private:
     struct TabSlot { int index; juce::Rectangle<int> r; };
@@ -649,7 +653,7 @@ private:
 //==============================================================================
 /** Workspace switcher shown at the right of the menu bar: workspace names as
     text tabs (the active one in blue, underlined), with a >> overflow menu. */
-class WorkspaceBar : public juce::Component
+class WorkspaceBar : public juce::Component, public juce::TooltipClient
 {
 public:
     WorkspaceBar() = default;
@@ -668,6 +672,7 @@ public:
     void mouseMove (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override;
     void mouseDown (const juce::MouseEvent&) override;
+    juce::String getTooltip() override;
 
     struct Slot { juce::String id; juce::Rectangle<int> r; };
     std::vector<Slot> layoutSlots() const;

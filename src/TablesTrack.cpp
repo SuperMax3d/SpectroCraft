@@ -798,6 +798,11 @@ public:
         cancelBtn.setButtonText ("Cancel");
         okBtn.onClick = [this] { exitModalState (1); };
         cancelBtn.onClick = [this] { exitModalState (-1); };
+        startEd.setTooltip ("Value at the start of the time selection.");
+        stopEd.setTooltip ("Value at the end of the time selection.");
+        constantBox.setTooltip ("Use the start value over the whole selection (no ramp).");
+        okBtn.setTooltip ("Overwrite the values in the time selection (Enter).");
+        cancelBtn.setTooltip ("Close without changing anything (Esc).");
 
         juce::Component::addAndMakeVisible (&msgLabel);
         juce::Component::addAndMakeVisible (&startLbl);

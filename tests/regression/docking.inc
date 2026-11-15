@@ -935,10 +935,12 @@ static void dockTest_editorTabsPerDocument()
                "editor tabs: opening files keeps the Editor maximised");
         win->setLeftPanelsVisible (true);
 
-        // A tab moved to its own group names its file until clicked.
+        // A tab moved to its own group keeps showing its file (issue #9: the
+        // picture taken when it was left) until clicked.
         const int idB2 = app.doc ()->id;
         const juce::String tabB2 = win->editorTabOfDoc (idB2);
         app.activate (indexOfDoc (idB2) == 0 ? 1 : 0);   // the other file
+        const juce::String tabOther = win->editorTabOfDoc (app.doc ()->id);
         {
             const auto loc = dock.locate ("editor");
             CHECK (dock.movePanel (tabB2, *loc.area, loc.group->uid, sc::dock::Zone::right),
@@ -949,9 +951,13 @@ static void dockTest_editorTabsPerDocument()
         {
             auto* slot = d->content;
             CHECK (slot->getNumChildComponents () == 0, "editor tabs: a tab whose file is not active holds no views");
+            CHECK (win->editorTabHasPicture (tabB2) && ! win->editorTabHasPicture (tabOther),
+                   "editor tabs: ... but a picture of them, taken when its file was left (issue #9); the active tab has the live views");
             slot->mouseDown (mkMouse (*slot, 10, 10, juce::ModifierKeys (juce::ModifierKeys::leftButtonModifier)));
             CHECK (app.doc () != nullptr && app.doc ()->id == idB2 && viewsIn (tabB2),
                    "editor tabs: a click in it makes its file active, the views move there");
+            CHECK (! win->editorTabHasPicture (tabB2) && win->editorTabHasPicture (tabOther),
+                   "editor tabs: ... its picture is dropped, and the file left gets one in turn");
         }
 
         // Switching workspaces keeps the active file's tab in front.

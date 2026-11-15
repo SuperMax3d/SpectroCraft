@@ -85,21 +85,26 @@ void parseCustomColours (const juce::String& text, std::vector<juce::Colour>& ou
 // NOTE: this JUCE build has no String::operator+=(char16_t) - on MSVC a
 // char16_t would silently bind to the int overload and append the character's
 // numeric code. Accumulate code points instead and convert once per field.
-std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
+std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text,
+                                                     const std::function<bool (double)>& progress)
 {
     std::vector<std::vector<juce::String>> grid;
     std::vector<juce::String> row;
-    // juce::String::operator[] yields full code points (juce_wchar); keep
-    // them as UTF-32 so non-BMP characters survive and the code is portable
-    // (wchar_t is 16-bit on Windows but 32-bit on macOS/Linux).
-    std::vector<juce::juce_wchar> fieldBuf;
+    // One pass over the UTF-8 bytes (issue #14): juce::String's operator[]
+    // and length() walk the text from its start, which made this loop
+    // quadratic (a 67 MB CSV never finished). Every byte that matters here
+    // (quote, comma, tab, CR, LF) is ASCII, and UTF-8 never uses ASCII bytes
+    // inside a multi-byte character, so fields split at the same places as
+    // the code points did and keep their characters whole.
+    const char* const s = text.toRawUTF8();
+    const size_t len = text.getNumBytesAsUTF8();
+    std::string fieldBuf;
     bool inQuotes = false;
 
     auto pushField = [&] ()
     {
         if (!fieldBuf.empty ())
-            row.push_back (juce::String (juce::CharPointer_UTF32 (fieldBuf.data()),
-                                         (size_t) fieldBuf.size()).trim());
+            row.push_back (juce::String::fromUTF8 (fieldBuf.data(), (int) fieldBuf.size()).trim());
         else
             row.push_back (juce::String());
         fieldBuf.clear();
@@ -107,17 +112,34 @@ std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
     // NOTE: a blank line yields one empty cell and is kept as a data gap
     // (importTable interpolates across it). Ragged rows are tolerated by the
     // importer, which treats missing cells as empty.
-    auto pushRow   = [&] () { if (!row.empty ()) grid.push_back (std::move (row)); row.clear(); };
-
-    for (size_t i = 0; i < text.length(); ++i)
+    auto pushRow   = [&] ()
     {
-        const juce::juce_wchar c = text[(int) i];
+        if (!row.empty ())
+        {
+            const size_t width = row.size();
+            grid.push_back (std::move (row));
+            row.clear();
+            row.reserve (width);   // the next row most likely has as many cells
+        }
+    };
+
+    constexpr size_t kProgressStep = (size_t) 1 << 20;   // report every MiB
+    size_t nextReport = kProgressStep;
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (progress && i >= nextReport)
+        {
+            nextReport = i + kProgressStep;
+            if (!progress ((double) i / (double) len))
+                return {};   // cancelled
+        }
+        const char c = s[i];
         if (inQuotes)
         {
             if (c == '"')
             {
                 // "" inside a quoted field is an escaped quote.
-                if (i + 1 < text.length() && text[(int) i + 1] == '"')
+                if (i + 1 < len && s[i + 1] == '"')
                     ++i;   // keep one literal quote, skip its twin
                 else
                 {
@@ -137,7 +159,7 @@ std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
         }
         else if (c == '\n' || c == '\r')
         {
-            if (c == '\r' && i + 1 < text.length() && text[(int) i + 1] == '\n')
+            if (c == '\r' && i + 1 < len && s[i + 1] == '\n')
                 ++i;
             pushField();
             pushRow();
@@ -157,12 +179,13 @@ std::vector<std::vector<juce::String>> parseCsvGrid (const juce::String& text)
 
 bool cellIsData (const juce::String& s, double* out)
 {
-    const auto t = s.trim().toLowerCase();
-    if (t == "true")  { if (out) *out = 1.0; return true; }
-    if (t == "false") { if (out) *out = 0.0; return true; }
+    // No allocation for the usual already-trimmed cell (trim() then shares
+    // the text): this runs once per cell, millions of times for a big CSV.
+    const auto t2 = s.trim();
+    if (t2.equalsIgnoreCase ("true"))  { if (out) *out = 1.0; return true; }
+    if (t2.equalsIgnoreCase ("false")) { if (out) *out = 0.0; return true; }
     // This JUCE build has no createFloatFromString(): validate the characters
     // first, then parse with getDoubleValue().
-    const auto t2 = s.trim();
     double v = 0.0;
     bool ok = false;
     if (!t2.isEmpty())
@@ -206,9 +229,20 @@ static void interpolateColumn (std::vector<double>& vals, const std::vector<bool
 }
 
 bool importTable (const juce::String& name, const juce::String& csvText,
-                  TableData& out, std::string* errOut, double docDurationSecs)
+                  TableData& out, std::string* errOut, double docDurationSecs,
+                  const std::function<bool (double)>& progress)
 {
-    auto grid = parseCsvGrid (csvText);
+    // Progress: reading the text is the first half, the columns the second.
+    bool cancelled = false;
+    std::function<bool (double)> parseProgress;
+    if (progress)
+        parseProgress = [&] (double f) { cancelled = !progress (0.5 * f); return !cancelled; };
+    auto grid = parseCsvGrid (csvText, parseProgress);
+    if (cancelled)
+    {
+        if (errOut) *errOut = "cancelled";
+        return false;
+    }
     if (grid.empty ())
     {
         if (errOut) *errOut = "the CSV text is empty";
@@ -280,35 +314,51 @@ bool importTable (const juce::String& name, const juce::String& csvText,
         }
     }
 
-    for (int c = firstDataCol; c < C; ++c)
+    // Cells -> numbers, row by row: a row's cells sit together in memory,
+    // where walking every row once per column jumped across the whole grid
+    // for each cell (issue #14: 52k rows x 135 columns). Each row is freed
+    // once read, so the text grid and the numbers are not both held whole.
+    const int nCols = C - firstDataCol;
+    std::vector<std::vector<double>> colVals ((size_t) nCols, std::vector<double> ((size_t) dataRows, 0.0));
+    std::vector<std::vector<bool>> colValid ((size_t) nCols, std::vector<bool> ((size_t) dataRows, false));
+    std::vector<int> nValid ((size_t) nCols, 0);
+    for (int r = 0; r < dataRows; ++r)
     {
-        std::vector<double> vals ((size_t) dataRows);
-        std::vector<bool> valid ((size_t) dataRows, false);
-        int nValid = 0;
-        for (int r = 0; r < dataRows; ++r)
+        if (progress && (r & 1023) == 0
+            && !progress (0.5 + 0.5 * (double) r / (double) dataRows))
         {
-            const auto& rowRef = grid[(size_t) (hasHeader ? r + 1 : r)];
-            // Ragged rows (fewer cells than the first row): treat missing
-            // cells as empty instead of reading out of range.
-            if ((int) rowRef.size() <= c)
-                continue;
-            const auto& cell = rowRef[(size_t) c];
+            if (errOut) *errOut = "cancelled";
+            return false;
+        }
+        auto& rowRef = grid[(size_t) (hasHeader ? r + 1 : r)];
+        // Ragged rows (fewer cells than the first row): missing cells stay
+        // empty (invalid) instead of being read out of range.
+        const int n = std::min ((int) rowRef.size(), C);
+        for (int c = firstDataCol; c < n; ++c)
+        {
             double v = 0.0;
-            if (cellIsData (cell, &v))
+            if (cellIsData (rowRef[(size_t) c], &v))
             {
-                vals[(size_t) r] = v;
-                valid[(size_t) r] = true;
-                ++nValid;
+                const auto k = (size_t) (c - firstDataCol);
+                colVals[k][(size_t) r] = v;
+                colValid[k][(size_t) r] = true;
+                ++nValid[k];
             }
         }
-        if (nValid == 0) continue;   // a column with only text is ignored
+        std::vector<juce::String>().swap (rowRef);   // done with it (the header row is never freed: it names the columns)
+    }
 
-        interpolateColumn (vals, valid);
+    for (int c = firstDataCol; c < C; ++c)
+    {
+        const auto k = (size_t) (c - firstDataCol);
+        if (nValid[k] == 0) continue;   // a column with only text is ignored
+
+        interpolateColumn (colVals[k], colValid[k]);
 
         ParamData p;
         const auto title = hasHeader ? grid[0][(size_t) c].trim() : juce::String();
         p.name = title.isEmpty () ? "Param" + juce::String (c + 1) : title;
-        p.values = std::move (vals);
+        p.values = std::move (colVals[k]);
         // Every parameter gets its own colour within the table; the host
         // (Application::addTableFromCsv) offsets these so that parameters of
         // different tables stay distinct as well.

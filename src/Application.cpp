@@ -12,6 +12,7 @@
 #include "SpectralMaskProcessor.h"
 #include "PythonScripts.h"
 #include "Resampler.h"
+#include "Measures.h"
 #include "control/ControlState.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     #include "NoiseSuppression.h"
@@ -204,6 +205,7 @@ void Application::loadSettings ()
     settings.diagLogEnabled = recentStore->getIntValue ("diag_log_enabled", 0) != 0;
     // Help > Check for Updates: also look once a day at startup (off by default).
     settings.checkUpdatesAtStartup = recentStore->getIntValue ("check_updates_startup", 0) != 0;
+    settings.showTooltips = recentStore->getIntValue ("show_tooltips", 1) != 0;
     // Track axis placement + grid lines (View menu).
     settings.trackAxisOnRight   = recentStore->getIntValue ("track_axis_right", 0) != 0;
     settings.trackRulerAtBottom = recentStore->getIntValue ("track_ruler_bottom", 0) != 0;
@@ -317,6 +319,7 @@ void Application::saveSettings ()
     recentStore->setValue ("control_enabled", settings.controlEnabled ? 1 : 0);
     recentStore->setValue ("diag_log_enabled", settings.diagLogEnabled ? 1 : 0);
     recentStore->setValue ("check_updates_startup", settings.checkUpdatesAtStartup ? 1 : 0);
+    recentStore->setValue ("show_tooltips", settings.showTooltips ? 1 : 0);
     recentStore->setValue ("track_axis_right", settings.trackAxisOnRight ? 1 : 0);
     recentStore->setValue ("track_ruler_bottom", settings.trackRulerAtBottom ? 1 : 0);
     recentStore->setValue ("show_amp_grid", settings.showAmpGrid ? 1 : 0);
@@ -615,6 +618,7 @@ void Application::activate (int index)
     if (activeDocIndex >= 0 && activeDocIndex != index
         && activeDocIndex < (int) docs.size())
     {
+        if (onBeforeActiveDocChange) onBeforeActiveDocChange ();
         syncActiveDoc ();
         FileDoc& prev = *docs[(size_t) activeDocIndex];
         if (prev.engine.isPlaying())
@@ -1080,7 +1084,11 @@ void Application::closeDoc (int index)
         sourcePlayer.setSource (&emptyEngine);
 
     docs.erase (docs.begin() + index);
-    if (!wasActive && activeDocIndex > index)
+    if (wasActive)
+        activeDocIndex = -1;   // the doc being left is gone: activate() below must not
+                               // save its state into, or take a picture of, the doc that
+                               // shifted into its index (the views still show the closed one)
+    else if (activeDocIndex > index)
         --activeDocIndex;   // indices shifted left of the removed doc
 
     if (!docs.empty())
@@ -1781,6 +1789,19 @@ bool Application::addTableFromCsv (const juce::String& name, const juce::String&
     // start lies beyond this file (absolute timestamps from a longer take).
     if (!sc::tables::importTable (name, csvText, t, errOut, audioEngine().duration()))
         return false;
+    return addImportedTable (d->id, std::move (t), errOut);
+}
+
+bool Application::addImportedTable (int docId, sc::tables::TableData&& t, std::string* errOut)
+{
+    FileDoc* d = nullptr;
+    for (auto& p : docs)
+        if (p->id == docId) { d = p.get (); break; }
+    if (d == nullptr)
+    {
+        if (errOut) *errOut = "the file it was imported for is no longer open";
+        return false;
+    }
 
     // Give every new parameter a colour not used by any existing parameter in
     // the document, so overlapping curves stay distinguishable.
@@ -1795,9 +1816,112 @@ bool Application::addTableFromCsv (const juce::String& name, const juce::String&
 
     d->tables.push_back (std::move (t));
     d->metaDirty = true;   // the tables persist with the file metadata
-    if (onTablesChanged)
+    if (d == doc () && onTablesChanged)
         onTablesChanged ();
     return true;
+}
+
+juce::String Application::freqVsTimeCsv (std::string* errOut) const
+{
+    const FileDoc* d = doc ();
+    if (d == nullptr || ! d->engine.isFileLoaded ())
+    {
+        if (errOut) *errOut = "no file is open";
+        return {};
+    }
+    if (d->spectralSel.empty ())
+    {
+        if (errOut) *errOut = "there is no spectral selection";
+        return {};
+    }
+    const AudioEngine& eng = d->engine;
+    const double dur = eng.duration ();
+    const auto ext = d->spectralSel.timeExtent ();
+    const double t0 = std::clamp (ext.getStart (), 0.0, dur);
+    const double t1 = std::clamp (ext.getEnd (), t0, dur);
+
+    // The Frequency Analysis panel's Freq vs Time curves: its Track and
+    // Smoothing settings, the visible channels, the spectral selection as
+    // the bin mask, over the selection's whole time extent.
+    std::vector<int> chans;
+    for (int ch : visibleChannels)
+        if (ch >= 0 && ch < eng.numChannels ())
+            chans.push_back (ch);
+    if (chans.empty ())
+    {
+        if (errOut) *errOut = "no channel is visible";
+        return {};
+    }
+    std::vector<sc::measures::CurveData> curves;
+    if (! sc::measures::timeCurve (eng, chans, t0, t1, std::clamp (settings.fftTrack, 0, 2),
+                               &d->spectralSel, curves)
+        || curves.empty () || curves[0].x.empty ())
+    {
+        if (errOut) *errOut = "the spectral selection is too short to analyse";
+        return {};
+    }
+    if (settings.fftSmooth > 1)
+        for (auto& cd : curves)
+        {
+            sc::measures::smoothSeries (cd.ampDb, settings.fftSmooth);
+            sc::measures::smoothSeries (cd.freqHz, settings.fftSmooth);
+        }
+
+    // Same columns and number formats as the panel's Copy in Freq vs Time
+    // mode with Absolute time: time_s, then per channel the tracked
+    // frequency, one column per enabled alternative frequency scale, and the
+    // level (calibrated when a scale is set).
+    const ScaleCalibration& sc = d->scale;
+    auto fmtLevel = [&] (double relDb, int ch) -> juce::String
+    {
+        if (sc.usesLinearLevels ())
+            return ScaleCalibration::formatLevelValue (sc.fullScaleFor (ch) * std::pow (10.0, relDb / 20.0), 6);
+        return juce::String (relDb + sc.levelOffsetDb (ch), 2);
+    };
+    std::vector<const AltScaleRef*> altRefs;
+    for (const auto& r : altFreqRefs)
+        if (r.enabled && std::abs (r.refMain) > 1e-9)
+            altRefs.push_back (&r);
+
+    const juce::String sep = "\t";
+    juce::String header = "time_s";
+    for (size_t c = 0; c < curves.size () && c < chans.size (); ++c)
+    {
+        const juce::String chName = "ch" + juce::String (chans[c] + 1) + "_";
+        header += sep + chName + "Hz";
+        for (const auto* r : altRefs)
+            header += sep + chName + r->name;
+        header += sep + chName + sc.spectralUnitLabel ();
+    }
+    juce::MemoryOutputStream out;
+    out << header;
+    const size_t nPts = curves[0].x.size ();
+    for (size_t i = 0; i < nPts; ++i)
+    {
+        out << "\n" << juce::String (curves[0].x[i], 6);
+        for (size_t c = 0; c < curves.size () && c < chans.size (); ++c)
+        {
+            const auto& cd = curves[c];
+            if (i >= cd.x.size ()) { out << sep << sep; continue; }
+            out << sep << juce::String (cd.freqHz[i], 2);
+            for (const auto* r : altRefs)
+                out << sep << juce::String (altScaleValue (*r, cd.freqHz[i]), 3);
+            out << sep << fmtLevel (cd.ampDb[i], chans[c]);
+        }
+    }
+    return out.toString ();
+}
+
+bool Application::addTableFromSpectralSelection (std::string* errOut)
+{
+    const juce::String csv = freqVsTimeCsv (errOut);
+    if (csv.isEmpty ())
+        return false;
+    const FileDoc* d = doc ();
+    const auto ext = d->spectralSel.timeExtent ();
+    const juce::String name = "Freq vs Time " + juce::String (ext.getStart (), 3)
+                              + "-" + juce::String (ext.getEnd (), 3) + " s";
+    return addTableFromCsv (name, csv, errOut);
 }
 
 std::vector<sc::tables::TableData>& Application::activeTables()

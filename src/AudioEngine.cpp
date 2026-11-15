@@ -418,26 +418,23 @@ void AudioEngine::setMutedChannels (std::vector<bool> muted)
     mutedForAudio_ = std::move (forAudio);
 }
 
-void AudioEngine::applyChannelMutes (const juce::AudioSourceChannelInfo& info, bool monoToAll) const
+std::shared_ptr<const std::vector<uint8_t>> AudioEngine::mutesForAudio() const
 {
-    std::shared_ptr<const std::vector<uint8_t>> m;
-    {
-        const std::lock_guard<std::mutex> lk (muteMutex);
-        m = mutedForAudio_;
-    }
-    if (m == nullptr) return;   // nothing muted: the common case
-    auto* dst = info.buffer;
-    const int outs = dst->getNumChannels();
-    if (monoToAll)
-    {
-        if (!m->empty() && (*m)[0] != 0)
-            for (int ch = 0; ch < outs; ++ch)
-                dst->clear (ch, info.startSample, info.numSamples);
-        return;
-    }
-    for (int ch = 0; ch < outs && ch < (int) m->size(); ++ch)
-        if ((*m)[(size_t) ch] != 0)
-            dst->clear (ch, info.startSample, info.numSamples);
+    const std::lock_guard<std::mutex> lk (muteMutex);
+    return mutedForAudio_;
+}
+
+int AudioEngine::playbackOutputFor (int channel, int numOutputs) noexcept
+{
+    return numOutputs > 0 && channel >= 0 ? channel % numOutputs : -1;
+}
+
+float AudioEngine::playbackFoldGain (int output, int numChannels, int numOutputs) noexcept
+{
+    if (numOutputs <= 0 || output < 0 || output >= numOutputs)
+        return 0.0f;
+    const int k = (numChannels - output + numOutputs - 1) / numOutputs;   // channels on this output
+    return k > 1 ? 1.0f / (float) k : 1.0f;
 }
 
 void AudioEngine::prepareToPlay (int, double sampleRate)
@@ -525,7 +522,11 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         const int64_t re = std::min (soloLen, (int64_t) std::ceil (pLast) + 1);
         const int64_t cnt = std::max<int64_t> (0, re - rs);
 
-        const int sChans = std::min (dst->getNumChannels(), (int) soloLocal->data.size());
+        // Every solo channel is heard, folded when the device has fewer
+        // outputs (playbackOutputFor).
+        const int outs = dst->getNumChannels();
+        const int soloChans = (int) soloLocal->data.size();
+        const int sChans = outs > 0 ? soloChans : 0;
         auto& tmp = playTmp;
         tmp.resize ((size_t) sChans);
         for (int ch = 0; ch < sChans; ++ch)
@@ -539,30 +540,38 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                 std::fill (tmp[(size_t) ch].begin() + (size_t) avail, tmp[(size_t) ch].end(), 0.0f);
         }
 
-        const float g = gain_.load();
-        for (int i = 0; i < n; ++i)
+        // Silence first (outputs nothing reaches, the solo's start or end),
+        // then each solo channel adds itself onto its output.
+        for (int o = 0; o < outs; ++o)
+            dst->clear (o, bufferToFill.startSample, n);
+        const auto muted = mutesForAudio();
+        // A mono document's single channel stands for every output here too:
+        // its mute silences the whole solo.
+        auto isMuted = [&] (int ch)
         {
-            const double p = (pos + (double) i * step) * a - offS - (double) rs;
-            for (int ch = 0; ch < sChans; ++ch)
+            const int m = nchans == 1 ? 0 : ch;
+            return muted != nullptr && m < (int) muted->size() && (*muted)[(size_t) m] != 0;
+        };
+        const float g = gain_.load();
+        for (int ch = 0; ch < sChans; ++ch)
+        {
+            if (isMuted (ch))
+                continue;
+            const int o = playbackOutputFor (ch, outs);
+            const float gc = g * playbackFoldGain (o, soloChans, outs);
+            float* d = dst->getWritePointer (o, bufferToFill.startSample);
+            const float* src = tmp[(size_t) ch].data();
+            for (int i = 0; i < n; ++i)
             {
-                float* d = dst->getWritePointer (ch, bufferToFill.startSample);
+                const double p = (pos + (double) i * step) * a - offS - (double) rs;
                 if (p >= 0.0 && p < (double) cnt - 1.0)
                 {
                     const int64_t ia = (int64_t) std::floor (p);
                     const float fr = (float) (p - (double) ia);
-                    d[i] = (tmp[(size_t) ch][(size_t) ia] * (1.0f - fr)
-                            + tmp[(size_t) ch][(size_t) (ia + 1)] * fr) * g;
-                }
-                else
-                {
-                    d[i] = 0.0f;   // before the solo's start or past its end
+                    d[i] += (src[ia] * (1.0f - fr) + src[ia + 1] * fr) * gc;
                 }
             }
         }
-        for (int ch = sChans; ch < dst->getNumChannels(); ++ch)
-            dst->clear (ch, bufferToFill.startSample, n);
-        // A mono document's single channel stands for every output here too.
-        applyChannelMutes (bufferToFill, nchans == 1);
         return;
     }
 
@@ -597,7 +606,10 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                                       + (masking ? SpectralMask::contextSamples() : 0));
     const int64_t extCount = std::max<int64_t> (0, readEnd - readStart);
 
-    const int chans = std::min (dst->getNumChannels(), nchans);
+    // Every channel is read, even past the device's outputs: the extra ones
+    // fold onto the outputs there are (playbackOutputFor), so none is lost.
+    const int outs = dst->getNumChannels();
+    const int chans = outs > 0 ? nchans : 0;
     // Scratch reused across blocks (no per-block heap allocation once grown).
     auto& tmp = playTmp;
     tmp.resize ((size_t) chans);
@@ -630,42 +642,41 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         playMask->process (tmp, readStart, baseReadStart, (int) count, *selLocal);
     }
 
+    // Silence first (past the end of the file, outputs beyond a
+    // multichannel file's channels, never stale data), then each channel
+    // that is not muted (channel numbers in the tracks) adds itself onto its
+    // output.
+    for (int o = 0; o < outs; ++o)
+        dst->clear (o, bufferToFill.startSample, n);
+    const auto muted = mutesForAudio();
     const float g = gain_.load();
-    for (int i = 0; i < n; ++i)
+    for (int ch = 0; ch < chans; ++ch)
     {
-        const double p = pos + (double) i * step - (double) readStart;
-        for (int ch = 0; ch < chans; ++ch)
+        if (muted != nullptr && ch < (int) muted->size() && (*muted)[(size_t) ch] != 0)
+            continue;
+        const int o = playbackOutputFor (ch, outs);
+        const float gc = g * playbackFoldGain (o, nchans, outs);
+        float* d = dst->getWritePointer (o, bufferToFill.startSample);
+        const float* src = tmp[(size_t) ch].data();
+        for (int i = 0; i < n; ++i)
         {
-            float* d = dst->getWritePointer (ch, bufferToFill.startSample);
+            // Linear interpolation between the two surrounding file samples.
+            // (p is relative to readStart, which includes the mask's
+            // pre-context; tmp indices are absolute within that buffer.)
+            const double p = pos + (double) i * step - (double) readStart;
             if (p >= 0.0 && p < (double) ctxBefore + count - 1.0)
             {
-                // Linear interpolation between the two surrounding file samples.
-                // (p is relative to readStart, which includes the mask's
-                // pre-context; tmp indices are absolute within that buffer.)
                 const int64_t a = (int64_t) std::floor (p);
                 const float fr = (float) (p - (double) a);
-                d[i] = (tmp[(size_t) ch][(size_t) a] * (1.0f - fr)
-                        + tmp[(size_t) ch][(size_t) a + 1] * fr) * g;
-            }
-            else
-            {
-                d[i] = 0.0f; // past end of file -> silence
+                d[i] += (src[a] * (1.0f - fr) + src[a + 1] * fr) * gc;
             }
         }
     }
 
-    // A mono file plays on every output; outputs beyond a multichannel
-    // file's channels are silent (never left with stale data).
-    for (int ch = chans; ch < dst->getNumChannels(); ++ch)
-    {
-        if (nchans == 1 && chans == 1)
-            dst->copyFrom (ch, bufferToFill.startSample, *dst, 0, bufferToFill.startSample, n);
-        else
-            dst->clear (ch, bufferToFill.startSample, n);
-    }
-
-    // Muted channels (channel numbers in the tracks) are silent.
-    applyChannelMutes (bufferToFill, nchans == 1 && chans == 1);
+    // A mono file plays on every output (muted: output 0 is silent, so all are).
+    if (nchans == 1)
+        for (int o = 1; o < outs; ++o)
+            dst->copyFrom (o, bufferToFill.startSample, *dst, 0, bufferToFill.startSample, n);
 }
 
 // Builds the finest mipmap level in ONE sequential pass over the file.

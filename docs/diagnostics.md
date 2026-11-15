@@ -13,7 +13,7 @@ The log is **off by default**. Any of these turns it on:
 
 | How | Scope |
 |---|---|
-| *Window > Diagnostic Log* | Saved (`diag_log_enabled`), applied at once. A dialog first says what is recorded, with a link that opens the log folder. |
+| *Help > Diagnostic Log* | Saved (`diag_log_enabled`), applied at once. A dialog first says what is recorded, with a link that opens the log folder. |
 | `SpectroCraft --diag-log` | This session only. |
 | `SC_DIAG_LOG=1` | This session only. |
 | `SC_DIAG_LOG_DIR=<folder>` | This session only, files in `<folder>`. |

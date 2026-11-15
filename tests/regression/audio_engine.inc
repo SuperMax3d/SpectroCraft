@@ -42,16 +42,17 @@ static void testAeStreamedReadHonoursChannel()
     CHECK (eng.readSamples (1, frames - 4, 10, tail.data ()), "W0: read at EOF succeeds");
     CHECK (std::abs (tail[3] - aeChanValue (1, frames - 1)) < 1e-6f, "W0: last frame of channel 1");
 
-    // Playback of the streamed file: output channel 1 carries file channel 1.
+    // Playback of the streamed file: output channel N carries file channel N
+    // (one output per channel; fewer outputs fold, see issue #18's test).
     eng.prepareToPlay (256, 48000.0);
     eng.play ();
-    juce::AudioBuffer<float> out (2, 256);
+    juce::AudioBuffer<float> out (3, 256);
     out.clear ();
     juce::AudioSourceChannelInfo info (&out, 0, 256);
     eng.getNextAudioBlock (info);
     bool playOk = true;
     for (int i = 0; i < 200 && playOk; ++i)
-        for (int ch = 0; ch < 2; ++ch)
+        for (int ch = 0; ch < 3; ++ch)
             if (std::abs (out.getSample (ch, i) - aeChanValue (ch, i)) > 1e-5f) { playOk = false; break; }
     CHECK (playOk, "W0: streamed playback outputs each file channel on its own output");
     eng.closeFile ();
@@ -551,6 +552,63 @@ static void testAeChannelMute()
     mono.setSoloAudio (nullptr);
 }
 
+// Issue #18: a device with fewer outputs than the file has channels still
+// plays every channel: channel ch folds onto output ch % outputs (2 outputs,
+// 4 channels: 1+3 left, 2+4 right), attenuated by the number sharing it.
+static void testAeFoldsChannelsOntoFewerOutputs()
+{
+    progress ("regression audio-engine#18: channels past the outputs fold onto them");
+    CHECK (AudioEngine::playbackOutputFor (0, 2) == 0 && AudioEngine::playbackOutputFor (2, 2) == 0
+           && AudioEngine::playbackOutputFor (3, 2) == 1 && AudioEngine::playbackOutputFor (1, 8) == 1
+           && AudioEngine::playbackOutputFor (1, 0) == -1, "#18: channel -> output");
+    CHECK (AudioEngine::playbackFoldGain (0, 4, 2) == 0.5f && AudioEngine::playbackFoldGain (1, 3, 2) == 1.0f
+           && AudioEngine::playbackFoldGain (0, 3, 2) == 0.5f && AudioEngine::playbackFoldGain (0, 2, 8) == 1.0f
+           && std::abs (AudioEngine::playbackFoldGain (1, 7, 3) - 1.0f / 2.0f) < 1e-6f
+           && std::abs (AudioEngine::playbackFoldGain (0, 7, 3) - 1.0f / 3.0f) < 1e-6f,
+           "#18: fold gain = 1 / channels sharing the output");
+
+    for (const int nch : { 4, 3 })
+    {
+        const juce::String tag = " (" + juce::String (nch) + " channels, 2 outputs)";
+        AudioEngine eng;
+        std::vector<std::vector<float>> data ((size_t) nch, std::vector<float> (4000));
+        for (int ch = 0; ch < nch; ++ch)
+            for (int i = 0; i < 4000; ++i)
+                data[(size_t) ch][(size_t) i] = aeChanValue (ch, i);
+        CHECK (eng.initNew (nch, 48000.0, &data), "#18: document" + tag);
+        eng.prepareToPlay (256, 48000.0);
+        eng.play ();
+        juce::AudioBuffer<float> out (2, 256);
+        out.clear ();
+        juce::AudioSourceChannelInfo info (&out, 0, 256);
+
+        auto expected = [&] (int o, int64_t f, int mutedCh)
+        {
+            float sum = 0.0f;
+            for (int ch = o; ch < nch; ch += 2)
+                if (ch != mutedCh)
+                    sum += aeChanValue (ch, f);
+            return sum * AudioEngine::playbackFoldGain (o, nch, 2);
+        };
+        auto matches = [&] (int64_t base, int mutedCh)
+        {
+            for (int i = 0; i < 200; ++i)
+                for (int o = 0; o < 2; ++o)
+                    if (std::abs (out.getSample (o, i) - expected (o, base + i, mutedCh)) > 1e-5f)
+                        return false;
+            return true;
+        };
+
+        eng.getNextAudioBlock (info);
+        CHECK (matches (0, -1), "#18: every channel is heard on its folded output" + tag);
+
+        // A muted channel drops out of its output's mix; the others stay put.
+        eng.setChannelMuted (2, true);
+        eng.getNextAudioBlock (info);   // the next 256 samples
+        CHECK (matches (256, 2), "#18: a muted folded channel leaves the mix, same gain for the rest" + tag);
+    }
+}
+
 static void runRegression_audio_engine()
 {
     testAeStreamedReadHonoursChannel ();
@@ -563,4 +621,5 @@ static void runRegression_audio_engine()
     testAeAtomicSave ();
     testAeContentVersionFollowsEdits ();
     testAeChannelMute ();
+    testAeFoldsChannelsOntoFewerOutputs ();
 }

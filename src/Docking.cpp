@@ -862,6 +862,21 @@ void GroupComponent::mouseDoubleClick (const juce::MouseEvent& e)
     mgr_.toggleMaximize (uid_);
 }
 
+juce::String GroupComponent::getTooltip()
+{
+    const auto pos = getMouseXYRelative();
+    if (! stripBounds().contains (pos))
+        return {};
+    if (! menuIcon_.isEmpty() && menuIcon_.contains (pos))
+        return "Panel menu: close, undock or dock this panel, and panel group settings.";
+    if (overflow_ && chevron_.contains (pos))
+        return "More panels of this group.";
+    if (tabIndexAt (pos) >= 0)
+        return "Click to show this panel, drag to move it, right-click for its menu. "
+               "Double-click maximises the group.";
+    return {};
+}
+
 void GroupComponent::showOverflowMenu()
 {
     Node* n = node();
@@ -3755,6 +3770,17 @@ void WorkspaceBar::mouseDown (const juce::MouseEvent& e)
                 onSelect (s.id);
             return;
         }
+}
+
+juce::String WorkspaceBar::getTooltip()
+{
+    const auto pos = getMouseXYRelative();
+    if (chevronBounds().contains (pos))
+        return "More workspaces and workspace commands.";
+    for (const auto& s : layoutSlots())
+        if (s.r.contains (pos))
+            return "Switch to this workspace (panel layout). Right-click for workspace commands.";
+    return {};
 }
 
 void WorkspaceBar::showMenu (const juce::String& clickedId)

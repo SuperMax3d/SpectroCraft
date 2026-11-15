@@ -1,5 +1,5 @@
 // SpectroCraft - AI control: diagnostic log commands (diag.summary / diag.tail).
-// The log itself is opt-in (Window > Diagnostic Log); these
+// The log itself is opt-in (Help > Diagnostic Log); these
 // commands only read it back, so an assistant connected to the open app can
 // look at what went wrong. Schema: docs/diagnostics.md.
 #include "control/CommandRegistry.h"
@@ -9,7 +9,7 @@ namespace sc::control {
 
 namespace {
 
-constexpr const char* kOffHint = "turn it on with Window > Diagnostic Log, reproduce the problem, "
+constexpr const char* kOffHint = "turn it on with Help > Diagnostic Log, reproduce the problem, "
                                  "then call diag.summary again";
 
 Outcome summaryCmd (Context& ctx)

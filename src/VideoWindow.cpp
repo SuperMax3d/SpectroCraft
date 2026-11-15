@@ -1151,6 +1151,11 @@ VideoAdjustDialog::VideoAdjustDialog (juce::Component* parent)
         if (onReset) onReset ();
     };
     closeBtn_.onClick = [this] { closeNow (); };
+    contrast_.setTooltip ("Contrast of this video track's picture (1 = unchanged).");
+    brightness_.setTooltip ("Brightness of this video track's picture (0 = unchanged).");
+    applyAll_.setTooltip ("Give every video track this contrast and brightness.");
+    reset_.setTooltip ("Back to the original contrast and brightness.");
+    closeBtn_.setTooltip ("Close this dialog; the adjustment stays.");
 
     contrastLbl_.setText ("Contrast", juce::NotificationType::dontSendNotification);
     brightnessLbl_.setText ("Brightness", juce::NotificationType::dontSendNotification);

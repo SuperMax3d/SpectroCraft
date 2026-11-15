@@ -851,6 +851,168 @@ static void regrPanels_statusBarChannelNumbers()
            "footer channels: only the numbers that fit are drawn");
 }
 
+// Issue #15: Tables > "Table from Spectral Selection" = Frequency Analysis >
+// Freq vs Time (Absolute) of the spectral selection, imported as a new table
+// without the panel or the clipboard.
+static void regrPanels_tableFromSpectralSelection()
+{
+    progress ("regression panels: Table from Spectral Selection");
+    const juce::File store = makeTempFile ("tables_from_sel.recent");
+    store.deleteFile ();
+    const juce::File wav = makeTempFile ("tables_from_sel.wav");
+    // 1 kHz from 0.5 s to 1.5 s, a stronger 2.5 kHz tone throughout: the
+    // selection's frequency band must mask the 2.5 kHz one out. 48 kHz: the
+    // fixed 2048-point frames of Freq vs Time last 43 ms, so the 0.8 s
+    // selection gets ~70 rows centred from ~0.62 to ~1.38 s.
+    writeWav (wav, 1, 48000.0, 2 * 48000, [] (int, int64_t f, double)
+    {
+        const double t = (double) f / 48000.0;
+        double v = 0.5 * std::sin (juce::MathConstants<double>::twoPi * 2500.0 * t);
+        if (t >= 0.5 && t < 1.5) v += 0.2 * std::sin (juce::MathConstants<double>::twoPi * 1000.0 * t);
+        return (float) v;
+    });
+    {
+        Application app (store);
+        app.settings.fftTrack = 0;    // Max: the strongest bin inside the mask
+        app.settings.fftSmooth = 0;
+        CHECK (app.openFile (wav), "table from sel: the wav opens");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) { wav.deleteFile (); return; }
+
+        std::string err;
+        CHECK (! app.addTableFromSpectralSelection (&err) && d->tables.empty () && ! err.empty (),
+               "table from sel: refused without a spectral selection (" + juce::String (err) + ")");
+
+        d->spectralSel.addRect (0.6, 1.4, 800.0, 1200.0, false, true);
+        const juce::String csv = app.freqVsTimeCsv ();
+        const auto lines = juce::StringArray::fromLines (csv.trim ());
+        CHECK (lines.size () > 10 && lines[0].startsWith ("time_s\tch1_Hz\t"),
+               "table from sel: Freq vs Time columns (" + lines[0] + ")");
+
+        TablesPanel panel (app);
+        panel.setSize (300, 400);
+        panel.refresh ();
+        panel.tableFromSpectralSelection ();
+        CHECK (d->tables.size () == 1 && d->tables[0].name.startsWith ("Freq vs Time"),
+               "table from sel: one new table, named after the analysis");
+        if (d->tables.size () == 1)
+        {
+            const auto& t = d->tables[0];
+            CHECK (t.params.size () == 2 && t.params[0].name == "ch1_Hz" && t.params[1].name.startsWith ("ch1_"),
+                   "table from sel: tracked frequency and level per channel");
+            CHECK (! t.params.empty () && (int) t.params[0].values.size () == lines.size () - 1,
+                   "table from sel: one row per analysis frame");
+            if (! t.params.empty () && ! t.params[0].values.empty ())
+            {
+                const auto& hz = t.params[0];
+                const int mid = (int) hz.values.size () / 2;
+                CHECK (std::abs (hz.values[(size_t) mid] - 1000.0) < 10.0,
+                       "table from sel: the masked band tracks the 1 kHz tone, not 2.5 kHz ("
+                       + juce::String (hz.values[(size_t) mid]) + " Hz)");
+                // Absolute time: the rows sit on the selection in the document.
+                const double tFirst = t.docTimeOfSample (hz, 0);
+                const double tLast  = t.docTimeOfSample (hz, (int) hz.values.size () - 1);
+                CHECK (tFirst >= 0.55 && tFirst < 0.75 && tLast > 1.25 && tLast <= 1.45,
+                       "table from sel: rows placed at the selection's document time ("
+                       + juce::String (tFirst, 3) + " .. " + juce::String (tLast, 3) + " s)");
+            }
+        }
+        CHECK (panel.plotView ().focusTableIndex () == 0, "table from sel: the new table is selected");
+    }
+    wav.deleteFile ();
+    store.deleteFile ();
+}
+
+// Issue #12: every control a user can see carries a tooltip. Walks the main
+// window, every dockable panel and the tool windows; a control counts when it
+// and its parents are visible (state-hidden controls are skipped), and JUCE's
+// internal parts (scroll bar buttons, a combo's label, a slider's text box,
+// table headers) are not controls of their own.
+static void collectControlsWithoutTooltip (juce::Component& c, const juce::String& path,
+                                           juce::StringArray& out, int& numControls)
+{
+    if (! c.isVisible ())
+        return;
+    if (dynamic_cast<juce::ScrollBar*> (&c) != nullptr
+        || dynamic_cast<juce::TableHeaderComponent*> (&c) != nullptr)
+        return;
+
+    const bool isControl = dynamic_cast<juce::Button*> (&c) != nullptr
+                        || dynamic_cast<juce::ComboBox*> (&c) != nullptr
+                        || dynamic_cast<juce::Slider*> (&c) != nullptr
+                        || (dynamic_cast<juce::TextEditor*> (&c) != nullptr
+                            && ! static_cast<juce::TextEditor&> (c).isReadOnly ());
+    if (isControl)
+    {
+        ++numControls;
+        auto* tc = dynamic_cast<juce::TooltipClient*> (&c);
+        if (tc == nullptr || tc->getTooltip ().trim ().isEmpty ())
+        {
+            juce::String what = c.getName ();
+            if (auto* b = dynamic_cast<juce::Button*> (&c)) what = b->getButtonText ();
+            out.add (path + " > " + juce::String (typeid (c).name ()) + " '" + what + "'");
+        }
+        return;   // a control's own children (combo label, slider text box) are its parts
+    }
+    for (auto* child : c.getChildren ())
+        collectControlsWithoutTooltip (*child, path, out, numControls);
+}
+
+static void regrPanels_everyControlHasATooltip()
+{
+    progress ("regression panels: every visible control has a tooltip (#12)");
+    const juce::File store = makeTempFile ("tooltips_all.recent");
+    store.deleteFile ();
+    const juce::File wav = makeTempFile ("tooltips_all.wav");
+    writeWav (wav, 2, 8000.0, 8000, [] (int, int64_t f, double)
+    {
+        return (float) (0.3 * std::sin (juce::MathConstants<double>::twoPi * 440.0 * (double) f / 8000.0));
+    });
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "tooltips: the wav opens");
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "tooltips test"));
+        win->setSize (1400, 900);
+        app.setSelection ({ 0.2, 0.6 });   // shows the status bar time fields
+
+        juce::StringArray missing;
+        int numControls = 0;
+        collectControlsWithoutTooltip (*win, "MainWindow", missing, numControls);
+        for (const char* id : { "editor", "files", "fft", "history", "python", "controls", "markers",
+                                "transcription", "selection", "drawing", "tables", "actions", "video" })
+            if (auto* panel = win->panelForId (id))
+            {
+                panel->setSize (std::max (panel->getWidth (), 360), std::max (panel->getHeight (), 500));
+                collectControlsWithoutTooltip (*panel, id, missing, numControls);
+            }
+
+        win->showStemSeparationWindow ();
+        if (auto* w = win->stemSepWindow ())
+            collectControlsWithoutTooltip (*w, "Stem Separation", missing, numControls);
+        win->showSuperResolutionWindow ();
+        if (auto* w = win->superResWindow ())
+            collectControlsWithoutTooltip (*w, "Super Resolution", missing, numControls);
+
+        {
+            ActionEditWindow w (app, -1);
+            collectControlsWithoutTooltip (w, "Edit Action", missing, numControls);
+        }
+        {
+            ActionBatchWindow w (app, -1);
+            collectControlsWithoutTooltip (w, "Action Batch", missing, numControls);
+        }
+        {
+            TablesColourDialog w ("Colour", 0, {});
+            collectControlsWithoutTooltip (w, "Table colour", missing, numControls);
+        }
+
+        CHECK (numControls > 60, "tooltips: the walk reaches the controls (" + juce::String (numControls) + ")");
+        CHECK (missing.isEmpty (), "tooltips: controls without a tooltip:\n  " + missing.joinIntoString ("\n  "));
+    }
+    wav.deleteFile ();
+    store.deleteFile ();
+}
+
 static void runRegression_panels()
 {
     regrPanels_pythonAddDialog();
@@ -865,4 +1027,6 @@ static void runRegression_panels()
     regrPanels_fileListCloseAsks();
     regrPanels_tablesPlotPlayheadAndSplitter();
     regrPanels_statusBarChannelNumbers();
+    regrPanels_tableFromSpectralSelection();
+    regrPanels_everyControlHasATooltip();
 }

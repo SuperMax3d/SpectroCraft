@@ -16,6 +16,9 @@ public:
     ~WaveformView();
 
     void paint (juce::Graphics&) override;
+    /** The channel labels explain their click (mute / solo); elsewhere the
+        settable tooltip (normally none). */
+    juce::String getTooltip() override;
     void resized() override;
 
     // Mouse interaction: left-drag = select, middle-drag = pan BOTH axes

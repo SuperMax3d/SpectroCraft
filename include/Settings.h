@@ -113,7 +113,7 @@ struct Settings
     // the loopback control server at launch. Off by default (opt-in).
     bool controlEnabled = false;
 
-    // Diagnostic log (Window > Diagnostic Log),
+    // Diagnostic log (Help > Diagnostic Log),
     // persisted: local JSON Lines file of errors, freezes and slow operations
     // (src/Diagnostics.cpp, docs/diagnostics.md). Off by default (opt-in).
     bool diagLogEnabled = false;
@@ -123,6 +123,9 @@ struct Settings
     // only if the last check found nothing newer. Off by default (opt-in); the
     // menu item works either way.
     bool checkUpdatesAtStartup = false;
+    // Help > Show Tooltips (issue #12): the hover tips of every control. On by
+    // default; off removes the app's tooltip window, so none shows anywhere.
+    bool showTooltips = true;
 
     // Track axis placement (View menu), persisted between sessions:
     // the vertical axis can sit on the right and the time ruler at the
@@ -218,6 +221,7 @@ struct Settings
             && controlEnabled == o.controlEnabled
             && diagLogEnabled == o.diagLogEnabled
             && checkUpdatesAtStartup == o.checkUpdatesAtStartup
+            && showTooltips == o.showTooltips
             && trackAxisOnRight == o.trackAxisOnRight
             && trackRulerAtBottom == o.trackRulerAtBottom
             && showAmpGrid == o.showAmpGrid

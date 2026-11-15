@@ -71,6 +71,8 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
         e->setColour (juce::CaretComponent::caretColourId, juce::Colours::white);
         e->addListener (this);   // keep the duration label in sync
     }
+    startEdit_.setTooltip ("Start of the range to enhance, in seconds.");
+    endEdit_.setTooltip ("End of the range to enhance, in seconds.");
 
     // Seed the range from the current track selection ONCE. Later changes to
     // that selection must not update these fields: the run works on a stable
@@ -88,6 +90,7 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
 
     selectAllBtn_.setButtonText ("Select All");
     selectAllBtn_.onClick = [this] { doSelectAll (); };
+    selectAllBtn_.setTooltip ("Set Start and End to the whole file.");
 
     // Mode row: which super-resolution family to run. Both emit a single
     // enhanced mono 48 kHz track regardless of the input.
@@ -95,6 +98,8 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
     modeCombo_.addItem ("AudioSR", 2);
     modeCombo_.setSelectedItemIndex (std::clamp (app_.settings.superResMode, 1, 2) - 1,
                                      juce::dontSendNotification);
+    modeCombo_.setTooltip ("FlashSR is small and fast; AudioSR uses a large model. Both give "
+                           "one enhanced mono 48 kHz track.");
     modeCombo_.onChange = [this]
     {
         app_.settings.superResMode = modeCombo_.getSelectedItemIndex () + 1;
@@ -109,12 +114,16 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
     outputCombo_.addItem ("Append to current file", 3);
     outputCombo_.setSelectedItemIndex (std::clamp (app_.settings.superResOutputMode, 1, 3) - 1,
                                        juce::dontSendNotification);
+    outputCombo_.setTooltip ("Where the enhanced track goes: a new file, in place of the "
+                             "current file, or as a new track of the current file.");
     outputCombo_.onChange = [this]
     {
         app_.settings.superResOutputMode = outputCombo_.getSelectedItemIndex () + 1;
         app_.saveSettings ();
     };
 
+    modelCombo_.setTooltip ("Model weights used by the selected mode. Download... fetches "
+                            "them.");
     modelCombo_.onChange = [this]
     {
         const juce::String t = modelCombo_.getText ();
@@ -132,6 +141,8 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
     // backend choice is shared with Stem Separation - same CLI binary.
     backendCombo_.setSelectedItemIndex (std::clamp (app_.settings.acppBackend, 1, (int) backends.size ()) - 1,
                                         juce::dontSendNotification);
+    backendCombo_.setTooltip ("Processor the enhancement runs on. It should match the "
+                              "installed audio.cpp variant (shared with Stem Separation).");
     backendCombo_.onChange = [this]
     {
         app_.settings.acppBackend = backendCombo_.getSelectedItemIndex () + 1;
@@ -144,11 +155,14 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
 
     downloadBtn_.setButtonText ("Download...");
     downloadBtn_.onClick = [this] { openDownloadDialog (); };
+    downloadBtn_.setTooltip ("Download the audio.cpp tool and super-resolution models.");
     runBtn_.setButtonText ("Run");
     runBtn_.onClick = [this] { startRun (); };
+    runBtn_.setTooltip ("Enhance the range with the chosen mode and model.");
 
     cancelBtn_.setButtonText ("Cancel");
     cancelBtn_.onClick = [this] { userTriedToCloseWindow (); };
+    cancelBtn_.setTooltip ("Close this window without running.");
 
     // DocumentWindow inherits ResizableWindow, whose addAndMakeVisible() asserts;
     // call the base-class method explicitly to side-step it. (Must use
@@ -361,6 +375,8 @@ void SuperResolutionWindow::openDownloadDialog()
             cb->addItem (choices[i].label + "   (" + juce::String ((double) choices[i].sizeBytes / 1.0e6, 1) + " MB)", (int) i + 1);
         // This JUCE build uses 0-based combo positions.
         cb->setSelectedItemIndex (0, juce::dontSendNotification);
+        cb->setTooltip ("Build of the audio.cpp tool to install. The Backend setting must "
+                        "match it.");
         dlg.addCustomComponent (cb);   // slot customSlot + 1
         binaryComboSlot = customSlot + 1;
         customSlot += 2;
@@ -379,6 +395,7 @@ void SuperResolutionWindow::openDownloadDialog()
                          (int) i + 1);
         // This JUCE build uses 0-based combo positions.
         cb->setSelectedItemIndex (0, juce::dontSendNotification);
+        cb->setTooltip ("Model file to download, with its size.");
         dlg.addCustomComponent (cb);   // slot customSlot + 1
         modelComboSlot = customSlot + 1;
     }

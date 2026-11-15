@@ -127,7 +127,8 @@ void SpectralEngine::setColourMap (ColourMap m)
 void SpectralEngine::computeFrames (SpectralTile& tile, const AudioEngine& engine,
                                     int channel, int64_t tileStartSample,
                                     int frameStart, int frameCount,
-                                    int fftSize, int hopSize, int windowType) const
+                                    int fftSize, int hopSize, int windowType,
+                                    int64_t windowOffset) const
 {
     if (frameCount <= 0 || frameStart >= tile.numFrames)
         return;
@@ -136,8 +137,10 @@ void SpectralEngine::computeFrames (SpectralTile& tile, const AudioEngine& engin
     const int64_t totalSamples = engine.numSamples();
 
     // Samples needed by this chunk: frames [fs, fs+fc) cover
-    // [tileStart + fs*hop, tileStart + (fs+fc-1)*hop + fftSize).
-    const int64_t s0 = tileStartSample + (int64_t) frameStart * hopSize;
+    // [anchor + fs*hop, anchor + (fs+fc-1)*hop + fftSize), anchor =
+    // tileStart + windowOffset. With centred frames (negative offset) the
+    // first windows reach before sample 0: that part reads as zeros.
+    const int64_t s0 = tileStartSample + windowOffset + (int64_t) frameStart * hopSize;
     if (s0 >= totalSamples)
         return; // remaining frames stay at -300 dB (silence)
 
@@ -146,8 +149,10 @@ void SpectralEngine::computeFrames (SpectralTile& tile, const AudioEngine& engin
     if (n <= 0)
         return;
 
-    std::vector<float> samples ((size_t) n);
-    engine.readSamples (channel, s0, n, samples.data());
+    std::vector<float> samples ((size_t) n, 0.0f);
+    const int64_t lead = std::min (n, std::max ((int64_t) 0, -s0));   // zeros before sample 0
+    if (n > lead)
+        engine.readSamples (channel, s0 + lead, n - lead, samples.data() + lead);
 
     const float* win = nullptr;
     if (windowType != 0)
@@ -222,7 +227,7 @@ std::shared_ptr<SpectralTile> SpectralEngine::computeTile (
     tile->mag.assign ((size_t) tile->numBins * tile->numFrames, -300.0f);
 
     computeFrames (*tile, engine, channel, startSample, 0, tile->numFrames,
-                   fftSize, hopSize, windowType);
+                   fftSize, hopSize, windowType, 0);
     return tile;
 }
 
@@ -249,10 +254,11 @@ bool SpectralEngine::tileStaleLocked (const SpectralTile& t, const AudioEngine& 
     if (t.contentVersion < overwriteVersion_)
         return true;   // samples were overwritten in place since this tile was computed
     // Appended since: the tile is stale if the samples its frames read
-    // ([start, start + (kFramesPerTile-1)*hop + fftSize)) were not all
-    // available when it was computed but more are now.
+    // (windows centred on [start, start + (kFramesPerTile-1)*hop], so up to
+    // that + fftSize/2) were not all available when it was computed but
+    // more are now.
     const int64_t need = std::min (total, t.startSample
-                                          + (int64_t) (kFramesPerTile - 1) * t.hopSize + t.fftSize);
+                                          + (int64_t) (kFramesPerTile - 1) * t.hopSize + t.fftSize / 2);
     return t.availSamples < need;
 }
 
@@ -403,7 +409,7 @@ SpectralEngine::getTiles (const AudioEngine& engine, int channel,
                     computeFrames (*w->missTiles[c.missIdx], *eng, channel,
                                    w->missTiles[c.missIdx]->startSample,
                                    c.frameStart, c.frameCount,
-                                   fftSize, hop, windowType);
+                                   fftSize, hop, windowType, -(int64_t) (fftSize / 2));
                 }
                 if (w->done.fetch_add (1) + 1 == numChunks)
                     w->finished.signal();
@@ -487,9 +493,9 @@ float SpectralEngine::probeMagnitude (const AudioEngine& engine, int channel,
     float best = -300.0f;
     for (const auto& tile : tiles)
     {
-        // Frames are displayed centred on their analysis window, so probe the
-        // frames whose windows straddle `pos` (same convention as renderToPixels).
-        const double frameF = ((double) pos - (double) tile->startSample - 0.5 * s.fftSize) / hop;
+        // Tile frames are centred on startSample + f*hop: probe the two
+        // frames whose centres straddle `pos` (same convention as renderToPixels).
+        const double frameF = ((double) pos - (double) tile->startSample) / hop;
         for (int f = (int) std::floor (frameF); f <= (int) std::ceil (frameF); ++f)
             best = std::max (best, tile->get (f, bin));
     }
@@ -607,10 +613,12 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
         for (int x = 0; x < width; ++x)
         {
             const int64_t sample = s0 + (int64_t) (((double) x + 0.5) / width * (s1 - s0));
-            // Frames are displayed centred on their analysis window: a pixel at
-            // time t shows the spectrum of the window centred on t, so transients
-            // line up with the waveform instead of appearing early.
-            const double frame = ((double) (sample - firstTileStart) - 0.5 * s.fftSize) / hop;
+            // Tile frames are centred on their analysis window: a pixel at
+            // time t shows the spectrum of the window centred on t, so
+            // transients line up with the waveform instead of appearing early,
+            // and the first N/2 samples (window zero-padded before the start)
+            // are covered too.
+            const double frame = (double) (sample - firstTileStart) / hop;
 
             double v = -300.0;
             for (auto& tiles : perCh)

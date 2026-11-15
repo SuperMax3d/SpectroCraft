@@ -131,6 +131,12 @@ public:
 
     void openFile (const juce::File& file);   // routes large files to the async path
     void openFileWithProgress (const juce::File& file);  // background load + progress dialog
+    /** CSV files dropped on the window become tables of the active document,
+        one after the other. A large one (kCsvProgressBytes and up) is read
+        and parsed on a worker thread behind a progress dialog with Cancel
+        (issue #14); a small one imports at once. */
+    void importCsvTables (std::vector<juce::File> files);
+    static constexpr juce::int64 kCsvProgressBytes = 2 * 1024 * 1024;
     void runSaveAsync (const juce::File& file, bool saveAs);      // background save + dialog
     void exportSpectralAsync (const juce::File& file,
                               const SpectralView::SpectralExportOptions& opts = {});
@@ -214,6 +220,11 @@ public:
         const auto it = editorTabOfDoc_.find (docId);
         return it != editorTabOfDoc_.end() ? it->second : juce::String();
     }
+    /** Whether an Editor tab (dock panel id) holds a picture of its document,
+        shown while the tab is visible without the views (unit tests). */
+    bool editorTabHasPicture (const juce::String& panelId) const;
+    /** Whether tooltips can show (Help > Show Tooltips) (unit tests). */
+    bool tooltipsActive() const noexcept { return tooltipWindow != nullptr; }
     juce::Component* tablesSepComp()   { return tablesSep.get (); }        // unit tests
     /** Top/bottom insets (px) that keep a view's vertical scrollbar clear of its own time ruler strip. */
     static void vScrollInsetsForView (Application& app, juce::Component* view,
@@ -266,7 +277,7 @@ public:
     void requestQuit (bool discardUnsaved) override;
     /** Window > Allow AI control toggled: Main.cpp starts/stops the server. */
     std::function<void (bool)> onControlToggled;
-    /** Window > Diagnostic Log toggled (after the setting was
+    /** Help > Diagnostic Log toggled (after the setting was
         saved): Main.cpp starts/stops the log (src/Diagnostics.cpp). */
     std::function<void (bool)> onDiagToggled;
     /** Turns the diagnostic log on (after explaining what it records, unless
@@ -692,22 +703,22 @@ public:
         WindowPanelBase = 6500,   // Window menu: per-panel open/close toggles
         WindowAllowMultiple = 6700,   // Window menu: "Allow multiple instances" toggle
         WindowAllowControl = 6701,    // Window menu: "Allow AI control (localhost)" toggle
-        WindowVideo = 6702,           // Window menu: show / hide the Video window
-        WindowDiagLog = 6704,         // Window menu: "Diagnostic Log" toggle
-        WindowVideoToggleDock = 6705, // Window menu: Dock / Undock the Video panel
+        WindowVideo = 6702,           // Window menu: open the Video panel / hide the picture
+        HelpDiagLog = 6704,           // Help menu: "Diagnostic Log" toggle
         WindowWorkspaceBase = 6600,   // Window > Workspaces: switch to workspace i (up to 48)
         WindowWsReset = 6650,         // Window > Workspaces > Reset to Saved Layout
         WindowWsSaveChanges = 6651,   // ... > Save Changes to this Workspace
         WindowWsSaveAs = 6652,        // ... > Save as New Workspace...
         WindowWsRename = 6653,        // ... > Rename Workspace...
         WindowWsDelete = 6654,        // ... > Delete Workspace
-        WindowMaximizeGroup = 6655,   // Window > Maximize Panel Group (`)
+        WindowMaximizeGroup = 6655,   // Window > Maximize Panel Group (backquote key)
         HelpAbout = 6000,
         HelpOpenDiagFolder = 6010,    // Help > Open Diagnostic Log Folder
         HelpCopyDiagSummary = 6011,   // Help > Copy Diagnostic Summary
         HelpSupportBundle = 6012,     // Help > Create Support Bundle...
         HelpCheckUpdates = 6013,      // Help > Check for Updates...
         HelpCheckUpdatesAtStartup = 6014, // ... submenu: also check at startup
+        HelpShowTooltips = 6015,      // Help > Show Tooltips (issue #12)
         MetaEmbedded = 7500, MetaExternal, MetaSaveOnly,   // File > Metadata submenu
         ChannelBase = 8000,    // per-channel visibility toggles: ChannelBase + index
         RecentBase = 9000,     // File > Open Recent items: RecentBase + index
@@ -814,7 +825,8 @@ private:
 
     // Single app-wide tooltip window (JUCE shows tooltips for any component
     // implementing juce::TooltipClient once this exists).
-    std::unique_ptr<juce::TooltipWindow> tooltipWindow;
+    std::unique_ptr<juce::TooltipWindow> tooltipWindow;   // null while Help > Show Tooltips is off
+    void applyTooltipsSetting();   // tooltipWindow <- app.settings.showTooltips
 
     int controlClients_ = 0;                  // AI control clients connected (status bar)
 
@@ -823,7 +835,6 @@ private:
     // (owned above) still exist.
     void layoutEditor();                      // place the views inside the Editor panel
     void handlePanelOpenChanged (const juce::String& id, bool open);
-    void toggleVideoDock();                   // the video menus' Dock / Undock Panel item
     void applyDockLayout (const juce::var& layout);
     juce::var legacyLeftLayout() const;       // arrangement saved by the old two-group column
     std::vector<sc::dock::Workspaces::Entry> builtInWorkspaces() const;
@@ -841,6 +852,7 @@ private:
     std::map<juce::String, std::unique_ptr<juce::Component>> editorSlots_;   // panel id -> tab content
     std::map<int, juce::String> editorTabOfDoc_;                             // FileDoc::id -> panel id
     void syncEditorTabs();             // tabs <- open documents; views -> the active one's tab
+    void snapshotEditorIntoItsTab();   // the active document's tab keeps a picture of the views
     void refreshEditorTabTitles();     // tab titles <- file names (cheap: after Save As...)
     void activateDocById (int docId);  // a document's tab was clicked
     std::unique_ptr<sc::dock::WorkspaceBar> workspaceBar_;  // right of the menu bar
@@ -848,6 +860,7 @@ private:
     bool dockLayoutDirty_ = false;            // save pending (debounced in the timer)
     juce::uint32 dockLayoutDirtyAt_ = 0;
     bool dockLoading_ = false;                // applying a layout: no persistence / video side effects
+    bool videoHideQuietly_ = false;           // Window > Video hides the picture: closing its tab must not pop its own window
     bool floatersHiddenForMinimise_ = false;  // floating panel windows hidden with this one
     juce::String workspaceMenuTarget_;        // workspace right-clicked in the bar
 

@@ -1997,9 +1997,13 @@ public:
     void downsamplePrimaryTable();
     void copySelection();
     void pasteToNewTable();
+    /** "Table from Spectral Selection": Application::addTableFromSpectralSelection,
+        then the new table is selected (errors go to the status line). */
+    void tableFromSpectralSelection();
     /** Selects only the given table's row in the list and points the
         preview plot at it. */
     void selectTable (int tableIdx);
+    void selectNewestTable();
     /** Colour picker dialog for one parameter (double-click on its square).
         Single clicks only cycle the palette - never open this. */
     void showColourPicker (int tableIdx, int paramIdx);
@@ -2215,7 +2219,7 @@ public:
     }
     juce::String getControlText() const { return controlText_; }
 
-    // Diagnostic log indicator (Window > Diagnostic Log): a
+    // Diagnostic log indicator (Help > Diagnostic Log): a
     // small dot and "Diagnostic log" while the log is being written.
     void setDiagActive (bool on)
     {

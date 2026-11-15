@@ -1,7 +1,7 @@
 #pragma once
 // SpectroCraft - opt-in diagnostic log for AI-assisted support.
 //
-// Window > Diagnostic Log (off by default), --diag-log, or
+// Help > Diagnostic Log (off by default), --diag-log, or
 // SC_DIAG_LOG=1 / SC_DIAG_LOG_DIR=<folder>. Schema and policy: docs/diagnostics.md.
 //
 // What it is:

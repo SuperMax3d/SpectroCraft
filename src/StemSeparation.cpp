@@ -47,6 +47,11 @@ public:
         excludeBtn_.onClick = [this] { owner_->addAnchorFromSelection (index_, false); };
         removeBtn_.setButtonText ("Remove");
         removeBtn_.onClick = [this] { owner_->removeDesc (index_); };
+        includeBtn_.setTooltip ("Add the current track selection as a range where this "
+                                "element is heard.");
+        excludeBtn_.setTooltip ("Add the current track selection as a range where this "
+                                "element is absent.");
+        removeBtn_.setTooltip ("Remove this description and its ranges.");
 
         addAndMakeVisible (numLabel_);
         addAndMakeVisible (edit_);
@@ -109,6 +114,7 @@ private:
                          juce::dontSendNotification);
             auto* btn = new juce::TextButton();
             btn->setButtonText ("Remove");
+            btn->setTooltip ("Remove this range from the description.");
             const size_t idx = i;
             btn->onClick = [this, idx] { owner_->removeAnchor (index_, (int) idx); };
             anchorWidgets_.push_back (lbl);
@@ -182,6 +188,8 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
         e->setColour (juce::CaretComponent::caretColourId, juce::Colours::white);
         e->addListener (this);   // keep the duration label in sync
     }
+    startEdit_.setTooltip ("Start of the range to separate, in seconds.");
+    endEdit_.setTooltip ("End of the range to separate, in seconds.");
 
     // Seed the range from the current track selection ONCE. Later changes to
     // that selection must not update these fields: advanced mode needs stable
@@ -235,6 +243,7 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
 
     selectAllBtn_.setButtonText ("Select All");
     selectAllBtn_.onClick = [this] { doSelectAll (); };
+    selectAllBtn_.setTooltip ("Set Start and End to the whole file.");
 
     // Mode row: which separation family to run. Sam Audio keeps the full
     // description UI; the htdemucs modes only need model + backend.
@@ -247,6 +256,8 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     modeCombo_.addItem ("htdemucs-whine-hiss-click-bump_v1", 5);
     modeCombo_.setSelectedItemIndex (std::clamp (app_.settings.stemSepMode, 1, 5) - 1,
                                      juce::dontSendNotification);
+    modeCombo_.setTooltip ("Sam Audio extracts what you describe in words; the htdemucs "
+                           "modes split the sound into fixed stems.");
     modeCombo_.onChange = [this]
     {
         app_.settings.stemSepMode = modeCombo_.getSelectedItemIndex () + 1;
@@ -261,12 +272,16 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     outputCombo_.addItem ("Append to current file", 3);
     outputCombo_.setSelectedItemIndex (std::clamp (app_.settings.stemSepOutputMode, 1, 3) - 1,
                                        juce::dontSendNotification);
+    outputCombo_.setTooltip ("Where the separated stems go: a new file, in place of the "
+                             "current file, or as new tracks of the current file.");
     outputCombo_.onChange = [this]
     {
         app_.settings.stemSepOutputMode = outputCombo_.getSelectedItemIndex () + 1;
         app_.saveSettings ();
     };
 
+    modelCombo_.setTooltip ("Model weights used by the selected mode (the installed "
+                            ".gguf files). Download... fetches more.");
     modelCombo_.onChange = [this]
     {
         const juce::String t = modelCombo_.getText ();
@@ -289,6 +304,8 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
     // 1-based id (1=Cpu 2=Cuda 3=Vulkan 4=Metal), so convert in both directions.
     backendCombo_.setSelectedItemIndex (std::clamp (app_.settings.acppBackend, 1, (int) backends.size ()) - 1,
                                        juce::dontSendNotification);
+    backendCombo_.setTooltip ("Processor the separation runs on. It should match the "
+                              "installed audio.cpp variant.");
     backendCombo_.onChange = [this]
     {
         app_.settings.acppBackend = backendCombo_.getSelectedItemIndex () + 1;
@@ -298,6 +315,9 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
 
     extractOrigToggle_.setButtonText ("Extract subsequent stem from original");
     extractOrigToggle_.setToggleState (app_.settings.acppExtractOriginal, juce::dontSendNotification);
+    extractOrigToggle_.setTooltip ("On: every description works on the original audio. Off: each "
+                                   "description after the first works on what the previous "
+                                   "one left over.");
     extractOrigToggle_.onClick = [this]
     {
         app_.settings.acppExtractOriginal = extractOrigToggle_.getToggleState ();
@@ -306,13 +326,18 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
 
     descEdit_.setMultiLine (false);
     descEdit_.setColour (juce::CaretComponent::caretColourId, juce::Colours::white);
+    descEdit_.setTooltip ("Describe the sound to extract, e.g. \"dog barking\" or "
+                          "\"engine hum\".");
 
     // The constructor's restore block may have entered advanced mode already.
     advancedBtn_.setButtonText (advanced_ ? "Simple view" : "Advanced...");
     advancedBtn_.onClick = [this] { setAdvanced (!advanced_); };
+    advancedBtn_.setTooltip ("Switch between one description and several, each with "
+                             "include / exclude ranges.");
 
     // Sits below the last description row in advanced mode (see resized()).
     addDescBtn_.setButtonText ("Add Stem");
+    addDescBtn_.setTooltip ("Add another description to extract in the same run.");
     addDescBtn_.onClick = [this]
     {
         descs_.push_back (StemDescEntry {});
@@ -329,11 +354,14 @@ StemSeparationWindow::StemSeparationWindow(Application& app)
 
     downloadBtn_.setButtonText ("Download...");
     downloadBtn_.onClick = [this] { openDownloadDialog (); };
+    downloadBtn_.setTooltip ("Download the audio.cpp tool and separation models.");
     runBtn_.setButtonText ("Run");
     runBtn_.onClick = [this] { startRun (); };
+    runBtn_.setTooltip ("Separate the range with the chosen mode and model.");
 
     cancelBtn_.setButtonText ("Cancel");
     cancelBtn_.onClick = [this] { userTriedToCloseWindow (); };
+    cancelBtn_.setTooltip ("Close this window without running.");
 
     // DocumentWindow inherits ResizableWindow, whose addAndMakeVisible() asserts;
     // call the base-class method explicitly to side-step it. (Must use
@@ -841,6 +869,8 @@ void StemSeparationWindow::openDownloadDialog()
             cb->addItem (choices[i].label + "   (" + juce::String ((double) choices[i].sizeBytes / 1.0e6, 1) + " MB)", (int) i + 1);
         // This JUCE build uses 0-based combo positions.
         cb->setSelectedItemIndex (0, juce::dontSendNotification);
+        cb->setTooltip ("Build of the audio.cpp tool to install. The Backend setting must "
+                        "match it.");
         dlg.addCustomComponent (cb);   // slot customSlot + 1
         binaryComboSlot = customSlot + 1;
         customSlot += 2;
@@ -861,6 +891,7 @@ void StemSeparationWindow::openDownloadDialog()
                          (int) i + 1);
         // This JUCE build uses 0-based combo positions.
         cb->setSelectedItemIndex (0, juce::dontSendNotification);
+        cb->setTooltip ("Model file to download, with its size.");
         dlg.addCustomComponent (cb);   // slot customSlot + 1
         modelComboSlot = customSlot + 1;
     }

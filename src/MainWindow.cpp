@@ -174,24 +174,55 @@ public:
 /** One Editor tab: there is one per open document (MainWindow::
     syncEditorTabs). They share the single EditorPanel, which sits in the tab
     of the active document. A tab of another document that shows anyway (moved
-    to another group) names its file, and a click there makes it active. */
-class EditorSlot : public juce::Component
+    to another group) keeps showing that document as the views last drew it
+    (`snapshot`, taken when it stopped being the active one), and a click
+    there makes it active. Without a picture yet it names its file. */
+class EditorSlot : public juce::Component,
+                   public juce::SettableTooltipClient
 {
 public:
     juce::String fileName;
     std::function<void()> onActivate;
+    juce::Image snapshot;   // the views showing this document, when it was left
+
+    void setSnapshot (juce::Image img)
+    {
+        snapshot = std::move (img);
+        updateTooltip ();
+        repaint ();
+    }
+    void updateTooltip()
+    {
+        setTooltip (getNumChildComponents() > 0 ? juce::String()
+                                                : fileName + ": click to make it the active file");
+    }
 
     void resized() override
     {
         for (auto* c : getChildren())
             c->setBounds (getLocalBounds());
     }
-    void childrenChanged() override { repaint(); }
+    void childrenChanged() override
+    {
+        // The views moved in: the picture is out of date from now on.
+        if (getNumChildComponents() > 0)
+            snapshot = {};
+        updateTooltip ();
+        repaint();
+    }
     void paint (juce::Graphics& g) override
     {
         g.fillAll (mainWindowBackground ());
         if (getNumChildComponents() > 0)
             return;
+        if (snapshot.isValid())
+        {
+            // Stretched if the tab was resized since (rare, and the next
+            // switch away redraws it at the new size).
+            g.setImageResamplingQuality (juce::Graphics::mediumResamplingQuality);
+            g.drawImage (snapshot, getLocalBounds().toFloat(), juce::RectanglePlacement::stretchToFit);
+            return;
+        }
         g.setColour (juce::Colours::white.withAlpha (0.6f));
         g.setFont (14.0f);
         g.drawFittedText (fileName + "\nClick to show it here.", getLocalBounds().reduced (16),
@@ -514,8 +545,9 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     juce::Component::addAndMakeVisible (statusBar.get());
 
     // One tooltip window for the whole app: it watches for mouse hovers and
-    // shows the tip of whichever TooltipClient component is under the cursor.
-    tooltipWindow = std::make_unique<juce::TooltipWindow> (nullptr, 600);
+    // shows the tip of whichever TooltipClient component is under the cursor
+    // (none at all while Help > Show Tooltips is off).
+    applyTooltipsSetting();
 
     editorPanel_->addAndMakeVisible (timeBar.get());
     editorPanel_->addAndMakeVisible (waveVScroll.get());
@@ -638,6 +670,10 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // Multi-file support: whenever a document becomes active (open, switch,
     // close), reset both views to that file and push its state into every panel.
     app.onActiveDocChanged = [this] { activateDocUI(); };
+    // Just before a switch, the tab of the document being left keeps a
+    // picture of it: shown when that tab is visible in another group, so
+    // two files can sit side by side.
+    app.onBeforeActiveDocChange = [this] { snapshotEditorIntoItsTab(); };
 
     // When a file is closed, drop the stored snapshots that came from it.
     app.onFileClosed = [this] (const FileDoc& d)
@@ -779,6 +815,7 @@ MainWindow::~MainWindow()
     app.onSetSpectralFreqRange = nullptr;
     app.onPlayheadChanged = nullptr;
     app.onActiveDocChanged = nullptr;
+    app.onBeforeActiveDocChange = nullptr;
     app.onFileClosed = nullptr;
     app.onTimeRangeDeleted = nullptr;
     app.onTimeRangeStretched = nullptr;
@@ -1311,22 +1348,16 @@ void MainWindow::handlePanelOpenChanged (const juce::String& id, bool open)
         else if (isVideoDocked ())
         {
             // Closing the docked tab sends the picture back to its own
-            // window instead of leaving it hidden everywhere.
+            // window instead of leaving it hidden everywhere (except when
+            // Window > Video hides it on purpose).
             videoWindow->undock ();
-            videoWindow->setVisible (true);
-            videoWindow->toFront (false);
+            if (! videoHideQuietly_)
+            {
+                videoWindow->setVisible (true);
+                videoWindow->toFront (false);
+            }
         }
     }
-}
-
-void MainWindow::toggleVideoDock()
-{
-    if (! isVideoDocked () || ! dock_->isOpen ("video"))
-        setVideoDocked (true);                 // own window -> panel
-    else if (dock_->isFloating ("video"))
-        dock_->dockPanelBack ("video");        // floating panel -> main window
-    else
-        dock_->floatPanel ("video");           // main window -> floating panel
 }
 
 bool MainWindow::areLeftPanelsVisible() const
@@ -1863,21 +1894,90 @@ void MainWindow::filesDropped (const juce::StringArray& files, int, int)
         return;
     }
 
+    // CSV files become tables in the Tables panel instead of audio docs.
+    std::vector<juce::File> csvs;
     for (const auto& f : valid)
     {
-        // CSV files become tables in the Tables panel instead of audio docs.
         if (f.getFileExtension ().equalsIgnoreCase (".csv"))
-        {
-            std::string err;
-            const juce::String text = f.loadFileAsString ();
-            if (!app.addTableFromCsv (f.getFileNameWithoutExtension (), text, &err))
-                sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
-                    "Could not import table \"" + f.getFileName () + "\":\n"
-                    + juce::String (err), "Tables");
-            continue;
-        }
-        openFile (f);   // multi-file editor: every valid drop becomes a document
+            csvs.push_back (f);
+        else
+            openFile (f);   // multi-file editor: every valid drop becomes a document
     }
+    importCsvTables (std::move (csvs));
+}
+
+void MainWindow::importCsvTables (std::vector<juce::File> files)
+{
+    if (files.empty ())
+        return;
+    const juce::File f = files.front ();
+    files.erase (files.begin ());
+    // One file at a time: the next starts once this one is in (or failed).
+    auto next = [this, files] { importCsvTables (files); };
+    auto failed = [f] (const std::string& err)
+    {
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon,
+            "Could not import table \"" + f.getFileName () + "\":\n"
+            + juce::String (err), "Tables");
+    };
+
+    FileDoc* d = app.doc ();
+    if (d == nullptr || f.getSize () < kCsvProgressBytes)
+    {
+        std::string err;
+        if (!app.addTableFromCsv (f.getFileNameWithoutExtension (), f.loadFileAsString (), &err))
+            failed (err);
+        next ();
+        return;
+    }
+
+    // Issue #14: a big CSV (tens of MB) takes seconds to read and parse; do
+    // it on a worker with a progress dialog (Cancel / Esc), and add the
+    // table to the document it was dropped on once it is ready.
+    const int docId = d->id;
+    const double docDuration = app.audioEngine ().duration ();
+    auto* dlg = new WorkProgressDialog ("Importing table",
+                                        "Reading " + f.getFileName () + " ...", true, this);
+    dlg->setProgress (0.0);
+    dlg->beginModal ();
+
+    std::thread ([this, dlg, f, docId, docDuration, next, failed] {
+        double lastSent = -1.0;
+        auto sendProgress = [dlg, &lastSent] (double v)
+        {
+            if (v - lastSent < 0.01 && v < 1.0) return;
+            lastSent = v;
+            juce::MessageManager::callAsync ([dlg, v] { dlg->setProgress (v); });
+        };
+        auto table = std::make_shared<sc::tables::TableData> ();
+        std::string err;
+        // Reading the file is the first 10 %, the import the rest.
+        const juce::String text = f.loadFileAsString ();
+        sendProgress (0.1);
+        const bool ok = ! dlg->cancelled.load ()
+            && sc::tables::importTable (f.getFileNameWithoutExtension (), text, *table, &err, docDuration,
+                                        [&] (double frac)
+                                        {
+                                            sendProgress (0.1 + 0.9 * frac);
+                                            return ! dlg->cancelled.load ();
+                                        });
+
+        juce::MessageManager::callAsync ([this, dlg, ok, err, table, docId, next, failed] {
+            const bool wasCancelled = dlg->cancelled.load ();
+            delete dlg;
+            if (ok && ! wasCancelled)
+            {
+                std::string addErr;
+                if (! app.addImportedTable (docId, std::move (*table), &addErr))
+                    failed (addErr);
+            }
+            else if (! wasCancelled)
+            {
+                failed (err);
+            }
+            next ();   // a cancel stops this file only: the next ones still import
+        });
+    }).detach ();
 }
 
 juce::PopupMenu MainWindow::buildMergeMenu (bool haveActiveDoc)
@@ -2684,11 +2784,53 @@ void MainWindow::refreshEditorTabTitles()
         dock_->setPanelTitle (it->second, title);
         if (const auto sit = editorSlots_.find (it->second); sit != editorSlots_.end ())
             if (auto* slot = dynamic_cast<EditorSlot*> (sit->second.get ()))
-                if (slot->fileName != title) { slot->fileName = title; slot->repaint (); }
+                if (slot->fileName != title)
+                {
+                    slot->fileName = title;
+                    slot->updateTooltip ();
+                    slot->repaint ();
+                }
         editorHasDoc = editorHasDoc || it->second == "editor";
     }
     if (! editorHasDoc)
         dock_->setPanelTitle ("editor", "Editor");
+}
+
+void MainWindow::snapshotEditorIntoItsTab()
+{
+    // Called by Application::activate() before it switches documents: the
+    // views still show the document being left, in its tab. That tab shows
+    // this picture whenever it is visible without the views (issue #9: two
+    // files side by side in two groups).
+    if (editorPanel_ == nullptr)
+        return;
+    auto* slot = dynamic_cast<EditorSlot*> (editorPanel_->getParentComponent ());
+    if (slot == nullptr || editorPanel_->getWidth () <= 0 || editorPanel_->getHeight () <= 0)
+        return;
+    const float scale = juce::jlimit (1.0f, 3.0f,
+        (float) juce::Component::getApproximateScaleFactorForComponent (editorPanel_.get ()));
+    slot->setSnapshot (editorPanel_->createComponentSnapshot (editorPanel_->getLocalBounds (),
+                                                              true, scale));
+}
+
+void MainWindow::applyTooltipsSetting()
+{
+    // Help > Show Tooltips (issue #12): without the TooltipWindow no tip
+    // shows anywhere (floating panel windows and dialogs included); with it,
+    // every control's own tooltip text appears after the usual hover delay.
+    if (app.settings.showTooltips && tooltipWindow == nullptr)
+        tooltipWindow = std::make_unique<juce::TooltipWindow> (nullptr, 600);
+    else if (! app.settings.showTooltips)
+        tooltipWindow.reset();
+}
+
+bool MainWindow::editorTabHasPicture (const juce::String& panelId) const
+{
+    const auto it = editorSlots_.find (panelId);
+    if (it == editorSlots_.end ())
+        return false;
+    const auto* slot = dynamic_cast<const EditorSlot*> (it->second.get ());
+    return slot != nullptr && slot->snapshot.isValid ();
 }
 
 void MainWindow::syncEditorTabs()
@@ -4173,7 +4315,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
     }
     const sc::diag::ScopedActivity diagActivity ("menu " + diagItem);
 
-    if (menuItemID == WindowDiagLog)
+    if (menuItemID == HelpDiagLog)
     {
         toggleDiagnosticLog ();
         return;
@@ -4218,18 +4360,22 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         return;
     }
 
-    // Window menu: Video window and its hover-following toggle.
+    // Window menu: Video, listed with the other panels and toggled like
+    // them. Opening docks the picture as the Video panel (dragging its tab
+    // out floats it); unchecking hides the picture wherever it is, the
+    // Video panel or its own window.
     if (menuItemID == WindowVideo)
     {
-        if (isVideoDocked ())
-            setVideoDocked (false);   // back to the standalone window, shown
+        if (isPanelOpen ("video") || isVideoWindowVisible ())
+        {
+            const juce::ScopedValueSetter<bool> quiet (videoHideQuietly_, true);
+            setPanelVisible ("video", false);
+            setVideoWindowVisible (false);
+        }
         else
-            setVideoWindowVisible (! isVideoWindowVisible ());
-        return;
-    }
-    if (menuItemID == WindowVideoToggleDock)
-    {
-        toggleVideoDock ();
+        {
+            setVideoDocked (true);
+        }
         return;
     }
     // Window menu: "Allow AI control (localhost)". Persisted and applied at
@@ -4604,6 +4750,11 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             app.settings.checkUpdatesAtStartup = !app.settings.checkUpdatesAtStartup;
             app.saveSettings();
             break;
+        case HelpShowTooltips:
+            app.settings.showTooltips = !app.settings.showTooltips;
+            app.saveSettings();
+            applyTooltipsSetting();
+            break;
     }
 }
 
@@ -4716,7 +4867,7 @@ void MainWindow::showSupportBundleDialog ()
     if (files.isEmpty ())
     {
         sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Create Support Bundle",
-            "There is no diagnostic log yet. Turn it on with Window > Diagnostic Log, "
+            "There is no diagnostic log yet. Turn it on with Help > Diagnostic Log, "
             "reproduce the problem, then create the bundle.", "", this);
         return;
     }
@@ -5800,11 +5951,21 @@ juce::AlertWindow* MainWindow::createAltRefEditDialog (bool isFreq, int index)
     w->addTextEditor ("name", r.name);
     w->addTextEditor (mainId, juce::String (r.refMain, isFreq ? 1 : 4));
     w->addTextEditor ("altValue", juce::String (r.altValue, 3));
+    if (auto* e = w->getTextEditor ("name"))
+        e->setTooltip ("Name of this scale, shown in the readout.");
+    if (auto* e = w->getTextEditor (mainId))
+        e->setTooltip (isFreq ? "Reference frequency, in Hz." : "Reference time, in seconds.");
+    if (auto* e = w->getTextEditor ("altValue"))
+        e->setTooltip (isFreq ? "Value of this scale at the reference frequency. The scale is "
+                                "proportional to the frequency."
+                              : "Value of this scale at the reference time. The scale is "
+                                "proportional to the time.");
 
     auto* vis = new juce::ToggleButton ();
     vis->setComponentID ("altref-visible");
     vis->setButtonText ("Show in mouse readout");
     vis->setToggleState (r.enabled, juce::dontSendNotification);
+    vis->setTooltip ("Show this scale's value next to the mouse position readout.");
     w->addCustomComponent (vis);
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
@@ -5953,6 +6114,9 @@ juce::AlertWindow* MainWindow::createGoToTimeDialog ()
                       formatDisplayedTime (app.playhead, app.timeAxisMode,
                                            app.timeOffsetSecs, rate));
 
+    if (auto* e = w->getTextEditor (fields.mainId))
+        e->setTooltip ("Time to go to, in the time axis's current format.");
+
     for (const auto& a : fields.alts)
     {
         if (a.first >= 0)
@@ -5968,6 +6132,8 @@ juce::AlertWindow* MainWindow::createGoToTimeDialog ()
         const auto& r = app.altTimeRefs[(size_t) ri];
         w->addTextEditor (a.second,
                           juce::String (Application::altScaleValue (r, app.playhead), 3));
+        if (auto* e = w->getTextEditor (a.second))
+            e->setTooltip ("Time to go to, as a value of the scale " + r.name + ".");
     }
 
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
@@ -6096,6 +6262,8 @@ juce::AlertWindow* MainWindow::createGainDialog()
                                      "Apply gain to the selection (dB):",
                                      juce::AlertWindow::QuestionIcon, this);
     w->addTextEditor ("gainDb", "0.0");
+    if (auto* e = w->getTextEditor ("gainDb"))
+        e->setTooltip ("Gain in dB: negative values make the selection quieter.");
 
     // Slider below the text box: -60..+24 dB in 0.1 steps. The text box stays
     // authoritative — OK applies whatever is typed; the slider simply clamps
@@ -6105,6 +6273,8 @@ juce::AlertWindow* MainWindow::createGainDialog()
     slider->setRange (-60.0, 24.0, 0.1);
     slider->setValue (0.0, juce::dontSendNotification);
     slider->setSize (280, 30);
+    slider->setTooltip ("Drag to set the gain, -60 to +24 dB. A typed value can go beyond "
+                        "this range.");
 
     if (auto* editor = w->getTextEditor ("gainDb"))
     {
@@ -6438,6 +6608,7 @@ public:
             chk->setButtonText (chName);
             chk->setClickingTogglesState (true);
             chk->onClick = [this] { refreshDestStates (); };
+            chk->setTooltip ("Extract the spectral selection from this channel.");
             auto* dst = new juce::TextEditor();
             dst->setMultiLine (false);
             dst->setTooltip ("Destination channel number: an existing "
@@ -6452,12 +6623,17 @@ public:
 
         const char* presetTexts[3] = { "All Tracks", "Last channel into new",
                                        "Second last into last" };
+        const char* presetTips[3] = {
+            "Extract from every channel, each into a new channel of its own.",
+            "Extract from the last channel only, into a new channel.",
+            "Extract from the second-last channel and mix it into the last one." };
         for (int i = 0; i < 3; ++i)
         {
             auto* b = new juce::TextButton (presetTexts[i]);
             b->setButtonText (presetTexts[i]);
             const int preset = i;
             b->onClick = [this, preset] { applyPreset (preset); };
+            b->setTooltip (presetTips[i]);
             addAndMakeVisible (b);
             presets_.push_back (b);
         }
@@ -6738,6 +6914,8 @@ juce::AlertWindow* MainWindow::createGenerateNoiseDialog()
     typeCombo->addItem ("Brown noise", 3);
     typeCombo->setSelectedId (1, juce::dontSendNotification);   // default: white
     typeCombo->setSize (200, 28);
+    typeCombo->setTooltip ("White: flat spectrum. Pink: -3 dB per octave. Brown: -6 dB per "
+                           "octave (deeper rumble).");
     w->addCustomComponent (typeCombo);
 
     // Intensity slider + Average Level button in one row.
@@ -6749,6 +6927,7 @@ juce::AlertWindow* MainWindow::createGenerateNoiseDialog()
     intensity->setRange (0.0, 1.0, 0.01);
     intensity->setValue (0.25, juce::dontSendNotification);
     intensity->setBounds (0, 0, 214, 30);
+    intensity->setTooltip ("Peak amplitude of the noise, 0 to 1 (1 = full scale).");
     auto* avgBtn = new juce::TextButton ("Average Level");
     avgBtn->setBounds (220, 1, 118, 26);
     avgBtn->setTooltip ("Set the intensity so the generated noise matches the "
@@ -6864,6 +7043,7 @@ juce::AlertWindow* MainWindow::createGenerateToneDialog()
     waveCombo->addItem ("Triangle", 4);
     waveCombo->setSelectedId (1, juce::dontSendNotification);   // default: sine
     waveCombo->setSize (200, 28);
+    waveCombo->setTooltip ("Wave shape used for every tone below.");
     w->addCustomComponent (waveCombo);
 
     auto* tones = new ToneListEditor();
@@ -7098,6 +7278,9 @@ CatTimeScalePanel::CatTimeScalePanel (double refDurationSecs)
     modeCombo_->addItem ("Time Stretch", 1);
     modeCombo_->addItem ("Reduce Gaps", 2);
     modeCombo_->addItem ("Export Variation", 3);
+    modeCombo_->setTooltip ("Time Stretch: change the length by cutting or repeating stable "
+                            "segments. Reduce Gaps: remove the most stable gaps. Export "
+                            "Variation: write the spectral change of each gap to a new table.");
 
     durRow_ = new LabeledField ("Time Duration:", formatWeightText (refDur_),
         "New length of the audio in seconds.");
@@ -7396,6 +7579,7 @@ juce::AlertWindow* MainWindow::createFilterEqDialog()
     auto* presetCombo = new juce::ComboBox ();
     presetCombo->setName ("Preset");
     presetCombo->setBounds (0, 0, 218, 26);
+    presetCombo->setTooltip ("Load a built-in or saved curve.");
     auto* addBtn = new juce::TextButton ("Add...");
     addBtn->setBounds (224, 0, 62, 26);
     addBtn->setTooltip ("Save the current curve as a named preset.");
@@ -7643,6 +7827,7 @@ juce::AlertWindow* MainWindow::createEnvelopeDialog()
     auto* presetCombo = new juce::ComboBox ();
     presetCombo->setName ("Preset");
     presetCombo->setBounds (0, 0, 218, 26);
+    presetCombo->setTooltip ("Load a built-in or saved curve.");
     auto* addBtn = new juce::TextButton ("Add...");
     addBtn->setBounds (224, 0, 62, 26);
     addBtn->setTooltip ("Save the current curve as a named preset.");
@@ -8151,6 +8336,10 @@ void MainWindow::showNewFileDialog()
                                      juce::AlertWindow::QuestionIcon, this);
     w->addTextEditor ("channels", juce::String (defChans));
     w->addTextEditor ("rate", juce::String (defRate, 3));
+    if (auto* e = w->getTextEditor ("channels"))
+        e->setTooltip ("Number of channels of the new file.");
+    if (auto* e = w->getTextEditor ("rate"))
+        e->setTooltip ("Sample rate of the new file, in Hz.");
     for (const char* name : { "channels", "rate" })
         if (auto* editor = w->getTextEditor (name))
             // Let Enter/Escape reach the OK/Cancel shortcuts even while a
@@ -8494,6 +8683,9 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
     // Default 100 = no attenuation limit (full noise suppression), matching
     // Audacity's default for this parameter.
     w->addTextEditor ("attenLim", "100", "Attenuation limit dB (100 = no limit)");
+    if (auto* e = w->getTextEditor ("attenLim"))
+        e->setTooltip ("Most the noise may be reduced, in dB. A lower value keeps more of the "
+                       "original sound; 100 = no limit.");
 
     w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
                     "Auto-download model if missing");
@@ -9437,7 +9629,9 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         juce::PopupMenu ws;
         buildWorkspaceMenu (ws, {});
         menu.addSubMenu ("Workspaces", ws);
-        menu.addItem (WindowMaximizeGroup, "Maximize Panel Group\t`", true, false);
+        // The shortcut is the backquote key (left of 1 on US keyboards);
+        // the bare ` character read as a stray mark in the menu.
+        menu.addItem (WindowMaximizeGroup, "Maximize Panel Group\tBackquote", true, false);
         menu.addSeparator ();
 
         // One entry per panel, in canonical order; a checkmark shows which
@@ -9445,23 +9639,18 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         const auto entries = leftPanelEntries ();
         for (size_t i = 0; i < entries.size (); ++i)
         {
-            // "Video" gets its own item below with the window controls.
-            if (juce::String (entries[i].id) == "video") continue;
+            // Video (the picture of a video document, following the playhead)
+            // has its own handler: checked while the picture shows anywhere,
+            // disabled where pictures cannot be decoded.
+            if (juce::String (entries[i].id) == "video")
+            {
+                menu.addItem (WindowVideo, entries[i].name, sc::videoDecodingAvailable (),
+                              isPanelOpen ("video") || isVideoWindowVisible ());
+                continue;
+            }
             menu.addItem ((int) (WindowPanelBase + i), entries[i].name, true,
                           isPanelOpen (entries[i].id));
         }
-
-        // Video window: the picture of a video document, following the
-        // playhead / playback (and the mouse over the views when enabled).
-        // Listed everywhere; disabled where pictures cannot be decoded.
-        menu.addSeparator ();
-        menu.addItem (WindowVideo, "Video", sc::videoDecodingAvailable (),
-                      isVideoWindowVisible () || isVideoDocked ());
-        // Docking the picture into / out of the docking workspace used to be
-        // in the video's right-click menu; it lives here now.
-        menu.addItem (WindowVideoToggleDock,
-                      isVideoDocked () ? "Undock Video Panel" : "Dock Video Panel",
-                      sc::videoDecodingAvailable (), false);
 
         // Instance behaviour: when unchecked, launching SpectroCraft again
         // hands its command-line files to this running instance and quits the
@@ -9475,16 +9664,16 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (WindowAllowControl, "Allow AI control (localhost)", true,
                       app.settings.controlEnabled);
 #endif
-        // Diagnostic log: local file of errors, freezes and
-        // slow operations (docs/diagnostics.md). Off by default.
-        menu.addItem (WindowDiagLog, "Diagnostic Log", true, sc::diag::enabled ());
     }
     else if (menuName == "Help")
     {
         menu.addItem (HelpAbout, "About SpectroCraft", true, false);
-        // Diagnostic log (Window > Diagnostic Log): what to give
-        // support. Nothing is ever sent.
+        menu.addItem (HelpShowTooltips, "Show Tooltips", true, app.settings.showTooltips);
+        // Diagnostic log: local file of errors, freezes and slow operations
+        // (docs/diagnostics.md), off by default, and what to give support.
+        // Nothing is ever sent.
         menu.addSeparator ();
+        menu.addItem (HelpDiagLog, "Diagnostic Log", true, sc::diag::enabled ());
         menu.addItem (HelpOpenDiagFolder, "Open Diagnostic Log Folder", true, false);
         menu.addItem (HelpCopyDiagSummary, "Copy Diagnostic Summary", true, false);
         menu.addItem (HelpSupportBundle, "Create Support Bundle...", true, false);

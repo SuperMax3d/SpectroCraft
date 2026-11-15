@@ -571,16 +571,14 @@ static void testVideoWindowFollowsDocument()
         const int wIdx = names.indexOf ("Window");
 
         // While docked in its tab (the new-user default), Window > Video
-        // brings back the standalone window and closes the tab.
+        // toggles it like any other panel: closing hides the picture (no
+        // standalone window pops up), opening docks it again.
         win->menuItemSelected (MainWindow::WindowVideo, wIdx);
-        CHECK (!win->isPanelOpen ("video") && vw->isVisible(),
-               "video window: Window > Video undocks to its own window");
-
-        // Then it hides and shows that window.
+        CHECK (!win->isPanelOpen ("video") && !vw->isVisible(),
+               "video window: Window > Video hides the docked picture");
         win->menuItemSelected (MainWindow::WindowVideo, wIdx);
-        CHECK (!vw->isVisible(), "video window: Window > Video hides it");
-        win->menuItemSelected (MainWindow::WindowVideo, wIdx);
-        CHECK (vw->isVisible(), "video window: Window > Video shows it again");
+        CHECK (win->isPanelOpen ("video") && !vw->isVisible(),
+               "video window: Window > Video opens the Video panel again");
 
         // Docked into the left panel like Tables; undocked back to its own window.
         win->setVideoDocked (true);
@@ -617,31 +615,54 @@ static void testVideoWindowFollowsDocument()
         CHECK (!win->isPanelOpen ("video") && vw->isVisible(),
                "video dock: closing the tab brings back its own window");
 
-        // The Window menu's Dock / Undock Video Panel items drive the same
-        // cycle that used to live in the picture's right-click menu.
-        auto menuDockLabel = [&] () -> juce::String
+        // Issue #10: Window > Video sits with the other panels, right after
+        // Drawing (no separator), and there is no Dock / Undock item any
+        // more: the Video panel floats by dragging its tab out, like every
+        // other panel.
+        auto windowItems = [&] ()
         {
+            std::vector<juce::PopupMenu::Item> items;
             const auto wm = win->getMenuForIndex (wIdx, "Window");
-            for (juce::PopupMenu::MenuItemIterator it (wm, true); it.next ();)
-                if (it.getItem().itemID == MainWindow::WindowVideoToggleDock)
-                    return it.getItem().text;
-            return juce::String();
+            for (juce::PopupMenu::MenuItemIterator it (wm, false); it.next ();)
+                items.push_back (it.getItem());
+            return items;
         };
-        CHECK (menuDockLabel () == "Dock Video Panel",
-               "video dock: Window menu offers Dock Video Panel while standalone");
-        win->menuItemSelected (MainWindow::WindowVideoToggleDock, wIdx);
-        CHECK (win->isPanelOpen ("video") && !vw->isVisible()
-                   && vw->view().getParentComponent () == win->getVideoDockHost(),
-               "video dock: the Window item docks it into the panel");
-        CHECK (menuDockLabel () == "Undock Video Panel",
-               "video dock: the Window item now offers Undock Video Panel");
-        win->menuItemSelected (MainWindow::WindowVideoToggleDock, wIdx);
-        CHECK (win->isPanelOpen ("video") && !vw->isVisible(),
-               "video dock: undocking floats it instead of hiding it");
-        win->menuItemSelected (MainWindow::WindowVideoToggleDock, wIdx);
-        CHECK (win->isPanelOpen ("video") && !vw->isVisible()
-                   && vw->view().getParentComponent () == win->getVideoDockHost(),
-               "video dock: docking back from the float");
+        auto videoItem = [&] () -> juce::PopupMenu::Item
+        {
+            for (const auto& it : windowItems ())
+                if (it.itemID == MainWindow::WindowVideo) return it;
+            return {};
+        };
+        {
+            const auto items = windowItems ();
+            bool afterDrawing = false, dockItem = false;
+            for (size_t i = 0; i + 1 < items.size (); ++i)
+                if (items[i].text == "Drawing")
+                    afterDrawing = items[i + 1].itemID == MainWindow::WindowVideo
+                                   && items[i + 1].text == "Video";
+            for (const auto& it : items)
+                dockItem = dockItem || it.text.containsIgnoreCase ("Dock");
+            CHECK (afterDrawing, "video menu: Video follows Drawing in the panel list");
+            CHECK (! dockItem, "video menu: no Dock / Undock Video Panel item");
+        }
+
+        // Standalone window shown: the item is checked and hides it.
+        CHECK (vw->isVisible () && videoItem ().isTicked,
+               "video menu: checked while the picture shows in its own window");
+        win->menuItemSelected (MainWindow::WindowVideo, wIdx);
+        CHECK (! vw->isVisible () && ! win->isPanelOpen ("video") && ! videoItem ().isTicked,
+               "video menu: unchecking hides the standalone picture");
+        // Checking it opens the Video panel with the picture docked in it.
+        win->menuItemSelected (MainWindow::WindowVideo, wIdx);
+        CHECK (win->isPanelOpen ("video") && ! vw->isVisible ()
+                   && vw->view().getParentComponent () == win->getVideoDockHost()
+                   && videoItem ().isTicked,
+               "video menu: checking opens the Video panel");
+        // Unchecking closes the panel without popping the standalone window.
+        win->menuItemSelected (MainWindow::WindowVideo, wIdx);
+        CHECK (! win->isPanelOpen ("video") && ! vw->isVisible () && ! win->isVideoDocked ()
+                   && ! videoItem ().isTicked,
+               "video menu: unchecking closes the panel, no window pops up");
         win->setVideoDocked (false);   // restore the standalone state
     }
 
