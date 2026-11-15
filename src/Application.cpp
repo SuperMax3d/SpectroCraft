@@ -171,6 +171,7 @@ void Application::loadSettings ()
 {
     settings.fftSize       = roundUpPow2Clamped ((int) recentStore->getIntValue ("fft_size", settings.fftSize), 256, 65536);
     settings.fftAuto       = recentStore->getIntValue ("fft_auto", settings.fftAuto ? 1 : 0) != 0;
+    settings.fftMultiRes   = recentStore->getIntValue ("fft_multires", settings.fftMultiRes ? 1 : 0) != 0;
     {
         const double ts = recentStore->getValue ("auto_time_slices",
                                                  juce::String (settings.autoTargetTimeSlices)).getDoubleValue();
@@ -302,6 +303,7 @@ void Application::saveSettings ()
 {
     recentStore->setValue ("fft_size", settings.fftSize);
     recentStore->setValue ("fft_auto", settings.fftAuto ? 1 : 0);
+    recentStore->setValue ("fft_multires", settings.fftMultiRes ? 1 : 0);
     recentStore->setValue ("auto_time_slices", settings.autoTargetTimeSlices);
     recentStore->setValue ("auto_bins_per_pixel", settings.autoBinsPerPixel);
     recentStore->setValue ("log_freq", settings.logFrequency ? 1 : 0);

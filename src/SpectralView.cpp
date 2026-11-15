@@ -221,7 +221,8 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
         juce::String autoLab = "Auto";
         if (autoFftSize > 0)
             autoLab = "Auto (" + juce::String (autoFftSize) + ")";
-        fftMenu.addItem (CtxFftAuto, autoLab, app.settings.fftAuto);
+        fftMenu.addItem (CtxFftAuto, autoLab, app.settings.fftAuto && !app.settings.fftMultiRes);
+        fftMenu.addItem (CtxFftMultiRes, "Multi-resolution", true, app.settings.fftMultiRes);
         fftMenu.addSeparator();
         fftMenu.addItem (CtxAxisLinear, "Linear",      !app.settings.logFrequency);
         fftMenu.addItem (CtxAxisLog,    "Logarithmic",  app.settings.logFrequency);
@@ -1465,7 +1466,7 @@ Settings SpectralView::effectiveSettingsFor (const Settings& base, int rowHeight
     // minFrequency/maxFrequency the caller's copy still carries.
     rs.minFrequency = (float) std::max (1.0, s.fMin);
     rs.maxFrequency = (float) std::min (s.sampleRate * 0.5, s.fMax);
-    if (rs.fftAuto)
+    if (rs.fftAuto && !rs.fftMultiRes)   // multi-resolution picks its own sizes
         rs.fftSize = SpectralEngine::chooseFftSize (s.t1 - s.t0,
                                                     s.sampleRate,
                                                     std::max (1, rowHeightPx),

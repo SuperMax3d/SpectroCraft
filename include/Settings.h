@@ -49,6 +49,7 @@ enum ContextMenuIDs : int
     CtxFftAuto            = 32,   // "Auto (N)": switch to auto FFT-size mode
     CtxAxisLinear         = 33,
     CtxAxisLog            = 34,
+    CtxFftMultiRes        = 35,   // "Multi-resolution" (issue #17)
     CtxAltRefTimeBase     = 100,  // + index: edit an existing time reference
     CtxAltRefFreqBase     = 200   // + index: edit an existing frequency reference
 };
@@ -64,6 +65,11 @@ struct Settings
     // SpectralEngine::chooseFftSize(). The two parameters below are persisted.
     // On by default: the combo shows "Auto (N)" with N = resolved size.
     bool fftAuto = true;
+    // Multi-resolution spectrogram (issue #17, Spectral Controls FFT size
+    // "Multi-resolution"): three FFT sizes blended by frequency - see
+    // SpectralEngine::multiResWeights(). Overrides fftSize and fftAuto while
+    // on; persisted.
+    bool fftMultiRes = false;
     double autoTargetTimeSlices = 80.0;   // target time slices across the visible range
     double autoBinsPerPixel = 1.25;       // spectral bins per pixel on the frequency axis
     int hopSize = 512;
@@ -194,7 +200,7 @@ struct Settings
 
     bool operator== (const Settings& o) const
     {
-        return fftSize == o.fftSize && fftAuto == o.fftAuto
+        return fftSize == o.fftSize && fftAuto == o.fftAuto && fftMultiRes == o.fftMultiRes
             && autoTargetTimeSlices == o.autoTargetTimeSlices
             && autoBinsPerPixel == o.autoBinsPerPixel
             && hopSize == o.hopSize && windowType == o.windowType
@@ -208,7 +214,7 @@ struct Settings
     // MainWindow to trigger a settings save when any of them changes.
     bool samePersistent (const Settings& o) const
     {
-        return fftSize == o.fftSize && fftAuto == o.fftAuto
+        return fftSize == o.fftSize && fftAuto == o.fftAuto && fftMultiRes == o.fftMultiRes
             && autoTargetTimeSlices == o.autoTargetTimeSlices
             && autoBinsPerPixel == o.autoBinsPerPixel
             && logFrequency == o.logFrequency

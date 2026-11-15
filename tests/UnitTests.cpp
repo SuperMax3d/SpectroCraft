@@ -6816,6 +6816,18 @@ static void testSpectralAxisContextActions()
               == SpectralControlsPanel::kFftAutoId,
           "the Spectral Controls combo shows the Auto entry selected");
 
+    // Multi-resolution (issue #17): on from the submenu, off again when a
+    // size is stepped (starting from the last manual size).
+    win->handleContextMenuAction (CtxFftMultiRes);
+    CHECK (app.settings.fftMultiRes && !app.settings.fftAuto
+               && win->controlsPanelComp()->fftSizeComboRef().getSelectedId ()
+                      == SpectralControlsPanel::kFftMultiResId,
+           "FFT Size > Multi-resolution turns it on and selects it in the combo");
+    win->handleContextMenuAction (CtxFftIncrease);
+    CHECK (!app.settings.fftMultiRes && !app.settings.fftAuto && app.settings.fftSize == 4096,
+           "FFT Size > Increase leaves multi-resolution for the next manual size");
+    win->handleContextMenuAction (CtxFftAuto);
+
     // Logarithmic / Linear toggle: flips settings.logFrequency; re-selecting
     // the active scale is a no-op.
     win->handleContextMenuAction (CtxAxisLog);
@@ -9248,8 +9260,8 @@ static void testSpectralControlsAutoFft()
         CHECK (app.settings.fftAuto, "auto mode is on by default");
 
         // Selecting Auto keeps the mode on and shows the parameter rows.
-        panel.fftSizeComboRef().setSelectedItemIndex (panel.fftSizeComboRef().getNumItems() - 1,
-                                                      juce::sendNotificationSync);
+        panel.fftSizeComboRef().setSelectedId (SpectralControlsPanel::kFftAutoId,
+                                               juce::sendNotificationSync);
         CHECK (app.settings.fftAuto, "selecting Auto turns auto mode on");
         CHECK (panel.autoSlicesEditRef().isVisible(), "time-slices row visible in auto mode");
         CHECK (panel.autoBinsEditRef().isVisible(), "bins-per-pixel row visible in auto mode");
@@ -9281,6 +9293,29 @@ static void testSpectralControlsAutoFft()
         CHECK (app.settings.autoTargetTimeSlices == 1000.0, "time slices clamped to 1000");
         CHECK (panel.applyAutoBinsText ("99"), "large bins-per-pixel accepted and clamped");
         CHECK (app.settings.autoBinsPerPixel == 16.0, "bins per pixel clamped to 16");
+
+        // Issue #17: Multi-resolution is the last entry; it leaves Auto and
+        // hides the Auto rows, and picking Auto again turns it off.
+        auto& combo = panel.fftSizeComboRef();
+        CHECK (combo.getItemText (combo.getNumItems() - 1) == "Multi-resolution"
+                   && combo.getItemId (combo.getNumItems() - 1) == SpectralControlsPanel::kFftMultiResId,
+               "multires: last entry of the FFT size combo");
+        combo.setSelectedId (SpectralControlsPanel::kFftMultiResId, juce::sendNotificationSync);
+        CHECK (app.settings.fftMultiRes && !app.settings.fftAuto && !panel.autoSlicesEditRef().isVisible(),
+               "multires: selecting it turns it on, Auto off, hides the Auto rows");
+        combo.setSelectedId (1024, juce::sendNotificationSync);
+        CHECK (!app.settings.fftMultiRes && app.settings.fftSize == 1024, "multires: a fixed size turns it off");
+        combo.setSelectedId (SpectralControlsPanel::kFftMultiResId, juce::sendNotificationSync);
+        app.saveSettings();
+        {
+            Application c (store);
+            SpectralControlsPanel panel3 (c);
+            panel3.refresh();
+            CHECK (c.settings.fftMultiRes && panel3.fftSizeComboRef().getSelectedId() == SpectralControlsPanel::kFftMultiResId,
+                   "multires: remembered after restart and shown in the combo");
+        }
+        combo.setSelectedId (SpectralControlsPanel::kFftAutoId, juce::sendNotificationSync);
+        CHECK (app.settings.fftAuto && !app.settings.fftMultiRes, "multires: picking Auto turns it off");
 
         app.saveSettings();
     }
@@ -9501,6 +9536,7 @@ static void testSpectralControlsResetAndAutoLabel()
     // Dirty every setting the Reset button is supposed to restore.
     app.settings.fftAuto = false;
     app.settings.fftSize = 1024;
+    app.settings.fftMultiRes = true;
     app.settings.autoTargetTimeSlices = 33.0;
     app.settings.autoBinsPerPixel = 2.5;
     app.settings.logFrequency = false;
@@ -9517,7 +9553,7 @@ static void testSpectralControlsResetAndAutoLabel()
     // triggerClick() posts an async message, so call onClick directly.
     resetBtn->onClick ();
 
-    CHECK (app.settings.fftAuto, "reset restores auto mode");
+    CHECK (app.settings.fftAuto && !app.settings.fftMultiRes, "reset restores auto mode (multi-resolution off)");
     CHECK (app.settings.fftSize == 2048, "reset restores the default FFT size");
     CHECK (std::abs (app.settings.autoTargetTimeSlices - 80.0) < 1e-9,
            "reset restores target time slices");
@@ -11671,6 +11707,193 @@ static void testSpectralEdgeCoverage()
         CHECK (bestLum > 60 && std::abs (bestX - 60) <= 26,
                "click in the first N/2 samples aligns (N=" + juce::String (n) + "), x="
                + juce::String (bestX));
+    }
+}
+
+// Issue #17 measurements, run only with SC_BENCH_MULTIRES=1 (prints a table):
+// time to draw one 1600 x 300 spectrogram row (log 20 Hz..20 kHz) from an
+// empty tile cache (cold: what a zoom or a new file costs) and again from the
+// filled cache (warm: a repaint), plus the tile memory, for single sizes,
+// Auto and multi-resolution, at three zoom levels of a 60 s 48 kHz file.
+static void benchSpectralMultiResolution()
+{
+    if (juce::SystemStats::getEnvironmentVariable ("SC_BENCH_MULTIRES", {}) != "1")
+        return;
+
+    const double rate = 48000.0;
+    const int len = 60 * 48000;
+    std::vector<std::vector<float>> data (1, std::vector<float> ((size_t) len));
+    juce::Random rng (17);
+    for (int i = 0; i < len; ++i)
+        data[0][(size_t) i] = 0.1f * (rng.nextFloat() * 2.0f - 1.0f)
+                            + 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * i / rate);
+    AudioEngine eng;
+    if (!eng.initNew (1, rate, &data)) return;
+
+    const int W = 1600, H = 300;
+    std::printf ("\n| visible | mode | cold ms | warm ms | tile MB |\n|---|---|---|---|---|\n");
+    for (const double visible : { 60.0, 10.0, 1.0 })
+    {
+        const double t0 = 30.0 - visible * 0.5, t1 = t0 + visible;
+        const int autoN = SpectralEngine::chooseFftSize (visible, rate, H, 20.0, 20000.0);
+        struct Case { juce::String name; int n; bool multi; };
+        const Case cases[] = { { "512", 512, false }, { "2048", 2048, false }, { "8192", 8192, false },
+                               { "Auto (" + juce::String (autoN) + ")", autoN, false },
+                               { "Multi-resolution", 2048, true } };
+        for (const auto& c : cases)
+        {
+            Settings s;
+            s.fftSize = c.n; s.hopSize = 512; s.windowType = 1; s.fftAuto = false;
+            s.fftMultiRes = c.multi; s.logFrequency = true;
+            s.minFrequency = 20.0f; s.maxFrequency = 20000.0f;
+            SpectralEngine sp;
+            std::vector<uint8_t> rgba;
+            const double a = juce::Time::getMillisecondCounterHiRes();
+            sp.renderToPixels (eng, s, W, H, t0, t1, { 0 }, rgba);
+            const double b = juce::Time::getMillisecondCounterHiRes();
+            sp.renderToPixels (eng, s, W, H, t0, t1, { 0 }, rgba);
+            const double e = juce::Time::getMillisecondCounterHiRes();
+            std::printf ("| %.0f s | %s | %.0f | %.0f | %.1f |\n", visible, c.name.toRawUTF8(),
+                         b - a, e - b, (double) sp.cacheBytes() / (1024.0 * 1024.0));
+        }
+    }
+    std::fflush (stdout);
+}
+
+// Issue #17: multi-resolution spectrogram. The three sizes and their blend
+// weights, then what it buys: low tones 20 Hz apart are resolved like with the
+// long window, and a click in the treble stays as short as with the short one.
+static void testSpectralMultiResolution()
+{
+    {
+        const auto at48 = SpectralEngine::multiResFftSizes (48000.0);
+        const auto at44 = SpectralEngine::multiResFftSizes (44100.0);
+        const auto at96 = SpectralEngine::multiResFftSizes (96000.0);
+        const auto at8  = SpectralEngine::multiResFftSizes (8000.0);
+        CHECK (at48[0] == 512 && at48[1] == 2048 && at48[2] == 8192
+                   && at44 == at48 && at96[0] == 1024 && at96[2] == 16384
+                   && at8[0] == 128 && at8[2] == 2048,
+               "multires: N, 4N, 16N with N ~ 10.7 ms (128..4096)");
+
+        bool sumsToOne = true;
+        for (double f = 5.0; f < 24000.0; f *= 1.07)
+        {
+            const auto w = SpectralEngine::multiResWeights (f, 48000.0);
+            sumsToOne = sumsToOne && std::abs (w[0] + w[1] + w[2] - 1.0) < 1e-9
+                        && w[0] >= 0.0 && w[1] >= 0.0 && w[2] >= 0.0;
+        }
+        CHECK (sumsToOne, "multires: the weights add up to 1 at every frequency");
+        const auto lo = SpectralEngine::multiResWeights (100.0, 48000.0);
+        const auto mid = SpectralEngine::multiResWeights (1000.0, 48000.0);
+        const auto hi = SpectralEngine::multiResWeights (8000.0, 48000.0);
+        const auto x1 = SpectralEngine::multiResWeights (20.0 * 48000.0 / 2048.0, 48000.0);
+        CHECK (lo[2] == 1.0 && mid[1] == 1.0 && hi[0] == 1.0
+                   && std::abs (x1[1] - 0.5) < 1e-9 && std::abs (x1[2] - 0.5) < 1e-9,
+               "multires: long window in the bass, middle in the mids, short in the treble, "
+               "halfway at a crossover");
+    }
+
+    // 3 s at 48 kHz: 200 + 220 Hz tones throughout, single-sample clicks at 1 s and 2 s.
+    const double rate = 48000.0;
+    const int len = 3 * 48000;
+    std::vector<std::vector<float>> data (1, std::vector<float> ((size_t) len));
+    for (int i = 0; i < len; ++i)
+    {
+        const double t = (double) i / rate;
+        data[0][(size_t) i] = (float) (0.25 * std::sin (juce::MathConstants<double>::twoPi * 200.0 * t)
+                                     + 0.25 * std::sin (juce::MathConstants<double>::twoPi * 220.0 * t));
+    }
+    data[0][48000] += 0.9f;
+    data[0][96000] += 0.9f;
+    AudioEngine eng;
+    CHECK (eng.initNew (1, rate, &data), "multires: test document");
+
+    auto settingsFor = [] (int n, bool multi)
+    {
+        Settings s;
+        s.fftSize = n; s.hopSize = 512; s.windowType = 1; s.fftAuto = false;
+        s.fftMultiRes = multi;
+        s.logFrequency = false;
+        s.dbMinDb = -100.0f; s.dbMaxDb = 0.0f;
+        return s;
+    };
+
+    // Depth of the dip between the two tones (dB) in the middle column of a
+    // 150..270 Hz view at 0.5 s (no click within the longest window).
+    auto toneDip = [&] (const Settings& base) -> double
+    {
+        Settings s = base;
+        s.minFrequency = 150.0f; s.maxFrequency = 270.0f;
+        const int W = 21, H = 240;   // 0.5 Hz per row
+        SpectralEngine sp;
+        std::vector<float> db;
+        if (!sp.renderToDb (eng, s, W, H, 0.45, 0.55, { 0 }, db)) return 0.0;
+        auto at = [&] (double hz)
+        {   // row whose centre is closest to hz (row 0 = top = 270 Hz)
+            const int y = std::clamp ((int) std::lround ((270.0 - hz) / 0.5 - 0.5), 0, H - 1);
+            return (double) db[(size_t) y * W + W / 2];
+        };
+        return std::min (at (200.0), at (220.0)) - at (210.0);
+    };
+
+    // Length (ms) over which the 1 s click stays within 6 dB of its peak on
+    // the 8 kHz row, 0.5 ms per column.
+    auto clickWidthMs = [&] (const Settings& base) -> double
+    {
+        Settings s = base;
+        s.minFrequency = 7900.0f; s.maxFrequency = 8100.0f;
+        const int W = 400, H = 3;
+        SpectralEngine sp;
+        std::vector<float> db;
+        if (!sp.renderToDb (eng, s, W, H, 0.9, 1.1, { 0 }, db)) return 1e9;
+        const float* row = db.data() + (size_t) (H / 2) * W;
+        const float peak = *std::max_element (row, row + W);
+        int above = 0;
+        for (int x = 0; x < W; ++x)
+            if (row[x] >= peak - 6.0f) ++above;
+        return above * 0.5;
+    };
+
+    const double dip2048 = toneDip (settingsFor (2048, false));
+    const double dip8192 = toneDip (settingsFor (8192, false));
+    const double dipMulti = toneDip (settingsFor (2048, true));
+    const double w512 = clickWidthMs (settingsFor (512, false));
+    const double w2048 = clickWidthMs (settingsFor (2048, false));
+    const double wMulti = clickWidthMs (settingsFor (2048, true));
+    const juce::String nums = " (dip 2048 " + juce::String (dip2048, 1) + " dB, 8192 " + juce::String (dip8192, 1)
+                              + " dB, multi " + juce::String (dipMulti, 1) + " dB; click 512 " + juce::String (w512, 1)
+                              + " ms, 2048 " + juce::String (w2048, 1) + " ms, multi " + juce::String (wMulti, 1) + " ms)";
+    if (juce::SystemStats::getEnvironmentVariable ("SC_BENCH_MULTIRES", {}) == "1")
+        std::printf ("\nmulti-resolution quality:%s\n", nums.toRawUTF8());
+    CHECK (dip2048 < 3.0 && dip8192 > 6.0, "multires: 2048 merges the 200/220 Hz tones, 8192 separates them" + nums);
+    CHECK (std::abs (dipMulti - dip8192) < 0.5, "multires: the tones are separated like with 8192" + nums);
+    CHECK (std::abs (wMulti - w512) < 1.0 && wMulti < 0.5 * w2048,
+           "multires: the treble click is as short as with 512" + nums);
+
+    // The readout follows the blend: a tone reads the same level as the long window.
+    {
+        SpectralEngine sp;
+        const float pMulti = sp.probeMagnitude (eng, 0, 0.5, 200.0, settingsFor (2048, true), 0);
+        const float pLong = sp.probeMagnitude (eng, 0, 0.5, 200.0, settingsFor (8192, false), 0);
+        CHECK (std::abs (pMulti - pLong) < 0.01f && pLong > -20.0f,
+               "multires: the readout at 200 Hz is the long window's ("
+               + juce::String (pMulti, 2) + " / " + juce::String (pLong, 2) + " dB)");
+    }
+
+    // Zoomed into the treble only the short window is computed.
+    {
+        Settings s = settingsFor (2048, true);
+        s.minFrequency = 6000.0f; s.maxFrequency = 12000.0f;
+        SpectralEngine sp;
+        std::vector<uint8_t> rgba;
+        CHECK (sp.renderToPixels (eng, s, 200, 50, 0.0, 3.0, { 0 }, rgba), "multires: treble view renders");
+        const size_t shortOnly = sp.cacheBytes();
+        sp.clearCache();
+        s.minFrequency = 50.0f;
+        CHECK (sp.renderToPixels (eng, s, 200, 50, 0.0, 3.0, { 0 }, rgba), "multires: full view renders");
+        CHECK (shortOnly > 0 && sp.cacheBytes() > 4 * shortOnly,
+               "multires: a treble-only view skips the longer windows ("
+               + juce::String ((juce::int64) shortOnly) + " vs " + juce::String ((juce::int64) sp.cacheBytes()) + " bytes)");
     }
 }
 
@@ -29509,6 +29732,8 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("render cancel", testRenderToPixelsCancel);
     SC_RUN_TEST ("spectral transient alignment", testSpectralTransientAlignment);
     SC_RUN_TEST ("spectral edge coverage", testSpectralEdgeCoverage);
+    SC_RUN_TEST ("spectral multi-resolution", testSpectralMultiResolution);
+    SC_RUN_TEST ("spectral multi-resolution bench", benchSpectralMultiResolution);
     SC_RUN_TEST ("third octave label placement", testThirdOctaveLabelPlacement);
     SC_RUN_TEST ("fft view rate change", testFFTAnalysisRateChange);
     SC_RUN_TEST ("fft harmonic references", testFFTHarmonicReferences);

@@ -1081,6 +1081,7 @@ public:
 
     // FFT-size combo + auto-mode widgets (unit tests).
     static constexpr int kFftAutoId = -1;   // combo item id of the "Auto" entry
+    static constexpr int kFftMultiResId = -2;   // "Multi-resolution" entry (issue #17)
     juce::ComboBox& fftSizeComboRef() { return fftSizeCombo; }
     LevelEdit& autoSlicesEditRef() { return autoSlicesEdit; }
     LevelEdit& autoBinsEditRef() { return autoBinsEdit; }

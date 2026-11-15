@@ -213,6 +213,7 @@ std::vector<SettingKey> settingKeys()
         { "fft_size", PType::Integer, [] (const Settings& s) { return juce::var (s.fftSize); },
           [] (Settings& s, const juce::var& v) { s.fftSize = pow2Clamp ((int) v, 512, 65536); return juce::var (s.fftSize); } },
         b ("fft_auto", &Settings::fftAuto),
+        b ("fft_multires", &Settings::fftMultiRes),
         b ("log_freq", &Settings::logFrequency),
         b ("snap_zero", &Settings::snapToZeroCrossings),
         { "fft_local_n", PType::Integer, [] (const Settings& s) { return juce::var (s.fftLocalN); },

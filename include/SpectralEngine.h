@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "Settings.h"
 #include "AudioEngine.h"
+#include <array>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -129,13 +130,41 @@ public:
                               int heightPixels, double minFreqHz, double maxFreqHz,
                               double targetTimeSlices = 80.0, double binsPerPixel = 1.25);
 
+    /** Multi-resolution mode (Settings::fftMultiRes, issue #17): the picture
+        is drawn from three FFT sizes, N, 4N and 16N with N the power of two
+        closest to 10.7 ms of audio (512 / 2048 / 8192 at 48 kHz), returned
+        shortest first. N is kept within 128..4096. */
+    static std::array<int, 3> multiResFftSizes (double sampleRate);
+
+    /** Share of each multi-resolution size (same order as multiResFftSizes)
+        at a frequency; the three add up to 1. Each frequency takes the
+        shortest window that still separates partials 5% apart: a window of
+        M samples has bins rate/M apart, so it takes over above 20 * rate / M.
+        Around each crossover the two sizes blend over one octave (linear in
+        log frequency), so no seam shows. Low notes therefore come from the
+        long window (fine frequency detail), transients in the upper range from
+        the short one (sharp in time). */
+    static std::array<double, 3> multiResWeights (double freqHz, double sampleRate);
+
     // Probe the magnitude (dB, e.g. -120..0) at an exact time/frequency point.
     // Pass the mipmap level the view is currently displaying so the tiles are
     // already cached; missing tiles fall back to a synchronous compute.
     float probeMagnitude (const AudioEngine& engine, int channel, double tSec,
                           double freqHz, const Settings& s, int level);
 
-    // Render a region to RGBA pixels (bilinear sampling, colour LUT, optional smoothing).
+    /** dB magnitude of every pixel of a region (row-major, row 0 = top =
+        highest frequency), before the dB window and colour map: what
+        renderToPixels() colours. In multi-resolution mode (s.fftMultiRes)
+        three single-size pictures are blended per row with multiResWeights();
+        a size with no share in the visible frequency range is not computed.
+        Pixels beyond the audio read -300. Returns false when cancelled. */
+    bool renderToDb (const AudioEngine& engine, const Settings& s,
+                     int width, int height, double t0, double t1,
+                     const std::vector<int>& channels, std::vector<float>& db,
+                     const std::atomic<bool>* cancel = nullptr);
+
+    // Render a region to RGBA pixels (bilinear sampling, colour LUT, optional smoothing):
+    // renderToDb() mapped through the dB window and the colour map.
     // Fills rgba with width*height*4 bytes. Returns false if cancel points at an
     // atomic set to true (rendering stops early; no partial tiles are cached).
     bool renderToPixels (const AudioEngine& engine, const Settings& s,
@@ -165,6 +194,13 @@ public:
                                                int fftSize, int hopSize, int windowType) const;
 
 private:
+    // renderToDb() for one FFT size (s.fftSize; fftMultiRes ignored). Only rows
+    // [yBegin, yEnd) are computed (yEnd < 0 = all); the others read -300.
+    bool renderSingleSizeDb (const AudioEngine& engine, const Settings& s,
+                             int width, int height, double t0, double t1,
+                             const std::vector<int>& channels, std::vector<float>& db,
+                             const std::atomic<bool>* cancel, int yBegin = 0, int yEnd = -1);
+
     // Fill tile->mag for frames [frameStart, frameStart+frameCount). Frame f's
     // window starts at tileStartSample + f*hopSize + windowOffset (-fftSize/2
     // for centred frames); samples before 0 or past the end read as zeros.

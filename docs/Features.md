@@ -373,6 +373,25 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     range sets a ceiling and "Bins per pixel:" (default 1.25) spectral bins per
     pixel of the frequency axis sets a floor, snapped to a power of two in
     256..16384 — both fields appear below the combo while Auto is selected).
+    **Multi-resolution**, the last entry, draws each frequency with the window
+    that suits it: three sizes N, 4N and 16N (512 / 2048 / 8192 at 48 kHz; N
+    is the power of two nearest 10.7 ms of audio) are blended by frequency, so
+    low notes get the long window's fine frequency detail and transients in
+    the upper range keep the short window's sharpness. Each frequency uses the
+    shortest window whose bins are at most 5% of it apart (a window of M
+    samples takes over above 20 × rate / M: 469 Hz and 1875 Hz at 48 kHz),
+    blended over one octave around each crossover. The level readout under the
+    mouse uses the same blend. Tones read the same level in every band; broad
+    noise reads about 6 dB lower per band towards the bass, since a 4x longer
+    window spreads it over 4x more bins. Each size only draws the rows where
+    it has a share, and a view zoomed entirely above the upper crossover only
+    computes the short window. Measured on an Apple M2 (Debug build, one
+    1600 × 300 row of a 48 kHz file, log 20 Hz–20 kHz): a repaint takes about
+    1.5x the time of a single size, a new view (empty tile cache) 2–2.5x that
+    of 2048 or Auto and 1.3–1.5x that of 8192, and the tiles take the memory
+    of all three sizes (about 5x that of 2048, 1.3x that of 8192). Run the
+    tests with `SC_BENCH_MULTIRES=1` to print the table. The choice is
+    remembered (`fft_multires`).
     **Auto is on by default**, and its combo entry shows the size currently
     resolved for the zoom levels (e.g. `Auto (4096)`); picking a fixed size
     switches auto mode off, and **Alt+Shift+= / Alt+Shift+-** step the FFT size
@@ -380,7 +399,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     Right-clicking the spectrogram's vertical frequency axis offers these same
     actions in an **FFT Size** submenu: **Increase**, **Reduce** and
     **Auto (N)** — N being the size Auto mode would resolve to at the current
-    zoom levels, selecting it switches auto mode on — followed by a checkable
+    zoom levels, selecting it switches auto mode on — and **Multi-resolution**,
+    followed by a checkable
     **Linear / Logarithmic** pair that toggles the axis scale.
     The full-width **Reset** button restores every Spectral Controls setting to
     its defaults at once — Classic colour map, -120..0 dB window, log axis on,

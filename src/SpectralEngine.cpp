@@ -481,6 +481,26 @@ float SpectralEngine::probeMagnitude (const AudioEngine& engine, int channel,
         return -300.0f;
 
     const double rate = engine.sampleRate();
+    if (s.fftMultiRes)
+    {
+        // Same blend as the picture: the readout matches what is drawn.
+        const auto sizes = multiResFftSizes (rate);
+        const auto w = multiResWeights (freqHz, rate);
+        double v = 0.0, best = -300.0;
+        for (int k = 0; k < 3; ++k)
+        {
+            if (!(w[(size_t) k] > 0.0)) continue;
+            Settings sk = s;
+            sk.fftMultiRes = false;
+            sk.fftSize = sizes[(size_t) k];
+            const double pk = probeMagnitude (engine, channel, tSec, freqHz, sk, level);
+            if (pk <= -299.0) return -300.0f;   // beyond the audio
+            v += w[(size_t) k] * pk;
+            best = std::max (best, pk);
+        }
+        return (float) (best > -299.0 ? v : -300.0);
+    }
+
     const int64_t pos = std::clamp ((int64_t) std::llround (tSec * rate),
                                     (int64_t) 0, engine.numSamples() - 1);
     auto tiles = getTiles (engine, channel, pos, pos + 1, level, s);
@@ -502,6 +522,48 @@ float SpectralEngine::probeMagnitude (const AudioEngine& engine, int channel,
     return best;
 }
 
+namespace
+{
+// Frequency of pixel row y (row 0 = top = highest frequency): the mapping
+// shared by renderToDb() and the multi-resolution blend.
+double rowFrequency (int y, int height, const Settings& s, double rate)
+{
+    const double rowT = 1.0 - ((double) y + 0.5) / height;
+    if (s.logFrequency)
+    {
+        const double logMin = std::log ((double) std::max (1.0, (double) s.minFrequency));
+        const double logMax = std::log ((double) std::min (rate * 0.5, (double) s.maxFrequency));
+        return std::exp (logMin + rowT * (logMax - logMin));
+    }
+    return (double) s.minFrequency + rowT * ((double) s.maxFrequency - (double) s.minFrequency);
+}
+} // namespace
+
+std::array<int, 3> SpectralEngine::multiResFftSizes (double sampleRate)
+{
+    // 512 samples at 48 kHz = 10.7 ms; the nearest power of two in log terms.
+    const double target = std::max (1.0, sampleRate) * 512.0 / 48000.0;
+    const int order = std::clamp ((int) std::lround (std::log2 (target)), 7, 12);   // 128..4096
+    const int n = 1 << order;
+    return { n, n * 4, n * 16 };
+}
+
+std::array<double, 3> SpectralEngine::multiResWeights (double freqHz, double sampleRate)
+{
+    const auto n = multiResFftSizes (sampleRate);
+    // Above 20 * rate / M a window of M samples separates partials 5% apart.
+    const double fLongToMid  = 20.0 * sampleRate / n[1];
+    const double fMidToShort = 20.0 * sampleRate / n[0];   // 4x higher: the ramps never overlap
+    auto above = [freqHz] (double fc)
+    {   // 0 below fc/sqrt(2), 1 above fc*sqrt(2), linear in log2(f) between
+        if (!(freqHz > 0.0)) return 0.0;
+        return std::clamp (std::log2 (freqHz / fc) + 0.5, 0.0, 1.0);
+    };
+    const double upper = above (fMidToShort);
+    const double midUp = above (fLongToMid);
+    return { upper, midUp - upper, 1.0 - midUp };
+}
+
 bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& s,
                                      int width, int height,
                                      double t0, double t1,
@@ -509,9 +571,107 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
                                      std::vector<uint8_t>& rgba,
                                      const std::atomic<bool>* cancel)
 {
+    rgba.assign ((size_t) std::max (0, width) * (size_t) std::max (0, height) * 4, 0);
+    if (!engine.isFileLoaded() || width <= 0 || height <= 0 || channels.empty())
+        return true;
+
+    std::vector<float> db;
+    if (!renderToDb (engine, s, width, height, t0, t1, channels, db, cancel))
+        return false;
+
+    // dB -> display value: normalise into the [dbMinDb, dbMaxDb] window,
+    // then apply gain/bias.
+    const double range = std::max (1e-6, (double) s.dbMaxDb - (double) s.dbMinDb);
+    for (size_t i = 0; i < db.size(); ++i)
+    {
+        const double norm = (((double) db[i] - (double) s.dbMinDb) / range) * (double) s.gain + (double) s.bias;
+        const int idx = (int) std::clamp (norm * 255.0, 0.0, 255.0);
+        const size_t o = i * 4;
+        rgba[o + 0] = lut_[(size_t) idx * 4 + 0];
+        rgba[o + 1] = lut_[(size_t) idx * 4 + 1];
+        rgba[o + 2] = lut_[(size_t) idx * 4 + 2];
+        rgba[o + 3] = 255;
+    }
+    return true;
+}
+
+bool SpectralEngine::renderToDb (const AudioEngine& engine, const Settings& s,
+                                 int width, int height, double t0, double t1,
+                                 const std::vector<int>& channels, std::vector<float>& db,
+                                 const std::atomic<bool>* cancel)
+{
+    if (!s.fftMultiRes || !engine.isFileLoaded() || width <= 0 || height <= 0 || channels.empty())
+        return renderSingleSizeDb (engine, s, width, height, t0, t1, channels, db, cancel);
+
+    {
+        // Multi-resolution: one dB picture per size, blended row by row. A
+        // size with no share anywhere in the visible frequency range (e.g. the
+        // long window when zoomed into the treble) is not computed at all.
+        const double rate = engine.sampleRate();
+        const auto sizes = multiResFftSizes (rate);
+        // Each size only renders the rows where it has a share: the weights
+        // follow the frequency monotonically, so those rows are one band.
+        std::vector<std::array<double, 3>> rowW ((size_t) height);
+        std::array<int, 3> yBegin { height, height, height }, yEnd { 0, 0, 0 };
+        for (int y = 0; y < height; ++y)
+        {
+            rowW[(size_t) y] = multiResWeights (rowFrequency (y, height, s, rate), rate);
+            for (size_t k = 0; k < 3; ++k)
+                if (rowW[(size_t) y][k] > 0.0)
+                {
+                    yBegin[k] = std::min (yBegin[k], y);
+                    yEnd[k] = std::max (yEnd[k], y + 1);
+                }
+        }
+
+        std::array<std::vector<float>, 3> parts;
+        for (size_t k = 0; k < 3; ++k)
+        {
+            if (yBegin[k] >= yEnd[k]) continue;   // no share in this view
+            Settings sk = s;
+            sk.fftMultiRes = false;
+            sk.fftSize = sizes[k];
+            if (!renderSingleSizeDb (engine, sk, width, height, t0, t1, channels, parts[k], cancel,
+                                     yBegin[k], yEnd[k]))
+                return false;
+        }
+
+        // Blend in dB. Values below the dB window are lifted to just under it
+        // first: a -300 "no data" or a very deep minimum of one size must not
+        // drag a blend down far below what either size shows on screen.
+        const float floorDb = s.dbMinDb - 1.0f;
+        db.assign ((size_t) width * height, -300.0f);
+        for (int y = 0; y < height; ++y)
+        {
+            const auto& w = rowW[(size_t) y];
+            for (int x = 0; x < width; ++x)
+            {
+                const size_t i = (size_t) y * width + x;
+                double v = 0.0;
+                bool any = false;
+                for (int k = 0; k < 3; ++k)
+                    if (w[(size_t) k] > 0.0)
+                    {
+                        const float pk = parts[(size_t) k][i];
+                        any = any || pk > -299.0f;
+                        v += w[(size_t) k] * (double) std::max (pk, floorDb);
+                    }
+                if (any) db[i] = (float) v;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool SpectralEngine::renderSingleSizeDb (const AudioEngine& engine, const Settings& s,
+                                         int width, int height, double t0, double t1,
+                                         const std::vector<int>& channels, std::vector<float>& db,
+                                         const std::atomic<bool>* cancel, int yBegin, int yEnd)
+{
     auto cancelled = [cancel] { return cancel != nullptr && cancel->load(); };
 
-    rgba.assign ((size_t) width * height * 4, 0);
+    db.assign ((size_t) std::max (0, width) * (size_t) std::max (0, height), -300.0f);
     if (!engine.isFileLoaded() || width <= 0 || height <= 0 || channels.empty())
         return true;
 
@@ -538,9 +698,6 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
 
 
     const int numBins = s.fftSize / 2;
-    const double freqMax = rate * 0.5;
-    const double logMin = std::log ((double) std::max (1.0, (double) s.minFrequency));
-    const double logMax = std::log ((double) std::min (freqMax, (double) s.maxFrequency));
 
     // Bilinear sampling across the concatenated tile frames of each channel.
     // `frame` is a global frame coordinate relative to firstTileStart. The
@@ -589,26 +746,19 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
 
     const int64_t firstTileStart = (s0 / ((int64_t) kFramesPerTile * hop)) * ((int64_t) kFramesPerTile * hop);
 
-    for (int y = 0; y < height; ++y)
+    const int yFrom = std::clamp (yBegin, 0, height);
+    const int yTo = yEnd < 0 ? height : std::clamp (yEnd, yFrom, height);
+    for (int y = yFrom; y < yTo; ++y)
     {
         if (cancelled())
             return false;
 
         // Frequency for this row (row 0 = top = max frequency)
-        const double rowT = 1.0 - ((double) y + 0.5) / height;
-        double freq;
-        if (s.logFrequency)
-            freq = std::exp (logMin + rowT * (logMax - logMin));
-        else
-            freq = (double) s.minFrequency + rowT * ((double) s.maxFrequency - (double) s.minFrequency);
+        const double freq = rowFrequency (y, height, s, rate);
 
         // Bin b is centred on b * rate / fftSize (same mapping as probeMagnitude).
         const double binF = freq * (double) s.fftSize / rate;
         const double bin = std::clamp (binF, -0.5, (double) numBins - 0.5);
-
-        // dB -> display value: normalise into the [dbMinDb, dbMaxDb] window,
-        // then apply gain/bias.
-        const double range = std::max (1e-6, (double) s.dbMaxDb - (double) s.dbMinDb);
 
         for (int x = 0; x < width; ++x)
         {
@@ -623,14 +773,7 @@ bool SpectralEngine::renderToPixels (const AudioEngine& engine, const Settings& 
             double v = -300.0;
             for (auto& tiles : perCh)
                 v = std::max (v, sampleMag (tiles, frame, bin));
-
-            const double norm = ((v - (double) s.dbMinDb) / range) * (double) s.gain + (double) s.bias;
-            const int idx = (int) std::clamp (norm * 255.0, 0.0, 255.0);
-            const size_t o = ((size_t) y * width + x) * 4;
-            rgba[o + 0] = lut_[idx * 4 + 0];
-            rgba[o + 1] = lut_[idx * 4 + 1];
-            rgba[o + 2] = lut_[idx * 4 + 2];
-            rgba[o + 3] = 255;
+            db[(size_t) y * width + x] = (float) v;
         }
     }
     return true;

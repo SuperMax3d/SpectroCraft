@@ -4140,12 +4140,14 @@ void MainWindow::repeatLastEffect()
 void MainWindow::stepFftSize (bool up)
 {
     if (!spectralView) return;
-    const int cur = app.settings.fftAuto ? spectralView->autoFftSizeForCurrentZoom ()
-                                         : app.settings.fftSize;
+    const int cur = (app.settings.fftAuto && ! app.settings.fftMultiRes)
+                        ? spectralView->autoFftSizeForCurrentZoom ()
+                        : app.settings.fftSize;
     const int next = up ? std::min (cur * 2, 65536) : cur / 2;
     if (!up && next < 256) return;   // already at/below the ladder minimum
     if (next == cur) return;         // already at the top of the ladder
     app.settings.fftAuto = false;
+    app.settings.fftMultiRes = false;   // stepping picks one size again
     app.settings.fftSize = next;
     if (controlsPanel) controlsPanel->setFftSizeSelection (next);
     updateAutoFftLabel ();
@@ -5534,6 +5536,7 @@ void MainWindow::handleContextMenuAction (int id)
         case CtxFftReduce:   stepFftSize (false); break;
         case CtxFftAuto:
             app.settings.fftAuto = true;
+            app.settings.fftMultiRes = false;
             if (controlsPanel)
             {
                 controlsPanel->setFftSizeSelection (SpectralControlsPanel::kFftAutoId);
@@ -5541,6 +5544,16 @@ void MainWindow::handleContextMenuAction (int id)
                 controlsPanel->resized();   // show the auto parameter rows again
             }
             updateAutoFftLabel ();
+            break;
+        case CtxFftMultiRes:
+            app.settings.fftMultiRes = true;
+            app.settings.fftAuto = false;
+            if (controlsPanel)
+            {
+                controlsPanel->setFftSizeSelection (SpectralControlsPanel::kFftMultiResId);
+                controlsPanel->syncAutoControls();
+                controlsPanel->resized();   // hide the auto parameter rows
+            }
             break;
         case CtxAxisLinear:
             if (!app.settings.logFrequency) break;

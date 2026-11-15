@@ -5036,15 +5036,19 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         if (app.onStateChange) app.onStateChange();
     };
 
-    // 256 gives the finest frequency resolution; larger sizes give a finer
-    // time resolution of the spectrogram tiles. "Auto" recomputes the size from
+    // 256 gives the finest time resolution; larger sizes give a finer
+    // frequency resolution of the spectrogram tiles. "Auto" recomputes the size from
     // the current zoom levels on every render (see SpectralEngine::chooseFftSize);
-    // its label shows the resolved size, e.g. "Auto (4096)".
+    // its label shows the resolved size, e.g. "Auto (4096)". "Multi-resolution"
+    // blends three sizes by frequency (SpectralEngine::multiResWeights).
     rebuildFftSizeItems (0);
     fftSizeCombo.onChange = [this] {
         const int id = fftSizeCombo.getSelectedId();
+        app.settings.fftMultiRes = (id == kFftMultiResId);
         if (id == kFftAutoId)
             app.settings.fftAuto = true;
+        else if (id == kFftMultiResId)
+            app.settings.fftAuto = false;   // Auto is restored by picking it again
         else
         {
             app.settings.fftAuto = false;
@@ -5166,6 +5170,7 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
         logToggle.setToggleState (true, juce::dontSendNotification);
         logToggle.setButtonText ("Logarithmic");
         fftSizeCombo.setSelectedId (kFftAutoId, juce::dontSendNotification);
+        app.settings.fftMultiRes = false;
         syncLevelControls();
         syncHarmControls();
         syncAutoControls();
@@ -5207,7 +5212,10 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
                             "and re-renders all tracks from the audio.");
     fftSizeCombo.setTooltip ("FFT size used by the spectrogram tiles. Larger values give finer "
                              "frequency resolution but render more slowly. 'Auto' picks the size "
-                             "from the current time/frequency zoom levels on every render.");
+                             "from the current time/frequency zoom levels on every render. "
+                             "'Multi-resolution' uses a long window for low frequencies and a short "
+                             "one for high frequencies (sharper transients); it takes about twice "
+                             "the time and five times the memory of a single 2048 size.");
     autoSlicesEdit.setTooltip ("Auto FFT size - target time slices: how many FFT frames to fit across "
                                "the visible time range. Higher values give finer time resolution but "
                                "render more slowly.");
@@ -5261,7 +5269,8 @@ SpectralControlsPanel::SpectralControlsPanel (Application& appIn)
 void SpectralControlsPanel::refresh()
 {
     colourMapCombo.setSelectedId ((int) app.colourMap + 1, juce::dontSendNotification);
-    fftSizeCombo.setSelectedId (app.settings.fftAuto ? kFftAutoId : app.settings.fftSize,
+    fftSizeCombo.setSelectedId (app.settings.fftMultiRes ? kFftMultiResId
+                                : app.settings.fftAuto ? kFftAutoId : app.settings.fftSize,
                                 juce::dontSendNotification);
     syncLevelControls();
     syncHarmControls();
@@ -5284,6 +5293,7 @@ void SpectralControlsPanel::rebuildFftSizeItems (int autoSize)
     if (autoSize > 0)
         autoLabel = juce::String ("Auto (") + juce::String (autoSize) + ")";
     fftSizeCombo.addItem (autoLabel, kFftAutoId);
+    fftSizeCombo.addItem ("Multi-resolution", kFftMultiResId);
     if (selId != 0)
         fftSizeCombo.setSelectedId (selId, juce::dontSendNotification);
 }
