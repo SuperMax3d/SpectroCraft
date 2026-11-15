@@ -9514,6 +9514,21 @@ static void testSpectralControlsResetAndAutoLabel()
           && panel->hasFftSizeOption ("Auto (" + juce::String (autoN) + ")"),
            "combo shows the resolved Auto size in its label");
 
+    // Issue #22: the Multi-resolution entry shows its sizes, and they follow
+    // the frequency zoom.
+    if (panel != nullptr)
+    {
+        const auto multi = win->spectralViewComp()->multiResSizesForCurrentZoom ();
+        CHECK (panel->hasFftSizeOption (SpectralEngine::multiResLabel (multi)) && multi[0] > 0,
+               "combo shows the Multi-resolution sizes (" + SpectralEngine::multiResLabel (multi) + ")");
+        win->spectralViewComp()->setFrequencyRange (200.0, 2000.0);
+        const auto zoomed = win->spectralViewComp()->multiResSizesForCurrentZoom ();
+        CHECK (zoomed[0] > multi[0] && panel->hasFftSizeOption (SpectralEngine::multiResLabel (zoomed)),
+               "zooming in frequency lengthens the Multi-resolution sizes and updates the label ("
+               + SpectralEngine::multiResLabel (zoomed) + ")");
+        win->spectralViewComp()->setFrequencyRange (20.0, 20000.0);
+    }
+
     // Find the Reset button by name.
     juce::TextButton* resetBtn = nullptr;
     if (panel != nullptr)
@@ -11757,6 +11772,33 @@ static void benchSpectralMultiResolution()
                          b - a, e - b, (double) sp.cacheBytes() / (1024.0 * 1024.0));
         }
     }
+
+    // Issue #22: 10 s visible, frequency axis zoomed to log 100 Hz..1 kHz.
+    {
+        const double visible = 10.0, t0 = 25.0, t1 = 35.0;
+        const int autoN = SpectralEngine::chooseFftSize (visible, rate, H, 100.0, 1000.0);
+        Settings zs;
+        zs.logFrequency = true; zs.minFrequency = 100.0f; zs.maxFrequency = 1000.0f;
+        const auto multi = SpectralEngine::multiResFftSizes (rate, SpectralEngine::multiResZoom (zs, rate));
+        struct Case { juce::String name; int n; bool multi; };
+        const Case cases[] = { { "2048", 2048, false }, { "16384", 16384, false },
+                               { "Auto (" + juce::String (autoN) + ")", autoN, false },
+                               { SpectralEngine::multiResLabel (multi), 2048, true } };
+        for (const auto& c : cases)
+        {
+            Settings s = zs;
+            s.fftSize = c.n; s.hopSize = 512; s.windowType = 1; s.fftAuto = false; s.fftMultiRes = c.multi;
+            SpectralEngine sp;
+            std::vector<uint8_t> rgba;
+            const double a = juce::Time::getMillisecondCounterHiRes();
+            sp.renderToPixels (eng, s, W, H, t0, t1, { 0 }, rgba);
+            const double b = juce::Time::getMillisecondCounterHiRes();
+            sp.renderToPixels (eng, s, W, H, t0, t1, { 0 }, rgba);
+            const double e = juce::Time::getMillisecondCounterHiRes();
+            std::printf ("| 10 s, 100 Hz-1 kHz | %s | %.0f | %.0f | %.1f |\n", c.name.toRawUTF8(),
+                         b - a, e - b, (double) sp.cacheBytes() / (1024.0 * 1024.0));
+        }
+    }
     std::fflush (stdout);
 }
 
@@ -11791,6 +11833,38 @@ static void testSpectralMultiResolution()
                    && std::abs (x1[1] - 0.5) < 1e-9 && std::abs (x1[2] - 0.5) < 1e-9,
                "multires: long window in the bass, middle in the mids, short in the treble, "
                "halfway at a crossover");
+
+        // Issue #22: the sizes follow the frequency zoom, up to Auto's longest.
+        const auto z2 = SpectralEngine::multiResFftSizes (48000.0, 2.0);
+        const auto z50 = SpectralEngine::multiResFftSizes (48000.0, 50.0);
+        const auto z96 = SpectralEngine::multiResFftSizes (96000.0, 8.0);
+        CHECK (z2[0] == 1024 && z2[2] == 16384 && z50 == z2 && z96[0] == 1024
+                   && SpectralEngine::multiResFftSizes (48000.0, 0.5)[0] == 512,
+               "multires zoom: 2x zoom doubles the sizes, capped at 16384 (a high rate starts higher)");
+        Settings v;   // default view: log 20 Hz..20 kHz
+        const double zDefault = SpectralEngine::multiResZoom (v, 48000.0);
+        v.minFrequency = 200.0f; v.maxFrequency = 2000.0f;
+        const double zLog = SpectralEngine::multiResZoom (v, 48000.0);
+        v.logFrequency = false; v.minFrequency = 1000.0f; v.maxFrequency = 3000.0f;
+        const double zLin = SpectralEngine::multiResZoom (v, 48000.0);
+        v.minFrequency = 0.0f; v.maxFrequency = 30000.0f;   // wider than the default
+        const double zWide = SpectralEngine::multiResZoom (v, 48000.0);
+        CHECK (std::abs (zDefault - 1.0) < 1e-9 && std::abs (zLog - 3.0) < 1e-6
+                   && std::abs (zLin - 19980.0 / 2000.0) < 1e-6 && zWide == 1.0,
+               "multires zoom: measured in the axis' own scale against 20 Hz..20 kHz, never below 1");
+        bool sumsToOneZoomed = true;
+        for (double f = 5.0; f < 24000.0; f *= 1.07)
+        {
+            const auto w = SpectralEngine::multiResWeights (f, 48000.0, 4.0);
+            sumsToOneZoomed = sumsToOneZoomed && std::abs (w[0] + w[1] + w[2] - 1.0) < 1e-9;
+        }
+        const auto zw = SpectralEngine::multiResWeights (1000.0, 48000.0, 1.0);
+        const auto zw4 = SpectralEngine::multiResWeights (1000.0, 48000.0, 4.0);
+        CHECK (sumsToOneZoomed && zw[1] == 1.0 && zw4[2] > 0.3 && zw4[0] == 0.0,
+               "multires zoom: zoomed in, 1 kHz moves towards the long window");
+        CHECK (SpectralEngine::multiResLabel ({ 512, 2048, 8192 }) == "Multi-resolution (512-2048-8192)"
+                   && SpectralEngine::multiResLabel ({ 0, 0, 0 }) == "Multi-resolution",
+               "multires: label with its sizes");
     }
 
     // 3 s at 48 kHz: 200 + 220 Hz tones throughout, single-sample clicks at 1 s and 2 s.
@@ -11837,16 +11911,19 @@ static void testSpectralMultiResolution()
     };
 
     // Length (ms) over which the 1 s click stays within 6 dB of its peak on
-    // the 8 kHz row, 0.5 ms per column.
+    // the 8 kHz row of the default (unzoomed) log 20 Hz..20 kHz view, 0.5 ms
+    // per column.
     auto clickWidthMs = [&] (const Settings& base) -> double
     {
         Settings s = base;
-        s.minFrequency = 7900.0f; s.maxFrequency = 8100.0f;
-        const int W = 400, H = 3;
+        s.logFrequency = true; s.minFrequency = 20.0f; s.maxFrequency = 20000.0f;
+        const int W = 400, H = 300;
         SpectralEngine sp;
         std::vector<float> db;
         if (!sp.renderToDb (eng, s, W, H, 0.9, 1.1, { 0 }, db)) return 1e9;
-        const float* row = db.data() + (size_t) (H / 2) * W;
+        const double rowT = std::log (8000.0 / 20.0) / std::log (1000.0);
+        const int y8k = std::clamp ((int) std::lround ((1.0 - rowT) * H - 0.5), 0, H - 1);
+        const float* row = db.data() + (size_t) y8k * W;
         const float peak = *std::max_element (row, row + W);
         int above = 0;
         for (int x = 0; x < W; ++x)
@@ -11866,7 +11943,7 @@ static void testSpectralMultiResolution()
     if (juce::SystemStats::getEnvironmentVariable ("SC_BENCH_MULTIRES", {}) == "1")
         std::printf ("\nmulti-resolution quality:%s\n", nums.toRawUTF8());
     CHECK (dip2048 < 3.0 && dip8192 > 6.0, "multires: 2048 merges the 200/220 Hz tones, 8192 separates them" + nums);
-    CHECK (std::abs (dipMulti - dip8192) < 0.5, "multires: the tones are separated like with 8192" + nums);
+    CHECK (dipMulti > dip8192 - 0.5, "multires: the tones are separated at least like with 8192" + nums);
     CHECK (std::abs (wMulti - w512) < 1.0 && wMulti < 0.5 * w2048,
            "multires: the treble click is as short as with 512" + nums);
 
@@ -11880,20 +11957,56 @@ static void testSpectralMultiResolution()
                + juce::String (pMulti, 2) + " / " + juce::String (pLong, 2) + " dB)");
     }
 
-    // Zoomed into the treble only the short window is computed.
+    // A view of the upper half of the spectrum only needs the short window:
+    // multi-resolution computes exactly the tiles of that one size.
     {
         Settings s = settingsFor (2048, true);
-        s.minFrequency = 6000.0f; s.maxFrequency = 12000.0f;
-        SpectralEngine sp;
+        s.minFrequency = 12000.0f; s.maxFrequency = 24000.0f;   // linear
+        const auto sizes = SpectralEngine::multiResFftSizes (rate, SpectralEngine::multiResZoom (s, rate));
+        SpectralEngine sp, single;
         std::vector<uint8_t> rgba;
         CHECK (sp.renderToPixels (eng, s, 200, 50, 0.0, 3.0, { 0 }, rgba), "multires: treble view renders");
-        const size_t shortOnly = sp.cacheBytes();
-        sp.clearCache();
-        s.minFrequency = 50.0f;
-        CHECK (sp.renderToPixels (eng, s, 200, 50, 0.0, 3.0, { 0 }, rgba), "multires: full view renders");
-        CHECK (shortOnly > 0 && sp.cacheBytes() > 4 * shortOnly,
-               "multires: a treble-only view skips the longer windows ("
-               + juce::String ((juce::int64) shortOnly) + " vs " + juce::String ((juce::int64) sp.cacheBytes()) + " bytes)");
+        Settings one = settingsFor (sizes[0], false);
+        one.minFrequency = s.minFrequency; one.maxFrequency = s.maxFrequency;
+        CHECK (single.renderToPixels (eng, one, 200, 50, 0.0, 3.0, { 0 }, rgba), "multires: single-size treble view renders");
+        CHECK (sp.cacheBytes() > 0 && sp.cacheBytes() == single.cacheBytes(),
+               "multires: a treble-only view computes the short window alone ("
+               + juce::String ((juce::int64) sp.cacheBytes()) + " vs " + juce::String ((juce::int64) single.cacheBytes()) + " bytes)");
+    }
+
+    // Issue #22: zoomed in on two tones 10 Hz apart, multi-resolution switches
+    // to longer windows and separates them, which #17's fixed sizes (8192 at
+    // most) could not.
+    {
+        std::vector<std::vector<float>> close (1, std::vector<float> ((size_t) len));
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = (double) i / rate;
+            close[0][(size_t) i] = (float) (0.25 * std::sin (juce::MathConstants<double>::twoPi * 200.0 * t)
+                                          + 0.25 * std::sin (juce::MathConstants<double>::twoPi * 210.0 * t));
+        }
+        AudioEngine eng2;
+        CHECK (eng2.initNew (1, rate, &close), "multires zoom: close-tones document");
+        auto dip = [&] (const Settings& base)
+        {
+            Settings s = base;
+            s.minFrequency = 190.0f; s.maxFrequency = 220.0f;   // linear, 0.1 Hz per row
+            const int W = 11, H = 300;   // middle column at 1.5 s: both tones in phase
+            SpectralEngine sp;
+            std::vector<float> db;
+            if (!sp.renderToDb (eng2, s, W, H, 1.3, 1.7, { 0 }, db)) return 0.0;
+            auto at = [&] (double hz)
+            {
+                const int y = std::clamp ((int) std::lround ((220.0 - hz) / 0.1 - 0.5), 0, H - 1);
+                return (double) db[(size_t) y * W + W / 2];
+            };
+            return std::min (at (200.0), at (210.0)) - at (205.0);
+        };
+        const double d8192 = dip (settingsFor (8192, false));
+        const double dMulti = dip (settingsFor (2048, true));
+        CHECK (d8192 < 3.0 && dMulti > 6.0,
+               "multires zoom: tones 10 Hz apart separate once zoomed in (8192 "
+               + juce::String (d8192, 1) + " dB, multi " + juce::String (dMulti, 1) + " dB)");
     }
 }
 
