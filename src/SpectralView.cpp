@@ -236,9 +236,40 @@ static void showViewContextMenu (Application& app, double clickT, double clickF,
         onAction (sel);
 }
 
+sc::session::ViewGeometry SpectralView::sessionGeometry() const
+{
+    sc::session::ViewGeometry g;
+    g.rowChannel = channels;
+    g.rows = rowRects();
+    g.plot = plotRect();
+    g.timeToX = [this] (double t) { return timeToX (t); };
+    g.xToTime = [this] (int x) { return xToTime (x); };
+    g.rate = app.audioEngine().sampleRate();
+    return g;
+}
+
+void SpectralView::paintOverChildren (juce::Graphics& g)
+{
+    const FileDoc* d = app.doc ();
+    if (d == nullptr || !d->session.active ())
+        return;
+    const auto geo = sessionGeometry ();
+    sc::session::paintBorders (g, d->session, geo);
+    sessionMove_.paint (g, d->session, geo);
+}
+
 void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
+
+    // Edit > Session > Move Files (issue #21): a left drag on a file moves it.
+    if (app.sessionMoveTool && e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
+        if (const FileDoc* d = app.doc(); d != nullptr
+            && sessionMove_.begin (d->session, sessionGeometry(), e.getPosition()))
+        {
+            repaint();
+            return;
+        }
 
     // A click on a channel number mutes/unmutes that channel; Ctrl+click
     // (Cmd+click on macOS, where Ctrl+click is the context menu) solos it.
@@ -474,6 +505,13 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
     reportHoverTime (e, true);
+    if (sessionMove_.active())
+    {
+        if (const FileDoc* d = app.doc())
+            sessionMove_.drag (d->session, sessionGeometry(), e.getPosition(), e.mods.isShiftDown(), app.playhead);
+        repaint();
+        return;
+    }
 
     // Keep the status-bar probe / brush cursor position current.
     probeX = e.x;
@@ -638,6 +676,14 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
 
 void SpectralView::mouseUp (const juce::MouseEvent&)
 {
+    if (sessionMove_.active())
+    {
+        const auto t = sessionMove_.end();
+        repaint();
+        if (t.clip >= 1 && t.valid)
+            app.moveSessionFile (t.clip, t.lane, t.offset);
+        return;
+    }
     // Finish a new Arrow/Rectangle/Freehand drawing. Accidental clicks
     // (drags under 3 px in either axis) and near-empty freehand strokes are
     // discarded without creating an item.

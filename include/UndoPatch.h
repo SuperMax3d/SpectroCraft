@@ -8,6 +8,7 @@
 #include "DrawingItem.h"         // DrawingItem (user drawings on the spectrogram)
 #include "ScttChunk.h"           // ScttSegment (transcription segments)
 #include "Tables.h"              // sc::tables::TableData (same)
+#include "Session.h"             // sc::session::Session (files of a session, issue #21)
 #include <vector>
 #include <array>
 #include <cstdint>
@@ -120,4 +121,10 @@ struct Patch
     // state moves, which is what makes the step undoable from the History tab.
     bool hasAxisState = false;
     std::vector<sc::axes::Entry> oldAxes, newAxes;
+
+    // Session layout before/after the step (issue #21): adding, moving or
+    // removing a file, and every time-changing edit (which warps the files'
+    // offsets). Restored with the audio on undo/redo.
+    bool hasSessionState = false;
+    sc::session::Session oldSession, newSession;
 };

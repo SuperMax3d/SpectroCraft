@@ -924,6 +924,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 
 ---
 
+## Sessions (experimental)
+
+**Edit > Session (experimental)** puts other WAV files on the timeline of the
+open file, one after the other or in parallel lanes. They are referenced from
+the open file's metadata, can be moved (with Shift snapping) and outlined, and
+are saved back to their own files when the open file is saved. See
+[sessions.md](sessions.md) for the details and the limits of this first
+version.
+
+---
+
 ## Video files
 
 SpectroCraft opens video files as their audio: the first audio stream is

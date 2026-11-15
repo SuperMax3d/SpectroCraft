@@ -419,6 +419,54 @@ public:
     uint64_t beginSave (FileDoc& d, const juce::File& file);
     bool completeSave (FileDoc& d, const juce::File& file, bool saveAs, uint64_t metaSnapshot);
 
+    // ---- Sessions (issue #21, experimental) --------------------------------
+    // Other WAV files placed on a document's timeline, one after the other or
+    // in parallel lanes; see include/Session.h for the model. Every change is
+    // one undoable step (audio + layout together).
+
+    /** Adds `file` to the active document's session: right after the last
+        file of the main lane (parallel = false; same channel count as the main
+        file) or in a new lane starting at 0 (parallel = true). The file must
+        have the document's sample rate. */
+    bool addSessionFile (const juce::File& file, bool parallel, std::string* errOut = nullptr);
+    /** Moves file `index` (1.. ; the main file stays at 0) to `lane` at
+        `offset` samples. The lane must have the file's channel count and the
+        place must be free. */
+    bool moveSessionFile (int index, int lane, int64_t offset, std::string* errOut = nullptr);
+    /** Takes file `index` out of the session; its own file is not touched.
+        Its audio leaves the composite (unsaved edits made to it are lost). */
+    bool removeSessionFile (int index, std::string* errOut = nullptr);
+    /** Shows or hides the files' outlines and names (persisted with the session). */
+    void setSessionBordersVisible (bool visible);
+    /** Builds the composite of the session stored in d's metadata
+        (d.pendingSession): reads the referenced files, skipping (and listing
+        in *warnings) those that are missing, have another sample rate or do
+        not fit their lane. Called when a document is opened. */
+    bool openSessionOf (FileDoc& d, juce::StringArray* warnings = nullptr);
+    /** Writes back every referenced file whose region of the composite changed
+        since it was loaded or last saved (the main file is written by the
+        normal save, limited to its own region). Called by beginSave. */
+    bool saveSessionFiles (FileDoc& d, std::string* errOut = nullptr);
+    /** Called (message thread) when saving the referenced files of a session
+        failed or was refused; the main file is still saved. */
+    std::function<void (const juce::String&)> onSessionSaveProblem;
+    /** Warnings of the last session opened (files skipped), for the UI. */
+    juce::StringArray lastSessionWarnings;
+    /** Called (message thread) when files of a session being opened were skipped. */
+    std::function<void (const juce::StringArray&)> onSessionOpenWarnings;
+    /** openSessionOf + the warnings, for the two open paths. */
+    void openSessionOfLoaded (FileDoc& d)
+    {
+        lastSessionWarnings.clear ();
+        if (d.pendingSession.isObject ())
+            openSessionOf (d, &lastSessionWarnings);
+        if (!lastSessionWarnings.isEmpty () && onSessionOpenWarnings)
+            onSessionOpenWarnings (lastSessionWarnings);
+    }
+    /** True while the move-files tool is armed (Edit > Session > Move Files):
+        a drag in the views moves the file under the mouse. */
+    bool sessionMoveTool = false;
+
     // AI feature preferences, persisted in the same store (keys ai_*).
     bool aiAutoDownload = true;          // download missing models on first use
     std::string lastNsModelId = "denseunet";
@@ -737,6 +785,7 @@ public:
         std::vector<DrawingItem> drawings;
         std::vector<ScttSegment> scttSegments;
         std::vector<sc::tables::TableData> tables;
+        sc::session::Session session;   // issue #21
     };
 
     TimeAnchoredState captureTimeAnchored () const;

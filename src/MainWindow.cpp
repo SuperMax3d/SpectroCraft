@@ -518,6 +518,23 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     timeBar     = std::make_unique<TimeScrollBar>();
     waveVScroll = std::make_unique<ValueScrollBar>();
     specVScroll = std::make_unique<ValueScrollBar>();
+    sessionVScroll = std::make_unique<ValueScrollBar>();
+    sessionVScroll->setTooltip ("Rows of the session's files: drag the thumb to move through them, "
+                                "drag an edge to show more or fewer rows (taller rows when fewer).");
+    sessionVScroll->onChange = [this] (double lo, double hi)
+    {
+        // Track [0, N] with channel 0 at the top: the window is a contiguous
+        // run of channels to show.
+        const int n = app.audioEngine().numChannels();
+        if (n <= 0 || !(hi > lo)) return;
+        int first = std::clamp ((int) std::lround ((double) n - hi), 0, n - 1);
+        int last = std::clamp ((int) std::lround ((double) n - lo), first + 1, n);
+        std::vector<int> want;
+        for (int ch = first; ch < last; ++ch) want.push_back (ch);
+        if (want == app.visibleChannels) return;
+        app.visibleChannels = want;
+        syncSharedState();
+    };
 
     timeBar->setTooltip ("Time zoom/pan bar: drag the thumb to pan, drag an edge to zoom, "
                          "click outside the thumb to jump there.");
@@ -552,6 +569,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     editorPanel_->addAndMakeVisible (timeBar.get());
     editorPanel_->addAndMakeVisible (waveVScroll.get());
     editorPanel_->addAndMakeVisible (specVScroll.get());
+    editorPanel_->addChildComponent (sessionVScroll.get());
 
     lastSyncedColourMap = app.colourMap;
     lastSyncedSettings  = app.settings;   // baseline for the settings-save trigger
@@ -674,6 +692,17 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     // picture of it: shown when that tab is visible in another group, so
     // two files can sit side by side.
     app.onBeforeActiveDocChange = [this] { snapshotEditorIntoItsTab(); };
+
+    // Sessions (issue #21): say which files were left out or not saved.
+    app.onSessionOpenWarnings = [this] (const juce::StringArray& w)
+    {
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Session",
+                                   "Some files of the session were left out:\n" + w.joinIntoString ("\n"), "", this);
+    };
+    app.onSessionSaveProblem = [this] (const juce::String& m)
+    {
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Session", m, "", this);
+    };
 
     // When a file is closed, drop the stored snapshots that came from it.
     app.onFileClosed = [this] (const FileDoc& d)
@@ -816,6 +845,8 @@ MainWindow::~MainWindow()
     app.onPlayheadChanged = nullptr;
     app.onActiveDocChanged = nullptr;
     app.onBeforeActiveDocChange = nullptr;
+    app.onSessionOpenWarnings = nullptr;
+    app.onSessionSaveProblem = nullptr;
     app.onFileClosed = nullptr;
     app.onTimeRangeDeleted = nullptr;
     app.onTimeRangeStretched = nullptr;
@@ -1055,6 +1086,14 @@ void MainWindow::layoutEditor()
         mainArea.removeFromBottom (18);
 
     const int vScrollW = 14;
+    // Sessions (issue #21): the bar for the whole stack of rows, on the far right.
+    if (sessionVScroll)
+    {
+        const bool on = haveFile && sessionBarWanted();
+        sessionVScroll->setVisible (on);
+        if (on)
+            sessionVScroll->setBounds (mainArea.removeFromRight (vScrollW + 2).withTrimmedLeft (2));
+    }
     if (waveVScroll) waveVScroll->setVisible (showWave && haveFile);
     if (specVScroll) specVScroll->setVisible (showSpec && haveFile);
 
@@ -2334,9 +2373,19 @@ juce::String MainWindow::currentModeText() const
 
 // Push shared state (selection, channels, playhead, settings) into the views.
 // Time windows and zoom levels are owned by each view independently.
+bool MainWindow::sessionBarWanted() const
+{
+    const FileDoc* d = app.doc();
+    return d != nullptr && d->session.active();
+}
+
 void MainWindow::syncSharedState()
 {
     updateTitle();   // cheap: keeps the * in sync with any state change
+
+    // A session started or ended (issue #21): its row bar appears or goes.
+    if (sessionVScroll && sessionVScroll->isVisible() != (app.audioEngine().isFileLoaded() && sessionBarWanted()))
+        resized();
 
     // An open Scale form mirrors the document's axes: if something else changed
     // them (an undo, another session), it has to follow, or its controls would
@@ -3858,6 +3907,21 @@ void MainWindow::handleFileOpen()
 
 // Save on a background thread with a progress dialog so writing large files
 // never blocks the UI thread.
+// Edit > Session > Add File After / in Parallel (issue #21).
+void MainWindow::addSessionFileFromChooser (bool parallel)
+{
+    if (!app.audioEngine().isFileLoaded())
+        return;
+    juce::FileChooser chooser (parallel ? "Add a File in Parallel" : "Add a File After",
+                               app.audioEngine().getFile().getParentDirectory(),
+                               "*.wav", kUseNativeFileChooser);
+    if (!chooser.browseForFileToOpen())
+        return;
+    std::string err;
+    if (!app.addSessionFile (chooser.getResult(), parallel, &err))
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Session", juce::String (err), "", this);
+}
+
 void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
 {
     auto* dlg = new WorkProgressDialog ("Saving", "Saving " + file.getFileName() + " ...",
@@ -4323,6 +4387,15 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         return;
     }
 
+    // Edit > Session > Remove File: EditSessionRemoveBase + file index.
+    if (menuItemID > EditSessionRemoveBase && menuItemID < EditSessionRemoveBase + 100)
+    {
+        std::string err;
+        if (!app.removeSessionFile (menuItemID - EditSessionRemoveBase, &err))
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Session", juce::String (err), "", this);
+        return;
+    }
+
     // Recording Device submenu: RecDeviceBase + pluginIndex*1000 + deviceIndex.
     if (menuItemID >= RecDeviceBase && menuItemID < RecDeviceEnd)
     {
@@ -4637,6 +4710,19 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         case EditSnapToZeroCrossings:
             app.settings.snapToZeroCrossings = !app.settings.snapToZeroCrossings;
             if (app.onStateChange) app.onStateChange();   // persist the new state
+            break;
+        case EditSessionAddAfter:
+        case EditSessionAddParallel:
+            addSessionFileFromChooser (menuItemID == EditSessionAddParallel);
+            break;
+        case EditSessionMoveTool:
+            app.sessionMoveTool = !app.sessionMoveTool;
+            break;
+        case EditSessionBorders:
+            if (const FileDoc* sd = app.doc())
+                app.setSessionBordersVisible (!sd->session.showBorders);
+            if (waveformView) waveformView->repaint();
+            if (spectralView) spectralView->repaint();
             break;
 
         case ViewZoomIn: zoomHorizontal (1.5); break;
@@ -9341,6 +9427,20 @@ void MainWindow::updateScrollBars()
         specVScroll->setWindow (spectralView->getFreqMin(), spectralView->getFreqMax());
     }
 
+    // Session rows: track [0, N] with channel 0 at the top; the thumb covers
+    // the channels shown.
+    if (sessionVScroll && sessionVScroll->isVisible())
+    {
+        const int n = app.audioEngine().numChannels();
+        int lo = n, hi = 0;
+        for (int ch : app.visibleChannels) { lo = std::min (lo, ch); hi = std::max (hi, ch + 1); }
+        if (n > 0 && hi > lo)
+        {
+            sessionVScroll->setRange (0.0, (double) n);
+            sessionVScroll->setWindow ((double) (n - hi), (double) (n - lo));
+        }
+    }
+
     // Dedicated tables track: the thumb shows its visible value window.
     if (tablesVScroll && tablesTrack && app.audioEngine().isFileLoaded())
     {
@@ -9470,6 +9570,26 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (EditSelectAll, "Select All\tCtrl+A", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         menu.addItem (EditSnapToZeroCrossings, "Snap to Zero Crossings", true, app.settings.snapToZeroCrossings);
+        {
+            // Sessions (issue #21, experimental): other files on this file's timeline.
+            const FileDoc* sd = app.doc();
+            const bool hasFile = app.audioEngine().isFileLoaded();
+            const bool active = sd != nullptr && sd->session.active();
+            juce::PopupMenu sess;
+            sess.addItem (EditSessionAddAfter, "Add File After...", hasFile, false);
+            sess.addItem (EditSessionAddParallel, "Add File in Parallel...", hasFile, false);
+            sess.addSeparator();
+            sess.addItem (EditSessionMoveTool, "Move Files", active, active && app.sessionMoveTool);
+            sess.addItem (EditSessionBorders, "Show File Borders", active, active && sd->session.showBorders);
+            if (active)
+            {
+                juce::PopupMenu rm;
+                for (int i = 1; i < (int) sd->session.clips.size() && i < 100; ++i)
+                    rm.addItem (EditSessionRemoveBase + i, sd->session.clips[(size_t) i].file.getFileName());
+                sess.addSubMenu ("Remove File", rm);
+            }
+            menu.addSubMenu ("Session (experimental)", sess, hasFile);
+        }
         menu.addSeparator();
         // Whole-file operation. Streamed files are materialised into memory
         // first when the resample actually runs.

@@ -139,6 +139,11 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
     else if (scmdB.haveVideoTracks)
         videoTracks = scmdB.videoTracks;
 
+    // Session (issue #21): unified > SCMD. Application builds the composite.
+    session = sc::session::Session {};
+    pendingSession = unifiedB.haveSession ? unifiedB.session
+                     : (scmdB.haveSession ? scmdB.session : juce::var ());
+
     // Scale / reference calibrations / analysis settings: unified > SCMD.
     scale        = unifiedB.haveScale        ? unifiedB.scale
                    : (scmdB.haveScale        ? scmdB.scale        : ScaleCalibration {});
@@ -241,6 +246,10 @@ std::string FileDoc::buildScmdJson () const
     b.scale        = scale;
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
+    if (session.active ())
+        b.session = sc::session::toVar (session, engine.getFile ().getParentDirectory ());
+    else if (pendingSession.isObject ())
+        b.session = pendingSession;   // not opened as a session (files missing): keep the entry
 
     if (!b.hasContent ())
         return {};   // nothing worth embedding: omit the SCMD chunk entirely
@@ -262,6 +271,10 @@ std::string FileDoc::buildMetaJson () const
     b.altRef       = altRef;
     b.freqAnalysis = freqAnalysis;
     b.transcription = sctt;
+    if (session.active ())
+        b.session = sc::session::toVar (session, engine.getFile ().getParentDirectory ());
+    else if (pendingSession.isObject ())
+        b.session = pendingSession;
 
     return sc::serialiseBundle (b, true);
 }
@@ -274,6 +287,7 @@ void FileDoc::applyBundle (const sc::MetaBundle& b)
     tables          = b.tables;
     tablesMode      = b.tablesMode;
     if (b.haveVideoTracks) videoTracks = b.videoTracks;   // absent key: keep current
+    if (b.haveSession) pendingSession = b.session;          // opened by Application
     scale           = b.scale;
     altRef          = b.altRef;
     freqAnalysis    = b.freqAnalysis;
@@ -361,10 +375,24 @@ namespace
     }
 } // anonymous namespace
 
+void FileDoc::applySessionSaveRegion ()
+{
+    if (session.active () && !session.laneChannels.empty ())
+        engine.setSaveRegion (session.laneChannels[0], session.clips[0].length);
+    else
+        engine.setSaveRegion (0, 0);
+}
+
 void FileDoc::remapForDeletion (double a, double b)
 {
     if (!(b > a))
         return;
+    if (session.active ())
+    {
+        const double r = engine.sampleRate ();
+        sc::session::warpForDeletion (session, std::llround (a * r), std::llround (b * r));
+        applySessionSaveRegion ();
+    }
 
     markers.adjustForDeletion (a, b);
     remapSpectralState (*this, [&] (auto& sel) { sel.adjustForDeletion (a, b); });
@@ -395,6 +423,12 @@ void FileDoc::remapForInsertion (double a, double lenSecs)
 {
     if (!(lenSecs > 0.0))
         return;
+    if (session.active ())
+    {
+        const double r = engine.sampleRate ();
+        sc::session::warpForInsertion (session, std::llround (a * r), std::llround (lenSecs * r));
+        applySessionSaveRegion ();
+    }
 
     markers.adjustForInsertion (a, lenSecs);
     remapSpectralState (*this, [&] (auto& sel) { sel.adjustForInsertion (a, lenSecs); });
@@ -410,6 +444,13 @@ void FileDoc::remapForStretch (double a, double bOld, double bNew)
 {
     if (!(bOld > a))
         return;
+    if (session.active ())
+    {
+        const double r = engine.sampleRate ();
+        sc::session::warpForStretch (session, std::llround (a * r), std::llround (bOld * r),
+                                     std::llround (bNew * r));
+        applySessionSaveRegion ();
+    }
 
     markers.adjustForStretch (a, bOld, bNew);
     remapSpectralState (*this, [&] (auto& sel) { sel.adjustForStretch (a, bOld, bNew); });

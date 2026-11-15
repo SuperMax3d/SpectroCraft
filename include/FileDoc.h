@@ -9,6 +9,7 @@
 #include "BkdkChunk.h"
 #include "FileMeta.h"
 #include "UndoManager.h"
+#include "Session.h"
 
 /** FileDoc::metaDirty: a bool that also counts how often it was set. Every
     assignment of true bumps a change counter, so an asynchronous save can
@@ -137,6 +138,20 @@ public:
     // transient UI state (-1 = follow the topmost available track).
     std::vector<sc::VideoTrackData> videoTracks;
     int selectedVideoTrack = -1;
+
+    // Session (issue #21, experimental): other files placed on this
+    // document's timeline. While active, `engine` holds the composite of
+    // every file (see include/Session.h) and saves only the main file's
+    // region (AudioEngine::setSaveRegion). `pendingSession` is the session
+    // entry read from the metadata at load; Application turns it into the
+    // composite once the referenced files are read.
+    sc::session::Session session;
+    juce::var pendingSession;
+
+    /** Points the engine's save region at the main file's own region while a
+        session is active (whole content otherwise). Call after every change
+        of `session`. */
+    void applySessionSaveRegion ();
 
     /** Replaces the track list and marks the document metadata-dirty.
         `newSelection` (optional pointer) updates the transient selection. */

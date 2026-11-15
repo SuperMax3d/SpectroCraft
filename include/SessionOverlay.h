@@ -1,0 +1,76 @@
+#pragma once
+#include <JuceHeader.h>
+#include "Session.h"
+
+#include <functional>
+#include <vector>
+
+/*  Session files in the waveform and spectrogram views (issue #21): their
+    outlines and names (Edit > Session > Show File Borders) and the Move Files
+    tool's drag, shared by both views. A view describes its layout with a
+    ViewGeometry; everything else is computed here. */
+namespace sc::session
+{
+
+struct ViewGeometry
+{
+    std::vector<int> rowChannel;                 // composite channel shown by each row
+    std::vector<juce::Rectangle<int>> rows;      // the rows, in component coordinates
+    juce::Rectangle<int> plot;                   // the plot area (span of the time axis)
+    std::function<double (double)> timeToX;
+    std::function<double (int)> xToTime;
+    double rate = 0.0;
+};
+
+struct ClipBox
+{
+    int clip = -1;
+    juce::Rectangle<int> box;
+};
+
+/** Rectangle of every file over the visible rows of its lane, clipped to the plot. */
+std::vector<ClipBox> clipBoxes (const Session& s, const ViewGeometry& g);
+
+/** Rectangle file `clip` would cover in `lane` at `offset` (empty when the
+    lane has no visible row). */
+juce::Rectangle<int> boxFor (const Session& s, const ViewGeometry& g, int clip, int lane, int64_t offset);
+
+/** Lane of the row under y, or -1. */
+int laneAtY (const Session& s, const ViewGeometry& g, int y);
+
+/** Outlines and file names over the views. */
+void paintBorders (juce::Graphics& gr, const Session& s, const ViewGeometry& g);
+
+/** The Move Files tool's drag. */
+class MoveGesture
+{
+public:
+    struct Target
+    {
+        int clip = -1, lane = 0;
+        int64_t offset = 0;
+        bool valid = false;   // the lane has the file's channel count and the place is free
+    };
+
+    /** Starts a drag when p is on a file other than the main one. */
+    bool begin (const Session& s, const ViewGeometry& g, juce::Point<int> p);
+    /** Follows the mouse: time moves the file, the row picks the lane; with
+        `snap` (Shift) the start or end jumps to 0, another file's start or
+        end or the playhead within 8 pixels. */
+    void drag (const Session& s, const ViewGeometry& g, juce::Point<int> p, bool snap, double playheadSecs);
+    /** Ends the drag and returns where the file should go (clip = -1: no drag). */
+    Target end();
+    void cancel() noexcept { clip_ = -1; }
+    bool active() const noexcept { return clip_ >= 1; }
+    const Target& target() const noexcept { return cur_; }
+    void paint (juce::Graphics& gr, const Session& s, const ViewGeometry& g) const;
+
+private:
+    int clip_ = -1;
+    double grabTime_ = 0.0;
+    int64_t startOffset_ = 0;
+    Target cur_;
+    bool snapped_ = false;
+};
+
+} // namespace sc::session

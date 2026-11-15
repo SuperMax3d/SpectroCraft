@@ -44,6 +44,9 @@ public:
     bool isFileLoaded() const { return hasFile; }
     bool fullyInMemory() const { return buffer != nullptr; }
     bool hasUnsavedChanges() const { return unsaved; }
+    /** Clears the unsaved flag without writing (a session composite built
+        from files that are all on disk, issue #21). */
+    void markContentSaved() { unsaved = false; }
     const juce::File& getFile() const { return currentFile; }
     int numChannels() const { return nchans; }
     int64_t numSamples() const { return totalSamples; }
@@ -359,6 +362,14 @@ public:
     // byte-for-byte in WAV saves. nullptr or empty string = no chunk.
     void setBkdkForSave (const std::string* raw) { saveBkdkPayload = raw; }
 
+    /** Session composite (issue #21): when channels > 0, every save writes only
+        channels [0, channels) over samples [0, length) - the main file's own
+        region - whichever path asks for the save (Save, Save As, batch, AI
+        control). 0 = the whole content (the default). */
+    void setSaveRegion (int channels, int64_t length) { saveRegionChannels = channels; saveRegionLength = length; }
+    int saveRegionChannelCount() const noexcept { return saveRegionChannels; }
+    int64_t saveRegionSampleCount() const noexcept { return saveRegionLength; }
+
     // ---- Waveform overview mipmaps (min/max pyramid) ----
     struct MipLevel { int64_t factor; std::vector<std::vector<float>> min, max; };
     const std::vector<MipLevel>& mipmaps() const { return mips; }
@@ -474,6 +485,8 @@ private:
     std::shared_ptr<const std::vector<uint8_t>> mutesForAudio() const;   // the audio thread's snapshot
 
     ::UndoManager* undo = nullptr;
+    int saveRegionChannels = 0;      // see setSaveRegion()
+    int64_t saveRegionLength = 0;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks
     const std::string* saveScttJson = nullptr;          // for the WAV SCTT chunk
     const sc::MetaMode* saveMetaMode = nullptr;         // for WAV metadata mode

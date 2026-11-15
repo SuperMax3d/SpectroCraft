@@ -2,6 +2,7 @@
 // SpectroCraft - Waveform view component (own time window + vertical zoom,
 // amplitude axis on the left or right, time ruler at the top or bottom)
 #include <JuceHeader.h>
+#include "SessionOverlay.h"
 #include "Application.h"
 #include "MarkerManager.h"
 #include <vector>
@@ -30,6 +31,11 @@ public:
     // menu, wheel over the plot or time ruler = horizontal zoom at cursor,
     // wheel over the left amplitude axis (or Shift+wheel) = vertical zoom,
     // double-click = fit whole file. Clicking moves the playhead.
+    /** Session files (issue #21): outlines and names, and the Move Files drag. */
+    void paintOverChildren (juce::Graphics& g) override;
+    /** This view's rows, plot and time axis, for the session overlay. */
+    sc::session::ViewGeometry sessionGeometry() const;
+
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent& e) override;
@@ -307,6 +313,7 @@ private:
     juce::Rectangle<int> channelLabelBounds (int ch, int centreY) const;
 
     Application& app;   // audio data read live via app.audioEngine() (active doc)
+    sc::session::MoveGesture sessionMove_;   // Edit > Session > Move Files drag
     bool showTimeRuler = true;   // stacked dual view: only one view draws it
     bool showMarkerTitles = true;   // suppressed while the spectrogram is stacked below
     double viewStart = 0, viewEnd = 10, vZoom = 1;

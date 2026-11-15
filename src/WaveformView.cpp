@@ -194,9 +194,42 @@ int WaveformView::rowAtY (int y) const
     return row;
 }
 
+sc::session::ViewGeometry WaveformView::sessionGeometry() const
+{
+    sc::session::ViewGeometry g;
+    for (int ch = 0; ch < app.audioEngine().numChannels(); ++ch)
+        if (ch < (int) chanVis.size() && chanVis[(size_t) ch]) g.rowChannel.push_back (ch);
+    g.rows = absRowRects();
+    g.plot = plotRect();
+    g.timeToX = [this] (double t) { return timeToX (t); };
+    g.xToTime = [this] (int x) { return xToTime (x); };
+    g.rate = app.audioEngine().sampleRate();
+    return g;
+}
+
+void WaveformView::paintOverChildren (juce::Graphics& g)
+{
+    const FileDoc* d = app.doc ();
+    if (d == nullptr || !d->session.active ())
+        return;
+    const auto geo = sessionGeometry ();
+    sc::session::paintBorders (g, d->session, geo);
+    sessionMove_.paint (g, d->session, geo);
+}
+
 void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
+
+    // Edit > Session > Move Files (issue #21): a left drag on a file moves it.
+    if (app.sessionMoveTool && e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
+        if (const FileDoc* d = app.doc(); d != nullptr
+            && sessionMove_.begin (d->session, sessionGeometry(), e.getPosition()))
+        {
+            dragMode = DragMode::None;
+            repaint();
+            return;
+        }
 
     // A click on a channel number mutes/unmutes that channel; Ctrl+click
     // (Cmd+click on macOS, where Ctrl+click is the context menu) solos it.
@@ -373,6 +406,13 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
     reportHoverTime (e, true);
+    if (sessionMove_.active())
+    {
+        if (const FileDoc* d = app.doc())
+            sessionMove_.drag (d->session, sessionGeometry(), e.getPosition(), e.mods.isShiftDown(), app.playhead);
+        repaint();
+        return;
+    }
 
     switch (dragMode)
     {
@@ -463,6 +503,14 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 
 void WaveformView::mouseUp (const juce::MouseEvent&)
 {
+    if (sessionMove_.active())
+    {
+        const auto t = sessionMove_.end();
+        repaint();
+        if (t.clip >= 1 && t.valid)
+            app.moveSessionFile (t.clip, t.lane, t.offset);
+        return;
+    }
     if (dragMode == DragMode::ZoomDrag)
     {
         if (!haveZoomRect)

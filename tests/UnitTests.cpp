@@ -29414,6 +29414,7 @@ static void testWriteDataToNewChannels()
 #include "regression/docking.inc"   // docking workspace: groups, drop zones, floating windows, workspaces
 #include "regression/diagnostics.inc"   // opt-in diagnostic log
 #include "regression/axes.inc"           // per-file axis entries behind the Scale form (docs/scale-form.md)
+#include "regression/sessions.inc"       // sessions: referenced files on the timeline (issue #21)
 #include "regression/updates.inc"       // automatic updates: Ed25519/SHA, manifest, staging (docs/updates.md)
 
 
@@ -29921,6 +29922,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: spectral_dsp", runRegression_spectral_dsp);
     SC_RUN_TEST ("regression: views", runRegression_views);
     SC_RUN_TEST ("regression: axes", runRegression_axes);
+    SC_RUN_TEST ("regression: sessions", runRegression_sessions);
     SC_RUN_TEST ("regression: panels", runRegression_panels);
     SC_RUN_TEST ("regression: mainwindow", runRegression_mainwindow);
     SC_RUN_TEST ("regression: application", runRegression_application);

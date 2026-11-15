@@ -351,6 +351,9 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
     if (!b.axes.empty())
         root->setProperty ("axes", sc::axes::toJson (b.axes));
 
+    if (b.session.isObject())
+        root->setProperty ("session", b.session);
+
     auto scale = new juce::DynamicObject();
     scale->setProperty ("unit", static_cast<int> (b.scale.unit));
     scale->setProperty ("fullScaleValue", b.scale.fullScaleValue);
@@ -549,6 +552,10 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
             out.videoTracks = std::move (list);
         }
     }
+
+    out.haveSession = p.contains ("session");
+    if (out.haveSession)
+        out.session = p.getWithDefault ("session", juce::var());
 
     out.haveScale = p.contains ("scale");
     if (const auto* scaleObj = p.getWithDefault ("scale", juce::var()).getDynamicObject())

@@ -137,7 +137,8 @@ public:
         (issue #14); a small one imports at once. */
     void importCsvTables (std::vector<juce::File> files);
     static constexpr juce::int64 kCsvProgressBytes = 2 * 1024 * 1024;
-    void runSaveAsync (const juce::File& file, bool saveAs);      // background save + dialog
+    void runSaveAsync (const juce::File& file, bool saveAs);
+    void addSessionFileFromChooser (bool parallel);   // Edit > Session (issue #21)      // background save + dialog
     void exportSpectralAsync (const juce::File& file,
                               const SpectralView::SpectralExportOptions& opts = {});
                                                           // background PNG render + dialog
@@ -660,6 +661,9 @@ public:
         EditTrimSelection,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,
         EditPasteToNewChannels,
+        // Edit > Session (issue #21, experimental)
+        EditSessionAddAfter = 2100, EditSessionAddParallel, EditSessionMoveTool, EditSessionBorders,
+        EditSessionRemoveBase = 2200,   // + file index (1..)
         ViewZoomIn = 3000, ViewZoomOut, ViewZoomFit, ViewZoomToSelection, ViewZoomOutFull,
         ViewVerticalZoomIn,
         ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels,
@@ -812,6 +816,14 @@ private:
     // scrollbar per view on its right edge.
     std::unique_ptr<TimeScrollBar> timeBar;
     std::unique_ptr<ValueScrollBar> waveVScroll, specVScroll;
+    // Sessions (issue #21): one bar for the whole stack of channel rows, shown
+    // while the active document is a session. Its thumb is the window of
+    // channels shown; an edge drag shows more or fewer of them (taller rows).
+    std::unique_ptr<ValueScrollBar> sessionVScroll;
+    bool sessionBarWanted() const;
+public:
+    ValueScrollBar* sessionScrollBar() const noexcept { return sessionVScroll.get(); }   // tests
+private:
 
     // Dedicated tables track (Tables panel mode 2): a strip above the data
     // views with its own separator + vertical scrollbar.
