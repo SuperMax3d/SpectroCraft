@@ -56,6 +56,12 @@ public:
         decide on re-renders even when neither the length nor the time window
         changed (an in-place edit, loop-mode recording). */
     int64_t contentVersion() const { return contentVer.load (); }
+    /** contentVersion() of the last change that was NOT a pure append
+        (appendSamples): every edit, undo/redo, whole-file replacement,
+        in-place overwrite, load. Content cached before it is stale whatever
+        the length did; a longer document is not proof of an append (moving
+        a session file to the end grows the composite too). */
+    int64_t lastRewriteVersion() const { return rewriteVer.load (); }
     double sampleRate() const { return rate; }
     double duration() const { return durationSecs; }
 
@@ -118,6 +124,17 @@ public:
     }
     void setMutedChannels (std::vector<bool> muted);
     const std::vector<bool>& mutedChannels() const noexcept { return muted_; }
+
+    /** Session playback routing (issue #21): each channel's index inside its
+        track and that track's channel count. A channel then plays on output
+        index % numOutputs (two stereo tracks: L, R, L, R - both lefts on the
+        left output), and a mono track on every output; the fold gain counts
+        the channels each output receives. Empty (the default) = the
+        document's own routing below. Set by FileDoc from the session
+        layout; read by the audio thread through a snapshot. */
+    struct ChannelRoute { int index = 0; int trackChannels = 1; };
+    void setPlaybackRoutes (std::vector<ChannelRoute> routes);
+    std::vector<ChannelRoute> playbackRoutes() const;
 
     /** Playback routing: channel ch plays on output ch, and when the device
         has fewer outputs than the file has channels, the extra ones fold
@@ -449,6 +466,8 @@ private:
     int nchans = 0;
     int64_t totalSamples = 0;
     std::atomic<int64_t> contentVer{ 0 };   // see contentVersion()
+    std::atomic<int64_t> rewriteVer{ 0 };   // see lastRewriteVersion()
+    void bumpRewrite() noexcept { rewriteVer.store (contentVer.fetch_add (1) + 1); }
     double rate = 44100.0;
     double durationSecs = 0.0;
     bool hasFile = false;
@@ -482,6 +501,8 @@ private:
     std::vector<bool> muted_;
     mutable std::mutex muteMutex;
     std::shared_ptr<const std::vector<uint8_t>> mutedForAudio_;
+    std::shared_ptr<const std::vector<ChannelRoute>> routesForAudio_;   // under muteMutex
+    std::vector<int> routeCount_;   // audio thread: channels per output (grown, never shrunk)
     std::shared_ptr<const std::vector<uint8_t>> mutesForAudio() const;   // the audio thread's snapshot
 
     ::UndoManager* undo = nullptr;

@@ -56,26 +56,59 @@ int laneAtY (const Session& s, const ViewGeometry& g, int y)
     return -1;
 }
 
+namespace
+{
+    const juce::Font& tagFont()
+    {
+        static const juce::Font f { juce::FontOptions (11.0f) };
+        return f;
+    }
+}
+
+juce::Rectangle<int> nameTag (const Session& s, const ViewGeometry&, const ClipBox& b)
+{
+    if (b.clip < 0 || b.clip >= (int) s.clips.size()) return {};
+    const auto name = s.clips[(size_t) b.clip].file.getFileName();
+    const int w = std::min (b.box.getWidth() - 4, juce::GlyphArrangement::getStringWidthInt (tagFont(), name) + 8);
+    if (w <= 12) return {};
+    return { b.box.getX() + 2, b.box.getY() + 2, w, 15 };
+}
+
+int clipAtNameTag (const Session& s, const ViewGeometry& g, juce::Point<int> p)
+{
+    if (!s.active()) return -1;
+    for (const auto& b : clipBoxes (s, g))
+        if (b.clip >= 1 && nameTag (s, g, b).contains (p))
+            return b.clip;
+    return -1;
+}
+
+int clipAtPoint (const Session& s, const ViewGeometry& g, juce::Point<int> p)
+{
+    for (const auto& b : clipBoxes (s, g))
+        if (b.box.contains (p))
+            return b.clip;
+    return -1;
+}
+
 void paintBorders (juce::Graphics& gr, const Session& s, const ViewGeometry& g)
 {
-    if (!s.active() || !s.showBorders) return;
-    const juce::Font font { juce::FontOptions (11.0f) };
-    gr.setFont (font);
+    if (!s.active()) return;
+    gr.setFont (tagFont());
     for (const auto& b : clipBoxes (s, g))
     {
         const bool main = b.clip == 0;
         const auto col = main ? juce::Colour (0xffffd166) : juce::Colour (0xff7fd4ff);
         gr.setColour (col.withAlpha (0.85f));
         gr.drawRect (b.box, 1);
-        const auto name = s.clips[(size_t) b.clip].file.getFileName();
-        const int w = std::min (b.box.getWidth() - 4, juce::GlyphArrangement::getStringWidthInt (font, name) + 8);
-        if (w > 12)
+        const auto tag = nameTag (s, g, b);
+        if (!tag.isEmpty())
         {
-            const juce::Rectangle<int> tag (b.box.getX() + 2, b.box.getY() + 2, w, 15);
             gr.setColour (juce::Colours::black.withAlpha (0.6f));
             gr.fillRect (tag);
             gr.setColour (col);
-            gr.drawText (name, tag.reduced (4, 0), juce::Justification::centredLeft, true);
+            gr.drawText (s.clips[(size_t) b.clip].file.getFileName(), tag.reduced (4, 0),
+                         juce::Justification::centredLeft, true);
         }
     }
 }

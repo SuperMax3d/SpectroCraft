@@ -6864,9 +6864,11 @@ int StatusBar::fileAndRateEnd() const
     return leftX;
 }
 
-void StatusBar::setChannels (int count, const std::vector<int>& visible, const std::vector<bool>& muted)
+void StatusBar::setChannels (int count, const std::vector<int>& visible, const std::vector<bool>& muted,
+                             std::vector<juce::String> names)
 {
     count = std::max (0, count);
+    if (names != chanNames_) { chanNames_ = std::move (names); repaint(); }
     std::vector<bool> shown ((size_t) count, false), mut ((size_t) count, false);
     for (const int ch : visible)
         if (ch >= 0 && ch < count) shown[(size_t) ch] = true;
@@ -6881,6 +6883,8 @@ void StatusBar::setChannels (int count, const std::vector<int>& visible, const s
 
 juce::String StatusBar::channelChipLabel (int ch) const
 {
+    if (ch >= 0 && ch < (int) chanNames_.size() && chanNames_[(size_t) ch].isNotEmpty())
+        return chanNames_[(size_t) ch];
     return chanCount_ == 2 ? juce::String (ch == 0 ? "L" : "R") : juce::String (ch + 1);
 }
 

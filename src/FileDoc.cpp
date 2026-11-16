@@ -377,10 +377,18 @@ namespace
 
 void FileDoc::applySessionSaveRegion ()
 {
+    std::vector<AudioEngine::ChannelRoute> routes;
     if (session.active () && !session.laneChannels.empty ())
+    {
         engine.setSaveRegion (session.laneChannels[0], session.clips[0].length);
+        // Playback by track (issue #21): two stereo tracks play L, R, L, R.
+        for (int lane = 0; lane < session.numLanes (); ++lane)
+            for (int i = 0; i < session.laneChannels[(size_t) lane]; ++i)
+                routes.push_back ({ i, session.laneChannels[(size_t) lane] });
+    }
     else
         engine.setSaveRegion (0, 0);
+    engine.setPlaybackRoutes (std::move (routes));
 }
 
 void FileDoc::remapForDeletion (double a, double b)

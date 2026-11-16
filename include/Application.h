@@ -424,20 +424,37 @@ public:
     // in parallel lanes; see include/Session.h for the model. Every change is
     // one undoable step (audio + layout together).
 
-    /** Adds `file` to the active document's session: right after the last
-        file of the main lane (parallel = false; same channel count as the main
-        file) or in a new lane starting at 0 (parallel = true). The file must
-        have the document's sample rate. */
+    /** Adds `files` to the active document's session in track `lane`, the
+        first at `offset` samples and each next one right after the previous
+        (a file that does not fit there takes the first free place after it).
+        An empty track takes the first file's channel count; the files must
+        have the track's channel count and the document's sample rate. One
+        undoable step. This is what dropping files on the tracks does. */
+    bool addSessionFilesAt (const std::vector<juce::File>& files, int lane, int64_t offset,
+                            std::string* errOut = nullptr);
+    /** addSessionFilesAt for one file: right after the last file of the main
+        track (parallel = false) or in a new track at 0 (parallel = true). */
     bool addSessionFile (const juce::File& file, bool parallel, std::string* errOut = nullptr);
+    /** Right-click > Add Track: a new empty track at the bottom with
+        `channels` channels (it takes the first file dropped on it). */
+    bool addSessionTrack (int channels, std::string* errOut = nullptr);
+    /** Right-click > Remove Track: removes an empty track (not the main one). */
+    bool removeSessionTrack (int lane, std::string* errOut = nullptr);
     /** Moves file `index` (1.. ; the main file stays at 0) to `lane` at
-        `offset` samples. The lane must have the file's channel count and the
-        place must be free. */
+        `offset` samples. The lane must have the file's channel count (or be
+        empty: it takes the file's) and the place must be free. A track left
+        empty stays (Remove Track takes it away). */
     bool moveSessionFile (int index, int lane, int64_t offset, std::string* errOut = nullptr);
     /** Takes file `index` out of the session; its own file is not touched.
         Its audio leaves the composite (unsaved edits made to it are lost). */
     bool removeSessionFile (int index, std::string* errOut = nullptr);
-    /** Shows or hides the files' outlines and names (persisted with the session). */
+    /** View > Show File Borders: the files' outlines and names (an app
+        setting, on by default and remembered). */
     void setSessionBordersVisible (bool visible);
+    /** True when the borders are drawn: the setting is on and the active
+        document has more than its own file (a referenced file or an extra
+        track) - a plain file never shows one. */
+    bool sessionBordersShown () const;
     /** Builds the composite of the session stored in d's metadata
         (d.pendingSession): reads the referenced files, skipping (and listing
         in *warnings) those that are missing, have another sample rate or do
@@ -448,7 +465,8 @@ public:
         normal save, limited to its own region). Called by beginSave. */
     bool saveSessionFiles (FileDoc& d, std::string* errOut = nullptr);
     /** Called (message thread) when saving the referenced files of a session
-        failed or was refused; the main file is still saved. */
+        failed or was refused (the main file is still saved), or when a
+        session action from a menu was refused. */
     std::function<void (const juce::String&)> onSessionSaveProblem;
     /** Warnings of the last session opened (files skipped), for the UI. */
     juce::StringArray lastSessionWarnings;
@@ -463,8 +481,20 @@ public:
         if (!lastSessionWarnings.isEmpty () && onSessionOpenWarnings)
             onSessionOpenWarnings (lastSessionWarnings);
     }
-    /** True while the move-files tool is armed (Edit > Session > Move Files):
-        a drag in the views moves the file under the mouse. */
+    /** Right-click on the tracks: Add Track, and Remove File / Remove Track
+        for the referenced file / empty track under the mouse (clip / lane:
+        what is under it, -1 for nothing). */
+    void addSessionContextItems (juce::PopupMenu& m, int clipUnder, int laneUnder) const;
+    /** Runs one of those items (a refusal goes to onSessionSaveProblem);
+        false when `id` is not one of them. */
+    bool runSessionContextItem (int id, int clipUnder, int laneUnder);
+    /** Name of channel `ch` in the tracks and the status bar: "L" / "R" in a
+        two-channel file, its number otherwise; in a session, by its place in
+        its own track (two stereo tracks read L, R, L, R). */
+    juce::String channelName (int ch) const;
+    /** True while the move-files tool is armed (Selection > Move Files, V):
+        a drag in the views moves the file under the mouse. Choosing a
+        selection tool (S, M, L, P) turns it off. */
     bool sessionMoveTool = false;
 
     // AI feature preferences, persisted in the same store (keys ai_*).

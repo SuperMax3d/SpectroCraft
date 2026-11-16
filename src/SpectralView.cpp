@@ -164,12 +164,14 @@ void SpectralView::resized() { dirty = true; imageDirty = true; }
 static void showViewContextMenu (Application& app, double clickT, double clickF,
                                  bool onFreqAxis, int autoFftSize,
                                  const std::array<int, 3>& multiResSizes,
+                                 int sessionClip, int sessionLane,
                                  const std::function<void(int)>& onAction)
 {
     if (!onAction) return;
 
     juce::PopupMenu m;
     using enum ContextMenuIDs;
+    app.addSessionContextItems (m, sessionClip, sessionLane);   // Add Track, Remove File / Track
     const bool hasSel = !app.selection.isEmpty();
     m.addItem (CtxZoomToSelection, "Zoom to Selection", hasSel, false);
     m.addItem (CtxZoomOutFull,     "Zoom Out Full",
@@ -256,7 +258,8 @@ void SpectralView::paintOverChildren (juce::Graphics& g)
     if (d == nullptr || !d->session.active ())
         return;
     const auto geo = sessionGeometry ();
-    sc::session::paintBorders (g, d->session, geo);
+    if (app.sessionBordersShown ())
+        sc::session::paintBorders (g, d->session, geo);
     sessionMove_.paint (g, d->session, geo);
 }
 
@@ -264,13 +267,19 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
-    // Edit > Session > Move Files (issue #21): a left drag on a file moves it.
-    if (app.sessionMoveTool && e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
-        if (const FileDoc* d = app.doc(); d != nullptr
-            && sessionMove_.begin (d->session, sessionGeometry(), e.getPosition()))
+    // Sessions (issue #21): with Move Files (V) a left drag on a file moves
+    // it; a drag from a file's name tag moves it whatever the tool.
+    if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
+        if (const FileDoc* d = app.doc(); d != nullptr && d->session.active())
         {
-            repaint();
-            return;
+            const auto geo = sessionGeometry();
+            const bool onTag = app.sessionBordersShown()
+                               && sc::session::clipAtNameTag (d->session, geo, e.getPosition()) >= 1;
+            if ((app.sessionMoveTool || onTag) && sessionMove_.begin (d->session, geo, e.getPosition()))
+            {
+                repaint();
+                return;
+            }
         }
 
     // A click on a channel number mutes/unmutes that channel; Ctrl+click
@@ -510,7 +519,8 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
     if (sessionMove_.active())
     {
         if (const FileDoc* d = app.doc())
-            sessionMove_.drag (d->session, sessionGeometry(), e.getPosition(), e.mods.isShiftDown(), app.playhead);
+            sessionMove_.drag (d->session, sessionGeometry(), e.getPosition(),
+                               !e.mods.isShiftDown(), app.playhead);   // snaps unless Shift
         repaint();
         return;
     }
@@ -743,15 +753,24 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
             // Only show the menu when there is something to do with it: an
             // external action callback, or a local axis reset. (Headless test
             // views have neither and must not enter a modal loop.)
+            int sClip = -1, sLane = -1;
+            if (const FileDoc* d = app.doc(); d != nullptr && d->session.active())
+            {
+                const auto geo = sessionGeometry();
+                sClip = sc::session::clipAtPoint (d->session, geo, { dragStartX, dragStartY });
+                sLane = sc::session::laneAtY (d->session, geo, dragStartY);
+            }
             if (onAxis || onContextAction)
                 showViewContextMenu (app,
                                      xToTime ((double) dragStartX), freqAtY (dragStartY),
                                      onAxis, autoFftSizeForCurrentZoom (),
                                      multiResSizesForCurrentZoom (),
-                                     [this, onAxis] (int id)
+                                     sClip, sLane,
+                                     [this, onAxis, sClip, sLane] (int id)
                 {
                     using enum ContextMenuIDs;
                     if (id == CtxZoomOutFull && onAxis) { resetFrequencyRange(); return; }
+                    if (app.runSessionContextItem (id, sClip, sLane)) return;
                     // Move/Scale start a local gesture in this view.
                     if (id == CtxMoveSelection || id == CtxScaleSelection)
                     {
@@ -2437,8 +2456,7 @@ void SpectralView::drawChannelLabels (juce::Graphics& g, bool showMuteState)
 
 juce::String SpectralView::channelLabel (int ch) const
 {
-    return app.audioEngine().numChannels() == 2 ? juce::String (ch == 0 ? "L" : "R")
-                                                : juce::String (ch + 1);
+    return app.channelName (ch);   // per track in a session (L, R, L, R)
 }
 
 juce::Rectangle<int> SpectralView::channelLabelBounds (int ch, int centreY) const

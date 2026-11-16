@@ -137,8 +137,11 @@ public:
         (issue #14); a small one imports at once. */
     void importCsvTables (std::vector<juce::File> files);
     static constexpr juce::int64 kCsvProgressBytes = 2 * 1024 * 1024;
-    void runSaveAsync (const juce::File& file, bool saveAs);
-    void addSessionFileFromChooser (bool parallel);   // Edit > Session (issue #21)      // background save + dialog
+    void runSaveAsync (const juce::File& file, bool saveAs);      // background save + dialog
+    /** Files dropped on the tracks of an open file join its session where
+        they were dropped (issue #21): the track under the mouse, from the
+        time under it. False when (x, y) is not on a view's tracks. */
+    bool dropFilesOnTracks (const std::vector<juce::File>& files, int x, int y);
     void exportSpectralAsync (const juce::File& file,
                               const SpectralView::SpectralExportOptions& opts = {});
                                                           // background PNG render + dialog
@@ -661,9 +664,8 @@ public:
         EditTrimSelection,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,
         EditPasteToNewChannels,
-        // Edit > Session (issue #21, experimental)
-        EditSessionAddAfter = 2100, EditSessionAddParallel, EditSessionMoveTool, EditSessionBorders,
-        EditSessionRemoveBase = 2200,   // + file index (1..)
+        // Sessions (issue #21): Selection > Move Files (V), View > Show File Borders.
+        SelectionMoveFiles = 2100, ViewShowFileBorders,
         ViewZoomIn = 3000, ViewZoomOut, ViewZoomFit, ViewZoomToSelection, ViewZoomOutFull,
         ViewVerticalZoomIn,
         ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels,

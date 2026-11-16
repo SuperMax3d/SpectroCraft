@@ -34,6 +34,11 @@ int Session::laneOfChannel (int channel) const
     return -1;
 }
 
+bool Session::laneEmpty (int lane) const
+{
+    return std::none_of (clips.begin(), clips.end(), [lane] (const Clip& c) { return c.lane == lane; });
+}
+
 int64_t Session::extent() const
 {
     int64_t e = 0;
@@ -245,7 +250,6 @@ juce::var toVar (const Session& s, const juce::File& baseDir)
     juce::Array<juce::var> lanes;
     for (int c : s.laneChannels) lanes.add (c);
     root->setProperty ("lanes", lanes);
-    root->setProperty ("showBorders", s.showBorders);
     juce::Array<juce::var> files;
     for (size_t i = 1; i < s.clips.size(); ++i)
     {
@@ -276,7 +280,6 @@ Session fromVar (const juce::var& v, const juce::File& baseDir, const juce::File
     if (const auto* lanes = v.getProperty ("lanes", {}).getArray())
         for (int i = 1; i < lanes->size(); ++i)   // lane 0 is the main file's own layout
             s.laneChannels.push_back (std::clamp ((int) (*lanes)[i], 1, 64));
-    s.showBorders = (bool) v.getProperty ("showBorders", true);
 
     if (const auto* files = v.getProperty ("files", {}).getArray())
         for (const auto& f : *files)

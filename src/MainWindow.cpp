@@ -39,6 +39,7 @@
 #include "ScaleForm.h"
 #include "Version.h"   // auto-generated: SC_VERSION_STRING (bumped on every build)
 #include <algorithm>
+#include <limits>
 
 namespace
 {
@@ -1916,7 +1917,7 @@ bool MainWindow::isInterestedInFileDrag (const juce::StringArray& files)
 void MainWindow::fileDragEnter (const juce::StringArray&, int, int) { repaint(); }
 void MainWindow::fileDragExit (const juce::StringArray&) { repaint(); }
 
-void MainWindow::filesDropped (const juce::StringArray& files, int, int)
+void MainWindow::filesDropped (const juce::StringArray& files, int x, int y)
 {
     // Collect the valid files first so the merge menu can offer its options.
     std::vector<juce::File> valid;
@@ -1934,15 +1935,64 @@ void MainWindow::filesDropped (const juce::StringArray& files, int, int)
     }
 
     // CSV files become tables in the Tables panel instead of audio docs.
-    std::vector<juce::File> csvs;
+    std::vector<juce::File> csvs, audio;
     for (const auto& f : valid)
     {
         if (f.getFileExtension ().equalsIgnoreCase (".csv"))
             csvs.push_back (f);
         else
-            openFile (f);   // multi-file editor: every valid drop becomes a document
+            audio.push_back (f);
     }
+    // Audio dropped on the tracks of an open file joins its session there
+    // (issue #21); dropped anywhere else, or with no file open, each file
+    // opens as a document of its own (multi-file editor).
+    if (!audio.empty () && !dropFilesOnTracks (audio, x, y))
+        for (const auto& f : audio)
+            openFile (f);
     importCsvTables (std::move (csvs));
+}
+
+bool MainWindow::dropFilesOnTracks (const std::vector<juce::File>& files, int x, int y)
+{
+    FileDoc* d = app.doc ();
+    if (d == nullptr || !app.audioEngine ().isFileLoaded () || files.empty ())
+        return false;
+    // The view actually under the drop point (not covered, not hidden).
+    juce::Component* hit = getComponentAt (x, y);
+    for (juce::Component* v : { static_cast<juce::Component*> (waveformView.get ()),
+                                static_cast<juce::Component*> (spectralView.get ()) })
+    {
+        if (v == nullptr || hit == nullptr || ! (hit == v || v->isParentOf (hit)))
+            continue;
+        const auto p = v->getLocalPoint (this, juce::Point<int> (x, y));
+        sc::session::ViewGeometry geo;
+        if (v == waveformView.get ()) geo = waveformView->sessionGeometry ();
+        else                          geo = spectralView->sessionGeometry ();
+        if (!geo.plot.contains (p) || geo.rows.empty () || geo.xToTime == nullptr)
+            continue;
+
+        // The track under the mouse (the nearest row's between rows); a plain
+        // file has only its own.
+        int lane = 0;
+        if (d->session.active ())
+        {
+            int best = -1, bestDist = std::numeric_limits<int>::max ();
+            for (size_t i = 0; i < geo.rows.size () && i < geo.rowChannel.size (); ++i)
+            {
+                const auto& r = geo.rows[i];
+                const int dist = p.y < r.getY () ? r.getY () - p.y : p.y >= r.getBottom () ? p.y - r.getBottom () + 1 : 0;
+                if (dist < bestDist) { bestDist = dist; best = (int) i; }
+            }
+            lane = best >= 0 ? d->session.laneOfChannel (geo.rowChannel[(size_t) best]) : 0;
+            if (lane < 0) lane = 0;
+        }
+        const int64_t offset = std::max<int64_t> (0, (int64_t) std::llround (geo.xToTime (p.x) * geo.rate));
+        std::string err;
+        if (!app.addSessionFilesAt (files, lane, offset, &err))
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Session", juce::String (err), "", this);
+        return true;   // handled on the tracks, even when refused
+    }
+    return false;
 }
 
 void MainWindow::importCsvTables (std::vector<juce::File> files)
@@ -2337,6 +2387,8 @@ juce::String MainWindow::currentModeText() const
             break;
         default: break;
     }
+    if (app.sessionMoveTool)
+        mode = "Move Files";   // sessions (issue #21): V
 
     // Clone & Multiply picking overrides the tool indicator with a hint.
     if (app.isClonePicking ())
@@ -2464,8 +2516,13 @@ void MainWindow::syncSharedState()
         statusBar->setSelection (app.selection.getStart(), app.selection.getEnd());
         statusBar->setPlayhead (app.playhead);
         // Channel numbers: dim when hidden, red when muted.
-        statusBar->setChannels (app.audioEngine().isFileLoaded() ? app.audioEngine().numChannels() : 0,
-                                app.visibleChannels, app.audioEngine().mutedChannels());
+        {
+            const int nch = app.audioEngine().isFileLoaded() ? app.audioEngine().numChannels() : 0;
+            std::vector<juce::String> names;
+            for (int ch = 0; ch < nch; ++ch) names.push_back (app.channelName (ch));
+            statusBar->setChannels (nch, app.visibleChannels, app.audioEngine().mutedChannels(),
+                                    std::move (names));
+        }
 
         // Active spectral tool indicator + live SHIFT/CTRL selection hint.
         statusBar->setModeText (currentModeText());
@@ -3907,21 +3964,6 @@ void MainWindow::handleFileOpen()
 
 // Save on a background thread with a progress dialog so writing large files
 // never blocks the UI thread.
-// Edit > Session > Add File After / in Parallel (issue #21).
-void MainWindow::addSessionFileFromChooser (bool parallel)
-{
-    if (!app.audioEngine().isFileLoaded())
-        return;
-    juce::FileChooser chooser (parallel ? "Add a File in Parallel" : "Add a File After",
-                               app.audioEngine().getFile().getParentDirectory(),
-                               "*.wav", kUseNativeFileChooser);
-    if (!chooser.browseForFileToOpen())
-        return;
-    std::string err;
-    if (!app.addSessionFile (chooser.getResult(), parallel, &err))
-        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Session", juce::String (err), "", this);
-}
-
 void MainWindow::runSaveAsync (const juce::File& file, bool saveAs)
 {
     auto* dlg = new WorkProgressDialog ("Saving", "Saving " + file.getFileName() + " ...",
@@ -4389,15 +4431,6 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
         return;
     }
 
-    // Edit > Session > Remove File: EditSessionRemoveBase + file index.
-    if (menuItemID > EditSessionRemoveBase && menuItemID < EditSessionRemoveBase + 100)
-    {
-        std::string err;
-        if (!app.removeSessionFile (menuItemID - EditSessionRemoveBase, &err))
-            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Session", juce::String (err), "", this);
-        return;
-    }
-
     // Recording Device submenu: RecDeviceBase + pluginIndex*1000 + deviceIndex.
     if (menuItemID >= RecDeviceBase && menuItemID < RecDeviceEnd)
     {
@@ -4713,16 +4746,12 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             app.settings.snapToZeroCrossings = !app.settings.snapToZeroCrossings;
             if (app.onStateChange) app.onStateChange();   // persist the new state
             break;
-        case EditSessionAddAfter:
-        case EditSessionAddParallel:
-            addSessionFileFromChooser (menuItemID == EditSessionAddParallel);
-            break;
-        case EditSessionMoveTool:
+        case SelectionMoveFiles:
             app.sessionMoveTool = !app.sessionMoveTool;
+            syncSharedState();
             break;
-        case EditSessionBorders:
-            if (const FileDoc* sd = app.doc())
-                app.setSessionBordersVisible (!sd->session.showBorders);
+        case ViewShowFileBorders:
+            app.setSessionBordersVisible (!app.settings.sessionShowBorders);
             if (waveformView) waveformView->repaint();
             if (spectralView) spectralView->repaint();
             break;
@@ -9572,26 +9601,6 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (EditSelectAll, "Select All\tCtrl+A", app.audioEngine().isFileLoaded(), false);
         menu.addSeparator();
         menu.addItem (EditSnapToZeroCrossings, "Snap to Zero Crossings", true, app.settings.snapToZeroCrossings);
-        {
-            // Sessions (issue #21, experimental): other files on this file's timeline.
-            const FileDoc* sd = app.doc();
-            const bool hasFile = app.audioEngine().isFileLoaded();
-            const bool active = sd != nullptr && sd->session.active();
-            juce::PopupMenu sess;
-            sess.addItem (EditSessionAddAfter, "Add File After...", hasFile, false);
-            sess.addItem (EditSessionAddParallel, "Add File in Parallel...", hasFile, false);
-            sess.addSeparator();
-            sess.addItem (EditSessionMoveTool, "Move Files", active, active && app.sessionMoveTool);
-            sess.addItem (EditSessionBorders, "Show File Borders", active, active && sd->session.showBorders);
-            if (active)
-            {
-                juce::PopupMenu rm;
-                for (int i = 1; i < (int) sd->session.clips.size() && i < 100; ++i)
-                    rm.addItem (EditSessionRemoveBase + i, sd->session.clips[(size_t) i].file.getFileName());
-                sess.addSubMenu ("Remove File", rm);
-            }
-            menu.addSubMenu ("Session (experimental)", sess, hasFile);
-        }
         menu.addSeparator();
         // Whole-file operation. Streamed files are materialised into memory
         // first when the resample actually runs.
@@ -9601,17 +9610,24 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     else if (menuName == "Selection")
     {
         const bool hasFile = app.audioEngine().isFileLoaded();
+        const bool moving = app.sessionMoveTool;   // Move Files replaces the selection tool
 
         menu.addItem (SelectionToolTimeRange, "Time Range\tS", true,
-                      app.selMode == SpectralSelMode::TimeRange);
+                      !moving && app.selMode == SpectralSelMode::TimeRange);
         menu.addItem (SelectionToolMarquee, "Marquee\tM", hasFile,
-                      app.selMode == SpectralSelMode::Marquee);
+                      !moving && app.selMode == SpectralSelMode::Marquee);
         menu.addItem (SelectionToolLasso, "Lasso\tL", hasFile,
-                      app.selMode == SpectralSelMode::Lasso);
+                      !moving && app.selMode == SpectralSelMode::Lasso);
         menu.addItem (SelectionToolPaintbrush,
                       juce::String ("Paintbrush (") +
                           juce::String (app.brushPctValue ()) + "%\tP",
-                      hasFile, app.selMode == SpectralSelMode::Paintbrush);
+                      hasFile, !moving && app.selMode == SpectralSelMode::Paintbrush);
+        // Sessions (issue #21): drag the files of a session along the timeline.
+        {
+            const FileDoc* sd = app.doc();
+            const bool active = hasFile && sd != nullptr && sd->session.active();
+            menu.addItem (SelectionMoveFiles, "Move Files\tV", active, active && moving);
+        }
         menu.addSeparator ();
         menu.addItem (SelectionBrushSmaller, "Brush Smaller\t[", hasFile, false);
         menu.addItem (SelectionBrushLarger, "Brush Larger\t]", hasFile, false);
@@ -9652,6 +9668,13 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       app.settings.showThirdOctaveGrid);
         menu.addItem (ViewShowDedTrackGrid, "Show Dedicated Track Grid", true,
                       app.settings.showDedicatedTrackGrid);
+        // Sessions (issue #21): outlines and names of the files. A plain file
+        // (no other file, no extra track) never shows them.
+        {
+            const FileDoc* sd = app.doc();
+            menu.addItem (ViewShowFileBorders, "Show File Borders", sd != nullptr && sd->session.active(),
+                          app.settings.sessionShowBorders);
+        }
 
         // Per-channel visibility toggles (applies to both views).
         // Ctrl/Shift+click shows only that channel; the same is available from
@@ -10220,6 +10243,13 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
             case 'm': app.setSelectionTool (SpectralSelMode::Marquee);   syncSharedState(); return true;
             case 'l': app.setSelectionTool (SpectralSelMode::Lasso);     syncSharedState(); return true;
             case 'p': app.setSelectionTool (SpectralSelMode::Paintbrush);syncSharedState(); return true;
+            case 'v':   // Move Files (sessions, issue #21)
+                if (const FileDoc* sd = app.doc(); sd != nullptr && sd->session.active())
+                {
+                    app.sessionMoveTool = !app.sessionMoveTool;
+                    syncSharedState();
+                }
+                return true;
             case '[': app.stepBrushRadius (false);
                      syncSharedState(); return true;
             case ']': app.stepBrushRadius (true);

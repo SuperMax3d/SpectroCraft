@@ -35,6 +35,13 @@ static void regrSessions_model()
     s.clips = { { juce::File ("/tmp/main.wav"), 0, 0, 100 },
                 { juce::File ("/tmp/b.wav"), 0, 100, 50 },
                 { juce::File ("/tmp/c.wav"), 1, 20, 40 } };
+    {
+        Session onlyTrack;
+        onlyTrack.laneChannels = { 2, 2 };
+        onlyTrack.clips = { { juce::File ("/tmp/main.wav"), 0, 0, 100 } };
+        CHECK (onlyTrack.active () && onlyTrack.laneEmpty (1) && ! onlyTrack.laneEmpty (0),
+               "sessions: an extra empty track makes a session (Add Track)");
+    }
     CHECK (s.active () && s.totalChannels () == 3 && s.laneFirstChannel (1) == 2 && s.laneOfChannel (2) == 1
                && s.laneOfChannel (1) == 0 && s.extent () == 150,
            "sessions: lanes map to consecutive channels; extent is the last file's end");
@@ -93,14 +100,13 @@ static void regrSessions_model()
         const juce::File other = dir.getChildFile ("sub").getChildFile ("b.wav");
         other.replaceWithText ("x");
         Session j;
-        j.laneChannels = { 2, 2 };
-        j.showBorders = false;
+        j.laneChannels = { 2, 2, 1 };   // lane 2: an empty track (Add Track) is kept
         j.clips = { { mainF, 0, 0, 10 }, { other, 1, 7, 3 } };
         const juce::String json = juce::JSON::toString (toVar (j, dir));
         const auto back = fromVar (juce::JSON::parse (json), dir, mainF, 2, 10);
         CHECK (json.contains ("\"sub/b.wav\"") && back.clips.size () == 2 && back.clips[1].file == other
                    && back.clips[1].lane == 1 && back.clips[1].offset == 7 && back.laneChannels == j.laneChannels
-                   && ! back.showBorders && back.clips[0].file == mainF && back.clips[0].length == 10,
+                   && back.laneEmpty (2) && back.clips[0].file == mainF && back.clips[0].length == 10,
                "sessions: JSON round trip with a path relative to the main file's folder");
         dir.deleteRecursively ();
     }
@@ -132,7 +138,7 @@ static void regrSessions_documents()
         std::string err;
         CHECK (! app.addSessionFile (fd, false, &err) && juce::String (err).contains ("Hz"),
                "sessions: a file at another sample rate is refused (" + juce::String (err) + ")");
-        CHECK (! app.addSessionFile (fc, false, &err) && juce::String (err).contains ("parallel"),
+        CHECK (! app.addSessionFile (fc, false, &err) && juce::String (err).contains ("channel"),
                "sessions: a mono file cannot follow a stereo main file in its lane");
 
         CHECK (app.addSessionFile (fb, false, &err), "sessions: add b after the main file (" + juce::String (err) + ")");
@@ -225,9 +231,13 @@ static void regrSessions_documents()
                "sessions: undo restores the files' layout");
 
         std::string err;
-        CHECK (app.removeSessionFile (2, &err) && eng.numChannels () == 2 && d->session.clips.size () == 2,
-               "sessions: remove c (its lane goes away)");
+        CHECK (app.removeSessionFile (2, &err) && eng.numChannels () == 3 && d->session.clips.size () == 2
+                   && d->session.laneEmpty (1),
+               "sessions: remove c: its track stays, empty (PR #24 review)");
         CHECK (fc.existsAsFile (), "sessions: a removed file stays on disk");
+        CHECK (! app.removeSessionTrack (0, &err) && app.removeSessionTrack (1, &err) && eng.numChannels () == 2
+                   && d->session.numLanes () == 1,
+               "sessions: Remove Track takes the empty track away (never the main one)");
     }
     dir.deleteRecursively ();
 }
@@ -286,7 +296,7 @@ static void regrSessions_overlayAndDrag()
 
 static void regrSessions_window()
 {
-    progress ("regression sessions: Edit > Session menu and the rows bar");
+    progress ("regression sessions: Selection > Move Files (V), View > Show File Borders, rows bar");
     using namespace scsessiontest;
     const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_ui");
     dir.deleteRecursively ();
@@ -300,7 +310,7 @@ static void regrSessions_window()
         std::unique_ptr<MainWindow> win (new MainWindow (app, "sessions ui"));
         win->setSize (1200, 800);
         const auto names = win->getMenuBarNames ();
-        const int eIdx = names.indexOf ("Edit");
+        const int eIdx = names.indexOf ("Edit"), sIdx = names.indexOf ("Selection"), vIdx = names.indexOf ("View");
         auto findItem = [] (const juce::PopupMenu& m, const juce::String& text) -> const juce::PopupMenu::Item* {
             for (juce::PopupMenu::MenuItemIterator it (m, true); it.next ();)
                 if (it.getItem ().text == text) return &it.getItem ();
@@ -308,11 +318,15 @@ static void regrSessions_window()
         };
         {
             const auto em = win->getMenuForIndex (eIdx, "Edit");
-            const auto* add = findItem (em, "Add File in Parallel...");
-            const auto* mv = findItem (em, "Move Files");
-            CHECK (findItem (em, "Session (experimental)") != nullptr && add != nullptr && add->isEnabled
-                       && mv != nullptr && ! mv->isEnabled,
-                   "sessions ui: Edit > Session offers Add; Move Files waits for a session");
+            const auto sm = win->getMenuForIndex (sIdx, "Selection");
+            const auto vm = win->getMenuForIndex (vIdx, "View");
+            const auto* mv = findItem (sm, "Move Files\tV");
+            const auto* borders = findItem (vm, "Show File Borders");
+            CHECK (findItem (em, "Session (experimental)") == nullptr && findItem (em, "Add File in Parallel...") == nullptr,
+                   "sessions ui: no Edit > Session menu any more (PR #24 review)");
+            CHECK (mv != nullptr && ! mv->isEnabled && borders != nullptr && ! borders->isEnabled && borders->isTicked,
+                   "sessions ui: Move Files and Show File Borders wait for a session; borders on by default");
+            CHECK (! app.sessionBordersShown (), "sessions ui: a plain file never shows a border");
             CHECK (win->sessionScrollBar () != nullptr && ! win->sessionScrollBar ()->isVisible (),
                    "sessions ui: no rows bar without a session");
         }
@@ -321,18 +335,25 @@ static void regrSessions_window()
         CHECK (app.addSessionFile (fc, true, &err), "sessions ui: add c in parallel");
         win->syncSharedState ();
         {
-            const auto em = win->getMenuForIndex (eIdx, "Edit");
-            const auto* mv = findItem (em, "Move Files");
-            const auto* borders = findItem (em, "Show File Borders");
-            CHECK (mv != nullptr && mv->isEnabled && ! mv->isTicked && borders != nullptr && borders->isTicked
-                       && findItem (em, "c.wav") != nullptr,
-                   "sessions ui: with a session, Move Files, borders on, and c in Remove File");
+            const auto sm = win->getMenuForIndex (sIdx, "Selection");
+            const auto vm = win->getMenuForIndex (vIdx, "View");
+            const auto* mv = findItem (sm, "Move Files\tV");
+            const auto* borders = findItem (vm, "Show File Borders");
+            CHECK (mv != nullptr && mv->isEnabled && ! mv->isTicked && borders != nullptr && borders->isEnabled
+                       && borders->isTicked && app.sessionBordersShown (),
+                   "sessions ui: with a session, Move Files and the borders (on)");
         }
-        win->menuItemSelected (MainWindow::EditSessionMoveTool, eIdx);
-        win->menuItemSelected (MainWindow::EditSessionBorders, eIdx);
-        CHECK (app.sessionMoveTool && ! app.doc ()->session.showBorders,
-               "sessions ui: Move Files arms the tool; Show File Borders toggles");
-        win->menuItemSelected (MainWindow::EditSessionBorders, eIdx);
+        win->menuItemSelected (MainWindow::SelectionMoveFiles, sIdx);
+        CHECK (app.sessionMoveTool, "sessions ui: Selection > Move Files arms the tool");
+        win->keyPressed (juce::KeyPress ('s'), nullptr);
+        CHECK (! app.sessionMoveTool, "sessions ui: a selection tool (S) puts it down");
+        win->keyPressed (juce::KeyPress ('v'), nullptr);
+        CHECK (app.sessionMoveTool, "sessions ui: V arms Move Files");
+        win->keyPressed (juce::KeyPress ('v'), nullptr);
+        CHECK (! app.sessionMoveTool, "sessions ui: V again puts it down");
+
+        win->menuItemSelected (MainWindow::ViewShowFileBorders, vIdx);
+        CHECK (! app.settings.sessionShowBorders && ! app.sessionBordersShown (), "sessions ui: View > Show File Borders toggles off");
 
         auto* bar = win->sessionScrollBar ();
         CHECK (bar != nullptr && bar->isVisible (), "sessions ui: the rows bar appears with the session");
@@ -353,11 +374,217 @@ static void regrSessions_window()
                    "sessions ui: the waveform view's rows carry both files");
         }
 
-        win->menuItemSelected (MainWindow::EditSessionRemoveBase + 1, eIdx);
-        CHECK (! app.doc ()->session.active () && app.audioEngine ().numChannels () == 2,
-               "sessions ui: Remove File > c.wav ends the session");
+        CHECK (app.runSessionContextItem (CtxSessionRemoveFile, 1, 1) && app.doc ()->session.active ()
+                   && app.doc ()->session.laneEmpty (1) && app.audioEngine ().numChannels () == 3,
+               "sessions ui: right-click > Remove File takes c out; its track stays");
+        CHECK (app.runSessionContextItem (CtxSessionRemoveTrack, -1, 1) && ! app.doc ()->session.active ()
+                   && app.audioEngine ().numChannels () == 2,
+               "sessions ui: right-click > Remove Track ends the session");
         win->syncSharedState ();
         CHECK (! win->sessionScrollBar ()->isVisible (), "sessions ui: the rows bar goes away");
+    }
+    {
+        Application app2 (dir.getChildFile ("store.recent"));
+        CHECK (! app2.settings.sessionShowBorders, "sessions ui: Show File Borders off is remembered");
+    }
+    dir.deleteRecursively ();
+}
+
+// PR #24 review, batch 1: tracks added by hand and files dropped on them,
+// names and playback by track, Move Files snapping by default, the name tag
+// as a handle, the right-click items, and the spectrogram after a move that
+// lengthens the timeline.
+static void regrSessions_reviewBatch1()
+{
+    progress ("regression sessions: PR #24 review batch 1");
+    using namespace scsessiontest;
+    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_b1");
+    dir.deleteRecursively ();
+    dir.createDirectory ();
+    const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav"),
+                     fe = dir.getChildFile ("e.wav"), fg = dir.getChildFile ("g.wav"),
+                     fc = dir.getChildFile ("c.wav"), ff = dir.getChildFile ("f.wav");
+    writeWav (fm, 2, 8000.0, 8000, [] (int ch, int64_t f, double) { return sig (1, ch, f); });
+    writeWav (fb, 2, 8000.0, 4000, [] (int ch, int64_t f, double) { return sig (2, ch, f); });
+    writeWav (fe, 2, 8000.0, 2000, [] (int ch, int64_t f, double) { return sig (5, ch, f); });
+    writeWav (fg, 2, 8000.0, 1000, [] (int ch, int64_t f, double) { return sig (6, ch, f); });
+    writeWav (fc, 1, 8000.0, 6000, [] (int ch, int64_t f, double) { return sig (3, ch, f); });
+    writeWav (ff, 2, 8000.0, 3000, [] (int ch, int64_t f, double) { return sig (7, ch, f); });
+    {
+        Application app (dir.getChildFile ("store.recent"));
+        CHECK (app.openFile (fm), "review b1: main opens");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        auto& eng = d->engine;
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "review b1"));
+        win->setSize (1200, 800);
+        std::string err;
+
+        // Add Track, then two files dropped at 1000 on it: one after the other.
+        CHECK (app.addSessionTrack (2, &err) && d->session.numLanes () == 2 && d->session.laneEmpty (1)
+                   && eng.numChannels () == 4 && d->session.active (),
+               "review b1: Add Track makes an empty stereo track (and a session)");
+        CHECK (app.addSessionFilesAt ({ fb, fe }, 1, 1000, &err) && d->session.clips.size () == 3
+                   && d->session.clips[1].lane == 1 && d->session.clips[1].offset == 1000
+                   && d->session.clips[2].lane == 1 && d->session.clips[2].offset == 5000
+                   && sampleIs (eng, 2, 1000, sig (2, 0, 0)) && sampleIs (eng, 3, 5000, sig (5, 1, 0)),
+               "review b1: several files dropped on a track go one after the other (" + juce::String (err) + ")");
+        CHECK (app.addSessionFilesAt ({ fg }, 1, 2000, &err) && d->session.clips[3].offset == 7000,
+               "review b1: a file dropped on another one takes the first free place after it");
+        CHECK (app.addSessionTrack (2, &err) && app.addSessionFilesAt ({ fc }, 2, 0, &err)
+                   && d->session.laneChannels[2] == 1 && eng.numChannels () == 5,
+               "review b1: an empty track takes the channels of the first file dropped on it");
+        app.undoStep ();
+        CHECK (d->session.laneChannels[2] == 2 && d->session.laneEmpty (2) && eng.numChannels () == 6,
+               "review b1: undo gives the empty track back");
+        app.redoStep ();
+        CHECK (eng.numChannels () == 5, "review b1: redo");
+        win->syncSharedState ();
+
+        // Names and routing by track: L R | L R | 1.
+        {
+            juce::StringArray names;
+            for (int ch = 0; ch < 5; ++ch) names.add (app.channelName (ch));
+            CHECK (names.joinIntoString (",") == "L,R,L,R,1", "review b1: channels named by track: " + names.joinIntoString (","));
+            const auto r = eng.playbackRoutes ();
+            CHECK (r.size () == 5 && r[2].index == 0 && r[2].trackChannels == 2 && r[3].index == 1
+                       && r[4].index == 0 && r[4].trackChannels == 1,
+                   "review b1: playback routes follow the tracks");
+            eng.prepareToPlay (256, 8000.0);
+            eng.setPosition (0.0);
+            eng.play ();
+            juce::AudioBuffer<float> out (2, 256);
+            out.clear ();
+            juce::AudioSourceChannelInfo info (&out, 0, 256);
+            eng.getNextAudioBlock (info);
+            eng.stop ();
+            bool ok = true;
+            for (int i = 0; i < 200 && ok; ++i)
+            {
+                float c[5] = {};
+                for (int ch = 0; ch < 5; ++ch) eng.readSamples (ch, i, 1, &c[ch]);
+                // Left: both lefts and the mono track; right: both rights and the mono track.
+                ok = std::abs (out.getSample (0, i) - (c[0] + c[2] + c[4]) / 3.0f) < 1e-5f
+                  && std::abs (out.getSample (1, i) - (c[1] + c[3] + c[4]) / 3.0f) < 1e-5f;
+            }
+            CHECK (ok, "review b1: both lefts play left, both rights right, the mono track on both");
+        }
+
+        // A drop through the window lands on the track and time under the mouse.
+        if (auto* wv = win->waveformViewComp ())
+        {
+            const auto geo = wv->sessionGeometry ();
+            int row0 = -1;
+            for (size_t i = 0; i < geo.rowChannel.size (); ++i)
+                if (geo.rowChannel[i] == 0) row0 = (int) i;
+            CHECK (row0 >= 0, "review b1: the main track has a row");
+            if (row0 >= 0)
+            {
+                const juce::Point<int> p ((int) geo.timeToX (0.5), geo.rows[(size_t) row0].getCentreY ());
+                const auto inWin = win->getLocalPoint (wv, p);
+                const size_t before = d->session.clips.size ();
+                CHECK (win->dropFilesOnTracks ({ ff }, inWin.x, inWin.y) && d->session.clips.size () == before + 1
+                           && d->session.clips.back ().lane == 0 && d->session.clips.back ().offset == 8000,
+                       "review b1: dropped on the main track at 0.5 s, f goes to the first free place (8000)");
+            }
+            CHECK (! win->dropFilesOnTracks ({ ff }, 2, 2), "review b1: a drop outside the tracks is not for the session");
+        }
+        else CHECK (false, "review b1: waveform view");
+
+        // Move Files snaps by default; Shift turns snapping off.
+        if (auto* wv = win->waveformViewComp ())
+        {
+            win->syncSharedState ();
+            const int ci = 4;   // c, alone in track 2, at 0
+            CHECK (d->session.clips[(size_t) ci].file == fc, "review b1: c is clip 4");
+            auto geo = wv->sessionGeometry ();
+            int rowC = -1;
+            for (size_t i = 0; i < geo.rowChannel.size (); ++i)
+                if (geo.rowChannel[i] == 4) rowC = (int) i;
+            if (rowC >= 0)
+            {
+                const int y = geo.rows[(size_t) rowC].getCentreY ();
+                const int x0 = (int) geo.timeToX (0.3);
+                // c's start 3 px after b's start (1000): within the 8 px of a snap.
+                const int dx = (int) std::lround (geo.timeToX (1000.0 / 8000.0) - geo.timeToX (0.0)) + 3;
+                const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+                const juce::ModifierKeys shiftLmb (juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier);
+                app.sessionMoveTool = true;
+                wv->mouseDown (mkMouse (*wv, x0, y, lmb));
+                wv->mouseDrag (mkMouse (*wv, x0 + dx, y, lmb));
+                wv->mouseUp (mkMouse (*wv, x0 + dx, y, lmb));
+                CHECK (d->session.clips[(size_t) ci].offset == 1000,
+                       "review b1: without Shift, c snaps onto b's start (" + juce::String (d->session.clips[(size_t) ci].offset) + ")");
+                app.undoStep ();
+                geo = wv->sessionGeometry ();
+                wv->mouseDown (mkMouse (*wv, x0, y, shiftLmb));
+                wv->mouseDrag (mkMouse (*wv, x0 + dx, y, shiftLmb));
+                wv->mouseUp (mkMouse (*wv, x0 + dx, y, shiftLmb));
+                CHECK (d->session.clips[(size_t) ci].offset > 1000,
+                       "review b1: with Shift, no snapping (" + juce::String (d->session.clips[(size_t) ci].offset) + ")");
+                app.undoStep ();
+
+                // The name tag is a handle whatever the tool.
+                app.setSelectionTool (SpectralSelMode::TimeRange);
+                CHECK (! app.sessionMoveTool, "review b1: a selection tool puts Move Files down");
+                geo = wv->sessionGeometry ();
+                const auto boxes = sc::session::clipBoxes (d->session, geo);
+                juce::Rectangle<int> tag;
+                for (const auto& b : boxes)
+                    if (b.clip == ci) tag = sc::session::nameTag (d->session, geo, b);
+                CHECK (! tag.isEmpty () && sc::session::clipAtNameTag (d->session, geo, tag.getCentre ()) == ci,
+                       "review b1: c's name tag is found under the mouse");
+                const auto tc = tag.getCentre ();
+                wv->mouseDown (mkMouse (*wv, tc.x, tc.y, lmb));
+                wv->mouseDrag (mkMouse (*wv, tc.x + 20, tc.y, lmb));
+                wv->mouseUp (mkMouse (*wv, tc.x + 20, tc.y, lmb));
+                CHECK (d->session.clips[(size_t) ci].offset > 0, "review b1: dragging c's name moved it with the Time Range tool");
+                app.undoStep ();
+            }
+            else CHECK (false, "review b1: c's row");
+        }
+
+        // Right-click items.
+        {
+            auto texts = [] (const juce::PopupMenu& m)
+            {
+                juce::StringArray t;
+                for (juce::PopupMenu::MenuItemIterator it (m); it.next ();)
+                    if (it.getItem ().text.isNotEmpty ()) t.add (it.getItem ().text);
+                return t.joinIntoString ("|");
+            };
+            juce::PopupMenu onRef, onMain;
+            app.addSessionContextItems (onRef, 1, 1);
+            app.addSessionContextItems (onMain, 0, 0);
+            CHECK (texts (onRef) == "Add Track|Remove File" && texts (onMain) == "Add Track",
+                   "review b1: right-click offers Add Track, and Remove File on a referenced file only");
+            CHECK (app.addSessionTrack (2, &err), "review b1: one more track");
+            juce::PopupMenu onEmpty;
+            app.addSessionContextItems (onEmpty, -1, d->session.numLanes () - 1);
+            CHECK (texts (onEmpty) == "Add Track|Remove Track", "review b1: Remove Track on an empty track");
+            app.undoStep ();
+        }
+
+        // The spectrogram follows a move that lengthens the timeline (the old
+        // place of the file went silent but kept its picture: issue in review).
+        {
+            Settings s = app.settings;
+            auto peak = [&] ()
+            {
+                std::vector<float> db;
+                app.spectralEngine.renderToDb (eng, s, 64, 64, 0.0, 0.25, { 4 }, db);
+                float m = -1000.0f;
+                for (float v : db) m = std::max (m, v);
+                return m;
+            };
+            const float before = peak ();
+            CHECK (app.moveSessionFile (4, 2, 12000, &err) && eng.numSamples () == 18000,
+                   "review b1: c moves to the end, the timeline grows (" + juce::String (err) + ")");
+            CHECK (eng.lastRewriteVersion () == eng.contentVersion (), "review b1: the move counts as a rewrite");
+            const float after = peak ();
+            CHECK (before > after + 30.0f, "review b1: c's old place is drawn silent ("
+                                              + juce::String (before, 1) + " -> " + juce::String (after, 1) + " dB)");
+        }
     }
     dir.deleteRecursively ();
 }
@@ -368,4 +595,5 @@ static void runRegression_sessions()
     regrSessions_documents();
     regrSessions_overlayAndDrag();
     regrSessions_window();
+    regrSessions_reviewBatch1();
 }

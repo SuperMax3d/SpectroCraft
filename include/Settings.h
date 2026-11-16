@@ -50,6 +50,10 @@ enum ContextMenuIDs : int
     CtxAxisLinear         = 33,
     CtxAxisLog            = 34,
     CtxFftMultiRes        = 35,   // "Multi-resolution" (issue #17)
+    // Sessions (issue #21): right-click on the tracks.
+    CtxSessionAddTrack    = 40,
+    CtxSessionRemoveFile  = 41,   // the referenced file under the mouse
+    CtxSessionRemoveTrack = 42,   // the empty track under the mouse
     CtxAltRefTimeBase     = 100,  // + index: edit an existing time reference
     CtxAltRefFreqBase     = 200   // + index: edit an existing frequency reference
 };
@@ -163,6 +167,9 @@ struct Settings
     bool exportSelections = false;  // draw time selection band + spectral selection shapes
     bool exportDrawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
 
+    // View > Show File Borders (sessions, issue #21): on until turned off.
+    bool sessionShowBorders = true;
+
     // Stem Separation (Effects menu): last used choices, persisted per session.
     juce::String acppModel;              // selected GGUF model file name ("" = none)
     int acppBackend = 0;                 // backend combo index: 1=Cpu 2=Cuda 3=Vulkan 4=Metal (macOS)
@@ -240,6 +247,7 @@ struct Settings
             && specHarmNumbers == o.specHarmNumbers
             && exportAxes == o.exportAxes && exportMarkers == o.exportMarkers
             && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings
+            && sessionShowBorders == o.sessionShowBorders
             && stemSepMode == o.stemSepMode && acppModel6 == o.acppModel6
             && acppModelWH == o.acppModelWH && acppModelWHCB == o.acppModelWHCB
             && stemSepOutputMode == o.stemSepOutputMode

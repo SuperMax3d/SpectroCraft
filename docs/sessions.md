@@ -9,27 +9,42 @@ or go away.
 
 ## Using it
 
-Everything is in **Edit > Session (experimental)**:
-
-- **Add File After...** puts a WAV right after the last file of the main
-  file's lane. It must have the main file's channel count.
-- **Add File in Parallel...** gives the WAV a lane of its own, starting at 0.
-  A lane is a group of channels (rows) below the main file's.
-- **Move Files** arms the move tool. Drag a file in the waveform or the
-  spectrogram:
+- **Add files by dropping them on the tracks** of the open file: they go to
+  the track under the mouse, from the time under it. Several files dropped
+  together go one after the other. A file dropped on another one takes the
+  first free place after it. Dropped anywhere else (or with no file open), a
+  file opens as a document of its own, as before. A file must have the
+  track's channel count and the main file's sample rate (for now).
+- **Right-click on the tracks**:
+  - **Add Track** adds an empty track at the bottom, with the channel count
+    of the track under the mouse. The first file dropped on an empty track
+    gives it its own channel count.
+  - **Remove File** (on a file other than the main one) takes it out of the
+    session. The file on disk is not touched. Its track stays.
+  - **Remove Track** (on an empty track) takes the track away.
+- **Selection > Move Files** (**V**; a selection tool S, M, L or P puts it
+  down) arms the move tool. Drag a file in the waveform or the spectrogram:
   - left and right changes its time;
-  - up and down picks another lane with the same channel count.
-  - **Shift** snaps the file's start or end, within 8 pixels, to 0, to the
-    start or end of any other file, or to the playhead. A yellow line shows
-    the snap.
-  - The outline turns red where the file cannot go: on another file of that
-    lane, or in a lane with another channel count.
-  - The main file does not move.
-- **Show File Borders** outlines each file over its rows and writes its name
-  in the top-left corner (yellow for the main file). With the borders off,
-  two files that touch in a lane look like one continuous recording.
-- **Remove File** takes a file out of the session. The file on disk is not
-  touched.
+  - up and down picks another track with the same channel count, or an
+    empty track;
+  - the file's start or end **snaps**, within 8 pixels, to 0, to the start or
+    end of any other file, or to the playhead (a yellow line shows it).
+    **Hold Shift** to move it freely;
+  - the outline turns red where the file cannot go: on another file of that
+    track, or in a track with another channel count;
+  - the main file does not move (yet).
+- **Dragging a file's name** (the tag in its top-left corner) moves it
+  whatever the selection tool.
+- **View > Show File Borders** outlines each file over its rows and writes
+  its name in the top-left corner (yellow for the main file). It is on by
+  default, and remembered when you turn it off. A plain file (no other file,
+  no extra track) never shows a border. With the borders off, two files that
+  touch in a track look like one continuous recording.
+- Channels are named **by track**: two stereo tracks read L, R, L, R, a mono
+  track 1. **Playback** follows the same rule: every left channel plays on the
+  left output, every right channel on the right one, a mono track on both
+  (each output divides by the number of channels it receives, so the sum
+  does not clip).
 
 While a session is open, a bar at the far right of the editor scrolls through
 the rows of every file. Drag its thumb to move through them, or drag an edge
@@ -73,8 +88,7 @@ folder, with the absolute path as a fallback:
 
 ```json
 "session": {
-  "lanes": [2, 1],
-  "showBorders": true,
+  "lanes": [2, 1, 2],
   "files": [
     { "path": "take2.wav", "abs": "/data/take2.wav", "lane": 0, "offset": 480000, "length": 240000 },
     { "path": "room.wav",  "abs": "/data/room.wav",  "lane": 1, "offset": 0,      "length": 360000 }
@@ -82,7 +96,9 @@ folder, with the absolute path as a fallback:
 }
 ```
 
-Offsets and lengths are in samples. When the main file is opened again,
+Offsets and lengths are in samples; `lanes` lists every track's channel
+count, empty ones included (here a third, empty stereo track). When the main
+file is opened again,
 files that are missing, have another sample rate, no longer have their lane's
 channel count, or overlap another file are left out, and the app lists them.
 If none can be read, the entry is kept as it was.
@@ -98,11 +114,11 @@ If none can be read, the entry is kept as it was.
   you save. Undo that edit, or remove those files from the session.
 - Adding, moving or removing a file rebuilds the whole composite, and its undo
   step holds the audio before and after. Memory grows with the session.
-- Not done yet:
-  - moving the main file;
-  - trimming a file by dragging its edges;
-  - per-file gain or mute;
-  - crossfades between files.
+- Not done yet (PR #24 review, batches 2 and 3): moving the main file,
+  trimming a file by dragging its edges, the same file several times,
+  inserting a file in front of another on a drop, a different sample rate or
+  channel count, and the choice between saving the other files as copies or
+  over the originals. Per-file gain or mute and crossfades are not planned.
 
 Code: `include/Session.h` (model: lanes, placement, warps, composite, JSON),
 `include/SessionOverlay.h` (outlines and the Move Files drag in both views),

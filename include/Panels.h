@@ -2241,7 +2241,10 @@ public:
     // Left side, after the sample rate: one number per channel of the active
     // file, labelled like the tracks ("L"/"R" for stereo). Hidden channels
     // (View > Channel N) are drawn dim, muted ones red. count 0 = no file.
-    void setChannels (int count, const std::vector<int>& visible, const std::vector<bool>& muted);
+    /** `names`: each chip's label (a session names channels by track: L, R,
+        L, R); empty = "L"/"R" for two channels, numbers otherwise. */
+    void setChannels (int count, const std::vector<int>& visible, const std::vector<bool>& muted,
+                      std::vector<juce::String> names = {});
     /** A channel number was clicked: the channel and whether a solo modifier
         (Ctrl / Cmd / Shift) was held. MainWindow shows/hides that channel. */
     std::function<void (int ch, bool soloRequested)> onChannelClicked;
@@ -2263,6 +2266,7 @@ private:
     int fileAndRateEnd() const;
     int chanCount_ = 0;
     std::vector<bool> chanShown_, chanMuted_;
+    std::vector<juce::String> chanNames_;
 
     void applyFieldVisibility();
     void commitField (juce::TextEditor& ed);

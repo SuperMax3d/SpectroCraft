@@ -251,6 +251,10 @@ bool SpectralEngine::tileStaleLocked (const SpectralTile& t, const AudioEngine& 
         return true;
     if (t.contentVersion == version)
         return false;
+    // Rewritten since (an edit, undo, a session file moved): stale, even if
+    // the document grew - only appendSamples() leaves older tiles usable.
+    if (t.contentVersion < engine.lastRewriteVersion())
+        return true;
     if (t.contentVersion < overwriteVersion_)
         return true;   // samples were overwritten in place since this tile was computed
     // Appended since: the tile is stale if the samples its frames read

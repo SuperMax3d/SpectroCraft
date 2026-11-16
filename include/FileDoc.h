@@ -149,8 +149,8 @@ public:
     juce::var pendingSession;
 
     /** Points the engine's save region at the main file's own region while a
-        session is active (whole content otherwise). Call after every change
-        of `session`. */
+        session is active (whole content otherwise), and its playback routing
+        at the session's tracks. Call after every change of `session`. */
     void applySessionSaveRegion ();
 
     /** Replaces the track list and marks the document metadata-dirty.

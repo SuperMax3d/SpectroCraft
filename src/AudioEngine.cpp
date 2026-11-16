@@ -148,7 +148,7 @@ bool AudioEngine::loadFile (const juce::File& file, std::function<void(float)> o
         closeFile();
         return false;
     }
-    contentVer.fetch_add (1);   // new content (closeFile above may already have bumped)
+    bumpRewrite();   // new content (closeFile above may already have bumped)
     return true;
 }
 
@@ -169,7 +169,7 @@ void AudioEngine::closeFile()
     currentFile = juce::File();
     nchans = 0; totalSamples = 0; rate = 44100.0; durationSecs = 0.0;
     hasFile = false; unsaved = false;
-    contentVer.fetch_add (1);   // the content is gone
+    bumpRewrite();   // the content is gone
     playing = false; paused = false; looping = false;
     playheadFrac = 0.0;
     playbackRate = 0.0;
@@ -313,7 +313,7 @@ bool AudioEngine::appendSamples (const float* interleaved, int64_t numFrames)
         return false;
     }
     unsaved = true;
-    contentVer.fetch_add (1);
+    contentVer.fetch_add (1);   // a pure append: not a rewrite
 
     // Keep the overview pyramid fresh while it is still cheap to rebuild; for
     // long recordings the caller does one final rebuild when recording stops.
@@ -350,7 +350,7 @@ bool AudioEngine::overwriteSamples (const float* interleaved, int64_t startFrame
     }
 
     unsaved = true;
-    contentVer.fetch_add (1);
+    bumpRewrite();
 
     // The length never changes, so the growth-based append throttle can't
     // fire here: refresh on a time throttle instead (~4x per second).
@@ -422,6 +422,21 @@ std::shared_ptr<const std::vector<uint8_t>> AudioEngine::mutesForAudio() const
 {
     const std::lock_guard<std::mutex> lk (muteMutex);
     return mutedForAudio_;
+}
+
+void AudioEngine::setPlaybackRoutes (std::vector<ChannelRoute> routes)
+{
+    std::shared_ptr<const std::vector<ChannelRoute>> forAudio;
+    if (!routes.empty())
+        forAudio = std::make_shared<const std::vector<ChannelRoute>> (std::move (routes));
+    const std::lock_guard<std::mutex> lk (muteMutex);
+    routesForAudio_ = std::move (forAudio);
+}
+
+std::vector<AudioEngine::ChannelRoute> AudioEngine::playbackRoutes() const
+{
+    const std::lock_guard<std::mutex> lk (muteMutex);
+    return routesForAudio_ != nullptr ? *routesForAudio_ : std::vector<ChannelRoute>();
 }
 
 int AudioEngine::playbackOutputFor (int channel, int numOutputs) noexcept
@@ -650,12 +665,8 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
         dst->clear (o, bufferToFill.startSample, n);
     const auto muted = mutesForAudio();
     const float g = gain_.load();
-    for (int ch = 0; ch < chans; ++ch)
+    auto addChannel = [&] (int ch, int o, float gc)
     {
-        if (muted != nullptr && ch < (int) muted->size() && (*muted)[(size_t) ch] != 0)
-            continue;
-        const int o = playbackOutputFor (ch, outs);
-        const float gc = g * playbackFoldGain (o, nchans, outs);
         float* d = dst->getWritePointer (o, bufferToFill.startSample);
         const float* src = tmp[(size_t) ch].data();
         for (int i = 0; i < n; ++i)
@@ -671,6 +682,53 @@ void AudioEngine::getNextAudioBlock (const juce::AudioSourceChannelInfo& bufferT
                 d[i] += (src[a] * (1.0f - fr) + src[a + 1] * fr) * gc;
             }
         }
+    };
+    auto isMuted = [&] (int ch)
+    {
+        return muted != nullptr && ch < (int) muted->size() && (*muted)[(size_t) ch] != 0;
+    };
+
+    // A session's tracks (issue #21): each channel by its place in its track.
+    std::shared_ptr<const std::vector<ChannelRoute>> routes;
+    {
+        const std::lock_guard<std::mutex> lk (muteMutex);
+        routes = routesForAudio_;
+    }
+    if (routes != nullptr && (int) routes->size() == nchans && outs > 0)
+    {
+        // Channels each output receives (muted ones included, like the
+        // document's own fold gain): their sum cannot clip.
+        if ((int) routeCount_.size() < outs) routeCount_.resize ((size_t) outs);
+        std::fill (routeCount_.begin(), routeCount_.begin() + outs, 0);
+        for (int ch = 0; ch < chans; ++ch)
+        {
+            const auto& r = (*routes)[(size_t) ch];
+            if (r.trackChannels == 1) for (int o = 0; o < outs; ++o) ++routeCount_[(size_t) o];
+            else                      ++routeCount_[(size_t) (r.index % outs)];
+        }
+        auto gainFor = [&] (int o) { const int k = routeCount_[(size_t) o]; return k > 1 ? g / (float) k : g; };
+        for (int ch = 0; ch < chans; ++ch)
+        {
+            if (isMuted (ch))
+                continue;
+            const auto& r = (*routes)[(size_t) ch];
+            if (r.trackChannels == 1)
+                for (int o = 0; o < outs; ++o) addChannel (ch, o, gainFor (o));
+            else
+            {
+                const int o = r.index % outs;
+                addChannel (ch, o, gainFor (o));
+            }
+        }
+        return;
+    }
+
+    for (int ch = 0; ch < chans; ++ch)
+    {
+        if (isMuted (ch))
+            continue;
+        const int o = playbackOutputFor (ch, outs);
+        addChannel (ch, o, g * playbackFoldGain (o, nchans, outs));
     }
 
     // A mono file plays on every output (muted: output 0 is silent, so all are).
@@ -1040,7 +1098,7 @@ bool AudioEngine::initNew (int numChans, double sampleRate,
     swapInBuffer (std::move (nb), numChans, len, sampleRate);
     hasFile = true;
     unsaved = len > 0;   // content that exists nowhere else is "unsaved"
-    contentVer.fetch_add (1);   // new content
+    bumpRewrite();   // new content
     currentFile = juce::File();   // no path until Save As
 
     playheadFrac = 0.0;
@@ -1135,7 +1193,7 @@ bool AudioEngine::pasteAt (int64_t samplePos, const juce::AudioBuffer<float>& cl
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1177,7 +1235,7 @@ bool AudioEngine::insertSamples (int64_t samplePos, const std::vector<std::vecto
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1242,7 +1300,7 @@ bool AudioEngine::pasteMixAt (int64_t samplePos, const juce::AudioBuffer<float>&
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1293,7 +1351,7 @@ bool AudioEngine::pasteToNewChannelsAt (int64_t samplePos, const juce::AudioBuff
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1341,7 +1399,7 @@ bool AudioEngine::writeDataToNewChannels (int64_t samplePos,
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1371,7 +1429,7 @@ bool AudioEngine::deleteSamples (juce::Range<int64_t> samples, std::string* errO
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1406,7 +1464,7 @@ bool AudioEngine::trimToRange (juce::Range<int64_t> keep, std::string* errOut)
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1448,7 +1506,7 @@ bool AudioEngine::silenceSamples (juce::Range<int64_t> samples, const std::vecto
         if (channelAffected (chans, ch))
             buffer->clear (ch, (int) samples.getStart(), (int) len);
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1485,7 +1543,7 @@ void applyPerSample (AudioEngine& eng, juce::Range<int64_t> samples,
                       eng.buffer->getWritePointer (ch, (int) samples.getStart()));
 
     eng.unsaved = true;
-    eng.contentVer.fetch_add (1);
+    eng.bumpRewrite();
     eng.rebuildMipmaps();
 }
 
@@ -1593,7 +1651,7 @@ bool AudioEngine::replaceSamples (const juce::Range<int64_t>& samplesIn,
                    buffer->getWritePointer (ch, (int) samples.getStart ()));
 
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     return true;
 }
 
@@ -1643,7 +1701,7 @@ bool AudioEngine::replaceRangeWithDifferentLength (const juce::Range<int64_t>& r
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1794,7 +1852,7 @@ bool AudioEngine::reverseSamples (juce::Range<int64_t> samples, const std::vecto
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -1853,7 +1911,7 @@ bool AudioEngine::stretchRange (juce::Range<int64_t> samples, float tempoPercent
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps ();
     return true;
 }
@@ -1895,7 +1953,7 @@ bool AudioEngine::eqFilterRange (juce::Range<int64_t> samples,
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps ();
     return true;
 }
@@ -1937,7 +1995,7 @@ bool AudioEngine::envelopeRange (juce::Range<int64_t> samples,
         return failNoMemory (errOut);
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps ();
     return true;
 }
@@ -1998,7 +2056,7 @@ bool AudioEngine::resampleTo (double newRate, std::function<void(float)> onProgr
         return failErr (errOut, "Not enough memory to resample this file.");
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
 
     // Not undoable: every recorded patch addresses positions and lengths at
     // the old rate (and possibly the old channel layout), so applying one now
@@ -2063,7 +2121,7 @@ bool AudioEngine::replaceWholeFile (const juce::AudioBuffer<float>& data, double
         reader.reset();
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
 
     playheadFrac.store ((double) (std::min (posSecs, durationSecs) * rate));
     clearMipmaps();   // caller rebuilds on its worker thread
@@ -2106,7 +2164,7 @@ bool AudioEngine::replaceWholeFileUndoable (const std::vector<std::vector<float>
         return false;
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps();
     return true;
 }
@@ -2208,7 +2266,7 @@ bool AudioEngine::appendSamples (const juce::AudioBuffer<float>& append,
         return false;
     }
     unsaved = true;
-    contentVer.fetch_add (1);   // edits invalidate content-keyed caches
+    bumpRewrite();   // edits invalidate content-keyed caches
     rebuildMipmaps ();
     return true;
 }
@@ -2278,7 +2336,7 @@ bool AudioEngine::applyPatch (const Patch& p, bool forward, bool rebuild)
         return false;
     }
 
-    contentVer.fetch_add (1);   // undo/redo changed the samples
+    bumpRewrite();   // undo/redo changed the samples
     if (rebuild)
         rebuildMipmaps();
     return true;

@@ -38,8 +38,17 @@ juce::Rectangle<int> boxFor (const Session& s, const ViewGeometry& g, int clip, 
 /** Lane of the row under y, or -1. */
 int laneAtY (const Session& s, const ViewGeometry& g, int y);
 
-/** Outlines and file names over the views. */
+/** Outlines and file names over the views (View > Show File Borders; the
+    caller decides whether they are shown). */
 void paintBorders (juce::Graphics& gr, const Session& s, const ViewGeometry& g);
+
+/** The name tag paintBorders() draws in a file's top-left corner. */
+juce::Rectangle<int> nameTag (const Session& s, const ViewGeometry& g, const ClipBox& b);
+/** The file whose name tag holds p (a referenced file, not the main one), or
+    -1: a press there moves that file whatever the selection tool. */
+int clipAtNameTag (const Session& s, const ViewGeometry& g, juce::Point<int> p);
+/** The file under p (any file, the main one included), or -1. */
+int clipAtPoint (const Session& s, const ViewGeometry& g, juce::Point<int> p);
 
 /** The Move Files tool's drag. */
 class MoveGesture
@@ -55,8 +64,8 @@ public:
     /** Starts a drag when p is on a file other than the main one. */
     bool begin (const Session& s, const ViewGeometry& g, juce::Point<int> p);
     /** Follows the mouse: time moves the file, the row picks the lane; with
-        `snap` (Shift) the start or end jumps to 0, another file's start or
-        end or the playhead within 8 pixels. */
+        `snap` (the default - Shift turns it off) the start or end jumps to 0,
+        another file's start or end or the playhead within 8 pixels. */
     void drag (const Session& s, const ViewGeometry& g, juce::Point<int> p, bool snap, double playheadSecs);
     /** Ends the drag and returns where the file should go (clip = -1: no drag). */
     Target end();

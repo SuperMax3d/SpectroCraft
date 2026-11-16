@@ -47,10 +47,12 @@ struct Session
 {
     std::vector<int> laneChannels;   // channel count of each lane; [0] = the main file's
     std::vector<Clip> clips;         // [0] = the main file
-    bool showBorders = true;         // draw each file's outline and name over its lane
 
-    /** True when the document references at least one other file. */
-    bool active() const noexcept { return clips.size() > 1; }
+    /** True when the document references at least one other file or has a
+        track besides the main file's (an empty track added with Add Track). */
+    bool active() const noexcept { return clips.size() > 1 || laneChannels.size() > 1; }
+    /** True when lane `lane` holds no file (a track added and still empty). */
+    bool laneEmpty (int lane) const;
     int numLanes() const noexcept { return (int) laneChannels.size(); }
     int totalChannels() const;
     /** First composite channel of a lane (-1 for an unknown lane). */
@@ -64,7 +66,7 @@ struct Session
 
     bool operator== (const Session& o) const
     {
-        return laneChannels == o.laneChannels && clips == o.clips && showBorders == o.showBorders;
+        return laneChannels == o.laneChannels && clips == o.clips;
     }
     bool operator!= (const Session& o) const { return !(*this == o); }
 };
@@ -107,8 +109,8 @@ uint64_t regionHash (const Session& s, int index,
                      const std::function<bool (int, int64_t, int64_t, float*)>& read);
 
 /** The "session" metadata entry: every referenced file (not the main one)
-    with its lane, offset and length, plus the lane layout and the border
-    option. Paths are stored relative to `baseDir` (the main file's folder)
+    with its lane, offset and length, plus the lane layout (empty tracks
+    included). Paths are stored relative to `baseDir` (the main file's folder)
     when possible, with the absolute path as a fallback. */
 juce::var toVar (const Session& s, const juce::File& baseDir);
 /** Reads it back; clips[0] (the main file) is filled from `mainFile`,
