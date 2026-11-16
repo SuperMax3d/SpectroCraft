@@ -569,12 +569,15 @@ juce::Rectangle<int> verticalLabelRect (int index, int count, int axisW,
                                        int plotX, int plotRight, int top, int bottom,
                                        bool axisOnRight, int gutter)
 {
-    const auto strip = verticalStrip (index, axisW, plotX, plotRight, top, bottom, axisOnRight);
-    const bool outer = (index == count - 1);
+    const auto strip = verticalStrip (index, count, axisW, plotX, plotRight, top, bottom,
+                                      axisOnRight, gutter);
+    // Only the outermost strip on the left gives up the gutter; with no
+    // gutter it keeps the usual 2 px margin like the others.
+    const bool inset = (index == count - 1) && gutter > 0;
     if (axisOnRight)
         return { strip.getX() + 2, top, strip.getWidth() - 4, bottom - top };
-    return { strip.getX() + (outer ? gutter : 2), top,
-             strip.getWidth() - 4 - (outer ? gutter : 0), bottom - top };
+    return { strip.getX() + (inset ? gutter : 2), top,
+             strip.getWidth() - 4 - (inset ? gutter : 0), bottom - top };
 }
 
 int axisStripWidth (const Application& app)
@@ -605,16 +608,30 @@ juce::Colour axisMinorLabelColour() { return juce::Colour::fromRGB (130, 130, 13
 juce::Colour axisGridColour()       { return juce::Colour::fromRGB (60, 60, 68); }
 juce::Colour axisStripFill()        { return juce::Colour::fromRGB (32, 32, 36); }
 
-juce::Rectangle<int> verticalStrip (int index, int axisW, int plotX, int plotRight,
-                                    int top, int bottom, bool axisOnRight)
+juce::Rectangle<int> verticalStrip (int index, int count, int axisW, int plotX, int plotRight,
+                                    int top, int bottom, bool axisOnRight, int gutter)
 {
     /* Walk out from the plot: the main axis strip (60 px) hugs the plot, each
-       extra one (44 px) sits further out. `axisW` is only a sanity check - the
+       extra one (38 px) sits further out. `axisW` is only a sanity check - the
        strips are laid out from the plot edge, so they always fill exactly the
        space Application::axisStripWidth() reserved. */
     (void) axisW;
     const auto h = std::max (1, bottom - top);
-    auto widthOf = [] (int i) { return i == 0 ? primaryStripWidth() : extraStripWidth(); };
+    const int outer = std::max (1, count) - 1;
+    auto widthOf = [&] (int i)
+    {
+        if (axisOnRight)
+            return i == 0 ? primaryStripWidth() : extraStripWidth();
+        /* On the left the channel label sits at the outer edge, and
+           verticalLabelRect() insets the outermost strip by its room. The
+           main strip's 60 px include that room: when an extra axis is the
+           outermost one, the room moves out with it - otherwise the extra
+           strip kept 10 px for its labels (they read "...") and the main
+           labels floated in the middle of the axis area. */
+        const int g = std::max (0, gutter);
+        const int base = i == 0 ? primaryStripWidth() - g : extraStripWidth();
+        return base + (i == outer ? g : 0);
+    };
 
     if (axisOnRight)
     {
@@ -635,7 +652,7 @@ juce::Rectangle<int> verticalStrip (int index, int axisW, int plotX, int plotRig
         x -= w;
         if (i == index) return { x, top, w, h };
     }
-    return { plotX - primaryStripWidth(), top, primaryStripWidth(), h };
+    return { plotX - widthOf (0), top, widthOf (0), h };
 }
 
 juce::Rectangle<int> timeStrip (int index, int x, int width, int plotTop,

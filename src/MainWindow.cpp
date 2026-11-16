@@ -1062,7 +1062,7 @@ void MainWindow::layoutEditor()
     // above the data views. When a view owns the top time ruler the strip sits
     // just below that ruler inside the owning view's bounds; otherwise it
     // takes space from the top of the main area.
-    const bool showTablesTrack = haveFile && app.tablesMode() == 2 && app.anyVisibleTableParam();
+    const bool showTablesTrack = haveFile && app.anyVisibleTableParam();
     if (tablesTrack)   tablesTrack->setVisible (showTablesTrack);
     if (tablesSep)     tablesSep->setVisible (showTablesTrack);
     if (tablesVScroll) tablesVScroll->setVisible (showTablesTrack);

@@ -177,7 +177,9 @@ int channelGutter();
 /** Where the tick labels of one vertical axis strip are drawn: inside that
     strip, inset at the outer edge of the whole axis area by the channel
     label's room. `index` / `count` are the axis position and total, so only
-    the outermost strip is inset. */
+    the outermost strip is inset. `gutter` is that room: channelGutter() for
+    amplitude labels (the zero line's sits at the row centre, beside the
+    channel label), 0 for frequency labels, which skip the row centre. */
 juce::Rectangle<int> verticalLabelRect (int index, int count, int axisW,
                                         int plotX, int plotRight, int top, int bottom,
                                         bool axisOnRight, int gutter);
@@ -188,10 +190,15 @@ int primaryRulerHeight();                 // unchanged 24 px ruler
 int extraRulerHeight();                  // a narrower secondary time axis
 int rulerStackHeight (const Application& app);   // primary + every extra ruler
 
-/** Rectangle of the `index`-th vertical axis strip (0 = the one next to the
-    plot, higher indexes further out), inside the shared `axisW` space. */
-juce::Rectangle<int> verticalStrip (int index, int axisW, int plotX, int plotRight,
-                                    int top, int bottom, bool axisOnRight);
+/** Rectangle of the `index`-th of `count` vertical axis strips (0 = the one
+    next to the plot, higher indexes further out), inside the shared `axisW`
+    space. On a left axis the outermost strip also holds `gutter`, the channel
+    label's room: the main strip gives it up when it is not the outermost one,
+    so an extra strip keeps its whole width for its labels and the total stays
+    primaryStripWidth() + extras (issue #27). Pass the same gutter as to
+    verticalLabelRect (0 = labels that never meet the channel label). */
+juce::Rectangle<int> verticalStrip (int index, int count, int axisW, int plotX, int plotRight,
+                                    int top, int bottom, bool axisOnRight, int gutter);
 /** Rectangle of the `index`-th time ruler (0 = the normal one). The primary
     ruler sits at the outer edge of the stack, the extras between it and the
     plot, so the main axis always looks the same. */

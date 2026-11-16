@@ -70,14 +70,43 @@ static void testAxisModelAndSharedGeometry()
     // The extra strip lies outside the main one, on the axis' side: the plot
     // starts after the whole shared width, the main axis hugs the plot and the
     // extra axis sits further out.
-    const auto s0 = sc::axes::verticalStrip (0, shared, shared, 400, 0, 200, false);
-    const auto s1 = sc::axes::verticalStrip (1, shared, shared, 400, 0, 200, false);
-    CHECK (s0.getWidth() == kLeftAxisWidth && s0.getX() == shared - kLeftAxisWidth
-               && s0.getRight() == shared,
+    // On the left the channel label's room (the gutter) belongs to the
+    // outermost strip: the main strip gives it up to the extra one (#27).
+    const int gutter = sc::axes::channelGutter();
+    const auto s0 = sc::axes::verticalStrip (0, 2, shared, shared, 400, 0, 200, false, gutter);
+    const auto s1 = sc::axes::verticalStrip (1, 2, shared, shared, 400, 0, 200, false, gutter);
+    CHECK (s0.getWidth() == kLeftAxisWidth - gutter && s0.getRight() == shared,
            "the main axis strip hugs the plot");
-    CHECK (s1.getWidth() == sc::axes::extraStripWidth() && s1.getX() == 0
+    CHECK (s1.getWidth() == sc::axes::extraStripWidth() + gutter && s1.getX() == 0
                && s1.getRight() == s0.getX(),
-           "the extra axis is narrower and sits outside the main one");
+           "the extra axis sits outside the main one and holds the channel label's room");
+    const auto only = sc::axes::verticalStrip (0, 1, kLeftAxisWidth, kLeftAxisWidth, 400, 0, 200, false, gutter);
+    CHECK (only.getWidth() == kLeftAxisWidth && only.getX() == 0, "a single axis keeps its 60 px strip");
+
+    // Every strip keeps the same room for its labels whatever the count: the
+    // extra axis' labels used to get 10 px on the left (they read "...").
+    const auto lab0 = sc::axes::verticalLabelRect (0, 2, shared, shared, 400, 0, 200, false, gutter);
+    const auto lab1 = sc::axes::verticalLabelRect (1, 2, shared, shared, 400, 0, 200, false, gutter);
+    const auto labOnly = sc::axes::verticalLabelRect (0, 1, kLeftAxisWidth, kLeftAxisWidth, 400, 0, 200,
+                                                      false, gutter);
+    CHECK (lab0.getWidth() == labOnly.getWidth() && lab0.getRight() >= shared - 4 && lab0.getRight() <= shared,
+           "left: the main labels keep their width, next to the plot: " + juce::String (lab0.getX()));
+    CHECK (lab1.getWidth() == sc::axes::extraStripWidth() - 4 && lab1.getX() == gutter,
+           "left: the extra labels get their strip's width past the channel label: "
+               + juce::String (lab1.getWidth()));
+    const auto r0s = sc::axes::verticalStrip (0, 2, shared, 0, 400 - shared, 0, 200, true, gutter);
+    const auto r1s = sc::axes::verticalStrip (1, 2, shared, 0, 400 - shared, 0, 200, true, gutter);
+    CHECK (r0s.getX() == 400 - shared && r0s.getWidth() == kLeftAxisWidth
+               && r1s.getX() == r0s.getRight() && r1s.getRight() == 400,
+           "right: the main strip hugs the plot, the extra one fills the rest");
+    // Frequency labels skip the row centre, so they keep no room for the
+    // channel label (gutter 0): the main ones get the strip's full width
+    // ("10.0 kHz" was cut to "10.0 k" on a left axis).
+    const auto f0 = sc::axes::verticalLabelRect (0, 1, kLeftAxisWidth, kLeftAxisWidth, 400, 0, 200, false, 0);
+    const auto f1 = sc::axes::verticalLabelRect (1, 2, shared, shared, 400, 0, 200, false, 0);
+    CHECK (f0.getWidth() == kLeftAxisWidth - 4 && f1.getWidth() == sc::axes::extraStripWidth() - 4
+               && f1.getX() == 2,
+           "frequency labels use their strips' whole width: " + juce::String (f0.getWidth()));
     const auto r0 = sc::axes::timeStrip (0, 0, 400, 24, 176, 24, false);
     CHECK (r0.getY() == 0 && r0.getHeight() == 24, "the main ruler keeps its place and height");
 

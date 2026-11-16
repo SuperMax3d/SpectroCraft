@@ -1021,7 +1021,8 @@ bool parseTables (const juce::var& v, std::vector<TableData>& out, int* mode)
 
     out = std::move (parsed);
     if (mode != nullptr)
-        *mode = std::clamp (static_cast<int> (obj->getProperties().getWithDefault ("mode", 0)), 0, 2);
+        *mode = std::clamp (static_cast<int> (obj->getProperties().getWithDefault ("mode", 0)),
+                            kModeWaveform, kModePanelOnly);
     return true;
 }
 

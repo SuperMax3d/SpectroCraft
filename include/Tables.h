@@ -8,6 +8,15 @@
 namespace sc::tables
 {
 
+/** Where a document's visible parameters are drawn (FileDoc::tablesMode,
+    the Tables panel's dropdown; persisted with the file's metadata). Values
+    0..2 predate kModePanelOnly, the default of a new document (issue #25):
+    the tables then show only in the panel's own preview plot. */
+constexpr int kModeWaveform    = 0;   // Overlay on Waveform
+constexpr int kModeSpectrogram = 1;   // Overlay on Spectrogram
+constexpr int kModeDedicated   = 2;   // Dedicated track
+constexpr int kModePanelOnly   = 3;   // Inside Table Panel Only
+
 /** One column of an imported table (a "parameter"). */
 struct ParamData
 {

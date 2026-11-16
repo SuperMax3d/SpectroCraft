@@ -288,6 +288,14 @@ public:
     // Absolute frequency at a screen y position (mapped through the channel row
     // containing it; nearest row when between rows).
     double freqAtY (int y) const;
+    // Index of the channel row containing y (nearest row when between rows),
+    // -1 when there is none.
+    int rowIndexAtY (int y) const;
+    // freqAtY() for a spectral-tool drag: the cursor is clamped to the row
+    // the gesture started in (toolRow), so a lasso, marquee or brush stroke
+    // stops at that row's edge instead of continuing in another channel's
+    // row (issue #26).
+    double toolFreqAtY (int y) const;
 
 public:
     static constexpr int kRulerH = 24;   // top time ruler height
@@ -400,6 +408,7 @@ private:
     double liveT0 = 0, liveT1 = 0, liveF0 = 0, liveF1 = 0;   // marquee (t,f) space
     std::vector<std::pair<double, double>> lassoPts;        // (tSecs, fHz)
     std::vector<std::pair<double, double>> strokePts;       // paintbrush path
+    int toolRow = -1;                                       // channel row of the gesture
 
     // Paintbrush straight-line mode (ALT+click): a line from the last stroke's
     // end point (the anchor) to the current cursor position. The anchor is set

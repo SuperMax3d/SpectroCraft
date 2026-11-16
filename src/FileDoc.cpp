@@ -118,9 +118,9 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
         drawings = scmdB.drawings;
 
     // Tables: unified > SCMD (same precedence as the drawings). The default
-    // display mode is the dedicated track.
+    // display mode draws them only inside the Tables panel.
     tables.clear ();
-    tablesMode = 2;
+    tablesMode = sc::tables::kModePanelOnly;
     if (unifiedB.haveTables)
     {
         tables     = unifiedB.tables;

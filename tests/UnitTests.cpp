@@ -13472,6 +13472,76 @@ static void testSpectralSelPlayheadJump()
     wav.deleteFile ();
 }
 
+// Issue #26: a lasso (or marquee) started in one channel row stops at that
+// row's edge when the cursor moves over another channel's row, instead of
+// continuing with the other row's frequency mapping.
+static void testSpectralToolStaysInItsRow()
+{
+    const juce::File wav = makeTempFile ("lasso_row_clip.wav");
+    writeWav (wav, 2, 8000.0, 32000, [] (int, int64_t f, double rate)
+    {
+        return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi
+                                        * 440.0 * (double) f / rate);
+    });
+
+    Application app;
+    CHECK (app.openFile (wav), "lasso row clip: open the stereo wav");
+    auto* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile (); return; }
+
+    SpectralView view (app);
+    view.setSize (400, 300);
+    view.setViewRange (0.0, 4.0);
+    view.setVisibleChannels ({ 0, 1 });
+    view.setSettings (app.settings);
+    const auto rows = view.rowRects();
+    CHECK (rows.size() == 2, "lasso row clip: two channel rows");
+    if (rows.size() != 2) { wav.deleteFile (); return; }
+
+    const int yMid0 = rows[0].getCentreY();
+    const int yTop1 = rows[1].getY() + 5;   // near the top of the OTHER row (high frequencies)
+    const double fMid0 = view.freqAtY (yMid0);
+    const double fBottom0 = view.freqAtY (rows[0].getBottom());
+    const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+
+    // Lasso: middle of row 0 -> into row 1 -> back to the middle of row 0.
+    app.selMode = SpectralSelMode::Lasso;
+    view.mouseDown (mkMouse (view, (int) view.timeToX (0.5), yMid0, lmb));
+    view.mouseDrag (mkMouse (view, (int) view.timeToX (1.5), yTop1, lmb));
+    view.mouseDrag (mkMouse (view, (int) view.timeToX (2.5), yTop1, lmb));
+    view.mouseDrag (mkMouse (view, (int) view.timeToX (2.5), yMid0, lmb));
+    view.mouseUp   (mkMouse (view, (int) view.timeToX (2.5), yMid0, lmb));
+
+    CHECK (d->spectralSel.shapes().size() == 1, "lasso row clip: one polygon committed");
+    if (d->spectralSel.shapes().size() == 1)
+    {
+        double fLo = 1e30, fHi = -1e30;
+        for (const auto& p : d->spectralSel.shapes()[0].pts)
+        {
+            fLo = std::min (fLo, p.second);
+            fHi = std::max (fHi, p.second);
+        }
+        CHECK (fHi <= fMid0 + 1e-6, "lasso row clip: no point jumps to the other row's frequencies");
+        CHECK (std::abs (fLo - fBottom0) < 1e-6, "lasso row clip: the path follows the row's bottom edge");
+    }
+
+    // Marquee: the same drag gives a box from the start down to the row's edge.
+    app.selMode = SpectralSelMode::Marquee;
+    view.mouseDown (mkMouse (view, (int) view.timeToX (0.5), yMid0, lmb));
+    view.mouseDrag (mkMouse (view, (int) view.timeToX (2.0), yTop1, lmb));
+    view.mouseUp   (mkMouse (view, (int) view.timeToX (2.0), yTop1, lmb));
+    CHECK (d->spectralSel.shapes().size() == 1, "marquee row clip: one box committed");
+    if (d->spectralSel.shapes().size() == 1)
+    {
+        const auto& b = d->spectralSel.shapes()[0];
+        CHECK (std::abs (b.f1 - fMid0) < 1e-6 && std::abs (b.f0 - fBottom0) < 1e-6,
+              "marquee row clip: box spans the start to the row's bottom edge");
+    }
+
+    app.selMode = SpectralSelMode::TimeRange;
+    wav.deleteFile ();
+}
+
 // ALT+click in paintbrush mode draws a straight line from the last stroke's
 // end point to the click position. The line is interpolated linearly in
 // (time, frequency) space - i.e. it stays straight on a LINEAR frequency
@@ -23853,6 +23923,7 @@ static void testDedicatedTrackLoadSync()
           "embedded table imports");
     d->tables.push_back (std::move (t));
     d->tables[0].params[0].colorIndex = 2;   // yellow
+    d->tablesMode = sc::tables::kModeDedicated;   // as saved in the file's metadata
 
     std::unique_ptr<MainWindow> win (new MainWindow (app, "dedicated load sync"));
     app.activate (0);   // fires onActiveDocChanged -> activateDocUI (the open path)
@@ -26747,7 +26818,7 @@ static void testTablesSoloAndRename()
 
     // Rows: 0=T1, 1=alpha(T1), 2=beta(T1), 3=T2, 4=alpha(T2), 5=beta(T2).
     auto effVisible = [&] (int ti, int pi)
-    { return app.showAllTables && d->tables[(size_t) ti].visible
+    { return d->tables[(size_t) ti].visible
              && d->tables[(size_t) ti].params[(size_t) pi].visible; };
     auto countEff = [&] ()
     {
@@ -26769,7 +26840,7 @@ static void testTablesSoloAndRename()
 
     // --- Shift+click again turns everything off ----------------------------
     panel.simulateCellClick (2, 1, shiftClick);
-    CHECK (!app.showAllTables && countEff () == 0, "second shift-click hides everything");
+    CHECK (countEff () == 0, "second shift-click hides everything");
 
     // --- Shift+click on a table eye solos the whole table -------------------
     panel.simulateCellClick (3, 1, shiftClick);   // T2 row
@@ -26779,13 +26850,13 @@ static void testTablesSoloAndRename()
 
     // --- Shift+click again turns everything off ----------------------------
     panel.simulateCellClick (3, 1, shiftClick);
-    CHECK (!app.showAllTables && countEff () == 0, "table solo toggles off");
+    CHECK (countEff () == 0, "table solo toggles off");
 
-    // --- Master eye: show all / hide all -------------------------------------
+    // --- Right-click Show All / Hide All Tables ------------------------------
     panel.toggleAllVisibility ();
-    CHECK (app.showAllTables && countEff () == 4, "master shift-click shows everything");
+    CHECK (countEff () == 4, "Show All Tables shows everything");
     panel.toggleAllVisibility ();
-    CHECK (!app.showAllTables && countEff () == 0, "second master shift-click hides everything");
+    CHECK (countEff () == 0, "Hide All Tables hides everything");
 
     // --- Rename a parameter through the prompt dialog -----------------------
     {
@@ -26838,6 +26909,63 @@ static void testTablesSoloAndRename()
     }
 
     wav.deleteFile();
+}
+
+//=============================================================================
+// Issue #25: no master eye at the top of the Tables panel; the display-mode
+// dropdown spans the full width and its first choice, Inside Table Panel
+// Only, is the default and draws nothing outside the panel.
+static void testTablesPanelOnlyMode()
+{
+    const juce::File wav = makeTempFile ("tables_panel_only.wav");
+    writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t, double) { return 0.25f; });
+    Application app;
+    if (!app.openFile (wav)) { CHECK (false, "panel only: open the generated wav"); wav.deleteFile(); return; }
+    FileDoc* d = app.doc ();
+    if (d == nullptr) { wav.deleteFile(); return; }
+
+    std::string err;
+    CHECK (app.addTableFromCsv ("T1", "alpha,beta\n1,2\n3,4\n5,6\n", &err), "panel only: table imported");
+    CHECK (app.tablesMode() == sc::tables::kModePanelOnly, "panel only: default mode");
+    CHECK (!app.anyVisibleTableParam(), "panel only: no dedicated track");
+
+    TablesPanel panel (app);
+    panel.setSize (320, 420);
+    panel.refresh();
+
+    CHECK (panel.findChildWithID ("tables-showall-btn") == nullptr, "panel only: master eye removed");
+    auto& combo = panel.displayModeCombo();
+    CHECK (combo.getX() == 6 && combo.getRight() == panel.getWidth() - 6,
+          "panel only: dropdown spans the panel width");
+    CHECK (combo.getNumItems() == 4 && combo.getItemText (0) == "Inside Table Panel Only",
+          "panel only: first choice is Inside Table Panel Only");
+    CHECK (combo.getSelectedItemIndex() == 0, "panel only: dropdown shows the default");
+
+    // Choosing Dedicated track from the dropdown shows the strip; going back
+    // to Panel Only hides it again without touching the eye states.
+    combo.setSelectedId (sc::tables::kModeDedicated + 1, juce::sendNotificationSync);
+    CHECK (app.tablesMode() == sc::tables::kModeDedicated && app.anyVisibleTableParam(),
+          "panel only: Dedicated track from the dropdown");
+    combo.setSelectedId (sc::tables::kModePanelOnly + 1, juce::sendNotificationSync);
+    CHECK (app.tablesMode() == sc::tables::kModePanelOnly && !app.anyVisibleTableParam(),
+          "panel only: back to Inside Table Panel Only");
+    CHECK (d->tables[0].visible && d->tables[0].params[0].visible && d->tables[0].params[1].visible,
+          "panel only: per-row visibility kept");
+
+    // A file's saved mode comes back into the dropdown.
+    app.setTablesMode (sc::tables::kModeSpectrogram);
+    panel.refresh();
+    CHECK (combo.getText() == "Overlay on Spectrogram", "panel only: dropdown follows the mode");
+
+    // Persisted like the other modes; out-of-range values are clamped.
+    std::vector<sc::tables::TableData> back; int mode = -1;
+    CHECK (sc::tables::parseTables (sc::tables::serialiseTables (d->tables, sc::tables::kModePanelOnly),
+                                    back, &mode)
+           && mode == sc::tables::kModePanelOnly, "panel only: mode round-trips");
+    CHECK (sc::tables::parseTables (sc::tables::serialiseTables (d->tables, 9), back, &mode)
+           && mode == sc::tables::kModePanelOnly, "panel only: mode clamped");
+
+    wav.deleteFile ();
 }
 
 //==============================================================================
@@ -27424,8 +27552,11 @@ static void testTablesTwoPointVerticalAlign()
     CHECK (d != nullptr, "2pt: doc created");
     if (d == nullptr) { wav.deleteFile(); return; }
 
-    // The default display mode is the dedicated track.
-    CHECK (d->tablesMode == 2, "default tables mode is Dedicated Track");
+    // The default display mode is Inside Table Panel Only (issue #25); this
+    // test works on the dedicated track.
+    CHECK (d->tablesMode == sc::tables::kModePanelOnly,
+          "default tables mode is Inside Table Panel Only");
+    d->tablesMode = sc::tables::kModeDedicated;
 
     std::string err;
     juce::String csv = "alpha\n";   // ramp 0..10 over 200 rows @ 1000 Hz
@@ -29890,6 +30021,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("spectral selection model", testSpectralSelectionModel);
     SC_RUN_TEST ("selection render hole", testSpectralSelectionRenderHole);
     SC_RUN_TEST ("spectral selection playhead jump", testSpectralSelPlayheadJump);
+    SC_RUN_TEST ("spectral tool stays in its row", testSpectralToolStaysInItsRow);
     SC_RUN_TEST ("straight line points", testStraightLinePoints);
     SC_RUN_TEST ("alt-click straight line", testAltClickStraightLine);
     SC_RUN_TEST ("scaled copy", testScaledCopy);
@@ -29997,6 +30129,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("tables align targets", testTablesAlignTarget);
     SC_RUN_TEST ("tables per-row overlay", testTablesPerRowOverlay);
     SC_RUN_TEST ("tables solo + rename", testTablesSoloAndRename);
+    SC_RUN_TEST ("tables panel only mode", testTablesPanelOnlyMode);
     SC_RUN_TEST ("tables timeline warp", testTablesTimelineWarp);
     SC_RUN_TEST ("tables stretch undo/redo", testTablesStretchUndoRedo);
     SC_RUN_TEST ("tables edit menu", testTablesEditMenu);
