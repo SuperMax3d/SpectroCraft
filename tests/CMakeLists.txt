@@ -43,6 +43,8 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/TablesTrack.cpp # dedicated table track view
         ${CMAKE_SOURCE_DIR}/src/SingleInstance.cpp   # single-instance mode + file forwarding pipe
         ${CMAKE_SOURCE_DIR}/src/MergeFiles.cpp  # multi-file merge (Shift + drag & drop)
+        ${CMAKE_SOURCE_DIR}/src/Session.cpp     # sessions: referenced files on the timeline (issue #21)
+        ${CMAKE_SOURCE_DIR}/src/SessionOverlay.cpp  # sessions: file borders and the Move Files drag in the views
         ${CMAKE_SOURCE_DIR}/src/VideoAudio.cpp  # FFmpeg video-container audio extraction
         ${CMAKE_SOURCE_DIR}/src/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_SOURCE_DIR}/src/StemSeparation.cpp
