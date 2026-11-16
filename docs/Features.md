@@ -2551,6 +2551,11 @@ list: a table row followed by its parameter rows.
       affect the auto-scaled axes, copy as blank fields, survive warps and
       downsampling as gaps and round-trip through save/reload (stored as JSON
       `null`).
+    - The auto-scaled axes add 10% above and below the data. A constant
+      parameter (or one whose variation is below the doubles' resolution at
+      its magnitude) gets a window of +-10% of its value, +-1 around zero, so
+      it shows as a flat line in the middle. (A constant like -1e9 used to
+      freeze the app when it became visible: issue #29.)
     - **Ctrl+0 / Zoom Out Full** also vertically fits this strip when it is
       shown.
 - The panel's preview plot shows hover values too: moving the mouse over it

@@ -206,6 +206,14 @@ double paramValueAt (const TableData& t, const ParamData& p, double tTableSecs);
 /** Min/max over the finite entries of v; returns false when there are none. */
 bool finiteMinMax (const std::vector<double>& v, double& lo, double& hi);
 
+/** The auto-scaled value window around the data range [mn, mx]: 10% padding
+    on each side. A flat range (a constant parameter, or a span below the
+    doubles' resolution at that magnitude) gets +-10% of its magnitude, or
+    +-1 around zero, so hi > lo always holds with a span the doubles can
+    represent. (Issue #29: the fixed 1e-9 padding vanished next to a
+    constant -1e9, and the preview plot's grid loop never ended.) */
+void paddedValueRange (double mn, double mx, double& lo, double& hi);
+
 /** Overwrites p's values inside [t0,t1] (document time) with a linear ramp
     from startVal to stopVal. When the range extends beyond the table's row
     grid, every parameter is extended: new cells are empty (NaN), and for a

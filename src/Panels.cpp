@@ -9337,9 +9337,7 @@ bool TablesPlotView::autoValueRange (double& lo, double& hi) const
         mx = std::max (mx, b);
     }
     if (!have || !(mx >= mn)) return false;
-    const double pad = std::max ((mx - mn) * 0.1, 1e-9);
-    lo = mn - pad;
-    hi = mx + pad;
+    sc::tables::paddedValueRange (mn, mx, lo, hi);
     return true;
 }
 
@@ -9591,8 +9589,13 @@ void TablesPlotView::paint (juce::Graphics& g)
         double vStep = 10.0 * mag;
         for (double m : { 1.0, 2.0, 5.0 })
             if (m * mag >= raw) { vStep = m * mag; break; }
-        for (double L = std::ceil (mn / vStep) * vStep; L <= mx + 1e-9; L += vStep)
+        // Counted, not accumulated: a step below the doubles' resolution at
+        // this magnitude left L unchanged and the loop never ended (#29).
+        const double first = std::ceil (mn / vStep) * vStep;
+        for (int i = 0; i <= 50; ++i)
         {
+            const double L = first + i * vStep;
+            if (!(L <= mx + vStep * 1e-6)) break;
             const int y = pr.getY() + (int) std::lround ((mx - L) / (mx - mn) * pr.getHeight());
             g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
         }

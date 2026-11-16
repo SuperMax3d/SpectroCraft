@@ -26912,6 +26912,75 @@ static void testTablesSoloAndRename()
 }
 
 //=============================================================================
+// Issue #29: a constant parameter of large magnitude (here -1e9) froze the
+// app when it became visible: the value window's fixed 1e-9 padding vanished
+// next to it, the preview plot's grid step fell below the doubles' resolution
+// and its accumulating loop never ended. The dedicated track's window came out
+// flat as well and was refused, so the curve was not shown.
+static void testTablesConstantLargeParameter()
+{
+    using namespace sc::tables;
+    // The window helper: always a span the doubles can represent.
+    for (double v : { -1e9, 1e12, 1.7e9, 5.0, 0.0, -3e-7 })
+    {
+        double lo = 0.0, hi = 0.0;
+        paddedValueRange (v, v, lo, hi);
+        CHECK (hi > lo && lo < v && hi > v && (hi - lo) >= std::abs (v) * 0.1,
+              "#29: a constant " + juce::String (v) + " gets a real window: ["
+                  + juce::String (lo) + ", " + juce::String (hi) + "]");
+    }
+    {
+        double lo = 0.0, hi = 0.0;
+        paddedValueRange (0.0, 10.0, lo, hi);
+        CHECK (std::abs (lo + 1.0) < 1e-12 && std::abs (hi - 11.0) < 1e-12, "#29: a real range keeps its 10% padding");
+    }
+
+    const juce::File wav = makeTempFile ("tables_const_large.wav");
+    writeWav (wav, 1, 8000.0, 8000 * 4, [] (int, int64_t, double) { return 0.25f; });
+    Application app;
+    if (!app.openFile (wav)) { CHECK (false, "#29: open the generated wav"); wav.deleteFile(); return; }
+
+    // Written digit by digit: juce::String (-1e9 - r) would round the values.
+    juce::String csv = "Time,wave,big,epoch,zero\n";
+    for (int r = 0; r < 200; ++r)
+        csv << juce::String (r * 0.01, 2) << "," << juce::String (std::sin (r * 0.1), 4)
+            << ",-1000000000,1700000000,0\n";
+    std::string err;
+    CHECK (app.addTableFromCsv ("T", csv, &err), "#29: table imported");
+    app.setTablesMode (kModeDedicated);
+
+    TablesPanel panel (app);
+    panel.setSize (320, 600);
+    panel.refresh();
+    TablesTrackView track (app);
+    track.setSize (800, 200);
+    const juce::MouseEvent shift = mkMouse (panel, 10, 10, juce::ModifierKeys (juce::ModifierKeys::shiftModifier));
+
+    // Solo each parameter as Max did (shift-click its eye, the row selected
+    // first like JUCE's mouse-down), then draw the preview and the track.
+    for (int p = 0; p < 4; ++p)
+    {
+        panel.listTable().selectRowsBasedOnModifierKeys (1 + p, shift.mods, false);
+        panel.simulateCellClick (1 + p, 1, shift);
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        { auto img = panel.createComponentSnapshot (panel.getLocalBounds()); (void) img; }
+        track.refit();
+        { auto img = track.createComponentSnapshot (track.getLocalBounds()); (void) img; }
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        const auto& prm = app.activeTables()[0].params[(size_t) p];
+        CHECK (prm.visible, "#29: " + prm.name + " soloed");
+        const auto [lo, hi] = panel.plotView().getValueRange();
+        const auto [tlo, thi] = track.visibleRange();
+        double mn = 0.0, mx = 0.0;
+        finiteMinMax (prm.values, mn, mx);
+        CHECK (hi > lo && lo <= mn && hi >= mx, "#29: " + prm.name + ": the preview's window holds it");
+        CHECK (thi > tlo && tlo <= mn && thi >= mx, "#29: " + prm.name + ": the dedicated track's window holds it");
+        CHECK (ms < 5000.0, "#29: " + prm.name + ": drawn in " + juce::String (ms, 0) + " ms");
+    }
+    wav.deleteFile ();
+}
+
+//=============================================================================
 // Issue #25: no master eye at the top of the Tables panel; the display-mode
 // dropdown spans the full width and its first choice, Inside Table Panel
 // Only, is the default and draws nothing outside the panel.
@@ -30130,6 +30199,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("tables per-row overlay", testTablesPerRowOverlay);
     SC_RUN_TEST ("tables solo + rename", testTablesSoloAndRename);
     SC_RUN_TEST ("tables panel only mode", testTablesPanelOnlyMode);
+    SC_RUN_TEST ("tables constant large parameter", testTablesConstantLargeParameter);
     SC_RUN_TEST ("tables timeline warp", testTablesTimelineWarp);
     SC_RUN_TEST ("tables stretch undo/redo", testTablesStretchUndoRedo);
     SC_RUN_TEST ("tables edit menu", testTablesEditMenu);
