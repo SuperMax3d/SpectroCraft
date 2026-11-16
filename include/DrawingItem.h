@@ -6,14 +6,14 @@
 #include <vector>
 #include <utility>
 
-/** One user drawing placed over the spectrogram: text, arrow, rectangle or
-    freehand. Geometry is stored in data coordinates (time seconds x
+/** One user drawing placed over the spectrogram: text, arrow, rectangle,
+    freehand or oval (ellipse / circle). Geometry is stored in data coordinates (time seconds x
     frequency Hz) so items stay anchored to the spectrum when zooming and
     panning; they are drawn on every visible channel row, like spectral
     selection shapes. */
 struct DrawingItem
 {
-    enum class Kind : int { Text = 0, Arrow = 1, Rectangle = 2, Freehand = 3 };
+    enum class Kind : int { Text = 0, Arrow = 1, Rectangle = 2, Freehand = 3, Ellipse = 4 };
 
     Kind kind = Kind::Text;
     juce::String text;      // Text items only (empty for the other kinds)
@@ -23,11 +23,16 @@ struct DrawingItem
     float widthPx = 2.0f;         // line width for Arrow / Rectangle / Freehand
     float textSize = 14.0f;       // font size for Text items
     bool hidden = false;          // per-item visibility toggle (Drawing panel eye icon)
+    /** Group the item belongs to (Drawing panel > Group, Ctrl+G): items with
+        the same non-zero id are selected, moved and resized together.
+        0 = in no group. */
+    int group = 0;
 
     // Bounding box in data coordinates, always t0 <= t1 and f0 <= f1.
     double t0 = 0.0, f0 = 0.0, t1 = 0.0, f1 = 0.0;
     // Path points (time, frequency): the freehand stroke for Freehand items
-    // and the two endpoints (start -> end) for Arrow items. Empty otherwise.
+    // and the two endpoints (start -> end) for Arrow items; the two dragged
+    // corners for Rectangle / Ellipse (the box follows them). Empty for Text.
     std::vector<std::pair<double, double>> points;
 
     juce::Colour colour() const
@@ -46,6 +51,7 @@ struct DrawingItem
             case Kind::Text:      return "Text";
             case Kind::Arrow:     return "Arrow";
             case Kind::Rectangle: return "Rectangle";
+            case Kind::Ellipse:   return "Oval";
             default:              return "Free Drawing";
         }
     }
@@ -57,6 +63,7 @@ struct DrawingItem
             case 1:  return Kind::Arrow;
             case 2:  return Kind::Rectangle;
             case 3:  return Kind::Freehand;
+            case 4:  return Kind::Ellipse;
             default: return Kind::Text;
         }
     }

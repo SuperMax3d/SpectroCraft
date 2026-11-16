@@ -110,7 +110,7 @@ public:
         metaDirty = true;
     }
 
-    // Spectrogram drawings (Drawing panel): text, arrow, rectangle and free
+    // Spectrogram drawings (Drawing panel): text, arrow, rectangle, oval and free
     // annotations in time x frequency coordinates. Persisted with the file's
     // metadata bundle like the saved selections.
     std::vector<DrawingItem> drawings;

@@ -360,7 +360,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
         return;
     }
 
-    // New-drawing mode armed by the Drawing panel or the t/a/r/d shortcuts:
+    // New-drawing mode armed by the Drawing panel or the t/a/r/d/o shortcuts:
     // a left click inside the plot starts the item (Text places immediately,
     // the other kinds drag). Clicking outside the plot cancels the mode.
     if (havePendingDraw_ && e.mods.isLeftButtonDown() && !e.mods.isRightButtonDown())
@@ -392,6 +392,44 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
         }
         havePendingDraw_ = false;
         repaint();
+    }
+
+    // Drawings: a click on one selects it (its whole group; Shift adds it to
+    // the selection). With drawings selected, a drag on a corner handle
+    // resizes them and a drag inside their box moves them. A click anywhere
+    // else drops the selection, then does what it always did.
+    if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu() && !e.mods.isAltDown()
+        && app.showAllDrawings && app.doc() != nullptr)
+    {
+        const auto row = rowAt (e.y);
+        if (!row.isEmpty() && plotRect().contains (e.getPosition()))
+        {
+            int handle = -1;
+            bool inBox = false;
+            if (!app.selectedDrawings.empty())
+            {
+                handle = drawingHandleAt (e.getPosition(), row);
+                inBox = selectionScreenBox (row).expanded (2.0f).contains (e.getPosition().toFloat());
+            }
+            if (handle < 0 && (!inBox || e.mods.isShiftDown()))
+            {
+                const int hit = drawingHit (e.getPosition(), row);
+                if (hit >= 0)
+                {
+                    auto sel = e.mods.isShiftDown() ? app.selectedDrawings : std::vector<int>();
+                    sel.push_back (hit);
+                    app.setDrawingSelection (sel);
+                    inBox = true;
+                }
+            }
+            if (handle >= 0 || inBox)
+            {
+                beginDrawingEdit (handle >= 0 ? DrawEdit::resize : DrawEdit::move, handle, row, e.getPosition());
+                return;
+            }
+            if (!app.selectedDrawings.empty())
+                app.setDrawingSelection ({});
+        }
     }
 
     // Right button: box-zoom drag. A plain right-click (no significant
@@ -545,12 +583,30 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
     probeX = e.x;
     probeY = e.y;
 
-    // Live drag of a new Arrow/Rectangle/Freehand drawing: track the end
+    // Moving or resizing the selected drawings.
+    if (drawEdit_ != DrawEdit::none)
+    {
+        drawEditLive_ = transformedDrawings (e.getPosition());
+        if (e.getPosition().getDistanceFrom (drawEditGrab_) > 2)
+            drawEditMoved_ = true;
+        repaint();
+        return;
+    }
+
+    // Live drag of a new Arrow/Rectangle/Oval/Freehand drawing: track the end
     // point (freehand decimates to ~2 px steps) and repaint the preview.
     if (drawingNew_)
     {
         drawEndX_ = e.x;
         drawEndY_ = e.y;
+        // Shift draws a circle: the same width and height on screen.
+        if (pendingDraw_ == DrawingItem::Kind::Ellipse && e.mods.isShiftDown())
+        {
+            const int dx = e.x - drawStartX_, dy = e.y - drawStartY_;
+            const int side = std::max (std::abs (dx), std::abs (dy));
+            drawEndX_ = drawStartX_ + (dx < 0 ? -side : side);
+            drawEndY_ = drawStartY_ + (dy < 0 ? -side : side);
+        }
         if (pendingDraw_ == DrawingItem::Kind::Freehand
             && std::abs (e.x - lastFreeX_) + std::abs (e.y - lastFreeY_) >= 2)
         {
@@ -720,7 +776,22 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
             app.moveSessionFile (t.clip, t.lane, t.offset);
         return;
     }
-    // Finish a new Arrow/Rectangle/Freehand drawing. Accidental clicks
+    // Finish a move or resize of the selected drawings: one undoable step.
+    if (drawEdit_ != DrawEdit::none)
+    {
+        const bool moved = drawEditMoved_;
+        const bool resize = drawEdit_ == DrawEdit::resize;
+        drawEdit_ = DrawEdit::none;
+        if (moved)
+            app.transformDrawings (drawEditItems_, drawEditLive_, resize ? "Resize Drawing" : "Move Drawing");
+        drawEditItems_.clear ();
+        drawEditOrig_.clear ();
+        drawEditLive_.clear ();
+        repaint();
+        return;
+    }
+
+    // Finish a new Arrow/Rectangle/Oval/Freehand drawing. Accidental clicks
     // (drags under 3 px in either axis) and near-empty freehand strokes are
     // discarded without creating an item.
     if (drawingNew_)
@@ -733,7 +804,8 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
         const double tEnd = xToTime ((double) drawEndX_);
         const double fEnd = freqAtY (drawEndY_);
         if (pendingDraw_ == DrawingItem::Kind::Arrow
-            || pendingDraw_ == DrawingItem::Kind::Rectangle)
+            || pendingDraw_ == DrawingItem::Kind::Rectangle
+            || pendingDraw_ == DrawingItem::Kind::Ellipse)
         {
             if (std::abs (drawEndX_ - drawStartX_) >= 3
                 && std::abs (drawEndY_ - drawStartY_) >= 3)
@@ -757,6 +829,8 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
         repaint();
         if (ok)
         {
+            // Inside the spectrogram: a drag past its edge stops there.
+            for (auto& p : item.points) p = app.clampToSpectrogram (p);
             // New shapes take the Drawing panel's current ink colour and
             // line width, exactly like text items do.
             item.colourARGB = app.settings.drawColourARGB;
@@ -941,12 +1015,35 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
 void SpectralView::mouseMove (const juce::MouseEvent& e)
 {
     reportHoverTime (e, false);
-    // Move Files: an edge of a file trims it - say so with the cursor.
+    /* One cursor for what a press would do here. The session's Move Files trim
+       edge wins (it is an explicit tool the user turned on); otherwise the
+       drawing handles: resize on a corner handle, move inside the selection's box
+       or on a drawing. */
     {
+        auto cursor = juce::MouseCursor::NormalCursor;
         const FileDoc* d = app.doc();
-        const bool onEdge = app.sessionMoveTool && d != nullptr && d->session.active()
-                            && sc::session::TrimGesture::edgeAt (d->session, sessionGeometry(), e.getPosition()) >= 1;
-        setMouseCursor (onEdge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+        if (app.sessionMoveTool && d != nullptr && d->session.active()
+            && sc::session::TrimGesture::edgeAt (d->session, sessionGeometry(), e.getPosition()) >= 1)
+        {
+            cursor = juce::MouseCursor::LeftRightResizeCursor;
+        }
+        else
+        {
+            const auto row = rowAt (e.y);
+            if (app.showAllDrawings && !row.isEmpty() && plotRect().contains (e.getPosition()))
+            {
+                static const juce::MouseCursor::StandardCursorType corners[4] {
+                    juce::MouseCursor::TopLeftCornerResizeCursor, juce::MouseCursor::TopRightCornerResizeCursor,
+                    juce::MouseCursor::BottomRightCornerResizeCursor, juce::MouseCursor::BottomLeftCornerResizeCursor };
+                if (const int h = drawingHandleAt (e.getPosition(), row); h >= 0)
+                    cursor = corners[h];
+                else if ((!app.selectedDrawings.empty()
+                          && selectionScreenBox (row).contains (e.getPosition().toFloat()))
+                         || drawingHit (e.getPosition(), row) >= 0)
+                    cursor = juce::MouseCursor::DraggingHandCursor;
+            }
+        }
+        setMouseCursor (cursor);
     }
 
     // Move/Scale gesture: the live preview follows the cursor even without a
@@ -2603,6 +2700,7 @@ void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
             live.points.push_back (p0);
             live.points.push_back (p1);
         }
+        live.normaliseBounds ();   // rectangles and ovals draw from their box
         haveLive = true;
     }
 
@@ -2611,10 +2709,18 @@ void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
 
     // Draw every item on every visible channel row, like the spectral
     // selection shapes: geometry is in data coordinates so it stays anchored.
+    // A drawing being moved or resized is drawn where it goes.
+    if (includeLivePreview && drawEdit_ != DrawEdit::none)
+        for (size_t k = 0; k < drawEditItems_.size () && k < drawEditLive_.size (); ++k)
+            if (drawEditItems_[k] >= 0 && drawEditItems_[k] < (int) items.size ())
+                items[(size_t) drawEditItems_[k]] = drawEditLive_[k];
+
     for (const auto& rr : rows)
     {
         const juce::Graphics::ScopedSaveState save (g);
-        g.reduceClipRegion (rr);
+        // The row inside the plot only: a drawing never spills over the
+        // frequency axis or the time ruler.
+        g.reduceClipRegion (rr.getIntersection (plotRect ()));
 
         auto drawOne = [&] (const DrawingItem& it, bool preview)
         {
@@ -2687,6 +2793,20 @@ void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
                     g.setColour (ink);   g.drawRect (box, it.widthPx);
                     break;
                 }
+                case DrawingItem::Kind::Ellipse:
+                {
+                    // Oval / circle inscribed in its box, outline only.
+                    const float x0 = timeToX (it.t0);
+                    const float x1 = timeToX (it.t1);
+                    const float yTop = rr.getY () + freqToY (it.f1, rr.getHeight());
+                    const float yBot = rr.getY () + freqToY (it.f0, rr.getHeight());
+                    const juce::Rectangle<float> box (std::min (x0, x1), std::min (yTop, yBot),
+                                                     std::max (1.0f, std::abs (x1 - x0)),
+                                                     std::max (1.0f, std::abs (yBot - yTop)));
+                    g.setColour (halo);  g.drawEllipse (box, it.widthPx + 3.0f);
+                    g.setColour (ink);   g.drawEllipse (box, it.widthPx);
+                    break;
+                }
                 case DrawingItem::Kind::Freehand:
                 {
                     juce::Path p;
@@ -2717,7 +2837,253 @@ void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
                 drawOne (it, false);
         if (haveLive)
             drawOne (live, true);
+
+        // The selected drawings (live view only): their box and its four
+        // corner handles - drag a handle to resize, inside to move.
+        if (includeLivePreview && app.showAllDrawings && !app.selectedDrawings.empty ())
+        {
+            const auto box = selectionScreenBox (rr);
+            if (!box.isEmpty ())
+            {
+                const float dashes[] = { 4.0f, 3.0f };
+                g.setColour (juce::Colours::white.withAlpha (0.8f));
+                g.drawDashedLine ({ box.getTopLeft (), box.getTopRight () }, dashes, 2);
+                g.drawDashedLine ({ box.getTopRight (), box.getBottomRight () }, dashes, 2);
+                g.drawDashedLine ({ box.getBottomRight (), box.getBottomLeft () }, dashes, 2);
+                g.drawDashedLine ({ box.getBottomLeft (), box.getTopLeft () }, dashes, 2);
+                for (const auto c : { box.getTopLeft (), box.getTopRight (), box.getBottomRight (), box.getBottomLeft () })
+                {
+                    const auto h = juce::Rectangle<float> (7.0f, 7.0f).withCentre (c);
+                    g.setColour (juce::Colours::white);
+                    g.fillRect (h);
+                    g.setColour (juce::Colours::black);
+                    g.drawRect (h, 1.0f);
+                }
+            }
+        }
     }
+}
+
+juce::Rectangle<int> SpectralView::rowAt (int y) const
+{
+    for (const auto& r : rowRects ())
+        if (y >= r.getY () && y < r.getBottom ())
+            return r;
+    return {};
+}
+
+juce::Rectangle<float> SpectralView::drawingScreenBox (const DrawingItem& it, const juce::Rectangle<int>& row) const
+{
+    auto X = [this] (double t) { return (float) timeToX (t); };
+    auto Y = [this, &row] (double f) { return (float) row.getY () + (float) freqToY (f, row.getHeight ()); };
+    if (it.kind == DrawingItem::Kind::Text)
+    {
+        // As drawn: left-aligned from the anchor, centred a quarter of the
+        // size below it.
+        const juce::Font font { juce::FontOptions (it.textSize) };
+        const juce::String txt = it.text.isEmpty () ? juce::String ("(text)") : it.text;
+        const float w = std::max (4.0f, juce::GlyphArrangement::getStringWidth (font, txt));
+        return { X (it.t0), Y (it.f0) - 0.35f * it.textSize, w, 1.2f * it.textSize };
+    }
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+    auto add = [&] (double t, double f)
+    {
+        const float x = X (t), y = Y (f);
+        x0 = std::min (x0, x); x1 = std::max (x1, x);
+        y0 = std::min (y0, y); y1 = std::max (y1, y);
+    };
+    if (!it.points.empty ())
+        for (const auto& p : it.points) add (p.first, p.second);
+    else
+    {
+        add (it.t0, it.f0);
+        add (it.t1, it.f1);
+    }
+    return juce::Rectangle<float>::leftTopRightBottom (x0, y0, std::max (x1, x0 + 1.0f), std::max (y1, y0 + 1.0f));
+}
+
+juce::Rectangle<float> SpectralView::selectionScreenBox (const juce::Rectangle<int>& row) const
+{
+    const FileDoc* d = app.doc ();
+    if (d == nullptr) return {};
+    juce::Rectangle<float> box;
+    for (int i : app.selectedDrawings)
+    {
+        if (i < 0 || i >= (int) d->drawings.size ()) continue;
+        const DrawingItem* it = &d->drawings[(size_t) i];
+        for (size_t k = 0; k < drawEditItems_.size () && k < drawEditLive_.size (); ++k)
+            if (drawEdit_ != DrawEdit::none && drawEditItems_[k] == i) it = &drawEditLive_[k];
+        const auto b = drawingScreenBox (*it, row);
+        box = box.isEmpty () ? b : box.getUnion (b);
+    }
+    return box;
+}
+
+namespace
+{
+    float distToSegment (juce::Point<float> p, juce::Point<float> a, juce::Point<float> b)
+    {
+        const auto ab = b - a;
+        const float len2 = ab.x * ab.x + ab.y * ab.y;
+        const float t = len2 > 0.0f ? std::clamp (((p - a).x * ab.x + (p - a).y * ab.y) / len2, 0.0f, 1.0f) : 0.0f;
+        return p.getDistanceFrom (a + ab * t);
+    }
+}
+
+int SpectralView::drawingHit (juce::Point<int> pi, const juce::Rectangle<int>& row) const
+{
+    const FileDoc* d = app.doc ();
+    if (d == nullptr || !app.showAllDrawings || row.isEmpty ()) return -1;
+    const auto p = pi.toFloat ();
+    auto X = [this] (double t) { return (float) timeToX (t); };
+    auto Y = [this, &row] (double f) { return (float) row.getY () + (float) freqToY (f, row.getHeight ()); };
+    for (int i = (int) d->drawings.size () - 1; i >= 0; --i)   // the top-most first
+    {
+        const auto& it = d->drawings[(size_t) i];
+        if (it.hidden) continue;
+        const float tol = 5.0f + it.widthPx * 0.5f;
+        const auto box = drawingScreenBox (it, row);
+        switch (it.kind)
+        {
+            case DrawingItem::Kind::Text:
+                if (box.contains (p)) return i;
+                break;
+            case DrawingItem::Kind::Rectangle:
+                if (box.expanded (tol).contains (p) && ! box.reduced (tol).contains (p)) return i;
+                break;
+            case DrawingItem::Kind::Ellipse:
+            {
+                const float rx = box.getWidth () * 0.5f, ry = box.getHeight () * 0.5f;
+                if (rx < 1.0f || ry < 1.0f) { if (box.expanded (tol).contains (p)) return i; break; }
+                const float nx = (p.x - box.getCentreX ()) / rx, ny = (p.y - box.getCentreY ()) / ry;
+                if (std::abs (std::sqrt (nx * nx + ny * ny) - 1.0f) * std::min (rx, ry) <= tol) return i;
+                break;
+            }
+            default:   // Arrow, Freehand: along the stroke
+                for (size_t k = 1; k < it.points.size (); ++k)
+                {
+                    const juce::Point<float> a (X (it.points[k - 1].first), Y (it.points[k - 1].second));
+                    const juce::Point<float> b (X (it.points[k].first), Y (it.points[k].second));
+                    if (distToSegment (p, a, b) <= tol) return i;
+                }
+                break;
+        }
+    }
+    return -1;
+}
+
+int SpectralView::drawingHandleAt (juce::Point<int> p, const juce::Rectangle<int>& row) const
+{
+    if (app.selectedDrawings.empty () || row.isEmpty ()) return -1;
+    const auto box = selectionScreenBox (row);
+    if (box.isEmpty ()) return -1;
+    const juce::Point<float> corners[4] { box.getTopLeft (), box.getTopRight (), box.getBottomRight (), box.getBottomLeft () };
+    for (int k = 0; k < 4; ++k)
+        if (juce::Rectangle<float> (11.0f, 11.0f).withCentre (corners[k]).contains (p.toFloat ()))
+            return k;
+    return -1;
+}
+
+void SpectralView::beginDrawingEdit (DrawEdit mode, int handle, juce::Rectangle<int> row, juce::Point<int> p)
+{
+    const FileDoc* d = app.doc ();
+    if (d == nullptr) return;
+    drawEditItems_.clear ();
+    drawEditOrig_.clear ();
+    for (int i : app.selectedDrawings)
+        if (i >= 0 && i < (int) d->drawings.size ())
+        {
+            drawEditItems_.push_back (i);
+            drawEditOrig_.push_back (d->drawings[(size_t) i]);
+        }
+    if (drawEditItems_.empty ()) return;
+    drawEditLive_ = drawEditOrig_;
+    drawEdit_ = mode;
+    drawEditHandle_ = handle;
+    drawEditRow_ = row;
+    drawEditGrab_ = p;
+    drawEditMoved_ = false;
+    drawEditBox_ = {};
+    for (const auto& it : drawEditOrig_)
+    {
+        const auto b = drawingScreenBox (it, row);
+        drawEditBox_ = drawEditBox_.isEmpty () ? b : drawEditBox_.getUnion (b);
+    }
+    repaint ();
+}
+
+std::vector<DrawingItem> SpectralView::transformedDrawings (juce::Point<int> pi) const
+{
+    const auto& row = drawEditRow_;
+    const auto p = pi.toFloat ();
+    const double dur = app.audioEngine ().duration ();
+    const double nyq = app.audioEngine ().sampleRate () * 0.5;
+    // The spectrogram's own edges in this row's pixels: the file's duration,
+    // 0 (1 Hz on a log axis) to Nyquist. Nothing goes past them.
+    const float L = (float) timeToX (0.0), R = (float) timeToX (dur);
+    const float T = (float) row.getY () + (float) freqToY (nyq, row.getHeight ());
+    const float B = (float) row.getY () + (float) freqToY (settings_.logFrequency ? 1.0 : 0.0, row.getHeight ());
+    const auto box = drawEditBox_;
+
+    std::function<juce::Point<float> (juce::Point<float>)> map;
+    float sizeScale = 1.0f;
+    if (drawEdit_ == DrawEdit::move)
+    {
+        float dx = p.x - (float) drawEditGrab_.x, dy = p.y - (float) drawEditGrab_.y;
+        dx = std::max (L - box.getX (), std::min (dx, R - box.getRight ()));
+        dy = std::max (T - box.getY (), std::min (dy, B - box.getBottom ()));
+        map = [dx, dy] (juce::Point<float> q) { return q.translated (dx, dy); };
+    }
+    else
+    {
+        const juce::Point<float> corners[4] { box.getTopLeft (), box.getTopRight (), box.getBottomRight (), box.getBottomLeft () };
+        const auto c = corners[(size_t) std::clamp (drawEditHandle_, 0, 3)];
+        const auto f = corners[(size_t) ((std::clamp (drawEditHandle_, 0, 3) + 2) % 4)];   // the opposite corner stays
+        const juce::Point<float> q (std::clamp (p.x, std::min (L, R), std::max (L, R)), std::clamp (p.y, std::min (T, B), std::max (T, B)));
+        auto scaleOf = [] (float to, float from, float fixed)
+        {
+            if (std::abs (from - fixed) < 1.0f) return 1.0f;
+            float s = (to - fixed) / (from - fixed);
+            if (std::abs (s) < 0.02f) s = s < 0.0f ? -0.02f : 0.02f;   // never flat
+            return s;
+        };
+        const float sx = scaleOf (q.x, c.x, f.x), sy = scaleOf (q.y, c.y, f.y);
+        sizeScale = std::abs (sy);
+        map = [f, sx, sy] (juce::Point<float> v) { return juce::Point<float> (f.x + (v.x - f.x) * sx, f.y + (v.y - f.y) * sy); };
+    }
+
+    auto toScreen = [this, &row] (double t, double fr)
+    { return juce::Point<float> ((float) timeToX (t), (float) row.getY () + (float) freqToY (fr, row.getHeight ())); };
+    auto toData = [this, &row] (juce::Point<float> v)
+    {
+        return app.clampToSpectrogram ({ xToTime ((double) v.x),
+                                         yToFreq (v.y - (float) row.getY (), row.getHeight ()) });
+    };
+    std::vector<DrawingItem> out = drawEditOrig_;
+    for (auto& it : out)
+    {
+        if (it.kind == DrawingItem::Kind::Text)
+        {
+            // A text is its anchor and its size; its extent follows from them.
+            const auto anchor = map (toScreen (it.t0, it.f0));
+            const auto a = toData (anchor);
+            it.t0 = a.first; it.f0 = a.second;
+            it.textSize = std::clamp (it.textSize * sizeScale, 6.0f, 72.0f);
+            double t1 = it.t0, f1 = it.f0;
+            estimateTextExtent ((int) std::lround (anchor.x), (int) std::lround (anchor.y), it.text, it.textSize, t1, f1);
+            it.t1 = std::max (it.t0, t1);
+            it.f1 = std::max (it.f0, f1);
+            continue;
+        }
+        for (auto& pt : it.points)
+            pt = toData (map (toScreen (pt.first, pt.second)));
+        const auto a = toData (map (toScreen (it.t0, it.f0)));
+        const auto b = toData (map (toScreen (it.t1, it.f1)));
+        it.t0 = a.first; it.f0 = a.second;
+        it.t1 = b.first; it.f1 = b.second;
+        it.normaliseBounds ();
+    }
+    return out;
 }
 
 // Tables overlay (Overlay on Spectrogram mode): one curve per visible

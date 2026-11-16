@@ -705,6 +705,7 @@ void Application::activate (int index)
     sourcePlayer.setSource (&d->engine);
     d->engine.setPosition (d->playhead);
     spectralEngine.clearCache();   // tiles are keyed by sample position only
+    selectedDrawings.clear ();     // drawing indices belong to the previous document
 
     if (onActiveDocChanged) onActiveDocChanged ();
 }
@@ -1744,6 +1745,7 @@ void Application::deleteSelectedDrawings (const std::vector<int>& rowsIn)
     for (int r : rows)
         d->drawings.erase (d->drawings.begin () + r);
     d->metaDirty = true;
+    setDrawingSelection ({});   // the indices moved
     if (onDrawingsChanged)
         onDrawingsChanged ();
 }
@@ -1772,6 +1774,126 @@ void Application::setShowAllDrawings (bool on)
     if (showAllDrawings == on) return;
     showAllDrawings = on;
     if (onStateChange) onStateChange ();   // repaints the views + refreshes panels
+}
+
+void Application::setDrawingsHidden (const std::vector<int>& items, bool hidden)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr) return;
+    for (int i : items)
+        if (i >= 0 && i < (int) d->drawings.size ())
+            d->drawings[(size_t) i].hidden = hidden;
+    d->metaDirty = true;
+    if (onDrawingsChanged)
+        onDrawingsChanged ();
+}
+
+void Application::setDrawingSelection (std::vector<int> items)
+{
+    const FileDoc* d = doc ();
+    std::vector<int> sel;
+    if (d != nullptr)
+    {
+        std::vector<int> groups;
+        for (int i : items)
+            if (i >= 0 && i < (int) d->drawings.size ())
+            {
+                sel.push_back (i);
+                if (d->drawings[(size_t) i].group != 0) groups.push_back (d->drawings[(size_t) i].group);
+            }
+        // A group is selected whole.
+        for (int i = 0; i < (int) d->drawings.size (); ++i)
+            if (d->drawings[(size_t) i].group != 0
+                && std::find (groups.begin (), groups.end (), d->drawings[(size_t) i].group) != groups.end ())
+                sel.push_back (i);
+        std::sort (sel.begin (), sel.end ());
+        sel.erase (std::unique (sel.begin (), sel.end ()), sel.end ());
+    }
+    if (sel == selectedDrawings) return;
+    selectedDrawings = std::move (sel);
+    if (onDrawingSelectionChanged) onDrawingSelectionChanged ();
+}
+
+void Application::groupDrawings (const std::vector<int>& items)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr) return;
+    std::vector<int> valid;
+    for (int i : items)
+        if (i >= 0 && i < (int) d->drawings.size ()) valid.push_back (i);
+    if (valid.size () < 2) return;
+    int id = 0;
+    for (const auto& it : d->drawings) id = std::max (id, it.group);
+    ++id;   // a new group, never reusing a live id
+    for (int i : valid) d->drawings[(size_t) i].group = id;
+    d->metaDirty = true;
+    if (onDrawingsChanged) onDrawingsChanged ();
+    setDrawingSelection (valid);
+}
+
+void Application::ungroupDrawings (const std::vector<int>& items)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr) return;
+    std::vector<int> groups;
+    for (int i : items)
+        if (i >= 0 && i < (int) d->drawings.size () && d->drawings[(size_t) i].group != 0)
+            groups.push_back (d->drawings[(size_t) i].group);
+    if (groups.empty ()) return;
+    for (auto& it : d->drawings)
+        if (std::find (groups.begin (), groups.end (), it.group) != groups.end ()) it.group = 0;
+    d->metaDirty = true;
+    if (onDrawingsChanged) onDrawingsChanged ();
+}
+
+std::pair<double, double> Application::clampToSpectrogram (std::pair<double, double> tf) const
+{
+    const FileDoc* d = doc ();
+    if (d == nullptr) return tf;
+    const double dur = d->engine.duration ();
+    const double nyq = d->engine.sampleRate () * 0.5;
+    if (dur > 0.0) tf.first = std::clamp (tf.first, 0.0, dur);
+    if (nyq > 0.0) tf.second = std::clamp (tf.second, 0.0, nyq);
+    return tf;
+}
+
+void Application::transformDrawings (const std::vector<int>& items, const std::vector<DrawingItem>& updated,
+                                     const juce::String& description)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr || items.size () != updated.size ()) return;
+    auto next = d->drawings;
+    bool changed = false;
+    for (size_t k = 0; k < items.size (); ++k)
+    {
+        const int i = items[k];
+        if (i < 0 || i >= (int) next.size ()) continue;
+        DrawingItem it = updated[k];
+        // Inside the spectrogram, point by point (the gestures already keep
+        // the box inside; this catches rounding and anything else).
+        for (auto& p : it.points) p = clampToSpectrogram (p);
+        std::tie (it.t0, it.f0) = clampToSpectrogram ({ it.t0, it.f0 });
+        std::tie (it.t1, it.f1) = clampToSpectrogram ({ it.t1, it.f1 });
+        it.textSize = std::clamp (it.textSize, 6.0f, 72.0f);
+        it.normaliseBounds ();
+        if (!(it.t0 == next[(size_t) i].t0 && it.t1 == next[(size_t) i].t1 && it.f0 == next[(size_t) i].f0
+              && it.f1 == next[(size_t) i].f1 && it.points == next[(size_t) i].points
+              && it.textSize == next[(size_t) i].textSize))
+            changed = true;
+        next[(size_t) i] = it;
+    }
+    if (!changed) return;
+
+    // One undoable step that changes only the drawings.
+    Patch p;
+    p.description = description;
+    p.hasDrawingState = true;
+    p.oldDrawings = d->drawings;
+    p.newDrawings = next;
+    d->drawings = std::move (next);
+    d->undo.record (std::move (p));
+    d->metaDirty = true;
+    if (onDrawingsChanged) onDrawingsChanged ();
 }
 
 void Application::toggleDrawingHidden (int row)
@@ -4826,7 +4948,8 @@ void Application::undoSteps (int n)
             control ().noteClearReason (d->id, "undo failed");   // journaled by pollDocuments
             break;
         }
-        if (p.hasSideState || p.hasAxisState || p.hasSessionState) restorePatchSideState (d, p, false);
+        if (p.hasSideState || p.hasAxisState || p.hasSessionState || p.hasDrawingState)
+            restorePatchSideState (d, p, false);
         if (!p.chainedToPrevious)   // a chained step goes back with the one before it
             ++done;
     }
@@ -4861,7 +4984,8 @@ void Application::redoSteps (int n)
             control ().noteClearReason (d->id, "redo failed");
             break;
         }
-        if (p.hasSideState || p.hasAxisState || p.hasSessionState) restorePatchSideState (d, p, true);
+        if (p.hasSideState || p.hasAxisState || p.hasSessionState || p.hasDrawingState)
+            restorePatchSideState (d, p, true);
         // A step chained to this one comes back with it.
         const bool nextChained = d->undo.canRedo () && d->undo.redoAt (d->undo.redoSize () - 1).chainedToPrevious;
         if (!nextChained)
@@ -4915,6 +5039,13 @@ void Application::restorePatchSideState (FileDoc* d, const Patch& p, bool isRedo
     {
         d->markers.restore (isRedo ? p.newMarkers : p.oldMarkers);
         d->savedSelections = isRedo ? p.newSavedSel : p.oldSavedSel;
+    }
+
+    if (p.hasDrawingState)
+    {
+        // A drawing moved or resized in the spectrogram.
+        d->drawings = isRedo ? p.newDrawings : p.oldDrawings;
+        if (onDrawingsChanged) onDrawingsChanged ();
     }
 
     if (p.hasSessionState)

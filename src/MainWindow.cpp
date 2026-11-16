@@ -632,6 +632,12 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (drawingPanel) drawingPanel->refresh();
         if (spectralView) spectralView->repaint();
     };
+    // Drawings picked in the spectrogram or the panel: both show it.
+    app.onDrawingSelectionChanged = [this]
+    {
+        if (drawingPanel) drawingPanel->syncSelectionFromApp();
+        if (spectralView) spectralView->repaint();
+    };
 
     // Tables panel <-> views wiring: refresh the list, repaint overlays and
     // relayout when the dedicated track appears/disappears.
@@ -865,6 +871,7 @@ MainWindow::~MainWindow()
     app.onSetTimeWindow = nullptr;
     app.onArmNewDrawing = nullptr;
     app.onDrawingsChanged = nullptr;
+    app.onDrawingSelectionChanged = nullptr;
     app.onTablesChanged = nullptr;
     app.onArmTableAlignClick = nullptr;
     app.onSetSpectralFreqRange = nullptr;
@@ -10126,7 +10133,7 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
     if (key == juce::KeyPress ('g', juce::ModifierKeys::commandModifier, 0)) { showGoToTimeDialog (); return true; }
 
     // Drawing tools (ignored while a text editor has focus): t = Text,
-    // a = Arrow, r = Rectangle, d = Free Drawing. Esc cancels an armed or
+    // a = Arrow, r = Rectangle, d = Free Drawing, o = Oval. Esc cancels an armed or
     // in-progress creation.
     if (!key.getModifiers().isCommandDown() && !key.getModifiers().isAltDown())
     {
@@ -10144,9 +10151,17 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
                 case 'a': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Arrow); return true;
                 case 'r': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Rectangle); return true;
                 case 'd': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Freehand); return true;
+                case 'o': if (spectralView) spectralView->startPendingDraw (DrawingItem::Kind::Ellipse); return true;
                 default: break;
             }
         }
+    }
+    // Esc drops the drawing selection (its box and handles) first.
+    if (key.getKeyCode() == juce::KeyPress::escapeKey && !app.selectedDrawings.empty ()
+        && spectralView != nullptr && !spectralView->isPendingDraw () && !spectralView->isDrawingNew ())
+    {
+        app.setDrawingSelection ({});
+        return true;
     }
     if (key.getKeyCode() == juce::KeyPress::escapeKey && spectralView != nullptr
         && (spectralView->isPendingDraw () || spectralView->isDrawingNew ()))

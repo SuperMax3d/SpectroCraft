@@ -670,6 +670,31 @@ public:
     /** Toggles one item's per-element visibility (the eye icon in the
         Drawing panel list). The state persists with the file metadata. */
     void toggleDrawingHidden (int row);
+    /** Shows or hides the drawings `items` (a group's eye). */
+    void setDrawingsHidden (const std::vector<int>& items, bool hidden);
+
+    /** Drawings selected in the Drawing panel or by a click in the
+        spectrogram (indices into the active document's list), always whole
+        groups. The spectrogram draws their box with four handles: drag a
+        handle to resize, drag inside to move. */
+    std::vector<int> selectedDrawings;
+    /** Sets the selection, extended to every member of the groups it
+        touches; calls onDrawingSelectionChanged when it changed. */
+    void setDrawingSelection (std::vector<int> items);
+    std::function<void()> onDrawingSelectionChanged;
+    /** Drawing panel > Group: the drawings `items` (two or more) become one
+        group (they are selected, moved and resized together). Ungroup frees
+        every group the items belong to. */
+    void groupDrawings (const std::vector<int>& items);
+    void ungroupDrawings (const std::vector<int>& items);
+    /** A move or resize from the spectrogram: drawings `items` become
+        `updated` (same order), kept inside the spectrogram (the file's
+        duration, 0 to Nyquist). One undoable step. */
+    void transformDrawings (const std::vector<int>& items, const std::vector<DrawingItem>& updated,
+                            const juce::String& description);
+    /** Moves a (time, frequency) point inside the spectrogram: [0, duration]
+        x [0, Nyquist]. */
+    std::pair<double, double> clampToSpectrogram (std::pair<double, double> tf) const;
 
     // ---- Tables (Tables panel) --------------------------------------------
     /** Imports CSV text as a new table on the active document (name = file

@@ -107,6 +107,9 @@ struct Patch
     juce::Range<double> oldSel { 0, 0 }, newSel { 0, 0 };
     SpectralSelection oldSpecSel, newSpecSel;
     std::vector<DrawingItem> oldDrawings, newDrawings;
+    // A drawing moved or resized in the spectrogram: only the drawings change
+    // (no audio, no playhead or selection), restored on undo/redo.
+    bool hasDrawingState = false;
     std::vector<ScttSegment> oldScttSegs, newScttSegs;
     // Parameter tables: their sample rows are warped by the same edits
     // (stretch / delete / insert), so undo/redo must restore them too.
