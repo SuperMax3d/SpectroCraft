@@ -370,7 +370,8 @@ private:
     // (inside the plot while moving; clamped to it while dragging).
     void reportHoverTime (const juce::MouseEvent& e, bool dragging);
     Application& app;   // audio data read live via app.audioEngine() (active doc)
-    sc::session::MoveGesture sessionMove_;   // Edit > Session > Move Files drag
+    sc::session::MoveGesture sessionMove_;   // Selection > Move Files drag
+    sc::session::TrimGesture sessionTrim_;   // ... or an edge of a file: trims it
 
     // New-drawing creation state (armed by startPendingDraw()).
     bool havePendingDraw_ = false;

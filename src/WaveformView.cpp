@@ -86,13 +86,14 @@ void WaveformView::resized() { dirty = true; }
 
 // Build and show the right-click context menu (zoom + edit actions).
 // Called from a mouse handler, so withMousePosition() lands exactly where clicked.
-static void showViewContextMenu (Application& app,
+static void showViewContextMenu (Application& app, int sessionClip, int sessionLane,
                                  const std::function<void(int)>& onAction)
 {
     if (!onAction) return;
 
     juce::PopupMenu m;
     using enum ContextMenuIDs;
+    app.addSessionContextItems (m, sessionClip, sessionLane);   // Add Track, Remove File / Track
     const bool hasSel = !app.selection.isEmpty();
     m.addItem (CtxZoomToSelection, "Zoom to Selection", hasSel, false);
     m.addItem (CtxZoomOutFull,     "Zoom Out Full",
@@ -128,8 +129,7 @@ static void showViewContextMenu (Application& app,
 
 juce::String WaveformView::channelLabel (int ch) const
 {
-    return app.audioEngine().numChannels() == 2 ? juce::String (ch == 0 ? "L" : "R")
-                                                : juce::String (ch + 1);
+    return app.channelName (ch);   // per track in a session (L, R, L, R)
 }
 
 juce::Rectangle<int> WaveformView::channelLabelBounds (int ch, int centreY) const
@@ -213,22 +213,36 @@ void WaveformView::paintOverChildren (juce::Graphics& g)
     if (d == nullptr || !d->session.active ())
         return;
     const auto geo = sessionGeometry ();
-    sc::session::paintBorders (g, d->session, geo);
+    if (app.sessionBordersShown ())
+        sc::session::paintBorders (g, d->session, geo);
     sessionMove_.paint (g, d->session, geo);
+    sessionTrim_.paint (g, d->session, geo);
 }
 
 void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
-    // Edit > Session > Move Files (issue #21): a left drag on a file moves it.
-    if (app.sessionMoveTool && e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
-        if (const FileDoc* d = app.doc(); d != nullptr
-            && sessionMove_.begin (d->session, sessionGeometry(), e.getPosition()))
+    // Sessions (issue #21): with Move Files (V) a left drag on a file moves
+    // it; a drag from a file's name tag moves it whatever the tool.
+    if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
+        if (const FileDoc* d = app.doc(); d != nullptr && d->session.active())
         {
-            dragMode = DragMode::None;
-            repaint();
-            return;
+            const auto geo = sessionGeometry();
+            const bool onTag = app.sessionBordersShown()
+                               && sc::session::clipAtNameTag (d->session, geo, e.getPosition()) >= 0;
+            if (app.sessionMoveTool && sessionTrim_.begin (d->session, geo, e.getPosition()))
+            {
+                dragMode = DragMode::None;
+                repaint();
+                return;
+            }
+            if ((app.sessionMoveTool || onTag) && sessionMove_.begin (d->session, geo, e.getPosition()))
+            {
+                dragMode = DragMode::None;
+                repaint();
+                return;
+            }
         }
 
     // A click on a channel number mutes/unmutes that channel; Ctrl+click
@@ -406,10 +420,19 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
     reportHoverTime (e, true);
+    if (sessionTrim_.active())
+    {
+        if (const FileDoc* d = app.doc())
+            sessionTrim_.drag (d->session, sessionGeometry(), e.getPosition(),
+                               !e.mods.isShiftDown(), app.playhead);   // snaps unless Shift
+        repaint();
+        return;
+    }
     if (sessionMove_.active())
     {
         if (const FileDoc* d = app.doc())
-            sessionMove_.drag (d->session, sessionGeometry(), e.getPosition(), e.mods.isShiftDown(), app.playhead);
+            sessionMove_.drag (d->session, sessionGeometry(), e.getPosition(),
+                               !e.mods.isShiftDown(), app.playhead);   // snaps unless Shift
         repaint();
         return;
     }
@@ -503,11 +526,19 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 
 void WaveformView::mouseUp (const juce::MouseEvent&)
 {
+    if (sessionTrim_.active())
+    {
+        const auto t = sessionTrim_.end();
+        repaint();
+        if (t.clip >= 1 && t.valid)
+            app.trimSessionFile (t.clip, t.offset, t.length);
+        return;
+    }
     if (sessionMove_.active())
     {
         const auto t = sessionMove_.end();
         repaint();
-        if (t.clip >= 1 && t.valid)
+        if (t.clip >= 0 && t.valid)
             app.moveSessionFile (t.clip, t.lane, t.offset);
         return;
     }
@@ -523,11 +554,21 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
             // external action callback, or a local axis reset. (Headless test
             // views have neither and must not enter a modal loop.)
             if (onAxis || onContextAction)
-                showViewContextMenu (app, [this, onAxis] (int id)
+            {
+                int sClip = -1, sLane = -1;
+                if (const FileDoc* d = app.doc(); d != nullptr && d->session.active())
+                {
+                    const auto geo = sessionGeometry();
+                    sClip = sc::session::clipAtPoint (d->session, geo, { dragStartX, dragStartY });
+                    sLane = sc::session::laneAtY (d->session, geo, dragStartY);
+                }
+                showViewContextMenu (app, sClip, sLane, [this, onAxis, sClip, sLane] (int id)
                 {
                     if (id == CtxZoomOutFull && onAxis) { resetVerticalZoom(); return; }
+                    if (app.runSessionContextItem (id, sClip, sLane)) return;
                     if (onContextAction) onContextAction (id);
                 });
+            }
         }
         else
         {
@@ -639,6 +680,13 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
 void WaveformView::mouseMove (const juce::MouseEvent& e)
 {
     reportHoverTime (e, false);
+    // Move Files: an edge of a file trims it - say so with the cursor.
+    {
+        const FileDoc* d = app.doc();
+        const bool onEdge = app.sessionMoveTool && d != nullptr && d->session.active()
+                            && sc::session::TrimGesture::edgeAt (d->session, sessionGeometry(), e.getPosition()) >= 1;
+        setMouseCursor (onEdge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    }
     updateHoverSample (e.x, e.y);
 
     if (!onCursorInfo) return;
@@ -679,8 +727,7 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
     const double value = (ampPx > 1e-6)
         ? vOffset + ((double) center - e.y) / ampPx : 0.0;
 
-    const juce::String lab = (chans == 2) ? (ch == 0 ? "L" : "R")
-                                          : juce::String (ch + 1);
+    const juce::String lab = app.channelName (ch);
 
     // Time part follows the active time-axis scale mode.
     juce::String tText;

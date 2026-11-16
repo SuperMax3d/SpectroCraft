@@ -939,12 +939,15 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 
 ## Sessions (experimental)
 
-**Edit > Session (experimental)** puts other WAV files on the timeline of the
-open file, one after the other or in parallel lanes. They are referenced from
-the open file's metadata, can be moved (with Shift snapping) and outlined, and
-are saved back to their own files when the open file is saved. See
-[sessions.md](sessions.md) for the details and the limits of this first
-version.
+Drop other WAV files on the tracks of the open file to put them on its
+timeline, where they were dropped; right-click **Add Track** gives them tracks
+of their own. They are referenced from the open file's metadata, can be moved
+(**Selection > Move Files**, V, or by dragging their name; they snap unless
+Shift is held), outlined (**View > Show File Borders**) and removed
+(right-click **Remove File**), and are saved back to their own files when the
+open file is saved. Channels are named and played by track (two stereo tracks:
+L, R, L, R). See [sessions.md](sessions.md) for the details and the limits of
+this version.
 
 ---
 

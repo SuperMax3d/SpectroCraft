@@ -56,6 +56,12 @@ public:
         decide on re-renders even when neither the length nor the time window
         changed (an in-place edit, loop-mode recording). */
     int64_t contentVersion() const { return contentVer.load (); }
+    /** contentVersion() of the last change that was NOT a pure append
+        (appendSamples): every edit, undo/redo, whole-file replacement,
+        in-place overwrite, load. Content cached before it is stale whatever
+        the length did; a longer document is not proof of an append (moving
+        a session file to the end grows the composite too). */
+    int64_t lastRewriteVersion() const { return rewriteVer.load (); }
     double sampleRate() const { return rate; }
     double duration() const { return durationSecs; }
 
@@ -118,6 +124,17 @@ public:
     }
     void setMutedChannels (std::vector<bool> muted);
     const std::vector<bool>& mutedChannels() const noexcept { return muted_; }
+
+    /** Session playback routing (issue #21): each channel's index inside its
+        track and that track's channel count. A channel then plays on output
+        index % numOutputs (two stereo tracks: L, R, L, R - both lefts on the
+        left output), and a mono track on every output; the fold gain counts
+        the channels each output receives. Empty (the default) = the
+        document's own routing below. Set by FileDoc from the session
+        layout; read by the audio thread through a snapshot. */
+    struct ChannelRoute { int index = 0; int trackChannels = 1; };
+    void setPlaybackRoutes (std::vector<ChannelRoute> routes);
+    std::vector<ChannelRoute> playbackRoutes() const;
 
     /** Playback routing: channel ch plays on output ch, and when the device
         has fewer outputs than the file has channels, the extra ones fold
@@ -363,11 +380,19 @@ public:
     void setBkdkForSave (const std::string* raw) { saveBkdkPayload = raw; }
 
     /** Session composite (issue #21): when channels > 0, every save writes only
-        channels [0, channels) over samples [0, length) - the main file's own
-        region - whichever path asks for the save (Save, Save As, batch, AI
-        control). 0 = the whole content (the default). */
-    void setSaveRegion (int channels, int64_t length) { saveRegionChannels = channels; saveRegionLength = length; }
+        channels [0, channels) over samples [start, start + length) - the main
+        file's own region, wherever it sits on the timeline - whichever path
+        asks for the save (Save, Save As, batch, AI control); the markers'
+        RIFF cues are written in the file's own time. 0 = the whole content
+        (the default). */
+    void setSaveRegion (int channels, int64_t start, int64_t length)
+    {
+        saveRegionChannels = channels;
+        saveRegionStart = std::max<int64_t> (0, start);
+        saveRegionLength = length;
+    }
     int saveRegionChannelCount() const noexcept { return saveRegionChannels; }
+    int64_t saveRegionStartSample() const noexcept { return saveRegionStart; }
     int64_t saveRegionSampleCount() const noexcept { return saveRegionLength; }
 
     // ---- Waveform overview mipmaps (min/max pyramid) ----
@@ -449,6 +474,8 @@ private:
     int nchans = 0;
     int64_t totalSamples = 0;
     std::atomic<int64_t> contentVer{ 0 };   // see contentVersion()
+    std::atomic<int64_t> rewriteVer{ 0 };   // see lastRewriteVersion()
+    void bumpRewrite() noexcept { rewriteVer.store (contentVer.fetch_add (1) + 1); }
     double rate = 44100.0;
     double durationSecs = 0.0;
     bool hasFile = false;
@@ -482,10 +509,13 @@ private:
     std::vector<bool> muted_;
     mutable std::mutex muteMutex;
     std::shared_ptr<const std::vector<uint8_t>> mutedForAudio_;
+    std::shared_ptr<const std::vector<ChannelRoute>> routesForAudio_;   // under muteMutex
+    std::vector<int> routeCount_;   // audio thread: channels per output (grown, never shrunk)
     std::shared_ptr<const std::vector<uint8_t>> mutesForAudio() const;   // the audio thread's snapshot
 
     ::UndoManager* undo = nullptr;
     int saveRegionChannels = 0;      // see setSaveRegion()
+    int64_t saveRegionStart = 0;
     int64_t saveRegionLength = 0;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks
     const std::string* saveScttJson = nullptr;          // for the WAV SCTT chunk

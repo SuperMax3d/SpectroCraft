@@ -229,6 +229,7 @@ void Application::loadSettings ()
     settings.exportMarkers    = recentStore->getIntValue ("exp_markers", 0) != 0;
     settings.exportSelections = recentStore->getIntValue ("exp_selections", 0) != 0;
     settings.exportDrawings   = recentStore->getIntValue ("exp_drawings", 0) != 0;
+    settings.sessionShowBorders = recentStore->getIntValue ("session_borders", 1) != 0;
     settings.exportFilenameHeader = recentStore->getIntValue ("exp_filename_header", 0) != 0;
     // Stem Separation (Effects menu).
     settings.acppModel          = recentStore->getValue ("acpp_model", juce::String ());
@@ -337,6 +338,7 @@ void Application::saveSettings ()
     recentStore->setValue ("exp_markers", settings.exportMarkers ? 1 : 0);
     recentStore->setValue ("exp_selections", settings.exportSelections ? 1 : 0);
     recentStore->setValue ("exp_drawings", settings.exportDrawings ? 1 : 0);
+    recentStore->setValue ("session_borders", settings.sessionShowBorders ? 1 : 0);
     recentStore->setValue ("exp_filename_header", settings.exportFilenameHeader ? 1 : 0);
     recentStore->setValue ("acpp_model", settings.acppModel);
     recentStore->setValue ("acpp_backend", settings.acppBackend);
@@ -419,6 +421,8 @@ uint64_t Application::beginSave (FileDoc& d, const juce::File& file)
     // the normal save, limited to its own region by the engine.
     if (d.session.active ())
     {
+        if (&d == doc ())
+            syncLinkedSessionFiles ();   // copies of one file are written identical
         std::string err;
         if (!saveSessionFiles (d, &err) && onSessionSaveProblem)
             onSessionSaveProblem (juce::String (err));
@@ -1550,6 +1554,7 @@ void Application::setSelection (juce::Range<double> s, bool snapEdges)
 void Application::setSelectionTool (SpectralSelMode m)
 {
     selMode = m;
+    sessionMoveTool = false;   // a selection tool replaces Move Files (V)
     // Leaving the spectral tools drops any active spectral selection: the time
     // range is what Time Range mode operates on, and keeping stale shapes
     // around would surprise the next effect.
@@ -4822,7 +4827,8 @@ void Application::undoSteps (int n)
             break;
         }
         if (p.hasSideState || p.hasAxisState || p.hasSessionState) restorePatchSideState (d, p, false);
-        ++done;
+        if (!p.chainedToPrevious)   // a chained step goes back with the one before it
+            ++done;
     }
     if (done > 0)
     {
@@ -4856,7 +4862,10 @@ void Application::redoSteps (int n)
             break;
         }
         if (p.hasSideState || p.hasAxisState || p.hasSessionState) restorePatchSideState (d, p, true);
-        ++done;
+        // A step chained to this one comes back with it.
+        const bool nextChained = d->undo.canRedo () && d->undo.redoAt (d->undo.redoSize () - 1).chainedToPrevious;
+        if (!nextChained)
+            ++done;
     }
     if (done > 0)
     {
@@ -5155,10 +5164,10 @@ namespace
         return out;
     }
 
-    // A file's audio at its own rate; refused when that rate is not `rate`
-    // (the composite has one rate and every file is written back as is).
+    // A file's audio at the session's rate: resampled when it is at another
+    // one (a file converted when it was added and not saved since).
     bool readSessionFile (const juce::File& f, double rate, std::vector<std::vector<float>>& data,
-                          std::string& err)
+                          std::string& err, bool* resampled = nullptr)
     {
         sc::MergeSource src;
         if (!sc::readMergeSource (f, 0.0, src))
@@ -5166,29 +5175,25 @@ namespace
             err = ("Could not read " + f.getFullPathName ()).toStdString ();
             return false;
         }
-        if (std::abs (src.rate - rate) > 1e-6 * rate)
+        const bool other = std::abs (src.rate - rate) > 1e-6 * rate;
+        if (resampled != nullptr) *resampled = other;
+        if (other && !sc::resampleMergeSource (src, rate))
         {
-            err = (f.getFileName () + " is at " + juce::String (src.rate, 0) + " Hz, the session at "
-                   + juce::String (rate, 0) + " Hz: resample it first.").toStdString ();
+            err = ("Could not resample " + f.getFileName () + " to " + juce::String (rate, 0) + " Hz.").toStdString ();
             return false;
         }
         data = std::move (src.data);
         return true;
     }
 
-    // Lanes left without any file (after a move or a removal) are dropped,
-    // except the main file's: their channels would only carry silence.
-    void dropEmptyLanes (sc::session::Session& s)
+    // Removes track `lane` (other than the main file's) and renumbers the
+    // tracks below it.
+    void eraseLane (sc::session::Session& s, int lane)
     {
-        for (int lane = s.numLanes () - 1; lane >= 1; --lane)
-        {
-            const bool used = std::any_of (s.clips.begin (), s.clips.end (),
-                                           [lane] (const sc::session::Clip& c) { return c.lane == lane; });
-            if (used) continue;
-            s.laneChannels.erase (s.laneChannels.begin () + lane);
-            for (auto& c : s.clips)
-                if (c.lane > lane) --c.lane;
-        }
+        if (lane < 1 || lane >= s.numLanes ()) return;
+        s.laneChannels.erase (s.laneChannels.begin () + lane);
+        for (auto& c : s.clips)
+            if (c.lane > lane) --c.lane;
     }
 
     sc::session::Session mainOnlySession (const FileDoc& d)
@@ -5208,7 +5213,8 @@ namespace
 // undoable step that carries the audio and both layouts.
 static bool applySessionLayout (FileDoc& d, sc::session::Session next,
                                 const std::vector<std::vector<std::vector<float>>>& data,
-                                const juce::String& description, std::string* errOut)
+                                const juce::String& description, std::string* errOut,
+                                double newRate = 0.0)
 {
     auto fail = [errOut] (const juce::String& m) { if (errOut != nullptr) *errOut = m.toStdString (); return false; };
     auto& eng = d.engine;
@@ -5221,7 +5227,7 @@ static bool applySessionLayout (FileDoc& d, sc::session::Session next,
     const auto markersNow = d.markers.markers ();
     const auto savedSelNow = d.savedSelections;
     const auto before = d.session;
-    if (!eng.replaceWholeFileUndoable (composite, description))
+    if (!eng.replaceWholeFileUndoable (composite, description, newRate))
         return fail ("Could not rebuild the session's audio.");
 
     Patch& p = d.undo.lastRecorded ();
@@ -5240,63 +5246,315 @@ static bool applySessionLayout (FileDoc& d, sc::session::Session next,
     return true;
 }
 
-bool Application::addSessionFile (const juce::File& file, bool parallel, std::string* errOut)
+namespace
+{
+    // Rows of zeros appended so `rows` has `channels` channels (silent ones).
+    void padChannels (std::vector<std::vector<float>>& rows, int channels)
+    {
+        const size_t n = rows.empty () ? 0 : rows[0].size ();
+        while ((int) rows.size () < channels)
+            rows.emplace_back (n, 0.0f);
+    }
+
+    sc::session::HiddenAudio padHidden (const sc::session::HiddenAudio& h, int channels)
+    {
+        if (h == nullptr || (int) h->size () >= channels) return h;
+        auto rows = *h;
+        padChannels (rows, channels);
+        return std::make_shared<const std::vector<std::vector<float>>> (std::move (rows));
+    }
+
+    bool resampleRows (std::vector<std::vector<float>>& rows, double from, double to)
+    {
+        if (rows.empty () || rows[0].empty () || std::abs (from - to) <= 1e-9 * to) return true;
+        juce::AudioBuffer<float> in ((int) rows.size (), (int) rows[0].size ()), out;
+        for (int ch = 0; ch < in.getNumChannels (); ++ch)
+            std::copy (rows[(size_t) ch].begin (), rows[(size_t) ch].end (), in.getWritePointer (ch));
+        if (!sc::Resampler::resample (in, from, to, out))
+            return false;
+        for (int ch = 0; ch < out.getNumChannels (); ++ch)
+            rows[(size_t) ch].assign (out.getReadPointer (ch), out.getReadPointer (ch) + out.getNumSamples ());
+        return true;
+    }
+
+    // The whole session at another sample rate (PR #24 review: a file at a
+    // higher rate takes the session up to it): every file - hidden parts
+    // included - is resampled, and every place on the timeline scaled, the
+    // boundaries rounded alike so touching files still touch.
+    bool resampleSession (sc::session::Session& s, std::vector<std::vector<std::vector<float>>>& data,
+                          double from, double to)
+    {
+        const double k = to / from;
+        auto at = [k] (int64_t t) { return (int64_t) std::llround ((double) t * k); };
+        for (size_t i = 0; i < s.clips.size () && i < data.size (); ++i)
+        {
+            auto& c = s.clips[i];
+            auto whole = sc::session::joinTrimmed (c, data[i]);
+            if (!resampleRows (whole, from, to))
+                return false;
+            const int64_t fs = at (c.fileStart ()), off = at (c.offset), end = std::max (at (c.end ()), off + 1),
+                          fe = std::max (at (c.fileEnd ()), end);
+            for (auto& row : whole)
+                row.resize ((size_t) (fe - fs), 0.0f);
+            std::vector<std::vector<float>> visible;
+            if (!sc::session::splitTrimmed (whole, off - fs, fe - end, visible, c.head, c.tail))
+                return false;
+            c.headLength = off - fs;
+            c.tailLength = fe - end;
+            c.offset = off;
+            c.length = end - off;
+            data[i] = std::move (visible);
+        }
+        return true;
+    }
+}
+
+bool Application::addSessionFilesAt (const std::vector<juce::File>& files, int lane, int64_t offset,
+                                     std::string* errOut)
 {
     auto fail = [errOut] (const juce::String& m) { if (errOut != nullptr) *errOut = m.toStdString (); return false; };
     FileDoc* d = doc ();
     if (d == nullptr || !d->engine.isFileLoaded ())
         return fail ("No file is open.");
-    if (!file.existsAsFile ())
-        return fail ("The file does not exist.");
-    if (file == d->file || file == d->engine.getFile ())
-        return fail ("This is the main file of the session.");
+    if (files.empty ())
+        return fail ("No file to add.");
     if (!d->session.active ())
         d->session = mainOnlySession (*d);
-    for (const auto& c : d->session.clips)
-        if (c.file == file)
-            return fail (file.getFileName () + " is already in the session.");
-
-    std::vector<std::vector<float>> fileData;
-    std::string err;
-    if (!readSessionFile (file, d->engine.sampleRate (), fileData, err))
-        return fail (juce::String (err));
-    if (fileData.empty () || fileData[0].empty ())
-        return fail (file.getFileName () + " holds no audio.");
 
     auto next = d->session;
-    sc::session::Clip c;
-    c.file = file;
-    c.length = (int64_t) fileData[0].size ();
-    const int nch = (int) fileData.size ();
-    if (parallel)
-    {
-        next.laneChannels.push_back (nch);
-        c.lane = next.numLanes () - 1;
-        c.offset = 0;
-    }
-    else
-    {
-        if (nch != next.laneChannels[0])
-            return fail (file.getFileName () + " has " + juce::String (nch) + " channel(s), the main file "
-                         + juce::String (next.laneChannels[0]) + ": add it in parallel instead.");
-        c.lane = 0;
-        for (const auto& o : next.clips)
-            if (o.lane == 0) c.offset = std::max (c.offset, o.end ());
-    }
-    next.clips.push_back (c);
-
     auto data = extractSessionClips (*d);
-    data.push_back (std::move (fileData));
+    const int firstNew = (int) next.clips.size ();
+    const double rate0 = d->engine.sampleRate ();
+
+    // 1) Read the files at their own rates. A file already in the session is
+    //    another copy of it, with its content as it is now (unsaved edits
+    //    included): the copies stay identical.
+    struct Incoming { juce::File file; std::vector<std::vector<float>> audio; double rate = 0.0; int copyOf = -1; };
+    std::vector<Incoming> in;
+    double target = rate0;
+    for (const auto& file : files)
+    {
+        if (!file.existsAsFile ())
+            return fail (file.getFullPathName () + " does not exist.");
+        if (file == d->file || file == d->engine.getFile ())
+            return fail (file.getFileName () + " is the main file of the session.");
+        Incoming f;
+        f.file = file;
+        for (int j = 1; j < (int) next.clips.size (); ++j)
+            if (next.clips[(size_t) j].file == file) { f.copyOf = j; break; }
+        if (f.copyOf < 0)
+        {
+            sc::MergeSource src;
+            if (!sc::readMergeSource (file, 0.0, src))
+                return fail ("Could not read " + file.getFullPathName ());
+            if (src.data.empty () || src.data[0].empty ())
+                return fail (file.getFileName () + " holds no audio.");
+            f.audio = std::move (src.data);
+            f.rate = src.rate;
+            target = std::max (target, src.rate);
+        }
+        in.push_back (std::move (f));
+    }
+
+    // 2) The conversions this takes - always to the higher rate and the
+    //    larger channel count, new channels silent - for the user to confirm.
+    const bool sessionUp = target > rate0 * (1.0 + 1e-9);
+    juce::StringArray notes;
+    if (sessionUp)
+        notes.add ("The session goes to " + juce::String (target, 0) + " Hz (it is at " + juce::String (rate0, 0)
+                   + " Hz): every file of it is resampled, the main file included.");
+    for (const auto& f : in)
+        if (f.copyOf < 0 && f.rate < target * (1.0 - 1e-9))
+            notes.add (f.file.getFileName () + " (" + juce::String (f.rate, 0) + " Hz) is resampled to "
+                       + juce::String (target, 0) + " Hz.");
+    {
+        bool fresh = lane < 0 || lane >= next.numLanes () || next.laneEmpty (lane);
+        int laneCh = (lane >= 0 && lane < next.numLanes ()) ? next.laneChannels[(size_t) lane] : 0;
+        for (const auto& f : in)
+        {
+            const int nch = f.copyOf >= 0 ? next.laneChannels[(size_t) next.clips[(size_t) f.copyOf].lane]
+                                          : (int) f.audio.size ();
+            if (fresh) { laneCh = nch; fresh = false; continue; }
+            if (nch < laneCh)
+                notes.add (f.file.getFileName () + " has " + juce::String (nch) + " channel(s), the track "
+                           + juce::String (laneCh) + ": it gets " + juce::String (laneCh - nch) + " silent channel(s).");
+            else if (nch > laneCh)
+                notes.add (f.file.getFileName () + " has " + juce::String (nch) + " channels, the track "
+                           + juce::String (laneCh) + ": the track's files get " + juce::String (nch - laneCh)
+                           + " silent channel(s).");
+            laneCh = std::max (laneCh, nch);
+        }
+    }
+    if (!notes.isEmpty () && onConfirmSessionConversion && !onConfirmSessionConversion (notes.joinIntoString ("\n")))
+        return fail (notes.joinIntoString (" ") + " Cancelled.");
+
+    // 3) Convert: the session up to the new rate, the new files up to it.
+    if (sessionUp && !resampleSession (next, data, rate0, target))
+        return fail ("Could not resample the session.");
+    for (auto& f : in)
+        if (f.copyOf < 0 && !resampleRows (f.audio, f.rate, target))
+            return fail ("Could not resample " + f.file.getFileName () + ".");
+
+    // 4) Place them.
+    bool newLane = lane < 0 || lane >= next.numLanes ();
+    int64_t at = (int64_t) std::llround ((double) std::max<int64_t> (0, offset) * target / rate0);
+    std::vector<bool> converted;
+    for (auto& f : in)
+    {
+        auto fileData = f.copyOf >= 0 ? sc::session::joinTrimmed (next.clips[(size_t) f.copyOf], data[(size_t) f.copyOf])
+                                      : std::move (f.audio);
+        bool conv = f.copyOf < 0 && f.rate < target * (1.0 - 1e-9);
+        const int nch = (int) fileData.size ();
+        if (newLane)
+        {
+            next.laneChannels.push_back (nch);
+            lane = next.numLanes () - 1;
+            newLane = false;
+        }
+        else if (next.laneEmpty (lane))
+            next.laneChannels[(size_t) lane] = nch;   // an empty track takes the file's channels
+        else if (nch < next.laneChannels[(size_t) lane])
+        {
+            padChannels (fileData, next.laneChannels[(size_t) lane]);   // silent extra channels
+            conv = true;
+        }
+        else if (nch > next.laneChannels[(size_t) lane])
+        {
+            // The track widens: its files get silent channels too.
+            for (int j = 0; j < (int) next.clips.size (); ++j)
+            {
+                auto& o = next.clips[(size_t) j];
+                if (o.lane != lane) continue;
+                padChannels (data[(size_t) j], nch);
+                o.head = padHidden (o.head, nch);
+                o.tail = padHidden (o.tail, nch);
+            }
+            next.laneChannels[(size_t) lane] = nch;
+        }
+
+        sc::session::Clip c;
+        c.file = f.file;
+        c.lane = lane;
+        c.length = (int64_t) fileData[0].size ();
+        if (f.copyOf >= 0)
+            c.savedHash = next.clips[(size_t) f.copyOf].savedHash;   // the same file on disk
+        next.clips.push_back (c);
+        const int idx = (int) next.clips.size () - 1;
+        // On another file: in front of it (the later files shift) or after it.
+        next = sc::session::placeWithInsert (next, idx, lane, at);
+        at = next.clips[(size_t) idx].end ();
+        data.push_back (std::move (fileData));
+        converted.push_back (conv);
+    }
+
+    const juce::String what = files.size () == 1 ? files.front ().getFileName ()
+                                                 : juce::String ((int) files.size ()) + " files";
     const int chBefore = d->engine.numChannels ();
-    if (!applySessionLayout (*d, next, data, "Add " + file.getFileName () + (parallel ? " in parallel" : " after"), errOut))
+    const auto mainBefore = d->session.clips.front ();
+    const auto anchoredBefore = captureTimeAnchored ();
+    const auto markersBefore = d->markers.markers ();
+    const auto savedSelBefore = d->savedSelections;
+    if (!applySessionLayout (*d, next, data, "Add " + what, errOut, sessionUp ? target : 0.0))
         return false;
-    const int idx = (int) d->session.clips.size () - 1;
-    d->session.clips[(size_t) idx].savedHash = clipHash (*d, idx);   // on disk as it is
+    if (!sessionUp)
+        followMainFile (*d, mainBefore, anchoredBefore, markersBefore, savedSelBefore);   // pushed by an insert
+    // Fingerprints: every copy's link state is its content now; a new file is
+    // on disk as it is unless it was converted (then it must be written).
+    for (int i = 1; i < (int) d->session.clips.size (); ++i)
+        d->session.clips[(size_t) i].linkHash = clipHash (*d, i);
+    for (int i = firstNew; i < (int) d->session.clips.size (); ++i)
+    {
+        auto& c = d->session.clips[(size_t) i];
+        bool copy = false;
+        for (int j = 1; j < firstNew; ++j)
+            if (d->session.clips[(size_t) j].file == c.file) copy = true;
+        const bool conv = (size_t) (i - firstNew) < converted.size () && converted[(size_t) (i - firstNew)];
+        if (!copy) c.savedHash = conv ? 0 : c.linkHash;
+    }
+    d->linkCheckVersion = d->engine.contentVersion ();
     d->undo.lastRecorded ().newSession = d->session;
     syncVisibleChannelsToEngine (chBefore);
     syncActiveDoc ();
     if (onStateChange) onStateChange ();
     return true;
+}
+
+bool Application::addSessionFile (const juce::File& file, bool parallel, std::string* errOut)
+{
+    const FileDoc* d = doc ();
+    int64_t end = 0;
+    if (d != nullptr)
+    {
+        if (d->session.active ())
+        {
+            for (const auto& c : d->session.clips)
+                if (c.lane == 0) end = std::max (end, c.end ());
+        }
+        else
+            end = d->engine.numSamples ();
+    }
+    return addSessionFilesAt ({ file }, parallel ? -1 : 0, parallel ? 0 : end, errOut);
+}
+
+bool Application::addSessionTrack (int channels, std::string* errOut)
+{
+    auto fail = [errOut] (const juce::String& m) { if (errOut != nullptr) *errOut = m.toStdString (); return false; };
+    FileDoc* d = doc ();
+    if (d == nullptr || !d->engine.isFileLoaded ())
+        return fail ("No file is open.");
+    if (!d->session.active ())
+        d->session = mainOnlySession (*d);
+    auto next = d->session;
+    next.laneChannels.push_back (std::clamp (channels, 1, 64));
+    const int chBefore = d->engine.numChannels ();
+    if (!applySessionLayout (*d, next, extractSessionClips (*d), "Add Track", errOut))
+        return false;
+    syncVisibleChannelsToEngine (chBefore);
+    syncActiveDoc ();
+    if (onStateChange) onStateChange ();
+    return true;
+}
+
+bool Application::removeSessionTrack (int lane, std::string* errOut)
+{
+    auto fail = [errOut] (const juce::String& m) { if (errOut != nullptr) *errOut = m.toStdString (); return false; };
+    FileDoc* d = doc ();
+    if (d == nullptr || !d->session.active ())
+        return fail ("There is no session.");
+    if (lane < 1 || lane >= d->session.numLanes ())
+        return fail ("The main file's track stays.");
+    if (!d->session.laneEmpty (lane))
+        return fail ("Only an empty track can be removed: remove its files first.");
+    auto next = d->session;
+    eraseLane (next, lane);
+    const int chBefore = d->engine.numChannels ();
+    if (!applySessionLayout (*d, next, extractSessionClips (*d), "Remove Track", errOut))
+        return false;
+    syncVisibleChannelsToEngine (chBefore);
+    syncActiveDoc ();
+    if (onStateChange) onStateChange ();
+    return true;
+}
+
+void Application::followMainFile (FileDoc& d, const sc::session::Clip& mainBefore,
+                                  const TimeAnchoredState& anchoredBefore,
+                                  const std::vector<Marker>& markersBefore,
+                                  const std::vector<SavedSpectralSelection>& savedSelBefore)
+{
+    const auto& m = d.session.clips.front ();
+    if (m.offset == mainBefore.offset)
+        return;
+    const double r = d.engine.sampleRate ();
+    d.shiftTimeAnchoredTouching ((double) mainBefore.offset / r, (double) mainBefore.end () / r,
+                                 (double) (m.offset - mainBefore.offset) / r);
+    Patch& p = d.undo.lastRecorded ();
+    p.hasSideState = true;
+    p.oldMarkers = markersBefore;
+    p.newMarkers = d.markers.markers ();
+    p.oldSavedSel = savedSelBefore;
+    p.newSavedSel = d.savedSelections;
+    commitTimeAnchoredToPatch (anchoredBefore, p);
+    if (onDrawingsChanged) onDrawingsChanged ();
 }
 
 bool Application::moveSessionFile (int index, int lane, int64_t offset, std::string* errOut)
@@ -5306,24 +5564,80 @@ bool Application::moveSessionFile (int index, int lane, int64_t offset, std::str
     if (d == nullptr || !d->session.active ())
         return fail ("There is no session.");
     auto& s = d->session;
-    if (index <= 0 || index >= (int) s.clips.size ())
-        return fail ("The main file does not move.");
-    const auto& c = s.clips[(size_t) index];
+    if (index < 0 || index >= (int) s.clips.size ())
+        return fail ("No such file.");
+    const auto c = s.clips[(size_t) index];   // copies: the session is replaced below
+    const auto mainBefore = s.clips.front ();
+    if (index == 0 && lane != 0)
+        return fail ("The main file stays on its own track.");
     if (lane < 0 || lane >= s.numLanes ())
         return fail ("No such lane.");
-    if (s.laneChannels[(size_t) lane] != s.laneChannels[(size_t) c.lane])
+    const bool emptyTarget = lane != c.lane && s.laneEmpty (lane);
+    if (!emptyTarget && s.laneChannels[(size_t) lane] != s.laneChannels[(size_t) c.lane])
         return fail ("That lane has another channel count.");
-    if (offset < 0 || !sc::session::fits (s, index, lane, offset))
-        return fail ("Another file is already there.");
-    if (lane == c.lane && offset == c.offset)
+    if (offset < 0)
+        return fail ("A file cannot start before the timeline.");
+
+    // Free there: there. On another file: in front of it (it and the later
+    // files of the lane shift right) or right after it.
+    auto next = sc::session::placeWithInsert (s, index, lane, offset);
+    if (emptyTarget)
+        next.laneChannels[(size_t) lane] = s.laneChannels[(size_t) c.lane];   // an empty track takes it
+    if (next == s)
+        return true;
+
+    // The main file carries what touches it (markers, drawings, tables, ...),
+    // whether it was moved or pushed; the rest stays on the timeline. One
+    // undo step.
+    const auto anchoredBefore = captureTimeAnchored ();
+    const auto markersBefore = d->markers.markers ();
+    const auto savedSelBefore = d->savedSelections;
+    const int chBefore = d->engine.numChannels ();
+    if (!applySessionLayout (*d, next, extractSessionClips (*d), "Move " + c.file.getFileName (), errOut))
+        return false;
+    followMainFile (*d, mainBefore, anchoredBefore, markersBefore, savedSelBefore);
+    if (onTablesChanged) onTablesChanged ();
+    syncVisibleChannelsToEngine (chBefore);
+    syncActiveDoc ();
+    if (onStateChange) onStateChange ();
+    return true;
+}
+
+bool Application::trimSessionFile (int index, int64_t offset, int64_t length, std::string* errOut)
+{
+    auto fail = [errOut] (const juce::String& m) { if (errOut != nullptr) *errOut = m.toStdString (); return false; };
+    FileDoc* d = doc ();
+    if (d == nullptr || !d->session.active ())
+        return fail ("There is no session.");
+    auto& s = d->session;
+    if (index <= 0 || index >= (int) s.clips.size ())
+        return fail ("Only the other files of the session can be trimmed.");
+    const auto c = s.clips[(size_t) index];
+    if (length < 1 || offset < c.fileStart () || offset + length > c.fileEnd ())
+        return fail ("A trim stays inside the file.");
+    if (offset == c.offset && length == c.length)
         return true;
 
     auto next = s;
-    next.clips[(size_t) index].lane = lane;
-    next.clips[(size_t) index].offset = offset;
-    dropEmptyLanes (next);
+    auto& n = next.clips[(size_t) index];
+    n.offset = offset;
+    n.length = length;
+    if (!sc::session::fits (next, index, c.lane, offset))
+        return fail ("Another file is already there.");
+
+    // The whole file, cut again: what is left of the window is hidden.
+    auto data = extractSessionClips (*d);
+    const auto whole = sc::session::joinTrimmed (c, data[(size_t) index]);
+    std::vector<std::vector<float>> visible;
+    if (!sc::session::splitTrimmed (whole, offset - c.fileStart (), c.fileEnd () - (offset + length),
+                                    visible, n.head, n.tail))
+        return fail ("A trim stays inside the file.");
+    n.headLength = offset - c.fileStart ();
+    n.tailLength = c.fileEnd () - (offset + length);
+    data[(size_t) index] = std::move (visible);
+
     const int chBefore = d->engine.numChannels ();
-    if (!applySessionLayout (*d, next, extractSessionClips (*d), "Move " + c.file.getFileName (), errOut))
+    if (!applySessionLayout (*d, next, data, "Trim " + c.file.getFileName (), errOut))
         return false;
     syncVisibleChannelsToEngine (chBefore);
     syncActiveDoc ();
@@ -5343,8 +5657,7 @@ bool Application::removeSessionFile (int index, std::string* errOut)
     auto next = d->session;
     auto data = extractSessionClips (*d);
     next.clips.erase (next.clips.begin () + index);
-    data.erase (data.begin () + index);
-    dropEmptyLanes (next);
+    data.erase (data.begin () + index);   // its track stays, empty: Remove Track takes it away
     const int chBefore = d->engine.numChannels ();
     if (!applySessionLayout (*d, next, data, "Remove " + name + " from the session", errOut))
         return false;
@@ -5354,13 +5667,77 @@ bool Application::removeSessionFile (int index, std::string* errOut)
     return true;
 }
 
+void Application::addSessionContextItems (juce::PopupMenu& m, int clip, int lane) const
+{
+    const FileDoc* d = doc ();
+    if (d == nullptr || !d->engine.isFileLoaded ())
+        return;
+    m.addItem (CtxSessionAddTrack, "Add Track");
+    if (d->session.active ())
+    {
+        if (clip >= 1 && clip < (int) d->session.clips.size ())
+            m.addItem (CtxSessionRemoveFile, "Remove File");
+        if (lane >= 1 && lane < d->session.numLanes () && d->session.laneEmpty (lane))
+            m.addItem (CtxSessionRemoveTrack, "Remove Track");
+    }
+    m.addSeparator ();
+}
+
+bool Application::runSessionContextItem (int id, int clip, int lane)
+{
+    std::string err;
+    bool ok = true;
+    switch (id)
+    {
+        case CtxSessionAddTrack:
+        {
+            // The new track has the channels of the one under the mouse.
+            const FileDoc* d = doc ();
+            int ch = audioEngine ().numChannels ();
+            if (d != nullptr && d->session.active () && lane >= 0 && lane < d->session.numLanes ())
+                ch = d->session.laneChannels[(size_t) lane];
+            else if (d != nullptr && d->session.active ())
+                ch = d->session.laneChannels[0];
+            ok = addSessionTrack (ch, &err);
+            break;
+        }
+        case CtxSessionRemoveFile:  ok = removeSessionFile (clip, &err);  break;
+        case CtxSessionRemoveTrack: ok = removeSessionTrack (lane, &err); break;
+        default: return false;
+    }
+    if (!ok && onSessionSaveProblem)
+        onSessionSaveProblem (juce::String (err));
+    return true;
+}
+
+juce::String Application::channelName (int ch) const
+{
+    const FileDoc* d = doc ();
+    const int n = d != nullptr ? d->engine.numChannels () : 0;
+    if (d != nullptr && d->session.active () && d->session.totalChannels () == n)
+    {
+        const int lane = d->session.laneOfChannel (ch);
+        if (lane >= 0)
+        {
+            const int i = ch - d->session.laneFirstChannel (lane);
+            return d->session.laneChannels[(size_t) lane] == 2 ? juce::String (i == 0 ? "L" : "R")
+                                                                : juce::String (i + 1);
+        }
+    }
+    return n == 2 ? juce::String (ch == 0 ? "L" : "R") : juce::String (ch + 1);
+}
+
 void Application::setSessionBordersVisible (bool visible)
 {
-    FileDoc* d = doc ();
-    if (d == nullptr || d->session.showBorders == visible) return;
-    d->session.showBorders = visible;
-    d->metaDirty = true;
-    if (onStateChange) onStateChange ();
+    if (settings.sessionShowBorders == visible) return;
+    settings.sessionShowBorders = visible;
+    if (onStateChange) onStateChange ();   // repaints, and persists the setting
+}
+
+bool Application::sessionBordersShown () const
+{
+    const FileDoc* d = doc ();
+    return settings.sessionShowBorders && d != nullptr && d->session.active ();
 }
 
 bool Application::openSessionOf (FileDoc& d, juce::StringArray* warnings)
@@ -5376,6 +5753,7 @@ bool Application::openSessionOf (FileDoc& d, juce::StringArray* warnings)
 
     // Keep the files that can be read, have the session's rate, match their
     // lane's channel count and do not overlap a file kept before them.
+    std::vector<bool> convertedKept { false };   // in step with kept.clips
     sc::session::Session kept = stored;
     kept.clips.resize (1);
     std::vector<std::vector<std::vector<float>>> data (1);
@@ -5390,33 +5768,61 @@ bool Application::openSessionOf (FileDoc& d, juce::StringArray* warnings)
         auto c = stored.clips[i];
         std::vector<std::vector<float>> fileData;
         std::string err;
-        if (!readSessionFile (c.file, rate, fileData, err))
+        bool resampled = false;
+        if (!readSessionFile (c.file, rate, fileData, err, &resampled))
         {
             if (warnings != nullptr) warnings->add (juce::String (err));
             continue;
         }
-        if ((int) fileData.size () != stored.laneChannels[(size_t) c.lane] || fileData[0].empty ())
+        const int laneCh = stored.laneChannels[(size_t) c.lane];
+        if ((int) fileData.size () > laneCh || fileData.empty () || fileData[0].empty ())
         {
             if (warnings != nullptr)
-                warnings->add (c.file.getFileName () + " no longer has its lane's channel count.");
+                warnings->add (c.file.getFileName () + " has more channels than its track now.");
             continue;
+        }
+        const bool padded = (int) fileData.size () < laneCh;
+        while ((int) fileData.size () < laneCh)   // silent channels, as when it was added
+            fileData.emplace_back (fileData[0].size (), 0.0f);
+        if (resampled || padded)
+        {
+            if (warnings != nullptr)
+                warnings->add (c.file.getFileName () + " was converted again (rate or channels): save to keep it so.");
+        }
+        // Trimmed: its hidden start and end stay in memory, the rest goes on
+        // the timeline. A file now too short for its trims comes back whole.
+        if (c.headLength > 0 || c.tailLength > 0)
+        {
+            std::vector<std::vector<float>> visible;
+            if (sc::session::splitTrimmed (fileData, c.headLength, c.tailLength, visible, c.head, c.tail))
+                fileData = std::move (visible);
+            else
+            {
+                if (warnings != nullptr)
+                    warnings->add (c.file.getFileName () + " is shorter than its trims: it comes back whole.");
+                c.offset = std::max<int64_t> (0, c.offset - c.headLength);
+                c.headLength = c.tailLength = 0;
+                c.head.reset ();
+                c.tail.reset ();
+            }
         }
         c.length = (int64_t) fileData[0].size ();
         kept.clips.push_back (c);
+        convertedKept.push_back (resampled || padded);
         if (!sc::session::fits (kept, (int) kept.clips.size () - 1, c.lane, c.offset))
         {
             kept.clips.pop_back ();
+            convertedKept.pop_back ();
             if (warnings != nullptr) warnings->add (c.file.getFileName () + " overlaps another file of its lane.");
             continue;
         }
         data.push_back (std::move (fileData));
     }
-    // Files may have been skipped: drop their lanes (and keep the data rows in step).
-    {
-        sc::session::Session compact = kept;
-        dropEmptyLanes (compact);
-        kept = compact;
-    }
+    // Files may have been skipped: drop the tracks they left empty. A track
+    // that was saved empty (Add Track) stays.
+    for (int lane = kept.numLanes () - 1; lane >= 1; --lane)
+        if (!stored.laneEmpty (lane) && kept.laneEmpty (lane))
+            eraseLane (kept, lane);
     if (!kept.active ())
         return false;   // nothing to add: pendingSession stays and is saved back as it was
 
@@ -5431,12 +5837,94 @@ bool Application::openSessionOf (FileDoc& d, juce::StringArray* warnings)
 
     d.session = std::move (kept);
     for (int i = 0; i < (int) d.session.clips.size (); ++i)
-        d.session.clips[(size_t) i].savedHash = clipHash (d, i);
+    {
+        auto& c = d.session.clips[(size_t) i];
+        const bool converted = (size_t) i < convertedKept.size () && convertedKept[(size_t) i];
+        c.linkHash = clipHash (d, i);
+        c.savedHash = converted ? 0 : c.linkHash;   // converted: written on the next save
+    }
     d.pendingSession = juce::var ();
     d.applySessionSaveRegion ();
     d.visibleChannels.clear ();
     for (int ch = 0; ch < eng.numChannels (); ++ch)
         d.visibleChannels.push_back (ch);
+    return true;
+}
+
+bool Application::syncLinkedSessionFiles ()
+{
+    FileDoc* d = doc ();
+    if (d == nullptr || !d->session.active () || d->session.clips.size () < 3)
+        return false;
+    // Only after the content changed (an edit), never twice for one change.
+    const int64_t ver = d->engine.contentVersion ();
+    if (ver == d->linkCheckVersion)
+        return false;
+    d->linkCheckVersion = ver;
+    if (d->engine.numChannels () != d->session.totalChannels ())
+        return false;
+
+    auto next = d->session;
+    std::vector<std::vector<std::vector<float>>> data;
+    std::vector<int> touched;
+    juce::String name;
+    for (int i = 1; i < (int) next.clips.size (); ++i)
+    {
+        std::vector<int> group;
+        bool seenBefore = false;
+        for (int j = 1; j < (int) next.clips.size (); ++j)
+            if (next.clips[(size_t) j].file == next.clips[(size_t) i].file)
+            {
+                if (j < i) seenBefore = true;
+                group.push_back (j);
+            }
+        if (seenBefore || group.size () < 2)
+            continue;
+        // The copy that was edited: its content no longer matches the last sync.
+        int src = -1;
+        for (int j : group)
+            if (clipHash (*d, j) != next.clips[(size_t) j].linkHash) { src = j; break; }
+        if (src < 0)
+            continue;
+        if (data.empty ())
+            data = extractSessionClips (*d);
+        const auto whole = sc::session::joinTrimmed (next.clips[(size_t) src], data[(size_t) src]);
+        const int64_t total = whole.empty () ? 0 : (int64_t) whole[0].size ();
+        if (total <= 0)
+            continue;
+        for (int j : group)
+        {
+            if (j == src) continue;
+            auto& c = next.clips[(size_t) j];
+            // Same window of the file as before, as far as the file still reaches.
+            const int64_t head = std::clamp<int64_t> (c.headLength, 0, total - 1);
+            const int64_t len = std::clamp<int64_t> (c.length, 1, total - head);
+            std::vector<std::vector<float>> visible;
+            if (!sc::session::splitTrimmed (whole, head, total - head - len, visible, c.head, c.tail))
+                continue;
+            c.headLength = head;
+            c.tailLength = total - head - len;
+            c.length = len;
+            data[(size_t) j] = std::move (visible);
+        }
+        touched.insert (touched.end (), group.begin (), group.end ());
+        name = next.clips[(size_t) src].file.getFileName ();
+    }
+    if (touched.empty ())
+        return false;
+
+    // Recorded as a step chained to the edit: one undo takes both back.
+    const int chBefore = d->engine.numChannels ();
+    std::string err;
+    if (!applySessionLayout (*d, next, data, "Update the copies of " + name, &err))
+        return false;
+    d->undo.lastRecorded ().chainedToPrevious = true;
+    for (int j : touched)
+        d->session.clips[(size_t) j].linkHash = clipHash (*d, j);
+    d->undo.lastRecorded ().newSession = d->session;
+    d->linkCheckVersion = d->engine.contentVersion ();
+    syncVisibleChannelsToEngine (chBefore);
+    syncActiveDoc ();
     return true;
 }
 
@@ -5453,29 +5941,90 @@ bool Application::saveSessionFiles (FileDoc& d, std::string* errOut)
         return false;
     }
     const double rate = d.engine.sampleRate ();
+    using SaveMode = sc::session::Session::SaveMode;
+
+    // The first time an edited file has to be written: as a copy or over the
+    // original? Asked once, then remembered with the session (PR #24 review).
+    if (d.session.referencedSave == SaveMode::ask)
+    {
+        juce::StringArray changed;
+        for (int i = 1; i < (int) d.session.clips.size (); ++i)
+        {
+            const auto& c = d.session.clips[(size_t) i];
+            if (!c.ownCopy && clipHash (d, i) != c.savedHash)
+                changed.addIfNotAlreadyThere (c.file.getFileName ());
+        }
+        if (!changed.isEmpty ())
+        {
+            const int choice = onAskReferencedSaveMode ? onAskReferencedSaveMode (changed) : 1;
+            if (choice == 0)
+            {
+                if (errOut != nullptr)
+                    *errOut = ("The other files of the session were not saved: " + changed.joinIntoString (", ")
+                               + ".").toStdString ();
+                return false;   // asked again at the next save
+            }
+            d.session.referencedSave = choice == 2 ? SaveMode::copies : SaveMode::overwrite;
+            d.metaDirty = true;
+        }
+    }
+
     juce::StringArray failed;
+    std::vector<juce::File> written;   // a file in the session several times is written once
     for (int i = 1; i < (int) d.session.clips.size (); ++i)
     {
         auto& c = d.session.clips[(size_t) i];
         const uint64_t h = clipHash (d, i);
+        if (std::find (written.begin (), written.end (), c.file) != written.end ())
+        {
+            c.savedHash = h;   // its copies are identical: already written
+            continue;
+        }
         if (h == c.savedHash)
             continue;   // untouched: the file on disk is already right
-        const auto data = extractSessionClips (d)[(size_t) i];
-        juce::AudioBuffer<float> buf ((int) data.size (), (int) c.length);
+        // The whole file: its hidden start and end (trims) around its region.
+        const auto data = sc::session::joinTrimmed (c, extractSessionClips (d)[(size_t) i]);
+        const int64_t total = data.empty () ? 0 : (int64_t) data[0].size ();
+        juce::AudioBuffer<float> buf ((int) data.size (), (int) total);
         for (int ch = 0; ch < buf.getNumChannels (); ++ch)
             std::copy (data[(size_t) ch].begin (), data[(size_t) ch].end (), buf.getWritePointer (ch));
+
+        // Save as Copies: the first write goes to "<name>_copy.wav" next to the
+        // original (left as it is), and the session refers to the copy from
+        // then on; later saves write the copy in place.
+        const juce::File original = c.file;
+        juce::File target = original;
+        if (d.session.referencedSave == SaveMode::copies && !c.ownCopy)
+        {
+            const juce::String stem = original.getFileNameWithoutExtension () + "_copy";
+            target = original.getSiblingFile (stem + original.getFileExtension ());
+            for (int k = 2; target.exists (); ++k)
+                target = original.getSiblingFile (stem + juce::String (k) + original.getFileExtension ());
+        }
 
         // Through a document of its own, so the file keeps its own metadata
         // (markers, drawings, ...); its audio is replaced by its region.
         FileDoc ref;
-        bool ok = ref.load (c.file) && ref.engine.replaceWholeFile (buf, rate);
+        bool ok = ref.load (original) && ref.engine.replaceWholeFile (buf, rate);
         if (ok)
         {
             std::string e;
-            ok = saveDocument (ref, c.file, false, &e);
+            ok = saveDocument (ref, target, target != original, &e);
         }
-        if (ok) c.savedHash = h;
-        else failed.add (c.file.getFileName ());
+        if (ok)
+        {
+            written.push_back (target);
+            for (int j = 1; j < (int) d.session.clips.size (); ++j)   // every copy of it in the session
+            {
+                auto& o = d.session.clips[(size_t) j];
+                if (o.file != original) continue;
+                o.file = target;
+                o.ownCopy = o.ownCopy || target != original;
+                if (j <= i) o.savedHash = h;
+            }
+            d.metaDirty = true;   // the session refers to the copy now
+        }
+        else failed.add (original.getFileName ());
     }
     if (!failed.isEmpty ())
     {
