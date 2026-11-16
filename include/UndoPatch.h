@@ -127,4 +127,9 @@ struct Patch
     // offsets). Restored with the audio on undo/redo.
     bool hasSessionState = false;
     sc::session::Session oldSession, newSession;
+
+    /** Undone and redone together with the step recorded before it (one
+        user action recorded as two steps: an edit of one copy of a session
+        file, then the update of its other copies). */
+    bool chainedToPrevious = false;
 };

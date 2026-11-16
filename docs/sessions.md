@@ -15,6 +15,15 @@ or go away.
   first free place after it. Dropped anywhere else (or with no file open), a
   file opens as a document of its own, as before. A file must have the
   track's channel count and the main file's sample rate (for now).
+- **Dropped on another file**, a file goes **in front of it** when the drop
+  is in that file's first half - that file and the later ones of the track
+  move right to make room - or **right after it** in its second half. The
+  same rule applies when a file is moved (the move preview shows where
+  everything lands).
+- **The same file can be added several times.** Its copies stay identical:
+  editing one copy updates the others (each keeps its own window of the
+  file, see trimming), as a second history step chained to the edit - one
+  undo takes both back. Saving writes the file once.
 - **Right-click on the tracks**:
   - **Add Track** adds an empty track at the bottom, with the channel count
     of the track under the mouse. The first file dropped on an empty track
@@ -30,9 +39,19 @@ or go away.
   - the file's start or end **snaps**, within 8 pixels, to 0, to the start or
     end of any other file, or to the playhead (a yellow line shows it).
     **Hold Shift** to move it freely;
-  - the outline turns red where the file cannot go: on another file of that
-    track, or in a track with another channel count;
-  - the main file does not move (yet).
+  - the outline turns red where the file cannot go: in a track with another
+    channel count;
+  - **the main file moves too**, along its own track. What touches it -
+    markers, saved and active spectral selections, drawings, tables,
+    transcription segments - moves with it; what does not stays on the
+    timeline. Saved, its position comes back when the file is opened again;
+    its own file on disk is unchanged (its RIFF markers stay in its own time).
+  - **dragging an edge** of a file other than the main one **trims** it (the
+    cursor shows it): the start or the end is hidden, not deleted - drag the
+    edge back out to see it again. It snaps like a move, stops at the file's
+    real start and end and at its neighbours. Saving an edited, trimmed file
+    writes the whole file back, hidden parts included; a trim alone does not
+    rewrite the file.
 - **Dragging a file's name** (the tag in its top-left corner) moves it
   whatever the selection tool.
 - **View > Show File Borders** outlines each file over its rows and writes
@@ -90,13 +109,16 @@ folder, with the absolute path as a fallback:
 "session": {
   "lanes": [2, 1, 2],
   "files": [
-    { "path": "take2.wav", "abs": "/data/take2.wav", "lane": 0, "offset": 480000, "length": 240000 },
+    { "path": "take2.wav", "abs": "/data/take2.wav", "lane": 0, "offset": 480000, "length": 240000,
+      "trimStart": 12000 },
     { "path": "room.wav",  "abs": "/data/room.wav",  "lane": 1, "offset": 0,      "length": 360000 }
   ]
 }
 ```
 
-Offsets and lengths are in samples; `lanes` lists every track's channel
+Offsets and lengths are in samples; `trimStart` / `trimEnd` are the samples
+hidden at a file's start / end (only when trimmed), and `mainOffset` the main
+file's place when it was moved (only when not 0). `lanes` lists every track's channel
 count, empty ones included (here a third, empty stereo track). When the main
 file is opened again,
 files that are missing, have another sample rate, no longer have their lane's
@@ -114,11 +136,12 @@ If none can be read, the entry is kept as it was.
   you save. Undo that edit, or remove those files from the session.
 - Adding, moving or removing a file rebuilds the whole composite, and its undo
   step holds the audio before and after. Memory grows with the session.
-- Not done yet (PR #24 review, batches 2 and 3): moving the main file,
-  trimming a file by dragging its edges, the same file several times,
-  inserting a file in front of another on a drop, a different sample rate or
-  channel count, and the choice between saving the other files as copies or
-  over the originals. Per-file gain or mute and crossfades are not planned.
+- Copies of one file: when an edit changes several copies differently (a
+  selection across two of them), the first copy changed on the timeline
+  wins and the others take its content.
+- Not done yet (PR #24 review, batch 3): a different sample rate or channel
+  count, and the choice between saving the other files as copies or over
+  the originals. Per-file gain or mute and crossfades are not planned.
 
 Code: `include/Session.h` (model: lanes, placement, warps, composite, JSON),
 `include/SessionOverlay.h` (outlines and the Move Files drag in both views),

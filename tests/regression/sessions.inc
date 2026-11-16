@@ -52,6 +52,24 @@ static void regrSessions_model()
                && ! fits (s, 1, 0, -1),
            "sessions: files of one lane never overlap");
     CHECK (firstFreeOffset (s, 1, 0, 30) == 100, "sessions: first free place after the file in the way");
+    {
+        // PR #24 review: dropped on a file's first half = in front of it,
+        // that file and the later ones of the lane shifted right.
+        Session p3;
+        p3.laneChannels = { 1 };
+        p3.clips = { { juce::File ("/tmp/m.wav"), 0, 0, 100 }, { juce::File ("/tmp/y.wav"), 0, 200, 100 },
+                     { juce::File ("/tmp/z.wav"), 0, 300, 50 }, { juce::File ("/tmp/x.wav"), 0, 500, 40 } };
+        const auto front = placeWithInsert (p3, 3, 0, 220);   // on y's first half
+        CHECK (front.clips[3].offset == 200 && front.clips[1].offset == 240 && front.clips[2].offset == 340
+                   && front.clips[0].offset == 0,
+               "sessions: in front of y, y and z pushed right by x's length");
+        const auto after = placeWithInsert (p3, 3, 0, 270);   // on y's second half: after y, z is there
+        CHECK (after.clips[3].offset == 350 && after.clips[1].offset == 200, "sessions: after y (past z)");
+        const auto free = placeWithInsert (p3, 3, 0, 150);
+        CHECK (free.clips[3].offset == 150, "sessions: a free place is kept as is");
+        const auto onMain = placeWithInsert (p3, 3, 0, 10);
+        CHECK (onMain.clips[3].offset == 0 && onMain.clips[0].offset == 40, "sessions: in front of the main file, it moves too");
+    }
 
     CHECK (snapOffset (s, 2, 97, 5) == 100 && snapOffset (s, 2, 63, 5) == 60   // end on 100
                && snapOffset (s, 2, 30, 5) == 30 && snapOffset (s, 2, 45, 5, { 47 }) == 47,
@@ -160,7 +178,8 @@ static void regrSessions_documents()
         app.redoStep ();
         CHECK (eng.numChannels () == 3 && d->session.clips.size () == 3, "sessions: redo puts it back");
 
-        CHECK (! app.moveSessionFile (1, 0, 4000, &err), "sessions: b cannot move onto the main file");
+        CHECK (app.moveSessionFile (1, 0, 4000, &err) && d->session.clips[1].offset == 8000,
+               "sessions: dropped on the second half of the main file, b stays right after it");
         CHECK (! app.moveSessionFile (2, 0, 0, &err), "sessions: a mono file cannot go to the stereo lane");
         CHECK (app.moveSessionFile (2, 1, 2000, &err), "sessions: move c by 2000 samples");
         CHECK (d->session.clips[2].offset == 2000 && sampleIs (eng, 2, 1999, 0.0f)
@@ -270,7 +289,10 @@ static void regrSessions_overlayAndDrag()
            "sessions: the lane under the mouse");
 
     MoveGesture m;
-    CHECK (! m.begin (s, g, { 100, 60 }), "sessions: the main file cannot be dragged");
+    CHECK (m.begin (s, g, { 100, 60 }) && m.active (), "sessions: the main file can be dragged (PR #24 review)");
+    m.drag (s, g, { 100, 280 }, false, 0.0);   // down to c's lane: the main file keeps its own
+    CHECK (m.target ().clip == 0 && m.target ().lane == 0, "sessions: the main file stays on its own track");
+    m.cancel ();
     CHECK (m.begin (s, g, { 100, 280 }) && m.active (), "sessions: a drag starts on c");
     m.drag (s, g, { 200, 280 }, false, 0.0);   // +100 px = +0.15 s = +1200 samples
     CHECK (m.target ().clip == 2 && m.target ().lane == 1 && m.target ().offset == 1200 && m.target ().valid,
@@ -429,8 +451,8 @@ static void regrSessions_reviewBatch1()
                    && d->session.clips[2].lane == 1 && d->session.clips[2].offset == 5000
                    && sampleIs (eng, 2, 1000, sig (2, 0, 0)) && sampleIs (eng, 3, 5000, sig (5, 1, 0)),
                "review b1: several files dropped on a track go one after the other (" + juce::String (err) + ")");
-        CHECK (app.addSessionFilesAt ({ fg }, 1, 2000, &err) && d->session.clips[3].offset == 7000,
-               "review b1: a file dropped on another one takes the first free place after it");
+        CHECK (app.addSessionFilesAt ({ fg }, 1, 4500, &err) && d->session.clips[3].offset == 7000,
+               "review b1: dropped on the second half of another file, it goes after (and past the next one)");
         CHECK (app.addSessionTrack (2, &err) && app.addSessionFilesAt ({ fc }, 2, 0, &err)
                    && d->session.laneChannels[2] == 1 && eng.numChannels () == 5,
                "review b1: an empty track takes the channels of the first file dropped on it");
@@ -480,12 +502,12 @@ static void regrSessions_reviewBatch1()
             CHECK (row0 >= 0, "review b1: the main track has a row");
             if (row0 >= 0)
             {
-                const juce::Point<int> p ((int) geo.timeToX (0.5), geo.rows[(size_t) row0].getCentreY ());
+                const juce::Point<int> p ((int) geo.timeToX (0.75), geo.rows[(size_t) row0].getCentreY ());
                 const auto inWin = win->getLocalPoint (wv, p);
                 const size_t before = d->session.clips.size ();
                 CHECK (win->dropFilesOnTracks ({ ff }, inWin.x, inWin.y) && d->session.clips.size () == before + 1
                            && d->session.clips.back ().lane == 0 && d->session.clips.back ().offset == 8000,
-                       "review b1: dropped on the main track at 0.5 s, f goes to the first free place (8000)");
+                       "review b1: dropped on the main file's second half (0.75 s), f goes right after it (8000)");
             }
             CHECK (! win->dropFilesOnTracks ({ ff }, 2, 2), "review b1: a drop outside the tracks is not for the session");
         }
@@ -589,6 +611,274 @@ static void regrSessions_reviewBatch1()
     dir.deleteRecursively ();
 }
 
+// PR #24 review, batch 2: the main file moves along the timeline, carrying
+// what touches it; a file dropped in front of another pushes it.
+static void regrSessions_reviewBatch2()
+{
+    progress ("regression sessions: PR #24 review batch 2 (main file moves, insert in front)");
+    using namespace scsessiontest;
+    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_b2");
+    dir.deleteRecursively ();
+    dir.createDirectory ();
+    const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav"), fx = dir.getChildFile ("x.wav");
+    writeWav (fm, 2, 8000.0, 8000, [] (int ch, int64_t f, double) { return sig (1, ch, f); });
+    writeWav (fb, 2, 8000.0, 4000, [] (int ch, int64_t f, double) { return sig (2, ch, f); });
+    writeWav (fx, 2, 8000.0, 2000, [] (int ch, int64_t f, double) { return sig (8, ch, f); });
+    const juce::File store = dir.getChildFile ("store.recent");
+    {
+        Application app (store);
+        CHECK (app.openFile (fm), "review b2: main opens");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        auto& eng = d->engine;
+        std::string err;
+
+        CHECK (app.addSessionTrack (2, &err) && app.addSessionFilesAt ({ fb }, 1, 0, &err), "review b2: b on a second track");
+        // Things on the main file (0..1 s) and one past it (2 s, on b's time only).
+        app.markers ().addPointMarker (0.5, "OnMain");
+        app.markers ().addPointMarker (1.4, "OnTimeline");
+        DrawingItem arrow;
+        arrow.kind = DrawingItem::Kind::Arrow;
+        arrow.points = { { 0.2, 100.0 }, { 0.4, 300.0 } };
+        app.addDrawing (arrow);
+
+        // Move the main file to 0.25 s (2000 samples).
+        CHECK (app.moveSessionFile (0, 0, 2000, &err), "review b2: the main file moves (" + juce::String (err) + ")");
+        auto markerAt = [&] (const juce::String& name)
+        {
+            for (const auto& m : d->markers.markers ()) if (m.name == name) return m.start;
+            return -1.0;
+        };
+        CHECK (d->session.clips[0].offset == 2000 && sampleIs (eng, 0, 1999, 0.0f) && sampleIs (eng, 0, 2000, sig (1, 0, 0))
+                   && sampleIs (eng, 2, 0, sig (2, 0, 0)),
+               "review b2: the main file's audio starts at 0.25 s, b did not move");
+        CHECK (std::abs (markerAt ("OnMain") - 0.75) < 1e-9 && std::abs (markerAt ("OnTimeline") - 1.4) < 1e-9,
+               "review b2: the marker on the main file follows it, the other stays");
+        CHECK (d->drawings.size () == 1 && std::abs (d->drawings[0].points[0].first - 0.45) < 1e-9,
+               "review b2: the drawing on the main file follows it");
+        app.undoStep ();
+        CHECK (d->session.clips[0].offset == 0 && std::abs (markerAt ("OnMain") - 0.5) < 1e-9
+                   && std::abs (d->drawings[0].points[0].first - 0.2) < 1e-9 && sampleIs (eng, 0, 0, sig (1, 0, 0)),
+               "review b2: undo puts the main file and what it carried back");
+        app.redoStep ();
+        CHECK (d->session.clips[0].offset == 2000 && std::abs (markerAt ("OnMain") - 0.75) < 1e-9, "review b2: redo");
+
+        // Saving writes the main file's own region and its markers in its own time.
+        CHECK (app.saveDocument (*d, fm, false, &err), "review b2: save with the main file moved");
+        {
+            AudioEngine back;
+            CHECK (back.loadFile (fm) && back.numSamples () == 8000 && sampleIs (back, 0, 0, sig (1, 0, 0)),
+                   "review b2: the main file on disk is its own audio, from its own start");
+            MarkerManager riff;
+            riff.loadFromWavFile (fm, 8000.0);
+            bool cueOk = false;
+            for (const auto& m : riff.markers ()) if (m.name == "OnMain") cueOk = std::abs (m.start - 0.5) < 1e-3;
+            CHECK (cueOk, "review b2: its RIFF cue sits in the file's own time (0.5 s)");
+        }
+    }
+    {
+        Application app (store);
+        CHECK (app.openFile (fm), "review b2: reopen");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        CHECK (d->session.clips.size () == 2 && d->session.clips[0].offset == 2000
+                   && sampleIs (d->engine, 0, 2000, sig (1, 0, 0)),
+               "review b2: the main file comes back where it was moved");
+        double onMain = -1.0;
+        for (const auto& m : d->markers.markers ()) if (m.name == "OnMain") onMain = m.start;
+        CHECK (std::abs (onMain - 0.75) < 1e-9, "review b2: and so do its markers");
+
+        // x dropped on the first half of the main file: in front of it, the
+        // main file pushed right by x's length with what it carries.
+        std::string err;
+        CHECK (app.addSessionFilesAt ({ fx }, 0, 2500, &err) && d->session.clips.back ().offset == 2000
+                   && d->session.clips[0].offset == 4000 && sampleIs (d->engine, 0, 4000, sig (1, 0, 0)),
+               "review b2: x goes in front of the main file, which moves right (" + juce::String (err) + ")");
+        onMain = -1.0;
+        for (const auto& m : d->markers.markers ()) if (m.name == "OnMain") onMain = m.start;
+        CHECK (std::abs (onMain - 1.0) < 1e-9, "review b2: the pushed main file's marker follows it");
+        app.undoStep ();
+        CHECK (d->session.clips[0].offset == 2000 && d->session.clips.size () == 2, "review b2: undo the insert");
+    }
+    dir.deleteRecursively ();
+}
+
+// PR #24 review, batch 2: trimming a file by its edges hides its start or
+// end without deleting it; saving writes the whole file back.
+static void regrSessions_trim()
+{
+    progress ("regression sessions: trimming a file's edges (PR #24 review)");
+    using namespace scsessiontest;
+    using namespace sc::session;
+
+    {   // split / join / fingerprint
+        std::vector<std::vector<float>> whole { { 1, 2, 3, 4, 5, 6 }, { 7, 8, 9, 10, 11, 12 } }, vis;
+        Clip c;
+        const bool split = splitTrimmed (whole, 2, 1, vis, c.head, c.tail);
+        const std::vector<float> mid { 3, 4, 5 }, head1 { 7, 8 }, tail0 { 6 };
+        CHECK (split && vis[0] == mid && (*c.head)[1] == head1 && (*c.tail)[0] == tail0,
+               "sessions trim: a file splits into hidden start, visible part, hidden end");
+        c.headLength = 2; c.tailLength = 1;
+        CHECK (joinTrimmed (c, vis) == whole, "sessions trim: and joins back whole");
+        HiddenAudio h, t;
+        CHECK (! splitTrimmed (whole, 4, 2, vis, h, t), "sessions trim: trims cannot hide the whole file");
+    }
+
+    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_trim");
+    dir.deleteRecursively ();
+    dir.createDirectory ();
+    const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav");
+    writeWav (fm, 1, 8000.0, 8000, [] (int ch, int64_t f, double) { return sig (1, ch, f); });
+    writeWav (fb, 1, 8000.0, 4000, [] (int ch, int64_t f, double) { return sig (2, ch, f); });
+    const juce::File store = dir.getChildFile ("store.recent");
+    {
+        Application app (store);
+        CHECK (app.openFile (fm), "sessions trim: main opens");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        auto& eng = d->engine;
+        std::string err;
+        CHECK (app.addSessionTrack (1, &err) && app.addSessionFilesAt ({ fb }, 1, 1000, &err), "sessions trim: b at 1000 on track 2");
+        const uint64_t hashWhole = d->session.clips[1].savedHash;
+
+        // Hide b's first 500 and last 1000 samples.
+        CHECK (app.trimSessionFile (1, 1500, 2500, &err) && d->session.clips[1].headLength == 500
+                   && d->session.clips[1].tailLength == 1000 && sampleIs (eng, 1, 1499, 0.0f)
+                   && sampleIs (eng, 1, 1500, sig (2, 0, 500)) && sampleIs (eng, 1, 3999, sig (2, 0, 2999))
+                   && sampleIs (eng, 1, 4000, 0.0f),
+               "sessions trim: b shows only its middle (" + juce::String (err) + ")");
+        CHECK (! app.trimSessionFile (1, 900, 3000, &err), "sessions trim: not past the file's own start");
+        CHECK (! app.trimSessionFile (0, 0, 4000, &err), "sessions trim: not the main file");
+        uint64_t h = 0;
+        {
+            const auto& c = d->session.clips[1];
+            h = regionHash (d->session, 1, [&eng] (int ch, int64_t st, int64_t n, float* dst) { return eng.readSamples (ch, st, n, dst); });
+            CHECK (h == hashWhole && c.savedHash == hashWhole, "sessions trim: a trim alone leaves the file unchanged (no rewrite)");
+        }
+        // Drag the start back out: the hidden samples come back.
+        CHECK (app.trimSessionFile (1, 1200, 2800, &err) && sampleIs (eng, 1, 1200, sig (2, 0, 200)),
+               "sessions trim: hidden samples come back when the edge goes out again");
+        app.undoStep ();
+        CHECK (d->session.clips[1].offset == 1500 && sampleIs (eng, 1, 1500, sig (2, 0, 500)), "sessions trim: undo");
+
+        // Edit the visible part, save: the whole file is written, hidden parts included.
+        app.setSelection ({ 0.25, 0.3 });   // 2000..2400 = b's samples 1000..1400
+        app.changeGain (6.0f);
+        CHECK (app.saveDocument (*d, fm, false, &err), "sessions trim: save");
+        AudioEngine back;
+        CHECK (back.loadFile (fb) && back.numSamples () == 4000 && sampleIs (back, 0, 0, sig (2, 0, 0))
+                   && sampleIs (back, 0, 3999, sig (2, 0, 3999))
+                   && sampleIs (back, 0, 1100, sig (2, 0, 1100) * std::pow (10.0f, 0.3f)),
+               "sessions trim: b on disk is whole, with the edit in its middle");
+    }
+    {
+        Application app (store);
+        CHECK (app.openFile (fm), "sessions trim: reopen");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        CHECK (d->session.clips.size () == 2 && d->session.clips[1].headLength == 500 && d->session.clips[1].tailLength == 1000
+                   && d->session.clips[1].offset == 1500 && d->session.clips[1].length == 2500
+                   && sampleIs (d->engine, 1, 1500, sig (2, 0, 500)) && ! app.docIsUnsaved (*d),
+               "sessions trim: the trims come back with the session");
+    }
+
+    // The gesture: an edge within 4 px, clamped to the file and its neighbours.
+    {
+        Session s;
+        s.laneChannels = { 1, 1 };
+        s.clips = { { juce::File ("/tmp/m.wav"), 0, 0, 8000 }, { juce::File ("/tmp/b.wav"), 1, 1500, 2500 },
+                    { juce::File ("/tmp/n.wav"), 1, 5000, 1000 } };
+        s.clips[1].headLength = 500;
+        s.clips[1].tailLength = 1000;
+        ViewGeometry g;
+        g.rowChannel = { 0, 1 };
+        g.rows = { { 0, 0, 840, 100 }, { 0, 105, 840, 100 } };
+        g.plot = { 40, 0, 800, 205 };
+        g.rate = 8000.0;
+        g.timeToX = [] (double t) { return 40.0 + t * 800.0; };   // 1 s = 800 px, 10 samples/px
+        g.xToTime = [] (int x) { return (x - 40) / 800.0; };
+        bool left = false;
+        CHECK (TrimGesture::edgeAt (s, g, { 190, 150 }, &left) == 1 && left
+                   && TrimGesture::edgeAt (s, g, { 441, 150 }, &left) == 1 && ! left
+                   && TrimGesture::edgeAt (s, g, { 300, 150 }) == -1 && TrimGesture::edgeAt (s, g, { 40, 50 }) == -1,
+               "sessions trim: the edges of a referenced file are handles, not its middle, not the main file");
+        TrimGesture t;
+        CHECK (t.begin (s, g, { 190, 150 }), "sessions trim: a drag starts on b's left edge");
+        t.drag (s, g, { 40, 150 }, false, 0.0);   // way left: stops at the file's start (1000)
+        CHECK (t.target ().offset == 1000 && t.target ().length == 3000, "sessions trim: not past the hidden start");
+        t.end ();
+        CHECK (t.begin (s, g, { 440, 150 }), "sessions trim: a drag starts on b's right edge");
+        t.drag (s, g, { 800, 150 }, false, 0.0);  // way right: the neighbour at 5000 stops it
+        CHECK (t.target ().offset == 1500 && t.target ().length == 3500, "sessions trim: not over the next file");
+    }
+    dir.deleteRecursively ();
+}
+
+// PR #24 review, batch 2: the same file several times; every copy stays
+// identical - an edit of one is copied to the others in a chained step.
+static void regrSessions_copies()
+{
+    progress ("regression sessions: the same file several times (linked copies)");
+    using namespace scsessiontest;
+    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_copies");
+    dir.deleteRecursively ();
+    dir.createDirectory ();
+    const juce::File fm = dir.getChildFile ("main.wav"), fb = dir.getChildFile ("b.wav");
+    writeWav (fm, 1, 8000.0, 8000, [] (int ch, int64_t f, double) { return sig (1, ch, f); });
+    writeWav (fb, 1, 8000.0, 4000, [] (int ch, int64_t f, double) { return sig (2, ch, f); });
+    {
+        Application app (dir.getChildFile ("store.recent"));
+        CHECK (app.openFile (fm), "copies: main opens");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        auto& eng = d->engine;
+        std::string err;
+        CHECK (app.addSessionTrack (1, &err) && app.addSessionFilesAt ({ fb }, 1, 0, &err)
+                   && app.addSessionFilesAt ({ fb }, 1, 5000, &err) && d->session.clips.size () == 3
+                   && sampleIs (eng, 1, 5000, sig (2, 0, 0)),
+               "copies: the same file twice on a track (" + juce::String (err) + ")");
+        CHECK (! app.syncLinkedSessionFiles (), "copies: nothing to do while nothing changed");
+
+        // Edit the first copy (0.1..0.2 s = its samples 800..1600).
+        app.setSelection ({ 0.1, 0.2 });
+        app.changeGain (6.0f);
+        const float g = std::pow (10.0f, 0.3f);
+        CHECK (sampleIs (eng, 1, 1000, sig (2, 0, 1000) * g) && sampleIs (eng, 1, 6000, sig (2, 0, 1000)),
+               "copies: the edit changed the first copy only, for now");
+        CHECK (app.syncLinkedSessionFiles () && sampleIs (eng, 1, 6000, sig (2, 0, 1000) * g)
+                   && sampleIs (eng, 1, 5000, sig (2, 0, 0)),
+               "copies: the second copy follows the edit");
+        CHECK (! app.syncLinkedSessionFiles (), "copies: and once is enough");
+        app.undoStep ();
+        CHECK (sampleIs (eng, 1, 1000, sig (2, 0, 1000)) && sampleIs (eng, 1, 6000, sig (2, 0, 1000)),
+               "copies: one undo takes the edit and its copy back");
+        app.redoStep ();
+        CHECK (sampleIs (eng, 1, 1000, sig (2, 0, 1000) * g) && sampleIs (eng, 1, 6000, sig (2, 0, 1000) * g),
+               "copies: one redo brings both");
+        CHECK (! app.syncLinkedSessionFiles (), "copies: nothing more to copy after undo / redo");
+
+        // A copy added now has the edited content.
+        CHECK (app.addSessionFilesAt ({ fb }, 1, 10000, &err) && sampleIs (eng, 1, 11000, sig (2, 0, 1000) * g),
+               "copies: a new copy takes the current (edited) content");
+
+        // Save: the file is written once, with the edit; the copies count as saved.
+        CHECK (app.saveDocument (*d, fm, false, &err), "copies: save");
+        AudioEngine back;
+        CHECK (back.loadFile (fb) && back.numSamples () == 4000 && sampleIs (back, 0, 1000, sig (2, 0, 1000) * g),
+               "copies: b on disk carries the edit");
+        const auto before = bytesOf (fb);
+        CHECK (app.saveDocument (*d, fm, false, &err) && bytesOf (fb) == before, "copies: saving again does not rewrite b");
+
+        // A deletion inside the first copy shortens the others too.
+        app.setSelection ({ 0.0625, 0.125 });   // samples 500..1000 of the first copy
+        app.del ();
+        app.syncLinkedSessionFiles ();
+        CHECK (d->session.clips[1].length == 3500 && d->session.clips[2].length == 3500 && d->session.clips[3].length == 3500,
+               "copies: the copies take the shorter content");
+    }
+    dir.deleteRecursively ();
+}
+
 static void runRegression_sessions()
 {
     regrSessions_model();
@@ -596,4 +886,7 @@ static void runRegression_sessions()
     regrSessions_overlayAndDrag();
     regrSessions_window();
     regrSessions_reviewBatch1();
+    regrSessions_reviewBatch2();
+    regrSessions_trim();
+    regrSessions_copies();
 }

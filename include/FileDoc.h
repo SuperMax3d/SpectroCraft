@@ -152,6 +152,9 @@ public:
         session is active (whole content otherwise), and its playback routing
         at the session's tracks. Call after every change of `session`. */
     void applySessionSaveRegion ();
+    /** contentVersion() at the last check of the session's linked copies
+        (Application::syncLinkedSessionFiles). */
+    int64_t linkCheckVersion = -1;
 
     /** Replaces the track list and marks the document metadata-dirty.
         `newSelection` (optional pointer) updates the transient selection. */
@@ -173,6 +176,12 @@ public:
         refreshScttJson ();
         metaDirty = true;   // transcription is per-file metadata
     }
+
+    /** Sessions (issue #21): the main file moved by `dt` seconds from
+        [a, b]. Everything time-anchored that touches that span - markers,
+        saved and active spectral selections, drawings, tables, transcription
+        segments - moves with it; the rest stays on the timeline. */
+    void shiftTimeAnchoredTouching (double a, double b, double dt);
 
     /** Remap every time-anchored piece of this document's state after the
         range [a, b] seconds has been removed from the audio: markers,

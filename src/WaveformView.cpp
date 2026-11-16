@@ -216,6 +216,7 @@ void WaveformView::paintOverChildren (juce::Graphics& g)
     if (app.sessionBordersShown ())
         sc::session::paintBorders (g, d->session, geo);
     sessionMove_.paint (g, d->session, geo);
+    sessionTrim_.paint (g, d->session, geo);
 }
 
 void WaveformView::mouseDown (const juce::MouseEvent& e)
@@ -229,7 +230,13 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
         {
             const auto geo = sessionGeometry();
             const bool onTag = app.sessionBordersShown()
-                               && sc::session::clipAtNameTag (d->session, geo, e.getPosition()) >= 1;
+                               && sc::session::clipAtNameTag (d->session, geo, e.getPosition()) >= 0;
+            if (app.sessionMoveTool && sessionTrim_.begin (d->session, geo, e.getPosition()))
+            {
+                dragMode = DragMode::None;
+                repaint();
+                return;
+            }
             if ((app.sessionMoveTool || onTag) && sessionMove_.begin (d->session, geo, e.getPosition()))
             {
                 dragMode = DragMode::None;
@@ -413,6 +420,14 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
     reportHoverTime (e, true);
+    if (sessionTrim_.active())
+    {
+        if (const FileDoc* d = app.doc())
+            sessionTrim_.drag (d->session, sessionGeometry(), e.getPosition(),
+                               !e.mods.isShiftDown(), app.playhead);   // snaps unless Shift
+        repaint();
+        return;
+    }
     if (sessionMove_.active())
     {
         if (const FileDoc* d = app.doc())
@@ -511,11 +526,19 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 
 void WaveformView::mouseUp (const juce::MouseEvent&)
 {
+    if (sessionTrim_.active())
+    {
+        const auto t = sessionTrim_.end();
+        repaint();
+        if (t.clip >= 1 && t.valid)
+            app.trimSessionFile (t.clip, t.offset, t.length);
+        return;
+    }
     if (sessionMove_.active())
     {
         const auto t = sessionMove_.end();
         repaint();
-        if (t.clip >= 1 && t.valid)
+        if (t.clip >= 0 && t.valid)
             app.moveSessionFile (t.clip, t.lane, t.offset);
         return;
     }
@@ -657,6 +680,13 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
 void WaveformView::mouseMove (const juce::MouseEvent& e)
 {
     reportHoverTime (e, false);
+    // Move Files: an edge of a file trims it - say so with the cursor.
+    {
+        const FileDoc* d = app.doc();
+        const bool onEdge = app.sessionMoveTool && d != nullptr && d->session.active()
+                            && sc::session::TrimGesture::edgeAt (d->session, sessionGeometry(), e.getPosition()) >= 1;
+        setMouseCursor (onEdge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    }
     updateHoverSample (e.x, e.y);
 
     if (!onCursorInfo) return;

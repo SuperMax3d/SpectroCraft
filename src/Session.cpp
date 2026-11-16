@@ -70,6 +70,46 @@ bool fits (const Session& s, int index, int lane, int64_t offset)
     return true;
 }
 
+Session placeWithInsert (const Session& s, int index, int lane, int64_t offset)
+{
+    Session r = s;
+    if (index < 0 || index >= (int) r.clips.size() || lane < 0 || lane >= r.numLanes())
+        return r;
+    auto& x = r.clips[(size_t) index];
+    x.lane = lane;
+    x.offset = std::max<int64_t> (0, offset);
+    if (fits (r, index, lane, x.offset))
+        return r;
+
+    // The file the drop lands on: the earliest one it overlaps.
+    int hit = -1;
+    for (int j = 0; j < (int) r.clips.size(); ++j)
+    {
+        const auto& y = r.clips[(size_t) j];
+        if (j == index || y.lane != lane || ! (x.offset < y.end() && x.end() > y.offset)) continue;
+        if (hit < 0 || y.offset < r.clips[(size_t) hit].offset) hit = j;
+    }
+    if (hit < 0)
+        return r;
+    const auto y = r.clips[(size_t) hit];
+    if (x.offset < y.offset + y.length / 2)
+    {
+        // In front: the dropped file takes its place, it and the files after
+        // it in the lane move right by the dropped file's length.
+        const int64_t at = y.offset;
+        for (int j = 0; j < (int) r.clips.size(); ++j)
+            if (j != index && r.clips[(size_t) j].lane == lane && r.clips[(size_t) j].offset >= at)
+                r.clips[(size_t) j].offset += x.length;
+        r.clips[(size_t) index].offset = at;
+    }
+    else
+    {
+        const int64_t f = firstFreeOffset (r, index, lane, y.end());
+        r.clips[(size_t) index].offset = f >= 0 ? f : y.end();
+    }
+    return r;
+}
+
 int64_t snapOffset (const Session& s, int index, int64_t proposed, int64_t tolerance,
                     const std::vector<int64_t>& extraTargets)
 {
@@ -145,7 +185,6 @@ void warpForDeletion (Session& s, int64_t a, int64_t b)
         c.offset = start;
         c.length = std::max<int64_t> (0, end - start);
     }
-    s.clips[0].offset = 0;
     dropEmptyClips (s);
 }
 
@@ -169,7 +208,6 @@ void warpForInsertion (Session& s, int64_t a, int64_t len)
         c.offset = start;
         c.length = std::max<int64_t> (0, end - start);
     }
-    s.clips[0].offset = 0;
 }
 
 void warpForStretch (Session& s, int64_t a, int64_t bOld, int64_t bNew)
@@ -188,7 +226,6 @@ void warpForStretch (Session& s, int64_t a, int64_t bOld, int64_t bNew)
         c.offset = start;
         c.length = std::max<int64_t> (0, end - start);
     }
-    s.clips[0].offset = 0;
     dropEmptyClips (s);
 }
 
@@ -227,21 +264,71 @@ uint64_t regionHash (const Session& s, int index,
     const int nch = s.laneChannels[(size_t) c.lane];
     constexpr int64_t block = 1 << 16;
     std::vector<float> buf ((size_t) block);
+    auto mix = [&h] (const float* p, int64_t n)
+    {
+        const auto* bytes = reinterpret_cast<const unsigned char*> (p);
+        for (size_t k = 0; k < (size_t) n * sizeof (float); ++k)
+        {
+            h ^= bytes[k];
+            h *= 1099511628211ull;
+        }
+    };
+    auto hidden = [&] (const HiddenAudio& part, int ch)
+    {
+        if (part != nullptr && ch < (int) part->size())
+            mix ((*part)[(size_t) ch].data(), (int64_t) (*part)[(size_t) ch].size());
+    };
     for (int ch = 0; ch < nch; ++ch)
+    {
+        hidden (c.head, ch);
         for (int64_t pos = 0; pos < c.length; pos += block)
         {
             const int64_t n = std::min (block, c.length - pos);
             std::fill (buf.begin(), buf.begin() + (std::ptrdiff_t) n, 0.0f);
             read (first + ch, c.offset + pos, n, buf.data());
-            const auto* bytes = reinterpret_cast<const unsigned char*> (buf.data());
-            for (size_t k = 0; k < (size_t) n * sizeof (float); ++k)
-            {
-                h ^= bytes[k];
-                h *= 1099511628211ull;
-            }
+            mix (buf.data(), n);
         }
-    h ^= (uint64_t) c.length;
+        hidden (c.tail, ch);
+    }
+    h ^= (uint64_t) (c.headLength + c.length + c.tailLength);
     return h;
+}
+
+bool splitTrimmed (const std::vector<std::vector<float>>& whole, int64_t headLength, int64_t tailLength,
+                   std::vector<std::vector<float>>& visible, HiddenAudio& head, HiddenAudio& tail)
+{
+    head.reset();
+    tail.reset();
+    visible.clear();
+    if (whole.empty()) return false;
+    const int64_t n = (int64_t) whole[0].size();
+    headLength = std::max<int64_t> (0, headLength);
+    tailLength = std::max<int64_t> (0, tailLength);
+    if (headLength + tailLength >= n) return false;
+    std::vector<std::vector<float>> h, t;
+    for (const auto& row : whole)
+    {
+        const auto b = row.begin();
+        h.emplace_back (b, b + (std::ptrdiff_t) headLength);
+        visible.emplace_back (b + (std::ptrdiff_t) headLength, row.end() - (std::ptrdiff_t) tailLength);
+        t.emplace_back (row.end() - (std::ptrdiff_t) tailLength, row.end());
+    }
+    if (headLength > 0) head = std::make_shared<const std::vector<std::vector<float>>> (std::move (h));
+    if (tailLength > 0) tail = std::make_shared<const std::vector<std::vector<float>>> (std::move (t));
+    return true;
+}
+
+std::vector<std::vector<float>> joinTrimmed (const Clip& c, const std::vector<std::vector<float>>& visible)
+{
+    std::vector<std::vector<float>> out (visible.size());
+    for (size_t ch = 0; ch < visible.size(); ++ch)
+    {
+        auto& row = out[ch];
+        if (c.head != nullptr && ch < c.head->size()) row.insert (row.end(), (*c.head)[ch].begin(), (*c.head)[ch].end());
+        row.insert (row.end(), visible[ch].begin(), visible[ch].end());
+        if (c.tail != nullptr && ch < c.tail->size()) row.insert (row.end(), (*c.tail)[ch].begin(), (*c.tail)[ch].end());
+    }
+    return out;
 }
 
 juce::var toVar (const Session& s, const juce::File& baseDir)
@@ -250,6 +337,8 @@ juce::var toVar (const Session& s, const juce::File& baseDir)
     juce::Array<juce::var> lanes;
     for (int c : s.laneChannels) lanes.add (c);
     root->setProperty ("lanes", lanes);
+    if (! s.clips.empty() && s.clips[0].offset != 0)
+        root->setProperty ("mainOffset", (juce::int64) s.clips[0].offset);
     juce::Array<juce::var> files;
     for (size_t i = 1; i < s.clips.size(); ++i)
     {
@@ -260,6 +349,8 @@ juce::var toVar (const Session& s, const juce::File& baseDir)
         o->setProperty ("lane", c.lane);
         o->setProperty ("offset", (juce::int64) c.offset);
         o->setProperty ("length", (juce::int64) c.length);
+        if (c.headLength > 0) o->setProperty ("trimStart", (juce::int64) c.headLength);
+        if (c.tailLength > 0) o->setProperty ("trimEnd", (juce::int64) c.tailLength);
         files.add (juce::var (o));
     }
     root->setProperty ("files", files);
@@ -277,6 +368,7 @@ Session fromVar (const juce::var& v, const juce::File& baseDir, const juce::File
     s.laneChannels.push_back (std::max (1, mainChannels));
 
     if (!v.isObject()) return s;
+    s.clips[0].offset = std::max<juce::int64> (0, (juce::int64) v.getProperty ("mainOffset", 0));
     if (const auto* lanes = v.getProperty ("lanes", {}).getArray())
         for (int i = 1; i < lanes->size(); ++i)   // lane 0 is the main file's own layout
             s.laneChannels.push_back (std::clamp ((int) (*lanes)[i], 1, 64));
@@ -294,6 +386,8 @@ Session fromVar (const juce::var& v, const juce::File& baseDir, const juce::File
             c.lane = (int) f.getProperty ("lane", 0);
             c.offset = std::max<juce::int64> (0, (juce::int64) f.getProperty ("offset", 0));
             c.length = std::max<juce::int64> (0, (juce::int64) f.getProperty ("length", 0));
+            c.headLength = std::max<juce::int64> (0, (juce::int64) f.getProperty ("trimStart", 0));
+            c.tailLength = std::max<juce::int64> (0, (juce::int64) f.getProperty ("trimEnd", 0));
             if (c.lane < 0 || c.lane >= s.numLanes() || c.file == juce::File()) continue;
             s.clips.push_back (c);
         }

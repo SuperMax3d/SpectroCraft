@@ -2633,21 +2633,34 @@ bool AudioEngine::saveFileImpl (const juce::File& file) const
     // Application::saveDocument. A plain engine holding just the region does
     // the writing, with this engine's save settings (markers, chunks, mode).
     if (saveRegionChannels > 0
-        && (saveRegionChannels != nchans || saveRegionLength != totalSamples))
+        && (saveRegionChannels != nchans || saveRegionStart != 0 || saveRegionLength != totalSamples))
     {
         const int chans = std::min (saveRegionChannels, nchans);
-        const int64_t len = std::clamp<int64_t> (saveRegionLength, 0, totalSamples);
+        const int64_t start = std::clamp<int64_t> (saveRegionStart, 0, totalSamples);
+        const int64_t len = std::clamp<int64_t> (saveRegionLength, 0, totalSamples - start);
         if (chans <= 0)
             return false;
         std::vector<std::vector<float>> part ((size_t) chans, std::vector<float> ((size_t) len));
         for (int ch = 0; ch < chans; ++ch)
-            if (len > 0 && !readSamples (ch, 0, len, part[(size_t) ch].data()))
+            if (len > 0 && !readSamples (ch, start, len, part[(size_t) ch].data()))
                 return false;
         AudioEngine sub;
         if (!sub.initNew (chans, rate, &part))
             return false;
         sub.forceRf64 = forceRf64;
-        sub.saveMarkers = saveMarkers;
+        // RIFF cues in the file's own time (the metadata keeps the timeline's).
+        std::vector<Marker> shifted;
+        if (saveMarkers != nullptr && start > 0)
+        {
+            const double dt = (double) start / rate;
+            for (Marker m : *saveMarkers)
+            {
+                m.start -= dt;
+                if (m.end >= 0.0) m.end -= dt;
+                if (m.start >= 0.0) shifted.push_back (m);
+            }
+        }
+        sub.saveMarkers = (saveMarkers != nullptr && start > 0) ? &shifted : saveMarkers;
         sub.saveScttJson = saveScttJson;
         sub.saveMetaMode = saveMetaMode;
         sub.saveScmdBuilder = saveScmdBuilder;

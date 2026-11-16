@@ -419,6 +419,8 @@ uint64_t Application::beginSave (FileDoc& d, const juce::File& file)
     // the normal save, limited to its own region by the engine.
     if (d.session.active ())
     {
+        if (&d == doc ())
+            syncLinkedSessionFiles ();   // copies of one file are written identical
         std::string err;
         if (!saveSessionFiles (d, &err) && onSessionSaveProblem)
             onSessionSaveProblem (juce::String (err));
@@ -4831,7 +4833,8 @@ void Application::undoSteps (int n)
             break;
         }
         if (p.hasSideState || p.hasAxisState || p.hasSessionState) restorePatchSideState (d, p, false);
-        ++done;
+        if (!p.chainedToPrevious)   // a chained step goes back with the one before it
+            ++done;
     }
     if (done > 0)
     {
@@ -4865,7 +4868,10 @@ void Application::redoSteps (int n)
             break;
         }
         if (p.hasSideState || p.hasAxisState || p.hasSessionState) restorePatchSideState (d, p, true);
-        ++done;
+        // A step chained to this one comes back with it.
+        const bool nextChained = d->undo.canRedo () && d->undo.redoAt (d->undo.redoSize () - 1).chainedToPrevious;
+        if (!nextChained)
+            ++done;
     }
     if (done > 0)
     {
@@ -5267,13 +5273,17 @@ bool Application::addSessionFilesAt (const std::vector<juce::File>& files, int l
             return fail (file.getFullPathName () + " does not exist.");
         if (file == d->file || file == d->engine.getFile ())
             return fail (file.getFileName () + " is the main file of the session.");
-        for (const auto& c : next.clips)
-            if (c.file == file)
-                return fail (file.getFileName () + " is already in the session.");
 
+        // Already in the session: another copy of it, with its content as it
+        // is now (unsaved edits included) - the copies stay identical.
         std::vector<std::vector<float>> fileData;
+        int copyOf = -1;
+        for (int j = 1; j < (int) next.clips.size (); ++j)
+            if (next.clips[(size_t) j].file == file) { copyOf = j; break; }
+        if (copyOf >= 0)
+            fileData = sc::session::joinTrimmed (next.clips[(size_t) copyOf], data[(size_t) copyOf]);
         std::string err;
-        if (!readSessionFile (file, d->engine.sampleRate (), fileData, err))
+        if (copyOf < 0 && !readSessionFile (file, d->engine.sampleRate (), fileData, err))
             return fail (juce::String (err));
         if (fileData.empty () || fileData[0].empty ())
             return fail (file.getFileName () + " holds no audio.");
@@ -5293,12 +5303,13 @@ bool Application::addSessionFilesAt (const std::vector<juce::File>& files, int l
         sc::session::Clip c;
         c.file = file;
         c.lane = lane;
-        c.offset = at;
         c.length = (int64_t) fileData[0].size ();
+        if (copyOf >= 0)
+            c.savedHash = next.clips[(size_t) copyOf].savedHash;   // the same file on disk
         next.clips.push_back (c);
         const int idx = (int) next.clips.size () - 1;
-        if (!sc::session::fits (next, idx, lane, at))
-            next.clips[(size_t) idx].offset = sc::session::firstFreeOffset (next, idx, lane, at);
+        // On another file: in front of it (the later files shift) or after it.
+        next = sc::session::placeWithInsert (next, idx, lane, at);
         at = next.clips[(size_t) idx].end ();
         data.push_back (std::move (fileData));
     }
@@ -5306,10 +5317,22 @@ bool Application::addSessionFilesAt (const std::vector<juce::File>& files, int l
     const juce::String what = files.size () == 1 ? files.front ().getFileName ()
                                                  : juce::String ((int) files.size ()) + " files";
     const int chBefore = d->engine.numChannels ();
+    const auto mainBefore = d->session.clips.front ();
+    const auto anchoredBefore = captureTimeAnchored ();
+    const auto markersBefore = d->markers.markers ();
+    const auto savedSelBefore = d->savedSelections;
     if (!applySessionLayout (*d, next, data, "Add " + what, errOut))
         return false;
+    followMainFile (*d, mainBefore, anchoredBefore, markersBefore, savedSelBefore);   // pushed by an insert
     for (int i = firstNew; i < (int) d->session.clips.size (); ++i)
-        d->session.clips[(size_t) i].savedHash = clipHash (*d, i);   // on disk as they are
+    {
+        auto& c = d->session.clips[(size_t) i];
+        c.linkHash = clipHash (*d, i);
+        bool copy = false;
+        for (int j = 1; j < firstNew; ++j)
+            if (d->session.clips[(size_t) j].file == c.file) copy = true;
+        if (!copy) c.savedHash = c.linkHash;   // on disk as it is (a copy keeps the disk state it got)
+    }
     d->undo.lastRecorded ().newSession = d->session;
     syncVisibleChannelsToEngine (chBefore);
     syncActiveDoc ();
@@ -5374,6 +5397,27 @@ bool Application::removeSessionTrack (int lane, std::string* errOut)
     return true;
 }
 
+void Application::followMainFile (FileDoc& d, const sc::session::Clip& mainBefore,
+                                  const TimeAnchoredState& anchoredBefore,
+                                  const std::vector<Marker>& markersBefore,
+                                  const std::vector<SavedSpectralSelection>& savedSelBefore)
+{
+    const auto& m = d.session.clips.front ();
+    if (m.offset == mainBefore.offset)
+        return;
+    const double r = d.engine.sampleRate ();
+    d.shiftTimeAnchoredTouching ((double) mainBefore.offset / r, (double) mainBefore.end () / r,
+                                 (double) (m.offset - mainBefore.offset) / r);
+    Patch& p = d.undo.lastRecorded ();
+    p.hasSideState = true;
+    p.oldMarkers = markersBefore;
+    p.newMarkers = d.markers.markers ();
+    p.oldSavedSel = savedSelBefore;
+    p.newSavedSel = d.savedSelections;
+    commitTimeAnchoredToPatch (anchoredBefore, p);
+    if (onDrawingsChanged) onDrawingsChanged ();
+}
+
 bool Application::moveSessionFile (int index, int lane, int64_t offset, std::string* errOut)
 {
     auto fail = [errOut] (const juce::String& m) { if (errOut != nullptr) *errOut = m.toStdString (); return false; };
@@ -5381,26 +5425,80 @@ bool Application::moveSessionFile (int index, int lane, int64_t offset, std::str
     if (d == nullptr || !d->session.active ())
         return fail ("There is no session.");
     auto& s = d->session;
-    if (index <= 0 || index >= (int) s.clips.size ())
-        return fail ("The main file does not move.");
-    const auto& c = s.clips[(size_t) index];
+    if (index < 0 || index >= (int) s.clips.size ())
+        return fail ("No such file.");
+    const auto c = s.clips[(size_t) index];   // copies: the session is replaced below
+    const auto mainBefore = s.clips.front ();
+    if (index == 0 && lane != 0)
+        return fail ("The main file stays on its own track.");
     if (lane < 0 || lane >= s.numLanes ())
         return fail ("No such lane.");
     const bool emptyTarget = lane != c.lane && s.laneEmpty (lane);
     if (!emptyTarget && s.laneChannels[(size_t) lane] != s.laneChannels[(size_t) c.lane])
         return fail ("That lane has another channel count.");
-    if (offset < 0 || !sc::session::fits (s, index, lane, offset))
-        return fail ("Another file is already there.");
-    if (lane == c.lane && offset == c.offset)
+    if (offset < 0)
+        return fail ("A file cannot start before the timeline.");
+
+    // Free there: there. On another file: in front of it (it and the later
+    // files of the lane shift right) or right after it.
+    auto next = sc::session::placeWithInsert (s, index, lane, offset);
+    if (emptyTarget)
+        next.laneChannels[(size_t) lane] = s.laneChannels[(size_t) c.lane];   // an empty track takes it
+    if (next == s)
+        return true;
+
+    // The main file carries what touches it (markers, drawings, tables, ...),
+    // whether it was moved or pushed; the rest stays on the timeline. One
+    // undo step.
+    const auto anchoredBefore = captureTimeAnchored ();
+    const auto markersBefore = d->markers.markers ();
+    const auto savedSelBefore = d->savedSelections;
+    const int chBefore = d->engine.numChannels ();
+    if (!applySessionLayout (*d, next, extractSessionClips (*d), "Move " + c.file.getFileName (), errOut))
+        return false;
+    followMainFile (*d, mainBefore, anchoredBefore, markersBefore, savedSelBefore);
+    if (onTablesChanged) onTablesChanged ();
+    syncVisibleChannelsToEngine (chBefore);
+    syncActiveDoc ();
+    if (onStateChange) onStateChange ();
+    return true;
+}
+
+bool Application::trimSessionFile (int index, int64_t offset, int64_t length, std::string* errOut)
+{
+    auto fail = [errOut] (const juce::String& m) { if (errOut != nullptr) *errOut = m.toStdString (); return false; };
+    FileDoc* d = doc ();
+    if (d == nullptr || !d->session.active ())
+        return fail ("There is no session.");
+    auto& s = d->session;
+    if (index <= 0 || index >= (int) s.clips.size ())
+        return fail ("Only the other files of the session can be trimmed.");
+    const auto c = s.clips[(size_t) index];
+    if (length < 1 || offset < c.fileStart () || offset + length > c.fileEnd ())
+        return fail ("A trim stays inside the file.");
+    if (offset == c.offset && length == c.length)
         return true;
 
     auto next = s;
-    if (emptyTarget)
-        next.laneChannels[(size_t) lane] = s.laneChannels[(size_t) c.lane];   // an empty track takes it
-    next.clips[(size_t) index].lane = lane;
-    next.clips[(size_t) index].offset = offset;
+    auto& n = next.clips[(size_t) index];
+    n.offset = offset;
+    n.length = length;
+    if (!sc::session::fits (next, index, c.lane, offset))
+        return fail ("Another file is already there.");
+
+    // The whole file, cut again: what is left of the window is hidden.
+    auto data = extractSessionClips (*d);
+    const auto whole = sc::session::joinTrimmed (c, data[(size_t) index]);
+    std::vector<std::vector<float>> visible;
+    if (!sc::session::splitTrimmed (whole, offset - c.fileStart (), c.fileEnd () - (offset + length),
+                                    visible, n.head, n.tail))
+        return fail ("A trim stays inside the file.");
+    n.headLength = offset - c.fileStart ();
+    n.tailLength = c.fileEnd () - (offset + length);
+    data[(size_t) index] = std::move (visible);
+
     const int chBefore = d->engine.numChannels ();
-    if (!applySessionLayout (*d, next, extractSessionClips (*d), "Move " + c.file.getFileName (), errOut))
+    if (!applySessionLayout (*d, next, data, "Trim " + c.file.getFileName (), errOut))
         return false;
     syncVisibleChannelsToEngine (chBefore);
     syncActiveDoc ();
@@ -5541,6 +5639,23 @@ bool Application::openSessionOf (FileDoc& d, juce::StringArray* warnings)
                 warnings->add (c.file.getFileName () + " no longer has its lane's channel count.");
             continue;
         }
+        // Trimmed: its hidden start and end stay in memory, the rest goes on
+        // the timeline. A file now too short for its trims comes back whole.
+        if (c.headLength > 0 || c.tailLength > 0)
+        {
+            std::vector<std::vector<float>> visible;
+            if (sc::session::splitTrimmed (fileData, c.headLength, c.tailLength, visible, c.head, c.tail))
+                fileData = std::move (visible);
+            else
+            {
+                if (warnings != nullptr)
+                    warnings->add (c.file.getFileName () + " is shorter than its trims: it comes back whole.");
+                c.offset = std::max<int64_t> (0, c.offset - c.headLength);
+                c.headLength = c.tailLength = 0;
+                c.head.reset ();
+                c.tail.reset ();
+            }
+        }
         c.length = (int64_t) fileData[0].size ();
         kept.clips.push_back (c);
         if (!sc::session::fits (kept, (int) kept.clips.size () - 1, c.lane, c.offset))
@@ -5570,12 +5685,92 @@ bool Application::openSessionOf (FileDoc& d, juce::StringArray* warnings)
 
     d.session = std::move (kept);
     for (int i = 0; i < (int) d.session.clips.size (); ++i)
-        d.session.clips[(size_t) i].savedHash = clipHash (d, i);
+    {
+        auto& c = d.session.clips[(size_t) i];
+        c.savedHash = c.linkHash = clipHash (d, i);
+    }
     d.pendingSession = juce::var ();
     d.applySessionSaveRegion ();
     d.visibleChannels.clear ();
     for (int ch = 0; ch < eng.numChannels (); ++ch)
         d.visibleChannels.push_back (ch);
+    return true;
+}
+
+bool Application::syncLinkedSessionFiles ()
+{
+    FileDoc* d = doc ();
+    if (d == nullptr || !d->session.active () || d->session.clips.size () < 3)
+        return false;
+    // Only after the content changed (an edit), never twice for one change.
+    const int64_t ver = d->engine.contentVersion ();
+    if (ver == d->linkCheckVersion)
+        return false;
+    d->linkCheckVersion = ver;
+    if (d->engine.numChannels () != d->session.totalChannels ())
+        return false;
+
+    auto next = d->session;
+    std::vector<std::vector<std::vector<float>>> data;
+    std::vector<int> touched;
+    juce::String name;
+    for (int i = 1; i < (int) next.clips.size (); ++i)
+    {
+        std::vector<int> group;
+        bool seenBefore = false;
+        for (int j = 1; j < (int) next.clips.size (); ++j)
+            if (next.clips[(size_t) j].file == next.clips[(size_t) i].file)
+            {
+                if (j < i) seenBefore = true;
+                group.push_back (j);
+            }
+        if (seenBefore || group.size () < 2)
+            continue;
+        // The copy that was edited: its content no longer matches the last sync.
+        int src = -1;
+        for (int j : group)
+            if (clipHash (*d, j) != next.clips[(size_t) j].linkHash) { src = j; break; }
+        if (src < 0)
+            continue;
+        if (data.empty ())
+            data = extractSessionClips (*d);
+        const auto whole = sc::session::joinTrimmed (next.clips[(size_t) src], data[(size_t) src]);
+        const int64_t total = whole.empty () ? 0 : (int64_t) whole[0].size ();
+        if (total <= 0)
+            continue;
+        for (int j : group)
+        {
+            if (j == src) continue;
+            auto& c = next.clips[(size_t) j];
+            // Same window of the file as before, as far as the file still reaches.
+            const int64_t head = std::clamp<int64_t> (c.headLength, 0, total - 1);
+            const int64_t len = std::clamp<int64_t> (c.length, 1, total - head);
+            std::vector<std::vector<float>> visible;
+            if (!sc::session::splitTrimmed (whole, head, total - head - len, visible, c.head, c.tail))
+                continue;
+            c.headLength = head;
+            c.tailLength = total - head - len;
+            c.length = len;
+            data[(size_t) j] = std::move (visible);
+        }
+        touched.insert (touched.end (), group.begin (), group.end ());
+        name = next.clips[(size_t) src].file.getFileName ();
+    }
+    if (touched.empty ())
+        return false;
+
+    // Recorded as a step chained to the edit: one undo takes both back.
+    const int chBefore = d->engine.numChannels ();
+    std::string err;
+    if (!applySessionLayout (*d, next, data, "Update the copies of " + name, &err))
+        return false;
+    d->undo.lastRecorded ().chainedToPrevious = true;
+    for (int j : touched)
+        d->session.clips[(size_t) j].linkHash = clipHash (*d, j);
+    d->undo.lastRecorded ().newSession = d->session;
+    d->linkCheckVersion = d->engine.contentVersion ();
+    syncVisibleChannelsToEngine (chBefore);
+    syncActiveDoc ();
     return true;
 }
 
@@ -5593,14 +5788,22 @@ bool Application::saveSessionFiles (FileDoc& d, std::string* errOut)
     }
     const double rate = d.engine.sampleRate ();
     juce::StringArray failed;
+    std::vector<juce::File> written;   // a file in the session several times is written once
     for (int i = 1; i < (int) d.session.clips.size (); ++i)
     {
         auto& c = d.session.clips[(size_t) i];
         const uint64_t h = clipHash (d, i);
+        if (std::find (written.begin (), written.end (), c.file) != written.end ())
+        {
+            c.savedHash = h;   // its copies are identical: already written
+            continue;
+        }
         if (h == c.savedHash)
             continue;   // untouched: the file on disk is already right
-        const auto data = extractSessionClips (d)[(size_t) i];
-        juce::AudioBuffer<float> buf ((int) data.size (), (int) c.length);
+        // The whole file: its hidden start and end (trims) around its region.
+        const auto data = sc::session::joinTrimmed (c, extractSessionClips (d)[(size_t) i]);
+        const int64_t total = data.empty () ? 0 : (int64_t) data[0].size ();
+        juce::AudioBuffer<float> buf ((int) data.size (), (int) total);
         for (int ch = 0; ch < buf.getNumChannels (); ++ch)
             std::copy (data[(size_t) ch].begin (), data[(size_t) ch].end (), buf.getWritePointer (ch));
 
@@ -5613,7 +5816,13 @@ bool Application::saveSessionFiles (FileDoc& d, std::string* errOut)
             std::string e;
             ok = saveDocument (ref, c.file, false, &e);
         }
-        if (ok) c.savedHash = h;
+        if (ok)
+        {
+            c.savedHash = h;
+            written.push_back (c.file);
+            for (int j = 1; j < i; ++j)   // earlier copies of it, skipped as untouched
+                if (d.session.clips[(size_t) j].file == c.file) d.session.clips[(size_t) j].savedHash = h;
+        }
         else failed.add (c.file.getFileName ());
     }
     if (!failed.isEmpty ())

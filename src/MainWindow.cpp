@@ -2433,6 +2433,10 @@ bool MainWindow::sessionBarWanted() const
 
 void MainWindow::syncSharedState()
 {
+    // Sessions (issue #21): after an edit of one copy of a file that is in
+    // the session several times, the other copies follow (a chained step).
+    app.syncLinkedSessionFiles();
+
     updateTitle();   // cheap: keeps the * in sync with any state change
 
     // A session started or ended (issue #21): its row bar appears or goes.

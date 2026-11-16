@@ -445,6 +445,11 @@ public:
         empty: it takes the file's) and the place must be free. A track left
         empty stays (Remove Track takes it away). */
     bool moveSessionFile (int index, int lane, int64_t offset, std::string* errOut = nullptr);
+    /** Trims file `index` (not the main one): its part on the timeline
+        becomes [offset, offset + length), anywhere inside the whole file.
+        What falls outside is hidden, not deleted: dragging the edge back out
+        shows it again, and saving writes the whole file. One undoable step. */
+    bool trimSessionFile (int index, int64_t offset, int64_t length, std::string* errOut = nullptr);
     /** Takes file `index` out of the session; its own file is not touched.
         Its audio leaves the composite (unsaved edits made to it are lost). */
     bool removeSessionFile (int index, std::string* errOut = nullptr);
@@ -460,6 +465,12 @@ public:
         in *warnings) those that are missing, have another sample rate or do
         not fit their lane. Called when a document is opened. */
     bool openSessionOf (FileDoc& d, juce::StringArray* warnings = nullptr);
+    /** The same file added several times stays identical (PR #24 review):
+        after an edit changed one copy, the others take its content (each
+        keeps its window of the file), recorded as a step chained to the edit
+        so one undo takes both back. Called after content changes (the main
+        window's sync, a save); true when copies were updated. */
+    bool syncLinkedSessionFiles ();
     /** Writes back every referenced file whose region of the composite changed
         since it was loaded or last saved (the main file is written by the
         normal save, limited to its own region). Called by beginSave. */
@@ -820,6 +831,13 @@ public:
 
     TimeAnchoredState captureTimeAnchored () const;
     void commitTimeAnchoredToPatch (const TimeAnchoredState& before, Patch& p);
+    /** Sessions: after a layout change that moved the main file (moved, or
+        pushed by a file inserted in front of it), what touches it follows it
+        and the last undo step records that too. */
+    void followMainFile (FileDoc& d, const sc::session::Clip& mainBefore,
+                         const TimeAnchoredState& anchoredBefore,
+                         const std::vector<Marker>& markersBefore,
+                         const std::vector<SavedSpectralSelection>& savedSelBefore);
 
     /** Filter EQ: FFT-based zero-phase curve equaliser on the active spectral
         selection region, or on the time selection if there is one, or over

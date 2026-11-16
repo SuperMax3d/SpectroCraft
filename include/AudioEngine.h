@@ -380,11 +380,19 @@ public:
     void setBkdkForSave (const std::string* raw) { saveBkdkPayload = raw; }
 
     /** Session composite (issue #21): when channels > 0, every save writes only
-        channels [0, channels) over samples [0, length) - the main file's own
-        region - whichever path asks for the save (Save, Save As, batch, AI
-        control). 0 = the whole content (the default). */
-    void setSaveRegion (int channels, int64_t length) { saveRegionChannels = channels; saveRegionLength = length; }
+        channels [0, channels) over samples [start, start + length) - the main
+        file's own region, wherever it sits on the timeline - whichever path
+        asks for the save (Save, Save As, batch, AI control); the markers'
+        RIFF cues are written in the file's own time. 0 = the whole content
+        (the default). */
+    void setSaveRegion (int channels, int64_t start, int64_t length)
+    {
+        saveRegionChannels = channels;
+        saveRegionStart = std::max<int64_t> (0, start);
+        saveRegionLength = length;
+    }
     int saveRegionChannelCount() const noexcept { return saveRegionChannels; }
+    int64_t saveRegionStartSample() const noexcept { return saveRegionStart; }
     int64_t saveRegionSampleCount() const noexcept { return saveRegionLength; }
 
     // ---- Waveform overview mipmaps (min/max pyramid) ----
@@ -507,6 +515,7 @@ private:
 
     ::UndoManager* undo = nullptr;
     int saveRegionChannels = 0;      // see setSaveRegion()
+    int64_t saveRegionStart = 0;
     int64_t saveRegionLength = 0;
     const std::vector<Marker>* saveMarkers = nullptr;   // for WAV cue/adtl chunks
     const std::string* saveScttJson = nullptr;          // for the WAV SCTT chunk

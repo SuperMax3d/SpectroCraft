@@ -261,6 +261,7 @@ void SpectralView::paintOverChildren (juce::Graphics& g)
     if (app.sessionBordersShown ())
         sc::session::paintBorders (g, d->session, geo);
     sessionMove_.paint (g, d->session, geo);
+    sessionTrim_.paint (g, d->session, geo);
 }
 
 void SpectralView::mouseDown (const juce::MouseEvent& e)
@@ -274,7 +275,12 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
         {
             const auto geo = sessionGeometry();
             const bool onTag = app.sessionBordersShown()
-                               && sc::session::clipAtNameTag (d->session, geo, e.getPosition()) >= 1;
+                               && sc::session::clipAtNameTag (d->session, geo, e.getPosition()) >= 0;
+            if (app.sessionMoveTool && sessionTrim_.begin (d->session, geo, e.getPosition()))
+            {
+                repaint();
+                return;
+            }
             if ((app.sessionMoveTool || onTag) && sessionMove_.begin (d->session, geo, e.getPosition()))
             {
                 repaint();
@@ -516,6 +522,14 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
     reportHoverTime (e, true);
+    if (sessionTrim_.active())
+    {
+        if (const FileDoc* d = app.doc())
+            sessionTrim_.drag (d->session, sessionGeometry(), e.getPosition(),
+                               !e.mods.isShiftDown(), app.playhead);   // snaps unless Shift
+        repaint();
+        return;
+    }
     if (sessionMove_.active())
     {
         if (const FileDoc* d = app.doc())
@@ -688,11 +702,19 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
 
 void SpectralView::mouseUp (const juce::MouseEvent&)
 {
+    if (sessionTrim_.active())
+    {
+        const auto t = sessionTrim_.end();
+        repaint();
+        if (t.clip >= 1 && t.valid)
+            app.trimSessionFile (t.clip, t.offset, t.length);
+        return;
+    }
     if (sessionMove_.active())
     {
         const auto t = sessionMove_.end();
         repaint();
-        if (t.clip >= 1 && t.valid)
+        if (t.clip >= 0 && t.valid)
             app.moveSessionFile (t.clip, t.lane, t.offset);
         return;
     }
@@ -917,6 +939,13 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
 void SpectralView::mouseMove (const juce::MouseEvent& e)
 {
     reportHoverTime (e, false);
+    // Move Files: an edge of a file trims it - say so with the cursor.
+    {
+        const FileDoc* d = app.doc();
+        const bool onEdge = app.sessionMoveTool && d != nullptr && d->session.active()
+                            && sc::session::TrimGesture::edgeAt (d->session, sessionGeometry(), e.getPosition()) >= 1;
+        setMouseCursor (onEdge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    }
 
     // Move/Scale gesture: the live preview follows the cursor even without a
     // button held (must not depend on onCursorInfo being set).

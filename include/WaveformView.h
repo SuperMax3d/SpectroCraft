@@ -313,7 +313,8 @@ private:
     juce::Rectangle<int> channelLabelBounds (int ch, int centreY) const;
 
     Application& app;   // audio data read live via app.audioEngine() (active doc)
-    sc::session::MoveGesture sessionMove_;   // Edit > Session > Move Files drag
+    sc::session::MoveGesture sessionMove_;   // Selection > Move Files drag
+    sc::session::TrimGesture sessionTrim_;   // ... or an edge of a file: trims it
     bool showTimeRuler = true;   // stacked dual view: only one view draws it
     bool showMarkerTitles = true;   // suppressed while the spectrogram is stacked below
     double viewStart = 0, viewEnd = 10, vZoom = 1;

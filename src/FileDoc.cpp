@@ -380,15 +380,68 @@ void FileDoc::applySessionSaveRegion ()
     std::vector<AudioEngine::ChannelRoute> routes;
     if (session.active () && !session.laneChannels.empty ())
     {
-        engine.setSaveRegion (session.laneChannels[0], session.clips[0].length);
+        engine.setSaveRegion (session.laneChannels[0], session.clips[0].offset, session.clips[0].length);
         // Playback by track (issue #21): two stereo tracks play L, R, L, R.
         for (int lane = 0; lane < session.numLanes (); ++lane)
             for (int i = 0; i < session.laneChannels[(size_t) lane]; ++i)
                 routes.push_back ({ i, session.laneChannels[(size_t) lane] });
     }
     else
-        engine.setSaveRegion (0, 0);
+        engine.setSaveRegion (0, 0, 0);
     engine.setPlaybackRoutes (std::move (routes));
+}
+
+void FileDoc::shiftTimeAnchoredTouching (double a, double b, double dt)
+{
+    if (dt == 0.0 || !(b >= a))
+        return;
+    auto touches = [a, b] (double t0, double t1) { return std::max (t0, t1) >= a && std::min (t0, t1) <= b; };
+
+    auto ms = markers.markers ();
+    for (auto& m : ms)
+        if (touches (m.start, m.end < 0.0 ? m.start : m.end))
+        {
+            m.start = std::max (0.0, m.start + dt);
+            if (m.end >= 0.0) m.end = std::max (m.start, m.end + dt);
+        }
+    markers.restore (ms);
+
+    auto moveSel = [&] (SpectralSelection& sel)
+    {
+        if (sel.empty ()) return;
+        const auto ext = sel.timeExtent ();
+        if (touches (ext.getStart (), ext.getEnd ()))
+            sel = sel.translatedCopy (dt, 0.0);
+    };
+    for (auto& s : savedSelections) moveSel (s.data);
+    moveSel (spectralSel);
+
+    for (auto& dr : drawings)
+    {
+        if (dr.points.empty ()) continue;
+        double t0 = dr.points.front ().first, t1 = t0;
+        for (const auto& p : dr.points) { t0 = std::min (t0, p.first); t1 = std::max (t1, p.first); }
+        if (touches (t0, t1))
+            for (auto& p : dr.points) p.first += dt;
+    }
+
+    for (auto& tb : tables)
+    {
+        bool hit = false;
+        for (const auto& p : tb.params)
+            if (!p.values.empty ()
+                && touches (tb.docTimeOfSample (p, 0), tb.docTimeOfSample (p, (int) p.values.size () - 1)))
+                hit = true;
+        if (hit) tb.offsetSecs += dt;   // the whole table follows the file
+    }
+
+    for (auto& seg : sctt.segments)
+        if (touches (seg.startSec, seg.endSec))
+        {
+            seg.startSec = std::max (0.0, seg.startSec + dt);
+            seg.endSec = std::max (seg.startSec, seg.endSec + dt);
+        }
+    metaDirty = true;
 }
 
 void FileDoc::remapForDeletion (double a, double b)

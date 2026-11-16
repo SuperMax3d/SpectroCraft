@@ -78,7 +78,7 @@ int clipAtNameTag (const Session& s, const ViewGeometry& g, juce::Point<int> p)
 {
     if (!s.active()) return -1;
     for (const auto& b : clipBoxes (s, g))
-        if (b.clip >= 1 && nameTag (s, g, b).contains (p))
+        if (b.clip >= 0 && nameTag (s, g, b).contains (p))
             return b.clip;
     return -1;
 }
@@ -118,7 +118,7 @@ bool MoveGesture::begin (const Session& s, const ViewGeometry& g, juce::Point<in
     clip_ = -1;
     if (!s.active() || g.xToTime == nullptr || g.rate <= 0.0) return false;
     for (const auto& b : clipBoxes (s, g))
-        if (b.clip >= 1 && b.box.contains (p))
+        if (b.clip >= 0 && b.box.contains (p))
         {
             clip_ = b.clip;
             grabTime_ = g.xToTime (p.x);
@@ -137,7 +137,7 @@ void MoveGesture::drag (const Session& s, const ViewGeometry& g, juce::Point<int
     const double t = g.xToTime (p.x);
     int64_t off = std::max<int64_t> (0, startOffset_ + (int64_t) std::llround ((t - grabTime_) * g.rate));
     int lane = laneAtY (s, g, p.y);
-    if (lane < 0) lane = cur_.lane;
+    if (lane < 0 || clip_ == 0) lane = cur_.lane;   // the main file keeps its own track
     snapped_ = false;
     if (snap)
     {
@@ -149,8 +149,11 @@ void MoveGesture::drag (const Session& s, const ViewGeometry& g, juce::Point<int
         off = snappedOff;
     }
     const bool sameShape = lane >= 0 && lane < s.numLanes()
-                           && s.laneChannels[(size_t) lane] == s.laneChannels[(size_t) c.lane];
-    cur_ = { clip_, lane, off, sameShape && fits (s, clip_, lane, off) };
+                           && (s.laneChannels[(size_t) lane] == s.laneChannels[(size_t) c.lane]
+                               || (lane != c.lane && s.laneEmpty (lane)));
+    // On another file it is not refused any more: it goes in front of it or
+    // after it (placeWithInsert), which the preview shows.
+    cur_ = { clip_, lane, off, sameShape };
 }
 
 MoveGesture::Target MoveGesture::end()
@@ -164,7 +167,19 @@ MoveGesture::Target MoveGesture::end()
 void MoveGesture::paint (juce::Graphics& gr, const Session& s, const ViewGeometry& g) const
 {
     if (!active()) return;
-    const auto box = boxFor (s, g, cur_.clip, cur_.lane, cur_.offset);
+    // Where everything lands: the dragged file, and the files it pushes right
+    // when it is dropped in front of one (thin outlines).
+    const Session placed = cur_.valid ? placeWithInsert (s, cur_.clip, cur_.lane, cur_.offset) : s;
+    if (cur_.valid)
+        for (int j = 0; j < (int) placed.clips.size() && j < (int) s.clips.size(); ++j)
+            if (j != cur_.clip && placed.clips[(size_t) j].offset != s.clips[(size_t) j].offset)
+            {
+                const auto pushed = boxFor (placed, g, j, placed.clips[(size_t) j].lane, placed.clips[(size_t) j].offset);
+                gr.setColour (juce::Colour (0xff7fff7f).withAlpha (0.6f));
+                gr.drawRect (pushed, 1);
+            }
+    const int64_t at = cur_.valid ? placed.clips[(size_t) cur_.clip].offset : cur_.offset;
+    const auto box = boxFor (s, g, cur_.clip, cur_.lane, at);
     if (box.isEmpty()) return;
     const auto col = cur_.valid ? juce::Colour (0xff7fff7f) : juce::Colour (0xffff6060);
     gr.setColour (col.withAlpha (0.18f));
@@ -176,6 +191,110 @@ void MoveGesture::paint (juce::Graphics& gr, const Session& s, const ViewGeometr
         gr.setColour (juce::Colours::yellow);
         gr.drawVerticalLine (box.getX(), (float) g.plot.getY(), (float) g.plot.getBottom());
         gr.drawVerticalLine (box.getRight() - 1, (float) g.plot.getY(), (float) g.plot.getBottom());
+    }
+}
+
+int TrimGesture::edgeAt (const Session& s, const ViewGeometry& g, juce::Point<int> p, bool* left)
+{
+    if (!s.active()) return -1;
+    for (const auto& b : clipBoxes (s, g))
+    {
+        if (b.clip < 1 || p.y < b.box.getY() || p.y >= b.box.getBottom()) continue;
+        const auto& c = s.clips[(size_t) b.clip];
+        // Only an edge that is really the file's edge (not the view's border).
+        const bool leftVisible = g.timeToX != nullptr && std::abs (g.timeToX ((double) c.offset / g.rate) - b.box.getX()) < 1.5;
+        const bool rightVisible = g.timeToX != nullptr && std::abs (g.timeToX ((double) c.end() / g.rate) - b.box.getRight()) < 1.5;
+        if (leftVisible && std::abs (p.x - b.box.getX()) <= 4)       { if (left) *left = true;  return b.clip; }
+        if (rightVisible && std::abs (p.x - b.box.getRight()) <= 4)  { if (left) *left = false; return b.clip; }
+    }
+    return -1;
+}
+
+bool TrimGesture::begin (const Session& s, const ViewGeometry& g, juce::Point<int> p)
+{
+    clip_ = -1;
+    if (g.xToTime == nullptr || g.rate <= 0.0) return false;
+    bool left = false;
+    const int c = edgeAt (s, g, p, &left);
+    if (c < 1) return false;
+    clip_ = c;
+    left_ = left;
+    cur_ = { c, s.clips[(size_t) c].offset, s.clips[(size_t) c].length, true };
+    snapped_ = false;
+    return true;
+}
+
+void TrimGesture::drag (const Session& s, const ViewGeometry& g, juce::Point<int> p, bool snap, double playheadSecs)
+{
+    if (!active() || clip_ >= (int) s.clips.size()) return;
+    const auto& c = s.clips[(size_t) clip_];
+    int64_t e = (int64_t) std::llround (g.xToTime (p.x) * g.rate);
+    snapped_ = false;
+    if (snap)
+    {
+        const double secsPerPx = std::abs (g.xToTime (g.plot.getX() + 8) - g.xToTime (g.plot.getX())) / 8.0;
+        const int64_t tol = (int64_t) std::llround (8.0 * secsPerPx * g.rate);
+        std::vector<int64_t> targets { 0, (int64_t) std::llround (playheadSecs * g.rate) };
+        for (size_t j = 0; j < s.clips.size(); ++j)
+            if ((int) j != clip_) { targets.push_back (s.clips[j].offset); targets.push_back (s.clips[j].end()); }
+        int64_t best = e, bestD = tol + 1;
+        for (auto t : targets)
+            if (std::abs (t - e) <= tol && std::abs (t - e) < bestD) { best = t; bestD = std::abs (t - e); }
+        snapped_ = best != e;
+        e = best;
+    }
+    // Inside the whole file, and not over a neighbour of the same track.
+    int64_t lo = c.fileStart(), hi = c.fileEnd();
+    for (size_t j = 0; j < s.clips.size(); ++j)
+    {
+        const auto& o = s.clips[j];
+        if ((int) j == clip_ || o.lane != c.lane) continue;
+        if (o.end() <= c.offset) lo = std::max (lo, o.end());
+        if (o.offset >= c.end()) hi = std::min (hi, o.offset);
+    }
+    if (left_)
+    {
+        const int64_t start = std::clamp<int64_t> (e, std::max<int64_t> (0, lo), c.end() - 1);
+        cur_ = { clip_, start, c.end() - start, true };
+    }
+    else
+    {
+        const int64_t end = std::clamp<int64_t> (e, c.offset + 1, hi);
+        cur_ = { clip_, c.offset, end - c.offset, true };
+    }
+}
+
+TrimGesture::Target TrimGesture::end()
+{
+    Target t = cur_;
+    if (!active()) t.clip = -1;
+    clip_ = -1;
+    return t;
+}
+
+void TrimGesture::paint (juce::Graphics& gr, const Session& s, const ViewGeometry& g) const
+{
+    if (!active() || clip_ >= (int) s.clips.size()) return;
+    const auto& c = s.clips[(size_t) clip_];
+    // The whole file faintly, the part kept clearly.
+    Session whole = s;
+    whole.clips[(size_t) clip_].offset = c.fileStart();
+    whole.clips[(size_t) clip_].length = c.fileEnd() - c.fileStart();
+    const auto all = boxFor (whole, g, clip_, c.lane, c.fileStart());
+    gr.setColour (juce::Colour (0xff7fd4ff).withAlpha (0.35f));
+    gr.drawRect (all, 1);
+    Session kept = s;
+    kept.clips[(size_t) clip_].length = cur_.length;
+    const auto box = boxFor (kept, g, clip_, c.lane, cur_.offset);
+    gr.setColour (juce::Colour (0xff7fff7f).withAlpha (0.18f));
+    gr.fillRect (box);
+    gr.setColour (juce::Colour (0xff7fff7f));
+    gr.drawRect (box, 2);
+    if (snapped_)
+    {
+        gr.setColour (juce::Colours::yellow);
+        const int x = left_ ? box.getX() : box.getRight() - 1;
+        gr.drawVerticalLine (x, (float) g.plot.getY(), (float) g.plot.getBottom());
     }
 }
 
