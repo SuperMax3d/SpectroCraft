@@ -162,6 +162,7 @@ struct Settings
     bool exportMarkers = false;     // draw marker lines and titles
     bool exportSelections = false;  // draw time selection band + spectral selection shapes
     bool exportDrawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
+    bool exportFilenameHeader = false;  // file name on top + a frame on the sides without an axis
 
     // Stem Separation (Effects menu): last used choices, persisted per session.
     juce::String acppModel;              // selected GGUF model file name ("" = none)
@@ -240,6 +241,7 @@ struct Settings
             && specHarmNumbers == o.specHarmNumbers
             && exportAxes == o.exportAxes && exportMarkers == o.exportMarkers
             && exportSelections == o.exportSelections && exportDrawings == o.exportDrawings
+            && exportFilenameHeader == o.exportFilenameHeader
             && stemSepMode == o.stemSepMode && acppModel6 == o.acppModel6
             && acppModelWH == o.acppModelWH && acppModelWHCB == o.acppModelWHCB
             && stemSepOutputMode == o.stemSepOutputMode

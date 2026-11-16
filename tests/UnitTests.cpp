@@ -24158,6 +24158,111 @@ static uint64_t fileChecksum (const juce::File& f)
     return h;
 }
 
+// Issue #30: File > Spectrogram > Save Filename header frames the exported
+// plot - the file name in a band on top, a thin border in the axis colour on
+// every side without an axis - and an export always carries the marker
+// titles, even while the live spectrogram is stacked below the waveform
+// (which then draws them instead).
+static void testSpectrogramExportFilenameHeader()
+{
+    const juce::File dir = makeTempFile ("export_header_dir").getParentDirectory ()
+                           .getChildFile ("spectrocraft_export_header_test");
+    dir.createDirectory ();
+    const juce::File store = makeTempFile ("export_header.recent");
+    store.deleteFile ();
+    const juce::File wav = dir.getChildFile ("header_src.wav");
+    writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t f, double) { return (float) (std::sin ((double) f * 0.05) * 0.3); });
+
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "#30: open wav");
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "export header"));
+        SpectralView* sv = win->spectralViewComp ();
+        if (sv == nullptr) { CHECK (false, "#30: spectral view"); return; }
+        const auto pr = sv->plotRect ();
+        const int pw = pr.getWidth (), ph = pr.getHeight ();
+        const int fr = SpectralView::kExportFrame, hh = SpectralView::kExportHeaderH;
+        const juce::Colour strip = sc::axes::axisStripFill ();
+        auto load = [] (const juce::File& f) { return juce::ImageFileFormat::loadFrom (f); };
+        auto isStrip = [&strip] (juce::Colour c) { return c.getARGB () == strip.getARGB (); };
+
+        // Header only: a frame on all four sides, the band on top.
+        SpectralView::SpectralExportOptions h;
+        h.filenameHeader = true;
+        const juce::File outH = dir.getChildFile ("hdr_only.png");
+        CHECK (sv->saveAsPng (outH, nullptr, h), "#30: header export writes a PNG");
+        const auto dH = pngDimensions (outH);
+        CHECK (dH.first == pw + 2 * fr && dH.second == ph + hh + fr,
+              "#30: header only = plot + frame on both sides + band on top + frame below: "
+                  + juce::String (dH.first) + "x" + juce::String (dH.second));
+        const juce::Image iH = load (outH);
+        if (iH.isValid ())
+        {
+            CHECK (isStrip (iH.getPixelAt (1, 1)) && isStrip (iH.getPixelAt (1, hh + ph / 2))
+                       && isStrip (iH.getPixelAt (iH.getWidth () - 2, hh + ph / 2))
+                       && isStrip (iH.getPixelAt (iH.getWidth () / 2, iH.getHeight () - 2)),
+                  "#30: the band and the frame are in the axis colour");
+            float brightest = 0.0f;
+            for (int x = fr + pw / 4; x < fr + 3 * pw / 4; ++x)
+                for (int y = 2; y < hh - 2; ++y)
+                    brightest = std::max (brightest, iH.getPixelAt (x, y).getPerceivedBrightness ());
+            CHECK (brightest > strip.getPerceivedBrightness () + 0.3f, "#30: the file name is written in the band");
+        }
+        else CHECK (false, "#30: header PNG loads");
+
+        // With axes (left, ruler on top): no frame on the axis sides.
+        SpectralView::SpectralExportOptions ha = h;
+        ha.axes = true;
+        const juce::File outHA = dir.getChildFile ("hdr_axes.png");
+        CHECK (sv->saveAsPng (outHA, nullptr, ha), "#30: header + axes export writes a PNG");
+        const auto dHA = pngDimensions (outHA);
+        CHECK (dHA.first == pw + sv->axisW () + fr && dHA.second == ph + app.rulerStackHeight () + hh + fr,
+              "#30: axes left / ruler on top: frame on the right and below only");
+
+        // Axis on the right, ruler at the bottom: frame on the left only (the
+        // band stays on top).
+        app.settings.trackAxisOnRight = true;
+        app.settings.trackRulerAtBottom = true;
+        sv->setSettings (app.settings);
+        const juce::File outHR = dir.getChildFile ("hdr_axes_right.png");
+        CHECK (sv->saveAsPng (outHR, nullptr, ha), "#30: header + axes (right / bottom) writes a PNG");
+        const auto dHR = pngDimensions (outHR);
+        const auto pr2 = sv->plotRect ();
+        CHECK (dHR.first == pr2.getWidth () + sv->axisW () + fr
+                   && dHR.second == pr2.getHeight () + app.rulerStackHeight () + hh,
+              "#30: axis right / ruler at the bottom: frame on the left, band on top, nothing below");
+        app.settings.trackAxisOnRight = false;
+        app.settings.trackRulerAtBottom = false;
+        sv->setSettings (app.settings);
+
+        // Marker titles: the same export whether or not the live view draws them.
+        app.markers ().addPointMarker (0.4, "TitleShouldShow");
+        SpectralView::SpectralExportOptions m;
+        m.markers = true;
+        const juce::File outLone = dir.getChildFile ("mk_lone.png");
+        const juce::File outStacked = dir.getChildFile ("mk_stacked.png");
+        sv->setShowMarkerTitles (true);
+        CHECK (sv->saveAsPng (outLone, nullptr, m), "#30: marker export (lone view)");
+        sv->setShowMarkerTitles (false);   // stacked below the waveform
+        CHECK (sv->saveAsPng (outStacked, nullptr, m), "#30: marker export (stacked view)");
+        CHECK (fileChecksum (outLone) == fileChecksum (outStacked),
+              "#30: the export carries the marker titles even while the live view leaves them to the waveform");
+
+        // The menu item toggles and persists.
+        CHECK (!app.settings.exportFilenameHeader, "#30: Save Filename header defaults off");
+        win->menuItemSelected (MainWindow::ExpFilenameHeader, 0);
+        CHECK (app.settings.exportFilenameHeader, "#30: Save Filename header toggles on from the menu");
+    }
+    {
+        Application app2 (store);
+        CHECK (app2.settings.exportFilenameHeader, "#30: Save Filename header persisted");
+    }
+    for (auto entry : juce::RangedDirectoryIterator (dir, false))
+        if (entry.getFile ().existsAsFile ()) entry.getFile ().deleteFile ();
+    dir.deleteRecursively ();
+    store.deleteFile ();
+}
+
 static void testSpectrogramExportOptions()
 {
     const juce::File dir = makeTempFile ("export_opts_dir").getParentDirectory ()
@@ -29984,6 +30089,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("dedicated track load sync", testDedicatedTrackLoadSync);
     SC_RUN_TEST ("track axis placement", testTrackAxisPlacement);
     SC_RUN_TEST ("spectrogram export options", testSpectrogramExportOptions);
+    SC_RUN_TEST ("spectrogram export filename header", testSpectrogramExportFilenameHeader);
     SC_RUN_TEST ("audio.cpp cli wrapper", testAudioCppCli);
     SC_RUN_TEST ("zoom fit auto mode", testZoomFitAutoMode);
     SC_RUN_TEST ("F5 refresh shortcut", testF5RefreshShortcut);
