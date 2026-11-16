@@ -475,6 +475,16 @@ public:
         since it was loaded or last saved (the main file is written by the
         normal save, limited to its own region). Called by beginSave. */
     bool saveSessionFiles (FileDoc& d, std::string* errOut = nullptr);
+    /** Adding a file at another sample rate or channel count converts to the
+        higher of the two (new channels silent); this asks the user to
+        confirm the conversions described (false cancels the add). Not set =
+        go ahead (headless, AI control). */
+    std::function<bool (const juce::String&)> onConfirmSessionConversion;
+    /** The first save that has to write edited referenced files asks how:
+        returns 2 = Save as Copies, 1 = Overwrite Originals, 0 = not now
+        (asked again next time). The choice is remembered with the session.
+        Not set = overwrite (headless, AI control). */
+    std::function<int (const juce::StringArray& files)> onAskReferencedSaveMode;
     /** Called (message thread) when saving the referenced files of a session
         failed or was refused (the main file is still saved), or when a
         session action from a menu was refused. */

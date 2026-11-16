@@ -154,10 +154,17 @@ static void regrSessions_documents()
         auto& eng = d->engine;
 
         std::string err;
-        CHECK (! app.addSessionFile (fd, false, &err) && juce::String (err).contains ("Hz"),
-               "sessions: a file at another sample rate is refused (" + juce::String (err) + ")");
-        CHECK (! app.addSessionFile (fc, false, &err) && juce::String (err).contains ("channel"),
-               "sessions: a mono file cannot follow a stereo main file in its lane");
+        // A conversion (rate or channels) is confirmed first: refused here.
+        juce::String asked;
+        app.onConfirmSessionConversion = [&asked] (const juce::String& what) { asked = what; return false; };
+        CHECK (! app.addSessionFile (fd, false, &err) && juce::String (err).contains ("Hz") && asked.contains ("16000 Hz"),
+               "sessions: a file at another sample rate asks first; refused, nothing changes (" + juce::String (err) + ")");
+        CHECK (! app.addSessionFile (fc, false, &err) && juce::String (err).contains ("channel")
+                   && asked.contains ("silent channel"),
+               "sessions: a mono file after a stereo main file asks to get a silent channel");
+        app.onConfirmSessionConversion = nullptr;
+        CHECK (! d->session.active () && eng.numChannels () == 2 && eng.sampleRate () == 8000.0,
+               "sessions: refused conversions leave the file alone");
 
         CHECK (app.addSessionFile (fb, false, &err), "sessions: add b after the main file (" + juce::String (err) + ")");
         CHECK (d->session.active () && eng.numChannels () == 2 && eng.numSamples () == 12000
@@ -879,6 +886,127 @@ static void regrSessions_copies()
     dir.deleteRecursively ();
 }
 
+// PR #24 review, batch 3: files at another rate or channel count are
+// converted to the higher of the two; edited referenced files are saved as
+// copies or over the originals, asked once and remembered.
+static void regrSessions_reviewBatch3()
+{
+    progress ("regression sessions: PR #24 review batch 3 (conversions, copies or originals)");
+    using namespace scsessiontest;
+    const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_b3");
+    dir.deleteRecursively ();
+    dir.createDirectory ();
+    const juce::File fm = dir.getChildFile ("main.wav"), f16 = dir.getChildFile ("hi16k.wav"),
+                     f4 = dir.getChildFile ("lo4k.wav"), fmono = dir.getChildFile ("mono.wav"),
+                     fst = dir.getChildFile ("stereo.wav"), fb = dir.getChildFile ("b.wav");
+    writeWav (fm, 2, 8000.0, 8000, [] (int ch, int64_t f, double) { return sig (1, ch, f); });
+    writeWav (f16, 2, 16000.0, 2000, [] (int, int64_t f, double r) { return 0.3f * (float) std::sin (6.283 * 500.0 * (double) f / r); });
+    writeWav (f4, 1, 4000.0, 1000, [] (int, int64_t f, double r) { return 0.3f * (float) std::sin (6.283 * 300.0 * (double) f / r); });
+    writeWav (fmono, 1, 8000.0, 1000, [] (int ch, int64_t f, double) { return sig (3, ch, f); });
+    writeWav (fst, 2, 8000.0, 1000, [] (int ch, int64_t f, double) { return sig (4, ch, f); });
+    writeWav (fb, 2, 8000.0, 2000, [] (int ch, int64_t f, double) { return sig (2, ch, f); });
+    const juce::File store = dir.getChildFile ("store.recent");
+
+    {   // Rates: the session goes up to a higher one; a lower file goes up to the session's.
+        Application app (store);
+        CHECK (app.openFile (fm), "review b3: main opens");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        auto& eng = d->engine;
+        std::string err;
+        juce::String asked;
+        app.onConfirmSessionConversion = [&asked] (const juce::String& what) { asked = what; return true; };
+        app.markers ().addPointMarker (0.5, "Half");
+        CHECK (app.addSessionFilesAt ({ f16 }, -1, 4000, &err) && eng.sampleRate () == 16000.0
+                   && d->session.clips[0].length == 16000 && d->session.clips[1].offset == 8000
+                   && d->session.clips[1].length == 2000 && asked.contains ("16000 Hz"),
+               "review b3: a 16 kHz file takes the session to 16 kHz, places doubled (" + juce::String (err) + ")");
+        CHECK (std::abs (d->markers.markers ()[0].start - 0.5) < 1e-9, "review b3: markers stay at their time");
+        app.undoStep ();
+        CHECK (eng.sampleRate () == 8000.0 && ! d->session.active () && eng.numSamples () == 8000,
+               "review b3: undo goes back to 8 kHz");
+        app.redoStep ();
+        CHECK (eng.sampleRate () == 16000.0 && d->session.clips.size () == 2, "review b3: redo");
+
+        CHECK (app.addSessionFilesAt ({ f4 }, -1, 0, &err) && d->session.clips[2].length == 4000
+                   && d->session.clips[2].savedHash == 0 && asked.contains ("4000 Hz"),
+               "review b3: a 4 kHz file is resampled up to the session (and will be written)");
+        app.onAskReferencedSaveMode = [] (const juce::StringArray&) { return 1; };   // overwrite
+        CHECK (app.saveDocument (*d, fm, false, &err), "review b3: save");
+        {
+            AudioEngine back;
+            CHECK (back.loadFile (f4) && back.sampleRate () == 16000.0 && back.numSamples () == 4000
+                       && back.loadFile (fm) && back.sampleRate () == 16000.0 && back.numSamples () == 16000,
+                   "review b3: the converted files are saved at the session's rate");
+        }
+    }
+    {   // Channels: the larger count, new channels silent.
+        writeWav (fm, 2, 8000.0, 8000, [] (int ch, int64_t f, double) { return sig (1, ch, f); });
+        sc::fileMetaSidecarPath (fm).deleteFile ();
+        Application app (dir.getChildFile ("store2.recent"));
+        CHECK (app.openFile (fm), "review b3: a fresh main");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        auto& eng = d->engine;
+        std::string err;
+        CHECK (app.addSessionFilesAt ({ fmono }, 0, 8000, &err) && d->session.laneChannels[0] == 2
+                   && sampleIs (eng, 0, 8000, sig (3, 0, 0)) && sampleIs (eng, 1, 8000, 0.0f),
+               "review b3: a mono file after a stereo one gets a silent second channel");
+        const juce::File fm2 = dir.getChildFile ("mono2.wav");   // f4 was saved at 16 kHz above
+        writeWav (fm2, 1, 8000.0, 2000, [] (int ch, int64_t f, double) { return sig (5, ch, f); });
+        CHECK (app.addSessionTrack (1, &err) && app.addSessionFilesAt ({ fm2 }, 1, 0, &err)
+                   && d->session.laneChannels[1] == 1 && eng.sampleRate () == 8000.0, "review b3: a mono track with a file");
+        CHECK (app.addSessionFilesAt ({ fst }, 1, 4000, &err) && d->session.laneChannels[1] == 2
+                   && eng.numChannels () == 4 && sampleIs (eng, 3, 0, 0.0f) && sampleIs (eng, 3, 4000, sig (4, 1, 0)),
+               "review b3: a stereo file widens the mono track; its first file gets a silent channel");
+    }
+    {   // Copies or originals: asked once, remembered with the session.
+        writeWav (fm, 2, 8000.0, 8000, [] (int ch, int64_t f, double) { return sig (1, ch, f); });
+        sc::fileMetaSidecarPath (fm).deleteFile ();
+        const juce::File store3 = dir.getChildFile ("store3.recent");
+        {
+            Application app (store3);
+            CHECK (app.openFile (fm), "review b3: main for the save choice");
+            FileDoc* d = app.doc ();
+            if (d == nullptr) return;
+            std::string err;
+            int asks = 0;
+            int answer = 0;
+            app.onAskReferencedSaveMode = [&] (const juce::StringArray& files) { ++asks; return files.contains ("b.wav") ? answer : -1; };
+            CHECK (app.addSessionFilesAt ({ fb }, 0, 8000, &err), "review b3: b after the main file");
+            CHECK (app.saveDocument (*d, fm, false, &err) && asks == 0, "review b3: nothing edited, nothing asked");
+            app.setSelection ({ 1.05, 1.1 });   // inside b
+            app.changeGain (6.0f);
+            const auto bBefore = bytesOf (fb);
+            answer = 0;   // not now
+            app.saveDocument (*d, fm, false, &err);
+            CHECK (asks == 1 && bytesOf (fb) == bBefore && d->session.referencedSave == sc::session::Session::SaveMode::ask,
+                   "review b3: Not Now saves nothing of b and asks again later");
+            answer = 2;   // copies
+            CHECK (app.saveDocument (*d, fm, false, &err) && asks == 2, "review b3: asked again, Save as Copies");
+            const juce::File copy = dir.getChildFile ("b_copy.wav");
+            AudioEngine back;
+            CHECK (bytesOf (fb) == bBefore && copy.existsAsFile () && back.loadFile (copy)
+                       && sampleIs (back, 0, 400, sig (2, 0, 400) * std::pow (10.0f, 0.3f))
+                       && d->session.clips[1].file == copy && d->session.clips[1].ownCopy,
+                   "review b3: b stays as it was, b_copy.wav has the edit and is the session's file now");
+            app.setSelection ({ 1.15, 1.2 });
+            app.changeGain (-6.0f);
+            CHECK (app.saveDocument (*d, fm, false, &err) && asks == 2 && ! dir.getChildFile ("b_copy2.wav").exists (),
+                   "review b3: the choice is remembered; the copy is written in place");
+        }
+        {
+            Application app (store3);
+            CHECK (app.openFile (fm), "review b3: reopen");
+            FileDoc* d = app.doc ();
+            CHECK (d != nullptr && d->session.clips.size () == 2 && d->session.clips[1].file == dir.getChildFile ("b_copy.wav")
+                       && d->session.referencedSave == sc::session::Session::SaveMode::copies,
+                   "review b3: the session refers to the copy, and remembers the choice");
+        }
+    }
+    dir.deleteRecursively ();
+}
+
 static void runRegression_sessions()
 {
     regrSessions_model();
@@ -889,4 +1017,5 @@ static void runRegression_sessions()
     regrSessions_reviewBatch2();
     regrSessions_trim();
     regrSessions_copies();
+    regrSessions_reviewBatch3();
 }

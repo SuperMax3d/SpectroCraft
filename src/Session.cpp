@@ -339,6 +339,8 @@ juce::var toVar (const Session& s, const juce::File& baseDir)
     root->setProperty ("lanes", lanes);
     if (! s.clips.empty() && s.clips[0].offset != 0)
         root->setProperty ("mainOffset", (juce::int64) s.clips[0].offset);
+    if (s.referencedSave != Session::SaveMode::ask)
+        root->setProperty ("referencedSave", s.referencedSave == Session::SaveMode::copies ? "copies" : "overwrite");
     juce::Array<juce::var> files;
     for (size_t i = 1; i < s.clips.size(); ++i)
     {
@@ -351,6 +353,7 @@ juce::var toVar (const Session& s, const juce::File& baseDir)
         o->setProperty ("length", (juce::int64) c.length);
         if (c.headLength > 0) o->setProperty ("trimStart", (juce::int64) c.headLength);
         if (c.tailLength > 0) o->setProperty ("trimEnd", (juce::int64) c.tailLength);
+        if (c.ownCopy) o->setProperty ("ownCopy", true);
         files.add (juce::var (o));
     }
     root->setProperty ("files", files);
@@ -369,6 +372,11 @@ Session fromVar (const juce::var& v, const juce::File& baseDir, const juce::File
 
     if (!v.isObject()) return s;
     s.clips[0].offset = std::max<juce::int64> (0, (juce::int64) v.getProperty ("mainOffset", 0));
+    {
+        const juce::String mode = v.getProperty ("referencedSave", "").toString();
+        s.referencedSave = mode == "copies" ? Session::SaveMode::copies
+                         : mode == "overwrite" ? Session::SaveMode::overwrite : Session::SaveMode::ask;
+    }
     if (const auto* lanes = v.getProperty ("lanes", {}).getArray())
         for (int i = 1; i < lanes->size(); ++i)   // lane 0 is the main file's own layout
             s.laneChannels.push_back (std::clamp ((int) (*lanes)[i], 1, 64));
@@ -388,6 +396,7 @@ Session fromVar (const juce::var& v, const juce::File& baseDir, const juce::File
             c.length = std::max<juce::int64> (0, (juce::int64) f.getProperty ("length", 0));
             c.headLength = std::max<juce::int64> (0, (juce::int64) f.getProperty ("trimStart", 0));
             c.tailLength = std::max<juce::int64> (0, (juce::int64) f.getProperty ("trimEnd", 0));
+            c.ownCopy = (bool) f.getProperty ("ownCopy", false);
             if (c.lane < 0 || c.lane >= s.numLanes() || c.file == juce::File()) continue;
             s.clips.push_back (c);
         }

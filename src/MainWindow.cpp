@@ -704,6 +704,31 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     {
         sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, "Session", m, "", this);
     };
+    // A file at another rate or channel count: confirm the conversion.
+    app.onConfirmSessionConversion = [] (const juce::String& what)
+    {
+        if (sc::alert::isHeadless ())
+            return true;
+        juce::AlertWindow dlg ("Add to the session", what, juce::AlertWindow::QuestionIcon);
+        dlg.addButton ("Convert", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        return dlg.runModalLoop () == 1;
+    };
+    // The first save of edited referenced files: copies or originals?
+    app.onAskReferencedSaveMode = [] (const juce::StringArray& files)
+    {
+        if (sc::alert::isHeadless ())
+            return 1;
+        juce::AlertWindow dlg ("Save the session's files",
+                               "These files of the session changed:\n" + files.joinIntoString ("\n")
+                                   + "\n\nSave them as copies (\"<name>_copy.wav\", the originals stay as they are) "
+                                     "or over the originals? The choice is remembered with this file.",
+                               juce::AlertWindow::QuestionIcon);
+        dlg.addButton ("Save as Copies", 2, juce::KeyPress (juce::KeyPress::returnKey));
+        dlg.addButton ("Overwrite Originals", 1);
+        dlg.addButton ("Not Now", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        return dlg.runModalLoop ();
+    };
 
     // When a file is closed, drop the stored snapshots that came from it.
     app.onFileClosed = [this] (const FileDoc& d)
@@ -848,6 +873,8 @@ MainWindow::~MainWindow()
     app.onBeforeActiveDocChange = nullptr;
     app.onSessionOpenWarnings = nullptr;
     app.onSessionSaveProblem = nullptr;
+    app.onConfirmSessionConversion = nullptr;
+    app.onAskReferencedSaveMode = nullptr;
     app.onFileClosed = nullptr;
     app.onTimeRangeDeleted = nullptr;
     app.onTimeRangeStretched = nullptr;

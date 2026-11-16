@@ -13,8 +13,18 @@ or go away.
   the track under the mouse, from the time under it. Several files dropped
   together go one after the other. A file dropped on another one takes the
   first free place after it. Dropped anywhere else (or with no file open), a
-  file opens as a document of its own, as before. A file must have the
-  track's channel count and the main file's sample rate (for now).
+  file opens as a document of its own, as before.
+- **Another sample rate or channel count**: the session takes the **higher**
+  of the two, after a window says what will happen (Cancel leaves everything
+  as it was):
+  - a file at a higher rate takes the whole session to it - every file,
+    the main one and hidden trims included, is resampled and every place on
+    the timeline scaled; a file at a lower rate is resampled up to the
+    session's. One undo step either way;
+  - a file with fewer channels than its track gets silent ones; a file with
+    more widens the track, whose other files get silent channels.
+  Converted files are written at the next save (at the session's rate and
+  channel count), like edited ones.
 - **Dropped on another file**, a file goes **in front of it** when the drop
   is in that file's first half - that file and the later ones of the track
   move right to make room - or **right after it** in its second half. The
@@ -85,14 +95,24 @@ file:
 - Two files touching in a lane form one signal, so the spectrogram runs
   across the boundary instead of ending with silence.
 
-When you **save** the main file:
+When you **save** the main file, the first time an edited (or converted)
+referenced file has to be written a window asks how: **Save as Copies**
+writes `<name>_copy.wav` (then `_copy2`, ...) next to the original, which
+stays as it is, and the session refers to the copy from then on (later saves
+write the copy in place); **Overwrite Originals** writes the files where they
+are; **Not Now** saves only the main file and asks again next time. The choice
+is remembered with the session, in the main file's metadata
+(`"referencedSave": "copies"` or `"overwrite"`). Without a window (AI control,
+command line) the files are overwritten.
+
+Then:
 
 - **The main file:** the engine writes only its own region: its channels, from
   0 to its own length. This holds whatever asks for the save: Save, Save As,
   batch actions, the command line or AI control. The composite never ends up
   in the main file.
 - **The other files:** every file whose region changed since it was opened or
-  last saved is written back to its own path. It goes through a document of
+  last saved is written back (to its own path or to its copy, see above). It goes through a document of
   its own, so it keeps its markers and other metadata, and like every save in
   SpectroCraft it becomes a 32-bit float WAV. Files you did not edit are not
   touched.
@@ -116,18 +136,19 @@ folder, with the absolute path as a fallback:
 }
 ```
 
-Offsets and lengths are in samples; `trimStart` / `trimEnd` are the samples
+Offsets and lengths are in samples; `ownCopy` marks a copy the session made
+(Save as Copies); `trimStart` / `trimEnd` are the samples
 hidden at a file's start / end (only when trimmed), and `mainOffset` the main
 file's place when it was moved (only when not 0). `lanes` lists every track's channel
 count, empty ones included (here a third, empty stereo track). When the main
-file is opened again,
-files that are missing, have another sample rate, no longer have their lane's
-channel count, or overlap another file are left out, and the app lists them.
-If none can be read, the entry is kept as it was.
+file is opened again, files that are missing, have more channels than their
+track, or overlap another file are left out, and the app lists them; a file
+at another sample rate or with fewer channels (converted, not saved since) is
+converted again and listed too. If none can be read, the entry is kept as it
+was.
 
 ## Limits of this first version
 
-- Every file must have the main file's sample rate. Resample it first.
 - Files of one lane cannot overlap: the composite could not tell them apart
   when saving. Put overlapping files in different lanes.
 - Audio outside every file (in a gap) belongs to no file and is not saved.
@@ -139,9 +160,7 @@ If none can be read, the entry is kept as it was.
 - Copies of one file: when an edit changes several copies differently (a
   selection across two of them), the first copy changed on the timeline
   wins and the others take its content.
-- Not done yet (PR #24 review, batch 3): a different sample rate or channel
-  count, and the choice between saving the other files as copies or over
-  the originals. Per-file gain or mute and crossfades are not planned.
+- Per-file gain or mute and crossfades are not planned.
 
 Code: `include/Session.h` (model: lanes, placement, warps, composite, JSON),
 `include/SessionOverlay.h` (outlines and the Move Files drag in both views),

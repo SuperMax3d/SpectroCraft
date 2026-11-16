@@ -53,6 +53,9 @@ struct Clip
         after an edit, the copy whose content no longer matches it is the one
         that was edited, and the others follow it. */
     uint64_t linkHash = 0;
+    /** A copy this session saved instead of overwriting the original (Save
+        as Copies): later saves write it in place. */
+    bool ownCopy = false;
 
     int64_t end() const noexcept { return offset + length; }
     /** Where the whole file would start / end on the timeline. */
@@ -62,7 +65,7 @@ struct Clip
     {
         return file == o.file && lane == o.lane && offset == o.offset && length == o.length
             && savedHash == o.savedHash && headLength == o.headLength && tailLength == o.tailLength
-            && head == o.head && tail == o.tail && linkHash == o.linkHash;
+            && head == o.head && tail == o.tail && linkHash == o.linkHash && ownCopy == o.ownCopy;
     }
 };
 
@@ -70,6 +73,11 @@ struct Session
 {
     std::vector<int> laneChannels;   // channel count of each lane; [0] = the main file's
     std::vector<Clip> clips;         // [0] = the main file
+    /** How edited referenced files are saved (PR #24 review): asked the
+        first time one has to be written, then remembered with the session
+        in the main file's metadata. */
+    enum class SaveMode { ask = 0, overwrite = 1, copies = 2 };
+    SaveMode referencedSave = SaveMode::ask;
 
     /** True when the document references at least one other file, has a
         track besides the main file's (an empty track added with Add Track),
@@ -93,7 +101,7 @@ struct Session
 
     bool operator== (const Session& o) const
     {
-        return laneChannels == o.laneChannels && clips == o.clips;
+        return laneChannels == o.laneChannels && clips == o.clips && referencedSave == o.referencedSave;
     }
     bool operator!= (const Session& o) const { return !(*this == o); }
 };
