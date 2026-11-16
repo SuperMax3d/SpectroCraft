@@ -579,6 +579,22 @@ bool finiteMinMax (const std::vector<double>& v, double& lo, double& hi)
     return have;
 }
 
+void paddedValueRange (double mn, double mx, double& lo, double& hi)
+{
+    const double span = mx - mn;
+    const double mag = std::max (std::abs (mn), std::abs (mx));
+    double pad = span * 0.1;
+    if (!(span > mag * 1e-9))                 // flat: a constant or below resolution
+        pad = mag > 0.0 ? mag * 0.1 : 1.0;
+    lo = mn - pad;
+    hi = mx + pad;
+    if (!(hi > lo))                            // non-finite input: a usable window
+    {
+        lo = -1.0;
+        hi = 1.0;
+    }
+}
+
 void overwriteParamRange (TableData& t, int paramIdx, double t0DocSecs,
                           double t1DocSecs, double startVal, double stopVal)
 {
@@ -1021,7 +1037,8 @@ bool parseTables (const juce::var& v, std::vector<TableData>& out, int* mode)
 
     out = std::move (parsed);
     if (mode != nullptr)
-        *mode = std::clamp (static_cast<int> (obj->getProperties().getWithDefault ("mode", 0)), 0, 2);
+        *mode = std::clamp (static_cast<int> (obj->getProperties().getWithDefault ("mode", 0)),
+                            kModeWaveform, kModePanelOnly);
     return true;
 }
 

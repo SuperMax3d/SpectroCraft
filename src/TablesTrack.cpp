@@ -145,10 +145,11 @@ void TablesTrackView::refit()
             mx = std::max (mx, hi);
         }
     }
-    const double pad = std::max ((mx - mn) * 0.1, 1e-9);
-    fitMin = have ? mn - pad : -1.0;
-    fitMax = have ? mx + pad : 1.0;
-    if (fitMax <= fitMin) fitMax = fitMin + 1e-9;
+    // A constant parameter keeps a real window (+-10% of its magnitude): the
+    // fixed 1e-9 padding vanished next to large values, the window came out
+    // flat and applyValueWindow() refused it (#29).
+    if (have) sc::tables::paddedValueRange (mn, mx, fitMin, fitMax);
+    else      { fitMin = -1.0; fitMax = 1.0; }
     applyValueWindow (fitMin, fitMax);
 }
 

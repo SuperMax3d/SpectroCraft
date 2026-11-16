@@ -349,7 +349,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     is selected in the list and its plot is drawn at once, no click needed;
     right-click also offers
     **Remove Selected**, **Copy** (CSV) and **Downsample...** (rows/second).
-    The top dropdown chooses where visible parameters are drawn: overlay on
+    The top dropdown chooses where visible parameters are drawn: only inside
+    the panel (the default), overlay on
     the waveform, overlay on the spectrogram (both auto-fit each parameter's
     range so curves stay visible; switching the choice re-targets every
     parameter to the new view, so imported tables show up without a manual
@@ -502,7 +503,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       When the tabs do not fit, the **>>** button lists the hidden ones.
     - Drag the **gaps** between groups to resize them: the 4 px gap and 4 px
       into each neighbour grab it, and the resize arrow shows exactly where a
-      press resizes. Double-click a gap to share the space equally between
+      press resizes. Each gap carries the same three-mark grip at its centre
+      as the app's other separators (stacked on a vertical gap). Double-click a gap to share the space equally between
       its two neighbours.
     - **Workspaces**: *Default* (the classic left column beside the Editor),
       *Editing*, *Analysis* and *Video* are listed at the right end of the
@@ -2459,13 +2461,12 @@ list: a table row followed by its parameter rows.
   plus any user-defined ones. In the dialog you can add custom colours with
   **New**, edit their RGB values in place, remove one with **Delete**, restore
   just the defaults with **Reset**, and apply or discard everything with
-  **OK/Cancel**. Custom colours persist between sessions. The **Show** button
-  at the top of the panel is the master switch for everything.
+  **OK/Cancel**. Custom colours persist between sessions.
 - **Shift+clicking an eye *solos* it**: a parameter's eye shows only that
-  parameter (and its parent table), a table's eye shows only that table with
-  all of its parameters, and shift-clicking the master **Show** button makes
-  everything visible. Shift-clicking again while in any of those states turns
-  *all* visibility off.
+  parameter (and its parent table), and a table's eye shows only that table
+  with all of its parameters. Shift-clicking again while in either state turns
+  *all* visibility off. Right-click → **Show All Tables** makes every table and
+  parameter visible (**Hide All Tables** when they already are).
 - Tables are created by **dragging CSV files onto the window** (the table name
   comes from the file name) or via right-click → **Paste to new table** (named
   *Clipboard*; parameter names come from the first row's column titles). A
@@ -2479,12 +2480,17 @@ list: a table row followed by its parameter rows.
   every Nth row so the density is at most that rate; no interpolation and no
   added data). Excel-style multi-selection applies: plain
   click, Ctrl/Cmd+click toggle, Shift+click range.
-- The dropdown at the top picks where visible parameters are drawn. Switching
-  it re-targets every parameter to the newly chosen view, so a table you just
+- The dropdown at the top (the full width of the panel) picks where visible
+  parameters are drawn. Switching
+  it to an overlay re-targets every parameter to the newly chosen view, so a table you just
   imported shows up in the spectrogram overlay immediately - no need to open
   each parameter's Align → **Manual…** dialog. (You can still give a parameter
   its own target afterwards from the Align submenu; the dedicated track shows
   every visible parameter whatever the target.)
+  - **Inside Table Panel Only** (the default for a new file) — nothing is drawn
+    over the waveform, the spectrogram or a track: the tables show only in the
+    panel's own preview plot. The choice is saved with the file like the
+    others; a file saved with another mode keeps it;
   - **Overlay on Waveform** — parameters whose alignment target is *Waveform*
     are drawn over the waveform view. Each parameter's raw range is first
     fitted into [-1,+1] (so the curve is visible regardless of the data's
@@ -2550,6 +2556,11 @@ list: a table row followed by its parameter rows.
       affect the auto-scaled axes, copy as blank fields, survive warps and
       downsampling as gaps and round-trip through save/reload (stored as JSON
       `null`).
+    - The auto-scaled axes add 10% above and below the data. A constant
+      parameter (or one whose variation is below the doubles' resolution at
+      its magnitude) gets a window of +-10% of its value, +-1 around zero, so
+      it shows as a flat line in the middle. (A constant like -1e9 used to
+      freeze the app when it became visible: issue #29.)
     - **Ctrl+0 / Zoom Out Full** also vertically fits this strip when it is
       shown.
 - The panel's preview plot shows hover values too: moving the mouse over it

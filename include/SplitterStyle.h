@@ -5,7 +5,9 @@
  * image and the video tracks, and the one between the table list and its
  * preview plot are all the same thing: a 6 px bar with a short grip of three
  * lines in the middle. They used to draw their own grips (one a long dotted
- * line, one five dots), which read as three different widgets.
+ * line, one five dots), which read as three different widgets. The gaps
+ * between docked panel groups (DockArea) keep their own 4 px width and dark
+ * fill but carry the same grip (issue #28).
  */
 #pragma once
 
@@ -20,13 +22,12 @@ namespace sc::ui
     inline juce::Colour splitterFill()   { return juce::Colour::fromRGB (40, 40, 44); }
     inline juce::Colour splitterGrip()   { return juce::Colour::fromRGB (110, 110, 120); }
 
-    /** Draw the grip in the middle of `area`. `vertical` = a bar that splits
-        left/right (its lines are horizontal); false = a bar that splits
-        top/bottom (its lines are vertical). */
-    inline void drawSplitterGrip (juce::Graphics& g, juce::Rectangle<float> area,
+    /** Draw only the grip (no fill) in the middle of `area`. `vertical` = a
+        bar that splits left/right (its marks are stacked vertically); false =
+        a bar that splits top/bottom (its marks sit side by side). */
+    inline void drawSplitterDots (juce::Graphics& g, juce::Rectangle<float> area,
                                   bool vertical)
     {
-        g.fillAll (splitterFill ());
         g.setColour (splitterGrip ());
 
         if (! vertical)
@@ -45,5 +46,14 @@ namespace sc::ui
             for (int i = -1; i <= 1; ++i)
                 g.drawHorizontalLine (cy + i * 3.0f, x1, x2);
         }
+    }
+
+    /** Fill a whole separator component and draw its grip in the middle of
+        `area` (see drawSplitterDots for `vertical`). */
+    inline void drawSplitterGrip (juce::Graphics& g, juce::Rectangle<float> area,
+                                  bool vertical)
+    {
+        g.fillAll (splitterFill ());
+        drawSplitterDots (g, area, vertical);
     }
 }
