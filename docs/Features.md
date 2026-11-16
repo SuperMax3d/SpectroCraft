@@ -123,7 +123,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   switch, Excel-style multi-selection that fits all selected drawings into view
   (10% margin on every side, and only when they are not already fully visible),
   right-click **Edit...** and **Delete Selected**. New items are created from the
-  panel's context menu or with **T / A / R / D** by clicking (text) or dragging
+  panel's context menu or with **T / A / R / D / O** (O = oval, Shift for a
+  circle) by clicking (text) or dragging
   (the rest) in the spectrogram — arrows point toward where you started dragging,
   so you place the arrowhead first and pull the shaft back; **Esc** cancels a
   pending creation. Drawings persist with the file
@@ -455,7 +456,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     menu — it never collapses an active multi-selection down to the clicked row
     (with nothing selected it selects exactly that row first).
   - **Drawing**: a table of user annotations drawn over the spectrogram — text,
-    arrows, rectangles and freehand strokes with per-item comments and
+    arrows, rectangles, ovals and freehand strokes, in groups if you like, with per-item comments and
     visibility; see [Drawing panel](#drawing-panel) below.
   - **Docking workspace (Adobe-style)**: every panel — the **Editor**
     (waveform + spectrogram) included — sits in a *panel group* with text
@@ -2064,7 +2065,7 @@ Schema, events and limits: [docs/diagnostics.md](docs/diagnostics.md).
 | Selection tool: Time Range / Marquee / Lasso / Paintbrush | S / M / L / P |
 | Brush size smaller / larger (Paintbrush only; % of cursor frequency) | [ / ] |
 | Paintbrush: straight line from the last stroke's end point to the click position (straight in linear-frequency space) | Alt+click |
-| New drawing on the spectrogram: Text / Arrow / Rectangle / Free Drawing | T / A / R / D |
+| New drawing on the spectrogram: Text / Arrow / Rectangle / Free Drawing / Oval | T / A / R / D / O |
 | Cancel a pending drawing creation (otherwise clears the active spectral selection) | Esc |
 | Zoom in / out (horizontal, both views) | Ctrl+= / Ctrl+- |
 | Zoom Out Full — reset the time window and both vertical ranges (Zoom Fit is menu-only now) | Ctrl+0 |
@@ -2446,10 +2447,25 @@ the spectrogram: **Text**, **Arrow**, **Rectangle** and **Free Drawing**.
   of the selected set fits every selected drawing into view — both time and
   frequency axes get a 10% margin on each side (clamped to the file).
 - New items are created from the panel's right-click menu (**New Text / New
-  Arrow / New Rectangle / New Free Drawing**) or with **T / A / R / D**: the
-  status bar shows "New drawing: click / drag in the spectrogram", a single
-  click places text (a dialog asks for its content) and a drag draws an arrow,
-  rectangle or freehand stroke. **Esc** cancels a pending creation.
+  Arrow / New Rectangle / New Free Drawing / New Oval**) or with
+  **T / A / R / D / O**: the status bar shows "New drawing: click / drag in the
+  spectrogram", a single click places text (a dialog asks for its content) and
+  a drag draws an arrow, rectangle, oval (hold **Shift** for a circle) or
+  freehand stroke. **Esc** cancels a pending creation.
+- **Selecting a drawing**: click it in the spectrogram (its line, or its text)
+  or pick its row in the list; **Shift**+click adds one. The selection shows a
+  dashed box with **four corner handles**: drag a handle to resize (the
+  opposite corner stays; text changes size), drag inside the box to move. One
+  undo step per move or resize. A click elsewhere, or **Esc**, drops the
+  selection. Picking drawings in the spectrogram selects their rows without
+  moving the view.
+- **Groups**: select two or more drawings and right-click → **Group**. The group
+  shows as one row (its eye, *Group N*, how many drawings) with its drawings
+  indented below; selecting any of them selects the whole group, which moves,
+  resizes, hides and deletes as one. **Ungroup** frees them.
+- **Drawings stay inside the spectrogram**: a drag that would take one past the
+  file's start or end, below 0 Hz or above Nyquist stops at that edge, and
+  nothing is drawn over the frequency axis or the time ruler.
 - Drawings are stored in data coordinates (time seconds × frequency Hz), so they
   stay anchored to the spectrum under zooming and panning, and are drawn on every
   visible channel row like spectral selection shapes. They persist with the file

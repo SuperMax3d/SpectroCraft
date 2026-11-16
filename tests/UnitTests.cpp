@@ -23572,6 +23572,164 @@ static void testDrawingPanel()
 }
 
 
+// ------------------------------------------------------------------ drawings: handles, groups, ovals
+// Ovals (Shift = circle), selecting a drawing by a click, its four corner
+// handles (resize) and box (move) with undo, staying inside the spectrogram,
+// groups (whole-group selection and moves, the panel's group rows), no
+// drawing over the axis, and the new fields saved with the file.
+static void testDrawingHandlesGroupsOvals()
+{
+    const juce::File wav = makeTempFile ("draw_handles.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 400.0 * (double) f / rate); });
+    const juce::File store = makeTempFile ("draw_handles.recent");
+    store.deleteFile ();
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "draw handles: open");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+        auto s = app.settings;
+        s.logFrequency = false;   // a linear axis: easy pixel arithmetic
+        SpectralView view (app);
+        view.setSize (440, 240);
+        view.setSettings (s);
+        view.setViewRange (0.0, 2.0);
+        view.setVisibleChannels ({ 0 });
+        view.onDrawingCreated = [&app] (DrawingItem it) { app.addDrawing (it); };
+        const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
+        const juce::ModifierKeys shiftLmb (juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier);
+        const auto pr = view.plotRect ();
+        const auto row = view.rowAt (pr.getCentreY ());
+        CHECK (! row.isEmpty (), "draw handles: a channel row");
+
+        // An oval, then a circle (Shift).
+        view.startPendingDraw (DrawingItem::Kind::Ellipse);
+        view.mouseDown (mkMouse (view, pr.getX () + 60, pr.getY () + 40, lmb));
+        view.mouseDrag (mkMouse (view, pr.getX () + 160, pr.getY () + 90, lmb));
+        view.mouseUp   (mkMouse (view, pr.getX () + 160, pr.getY () + 90, lmb));
+        view.startPendingDraw (DrawingItem::Kind::Ellipse);
+        view.mouseDown (mkMouse (view, pr.getX () + 200, pr.getY () + 40, shiftLmb));
+        view.mouseDrag (mkMouse (view, pr.getX () + 260, pr.getY () + 70, shiftLmb));
+        view.mouseUp   (mkMouse (view, pr.getX () + 260, pr.getY () + 70, shiftLmb));
+        CHECK (d->drawings.size () == 2 && d->drawings[0].kind == DrawingItem::Kind::Ellipse
+                   && d->drawings[1].kind == DrawingItem::Kind::Ellipse,
+               "draw handles: O draws ovals");
+        if (d->drawings.size () != 2) { wav.deleteFile (); return; }
+        {
+            const auto b = view.drawingScreenBox (d->drawings[1], row);
+            CHECK (std::abs (b.getWidth () - b.getHeight ()) <= 1.5f, "draw handles: Shift makes a circle (equal sides on screen)");
+        }
+
+        // A click on the first oval's outline selects it; its handles sit on its corners.
+        const auto box0 = view.drawingScreenBox (d->drawings[0], row);
+        const juce::Point<int> onEdge ((int) box0.getCentreX (), (int) std::lround (box0.getY ()));
+        CHECK (view.drawingHit (onEdge, row) == 0 && view.drawingHit (box0.getCentre ().toInt (), row) == -1,
+               "draw handles: the outline is hit, not the inside");
+        view.mouseDown (mkMouse (view, onEdge.x, onEdge.y, lmb));
+        view.mouseUp   (mkMouse (view, onEdge.x, onEdge.y, lmb));
+        CHECK (app.selectedDrawings == std::vector<int> { 0 }, "draw handles: a click selects the drawing");
+        CHECK (view.drawingHandleAt (box0.getBottomRight ().toInt (), row) == 2
+                   && view.drawingHandleAt (box0.getTopLeft ().toInt (), row) == 0,
+               "draw handles: four corner handles");
+
+        // Move it 40 px right: one undo step.
+        const DrawingItem before = d->drawings[0];
+        const auto c = box0.getCentre ().toInt ();
+        view.mouseDown (mkMouse (view, c.x, c.y, lmb));
+        view.mouseDrag (mkMouse (view, c.x + 40, c.y, lmb));
+        view.mouseUp   (mkMouse (view, c.x + 40, c.y, lmb));
+        const double dt = view.xToTime (pr.getX () + 40) - view.xToTime (pr.getX ());
+        CHECK (std::abs (d->drawings[0].t0 - (before.t0 + dt)) < 1e-3 && std::abs (d->drawings[0].f0 - before.f0) < 1.0,
+               "draw handles: dragging inside the box moves it");
+        app.undoStep ();
+        CHECK (std::abs (d->drawings[0].t0 - before.t0) < 1e-9, "draw handles: undo the move");
+        app.redoStep ();
+
+        // Resize from the bottom-right handle: the top-left corner stays.
+        const auto b1 = view.drawingScreenBox (d->drawings[0], row);
+        const DrawingItem beforeResize = d->drawings[0];
+        view.mouseDown (mkMouse (view, (int) b1.getRight (), (int) b1.getBottom (), lmb));
+        view.mouseDrag (mkMouse (view, (int) b1.getRight () + 30, (int) b1.getBottom () + 20, lmb));
+        view.mouseUp   (mkMouse (view, (int) b1.getRight () + 30, (int) b1.getBottom () + 20, lmb));
+        CHECK (d->drawings[0].t1 > beforeResize.t1 + 0.05 && std::abs (d->drawings[0].t0 - beforeResize.t0) < 1e-3
+                   && d->drawings[0].f0 < beforeResize.f0 && std::abs (d->drawings[0].f1 - beforeResize.f1) < 5.0,
+               "draw handles: a corner handle resizes, the opposite corner stays");
+
+        // Never past the spectrogram's edges.
+        const auto b2 = view.drawingScreenBox (d->drawings[0], row);
+        view.mouseDown (mkMouse (view, (int) b2.getCentreX (), (int) b2.getY (), lmb));
+        view.mouseDrag (mkMouse (view, (int) b2.getCentreX () - 1000, (int) b2.getY () - 1000, lmb));
+        view.mouseUp   (mkMouse (view, (int) b2.getCentreX () - 1000, (int) b2.getY () - 1000, lmb));
+        CHECK (d->drawings[0].t0 >= 0.0 && d->drawings[0].t0 < 1e-3 && d->drawings[0].f1 <= 4000.0 + 1e-6
+                   && d->drawings[0].f1 > 3990.0,
+               "draw handles: a move stops at the start of the file and at Nyquist");
+
+        // Groups: the two ovals as one.
+        app.groupDrawings ({ 0, 1 });
+        CHECK (d->drawings[0].group != 0 && d->drawings[0].group == d->drawings[1].group, "draw handles: grouped");
+        app.setDrawingSelection ({ 1 });
+        CHECK (app.selectedDrawings == (std::vector<int> { 0, 1 }), "draw handles: selecting a member selects the group");
+        const double t0a = d->drawings[0].t0, t0b = d->drawings[1].t0;
+        const auto gb = view.selectionScreenBox (row);
+        const auto gbHit = view.drawingScreenBox (d->drawings[1], row);
+        view.mouseDown (mkMouse (view, (int) gbHit.getCentreX (), (int) std::lround (gbHit.getY ()), lmb));
+        view.mouseDrag (mkMouse (view, (int) gbHit.getCentreX () + 20, (int) std::lround (gbHit.getY ()), lmb));
+        view.mouseUp   (mkMouse (view, (int) gbHit.getCentreX () + 20, (int) std::lround (gbHit.getY ()), lmb));
+        CHECK (! gb.isEmpty () && d->drawings[0].t0 > t0a && d->drawings[1].t0 > t0b
+                   && std::abs ((d->drawings[0].t0 - t0a) - (d->drawings[1].t0 - t0b)) < 1e-3,
+               "draw handles: the group moves as one");
+        {
+            DrawingPanel panel (app);
+            panel.setSize (300, 300);
+            panel.refresh ();
+            CHECK (panel.numListRows () == 3 && panel.listRow (0).item == -1 && panel.listRow (1).item == 0
+                       && panel.listRow (2).item == 1 && panel.itemsOfRows ({ 0 }) == (std::vector<int> { 0, 1 }),
+                   "draw handles: the panel shows the group's row, its drawings under it");
+            CHECK (panel.numSelectedRows () == 3, "draw handles: the panel shows the selection made in the view");
+        }
+        app.ungroupDrawings ({ 0 });
+        CHECK (d->drawings[0].group == 0 && d->drawings[1].group == 0, "draw handles: ungrouped");
+        app.setDrawingSelection ({});
+
+        // Nothing over the axis: a wide oval touching the start of the file.
+        DrawingItem edge;
+        edge.kind = DrawingItem::Kind::Rectangle;
+        edge.widthPx = 8.0f;
+        edge.colourARGB = (int) 0xFFFF00FF;
+        edge.t0 = 0.0; edge.t1 = 0.5; edge.f0 = 500.0; edge.f1 = 1500.0;
+        app.addDrawing (edge);
+        const juce::Image shot = view.createComponentSnapshot (view.getLocalBounds ());
+        const auto inAxis = shot.getPixelAt (pr.getX () - 3, (int) row.getCentreY ());
+        CHECK (! (inAxis.getRed () > 200 && inAxis.getBlue () > 200 && inAxis.getGreen () < 80),
+               "draw handles: a drawing is not drawn over the frequency axis");
+
+        CHECK (app.saveDocument (*d, wav, false, nullptr), "draw handles: save");
+    }
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "draw handles: reopen");
+        const FileDoc* d = app.doc ();
+        CHECK (d != nullptr && d->drawings.size () == 3 && d->drawings[1].kind == DrawingItem::Kind::Ellipse,
+               "draw handles: ovals are saved with the file");
+    }
+    {
+        // The group id round-trips too.
+        sc::MetaBundle b;
+        DrawingItem g;
+        g.kind = DrawingItem::Kind::Ellipse;
+        g.group = 7;
+        b.drawings = { g };
+        b.haveDrawings = true;
+        sc::MetaBundle back;
+        sc::parseBundle (juce::String (sc::serialiseBundle (b, false)), back);
+        CHECK (back.drawings.size () == 1 && back.drawings[0].group == 7 && back.drawings[0].kind == DrawingItem::Kind::Ellipse,
+               "draw handles: a drawing's group is saved");
+    }
+    store.deleteFile ();
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------------------------ drawing key shortcuts
 static void testDrawingKeyShortcuts()
 {
@@ -30285,6 +30443,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("arrow head geometry", testArrowHeadGeometry);
     SC_RUN_TEST ("drawing panel", testDrawingPanel);
     SC_RUN_TEST ("drawing key shortcuts", testDrawingKeyShortcuts);
+    SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);
     SC_RUN_TEST ("left panels toggle shortcut", testLeftPanelsToggleShortcut);
     SC_RUN_TEST ("ctrl+0 zoom out full", testCtrl0ZoomOutFull);
     SC_RUN_TEST ("marker title visibility", testMarkerTitleVisibility);

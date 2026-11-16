@@ -8688,8 +8688,82 @@ DrawingPanel::Model::Model (DrawingPanel* o) : owner (o) {}
 
 int DrawingPanel::Model::getNumRows()
 {
-    auto* d = owner->app.doc ();
-    return d != nullptr ? (int) d->drawings.size () : 0;
+    return (int) owner->rows_.size ();
+}
+
+void DrawingPanel::rebuildRows ()
+{
+    rows_.clear ();
+    const auto* d = app.doc ();
+    if (d == nullptr) return;
+    // In list order; a group shows up where its first member is: its own
+    // row, then all its members.
+    std::vector<int> shown;
+    for (int i = 0; i < (int) d->drawings.size (); ++i)
+    {
+        const int g = d->drawings[(size_t) i].group;
+        if (g == 0) { rows_.push_back ({ i, 0 }); continue; }
+        if (std::find (shown.begin (), shown.end (), g) != shown.end ()) continue;
+        shown.push_back (g);
+        rows_.push_back ({ -1, g });
+        for (int j = i; j < (int) d->drawings.size (); ++j)
+            if (d->drawings[(size_t) j].group == g) rows_.push_back ({ j, g });
+    }
+}
+
+int DrawingPanel::itemOfRow (int row) const
+{
+    return row >= 0 && row < (int) rows_.size () ? rows_[(size_t) row].item : -1;
+}
+
+std::vector<int> DrawingPanel::itemsOfRows (const std::vector<int>& rowsIn) const
+{
+    std::vector<int> out;
+    for (int r : rowsIn)
+    {
+        if (r < 0 || r >= (int) rows_.size ()) continue;
+        const auto& row = rows_[(size_t) r];
+        if (row.item >= 0) out.push_back (row.item);
+        else
+            for (const auto& m : rows_)
+                if (m.item >= 0 && m.group == row.group) out.push_back (m.item);
+    }
+    std::sort (out.begin (), out.end ());
+    out.erase (std::unique (out.begin (), out.end ()), out.end ());
+    return out;
+}
+
+void DrawingPanel::groupSelected ()
+{
+    app.groupDrawings (itemsOfRows (selectedRowIndices ()));
+}
+
+void DrawingPanel::ungroupSelected ()
+{
+    app.ungroupDrawings (itemsOfRows (selectedRowIndices ()));
+}
+
+void DrawingPanel::syncSelectionFromApp ()
+{
+    // The rows of the selected drawings, and a group's own row when the
+    // whole group is selected.
+    juce::SparseSet<int> sel;
+    const auto& want = app.selectedDrawings;
+    for (int r = 0; r < (int) rows_.size (); ++r)
+    {
+        const auto& row = rows_[(size_t) r];
+        const bool on = row.item >= 0 ? std::find (want.begin (), want.end (), row.item) != want.end ()
+                                      : ! itemsOfRows ({ r }).empty ()
+                                        && std::all_of (rows_.begin (), rows_.end (), [&] (const Row& m)
+                                           { return m.item < 0 || m.group != row.group
+                                                    || std::find (want.begin (), want.end (), m.item) != want.end (); });
+        if (on) sel.addRange ({ r, r + 1 });
+    }
+    if (sel == table.getSelectedRows ()) return;
+    syncingSelection_ = true;
+    table.setSelectedRows (sel, juce::sendNotification);   // selectedRowsChanged: no fit while syncing
+    syncingSelection_ = false;
+    deleteBtn.setEnabled (table.getNumSelectedRows () > 0);
 }
 
 void DrawingPanel::Model::paintRowBackground (juce::Graphics& g, int, int width, int height,
@@ -8706,10 +8780,37 @@ void DrawingPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int colum
                                      int width, int height, bool)
 {
     auto* d = owner->app.doc ();
-    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->drawings.size ()) return;
-    const DrawingItem& it = d->drawings [(size_t) rowNumber];
-
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) owner->rows_.size ()) return;
+    const auto row = owner->rows_[(size_t) rowNumber];
     g.setFont (11.0f);
+    if (row.item < 0)   // a group's own row: its eye, its name, how many drawings
+    {
+        const auto members = owner->itemsOfRows ({ rowNumber });
+        bool anyShown = false;
+        for (int i : members)
+            if (i < (int) d->drawings.size () && !d->drawings[(size_t) i].hidden) anyShown = true;
+        if (columnId == 1)
+            drawEyeIcon (g, juce::Rectangle<float> ((float) width / 2.0f - 8.0f, (float) height / 2.0f - 6.0f, 16.0f, 12.0f),
+                         anyShown);
+        else if (columnId == 2)
+        {
+            g.setColour (juce::Colours::white);
+            g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened ());
+            g.drawText ("Group " + juce::String (row.group), 4, 0, width - 8, height,
+                        juce::Justification::centredLeft, false);
+        }
+        else
+        {
+            g.setColour (juce::Colours::grey);
+            g.drawText (juce::String ((int) members.size ()) + " drawings", 4, 0, width - 8, height,
+                        juce::Justification::centredLeft, false);
+        }
+        return;
+    }
+    if (row.item >= (int) d->drawings.size ()) return;
+    const DrawingItem& it = d->drawings [(size_t) row.item];
+    const int indent = row.group != 0 ? 14 : 0;   // a group's members sit under it
+
     if (columnId == 1)   // per-item visibility eye icon
     {
         drawEyeIcon (g, juce::Rectangle<float> ((float) width / 2.0f - 8.0f,
@@ -8720,7 +8821,7 @@ void DrawingPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int colum
     else if (columnId == 2)   // type
     {
         g.setColour (juce::Colours::white);
-        g.drawText (DrawingItem::kindName (it.kind), 4, 0, width - 8, height,
+        g.drawText (DrawingItem::kindName (it.kind), 4 + indent, 0, width - 8 - indent, height,
                     juce::Justification::centredLeft, false);
     }
     else   // comment (fills the remainder of the table)
@@ -8740,7 +8841,19 @@ void DrawingPanel::Model::cellClicked (int rowNumber, int columnId, const juce::
         // The list box already auto-selected this row before calling us, which
         // scheduled a view fit - cancel it so the viewed range stays put.
         owner->cancelPendingFit ();
-        owner->app.toggleDrawingHidden (rowNumber);
+        const int item = owner->itemOfRow (rowNumber);
+        if (item >= 0)
+            owner->app.toggleDrawingHidden (item);
+        else
+        {
+            // A group's eye: shows all its drawings, or hides them all.
+            const auto members = owner->itemsOfRows ({ rowNumber });
+            bool anyShown = false;
+            if (const auto* d = owner->app.doc ())
+                for (int i : members)
+                    if (i < (int) d->drawings.size () && !d->drawings[(size_t) i].hidden) anyShown = true;
+            owner->app.setDrawingsHidden (members, anyShown);
+        }
         return;
     }
     owner->onRowClicked (rowNumber, e);
@@ -8757,6 +8870,11 @@ void DrawingPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::Mou
 
 void DrawingPanel::Model::selectedRowsChanged (int)
 {
+    if (owner->syncingSelection_)
+        return;   // the spectrogram picked them: no view fit, no echo
+    // The spectrogram shows the selection's box and handles.
+    owner->app.setDrawingSelection (owner->itemsOfRows (owner->selectedRowIndices ()));
+    owner->syncSelectionFromApp ();   // a group's members come along
     owner->scheduleFit ();
 }
 
@@ -8841,7 +8959,7 @@ DrawingPanel::DrawingPanel (Application& appIn)
     };
 
     // Tooltips explain what each default applies to.
-    const juce::String widthTip ("Line width in pixels for new arrows, rectangles and freehand strokes.");
+    const juce::String widthTip ("Line width in pixels for new arrows, rectangles, ovals and freehand strokes.");
     const juce::String sizeTip  ("Font size in points for new text items.");
     showAllBtn.setTooltip ("Show or hide all drawings of this file.");
     deleteBtn.setTooltip ("Delete the drawings selected in the list.");
@@ -8873,6 +8991,7 @@ DrawingPanel::DrawingPanel (Application& appIn)
 
 void DrawingPanel::refresh()
 {
+    rebuildRows ();
     table.updateContent ();
     table.repaint ();
 
@@ -8890,6 +9009,7 @@ void DrawingPanel::refresh()
 
     showAllBtn.shown = app.showAllDrawings;
     showAllBtn.repaint ();
+    syncSelectionFromApp ();
     deleteBtn.setEnabled (table.getNumSelectedRows () > 0);
 }
 
@@ -8905,8 +9025,7 @@ void DrawingPanel::onRowClicked (int row, const juce::MouseEvent& e)
     if (e.mods.isShiftDown ())
     {
         // Excel: the selection becomes EXACTLY anchor..row, then fit it.
-        auto* d = app.doc ();
-        const int n = d != nullptr ? (int) d->drawings.size () : 0;
+        const int n = (int) rows_.size ();
         const int a = (anchorRow >= 0 && anchorRow < n) ? anchorRow : row;
         juce::SparseSet<int> sel;
         sel.addRange ({ std::min (a, row), std::max (a, row) + 1 });
@@ -8933,13 +9052,10 @@ void DrawingPanel::deleteSelected ()
     auto* d = app.doc ();
     if (d == nullptr) return;
 
-    std::vector<int> rows;
-    for (int r : sparseRows (table.getSelectedRows ()))
-        if (r >= 0 && r < (int) d->drawings.size ())
-            rows.push_back (r);
-    if (rows.empty()) return;
+    const auto items = itemsOfRows (selectedRowIndices ());   // a group row = its members
+    if (items.empty()) return;
 
-    app.deleteSelectedDrawings (rows);   // fires onDrawingsChanged -> refresh + repaint
+    app.deleteSelectedDrawings (items);   // fires onDrawingsChanged -> refresh + repaint
 }
 
 void DrawingPanel::doDelete()
@@ -8954,7 +9070,7 @@ void DrawingPanel::fitViewToSelected ()
 
     double t0 = 1e300, f0 = 1e300, t1 = -1e300, f1 = -1e300;
     bool any = false;
-    for (int r : sparseRows (table.getSelectedRows ()))
+    for (int r : itemsOfRows (selectedRowIndices ()))
         if (r >= 0 && r < (int) d->drawings.size ())
         {
             const auto& it = d->drawings [(size_t) r];
@@ -9031,11 +9147,23 @@ void DrawingPanel::showContextMenu (int)
     m.addItem (11, "New Arrow\tA");
     m.addItem (12, "New Rectangle\tR");
     m.addItem (13, "New Free Drawing\tD");
+    m.addItem (14, "New Oval\tO");
     m.addSeparator ();
     m.addItem (20, app.showAllDrawings ? "Hide All Drawings" : "Show All Drawings");
     m.addSeparator ();
-    m.addItem (30, "Edit...", nSel > 0);
+    m.addItem (30, "Edit...", nSel > 0 && itemOfRow (primaryRow ()) >= 0);
     m.addItem (31, "Delete Selected", nSel > 0);
+    {
+        // Groups: two or more drawings become one; Ungroup frees them.
+        const auto items = itemsOfRows (selectedRowIndices ());
+        bool inGroup = false;
+        if (const auto* d = app.doc ())
+            for (int i : items)
+                if (i < (int) d->drawings.size () && d->drawings[(size_t) i].group != 0) inGroup = true;
+        m.addSeparator ();
+        m.addItem (40, "Group", items.size () >= 2);
+        m.addItem (41, "Ungroup", inGroup);
+    }
 
 
     const int id = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
@@ -9043,16 +9171,20 @@ void DrawingPanel::showContextMenu (int)
     else if (id == 11) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Arrow); }
     else if (id == 12) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Rectangle); }
     else if (id == 13) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Freehand); }
+    else if (id == 14) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Ellipse); }
+    else if (id == 40) groupSelected ();
+    else if (id == 41) ungroupSelected ();
     else if (id == 20) toggleShowAll ();
-    else if (id == 30) showEditDialog (primaryRow ());
+    else if (id == 30) showEditDialog (primaryRow ());   // a drawing's row (not a group's)
     else if (id == 31) deleteSelected ();
 }
 
 void DrawingPanel::showEditDialog (int row)
 {
     auto* d = app.doc ();
-    if (d == nullptr || row < 0 || row >= (int) d->drawings.size ()) return;
-    const DrawingItem& it = d->drawings [(size_t) row];
+    const int item = itemOfRow (row);
+    if (d == nullptr || item < 0 || item >= (int) d->drawings.size ()) return;
+    const DrawingItem& it = d->drawings [(size_t) item];
 
     // Owning: the swatch and sliders below are added with new.
     sc::OwningAlertWindow dlg ("Edit drawing",

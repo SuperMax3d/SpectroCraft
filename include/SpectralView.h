@@ -382,6 +382,36 @@ private:
     int lastFreeX_ = 0, lastFreeY_ = 0;  // freehand decimation in pixels
     std::vector<std::pair<double, double>> freePts_;   // (tSecs, fHz) path
 
+    // Editing drawings (selected in the Drawing panel or by a click here):
+    // their box carries four corner handles - drag one to resize, drag inside
+    // the box to move. Worked out in the pixels of one channel row, then
+    // mapped back to time x frequency; kept inside the spectrogram.
+    enum class DrawEdit { none, move, resize };
+    DrawEdit drawEdit_ = DrawEdit::none;
+    int drawEditHandle_ = -1;                // 0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left
+    juce::Rectangle<int> drawEditRow_;       // the channel row the gesture maps through
+    juce::Point<int> drawEditGrab_;
+    juce::Rectangle<float> drawEditBox_;     // the selection's box when the gesture started
+    std::vector<int> drawEditItems_;
+    std::vector<DrawingItem> drawEditOrig_, drawEditLive_;
+    bool drawEditMoved_ = false;
+    void beginDrawingEdit (DrawEdit mode, int handle, juce::Rectangle<int> row, juce::Point<int> p);
+    std::vector<DrawingItem> transformedDrawings (juce::Point<int> p) const;
+public:
+    /** The channel row containing y (empty when none). */
+    juce::Rectangle<int> rowAt (int y) const;
+    /** A drawing's box on screen, in channel row `row`. */
+    juce::Rectangle<float> drawingScreenBox (const DrawingItem& it, const juce::Rectangle<int>& row) const;
+    /** The box of the selected drawings in `row` (the live ones during a
+        move or resize); empty without a selection. */
+    juce::Rectangle<float> selectionScreenBox (const juce::Rectangle<int>& row) const;
+    /** The top-most visible drawing whose stroke (or text) is under p, -1. */
+    int drawingHit (juce::Point<int> p, const juce::Rectangle<int>& row) const;
+    /** The corner handle of the selection's box under p (0..3), or -1. */
+    int drawingHandleAt (juce::Point<int> p, const juce::Rectangle<int>& row) const;
+    bool isEditingDrawing() const noexcept { return drawEdit_ != DrawEdit::none; }
+private:
+
     bool showOwnTimeRuler = true;
     bool showMarkerTitles = true;   // false while the waveform is stacked above
     int tablesTopInset = 0;   // reserved strip below the top ruler (tables track)

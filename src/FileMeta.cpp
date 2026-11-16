@@ -300,6 +300,7 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
             if (!d.comment.isEmpty()) o->setProperty ("comment", d.comment);
             o->setProperty ("colour", d.colourARGB);
             if (d.hidden)          o->setProperty ("hidden", 1);
+            if (d.group != 0)      o->setProperty ("group", d.group);
             o->setProperty ("width", d.widthPx);
             o->setProperty ("textSize", d.textSize);
             o->setProperty ("t0", d.t0);
@@ -490,6 +491,7 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
                 d.colourARGB = static_cast<int> (op.getWithDefault ("colour",
                                                                    juce::var(static_cast<int> (0xFF00FF00))));
                 d.hidden     = static_cast<int> (op.getWithDefault ("hidden", 0)) != 0;
+                d.group      = std::max (0, static_cast<int> (op.getWithDefault ("group", 0)));
                 d.widthPx    = std::max (0.5f, static_cast<float> (op.getWithDefault ("width", 2.0)));
                 d.textSize   = std::clamp (static_cast<float> (op.getWithDefault ("textSize", 14.0)),
                                           6.0f, 72.0f);

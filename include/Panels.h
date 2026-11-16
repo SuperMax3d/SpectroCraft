@@ -1625,7 +1625,7 @@ public:
 /** Bottom tab listing the active file's spectrogram drawings: text, arrows,
     rectangles and freehand strokes. Each row carries a visibility eye icon;
     the top-left button is the master show/hide switch for all of them. New
-    items are created from the context menu (or the t/a/r/d shortcuts) by
+    items are created from the context menu (or the t/a/r/d/o shortcuts) by
     clicking or dragging on the spectrogram itself. The list persists with
     the file's unified metadata, like the saved selections. */
 class DrawingPanel : public juce::Component
@@ -1664,8 +1664,26 @@ public:
     // unit tests call it directly).
     void applyDrawingEdit (int row, const DrawingItem& updated)
     {
-        app.applyDrawingEdit (row, updated);
+        const int item = itemOfRow (row);
+        if (item >= 0) app.applyDrawingEdit (item, updated);
     }
+
+    /** One row of the list: a drawing (item >= 0), or a group's own row
+        (item = -1) followed by its members, indented. Without groups the
+        rows are the drawings in order. */
+    struct Row { int item = -1; int group = 0; };
+    int numListRows() const { return (int) rows_.size(); }
+    Row listRow (int row) const { return row >= 0 && row < (int) rows_.size() ? rows_[(size_t) row] : Row {}; }
+    /** The drawing a row shows (-1 for a group row). */
+    int itemOfRow (int row) const;
+    /** The drawings the rows stand for: a group row is all its members. */
+    std::vector<int> itemsOfRows (const std::vector<int>& rows) const;
+    /** Group / Ungroup the selected drawings (right-click menu). */
+    void groupSelected();
+    void ungroupSelected();
+    /** Selects the rows of the app's drawing selection (made in the
+        spectrogram), without moving the view. */
+    void syncSelectionFromApp();
 
     // Accessors for headless unit tests.
     int numSelectedRows() const { return table.getNumSelectedRows (); }
@@ -1716,6 +1734,9 @@ private:
 
     FileDoc* listDoc = nullptr;   // doc whose list the current rows belong to
     int anchorRow = -1;           // last plain-clicked row: Shift+click origin
+    std::vector<Row> rows_;       // what each list row shows (rebuilt by refresh)
+    bool syncingSelection_ = false;   // selecting rows for the app: no view fit, no echo
+    void rebuildRows();
 
     // Deferred-fit bookkeeping lives in a shared object so pending callAsync
     // lambdas never read freed panel memory: each lambda holds its own
