@@ -118,8 +118,7 @@ struct MetaBundle
     std::vector<sc::axes::Entry> axes;
 
     // Tables panel: imported CSV tables with per-parameter alignment, plus
-    // the display mode (0=Overlay on Waveform 1=Overlay on Spectrogram
-    // 2=Dedicated track).
+    // the display mode (sc::tables::kModeWaveform...kModePanelOnly).
     std::vector<sc::tables::TableData> tables;
     int tablesMode = 0;
 

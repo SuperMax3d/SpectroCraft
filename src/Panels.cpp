@@ -9341,9 +9341,7 @@ bool TablesPlotView::autoValueRange (double& lo, double& hi) const
         mx = std::max (mx, b);
     }
     if (!have || !(mx >= mn)) return false;
-    const double pad = std::max ((mx - mn) * 0.1, 1e-9);
-    lo = mn - pad;
-    hi = mx + pad;
+    sc::tables::paddedValueRange (mn, mx, lo, hi);
     return true;
 }
 
@@ -9595,8 +9593,13 @@ void TablesPlotView::paint (juce::Graphics& g)
         double vStep = 10.0 * mag;
         for (double m : { 1.0, 2.0, 5.0 })
             if (m * mag >= raw) { vStep = m * mag; break; }
-        for (double L = std::ceil (mn / vStep) * vStep; L <= mx + 1e-9; L += vStep)
+        // Counted, not accumulated: a step below the doubles' resolution at
+        // this magnitude left L unchanged and the loop never ended (#29).
+        const double first = std::ceil (mn / vStep) * vStep;
+        for (int i = 0; i <= 50; ++i)
         {
+            const double L = first + i * vStep;
+            if (!(L <= mx + vStep * 1e-6)) break;
             const int y = pr.getY() + (int) std::lround ((mx - L) / (mx - mn) * pr.getHeight());
             g.drawHorizontalLine ((int) y, (float) pr.getX(), (float) pr.getRight());
         }
@@ -10268,26 +10271,26 @@ void TablesPanel::Model::cellClicked (int rowNumber, int columnId, const juce::M
 TablesPanel::TablesPanel (Application& appIn)
     : app (appIn), listDoc (nullptr), plot (appIn)
 {
-    masterShowBtn.setComponentID ("tables-showall-btn");
-
     auto& header = table.getHeader ();
     const int fixedFlags = juce::TableHeaderComponent::notResizableOrSortable;
     header.addColumn ("Show", 1, 40, 30, -1, fixedFlags);
     header.addColumn ("Colour", 2, 56, 30, -1, fixedFlags);
     header.addColumn ("Name", 3, 120, 40, -1, fixedFlags);
 
-    modeCombo.addItem ("Overlay on Waveform", 1);
-    modeCombo.addItem ("Overlay on Spectrogram", 2);
-    modeCombo.addItem ("Dedicated track", 3);
-    modeCombo.setSelectedItemIndex (app.tablesMode(), juce::dontSendNotification);
-    modeCombo.onChange = [this] { app.setTablesMode (modeCombo.getSelectedItemIndex ()); };
-
-    masterShowBtn.onClick = [this] { app.setShowAllTables (!app.showAllTables); };
-    masterShowBtn.onShiftClick = [this] (const juce::MouseEvent&) { toggleAllVisibility (); };
-    masterShowBtn.setTooltip ("Show or hide the tables of this file in the views. Shift-click "
-                              "shows (or hides) every table and parameter.");
-    modeCombo.setTooltip ("Where the tables are drawn: over the waveform, over the "
-                          "spectrogram, or in a track of their own.");
+    // Item id = display mode + 1; the default mode comes first (issue #25).
+    modeCombo.setComponentID ("tables-mode-combo");
+    modeCombo.addItem ("Inside Table Panel Only", sc::tables::kModePanelOnly + 1);
+    modeCombo.addItem ("Overlay on Waveform", sc::tables::kModeWaveform + 1);
+    modeCombo.addItem ("Overlay on Spectrogram", sc::tables::kModeSpectrogram + 1);
+    modeCombo.addItem ("Dedicated track", sc::tables::kModeDedicated + 1);
+    modeCombo.setSelectedId (app.tablesMode() + 1, juce::dontSendNotification);
+    modeCombo.onChange = [this]
+    {
+        if (modeCombo.getSelectedId () > 0)
+            app.setTablesMode (modeCombo.getSelectedId () - 1);
+    };
+    modeCombo.setTooltip ("Where the tables are drawn: only in this panel, over the "
+                          "waveform, over the spectrogram, or in a track of their own.");
 
     // A click in the plot feeds a click-based alignment that still needs
     // plot points; otherwise it moves the playhead there. Decided once per
@@ -10333,7 +10336,6 @@ TablesPanel::TablesPanel (Application& appIn)
         }
     };
 
-    addAndMakeVisible (&masterShowBtn);
     addAndMakeVisible (&modeCombo);
     addAndMakeVisible (&statusLabel);
     addAndMakeVisible (&table);
@@ -10391,9 +10393,7 @@ void TablesPanel::refresh()
         }
     }
 
-    masterShowBtn.shown = app.showAllTables;
-    masterShowBtn.repaint ();
-    modeCombo.setSelectedItemIndex (app.tablesMode(), juce::dontSendNotification);
+    modeCombo.setSelectedId (app.tablesMode() + 1, juce::dontSendNotification);
 
     // The preview follows the primary selected row's table (its parameter's
     // own alignment, if it is a parameter row, maps the playhead).
@@ -11127,9 +11127,8 @@ static int countVisibleParams (const FileDoc& d, int skipTable = -1, int skipPar
     return n;
 }
 
-static bool everythingVisible (const Application& app, const FileDoc& d)
+static bool everythingVisible (const FileDoc& d)
 {
-    if (!app.showAllTables) return false;
     for (const auto& t : d.tables)
     {
         if (!t.visible) return false;
@@ -11143,7 +11142,6 @@ void TablesPanel::hideEverything ()
 {
     auto* d = app.doc ();
     if (d == nullptr) return;
-    app.setShowAllTables (false);
     for (auto& t : d->tables)
     {
         t.visible = false;
@@ -11163,14 +11161,12 @@ void TablesPanel::soloParameter (int ti, int pi)
     auto& p = t.params[(size_t) pi];
 
     // Already the only visible parameter? Then turn everything off.
-    if (app.showAllTables && t.visible && p.visible
-        && countVisibleParams (*d, ti, pi) == 0)
+    if (t.visible && p.visible && countVisibleParams (*d, ti, pi) == 0)
     {
         hideEverything ();
         return;
     }
 
-    app.setShowAllTables (true);
     for (auto& t2 : d->tables)
     {
         const bool isTarget = (&t2 == &t);
@@ -11191,7 +11187,7 @@ void TablesPanel::soloTable (int ti)
     auto& t = d->tables[(size_t) ti];
 
     // Already "this table with all its parameters, and nothing else"? Off.
-    bool thisTableFullyOn = app.showAllTables && t.visible;
+    bool thisTableFullyOn = t.visible;
     for (const auto& q : t.params)
         if (!q.visible) { thisTableFullyOn = false; break; }
     if (thisTableFullyOn && countVisibleParams (*d, ti, -1) == 0)
@@ -11200,7 +11196,6 @@ void TablesPanel::soloTable (int ti)
         return;
     }
 
-    app.setShowAllTables (true);
     for (auto& t2 : d->tables)
         t2.visible = (&t2 == &t);
     for (auto& q : t.params)
@@ -11215,9 +11210,8 @@ void TablesPanel::toggleAllVisibility ()
     auto* d = app.doc ();
     if (d == nullptr) return;
 
-    if (everythingVisible (app, *d)) { hideEverything (); return; }
+    if (everythingVisible (*d)) { hideEverything (); return; }
 
-    app.setShowAllTables (true);
     for (auto& t : d->tables)
     {
         t.visible = true;
@@ -11282,6 +11276,13 @@ void TablesPanel::showContextMenu (int row)
     // straight into a new table: no panel, no clipboard.
     m.addItem (9, "Table from Spectral Selection", app.hasSpectralSelection ());
     m.addSeparator ();
+    // Replaces the old master eye's shift-click (issue #25 removed the eye).
+    {
+        const auto* d = app.doc ();
+        const bool any = d != nullptr && !d->tables.empty ();
+        const bool all = any && everythingVisible (*d);
+        m.addItem (10, all ? "Hide All Tables" : "Show All Tables", any);
+    }
     m.addItem (2, "Remove Selected", nSel > 0);
     if (nSel > 0)
         m.addItem (3, "Copy", true);
@@ -11347,6 +11348,7 @@ void TablesPanel::showContextMenu (int row)
     {
         case 1: pasteToNewTable (); break;
         case 9: tableFromSpectralSelection (); break;
+        case 10: toggleAllVisibility (); break;
         case 2: removeSelected (); break;
         case 3: copySelection (); break;
         case 4:
@@ -11428,9 +11430,8 @@ void TablesPanel::resized()
 {
     const auto r = getLocalBounds ();
 
-    // Top row: master visibility switch + display-mode dropdown.
-    masterShowBtn.setBounds (6, 4, 26, 22);
-    modeCombo.setBounds (38, 5, r.getWidth () - 44, 20);
+    // Top row: the display-mode dropdown, full width.
+    modeCombo.setBounds (6, 5, r.getWidth () - 12, 20);
 
     statusLabel.setBounds (6, 28, r.getWidth () - 12, 16);
 

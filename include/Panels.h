@@ -1954,8 +1954,10 @@ private:
     colour picker dialog with custom swatches, RGB editing and OK/Cancel).
     Tables themselves carry no colour. Tables are created by
     dropping CSV files on the app or via right-click "Paste to new table".
-    The top row has a master visibility switch and the display-mode dropdown
-    (Overlay on Waveform / Overlay on Spectrogram / Dedicated track).
+    The top row is the display-mode dropdown (Inside Table Panel Only - the
+    default, nothing drawn outside the panel - / Overlay on Waveform /
+    Overlay on Spectrogram / Dedicated track); the right-click menu shows or
+    hides every table and parameter.
 
     Alignment: tables and parameters can be aligned in time against the
     waveform/spectrogram timeline - manually (offset + scale prompt) or by
@@ -2016,7 +2018,8 @@ public:
 
     // Shift+click visibility operations ("solo" semantics): showing only the
     // clicked parameter / table - or turning all visibility off again when that
-    // state was already active. The master eye shows everything (or hides it).
+    // state was already active. toggleAllVisibility (right-click Show All /
+    // Hide All) shows every table and parameter, or hides them all.
     void soloParameter (int tableIdx, int paramIdx);
     void soloTable (int tableIdx);
     void toggleAllVisibility ();
@@ -2054,7 +2057,7 @@ public:
     juce::TableListBox& listTable() { return table; }
     TablesPlotView& plotView() { return plot; }
     TablesSplitter& plotSplitter() { return splitter; }
-    EyeButton& masterShowButton() { return masterShowBtn; }
+    juce::ComboBox& displayModeCombo() { return modeCombo; }
     void simulateCellClick (int row, int columnId, const juce::MouseEvent& e)
     {
         model.cellClicked (row, columnId, e);
@@ -2084,8 +2087,7 @@ private:
     Model model { this };
     juce::TableListBox table { "", &model };
 
-    EyeButton masterShowBtn { "Show" };   // top-row master visibility switch
-    juce::ComboBox modeCombo;            // Overlay on Waveform / Spectrogram / Dedicated track
+    juce::ComboBox modeCombo;            // display mode: item id = sc::tables::kMode* + 1
     juce::Label statusLabel;             // pending-alignment hints + import errors
     TablesPlotView plot;
     TablesSplitter splitter;             // between the list and the plot (drag = heights)

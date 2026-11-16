@@ -973,6 +973,47 @@ static void dockTest_editorTabsPerDocument()
     store.deleteFile ();
 }
 
+/** Issue #28: the gaps between docked groups carry the same three-mark grip
+    as the app's other separators, centred, at their own 4 px width. */
+static void dockTest_gapGrips()
+{
+    progress ("docking: separator grips in the gaps");
+    DockFixture f;
+    auto& main = f.dock.mainArea ();
+    CHECK (f.load (R"({"main":{"split":"h","children":[{"tabs":["a"]},{"split":"v","children":[{"tabs":["b"]},{"tabs":["c"]}],"weights":[0.5,0.5]}],"weights":[0.5,0.5]},"closed":["d","e","f"]})"),
+           "dock grips: layout loaded");
+    auto* ga = dockGroupOf (f.dock, "a");
+    auto* gb = dockGroupOf (f.dock, "b");
+    if (ga == nullptr || gb == nullptr) { CHECK (false, "dock grips: groups found"); return; }
+
+    const juce::Image img = main.createComponentSnapshot (main.getLocalBounds ());
+    auto brightest = [&img] (juce::Rectangle<int> r)
+    {
+        float best = 0.0f;
+        for (int y = r.getY (); y < r.getBottom (); ++y)
+            for (int x = r.getX (); x < r.getRight (); ++x)
+                if (img.getBounds ().contains (x, y))
+                    best = std::max (best, img.getPixelAt (x, y).getPerceivedBrightness ());
+        return best;
+    };
+    const float bg = sc::dock::style::appBackground.getPerceivedBrightness ();
+    const float grip = sc::ui::splitterGrip ().getPerceivedBrightness ();
+    const float mid = (bg + grip) * 0.5f;
+    constexpr int kGap = sc::dock::style::kGap;
+
+    // Vertical gap right of a (full height): marks stacked at its centre.
+    const int x0 = ga->getRight ();
+    const int cy = ga->getBounds ().getCentreY ();
+    CHECK (brightest ({ x0, cy - 4, kGap, 9 }) > mid, "dock grips: the vertical gap has a grip at its centre");
+    CHECK (brightest ({ x0, ga->getY () + 10, kGap, 20 }) < mid, "dock grips: ... and only there");
+
+    // Horizontal gap between b and c: marks side by side at its centre.
+    const int y0 = gb->getBottom ();
+    const int cx = gb->getBounds ().getCentreX ();
+    CHECK (brightest ({ cx - 4, y0, 9, kGap }) > mid, "dock grips: the horizontal gap has a grip at its centre");
+    CHECK (brightest ({ gb->getX () + 10, y0, 20, kGap }) < mid, "dock grips: ... and only there");
+}
+
 static void runRegression_docking()
 {
     dockTest_zoneGeometry();
@@ -984,5 +1025,6 @@ static void runRegression_docking()
     dockTest_legacyLayout();
     dockTest_editorAndVideo();
     dockTest_resizeHandles();
+    dockTest_gapGrips();
     dockTest_editorTabsPerDocument();
 }

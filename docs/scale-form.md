@@ -198,7 +198,16 @@ first on the left side (and why only one set of amplitude units was readable).
 **The channel label** (`L` / `R`, or `1 2 3 4`) sits at the *outer* edge of the
 axis area — left of the units when the axis is on the left, right of them when
 it is on the right — in 13 pt. `sc::axes::channelGutter()` (24 px) is the room
-the outermost strip keeps for it, so the two never overlap.
+the outermost strip keeps for it on the left, so the two never overlap. That
+room belongs to the **outermost** strip: with a second amplitude axis the main
+strip gives its 24 px up to the extra one (`verticalStrip(index, count, ...,
+gutter)`), so the total width is unchanged and the extra labels keep their
+whole 34 px (they used to get 10 px and read `...`). Frequency labels pass a
+gutter of 0: they already skip the row centre where the channel label sits, so
+they use their strips' full width and, on a left axis, are right-aligned
+against the plot (`10.0 kHz` was cut to `10.0 k`). An extra frequency axis
+labels the minor ticks too, not only the decades, so it shows as many values
+as the main one (issue #27).
 
 **Secondary axes read as secondary**: their labels use the same 8.5 pt type as
 the extra time axes, and their strips are narrower (38 px against the main 60). It appears:

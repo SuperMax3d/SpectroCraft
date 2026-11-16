@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <future>
+#include <limits>
 
 // Time-pan speed: content moves this many px per cursor pixel (0.5 = half
 // speed, matching the waveform view's grab pan).
@@ -425,6 +426,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
         lassoPts.clear ();
         strokePts.clear ();
         liveT0 = liveT1 = liveF0 = liveF1 = 0.0;
+        toolRow = rowIndexAtY (e.y);   // the drag stays inside this channel row
 
         switch (app.selMode)
         {
@@ -433,13 +435,13 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
                 break;
             case SpectralSelMode::Lasso:
                 dragMode = DragMode::Lasso;
-                lassoPts.emplace_back (dragStartTime, freqAtY (e.y));
+                lassoPts.emplace_back (dragStartTime, toolFreqAtY (e.y));
                 break;
             default:   // Paintbrush
                 if (e.mods.isAltDown ())
                 {
                     const double t = dragStartTime;
-                    const double f = freqAtY (e.y);
+                    const double f = toolFreqAtY (e.y);
                     if (haveLineAnchor)
                     {
                         // Straight line from the last stroke's end point to here.
@@ -461,7 +463,7 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
                 else
                 {
                     dragMode = DragMode::Paint;
-                    strokePts.emplace_back (dragStartTime, freqAtY (e.y));
+                    strokePts.emplace_back (dragStartTime, toolFreqAtY (e.y));
                 }
                 break;
         }
@@ -573,8 +575,8 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
         {
             const double tA = xToTime (std::min (dragStartX, e.x));
             const double tB = xToTime (std::max (dragStartX, e.x));
-            const double fA = freqAtY (std::min (dragStartY, e.y));
-            const double fB = freqAtY (std::max (dragStartY, e.y));
+            const double fA = toolFreqAtY (std::min (dragStartY, e.y));
+            const double fB = toolFreqAtY (std::max (dragStartY, e.y));
             liveT0 = tA;
             liveT1 = tB;
             liveF0 = std::min (fA, fB);
@@ -586,7 +588,7 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
         case DragMode::Lasso:
         {
             const double t = xToTime (e.x);
-            const double f = freqAtY (e.y);
+            const double f = toolFreqAtY (e.y);
             const auto last = lassoPts.empty() ? std::pair<double, double> (-1e30, -1e30)
                                                : lassoPts.back();
             if (std::abs (t - last.first) >= 1e-3 || std::abs (f - last.second) >= 8.0)
@@ -602,7 +604,7 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
         case DragMode::Paint:
         {
             const double t = xToTime (e.x);
-            const double f = freqAtY (e.y);
+            const double f = toolFreqAtY (e.y);
             const auto last = strokePts.empty() ? std::pair<double, double> (-1e30, -1e30)
                                                 : strokePts.back();
             if (std::abs (t - last.first) >= 1e-3 || std::abs (f - last.second) >= 8.0)
@@ -617,7 +619,7 @@ void SpectralView::mouseDrag (const juce::MouseEvent& e)
         case DragMode::LineDrag:
         {
             lineEndT = xToTime (e.x);
-            lineEndF = freqAtY (e.y);
+            lineEndF = toolFreqAtY (e.y);
             syncToolTimeExtent ({ std::min (lineAnchorT, lineEndT),
                                   std::max (lineAnchorT, lineEndT) });
             repaint();
@@ -967,7 +969,7 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
 
     // Table overlay hover values (spectrogram mode): show the raw parameter
     // value of curves near the cursor - like the dedicated track's readout.
-    if (app.showAllTables && app.tablesMode () == 1)
+    if (app.tablesMode () == sc::tables::kModeSpectrogram)
     {
         collectTableHoverLabels (e.x, e.y);
         repaint();
@@ -1251,33 +1253,71 @@ SpectralView::PngExportJob SpectralView::preparePngExport (const juce::File& fil
     // An export always carries its own ruler (independent of a stacked live
     // view, which hides its ruler because the other view draws it).
     const int exportRuler = app.rulerStackHeight();
-    const int ox = (opts.axes && !axisOnRight()) ? axisW() : 0;
-    const int oy = (opts.axes && !rulerAtBottom()) ? exportRuler : 0;
-    const int W = pw + (opts.axes ? axisW() : 0);
-    const int H = ph + (opts.axes ? exportRuler : 0);
+    // The plot (and its axes) inside the inner canvas [W0 x H0]...
+    const int ox0 = (opts.axes && !axisOnRight()) ? axisW() : 0;
+    const int oy0 = (opts.axes && !rulerAtBottom()) ? exportRuler : 0;
+    const int W0 = pw + (opts.axes ? axisW() : 0);
+    const int H0 = ph + (opts.axes ? exportRuler : 0);
+
+    // ...which File > Spectrogram > Save Filename header (#30) puts inside a
+    // frame: the file name in a band on top and a thin border in the axis
+    // colour on every side that has no axis, so the plot is framed all
+    // round. Without the option there is no frame and the canvas is as
+    // before.
+    const bool header = opts.filenameHeader;
+    const int headerH = header ? kExportHeaderH : 0;
+    const int frameL = (header && ! (opts.axes && !axisOnRight())) ? kExportFrame : 0;
+    const int frameR = (header && ! (opts.axes && axisOnRight())) ? kExportFrame : 0;
+    const int frameB = (header && ! (opts.axes && rulerAtBottom())) ? kExportFrame : 0;
+    const int ox = frameL + ox0, oy = headerH + oy0;   // the plot in the final canvas
+    const int W = W0 + frameL + frameR;
+    const int H = H0 + headerH + frameB;
+    juce::String headerText;
+    if (header)
+    {
+        if (const auto* d = app.doc())  headerText = d->name;
+        if (headerText.isEmpty())       headerText = app.audioEngine().getFile().getFileName();
+    }
 
     // Overlays are cheap: compose them now into a transparent layer laid
     // over the spectral plot by the job. For this block only, plotRect() /
     // rulerH() and everything built on them (row rects, timeToX, rulers,
-    // overlays) address the export canvas instead of the live bounds.
+    // overlays) address the inner export canvas instead of the live bounds;
+    // the frame is drawn around it, the rest is shifted in by the origin.
     // Software images: no platform/GPU image thread affinity for the job.
     juce::Image overlay;
-    if (opts.axes || opts.selections || opts.markers || opts.drawings)
+    if (opts.axes || opts.selections || opts.markers || opts.drawings || header)
     {
         overlay = juce::Image (juce::Image::ARGB, W, H, true, juce::SoftwareImageType());
+        if (header)
+        {
+            juce::Graphics g (overlay);
+            g.setColour (sc::axes::axisStripFill());
+            g.fillRect (0, 0, W, headerH);
+            if (frameL > 0) g.fillRect (0, headerH, frameL, H0);
+            if (frameR > 0) g.fillRect (W - frameR, headerH, frameR, H0);
+            if (frameB > 0) g.fillRect (0, H - frameB, W, frameB);
+            // Centred over the plot, in the axis labels' colour and family.
+            g.setColour (sc::axes::axisLabelColour());
+            g.setFont (sc::axes::axisLabelFont().withHeight (13.0f));
+            g.drawText (headerText, juce::Rectangle<int> (ox, 0, pw, headerH).reduced (4, 0),
+                        juce::Justification::centred, true);
+        }
         haveExportLayout_ = true;
-        exportLayout_ = juce::Rectangle<int> (ox, oy, pw, ph);
+        exportLayout_ = juce::Rectangle<int> (ox0, oy0, pw, ph);
         exportRulerH_ = opts.axes ? app.rulerStackHeight() : 0;
         {
             juce::Graphics g (overlay);
+            g.setOrigin (frameL, headerH);
+            g.reduceClipRegion (0, 0, W0, H0);
             if (opts.axes)
             {
                 // Opaque ruler background so the labels stay readable over the spectrum.
                 g.setColour (juce::Colour::fromRGB (32, 32, 36));
                 if (axisOnRight())
-                    g.fillRect (W - axisW(), 0, axisW(), H);
+                    g.fillRect (W0 - axisW(), 0, axisW(), H0);
                 else
-                    g.fillRect (0, 0, axisW(), H);
+                    g.fillRect (0, 0, axisW(), H0);
                 drawFrequencyRuler (g);
                 drawTimeRuler (g);
                 drawChannelLabels (g, false);   // an export never carries the mute state
@@ -1288,7 +1328,8 @@ SpectralView::PngExportJob SpectralView::preparePngExport (const juce::File& fil
                 drawTimeSelectionOverlay (g);
                 drawSpectralShapesOverlay (g, false);   // committed shapes only
             }
-            if (opts.markers)  drawMarkersOverlay (g);
+            // An export has no waveform above it: the titles always go in.
+            if (opts.markers)  drawMarkersOverlay (g, true);
             if (opts.drawings) drawDrawings (g, false); // committed items only
         }
         haveExportLayout_ = false;
@@ -1823,16 +1864,21 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
 
     const auto rows = rowRects ();
     g.setFont (sc::axes::axisLabelFont());
-    std::vector<std::pair<float, double>> axisTicks;   // y -> Hz, reused by the extra axes
+    struct AxisTick { float y; double hz; bool minor; };
+    std::vector<AxisTick> axisTicks;   // every labelled tick, reused by the extra axes
 
-    // The main axis labels stay inside the main strip (nearest the plot); the
-    // outermost one is inset by the room the channel label needs.
+    // The main axis labels stay inside the main strip (nearest the plot) and
+    // hug the plot on either side. No room is kept for the channel label: the
+    // labels skip the row centre where it sits (hasChanLabel below), and the
+    // 24 px it took on a left axis cut "10.0 kHz" to "10.0 k" (issue #27).
     const sc::axes::List freqExtras = sc::axes::extras (app.axisEntries, sc::axes::Kind::Frequency);
     const int nFreq = 1 + (int) freqExtras.size();
     const auto mainLab = sc::axes::verticalLabelRect (0, nFreq, axisW(), plotRect().getX(),
                                                       layoutWidth() - (axisOnRight() ? axisW() : 0),
                                                       plotRect().getY(), plotRect().getBottom(),
-                                                      axisOnRight(), sc::axes::channelGutter());
+                                                      axisOnRight(), 0);
+    const juce::Justification mainJ = axisOnRight() ? juce::Justification::bottomLeft
+                                                    : juce::Justification::bottomRight;
 
     for (const auto& rr : rows)
     {
@@ -1867,12 +1913,14 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
             g.setColour (minor ? sc::axes::axisMinorLabelColour()
                                : sc::axes::axisLabelColour());
             const double factor = (app.specFreqScaleMode == 1) ? app.specFreqFactor : 1.0;
-            if (! minor) axisTicks.push_back ({ y, f });
+            // Minor labels too: an extra axis used to label only the decades
+            // and so showed fewer values than the main one (issue #27).
+            axisTicks.push_back ({ y, f, minor });
             // Each axis keeps to its own strip: an extra frequency axis used to
             // be drawn on top of these labels on the left side.
             g.drawText (formatFreqAxisLabel (f, factor),
                        mainLab.getX(), (int) y - 12, mainLab.getWidth(), 12,
-                       juce::Justification::bottomLeft, false);
+                       mainJ, false);
         };
 
         if (settings_.logFrequency)
@@ -1978,24 +2026,26 @@ void SpectralView::drawFrequencyRuler (juce::Graphics& g)
     int index = 1;
     for (const auto& e : freqExtras)
     {
-        const auto strip = sc::axes::verticalStrip (index, axW, plotRect().getX(),
+        const auto strip = sc::axes::verticalStrip (index, nFreq, axW, plotRect().getX(),
                                                     layoutWidth() - (axisOnRight() ? axW : 0),
                                                     plotRect().getY(), plotRect().getBottom(),
-                                                    axisOnRight());
+                                                    axisOnRight(), 0);
         if (axisOnRight() ? strip.getRight() > layoutWidth() : strip.getX() < 0) break;
 
-        // Secondary axis: the same smaller type the extra time axes use.
+        // Secondary axis: the same smaller type the extra time axes use; its
+        // minor labels a shade darker, like the main axis' own.
         g.setFont (juce::Font { juce::FontOptions (8.5f) });
-        g.setColour (sc::axes::axisMinorLabelColour());
         const auto lab = sc::axes::verticalLabelRect (index, nFreq, axW, plotRect().getX(),
                                                       layoutWidth() - (axisOnRight() ? axW : 0),
                                                       plotRect().getY(), plotRect().getBottom(),
-                                                      axisOnRight(), sc::axes::channelGutter());
+                                                      axisOnRight(), 0);
         for (const auto& t : axisTicks)
         {
-            const auto box = juce::Rectangle<int> (lab.getX(), (int) t.first - 12, lab.getWidth(), 12);
+            g.setColour (t.minor ? sc::axes::axisMinorLabelColour().darker (0.25f)
+                                 : sc::axes::axisMinorLabelColour());
+            const auto box = juce::Rectangle<int> (lab.getX(), (int) t.y - 12, lab.getWidth(), 12);
             // With the unit spelled out: an extra axis in Hz must read as Hz.
-            g.drawText (sc::axes::formatFrequencyAxis (e, t.second, rate * 0.5), box,
+            g.drawText (sc::axes::formatFrequencyAxis (e, t.hz, rate * 0.5), box,
                         axisOnRight() ? juce::Justification::bottomLeft
                                       : juce::Justification::bottomRight, true);
         }
@@ -2216,9 +2266,10 @@ void SpectralView::drawSpectralShapesOverlay (juce::Graphics& g, bool includeLiv
 // Markers — clipped to the plot so lines and titles never paint over the
 // left frequency axis when a marker starts before the visible window.
 // While the waveform is stacked above (showMarkerTitles == false) only the
-// vertical delimiter lines are drawn here; the bracket line and titles live
-// on the waveform instead. A lone spectrogram draws the full overlay.
-void SpectralView::drawMarkersOverlay (juce::Graphics& g)
+// vertical delimiter lines are drawn in the live view; the bracket line and
+// titles live on the waveform instead. A lone spectrogram draws the full
+// overlay, and so does an export, which never carries the waveform (#30).
+void SpectralView::drawMarkersOverlay (juce::Graphics& g, bool withTitles)
 {
     if (!markerList) return;
     const auto pr = plotRect();
@@ -2240,7 +2291,7 @@ void SpectralView::drawMarkersOverlay (juce::Graphics& g)
             else
             {
                 const double x2 = timeToX (m.end);
-                if (!showMarkerTitles)
+                if (!withTitles)
                 {
                     // Stacked below the waveform: delimiter lines only.
                     g.drawVerticalLine ((int) x,  (float) pr.getY(), (float) pr.getBottom());
@@ -2253,7 +2304,7 @@ void SpectralView::drawMarkersOverlay (juce::Graphics& g)
                     g.drawLine ((float) x2, (float) pr.getY() + 6, (float) x2, pr.getBottom(), 1.0f);
                 }
             }
-            if (!showMarkerTitles) continue;   // no titles while stacked
+            if (!withTitles) continue;   // no titles while stacked
             // Title: may run past this marker's own range, but must stop
             // before the next marker starts so that marker's title has room.
             g.setFont (10.0f);
@@ -2276,7 +2327,7 @@ void SpectralView::drawOverlays (juce::Graphics& g)
 
     drawTimeSelectionOverlay (g);
     drawSpectralShapesOverlay (g, true);
-    drawMarkersOverlay (g);
+    drawMarkersOverlay (g, showMarkerTitles);
 
     // Paintbrush cursor: a translucent band showing the brush's frequency
     // width at the current cursor position.
@@ -2676,7 +2727,7 @@ void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
 // frequency axis.
 void SpectralView::drawTablesOverlay (juce::Graphics& g)
 {
-    if (!app.showAllTables || app.tablesMode() != 1) return;
+    if (app.tablesMode() != sc::tables::kModeSpectrogram) return;
     const auto& tables = app.activeTables();
     if (tables.empty()) return;
 
@@ -2794,21 +2845,37 @@ void SpectralView::drawTableHoverLabels (juce::Graphics& g)
 
 // ------------------------------------------------- spectral selection tools
 
+int SpectralView::rowIndexAtY (int y) const
+{
+    const auto rows = rowRects ();
+    int best = -1;
+    int bestDist = std::numeric_limits<int>::max();
+    for (int i = 0; i < (int) rows.size(); ++i)
+    {
+        const auto& r = rows[(size_t) i];
+        const int dy = y < r.getY() ? r.getY() - y
+                        : y > r.getBottom() ? y - r.getBottom() : 0;
+        if (dy < bestDist) { bestDist = dy; best = i; }
+    }
+    return best;
+}
+
 double SpectralView::freqAtY (int y) const
 {
     const auto rows = rowRects ();
-    if (rows.empty()) return 0.0;
-
-    size_t best = 0;
-    double bestDist = 1e30;
-    for (size_t i = 0; i < rows.size(); ++i)
-    {
-        const int dy = y < rows[i].getY() ? rows[i].getY() - y
-                        : y > rows[i].getBottom() ? y - rows[i].getBottom() : 0;
-        if (dy < bestDist) { bestDist = dy; best = i; }
-    }
-    const auto& r = rows[best];
+    const int i = rowIndexAtY (y);
+    if (i < 0) return 0.0;
+    const auto& r = rows[(size_t) i];
     return yToFreq ((float) (y - r.getY()), r.getHeight());
+}
+
+double SpectralView::toolFreqAtY (int y) const
+{
+    const auto rows = rowRects ();
+    if (toolRow < 0 || toolRow >= (int) rows.size()) return freqAtY (y);
+    const auto& r = rows[(size_t) toolRow];
+    const int yc = juce::jlimit (r.getY(), r.getBottom(), y);
+    return yToFreq ((float) (yc - r.getY()), r.getHeight());
 }
 
 void SpectralView::syncToolTimeExtent (juce::Range<double> ext)

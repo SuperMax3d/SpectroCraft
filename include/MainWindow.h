@@ -660,6 +660,7 @@ public:
     {
         FileNew = 999, FileOpen = 1000, FileClose, FileCloseAll, FileSave, FileSaveAs,
         FileExportSpectral, FileSnapshot, ExpAxes, ExpMarkers, ExpSelections, ExpDrawings, FileQuit,
+        ExpFilenameHeader,   // after FileQuit: the existing ids keep their values
         EditUndo = 2000, EditRedo, EditCut, EditCopy, EditPaste, EditDelete,
         EditTrimSelection,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,

@@ -1129,7 +1129,7 @@ void MainWindow::layoutEditor()
     // above the data views. When a view owns the top time ruler the strip sits
     // just below that ruler inside the owning view's bounds; otherwise it
     // takes space from the top of the main area.
-    const bool showTablesTrack = haveFile && app.tablesMode() == 2 && app.anyVisibleTableParam();
+    const bool showTablesTrack = haveFile && app.anyVisibleTableParam();
     if (tablesTrack)   tablesTrack->setVisible (showTablesTrack);
     if (tablesSep)     tablesSep->setVisible (showTablesTrack);
     if (tablesVScroll) tablesVScroll->setVisible (showTablesTrack);
@@ -4180,6 +4180,7 @@ static SpectralView::SpectralExportOptions spectralExportOptionsFromSettings (co
     o.markers    = s.exportMarkers;
     o.selections = s.exportSelections;
     o.drawings   = s.exportDrawings;
+    o.filenameHeader = s.exportFilenameHeader;
     return o;
 }
 
@@ -4755,6 +4756,10 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             break;
         case ExpDrawings:
             app.settings.exportDrawings = !app.settings.exportDrawings;
+            if (app.onStateChange) app.onStateChange();
+            break;
+        case ExpFilenameHeader:
+            app.settings.exportFilenameHeader = !app.settings.exportFilenameHeader;
             if (app.onStateChange) app.onStateChange();
             break;
         case FileQuit: closeButtonPressed(); break;   // refuses while a job runs
@@ -9602,6 +9607,8 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
             specMenu.addItem (ExpMarkers, "Save Markers", true, app.settings.exportMarkers);
             specMenu.addItem (ExpSelections, "Save Selections", true, app.settings.exportSelections);
             specMenu.addItem (ExpDrawings, "Save Drawing", true, app.settings.exportDrawings);
+            specMenu.addItem (ExpFilenameHeader, "Save Filename header", true,
+                              app.settings.exportFilenameHeader);
             menu.addSubMenu ("Spectrogram", specMenu);
         }
         menu.addSeparator();

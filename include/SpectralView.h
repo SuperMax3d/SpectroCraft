@@ -21,6 +21,7 @@ struct SpectralExportOptions
     bool markers = false;     // draw marker lines and titles
     bool selections = false;  // draw time selection band + spectral selection shapes
     bool drawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
+    bool filenameHeader = false;  // the file name on top + a frame on the sides without an axis
 };
 
 class SpectralView : public juce::Component,
@@ -294,9 +295,21 @@ public:
     // Absolute frequency at a screen y position (mapped through the channel row
     // containing it; nearest row when between rows).
     double freqAtY (int y) const;
+    // Index of the channel row containing y (nearest row when between rows),
+    // -1 when there is none.
+    int rowIndexAtY (int y) const;
+    // freqAtY() for a spectral-tool drag: the cursor is clamped to the row
+    // the gesture started in (toolRow), so a lasso, marquee or brush stroke
+    // stops at that row's edge instead of continuing in another channel's
+    // row (issue #26).
+    double toolFreqAtY (int y) const;
 
 public:
     static constexpr int kRulerH = 24;   // top time ruler height
+    // Export with "Save Filename header" (#30): the band holding the file
+    // name on top, and the frame on each side that has no axis.
+    static constexpr int kExportHeaderH = 20;
+    static constexpr int kExportFrame = 6;
 
     /** Frequency-axis label for a real frequency: plain Hz/kHz when `factor`
         is 1, otherwise the scaled value (custom units are unitless). */
@@ -332,7 +345,10 @@ public:
     // Overlay pieces, split so an export can bake in a subset of them.
     void drawTimeSelectionOverlay (juce::Graphics& g);
     void drawSpectralShapesOverlay (juce::Graphics& g, bool includeLivePreview);
-    void drawMarkersOverlay (juce::Graphics& g);
+    // withTitles: the bracket line and titles too (a lone spectrogram, and
+    // every export); false = delimiter lines only (stacked below the
+    // waveform, which carries the titles).
+    void drawMarkersOverlay (juce::Graphics& g, bool withTitles);
     // showMuteState: muted channels' labels in red (live view; exports
     // never carry the mute state).
     void drawChannelLabels (juce::Graphics& g, bool showMuteState = true);
@@ -408,6 +424,7 @@ private:
     double liveT0 = 0, liveT1 = 0, liveF0 = 0, liveF1 = 0;   // marquee (t,f) space
     std::vector<std::pair<double, double>> lassoPts;        // (tSecs, fHz)
     std::vector<std::pair<double, double>> strokePts;       // paintbrush path
+    int toolRow = -1;                                       // channel row of the gesture
 
     // Paintbrush straight-line mode (ALT+click): a line from the last stroke's
     // end point (the anchor) to the current cursor position. The anchor is set

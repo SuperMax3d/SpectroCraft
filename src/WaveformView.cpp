@@ -1119,7 +1119,7 @@ void WaveformView::paint (juce::Graphics& g)
 // in amplitude units mapped with the same centre/zoom as a channel row.
 void WaveformView::drawTablesOverlay (juce::Graphics& g)
 {
-    if (!app.showAllTables || app.tablesMode() != 0) return;
+    if (app.tablesMode() != sc::tables::kModeWaveform) return;
     const auto& tables = app.activeTables();
     if (tables.empty()) return;
 
@@ -1648,8 +1648,9 @@ void WaveformView::drawAmplitudeAxis (juce::Graphics& g, const std::vector<juce:
     int index = 1;
     for (const auto& e : ampExtras)
     {
-        const auto strip = sc::axes::verticalStrip (index, axisW, pr.getX(), pr.getRight(),
-                                                    pr.getY(), pr.getBottom(), axisOnRight());
+        const auto strip = sc::axes::verticalStrip (index, nAmp, axisW, pr.getX(), pr.getRight(),
+                                                    pr.getY(), pr.getBottom(), axisOnRight(),
+                                                    sc::axes::channelGutter());
         if (strip.getX() < 0 || strip.getRight() > getWidth()) break;
 
         // Secondary axis: the same smaller type the extra time axes use.

@@ -234,6 +234,7 @@ std::vector<SettingKey> settingKeys()
         b ("export_markers", &Settings::exportMarkers),
         b ("export_selections", &Settings::exportSelections),
         b ("export_drawings", &Settings::exportDrawings),
+        b ("export_filename_header", &Settings::exportFilenameHeader),
     };
 }
 

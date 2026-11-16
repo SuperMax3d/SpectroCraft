@@ -230,6 +230,7 @@ void Application::loadSettings ()
     settings.exportSelections = recentStore->getIntValue ("exp_selections", 0) != 0;
     settings.exportDrawings   = recentStore->getIntValue ("exp_drawings", 0) != 0;
     settings.sessionShowBorders = recentStore->getIntValue ("session_borders", 1) != 0;
+    settings.exportFilenameHeader = recentStore->getIntValue ("exp_filename_header", 0) != 0;
     // Stem Separation (Effects menu).
     settings.acppModel          = recentStore->getValue ("acpp_model", juce::String ());
     settings.acppBackend        = std::clamp ((int) recentStore->getIntValue ("acpp_backend", 1), 1,
@@ -338,6 +339,7 @@ void Application::saveSettings ()
     recentStore->setValue ("exp_selections", settings.exportSelections ? 1 : 0);
     recentStore->setValue ("exp_drawings", settings.exportDrawings ? 1 : 0);
     recentStore->setValue ("session_borders", settings.sessionShowBorders ? 1 : 0);
+    recentStore->setValue ("exp_filename_header", settings.exportFilenameHeader ? 1 : 0);
     recentStore->setValue ("acpp_model", settings.acppModel);
     recentStore->setValue ("acpp_backend", settings.acppBackend);
     recentStore->setValue ("acpp_extract_orig", settings.acppExtractOriginal ? 1 : 0);
@@ -1772,14 +1774,6 @@ void Application::setShowAllDrawings (bool on)
     if (onStateChange) onStateChange ();   // repaints the views + refreshes panels
 }
 
-void Application::setShowAllTables (bool on)
-{
-    if (showAllTables == on) return;
-    showAllTables = on;
-    if (onTablesChanged)
-        onTablesChanged ();
-}
-
 void Application::toggleDrawingHidden (int row)
 {
     FileDoc* d = doc ();
@@ -1958,14 +1952,14 @@ int Application::tablesMode() const
 void Application::setTablesMode (int mode)
 {
     FileDoc* d = doc ();
-    const int m = std::clamp (mode, 0, 2);
+    const int m = std::clamp (mode, sc::tables::kModeWaveform, sc::tables::kModePanelOnly);
     if (d == nullptr || d->tablesMode == m) return;
     d->tablesMode = m;
     // The overlay views draw only the parameters whose target matches the
     // active mode: re-target every parameter on a switch so all curves appear
     // in the newly chosen view without per-parameter manual alignment. (The
     // dedicated track shows everything regardless of target.)
-    if (m <= 1)
+    if (m == sc::tables::kModeWaveform || m == sc::tables::kModeSpectrogram)
         for (auto& t : d->tables)
             for (auto& p : t.params)
                 p.alignTarget = m;
@@ -1977,7 +1971,7 @@ void Application::setTablesMode (int mode)
 bool Application::anyVisibleTableParam() const
 {
     const FileDoc* d = doc ();
-    if (!showAllTables || d == nullptr || d->tablesMode != 2) return false;
+    if (d == nullptr || d->tablesMode != sc::tables::kModeDedicated) return false;
     for (const auto& t : d->tables)
         if (!t.visible) continue;
         else

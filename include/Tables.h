@@ -8,6 +8,15 @@
 namespace sc::tables
 {
 
+/** Where a document's visible parameters are drawn (FileDoc::tablesMode,
+    the Tables panel's dropdown; persisted with the file's metadata). Values
+    0..2 predate kModePanelOnly, the default of a new document (issue #25):
+    the tables then show only in the panel's own preview plot. */
+constexpr int kModeWaveform    = 0;   // Overlay on Waveform
+constexpr int kModeSpectrogram = 1;   // Overlay on Spectrogram
+constexpr int kModeDedicated   = 2;   // Dedicated track
+constexpr int kModePanelOnly   = 3;   // Inside Table Panel Only
+
 /** One column of an imported table (a "parameter"). */
 struct ParamData
 {
@@ -196,6 +205,14 @@ double paramValueAt (const TableData& t, const ParamData& p, double tTableSecs);
 
 /** Min/max over the finite entries of v; returns false when there are none. */
 bool finiteMinMax (const std::vector<double>& v, double& lo, double& hi);
+
+/** The auto-scaled value window around the data range [mn, mx]: 10% padding
+    on each side. A flat range (a constant parameter, or a span below the
+    doubles' resolution at that magnitude) gets +-10% of its magnitude, or
+    +-1 around zero, so hi > lo always holds with a span the doubles can
+    represent. (Issue #29: the fixed 1e-9 padding vanished next to a
+    constant -1e9, and the preview plot's grid loop never ended.) */
+void paddedValueRange (double mn, double mx, double& lo, double& hi);
 
 /** Overwrites p's values inside [t0,t1] (document time) with a linear ramp
     from startVal to stopVal. When the range extends beyond the table's row

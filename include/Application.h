@@ -667,11 +667,6 @@ public:
     bool showAllDrawings = true;
     void setShowAllDrawings (bool on);
 
-    /** Master switch for table rendering (session state): when off, no table
-        overlays or dedicated track are drawn at all. */
-    bool showAllTables = true;
-    void setShowAllTables (bool on);
-
     /** Toggles one item's per-element visibility (the eye icon in the
         Drawing panel list). The state persists with the file metadata. */
     void toggleDrawingHidden (int row);
@@ -702,7 +697,9 @@ public:
     /** The active document's tables (empty vector when no file is open). */
     std::vector<sc::tables::TableData>& activeTables();
     int  tablesMode() const;
-    void setTablesMode (int mode);   // 0=Overlay on Waveform 1=Spectral 2=Dedicated
+    /** sc::tables::kModeWaveform...kModePanelOnly; Panel Only draws no
+        overlay and no dedicated track (the panel's own plot still shows). */
+    void setTablesMode (int mode);
     /** True when the dedicated track should be shown: mode == Dedicated and at
         least one parameter of a visible table is itself visible. */
     bool anyVisibleTableParam() const;
