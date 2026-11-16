@@ -604,12 +604,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     - **Take Snapshot** — saves a PNG right next to the WAV file with
       a timestamped name (`<name>_snapshot_<yyyy-mm-dd>_<hh-mm-ss>.png`, numeric
       suffix on collision); falls back to a save dialog when no file is loaded.
-    - Four checkable options, persisted across restarts, that add overlays to
+    - Five checkable options, persisted across restarts, that add overlays to
       the exported image (all off by default):
       **Save Axes** (frequency + time axes around the plot), **Save Markers**
-      (marker lines and titles), **Save Selections** (time selection band plus
-      spectral selection shapes) and **Save Drawing** (your committed drawings —
-      text, arrows, rectangles, freehand).
+      (marker lines and titles — the titles are exported even while the live
+      spectrogram is stacked below the waveform and leaves them to it),
+      **Save Selections** (time selection band plus spectral selection
+      shapes), **Save Drawing** (your committed drawings — text, arrows,
+      rectangles, freehand) and **Save Filename header** (the file name
+      centred in a 20 px band on top, in the axis labels' colour, and a 6 px
+      border in the axis colour on every side that has no axis, so the plot
+      is framed all round).
 - **New files**: File → **New...** creates an empty document with
   the chosen channel count and sample rate (defaults: 2 channels / 44100 Hz,
   or the active file's values). New documents are named *Untitled*,

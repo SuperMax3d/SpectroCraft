@@ -229,6 +229,7 @@ void Application::loadSettings ()
     settings.exportMarkers    = recentStore->getIntValue ("exp_markers", 0) != 0;
     settings.exportSelections = recentStore->getIntValue ("exp_selections", 0) != 0;
     settings.exportDrawings   = recentStore->getIntValue ("exp_drawings", 0) != 0;
+    settings.exportFilenameHeader = recentStore->getIntValue ("exp_filename_header", 0) != 0;
     // Stem Separation (Effects menu).
     settings.acppModel          = recentStore->getValue ("acpp_model", juce::String ());
     settings.acppBackend        = std::clamp ((int) recentStore->getIntValue ("acpp_backend", 1), 1,
@@ -336,6 +337,7 @@ void Application::saveSettings ()
     recentStore->setValue ("exp_markers", settings.exportMarkers ? 1 : 0);
     recentStore->setValue ("exp_selections", settings.exportSelections ? 1 : 0);
     recentStore->setValue ("exp_drawings", settings.exportDrawings ? 1 : 0);
+    recentStore->setValue ("exp_filename_header", settings.exportFilenameHeader ? 1 : 0);
     recentStore->setValue ("acpp_model", settings.acppModel);
     recentStore->setValue ("acpp_backend", settings.acppBackend);
     recentStore->setValue ("acpp_extract_orig", settings.acppExtractOriginal ? 1 : 0);

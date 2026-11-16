@@ -535,7 +535,7 @@ Outcome exportSpectrogramCmd (Context& ctx)
                                  obj ({ { "path", png.getFullPathName() }, { "hint", "pass confirm:true" } }));
     const auto ov = ctx.get ("overlays");
     if (isObj (ov))
-        for (const char* k : { "axes", "markers", "selections", "drawings" })
+        for (const char* k : { "axes", "markers", "selections", "drawings", "filenameHeader" })
             if ((bool) ov.getProperty (k, false))
                 return Outcome::failure (err::needsUi,
                                          "overlays need the window's renderer (File > Export Spectral Image)",
@@ -661,7 +661,8 @@ void registerMeasureCommands (CommandRegistry& r)
                P ("start", PType::Number).min (0), P ("end", PType::Number).min (0),
                P ("width", PType::Integer).range (16, 16384).def (1920), P ("height", PType::Integer).range (16, 16384).def (600),
                P ("overlays", PType::Object).props ({ P ("axes", PType::Boolean), P ("markers", PType::Boolean),
-                                                      P ("selections", PType::Boolean), P ("drawings", PType::Boolean) })
+                                                      P ("selections", PType::Boolean), P ("drawings", PType::Boolean),
+                                                      P ("filenameHeader", PType::Boolean) })
                    .describe ("Overlays need the window renderer: not available through the API yet"),
                P ("confirm", PType::Boolean).describe ("Overwrite / outside the allowed folders") },
              {}, NeedsDoc | LongRunning, {}, exportSpectrogramCmd });

@@ -20,6 +20,7 @@ struct SpectralExportOptions
     bool markers = false;     // draw marker lines and titles
     bool selections = false;  // draw time selection band + spectral selection shapes
     bool drawings = false;    // draw user drawings (text / arrows / rectangles / freehand)
+    bool filenameHeader = false;  // the file name on top + a frame on the sides without an axis
 };
 
 class SpectralView : public juce::Component,
@@ -291,6 +292,10 @@ public:
 
 public:
     static constexpr int kRulerH = 24;   // top time ruler height
+    // Export with "Save Filename header" (#30): the band holding the file
+    // name on top, and the frame on each side that has no axis.
+    static constexpr int kExportHeaderH = 20;
+    static constexpr int kExportFrame = 6;
 
     /** Frequency-axis label for a real frequency: plain Hz/kHz when `factor`
         is 1, otherwise the scaled value (custom units are unitless). */
@@ -326,7 +331,10 @@ public:
     // Overlay pieces, split so an export can bake in a subset of them.
     void drawTimeSelectionOverlay (juce::Graphics& g);
     void drawSpectralShapesOverlay (juce::Graphics& g, bool includeLivePreview);
-    void drawMarkersOverlay (juce::Graphics& g);
+    // withTitles: the bracket line and titles too (a lone spectrogram, and
+    // every export); false = delimiter lines only (stacked below the
+    // waveform, which carries the titles).
+    void drawMarkersOverlay (juce::Graphics& g, bool withTitles);
     // showMuteState: muted channels' labels in red (live view; exports
     // never carry the mute state).
     void drawChannelLabels (juce::Graphics& g, bool showMuteState = true);

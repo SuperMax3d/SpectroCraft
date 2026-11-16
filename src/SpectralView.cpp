@@ -1157,33 +1157,71 @@ SpectralView::PngExportJob SpectralView::preparePngExport (const juce::File& fil
     // An export always carries its own ruler (independent of a stacked live
     // view, which hides its ruler because the other view draws it).
     const int exportRuler = app.rulerStackHeight();
-    const int ox = (opts.axes && !axisOnRight()) ? axisW() : 0;
-    const int oy = (opts.axes && !rulerAtBottom()) ? exportRuler : 0;
-    const int W = pw + (opts.axes ? axisW() : 0);
-    const int H = ph + (opts.axes ? exportRuler : 0);
+    // The plot (and its axes) inside the inner canvas [W0 x H0]...
+    const int ox0 = (opts.axes && !axisOnRight()) ? axisW() : 0;
+    const int oy0 = (opts.axes && !rulerAtBottom()) ? exportRuler : 0;
+    const int W0 = pw + (opts.axes ? axisW() : 0);
+    const int H0 = ph + (opts.axes ? exportRuler : 0);
+
+    // ...which File > Spectrogram > Save Filename header (#30) puts inside a
+    // frame: the file name in a band on top and a thin border in the axis
+    // colour on every side that has no axis, so the plot is framed all
+    // round. Without the option there is no frame and the canvas is as
+    // before.
+    const bool header = opts.filenameHeader;
+    const int headerH = header ? kExportHeaderH : 0;
+    const int frameL = (header && ! (opts.axes && !axisOnRight())) ? kExportFrame : 0;
+    const int frameR = (header && ! (opts.axes && axisOnRight())) ? kExportFrame : 0;
+    const int frameB = (header && ! (opts.axes && rulerAtBottom())) ? kExportFrame : 0;
+    const int ox = frameL + ox0, oy = headerH + oy0;   // the plot in the final canvas
+    const int W = W0 + frameL + frameR;
+    const int H = H0 + headerH + frameB;
+    juce::String headerText;
+    if (header)
+    {
+        if (const auto* d = app.doc())  headerText = d->name;
+        if (headerText.isEmpty())       headerText = app.audioEngine().getFile().getFileName();
+    }
 
     // Overlays are cheap: compose them now into a transparent layer laid
     // over the spectral plot by the job. For this block only, plotRect() /
     // rulerH() and everything built on them (row rects, timeToX, rulers,
-    // overlays) address the export canvas instead of the live bounds.
+    // overlays) address the inner export canvas instead of the live bounds;
+    // the frame is drawn around it, the rest is shifted in by the origin.
     // Software images: no platform/GPU image thread affinity for the job.
     juce::Image overlay;
-    if (opts.axes || opts.selections || opts.markers || opts.drawings)
+    if (opts.axes || opts.selections || opts.markers || opts.drawings || header)
     {
         overlay = juce::Image (juce::Image::ARGB, W, H, true, juce::SoftwareImageType());
+        if (header)
+        {
+            juce::Graphics g (overlay);
+            g.setColour (sc::axes::axisStripFill());
+            g.fillRect (0, 0, W, headerH);
+            if (frameL > 0) g.fillRect (0, headerH, frameL, H0);
+            if (frameR > 0) g.fillRect (W - frameR, headerH, frameR, H0);
+            if (frameB > 0) g.fillRect (0, H - frameB, W, frameB);
+            // Centred over the plot, in the axis labels' colour and family.
+            g.setColour (sc::axes::axisLabelColour());
+            g.setFont (sc::axes::axisLabelFont().withHeight (13.0f));
+            g.drawText (headerText, juce::Rectangle<int> (ox, 0, pw, headerH).reduced (4, 0),
+                        juce::Justification::centred, true);
+        }
         haveExportLayout_ = true;
-        exportLayout_ = juce::Rectangle<int> (ox, oy, pw, ph);
+        exportLayout_ = juce::Rectangle<int> (ox0, oy0, pw, ph);
         exportRulerH_ = opts.axes ? app.rulerStackHeight() : 0;
         {
             juce::Graphics g (overlay);
+            g.setOrigin (frameL, headerH);
+            g.reduceClipRegion (0, 0, W0, H0);
             if (opts.axes)
             {
                 // Opaque ruler background so the labels stay readable over the spectrum.
                 g.setColour (juce::Colour::fromRGB (32, 32, 36));
                 if (axisOnRight())
-                    g.fillRect (W - axisW(), 0, axisW(), H);
+                    g.fillRect (W0 - axisW(), 0, axisW(), H0);
                 else
-                    g.fillRect (0, 0, axisW(), H);
+                    g.fillRect (0, 0, axisW(), H0);
                 drawFrequencyRuler (g);
                 drawTimeRuler (g);
                 drawChannelLabels (g, false);   // an export never carries the mute state
@@ -1194,7 +1232,8 @@ SpectralView::PngExportJob SpectralView::preparePngExport (const juce::File& fil
                 drawTimeSelectionOverlay (g);
                 drawSpectralShapesOverlay (g, false);   // committed shapes only
             }
-            if (opts.markers)  drawMarkersOverlay (g);
+            // An export has no waveform above it: the titles always go in.
+            if (opts.markers)  drawMarkersOverlay (g, true);
             if (opts.drawings) drawDrawings (g, false); // committed items only
         }
         haveExportLayout_ = false;
@@ -2122,9 +2161,10 @@ void SpectralView::drawSpectralShapesOverlay (juce::Graphics& g, bool includeLiv
 // Markers — clipped to the plot so lines and titles never paint over the
 // left frequency axis when a marker starts before the visible window.
 // While the waveform is stacked above (showMarkerTitles == false) only the
-// vertical delimiter lines are drawn here; the bracket line and titles live
-// on the waveform instead. A lone spectrogram draws the full overlay.
-void SpectralView::drawMarkersOverlay (juce::Graphics& g)
+// vertical delimiter lines are drawn in the live view; the bracket line and
+// titles live on the waveform instead. A lone spectrogram draws the full
+// overlay, and so does an export, which never carries the waveform (#30).
+void SpectralView::drawMarkersOverlay (juce::Graphics& g, bool withTitles)
 {
     if (!markerList) return;
     const auto pr = plotRect();
@@ -2146,7 +2186,7 @@ void SpectralView::drawMarkersOverlay (juce::Graphics& g)
             else
             {
                 const double x2 = timeToX (m.end);
-                if (!showMarkerTitles)
+                if (!withTitles)
                 {
                     // Stacked below the waveform: delimiter lines only.
                     g.drawVerticalLine ((int) x,  (float) pr.getY(), (float) pr.getBottom());
@@ -2159,7 +2199,7 @@ void SpectralView::drawMarkersOverlay (juce::Graphics& g)
                     g.drawLine ((float) x2, (float) pr.getY() + 6, (float) x2, pr.getBottom(), 1.0f);
                 }
             }
-            if (!showMarkerTitles) continue;   // no titles while stacked
+            if (!withTitles) continue;   // no titles while stacked
             // Title: may run past this marker's own range, but must stop
             // before the next marker starts so that marker's title has room.
             g.setFont (10.0f);
@@ -2182,7 +2222,7 @@ void SpectralView::drawOverlays (juce::Graphics& g)
 
     drawTimeSelectionOverlay (g);
     drawSpectralShapesOverlay (g, true);
-    drawMarkersOverlay (g);
+    drawMarkersOverlay (g, showMarkerTitles);
 
     // Paintbrush cursor: a translucent band showing the brush's frequency
     // width at the current cursor position.
