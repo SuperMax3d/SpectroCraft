@@ -24038,8 +24038,9 @@ static void testTrackAxisPlacement()
     CHECK (viewMenu.getNumItems() == 19, "View menu item count with stereo file");
 
     // --- Resample lives in its own section of the Edit menu -----------------
+    // (14 entries: the Session (experimental) submenu of issue #21 included.)
     const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
-    CHECK (editMenu.getNumItems() == 13, "Edit menu includes the Resample item");
+    CHECK (editMenu.getNumItems() == 14, "Edit menu includes the Resample item");
     const juce::PopupMenu fxMenu = win->getMenuForIndex (4, "Effects");
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
     CHECK (fxMenu.getNumItems() == 19, "Effects menu includes the invert/stretch/cat-time-scale/eq/envelope + split + generate + super-res items");
@@ -29832,6 +29833,7 @@ static void testWriteDataToNewChannels()
 #include "regression/docking.inc"   // docking workspace: groups, drop zones, floating windows, workspaces
 #include "regression/diagnostics.inc"   // opt-in diagnostic log
 #include "regression/axes.inc"           // per-file axis entries behind the Scale form (docs/scale-form.md)
+#include "regression/sessions.inc"       // sessions: referenced files on the timeline (issue #21)
 #include "regression/updates.inc"       // automatic updates: Ed25519/SHA, manifest, staging (docs/updates.md)
 
 
@@ -30343,6 +30345,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: spectral_dsp", runRegression_spectral_dsp);
     SC_RUN_TEST ("regression: views", runRegression_views);
     SC_RUN_TEST ("regression: axes", runRegression_axes);
+    SC_RUN_TEST ("regression: sessions", runRegression_sessions);
     SC_RUN_TEST ("regression: panels", runRegression_panels);
     SC_RUN_TEST ("regression: mainwindow", runRegression_mainwindow);
     SC_RUN_TEST ("regression: application", runRegression_application);

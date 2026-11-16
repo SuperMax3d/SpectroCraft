@@ -1,6 +1,7 @@
 #pragma once
 // SpectroCraft - Spectral view component (renders engine tiles + overlays)
 #include <JuceHeader.h>
+#include "SessionOverlay.h"
 #include "Application.h"
 #include "SpectralEngine.h"
 #include "Settings.h"
@@ -51,6 +52,11 @@ public:
     // wheel over the plot = time zoom at cursor, wheel over the left
     // frequency axis (or Shift+wheel) = frequency-range zoom,
     // double-click = fit whole file. Clicking moves the playhead.
+    /** Session files (issue #21): outlines and names, and the Move Files drag. */
+    void paintOverChildren (juce::Graphics& g) override;
+    /** This view's rows, plot and time axis, for the session overlay. */
+    sc::session::ViewGeometry sessionGeometry() const;
+
     void mouseDown (const juce::MouseEvent& e) override;
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent& e) override;
@@ -364,6 +370,7 @@ private:
     // (inside the plot while moving; clamped to it while dragging).
     void reportHoverTime (const juce::MouseEvent& e, bool dragging);
     Application& app;   // audio data read live via app.audioEngine() (active doc)
+    sc::session::MoveGesture sessionMove_;   // Edit > Session > Move Files drag
 
     // New-drawing creation state (armed by startPendingDraw()).
     bool havePendingDraw_ = false;

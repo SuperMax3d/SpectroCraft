@@ -45,6 +45,8 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/BkdkChunk.cpp   # B&K bkdk calibration chunk parsing
         ${CMAKE_CURRENT_SOURCE_DIR}/FileMeta.cpp    # unified metadata bundle + RIFF patching
         ${CMAKE_CURRENT_SOURCE_DIR}/MergeFiles.cpp  # multi-file merge (Shift + drag & drop)
+        ${CMAKE_CURRENT_SOURCE_DIR}/Session.cpp     # sessions: referenced files on the timeline (issue #21)
+        ${CMAKE_CURRENT_SOURCE_DIR}/SessionOverlay.cpp  # sessions: file borders and the Move Files drag in the views
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoAudio.cpp  # FFmpeg video-container audio extraction
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_CURRENT_SOURCE_DIR}/StemSeparation.cpp

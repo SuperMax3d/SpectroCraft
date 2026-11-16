@@ -2569,6 +2569,40 @@ bool AudioEngine::saveFileImpl (const juce::File& file) const
     if (!hasFile)
         return false;
 
+    // Session composite (issue #21): write only the main file's own region.
+    // The other files of the session live in the other channels and after
+    // the main file's end; they are saved to their own files by
+    // Application::saveDocument. A plain engine holding just the region does
+    // the writing, with this engine's save settings (markers, chunks, mode).
+    if (saveRegionChannels > 0
+        && (saveRegionChannels != nchans || saveRegionLength != totalSamples))
+    {
+        const int chans = std::min (saveRegionChannels, nchans);
+        const int64_t len = std::clamp<int64_t> (saveRegionLength, 0, totalSamples);
+        if (chans <= 0)
+            return false;
+        std::vector<std::vector<float>> part ((size_t) chans, std::vector<float> ((size_t) len));
+        for (int ch = 0; ch < chans; ++ch)
+            if (len > 0 && !readSamples (ch, 0, len, part[(size_t) ch].data()))
+                return false;
+        AudioEngine sub;
+        if (!sub.initNew (chans, rate, &part))
+            return false;
+        sub.forceRf64 = forceRf64;
+        sub.saveMarkers = saveMarkers;
+        sub.saveScttJson = saveScttJson;
+        sub.saveMetaMode = saveMetaMode;
+        sub.saveScmdBuilder = saveScmdBuilder;
+        sub.saveBkdkPayload = saveBkdkPayload;
+        const bool ok = sub.saveFileImpl (file);
+        if (ok)
+        {
+            unsaved = false;
+            currentFile = file;
+        }
+        return ok;
+    }
+
     // WAV files use the custom writer so markers can be embedded as standard
     // RIFF chunks ("cue" + "LIST"/"adtl"). Other formats go through JUCE.
     if (file.getFileExtension().toLowerCase() == ".wav")

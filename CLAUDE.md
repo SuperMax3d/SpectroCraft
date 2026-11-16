@@ -89,6 +89,12 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   `include/AxisScale.h` + `src/AxisScale.cpp`, the dialog `include/ScaleForm.h` +
   `src/ScaleForm.cpp`, applied through `Application::setAxisEntries`; behaviour and
   limits: `docs/scale-form.md`, tests `tests/regression/axes.inc`.
+- Sessions (issue #21, experimental; other WAV files on the open file's timeline): the model is
+  `include/Session.h` + `src/Session.cpp`, the views' overlay and Move Files drag
+  `include/SessionOverlay.h`, wired in `Application::addSessionFile` / `moveSessionFile` /
+  `removeSessionFile` / `openSessionOf` / `saveSessionFiles`. While a session is open the
+  engine holds the composite and `AudioEngine::setSaveRegion` limits every save to the main
+  file's region. Behaviour and limits: `docs/sessions.md`, tests `tests/regression/sessions.inc`.
 - Draggable separators (waveform/spectrogram, video picture/tracks, table
   list/preview plot) share one widget style: `include/SplitterStyle.h`
   (`sc::ui::kSplitterH`, `sc::ui::drawSplitterGrip`). Do not draw a private grip
