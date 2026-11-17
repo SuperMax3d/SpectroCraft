@@ -42,6 +42,7 @@
 #include "RecorderRing.h"      // the WASAPI plugin's thread-safe capture ring
 #include "RuntimeDlls.h"    // runtime DLL search path (SpectroCraft subfolder)
 #include "SingleInstance.h"   // single-instance mode + file forwarding pipe
+#include "SoundModel.h"       // Model panel: sound model (issue #40)
 #include "AI/OvRuntime.h"  // resolveAiDevice is plain string logic; the header degrades without AI
 #if defined(SC_ENABLE_AI)
 #include "AI/ModelManager.h"
@@ -4197,11 +4198,12 @@ const int kNumPanels = 9;
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
         // +2: the "Workspaces" submenu and "Maximize Panel Group" above the
         // panels, +1: "Video" listed with them (after Drawing, issue #10),
+        // +1: "Model" (last; closed by default, issue #40),
         // +1 the "Allow multiple instances" toggle,
         // +1 "Allow AI control (localhost)" when the control server is built
         // in (separators are not counted by getNumItems). The Diagnostic Log
         // toggle moved to the Help menu (issue #11).
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + kScControlMenuItems, "Window menu lists every panel");
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + 1 + kScControlMenuItems, "Window menu lists every panel");
 
         // The toggle is checked by default; clicking it flips the setting and
         // persists it to the store file immediately.
@@ -4336,7 +4338,7 @@ const int kNumPanels = 9;
 
         const int wIdx = windowMenuIndex (*win);
         juce::PopupMenu wm = win->getMenuForIndex (wIdx, "Window");
-        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + kScControlMenuItems, "Window menu still lists every panel");
+        CHECK (wm.getNumItems () == 2 + kNumPanels + 1 + 1 + 1 + kScControlMenuItems, "Window menu still lists every panel");
 
         // Reopening a closed panel from the Window menu works after restart too.
         win->menuItemSelected (MainWindow::MenuIDs::WindowPanelBase + 4, wIdx);   // tables
@@ -30641,6 +30643,7 @@ static void testWriteDataToNewChannels()
 #include "regression/axes.inc"           // per-file axis entries behind the Scale form (docs/scale-form.md)
 #include "regression/sessions.inc"       // sessions: referenced files on the timeline (issue #21)
 #include "regression/updates.inc"       // automatic updates: Ed25519/SHA, manifest, staging (docs/updates.md)
+#include "regression/model.inc"         // Model panel: sound model analysis / rendering (issue #40)
 
 
 // SC_TEST_FILTER=<substring>[,<substring>...] runs only the tests whose
@@ -31178,6 +31181,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("regression: docking", runRegression_docking);
     SC_RUN_TEST ("regression: diagnostics", runRegression_diagnostics);
     SC_RUN_TEST ("regression: updates", runRegression_updates);
+    SC_RUN_TEST ("regression: model", runRegression_model);
 
 
     scReportTimings();

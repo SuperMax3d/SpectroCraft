@@ -362,6 +362,9 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
     if (b.session.isObject())
         root->setProperty ("session", b.session);
 
+    if (b.soundModel.isObject())
+        root->setProperty ("soundModel", b.soundModel);
+
     auto scale = new juce::DynamicObject();
     scale->setProperty ("unit", static_cast<int> (b.scale.unit));
     scale->setProperty ("fullScaleValue", b.scale.fullScaleValue);
@@ -570,6 +573,10 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
     if (out.haveSession)
         out.session = p.getWithDefault ("session", juce::var());
 
+    out.haveSoundModel = p.contains ("soundModel");
+    if (out.haveSoundModel)
+        out.soundModel = p.getWithDefault ("soundModel", juce::var());
+
     out.haveScale = p.contains ("scale");
     if (const auto* scaleObj = p.getWithDefault ("scale", juce::var()).getDynamicObject())
     {
@@ -755,6 +762,7 @@ bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
     b.freqAnalysis = unifiedB.haveFreqAnalysis ? unifiedB.freqAnalysis : scmdB.freqAnalysis;
     b.tables       = unifiedB.haveTables       ? unifiedB.tables       : scmdB.tables;
     b.tablesMode   = unifiedB.haveTables       ? unifiedB.tablesMode   : scmdB.tablesMode;
+    b.soundModel   = unifiedB.haveSoundModel   ? unifiedB.soundModel   : scmdB.soundModel;
 
     // The cue/adtl payloads are sample-based: the file's rate is needed both to
     // READ them and to REBUILD them below.

@@ -468,6 +468,9 @@ private:
     // feature is active (-1 = mouse outside). Small white circles are drawn at the
     // harmonics of the frequency under the cursor - no lines.
     int harmMouseX = -1, harmMouseY = -1;
+    // Model panel picking (issue #40): the mouse, for the guide.
+    int modelMouseX = -1, modelMouseY = -1;
+    void drawModelPickGuide (juce::Graphics& g);
 
     // Table overlay hover labels (spectrogram mode): collected on mouseMove,
     // cleared on mouseExit. tblHoverPos is the cursor position in view coords.

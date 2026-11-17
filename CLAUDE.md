@@ -97,6 +97,13 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   `AudioEngine::setPlaybackRoutes` (set by `FileDoc::applySessionSaveRegion`). While a session is open the
   engine holds the composite and `AudioEngine::setSaveRegion` limits every save to the main
   file's region. Behaviour and limits: `docs/sessions.md`, tests `tests/regression/sessions.inc`.
+- Model panel (issue #40; Window > Model, closed in the built-in workspaces): the sound model is
+  `include/SoundModel.h` + `src/SoundModel.cpp` (analysis, synthesis, JSON; no UI dependency),
+  kept in `FileDoc::soundModel` (metadata key `soundModel`), driven by `src/ApplicationModel.cpp`
+  (`Application::analyseModel` / `compareModel` / `renderModelSelection` / `renderModelCsv` /
+  `modelPick*`), shown by `include/ModelPanel.h`; the spectrogram guide is
+  `SpectralView::drawModelPickGuide`. Behaviour: `docs/model-panel.md`, tests
+  `tests/regression/model.inc`.
 - Draggable separators (waveform/spectrogram, video picture/tracks, table
   list/preview plot) share one widget style: `include/SplitterStyle.h`
   (`sc::ui::kSplitterH`, `sc::ui::drawSplitterGrip`). Do not draw a private grip

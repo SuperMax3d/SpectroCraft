@@ -309,6 +309,7 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 #endif
     selectionPanel = std::make_unique<SelectionPanel> (app);
     drawingPanel   = std::make_unique<DrawingPanel> (app);
+    modelPanel     = std::make_unique<ModelPanel> (app);
     historyPanel  = std::make_unique<HistoryPanel> (app);
     actionsPanel  = std::make_unique<ActionsPanel> (app);
     pythonPanel   = std::make_unique<PythonPanel> (app);
@@ -405,6 +406,19 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
 #endif
     selectionPanel->onCloseRequested  = [this] { setPanelVisible ("selection", false); };
     drawingPanel->onCloseRequested    = [this] { setPanelVisible ("drawing", false); };
+    modelPanel->onCloseRequested      = [this] { setPanelVisible ("model", false); };
+    // Render Selection writes a new channel: a streamed file is loaded into
+    // memory first (runDestructiveEdit), then the render runs here.
+    modelPanel->onRenderSelectionRequested = [this]
+    {
+        runDestructiveEdit ([] (std::string*) { return true; }, [this] (bool ok)
+        {
+            if (! ok) return;
+            juce::String err;
+            if (app.renderModelSelection (&err)) refreshAfterEdit();
+            else showEditError (err.toStdString());
+        });
+    };
     tablesPanel->onCloseRequested     = [this] { setPanelVisible ("tables", false); };
 
     // ---- Docking workspace ----------------------------------------------
@@ -688,12 +702,25 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     {
         if (selectionPanel) selectionPanel->refresh();
     };
+    // Model panel (issue #40): the model changed, or the spectrogram picking
+    // started / stopped (the guide is drawn by the spectral view).
+    app.onSoundModelChanged = [this]
+    {
+        if (modelPanel) modelPanel->refresh();
+        if (spectralView) spectralView->repaint();
+    };
+    app.onModelPickChanged = [this]
+    {
+        if (modelPanel) modelPanel->refresh();
+        if (spectralView) spectralView->repaint();
+    };
 
     // Tables panel <-> views wiring: refresh the list, repaint overlays and
     // relayout when the dedicated track appears/disappears.
     app.onTablesChanged = [this]
     {
         if (tablesPanel) tablesPanel->refresh();
+        if (modelPanel) modelPanel->refresh();   // its parameter list
         if (waveformView) waveformView->repaint();
         if (spectralView) spectralView->repaint();
         if (tablesTrack)
@@ -923,6 +950,8 @@ MainWindow::~MainWindow()
     app.onDrawingsChanged = nullptr;
     app.onDrawingSelectionChanged = nullptr;
     app.onSavedSelectionsChanged = nullptr;
+    app.onSoundModelChanged = nullptr;
+    app.onModelPickChanged = nullptr;
     app.onTablesChanged = nullptr;
     app.onArmTableAlignClick = nullptr;
     app.onSetSpectralFreqRange = nullptr;
@@ -1355,6 +1384,7 @@ const char* MainWindow::panelIdFor (juce::Component* c) const
     if (c == selectionPanel.get())      return "selection";
     if (c == drawingPanel.get())        return "drawing";
     if (c == videoDockHost.get())       return "video";
+    if (c == modelPanel.get())          return "model";
     return nullptr;
 }
 
@@ -1379,6 +1409,9 @@ std::vector<MainWindow::LeftPanelEntry> MainWindow::leftPanelEntries() const
         { "selection",   "Selection",          false },
         { "drawing",     "Drawing",            false },
         { "video",       "Video",              true  },
+        // Last, so the Window menu keeps its order; closed in the built-in
+        // workspaces (open it from Window > Model).
+        { "model",       "Model",              true  },
     };
 }
 
@@ -1398,6 +1431,7 @@ juce::Component* MainWindow::panelForId (const juce::String& id) const
     if (id == "selection")   return selectionPanel.get ();
     if (id == "drawing")     return drawingPanel.get ();
     if (id == "video")       return videoDockHost.get ();
+    if (id == "model")       return modelPanel.get ();
     return nullptr;
 }
 
@@ -1606,7 +1640,7 @@ juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
                   { dockGroup ({ "tables", "video" }), 0.26 } }), 0.57 },
             { dockSplit (false, {
                   { dockGroup ({ "controls", "drawing" }), 0.55 },
-                  { dockGroup ({ "fft" }), 0.45 } }), 0.23 } }));
+                  { dockGroup ({ "fft" }), 0.45 } }), 0.23 } }), { "model" });
 
     if (id == "analysis")
         // A wide Frequency Analysis beside the Editor, three groups below.
@@ -1617,7 +1651,7 @@ juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
             { dockSplit (true, {
                   { dockGroup ({ "controls", "selection", "drawing" }), 0.34 },
                   { dockGroup ({ "markers", "transcription", "history" }), 0.33 },
-                  { dockGroup ({ "tables", "actions", "python", "video" }), 0.33 } }), 0.34 } }));
+                  { dockGroup ({ "tables", "actions", "python", "video" }), 0.33 } }), 0.34 } }), { "model" });
 
     if (id == "video")
         // The picture large above the Editor.
@@ -1629,7 +1663,7 @@ juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
                   { dockSplit (true, {
                         { dockGroup ({ "video" }), 0.55 },
                         { dockGroup ({ "controls", "fft" }), 0.45 } }), 0.46 },
-                  { dockGroup ({ "editor" }), 0.54 } }), 0.8 } }));
+                  { dockGroup ({ "editor" }), 0.54 } }), 0.8 } }), { "model" });
 
     // "default": the classic arrangement - a left column with two groups
     // beside the Editor.
@@ -1637,7 +1671,7 @@ juce::var MainWindow::builtInWorkspaceLayout (const juce::String& id) const
         { dockSplit (false, {
               { dockGroup ({ "fft", "history", "actions", "python", "tables", "video" }, "fft"), 0.52 },
               { dockGroup ({ "controls", "markers", "transcription", "selection", "drawing" }), 0.48 } }), 0.245 },
-        { dockGroup ({ "editor" }), 0.755 } }));
+        { dockGroup ({ "editor" }), 0.755 } }), { "model" });
 }
 
 std::vector<sc::dock::Workspaces::Entry> MainWindow::builtInWorkspaces() const
@@ -1671,7 +1705,8 @@ juce::var MainWindow::legacyLeftLayout() const
     };
     const juce::String saved = app.recentStore->getValue ("left_tab_layout");
     const int sep = saved.indexOfChar ('|');
-    const juce::StringArray closed = ids (app.recentStore->getValue ("left_panels_closed"));
+    juce::StringArray closed = ids (app.recentStore->getValue ("left_panels_closed"));
+    closed.addIfNotAlreadyThere ("model");   // newer than the old column: closed, like in the workspaces
     juce::StringArray top = ids (sep < 0 ? saved : saved.substring (0, sep));
     juce::StringArray bottom = ids (sep < 0 ? juce::String () : saved.substring (sep + 1));
     for (const auto& id : closed)
@@ -2644,6 +2679,7 @@ void MainWindow::refreshPanels()
 #endif
     if (selectionPanel)   selectionPanel->refresh();
     if (drawingPanel)     drawingPanel->refresh();
+    if (modelPanel)       modelPanel->refresh();
     if (tablesPanel)      tablesPanel->refresh();
     if (historyPanel)   historyPanel->refresh();
     if (fftPanel)       fftPanel->repaint();
@@ -10259,6 +10295,12 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
                 default: break;
             }
         }
+    }
+    // Esc stops the Model panel's picking on the spectrogram first.
+    if (key.getKeyCode() == juce::KeyPress::escapeKey && app.modelPick != Application::ModelPick::none)
+    {
+        app.cancelModelPick();
+        return true;
     }
     // Esc drops the drawing selection (its box and handles) first.
     if (key.getKeyCode() == juce::KeyPress::escapeKey && !app.selectedDrawings.empty ()

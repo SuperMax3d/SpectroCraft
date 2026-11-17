@@ -12,6 +12,17 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 
 ## Features
 
+- **Model panel** (Window > Model, issue #40): learns a sound model of the
+  recording, i.e. **harmonic** components (whines at orders of a fundamental
+  that follows a Tables parameter, or tracks measured in stored selections)
+  and **noise** components (one spectrum per time range, interpolated by the
+  parameter). Each component is analysed with the ones above it taken out.
+  The model renders back into the file (**Render Selection**, a new channel),
+  into a side-by-side **Compare** file (simulation / original, with the
+  markers and parameters of the analysed ranges) or from a CSV of parameters
+  (**Render CSV**), and exports as JSON. Picking on the spectrogram sets the
+  fundamental and adds harmonics, with a guide that snaps to them. Details:
+  [docs/model-panel.md](model-panel.md).
 - **Formats**: WAV / AIFF / FLAC / MP3 / Ogg via JUCE AudioFormatManager
   (PCM 8/16/24/32-bit int, 32-bit float), up to 32+ channels — plus the audio
   track of video containers (.mp4/.m4a, .mkv, .avi, .webm, .mov, .wmv, .flv,
@@ -2754,7 +2765,7 @@ runs a whole tree (see **Running & CLI flags**).
 ### Per-file metadata (File → Metadata)
 
 Everything that belongs to a file — **markers**, **user drawings**,
-**data tables**, **named spectral selections**,
+**data tables**, **named spectral selections**, the **sound model** (Model panel),
 the **scale calibration** (Set Unit and Scale), the **axis calibrations**
 (custom frequency units + alternative scales) and the **Frequency Analysis**
 settings (axis mode, FFT size, Ref Time, Smooth, Track) — is stored together
@@ -2824,6 +2835,7 @@ Clean separation into independent components (see `include/` + `src/`):
 | `BkdkChunk` (`src/BkdkChunk.cpp`) | Parser for the custom `bkdk` RIFF chunk found in some legacy measurement WAV files: NUL-separated ASCII fields, one 11-field group per channel whose Calibration field (sample × gain = pascals) drives the automatic Pascal calibration on load. A single defined group applies to every channel; missing/unparseable values fall back to no scaling. |
 | `Tables` (`src/Tables.cpp`) | Data-table model + CSV import (comma/tab separated, quoted fields, CRLF, boolean cells, first-column-text transpose, time-column auto-detection with duration-based start shift, scattered-gap interpolation, text-only column drop), remove-only downsample decimation, value transforms (normalized/inverted/absolute + offset/scale), composed table+parameter time maps, document-time normalized cross-correlation auto-align lag (idempotent), and the JSON serialise/parse used by `FileMeta`. |
 | `TablesTrackView` (`src/TablesTrack.cpp`) | The dedicated-tables strip: draws every visible table parameter auto-scaled into its own plot area (same width as the data views, same left-axis width), with vertical zoom/pan driven by a `ValueScrollBar`, the blue time-selection band and red playhead over it, vertical yellow marker delimiter lines (no bracket line or titles on this strip), and hover readout of each curve's unscaled value at the cursor time. |
+| `SoundModel` (`src/SoundModel.cpp`), `ModelPanel` (`src/ModelPanel.cpp`), `src/ApplicationModel.cpp` | The Model panel (issue #40): the sound model's data, analysis (harmonic peaks above the local floor, noise spectra per state, the components above taken out), synthesis (additive lines, shaped noise) and JSON; the panel; and the actions on the active file (parameters from the tables, Compare, Render Selection, Render CSV, Export / Import, spectrogram picking). See `docs/model-panel.md`. |
 | `FileMeta` (`src/FileMeta.cpp`) | Unified per-file metadata bundle: serialises/parses the JSON that holds markers, saved selections, data tables, scale calibration, axis calibrations and Frequency Analysis settings; scans a WAV for managed RIFF chunks (`cue`, LIST/`adtl`, `SCTT`, `SCMD`). The transcription always travels in its own `SCTT` chunk (see `ScttChunk`). Also provides `migrateFileMetadata` (behind the CLI `--meta-mode` option): moves a WAV's whole metadata bundle between embedded chunks and `.meta.json` without opening it in the editor, reading each category from whichever source currently holds it. |
 | `MergeFiles` (`src/MergeFiles.cpp`) | Multi-file merge engine behind Shift + drag & drop: reads every source at its native rate in streaming chunks (+ markers from sidecar/embedded/cue), resamples all sources to the highest rate with SoXR, computes the sequence/parallel layout and builds the merged audio buffer (silence padding on missing channels) plus the merged marker list. `Application::mergeFilesIntoActiveDoc` applies a result to the active document (undoable append for same-rate sequence, whole-file replacement otherwise); `Application::createDocFromMerged` activates a fresh document from a standalone merge result. |
 | `VideoAudio` (`src/VideoAudio.cpp`, `src/VideoAudio_mac.mm`) | Video-container audio extraction (Windows + FFmpeg; macOS through an `AVAssetReader` reader that continues sequential reads and restarts at the requested time otherwise): a `juce::AudioFormatReader` over libavformat/libavcodec/libswresample that opens the first audio stream of .mp4/.mkv/.avi/etc., decodes it to float and positions reads sample-accurately via frame timestamps (seek-per-read, zero-fill beyond EOF). Registered after JUCE's basic formats so native files keep their usual readers; video-only containers are rejected. |

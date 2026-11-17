@@ -278,6 +278,16 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
+    // Model panel picking (issue #40): a left click in the plot sets the
+    // fundamental, or adds / removes the harmonic nearest the mouse.
+    if (app.modelPick != Application::ModelPick::none && e.mods.isLeftButtonDown()
+        && ! e.mods.isPopupMenu() && plotRect().contains (e.getPosition()))
+    {
+        app.modelPickClick (xToTime ((double) e.x), freqAtY ((int) e.y));
+        repaint();
+        return;
+    }
+
     // Tables panel alignment flow: a left click is consumed as the reference
     // point in this view and reported to the panel. The second value is the
     // fitted [-1,+1] position of the clicked frequency - the same domain
@@ -1058,6 +1068,15 @@ void SpectralView::mouseMove (const juce::MouseEvent& e)
     if (app.haveSelGestureRef ())
         updateSelGestureFromEvent (e);
 
+    // Model panel picking: the guide follows the mouse.
+    if (app.modelPick != Application::ModelPick::none
+        && (modelMouseX != e.x || modelMouseY != e.y))
+    {
+        modelMouseX = e.x;
+        modelMouseY = e.y;
+        repaint();
+    }
+
     // Harmonic markers (Spectral Controls panel): follow the cursor so the
     // white circles track it. Only repaint when the position changed.
     if (app.settings.specHarmVisible && app.settings.specHarmMaxK >= 1
@@ -1160,6 +1179,12 @@ void SpectralView::mouseExit (const juce::MouseEvent&)
 {
     if (onHoverTime) onHoverTime (-1.0);
     if (onCursorInfo) onCursorInfo ("");
+
+    if (modelMouseX >= 0)
+    {
+        modelMouseX = modelMouseY = -1;
+        if (app.modelPick != Application::ModelPick::none) repaint();
+    }
 
     // Harmonic markers: hide the circles once the cursor leaves the view.
     if (harmMouseX >= 0 || harmMouseY >= 0)
@@ -2425,6 +2450,89 @@ void SpectralView::drawMarkersOverlay (juce::Graphics& g, bool withTitles)
     }
 }
 
+// Model panel picking (issue #40). Fundamental: a level line at the mouse.
+// Harmonics: the chosen orders as thin lines that follow the component's
+// parameter across the view, the order nearest the mouse highlighted (it is
+// what a click adds or removes) with a dot snapped onto it and its label.
+void SpectralView::drawModelPickGuide (juce::Graphics& g)
+{
+    if (app.modelPick == Application::ModelPick::none) return;
+    const FileDoc* d = app.doc();
+    if (d == nullptr) return;
+    const int ci = d->soundModel.indexOf (app.modelPickId);
+    if (ci < 0) return;
+    const auto& c = d->soundModel.components[(size_t) ci];
+    const auto pr = plotRect();
+    const bool inside = modelMouseX >= pr.getX() && modelMouseX < pr.getRight()
+                     && modelMouseY >= pr.getY() && modelMouseY < pr.getBottom();
+    g.saveState();
+    g.reduceClipRegion (pr);
+    g.setFont (12.0f);
+
+    if (app.modelPick == Application::ModelPick::fundamental)
+    {
+        if (inside)
+        {
+            g.setColour (juce::Colour::fromRGB (255, 210, 60));
+            g.drawHorizontalLine (modelMouseY, (float) pr.getX(), (float) pr.getRight());
+            const double f = freqAtY (modelMouseY);
+            g.drawText ("Fundamental " + juce::String (f, 1) + " Hz: click to set",
+                        modelMouseX + 8, modelMouseY - 16, 220, 14, juce::Justification::centredLeft);
+        }
+        g.restoreState();
+        return;
+    }
+
+    const auto param = app.modelParamFn (*d);
+    const double fMax = getFreqMax();
+    auto curve = [&] (double order, juce::Colour col, float thickness)
+    {
+        g.setColour (col);
+        for (const auto& row : rowRects())
+        {
+            juce::Path path;
+            bool started = false;
+            for (int x = pr.getX(); x <= pr.getRight(); x += 3)
+            {
+                const double t = xToTime ((double) x);
+                const double f = order * c.fundamentalAt (param (c.parameter, t, nullptr));
+                if (! (f > 0.0) || f > fMax) { started = false; continue; }
+                const float y = (float) (row.getY() + freqToY (f, row.getHeight()));
+                if (! started) { path.startNewSubPath ((float) x, y); started = true; }
+                else path.lineTo ((float) x, y);
+            }
+            g.strokePath (path, juce::PathStrokeType (thickness));
+        }
+    };
+    for (const auto& l : c.lines)
+        if (! l.isTrack()) curve (l.order, juce::Colour::fromRGBA (90, 220, 255, 170), 1.0f);
+
+    if (inside)
+    {
+        const double t = xToTime ((double) modelMouseX);
+        const int k = app.modelPickOrderAt (t, freqAtY (modelMouseY));
+        if (k > 0)
+        {
+            const bool chosen = std::any_of (c.lines.begin(), c.lines.end(), [k] (const auto& l)
+                                             { return ! l.isTrack() && std::abs (l.order - k) < 1e-9; });
+            curve (k, juce::Colour::fromRGB (255, 210, 60), 2.0f);
+            const double f = k * c.fundamentalAt (param (c.parameter, t, nullptr));
+            for (const auto& row : rowRects())
+            {
+                const float y = (float) (row.getY() + freqToY (f, row.getHeight()));
+                g.setColour (juce::Colour::fromRGB (255, 210, 60));
+                g.fillEllipse ((float) modelMouseX - 4.0f, y - 4.0f, 8.0f, 8.0f);
+                const juce::String text = "H" + juce::String (k) + "  " + juce::String (f, 1) + " Hz: click to "
+                                        + (chosen ? "remove" : "add");
+                const bool onLeft = modelMouseX + 230 > pr.getRight();
+                g.drawText (text, onLeft ? modelMouseX - 230 : modelMouseX + 10, (int) y - 16, 220, 14,
+                            onLeft ? juce::Justification::centredRight : juce::Justification::centredLeft);
+            }
+        }
+    }
+    g.restoreState();
+}
+
 void SpectralView::drawOverlays (juce::Graphics& g)
 {
     const auto pr = plotRect();
@@ -2432,6 +2540,7 @@ void SpectralView::drawOverlays (juce::Graphics& g)
     drawTimeSelectionOverlay (g);
     drawSpectralShapesOverlay (g, true);
     drawMarkersOverlay (g, showMarkerTitles);
+    drawModelPickGuide (g);
 
     // Paintbrush cursor: a translucent band showing the brush's frequency
     // width at the current cursor position.

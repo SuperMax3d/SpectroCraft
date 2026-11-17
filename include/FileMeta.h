@@ -138,12 +138,16 @@ struct MetaBundle
     bool haveMarkers = false, haveSelections = false, haveDrawings = false,
          haveScale = false, haveAltRef = false, haveFreqAnalysis = false,
          haveTranscription = false, haveTables = false, haveVideoTracks = false,
-         haveAxes = false, haveSession = false;
+         haveAxes = false, haveSession = false, haveSoundModel = false;
 
     /** Session (issue #21): the referenced files with their lanes and
         offsets, as written by sc::session::toVar (kept as JSON here; the
         document resolves the paths against its own folder). */
     juce::var session;
+
+    /** Model panel (issue #40): the file's sound model, as written by
+        sc::model::Model::toVar (kept as JSON here, like the session). */
+    juce::var soundModel;
 
     /** True when the bundle holds anything worth persisting. */
     bool hasContent() const
@@ -151,7 +155,8 @@ struct MetaBundle
         return !markers.empty() || !selections.empty() || !drawings.empty()
             || scale.isCalibrated() || !altRef.isDefault()
             || !freqAnalysis.isDefault() || !tables.empty()
-            || !videoTracks.empty() || !axes.empty() || session.isObject();
+            || !videoTracks.empty() || !axes.empty() || session.isObject()
+            || soundModel.isObject();
     }
 };
 
