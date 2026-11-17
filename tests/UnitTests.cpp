@@ -24213,6 +24213,7 @@ static void testMainToolbar()
         set[0] = { tb::CustomShortcut::Kind::keyPress, "cmd+h", "H", "", "cmd+alt+k" };
         set[4] = { tb::CustomShortcut::Kind::menuCommand, "Effects > Normalize", "", "star", "" };
         set[8] = { tb::CustomShortcut::Kind::pythonScript, "/tmp/x.py", "py", "", "" };
+        set[6] = { tb::CustomShortcut::Kind::action, "Clean up", "CU", "", "" };
         const auto back = tb::parse (tb::serialise (set));
         CHECK (back == set, "toolbar: the custom shortcuts round-trip through the settings");
         CHECK (tb::parse ("garbage")[0].defined () == false, "toolbar: broken settings give empty shortcuts");
@@ -24323,6 +24324,34 @@ static void testMainToolbar()
         win->runToolbarCommand ("tool.marquee");
         win->runToolbarCommand ("custom.1");
         CHECK (app.selMode == SpectralSelMode::TimeRange, "toolbar: a click runs shortcut 1 too");
+
+        // A recorded action (Actions panel): replayed like its Run button.
+        {
+            const int ai = app.actions.add ("Flip");
+            if (auto* a = app.actions.get (ai))
+            {
+                sc::ActionStep st;
+                st.type = sc::actionTypes::kInvert;
+                a->steps.push_back (st);
+            }
+            app.selectAll ();
+            float before = 0.0f, after = 0.0f;
+            app.audioEngine ().readSamples (0, 1003, 1, &before);   // not on a zero crossing of the 300 Hz sine
+            bool finished = false;
+            win->onReplayFinished = [&finished] (bool ok, const juce::String&) { finished = ok; };
+            CHECK (win->setCustomShortcut (2, { tb::CustomShortcut::Kind::action, "Flip", "FL", "", "" }).isEmpty ()
+                       && bar->button ("custom.3")->getTooltip ().contains ("action Flip"),
+                   "toolbar: shortcut 3 runs a recorded action");
+            win->runToolbarCommand ("custom.3");
+            for (int i = 0; i < 200 && ! finished; ++i)
+                juce::MessageManager::getInstance ()->runDispatchLoopUntil (10);
+            app.audioEngine ().readSamples (0, 1003, 1, &after);
+            CHECK (finished && std::abs (before) > 0.01f && std::abs (after + before) < 1.0e-4f,
+                   "toolbar: the action ran (the polarity is inverted: " + juce::String (before) + " -> "
+                       + juce::String (after) + (finished ? "" : ", not finished") + ")");
+            win->onReplayFinished = nullptr;
+            win->setCustomShortcut (2, {});
+        }
 
         // View > Toolbar.
         const int vIdx = win->getMenuBarNames ().indexOf ("View");

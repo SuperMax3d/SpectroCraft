@@ -461,6 +461,7 @@ juce::String CustomShortcut::describe() const
         case Kind::menuCommand:  return target;
         case Kind::pythonScript: return "Python script " + juce::File (target).getFileName();
         case Kind::keyPress:     return "keys " + displayText (target);
+        case Kind::action:       return "action " + target;
         case Kind::none:
         default:                 return {};
     }
@@ -496,7 +497,7 @@ CustomSet parse (const juce::String& json)
                 const auto& p = o->getProperties();
                 CustomShortcut s;
                 const int k = (int) p.getWithDefault ("kind", 0);
-                if (k < 1 || k > 3) continue;
+                if (k < 1 || k > 4) continue;
                 s.kind   = (CustomShortcut::Kind) k;
                 s.target = p.getWithDefault ("target", {}).toString();
                 s.label  = p.getWithDefault ("label", {}).toString().substring (0, 4);
@@ -701,7 +702,7 @@ void Toolbar::refresh()
                 b->icon = Icon::none;
                 b->label = juce::String (n);
                 tip = "Shortcut " + juce::String (n) + ": not defined yet. Click or right-click to "
-                      "define it: a menu command or effect, a Python script or keys to send.";
+                      "define it: a menu command or effect, a recorded action, a Python script or keys to send.";
             }
             if (b->getTooltip() != tip) b->setTooltip (tip);
             if (wasPlaceholder != b->placeholder || oldIcon != b->icon || oldLabel != b->label)

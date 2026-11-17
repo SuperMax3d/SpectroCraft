@@ -534,7 +534,8 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     - **Shortcuts 1 to 9** are your own: click an empty one, or right-click
       any (**Define / Change Shortcut N...**, **Run**, **Clear**, **Hide
       Toolbar**). A shortcut runs a **menu command** (every command of the
-      menu bar, the effects included), a **Python script**, or **sends keys**
+      menu bar, the effects included), a **recorded action** (Actions panel,
+      by name), a **Python script**, or **sends keys**
       (Ctrl+H to show the harmonics, F5 to refresh...). It shows a short text
       (up to 4 characters) or an icon from a small library (star, bolt, gear,
       play, flag, heart, wave, note, check, cross, plus, eye, magnifier,

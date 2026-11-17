@@ -10846,6 +10846,19 @@ bool MainWindow::runCustomShortcut (int slot)
             "OK", this);
         return false;
     }
+    if (s.kind == Kind::action)
+    {
+        for (int i = 0; i < app.actions.size (); ++i)
+            if (const auto* a = app.actions.get (i); a != nullptr && a->name == s.target)
+            {
+                runAction (i);   // the same replay as the Actions panel's Run
+                return true;
+            }
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, title,
+                                   "There is no recorded action named \"" + s.target + "\" any more (Actions panel).",
+                                   "OK", this);
+        return false;
+    }
     if (s.kind == Kind::pythonScript)
     {
         const juce::File f (s.target);
@@ -10893,6 +10906,9 @@ void MainWindow::showCustomShortcutDialog (int slot)
     using sc::toolbar::CustomShortcut;
     auto cur = toolbar_->custom ()[(size_t) slot];
     const auto commands = menuCommandPaths ();
+    juce::StringArray actionNames;
+    for (int i = 0; i < app.actions.size (); ++i)
+        if (const auto* a = app.actions.get (i)) actionNames.add (a->name);
     juce::StringArray iconNames { "(none: show the text)" };
     for (auto i : sc::toolbar::libraryIcons ())
         iconNames.add (sc::toolbar::iconId (i));
@@ -10902,21 +10918,26 @@ void MainWindow::showCustomShortcutDialog (int slot)
     {
         OwningAlertWindow w ("Shortcut " + juce::String (slot + 1),
             (problem.isNotEmpty () ? problem + "\n\n" : juce::String ())
-            + "What this toolbar button does: a menu command (the effects included), a Python script, "
-              "or keys to send (Ctrl+H shows the harmonics...). It shows a short text or an icon, and "
-              "can have a keyboard shortcut of its own.",
+            + "What this toolbar button does: a menu command (the effects included), a recorded action "
+              "(Actions panel), a Python script, or keys to send (Ctrl+H shows the harmonics...). It shows "
+              "a short text or an icon, and can have a keyboard shortcut of its own.",
             juce::AlertWindow::NoIcon, this);
         w.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
-        w.addComboBox ("kind", { "Menu command or effect", "Python script", "Keys to send" }, "Action");
+        w.addComboBox ("kind", { "Menu command or effect", "Python script", "Keys to send", "Recorded action" }, "Does");
         if (auto* c = w.getComboBoxComponent ("kind"))
             c->setSelectedItemIndex (cur.kind == CustomShortcut::Kind::pythonScript ? 1
-                                     : cur.kind == CustomShortcut::Kind::keyPress ? 2 : 0);
+                                     : cur.kind == CustomShortcut::Kind::keyPress ? 2
+                                     : cur.kind == CustomShortcut::Kind::action ? 3 : 0);
         w.addComboBox ("command", commands, "Menu command (for a menu command)");
         if (auto* c = w.getComboBoxComponent ("command"))
         {
             const int i = cur.kind == CustomShortcut::Kind::menuCommand ? commands.indexOf (cur.target) : -1;
             c->setSelectedItemIndex (std::max (0, i));
         }
+        w.addComboBox ("action", actionNames.isEmpty () ? juce::StringArray { "(no recorded action yet)" } : actionNames,
+                       "Recorded action (for an action)");
+        if (auto* c = w.getComboBoxComponent ("action"))
+            c->setSelectedItemIndex (std::max (0, cur.kind == CustomShortcut::Kind::action ? actionNames.indexOf (cur.target) : 0));
         w.addTextEditor ("script", cur.kind == CustomShortcut::Kind::pythonScript ? cur.target : juce::String (),
                          "Python script (for a script)");
         auto* browse = new juce::TextButton ("Choose the Python script...");
@@ -10955,6 +10976,12 @@ void MainWindow::showCustomShortcutDialog (int slot)
             ns.kind = CustomShortcut::Kind::keyPress;
             ns.target = send->key;
         }
+        else if (kind == 3)
+        {
+            ns.kind = CustomShortcut::Kind::action;
+            ns.target = actionNames.isEmpty () || w.getComboBoxComponent ("action") == nullptr
+                            ? juce::String () : w.getComboBoxComponent ("action")->getText ();
+        }
         else
         {
             ns.kind = CustomShortcut::Kind::menuCommand;
@@ -10967,7 +10994,8 @@ void MainWindow::showCustomShortcutDialog (int slot)
         cur = ns;
 
         if (ns.target.isEmpty ())
-            problem = kind == 1 ? "Choose the Python script." : kind == 2 ? "Press the keys to send." : "Choose a menu command.";
+            problem = kind == 1 ? "Choose the Python script." : kind == 2 ? "Press the keys to send."
+                    : kind == 3 ? "Record an action first (Actions panel), then choose it." : "Choose a menu command.";
         else if (kind == 1 && ! juce::File::isAbsolutePath (ns.target))
             problem = "Give the Python script's full path.";
         else if (kind == 2 && ns.key.isNotEmpty () && ns.key == ns.target)

@@ -8,8 +8,9 @@
 //
 // The icons are drawn here with vector paths (original artwork, no
 // third-party icon set). The nine shortcuts are the user's own: a right-click
-// defines one - a menu command (effects included), a Python script or a
-// keyboard shortcut to send (Ctrl+H shows the harmonics...) - shown with a
+// defines one - a menu command (effects included), a recorded action (Actions
+// panel), a Python script or a keyboard shortcut to send (Ctrl+H shows the
+// harmonics...) - shown with a
 // short text or an icon of a small library, with an optional keyboard
 // shortcut of its own (checked against the shortcuts in use). MainWindow
 // wires the commands and saves the shortcuts in the settings store.
@@ -60,17 +61,19 @@ juce::String displayText (const juce::String& canonicalKey);
 
 struct CustomShortcut
 {
-    enum class Kind { none = 0, menuCommand = 1, pythonScript = 2, keyPress = 3 };
+    enum class Kind { none = 0, menuCommand = 1, pythonScript = 2, keyPress = 3, action = 4 };
     Kind kind = Kind::none;
     /** menuCommand: the menu path ("Effects > Normalize"); pythonScript: the
-        script's full path; keyPress: the canonical key to send ("cmd+h"). */
+        script's full path; keyPress: the canonical key to send ("cmd+h");
+        action: the name of a recorded action (Actions panel). */
     juce::String target;
     juce::String label;   // short text on the button (used when there is no icon)
     juce::String icon;    // iconId() of a library icon, "" = the label
     juce::String key;     // the shortcut's own key (canonical), "" = none
 
     bool defined() const noexcept { return kind != Kind::none && target.isNotEmpty(); }
-    /** "Effects > Normalize", "Python: denoise.py", "Keys: Ctrl+H". */
+    /** "Effects > Normalize", "Python script denoise.py", "keys Ctrl+H",
+        "action Clean up". */
     juce::String describe() const;
     bool operator== (const CustomShortcut& o) const
     {
