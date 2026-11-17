@@ -37,6 +37,7 @@
 #include "AudioCpp.h"     // stem-separation CLI argument building + file discovery
 #include "StemSeparation.h"   // the Effects > Stem Separation window
 #include "SuperResolution.h"  // the Effects > Super Resolution window
+#include "AiDownloadPrompt.h" // "(Download Required)" + the download question (issue #38)
 #include "Recorder.h"         // recorder plugin host (Transport > Record)
 #include "RecorderRing.h"      // the WASAPI plugin's thread-safe capture ring
 #include "RuntimeDlls.h"    // runtime DLL search path (SpectroCraft subfolder)
@@ -7181,14 +7182,15 @@ static void testStemSepWindowLayoutAndClose()
     // Every control must be laid out with a visible size. In simple mode the
     // advanced-only addDescBtn_, rowsHost_ and advancedHint_ stay at zero
     // bounds, as does extractOrigToggle_ (it only appears in advanced mode
-    // with more than one description), so of the 24 content children exactly
-    // 20 are visible (a non-native test peer adds two more internal
-    // minimise/close buttons, which we ignore).
+    // with more than one description), so of the 23 content children exactly
+    // 19 are visible (a non-native test peer adds two more internal
+    // minimise/close buttons, which we ignore). No Download... button since
+    // issue #38: Run downloads what is missing.
     int visible = 0;
     for (int i = 0; i < dlg->getNumChildComponents(); ++i)
         if (!dlg->getChildComponent (i)->getBounds().isEmpty())
             ++visible;
-    CHECK (dlg->getNumChildComponents() >= 24 && visible == 20,
+    CHECK (dlg->getNumChildComponents() >= 23 && visible == 19,
           "stem separation window lays out all its controls");
 
     // The non-modal dialog must stay above the main window so making
@@ -7913,13 +7915,14 @@ static void testSuperResWindowLayoutAndClose()
     CHECK (dlg->startTextForTest () == "0.000", "start field seeded at zero");
     CHECK (dlg->endTextForTest ().startsWith ("0.25"), "end field seeded at the file end");
 
-    // 17 content children; a non-native test peer adds two internal
-    // minimise/close buttons, which we ignore.
+    // 16 content children (no Download... button since issue #38); a
+    // non-native test peer adds two internal minimise/close buttons, which we
+    // ignore.
     int visible = 0;
     for (int i = 0; i < dlg->getNumChildComponents (); ++i)
         if (!dlg->getChildComponent (i)->getBounds ().isEmpty ())
             ++visible;
-    CHECK (dlg->getNumChildComponents () >= 17 && visible == 17,
+    CHECK (dlg->getNumChildComponents () >= 16 && visible == 16,
           "super resolution window lays out all its controls");
 
     // No two visible controls may overlap.
@@ -7942,6 +7945,120 @@ static void testSuperResWindowLayoutAndClose()
     // Re-opening creates a fresh instance.
     win->menuItemSelected (MainWindow::MenuIDs::ToolsSuperResolve, 5);
     CHECK (win->superResWindow () != nullptr, "re-open works after close");
+}
+
+// ---------------- AI downloads: one behaviour everywhere (issue #38) --------
+// Every model version is listed, a missing one marked "(Download Required)";
+// there is no Download... button nor auto-download option any more; Run asks
+// once before downloading (headless: the question is recorded, answered no).
+static void testAiDownloadRequiredLists()
+{
+    const juce::File wav = makeTempFile ("ai_dl_required.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * (double) f / rate); }),
+          "ai downloads: wav");
+    Application app;
+    CHECK (app.openFile (wav), "ai downloads: open");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "ai downloads"));
+    auto hasDownloadButton = [] (juce::Component& c)
+    {
+        for (int i = 0; i < c.getNumChildComponents (); ++i)
+            if (auto* b = dynamic_cast<juce::Button*> (c.getChildComponent (i)))
+                if (b->getButtonText ().startsWith ("Download")) return true;
+        return false;
+    };
+    CHECK (sc::aidl::label ("m.gguf", false) == "m.gguf (Download Required)" && sc::aidl::label ("m.gguf", true) == "m.gguf"
+               && sc::aidl::stripTag ("m.gguf (Download Required)") == "m.gguf",
+           "ai downloads: the (Download Required) tag");
+
+    // Super Resolution with an empty models folder: every version, all tagged.
+    const juce::File root = makeTempFile ("ai_dl_required_root");
+    root.deleteRecursively ();
+    root.createDirectory ();
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsSuperResolve, 5);
+    if (auto* sr = win->superResWindow ())
+    {
+        sr->setModelsRootForTest (root);
+        sr->modeComboForTest ()->setSelectedItemIndex (1, juce::sendNotificationSync);   // AudioSR
+        const auto& opts = sr->modelOptionsForTest ();
+        auto* models = sr->modelComboForTest ();
+        CHECK (! opts.empty () && (int) opts.size () == models->getNumItems ()
+                   && opts.size () == sc::acpp::audioSRChoices ().size (),
+               "ai downloads: Super Resolution lists every AudioSR version");
+        bool tagged = true;
+        for (int i = 0; i < models->getNumItems (); ++i)
+            tagged = tagged && models->getItemText (i).endsWith ("(Download Required)") && ! opts[(size_t) i].installed ();
+        CHECK (tagged, "ai downloads: a version not installed reads (Download Required)");
+        CHECK (! hasDownloadButton (*sr), "ai downloads: no Download... button in Super Resolution");
+        CHECK (sr->statusTextForTest ().startsWith ("Run downloads"), "ai downloads: the status says Run downloads first");
+
+        // An installed version loses the tag.
+        const auto dest = opts[0].dest;
+        dest.getParentDirectory ().createDirectory ();
+        dest.replaceWithText ("x");
+        sr->setModelsRootForTest (root);
+        CHECK (sr->modelOptionsForTest ()[0].installed () && ! models->getItemText (0).endsWith ("(Download Required)"),
+               "ai downloads: an installed version shows without the tag");
+        sr->userTriedToCloseWindow ();
+    }
+    else
+        CHECK (false, "ai downloads: Super Resolution opens");
+
+    // Stem Separation: Sam Audio lists the whole catalogue; the missing ones tagged.
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    if (auto* st = win->stemSepWindow ())
+    {
+        st->modeComboForTest ()->setSelectedItemIndex (0, juce::sendNotificationSync);   // Sam Audio
+        const auto& opts = st->modelOptionsForTest ();
+        auto* models = st->modelComboForTest ();
+        CHECK (opts.size () >= sc::acpp::modelChoices ().size () && (int) opts.size () == models->getNumItems (),
+               "ai downloads: Stem Separation lists every Sam Audio version");
+        bool labels = true;
+        for (int i = 0; i < models->getNumItems (); ++i)
+            labels = labels && models->getItemText (i) == sc::aidl::label (opts[(size_t) i].name, opts[(size_t) i].installed ());
+        CHECK (labels, "ai downloads: Stem Separation tags exactly the versions not installed");
+        st->modeComboForTest ()->setSelectedItemIndex (3, juce::sendNotificationSync);   // htdemucs-whine-hiss_v1
+        CHECK (st->modelOptionsForTest ().size () >= 2, "ai downloads: the htdemucs engines list their versions too");
+        CHECK (! hasDownloadButton (*st), "ai downloads: no Download... button in Stem Separation");
+        st->userTriedToCloseWindow ();
+    }
+    else
+        CHECK (false, "ai downloads: Stem Separation opens");
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    // Noise Suppression and Transcription: no auto-download option; the model
+    // list marks what has to be downloaded.
+    {
+        auto* w = win->createNoiseSuppressDialog ();
+        CHECK (w->getComboBoxComponent ("autoDl") == nullptr, "ai downloads: no auto-download option (Noise Suppression)");
+        auto* m = w->getComboBoxComponent ("model");
+        CHECK (m != nullptr && m->getNumItems () == 3, "ai downloads: Noise Suppression lists its three models");
+        delete w;
+        auto* t = win->createTranscribeDialog ();
+        CHECK (t->getComboBoxComponent ("autoDl") == nullptr, "ai downloads: no auto-download option (Transcription)");
+        auto* tm = t->getComboBoxComponent ("model");
+        bool ok = tm != nullptr && tm->getNumItems () >= 2;
+        auto& mm = sc::ai::ModelManager::instance ();
+        int k = 0;
+        for (const auto& spec : mm.registry ())
+            if (spec.id.rfind ("whisper-", 0) == 0 && tm != nullptr)
+                ok = ok && tm->getItemText (k++) == sc::aidl::label (juce::String (spec.displayName), mm.isInstalled (spec));
+        CHECK (ok, "ai downloads: Transcription lists every Whisper model, the missing ones tagged");
+        delete t;
+    }
+#endif
+
+    // Run with something missing asks first; headless the answer is no.
+    sc::alert::clearSuppressedMessages ();
+    CHECK (! sc::aidl::confirmDownload ("Feature", { { "model.gguf", 2000000 } }, nullptr),
+           "ai downloads: the confirmation answers no headless");
+    CHECK (sc::alert::suppressedMessages ().joinIntoString ("|").contains ("Download required: Feature needs files")
+               && sc::alert::suppressedMessages ().joinIntoString ("|").contains ("model.gguf  (2.0 MB)"),
+           "ai downloads: the question lists what would be downloaded, with its size");
+    sc::alert::clearSuppressedMessages ();
+
+    root.deleteRecursively ();
+    wav.deleteFile ();
 }
 
 // ---------------- Super Resolution mode/output combos + persistence ---------
@@ -30613,6 +30730,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("super-res model discovery", testSuperResModelDiscovery);
     SC_RUN_TEST ("super-res window layout + close", testSuperResWindowLayoutAndClose);
     SC_RUN_TEST ("super-res mode/output combos", testSuperResModeOutputCombos);
+    SC_RUN_TEST ("ai downloads: (Download Required) lists, confirm on Run", testAiDownloadRequiredLists);
     SC_RUN_TEST ("super-res apply output modes", testSuperResApplyOutputModes);
     SC_RUN_TEST ("time-pan speed + reversal", testTimePanSpeedAndReversal);
     SC_RUN_TEST ("middle-drag pans both axes", testMiddleDragPanBothAxes);

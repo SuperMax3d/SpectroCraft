@@ -28,6 +28,7 @@
 #include "VideoFrames.h"
 #include "VideoWindow.h"
 #include "WorkProgress.h"
+#include "AiDownloadPrompt.h"   // "(Download Required)" + the download confirmation (issue #38)
 #include "StemSeparation.h"
 #include "SuperResolution.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -8795,6 +8796,37 @@ std::string aiDevicePrefFromText (const juce::String& text)
 
 } // namespace sc
 
+// Issue #38: every model is listed, a missing one marked "(Download Required)";
+// Run asks once before downloading it.
+static bool aiModelInstalled (const std::string& id)
+{
+    auto& mm = sc::ai::ModelManager::instance ();
+    const auto* spec = mm.find (id);
+    return spec != nullptr && mm.isInstalled (*spec);
+}
+
+static sc::aidl::Item aiModelDownloadItem (const std::string& id)
+{
+    sc::aidl::Item it;
+    if (const auto* spec = sc::ai::ModelManager::instance ().find (id))
+    {
+        it.name = juce::String (spec->displayName);
+        for (const auto& f : spec->files) it.bytes += f.sizeBytes;
+    }
+    else
+        it.name = juce::String (id);
+    return it;
+}
+
+// Noise Suppression models, in the dialog's order.
+static const std::vector<std::pair<std::string, juce::String>>& nsModels()
+{
+    static const std::vector<std::pair<std::string, juce::String>> m {
+        { "denseunet", "DenseUNet (legacy)" }, { "deepfilternet2", "DeepFilterNet2" },
+        { "deepfilternet3", "DeepFilterNet3" } };
+    return m;
+}
+
 // Shared failure dialog for the AI features: a copyable read-only text editor
 // with the error details (paths/URLs), built by sc::buildNsFailureDetails().
 static void showAiFailureDialog (const juce::String& feature, const std::string& err,
@@ -8828,8 +8860,8 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
 {
     auto* w = new OwningAlertWindow ("Noise Suppression",
                                      "The selection will be processed by the chosen AI model.\n"
-                                     "First use downloads the model weights to\n"
-                                     "%APPDATA%/SpectroCraft/models.\n"
+                                     "A model marked (Download Required) is downloaded first, after\n"
+                                     "you confirm, to %APPDATA%/SpectroCraft/models.\n"
                                      "\n"
                                      "Device: Auto picks GPU over NPU over CPU when available;\n"
                                      "pick one explicitly to override (unavailable devices fall back to CPU).\n"
@@ -8844,15 +8876,19 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
                                      "containing only the estimated noise (original minus enhanced).",
                                      juce::AlertWindow::QuestionIcon, this);
 
-    const juce::StringArray modelNames { "DenseUNet (legacy)", "DeepFilterNet2", "DeepFilterNet3" };
+    juce::StringArray modelNames;
+    for (const auto& m : nsModels ())
+        modelNames.add (sc::aidl::label (m.second, aiModelInstalled (m.first)));
     w->addComboBox ("model", modelNames, "Model");
 
     // Remember the last choice between sessions.
     if (auto* c = w->getComboBoxComponent ("model"))
     {
-        const int idx = app.lastNsModelId == "deepfilternet2" ? 1
-                        : app.lastNsModelId == "deepfilternet3" ? 2 : 0;
+        int idx = 0;
+        for (size_t i = 0; i < nsModels ().size (); ++i)
+            if (nsModels ()[i].first == app.lastNsModelId) idx = (int) i;
         c->setSelectedItemIndex (idx);
+        c->setTooltip ("AI model. One marked (Download Required) is downloaded when you press OK.");
     }
 
     w->addComboBox ("device", sc::aiDeviceNames (), "Device");
@@ -8865,12 +8901,6 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
     if (auto* e = w->getTextEditor ("attenLim"))
         e->setTooltip ("Most the noise may be reduced, in dB. A lower value keeps more of the "
                        "original sound; 100 = no limit.");
-
-    w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
-                    "Auto-download model if missing");
-    // The persisted choice is preselected.
-    if (auto* c = w->getComboBoxComponent ("autoDl"))
-        c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
 
     // "Copy noise on new track": one appended channel per processed channel
     // holding only the estimated noise (original - enhanced).
@@ -8901,11 +8931,9 @@ void MainWindow::showNoiseSuppressDialog(std::function<void(bool)> onApplied)
         combo->grabKeyboardFocus();
 
     const int result = w->runModalLoop();
-    const juce::String modelText = w->getComboBoxComponent ("model") != nullptr
-                                       ? w->getComboBoxComponent ("model")->getText() : "";
+    const int modelIdx = w->getComboBoxComponent ("model") != nullptr
+                             ? w->getComboBoxComponent ("model")->getSelectedItemIndex () : 0;
     const float attenLimDb = (float) w->getTextEditorContents ("attenLim").trim().getDoubleValue();
-    const bool autoDownload = w->getComboBoxComponent ("autoDl") == nullptr
-                               || w->getComboBoxComponent ("autoDl")->getText() == "Yes";
     const bool copyNoise = w->getComboBoxComponent ("copyNoise") == nullptr
                              || w->getComboBoxComponent ("copyNoise")->getText () == "Yes";
     const std::string devicePref = sc::aiDevicePrefFromText (w->getComboBoxComponent ("device") != nullptr
@@ -8914,14 +8942,17 @@ void MainWindow::showNoiseSuppressDialog(std::function<void(bool)> onApplied)
     delete w;
     if (result != 1) { if (onApplied) onApplied (false); return; }
 
-    const std::string modelId = modelText == "DeepFilterNet2" ? "deepfilternet2"
-                                 : modelText == "DeepFilterNet3" ? "deepfilternet3"
-                                                                 : "denseunet";
+    const std::string modelId = nsModels ()[(size_t) juce::jlimit (0, (int) nsModels ().size () - 1, modelIdx)].first;
     // Remember the choices for next time.
     app.lastNsModelId  = modelId;
-    app.aiAutoDownload = autoDownload;
     app.aiDevicePref   = devicePref;
     app.saveAiSettings();
+
+    // A model not on this computer yet: ask once, then download and run.
+    if (!aiModelInstalled (modelId)
+        && !sc::aidl::confirmDownload ("Noise Suppression", { aiModelDownloadItem (modelId) }, this))
+    { if (onApplied) onApplied (false); return; }
+    const bool autoDownload = true;
 
     app.recordActionStep (sc::actionTypes::kNoiseSuppress,
         sc::makeVarObject ({
@@ -9076,12 +9107,14 @@ static juce::StringArray whisperModelIds()
     return ids;
 }
 
+// Display names, a model not installed yet marked "(Download Required)".
 static juce::StringArray whisperModelNames()
 {
     juce::StringArray names;
-    for (const auto& s : sc::ai::ModelManager::instance ().registry ())
+    auto& mm = sc::ai::ModelManager::instance ();
+    for (const auto& s : mm.registry ())
         if (s.id.rfind ("whisper-", 0) == 0)
-            names.add (juce::String (s.displayName));
+            names.add (sc::aidl::label (juce::String (s.displayName), mm.isInstalled (s)));
     return names;
 }
 
@@ -9111,8 +9144,8 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
     auto* w = new OwningAlertWindow ("Transcription",
                                      "The WHOLE file will be transcribed by Whisper; the visible "
                                      "channels are mixed to mono.\n"
-                                     "First use downloads the model weights to\n"
-                                     "%APPDATA%/SpectroCraft/models.\n"
+                                     "A model marked (Download Required) is downloaded first, after\n"
+                                     "you confirm, to %APPDATA%/SpectroCraft/models.\n"
                                      "Larger models are more accurate but slower.\n"
                                      "Transcription runs on CPU (whisper.cpp b5454 prebuilt runtime).",
                                      juce::AlertWindow::QuestionIcon, this);
@@ -9142,11 +9175,6 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
     if (auto* c = w->getComboBoxComponent ("speed"))
         c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
 
-    w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
-                    "Auto-download model if missing");
-    if (auto* c = w->getComboBoxComponent ("autoDl"))
-        c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
-
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
     return w;
@@ -9165,24 +9193,21 @@ void MainWindow::showTranscribeDialog(std::function<void(bool)> onApplied)
         combo->grabKeyboardFocus ();
 
     const int result = w->runModalLoop ();
-    const juce::String modelText   = w->getComboBoxComponent ("model") != nullptr
-                                        ? w->getComboBoxComponent ("model")->getText () : "";
+    const int mi                   = w->getComboBoxComponent ("model") != nullptr
+                                        ? w->getComboBoxComponent ("model")->getSelectedItemIndex () : -1;
     const juce::String langText    = w->getComboBoxComponent ("language") != nullptr
                                         ? w->getComboBoxComponent ("language")->getText () : "auto";
     const bool translate           = w->getComboBoxComponent ("mode") != nullptr
                                         && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
     const bool fast                = w->getComboBoxComponent ("speed") != nullptr
                                         && w->getComboBoxComponent ("speed")->getText ().startsWith ("Fast");
-    const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
-                                       || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
     delete w;
     if (result != 1) { if (onApplied) onApplied (false); return; }
 
-    // Map the display texts back to registry ids / language codes.
-    const auto names = whisperModelNames ();
-    const int mi = names.indexOf (modelText);
-    if (mi < 0) { if (onApplied) onApplied (false); return; }
-    const std::string modelId = whisperModelIds ()[(size_t) mi].toStdString ();
+    // Map the choices back to registry ids / language codes.
+    const auto ids = whisperModelIds ();
+    if (mi < 0 || mi >= ids.size ()) { if (onApplied) onApplied (false); return; }
+    const std::string modelId = ids[mi].toStdString ();
 
     const auto langNames = transcribeLanguageNames ();
     const int li = langNames.indexOf (langText);
@@ -9193,8 +9218,13 @@ void MainWindow::showTranscribeDialog(std::function<void(bool)> onApplied)
     app.lastTranscribeLanguage  = language;
     app.lastTranscribeTranslate = translate;
     app.lastTranscribeFast      = fast;
-    app.aiAutoDownload          = autoDownload;
     app.saveAiSettings ();
+
+    // A model not on this computer yet: ask once, then download and run.
+    if (!aiModelInstalled (modelId)
+        && !sc::aidl::confirmDownload ("Transcription", { aiModelDownloadItem (modelId) }, this))
+    { if (onApplied) onApplied (false); return; }
+    const bool autoDownload = true;
 
     app.recordActionStep (sc::actionTypes::kTranscribe,
         sc::makeVarObject ({
@@ -9322,11 +9352,6 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
     if (auto* c = w->getComboBoxComponent ("speed"))
         c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
 
-    w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
-                    "Auto-download model if missing");
-    if (auto* c = w->getComboBoxComponent ("autoDl"))
-        c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
-
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
     return w;
@@ -9349,8 +9374,8 @@ void MainWindow::showTranscribeFolderDialog()
         combo->grabKeyboardFocus ();
 
     const int result = w->runModalLoop ();
-    const juce::String modelText   = w->getComboBoxComponent ("model") != nullptr
-                                        ? w->getComboBoxComponent ("model")->getText () : "";
+    const int mi                   = w->getComboBoxComponent ("model") != nullptr
+                                        ? w->getComboBoxComponent ("model")->getSelectedItemIndex () : -1;
     const juce::String langText    = w->getComboBoxComponent ("language") != nullptr
                                         ? w->getComboBoxComponent ("language")->getText () : "auto";
     const bool translate           = w->getComboBoxComponent ("mode") != nullptr
@@ -9360,8 +9385,6 @@ void MainWindow::showTranscribeFolderDialog()
     const bool skipExisting        = w->getComboBoxComponent ("existing") != nullptr
                                         && w->getComboBoxComponent ("existing")->getText ().startsWith ("Skip");
     const juce::String channelText = w->getTextEditorContents ("channel");
-    const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
-                                       || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
     delete w;
     if (result != 1) return;
 
@@ -9379,11 +9402,10 @@ void MainWindow::showTranscribeFolderDialog()
         return;
     }
 
-    // Map the display texts back to registry ids / language codes.
-    const auto names = whisperModelNames ();
-    const int mi = names.indexOf (modelText);
-    if (mi < 0) return;
-    const std::string modelId = whisperModelIds ()[(size_t) mi].toStdString ();
+    // Map the choices back to registry ids / language codes.
+    const auto ids = whisperModelIds ();
+    if (mi < 0 || mi >= ids.size ()) return;
+    const std::string modelId = ids[mi].toStdString ();
 
     const auto langNames = transcribeLanguageNames ();
     const int li = langNames.indexOf (langText);
@@ -9395,8 +9417,13 @@ void MainWindow::showTranscribeFolderDialog()
     app.lastTranscribeTranslate = translate;
     app.lastTranscribeFast      = fast;
     app.lastTranscribeChannel   = channel;
-    app.aiAutoDownload          = autoDownload;
     app.saveAiSettings ();
+
+    // A model not on this computer yet: ask once, then download and run.
+    if (!aiModelInstalled (modelId)
+        && !sc::aidl::confirmDownload ("Transcription", { aiModelDownloadItem (modelId) }, this))
+        return;
+    const bool autoDownload = true;
 
     runBatchTranscribeAsync (folder, modelId, language, translate, fast, skipExisting,
                              channel, autoDownload);

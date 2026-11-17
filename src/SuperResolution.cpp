@@ -5,6 +5,7 @@
 #include "AudioCpp.h"
 #include "OwningAlertWindow.h"   // dialogs with new-ed custom components
 #include "WorkProgress.h"
+#include "AcppSetup.h"           // Run downloads what is missing, after asking (issue #38)
 
 namespace {
 
@@ -122,13 +123,15 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
         app_.saveSettings ();
     };
 
-    modelCombo_.setTooltip ("Model weights used by the selected mode. Download... fetches "
-                            "them.");
+    modelCombo_.setTooltip ("Model weights used by the selected mode: every version, one "
+                            "marked (Download Required) is downloaded when you press Run.");
     modelCombo_.onChange = [this]
     {
-        const juce::String t = modelCombo_.getText ();
-        app_.settings.superResModel = (t == "(no models installed)") ? juce::String () : t;
-        app_.saveSettings ();
+        if (const auto* o = selectedOption ())
+        {
+            app_.settings.superResModel = o->name;
+            app_.saveSettings ();
+        }
         refreshStatusIdle ();
     };
 
@@ -153,12 +156,10 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
     statusLabel_.setJustificationType (juce::Justification (juce::Justification::left));
     statusLabel_.setFont (juce::FontOptions (12.0f));
 
-    downloadBtn_.setButtonText ("Download...");
-    downloadBtn_.onClick = [this] { openDownloadDialog (); };
-    downloadBtn_.setTooltip ("Download the audio.cpp tool and super-resolution models.");
     runBtn_.setButtonText ("Run");
     runBtn_.onClick = [this] { startRun (); };
-    runBtn_.setTooltip ("Enhance the range with the chosen mode and model.");
+    runBtn_.setTooltip ("Enhance the range with the chosen mode and model. A missing model "
+                        "or audio.cpp tool is downloaded first, after you confirm.");
 
     cancelBtn_.setButtonText ("Cancel");
     cancelBtn_.onClick = [this] { userTriedToCloseWindow (); };
@@ -182,7 +183,6 @@ SuperResolutionWindow::SuperResolutionWindow(Application& app)
     juce::Component::addAndMakeVisible (&statusLabel_);
     juce::Component::addAndMakeVisible (&outputCombo_);
     juce::Component::addAndMakeVisible (&cancelBtn_);
-    juce::Component::addAndMakeVisible (&downloadBtn_);
     juce::Component::addAndMakeVisible (&runBtn_);
 
     refreshModelList ();
@@ -250,8 +250,7 @@ void SuperResolutionWindow::resized()
     statusLabel_.setBounds (x, y.statusTop, w, 40);
     outputCombo_.setBounds (x, y.bottomRow, 210, 28);   // bottom-left, clear of Cancel/Download/Run
     runBtn_.setBounds (getWidth () - kMargin - 90, y.bottomRow, 90, 28);
-    downloadBtn_.setBounds (runBtn_.getX () - 110, y.bottomRow, 104, 28);
-    cancelBtn_.setBounds (downloadBtn_.getX () - 96, y.bottomRow, 88, 28);
+    cancelBtn_.setBounds (runBtn_.getX () - 96, y.bottomRow, 88, 28);
 }
 
 void SuperResolutionWindow::textEditorTextChanged(juce::TextEditor& editor)
@@ -260,42 +259,34 @@ void SuperResolutionWindow::textEditorTextChanged(juce::TextEditor& editor)
         refreshDurationLabel ();
 }
 
+const sc::acpp::ModelOption* SuperResolutionWindow::selectedOption() const
+{
+    const int i = modelCombo_.getSelectedItemIndex ();   // 0-based position
+    return i >= 0 && i < (int) modelOptions_.size () ? &modelOptions_[(size_t) i] : nullptr;
+}
+
 void SuperResolutionWindow::refreshModelList()
 {
+    // Every version of the mode's model (issue #38): the installed ones as
+    // they are, the others marked "(Download Required)" - Run downloads them.
     // This JUCE build uses 0-based combo positions.
-    auto addPlaceholder = [this] { modelCombo_.addItem ("(no models installed)", 1); };
-
     modelCombo_.clear ();
-    if (selectedModeId () == 2)   // AudioSR: any .gguf in the AudioSR-GGUF folder
+    modelOptions_ = sc::acpp::modelOptions (selectedModeId () == 2 ? "audiosr" : "flashsr", modelsRoot ());
+    if (modelOptions_.empty ())
+        modelCombo_.addItem ("(no models installed)", 1);
+    else
     {
-        const auto models = sc::acpp::listAudioSRModels (modelsRoot ());
-        if (models.empty ())
-            addPlaceholder ();
-        else
-        {
-            for (size_t i = 0; i < models.size (); ++i)
-                modelCombo_.addItem (models[i].getFileName (), (int) i + 1);
-            // Restore the last used model when it is still installed.
-            int pos = 0;
-            const juce::String saved = app_.settings.superResModel;
-            for (size_t i = 0; i < models.size (); ++i)
-                if (models[i].getFileName() == saved) { pos = (int) i; break; }
-            modelCombo_.setSelectedItemIndex (pos, juce::dontSendNotification);
-        }
+        for (size_t i = 0; i < modelOptions_.size (); ++i)
+            modelCombo_.addItem (sc::aidl::label (modelOptions_[i].name, modelOptions_[i].installed ()), (int) i + 1);
+        // The last used version, else the first installed one, else the first.
+        const juce::String saved = app_.settings.superResModel;
+        int pos = -1;
+        for (size_t i = 0; i < modelOptions_.size () && pos < 0; ++i)
+            if (modelOptions_[i].name == saved) pos = (int) i;
+        for (size_t i = 0; i < modelOptions_.size () && pos < 0; ++i)
+            if (modelOptions_[i].installed ()) pos = (int) i;
+        modelCombo_.setSelectedItemIndex (std::max (0, pos), juce::dontSendNotification);
     }
-    else   // FlashSR: the single safetensors asset.
-    {
-        if (sc::acpp::flashSrModelFile (modelsRoot ()) == juce::File ())
-            addPlaceholder ();
-        else
-        {
-            // There is exactly one FlashSR asset; the remembered name only
-            // matters for display purposes in refreshStatusIdle().
-            modelCombo_.addItem ("flashsr.safetensors", 1);
-            modelCombo_.setSelectedItemIndex (0, juce::dontSendNotification);
-        }
-    }
-
     refreshStatusIdle ();
 }
 
@@ -304,23 +295,25 @@ void SuperResolutionWindow::refreshStatusIdle()
     if (running_.load ()) return;
 
     const bool hasBin = sc::acpp::hasBinary (modelsRoot ());
-    const int modelIdx = modelCombo_.getSelectedItemIndex ();   // 0-based position
-    const bool hasModel = modelIdx >= 0 && modelCombo_.getText () != "(no models installed)";
+    const auto* opt = selectedOption ();
 
     juce::String s;
-    if (!hasBin)
-        s = "The " + sc::acpp::binaryFileName () + " binary is not installed yet - use Download...";
-    else if (selectedModeId () == 2 && !hasModel)
-        s = "No AudioSR model found in the AudioSR-GGUF folder - use Download...";
-    else if (selectedModeId () != 2 && !hasModel)
-        s = "The FlashSR model is not installed yet - use Download...";
+    if (opt == nullptr)
+        s = "No model is known for this mode.";
+    else if (!hasBin || !opt->installed ())
+    {
+        juce::StringArray missing;
+        if (!hasBin) missing.add ("the audio.cpp tool");
+        if (!opt->installed ()) missing.add (opt->name);
+        s = "Run downloads " + missing.joinIntoString (" and ") + " first (you are asked before).";
+    }
     else
     {
         const juce::String variant = sc::acpp::installedVariant (modelsRoot ());
         // Convert the 0-based position back to the stored 1-based id.
         const int backendIdx = backendCombo_.getSelectedItemIndex () + 1;
         const bool mismatch = !sc::acpp::variantSupportsBackend (variant, sc::acpp::backendForChoiceId (backendIdx));
-        s = juce::String ("Ready: ") + modelCombo_.getText ()
+        s = juce::String ("Ready: ") + opt->name
           + (variant.isEmpty () ? juce::String ("") : juce::String ("  [") + variant + "]");
         if (mismatch)
             s += "  - the installed binary may not support this backend";
@@ -346,149 +339,6 @@ void SuperResolutionWindow::doSelectAll()
 }
 
 //==============================================================================
-// Download
-//==============================================================================
-
-void SuperResolutionWindow::openDownloadDialog()
-{
-    const bool needBinary = !sc::acpp::hasBinary (modelsRoot ());
-    // The model row is always offered: it installs (or re-installs) the model
-    // for the currently selected mode.
-    const int modeId = selectedModeId ();
-
-    // Owning: the Label/ComboBox rows below are added with new.
-    sc::OwningAlertWindow dlg ("Super Resolution setup", "", juce::AlertWindow::NoIcon, this);
-    dlg.addButton ("Download", 1, {});
-    dlg.addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
-
-    // getCustomComponent() indexes only addCustomComponent() calls, in order.
-    int customSlot = 0;
-    int binaryComboSlot = -1, modelComboSlot = -1;
-    if (needBinary)
-    {
-        auto* lbl = new juce::Label();
-        lbl->setText ("CLI binary:", juce::dontSendNotification);
-        dlg.addCustomComponent (lbl);   // slot customSlot
-        auto* cb = new juce::ComboBox ();
-        const auto choices = sc::acpp::binaryChoices ();
-        for (size_t i = 0; i < choices.size (); ++i)
-            cb->addItem (choices[i].label + "   (" + juce::String ((double) choices[i].sizeBytes / 1.0e6, 1) + " MB)", (int) i + 1);
-        // This JUCE build uses 0-based combo positions.
-        cb->setSelectedItemIndex (0, juce::dontSendNotification);
-        cb->setTooltip ("Build of the audio.cpp tool to install. The Backend setting must "
-                        "match it.");
-        dlg.addCustomComponent (cb);   // slot customSlot + 1
-        binaryComboSlot = customSlot + 1;
-        customSlot += 2;
-    }
-
-    {
-        auto* lbl = new juce::Label();
-        lbl->setText ((modeId == 2 ? "AudioSR model:" : "FlashSR model:"),
-                      juce::dontSendNotification);
-        dlg.addCustomComponent (lbl);   // slot customSlot
-        auto* cb = new juce::ComboBox ();
-        const auto choices = (modeId == 2) ? sc::acpp::audioSRChoices () : sc::acpp::flashSrChoices ();
-        for (size_t i = 0; i < choices.size (); ++i)
-            cb->addItem (juce::String (choices[i].file) + "   ("
-                         + juce::String ((double) choices[i].sizeBytes / 1.0e6, 1) + " MB)",
-                         (int) i + 1);
-        // This JUCE build uses 0-based combo positions.
-        cb->setSelectedItemIndex (0, juce::dontSendNotification);
-        cb->setTooltip ("Model file to download, with its size.");
-        dlg.addCustomComponent (cb);   // slot customSlot + 1
-        modelComboSlot = customSlot + 1;
-    }
-
-    if (dlg.runModalLoop () != 1) return;   // cancelled
-
-    int binaryChoice = 1, modelChoice = 1;
-    if (binaryComboSlot >= 0)
-        if (auto* cb = dynamic_cast<juce::ComboBox*> (dlg.getCustomComponent (binaryComboSlot)))
-            if (const int p = cb->getSelectedItemIndex (); p >= 0)   // 0-based position -> 1-based id
-                binaryChoice = p + 1;
-    if (modelComboSlot >= 0)
-        if (auto* cb = dynamic_cast<juce::ComboBox*> (dlg.getCustomComponent (modelComboSlot)))
-            if (const int p = cb->getSelectedItemIndex (); p >= 0)   // 0-based position -> 1-based id
-                modelChoice = p + 1;
-
-    // Download on a worker thread with a cancellable progress dialog. The
-    // binary is installed first; then the model file for the selected mode.
-    auto* prog = new sc::WorkProgressDialog ("Downloading", "Starting...", true, this);
-    prog->setProgress (0.0);
-    prog->beginModal ();
-
-    const juce::File root = modelsRoot ();
-    std::thread ([this, guard = alive_, prog, needBinary, modeId,
-                  binaryChoice, modelChoice, root] {
-        auto setStatus = [prog] (const juce::String& s)
-            { juce::MessageManager::callAsync ([prog, s] { prog->setStatusText (s); }); };
-
-        double lastSent = -1.0;
-        auto sendProgress = [prog, &lastSent] (double v)
-        {
-            if (v == lastSent) return;   // e.g. repeated 1.0 on chunked responses
-            if (v - lastSent < 0.02 && v != 1.0) return;
-            lastSent = v;
-            juce::MessageManager::callAsync ([prog, v] { prog->setProgress (v); });
-        };
-
-        std::string err;
-        bool ok = true;
-
-        if (needBinary)
-        {
-            const auto choices = sc::acpp::binaryChoices ();
-            const size_t i = (size_t) std::min (std::max (1, binaryChoice), (int) choices.size ()) - 1;
-            const juce::File zip = root.getChildFile (sc::acpp::archiveFileName ());   // .zip or .tar.gz
-
-            setStatus ("Downloading " + choices[i].label + "...");
-            ok = sc::acpp::downloadFile (choices[i].url, zip,
-                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err,
-                choices[i].sizeBytes);
-            if (!ok && !prog->cancelled.load ())
-                setStatus ("Download failed: " + juce::String (err));
-
-            if (ok)
-            {
-                setStatus ("Extracting the binary...");
-                ok = sc::acpp::installBinaryFromArchive (zip, choices[i].id, root, &err);
-                if (!ok && !prog->cancelled.load ())
-                    setStatus ("Extraction failed: " + juce::String (err));
-            }
-        }
-
-        if (ok)
-        {
-            const auto choices = (modeId == 2) ? sc::acpp::audioSRChoices () : sc::acpp::flashSrChoices ();
-            const size_t i = (size_t) std::min (std::max (1, modelChoice), (int) choices.size ()) - 1;
-            const juce::File dest = root.getChildFile (choices[i].file);
-
-            lastSent = -1.0;
-            setStatus ("Downloading " + choices[i].file + "...");
-            ok = sc::acpp::downloadFile ((modeId == 2 ? sc::acpp::audioSRUrl (choices[i].file)
-                                                      : sc::acpp::flashSrUrl (choices[i].file))
-                                         .toStdString (),
-                                         dest,
-                [&] (float f) { sendProgress (f); return !prog->cancelled.load (); }, &err,
-                choices[i].sizeBytes);
-            if (!ok && !prog->cancelled.load ())
-                setStatus ("Download failed: " + juce::String (err));
-        }
-
-        const bool cancelled = prog->cancelled.load ();
-        juce::MessageManager::callAsync ([this, guard, prog, ok, cancelled] {
-            delete prog;
-            if (!guard || !guard->load ()) return;   // window closed meanwhile
-            refreshModelList ();   // updates the model combo + status line
-            if (!ok && !cancelled)
-                statusLabel_.setText ("Download failed - see the progress log above.",
-                                      juce::dontSendNotification);
-        });
-    }).detach ();
-}
-
-//==============================================================================
 // Run
 //==============================================================================
 
@@ -503,23 +353,40 @@ void SuperResolutionWindow::startRun()
     const int modeId = selectedModeId ();   // 1=FlashSR, 2=AudioSR
 
     // Resolve the model for the selected mode.
-    juce::File model;
-    if (modeId == 2)
+    const auto* opt = selectedOption ();
+    if (opt == nullptr)
+    { statusLabel_.setText ("Pick a model first.", juce::dontSendNotification); return; }
+
+    // The audio.cpp tool or the chosen model missing (issue #38): ask once,
+    // download, then run.
+    if (!sc::acpp::hasBinary (modelsRoot ()) || !opt->installed ())
     {
-        const auto models = sc::acpp::listAudioSRModels (modelsRoot ());
-        if (models.empty ())
-        { openDownloadDialog (); return; }
-        const int mi = modelCombo_.getSelectedItemIndex ();   // 0-based position
-        if (mi < 0 || mi >= (int) models.size ())
-        { statusLabel_.setText ("Pick a model first.", juce::dontSendNotification); return; }
-        model = models[(size_t) mi];
+        const int bi = backendCombo_.getSelectedItemIndex () + 1;   // 0-based position -> 1-based id
+        int binaryChoice = -1;
+        if (!sc::acpp::confirmMissing ("Super Resolution", modelsRoot (), sc::acpp::backendForChoiceId (bi),
+                                       opt, this, &binaryChoice))
+        {
+            statusLabel_.setText ("Nothing was downloaded or run.", juce::dontSendNotification);
+            return;
+        }
+        app_.settings.superResModel = opt->name;   // the list selects it again once installed
+        app_.saveSettings ();
+        std::optional<sc::acpp::ModelOption> want;
+        if (!opt->installed ()) want = *opt;
+        statusLabel_.setText ("Downloading...", juce::dontSendNotification);
+        sc::acpp::downloadMissing (this, modelsRoot (), binaryChoice, want, alive_,
+            [this] (bool ok, bool cancelled, juce::String err)
+            {
+                refreshModelList ();
+                if (ok)
+                    startRun ();
+                else
+                    statusLabel_.setText (cancelled ? juce::String ("Download cancelled - nothing was run.")
+                                                    : "Download failed: " + err, juce::dontSendNotification);
+            });
+        return;
     }
-    else
-    {
-        model = sc::acpp::flashSrModelFile (modelsRoot ());
-        if (model == juce::File ())
-        { openDownloadDialog (); return; }
-    }
+    const juce::File model = opt->file;
 
     // Capture the extraction range from the editable fields on the message
     // thread (they were seeded from the track selection when the window
