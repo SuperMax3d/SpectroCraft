@@ -371,15 +371,10 @@ juce::String canonicalFromText (const juce::String& textIn)
     bool cmd = false, ctrl = false, alt = false, shift = false;
     for (const auto& p : parts)
     {
-        if (p == "ctrl" || p == "control")
-        {
-           #if JUCE_MAC
-            ctrl = true;
-           #else
-            cmd = true;
-           #endif
-        }
-        else if (p == "cmd" || p == "command") cmd = true;
+        // The menus write "Ctrl+" for the command modifier on every
+        // platform (MainWindow::keyPressed tests commandModifier, which is
+        // Cmd on macOS), so "Ctrl" is cmd here, macOS included.
+        if (p == "ctrl" || p == "control" || p == "cmd" || p == "command") cmd = true;
         else if (p == "alt" || p == "option") alt = true;
         else if (p == "shift") shift = true;
         else if (p.isNotEmpty()) return {};   // not a shortcut ("Paintbrush (25%")

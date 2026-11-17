@@ -24304,8 +24304,10 @@ static void testMainToolbar()
         keys.key = "cmd+alt+k";
         CHECK (win->setCustomShortcut (0, keys).isEmpty () && bar->custom ()[0].defined (), "toolbar: shortcut 1 defined");
         CHECK (bar->button ("custom.1")->label == "TR" && ! bar->button ("custom.1")->placeholder
-                   && bar->button ("custom.1")->getTooltip ().contains ("Ctrl+Alt+K"),
-               "toolbar: shortcut 1 shows its text, its tooltip its key");
+                   && bar->button ("custom.1")->getTooltip ().contains (tb::displayText ("cmd+alt+k"))
+                   && tb::displayText ("cmd+alt+k") == (juce::SystemStats::getOperatingSystemType() & juce::SystemStats::MacOSX
+                                                           ? "Cmd+Alt+K" : "Ctrl+Alt+K"),
+               "toolbar: shortcut 1 shows its text, its tooltip its key (Cmd on macOS)");
         CHECK (win->setCustomShortcut (1, { tb::CustomShortcut::Kind::menuCommand, "Selection > Lasso", "", "star", "cmd+alt+k" })
                    .contains ("Shortcut 1"),
                "toolbar: two shortcuts cannot share a key");

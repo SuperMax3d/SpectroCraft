@@ -50,7 +50,8 @@ const std::vector<Icon>& libraryIcons();
     canonical forms are equal. */
 juce::String canonical (const juce::KeyPress& k);
 /** The canonical form of a shortcut as the menus show it ("Ctrl+Shift+H",
-    "F9", "V", "Ctrl+="); "" when it is not one. */
+    "F9", "V", "Ctrl+="); "" when it is not one. The menus' "Ctrl" is the
+    command modifier on every platform (Cmd on macOS): "Ctrl+Z" -> "cmd+z". */
 juce::String canonicalFromText (const juce::String& text);
 /** The key of a canonical form (invalid KeyPress for "" or garbage). */
 juce::KeyPress keyFromCanonical (const juce::String& canonicalKey);
