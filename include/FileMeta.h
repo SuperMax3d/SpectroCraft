@@ -9,6 +9,7 @@
 #pragma once
 
 #include "DrawingItem.h"      // DrawingItem
+#include "ItemGroups.h"       // ItemGroupList (group names, folded state)
 #include "AxisScale.h"        // sc::axes::Entry (the Scale form)
 #include "MarkerManager.h"     // Marker
 #include "SavedSelections.h"   // SavedSpectralSelection
@@ -106,6 +107,10 @@ struct MetaBundle
     std::vector<Marker> markers;
     std::vector<SavedSpectralSelection> selections;
     std::vector<DrawingItem> drawings;   // spectrogram annotations (Drawing panel)
+    /** Names and folded state of the drawing groups and of the stored
+        selection groups ("drawingGroups" / "selectionGroups"; written only
+        when one has a name or is folded). Read with their items. */
+    ItemGroupList drawingGroups, selectionGroups;
     ScaleCalibration scale;
     AltRefState altRef;
     FreqAnalysisState freqAnalysis;

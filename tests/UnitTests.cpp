@@ -37,6 +37,7 @@
 #include "AudioCpp.h"     // stem-separation CLI argument building + file discovery
 #include "StemSeparation.h"   // the Effects > Stem Separation window
 #include "SuperResolution.h"  // the Effects > Super Resolution window
+#include "AiDownloadPrompt.h" // "(Download Required)" + the download question (issue #38)
 #include "Recorder.h"         // recorder plugin host (Transport > Record)
 #include "RecorderRing.h"      // the WASAPI plugin's thread-safe capture ring
 #include "RuntimeDlls.h"    // runtime DLL search path (SpectroCraft subfolder)
@@ -7181,14 +7182,15 @@ static void testStemSepWindowLayoutAndClose()
     // Every control must be laid out with a visible size. In simple mode the
     // advanced-only addDescBtn_, rowsHost_ and advancedHint_ stay at zero
     // bounds, as does extractOrigToggle_ (it only appears in advanced mode
-    // with more than one description), so of the 24 content children exactly
-    // 20 are visible (a non-native test peer adds two more internal
-    // minimise/close buttons, which we ignore).
+    // with more than one description), so of the 23 content children exactly
+    // 19 are visible (a non-native test peer adds two more internal
+    // minimise/close buttons, which we ignore). No Download... button since
+    // issue #38: Run downloads what is missing.
     int visible = 0;
     for (int i = 0; i < dlg->getNumChildComponents(); ++i)
         if (!dlg->getChildComponent (i)->getBounds().isEmpty())
             ++visible;
-    CHECK (dlg->getNumChildComponents() >= 24 && visible == 20,
+    CHECK (dlg->getNumChildComponents() >= 23 && visible == 19,
           "stem separation window lays out all its controls");
 
     // The non-modal dialog must stay above the main window so making
@@ -7913,13 +7915,14 @@ static void testSuperResWindowLayoutAndClose()
     CHECK (dlg->startTextForTest () == "0.000", "start field seeded at zero");
     CHECK (dlg->endTextForTest ().startsWith ("0.25"), "end field seeded at the file end");
 
-    // 17 content children; a non-native test peer adds two internal
-    // minimise/close buttons, which we ignore.
+    // 16 content children (no Download... button since issue #38); a
+    // non-native test peer adds two internal minimise/close buttons, which we
+    // ignore.
     int visible = 0;
     for (int i = 0; i < dlg->getNumChildComponents (); ++i)
         if (!dlg->getChildComponent (i)->getBounds ().isEmpty ())
             ++visible;
-    CHECK (dlg->getNumChildComponents () >= 17 && visible == 17,
+    CHECK (dlg->getNumChildComponents () >= 16 && visible == 16,
           "super resolution window lays out all its controls");
 
     // No two visible controls may overlap.
@@ -7942,6 +7945,120 @@ static void testSuperResWindowLayoutAndClose()
     // Re-opening creates a fresh instance.
     win->menuItemSelected (MainWindow::MenuIDs::ToolsSuperResolve, 5);
     CHECK (win->superResWindow () != nullptr, "re-open works after close");
+}
+
+// ---------------- AI downloads: one behaviour everywhere (issue #38) --------
+// Every model version is listed, a missing one marked "(Download Required)";
+// there is no Download... button nor auto-download option any more; Run asks
+// once before downloading (headless: the question is recorded, answered no).
+static void testAiDownloadRequiredLists()
+{
+    const juce::File wav = makeTempFile ("ai_dl_required.wav");
+    CHECK (writeWav (wav, 1, 8000.0, 4000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * (double) f / rate); }),
+          "ai downloads: wav");
+    Application app;
+    CHECK (app.openFile (wav), "ai downloads: open");
+    std::unique_ptr<MainWindow> win (new MainWindow (app, "ai downloads"));
+    auto hasDownloadButton = [] (juce::Component& c)
+    {
+        for (int i = 0; i < c.getNumChildComponents (); ++i)
+            if (auto* b = dynamic_cast<juce::Button*> (c.getChildComponent (i)))
+                if (b->getButtonText ().startsWith ("Download")) return true;
+        return false;
+    };
+    CHECK (sc::aidl::label ("m.gguf", false) == "m.gguf (Download Required)" && sc::aidl::label ("m.gguf", true) == "m.gguf"
+               && sc::aidl::stripTag ("m.gguf (Download Required)") == "m.gguf",
+           "ai downloads: the (Download Required) tag");
+
+    // Super Resolution with an empty models folder: every version, all tagged.
+    const juce::File root = makeTempFile ("ai_dl_required_root");
+    root.deleteRecursively ();
+    root.createDirectory ();
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsSuperResolve, 5);
+    if (auto* sr = win->superResWindow ())
+    {
+        sr->setModelsRootForTest (root);
+        sr->modeComboForTest ()->setSelectedItemIndex (1, juce::sendNotificationSync);   // AudioSR
+        const auto& opts = sr->modelOptionsForTest ();
+        auto* models = sr->modelComboForTest ();
+        CHECK (! opts.empty () && (int) opts.size () == models->getNumItems ()
+                   && opts.size () == sc::acpp::audioSRChoices ().size (),
+               "ai downloads: Super Resolution lists every AudioSR version");
+        bool tagged = true;
+        for (int i = 0; i < models->getNumItems (); ++i)
+            tagged = tagged && models->getItemText (i).endsWith ("(Download Required)") && ! opts[(size_t) i].installed ();
+        CHECK (tagged, "ai downloads: a version not installed reads (Download Required)");
+        CHECK (! hasDownloadButton (*sr), "ai downloads: no Download... button in Super Resolution");
+        CHECK (sr->statusTextForTest ().startsWith ("Run downloads"), "ai downloads: the status says Run downloads first");
+
+        // An installed version loses the tag.
+        const auto dest = opts[0].dest;
+        dest.getParentDirectory ().createDirectory ();
+        dest.replaceWithText ("x");
+        sr->setModelsRootForTest (root);
+        CHECK (sr->modelOptionsForTest ()[0].installed () && ! models->getItemText (0).endsWith ("(Download Required)"),
+               "ai downloads: an installed version shows without the tag");
+        sr->userTriedToCloseWindow ();
+    }
+    else
+        CHECK (false, "ai downloads: Super Resolution opens");
+
+    // Stem Separation: Sam Audio lists the whole catalogue; the missing ones tagged.
+    win->menuItemSelected (MainWindow::MenuIDs::ToolsStemSeparate, 5);
+    if (auto* st = win->stemSepWindow ())
+    {
+        st->modeComboForTest ()->setSelectedItemIndex (0, juce::sendNotificationSync);   // Sam Audio
+        const auto& opts = st->modelOptionsForTest ();
+        auto* models = st->modelComboForTest ();
+        CHECK (opts.size () >= sc::acpp::modelChoices ().size () && (int) opts.size () == models->getNumItems (),
+               "ai downloads: Stem Separation lists every Sam Audio version");
+        bool labels = true;
+        for (int i = 0; i < models->getNumItems (); ++i)
+            labels = labels && models->getItemText (i) == sc::aidl::label (opts[(size_t) i].name, opts[(size_t) i].installed ());
+        CHECK (labels, "ai downloads: Stem Separation tags exactly the versions not installed");
+        st->modeComboForTest ()->setSelectedItemIndex (3, juce::sendNotificationSync);   // htdemucs-whine-hiss_v1
+        CHECK (st->modelOptionsForTest ().size () >= 2, "ai downloads: the htdemucs engines list their versions too");
+        CHECK (! hasDownloadButton (*st), "ai downloads: no Download... button in Stem Separation");
+        st->userTriedToCloseWindow ();
+    }
+    else
+        CHECK (false, "ai downloads: Stem Separation opens");
+
+#if defined(SC_ENABLE_AI) && SC_ENABLE_AI
+    // Noise Suppression and Transcription: no auto-download option; the model
+    // list marks what has to be downloaded.
+    {
+        auto* w = win->createNoiseSuppressDialog ();
+        CHECK (w->getComboBoxComponent ("autoDl") == nullptr, "ai downloads: no auto-download option (Noise Suppression)");
+        auto* m = w->getComboBoxComponent ("model");
+        CHECK (m != nullptr && m->getNumItems () == 3, "ai downloads: Noise Suppression lists its three models");
+        delete w;
+        auto* t = win->createTranscribeDialog ();
+        CHECK (t->getComboBoxComponent ("autoDl") == nullptr, "ai downloads: no auto-download option (Transcription)");
+        auto* tm = t->getComboBoxComponent ("model");
+        bool ok = tm != nullptr && tm->getNumItems () >= 2;
+        auto& mm = sc::ai::ModelManager::instance ();
+        int k = 0;
+        for (const auto& spec : mm.registry ())
+            if (spec.id.rfind ("whisper-", 0) == 0 && tm != nullptr)
+                ok = ok && tm->getItemText (k++) == sc::aidl::label (juce::String (spec.displayName), mm.isInstalled (spec));
+        CHECK (ok, "ai downloads: Transcription lists every Whisper model, the missing ones tagged");
+        delete t;
+    }
+#endif
+
+    // Run with something missing asks first; headless the answer is no.
+    sc::alert::clearSuppressedMessages ();
+    CHECK (! sc::aidl::confirmDownload ("Feature", { { "model.gguf", 2000000 } }, nullptr),
+           "ai downloads: the confirmation answers no headless");
+    CHECK (sc::alert::suppressedMessages ().joinIntoString ("|").contains ("Download required: Feature needs files")
+               && sc::alert::suppressedMessages ().joinIntoString ("|").contains ("model.gguf  (2.0 MB)"),
+           "ai downloads: the question lists what would be downloaded, with its size");
+    sc::alert::clearSuppressedMessages ();
+
+    root.deleteRecursively ();
+    wav.deleteFile ();
 }
 
 // ---------------- Super Resolution mode/output combos + persistence ---------
@@ -23807,6 +23924,14 @@ static void testDrawingHandlesGroupsOvals()
         const juce::Point<int> onEdge ((int) box0.getCentreX (), (int) std::lround (box0.getY ()));
         CHECK (view.drawingHit (onEdge, row) == 0 && view.drawingHit (box0.getCentre ().toInt (), row) == -1,
                "draw handles: the outline is hit, not the inside");
+        // Issue #41: only the Move tool (V) picks drawings; a selection tool
+        // selects as it always did.
+        CHECK (! app.moveTool, "draw handles: a selection tool is on by default");
+        view.mouseDown (mkMouse (view, onEdge.x, onEdge.y, lmb));
+        view.mouseUp   (mkMouse (view, onEdge.x, onEdge.y, lmb));
+        CHECK (app.selectedDrawings.empty (), "draw handles: a selection tool does not pick a drawing");
+        app.setMoveTool (true);
+        CHECK (app.moveTool, "draw handles: Move armed");
         view.mouseDown (mkMouse (view, onEdge.x, onEdge.y, lmb));
         view.mouseUp   (mkMouse (view, onEdge.x, onEdge.y, lmb));
         CHECK (app.selectedDrawings == std::vector<int> { 0 }, "draw handles: a click selects the drawing");
@@ -23871,7 +23996,12 @@ static void testDrawingHandlesGroupsOvals()
         }
         app.ungroupDrawings ({ 0 });
         CHECK (d->drawings[0].group == 0 && d->drawings[1].group == 0, "draw handles: ungrouped");
+        app.setDrawingSelection ({ 0 });
+        app.setSelectionTool (SpectralSelMode::Marquee);
+        CHECK (! app.moveTool && view.drawingHandleAt (view.drawingScreenBox (d->drawings[0], row).getTopLeft ().toInt (), row) == -1,
+               "draw handles: a selection tool puts Move down, no handles then");
         app.setDrawingSelection ({});
+        app.setSelectionTool (SpectralSelMode::TimeRange);
 
         // Nothing over the axis: a wide oval touching the start of the file.
         DrawingItem edge;
@@ -23906,6 +24036,343 @@ static void testDrawingHandlesGroupsOvals()
         sc::parseBundle (juce::String (sc::serialiseBundle (b, false)), back);
         CHECK (back.drawings.size () == 1 && back.drawings[0].group == 7 && back.drawings[0].kind == DrawingItem::Kind::Ellipse,
                "draw handles: a drawing's group is saved");
+    }
+    store.deleteFile ();
+    wav.deleteFile ();
+}
+
+// ------------------------------------------------------------------ groups (#39, #41)
+// Stored selections in groups (issue #39); groups of both panels fold under
+// their arrow, are renamed, folded / unfolded all at once, and saved with the
+// file (issue #41).
+static void testItemGroupsSelectionsDrawings()
+{
+    const juce::File wav = makeTempFile ("item_groups.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * (double) f / rate); });
+    const juce::File store = makeTempFile ("item_groups.recent");
+    store.deleteFile ();
+    auto menuHas = [] (const juce::PopupMenu& m, const juce::String& text, bool enabled)
+    {
+        for (juce::PopupMenu::MenuItemIterator it (m, true); it.next ();)
+            if (it.getItem ().text == text) return it.getItem ().isEnabled == enabled;
+        return false;
+    };
+    int selGroup = 0, drawGroup = 0;
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "groups: open");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+
+        // --- Stored selections ---------------------------------------------
+        SpectralSelection a, b, c;
+        a.addRect (0.1, 0.3, 100.0, 500.0, false);
+        b.addRect (0.5, 0.7, 100.0, 500.0, false);
+        c.addRect (1.0, 1.2, 100.0, 500.0, false);
+        d->savedSelections.push_back ({ "A", a });
+        d->savedSelections.push_back ({ "B", b });
+        d->savedSelections.push_back ({ "C", c });
+        SelectionPanel sp (app);
+        sp.setSize (320, 240);
+        sp.refresh ();
+        CHECK (sp.numListRows () == 3 && sp.listRow (0).item == 0, "groups: no group, one row per selection");
+        CHECK (menuHas (sp.buildContextMenu (), "Group", false), "groups: Group needs two selections");
+
+        juce::SparseSet<int> two;
+        two.addRange ({ 0, 2 });
+        sp.listTable ().setSelectedRows (two, juce::dontSendNotification);
+        CHECK (menuHas (sp.buildContextMenu (), "Group", true), "groups: Group offered for two selections");
+        sp.groupSelected ();
+        selGroup = d->savedSelections[0].group;
+        CHECK (selGroup != 0 && d->savedSelections[1].group == selGroup && d->savedSelections[2].group == 0,
+               "groups: two stored selections become one group");
+        CHECK (sp.numListRows () == 4 && sp.listRow (0).item == -1 && sp.listRow (1).item == 0
+                   && sp.listRow (2).item == 1 && sp.listRow (3).item == 2,
+               "groups: the group's row, its selections under it, then the rest");
+        CHECK (sp.numSelectedRows () == 3, "groups: the new group stays selected (its row and its members)");
+        CHECK (d->selectionGroups.nameOf (selGroup) == "Group " + juce::String (selGroup), "groups: default name");
+
+        // Selecting the group's row recalls all its selections.
+        sp.doRecall (0);
+        CHECK (d->spectralSel.count () == 2, "groups: a group's row recalls its members");
+
+        // Fold it with the arrow (a click left of the name).
+        sp.listTable ().setSelectedRows ({}, juce::dontSendNotification);
+        sp.simulateCellClick (0, 1, mkMouse (sp, 4, 5, juce::ModifierKeys (juce::ModifierKeys::leftButtonModifier)));
+        CHECK (d->selectionGroups.isCollapsed (selGroup) && sp.numListRows () == 2
+                   && sp.listRow (0).item == -1 && sp.listRow (1).item == 2,
+               "groups: the arrow folds the group's selections away");
+        CHECK (sp.itemsOfRows ({ 0 }) == (std::vector<int> { 0, 1 }), "groups: a folded group's row still stands for its members");
+        sp.simulateCellClick (0, 1, mkMouse (sp, 4, 5, juce::ModifierKeys (juce::ModifierKeys::leftButtonModifier)));
+        CHECK (! d->selectionGroups.isCollapsed (selGroup) && sp.numListRows () == 4, "groups: and unfolds them");
+
+        // Collapse All / Expand All, Rename.
+        CHECK (menuHas (sp.buildContextMenu (), "Collapse All Groups", true)
+                   && menuHas (sp.buildContextMenu (), "Expand All Groups", true),
+               "groups: Collapse All / Expand All in the menu");
+        sp.runContextMenuItem (43);
+        CHECK (sp.numListRows () == 2, "groups: Collapse All Groups");
+        sp.runContextMenuItem (44);
+        CHECK (sp.numListRows () == 4, "groups: Expand All Groups");
+        juce::SparseSet<int> groupRow;
+        groupRow.addRange ({ 0, 1 });
+        sp.listTable ().setSelectedRows (groupRow, juce::dontSendNotification);
+        CHECK (menuHas (sp.buildContextMenu (), "Rename Group...", true), "groups: Rename Group... on a group's row");
+        d->metaDirty = false;
+        sp.applyNameComment ("Birds", "");   // Edit... on a group's row renames it
+        CHECK (d->selectionGroups.nameOf (selGroup) == "Birds" && d->metaDirty, "groups: a stored-selection group is renamed");
+        app.setSelectionGroupCollapsed (selGroup, true);
+
+        // --- Drawings --------------------------------------------------------
+        DrawingItem t1, t2, t3;
+        t1.kind = t2.kind = t3.kind = DrawingItem::Kind::Rectangle;
+        t1.t0 = 0.1; t1.t1 = 0.2; t1.f0 = 100.0; t1.f1 = 200.0;
+        t2 = t1; t2.t0 = 0.3; t2.t1 = 0.4;
+        t3 = t1; t3.t0 = 0.6; t3.t1 = 0.7;
+        app.addDrawing (t1); app.addDrawing (t2); app.addDrawing (t3);
+        app.groupDrawings ({ 1, 2 });
+        drawGroup = d->drawings[1].group;
+        DrawingPanel dp (app);
+        dp.setSize (320, 240);
+        dp.refresh ();
+        CHECK (dp.numListRows () == 4 && dp.groupOfRow (1) == drawGroup, "groups: the drawing group's row");
+        dp.toggleCollapsed (1);
+        dp.refresh ();
+        CHECK (d->drawingGroups.isCollapsed (drawGroup) && dp.numListRows () == 2
+                   && dp.itemsOfRows ({ 1 }) == (std::vector<int> { 1, 2 }),
+               "groups: a drawing group folds under its arrow");
+        app.setDrawingSelection ({ 2 });
+        dp.syncSelectionFromApp ();
+        CHECK (dp.numSelectedRows () == 1 && dp.selectedRowIndices ()[0] == 1,
+               "groups: a folded group's row shows its drawings' selection");
+        app.setDrawingSelection ({});
+        app.renameDrawingGroup (drawGroup, "Labels");
+        CHECK (d->drawingGroups.nameOf (drawGroup) == "Labels", "groups: a drawing group is renamed");
+        dp.runContextMenuItem (44);
+        dp.refresh ();
+        CHECK (dp.numListRows () == 4, "groups: Expand All Groups (drawings)");
+        dp.runContextMenuItem (43);
+        dp.refresh ();
+        CHECK (dp.numListRows () == 2, "groups: Collapse All Groups (drawings)");
+
+        CHECK (app.saveDocument (*d, wav, false, nullptr), "groups: save");
+    }
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "groups: reopen");
+        const FileDoc* d = app.doc ();
+        CHECK (d != nullptr && d->savedSelections.size () == 3 && d->savedSelections[0].group == selGroup
+                   && d->savedSelections[1].group == selGroup && d->selectionGroups.nameOf (selGroup) == "Birds"
+                   && d->selectionGroups.isCollapsed (selGroup),
+               "groups: stored-selection groups, their name and fold are saved with the file");
+        CHECK (d != nullptr && d->drawings.size () == 3 && d->drawings[2].group == drawGroup
+                   && d->drawingGroups.nameOf (drawGroup) == "Labels" && d->drawingGroups.isCollapsed (drawGroup),
+               "groups: drawing groups' names and fold are saved with the file");
+    }
+    {
+        // The legacy .selections.json format keeps the group too.
+        SavedSpectralSelection s1 { "X", {} }, s2 { "Y", {} };
+        s1.data.addRect (0.0, 1.0, 10.0, 20.0, false);
+        s2.data.addRect (1.0, 2.0, 10.0, 20.0, false);
+        s1.group = 3;
+        std::vector<SavedSpectralSelection> back;
+        CHECK (deserialiseSavedSelections (serialiseSavedSelections ({ s1, s2 }), back) && back.size () == 2
+                   && back[0].group == 3 && back[1].group == 0,
+               "groups: the selections sidecar keeps the group");
+    }
+    store.deleteFile ();
+    wav.deleteFile ();
+    sc::fileMetaSidecarPath (wav).deleteFile ();
+}
+
+// ------------------------------------------------------------------ toolbar (#43)
+// The toolbar in the menu bar row, left of the workspace presets: its
+// groups, the tooltips with their keys, the commands, the nine custom
+// shortcuts (defined, checked against the keys in use, run by click and by
+// key, remembered after a restart) and View > Toolbar.
+static void testMainToolbar()
+{
+    namespace tb = sc::toolbar;
+    // Keys.
+    CHECK (tb::canonical (juce::KeyPress ('H', juce::ModifierKeys::commandModifier, 0)) == "cmd+h"
+               && tb::canonical (juce::KeyPress (juce::KeyPress::F9Key)) == "f9"
+               && tb::canonical (juce::KeyPress ('k', juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier, 0)) == "cmd+alt+k",
+           "toolbar: canonical keys");
+    CHECK (tb::canonicalFromText ("Ctrl+H") == "cmd+h" && tb::canonicalFromText ("Shift+F10") == "shift+f10"
+               && tb::canonicalFromText ("Ctrl+Shift+Enter") == "cmd+shift+return" && tb::canonicalFromText ("V") == "v"
+               && tb::canonicalFromText ("Ctrl+=") == "cmd+=" && tb::canonicalFromText ("Paintbrush (25%") == "",
+           "toolbar: the menus' shortcut texts");
+    CHECK (tb::canonical (tb::keyFromCanonical ("cmd+alt+k")) == "cmd+alt+k" && tb::canonical (tb::keyFromCanonical ("f8")) == "f8",
+           "toolbar: canonical keys round-trip");
+   #if ! JUCE_MAC
+    CHECK (tb::displayText ("cmd+shift+h") == "Ctrl+Shift+H" && tb::displayText ("f9") == "F9", "toolbar: keys as the user reads them");
+   #endif
+    {
+        tb::CustomSet set;
+        set[0] = { tb::CustomShortcut::Kind::keyPress, "cmd+h", "H", "", "cmd+alt+k" };
+        set[4] = { tb::CustomShortcut::Kind::menuCommand, "Effects > Normalize", "", "star", "" };
+        set[8] = { tb::CustomShortcut::Kind::pythonScript, "/tmp/x.py", "py", "", "" };
+        set[6] = { tb::CustomShortcut::Kind::action, "Clean up", "CU", "", "" };
+        const auto back = tb::parse (tb::serialise (set));
+        CHECK (back == set, "toolbar: the custom shortcuts round-trip through the settings");
+        CHECK (tb::parse ("garbage")[0].defined () == false, "toolbar: broken settings give empty shortcuts");
+    }
+    {
+        // Every icon draws something.
+        bool all = true;
+        for (int i = (int) tb::Icon::undo; i <= (int) tb::Icon::scissors; ++i)
+        {
+            juce::Image img (juce::Image::ARGB, 24, 24, true);
+            juce::Graphics g (img);
+            tb::drawIcon (g, (tb::Icon) i, { 2.0f, 2.0f, 20.0f, 20.0f }, juce::Colours::white);
+            int lit = 0;
+            for (int y = 0; y < 24; ++y)
+                for (int x = 0; x < 24; ++x)
+                    if (img.getPixelAt (x, y).getAlpha () > 100) ++lit;
+            all = all && lit > 8;
+        }
+        CHECK (all, "toolbar: every icon draws");
+    }
+
+    const juce::File wav = makeTempFile ("toolbar.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * (double) f / rate); });
+    const juce::File store = makeTempFile ("toolbar.recent");
+    store.deleteFile ();
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "toolbar: open");
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "toolbar"));
+        win->setSize (1600, 800);
+        auto* bar = win->toolbarComp ();
+        CHECK (bar != nullptr && bar->isVisible () && win->isToolbarVisible (), "toolbar: shown by default");
+        if (bar == nullptr) return;
+        CHECK (bar->getY () == 0 && win->workspaceBarComp () != nullptr
+                   && bar->getRight () <= win->workspaceBarComp ()->getX (),
+               "toolbar: in the menu bar row, left of the workspace presets");
+        CHECK (bar->numButtons () == 14 + tb::kNumCustom, "toolbar: 14 tools and 9 shortcuts");
+        bool allShown = true, allTips = true;
+        for (int i = 0; i < bar->numButtons (); ++i)
+        {
+            allShown = allShown && bar->buttonAt (i)->isVisible ();
+            allTips = allTips && bar->buttonAt (i)->getTooltip ().isNotEmpty ();
+        }
+        CHECK (allShown, "toolbar: every group fits a 1600 px window");
+        CHECK (allTips, "toolbar: every button has a tooltip");
+        win->syncSharedState ();
+       #if ! JUCE_MAC
+        CHECK (bar->button ("undo")->getTooltip () == "Undo (Ctrl+Z)" && bar->button ("view.toggle")->getTooltip ().endsWith ("(F9)")
+                   && bar->button ("marker.add")->getTooltip () == "Add Marker (F8)" && bar->button ("tool.lasso")->getTooltip () == "Lasso (L)",
+               "toolbar: the tooltips say the keyboard shortcut");
+       #endif
+        CHECK (bar->button ("tool.timeRange")->on && ! bar->button ("tool.marquee")->on, "toolbar: the current tool is lit");
+        CHECK (! bar->button ("undo")->isEnabled (), "toolbar: nothing to undo yet");
+
+        // The commands.
+        win->runToolbarCommand ("tool.marquee");
+        CHECK (app.selMode == SpectralSelMode::Marquee && bar->button ("tool.marquee")->on && ! bar->button ("tool.timeRange")->on,
+               "toolbar: Marquee");
+        win->runToolbarCommand ("tool.move");
+        CHECK (app.moveTool && bar->button ("tool.move")->on && ! bar->button ("tool.marquee")->on, "toolbar: Move");
+        win->runToolbarCommand ("tool.move");
+        CHECK (app.moveTool, "toolbar: the Move button arms Move (it does not toggle)");
+        win->runToolbarCommand ("tool.paintbrush");
+        CHECK (! app.moveTool && app.selMode == SpectralSelMode::Paintbrush, "toolbar: Paintbrush");
+        win->runToolbarCommand ("draw.oval");
+        CHECK (win->spectralViewComp ()->isPendingDraw () && win->spectralViewComp ()->pendingDrawKind () == DrawingItem::Kind::Ellipse
+                   && bar->button ("draw.oval")->on,
+               "toolbar: Oval arms a new oval");
+        win->spectralViewComp ()->cancelPendingDraw ();
+        const auto markers = app.markers ().markers ().size ();
+        win->runToolbarCommand ("marker.add");
+        CHECK (app.markers ().markers ().size () == markers + 1, "toolbar: Add Marker (like F8)");
+        win->runToolbarCommand ("view.toggle");
+        CHECK (win->spectralViewComp () != nullptr && ! win->spectralViewComp ()->isVisible ()
+                   && win->waveformViewComp ()->isVisible (),
+               "toolbar: Waveform / Spectrogram cycles the views (like F9)");
+        win->runToolbarCommand ("view.toggle");
+        win->runToolbarCommand ("view.toggle");
+
+        // Custom shortcuts: a key already in use is refused.
+        tb::CustomShortcut keys { tb::CustomShortcut::Kind::keyPress, "s", "TR", "", "cmd+h" };
+        const auto refused = win->setCustomShortcut (0, keys);
+        CHECK (refused.contains ("already used") && ! bar->custom ()[0].defined (), "toolbar: a key in use (Ctrl+H) is refused");
+        CHECK (win->shortcutUsedBy ("cmd+z") == "Edit > Undo" && win->shortcutUsedBy ("f9").isNotEmpty ()
+                   && win->shortcutUsedBy ("cmd+alt+k").isEmpty (),
+               "toolbar: the keys in use come from the menus and the main window");
+        keys.key = "cmd+alt+k";
+        CHECK (win->setCustomShortcut (0, keys).isEmpty () && bar->custom ()[0].defined (), "toolbar: shortcut 1 defined");
+        CHECK (bar->button ("custom.1")->label == "TR" && ! bar->button ("custom.1")->placeholder
+                   && bar->button ("custom.1")->getTooltip ().contains (tb::displayText ("cmd+alt+k"))
+                   && tb::displayText ("cmd+alt+k") == (juce::SystemStats::getOperatingSystemType() & juce::SystemStats::MacOSX
+                                                           ? "Cmd+Alt+K" : "Ctrl+Alt+K"),
+               "toolbar: shortcut 1 shows its text, its tooltip its key (Cmd on macOS)");
+        CHECK (win->setCustomShortcut (1, { tb::CustomShortcut::Kind::menuCommand, "Selection > Lasso", "", "star", "cmd+alt+k" })
+                   .contains ("Shortcut 1"),
+               "toolbar: two shortcuts cannot share a key");
+        CHECK (win->setCustomShortcut (1, { tb::CustomShortcut::Kind::menuCommand, "Selection > Lasso", "", "star", "" }).isEmpty ()
+                   && bar->button ("custom.2")->icon == tb::Icon::star,
+               "toolbar: shortcut 2 runs a menu command, shown with an icon");
+        CHECK (win->menuCommandPaths ().contains ("Selection > Lasso") && win->menuCommandPaths ().contains ("Effects > Normalize"),
+               "toolbar: the commands offered are the menu bar's");
+
+        // Running them: a click, and the shortcut's own key.
+        win->runToolbarCommand ("custom.2");
+        CHECK (app.selMode == SpectralSelMode::Lasso, "toolbar: shortcut 2 runs Selection > Lasso");
+        CHECK (win->keyPressed (juce::KeyPress ('k', juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier, 0), nullptr)
+                   && app.selMode == SpectralSelMode::TimeRange,
+               "toolbar: Ctrl+Alt+K runs shortcut 1 (it sends S: Time Range)");
+        win->runToolbarCommand ("tool.marquee");
+        win->runToolbarCommand ("custom.1");
+        CHECK (app.selMode == SpectralSelMode::TimeRange, "toolbar: a click runs shortcut 1 too");
+
+        // A recorded action (Actions panel): replayed like its Run button.
+        {
+            const int ai = app.actions.add ("Flip");
+            if (auto* a = app.actions.get (ai))
+            {
+                sc::ActionStep st;
+                st.type = sc::actionTypes::kInvert;
+                a->steps.push_back (st);
+            }
+            app.selectAll ();
+            float before = 0.0f, after = 0.0f;
+            app.audioEngine ().readSamples (0, 1003, 1, &before);   // not on a zero crossing of the 300 Hz sine
+            bool finished = false;
+            win->onReplayFinished = [&finished] (bool ok, const juce::String&) { finished = ok; };
+            CHECK (win->setCustomShortcut (2, { tb::CustomShortcut::Kind::action, "Flip", "FL", "", "" }).isEmpty ()
+                       && bar->button ("custom.3")->getTooltip ().contains ("action Flip"),
+                   "toolbar: shortcut 3 runs a recorded action");
+            win->runToolbarCommand ("custom.3");
+            for (int i = 0; i < 200 && ! finished; ++i)
+                juce::MessageManager::getInstance ()->runDispatchLoopUntil (10);
+            app.audioEngine ().readSamples (0, 1003, 1, &after);
+            CHECK (finished && std::abs (before) > 0.01f && std::abs (after + before) < 1.0e-4f,
+                   "toolbar: the action ran (the polarity is inverted: " + juce::String (before) + " -> "
+                       + juce::String (after) + (finished ? "" : ", not finished") + ")");
+            win->onReplayFinished = nullptr;
+            win->setCustomShortcut (2, {});
+        }
+
+        // View > Toolbar.
+        const int vIdx = win->getMenuBarNames ().indexOf ("View");
+        win->menuItemSelected (MainWindow::ViewShowToolbar, vIdx);
+        CHECK (! win->isToolbarVisible () && ! bar->isVisible (), "toolbar: View > Toolbar hides it");
+        win->menuItemSelected (MainWindow::ViewShowToolbar, vIdx);
+        CHECK (win->isToolbarVisible () && bar->isVisible (), "toolbar: and shows it");
+        win->menuItemSelected (MainWindow::ViewShowToolbar, vIdx);
+        app.recentStore->saveIfNeeded ();
+    }
+    {
+        // After a restart: the shortcuts and the hidden toolbar are remembered.
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "toolbar again"));
+        auto* bar = win->toolbarComp ();
+        CHECK (bar != nullptr && bar->custom ()[0].key == "cmd+alt+k" && bar->custom ()[1].target == "Selection > Lasso"
+                   && ! bar->custom ()[2].defined (),
+               "toolbar: the custom shortcuts are remembered after a restart");
+        CHECK (! win->isToolbarVisible (), "toolbar: so is View > Toolbar");
     }
     store.deleteFile ();
     wav.deleteFile ();
@@ -24371,11 +24838,11 @@ static void testTrackAxisPlacement()
     std::unique_ptr<MainWindow> win (new MainWindow (app, "track axis placement"));
     // Menu bar order: File Edit Selection Transport Effects View Window Help.
     const juce::PopupMenu viewMenu = win->getMenuForIndex (5, "View");
-    // 20 items for a stereo file (the Colour Map submenu moved out of this
+    // 21 items for a stereo file (the Colour Map submenu moved out of this
     // menu; the 1/3 octave grid item was added under the frequency grid;
-    // Show File Borders for sessions, issue #21; channel visibility is still
-    // listed per channel).
-    CHECK (viewMenu.getNumItems() == 20, "View menu item count with stereo file");
+    // Show File Borders for sessions, issue #21; Toolbar, issue #43; channel
+    // visibility is still listed per channel).
+    CHECK (viewMenu.getNumItems() == 21, "View menu item count with stereo file");
 
     // --- Resample lives in its own section of the Edit menu -----------------
     const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
@@ -30455,6 +30922,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("super-res model discovery", testSuperResModelDiscovery);
     SC_RUN_TEST ("super-res window layout + close", testSuperResWindowLayoutAndClose);
     SC_RUN_TEST ("super-res mode/output combos", testSuperResModeOutputCombos);
+    SC_RUN_TEST ("ai downloads: (Download Required) lists, confirm on Run", testAiDownloadRequiredLists);
     SC_RUN_TEST ("super-res apply output modes", testSuperResApplyOutputModes);
     SC_RUN_TEST ("time-pan speed + reversal", testTimePanSpeedAndReversal);
     SC_RUN_TEST ("middle-drag pans both axes", testMiddleDragPanBothAxes);
@@ -30625,7 +31093,9 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("arrow head geometry", testArrowHeadGeometry);
     SC_RUN_TEST ("drawing panel", testDrawingPanel);
     SC_RUN_TEST ("drawing key shortcuts", testDrawingKeyShortcuts);
+    SC_RUN_TEST ("toolbar: tools, shortcuts 1-9 (#43)", testMainToolbar);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);
+    SC_RUN_TEST ("item groups: stored selections, drawings (fold, rename)", testItemGroupsSelectionsDrawings);
     SC_RUN_TEST ("left panels toggle shortcut", testLeftPanelsToggleShortcut);
     SC_RUN_TEST ("ctrl+0 zoom out full", testCtrl0ZoomOutFull);
     SC_RUN_TEST ("marker title visibility", testMarkerTitleVisibility);

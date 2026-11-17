@@ -39,6 +39,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoWindow.cpp   # Video window (picture follows the playhead)
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoScaler.cpp   # Video picture scaling (Lanczos / Bicubic / Nearest)
         ${CMAKE_CURRENT_SOURCE_DIR}/MainWindow.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/MainToolbar.cpp   # the toolbar in the menu bar row (issue #43)
         ${CMAKE_CURRENT_SOURCE_DIR}/Resampler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FFTAvx.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ScttChunk.cpp   # SCTT RIFF chunk I/O (no AI dependency)
@@ -46,7 +47,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/FileMeta.cpp    # unified metadata bundle + RIFF patching
         ${CMAKE_CURRENT_SOURCE_DIR}/MergeFiles.cpp  # multi-file merge (Shift + drag & drop)
         ${CMAKE_CURRENT_SOURCE_DIR}/Session.cpp     # sessions: referenced files on the timeline (issue #21)
-        ${CMAKE_CURRENT_SOURCE_DIR}/SessionOverlay.cpp  # sessions: file borders and the Move Files drag in the views
+        ${CMAKE_CURRENT_SOURCE_DIR}/SessionOverlay.cpp  # sessions: file borders and the Move (V) drag in the views
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoAudio.cpp  # FFmpeg video-container audio extraction
         ${CMAKE_CURRENT_SOURCE_DIR}/AudioCpp.cpp    # audio.cpp stem-separation CLI support
         ${CMAKE_CURRENT_SOURCE_DIR}/StemSeparation.cpp

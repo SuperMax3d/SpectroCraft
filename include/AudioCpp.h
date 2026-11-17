@@ -185,6 +185,34 @@ std::string knownSha256ForUrl(const std::string& url);
 int64_t knownSizeForUrl(const std::string& url);
 
 // ---------------------------------------------------------------------------
+// Model versions shown in the Stem Separation / Super Resolution windows
+// (issue #38): every version of the family, installed or not.
+// ---------------------------------------------------------------------------
+
+/** One version of a model family, as the windows list it. */
+struct ModelOption
+{
+    juce::String name;       // file name shown in the list ("sam-audio-small-q8_0.gguf")
+    juce::File file;         // the installed file (or folder); empty = not installed
+    juce::String url;        // download URL; empty = not downloadable (manual family)
+    int64_t sizeBytes = 0;   // download size (0 = unknown)
+    juce::File dest;         // where a download goes
+    bool installed() const { return file != juce::File(); }
+};
+
+/** Families: "sam" (Sam Audio), "demucs6" (htdemucs_6stems), "demucsft"
+    (htdemucs_ft), "whinehiss" (htdemucs-whine-hiss_v1), "whinehissclickbump"
+    (htdemucs-whine-hiss-click-bump_v1), "flashsr", "audiosr". The download
+    catalogue's versions first, in its order (installed or not), then the
+    installed files the catalogue does not know. The manual families
+    (demucs6, demucsft) list only what is installed. */
+std::vector<ModelOption> modelOptions(const juce::String& family, const juce::File& d = {});
+
+/** Index in binaryChoices() of the build that matches a --backend value
+    ("cuda" -> the first CUDA build, ...); 0 when none does. */
+int binaryChoiceForBackend(const juce::String& backendCli);
+
+// ---------------------------------------------------------------------------
 // Installed-binary variant marker (written when we install a binary).
 // ---------------------------------------------------------------------------
 

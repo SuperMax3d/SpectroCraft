@@ -31,7 +31,7 @@ public:
     // menu, wheel over the plot or time ruler = horizontal zoom at cursor,
     // wheel over the left amplitude axis (or Shift+wheel) = vertical zoom,
     // double-click = fit whole file. Clicking moves the playhead.
-    /** Session files (issue #21): outlines and names, and the Move Files drag. */
+    /** Session files (issue #21): outlines and names, and the Move (V) drag. */
     void paintOverChildren (juce::Graphics& g) override;
     /** This view's rows, plot and time axis, for the session overlay. */
     sc::session::ViewGeometry sessionGeometry() const;
@@ -313,7 +313,7 @@ private:
     juce::Rectangle<int> channelLabelBounds (int ch, int centreY) const;
 
     Application& app;   // audio data read live via app.audioEngine() (active doc)
-    sc::session::MoveGesture sessionMove_;   // Selection > Move Files drag
+    sc::session::MoveGesture sessionMove_;   // Selection > Move drag
     sc::session::TrimGesture sessionTrim_;   // ... or an edge of a file: trims it
     bool showTimeRuler = true;   // stacked dual view: only one view draws it
     bool showMarkerTitles = true;   // suppressed while the spectrogram is stacked below

@@ -46,6 +46,7 @@ juce::String serialiseSavedSelections (const std::vector<SavedSpectralSelection>
         s += "\n { \"name\": \"" + jsonEscape (sel.name) + "\""
            + (sel.comment.isEmpty () ? juce::String() : juce::String(", \"comment\": \"")
                                       + jsonEscape (sel.comment) + "\"")
+           + (sel.group != 0 ? ", \"group\": " + juce::String (sel.group) : juce::String())
            + ", \"shapes\": [";
 
         bool firstShape = true;
@@ -178,6 +179,10 @@ bool deserialiseSavedSelections (const juce::String& json,
         const juce::var commentVar = p.getWithDefault ("comment", juce::var());
         if (commentVar.isString())
             sel.comment = commentVar.toString();
+        // Optional group id (Selection panel > Group); absent = in no group.
+        double groupV = 0.0;
+        if (num (p, "group", groupV))
+            sel.group = std::max (0, (int) groupV);
 
         const juce::var shapesVar = p.getWithDefault ("shapes", juce::var());
         const auto* shapes = shapesVar.isArray() ? shapesVar.getArray() : nullptr;

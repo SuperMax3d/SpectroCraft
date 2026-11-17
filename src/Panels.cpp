@@ -7754,8 +7754,88 @@ SelectionPanel::Model::Model (SelectionPanel* ownerIn) : owner (ownerIn) {}
 
 int SelectionPanel::Model::getNumRows()
 {
-    auto* d = owner->app.doc ();
-    return d != nullptr ? (int) d->savedSelections.size () : 0;
+    owner->syncRows ();
+    return (int) owner->rows_.size ();
+}
+
+std::vector<int> SelectionPanel::currentRowsKey () const
+{
+    std::vector<int> key;
+    if (const auto* d = app.doc ())
+    {
+        key = d->selectionGroupIds ();
+        key.push_back (-1);
+        for (const auto& g : d->selectionGroups.list)
+            if (g.collapsed) key.push_back (g.id);
+    }
+    return key;
+}
+
+void SelectionPanel::rebuildRows () const
+{
+    rows_.clear ();
+    rowsDoc_ = app.doc ();
+    rowsKey_ = currentRowsKey ();
+    if (const auto* d = app.doc ())
+        rows_ = sc::groups::buildRows (d->selectionGroupIds (), d->selectionGroups);
+}
+
+void SelectionPanel::syncRows () const
+{
+    if (rowsDoc_ != app.doc () || rowsKey_ != currentRowsKey ())
+        rebuildRows ();
+}
+
+std::vector<int> SelectionPanel::itemsOfRows (const std::vector<int>& rowsIn) const
+{
+    const auto* d = app.doc ();
+    if (d == nullptr) return {};
+    syncRows ();
+    return sc::groups::itemsOfRows (rows_, d->selectionGroupIds (), rowsIn);
+}
+
+void SelectionPanel::groupSelected ()
+{
+    const auto items = itemsOfRows (selectedRowIndices ());
+    app.groupSavedSelections (items);
+    refresh ();   // the group's row comes first, its members under it
+    if (const auto* d = app.doc ())
+        table.setSelectedRows (sc::groups::rowsForItems (rows_, d->selectionGroupIds (), items),
+                               juce::dontSendNotification);
+}
+
+void SelectionPanel::ungroupSelected ()
+{
+    const auto items = itemsOfRows (selectedRowIndices ());
+    app.ungroupSavedSelections (items);
+    refresh ();   // the members keep their selection, each on its own row now
+    if (const auto* d = app.doc ())
+        table.setSelectedRows (sc::groups::rowsForItems (rows_, d->selectionGroupIds (), items),
+                               juce::dontSendNotification);
+}
+
+void SelectionPanel::toggleCollapsed (int row)
+{
+    const int g = groupOfRow (row);
+    if (g == 0 || app.doc () == nullptr) return;
+    app.setSelectionGroupCollapsed (g, ! app.doc ()->selectionGroups.isCollapsed (g));
+    refresh ();
+}
+
+void SelectionPanel::showRenameGroupDialog (int groupId)
+{
+    const auto* d = app.doc ();
+    if (d == nullptr || groupId <= 0) return;
+    juce::AlertWindow dlg ("Rename Group", "Name of the group:", juce::AlertWindow::NoIcon);
+    dlg.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
+    dlg.addTextEditor ("name", d->selectionGroups.nameOf (groupId), "Name:");
+    dlg.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    if (auto* ed = dlg.getTextEditor ("name")) ed->selectAll ();
+    if (dlg.runModalLoop () != 1) return;
+    if (auto* ed = dlg.getTextEditor ("name"))
+        app.renameSelectionGroup (groupId, ed->getText ());
+    refresh ();
 }
 
 void SelectionPanel::Model::paintRowBackground (juce::Graphics& g, int, int width, int height,
@@ -7772,14 +7852,38 @@ void SelectionPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int col
                                        int width, int height, bool)
 {
     auto* d = owner->app.doc ();
-    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) d->savedSelections.size ()) return;
-    const SavedSpectralSelection& s = d->savedSelections [(size_t) rowNumber];
-
+    owner->syncRows ();
+    if (d == nullptr || rowNumber < 0 || rowNumber >= (int) owner->rows_.size ()) return;
+    const auto row = owner->rows_[(size_t) rowNumber];
     g.setFont (11.0f);
+    if (row.item < 0)   // a group's own row: its fold arrow and name, how many selections
+    {
+        if (columnId == 1)
+        {
+            sc::groups::drawDisclosure (g, juce::Rectangle<float> (0.0f, 0.0f, (float) sc::groups::kDisclosureW, (float) height),
+                                        d->selectionGroups.isCollapsed (row.group));
+            g.setColour (juce::Colours::white);
+            g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened ());
+            g.drawText (d->selectionGroups.nameOf (row.group), sc::groups::kDisclosureW, 0,
+                        width - sc::groups::kDisclosureW - 4, height, juce::Justification::centredLeft, true);
+        }
+        else
+        {
+            const auto n = sc::groups::membersOf (d->selectionGroupIds (), row.group).size ();
+            g.setColour (juce::Colours::grey);
+            g.drawText (juce::String ((int) n) + " selections", 4, 0, width - 8, height,
+                        juce::Justification::centredLeft, false);
+        }
+        return;
+    }
+    if (row.item >= (int) d->savedSelections.size ()) return;
+    const SavedSpectralSelection& s = d->savedSelections [(size_t) row.item];
+    const int indent = row.group != 0 ? sc::groups::kDisclosureW : 0;   // a group's members sit under it
+
     if (columnId == 1)   // name
     {
         g.setColour (juce::Colours::white);
-        g.drawText (s.name, 4, 0, width - 8, height, juce::Justification::centredLeft, false);
+        g.drawText (s.name, 4 + indent, 0, width - 8 - indent, height, juce::Justification::centredLeft, false);
     }
     else   // comment (fills the remainder of the table)
     {
@@ -7788,15 +7892,34 @@ void SelectionPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int col
     }
 }
 
-void SelectionPanel::Model::cellClicked (int rowNumber, int, const juce::MouseEvent& e)
+void SelectionPanel::Model::cellClicked (int rowNumber, int columnId, const juce::MouseEvent& e)
 {
-    if (rowNumber >= 0 && rowNumber < getNumRows())
-        owner->onRowClicked (rowNumber, e);
+    if (rowNumber < 0 || rowNumber >= getNumRows())
+        return;
+    // A group's fold arrow (left of its name): fold or unfold, nothing else.
+    if (columnId == 1 && !e.mods.isRightButtonDown () && owner->groupOfRow (rowNumber) != 0)
+    {
+        auto& hdr = owner->table.getHeader ();
+        const int x0 = hdr.getColumnPosition (hdr.getIndexOfColumnId (1, true)).getX ();
+        if (e.x - x0 < sc::groups::kDisclosureW)
+        {
+            owner->toggleCollapsed (rowNumber);
+            return;
+        }
+    }
+    owner->onRowClicked (rowNumber, e);
 }
 
-void SelectionPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
+void SelectionPanel::Model::cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&)
 {
-    // Double-clicking any cell recalls that row's stored selection.
+    // A double-click on a group's name renames the group.
+    if (columnId == 1)
+        if (const int g = owner->groupOfRow (rowNumber); g != 0)
+        {
+            owner->showRenameGroupDialog (g);
+            return;
+        }
+    // Double-clicking any other cell recalls that row's stored selection.
     owner->doRecall (rowNumber);
 }
 
@@ -7864,10 +7987,17 @@ SelectionPanel::SelectionPanel (Application& appIn)
 
 void SelectionPanel::refresh()
 {
+    auto* d = app.doc ();
+    // The selected stored selections, by item: a group folded or unfolded
+    // moves the rows, not what is selected.
+    // (The rows as they were, not re-synced: they are what the table shows.)
+    std::vector<int> selectedItems;
+    if (d != nullptr && d == selListDoc)
+        selectedItems = sc::groups::itemsOfRows (rows_, d->selectionGroupIds (), selectedRowIndices ());
+    const auto rowsBefore = rows_;
+    rebuildRows ();
     table.updateContent ();
     table.repaint ();
-
-    auto* d = app.doc ();
 
     // The row selection belongs to the document whose list is shown: reset it
     // when switching files so stale rows never point at another file's entries.
@@ -7877,12 +8007,22 @@ void SelectionPanel::refresh()
         anchorRow = -1;
         table.setSelectedRows (juce::SparseSet<int>(), juce::dontSendNotification);
     }
+    else if (d != nullptr && ! (rows_.size () == rowsBefore.size ()
+                                && std::equal (rows_.begin (), rows_.end (), rowsBefore.begin (),
+                                               [] (const Row& a, const Row& b) { return a.item == b.item && a.group == b.group; })))
+    {
+        std::vector<int> live;
+        for (int i : selectedItems)
+            if (i < (int) d->savedSelections.size ()) live.push_back (i);
+        table.setSelectedRows (sc::groups::rowsForItems (rows_, d->selectionGroupIds (), live),
+                               juce::dontSendNotification);
+    }
 
     // Store is available with a spectral selection OR a time-range selection
     // (the latter is stored as a full-height band).
     saveBtn.setEnabled (app.hasSpectralSelection () || app.selection.getLength () > 0.0);
 
-    const int nRows = d != nullptr ? (int) d->savedSelections.size () : 0;
+    const int nRows = (int) rows_.size ();
     const bool haveRow = table.getNumSelectedRows () > 0 && primaryRow () < nRows;
     recallBtn.setEnabled (haveRow);
     deleteBtn.setEnabled (haveRow);
@@ -7968,19 +8108,30 @@ void SelectionPanel::doSave()
 void SelectionPanel::doRecall (int row)
 {
     auto* d = app.doc ();
-    if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
-    const auto& sel = d->savedSelections [(size_t) row];
+    if (d == nullptr) return;
+    // A group's row recalls all its members.
+    const auto items = itemsOfRows ({ row });
+    if (items.empty ()) return;
 
     SpectralSelection merged;
-    merged.appendShapesFrom (sel.data);
+    double t0 = 0.0, t1 = 0.0;
+    bool any = false;
+    for (int i : items)
+    {
+        if (i >= (int) d->savedSelections.size ()) continue;
+        const auto& sel = d->savedSelections [(size_t) i];
+        merged.appendShapesFrom (sel.data);
+        if (sel.data.empty ()) continue;
+        const auto ext = sel.data.timeExtent();
+        t0 = any ? std::min (t0, ext.getStart ()) : ext.getStart ();
+        t1 = any ? std::max (t1, ext.getEnd ()) : ext.getEnd ();
+        any = true;
+    }
     app.setSpectralSelectionFrom (merged);
 
     // Make sure both views show the recalled selection's time range.
-    if (!sel.data.empty())
-    {
-        const auto ext = sel.data.timeExtent();
-        app.ensureTimeRangeVisible (ext.getStart(), ext.getEnd());
-    }
+    if (any)
+        app.ensureTimeRangeVisible (t0, t1);
     refresh();
 }
 
@@ -7992,7 +8143,7 @@ void SelectionPanel::recallSelected ()
     SpectralSelection merged;
     double t0 = 0.0, t1 = 0.0;
     bool any = false;
-    for (int r : sparseRows (table.getSelectedRows()))
+    for (int r : itemsOfRows (selectedRowIndices ()))   // a group's row = its members
     {
         if (r < 0 || r >= (int) d->savedSelections.size ()) continue;
         const auto& s = d->savedSelections [(size_t) r];
@@ -8072,34 +8223,69 @@ void SelectionPanel::mouseDown (const juce::MouseEvent& e)
     showLoadContextMenu ();
 }
 
-void SelectionPanel::showLoadContextMenu()
+juce::PopupMenu SelectionPanel::buildContextMenu ()
 {
     const int nSel = table.getNumSelectedRows ();
     const bool hasLive = app.hasSpectralSelection ();
+    const auto* d = app.doc ();
 
     juce::PopupMenu m;
     m.addItem (10, "Recall", nSel > 0);
     m.addItem (12, "Edit...", nSel > 0);
     m.addItem (11, "Delete Selected", nSel > 0);
+    {
+        // Groups (issue #39): two or more stored selections become one.
+        const auto items = itemsOfRows (selectedRowIndices ());
+        bool inGroup = false;
+        if (d != nullptr)
+            for (int i : items)
+                if (i < (int) d->savedSelections.size () && d->savedSelections[(size_t) i].group != 0) inGroup = true;
+        const bool anyGroup = d != nullptr && ! sc::groups::liveIds (d->selectionGroupIds ()).empty ();
+        m.addSeparator();
+        m.addItem (40, "Group", items.size () >= 2);
+        m.addItem (41, "Ungroup", inGroup);
+        m.addItem (42, "Rename Group...", groupOfRow (primaryRow ()) != 0);
+        m.addItem (43, "Collapse All Groups", anyGroup);
+        m.addItem (44, "Expand All Groups", anyGroup);
+    }
     m.addSeparator();
     m.addItem (20, "Clone Harmonics by Numbers...", hasLive);
     m.addItem (21, app.isClonePicking () ? "Stop Picking" : "Clone Harmonics by Mouse", hasLive);
     m.addSeparator();
     m.addItem (30, "Fit View to Selected", nSel > 0);
+    return m;
+}
 
-    const int id = m.showMenu (juce::PopupMenu::Options().withMousePosition());
+void SelectionPanel::runContextMenuItem (int id)
+{
     if (id == 10)
         doRecall (primaryRow());
     else if (id == 12)
         showEditDialog ();
     else if (id == 11)
         deleteSelected ();
+    else if (id == 40)
+        groupSelected ();
+    else if (id == 41)
+        ungroupSelected ();
+    else if (id == 42)
+        showRenameGroupDialog (groupOfRow (primaryRow ()));
+    else if (id == 43 || id == 44)
+    {
+        app.setSelectionGroupCollapsed (0, id == 43);
+        refresh ();
+    }
     else if (id == 20)
         showCloneNumbersDialog();
     else if (id == 21)
         toggleClonePick ();
     else if (id == 30)
         fitViewToSelected ();
+}
+
+void SelectionPanel::showLoadContextMenu()
+{
+    runContextMenuItem (buildContextMenu ().showMenu (juce::PopupMenu::Options().withMousePosition()));
 }
 
 bool SelectionPanel::loadSelectionsFromFile (const juce::File& f)
@@ -8112,6 +8298,7 @@ bool SelectionPanel::loadSelectionsFromFile (const juce::File& f)
     if (!deserialiseSavedSelections (f.loadFileAsString (), list)) return false;
 
     d->savedSelections = std::move (list);
+    d->selectionGroups = {};   // the old groups' names belong to the old list
     d->metaDirty = true;   // the imported list is not on disk yet
     // The imported list persists with the file's unified metadata on Save.
     refresh ();
@@ -8165,7 +8352,19 @@ int SelectionPanel::primaryRow() const
 
 void SelectionPanel::onSelectionSetChanged()
 {
-    if (table.getNumSelectedRows () > 0)
+    // A press on a group's fold arrow selects its row before the click
+    // reaches cellClicked: it only folds, it does not recall (or move the view).
+    bool onFoldArrow = false;
+    if (juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown () && table.isShowing ())
+    {
+        const auto p = table.getLocalPoint (nullptr, juce::Desktop::getInstance ().getMainMouseSource ()
+                                                         .getScreenPosition ()).toInt ();
+        const int row = table.getRowContainingPosition (p.x, p.y);
+        auto& hdr = table.getHeader ();
+        const int x0 = hdr.getColumnPosition (hdr.getIndexOfColumnId (1, true)).getX ();
+        onFoldArrow = groupOfRow (row) != 0 && p.x >= x0 && p.x - x0 < sc::groups::kDisclosureW;
+    }
+    if (table.getNumSelectedRows () > 0 && ! onFoldArrow)
         recallSelected ();   // union -> live spectral selection + view fit
     refresh ();   // button enablement follows the selection set
 }
@@ -8192,8 +8391,7 @@ void SelectionPanel::onRowClicked (int row, const juce::MouseEvent& e)
     {
         // Excel: the selection becomes EXACTLY anchor..row (JUCE's built-in
         // shift behaviour unions instead), then fit everything selected.
-        auto* d = app.doc ();
-        const int n = d != nullptr ? (int) d->savedSelections.size () : 0;
+        const int n = (int) rows_.size ();
         const int a = (anchorRow >= 0 && anchorRow < n) ? anchorRow : row;
         juce::SparseSet<int> sel;
         sel.addRange ({ std::min (a, row), std::max (a, row) + 1 });
@@ -8222,7 +8420,7 @@ void SelectionPanel::deleteSelected ()
     if (d == nullptr) return;
 
     std::vector<int> rows;
-    for (int r : sparseRows (table.getSelectedRows()))
+    for (int r : itemsOfRows (selectedRowIndices ()))   // a group's row = its members
         if (r >= 0 && r < (int) d->savedSelections.size ())
             rows.push_back (r);
     if (rows.empty()) return;
@@ -8246,7 +8444,7 @@ void SelectionPanel::fitViewToSelected ()
 
     double t0 = 0.0, t1 = 0.0;
     bool any = false;
-    for (int r : sparseRows (table.getSelectedRows()))
+    for (int r : itemsOfRows (selectedRowIndices ()))
     {
         if (r < 0 || r >= (int) d->savedSelections.size ()) continue;
         const auto ext = d->savedSelections [(size_t) r].data.timeExtent();
@@ -8285,7 +8483,12 @@ juce::String SelectionPanel::nextSelectionName() const
 void SelectionPanel::showEditDialog()
 {
     auto* d = app.doc ();
-    const int row = primaryRow();
+    if (const int g = groupOfRow (primaryRow ()); g != 0)
+    {
+        showRenameGroupDialog (g);   // a group's row: its name is what there is to edit
+        return;
+    }
+    const int row = itemOfRow (primaryRow());
     if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
     const SavedSpectralSelection& s = d->savedSelections [(size_t) row];
 
@@ -8323,7 +8526,13 @@ void SelectionPanel::showEditDialog()
 void SelectionPanel::applyNameComment (const juce::String& name, const juce::String& comment)
 {
     auto* d = app.doc ();
-    const int row = primaryRow();
+    if (const int g = groupOfRow (primaryRow ()); g != 0)
+    {
+        app.renameSelectionGroup (g, name);   // a group's row: the name is the group's
+        refresh ();
+        return;
+    }
+    const int row = itemOfRow (primaryRow());
     if (d == nullptr || row < 0 || row >= (int) d->savedSelections.size ()) return;
 
     // An empty title keeps the old name; an empty comment is fine.
@@ -8804,18 +9013,8 @@ void DrawingPanel::rebuildRows ()
     const auto* d = app.doc ();
     if (d == nullptr) return;
     // In list order; a group shows up where its first member is: its own
-    // row, then all its members.
-    std::vector<int> shown;
-    for (int i = 0; i < (int) d->drawings.size (); ++i)
-    {
-        const int g = d->drawings[(size_t) i].group;
-        if (g == 0) { rows_.push_back ({ i, 0 }); continue; }
-        if (std::find (shown.begin (), shown.end (), g) != shown.end ()) continue;
-        shown.push_back (g);
-        rows_.push_back ({ -1, g });
-        for (int j = i; j < (int) d->drawings.size (); ++j)
-            if (d->drawings[(size_t) j].group == g) rows_.push_back ({ j, g });
-    }
+    // row, then all its members (none while it is collapsed).
+    rows_ = sc::groups::buildRows (d->drawingGroupIds (), d->drawingGroups);
 }
 
 int DrawingPanel::itemOfRow (int row) const
@@ -8825,19 +9024,31 @@ int DrawingPanel::itemOfRow (int row) const
 
 std::vector<int> DrawingPanel::itemsOfRows (const std::vector<int>& rowsIn) const
 {
-    std::vector<int> out;
-    for (int r : rowsIn)
-    {
-        if (r < 0 || r >= (int) rows_.size ()) continue;
-        const auto& row = rows_[(size_t) r];
-        if (row.item >= 0) out.push_back (row.item);
-        else
-            for (const auto& m : rows_)
-                if (m.item >= 0 && m.group == row.group) out.push_back (m.item);
-    }
-    std::sort (out.begin (), out.end ());
-    out.erase (std::unique (out.begin (), out.end ()), out.end ());
-    return out;
+    const auto* d = app.doc ();
+    if (d == nullptr) return {};
+    return sc::groups::itemsOfRows (rows_, d->drawingGroupIds (), rowsIn);
+}
+
+void DrawingPanel::toggleCollapsed (int row)
+{
+    const int g = groupOfRow (row);
+    if (g == 0 || app.doc () == nullptr) return;
+    app.setDrawingGroupCollapsed (g, ! app.doc ()->drawingGroups.isCollapsed (g));   // -> refresh
+}
+
+void DrawingPanel::showRenameGroupDialog (int groupId)
+{
+    const auto* d = app.doc ();
+    if (d == nullptr || groupId <= 0) return;
+    juce::AlertWindow dlg ("Rename Group", "Name of the group:", juce::AlertWindow::NoIcon);
+    dlg.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
+    dlg.addTextEditor ("name", d->drawingGroups.nameOf (groupId), "Name:");
+    dlg.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    dlg.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    if (auto* ed = dlg.getTextEditor ("name")) ed->selectAll ();
+    if (dlg.runModalLoop () != 1) return;
+    if (auto* ed = dlg.getTextEditor ("name"))
+        app.renameDrawingGroup (groupId, ed->getText ());
 }
 
 void DrawingPanel::groupSelected ()
@@ -8853,19 +9064,10 @@ void DrawingPanel::ungroupSelected ()
 void DrawingPanel::syncSelectionFromApp ()
 {
     // The rows of the selected drawings, and a group's own row when the
-    // whole group is selected.
-    juce::SparseSet<int> sel;
-    const auto& want = app.selectedDrawings;
-    for (int r = 0; r < (int) rows_.size (); ++r)
-    {
-        const auto& row = rows_[(size_t) r];
-        const bool on = row.item >= 0 ? std::find (want.begin (), want.end (), row.item) != want.end ()
-                                      : ! itemsOfRows ({ r }).empty ()
-                                        && std::all_of (rows_.begin (), rows_.end (), [&] (const Row& m)
-                                           { return m.item < 0 || m.group != row.group
-                                                    || std::find (want.begin (), want.end (), m.item) != want.end (); });
-        if (on) sel.addRange ({ r, r + 1 });
-    }
+    // whole group is selected (the only row of a collapsed group).
+    const auto* d = app.doc ();
+    const auto sel = d != nullptr ? sc::groups::rowsForItems (rows_, d->drawingGroupIds (), app.selectedDrawings)
+                                  : juce::SparseSet<int> ();
     if (sel == table.getSelectedRows ()) return;
     syncingSelection_ = true;
     table.setSelectedRows (sel, juce::sendNotification);   // selectedRowsChanged: no fit while syncing
@@ -8901,10 +9103,13 @@ void DrawingPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int colum
                          anyShown);
         else if (columnId == 2)
         {
+            // The fold arrow, then the group's name.
+            sc::groups::drawDisclosure (g, juce::Rectangle<float> (0.0f, 0.0f, (float) sc::groups::kDisclosureW, (float) height),
+                                        d->drawingGroups.isCollapsed (row.group));
             g.setColour (juce::Colours::white);
             g.setFont (juce::Font (juce::FontOptions (11.0f)).boldened ());
-            g.drawText ("Group " + juce::String (row.group), 4, 0, width - 8, height,
-                        juce::Justification::centredLeft, false);
+            g.drawText (d->drawingGroups.nameOf (row.group), sc::groups::kDisclosureW, 0,
+                        width - sc::groups::kDisclosureW - 4, height, juce::Justification::centredLeft, true);
         }
         else
         {
@@ -8916,7 +9121,7 @@ void DrawingPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int colum
     }
     if (row.item >= (int) d->drawings.size ()) return;
     const DrawingItem& it = d->drawings [(size_t) row.item];
-    const int indent = row.group != 0 ? 14 : 0;   // a group's members sit under it
+    const int indent = row.group != 0 ? sc::groups::kDisclosureW : 0;   // a group's members sit under it
 
     if (columnId == 1)   // per-item visibility eye icon
     {
@@ -8941,6 +9146,18 @@ void DrawingPanel::Model::paintCell (juce::Graphics& g, int rowNumber, int colum
 void DrawingPanel::Model::cellClicked (int rowNumber, int columnId, const juce::MouseEvent& e)
 {
     if (rowNumber < 0 || rowNumber >= getNumRows ()) return;
+    // A group's fold arrow (left of its name): fold or unfold, nothing else.
+    if (columnId == 2 && !e.mods.isRightButtonDown () && owner->groupOfRow (rowNumber) != 0)
+    {
+        auto& hdr = owner->table.getHeader ();
+        const int x0 = hdr.getColumnPosition (hdr.getIndexOfColumnId (2, true)).getX ();
+        if (e.x - x0 < sc::groups::kDisclosureW)
+        {
+            owner->cancelPendingFit ();
+            owner->toggleCollapsed (rowNumber);
+            return;
+        }
+    }
     // The eye icon toggles visibility on LEFT clicks only; a right-click there
     // just shows the context menu like any other cell.
     if (columnId == 1 && !e.mods.isRightButtonDown())
@@ -8966,9 +9183,16 @@ void DrawingPanel::Model::cellClicked (int rowNumber, int columnId, const juce::
     owner->onRowClicked (rowNumber, e);
 }
 
-void DrawingPanel::Model::cellDoubleClicked (int rowNumber, int, const juce::MouseEvent&)
+void DrawingPanel::Model::cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&)
 {
     if (rowNumber < 0 || rowNumber >= getNumRows ()) return;
+    // A double-click on a group's name renames the group.
+    if (columnId == 2)
+        if (const int g = owner->groupOfRow (rowNumber); g != 0)
+        {
+            owner->showRenameGroupDialog (g);
+            return;
+        }
     owner->anchorRow = rowNumber;
     juce::SparseSet<int> sel;
     sel.addRange ({ rowNumber, rowNumber + 1 });
@@ -9245,9 +9469,10 @@ void DrawingPanel::mouseDown (const juce::MouseEvent& e)
     showContextMenu (row);
 }
 
-void DrawingPanel::showContextMenu (int)
+juce::PopupMenu DrawingPanel::buildContextMenu ()
 {
     const int nSel = table.getNumSelectedRows ();
+    const auto* d = app.doc ();
 
     juce::PopupMenu m;
     m.addItem (10, "New Text\tT");
@@ -9264,16 +9489,22 @@ void DrawingPanel::showContextMenu (int)
         // Groups: two or more drawings become one; Ungroup frees them.
         const auto items = itemsOfRows (selectedRowIndices ());
         bool inGroup = false;
-        if (const auto* d = app.doc ())
+        if (d != nullptr)
             for (int i : items)
                 if (i < (int) d->drawings.size () && d->drawings[(size_t) i].group != 0) inGroup = true;
+        const bool anyGroup = d != nullptr && ! sc::groups::liveIds (d->drawingGroupIds ()).empty ();
         m.addSeparator ();
         m.addItem (40, "Group", items.size () >= 2);
         m.addItem (41, "Ungroup", inGroup);
+        m.addItem (42, "Rename Group...", groupOfRow (primaryRow ()) != 0);
+        m.addItem (43, "Collapse All Groups", anyGroup);
+        m.addItem (44, "Expand All Groups", anyGroup);
     }
+    return m;
+}
 
-
-    const int id = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
+void DrawingPanel::runContextMenuItem (int id)
+{
     if (id == 10)      { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Text); }
     else if (id == 11) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Arrow); }
     else if (id == 12) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Rectangle); }
@@ -9281,9 +9512,18 @@ void DrawingPanel::showContextMenu (int)
     else if (id == 14) { if (app.onArmNewDrawing) app.onArmNewDrawing (DrawingItem::Kind::Ellipse); }
     else if (id == 40) groupSelected ();
     else if (id == 41) ungroupSelected ();
+    else if (id == 42) showRenameGroupDialog (groupOfRow (primaryRow ()));
+    else if (id == 43) app.setDrawingGroupCollapsed (0, true);
+    else if (id == 44) app.setDrawingGroupCollapsed (0, false);
     else if (id == 20) toggleShowAll ();
     else if (id == 30) showEditDialog (primaryRow ());   // a drawing's row (not a group's)
     else if (id == 31) deleteSelected ();
+}
+
+void DrawingPanel::showContextMenu (int)
+{
+    const int id = buildContextMenu ().showMenu (juce::PopupMenu::Options ().withMousePosition ());
+    runContextMenuItem (id);
 }
 
 void DrawingPanel::showEditDialog (int row)

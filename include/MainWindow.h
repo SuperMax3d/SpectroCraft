@@ -10,6 +10,7 @@
 #include "Panels.h"
 #include "ScaleForm.h"   // ScaleFormWindow::PickAction in handleScalePick
 #include "Docking.h"   // Adobe-style docking workspace (panel groups, floating windows)
+#include "MainToolbar.h"   // the toolbar in the menu bar row (issue #43)
 #include <memory>
 #include <algorithm>
 #include <atomic>
@@ -379,6 +380,35 @@ public:
     sc::dock::Workspaces& workspaces() noexcept { return workspaces_; }
     juce::Component* editorPanelComp() const noexcept { return editorPanel_.get(); }
     sc::dock::WorkspaceBar* workspaceBarComp() const noexcept { return workspaceBar_.get(); }
+
+    // ---- Toolbar (issue #43): the menu bar row, left of the workspace bar --
+    sc::toolbar::Toolbar* toolbarComp() const noexcept { return toolbar_.get(); }
+    /** A toolbar button: "undo", "redo", "tool.timeRange" ... "tool.move",
+        "view.toggle", "marker.add", "draw.freehand" ... "draw.oval",
+        "custom.1" .. "custom.9" (an empty one asks what it should do). */
+    void runToolbarCommand (const juce::String& id);
+    /** Runs custom shortcut `slot` (0-based); false when it is not defined
+        or its command / script is gone (the user is told). */
+    bool runCustomShortcut (int slot);
+    /** Right-click on a custom shortcut: Define / Change..., Clear, Hide Toolbar. */
+    void showCustomShortcutMenu (int slot);
+    /** The dialog that defines custom shortcut `slot`. */
+    void showCustomShortcutDialog (int slot);
+    /** Stores custom shortcut `slot` (an undefined one clears it), saved in
+        the settings. Returns "" when done, otherwise why not: its keyboard
+        shortcut is already used ("Ctrl+H is already used by ..."). */
+    juce::String setCustomShortcut (int slot, const sc::toolbar::CustomShortcut& s);
+    /** What already uses the key (canonical form, sc::toolbar::canonical):
+        a menu item ("Edit > Undo"), a key of the main window ("Add Marker"),
+        another custom shortcut ("Shortcut 3"); "" when it is free. The custom
+        slot `ignoreSlot` (the one being edited) does not count. */
+    juce::String shortcutUsedBy (const juce::String& key, int ignoreSlot = -1);
+    /** Every command of the menu bar as its path ("Effects > Normalize"). */
+    juce::StringArray menuCommandPaths();
+    /** Runs the menu command at `path`; false when no enabled item has it. */
+    bool runMenuCommandPath (const juce::String& path);
+    bool isToolbarVisible() const noexcept { return toolbarVisible_; }
+    void setToolbarVisible (bool on);
     /** Tabs of the group holding a panel, as shown (titles), empty if closed. */
     juce::StringArray panelGroupTitles (const juce::String& id) const;
     void saveDockLayout();                    // persist the arrangement now
@@ -665,8 +695,9 @@ public:
         EditTrimSelection,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,
         EditPasteToNewChannels,
-        // Sessions (issue #21): Selection > Move Files (V), View > Show File Borders.
+        // Selection > Move (V; drawings, session files - issues #41, #21), View > Show File Borders.
         SelectionMoveFiles = 2100, ViewShowFileBorders,
+        ViewShowToolbar = 2110,   // View > Toolbar (issue #43)
         ViewZoomIn = 3000, ViewZoomOut, ViewZoomFit, ViewZoomToSelection, ViewZoomOutFull,
         ViewVerticalZoomIn,
         ViewVerticalZoomOut, ViewShowWaveform, ViewShowSpectral, ViewShowAllChannels,
@@ -871,6 +902,11 @@ private:
     void refreshEditorTabTitles();     // tab titles <- file names (cheap: after Save As...)
     void activateDocById (int docId);  // a document's tab was clicked
     std::unique_ptr<sc::dock::WorkspaceBar> workspaceBar_;  // right of the menu bar
+    std::unique_ptr<sc::toolbar::Toolbar> toolbar_;           // left of the workspace bar (issue #43)
+    bool toolbarVisible_ = true;
+    bool sendingCustomKeys_ = false;          // a custom shortcut sends its keys: no custom dispatch
+    juce::uint32 toolbarRefreshedAt_ = 0;     // the timer refreshes the toolbar a few times a second
+    void refreshToolbar();
     std::unique_ptr<sc::dock::DockManager> dock_;
     bool dockLayoutDirty_ = false;            // save pending (debounced in the timer)
     juce::uint32 dockLayoutDirtyAt_ = 0;

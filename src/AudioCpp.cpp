@@ -213,6 +213,95 @@ juce::String audioSRUrl(const juce::String& fileName)
     return "https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/" + fileName;
 }
 
+std::vector<ModelOption> modelOptions(const juce::String& family, const juce::File& d)
+{
+    const juce::File root = (d.getFullPathName().isEmpty() ? dir() : d);
+    std::vector<ModelOption> out;
+    std::vector<juce::File> installed;
+    auto addCatalogue = [&] (const juce::String& relPath, const juce::String& url, int64_t size)
+    {
+        ModelOption o;
+        o.dest = root.getChildFile (relPath);
+        o.name = o.dest.getFileName();
+        o.url = url;
+        o.sizeBytes = size;
+        for (const auto& f : installed)
+            if (f.getFileName().equalsIgnoreCase (o.name)) o.file = f;
+        out.push_back (o);
+    };
+    auto addRest = [&]
+    {
+        for (const auto& f : installed)
+        {
+            bool known = false;
+            for (const auto& o : out)
+                if (o.name.equalsIgnoreCase (f.getFileName())) known = true;
+            if (!known)
+            {
+                ModelOption o;
+                o.name = f.getFileName();
+                o.file = f;
+                o.dest = f;
+                out.push_back (o);
+            }
+        }
+    };
+
+    if (family == "sam")
+    {
+        installed = listModels (root);
+        for (const auto& m : modelChoices())
+            addCatalogue (m.file, modelUrl (m.file), m.sizeBytes);
+    }
+    else if (family == "whinehiss" || family == "whinehissclickbump")
+    {
+        const bool wh = family == "whinehiss";
+        installed = wh ? listWhineHissModels (root) : listWhineHissClickBumpModels (root);
+        const juce::String folder = wh ? "HTDemucs-WhineHiss-v1-GGUF" : "HTDemucs-WhineHiss-ClickBump-v1-GGUF";
+        for (const auto& m : demucsEngineChoices())
+            if (m.mode == (wh ? 4 : 5))
+                addCatalogue (folder + "/" + juce::String (m.file), demucsEngineUrl (m.file), m.sizeBytes);
+    }
+    else if (family == "flashsr")
+    {
+        if (const juce::File f = flashSrModelFile (root); f != juce::File())
+            installed.push_back (f);
+        for (const auto& m : flashSrChoices())
+            addCatalogue (m.file, flashSrUrl (m.file), m.sizeBytes);
+    }
+    else if (family == "audiosr")
+    {
+        installed = listAudioSRModels (root);
+        for (const auto& m : audioSRChoices())
+            addCatalogue (m.file, audioSRUrl (m.file), m.sizeBytes);
+    }
+    else if (family == "demucs6")
+        installed = listDemucs6Models (root);
+    else if (family == "demucsft")
+    {
+        if (const juce::File ft = demucsFtModelDir (root); ft != juce::File())
+        {
+            ModelOption o;
+            o.name = "htdemucs_ft";
+            o.file = ft;
+            o.dest = ft;
+            out.push_back (o);
+        }
+        return out;
+    }
+    addRest();
+    return out;
+}
+
+int binaryChoiceForBackend(const juce::String& backendCli)
+{
+    const auto choices = binaryChoices();
+    for (size_t i = 0; i < choices.size(); ++i)
+        if (juce::String (choices[i].id).startsWithIgnoreCase (backendCli))
+            return (int) i;
+    return 0;
+}
+
 std::vector<BinarySpec> binaryChoices()
 {
     const char* base = "https://github.com/0xShug0/audio.cpp/releases/download/v0.9.2-drama3-base-small/";

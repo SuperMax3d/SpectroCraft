@@ -2,6 +2,7 @@
 // SpectroCraft - Effects > Super Resolution (external audio.cpp CLI tool).
 #include <JuceHeader.h>
 #include "Application.h"
+#include "AudioCpp.h"   // sc::acpp::ModelOption
 
 /** Non-modal window driving the external super-resolution CLI: pick a range,
     choose FlashSR or AudioSR + model + backend, run it on a worker thread and
@@ -28,6 +29,9 @@ public:
     void setModelsRootForTest(const juce::File& root) { modelsRoot_ = root; refreshModelList (); }
     juce::String startTextForTest() const { return startEdit_.getText (); }
     juce::String endTextForTest() const { return endEdit_.getText (); }
+    /** Every version of the mode's model, installed or not (issue #38). */
+    const std::vector<sc::acpp::ModelOption>& modelOptionsForTest() const { return modelOptions_; }
+    juce::String statusTextForTest() const { return statusLabel_.getText (); }
 
 private:
     // Empty override = the default %APPDATA%/SpectroCraft/models/audiocpp location.
@@ -40,8 +44,9 @@ private:
     void refreshStatusIdle();
     void refreshDurationLabel();
     void doSelectAll();
-    void openDownloadDialog();
     void startRun();
+    /** The version picked in the Model list (nullptr: none). */
+    const sc::acpp::ModelOption* selectedOption() const;
 
     struct RunJob;   // defined in the .cpp
     void runWorker(std::unique_ptr<RunJob> job);
@@ -67,8 +72,8 @@ private:
     juce::Label statusLabel_;
     juce::ComboBox outputCombo_;         // 1=new file 2=overwrite current 3=append to current
     juce::TextButton cancelBtn_;         // closes the window without running
-    juce::TextButton downloadBtn_;
-    juce::TextButton runBtn_;
+    juce::TextButton runBtn_;            // downloads what is missing first (asks), then runs
+    std::vector<sc::acpp::ModelOption> modelOptions_;   // the Model list's rows
 
     // Guards the detached worker threads (download / run) against this
     // window being closed while they are still active: workers capture a copy

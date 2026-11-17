@@ -53,6 +53,11 @@ public:
     juce::Component* rowsHostForTest() { return &rowsHost_; }
     juce::ComboBox* modeComboForTest() { return &modeCombo_; }
     juce::ComboBox* outputComboForTest() { return &outputCombo_; }
+    juce::ComboBox* modelComboForTest() { return &modelCombo_; }
+    /** Every version of the mode's model, installed or not (issue #38). */
+    const std::vector<sc::acpp::ModelOption>& modelOptionsForTest() const { return modelOptions_; }
+    juce::String statusTextForTest() const { return statusLabel_.getText (); }
+    void refreshModelListForTest() { refreshModelList (); }
     int selectedModeId() const { return modeCombo_.getSelectedItemIndex () + 1; }   // 1=Sam Audio 2-5=htdemucs
     bool demucsMode() const { return modeCombo_.getSelectedItemIndex () >= 1; }
 
@@ -75,8 +80,13 @@ private:
 
     // --- actions ------------------------------------------------------------
     void doSelectAll();
-    void openDownloadDialog();
     void startRun();
+    /** The model family of the selected mode ("sam", "demucs6", ...). */
+    juce::String familyForMode() const;
+    /** The version picked in the Model list (nullptr: none for this mode). */
+    const sc::acpp::ModelOption* selectedOption() const;
+    /** The remembered model name of the selected mode (settings). */
+    juce::String& savedModelName();
 
     // --- worker -------------------------------------------------------------
     struct RunJob;   // defined in the .cpp
@@ -109,8 +119,8 @@ private:
     juce::Label statusLabel_;
     juce::ComboBox outputCombo_;         // 1=new file 2=overwrite current 3=append to current
     juce::TextButton cancelBtn_;         // closes the window without running
-    juce::TextButton downloadBtn_;
-    juce::TextButton runBtn_;
+    juce::TextButton runBtn_;            // downloads what is missing first (asks), then runs
+    std::vector<sc::acpp::ModelOption> modelOptions_;   // the Model list's rows
 
     // Guards the detached worker threads (download / run) against this
     // window being closed while they are still active: workers capture a copy

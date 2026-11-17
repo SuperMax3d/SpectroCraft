@@ -1555,12 +1555,20 @@ void Application::setSelection (juce::Range<double> s, bool snapEdges)
 void Application::setSelectionTool (SpectralSelMode m)
 {
     selMode = m;
-    sessionMoveTool = false;   // a selection tool replaces Move Files (V)
+    moveTool = false;   // a selection tool replaces Move (V)
     // Leaving the spectral tools drops any active spectral selection: the time
     // range is what Time Range mode operates on, and keeping stale shapes
     // around would surprise the next effect.
     if (m == SpectralSelMode::TimeRange && doc() && !doc()->spectralSel.empty ())
         clearSpectralSelection ();
+}
+
+void Application::setMoveTool (bool on)
+{
+    if (on && !audioEngine().isFileLoaded()) on = false;
+    if (moveTool == on) return;
+    moveTool = on;
+    if (onStateChange) onStateChange ();   // the views redraw (handles), the menus and the status bar follow
 }
 
 void Application::clearSpectralSelection ()
@@ -1844,6 +1852,85 @@ void Application::ungroupDrawings (const std::vector<int>& items)
         if (std::find (groups.begin (), groups.end (), it.group) != groups.end ()) it.group = 0;
     d->metaDirty = true;
     if (onDrawingsChanged) onDrawingsChanged ();
+}
+
+void Application::renameDrawingGroup (int groupId, const juce::String& name)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr || groupId <= 0) return;
+    if (d->drawingGroups.nameOf (groupId) == (name.trim ().isEmpty () ? ItemGroupList::defaultName (groupId)
+                                                                       : name.trim ()))
+        return;
+    d->drawingGroups.setName (groupId, name);
+    d->metaDirty = true;   // the name is saved with the file
+    if (onDrawingsChanged) onDrawingsChanged ();
+}
+
+void Application::setDrawingGroupCollapsed (int groupId, bool collapsed)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr) return;
+    // Folding is how the list looks: saved with the next Save, but it does
+    // not make the document dirty on its own.
+    for (int g : sc::groups::liveIds (d->drawingGroupIds ()))
+        if (groupId == 0 || g == groupId)
+            d->drawingGroups.setCollapsed (g, collapsed);
+    if (onDrawingsChanged) onDrawingsChanged ();
+}
+
+void Application::groupSavedSelections (const std::vector<int>& items)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr) return;
+    std::vector<int> valid;
+    for (int i : items)
+        if (i >= 0 && i < (int) d->savedSelections.size ()
+            && std::find (valid.begin (), valid.end (), i) == valid.end ())
+            valid.push_back (i);
+    if (valid.size () < 2) return;
+    int id = 0;
+    for (const auto& s : d->savedSelections) id = std::max (id, s.group);
+    ++id;   // a new group, never reusing a live id
+    for (int i : valid) d->savedSelections[(size_t) i].group = id;
+    d->metaDirty = true;
+    if (onSavedSelectionsChanged) onSavedSelectionsChanged ();
+}
+
+void Application::ungroupSavedSelections (const std::vector<int>& items)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr) return;
+    std::vector<int> groups;
+    for (int i : items)
+        if (i >= 0 && i < (int) d->savedSelections.size () && d->savedSelections[(size_t) i].group != 0)
+            groups.push_back (d->savedSelections[(size_t) i].group);
+    if (groups.empty ()) return;
+    for (auto& s : d->savedSelections)
+        if (std::find (groups.begin (), groups.end (), s.group) != groups.end ()) s.group = 0;
+    d->metaDirty = true;
+    if (onSavedSelectionsChanged) onSavedSelectionsChanged ();
+}
+
+void Application::renameSelectionGroup (int groupId, const juce::String& name)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr || groupId <= 0) return;
+    if (d->selectionGroups.nameOf (groupId) == (name.trim ().isEmpty () ? ItemGroupList::defaultName (groupId)
+                                                                         : name.trim ()))
+        return;
+    d->selectionGroups.setName (groupId, name);
+    d->metaDirty = true;
+    if (onSavedSelectionsChanged) onSavedSelectionsChanged ();
+}
+
+void Application::setSelectionGroupCollapsed (int groupId, bool collapsed)
+{
+    FileDoc* d = doc ();
+    if (d == nullptr) return;
+    for (int g : sc::groups::liveIds (d->selectionGroupIds ()))
+        if (groupId == 0 || g == groupId)
+            d->selectionGroups.setCollapsed (g, collapsed);
+    if (onSavedSelectionsChanged) onSavedSelectionsChanged ();
 }
 
 std::pair<double, double> Application::clampToSpectrogram (std::pair<double, double> tf) const

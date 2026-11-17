@@ -6,7 +6,7 @@
 #include <vector>
 
 /*  Session files in the waveform and spectrogram views (issue #21): their
-    outlines and names (Edit > Session > Show File Borders) and the Move Files
+    outlines and names (Edit > Session > Show File Borders) and the Move (V)
     tool's drag, shared by both views. A view describes its layout with a
     ViewGeometry; everything else is computed here. */
 namespace sc::session
@@ -50,7 +50,7 @@ int clipAtNameTag (const Session& s, const ViewGeometry& g, juce::Point<int> p);
 /** The file under p (any file, the main one included), or -1. */
 int clipAtPoint (const Session& s, const ViewGeometry& g, juce::Point<int> p);
 
-/** The Move Files tool's drag. */
+/** The Move tool's drag (Selection > Move, V). */
 class MoveGesture
 {
 public:

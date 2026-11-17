@@ -28,6 +28,7 @@
 #include "VideoFrames.h"
 #include "VideoWindow.h"
 #include "WorkProgress.h"
+#include "AiDownloadPrompt.h"   // "(Download Required)" + the download confirmation (issue #38)
 #include "StemSeparation.h"
 #include "SuperResolution.h"
 #if defined(SC_ENABLE_AI) && SC_ENABLE_AI
@@ -510,6 +511,50 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     workspaceBar_->onMenuResult = [this] (int id) { handleWorkspaceCommand (id, workspaceMenuTarget_); };
     juce::Component::addAndMakeVisible (workspaceBar_.get ());
 
+    // Toolbar (issue #43): in the menu bar row, left of the workspace bar.
+    toolbar_ = std::make_unique<sc::toolbar::Toolbar> ();
+    toolbar_->onCommand = [this] (const juce::String& id) { runToolbarCommand (id); };
+    toolbar_->onCustomMenu = [this] (int slot) { showCustomShortcutMenu (slot); };
+    toolbar_->isOn = [this] (const juce::String& id)
+    {
+        const bool moving = app.moveTool;
+        if (id == "tool.timeRange")  return ! moving && app.selMode == SpectralSelMode::TimeRange;
+        if (id == "tool.marquee")    return ! moving && app.selMode == SpectralSelMode::Marquee;
+        if (id == "tool.lasso")      return ! moving && app.selMode == SpectralSelMode::Lasso;
+        if (id == "tool.paintbrush") return ! moving && app.selMode == SpectralSelMode::Paintbrush;
+        if (id == "tool.move")       return moving;
+        if (id.startsWith ("draw.") && spectralView != nullptr && spectralView->isPendingDraw ())
+        {
+            const auto k = spectralView->pendingDrawKind ();
+            return (id == "draw.freehand" && k == DrawingItem::Kind::Freehand) || (id == "draw.text" && k == DrawingItem::Kind::Text)
+                || (id == "draw.arrow" && k == DrawingItem::Kind::Arrow) || (id == "draw.rectangle" && k == DrawingItem::Kind::Rectangle)
+                || (id == "draw.oval" && k == DrawingItem::Kind::Ellipse);
+        }
+        return false;
+    };
+    toolbar_->isEnabled = [this] (const juce::String& id)
+    {
+        const bool hasFile = app.audioEngine ().isFileLoaded ();
+        if (id == "undo") return app.undo ().canUndo ();
+        if (id == "redo") return app.undo ().canRedo ();
+        if (id == "tool.timeRange" || id == "view.toggle") return true;
+        return hasFile;
+    };
+    toolbar_->shortcutFor = [] (const juce::String& id) -> juce::String
+    {
+        static const std::map<juce::String, juce::String> keys {
+            { "undo", "cmd+z" }, { "redo", "cmd+y" }, { "tool.timeRange", "s" }, { "tool.marquee", "m" },
+            { "tool.lasso", "l" }, { "tool.paintbrush", "p" }, { "tool.move", "v" }, { "view.toggle", "f9" },
+            { "marker.add", "f8" }, { "draw.freehand", "d" }, { "draw.text", "t" }, { "draw.arrow", "a" },
+            { "draw.rectangle", "r" }, { "draw.oval", "o" } };
+        const auto it = keys.find (id);
+        return it != keys.end () ? sc::toolbar::displayText (it->second) : juce::String ();
+    };
+    toolbar_->setCustom (sc::toolbar::parse (app.recentStore->getValue ("toolbar_shortcuts")));
+    toolbarVisible_ = app.recentStore->getIntValue ("toolbar_visible", 1) != 0;
+    juce::Component::addChildComponent (toolbar_.get ());
+    toolbar_->setVisible (toolbarVisible_);
+
     splitter = std::make_unique<ViewSplitter>();
     splitter->onDrag = [this] (const juce::MouseEvent& e) { handleSplitterDrag (e); };
     splitter->setTooltip ("Drag to adjust the height of the waveform and spectrogram views.");
@@ -637,6 +682,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
     {
         if (drawingPanel) drawingPanel->syncSelectionFromApp();
         if (spectralView) spectralView->repaint();
+    };
+    // Stored selections grouped, ungrouped, renamed or folded (issue #39).
+    app.onSavedSelectionsChanged = [this]
+    {
+        if (selectionPanel) selectionPanel->refresh();
     };
 
     // Tables panel <-> views wiring: refresh the list, repaint overlays and
@@ -872,6 +922,7 @@ MainWindow::~MainWindow()
     app.onArmNewDrawing = nullptr;
     app.onDrawingsChanged = nullptr;
     app.onDrawingSelectionChanged = nullptr;
+    app.onSavedSelectionsChanged = nullptr;
     app.onTablesChanged = nullptr;
     app.onArmTableAlignClick = nullptr;
     app.onSetSpectralFreqRange = nullptr;
@@ -1066,6 +1117,17 @@ void MainWindow::resized()
     {
         const int w = std::min (workspaceBar_->idealWidth (), std::max (0, menuRow.getWidth () / 2));
         workspaceBar_->setBounds (menuRow.removeFromRight (w));
+    }
+    // The toolbar (issue #43) fills what the menu names leave free, left of
+    // the workspace bar; the groups that do not fit are hidden.
+    if (toolbar_ != nullptr && toolbarVisible_)
+    {
+        int namesW = 8;
+        const auto names = getMenuBarNames ();
+        for (int i = 0; i < names.size (); ++i)
+            namesW += getLookAndFeel ().getMenuBarItemWidth (menuBar, i, names[i]);
+        const int w = std::min (toolbar_->idealWidth (), std::max (0, menuRow.getWidth () - namesW));
+        toolbar_->setBounds (menuRow.removeFromRight (w));
     }
 
     // Status bar at the very bottom, full window width. (resized() can run
@@ -1809,6 +1871,9 @@ void MainWindow::userTriedToCloseWindow()
 
 void MainWindow::timerCallback()
 {
+    // The toolbar follows Undo / Redo and an armed drawing a few times a second.
+    if (juce::Time::getMillisecondCounter () - toolbarRefreshedAt_ > 200)
+        refreshToolbar ();
     // Docking: save the arrangement shortly after the last change (a gap
     // drag or a burst of tab clicks writes the settings once).
     if (dockLayoutDirty_ && juce::Time::getMillisecondCounter () - dockLayoutDirtyAt_ > 400)
@@ -2421,8 +2486,8 @@ juce::String MainWindow::currentModeText() const
             break;
         default: break;
     }
-    if (app.sessionMoveTool)
-        mode = "Move Files";   // sessions (issue #21): V
+    if (app.moveTool)
+        mode = "Move";   // drawings, session files (issues #41, #21): V
 
     // Clone & Multiply picking overrides the tool indicator with a hint.
     if (app.isClonePicking ())
@@ -2467,6 +2532,7 @@ bool MainWindow::sessionBarWanted() const
 
 void MainWindow::syncSharedState()
 {
+    refreshToolbar ();   // the tools on, Undo / Redo usable
     // Sessions (issue #21): after an edit of one copy of a file that is in
     // the session several times, the other copies follow (a chained step).
     app.syncLinkedSessionFiles();
@@ -4790,8 +4856,11 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             if (app.onStateChange) app.onStateChange();   // persist the new state
             break;
         case SelectionMoveFiles:
-            app.sessionMoveTool = !app.sessionMoveTool;
+            app.setMoveTool (!app.moveTool);
             syncSharedState();
+            break;
+        case ViewShowToolbar:
+            setToolbarVisible (! toolbarVisible_);
             break;
         case ViewShowFileBorders:
             app.setSessionBordersVisible (!app.settings.sessionShowBorders);
@@ -8789,6 +8858,37 @@ std::string aiDevicePrefFromText (const juce::String& text)
 
 } // namespace sc
 
+// Issue #38: every model is listed, a missing one marked "(Download Required)";
+// Run asks once before downloading it.
+static bool aiModelInstalled (const std::string& id)
+{
+    auto& mm = sc::ai::ModelManager::instance ();
+    const auto* spec = mm.find (id);
+    return spec != nullptr && mm.isInstalled (*spec);
+}
+
+static sc::aidl::Item aiModelDownloadItem (const std::string& id)
+{
+    sc::aidl::Item it;
+    if (const auto* spec = sc::ai::ModelManager::instance ().find (id))
+    {
+        it.name = juce::String (spec->displayName);
+        for (const auto& f : spec->files) it.bytes += f.sizeBytes;
+    }
+    else
+        it.name = juce::String (id);
+    return it;
+}
+
+// Noise Suppression models, in the dialog's order.
+static const std::vector<std::pair<std::string, juce::String>>& nsModels()
+{
+    static const std::vector<std::pair<std::string, juce::String>> m {
+        { "denseunet", "DenseUNet (legacy)" }, { "deepfilternet2", "DeepFilterNet2" },
+        { "deepfilternet3", "DeepFilterNet3" } };
+    return m;
+}
+
 // Shared failure dialog for the AI features: a copyable read-only text editor
 // with the error details (paths/URLs), built by sc::buildNsFailureDetails().
 static void showAiFailureDialog (const juce::String& feature, const std::string& err,
@@ -8822,8 +8922,8 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
 {
     auto* w = new OwningAlertWindow ("Noise Suppression",
                                      "The selection will be processed by the chosen AI model.\n"
-                                     "First use downloads the model weights to\n"
-                                     "%APPDATA%/SpectroCraft/models.\n"
+                                     "A model marked (Download Required) is downloaded first, after\n"
+                                     "you confirm, to %APPDATA%/SpectroCraft/models.\n"
                                      "\n"
                                      "Device: Auto picks GPU over NPU over CPU when available;\n"
                                      "pick one explicitly to override (unavailable devices fall back to CPU).\n"
@@ -8838,15 +8938,19 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
                                      "containing only the estimated noise (original minus enhanced).",
                                      juce::AlertWindow::QuestionIcon, this);
 
-    const juce::StringArray modelNames { "DenseUNet (legacy)", "DeepFilterNet2", "DeepFilterNet3" };
+    juce::StringArray modelNames;
+    for (const auto& m : nsModels ())
+        modelNames.add (sc::aidl::label (m.second, aiModelInstalled (m.first)));
     w->addComboBox ("model", modelNames, "Model");
 
     // Remember the last choice between sessions.
     if (auto* c = w->getComboBoxComponent ("model"))
     {
-        const int idx = app.lastNsModelId == "deepfilternet2" ? 1
-                        : app.lastNsModelId == "deepfilternet3" ? 2 : 0;
+        int idx = 0;
+        for (size_t i = 0; i < nsModels ().size (); ++i)
+            if (nsModels ()[i].first == app.lastNsModelId) idx = (int) i;
         c->setSelectedItemIndex (idx);
+        c->setTooltip ("AI model. One marked (Download Required) is downloaded when you press OK.");
     }
 
     w->addComboBox ("device", sc::aiDeviceNames (), "Device");
@@ -8859,12 +8963,6 @@ juce::AlertWindow* MainWindow::createNoiseSuppressDialog()
     if (auto* e = w->getTextEditor ("attenLim"))
         e->setTooltip ("Most the noise may be reduced, in dB. A lower value keeps more of the "
                        "original sound; 100 = no limit.");
-
-    w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
-                    "Auto-download model if missing");
-    // The persisted choice is preselected.
-    if (auto* c = w->getComboBoxComponent ("autoDl"))
-        c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
 
     // "Copy noise on new track": one appended channel per processed channel
     // holding only the estimated noise (original - enhanced).
@@ -8895,11 +8993,9 @@ void MainWindow::showNoiseSuppressDialog(std::function<void(bool)> onApplied)
         combo->grabKeyboardFocus();
 
     const int result = w->runModalLoop();
-    const juce::String modelText = w->getComboBoxComponent ("model") != nullptr
-                                       ? w->getComboBoxComponent ("model")->getText() : "";
+    const int modelIdx = w->getComboBoxComponent ("model") != nullptr
+                             ? w->getComboBoxComponent ("model")->getSelectedItemIndex () : 0;
     const float attenLimDb = (float) w->getTextEditorContents ("attenLim").trim().getDoubleValue();
-    const bool autoDownload = w->getComboBoxComponent ("autoDl") == nullptr
-                               || w->getComboBoxComponent ("autoDl")->getText() == "Yes";
     const bool copyNoise = w->getComboBoxComponent ("copyNoise") == nullptr
                              || w->getComboBoxComponent ("copyNoise")->getText () == "Yes";
     const std::string devicePref = sc::aiDevicePrefFromText (w->getComboBoxComponent ("device") != nullptr
@@ -8908,14 +9004,17 @@ void MainWindow::showNoiseSuppressDialog(std::function<void(bool)> onApplied)
     delete w;
     if (result != 1) { if (onApplied) onApplied (false); return; }
 
-    const std::string modelId = modelText == "DeepFilterNet2" ? "deepfilternet2"
-                                 : modelText == "DeepFilterNet3" ? "deepfilternet3"
-                                                                 : "denseunet";
+    const std::string modelId = nsModels ()[(size_t) juce::jlimit (0, (int) nsModels ().size () - 1, modelIdx)].first;
     // Remember the choices for next time.
     app.lastNsModelId  = modelId;
-    app.aiAutoDownload = autoDownload;
     app.aiDevicePref   = devicePref;
     app.saveAiSettings();
+
+    // A model not on this computer yet: ask once, then download and run.
+    if (!aiModelInstalled (modelId)
+        && !sc::aidl::confirmDownload ("Noise Suppression", { aiModelDownloadItem (modelId) }, this))
+    { if (onApplied) onApplied (false); return; }
+    const bool autoDownload = true;
 
     app.recordActionStep (sc::actionTypes::kNoiseSuppress,
         sc::makeVarObject ({
@@ -9070,12 +9169,14 @@ static juce::StringArray whisperModelIds()
     return ids;
 }
 
+// Display names, a model not installed yet marked "(Download Required)".
 static juce::StringArray whisperModelNames()
 {
     juce::StringArray names;
-    for (const auto& s : sc::ai::ModelManager::instance ().registry ())
+    auto& mm = sc::ai::ModelManager::instance ();
+    for (const auto& s : mm.registry ())
         if (s.id.rfind ("whisper-", 0) == 0)
-            names.add (juce::String (s.displayName));
+            names.add (sc::aidl::label (juce::String (s.displayName), mm.isInstalled (s)));
     return names;
 }
 
@@ -9105,8 +9206,8 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
     auto* w = new OwningAlertWindow ("Transcription",
                                      "The WHOLE file will be transcribed by Whisper; the visible "
                                      "channels are mixed to mono.\n"
-                                     "First use downloads the model weights to\n"
-                                     "%APPDATA%/SpectroCraft/models.\n"
+                                     "A model marked (Download Required) is downloaded first, after\n"
+                                     "you confirm, to %APPDATA%/SpectroCraft/models.\n"
                                      "Larger models are more accurate but slower.\n"
                                      "Transcription runs on CPU (whisper.cpp b5454 prebuilt runtime).",
                                      juce::AlertWindow::QuestionIcon, this);
@@ -9136,11 +9237,6 @@ juce::AlertWindow* MainWindow::createTranscribeDialog()
     if (auto* c = w->getComboBoxComponent ("speed"))
         c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
 
-    w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
-                    "Auto-download model if missing");
-    if (auto* c = w->getComboBoxComponent ("autoDl"))
-        c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
-
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
     return w;
@@ -9159,24 +9255,21 @@ void MainWindow::showTranscribeDialog(std::function<void(bool)> onApplied)
         combo->grabKeyboardFocus ();
 
     const int result = w->runModalLoop ();
-    const juce::String modelText   = w->getComboBoxComponent ("model") != nullptr
-                                        ? w->getComboBoxComponent ("model")->getText () : "";
+    const int mi                   = w->getComboBoxComponent ("model") != nullptr
+                                        ? w->getComboBoxComponent ("model")->getSelectedItemIndex () : -1;
     const juce::String langText    = w->getComboBoxComponent ("language") != nullptr
                                         ? w->getComboBoxComponent ("language")->getText () : "auto";
     const bool translate           = w->getComboBoxComponent ("mode") != nullptr
                                         && w->getComboBoxComponent ("mode")->getText () == "Translate to English";
     const bool fast                = w->getComboBoxComponent ("speed") != nullptr
                                         && w->getComboBoxComponent ("speed")->getText ().startsWith ("Fast");
-    const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
-                                       || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
     delete w;
     if (result != 1) { if (onApplied) onApplied (false); return; }
 
-    // Map the display texts back to registry ids / language codes.
-    const auto names = whisperModelNames ();
-    const int mi = names.indexOf (modelText);
-    if (mi < 0) { if (onApplied) onApplied (false); return; }
-    const std::string modelId = whisperModelIds ()[(size_t) mi].toStdString ();
+    // Map the choices back to registry ids / language codes.
+    const auto ids = whisperModelIds ();
+    if (mi < 0 || mi >= ids.size ()) { if (onApplied) onApplied (false); return; }
+    const std::string modelId = ids[mi].toStdString ();
 
     const auto langNames = transcribeLanguageNames ();
     const int li = langNames.indexOf (langText);
@@ -9187,8 +9280,13 @@ void MainWindow::showTranscribeDialog(std::function<void(bool)> onApplied)
     app.lastTranscribeLanguage  = language;
     app.lastTranscribeTranslate = translate;
     app.lastTranscribeFast      = fast;
-    app.aiAutoDownload          = autoDownload;
     app.saveAiSettings ();
+
+    // A model not on this computer yet: ask once, then download and run.
+    if (!aiModelInstalled (modelId)
+        && !sc::aidl::confirmDownload ("Transcription", { aiModelDownloadItem (modelId) }, this))
+    { if (onApplied) onApplied (false); return; }
+    const bool autoDownload = true;
 
     app.recordActionStep (sc::actionTypes::kTranscribe,
         sc::makeVarObject ({
@@ -9316,11 +9414,6 @@ juce::AlertWindow* MainWindow::createTranscribeFolderDialog (const juce::File& f
     if (auto* c = w->getComboBoxComponent ("speed"))
         c->setSelectedItemIndex (app.lastTranscribeFast ? 1 : 0);
 
-    w->addComboBox ("autoDl", juce::StringArray { "Yes", "No" },
-                    "Auto-download model if missing");
-    if (auto* c = w->getComboBoxComponent ("autoDl"))
-        c->setSelectedItemIndex (app.aiAutoDownload ? 0 : 1);
-
     w->addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
     w->addButton ("Cancel", 2, juce::KeyPress (juce::KeyPress::escapeKey));
     return w;
@@ -9343,8 +9436,8 @@ void MainWindow::showTranscribeFolderDialog()
         combo->grabKeyboardFocus ();
 
     const int result = w->runModalLoop ();
-    const juce::String modelText   = w->getComboBoxComponent ("model") != nullptr
-                                        ? w->getComboBoxComponent ("model")->getText () : "";
+    const int mi                   = w->getComboBoxComponent ("model") != nullptr
+                                        ? w->getComboBoxComponent ("model")->getSelectedItemIndex () : -1;
     const juce::String langText    = w->getComboBoxComponent ("language") != nullptr
                                         ? w->getComboBoxComponent ("language")->getText () : "auto";
     const bool translate           = w->getComboBoxComponent ("mode") != nullptr
@@ -9354,8 +9447,6 @@ void MainWindow::showTranscribeFolderDialog()
     const bool skipExisting        = w->getComboBoxComponent ("existing") != nullptr
                                         && w->getComboBoxComponent ("existing")->getText ().startsWith ("Skip");
     const juce::String channelText = w->getTextEditorContents ("channel");
-    const bool autoDownload        = w->getComboBoxComponent ("autoDl") == nullptr
-                                       || w->getComboBoxComponent ("autoDl")->getText () == "Yes";
     delete w;
     if (result != 1) return;
 
@@ -9373,11 +9464,10 @@ void MainWindow::showTranscribeFolderDialog()
         return;
     }
 
-    // Map the display texts back to registry ids / language codes.
-    const auto names = whisperModelNames ();
-    const int mi = names.indexOf (modelText);
-    if (mi < 0) return;
-    const std::string modelId = whisperModelIds ()[(size_t) mi].toStdString ();
+    // Map the choices back to registry ids / language codes.
+    const auto ids = whisperModelIds ();
+    if (mi < 0 || mi >= ids.size ()) return;
+    const std::string modelId = ids[mi].toStdString ();
 
     const auto langNames = transcribeLanguageNames ();
     const int li = langNames.indexOf (langText);
@@ -9389,8 +9479,13 @@ void MainWindow::showTranscribeFolderDialog()
     app.lastTranscribeTranslate = translate;
     app.lastTranscribeFast      = fast;
     app.lastTranscribeChannel   = channel;
-    app.aiAutoDownload          = autoDownload;
     app.saveAiSettings ();
+
+    // A model not on this computer yet: ask once, then download and run.
+    if (!aiModelInstalled (modelId)
+        && !sc::aidl::confirmDownload ("Transcription", { aiModelDownloadItem (modelId) }, this))
+        return;
+    const bool autoDownload = true;
 
     runBatchTranscribeAsync (folder, modelId, language, translate, fast, skipExisting,
                              channel, autoDownload);
@@ -9655,7 +9750,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     else if (menuName == "Selection")
     {
         const bool hasFile = app.audioEngine().isFileLoaded();
-        const bool moving = app.sessionMoveTool;   // Move Files replaces the selection tool
+        const bool moving = app.moveTool;   // Move replaces the selection tool
 
         menu.addItem (SelectionToolTimeRange, "Time Range\tS", true,
                       !moving && app.selMode == SpectralSelMode::TimeRange);
@@ -9667,12 +9762,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       juce::String ("Paintbrush (") +
                           juce::String (app.brushPctValue ()) + "%\tP",
                       hasFile, !moving && app.selMode == SpectralSelMode::Paintbrush);
-        // Sessions (issue #21): drag the files of a session along the timeline.
-        {
-            const FileDoc* sd = app.doc();
-            const bool active = hasFile && sd != nullptr && sd->session.active();
-            menu.addItem (SelectionMoveFiles, "Move Files\tV", active, active && moving);
-        }
+        // Move (issue #41): the tool that selects, moves and resizes the
+        // drawings; in a session (issue #21) it also drags the files along
+        // the timeline.
+        menu.addItem (SelectionMoveFiles, "Move\tV", hasFile, hasFile && moving);
         menu.addSeparator ();
         menu.addItem (SelectionBrushSmaller, "Brush Smaller\t[", hasFile, false);
         menu.addItem (SelectionBrushLarger, "Brush Larger\t]", hasFile, false);
@@ -9695,6 +9788,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (ViewShowSpectral, "Spectrogram View", true, showSpectralView);
         menu.addItem (ViewShowAllChannels, "Show All Channels", app.audioEngine().isFileLoaded(), false);
         menu.addItem (ViewShowLeftPanels, "Panels\tCtrl+Shift+Enter", true, areLeftPanelsVisible ());
+        menu.addItem (ViewShowToolbar, "Toolbar", true, toolbarVisible_);
         menu.addSeparator();
         // Track axis placement: the vertical axis can sit on the right and
         // the time ruler at the bottom of both track views. The choices are
@@ -9983,6 +10077,16 @@ void MainWindow::handleFindPrevious ()
 
 bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
 {
+    // The custom toolbar shortcuts' own keys (issue #43) come first: they
+    // are checked against every key in use when they are set.
+    if (! sendingCustomKeys_ && toolbar_ != nullptr)
+        if (const auto c = sc::toolbar::canonical (key); c.isNotEmpty ())
+            for (int i = 0; i < sc::toolbar::kNumCustom; ++i)
+                if (const auto& cs = toolbar_->custom ()[(size_t) i]; cs.defined () && cs.key == c)
+                {
+                    runCustomShortcut (i);
+                    return true;
+                }
     // Esc while a panel is being dragged cancels the drag (and nothing else).
     if (key.getKeyCode() == juce::KeyPress::escapeKey && dock_ != nullptr && dock_->isDragging ())
     {
@@ -10296,10 +10400,10 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
             case 'm': app.setSelectionTool (SpectralSelMode::Marquee);   syncSharedState(); return true;
             case 'l': app.setSelectionTool (SpectralSelMode::Lasso);     syncSharedState(); return true;
             case 'p': app.setSelectionTool (SpectralSelMode::Paintbrush);syncSharedState(); return true;
-            case 'v':   // Move Files (sessions, issue #21)
-                if (const FileDoc* sd = app.doc(); sd != nullptr && sd->session.active())
+            case 'v':   // Move: drawings, and the files of a session (issues #41, #21)
+                if (app.audioEngine().isFileLoaded())
                 {
-                    app.sessionMoveTool = !app.sessionMoveTool;
+                    app.setMoveTool (!app.moveTool);
                     syncSharedState();
                 }
                 return true;
@@ -10529,4 +10633,375 @@ bool MainWindow::runMenuCommand (const juce::String& cmd, const juce::var& param
     if (!quiet && e.getProperty ("code", {}).toString() != sc::control::err::cancelled)
         showEditError (e.getProperty ("message", {}).toString().toStdString());
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar (issue #43): the menu bar row, left of the workspace bar.
+// ---------------------------------------------------------------------------
+
+void MainWindow::refreshToolbar()
+{
+    toolbarRefreshedAt_ = juce::Time::getMillisecondCounter ();
+    if (toolbar_ != nullptr && toolbarVisible_)
+        toolbar_->refresh ();
+}
+
+void MainWindow::setToolbarVisible (bool on)
+{
+    toolbarVisible_ = on;
+    app.recentStore->setValue ("toolbar_visible", on ? 1 : 0);
+    if (toolbar_ != nullptr)
+        toolbar_->setVisible (on);
+    resized ();
+    refreshToolbar ();
+    menuItemsChanged ();
+}
+
+void MainWindow::runToolbarCommand (const juce::String& id)
+{
+    const int editIdx = getMenuBarNames ().indexOf ("Edit");
+    const int selIdx = getMenuBarNames ().indexOf ("Selection");
+    auto startDraw = [this] (DrawingItem::Kind k)
+    {
+        if (spectralView != nullptr && app.audioEngine ().isFileLoaded ())
+            spectralView->startPendingDraw (k);
+    };
+    if (id == "undo")                 menuItemSelected (EditUndo, editIdx);
+    else if (id == "redo")            menuItemSelected (EditRedo, editIdx);
+    else if (id == "tool.timeRange")  menuItemSelected (SelectionToolTimeRange, selIdx);
+    else if (id == "tool.marquee")    menuItemSelected (SelectionToolMarquee, selIdx);
+    else if (id == "tool.lasso")      menuItemSelected (SelectionToolLasso, selIdx);
+    else if (id == "tool.paintbrush") menuItemSelected (SelectionToolPaintbrush, selIdx);
+    else if (id == "tool.move")
+    {
+        // A tool button arms its tool (it does not toggle like V does).
+        if (! app.moveTool) menuItemSelected (SelectionMoveFiles, selIdx);
+    }
+    else if (id == "view.toggle")     keyPressed (juce::KeyPress (juce::KeyPress::F9Key), nullptr);   // like F9
+    else if (id == "marker.add")      keyPressed (juce::KeyPress (juce::KeyPress::F8Key), nullptr);   // like F8
+    else if (id == "draw.freehand")   startDraw (DrawingItem::Kind::Freehand);
+    else if (id == "draw.text")       startDraw (DrawingItem::Kind::Text);
+    else if (id == "draw.arrow")      startDraw (DrawingItem::Kind::Arrow);
+    else if (id == "draw.rectangle")  startDraw (DrawingItem::Kind::Rectangle);
+    else if (id == "draw.oval")       startDraw (DrawingItem::Kind::Ellipse);
+    else if (id.startsWith ("custom."))
+    {
+        const int slot = id.fromFirstOccurrenceOf (".", false, false).getIntValue () - 1;
+        if (! juce::isPositiveAndBelow (slot, sc::toolbar::kNumCustom) || toolbar_ == nullptr) return;
+        if (toolbar_->custom ()[(size_t) slot].defined ())
+            runCustomShortcut (slot);
+        else
+            showCustomShortcutDialog (slot);   // an empty slot: define it
+    }
+    refreshToolbar ();
+}
+
+// Every enabled-or-not command item of a menu, with its path.
+static void collectMenuCommands (const juce::PopupMenu& m, const juce::String& path,
+                                 std::vector<std::pair<juce::String, const juce::PopupMenu::Item*>>& out)
+{
+    for (juce::PopupMenu::MenuItemIterator it (m, false); it.next ();)
+    {
+        const auto& item = it.getItem ();
+        const auto text = item.text.upToFirstOccurrenceOf ("\t", false, false).trim ();
+        if (text.isEmpty () || item.isSeparator || item.isSectionHeader) continue;
+        if (item.subMenu != nullptr)
+            collectMenuCommands (*item.subMenu, path + " > " + text, out);
+        else if (item.itemID != 0)
+            out.push_back ({ path + " > " + text, &item });
+    }
+}
+
+juce::StringArray MainWindow::menuCommandPaths()
+{
+    juce::StringArray paths;
+    const auto names = getMenuBarNames ();
+    for (int i = 0; i < names.size (); ++i)
+    {
+        const auto menu = getMenuForIndex (i, names[i]);
+        std::vector<std::pair<juce::String, const juce::PopupMenu::Item*>> items;
+        collectMenuCommands (menu, names[i], items);
+        for (const auto& [p, item] : items)
+            paths.addIfNotAlreadyThere (p);
+    }
+    return paths;
+}
+
+bool MainWindow::runMenuCommandPath (const juce::String& path)
+{
+    const auto names = getMenuBarNames ();
+    const int idx = names.indexOf (path.upToFirstOccurrenceOf (" > ", false, false).trim ());
+    if (idx < 0) return false;
+    const auto menu = getMenuForIndex (idx, names[idx]);
+    std::vector<std::pair<juce::String, const juce::PopupMenu::Item*>> items;
+    collectMenuCommands (menu, names[idx], items);
+    for (const auto& [p, item] : items)
+        if (p == path)
+        {
+            if (! item->isEnabled) return false;
+            const int itemId = item->itemID;
+            if (item->action != nullptr) item->action ();
+            else menuItemSelected (itemId, idx);
+            return true;
+        }
+    return false;
+}
+
+// Keys the main window handles itself (MainWindow::keyPressed), beside the
+// ones shown in the menus: a custom shortcut must not take them.
+static const std::vector<std::pair<juce::String, juce::String>>& mainWindowKeys()
+{
+    static const std::vector<std::pair<juce::String, juce::String>> k = []
+    {
+        std::vector<std::pair<juce::String, juce::String>> v {
+            { "space", "Play / Pause" }, { "delete", "Delete" }, { "backspace", "Delete" },
+            { "escape", "Esc" }, { "left", "the playhead" }, { "right", "the playhead" },
+            { "shift+left", "selecting with the playhead" }, { "shift+right", "selecting with the playhead" },
+            { "cmd+left", "the playhead (one video frame)" }, { "cmd+right", "the playhead (one video frame)" },
+            { "cmd+shift+left", "selecting by one sample" }, { "cmd+shift+right", "selecting by one sample" },
+            { "home", "Go to the start" }, { "end", "Go to the end" },
+            { "cmd+tab", "Next file" }, { "cmd+shift+tab", "Previous file" }, { "`", "Maximise the panel group" },
+            { "cmd+o", "File > Open" }, { "cmd+s", "File > Save" }, { "cmd+shift+s", "File > Save As" },
+            { "cmd+shift+g", "Change Gain" }, { "cmd+shift+n", "Normalize" }, { "cmd+shift+i", "Fade In" },
+            { "cmd+shift+o", "Fade Out" }, { "cmd+shift+e", "Filter EQ" }, { "cmd+shift+t", "Time Stretch" },
+            { "cmd+shift+f", "Repeat the last effect" }, { "cmd+shift+p", "Run the selected action" },
+            { "alt+shift+=", "FFT size up" }, { "alt+shift++", "FFT size up" }, { "alt+shift+-", "FFT size down" },
+            { "=", "Raise the selection by 6 dB" }, { "+", "Raise the selection by 6 dB" },
+            { "-", "Lower the selection by 6 dB" }, { "shift+=", "Raise the selection by 1 dB" },
+            { "shift++", "Raise the selection by 1 dB" }, { "shift+-", "Lower the selection by 1 dB" },
+            { "shift+f10", "Record" }, { "f11", "Resample" }, { "shift+f12", "Split configuration" },
+            { "f12", "Split" }, { "f5", "Refresh the spectrogram" }, { "cmd+h", "Show harmonics" },
+            { "cmd+shift+return", "Panels" }, { "cmd+w", "Close the file" }, { "cmd+q", "Quit" },
+            { "cmd+.", "Stop" }, { "cmd+f4", "Close the file" }, { "cmd+z", "Undo" }, { "cmd+y", "Redo" },
+            { "cmd+x", "Cut" }, { "cmd+t", "Trim" }, { "cmd+c", "Copy" }, { "cmd+v", "Paste" },
+            { "cmd+shift+v", "Paste Mix" }, { "cmd+a", "Select All" }, { "cmd+f", "Find" }, { "cmd+g", "Go to Time" },
+            { "t", "New Text" }, { "a", "New Arrow" }, { "r", "New Rectangle" }, { "d", "New Free Drawing" },
+            { "o", "New Oval" }, { "cmd+=", "Zoom In" }, { "cmd+-", "Zoom Out" }, { "cmd+shift+=", "Vertical Zoom In" },
+            { "cmd+shift+>", "Vertical Zoom In" }, { "cmd+shift+-", "Vertical Zoom Out" }, { "cmd+0", "Zoom Out Full" },
+            { "s", "Time Range" }, { "m", "Marquee" }, { "l", "Lasso" }, { "p", "Paintbrush" }, { "v", "Move" },
+            { "[", "Brush Smaller" }, { "]", "Brush Larger" }, { "f3", "Find Next" }, { "cmd+f3", "Find Previous" },
+            { "cmd+l", "Loop" }, { "f2", "Add Marker" }, { "f8", "Add Marker" }, { "f9", "Waveform / Spectrogram" },
+            { "shift+f9", "Waveform / Spectrogram" } };
+        for (int c = 1; c <= 9; ++c)
+        {
+            v.push_back ({ "cmd+" + juce::String (c), "Show / hide channel " + juce::String (c) });
+            v.push_back ({ "cmd+shift+" + juce::String (c), "Show only channel " + juce::String (c) });
+        }
+        return v;
+    } ();
+    return k;
+}
+
+juce::String MainWindow::shortcutUsedBy (const juce::String& key, int ignoreSlot)
+{
+    if (key.isEmpty ()) return {};
+    // The menus show their shortcuts after a tab ("Undo\tCtrl+Z").
+    const auto names = getMenuBarNames ();
+    for (int i = 0; i < names.size (); ++i)
+    {
+        const auto menu = getMenuForIndex (i, names[i]);
+        std::vector<std::pair<juce::String, const juce::PopupMenu::Item*>> items;
+        collectMenuCommands (menu, names[i], items);
+        for (const auto& [p, item] : items)
+            if (item->text.containsChar ('\t')
+                && sc::toolbar::canonicalFromText (item->text.fromFirstOccurrenceOf ("\t", false, false)) == key)
+                return p;
+    }
+    for (const auto& [k, what] : mainWindowKeys ())
+        if (k == key) return what;
+    if (toolbar_ != nullptr)
+        for (int i = 0; i < sc::toolbar::kNumCustom; ++i)
+            if (i != ignoreSlot && toolbar_->custom ()[(size_t) i].defined () && toolbar_->custom ()[(size_t) i].key == key)
+                return "Shortcut " + juce::String (i + 1) + " of the toolbar";
+    return {};
+}
+
+juce::String MainWindow::setCustomShortcut (int slot, const sc::toolbar::CustomShortcut& s)
+{
+    if (! juce::isPositiveAndBelow (slot, sc::toolbar::kNumCustom) || toolbar_ == nullptr)
+        return "There is no shortcut " + juce::String (slot + 1) + ".";
+    if (s.defined () && s.key.isNotEmpty ())
+        if (const auto by = shortcutUsedBy (s.key, slot); by.isNotEmpty ())
+            return sc::toolbar::displayText (s.key) + " is already used by " + by + ". Pick another key, or none.";
+    auto set = toolbar_->custom ();
+    set[(size_t) slot] = s.defined () ? s : sc::toolbar::CustomShortcut {};
+    toolbar_->setCustom (set);
+    app.recentStore->setValue ("toolbar_shortcuts", sc::toolbar::serialise (set));
+    refreshToolbar ();
+    return {};
+}
+
+bool MainWindow::runCustomShortcut (int slot)
+{
+    if (! juce::isPositiveAndBelow (slot, sc::toolbar::kNumCustom) || toolbar_ == nullptr) return false;
+    const auto s = toolbar_->custom ()[(size_t) slot];   // a copy: the command may change the set
+    if (! s.defined ()) return false;
+    const juce::String title ("Shortcut " + juce::String (slot + 1));
+    using Kind = sc::toolbar::CustomShortcut::Kind;
+    if (s.kind == Kind::menuCommand)
+    {
+        if (runMenuCommandPath (s.target)) return true;
+        sc::alert::showMessageBox (juce::AlertWindow::InfoIcon, title,
+            s.target + " is not available now (it needs a file, a selection, ...), or is no longer in the menus.",
+            "OK", this);
+        return false;
+    }
+    if (s.kind == Kind::action)
+    {
+        for (int i = 0; i < app.actions.size (); ++i)
+            if (const auto* a = app.actions.get (i); a != nullptr && a->name == s.target)
+            {
+                runAction (i);   // the same replay as the Actions panel's Run
+                return true;
+            }
+        sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, title,
+                                   "There is no recorded action named \"" + s.target + "\" any more (Actions panel).",
+                                   "OK", this);
+        return false;
+    }
+    if (s.kind == Kind::pythonScript)
+    {
+        const juce::File f (s.target);
+        if (! f.existsAsFile ())
+        {
+            sc::alert::showMessageBox (juce::AlertWindow::WarningIcon, title,
+                                       "The Python script is not there any more:\n" + s.target, "OK", this);
+            return false;
+        }
+        app.recordActionStep (sc::actionTypes::kPython, sc::makeVarObject ({ { "script", f.getFullPathName () } }));
+        runPythonScriptAsync (f, f.loadFileAsString ());
+        return true;
+    }
+    if (s.kind == Kind::keyPress)
+    {
+        const auto k = sc::toolbar::keyFromCanonical (s.target);
+        if (! k.isValid ()) return false;
+        const juce::ScopedValueSetter<bool> guard (sendingCustomKeys_, true);   // never itself again
+        return keyPressed (k, nullptr);
+    }
+    return false;
+}
+
+void MainWindow::showCustomShortcutMenu (int slot)
+{
+    if (! juce::isPositiveAndBelow (slot, sc::toolbar::kNumCustom) || toolbar_ == nullptr) return;
+    const bool defined = toolbar_->custom ()[(size_t) slot].defined ();
+    const juce::String n (slot + 1);
+    juce::PopupMenu m;
+    m.addItem (1, (defined ? "Change Shortcut " : "Define Shortcut ") + n + "...");
+    m.addItem (2, "Run Shortcut " + n, defined);
+    m.addItem (3, "Clear Shortcut " + n, defined);
+    m.addSeparator ();
+    m.addItem (4, "Hide Toolbar");
+    const int r = m.showMenu (juce::PopupMenu::Options ().withMousePosition ());
+    if (r == 1) showCustomShortcutDialog (slot);
+    else if (r == 2) runCustomShortcut (slot);
+    else if (r == 3) setCustomShortcut (slot, {});
+    else if (r == 4) setToolbarVisible (false);
+}
+
+void MainWindow::showCustomShortcutDialog (int slot)
+{
+    if (! juce::isPositiveAndBelow (slot, sc::toolbar::kNumCustom) || toolbar_ == nullptr) return;
+    using sc::toolbar::CustomShortcut;
+    auto cur = toolbar_->custom ()[(size_t) slot];
+    const auto commands = menuCommandPaths ();
+    juce::StringArray actionNames;
+    for (int i = 0; i < app.actions.size (); ++i)
+        if (const auto* a = app.actions.get (i)) actionNames.add (a->name);
+    juce::StringArray iconNames { "(none: show the text)" };
+    for (auto i : sc::toolbar::libraryIcons ())
+        iconNames.add (sc::toolbar::iconId (i));
+    juce::String problem;
+
+    for (;;)
+    {
+        OwningAlertWindow w ("Shortcut " + juce::String (slot + 1),
+            (problem.isNotEmpty () ? problem + "\n\n" : juce::String ())
+            + "What this toolbar button does: a menu command (the effects included), a recorded action "
+              "(Actions panel), a Python script, or keys to send (Ctrl+H shows the harmonics...). It shows "
+              "a short text or an icon, and can have a keyboard shortcut of its own.",
+            juce::AlertWindow::NoIcon, this);
+        w.setColour (juce::AlertWindow::backgroundColourId, juce::Colour::fromRGB (45, 45, 48));
+        w.addComboBox ("kind", { "Menu command or effect", "Python script", "Keys to send", "Recorded action" }, "Does");
+        if (auto* c = w.getComboBoxComponent ("kind"))
+            c->setSelectedItemIndex (cur.kind == CustomShortcut::Kind::pythonScript ? 1
+                                     : cur.kind == CustomShortcut::Kind::keyPress ? 2
+                                     : cur.kind == CustomShortcut::Kind::action ? 3 : 0);
+        w.addComboBox ("command", commands, "Menu command (for a menu command)");
+        if (auto* c = w.getComboBoxComponent ("command"))
+        {
+            const int i = cur.kind == CustomShortcut::Kind::menuCommand ? commands.indexOf (cur.target) : -1;
+            c->setSelectedItemIndex (std::max (0, i));
+        }
+        w.addComboBox ("action", actionNames.isEmpty () ? juce::StringArray { "(no recorded action yet)" } : actionNames,
+                       "Recorded action (for an action)");
+        if (auto* c = w.getComboBoxComponent ("action"))
+            c->setSelectedItemIndex (std::max (0, cur.kind == CustomShortcut::Kind::action ? actionNames.indexOf (cur.target) : 0));
+        w.addTextEditor ("script", cur.kind == CustomShortcut::Kind::pythonScript ? cur.target : juce::String (),
+                         "Python script (for a script)");
+        auto* browse = new juce::TextButton ("Choose the Python script...");
+        browse->setSize (220, 24);
+        browse->setTooltip ("Pick the .py file this shortcut runs.");
+        browse->onClick = [&w]
+        {
+            juce::FileChooser fc ("Python script", juce::File (w.getTextEditorContents ("script")), "*.py");
+            if (fc.browseForFileToOpen ())
+                if (auto* e = w.getTextEditor ("script")) e->setText (fc.getResult ().getFullPathName ());
+        };
+        w.addCustomComponent (browse);
+        auto* send = new sc::toolbar::KeyCapture ("Keys to send (for keys)");
+        send->key = cur.kind == CustomShortcut::Kind::keyPress ? cur.target : juce::String ();
+        w.addCustomComponent (send);
+        w.addTextEditor ("label", cur.label, "Text on the button (up to 4 characters)");
+        w.addComboBox ("icon", iconNames, "Icon (instead of the text)");
+        if (auto* c = w.getComboBoxComponent ("icon"))
+            c->setSelectedItemIndex (std::max (0, iconNames.indexOf (cur.icon)));
+        auto* own = new sc::toolbar::KeyCapture ("Keyboard shortcut of this button");
+        own->key = cur.key;
+        w.addCustomComponent (own);
+        w.addButton ("OK", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        w.addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (w.runModalLoop () != 1) return;
+
+        CustomShortcut ns;
+        const int kind = w.getComboBoxComponent ("kind") != nullptr ? w.getComboBoxComponent ("kind")->getSelectedItemIndex () : 0;
+        if (kind == 1)
+        {
+            ns.kind = CustomShortcut::Kind::pythonScript;
+            ns.target = w.getTextEditorContents ("script").trim ();
+        }
+        else if (kind == 2)
+        {
+            ns.kind = CustomShortcut::Kind::keyPress;
+            ns.target = send->key;
+        }
+        else if (kind == 3)
+        {
+            ns.kind = CustomShortcut::Kind::action;
+            ns.target = actionNames.isEmpty () || w.getComboBoxComponent ("action") == nullptr
+                            ? juce::String () : w.getComboBoxComponent ("action")->getText ();
+        }
+        else
+        {
+            ns.kind = CustomShortcut::Kind::menuCommand;
+            ns.target = w.getComboBoxComponent ("command") != nullptr ? w.getComboBoxComponent ("command")->getText () : juce::String ();
+        }
+        ns.label = w.getTextEditorContents ("label").trim ().substring (0, 4);
+        const int iconIdx = w.getComboBoxComponent ("icon") != nullptr ? w.getComboBoxComponent ("icon")->getSelectedItemIndex () : 0;
+        ns.icon = iconIdx > 0 ? iconNames[iconIdx] : juce::String ();
+        ns.key = own->key;
+        cur = ns;
+
+        if (ns.target.isEmpty ())
+            problem = kind == 1 ? "Choose the Python script." : kind == 2 ? "Press the keys to send."
+                    : kind == 3 ? "Record an action first (Actions panel), then choose it." : "Choose a menu command.";
+        else if (kind == 1 && ! juce::File::isAbsolutePath (ns.target))
+            problem = "Give the Python script's full path.";
+        else if (kind == 2 && ns.key.isNotEmpty () && ns.key == ns.target)
+            problem = "The keys to send cannot be the button's own shortcut.";
+        else
+            problem = setCustomShortcut (slot, ns);   // "" = done; else the key is in use
+        if (problem.isEmpty ()) return;
+    }
 }

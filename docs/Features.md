@@ -522,6 +522,27 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       menu). The whole arrangement, floating windows included, is restored at
       the next launch; the first launch after the update keeps the
       arrangement of the former two-group left column.
+    - **Toolbar** (issue #43), in the menu bar row left of the workspaces:
+      **Undo, Redo | Time Range, Marquee, Lasso, Paintbrush, Move |
+      Waveform / Spectrogram** (like F9), **Add Marker** (like F8) **| Free
+      Drawing, Text, Arrow, Rectangle, Oval | 1 ... 9**. Every button's
+      tooltip names its keyboard shortcut; the tool in use is lit. The icons
+      are drawn by SpectroCraft itself (vector paths in `src/MainToolbar.cpp`,
+      no third-party icon set). Groups that do not fit a narrow window are
+      left out, the shortcuts first. **View > Toolbar** shows or hides it
+      (remembered).
+    - **Shortcuts 1 to 9** are your own: click an empty one, or right-click
+      any (**Define / Change Shortcut N...**, **Run**, **Clear**, **Hide
+      Toolbar**). A shortcut runs a **menu command** (every command of the
+      menu bar, the effects included), a **recorded action** (Actions panel,
+      by name), a **Python script**, or **sends keys**
+      (Ctrl+H to show the harmonics, F5 to refresh...). It shows a short text
+      (up to 4 characters) or an icon from a small library (star, bolt, gear,
+      play, flag, heart, wave, note, check, cross, plus, eye, magnifier,
+      scissors), and can have a **keyboard shortcut of its own**: a key already
+      used by a menu, by the main window or by another shortcut is refused with
+      what uses it. The shortcuts are remembered after a restart (settings key
+      `toolbar_shortcuts`).
     - **View > Panels** (Ctrl+Shift+Enter) maximises the Editor's group to
       hide every other panel, and brings them back.
     - Individual panels can be closed from their tab menu (**≡**) or the
@@ -948,7 +969,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 Drop other WAV files on the tracks of the open file to put them on its
 timeline, where they were dropped; right-click **Add Track** gives them tracks
 of their own. They are referenced from the open file's metadata, can be moved
-(**Selection > Move Files**, V, or by dragging their name; they snap unless
+(**Selection > Move**, V, or by dragging their name; they snap unless
 Shift is held), outlined (**View > Show File Borders**) and removed
 (right-click **Remove File**), and are saved back to their own files when the
 open file is saved. Channels are named and played by track (two stereo tracks:
@@ -1591,9 +1612,16 @@ cmake --build build --target SpectroCraft
   progress dialog says so. The choice persists between sessions. Transcription
   has no device option: whisper.cpp's prebuilt runtime is CPU-only.
 - **Model preferences persist** between sessions (last model, language, mode,
-  batch channel and the auto-download toggle) in the same `SpectroCraft.recent`
-  store as the recent-files list. With *auto-download off*, missing models are never
-  fetched; the failure dialog then shows exactly where to put them manually.
+  batch channel) in the same `SpectroCraft.recent` store as the recent-files list.
+- **Missing models (issue #38)** — every AI feature behaves the same: the model
+  list shows every version, a model not on this computer yet marked
+  *(Download Required)*. Pressing OK / Run with such a model (or, for Stem
+  Separation and Super Resolution, without the audio.cpp tool) shows one
+  confirmation listing what is needed and its size; **Download and Run**
+  downloads it (with progress and cancel) and then runs, **Cancel** does
+  neither. There is no separate *Download...* button nor *Auto-download model
+  if missing* option any more. (The `ai_auto_download` preference remains for
+  the command line and AI control.)
 
 ### Model sources & licenses
 
@@ -1611,9 +1639,9 @@ The model weights remain under their upstream licenses (Intel's repositories /
 OpenAI MIT for Whisper); SpectroCraft itself is AGPL-3.0, which is compatible
 with the GPL-licensed DeepFilterNet code this port derives from.
 
-### Manual installation (no auto-download)
+### Manual installation (no download)
 
-If a download fails — or you turn *auto-download* off in the dialog — put the
+If a download fails — or you would rather not download from the app — put the
 files yourself into `%APPDATA%/SpectroCraft/models/<model-id>/`:
 
 ```
@@ -1681,14 +1709,19 @@ aimed at whine + hiss (and click + bump) artifacts. Like the other htdemucs
 families they need 44.1 kHz stereo input: a mono range is duplicated to L=R and
 every stem comes back downmixed to mono; a file with more than two channels is
 processed channel by channel, each source channel as its own duplicated-stereo run
-and every stem coming back as one mono track named `ch<i>_<stem>`. The model for
-these modes can be fetched from the dialog's **Download…** button. In these modes
-the description area of the dialog is hidden entirely.
+and every stem coming back as one mono track named `ch<i>_<stem>`. The model list of
+these modes shows every version, the ones not installed marked *(Download
+Required)*: Run downloads the chosen one first. In these modes the description
+area of the dialog is hidden entirely.
 
 ### Getting the binary and models
 
-The dialog's **Download…** button fetches what is missing (with progress and
-cancel):
+The **Model** list shows every version of the selected mode's model, the ones
+not installed marked *(Download Required)*. **Run** with a missing model, or
+without the audio.cpp tool, first asks once ("Download and Run" / "Cancel"),
+listing what is needed and its size, with the tool's build to install
+(preselected from the **Backend** setting); it then downloads it (with progress
+and cancel) and runs:
 
 - **Binary** — one variant of this platform's build from the
   [0xShug0/audio.cpp](https://github.com/0xShug0/audio.cpp) v0.9.2-drama3-base-small
@@ -1838,8 +1871,9 @@ The **Mode** dropdown selects the family:
 
 ### Getting the binary and models
 
-The dialog's **Download…** button fetches what is missing (with progress and
-cancel), using the same CLI-binary variants as Stem Separation:
+As in Stem Separation, the **Model** list shows every version (the missing ones
+marked *(Download Required)*), and **Run** downloads what is missing after one
+confirmation (with progress and cancel), using the same CLI-binary variants:
 
 - **FlashSR model** — `flashsr.safetensors` (~0.3 MB) from the audio.cpp
   repository assets, installed to
@@ -2071,6 +2105,7 @@ Schema, events and limits: [docs/diagnostics.md](docs/diagnostics.md).
 | Go to Time... (jump the playhead by time, sample count or any alternative-scale value) | Ctrl+G |
 | Add marker (region if selected, else point at cursor) | F2 / F8 |
 | Selection tool: Time Range / Marquee / Lasso / Paintbrush | S / M / L / P |
+| Move tool: select, move and resize drawings; drag the files of a session | V |
 | Brush size smaller / larger (Paintbrush only; % of cursor frequency) | [ / ] |
 | Paintbrush: straight line from the last stroke's end point to the click position (straight in linear-frequency space) | Alt+click |
 | New drawing on the spectrogram: Text / Arrow / Rectangle / Free Drawing / Oval | T / A / R / D / O |
@@ -2113,7 +2148,7 @@ Window menu holds the **Workspaces** submenu and **Maximize Panel Group**,
 opens/closes the individual panels — **Video** included — and carries the **Allow multiple
 instances** toggle — see above; the **Help** menu holds **Show Tooltips** (on by default,
 remembered: off hides every hover tip in all windows; every button, list, slider and text field
-of the panels and tool windows has one, as do the panel tabs, the workspace bar and the channel
+of the panels and tool windows has one, as do the panel tabs, the toolbar, the workspace bar and the channel
 labels of the views), the **Diagnostic Log** toggle and its
 folder, summary and support-bundle actions). The Edit menu has a
 checkable **Snap to Zero Crossings** toggle (**off by default**): when on,
@@ -2417,9 +2452,20 @@ harmonics of whatever is currently selected.
   of that active selection, while Delete Selected removes every selected entry
   from the list.
 - Right-clicking a row offers **Recall**, **Edit...**, **Delete Selected**,
-  **Clone Harmonics by Numbers...**, **Clone Harmonics by Mouse** /
-  **Stop Picking** and **Fit View to Selected**. Double-clicking
+  **Group** / **Ungroup** / **Rename Group...** / **Collapse All Groups** /
+  **Expand All Groups**, **Clone Harmonics by Numbers...**, **Clone Harmonics
+  by Mouse** / **Stop Picking** and **Fit View to Selected**. Double-clicking
   a row recalls it the same way.
+- **Groups** (issue #39): select two or more stored selections and right-click
+  → **Group**. The group shows as one row (its fold arrow, its name, how many
+  selections) with its selections indented below; selecting the group's row
+  recalls all of them at once (their union becomes the live selection).
+  **Ungroup** frees them. The arrow left of the name folds the members away
+  under the group's row (or shows them again); right-click **Collapse All
+  Groups** / **Expand All Groups** does it for every group. **Rename
+  Group...** (or a double-click on the group's name, or **Edit...** on its row)
+  names the group; an empty name goes back to *Group N*. Groups, their names
+  and whether they are folded are saved with the file.
 - **Clone Harmonics by Numbers...** opens a dialog for frequency multipliers
   such as `0.5, 2, 5` — additive clones of every shape in the current
   selection are appended at those multiples (the original stays in place),
@@ -2460,17 +2506,24 @@ the spectrogram: **Text**, **Arrow**, **Rectangle** and **Free Drawing**.
   spectrogram", a single click places text (a dialog asks for its content) and
   a drag draws an arrow, rectangle, oval (hold **Shift** for a circle) or
   freehand stroke. **Esc** cancels a pending creation.
-- **Selecting a drawing**: click it in the spectrogram (its line, or its text)
-  or pick its row in the list; **Shift**+click adds one. The selection shows a
+- **Selecting a drawing** takes the **Move** tool (**Selection > Move**, **V**;
+  issue #41): click a drawing in the spectrogram (its line, or its text) or
+  pick its row in the list; **Shift**+click adds one. The selection shows a
   dashed box with **four corner handles**: drag a handle to resize (the
   opposite corner stays; text changes size), drag inside the box to move. One
   undo step per move or resize. A click elsewhere, or **Esc**, drops the
   selection. Picking drawings in the spectrogram selects their rows without
-  moving the view.
+  moving the view. The selection tools (Time Range, Marquee, Lasso,
+  Paintbrush) only make selections, over drawings too: a drawing picked in the
+  list then shows its dashed box without handles.
 - **Groups**: select two or more drawings and right-click → **Group**. The group
-  shows as one row (its eye, *Group N*, how many drawings) with its drawings
-  indented below; selecting any of them selects the whole group, which moves,
-  resizes, hides and deletes as one. **Ungroup** frees them.
+  shows as one row (its eye, its fold arrow and name, how many drawings) with
+  its drawings indented below; selecting any of them selects the whole group,
+  which moves, resizes, hides and deletes as one. **Ungroup** frees them. The
+  arrow folds the group's drawings away in the list (they stay on the
+  spectrogram); right-click **Collapse All Groups** / **Expand All Groups** does
+  it for every group, and **Rename Group...** (or a double-click on the group's
+  name) names it. Names and folds are saved with the file.
 - **Drawings stay inside the spectrogram**: a drag that would take one past the
   file's start or end, below 0 Hz or above Nyquist stops at that edge, and
   nothing is drawn over the frequency axis or the time ruler.

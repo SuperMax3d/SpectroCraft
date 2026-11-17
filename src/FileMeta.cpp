@@ -116,6 +116,8 @@ static void appendSelectionObjects (const std::vector<SavedSpectralSelection>& l
         o->setProperty ("name", sel.name);
         if (!sel.comment.isEmpty ())
             o->setProperty ("comment", sel.comment);
+        if (sel.group != 0)
+            o->setProperty ("group", sel.group);
 
         juce::Array<juce::var> shapes;
         for (const auto& sh : sel.data.shapes())
@@ -195,6 +197,7 @@ static bool readSelectionObjects (const juce::var& v, std::vector<SavedSpectralS
         const auto& props = o->getProperties();
         sel.name    = props.getWithDefault ("name", "").toString();
         sel.comment = props.getWithDefault ("comment", "").toString();
+        sel.group   = std::max (0, static_cast<int> (props.getWithDefault ("group", 0)));
 
         const auto& p = o->getProperties();
         const juce::var shapesVar = p.getWithDefault ("shapes", juce::var());
@@ -289,6 +292,10 @@ std::string serialiseBundle (const MetaBundle& b, bool includeTranscription)
         appendSelectionObjects (b.selections, arr);
         root->setProperty ("selections", arr);
     }
+    if (!b.selectionGroups.empty())
+        root->setProperty ("selectionGroups", b.selectionGroups.toVar());
+    if (!b.drawingGroups.empty())
+        root->setProperty ("drawingGroups", b.drawingGroups.toVar());
     if (!b.drawings.empty())
     {
         juce::Array<juce::var> arr;
@@ -470,6 +477,10 @@ bool parseBundle (const juce::String& json, MetaBundle& out, std::string* errOut
             return false;
         out.selections = std::move (sels);
     }
+    if (p.contains ("selectionGroups"))
+        out.selectionGroups = ItemGroupList::fromVar (p.getWithDefault ("selectionGroups", juce::var()));
+    if (p.contains ("drawingGroups"))
+        out.drawingGroups = ItemGroupList::fromVar (p.getWithDefault ("drawingGroups", juce::var()));
 
     out.haveDrawings = p.contains ("drawings");
     if (out.haveDrawings)
@@ -738,6 +749,7 @@ bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
     // Categories with no legacy sidecar: unified > SCMD.
     MetaBundle b;
     b.drawings     = unifiedB.haveDrawings     ? unifiedB.drawings     : scmdB.drawings;
+    b.drawingGroups = unifiedB.haveDrawings    ? unifiedB.drawingGroups : scmdB.drawingGroups;
     b.scale        = unifiedB.haveScale        ? unifiedB.scale        : scmdB.scale;
     b.altRef       = unifiedB.haveAltRef       ? unifiedB.altRef       : scmdB.altRef;
     b.freqAnalysis = unifiedB.haveFreqAnalysis ? unifiedB.freqAnalysis : scmdB.freqAnalysis;
@@ -795,14 +807,20 @@ bool migrateFileMetadata (const juce::File& wav, MetaSaveTarget target,
 
     // Selections: unified > legacy .selections.json > SCMD.
     if (unifiedB.haveSelections)
+    {
         b.selections = unifiedB.selections;
+        b.selectionGroups = unifiedB.selectionGroups;
+    }
     else if (legacyS.existsAsFile ()
              && deserialiseSavedSelections (legacyS.loadFileAsString (), b.selections))
         ;   // filled
     else if (unreadable (legacyS))
         return fail ("the legacy .selections.json sidecar could not be read; file left unchanged");
     else if (scmdB.haveSelections)
+    {
         b.selections = scmdB.selections;
+        b.selectionGroups = scmdB.selectionGroups;
+    }
 
     // Transcription: unified > SCTT chunk.
     if (unifiedB.haveTranscription)
