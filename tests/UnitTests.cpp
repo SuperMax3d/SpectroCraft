@@ -23807,6 +23807,14 @@ static void testDrawingHandlesGroupsOvals()
         const juce::Point<int> onEdge ((int) box0.getCentreX (), (int) std::lround (box0.getY ()));
         CHECK (view.drawingHit (onEdge, row) == 0 && view.drawingHit (box0.getCentre ().toInt (), row) == -1,
                "draw handles: the outline is hit, not the inside");
+        // Issue #41: only the Move tool (V) picks drawings; a selection tool
+        // selects as it always did.
+        CHECK (! app.moveTool, "draw handles: a selection tool is on by default");
+        view.mouseDown (mkMouse (view, onEdge.x, onEdge.y, lmb));
+        view.mouseUp   (mkMouse (view, onEdge.x, onEdge.y, lmb));
+        CHECK (app.selectedDrawings.empty (), "draw handles: a selection tool does not pick a drawing");
+        app.setMoveTool (true);
+        CHECK (app.moveTool, "draw handles: Move armed");
         view.mouseDown (mkMouse (view, onEdge.x, onEdge.y, lmb));
         view.mouseUp   (mkMouse (view, onEdge.x, onEdge.y, lmb));
         CHECK (app.selectedDrawings == std::vector<int> { 0 }, "draw handles: a click selects the drawing");
@@ -23871,7 +23879,12 @@ static void testDrawingHandlesGroupsOvals()
         }
         app.ungroupDrawings ({ 0 });
         CHECK (d->drawings[0].group == 0 && d->drawings[1].group == 0, "draw handles: ungrouped");
+        app.setDrawingSelection ({ 0 });
+        app.setSelectionTool (SpectralSelMode::Marquee);
+        CHECK (! app.moveTool && view.drawingHandleAt (view.drawingScreenBox (d->drawings[0], row).getTopLeft ().toInt (), row) == -1,
+               "draw handles: a selection tool puts Move down, no handles then");
         app.setDrawingSelection ({});
+        app.setSelectionTool (SpectralSelMode::TimeRange);
 
         // Nothing over the axis: a wide oval touching the start of the file.
         DrawingItem edge;
@@ -23909,6 +23922,151 @@ static void testDrawingHandlesGroupsOvals()
     }
     store.deleteFile ();
     wav.deleteFile ();
+}
+
+// ------------------------------------------------------------------ groups (#39, #41)
+// Stored selections in groups (issue #39); groups of both panels fold under
+// their arrow, are renamed, folded / unfolded all at once, and saved with the
+// file (issue #41).
+static void testItemGroupsSelectionsDrawings()
+{
+    const juce::File wav = makeTempFile ("item_groups.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * (double) f / rate); });
+    const juce::File store = makeTempFile ("item_groups.recent");
+    store.deleteFile ();
+    auto menuHas = [] (const juce::PopupMenu& m, const juce::String& text, bool enabled)
+    {
+        for (juce::PopupMenu::MenuItemIterator it (m, true); it.next ();)
+            if (it.getItem ().text == text) return it.getItem ().isEnabled == enabled;
+        return false;
+    };
+    int selGroup = 0, drawGroup = 0;
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "groups: open");
+        FileDoc* d = app.doc ();
+        if (d == nullptr) return;
+
+        // --- Stored selections ---------------------------------------------
+        SpectralSelection a, b, c;
+        a.addRect (0.1, 0.3, 100.0, 500.0, false);
+        b.addRect (0.5, 0.7, 100.0, 500.0, false);
+        c.addRect (1.0, 1.2, 100.0, 500.0, false);
+        d->savedSelections.push_back ({ "A", a });
+        d->savedSelections.push_back ({ "B", b });
+        d->savedSelections.push_back ({ "C", c });
+        SelectionPanel sp (app);
+        sp.setSize (320, 240);
+        sp.refresh ();
+        CHECK (sp.numListRows () == 3 && sp.listRow (0).item == 0, "groups: no group, one row per selection");
+        CHECK (menuHas (sp.buildContextMenu (), "Group", false), "groups: Group needs two selections");
+
+        juce::SparseSet<int> two;
+        two.addRange ({ 0, 2 });
+        sp.listTable ().setSelectedRows (two, juce::dontSendNotification);
+        CHECK (menuHas (sp.buildContextMenu (), "Group", true), "groups: Group offered for two selections");
+        sp.groupSelected ();
+        selGroup = d->savedSelections[0].group;
+        CHECK (selGroup != 0 && d->savedSelections[1].group == selGroup && d->savedSelections[2].group == 0,
+               "groups: two stored selections become one group");
+        CHECK (sp.numListRows () == 4 && sp.listRow (0).item == -1 && sp.listRow (1).item == 0
+                   && sp.listRow (2).item == 1 && sp.listRow (3).item == 2,
+               "groups: the group's row, its selections under it, then the rest");
+        CHECK (sp.numSelectedRows () == 3, "groups: the new group stays selected (its row and its members)");
+        CHECK (d->selectionGroups.nameOf (selGroup) == "Group " + juce::String (selGroup), "groups: default name");
+
+        // Selecting the group's row recalls all its selections.
+        sp.doRecall (0);
+        CHECK (d->spectralSel.count () == 2, "groups: a group's row recalls its members");
+
+        // Fold it with the arrow (a click left of the name).
+        sp.listTable ().setSelectedRows ({}, juce::dontSendNotification);
+        sp.simulateCellClick (0, 1, mkMouse (sp, 4, 5, juce::ModifierKeys (juce::ModifierKeys::leftButtonModifier)));
+        CHECK (d->selectionGroups.isCollapsed (selGroup) && sp.numListRows () == 2
+                   && sp.listRow (0).item == -1 && sp.listRow (1).item == 2,
+               "groups: the arrow folds the group's selections away");
+        CHECK (sp.itemsOfRows ({ 0 }) == (std::vector<int> { 0, 1 }), "groups: a folded group's row still stands for its members");
+        sp.simulateCellClick (0, 1, mkMouse (sp, 4, 5, juce::ModifierKeys (juce::ModifierKeys::leftButtonModifier)));
+        CHECK (! d->selectionGroups.isCollapsed (selGroup) && sp.numListRows () == 4, "groups: and unfolds them");
+
+        // Collapse All / Expand All, Rename.
+        CHECK (menuHas (sp.buildContextMenu (), "Collapse All Groups", true)
+                   && menuHas (sp.buildContextMenu (), "Expand All Groups", true),
+               "groups: Collapse All / Expand All in the menu");
+        sp.runContextMenuItem (43);
+        CHECK (sp.numListRows () == 2, "groups: Collapse All Groups");
+        sp.runContextMenuItem (44);
+        CHECK (sp.numListRows () == 4, "groups: Expand All Groups");
+        juce::SparseSet<int> groupRow;
+        groupRow.addRange ({ 0, 1 });
+        sp.listTable ().setSelectedRows (groupRow, juce::dontSendNotification);
+        CHECK (menuHas (sp.buildContextMenu (), "Rename Group...", true), "groups: Rename Group... on a group's row");
+        d->metaDirty = false;
+        sp.applyNameComment ("Birds", "");   // Edit... on a group's row renames it
+        CHECK (d->selectionGroups.nameOf (selGroup) == "Birds" && d->metaDirty, "groups: a stored-selection group is renamed");
+        app.setSelectionGroupCollapsed (selGroup, true);
+
+        // --- Drawings --------------------------------------------------------
+        DrawingItem t1, t2, t3;
+        t1.kind = t2.kind = t3.kind = DrawingItem::Kind::Rectangle;
+        t1.t0 = 0.1; t1.t1 = 0.2; t1.f0 = 100.0; t1.f1 = 200.0;
+        t2 = t1; t2.t0 = 0.3; t2.t1 = 0.4;
+        t3 = t1; t3.t0 = 0.6; t3.t1 = 0.7;
+        app.addDrawing (t1); app.addDrawing (t2); app.addDrawing (t3);
+        app.groupDrawings ({ 1, 2 });
+        drawGroup = d->drawings[1].group;
+        DrawingPanel dp (app);
+        dp.setSize (320, 240);
+        dp.refresh ();
+        CHECK (dp.numListRows () == 4 && dp.groupOfRow (1) == drawGroup, "groups: the drawing group's row");
+        dp.toggleCollapsed (1);
+        dp.refresh ();
+        CHECK (d->drawingGroups.isCollapsed (drawGroup) && dp.numListRows () == 2
+                   && dp.itemsOfRows ({ 1 }) == (std::vector<int> { 1, 2 }),
+               "groups: a drawing group folds under its arrow");
+        app.setDrawingSelection ({ 2 });
+        dp.syncSelectionFromApp ();
+        CHECK (dp.numSelectedRows () == 1 && dp.selectedRowIndices ()[0] == 1,
+               "groups: a folded group's row shows its drawings' selection");
+        app.setDrawingSelection ({});
+        app.renameDrawingGroup (drawGroup, "Labels");
+        CHECK (d->drawingGroups.nameOf (drawGroup) == "Labels", "groups: a drawing group is renamed");
+        dp.runContextMenuItem (44);
+        dp.refresh ();
+        CHECK (dp.numListRows () == 4, "groups: Expand All Groups (drawings)");
+        dp.runContextMenuItem (43);
+        dp.refresh ();
+        CHECK (dp.numListRows () == 2, "groups: Collapse All Groups (drawings)");
+
+        CHECK (app.saveDocument (*d, wav, false, nullptr), "groups: save");
+    }
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "groups: reopen");
+        const FileDoc* d = app.doc ();
+        CHECK (d != nullptr && d->savedSelections.size () == 3 && d->savedSelections[0].group == selGroup
+                   && d->savedSelections[1].group == selGroup && d->selectionGroups.nameOf (selGroup) == "Birds"
+                   && d->selectionGroups.isCollapsed (selGroup),
+               "groups: stored-selection groups, their name and fold are saved with the file");
+        CHECK (d != nullptr && d->drawings.size () == 3 && d->drawings[2].group == drawGroup
+                   && d->drawingGroups.nameOf (drawGroup) == "Labels" && d->drawingGroups.isCollapsed (drawGroup),
+               "groups: drawing groups' names and fold are saved with the file");
+    }
+    {
+        // The legacy .selections.json format keeps the group too.
+        SavedSpectralSelection s1 { "X", {} }, s2 { "Y", {} };
+        s1.data.addRect (0.0, 1.0, 10.0, 20.0, false);
+        s2.data.addRect (1.0, 2.0, 10.0, 20.0, false);
+        s1.group = 3;
+        std::vector<SavedSpectralSelection> back;
+        CHECK (deserialiseSavedSelections (serialiseSavedSelections ({ s1, s2 }), back) && back.size () == 2
+                   && back[0].group == 3 && back[1].group == 0,
+               "groups: the selections sidecar keeps the group");
+    }
+    store.deleteFile ();
+    wav.deleteFile ();
+    sc::fileMetaSidecarPath (wav).deleteFile ();
 }
 
 // ------------------------------------------------------------------ drawing key shortcuts
@@ -30626,6 +30784,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("drawing panel", testDrawingPanel);
     SC_RUN_TEST ("drawing key shortcuts", testDrawingKeyShortcuts);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);
+    SC_RUN_TEST ("item groups: stored selections, drawings (fold, rename)", testItemGroupsSelectionsDrawings);
     SC_RUN_TEST ("left panels toggle shortcut", testLeftPanelsToggleShortcut);
     SC_RUN_TEST ("ctrl+0 zoom out full", testCtrl0ZoomOutFull);
     SC_RUN_TEST ("marker title visibility", testMarkerTitleVisibility);

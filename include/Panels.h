@@ -1553,10 +1553,40 @@ public:
     // (the smallest index not already used as a name).
     juce::String nextSelectionName() const;
 
+    /** Groups (issue #39): one row of the list is a stored selection
+        (item >= 0) or a group's own row (item = -1) followed by its members,
+        indented - unless the group is collapsed (its arrow). Selecting a
+        group's row recalls all its members. Without groups the rows are the
+        stored selections in order. */
+    using Row = sc::groups::Row;
+    int numListRows() const { syncRows(); return (int) rows_.size(); }
+    Row listRow (int row) const { syncRows(); return row >= 0 && row < (int) rows_.size() ? rows_[(size_t) row] : Row {}; }
+    /** The stored selection a row shows (-1 for a group row). */
+    int itemOfRow (int row) const { return listRow (row).item; }
+    /** The group whose own row is `row` (0 when it is a selection's row). */
+    int groupOfRow (int row) const { return listRow (row).item < 0 ? listRow (row).group : 0; }
+    /** The stored selections the rows stand for: a group row is all its members. */
+    std::vector<int> itemsOfRows (const std::vector<int>& rows) const;
+    /** Right-click > Group / Ungroup the selected stored selections. */
+    void groupSelected();
+    void ungroupSelected();
+    /** A group row's arrow: folds its selections away under it, or shows them. */
+    void toggleCollapsed (int row);
+    /** Right-click > Rename Group... (also a double-click on a group's name). */
+    void showRenameGroupDialog (int groupId);
+    /** The context menu for the current row selection, and running one of
+        its items (tests use both). */
+    juce::PopupMenu buildContextMenu();
+    void runContextMenuItem (int id);
+
     // Accessors for headless unit tests.
     int numSelectedRows() const { return table.getNumSelectedRows (); }
     std::vector<int> selectedRowIndices() const;
     juce::TableListBox& listTable() { return table; }
+    void simulateCellClick (int row, int columnId, const juce::MouseEvent& e)
+    {
+        model.cellClicked (row, columnId, e);
+    }
 
     // Loads `f` into the active doc's saved-selection list (replacing it).
     // Returns false - leaving everything unchanged - when the file is missing,
@@ -1609,6 +1639,14 @@ private:
 
     FileDoc* selListDoc = nullptr;   // doc whose list the current rows belong to
     int anchorRow = -1;              // last plain-clicked row: Shift+click origin
+    // What each list row shows: rebuilt by refresh(), and whenever the
+    // document's list changed without one (syncRows).
+    mutable std::vector<Row> rows_;
+    mutable const FileDoc* rowsDoc_ = nullptr;
+    mutable std::vector<int> rowsKey_;   // the group of each item, then the folded groups
+    std::vector<int> currentRowsKey() const;
+    void rebuildRows() const;
+    void syncRows() const;
 
     void mouseDown (const juce::MouseEvent&) override;
     void showLoadContextMenu();
@@ -1695,9 +1733,10 @@ public:
     }
 
     /** One row of the list: a drawing (item >= 0), or a group's own row
-        (item = -1) followed by its members, indented. Without groups the
-        rows are the drawings in order. */
-    struct Row { int item = -1; int group = 0; };
+        (item = -1) followed by its members, indented - unless the group is
+        collapsed (its arrow), then the group's row stands for all of them.
+        Without groups the rows are the drawings in order. */
+    using Row = sc::groups::Row;
     int numListRows() const { return (int) rows_.size(); }
     Row listRow (int row) const { return row >= 0 && row < (int) rows_.size() ? rows_[(size_t) row] : Row {}; }
     /** The drawing a row shows (-1 for a group row). */
@@ -1707,6 +1746,12 @@ public:
     /** Group / Ungroup the selected drawings (right-click menu). */
     void groupSelected();
     void ungroupSelected();
+    /** The group whose own row is `row` (0 when it is a drawing's row). */
+    int groupOfRow (int row) const { return listRow (row).item < 0 ? listRow (row).group : 0; }
+    /** A group row's arrow: folds its drawings away under it, or shows them. */
+    void toggleCollapsed (int row);
+    /** Right-click > Rename Group... (also a double-click on a group's row). */
+    void showRenameGroupDialog (int groupId);
     /** Selects the rows of the app's drawing selection (made in the
         spectrogram), without moving the view. */
     void syncSelectionFromApp();
@@ -1719,6 +1764,10 @@ public:
     {
         model.cellClicked (row, columnId, e);
     }
+    /** The context menu's items for the current row selection (tests). */
+    juce::PopupMenu buildContextMenu();
+    /** Runs one of the context menu's items (tests). */
+    void runContextMenuItem (int id);
 
     // Right-click "Close Panel": set by MainWindow. requestClose() is the
     // testable entry point.

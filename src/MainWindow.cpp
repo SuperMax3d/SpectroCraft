@@ -638,6 +638,11 @@ MainWindow::MainWindow (Application& appIn, const juce::String& name)
         if (drawingPanel) drawingPanel->syncSelectionFromApp();
         if (spectralView) spectralView->repaint();
     };
+    // Stored selections grouped, ungrouped, renamed or folded (issue #39).
+    app.onSavedSelectionsChanged = [this]
+    {
+        if (selectionPanel) selectionPanel->refresh();
+    };
 
     // Tables panel <-> views wiring: refresh the list, repaint overlays and
     // relayout when the dedicated track appears/disappears.
@@ -872,6 +877,7 @@ MainWindow::~MainWindow()
     app.onArmNewDrawing = nullptr;
     app.onDrawingsChanged = nullptr;
     app.onDrawingSelectionChanged = nullptr;
+    app.onSavedSelectionsChanged = nullptr;
     app.onTablesChanged = nullptr;
     app.onArmTableAlignClick = nullptr;
     app.onSetSpectralFreqRange = nullptr;
@@ -2421,8 +2427,8 @@ juce::String MainWindow::currentModeText() const
             break;
         default: break;
     }
-    if (app.sessionMoveTool)
-        mode = "Move Files";   // sessions (issue #21): V
+    if (app.moveTool)
+        mode = "Move";   // drawings, session files (issues #41, #21): V
 
     // Clone & Multiply picking overrides the tool indicator with a hint.
     if (app.isClonePicking ())
@@ -4790,7 +4796,7 @@ void MainWindow::menuItemSelected (int menuItemID, int topLevelMenuIndex)
             if (app.onStateChange) app.onStateChange();   // persist the new state
             break;
         case SelectionMoveFiles:
-            app.sessionMoveTool = !app.sessionMoveTool;
+            app.setMoveTool (!app.moveTool);
             syncSharedState();
             break;
         case ViewShowFileBorders:
@@ -9655,7 +9661,7 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
     else if (menuName == "Selection")
     {
         const bool hasFile = app.audioEngine().isFileLoaded();
-        const bool moving = app.sessionMoveTool;   // Move Files replaces the selection tool
+        const bool moving = app.moveTool;   // Move replaces the selection tool
 
         menu.addItem (SelectionToolTimeRange, "Time Range\tS", true,
                       !moving && app.selMode == SpectralSelMode::TimeRange);
@@ -9667,12 +9673,10 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
                       juce::String ("Paintbrush (") +
                           juce::String (app.brushPctValue ()) + "%\tP",
                       hasFile, !moving && app.selMode == SpectralSelMode::Paintbrush);
-        // Sessions (issue #21): drag the files of a session along the timeline.
-        {
-            const FileDoc* sd = app.doc();
-            const bool active = hasFile && sd != nullptr && sd->session.active();
-            menu.addItem (SelectionMoveFiles, "Move Files\tV", active, active && moving);
-        }
+        // Move (issue #41): the tool that selects, moves and resizes the
+        // drawings; in a session (issue #21) it also drags the files along
+        // the timeline.
+        menu.addItem (SelectionMoveFiles, "Move\tV", hasFile, hasFile && moving);
         menu.addSeparator ();
         menu.addItem (SelectionBrushSmaller, "Brush Smaller\t[", hasFile, false);
         menu.addItem (SelectionBrushLarger, "Brush Larger\t]", hasFile, false);
@@ -10296,10 +10300,10 @@ bool MainWindow::keyPressed (const juce::KeyPress& key, juce::Component*)
             case 'm': app.setSelectionTool (SpectralSelMode::Marquee);   syncSharedState(); return true;
             case 'l': app.setSelectionTool (SpectralSelMode::Lasso);     syncSharedState(); return true;
             case 'p': app.setSelectionTool (SpectralSelMode::Paintbrush);syncSharedState(); return true;
-            case 'v':   // Move Files (sessions, issue #21)
-                if (const FileDoc* sd = app.doc(); sd != nullptr && sd->session.active())
+            case 'v':   // Move: drawings, and the files of a session (issues #41, #21)
+                if (app.audioEngine().isFileLoaded())
                 {
-                    app.sessionMoveTool = !app.sessionMoveTool;
+                    app.setMoveTool (!app.moveTool);
                     syncSharedState();
                 }
                 return true;

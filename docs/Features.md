@@ -948,7 +948,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
 Drop other WAV files on the tracks of the open file to put them on its
 timeline, where they were dropped; right-click **Add Track** gives them tracks
 of their own. They are referenced from the open file's metadata, can be moved
-(**Selection > Move Files**, V, or by dragging their name; they snap unless
+(**Selection > Move**, V, or by dragging their name; they snap unless
 Shift is held), outlined (**View > Show File Borders**) and removed
 (right-click **Remove File**), and are saved back to their own files when the
 open file is saved. Channels are named and played by track (two stereo tracks:
@@ -2071,6 +2071,7 @@ Schema, events and limits: [docs/diagnostics.md](docs/diagnostics.md).
 | Go to Time... (jump the playhead by time, sample count or any alternative-scale value) | Ctrl+G |
 | Add marker (region if selected, else point at cursor) | F2 / F8 |
 | Selection tool: Time Range / Marquee / Lasso / Paintbrush | S / M / L / P |
+| Move tool: select, move and resize drawings; drag the files of a session | V |
 | Brush size smaller / larger (Paintbrush only; % of cursor frequency) | [ / ] |
 | Paintbrush: straight line from the last stroke's end point to the click position (straight in linear-frequency space) | Alt+click |
 | New drawing on the spectrogram: Text / Arrow / Rectangle / Free Drawing / Oval | T / A / R / D / O |
@@ -2417,9 +2418,20 @@ harmonics of whatever is currently selected.
   of that active selection, while Delete Selected removes every selected entry
   from the list.
 - Right-clicking a row offers **Recall**, **Edit...**, **Delete Selected**,
-  **Clone Harmonics by Numbers...**, **Clone Harmonics by Mouse** /
-  **Stop Picking** and **Fit View to Selected**. Double-clicking
+  **Group** / **Ungroup** / **Rename Group...** / **Collapse All Groups** /
+  **Expand All Groups**, **Clone Harmonics by Numbers...**, **Clone Harmonics
+  by Mouse** / **Stop Picking** and **Fit View to Selected**. Double-clicking
   a row recalls it the same way.
+- **Groups** (issue #39): select two or more stored selections and right-click
+  → **Group**. The group shows as one row (its fold arrow, its name, how many
+  selections) with its selections indented below; selecting the group's row
+  recalls all of them at once (their union becomes the live selection).
+  **Ungroup** frees them. The arrow left of the name folds the members away
+  under the group's row (or shows them again); right-click **Collapse All
+  Groups** / **Expand All Groups** does it for every group. **Rename
+  Group...** (or a double-click on the group's name, or **Edit...** on its row)
+  names the group; an empty name goes back to *Group N*. Groups, their names
+  and whether they are folded are saved with the file.
 - **Clone Harmonics by Numbers...** opens a dialog for frequency multipliers
   such as `0.5, 2, 5` — additive clones of every shape in the current
   selection are appended at those multiples (the original stays in place),
@@ -2460,17 +2472,24 @@ the spectrogram: **Text**, **Arrow**, **Rectangle** and **Free Drawing**.
   spectrogram", a single click places text (a dialog asks for its content) and
   a drag draws an arrow, rectangle, oval (hold **Shift** for a circle) or
   freehand stroke. **Esc** cancels a pending creation.
-- **Selecting a drawing**: click it in the spectrogram (its line, or its text)
-  or pick its row in the list; **Shift**+click adds one. The selection shows a
+- **Selecting a drawing** takes the **Move** tool (**Selection > Move**, **V**;
+  issue #41): click a drawing in the spectrogram (its line, or its text) or
+  pick its row in the list; **Shift**+click adds one. The selection shows a
   dashed box with **four corner handles**: drag a handle to resize (the
   opposite corner stays; text changes size), drag inside the box to move. One
   undo step per move or resize. A click elsewhere, or **Esc**, drops the
   selection. Picking drawings in the spectrogram selects their rows without
-  moving the view.
+  moving the view. The selection tools (Time Range, Marquee, Lasso,
+  Paintbrush) only make selections, over drawings too: a drawing picked in the
+  list then shows its dashed box without handles.
 - **Groups**: select two or more drawings and right-click → **Group**. The group
-  shows as one row (its eye, *Group N*, how many drawings) with its drawings
-  indented below; selecting any of them selects the whole group, which moves,
-  resizes, hides and deletes as one. **Ungroup** frees them.
+  shows as one row (its eye, its fold arrow and name, how many drawings) with
+  its drawings indented below; selecting any of them selects the whole group,
+  which moves, resizes, hides and deletes as one. **Ungroup** frees them. The
+  arrow folds the group's drawings away in the list (they stay on the
+  spectrogram); right-click **Collapse All Groups** / **Expand All Groups** does
+  it for every group, and **Rename Group...** (or a double-click on the group's
+  name) names it. Names and folds are saved with the file.
 - **Drawings stay inside the spectrogram**: a drag that would take one past the
   file's start or end, below 0 Hz or above Nyquist stops at that edge, and
   nothing is drawn over the frequency axis or the time ruler.

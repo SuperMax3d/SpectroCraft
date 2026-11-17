@@ -665,7 +665,7 @@ public:
         EditTrimSelection,
         EditSelectAll, EditSnapToZeroCrossings, EditCopyToNewFile, EditPasteMix,
         EditPasteToNewChannels,
-        // Sessions (issue #21): Selection > Move Files (V), View > Show File Borders.
+        // Selection > Move (V; drawings, session files - issues #41, #21), View > Show File Borders.
         SelectionMoveFiles = 2100, ViewShowFileBorders,
         ViewZoomIn = 3000, ViewZoomOut, ViewZoomFit, ViewZoomToSelection, ViewZoomOutFull,
         ViewVerticalZoomIn,

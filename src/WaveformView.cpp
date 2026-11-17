@@ -223,7 +223,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
-    // Sessions (issue #21): with Move Files (V) a left drag on a file moves
+    // Sessions (issue #21): with Move (V) a left drag on a file moves
     // it; a drag from a file's name tag moves it whatever the tool.
     if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
         if (const FileDoc* d = app.doc(); d != nullptr && d->session.active())
@@ -231,13 +231,13 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
             const auto geo = sessionGeometry();
             const bool onTag = app.sessionBordersShown()
                                && sc::session::clipAtNameTag (d->session, geo, e.getPosition()) >= 0;
-            if (app.sessionMoveTool && sessionTrim_.begin (d->session, geo, e.getPosition()))
+            if (app.moveTool && sessionTrim_.begin (d->session, geo, e.getPosition()))
             {
                 dragMode = DragMode::None;
                 repaint();
                 return;
             }
-            if ((app.sessionMoveTool || onTag) && sessionMove_.begin (d->session, geo, e.getPosition()))
+            if ((app.moveTool || onTag) && sessionMove_.begin (d->session, geo, e.getPosition()))
             {
                 dragMode = DragMode::None;
                 repaint();
@@ -680,10 +680,10 @@ void WaveformView::mouseUp (const juce::MouseEvent&)
 void WaveformView::mouseMove (const juce::MouseEvent& e)
 {
     reportHoverTime (e, false);
-    // Move Files: an edge of a file trims it - say so with the cursor.
+    // Move (V): an edge of a file trims it - say so with the cursor.
     {
         const FileDoc* d = app.doc();
-        const bool onEdge = app.sessionMoveTool && d != nullptr && d->session.active()
+        const bool onEdge = app.moveTool && d != nullptr && d->session.active()
                             && sc::session::TrimGesture::edgeAt (d->session, sessionGeometry(), e.getPosition()) >= 1;
         setMouseCursor (onEdge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
     }

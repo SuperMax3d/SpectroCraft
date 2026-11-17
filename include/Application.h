@@ -513,10 +513,14 @@ public:
         two-channel file, its number otherwise; in a session, by its place in
         its own track (two stereo tracks read L, R, L, R). */
     juce::String channelName (int ch) const;
-    /** True while the move-files tool is armed (Selection > Move Files, V):
-        a drag in the views moves the file under the mouse. Choosing a
-        selection tool (S, M, L, P) turns it off. */
-    bool sessionMoveTool = false;
+    /** True while the Move tool is armed (Selection > Move, V; issue #41):
+        the only tool that selects, moves and resizes drawings on the
+        spectrogram (a click on one selects it; its handles resize it), and
+        in a session a drag on a file moves that file. Choosing a selection
+        tool (S, M, L, P) turns it off; those make selections only. */
+    bool moveTool = false;
+    /** Selection > Move (V): arms or puts down the Move tool. */
+    void setMoveTool (bool on);
 
     // AI feature preferences, persisted in the same store (keys ai_*).
     bool aiAutoDownload = true;          // download missing models on first use
@@ -687,6 +691,24 @@ public:
         every group the items belong to. */
     void groupDrawings (const std::vector<int>& items);
     void ungroupDrawings (const std::vector<int>& items);
+    /** Drawing panel > Rename Group: an empty name goes back to "Group N". */
+    void renameDrawingGroup (int groupId, const juce::String& name);
+    /** Folds (collapsed) or unfolds group `groupId` in the Drawing panel
+        list; groupId 0 = every group. The drawings stay on the spectrogram. */
+    void setDrawingGroupCollapsed (int groupId, bool collapsed);
+
+    /** Selection panel > Group (issue #39): the stored selections `items`
+        (two or more) become one group, shown as one row with its members
+        under it and recalled together. Ungroup frees every group the items
+        belong to. Rename: an empty name goes back to "Group N". */
+    void groupSavedSelections (const std::vector<int>& items);
+    void ungroupSavedSelections (const std::vector<int>& items);
+    void renameSelectionGroup (int groupId, const juce::String& name);
+    /** Folds or unfolds group `groupId` (0 = every group) in the Selection panel. */
+    void setSelectionGroupCollapsed (int groupId, bool collapsed);
+    /** Called after the stored selections' groups changed (MainWindow
+        refreshes the Selection panel). */
+    std::function<void()> onSavedSelectionsChanged;
     /** A move or resize from the spectrogram: drawings `items` become
         `updated` (same order), kept inside the spectrogram (the file's
         duration, 0 to Nyquist). One undoable step. */

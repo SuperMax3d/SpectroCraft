@@ -115,6 +115,25 @@ public:
     // metadata bundle like the saved selections.
     std::vector<DrawingItem> drawings;
 
+    /** Names and folded state of the drawing groups and of the stored
+        selection groups (Drawing / Selection panel), saved with the items. */
+    ItemGroupList drawingGroups, selectionGroups;
+    /** The group of each drawing / stored selection, in list order (0 = none). */
+    std::vector<int> drawingGroupIds() const
+    {
+        std::vector<int> g;
+        g.reserve (drawings.size());
+        for (const auto& d : drawings) g.push_back (d.group);
+        return g;
+    }
+    std::vector<int> selectionGroupIds() const
+    {
+        std::vector<int> g;
+        g.reserve (savedSelections.size());
+        for (const auto& s : savedSelections) g.push_back (s.group);
+        return g;
+    }
+
     // Tables panel: imported CSV tables with per-parameter alignment plus the
     // display mode (sc::tables::kModeWaveform...kModePanelOnly). Persisted
     // with the file's metadata bundle. The default draws them only inside

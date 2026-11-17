@@ -269,26 +269,6 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
 {
     if (!app.audioEngine().isFileLoaded()) return;
 
-    // Sessions (issue #21): with Move Files (V) a left drag on a file moves
-    // it; a drag from a file's name tag moves it whatever the tool.
-    if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
-        if (const FileDoc* d = app.doc(); d != nullptr && d->session.active())
-        {
-            const auto geo = sessionGeometry();
-            const bool onTag = app.sessionBordersShown()
-                               && sc::session::clipAtNameTag (d->session, geo, e.getPosition()) >= 0;
-            if (app.sessionMoveTool && sessionTrim_.begin (d->session, geo, e.getPosition()))
-            {
-                repaint();
-                return;
-            }
-            if ((app.sessionMoveTool || onTag) && sessionMove_.begin (d->session, geo, e.getPosition()))
-            {
-                repaint();
-                return;
-            }
-        }
-
     // A click on a channel number mutes/unmutes that channel; Ctrl+click
     // (Cmd+click on macOS, where Ctrl+click is the context menu) solos it.
     if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
@@ -394,11 +374,12 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
         repaint();
     }
 
-    // Drawings: a click on one selects it (its whole group; Shift adds it to
-    // the selection). With drawings selected, a drag on a corner handle
-    // resizes them and a drag inside their box moves them. A click anywhere
-    // else drops the selection, then does what it always did.
-    if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu() && !e.mods.isAltDown()
+    // Drawings, with the Move tool (V) only (issue #41; the selection tools
+    // only make selections): a click on one selects it (its whole group;
+    // Shift adds it to the selection). With drawings selected, a drag on a
+    // corner handle resizes them and a drag inside their box moves them. A
+    // click anywhere else drops the selection, then does what Move does there.
+    if (app.moveTool && e.mods.isLeftButtonDown() && !e.mods.isPopupMenu() && !e.mods.isAltDown()
         && app.showAllDrawings && app.doc() != nullptr)
     {
         const auto row = rowAt (e.y);
@@ -431,6 +412,27 @@ void SpectralView::mouseDown (const juce::MouseEvent& e)
                 app.setDrawingSelection ({});
         }
     }
+
+    // Sessions (issue #21): with Move (V) a left drag on a file moves it (a
+    // drawing under the mouse wins, above); a drag from a file's name tag
+    // moves it whatever the tool.
+    if (e.mods.isLeftButtonDown() && !e.mods.isPopupMenu())
+        if (const FileDoc* d = app.doc(); d != nullptr && d->session.active())
+        {
+            const auto geo = sessionGeometry();
+            const bool onTag = app.sessionBordersShown()
+                               && sc::session::clipAtNameTag (d->session, geo, e.getPosition()) >= 0;
+            if (app.moveTool && sessionTrim_.begin (d->session, geo, e.getPosition()))
+            {
+                repaint();
+                return;
+            }
+            if ((app.moveTool || onTag) && sessionMove_.begin (d->session, geo, e.getPosition()))
+            {
+                repaint();
+                return;
+            }
+        }
 
     // Right button: box-zoom drag. A plain right-click (no significant
     // movement) still shows the context menu, deferred to mouseUp.
@@ -1015,33 +1017,38 @@ void SpectralView::mouseUp (const juce::MouseEvent&)
 void SpectralView::mouseMove (const juce::MouseEvent& e)
 {
     reportHoverTime (e, false);
-    /* One cursor for what a press would do here. The session's Move Files trim
-       edge wins (it is an explicit tool the user turned on); otherwise the
-       drawing handles: resize on a corner handle, move inside the selection's box
-       or on a drawing. */
+    /* One cursor for what a press would do here, with the Move tool (V) only:
+       the drawing handles first (resize on a corner handle, move inside the
+       selection's box or on a drawing), then the session's trim edge. The
+       selection tools keep the normal cursor (issue #41). */
     {
         auto cursor = juce::MouseCursor::NormalCursor;
         const FileDoc* d = app.doc();
-        if (app.sessionMoveTool && d != nullptr && d->session.active()
-            && sc::session::TrimGesture::edgeAt (d->session, sessionGeometry(), e.getPosition()) >= 1)
-        {
-            cursor = juce::MouseCursor::LeftRightResizeCursor;
-        }
-        else
+        if (app.moveTool)
         {
             const auto row = rowAt (e.y);
+            bool onDrawing = false;
             if (app.showAllDrawings && !row.isEmpty() && plotRect().contains (e.getPosition()))
             {
                 static const juce::MouseCursor::StandardCursorType corners[4] {
                     juce::MouseCursor::TopLeftCornerResizeCursor, juce::MouseCursor::TopRightCornerResizeCursor,
                     juce::MouseCursor::BottomRightCornerResizeCursor, juce::MouseCursor::BottomLeftCornerResizeCursor };
                 if (const int h = drawingHandleAt (e.getPosition(), row); h >= 0)
+                {
                     cursor = corners[h];
+                    onDrawing = true;
+                }
                 else if ((!app.selectedDrawings.empty()
                           && selectionScreenBox (row).contains (e.getPosition().toFloat()))
                          || drawingHit (e.getPosition(), row) >= 0)
+                {
                     cursor = juce::MouseCursor::DraggingHandCursor;
+                    onDrawing = true;
+                }
             }
+            if (!onDrawing && d != nullptr && d->session.active()
+                && sc::session::TrimGesture::edgeAt (d->session, sessionGeometry(), e.getPosition()) >= 1)
+                cursor = juce::MouseCursor::LeftRightResizeCursor;
         }
         setMouseCursor (cursor);
     }
@@ -2838,8 +2845,9 @@ void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
         if (haveLive)
             drawOne (live, true);
 
-        // The selected drawings (live view only): their box and its four
-        // corner handles - drag a handle to resize, inside to move.
+        // The selected drawings (live view only): their box, and with the
+        // Move tool its four corner handles - drag a handle to resize,
+        // inside to move. The selection tools show the box only.
         if (includeLivePreview && app.showAllDrawings && !app.selectedDrawings.empty ())
         {
             const auto box = selectionScreenBox (rr);
@@ -2853,6 +2861,7 @@ void SpectralView::drawDrawings (juce::Graphics& g, bool includeLivePreview)
                 g.drawDashedLine ({ box.getBottomLeft (), box.getTopLeft () }, dashes, 2);
                 for (const auto c : { box.getTopLeft (), box.getTopRight (), box.getBottomRight (), box.getBottomLeft () })
                 {
+                    if (!app.moveTool) break;
                     const auto h = juce::Rectangle<float> (7.0f, 7.0f).withCentre (c);
                     g.setColour (juce::Colours::white);
                     g.fillRect (h);
@@ -2974,7 +2983,7 @@ int SpectralView::drawingHit (juce::Point<int> pi, const juce::Rectangle<int>& r
 
 int SpectralView::drawingHandleAt (juce::Point<int> p, const juce::Rectangle<int>& row) const
 {
-    if (app.selectedDrawings.empty () || row.isEmpty ()) return -1;
+    if (!app.moveTool || app.selectedDrawings.empty () || row.isEmpty ()) return -1;   // handles: Move tool only
     const auto box = selectionScreenBox (row);
     if (box.isEmpty ()) return -1;
     const juce::Point<float> corners[4] { box.getTopLeft (), box.getTopRight (), box.getBottomRight (), box.getBottomLeft () };

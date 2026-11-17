@@ -41,8 +41,9 @@ or go away.
   - **Remove File** (on a file other than the main one) takes it out of the
     session. The file on disk is not touched. Its track stays.
   - **Remove Track** (on an empty track) takes the track away.
-- **Selection > Move Files** (**V**; a selection tool S, M, L or P puts it
-  down) arms the move tool. Drag a file in the waveform or the spectrogram:
+- **Selection > Move** (**V**; called *Move Files* before issue #41, where it
+  also became the tool that selects and moves the drawings; a selection tool
+  S, M, L or P puts it down) arms the move tool. Drag a file in the waveform or the spectrogram:
   - left and right changes its time;
   - up and down picks another track with the same channel count, or an
     empty track;
@@ -163,7 +164,7 @@ was.
 - Per-file gain or mute and crossfades are not planned.
 
 Code: `include/Session.h` (model: lanes, placement, warps, composite, JSON),
-`include/SessionOverlay.h` (outlines and the Move Files drag in both views),
+`include/SessionOverlay.h` (outlines and the Move drag in both views),
 `Application::addSessionFile` / `moveSessionFile` / `removeSessionFile` /
 `openSessionOf` / `saveSessionFiles`, `AudioEngine::setSaveRegion`. Tests:
 `tests/regression/sessions.inc`.

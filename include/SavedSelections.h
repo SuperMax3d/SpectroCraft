@@ -16,7 +16,11 @@ struct SavedSpectralSelection
     juce::String name;
     SpectralSelection data;   // deep copy of the shapes at save time
     juce::String comment;     // free-form note, editable in the Selection panel
-                              // (kept last so {name, data} aggregates still work)
+                              // (kept after name/data so {name, data} aggregates still work)
+    /** Group the stored selection belongs to (Selection panel > Group): the
+        members show under the group's row and are recalled together.
+        0 = in no group. */
+    int group = 0;
 };
 
 // Sidecar path for an audio file: "<full path>.selections.json".

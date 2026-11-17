@@ -270,7 +270,7 @@ static void regrSessions_documents()
 
 static void regrSessions_overlayAndDrag()
 {
-    progress ("regression sessions: file boxes, borders, Move Files drag with Shift snapping");
+    progress ("regression sessions: file boxes, borders, Move drag with Shift snapping");
     using namespace sc::session;
 
     // 3 rows (lane 0 stereo, lane 1 mono), 1000 px for 0..1.5 s at 8 kHz.
@@ -325,7 +325,7 @@ static void regrSessions_overlayAndDrag()
 
 static void regrSessions_window()
 {
-    progress ("regression sessions: Selection > Move Files (V), View > Show File Borders, rows bar");
+    progress ("regression sessions: Selection > Move (V), View > Show File Borders, rows bar");
     using namespace scsessiontest;
     const juce::File dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("sc_sessions_ui");
     dir.deleteRecursively ();
@@ -349,12 +349,13 @@ static void regrSessions_window()
             const auto em = win->getMenuForIndex (eIdx, "Edit");
             const auto sm = win->getMenuForIndex (sIdx, "Selection");
             const auto vm = win->getMenuForIndex (vIdx, "View");
-            const auto* mv = findItem (sm, "Move Files\tV");
+            const auto* mv = findItem (sm, "Move\tV");
             const auto* borders = findItem (vm, "Show File Borders");
             CHECK (findItem (em, "Session (experimental)") == nullptr && findItem (em, "Add File in Parallel...") == nullptr,
                    "sessions ui: no Edit > Session menu any more (PR #24 review)");
-            CHECK (mv != nullptr && ! mv->isEnabled && borders != nullptr && ! borders->isEnabled && borders->isTicked,
-                   "sessions ui: Move Files and Show File Borders wait for a session; borders on by default");
+            CHECK (findItem (sm, "Move Files\tV") == nullptr, "sessions ui: Move Files is called Move now (issue #41)");
+            CHECK (mv != nullptr && mv->isEnabled && ! mv->isTicked && borders != nullptr && ! borders->isEnabled && borders->isTicked,
+                   "sessions ui: Move works on any file (drawings); Show File Borders waits for a session; borders on by default");
             CHECK (! app.sessionBordersShown (), "sessions ui: a plain file never shows a border");
             CHECK (win->sessionScrollBar () != nullptr && ! win->sessionScrollBar ()->isVisible (),
                    "sessions ui: no rows bar without a session");
@@ -366,20 +367,20 @@ static void regrSessions_window()
         {
             const auto sm = win->getMenuForIndex (sIdx, "Selection");
             const auto vm = win->getMenuForIndex (vIdx, "View");
-            const auto* mv = findItem (sm, "Move Files\tV");
+            const auto* mv = findItem (sm, "Move\tV");
             const auto* borders = findItem (vm, "Show File Borders");
             CHECK (mv != nullptr && mv->isEnabled && ! mv->isTicked && borders != nullptr && borders->isEnabled
                        && borders->isTicked && app.sessionBordersShown (),
-                   "sessions ui: with a session, Move Files and the borders (on)");
+                   "sessions ui: with a session, Move and the borders (on)");
         }
         win->menuItemSelected (MainWindow::SelectionMoveFiles, sIdx);
-        CHECK (app.sessionMoveTool, "sessions ui: Selection > Move Files arms the tool");
+        CHECK (app.moveTool, "sessions ui: Selection > Move arms the tool");
         win->keyPressed (juce::KeyPress ('s'), nullptr);
-        CHECK (! app.sessionMoveTool, "sessions ui: a selection tool (S) puts it down");
+        CHECK (! app.moveTool, "sessions ui: a selection tool (S) puts it down");
         win->keyPressed (juce::KeyPress ('v'), nullptr);
-        CHECK (app.sessionMoveTool, "sessions ui: V arms Move Files");
+        CHECK (app.moveTool, "sessions ui: V arms Move");
         win->keyPressed (juce::KeyPress ('v'), nullptr);
-        CHECK (! app.sessionMoveTool, "sessions ui: V again puts it down");
+        CHECK (! app.moveTool, "sessions ui: V again puts it down");
 
         win->menuItemSelected (MainWindow::ViewShowFileBorders, vIdx);
         CHECK (! app.settings.sessionShowBorders && ! app.sessionBordersShown (), "sessions ui: View > Show File Borders toggles off");
@@ -420,7 +421,7 @@ static void regrSessions_window()
 }
 
 // PR #24 review, batch 1: tracks added by hand and files dropped on them,
-// names and playback by track, Move Files snapping by default, the name tag
+// names and playback by track, Move snapping by default, the name tag
 // as a handle, the right-click items, and the spectrogram after a move that
 // lengthens the timeline.
 static void regrSessions_reviewBatch1()
@@ -520,7 +521,7 @@ static void regrSessions_reviewBatch1()
         }
         else CHECK (false, "review b1: waveform view");
 
-        // Move Files snaps by default; Shift turns snapping off.
+        // Move snaps by default; Shift turns snapping off.
         if (auto* wv = win->waveformViewComp ())
         {
             win->syncSharedState ();
@@ -538,7 +539,7 @@ static void regrSessions_reviewBatch1()
                 const int dx = (int) std::lround (geo.timeToX (1000.0 / 8000.0) - geo.timeToX (0.0)) + 3;
                 const juce::ModifierKeys lmb (juce::ModifierKeys::leftButtonModifier);
                 const juce::ModifierKeys shiftLmb (juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier);
-                app.sessionMoveTool = true;
+                app.moveTool = true;
                 wv->mouseDown (mkMouse (*wv, x0, y, lmb));
                 wv->mouseDrag (mkMouse (*wv, x0 + dx, y, lmb));
                 wv->mouseUp (mkMouse (*wv, x0 + dx, y, lmb));
@@ -555,7 +556,7 @@ static void regrSessions_reviewBatch1()
 
                 // The name tag is a handle whatever the tool.
                 app.setSelectionTool (SpectralSelMode::TimeRange);
-                CHECK (! app.sessionMoveTool, "review b1: a selection tool puts Move Files down");
+                CHECK (! app.moveTool, "review b1: a selection tool puts Move down");
                 geo = wv->sessionGeometry ();
                 const auto boxes = sc::session::clipBoxes (d->session, geo);
                 juce::Rectangle<int> tag;

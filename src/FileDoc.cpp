@@ -98,24 +98,36 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
 
     // Selections: unified > legacy sidecar > SCMD.
     savedSelections.clear ();
+    selectionGroups = {};
     bool gotSelections = false;
     if (unifiedB.haveSelections)
     {
         savedSelections = unifiedB.selections;
+        selectionGroups = unifiedB.selectionGroups;
         gotSelections = true;
     }
     else if (legacyS.existsAsFile () && deserialiseSavedSelections (legacyS.loadFileAsString (), savedSelections))
         gotSelections = true;
 
     if (!gotSelections && scmdB.haveSelections)
+    {
         savedSelections = scmdB.selections;
+        selectionGroups = scmdB.selectionGroups;
+    }
 
     // Drawings: unified > SCMD (same precedence as the selections).
     drawings.clear ();
+    drawingGroups = {};
     if (unifiedB.haveDrawings)
+    {
         drawings = unifiedB.drawings;
+        drawingGroups = unifiedB.drawingGroups;
+    }
     else if (scmdB.haveDrawings)
+    {
         drawings = scmdB.drawings;
+        drawingGroups = scmdB.drawingGroups;
+    }
 
     // Tables: unified > SCMD (same precedence as the drawings). The default
     // display mode draws them only inside the Tables panel.
@@ -236,6 +248,8 @@ std::string FileDoc::buildScmdJson () const
     b.markers      = markers.markers ();
     b.selections   = savedSelections;
     b.drawings     = drawings;
+    b.selectionGroups = selectionGroups.liveSubset (selectionGroupIds ());
+    b.drawingGroups   = drawingGroups.liveSubset (drawingGroupIds ());
     b.tables       = tables;
     b.tablesMode   = tablesMode;
     b.videoTracks  = videoTracks;
@@ -262,6 +276,8 @@ std::string FileDoc::buildMetaJson () const
     b.markers      = markers.markers ();
     b.selections   = savedSelections;
     b.drawings     = drawings;
+    b.selectionGroups = selectionGroups.liveSubset (selectionGroupIds ());
+    b.drawingGroups   = drawingGroups.liveSubset (drawingGroupIds ());
     b.tables       = tables;
     b.tablesMode   = tablesMode;
     b.videoTracks  = videoTracks;
@@ -284,6 +300,8 @@ void FileDoc::applyBundle (const sc::MetaBundle& b)
     markers.restore (b.markers);
     savedSelections = b.selections;
     drawings        = b.drawings;
+    selectionGroups = b.selectionGroups;
+    drawingGroups   = b.drawingGroups;
     tables          = b.tables;
     tablesMode      = b.tablesMode;
     if (b.haveVideoTracks) videoTracks = b.videoTracks;   // absent key: keep current
