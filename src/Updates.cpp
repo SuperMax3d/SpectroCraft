@@ -11,6 +11,8 @@
 #include "Ed25519.h"
 
 #include <algorithm>
+#include <cstring>
+#include <string>
 #include <vector>
 
 #if JUCE_WINDOWS
@@ -19,6 +21,11 @@
 #endif
 #include <windows.h>
 #include <wininet.h>
+#else
+#include <fcntl.h>
+#include <spawn.h>
+#include <unistd.h>
+extern char** environ;
 #endif
 
 namespace sc { namespace update {
@@ -272,38 +279,87 @@ bool httpGetString (const juce::String& url, juce::String& bodyOut, juce::String
 
 #else  // ----------------------------------------------------------------- !Windows
 
+namespace {
+
+// JUCE's URL stream: NSURLSession on macOS, libcurl on Linux. Redirects are
+// followed (a release asset answers with a 302 to its storage host) and the
+// final status is checked, as on Windows, so an error page is never saved as
+// the archive.
+std::unique_ptr<juce::InputStream> openGet (const juce::String& url, int64_t& lengthOut,
+                                            juce::String& errOut)
+{
+    int status = 0;
+    juce::URL u (url);
+    auto in = u.createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                                     .withConnectionTimeoutMs (30000)
+                                     .withNumRedirectsToFollow (8)
+                                     .withStatusCode (&status)
+                                     .withExtraHeaders ("User-Agent: SpectroCraft"));
+    if (in == nullptr)
+    {
+        errOut = status > 0 ? "HTTP " + juce::String (status) + " from GitHub"
+                            : juce::String ("could not reach GitHub (no internet access, a proxy "
+                                            "or a captive portal?).");
+        return nullptr;
+    }
+    if (status != 0 && (status < 200 || status > 299))
+    {
+        errOut = "HTTP " + juce::String (status) + " from GitHub";
+        return nullptr;
+    }
+    lengthOut = juce::jmax ((juce::int64) 0, in->getTotalLength());   // -1: unknown
+    return in;
+}
+
+} // namespace
+
 bool httpGetToFile (const juce::String& url, const juce::File& dest,
                     ProgressFn onProgress, juce::String& errOut)
 {
     if (! isHttps (url)) { errOut = "refusing a non-HTTPS URL: " + url; return false; }
 
-    juce::URL u (url);
-    auto in = u.createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
-                                     .withConnectionTimeoutMs (30000)
-                                     .withExtraHeaders ("User-Agent: SpectroCraft"));
-    if (in == nullptr) { errOut = "could not open " + url; return false; }
+    int64_t expected = 0;
+    auto in = openGet (url, expected, errOut);
+    if (in == nullptr) return false;
 
     const juce::File part = dest.withFileExtension (dest.getFileExtension() + ".part");
     part.deleteFile();
+    if (! part.getParentDirectory().createDirectory())
+    { errOut = "could not write " + part.getParentDirectory().getFullPathName(); return false; }
+
+    int64_t got = 0;
     {
         juce::FileOutputStream out (part);
         if (out.failedToOpen()) { errOut = "could not write " + part.getFullPathName(); return false; }
 
-        int64_t total = 0;
         char buf[1 << 16];
         for (;;)
         {
             const int n = in->read (buf, sizeof (buf));
             if (n < 0) { errOut = "the connection was interrupted."; part.deleteFile(); return false; }
             if (n == 0) break;
-            if (! out.write (buf, n)) { errOut = "could not write " + part.getFullPathName(); part.deleteFile(); return false; }
-            total += n;
-            if (onProgress != nullptr && ! onProgress (0.0, "downloading " + dest.getFileName()))
+            if (! out.write (buf, (size_t) n))
+            { errOut = "could not write " + part.getFullPathName(); part.deleteFile(); return false; }
+            got += n;
+            if (onProgress != nullptr)
             {
-                part.deleteFile(); errOut = "cancelled"; return false;
+                const double frac = expected > 0 ? std::min (1.0, (double) got / (double) expected) : 0.0;
+                if (! onProgress (frac, "downloading " + dest.getFileName()))
+                { part.deleteFile(); errOut = "cancelled"; return false; }
             }
         }
-        if (total == 0) { part.deleteFile(); errOut = "empty response."; return false; }
+        out.flush();
+        if (out.getStatus().failed())
+        { errOut = "could not write " + part.getFullPathName(); part.deleteFile(); return false; }
+    }
+
+    if (got == 0) { part.deleteFile(); errOut = "empty response."; return false; }
+    if (expected > 0 && got != expected)
+    {
+        part.deleteFile();
+        errOut = "incomplete download (" + juce::String (got) + " of "
+               + juce::String (expected) + " bytes).";
+        return false;
     }
 
     if (! part.moveFileTo (dest)) { part.deleteFile(); errOut = "could not create " + dest.getFullPathName(); return false; }
@@ -312,15 +368,11 @@ bool httpGetToFile (const juce::String& url, const juce::File& dest,
 
 bool httpGetString (const juce::String& url, juce::String& bodyOut, juce::String& errOut)
 {
-    // Automatic updates are Windows-only for now (docs/updates.md); this path
-    // exists so the code and its tests build everywhere.
     if (! isHttps (url)) { errOut = "refusing a non-HTTPS URL: " + url; return false; }
 
-    juce::URL u (url);
-    auto in = u.createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
-                                     .withConnectionTimeoutMs (30000)
-                                     .withExtraHeaders ("User-Agent: SpectroCraft"));
-    if (in == nullptr) { errOut = "could not open " + url; return false; }
+    int64_t expected = 0;
+    auto in = openGet (url, expected, errOut);
+    if (in == nullptr) return false;
 
     std::string body;
     char buf[1 << 16];
@@ -333,6 +385,7 @@ bool httpGetString (const juce::String& url, juce::String& bodyOut, juce::String
         if (body.size() > (size_t) kMaxStringBytes) { errOut = "the response is larger than 4 MB."; return false; }
     }
     if (body.empty()) { errOut = "empty response."; return false; }
+    // UTF-8, as on Windows (release notes contain em dashes and the like).
     bodyOut = juce::String::fromUTF8 (body.data(), (int) body.size());
     return true;
 }
@@ -446,6 +499,31 @@ juce::String archToken()
 #endif
 }
 
+juce::String manifestAssetName (const juce::String& os, const juce::String& arch)
+{
+    if (os == "windows") return kManifestName;
+    return "update-manifest-" + os + "-" + arch + ".json";
+}
+
+juce::String manifestSigAssetName (const juce::String& os, const juce::String& arch)
+{
+    return manifestAssetName (os, arch) + ".sig";
+}
+
+juce::String mainExecutablePath (const juce::String& os)
+{
+    if (os == "windows") return "SpectroCraft.exe";
+    if (os == "macos")   return "Contents/MacOS/SpectroCraft";
+    return "SpectroCraft";
+}
+
+juce::String updaterPath (const juce::String& os)
+{
+    if (os == "windows") return "SpectroCraft/spectrocraft-updater.exe";
+    if (os == "macos")   return "Contents/MacOS/spectrocraft-updater";
+    return "spectrocraft-updater";
+}
+
 const AssetInfo* pickAsset (const ReleaseInfo& release)
 {
     const juce::String os = platformToken(), arch = archToken();
@@ -512,6 +590,8 @@ bool parseManifest (const juce::String& jsonText, Manifest& out, juce::String& e
 
     out.format = jsonField (parsed, "format");
     out.version = jsonField (parsed, "version");
+    out.platform = jsonField (parsed, "platform");
+    out.root = jsonField (parsed, "root");
 
     if (out.format != "spectrocraft-update-manifest/1")
     {
@@ -523,6 +603,10 @@ bool parseManifest (const juce::String& jsonText, Manifest& out, juce::String& e
     // and is checked more loosely where it is read.
     if (out.version.isEmpty() || versionParts (out.version).size() != 3)
     { errOut = "the update manifest has no usable version: " + out.version; return false; }
+
+    // "root": the archive's one top folder (macOS / Linux), a single name.
+    if (out.root.isNotEmpty() && (! validRelativePath (out.root) || out.root.containsChar ('/')))
+    { errOut = "the update manifest has an invalid root folder: " + out.root; return false; }
 
     const juce::var files = obj->getProperty (juce::Identifier ("files"));
     auto* arr = files.getArray();
@@ -538,14 +622,56 @@ bool parseManifest (const juce::String& jsonText, Manifest& out, juce::String& e
         int64_t sz = -1;
         mf.size = jsonInt64 (f, "size", sz) ? sz : -1;
         mf.sha256 = jsonField (f, "sha256");
+        mf.executable = jsonBool (f, "executable");
 
         if (! validRelativePath (mf.path)) { errOut = "the manifest lists an invalid path: " + mf.path; return false; }
+        if (out.root.isNotEmpty() && ! mf.path.startsWith (out.root + "/"))
+        { errOut = "the manifest lists " + mf.path + " outside its root folder " + out.root; return false; }
         if (mf.size < 0) { errOut = "the manifest has no size for " + mf.path; return false; }
         if (! isHex64 (mf.sha256)) { errOut = "the manifest has no SHA-256 for " + mf.path; return false; }
         for (const auto& other : out.files)
             if (other.path == mf.path) { errOut = "the manifest lists " + mf.path + " twice."; return false; }
 
         out.files.add (mf);
+    }
+    return true;
+}
+
+juce::String installRelativePath (const Manifest& manifest, const juce::String& path)
+{
+    if (manifest.root.isNotEmpty() && path.startsWith (manifest.root + "/"))
+        return path.substring (manifest.root.length() + 1);
+    return path;
+}
+
+bool checkManifestPlatform (const Manifest& manifest, const juce::String& os,
+                            const juce::String& arch, juce::String& errOut)
+{
+    const juce::String want = os + "-" + arch;
+    if (manifest.platform.isNotEmpty() && manifest.platform != want)
+    {
+        errOut = "the update manifest is for " + manifest.platform + ", this is " + want + ".";
+        return false;
+    }
+
+    bool haveApp = false, haveUpdater = false;
+    for (const auto& f : manifest.files)
+    {
+        const juce::String rel = installRelativePath (manifest, f.path);
+        haveApp     = haveApp     || rel == mainExecutablePath (os);
+        haveUpdater = haveUpdater || rel == updaterPath (os);
+    }
+    if (! haveApp)
+    {
+        errOut = "the update does not contain " + mainExecutablePath (os)
+               + " (an archive for another platform?).";
+        return false;
+    }
+    if (! haveUpdater)
+    {
+        errOut = "the update does not contain " + updaterPath (os)
+               + ", so the files cannot be replaced while SpectroCraft is running.";
+        return false;
     }
     return true;
 }
@@ -612,8 +738,12 @@ bool unzipAndVerify (const juce::File& zip, const juce::File& stagingDir,
         const auto* entry = archive.getEntry (i);
         if (entry == nullptr) continue;
 
+        // Folder entries (zip -r writes one per folder) and the AppleDouble
+        // metadata the macOS Finder adds (__MACOSX/...) are not files of the
+        // release.
+        if (entry->filename.endsWithChar ('/') || entry->filename.endsWithChar ('\\')) continue;
         const juce::String path = normaliseEntry (entry->filename);
-        if (path.isEmpty()) continue;
+        if (path.isEmpty() || path.startsWith ("__MACOSX/")) continue;
         if (path.contains ("..")) { errOut = "the archive contains a path outside the update: " + path; return false; }
 
         int wantIndex = -1;
@@ -627,10 +757,21 @@ bool unzipAndVerify (const juce::File& zip, const juce::File& stagingDir,
 
         const ManifestFile want = manifest.files[wantIndex];
 
+        // A link's "content" is its target's name, never the file the
+        // manifest hashed: say so instead of reporting a hash mismatch.
+        if (entry->isSymbolicLink)
+        {
+            errOut = "the archive stores " + path + " as a symbolic link; the update needs "
+                     "the file itself (zip the release payload without --symlinks / -y).";
+            return false;
+        }
+
         std::unique_ptr<juce::InputStream> in (archive.createStreamForEntry (i));
         if (in == nullptr) { errOut = "could not read " + path + " from the archive."; return false; }
 
-        const juce::File out = stagingDir.getChildFile (path);
+        // Staged at its install-relative path: the staging folder has the
+        // layout of the install folder (no "SpectroCraft.app/" on top).
+        const juce::File out = stagingDir.getChildFile (installRelativePath (manifest, path));
         if (! out.getParentDirectory().createDirectory())
         { errOut = "could not create " + out.getParentDirectory().getFullPathName(); return false; }
         out.deleteFile();
@@ -666,6 +807,13 @@ bool unzipAndVerify (const juce::File& zip, const juce::File& stagingDir,
                 return false;
             }
         }
+#if ! JUCE_WINDOWS
+        // A zip written without Unix permissions (Python's zipfile, the
+        // Windows tools) unpacks every file as 0644: the program would not
+        // start. The manifest, which is signed, says which files need +x.
+        if (want.executable && ! out.setExecutePermission (true))
+        { errOut = "could not make " + path + " executable."; return false; }
+#endif
         seen[wantIndex] = true;
 
         ++done;
@@ -692,7 +840,22 @@ bool unzipAndVerify (const juce::File& zip, const juce::File& stagingDir,
 
 juce::File installDir()
 {
+#if JUCE_MAC
+    // currentApplicationFile is the .app bundle (the executable is
+    // <bundle>/Contents/MacOS/SpectroCraft).
+    const juce::File app = juce::File::getSpecialLocation (juce::File::currentApplicationFile);
+    if (app.getFileExtension().equalsIgnoreCase (".app")) return app;
+#endif
     return juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
+}
+
+juce::File relaunchTarget()
+{
+#if JUCE_MAC
+    const juce::File app = installDir();
+    if (app.getFileExtension().equalsIgnoreCase (".app")) return app;
+#endif
+    return juce::File::getSpecialLocation (juce::File::currentExecutableFile);
 }
 
 bool dirIsWritable (const juce::File& dir)
@@ -709,8 +872,56 @@ bool dirIsWritable (const juce::File& dir)
     return probe.deleteFile();
 }
 
+juce::File firstUnwritableFolder (const juce::File& install, const juce::String& os)
+{
+    if (! dirIsWritable (install)) return install;
+
+    juce::StringArray subfolders;
+    if (os == "windows") subfolders = { "SpectroCraft", "recorders" };
+    else if (os == "macos") subfolders = { "Contents", "Contents/MacOS", "Contents/Frameworks",
+                                           "Contents/Resources" };
+
+    for (const auto& sub : subfolders)
+    {
+        const juce::File d = install.getChildFile (sub);
+        if (d.isDirectory() && ! dirIsWritable (d)) return d;   // a missing one is created
+    }
+    return {};
+}
+
+juce::String notWritableAdvice (const juce::File& install, const juce::File& folder,
+                                const juce::String& os)
+{
+    const juce::String path = install.getFullPathName();
+    juce::String text = "SpectroCraft cannot write to:\n\n" + folder.getFullPathName() + "\n\n";
+
+    if (os == "macos")
+    {
+        if (path.contains ("/AppTranslocation/"))
+            return text + "macOS runs SpectroCraft from a read-only copy because it was opened "
+                          "straight from the download. Move SpectroCraft.app to Applications "
+                          "(or any folder of yours) with the Finder, open it from there, and "
+                          "check for updates again.";
+        if (path.startsWith ("/Volumes/"))
+            return text + "SpectroCraft.app is on a disk image or a read-only volume. Copy it "
+                          "to Applications, open it from there, and check for updates again.";
+        return text + "Move SpectroCraft.app to a folder you own (Applications in your home "
+                      "folder, or /Applications if you are an administrator) and open it "
+                      "from there; the update replaces the files inside the app.";
+    }
+    if (os == "linux")
+        return text + "Copy the SpectroCraft folder to a folder you own (in your home folder) "
+                      "and start it from there; the update replaces the files in that folder.";
+
+    return text + "Copy the program to a folder you own (Desktop, Documents...) and start "
+                  "it from there; the update replaces the files in that folder.";
+}
+
 juce::File findUpdaterBinary (const juce::File& stagingDir)
 {
+    const juce::File expected = stagingDir.getChildFile (updaterPath());
+    if (expected.existsAsFile()) return expected;
+
     const char* names[] = { "spectrocraft-updater.exe", "spectrocraft-updater" };
 
     for (const char* n : names)
@@ -736,6 +947,11 @@ juce::File updateTempDir()
              .getChildFile ("SpectroCraft").getChildFile ("update");
 }
 
+juce::File updaterLogFile()
+{
+    return updateTempDir().getSiblingFile ("update-log.txt");
+}
+
 juce::File updatePlanFile (const juce::File& stagingDir)
 {
     return stagingDir.getChildFile ("update-plan.txt");
@@ -749,7 +965,7 @@ bool writeUpdatePlan (const juce::File& stagingDir, const Manifest& manifest, ju
     juce::String text = "spectrocraft-update-plan/1\n";
     text += "version=" + manifest.version + "\n";
     for (const auto& f : manifest.files)
-        text += "file=" + f.path + "\n";
+        text += "file=" + installRelativePath (manifest, f.path) + "\n";
 
     const juce::File plan = updatePlanFile (stagingDir);
     plan.deleteFile();
@@ -797,7 +1013,7 @@ std::wstring quoteArg (const juce::String& arg)
 } // namespace
 
 bool launchUpdater (const juce::File& updater, const juce::File& install,
-                    const juce::File& stagingDir, const juce::File& appExe,
+                    const juce::File& stagingDir, const juce::File& relaunch,
                     juce::String& errOut)
 {
     std::wstring cmd = quoteArg (updater.getFullPathName());
@@ -805,7 +1021,7 @@ bool launchUpdater (const juce::File& updater, const juce::File& install,
     cmd += std::to_wstring ((long long) GetCurrentProcessId());
     cmd += L" --install-dir " + quoteArg (install.getFullPathName());
     cmd += L" --staging-dir " + quoteArg (stagingDir.getFullPathName());
-    cmd += L" --relaunch " + quoteArg (appExe.getFullPathName());
+    cmd += L" --relaunch " + quoteArg (relaunch.getFullPathName());
 
     // CreateProcessW may modify the command line buffer, so it needs a copy.
     std::wstring mutableCmd = cmd;
@@ -832,14 +1048,64 @@ bool launchUpdater (const juce::File& updater, const juce::File& install,
 
 #else
 
-bool launchUpdater (const juce::File&, const juce::File&, const juce::File&,
-                    const juce::File&, juce::String& errOut)
+bool launchUpdater (const juce::File& updater, const juce::File& install,
+                    const juce::File& stagingDir, const juce::File& relaunch,
+                    juce::String& errOut)
 {
-    // Automatic updates are Windows-only for now (docs/updates.md): there is no
-    // updater binary in the macOS/Linux archives and no detached-process helper
-    // in this JUCE build. Help > Check for Updates is not offered elsewhere.
-    errOut = "automatic updates are only available in the Windows build.";
-    return false;
+    // The staged copy came out of a zip: make sure it can run whatever the
+    // archive kept (unzipAndVerify already applied the manifest's flag).
+    if (! updater.setExecutePermission (true))
+    {
+        errOut = "could not make " + updater.getFullPathName() + " executable.";
+        return false;
+    }
+
+    std::vector<std::string> args {
+        updater.getFullPathName().toStdString(),
+        "--pid", std::to_string ((long long) getpid()),
+        "--install-dir", install.getFullPathName().toStdString(),
+        "--staging-dir", stagingDir.getFullPathName().toStdString(),
+        "--relaunch", relaunch.getFullPathName().toStdString()
+    };
+    std::vector<char*> argv;
+    for (auto& a : args) argv.push_back (a.data());
+    argv.push_back (nullptr);
+
+    // posix_spawn, not fork(): this process has many threads. The updater's
+    // output goes to a log file (a closed terminal or pipe must not kill it
+    // with SIGPIPE halfway through the swap), its input is /dev/null.
+    const juce::File log = updaterLogFile();
+    log.getParentDirectory().createDirectory();
+    const std::string logPath = log.getFullPathName().toStdString();
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init (&actions);
+    posix_spawn_file_actions_addopen (&actions, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_addopen (&actions, 1, logPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    posix_spawn_file_actions_adddup2 (&actions, 1, 2);
+
+    posix_spawnattr_t attr;
+    posix_spawnattr_init (&attr);
+#if JUCE_MAC
+    // Only 0, 1 and 2 reach the updater: not this process's sockets (the AI
+    // control port) or audio devices. On Linux the updater closes them itself.
+    posix_spawnattr_setflags (&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
+
+    pid_t pid = 0;
+    const int rc = posix_spawn (&pid, argv[0], &actions, &attr, argv.data(), environ);
+    posix_spawn_file_actions_destroy (&actions);
+    posix_spawnattr_destroy (&attr);
+
+    if (rc != 0)
+    {
+        errOut = "could not start " + updater.getFileName() + " ("
+               + juce::String (std::strerror (rc)) + ").";
+        return false;
+    }
+    // Not waited for: the updater outlives this process (it waits for it to
+    // exit); once we are gone it is re-parented and reaped by the system.
+    return true;
 }
 
 #endif

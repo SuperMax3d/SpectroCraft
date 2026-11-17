@@ -316,8 +316,7 @@ public:
     bool controlServerRunning = false;
 
     // ------------------------------------------------------------------ updates
-    // Help > Check for Updates (docs/updates.md). Windows only: the archive
-    // layout, the updater and the menu item are Windows-specific for now.
+    // Help > Check for Updates (docs/updates.md): Windows, macOS and Linux.
     /** Fetch the latest GitHub release and compare it with this build. With
         automatic = true (the startup check) nothing newer, an unreachable
         GitHub or a declined version stays silent; only the diagnostic log may
