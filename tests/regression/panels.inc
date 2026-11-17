@@ -982,18 +982,22 @@ static void regrPanels_everyControlHasATooltip()
                                 "transcription", "selection", "drawing", "tables", "actions", "video" })
             if (auto* panel = win->panelForId (id))
             {
+                progress (("tooltips: walking the " + juce::String (id) + " panel").toRawUTF8());
                 panel->setSize (std::max (panel->getWidth (), 360), std::max (panel->getHeight (), 500));
                 collectControlsWithoutTooltip (*panel, id, missing, numControls);
             }
 
+        progress ("tooltips: walking the Stem Separation window");
         win->showStemSeparationWindow ();
         if (auto* w = win->stemSepWindow ())
             collectControlsWithoutTooltip (*w, "Stem Separation", missing, numControls);
+        progress ("tooltips: walking the Super Resolution window");
         win->showSuperResolutionWindow ();
         if (auto* w = win->superResWindow ())
             collectControlsWithoutTooltip (*w, "Super Resolution", missing, numControls);
 
         {
+            progress ("tooltips: walking the action windows and the table colour dialog");
             ActionEditWindow w (app, -1);
             collectControlsWithoutTooltip (w, "Edit Action", missing, numControls);
         }
@@ -1005,6 +1009,7 @@ static void regrPanels_everyControlHasATooltip()
             TablesColourDialog w ("Colour", 0, {});
             collectControlsWithoutTooltip (w, "Table colour", missing, numControls);
         }
+        progress (("tooltips: walk done (" + juce::String (numControls) + " controls)").toRawUTF8());
 
         CHECK (numControls > 60, "tooltips: the walk reaches the controls (" + juce::String (numControls) + ")");
         CHECK (missing.isEmpty (), "tooltips: controls without a tooltip:\n  " + missing.joinIntoString ("\n  "));
