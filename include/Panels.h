@@ -32,6 +32,7 @@ public:
     bool vertical = false;
 
     std::function<void (const juce::MouseEvent&)> onDrag;
+    std::function<void ()> onPress;     // optional: called on mouseDown, before onDrag
     std::function<void ()> onRelease;   // optional: called when the drag ends
 
     void paint (juce::Graphics& g) override
@@ -49,6 +50,7 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        if (onPress) onPress ();
         if (onDrag) onDrag (e);
     }
 
@@ -1236,6 +1238,23 @@ public:
     int numSelectedRows() const { return table.getNumSelectedRows (); }
     std::vector<int> selectedRowIndices() const;
     juce::TableListBox& listTable() { return table; }
+    juce::TextButton& addMarkerButton() { return addBtn; }
+    juce::TextButton& deleteMarkerButton() { return deleteBtn; }
+
+    // Detail section layout (#42). Begin / End / Length sit on one line when
+    // each box can still show "hh:mm:ss.xxxx", else Begin and End share a line
+    // and Length takes the next, else one per line: timeRowCount() is 1, 2 or 3.
+    int timeRowCount() const { return timeRows_; }
+    int minTimeFieldWidth() const;
+    // The Comments box is 4 lines tall by default. The bar between the
+    // buttons and Begin (detailSplitter) trades the list's height for the
+    // comment's, down to one line. setCommentHeight clamps to what fits;
+    // resetCommentHeight goes back to 4 lines.
+    int commentHeightForLines (int lines) const;
+    int commentHeight() const { return commentEdit.getHeight(); }
+    void setCommentHeight (int px);
+    void resetCommentHeight();
+    juce::Component& detailSplitter() { return splitter_; }
 
     // Find (Ctrl+F / F3 / Ctrl+F3): case-insensitive substring search over
     // marker titles and comments. The query/anchor state is independent of
@@ -1282,6 +1301,13 @@ private:
 
     juce::TextButton addBtn, deleteBtn;
     juce::TextEditor beginEdit, endEdit, lengthEdit, titleEdit, commentEdit;
+    ViewSplitter splitter_;          // list | details, between the buttons and Begin
+    int commentWanted_ = -1;         // Comments height the user dragged to (-1 = 4 lines)
+    int commentAtPress_ = 0;         // Comments height when the bar was pressed
+    int timeRows_ = 3;               // rows taken by Begin / End / Length
+    struct LabelSlot { juce::String text; juce::Rectangle<int> area; };
+    std::vector<LabelSlot> labels_;  // detail labels, placed by resized()
+    int maxCommentHeight() const;    // tallest Comments box that leaves the list its minimum
     int selectedRow = -1;
     bool editing = false; // guard against feedback loops in text editors
     int anchorRow = -1;   // last plain-clicked row: the Shift+click range origin

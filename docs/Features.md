@@ -85,7 +85,7 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
   markers live either inside the WAV's RIFF `cue` + LIST/`adtl` chunks (the
   classic DAW marker layout) or in a `.meta.json` sidecar, depending on the
   file's storage mode — files saved with that layout load their markers back
-  automatically. Sorted access, find-near. "Add Marker" (button or `M`) creates a **region
+  automatically. Sorted access, find-near. "Add Marker (F8)" (button, `F8` or `F2`) creates a **region
   marker spanning the current selection** if there is one, otherwise a point
   marker at the cursor. Every file has its own marker list — switching files
   shows that file's markers, which are restored from the file's metadata store
@@ -445,8 +445,13 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     anchor — any change of the selected set makes their union the time
     selection and fits both views to it with the usual 10% margin); edit Title,
     multi-line Comments, Begin, End and Length of the first selected marker in
-    the detail editors below the table (the comments box starts beside its label
-    and extends to the bottom of the panel); Add Marker; Delete Selected removes
+    the detail editors below the table. Begin, End and Length share one line
+    when each box still fits `hh:mm:ss.xxxx`, otherwise Begin and End share a
+    line and Length takes the next, otherwise one per line; the last box of
+    each line ends where the Title box ends. The Comments box is 4 lines tall
+    by default and ends at the bottom of the panel; drag the bar between the
+    buttons and Begin to make it taller (the list gets shorter) or shorter,
+    down to one line. Add Marker (F8); Delete Selected removes
     every selected row at once — DEL instead deletes the audio data of the active
     selection (zeros a spectral selection or trims out a time range, undoable);
     right-click a row for Copy All Markers / Paste Markers from Clipboard,
