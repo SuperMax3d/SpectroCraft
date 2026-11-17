@@ -1991,18 +1991,22 @@ juce::String formatTimeTickLabel (double t, double step, double span)
         return formatClockTime (t, maxDec);
     }
 
-    if (t == 0.0) return "0";
+    // A tick at the origin, or one a rounding error away from it.
+    if (t == 0.0 || (step > 0.0 && std::abs (t) < step * 1e-6)) return "0";
     if (step >= 1.0)   return juce::String ((int) std::llround (t));
     if (step >= 0.01)  return juce::String (t, step >= 0.1 ? 1 : 2);
 
-    // Sub-10 ms steps: compact ms/us suffixes while still inside the first
-    // second of the file...
-    if (t < 1.0)
+    // Sub-10 ms steps inside the first second: milliseconds, with as many
+    // decimals as a sub-millisecond step needs ("380ms", "380.5ms",
+    // "380.005ms"). No microseconds (#36): counts like "380000us" were hard
+    // to read, and the escaped micro sign was not UTF-8 in MSVC builds, so
+    // Windows drew a box in its place.
+    if (std::abs (t) < 1.0)
     {
-        if (step >= 0.001) return juce::String ((int) std::llround (t * 1000.0)) + "ms";
-        // fromUTF8: plain const char* literals are treated as ASCII by
-        // juce::String, which would mangle the UTF-8 micro sign (stray 'A').
-        return juce::String ((int) std::llround (t * 1e6)) + juce::String::fromUTF8 ("\u00b5s");
+        const double stepMs = step * 1000.0;
+        if (stepMs >= 1.0 - 1e-9) return juce::String ((int) std::llround (t * 1000.0)) + "ms";
+        const int decimals = juce::jlimit (1, 6, (int) std::ceil (-std::log10 (stepMs) - 1e-9));
+        return juce::String (t * 1000.0, decimals) + "ms";
     }
 
     // ...otherwise decimal seconds with as many digits as the step needs.

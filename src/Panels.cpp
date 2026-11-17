@@ -5749,7 +5749,7 @@ void MarkerListPanel::deleteAudioData ()
 }
 
 MarkerListPanel::MarkerListPanel (Application& appIn)
-    : app (appIn), addBtn ("Add Marker"), deleteBtn ("Delete")
+    : app (appIn), addBtn ("Add Marker (F8)"), deleteBtn ("Delete")
 {
     auto& header = table.getHeader();
     // JUCE TableHeaderComponent column IDs must be non-zero. The Comment
@@ -5774,6 +5774,18 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
     addAndMakeVisible (&lengthEdit);
     addAndMakeVisible (&titleEdit);
     addAndMakeVisible (&commentEdit);
+    addAndMakeVisible (&splitter_);
+
+    // The bar between the buttons and Begin: dragging it trades the list's
+    // height for the Comments box's (#42). The box grows by however far the
+    // mouse went up since the press (measured from the press, not from the
+    // bar, which moves while it is dragged), so pressing alone changes nothing.
+    splitter_.setTooltip ("Drag to make the Comments box taller or shorter.");
+    splitter_.onPress = [this] { commentAtPress_ = commentEdit.getHeight(); };
+    splitter_.onDrag  = [this] (const juce::MouseEvent& e)
+    {
+        setCommentHeight (commentAtPress_ - e.getDistanceFromDragStartY());
+    };
 
     // Names let unit tests (and future code) find the editors without exposing
     // the private members.
@@ -5825,8 +5837,8 @@ MarkerListPanel::MarkerListPanel (Application& appIn)
     // component, not to the TableListBox itself.
     table.addMouseListener (this, true);
 
-    addBtn.setTooltip ("Add a marker at the playhead. With an active selection it creates a "
-                       "region marker spanning the selection; otherwise a point marker.");
+    addBtn.setTooltip ("Add a marker at the playhead (F8 or F2). With an active selection it "
+                       "creates a region marker spanning the selection; otherwise a point marker.");
     deleteBtn.setTooltip ("Delete every selected marker from the list and from both views.");
     table.setTooltip ("Double-click a row to edit its details in the fields below. "
                       "Ctrl+click toggles rows, Shift+click range-selects from the last plain click "
@@ -6472,10 +6484,96 @@ int MarkerListPanel::pasteMarkersFromClipboard()
     return added;
 }
 
+// Detail section geometry (#42).
+namespace
+{
+    constexpr int kMarkerRowH      = 24;   // one Begin / End / Length / Title row
+    constexpr int kMarkerLabelCol  = 60;   // first label column; the editors start here
+    constexpr int kMarkerButtonsH  = 26;
+    constexpr int kMarkerFieldGap  = 8;    // between a box and the next label on a line
+    constexpr int kMarkerMinListH  = 40;   // the list keeps at least this when the comment grows
+    constexpr float kMarkerLabelFont = 12.0f;
+
+    int markerLabelWidth (const juce::String& text)
+    {
+        return juce::GlyphArrangement::getStringWidthInt (juce::Font (juce::FontOptions (kMarkerLabelFont)),
+                                                          text) + 6;
+    }
+}
+
+int MarkerListPanel::minTimeFieldWidth() const
+{
+    // Just wide enough for "hh:mm:ss.xxxx" with the editor's own margins.
+    return juce::GlyphArrangement::getStringWidthInt (beginEdit.getFont(), "00:00:00.0000")
+         + 2 * beginEdit.getLeftIndent() + beginEdit.getBorder().getLeftAndRight() + 2;
+}
+
+int MarkerListPanel::commentHeightForLines (int lines) const
+{
+    const float lineH = commentEdit.getFont().getHeight() * commentEdit.getLineSpacing();
+    return (int) std::ceil (lineH * (float) std::max (1, lines))
+         + 2 * commentEdit.getTopIndent() + commentEdit.getBorder().getTopAndBottom() + 1;
+}
+
+int MarkerListPanel::maxCommentHeight() const
+{
+    // Everything else in the panel, top to bottom: margins, the list's
+    // minimum, the buttons, the bar, the time rows and the Title row.
+    const int others = 8 + kMarkerMinListH + kMarkerButtonsH + sc::ui::kSplitterH
+                     + timeRows_ * kMarkerRowH + kMarkerRowH;
+    return std::max (commentHeightForLines (1), getHeight() - others);
+}
+
+void MarkerListPanel::resetCommentHeight()
+{
+    commentWanted_ = -1;
+    resized();
+    repaint();
+}
+
+void MarkerListPanel::setCommentHeight (int px)
+{
+    commentWanted_ = juce::jlimit (commentHeightForLines (1), maxCommentHeight(), px);
+    resized();
+    repaint();
+}
+
 void MarkerListPanel::resized()
 {
     auto b = getLocalBounds().reduced (4, 4);
-    table.setBounds (b.removeFromTop (std::max (80, (int) (b.getHeight() * 0.42))));
+    labels_.clear();
+
+    // Begin / End / Length: as many per line as fit while each box still
+    // shows "hh:mm:ss.xxxx" (3, then 2 + 1, then one per line). The boxes of
+    // a line share its width and the last one ends at the right edge, like
+    // the Title and Comments boxes below.
+    const int x0 = b.getX() + kMarkerLabelCol, x1 = b.getRight();
+    const int minW = minTimeFieldWidth();
+    const int endLblW = markerLabelWidth ("End:"), lenLblW = markerLabelWidth ("Length:");
+    auto boxWidth = [&] (int boxes, int inlineLabelsW)
+    {
+        return (x1 - x0 - inlineLabelsW - (boxes - 1) * kMarkerFieldGap) / boxes;
+    };
+    std::vector<std::vector<std::pair<juce::String, juce::TextEditor*>>> lines;
+    if (boxWidth (3, endLblW + lenLblW) >= minW)
+        lines = { { { "Begin:", &beginEdit }, { "End:", &endEdit }, { "Length:", &lengthEdit } } };
+    else if (boxWidth (2, endLblW) >= minW)
+        lines = { { { "Begin:", &beginEdit }, { "End:", &endEdit } }, { { "Length:", &lengthEdit } } };
+    else
+        lines = { { { "Begin:", &beginEdit } }, { { "End:", &endEdit } }, { { "Length:", &lengthEdit } } };
+    timeRows_ = (int) lines.size();
+
+    // Heights, from the bottom: the Comments box (4 lines unless dragged,
+    // never under one line), Title, the time rows, the bar, the buttons; the
+    // list takes the rest.
+    const int commentH = juce::jlimit (commentHeightForLines (1), maxCommentHeight(),
+                                       commentWanted_ > 0 ? commentWanted_ : commentHeightForLines (4));
+    auto commentRow = b.removeFromBottom (commentH);
+    auto titleRow   = b.removeFromBottom (kMarkerRowH);
+    auto timeArea   = b.removeFromBottom (timeRows_ * kMarkerRowH);
+    splitter_.setBounds (b.removeFromBottom (sc::ui::kSplitterH));
+    auto buttons    = b.removeFromBottom (kMarkerButtonsH);
+    table.setBounds (b);
 
     // The Comment column fills whatever width is left of the fixed columns.
     auto& hdr = table.getHeader();
@@ -6485,49 +6583,54 @@ void MarkerListPanel::resized()
     hdr.setColumnWidth (3, 75);
     hdr.setColumnWidth (4, std::max (40, table.getWidth () - fixedW));
 
-    addBtn.setBounds (b.removeFromTop (26));
-    deleteBtn.setTopLeftPosition (addBtn.getRight() + 8, b.getY());
-    deleteBtn.setBounds (deleteBtn.getX(), b.getY(), 70, 26);
-    b.reduce (0, 4);
+    const juce::Font btnFont = getLookAndFeel().getTextButtonFont (addBtn, kMarkerButtonsH);
+    const int addW = juce::GlyphArrangement::getStringWidthInt (btnFont, addBtn.getButtonText()) + 24;
+    addBtn.setBounds (buttons.removeFromLeft (std::min (addW, buttons.getWidth())));
+    buttons.removeFromLeft (8);
+    deleteBtn.setBounds (buttons.removeFromLeft (std::min (70, buttons.getWidth())));
 
-    // Detail grid: one label + editor per row. The Comments editor is
-    // multi-line, starts on the same row as its label and extends to the
-    // bottom of the panel.
-    auto row1 = b.removeFromTop (24);
-    beginEdit.setBounds (xoffset (row1, 60));
+    const int labelX = b.getX() + 2;
+    for (const auto& line : lines)
+    {
+        auto row = timeArea.removeFromTop (kMarkerRowH);
+        const int n = (int) line.size();
+        const int inlineW = n == 3 ? endLblW + lenLblW : (n == 2 ? endLblW : 0);
+        const int w = boxWidth (n, inlineW);
+        int x = x0;
+        for (int i = 0; i < n; ++i)
+        {
+            const auto& [text, editor] = line[(size_t) i];
+            if (i == 0)
+                labels_.push_back ({ text, { labelX, row.getY(), kMarkerLabelCol - 2, row.getHeight() } });
+            else
+            {
+                x += kMarkerFieldGap;
+                const int lw = text == "End:" ? endLblW : lenLblW;
+                labels_.push_back ({ text, { x, row.getY(), lw, row.getHeight() } });
+                x += lw;
+            }
+            const int right = (i == n - 1) ? x1 : x + w;
+            editor->setBounds (x, row.getY(), right - x, row.getHeight());
+            x = right;
+        }
+    }
 
-    auto row2 = b.removeFromTop (24);
-    endEdit.setBounds (xoffset (row2, 60));
+    labels_.push_back ({ "Title:", { labelX, titleRow.getY(), kMarkerLabelCol - 2, titleRow.getHeight() } });
+    titleEdit.setBounds (xoffset (titleRow, kMarkerLabelCol));
 
-    auto row3 = b.removeFromTop (24);
-    lengthEdit.setBounds (xoffset (row3, 60));
-
-    auto row4 = b.removeFromTop (24);
-    titleEdit.setBounds (xoffset (row4, 60));
-
-    commentEdit.setBounds (xoffset (b, 60));
+    // "Comments:" is wider than the other labels; it sits beside the box's
+    // first line and still ends before the editor column starts.
+    labels_.push_back ({ "Comments:", { labelX, commentRow.getY(), 72, kMarkerRowH } });
+    commentEdit.setBounds (xoffset (commentRow, kMarkerLabelCol));
 }
 
 void MarkerListPanel::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour::fromRGB (45, 45, 48));
     g.setColour (juce::Colours::white);
-    g.setFont (12.0f);
-
-    auto b = getLocalBounds().reduced (4, 4);
-    const int tableH = std::max (80, (int) (b.getHeight() * 0.42));
-    b.removeFromTop (tableH + 30); // skip table + buttons rows
-    g.drawText ("Begin:", 6, b.getY(), 52, 20, juce::Justification::centredLeft, false);
-    auto row2 = b.reduced (0, 24);
-    g.drawText ("End:", 6, row2.getY(), 52, 20, juce::Justification::centredLeft, false);
-    auto row3 = b.reduced (0, 48);
-    g.drawText ("Length:", 6, row3.getY(), 52, 20, juce::Justification::centredLeft, false);
-    auto row4 = b.reduced (0, 72);
-    g.drawText ("Title:", 6, row4.getY(), 52, 20, juce::Justification::centredLeft, false);
-    auto row5 = b.reduced (0, 96);
-    // "Comments:" is wider than the other labels; give it room so it is not
-    // clipped (the text still ends before the editor column starts).
-    g.drawText ("Comments:", 6, row5.getY(), 72, 20, juce::Justification::centredLeft, false);
+    g.setFont (kMarkerLabelFont);
+    for (const auto& l : labels_)
+        g.drawText (l.text, l.area, juce::Justification::centredLeft, false);
 }
 
 // ---------------------------------------------------------------- Status bar

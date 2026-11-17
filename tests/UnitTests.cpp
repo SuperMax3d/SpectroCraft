@@ -1727,9 +1727,12 @@ static void testMarkerPanelLayout()
     const int rid = app.markers().addRegionMarker (1.0, 3.0, "Alpha");
     app.markers().setComment (rid, "a comment\nwith two lines");
 
+    // Narrow enough for one Begin / End / Length box per line (#42 puts them
+    // side by side when the panel is wider: testMarkerPanelCompactDetails).
     MarkerListPanel panel (app);
-    panel.setSize (280, 420);
+    panel.setSize (200, 420);
     panel.refresh();
+    CHECK (panel.timeRowCount() == 3, "narrow marker panel: one time box per line");
 
     auto editorNamed = [&] (const juce::String& nm) -> juce::TextEditor*
     {
@@ -1781,6 +1784,171 @@ static void testMarkerPanelLayout()
                 ++brightLabelPixels;
     CHECK (brightLabelPixels > 100,
            "Begin/End/Length/Title/Comment labels are painted");
+
+    wav.deleteFile();
+    juce::File (wav.getFullPathName() + ".markers.json").deleteFile();
+}
+
+// ---------------- Marker panel details (#42): compact time rows, 4-line comment, drag bar, F8 ----------------
+static void testMarkerPanelCompactDetails()
+{
+    const juce::File wav = makeTempFile ("mkcompact.wav");
+    wav.deleteFile();
+    juce::File (wav.getFullPathName() + ".markers.json").deleteFile();
+    writeWav (wav, 1, 8000.0, 40000, [] (int, int64_t, double) { return 0.0f; });
+
+    Application app;
+    CHECK (app.openFile (wav), "regr #42: open wav");
+    app.markers().addRegionMarker (1.0, 3.0, "Alpha");
+
+    MarkerListPanel panel (app);
+    panel.setSize (300, 460);
+    panel.refresh();
+
+    auto editorNamed = [&] (const juce::String& nm) -> juce::TextEditor*
+    {
+        for (int i = 0; i < panel.getNumChildComponents(); ++i)
+            if (auto* te = dynamic_cast<juce::TextEditor*> (panel.getChildComponent (i)))
+                if (te->getName() == nm) return te;
+        return nullptr;
+    };
+    auto* beginEd   = editorNamed ("marker-begin-edit");
+    auto* endEd     = editorNamed ("marker-end-edit");
+    auto* lenEd     = editorNamed ("marker-length-edit");
+    auto* titleEd   = editorNamed ("marker-title-edit");
+    auto* commentEd = editorNamed ("marker-comment-edit");
+    CHECK (beginEd && endEd && lenEd && titleEd && commentEd, "regr #42: detail editors found");
+    if (! beginEd || ! endEd || ! lenEd || ! titleEd || ! commentEd)
+    {
+        wav.deleteFile();
+        return;
+    }
+
+    // A time box is just wide enough for "hh:mm:ss.xxxx".
+    const int minW = panel.minTimeFieldWidth();
+    const int textW = juce::GlyphArrangement::getStringWidthInt (beginEd->getFont(), "00:00:00.0000");
+    CHECK (minW > textW && minW < textW + 30, "regr #42: minimum time box fits hh:mm:ss.xxxx");
+
+    // Width sweep: 3, then 2 + 1, then 1 box per line as the panel narrows;
+    // boxes sharing a line are as wide as each other and at least minW; the
+    // last box of every line ends at the Title / Comments boxes' right edge.
+    bool seen[4] = { false, false, false, false };
+    bool monotonic = true, wideEnough = true, rightAligned = true, lined = true, ordered = true;
+    int prevRows = 4;
+    for (int w = 150; w <= 900; w += 3)
+    {
+        panel.setSize (w, 460);
+        const int rows = panel.timeRowCount();
+        if (rows < 1 || rows > 3) { lined = false; continue; }
+        seen[rows] = true;
+        monotonic = monotonic && rows <= prevRows;
+        prevRows = rows;
+        const int right = titleEd->getRight();
+        rightAligned = rightAligned && lenEd->getRight() == right && commentEd->getRight() == right;
+        if (rows == 1)
+        {
+            wideEnough = wideEnough && beginEd->getWidth() >= minW && endEd->getWidth() >= minW
+                                    && lenEd->getWidth() >= minW;
+            lined = lined && beginEd->getY() == endEd->getY() && endEd->getY() == lenEd->getY()
+                          && beginEd->getWidth() == endEd->getWidth()
+                          && std::abs (lenEd->getWidth() - endEd->getWidth()) <= 2;
+            ordered = ordered && beginEd->getRight() < endEd->getX() && endEd->getRight() < lenEd->getX();
+        }
+        else if (rows == 2)
+        {
+            wideEnough = wideEnough && beginEd->getWidth() >= minW && endEd->getWidth() >= minW;
+            rightAligned = rightAligned && endEd->getRight() == right;
+            lined = lined && beginEd->getY() == endEd->getY() && lenEd->getY() > beginEd->getY()
+                          && lenEd->getX() == beginEd->getX()
+                          && std::abs (beginEd->getWidth() - endEd->getWidth()) <= 1;
+            ordered = ordered && beginEd->getRight() < endEd->getX();
+        }
+        else
+        {
+            lined = lined && beginEd->getX() == endEd->getX() && endEd->getX() == lenEd->getX();
+            ordered = ordered && beginEd->getY() < endEd->getY() && endEd->getY() < lenEd->getY();
+        }
+        ordered = ordered && lenEd->getBottom() <= titleEd->getY() && titleEd->getBottom() <= commentEd->getY();
+    }
+    CHECK (seen[1] && seen[2] && seen[3], "regr #42: one, two and three time rows across widths");
+    CHECK (monotonic, "regr #42: a wider panel never needs more time rows");
+    CHECK (wideEnough, "regr #42: boxes sharing a line keep room for hh:mm:ss.xxxx");
+    CHECK (rightAligned, "regr #42: the last box of each line ends at the same right edge");
+    CHECK (lined, "regr #42: boxes on a line share its row and width");
+    CHECK (ordered, "regr #42: boxes do not overlap; time rows, Title, Comments in order");
+
+    // One line: the End and Length labels are painted between the boxes.
+    panel.setSize (900, 460);
+    CHECK (panel.timeRowCount() == 1, "regr #42: wide panel, one time row");
+    {
+        const juce::Image img = panel.createComponentSnapshot (panel.getLocalBounds());
+        auto brightBetween = [&] (int xa, int xb)
+        {
+            int n = 0;
+            for (int y = beginEd->getY(); y < beginEd->getBottom(); ++y)
+                for (int x = xa + 1; x < xb - 1; ++x)
+                    if (img.getPixelAt (x, y).getBrightness() > 0.35f) ++n;
+            return n;
+        };
+        CHECK (brightBetween (beginEd->getRight(), endEd->getX()) > 15, "regr #42: End label drawn on the line");
+        CHECK (brightBetween (endEd->getRight(), lenEd->getX()) > 25, "regr #42: Length label drawn on the line");
+    }
+
+    // The Comments box: 4 lines by default, at the bottom of the panel.
+    panel.setSize (300, 460);
+    CHECK (commentEd->getHeight() == panel.commentHeightForLines (4)
+           && panel.commentHeight() == commentEd->getHeight(), "regr #42: Comments box is 4 lines by default");
+    CHECK (commentEd->getBottom() == panel.getHeight() - 4, "regr #42: Comments box ends at the panel bottom");
+    commentEd->setText ("one\ntwo\nthree\nfour", false);
+    const int textBottom = commentEd->getTextBounds ({ 0, commentEd->getTotalNumChars() }).getBounds().getBottom();
+    CHECK (textBottom <= commentEd->getHeight() - commentEd->getBorder().getBottom(),
+           "regr #42: four lines of comment fit without scrolling");
+    commentEd->setText ({}, false);
+
+    // The bar sits between the buttons and Begin; dragging it moves height
+    // between the list and the comment.
+    auto& bar = panel.detailSplitter();
+    CHECK (bar.getY() >= panel.addMarkerButton().getBottom() && bar.getBottom() <= beginEd->getY(),
+           "regr #42: the bar is between Add Marker and Begin");
+    auto barEvent = [&] (int y)
+    {
+        return juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(),
+                                 { 20.0f, (float) y }, {}, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                 &bar, &bar, juce::Time(), { 20.0f, 3.0f }, juce::Time(), 1, false);
+    };
+    const int list0 = panel.listTable().getHeight(), comment0 = commentEd->getHeight();
+    bar.mouseDown (barEvent (3));
+    CHECK (commentEd->getHeight() == comment0, "regr #42: pressing the bar changes nothing");
+    bar.mouseDrag (barEvent (3 - 50));
+    CHECK (commentEd->getHeight() == comment0 + 50 && panel.listTable().getHeight() == list0 - 50,
+           "regr #42: dragging the bar up 50 px gives the comment 50 px of the list");
+    CHECK (commentEd->getBottom() == panel.getHeight() - 4 && bar.getBottom() <= beginEd->getY(),
+           "regr #42: the comment still ends at the bottom, the bar stays above Begin");
+    bar.mouseDrag (barEvent (3 + 2000));
+    CHECK (commentEd->getHeight() == panel.commentHeightForLines (1),
+           "regr #42: dragging down stops at a one-line comment");
+    bar.mouseDrag (barEvent (3 - 5000));
+    CHECK (panel.listTable().getHeight() >= 40 && commentEd->getBottom() == panel.getHeight() - 4,
+           "regr #42: dragging up stops while the list keeps its minimum");
+    bar.mouseUp (barEvent (3 - 5000));
+    bar.mouseDown (barEvent (3));
+    bar.mouseDrag (barEvent (3 + 40));
+    const int dragged = commentEd->getHeight();
+    panel.setSize (300, 520);   // the panel grows: the list takes the extra room
+    CHECK (commentEd->getHeight() == dragged, "regr #42: a dragged comment height survives a resize");
+    panel.setSize (300, 160);   // too short: the comment gives way, down to one line
+    CHECK (commentEd->getHeight() >= panel.commentHeightForLines (1)
+           && commentEd->getHeight() < dragged, "regr #42: a short panel shrinks the comment first");
+
+    panel.setSize (300, 460);
+    panel.resetCommentHeight();
+    CHECK (commentEd->getHeight() == panel.commentHeightForLines (4), "regr #42: reset restores 4 lines");
+
+    // F8 on the button; both buttons are inside the panel.
+    CHECK (panel.addMarkerButton().getButtonText() == "Add Marker (F8)", "regr #42: Add Marker shows F8");
+    CHECK (panel.getLocalBounds().contains (panel.deleteMarkerButton().getBounds())
+           && panel.deleteMarkerButton().getX() > panel.addMarkerButton().getRight(),
+           "regr #42: the Delete button sits beside Add Marker, inside the panel");
 
     wav.deleteFile();
     juce::File (wav.getFullPathName() + ".markers.json").deleteFile();
@@ -8369,9 +8537,22 @@ static void testTimeAxisTicks()
     CHECK (formatTimeTickLabel (0.2, 0.2, 1.0) == "0.2", "tenths of a second label");
     CHECK (formatTimeTickLabel (0.05, 0.05, 1.0) == "0.05", "hundredths of a second label");
     CHECK (formatTimeTickLabel (0.002, 0.002, 1.0) == "2ms", "millisecond label");
-    // fromUTF8: the app builds this suffix with juce::String::fromUTF8; a plain
-    // literal would be read as ASCII and mangle the micro sign.
-    CHECK (formatTimeTickLabel (0.0005, 0.0005, 1.0) == juce::String::fromUTF8 ("500\u00b5s"), "microsecond label");
+    // Sub-millisecond steps (#36): milliseconds with decimals, never a micro
+    // sign (it came out as a box in Windows builds) nor "380000us".
+    CHECK (formatTimeTickLabel (0.0005, 0.0005, 1.0) == "0.5ms", "half-millisecond label");
+    CHECK (formatTimeTickLabel (0.3805, 0.0005, 0.006) == "380.5ms", "380.5 ms in a 6 ms view");
+    CHECK (formatTimeTickLabel (0.384, 0.0005, 0.006) == "384.0ms", "whole ms tick keeps the step's decimals");
+    CHECK (formatTimeTickLabel (0.38002, 0.00002, 0.0003) == "380.02ms", "20 us steps: two decimals");
+    CHECK (formatTimeTickLabel (0.380001, 0.000001, 0.00002) == "380.001ms", "1 us steps: three decimals");
+    CHECK (formatTimeTickLabel (-0.0025, 0.0005, 0.006) == "-2.5ms", "negative offset times in ms too");
+    CHECK (formatTimeTickLabel (1e-12, 0.0005, 0.006) == "0", "rounding noise at the origin is 0");
+    {
+        bool ascii = true;
+        for (double t : { 0.0005, 0.3805, 0.380001, 0.000002 })
+            for (auto c : formatTimeTickLabel (t, 0.000001, 0.00002))
+                ascii = ascii && c < 128;
+        CHECK (ascii, "sub-millisecond labels are plain ASCII (no micro sign)");
+    }
     CHECK (formatTimeTickLabel (9.242, 0.002, 20.0) == "9.242", "ms step away from start: decimal seconds");
     CHECK (formatTimeTickLabel (12.5, 0.0005, 20.0) == "12.5000", "sub-ms step away from start: 4 digits");
     CHECK (formatTimeTickLabel (0.0, 1.0, 30.0) == "0", "origin label is plain 0 when zoomed in");
@@ -30212,6 +30393,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("marker panel details", testMarkerPanelDetails);
     SC_RUN_TEST ("history panel paint", testHistoryPanelPaint);
     SC_RUN_TEST ("marker panel layout", testMarkerPanelLayout);
+    SC_RUN_TEST ("marker panel compact details (#42)", testMarkerPanelCompactDetails);
     SC_RUN_TEST ("independent views", testIndependentViews);
     SC_RUN_TEST ("scroll bars", testScrollBars);
     SC_RUN_TEST ("wav marker chunks", testWavMarkerChunks);
