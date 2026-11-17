@@ -39,6 +39,7 @@ target_sources (SpectroCraft
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoWindow.cpp   # Video window (picture follows the playhead)
         ${CMAKE_CURRENT_SOURCE_DIR}/VideoScaler.cpp   # Video picture scaling (Lanczos / Bicubic / Nearest)
         ${CMAKE_CURRENT_SOURCE_DIR}/MainWindow.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/MainToolbar.cpp   # the toolbar in the menu bar row (issue #43)
         ${CMAKE_CURRENT_SOURCE_DIR}/Resampler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/FFTAvx.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/ScttChunk.cpp   # SCTT RIFF chunk I/O (no AI dependency)

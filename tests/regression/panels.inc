@@ -987,6 +987,9 @@ static void regrPanels_everyControlHasATooltip()
                 collectControlsWithoutTooltip (*panel, id, missing, numControls);
             }
 
+        progress ("tooltips: walking the toolbar");
+        if (auto* bar = win->toolbarComp ())
+            collectControlsWithoutTooltip (*bar, "Toolbar", missing, numControls);
         progress ("tooltips: walking the Stem Separation window");
         win->showStemSeparationWindow ();
         if (auto* w = win->stemSepWindow ())

@@ -101,6 +101,11 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   list/preview plot) share one widget style: `include/SplitterStyle.h`
   (`sc::ui::kSplitterH`, `sc::ui::drawSplitterGrip`). Do not draw a private grip
   in a new splitter.
+- Toolbar (issue #43; menu bar row, left of the workspace bar): buttons, vector icons, key
+  helpers and the custom shortcuts' model in `include/MainToolbar.h` + `src/MainToolbar.cpp`;
+  wired in `MainWindow` (`runToolbarCommand`, `runCustomShortcut`, `setCustomShortcut`,
+  `shortcutUsedBy` - add a key handled in `MainWindow::keyPressed` to `mainWindowKeys()` there
+  so a custom shortcut cannot take it). Test "toolbar: tools, shortcuts 1-9 (#43)".
 - Menu and label text must stay **7-bit ASCII**: `juce::String` treats a plain `const char*`
   literal as `CharPointer_ASCII` and asserts on bytes > 127, so a literal `…` or `×` shows up as
   a garbage glyph. Use `...` in menus, or `juce::String::fromUTF8 (u8"…")` when a real

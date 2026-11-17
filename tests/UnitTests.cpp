@@ -24186,6 +24186,167 @@ static void testItemGroupsSelectionsDrawings()
     sc::fileMetaSidecarPath (wav).deleteFile ();
 }
 
+// ------------------------------------------------------------------ toolbar (#43)
+// The toolbar in the menu bar row, left of the workspace presets: its
+// groups, the tooltips with their keys, the commands, the nine custom
+// shortcuts (defined, checked against the keys in use, run by click and by
+// key, remembered after a restart) and View > Toolbar.
+static void testMainToolbar()
+{
+    namespace tb = sc::toolbar;
+    // Keys.
+    CHECK (tb::canonical (juce::KeyPress ('H', juce::ModifierKeys::commandModifier, 0)) == "cmd+h"
+               && tb::canonical (juce::KeyPress (juce::KeyPress::F9Key)) == "f9"
+               && tb::canonical (juce::KeyPress ('k', juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier, 0)) == "cmd+alt+k",
+           "toolbar: canonical keys");
+    CHECK (tb::canonicalFromText ("Ctrl+H") == "cmd+h" && tb::canonicalFromText ("Shift+F10") == "shift+f10"
+               && tb::canonicalFromText ("Ctrl+Shift+Enter") == "cmd+shift+return" && tb::canonicalFromText ("V") == "v"
+               && tb::canonicalFromText ("Ctrl+=") == "cmd+=" && tb::canonicalFromText ("Paintbrush (25%") == "",
+           "toolbar: the menus' shortcut texts");
+    CHECK (tb::canonical (tb::keyFromCanonical ("cmd+alt+k")) == "cmd+alt+k" && tb::canonical (tb::keyFromCanonical ("f8")) == "f8",
+           "toolbar: canonical keys round-trip");
+   #if ! JUCE_MAC
+    CHECK (tb::displayText ("cmd+shift+h") == "Ctrl+Shift+H" && tb::displayText ("f9") == "F9", "toolbar: keys as the user reads them");
+   #endif
+    {
+        tb::CustomSet set;
+        set[0] = { tb::CustomShortcut::Kind::keyPress, "cmd+h", "H", "", "cmd+alt+k" };
+        set[4] = { tb::CustomShortcut::Kind::menuCommand, "Effects > Normalize", "", "star", "" };
+        set[8] = { tb::CustomShortcut::Kind::pythonScript, "/tmp/x.py", "py", "", "" };
+        const auto back = tb::parse (tb::serialise (set));
+        CHECK (back == set, "toolbar: the custom shortcuts round-trip through the settings");
+        CHECK (tb::parse ("garbage")[0].defined () == false, "toolbar: broken settings give empty shortcuts");
+    }
+    {
+        // Every icon draws something.
+        bool all = true;
+        for (int i = (int) tb::Icon::undo; i <= (int) tb::Icon::scissors; ++i)
+        {
+            juce::Image img (juce::Image::ARGB, 24, 24, true);
+            juce::Graphics g (img);
+            tb::drawIcon (g, (tb::Icon) i, { 2.0f, 2.0f, 20.0f, 20.0f }, juce::Colours::white);
+            int lit = 0;
+            for (int y = 0; y < 24; ++y)
+                for (int x = 0; x < 24; ++x)
+                    if (img.getPixelAt (x, y).getAlpha () > 100) ++lit;
+            all = all && lit > 8;
+        }
+        CHECK (all, "toolbar: every icon draws");
+    }
+
+    const juce::File wav = makeTempFile ("toolbar.wav");
+    writeWav (wav, 1, 8000.0, 16000, [] (int, int64_t f, double rate)
+        { return 0.5f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 300.0 * (double) f / rate); });
+    const juce::File store = makeTempFile ("toolbar.recent");
+    store.deleteFile ();
+    {
+        Application app (store);
+        CHECK (app.openFile (wav), "toolbar: open");
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "toolbar"));
+        win->setSize (1600, 800);
+        auto* bar = win->toolbarComp ();
+        CHECK (bar != nullptr && bar->isVisible () && win->isToolbarVisible (), "toolbar: shown by default");
+        if (bar == nullptr) return;
+        CHECK (bar->getY () == 0 && win->workspaceBarComp () != nullptr
+                   && bar->getRight () <= win->workspaceBarComp ()->getX (),
+               "toolbar: in the menu bar row, left of the workspace presets");
+        CHECK (bar->numButtons () == 14 + tb::kNumCustom, "toolbar: 14 tools and 9 shortcuts");
+        bool allShown = true, allTips = true;
+        for (int i = 0; i < bar->numButtons (); ++i)
+        {
+            allShown = allShown && bar->buttonAt (i)->isVisible ();
+            allTips = allTips && bar->buttonAt (i)->getTooltip ().isNotEmpty ();
+        }
+        CHECK (allShown, "toolbar: every group fits a 1600 px window");
+        CHECK (allTips, "toolbar: every button has a tooltip");
+        win->syncSharedState ();
+       #if ! JUCE_MAC
+        CHECK (bar->button ("undo")->getTooltip () == "Undo (Ctrl+Z)" && bar->button ("view.toggle")->getTooltip ().endsWith ("(F9)")
+                   && bar->button ("marker.add")->getTooltip () == "Add Marker (F8)" && bar->button ("tool.lasso")->getTooltip () == "Lasso (L)",
+               "toolbar: the tooltips say the keyboard shortcut");
+       #endif
+        CHECK (bar->button ("tool.timeRange")->on && ! bar->button ("tool.marquee")->on, "toolbar: the current tool is lit");
+        CHECK (! bar->button ("undo")->isEnabled (), "toolbar: nothing to undo yet");
+
+        // The commands.
+        win->runToolbarCommand ("tool.marquee");
+        CHECK (app.selMode == SpectralSelMode::Marquee && bar->button ("tool.marquee")->on && ! bar->button ("tool.timeRange")->on,
+               "toolbar: Marquee");
+        win->runToolbarCommand ("tool.move");
+        CHECK (app.moveTool && bar->button ("tool.move")->on && ! bar->button ("tool.marquee")->on, "toolbar: Move");
+        win->runToolbarCommand ("tool.move");
+        CHECK (app.moveTool, "toolbar: the Move button arms Move (it does not toggle)");
+        win->runToolbarCommand ("tool.paintbrush");
+        CHECK (! app.moveTool && app.selMode == SpectralSelMode::Paintbrush, "toolbar: Paintbrush");
+        win->runToolbarCommand ("draw.oval");
+        CHECK (win->spectralViewComp ()->isPendingDraw () && win->spectralViewComp ()->pendingDrawKind () == DrawingItem::Kind::Ellipse
+                   && bar->button ("draw.oval")->on,
+               "toolbar: Oval arms a new oval");
+        win->spectralViewComp ()->cancelPendingDraw ();
+        const auto markers = app.markers ().markers ().size ();
+        win->runToolbarCommand ("marker.add");
+        CHECK (app.markers ().markers ().size () == markers + 1, "toolbar: Add Marker (like F8)");
+        win->runToolbarCommand ("view.toggle");
+        CHECK (win->spectralViewComp () != nullptr && ! win->spectralViewComp ()->isVisible ()
+                   && win->waveformViewComp ()->isVisible (),
+               "toolbar: Waveform / Spectrogram cycles the views (like F9)");
+        win->runToolbarCommand ("view.toggle");
+        win->runToolbarCommand ("view.toggle");
+
+        // Custom shortcuts: a key already in use is refused.
+        tb::CustomShortcut keys { tb::CustomShortcut::Kind::keyPress, "s", "TR", "", "cmd+h" };
+        const auto refused = win->setCustomShortcut (0, keys);
+        CHECK (refused.contains ("already used") && ! bar->custom ()[0].defined (), "toolbar: a key in use (Ctrl+H) is refused");
+        CHECK (win->shortcutUsedBy ("cmd+z") == "Edit > Undo" && win->shortcutUsedBy ("f9").isNotEmpty ()
+                   && win->shortcutUsedBy ("cmd+alt+k").isEmpty (),
+               "toolbar: the keys in use come from the menus and the main window");
+        keys.key = "cmd+alt+k";
+        CHECK (win->setCustomShortcut (0, keys).isEmpty () && bar->custom ()[0].defined (), "toolbar: shortcut 1 defined");
+        CHECK (bar->button ("custom.1")->label == "TR" && ! bar->button ("custom.1")->placeholder
+                   && bar->button ("custom.1")->getTooltip ().contains ("Ctrl+Alt+K"),
+               "toolbar: shortcut 1 shows its text, its tooltip its key");
+        CHECK (win->setCustomShortcut (1, { tb::CustomShortcut::Kind::menuCommand, "Selection > Lasso", "", "star", "cmd+alt+k" })
+                   .contains ("Shortcut 1"),
+               "toolbar: two shortcuts cannot share a key");
+        CHECK (win->setCustomShortcut (1, { tb::CustomShortcut::Kind::menuCommand, "Selection > Lasso", "", "star", "" }).isEmpty ()
+                   && bar->button ("custom.2")->icon == tb::Icon::star,
+               "toolbar: shortcut 2 runs a menu command, shown with an icon");
+        CHECK (win->menuCommandPaths ().contains ("Selection > Lasso") && win->menuCommandPaths ().contains ("Effects > Normalize"),
+               "toolbar: the commands offered are the menu bar's");
+
+        // Running them: a click, and the shortcut's own key.
+        win->runToolbarCommand ("custom.2");
+        CHECK (app.selMode == SpectralSelMode::Lasso, "toolbar: shortcut 2 runs Selection > Lasso");
+        CHECK (win->keyPressed (juce::KeyPress ('k', juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier, 0), nullptr)
+                   && app.selMode == SpectralSelMode::TimeRange,
+               "toolbar: Ctrl+Alt+K runs shortcut 1 (it sends S: Time Range)");
+        win->runToolbarCommand ("tool.marquee");
+        win->runToolbarCommand ("custom.1");
+        CHECK (app.selMode == SpectralSelMode::TimeRange, "toolbar: a click runs shortcut 1 too");
+
+        // View > Toolbar.
+        const int vIdx = win->getMenuBarNames ().indexOf ("View");
+        win->menuItemSelected (MainWindow::ViewShowToolbar, vIdx);
+        CHECK (! win->isToolbarVisible () && ! bar->isVisible (), "toolbar: View > Toolbar hides it");
+        win->menuItemSelected (MainWindow::ViewShowToolbar, vIdx);
+        CHECK (win->isToolbarVisible () && bar->isVisible (), "toolbar: and shows it");
+        win->menuItemSelected (MainWindow::ViewShowToolbar, vIdx);
+        app.recentStore->saveIfNeeded ();
+    }
+    {
+        // After a restart: the shortcuts and the hidden toolbar are remembered.
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "toolbar again"));
+        auto* bar = win->toolbarComp ();
+        CHECK (bar != nullptr && bar->custom ()[0].key == "cmd+alt+k" && bar->custom ()[1].target == "Selection > Lasso"
+                   && ! bar->custom ()[2].defined (),
+               "toolbar: the custom shortcuts are remembered after a restart");
+        CHECK (! win->isToolbarVisible (), "toolbar: so is View > Toolbar");
+    }
+    store.deleteFile ();
+    wav.deleteFile ();
+}
+
 // ------------------------------------------------------------------ drawing key shortcuts
 static void testDrawingKeyShortcuts()
 {
@@ -30901,6 +31062,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("arrow head geometry", testArrowHeadGeometry);
     SC_RUN_TEST ("drawing panel", testDrawingPanel);
     SC_RUN_TEST ("drawing key shortcuts", testDrawingKeyShortcuts);
+    SC_RUN_TEST ("toolbar: tools, shortcuts 1-9 (#43)", testMainToolbar);
     SC_RUN_TEST ("drawing handles, groups, ovals", testDrawingHandlesGroupsOvals);
     SC_RUN_TEST ("item groups: stored selections, drawings (fold, rename)", testItemGroupsSelectionsDrawings);
     SC_RUN_TEST ("left panels toggle shortcut", testLeftPanelsToggleShortcut);

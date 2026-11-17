@@ -522,6 +522,26 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
       menu). The whole arrangement, floating windows included, is restored at
       the next launch; the first launch after the update keeps the
       arrangement of the former two-group left column.
+    - **Toolbar** (issue #43), in the menu bar row left of the workspaces:
+      **Undo, Redo | Time Range, Marquee, Lasso, Paintbrush, Move |
+      Waveform / Spectrogram** (like F9), **Add Marker** (like F8) **| Free
+      Drawing, Text, Arrow, Rectangle, Oval | 1 ... 9**. Every button's
+      tooltip names its keyboard shortcut; the tool in use is lit. The icons
+      are drawn by SpectroCraft itself (vector paths in `src/MainToolbar.cpp`,
+      no third-party icon set). Groups that do not fit a narrow window are
+      left out, the shortcuts first. **View > Toolbar** shows or hides it
+      (remembered).
+    - **Shortcuts 1 to 9** are your own: click an empty one, or right-click
+      any (**Define / Change Shortcut N...**, **Run**, **Clear**, **Hide
+      Toolbar**). A shortcut runs a **menu command** (every command of the
+      menu bar, the effects included), a **Python script**, or **sends keys**
+      (Ctrl+H to show the harmonics, F5 to refresh...). It shows a short text
+      (up to 4 characters) or an icon from a small library (star, bolt, gear,
+      play, flag, heart, wave, note, check, cross, plus, eye, magnifier,
+      scissors), and can have a **keyboard shortcut of its own**: a key already
+      used by a menu, by the main window or by another shortcut is refused with
+      what uses it. The shortcuts are remembered after a restart (settings key
+      `toolbar_shortcuts`).
     - **View > Panels** (Ctrl+Shift+Enter) maximises the Editor's group to
       hide every other panel, and brings them back.
     - Individual panels can be closed from their tab menu (**≡**) or the
@@ -2127,7 +2147,7 @@ Window menu holds the **Workspaces** submenu and **Maximize Panel Group**,
 opens/closes the individual panels — **Video** included — and carries the **Allow multiple
 instances** toggle — see above; the **Help** menu holds **Show Tooltips** (on by default,
 remembered: off hides every hover tip in all windows; every button, list, slider and text field
-of the panels and tool windows has one, as do the panel tabs, the workspace bar and the channel
+of the panels and tool windows has one, as do the panel tabs, the toolbar, the workspace bar and the channel
 labels of the views), the **Diagnostic Log** toggle and its
 folder, summary and support-bundle actions). The Edit menu has a
 checkable **Snap to Zero Crossings** toggle (**off by default**): when on,
