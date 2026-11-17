@@ -1,6 +1,7 @@
 # Update signing key
 
-Every automatic update is described by a `update-manifest.json` (file list + SHA-256 of each
+Every automatic update is described by an update manifest (`update-manifest.json` on Windows,
+`update-manifest-macos-arm64.json`, `update-manifest-linux-x64.json`: file list + SHA-256 of each
 file, `docs/updates.md`). SpectroCraft only unpacks it when its **Ed25519 signature** validates
 against the public key built into the app — `sc::update::manifestPublicKeyHex()` in
 `src/Updates.cpp`. This folder holds the key material CI signs with.
@@ -33,7 +34,9 @@ self-check.)
 
 ## Where it is used
 
-`.github/workflows/build.yml` (Windows job): after the release payload is assembled,
+`.github/workflows/build.yml` (the Windows, macOS and Linux jobs): after the release payload is
+assembled (on macOS / Linux by `tools/make_release_payload.py`, and with `--platform macos|linux`
+and the manifest names above),
 
 ```sh
 python3 tools/make_update_manifest.py --dir build/release-payload \

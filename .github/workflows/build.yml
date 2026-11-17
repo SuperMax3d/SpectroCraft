@@ -207,7 +207,7 @@ jobs:
           -DSC_AI_DOWNLOAD_DIR="$GITHUB_WORKSPACE/ai-downloads"
           -DSC_TEST_MODELS_DIR="$GITHUB_WORKSPACE/test-models"
 
-      - name: Build (Debug, app + fake recorder plugin + AI runtimes)
+      - name: Build (Debug, app + updater + fake recorder plugin + AI runtimes)
         run: cmake --build build --target SpectroCraft --parallel "$(sysctl -n hw.ncpu)"
 
       # Every library in the bundle must resolve inside the bundle: no
@@ -238,10 +238,32 @@ jobs:
         timeout-minutes: 30
         run: python3 tools/acpp_e2e.py --exe build/src/SpectroCraft_artefacts/Debug/SpectroCraft.app/Contents/MacOS/SpectroCraft --variant metal --backend cpu
 
-      # tar first: upload-artifact zips drop the executable bit and symlinks.
+      # The archive payload (docs/updates.md): a copy of the bundle where the
+      # library links the program loads (libggml.0.dylib...) are files, so a
+      # zip made from it starts even without symbolic-link support.
+      - name: Assemble the macOS archive payload
+        if: success()
+        run: python3 tools/make_release_payload.py --platform macos --src build/src/SpectroCraft_artefacts/Debug --out build/release-payload
+
+      # update-manifest-macos-arm64.json + its Ed25519 signature, made from the
+      # payload: the release uploads both next to the archive (docs/updates.md).
+      - name: Update manifest (generate + sign)
+        if: success()
+        run: |
+          set -euo pipefail
+          updater=build/release-payload/SpectroCraft.app/Contents/MacOS/spectrocraft-updater
+          python3 tools/make_update_manifest.py --platform macos \
+            --dir build/release-payload \
+            --out build/update-manifest-macos-arm64.json \
+            --version-file build/generated/SC_VERSION.txt
+          "$updater" --sign tools/updates/ed25519.key build/update-manifest-macos-arm64.json build/update-manifest-macos-arm64.json.sig
+          "$updater" --verify tools/updates/ed25519.key build/update-manifest-macos-arm64.json build/update-manifest-macos-arm64.json.sig
+
+      # tar first: upload-artifact zips drop the executable bit. The tar holds
+      # exactly the files the manifest lists.
       - name: Package app (macOS arm64)
         if: success()
-        run: tar -czf SpectroCraft-macos-arm64.tar.gz -C build/src/SpectroCraft_artefacts/Debug SpectroCraft.app
+        run: tar -czf SpectroCraft-macos-arm64.tar.gz -C build/release-payload SpectroCraft.app
 
       - name: Upload app (macOS arm64, Debug, unsigned)
         if: success()
@@ -249,6 +271,16 @@ jobs:
         with:
           name: SpectroCraft-macos-arm64${{ env.SC_ARTIFACT_SUFFIX }}
           path: SpectroCraft-macos-arm64.tar.gz
+          retention-days: 30
+
+      - name: Upload update manifest (macOS arm64)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-manifest-macos${{ env.SC_ARTIFACT_SUFFIX }}
+          path: |
+            build/update-manifest-macos-arm64.json
+            build/update-manifest-macos-arm64.json.sig
           retention-days: 30
 
       - name: Upload test logs
@@ -316,7 +348,7 @@ jobs:
           -DSC_AI_DOWNLOAD_DIR="$GITHUB_WORKSPACE/ai-downloads"
           -DSC_TEST_MODELS_DIR="$GITHUB_WORKSPACE/test-models"
 
-      - name: Build (Debug, app + fake recorder plugin + AI runtimes)
+      - name: Build (Debug, app + updater + fake recorder plugin + AI runtimes)
         run: cmake --build build --target SpectroCraft --parallel "$(nproc)" -- -k 0
 
       # Every library must resolve from the executable's folder: none missing,
@@ -352,10 +384,30 @@ jobs:
         timeout-minutes: 30
         run: xvfb-run -a python3 tools/acpp_e2e.py --exe build/src/SpectroCraft_artefacts/Debug/SpectroCraft --variant cpu --backend cpu
 
-      # The executable needs the libraries next to it: ship the whole folder.
+      # The archive payload (docs/updates.md): the program, the updater and the
+      # libraries, with the sonames the program loads (libggml.so.0...) as
+      # files, so a zip made from it starts even without symbolic links.
+      - name: Assemble the Linux archive payload
+        if: success()
+        run: python3 tools/make_release_payload.py --platform linux --src build/src/SpectroCraft_artefacts/Debug --out build/release-payload
+
+      - name: Update manifest (generate + sign)
+        if: success()
+        run: |
+          set -euo pipefail
+          updater=build/release-payload/Debug/spectrocraft-updater
+          python3 tools/make_update_manifest.py --platform linux \
+            --dir build/release-payload \
+            --out build/update-manifest-linux-x64.json \
+            --version-file build/generated/SC_VERSION.txt
+          "$updater" --sign tools/updates/ed25519.key build/update-manifest-linux-x64.json build/update-manifest-linux-x64.json.sig
+          "$updater" --verify tools/updates/ed25519.key build/update-manifest-linux-x64.json build/update-manifest-linux-x64.json.sig
+
+      # The executable needs the libraries next to it: the whole payload folder
+      # (Debug/, the name the Linux archives have always used).
       - name: Package app (Linux x64)
         if: success()
-        run: tar -czf SpectroCraft-linux-x64.tar.gz -C build/src/SpectroCraft_artefacts Debug
+        run: tar -czf SpectroCraft-linux-x64.tar.gz -C build/release-payload Debug
 
       - name: Upload app (Linux x64, Debug)
         if: success()
@@ -363,6 +415,16 @@ jobs:
         with:
           name: SpectroCraft-linux-x64${{ env.SC_ARTIFACT_SUFFIX }}
           path: SpectroCraft-linux-x64.tar.gz
+          retention-days: 30
+
+      - name: Upload update manifest (Linux x64)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-manifest-linux${{ env.SC_ARTIFACT_SUFFIX }}
+          path: |
+            build/update-manifest-linux-x64.json
+            build/update-manifest-linux-x64.json.sig
           retention-days: 30
 
       - name: Upload test logs

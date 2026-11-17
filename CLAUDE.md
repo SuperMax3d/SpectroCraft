@@ -112,8 +112,9 @@ python3 tools/acpp_e2e.py --exe <exe> [--backend metal]          # real audio.cp
   non-ASCII character is wanted.
 - AI control code: `include/control/`, `src/control/` (command registry, `--json`, server);
   per-lot handoff notes: `docs/ai-control/progress/`.
-- Auto-update (Windows): `include/Updates.h` + `src/Updates.cpp` (GitHub lookup, signed manifest,
-  download/stage), `include/Ed25519.h` + `src/Ed25519.cpp` (signature), `updater/`
-  (`spectrocraft-updater`, a plain C++20 console program built as its own target and shipped inside
-  the release archive), keys in `tools/updates/`, manifest generator `tools/make_update_manifest.py`.
+- Auto-update (Windows, macOS, Linux; issue #37): `include/Updates.h` + `src/Updates.cpp` (GitHub
+  lookup, signed manifest, download/stage, per-platform install folder and layout), `include/Ed25519.h`
+  + `src/Ed25519.cpp` (signature), `updater/` (`spectrocraft-updater`, a plain C++20 console program
+  built with the app and shipped inside the release archive), keys in `tools/updates/`, macOS / Linux
+  archive payload `tools/make_release_payload.py`, manifest generator `tools/make_update_manifest.py`.
   Flow and release requirements: `docs/updates.md`; tests: `SC_TEST_FILTER=updates`.

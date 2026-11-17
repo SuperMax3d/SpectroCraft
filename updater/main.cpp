@@ -5,15 +5,23 @@
 // Windows will not overwrite a running executable. So the app stages and
 // verifies everything, launches this program, and exits; the updater waits for
 // the app's process to disappear, swaps the files, writes update-result.json
-// next to SpectroCraft.exe, and relaunches the app with --finish-update so it
+// in the install folder, and relaunches the app with --finish-update so it
 // can tell the user what happened (docs/updates.md).
 //
-// Plain C++20 + Win32, no JUCE: it must keep working when the rest of the
-// install folder is in the middle of being replaced.
+// macOS and Linux use the same steps: the install folder is the
+// SpectroCraft.app bundle (relaunched with /usr/bin/open) or the folder
+// holding the SpectroCraft executable. There the updater starts its own
+// session (closing the terminal the app came from does not stop it), ignores
+// SIGPIPE / SIGHUP, copies a file when the staging folder is on another
+// file system than the install (rename() cannot cross one), and deletes the
+// .old backups itself once every file is in place.
+//
+// Plain C++20 + Win32 / POSIX, no JUCE: it must keep working when the rest of
+// the install folder is in the middle of being replaced.
 //
 // Usage:
 //   spectrocraft-updater --pid <n> --install-dir <dir> --staging-dir <dir>
-//                        --relaunch <exe> [--no-relaunch]
+//                        --relaunch <exe or .app> [--no-relaunch]
 //       Reads <staging-dir>/update-plan.txt (written by the app after it has
 //       checked the manifest signature and every SHA-256), swaps the listed
 //       files, and reports the result.
@@ -51,6 +59,7 @@
   #include <signal.h>
   #include <sys/stat.h>
   #include <sys/types.h>
+  #include <sys/wait.h>
   #include <unistd.h>
 #endif
 
@@ -209,13 +218,63 @@ bool removeFile (const std::string& p)
 #endif
 }
 
+#ifndef _WIN32
+// Copy `from` next to `to` (<to>.new, same folder, same permission bits),
+// then rename it over `to`: the target is either the old file or the
+// complete new one, never half written. A new inode also matters on macOS,
+// where the kernel caches the code signature of an executable by inode.
+bool copyAcross (const std::string& from, const std::string& to)
+{
+    const int in = open (from.c_str(), O_RDONLY);
+    if (in < 0) return false;
+    struct stat st {};
+    if (fstat (in, &st) != 0) { close (in); return false; }
+
+    const std::string tmp = to + ".new";
+    unlink (tmp.c_str());
+    const int out = open (tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 07777);
+    if (out < 0) { close (in); return false; }
+
+    bool ok = true;
+    std::vector<char> buf (1 << 20);
+    for (;;)
+    {
+        const ssize_t n = read (in, buf.data(), buf.size());
+        if (n < 0) { if (errno == EINTR) continue; ok = false; break; }
+        if (n == 0) break;
+        for (ssize_t done = 0; done < n;)
+        {
+            const ssize_t w = write (out, buf.data() + done, (size_t) (n - done));
+            if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
+            done += w;
+        }
+        if (! ok) break;
+    }
+    ok = ok && fchmod (out, st.st_mode & 07777) == 0;   // umask may have dropped bits
+    ok = ok && fsync (out) == 0;
+    ok = close (out) == 0 && ok;
+    close (in);
+
+    if (ok && rename (tmp.c_str(), to.c_str()) == 0)
+    {
+        unlink (from.c_str());   // a move: the staged copy goes
+        return true;
+    }
+    unlink (tmp.c_str());
+    return false;
+}
+#endif
+
 bool moveFile (const std::string& from, const std::string& to)
 {
 #ifdef _WIN32
     return MoveFileExW (toWide (from).c_str(), toWide (to).c_str(),
                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != 0;
 #else
-    return rename (from.c_str(), to.c_str()) == 0;
+    if (rename (from.c_str(), to.c_str()) == 0) return true;
+    // The staging folder is in the temporary folder: often another file
+    // system (Linux /tmp is a tmpfs, the app may live on an external disk).
+    return errno == EXDEV && copyAcross (from, to);
 #endif
 }
 
@@ -289,6 +348,11 @@ std::string quoteForCmd (const std::string& s)
     return q + "\"";
 }
 
+bool endsWith (const std::string& s, const std::string& tail)
+{
+    return s.size() >= tail.size() && s.compare (s.size() - tail.size(), tail.size(), tail) == 0;
+}
+
 bool relaunch (const std::string& exe, const std::vector<std::string>& args)
 {
 #ifdef _WIN32
@@ -308,22 +372,66 @@ bool relaunch (const std::string& exe, const std::vector<std::string>& args)
     CloseHandle (pi.hThread);
     return true;
 #else
-    std::vector<std::string> argv { exe };
+    // A macOS bundle is opened through Launch Services, like a double-click
+    // (-n: a new instance even if the system still lists the old one).
+    std::vector<std::string> argv;
+    if (endsWith (exe, ".app") || endsWith (exe, ".app/"))
+    {
+        argv = { "/usr/bin/open", "-n", exe, "--args" };
+    }
+    else
+        argv = { exe };
     for (const auto& a : args) argv.push_back (a);
 
+    std::vector<char*> cargv;
+    for (auto& s : argv) cargv.push_back (s.data());
+    cargv.push_back (nullptr);
+
+    // This program has a single thread, so fork() is safe here.
     const pid_t child = fork();
     if (child < 0) return false;
     if (child == 0)
     {
-        std::vector<char*> cargv;
-        for (auto& s : argv) cargv.push_back (s.data());
-        cargv.push_back (nullptr);
-        execv (argv[0].c_str(), cargv.data());
+        setsid();
+        const int devNull = open ("/dev/null", O_RDWR);
+        if (devNull >= 0)
+        {
+            dup2 (devNull, 0);
+            dup2 (devNull, 1);
+            dup2 (devNull, 2);
+            if (devNull > 2) close (devNull);
+        }
+        execv (cargv[0], cargv.data());
         _exit (127);
+    }
+
+    // `open` returns once Launch Services has the app: wait for it so a
+    // failure is reported (the app itself is not our child).
+    if (argv[0] == "/usr/bin/open")
+    {
+        int status = 0;
+        while (waitpid (child, &status, 0) < 0 && errno == EINTR) {}
+        return WIFEXITED (status) && WEXITSTATUS (status) == 0;
     }
     return true;
 #endif
 }
+
+#ifndef _WIN32
+// Detach from the app: own session (no SIGHUP when the app's terminal
+// closes), no SIGPIPE when the log reader goes away, and none of the app's
+// file descriptors (its listening control socket would keep the port busy
+// for the relaunched app). macOS already spawns us with only 0-2.
+void detachFromApp()
+{
+    setsid();
+    signal (SIGHUP, SIG_IGN);
+    signal (SIGPIPE, SIG_IGN);
+    long maxFd = sysconf (_SC_OPEN_MAX);
+    if (maxFd < 0 || maxFd > 4096) maxFd = 4096;
+    for (int fd = 3; fd < (int) maxFd; ++fd) close (fd);
+}
+#endif
 
 // ------------------------------------------------------------------ key file
 
@@ -468,16 +576,33 @@ bool writeResult (const std::string& installDir, const std::string& version, boo
 
 int runUpdate (const Options& opt)
 {
+#ifndef _WIN32
+    detachFromApp();
+#endif
     const std::string planPath = join (opt.stagingDir, "update-plan.txt");
     logLine ("SpectroCraft updater");
     logLine ("  install dir : " + opt.installDir);
     logLine ("  staging dir : " + opt.stagingDir);
+
+    // Once the app has quit, a failure must still bring it back: the user
+    // gets the previous version and the reason (--finish-update reads
+    // update-result.json), not a program that silently vanished.
+    auto relaunchAfterFailure = [&opt]
+    {
+        if (opt.noRelaunch || opt.relaunchExe.empty()) return;
+        logLine ("starting SpectroCraft (the update failed)...");
+        if (! relaunch (opt.relaunchExe, { "--finish-update" }))
+            logLine ("warning: could not start " + opt.relaunchExe + " - open SpectroCraft yourself.");
+    };
 
     const Plan plan = readPlan (planPath);
     if (! plan.ok)
     {
         logLine ("error: " + plan.error);
         writeResult (opt.installDir, "", false, plan.error, planPath, {}, {}, { opt.stagingDir });
+        // Nothing was touched; wait for the app to be gone before starting it
+        // again, or the user ends up with two windows.
+        if (! opt.havePid || waitForExit (opt.pid, opt.waitMs)) relaunchAfterFailure();
         return 1;
     }
 
@@ -509,6 +634,7 @@ int runUpdate (const Options& opt)
             logLine ("error: the staged file is missing: " + rel);
             writeResult (opt.installDir, plan.version, false,
                          "The staged file is missing: " + rel, rel, {}, {}, { opt.stagingDir });
+            relaunchAfterFailure();
             return 1;
         }
     }
@@ -565,6 +691,18 @@ int runUpdate (const Options& opt)
         replaced.clear();
         oldFiles.clear();
     }
+#ifndef _WIN32
+    else
+    {
+        // Every file is in place: the backups can go now (POSIX removes a
+        // file that is still mapped or running without complaint). What
+        // cannot be removed is left to the app, as on Windows.
+        std::vector<std::string> kept;
+        for (const auto& old : oldFiles)
+            if (! removeFile (old)) kept.push_back (old);
+        oldFiles = kept;
+    }
+#endif
 
     // 5. Report, then hand the app back to the user.
     const std::vector<std::string> cleanup { opt.stagingDir };
@@ -649,9 +787,10 @@ void printUsage()
     std::printf (
         "SpectroCraft updater\n\n"
         "  spectrocraft-updater --pid <n> --install-dir <dir> --staging-dir <dir>\n"
-        "                       --relaunch <exe> [--no-relaunch] [--wait-ms <n>]\n"
+        "                       --relaunch <exe or .app> [--no-relaunch] [--wait-ms <n>]\n"
         "      Apply the update staged in <dir> (update-plan.txt), write\n"
-        "      update-result.json next to the app, and start the app again.\n\n"
+        "      update-result.json in the install folder, and start the app again\n"
+        "      (a macOS .app bundle is opened with /usr/bin/open).\n\n"
         "  spectrocraft-updater --sign <keyfile> <file> <out.sig>\n"
         "      Ed25519-sign a file (CI signs update-manifest.json this way).\n\n"
         "  spectrocraft-updater --verify <keyfile> <file> <out.sig>\n"

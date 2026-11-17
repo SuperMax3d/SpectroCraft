@@ -5153,16 +5153,15 @@ void MainWindow::showSupportBundleDialog ()
 //   3. download the archive, then unpack it to a staging folder while hashing
 //      every file against the manifest - nothing in the install folder has
 //      been touched yet, so a failure or a Cancel leaves the running app alone;
-//   4. start spectrocraft-updater.exe from the staging folder and quit: the
+//   4. start spectrocraft-updater from the staging folder and quit: the
 //      updater waits for this process to disappear, swaps the files (SpectroCraft.exe
 //      cannot be overwritten while it runs), writes update-result.json and
 //      starts the app again with --finish-update, where reportFinishedUpdate()
 //      tells the user what happened.
 //
-// Windows only: the archive layout and the updater are Windows-specific, and
-// so is this wiring. src/Updates.cpp itself compiles everywhere.
-
-#if JUCE_WINDOWS
+// Windows, macOS and Linux: what differs (the install folder, the manifest
+// asset, where the updater sits, how the app is started again) is in
+// src/Updates.cpp.
 
 namespace {
 
@@ -5199,6 +5198,16 @@ juce::String megabytes (juce::int64 bytes)
 {
     if (bytes <= 0) return "? MB";
     return juce::String ((double) bytes / (1024.0 * 1024.0), 1) + " MB";
+}
+
+/** What "install it by hand" means on this platform. */
+juce::String manualInstallHint()
+{
+#if JUCE_MAC
+    return "download the archive and replace SpectroCraft.app with the one it contains.";
+#else
+    return "download the archive and replace the files in this folder.";
+#endif
 }
 
 } // namespace
@@ -5282,16 +5291,17 @@ void MainWindow::offerUpdate (const sc::update::ReleaseInfo& rel, const juce::St
     }
 
     const sc::update::AssetInfo* manifestAsset =
-        sc::update::findAsset (rel, sc::update::kManifestName);
+        sc::update::findAsset (rel, sc::update::manifestAssetName());
     const sc::update::AssetInfo* sigAsset =
-        sc::update::findAsset (rel, sc::update::kManifestSigName);
+        sc::update::findAsset (rel, sc::update::manifestSigAssetName());
     if (manifestAsset == nullptr || sigAsset == nullptr)
     {
         sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
             "Check for Updates",
             "Release " + rel.tag + " has no signed update manifest, so this version "
-            "cannot be installed automatically.\n\nInstall it by hand from " + rel.pageUrl
-            + ": download the archive and replace the files in this folder.",
+            "cannot be installed automatically (" + sc::update::manifestAssetName()
+            + " is missing).\n\nInstall it by hand from " + rel.pageUrl + ": "
+            + manualInstallHint(),
             "", this);
         return;
     }
@@ -5340,14 +5350,11 @@ void MainWindow::startUpdate (const sc::update::ReleaseInfo& rel, const sc::upda
     }
 
     const juce::File install = sc::update::installDir();
-    if (! sc::update::dirIsWritable (install))
+    const juce::File unwritable = sc::update::firstUnwritableFolder (install);
+    if (unwritable != juce::File())
     {
         sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Update",
-            "SpectroCraft is running from a folder it may not write to:\n\n"
-            + install.getFullPathName() + "\n\n"
-            "Copy the program to a folder you own (Desktop, Documents...) and start "
-            "it from there; the update replaces the files in that folder.",
-            "", this);
+            sc::update::notWritableAdvice (install, unwritable), "", this);
         return;
     }
 
@@ -5410,6 +5417,9 @@ void MainWindow::startUpdate (const sc::update::ReleaseInfo& rel, const sc::upda
         }
         if (err.isEmpty() && ! sc::update::verifyManifestSignature (manifestText, sigText, err))
             err = "The update manifest could not be verified: " + err;
+        if (err.isEmpty() && ! sc::update::checkManifestPlatform (manifest, sc::update::platformToken(),
+                                                                  sc::update::archToken(), err))
+            err = "The update manifest does not fit this computer: " + err;
         if (err.isEmpty() && sc::update::compareVersions (manifest.version, version) != 0)
             err = "The manifest belongs to version " + manifest.version
                 + ", not to the release " + version + " it was published with.";
@@ -5520,8 +5530,7 @@ void MainWindow::startUpdate (const sc::update::ReleaseInfo& rel, const sc::upda
 
             juce::String launchErr;
             if (! sc::update::launchUpdater (updater, install, staging,
-                                             juce::File::getSpecialLocation (
-                                                 juce::File::currentExecutableFile), launchErr))
+                                             sc::update::relaunchTarget(), launchErr))
             {
                 sc::update::updateTempDir().deleteRecursively();
                 sc::alert::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Update",
@@ -5593,16 +5602,6 @@ void MainWindow::reportFinishedUpdate()
                                     text, "", this);
 }
 
-#else   // ! JUCE_WINDOWS: the menu item is not offered; see docs/updates.md.
-
-void MainWindow::checkForUpdates (bool) {}
-void MainWindow::offerUpdate (const sc::update::ReleaseInfo&, const juce::String&, bool) {}
-void MainWindow::startUpdate (const sc::update::ReleaseInfo&, const sc::update::AssetInfo&,
-                              const sc::update::AssetInfo&, const sc::update::AssetInfo&) {}
-void MainWindow::maybeCheckForUpdatesAtStartup() {}
-void MainWindow::reportFinishedUpdate() {}
-
-#endif
 
 // Zoom the shared time window around its centre (applies to both views).
 void MainWindow::zoomHorizontal (double factor)
@@ -9974,14 +9973,11 @@ juce::PopupMenu MainWindow::getMenuForIndex (int menuIndex, const juce::String& 
         menu.addItem (HelpOpenDiagFolder, "Open Diagnostic Log Folder", true, false);
         menu.addItem (HelpCopyDiagSummary, "Copy Diagnostic Summary", true, false);
         menu.addItem (HelpSupportBundle, "Create Support Bundle...", true, false);
-#if JUCE_WINDOWS
-        // Automatic updates (docs/updates.md): the Windows archive layout, the
-        // updater program and this menu item are Windows-only for now.
+        // Automatic updates (docs/updates.md): Windows, macOS and Linux.
         menu.addSeparator ();
         menu.addItem (HelpCheckUpdates, "Check for Updates...", true, false);
         menu.addItem (HelpCheckUpdatesAtStartup, "Check for Updates at Startup", true,
                      app.settings.checkUpdatesAtStartup);
-#endif
     }
 
     return menu;

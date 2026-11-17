@@ -1,8 +1,10 @@
 // Automatic updates (docs/updates.md): the crypto (Ed25519 + SHA-512 against
 // the RFC 8032 / FIPS vectors), version comparison, asset picking, manifest
-// parsing and signature verification, staging with per-file hash checks, and
-// the two files the app and spectrocraft-updater exchange (update-plan.txt,
-// update-result.json).
+// parsing and signature verification, staging with per-file hash checks, the
+// two files the app and spectrocraft-updater exchange (update-plan.txt,
+// update-result.json), the macOS / Linux layouts (manifest root, executable
+// bits, platform check, unwritable folders) and the real updater program
+// swapping a fake install.
 //
 // Included by tests/UnitTests.cpp; uses its helpers (CHECK, scSkip,
 // makeTempFile, scTestTempDir). Nothing here touches the network: the release
@@ -10,6 +12,11 @@
 #include "Updates.h"
 #include "Ed25519.h"
 #include "AI/Sha256.h"
+
+#include <filesystem>
+#if ! JUCE_WINDOWS
+#include <unistd.h>
+#endif
 
 namespace scupd = sc::update;
 namespace sccry = sc::crypto;
@@ -665,8 +672,29 @@ static void updTest_folders()
     CHECK (tmp.getParentDirectory() == juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("SpectroCraft"),
            "the update staging folder is in the system temp folder");
 
-    CHECK (scupd::installDir() == juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory(),
+    const juce::File exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+#if JUCE_MAC
+    // ctest runs the suite inside SpectroCraft.app/Contents/MacOS/SpectroCraft
+    // (the console SpectroCraftTests has no bundle: then it is its folder).
+    if (juce::File::getSpecialLocation (juce::File::currentApplicationFile).getFileExtension() != ".app")
+        CHECK (scupd::installDir() == exe.getParentDirectory()
+                   && scupd::relaunchTarget() == exe,
+               "outside a bundle, installDir is the executable's folder");
+    else
+    CHECK (scupd::installDir().getFileExtension() == ".app"
+               && exe.isAChildOf (scupd::installDir())
+               && scupd::installDir().getChildFile (scupd::mainExecutablePath()) == exe,
+           "installDir is the .app bundle; mainExecutablePath leads to the running executable");
+    if (scupd::installDir().getFileExtension() == ".app")
+        CHECK (scupd::relaunchTarget() == scupd::installDir(), "macOS relaunches the bundle");
+#else
+    CHECK (scupd::installDir() == exe.getParentDirectory(),
            "installDir is the folder holding the running executable");
+    CHECK (scupd::relaunchTarget() == exe, "the updater relaunches the running executable");
+#endif
+    CHECK (scupd::updaterLogFile().getParentDirectory() == tmp.getParentDirectory()
+               && ! scupd::updaterLogFile().isAChildOf (tmp),
+           "the updater log sits next to the staging folder, so the cleanup keeps it");
 
     const juce::File writable = makeTempFile ("updwritable");
     writable.createDirectory();
@@ -707,6 +735,293 @@ static void updTest_setting()
     CHECK (settings.samePersistent (other), "samePersistent: equal settings are equal");
 }
 
+
+// ---------------------------------------------------------------------------
+// macOS / Linux: manifest asset names, the root folder, executable bits, the
+// platform check, unwritable folders
+// ---------------------------------------------------------------------------
+#if ! JUCE_WINDOWS
+static bool isExecutableFile (const juce::File& f)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const auto perms = fs::status (fs::path (f.getFullPathName().toStdString()), ec).permissions();
+    return ! ec && (perms & fs::perms::owner_exec) != fs::perms::none;
+}
+#endif
+
+static void updTest_platformLayouts()
+{
+    CHECK (scupd::manifestAssetName ("windows", "x64") == "update-manifest.json"
+               && scupd::manifestSigAssetName ("windows", "x64") == "update-manifest.json.sig",
+           "Windows keeps the manifest names every Windows version reads");
+    CHECK (scupd::manifestAssetName ("macos", "arm64") == "update-manifest-macos-arm64.json"
+               && scupd::manifestSigAssetName ("macos", "arm64") == "update-manifest-macos-arm64.json.sig"
+               && scupd::manifestAssetName ("linux", "x64") == "update-manifest-linux-x64.json",
+           "macOS / Linux manifests are named per platform (three in one release)");
+    CHECK (scupd::mainExecutablePath ("windows") == "SpectroCraft.exe"
+               && scupd::mainExecutablePath ("macos") == "Contents/MacOS/SpectroCraft"
+               && scupd::mainExecutablePath ("linux") == "SpectroCraft"
+               && scupd::updaterPath ("windows") == "SpectroCraft/spectrocraft-updater.exe"
+               && scupd::updaterPath ("macos") == "Contents/MacOS/spectrocraft-updater"
+               && scupd::updaterPath ("linux") == "spectrocraft-updater",
+           "the application and the updater, relative to each platform's install folder");
+
+    // A macOS manifest, as tools/make_update_manifest.py --platform macos writes it.
+    const juce::String shaApp = sha256Of ("the application");
+    const juce::String shaUpd = sha256Of ("the updater");
+    const juce::String shaLib = sha256Of ("a library");
+    auto macJson = [&] (const juce::String& root, const juce::String& platform,
+                        const juce::String& libPath) {
+        return "{\n  \"format\": \"spectrocraft-update-manifest/1\",\n  \"version\": \"1.0.2300\",\n"
+               "  \"platform\": \"" + platform + "\",\n  \"root\": \"" + root + "\",\n  \"files\": [\n"
+               "    { \"path\": \"SpectroCraft.app/Contents/MacOS/SpectroCraft\", \"size\": 15, \"sha256\": \""
+               + shaApp + "\", \"executable\": true },\n"
+               "    { \"path\": \"SpectroCraft.app/Contents/MacOS/spectrocraft-updater\", \"size\": 11, \"sha256\": \""
+               + shaUpd + "\", \"executable\": true },\n"
+               "    { \"path\": \"" + libPath + "\", \"size\": 9, \"sha256\": \"" + shaLib + "\" }\n  ]\n}\n";
+    };
+
+    scupd::Manifest m;
+    juce::String err;
+    CHECK (scupd::parseManifest (macJson ("SpectroCraft.app", "macos-arm64",
+                                          "SpectroCraft.app/Contents/Frameworks/libggml.0.dylib"), m, err),
+           "macOS manifest parses: " + err);
+    CHECK (m.root == "SpectroCraft.app" && m.platform == "macos-arm64" && m.files.size() == 3
+               && m.files[0].executable && m.files[1].executable && ! m.files[2].executable,
+           "root, platform and the executable flags are read");
+    CHECK (scupd::installRelativePath (m, m.files[0].path) == "Contents/MacOS/SpectroCraft"
+               && scupd::installRelativePath (m, m.files[2].path) == "Contents/Frameworks/libggml.0.dylib",
+           "installRelativePath drops the root folder");
+
+    CHECK (scupd::checkManifestPlatform (m, "macos", "arm64", err), "macOS manifest fits macOS arm64: " + err);
+    CHECK (! scupd::checkManifestPlatform (m, "macos", "x64", err) && err.contains ("macos-arm64"),
+           "a manifest for another architecture is refused: " + err);
+    CHECK (! scupd::checkManifestPlatform (m, "linux", "x64", err),
+           "a macOS manifest is refused on Linux: " + err);
+
+    scupd::Manifest noPlatform = m;
+    noPlatform.platform = {};
+    CHECK (! scupd::checkManifestPlatform (noPlatform, "windows", "x64", err)
+               && err.contains ("SpectroCraft.exe"),
+           "without a platform field the layout still has to fit: " + err);
+    scupd::Manifest noUpdater = m;
+    noUpdater.files.remove (1);
+    CHECK (! scupd::checkManifestPlatform (noUpdater, "macos", "arm64", err) && err.contains ("updater"),
+           "a manifest without the updater is refused: " + err);
+
+    CHECK (! scupd::parseManifest (macJson ("SpectroCraft.app", "macos-arm64", "Other.app/x.dylib"), m, err)
+               && err.contains ("outside"),
+           "a file outside the root folder is refused: " + err);
+    CHECK (! scupd::parseManifest (macJson ("A/B", "macos-arm64", "A/B/x.dylib"), m, err),
+           "a root with a slash is refused: " + err);
+    CHECK (! scupd::parseManifest (macJson ("..", "macos-arm64", "../x.dylib"), m, err),
+           "a root that leaves the archive is refused: " + err);
+
+    // Staging: the root folder is not staged, folder entries and __MACOSX
+    // metadata are skipped, the executable bit comes back.
+    scupd::Manifest mac;
+    CHECK (scupd::parseManifest (macJson ("SpectroCraft.app", "macos-arm64",
+                                          "SpectroCraft.app/Contents/Frameworks/libggml.0.dylib"), mac, err),
+           "macOS manifest parses again");
+    const juce::File dir = makeTempFile ("updzip_mac");
+    dir.createDirectory();
+    juce::ZipFile::Builder zb;
+    auto addText = [&] (const juce::String& path, const juce::String& text) {
+        const juce::File src = dir.getChildFile ("src_" + juce::String (text.hashCode()) + ".bin");
+        src.replaceWithText (text);
+        zb.addFile (src, 9, path);
+    };
+    zb.addEntry (new juce::MemoryInputStream (nullptr, 0, false), 0, "SpectroCraft.app/",
+                 juce::Time::getCurrentTime());
+    zb.addEntry (new juce::MemoryInputStream (nullptr, 0, false), 0, "SpectroCraft.app/Contents/MacOS/",
+                 juce::Time::getCurrentTime());
+    addText ("SpectroCraft.app/Contents/MacOS/SpectroCraft", "the application");
+    addText ("SpectroCraft.app/Contents/MacOS/spectrocraft-updater", "the updater");
+    addText ("SpectroCraft.app/Contents/Frameworks/libggml.0.dylib", "a library");
+    addText ("__MACOSX/SpectroCraft.app/._Contents", "AppleDouble");
+    const juce::File zip = dir.getChildFile ("mac.zip");
+    {
+        juce::FileOutputStream os (zip);
+        CHECK (zb.writeToStream (os, nullptr), "macOS test archive written");
+    }
+
+    const juce::File staging = makeTempFile ("updstage_mac");
+    CHECK (scupd::unzipAndVerify (zip, staging, mac, nullptr, err),
+           "macOS archive staged (folder entries and __MACOSX skipped): " + err);
+    CHECK (staging.getChildFile ("Contents/MacOS/SpectroCraft").loadFileAsString() == "the application"
+               && staging.getChildFile ("Contents/Frameworks/libggml.0.dylib").existsAsFile()
+               && ! staging.getChildFile ("SpectroCraft.app").exists()
+               && ! staging.getChildFile ("__MACOSX").exists(),
+           "staged with the install folder's layout (no root folder on top)");
+#if ! JUCE_WINDOWS
+    CHECK (isExecutableFile (staging.getChildFile ("Contents/MacOS/SpectroCraft"))
+               && isExecutableFile (staging.getChildFile ("Contents/MacOS/spectrocraft-updater"))
+               && ! isExecutableFile (staging.getChildFile ("Contents/Frameworks/libggml.0.dylib")),
+           "the files the manifest marks executable are executable, the others are not");
+#endif
+
+    CHECK (scupd::writeUpdatePlan (staging, mac, err), "macOS plan written: " + err);
+    const juce::StringArray planLines = juce::StringArray::fromLines (scupd::updatePlanFile (staging).loadFileAsString());
+    CHECK (planLines.contains ("file=Contents/MacOS/SpectroCraft")
+               && planLines.contains ("file=Contents/Frameworks/libggml.0.dylib")
+               && ! planLines.joinIntoString ("\n").contains ("SpectroCraft.app/"),
+           "the plan lists install-relative paths");
+
+    const juce::File oldUpdater = staging.getChildFile ("SpectroCraft").getChildFile ("spectrocraft-updater.exe");
+    oldUpdater.create();
+    const juce::File expectedUpdater = staging.getChildFile (scupd::updaterPath());
+    expectedUpdater.create();
+    CHECK (scupd::findUpdaterBinary (staging) == expectedUpdater,
+           "findUpdaterBinary looks at this platform's updaterPath first");
+
+    // Writability, and what the user is told.
+    const juce::File install = makeTempFile ("updinstall_rw");
+    install.getChildFile ("Contents/MacOS").createDirectory();
+    CHECK (scupd::firstUnwritableFolder (install, "macos") == juce::File(),
+           "a writable bundle: nothing to report");
+#if ! JUCE_WINDOWS
+    namespace fs = std::filesystem;
+    const fs::path macosDir (install.getChildFile ("Contents/MacOS").getFullPathName().toStdString());
+    std::error_code ec;
+    fs::permissions (macosDir, fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace, ec);
+    if (geteuid() == 0)
+        scSkip ("unwritable folder check: running as root, every folder is writable");
+    else
+        CHECK (scupd::firstUnwritableFolder (install, "macos") == install.getChildFile ("Contents/MacOS"),
+               "a read-only Contents/MacOS is found before anything is downloaded");
+    fs::permissions (macosDir, fs::perms::owner_all, fs::perm_options::replace, ec);
+#endif
+    CHECK (! scupd::firstUnwritableFolder (install.getChildFile ("missing"), "linux").exists()
+               && scupd::firstUnwritableFolder (install.getChildFile ("missing"), "linux")
+                      == install.getChildFile ("missing"),
+           "a missing install folder is reported as unwritable");
+
+#if ! JUCE_WINDOWS
+    const juce::File translocated ("/private/var/folders/x/AppTranslocation/ABC/d/SpectroCraft.app");
+    CHECK (scupd::notWritableAdvice (translocated, translocated, "macos").contains ("read-only copy")
+               && scupd::notWritableAdvice (translocated, translocated, "macos").contains ("Applications"),
+           "macOS: App Translocation is explained");
+    const juce::File dmg ("/Volumes/SpectroCraft/SpectroCraft.app");
+    CHECK (scupd::notWritableAdvice (dmg, dmg, "macos").contains ("disk image"),
+           "macOS: a disk image is explained");
+#endif
+    CHECK (scupd::notWritableAdvice (install, install, "linux").contains ("SpectroCraft folder")
+               && scupd::notWritableAdvice (install, install, "windows").contains ("folder you own"),
+           "Linux / Windows advice names the folder to move");
+}
+
+// ---------------------------------------------------------------------------
+// The real updater program on a fake install: swap, backups, permissions,
+// rollback (spectrocraft-updater is built with the app, updater/CMakeLists.txt)
+// ---------------------------------------------------------------------------
+static int runUpdaterProgram (const juce::File& updater, const juce::StringArray& args,
+                              juce::String& output)
+{
+    juce::StringArray cmd;
+    cmd.add (updater.getFullPathName());
+    cmd.addArray (args);
+    juce::ChildProcess proc;
+    if (! proc.start (cmd)) { output = "could not start the updater"; return -1; }
+    output = proc.readAllProcessOutput();
+    proc.waitForProcessToFinish (30000);
+    return (int) proc.getExitCode();
+}
+
+static void updTest_updaterProgram()
+{
+    const juce::File updater = scupd::installDir().getChildFile (scupd::updaterPath());
+    if (! updater.existsAsFile())
+    {
+        scSkip ("spectrocraft-updater not built next to the app (" + updater.getFullPathName() + ")");
+        return;
+    }
+
+    // An install with an old program, a library and a file the update does
+    // not touch; the staging folder holds the new program and library.
+    const juce::File install = makeTempFile ("updprog_install");
+    const juce::File staging = makeTempFile ("updprog_staging");
+    install.getChildFile ("lib").createDirectory();
+    install.getChildFile ("app.bin").replaceWithText ("old program");
+    install.getChildFile ("lib/a.lib").replaceWithText ("old library");
+    install.getChildFile ("user-notes.txt").replaceWithText ("not part of the update");
+    staging.getChildFile ("lib").createDirectory();
+    staging.getChildFile ("app.bin").replaceWithText ("new program");
+    staging.getChildFile ("lib/a.lib").replaceWithText ("new library");
+    staging.getChildFile ("lib/b.lib").replaceWithText ("a new file");
+#if ! JUCE_WINDOWS
+    staging.getChildFile ("app.bin").setExecutePermission (true);
+#endif
+    scupd::updatePlanFile (staging).replaceWithText (
+        "spectrocraft-update-plan/1\nversion=1.0.2300\nfile=app.bin\nfile=lib/a.lib\nfile=lib/b.lib\n");
+
+    juce::String out;
+    const int rc = runUpdaterProgram (updater, { "--install-dir", install.getFullPathName(),
+                                                 "--staging-dir", staging.getFullPathName(),
+                                                 "--no-relaunch" }, out);
+    CHECK (rc == 0, "the updater applies a staged update (exit " + juce::String (rc) + "): " + out);
+    CHECK (install.getChildFile ("app.bin").loadFileAsString() == "new program"
+               && install.getChildFile ("lib/a.lib").loadFileAsString() == "new library"
+               && install.getChildFile ("lib/b.lib").loadFileAsString() == "a new file"
+               && install.getChildFile ("user-notes.txt").loadFileAsString() == "not part of the update",
+           "every planned file replaced or added, the rest left alone");
+#if ! JUCE_WINDOWS
+    CHECK (isExecutableFile (install.getChildFile ("app.bin")), "the executable bit survives the swap");
+    CHECK (! install.getChildFile ("app.bin.old").exists() && ! install.getChildFile ("lib/a.lib.old").exists(),
+           "macOS / Linux: the updater removes the .old backups itself");
+#endif
+
+    scupd::UpdateResult res;
+    CHECK (scupd::readUpdateResult (install, res) && res.success && res.version == "1.0.2300"
+               && res.replaced.size() == 3,
+           "update-result.json reports the swap");
+
+    // A failure halfway: the second file cannot be installed (its folder is
+    // read-only), so the first one is put back.
+#if ! JUCE_WINDOWS
+    if (geteuid() == 0)
+    {
+        scSkip ("updater rollback: running as root, a read-only folder is still writable");
+        return;
+    }
+    const juce::File staging2 = makeTempFile ("updprog_staging2");
+    staging2.getChildFile ("lib").createDirectory();
+    staging2.getChildFile ("app.bin").replaceWithText ("newer program");
+    staging2.getChildFile ("lib/a.lib").replaceWithText ("newer library");
+    scupd::updatePlanFile (staging2).replaceWithText (
+        "spectrocraft-update-plan/1\nversion=1.0.2301\nfile=app.bin\nfile=lib/a.lib\n");
+
+    namespace fs = std::filesystem;
+    const fs::path libDir (install.getChildFile ("lib").getFullPathName().toStdString());
+    std::error_code ec;
+    fs::permissions (libDir, fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace, ec);
+    const int rc2 = runUpdaterProgram (updater, { "--install-dir", install.getFullPathName(),
+                                                  "--staging-dir", staging2.getFullPathName(),
+                                                  "--no-relaunch" }, out);
+    fs::permissions (libDir, fs::perms::owner_all, fs::perm_options::replace, ec);
+
+    CHECK (rc2 != 0, "the updater reports a failed swap");
+    CHECK (install.getChildFile ("app.bin").loadFileAsString() == "new program"
+               && install.getChildFile ("lib/a.lib").loadFileAsString() == "new library"
+               && ! install.getChildFile ("app.bin.old").exists(),
+           "after a failure the files already swapped are put back: " + out);
+    CHECK (scupd::readUpdateResult (install, res) && ! res.success && res.failedFile == "lib/a.lib",
+           "update-result.json names the file that failed: " + res.reason);
+#endif
+
+    // A plan whose staged file is missing: nothing is touched at all.
+    const juce::File staging3 = makeTempFile ("updprog_staging3");
+    staging3.createDirectory();
+    scupd::updatePlanFile (staging3).replaceWithText (
+        "spectrocraft-update-plan/1\nversion=1.0.2302\nfile=app.bin\n");
+    const int rc3 = runUpdaterProgram (updater, { "--install-dir", install.getFullPathName(),
+                                                  "--staging-dir", staging3.getFullPathName(),
+                                                  "--no-relaunch" }, out);
+    CHECK (rc3 != 0 && install.getChildFile ("app.bin").loadFileAsString() == "new program",
+           "a missing staged file stops the updater before anything moves");
+    scupd::readUpdateResult (install, res);
+}
+
 } // namespace scupdtest
 
 static void runRegression_updates()
@@ -720,5 +1035,7 @@ static void runRegression_updates()
     scupdtest::updTest_staging();
     scupdtest::updTest_planAndResult();
     scupdtest::updTest_folders();
+    scupdtest::updTest_platformLayouts();
+    scupdtest::updTest_updaterProgram();
     scupdtest::updTest_setting();
 }

@@ -978,10 +978,9 @@ public:
         for (const auto& f : cliFiles)
             mainWindow->openFile (f);
 
-        // Automatic updates (docs/updates.md, Windows only). Both happen after
-        // the window is up and the files have been handed to the loader, so an
-        // update dialog never competes with the startup or a large open.
-#if JUCE_WINDOWS
+        // Automatic updates (docs/updates.md). Both happen after the window is
+        // up and the files have been handed to the loader, so an update dialog
+        // never competes with the startup or a large open.
         if (finishUpdateFlag)
         {
             juce::Component::SafePointer<MainWindow> mw (mainWindow.get());
@@ -995,7 +994,6 @@ public:
             juce::Timer::callAfterDelay (4000,
                 [mw] { if (mw != nullptr) mw->maybeCheckForUpdatesAtStartup(); });
         }
-#endif
     }
 
     void shutdown() override
