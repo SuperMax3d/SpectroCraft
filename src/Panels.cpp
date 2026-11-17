@@ -8352,7 +8352,19 @@ int SelectionPanel::primaryRow() const
 
 void SelectionPanel::onSelectionSetChanged()
 {
-    if (table.getNumSelectedRows () > 0)
+    // A press on a group's fold arrow selects its row before the click
+    // reaches cellClicked: it only folds, it does not recall (or move the view).
+    bool onFoldArrow = false;
+    if (juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown () && table.isShowing ())
+    {
+        const auto p = table.getLocalPoint (nullptr, juce::Desktop::getInstance ().getMainMouseSource ()
+                                                         .getScreenPosition ()).toInt ();
+        const int row = table.getRowContainingPosition (p.x, p.y);
+        auto& hdr = table.getHeader ();
+        const int x0 = hdr.getColumnPosition (hdr.getIndexOfColumnId (1, true)).getX ();
+        onFoldArrow = groupOfRow (row) != 0 && p.x >= x0 && p.x - x0 < sc::groups::kDisclosureW;
+    }
+    if (table.getNumSelectedRows () > 0 && ! onFoldArrow)
         recallSelected ();   // union -> live spectral selection + view fit
     refresh ();   // button enablement follows the selection set
 }

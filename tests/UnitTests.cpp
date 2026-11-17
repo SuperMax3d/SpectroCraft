@@ -24807,11 +24807,11 @@ static void testTrackAxisPlacement()
     std::unique_ptr<MainWindow> win (new MainWindow (app, "track axis placement"));
     // Menu bar order: File Edit Selection Transport Effects View Window Help.
     const juce::PopupMenu viewMenu = win->getMenuForIndex (5, "View");
-    // 20 items for a stereo file (the Colour Map submenu moved out of this
+    // 21 items for a stereo file (the Colour Map submenu moved out of this
     // menu; the 1/3 octave grid item was added under the frequency grid;
-    // Show File Borders for sessions, issue #21; channel visibility is still
-    // listed per channel).
-    CHECK (viewMenu.getNumItems() == 20, "View menu item count with stereo file");
+    // Show File Borders for sessions, issue #21; Toolbar, issue #43; channel
+    // visibility is still listed per channel).
+    CHECK (viewMenu.getNumItems() == 21, "View menu item count with stereo file");
 
     // --- Resample lives in its own section of the Edit menu -----------------
     const juce::PopupMenu editMenu = win->getMenuForIndex (1, "Edit");
