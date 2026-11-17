@@ -978,8 +978,11 @@ static void regrPanels_everyControlHasATooltip()
         juce::StringArray missing;
         int numControls = 0;
         collectControlsWithoutTooltip (*win, "MainWindow", missing, numControls);
+        // The Model panel shows its detail controls once it has a component.
+        if (auto* mp = dynamic_cast<ModelPanel*> (win->panelForId ("model")))
+            mp->addComponent (sc::model::Kind::Harmonic);
         for (const char* id : { "editor", "files", "fft", "history", "python", "controls", "markers",
-                                "transcription", "selection", "drawing", "tables", "actions", "video" })
+                                "transcription", "selection", "drawing", "tables", "actions", "video", "model" })
             if (auto* panel = win->panelForId (id))
             {
                 progress (("tooltips: walking the " + juce::String (id) + " panel").toRawUTF8());

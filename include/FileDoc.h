@@ -10,6 +10,7 @@
 #include "FileMeta.h"
 #include "UndoManager.h"
 #include "Session.h"
+#include "SoundModel.h"
 
 /** FileDoc::metaDirty: a bool that also counts how often it was set. Every
     assignment of true bumps a change counter, so an asynchronous save can
@@ -140,6 +141,10 @@ public:
     // the Tables panel (issue #25).
     std::vector<sc::tables::TableData> tables;
     int tablesMode = sc::tables::kModePanelOnly;
+
+    // Model panel (issue #40): the sound model learned from this file,
+    // persisted with its metadata bundle ("soundModel").
+    sc::model::Model soundModel;
 
     /** Replaces the table list (and optionally the display mode) and marks
         the document metadata-dirty. */

@@ -741,6 +741,56 @@ public:
     /** The tab-separated text behind addTableFromSpectralSelection(), empty
         (with a message) when there is nothing to analyse. */
     juce::String freqVsTimeCsv (std::string* errOut = nullptr) const;
+    // ---- Model panel (issue #40): the active file's sound model --------------
+    // Core: include/SoundModel.h; behaviour: docs/model-panel.md.
+    /** The active document's model (nullptr when no file is open). */
+    sc::model::Model* soundModel();
+    /** Call after changing the model: marks the file's metadata dirty and
+        fires onSoundModelChanged. */
+    void soundModelChanged();
+    std::function<void()> onSoundModelChanged;
+    /** "Table.Param" for every parameter of the active file's tables. */
+    juce::StringArray modelParameterNames() const;
+    /** Parameter values of a document's tables at document times: "Table.Param",
+        or a parameter name alone (first match); end values held outside.
+        Reads the tables in place: use it at once, not after they change. */
+    sc::model::ParamFn modelParamFn (const FileDoc& d) const;
+    /** Parameter values of tables that are not attached to a document (CSV). */
+    static sc::model::ParamFn modelParamFnFor (const std::vector<sc::tables::TableData>& tables);
+    sc::model::Audio modelAudio (const FileDoc& d) const;
+    sc::model::SelectionFn modelSelectionFn (const FileDoc& d) const;
+    /** Analyses component `index` of the active model, or all of them (-1). */
+    bool analyseModel (int index, juce::String* err = nullptr);
+    /** Renders the model over the time selection into a new channel (one undo step). */
+    bool renderModelSelection (juce::String* err = nullptr);
+    /** New file: the simulation (channel 1) and the original (channel 2) of
+        every range used for the analysis, back to back, with the markers and
+        parameters of those ranges. */
+    bool compareModel (juce::String* err = nullptr);
+    /** New file: the model rendered from the parameters of a CSV file (the
+        CSV becomes the new file's table). */
+    bool renderModelCsv (const juce::File& csv, juce::String* err = nullptr);
+    bool exportModel (const juce::File& target, juce::String* err = nullptr);
+    bool importModel (const juce::File& source, juce::String* err = nullptr);
+    /** The ranges Compare plays: every component's ranges, merged. */
+    std::vector<sc::model::TimeRange> modelCompareRanges() const;
+
+    /** Picking on the spectrogram for the Model panel: Fundamental = the next
+        click sets the component's fundamental (snapped to the strongest peak
+        nearby) at the parameter value of that time; Harmonics = clicks add or
+        remove the harmonic nearest the mouse, with a guide while moving. */
+    enum class ModelPick { none, fundamental, harmonics };
+    ModelPick modelPick = ModelPick::none;
+    juce::String modelPickId;   // component being picked for
+    void startModelPick (ModelPick mode, const juce::String& componentId);
+    void cancelModelPick();
+    /** The harmonic order nearest (t, f) for the picked component, 0 when
+        none (no fundamental there). */
+    int modelPickOrderAt (double t, double fHz) const;
+    /** A click at (t, f) while picking; true when it was used. */
+    bool modelPickClick (double t, double fHz);
+    std::function<void()> onModelPickChanged;
+
     /** The active document's tables (empty vector when no file is open). */
     std::vector<sc::tables::TableData>& activeTables();
     int  tablesMode() const;

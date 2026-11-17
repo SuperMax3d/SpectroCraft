@@ -144,6 +144,14 @@ bool FileDoc::load (const juce::File& f, std::function<void(float)> onProgress,
         tablesMode = scmdB.tablesMode;
     }
 
+    // Sound model (Model panel): unified > SCMD.
+    soundModel = {};
+    {
+        const juce::var& mv = unifiedB.haveSoundModel ? unifiedB.soundModel : scmdB.soundModel;
+        if (mv.isObject())
+            sc::model::Model::fromVar (mv, soundModel);
+    }
+
     // Video tracks: unified > SCMD. A document opened from a video file has
     // no explicit list and falls back to its implicit `videoFile` track.
     if (unifiedB.haveVideoTracks)
@@ -264,6 +272,8 @@ std::string FileDoc::buildScmdJson () const
         b.session = sc::session::toVar (session, engine.getFile ().getParentDirectory ());
     else if (pendingSession.isObject ())
         b.session = pendingSession;   // not opened as a session (files missing): keep the entry
+    if (!soundModel.empty ())
+        b.soundModel = soundModel.toVar ();
 
     if (!b.hasContent ())
         return {};   // nothing worth embedding: omit the SCMD chunk entirely
@@ -291,6 +301,8 @@ std::string FileDoc::buildMetaJson () const
         b.session = sc::session::toVar (session, engine.getFile ().getParentDirectory ());
     else if (pendingSession.isObject ())
         b.session = pendingSession;
+    if (!soundModel.empty ())
+        b.soundModel = soundModel.toVar ();
 
     return sc::serialiseBundle (b, true);
 }
@@ -306,6 +318,8 @@ void FileDoc::applyBundle (const sc::MetaBundle& b)
     tablesMode      = b.tablesMode;
     if (b.haveVideoTracks) videoTracks = b.videoTracks;   // absent key: keep current
     if (b.haveSession) pendingSession = b.session;          // opened by Application
+    soundModel = {};
+    if (b.soundModel.isObject ()) sc::model::Model::fromVar (b.soundModel, soundModel);
     scale           = b.scale;
     altRef          = b.altRef;
     freqAnalysis    = b.freqAnalysis;

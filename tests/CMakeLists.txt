@@ -33,6 +33,9 @@ target_sources (SpectroCraftTests
         ${CMAKE_SOURCE_DIR}/src/VideoScaler.cpp   # Video picture scaling (JUCE side)
         ${CMAKE_SOURCE_DIR}/src/MainWindow.cpp
         ${CMAKE_SOURCE_DIR}/src/MainToolbar.cpp   # the toolbar in the menu bar row (issue #43)
+        ${CMAKE_SOURCE_DIR}/src/SoundModel.cpp    # Model panel: sound model analysis / rendering (issue #40)
+        ${CMAKE_SOURCE_DIR}/src/ApplicationModel.cpp   # Model panel: actions on the active file (issue #40)
+        ${CMAKE_SOURCE_DIR}/src/ModelPanel.cpp    # Model panel UI (issue #40)
         ${CMAKE_SOURCE_DIR}/src/FileDoc.cpp
         ${CMAKE_SOURCE_DIR}/src/Application.cpp
         ${CMAKE_SOURCE_DIR}/src/Resampler.cpp
