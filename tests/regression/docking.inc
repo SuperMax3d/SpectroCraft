@@ -89,7 +89,7 @@ static void dockTest_treeOperations()
 
     CHECK (f.load (R"({"main":{"split":"h","children":[{"tabs":["a","b"],"active":"b"},{"tabs":["c"]}],"weights":[0.3,0.7]},"closed":["d","f"]})"),
            "dock tree: layout loaded");
-    CHECK (f.tree () == "H[(a,b*)|(c,e*)]",
+    CHECK (f.tree () == "H[(a,b*)|(c*,e)]",
            "dock tree: a panel missing from a layout joins its default buddy: " + f.tree ());
     CHECK (! f.dock.isOpen ("d") && ! f.dock.isOpen ("f"), "dock tree: closed panels stay closed");
     CHECK (f.panel ('b').getParentComponent () == main.componentFor (f.groupOf ("b"))
@@ -99,7 +99,7 @@ static void dockTest_treeOperations()
     // Docking beside a group whose parent split has the same direction adds
     // a sibling; otherwise a new split replaces the group.
     CHECK (f.dock.movePanel ("a", main, f.groupOf ("c"), Z::right), "dock tree: dock right accepted");
-    CHECK (f.tree () == "H[(b*)|(c,e*)|(a*)]", "dock tree: right of a group: " + f.tree ());
+    CHECK (f.tree () == "H[(b*)|(c*,e)|(a*)]", "dock tree: right of a group: " + f.tree ());
     CHECK (f.dock.movePanel ("b", main, f.groupOf ("c"), Z::centre), "dock tree: centre accepted");
     CHECK (f.tree () == "H[(c,e,b*)|(a*)]", "dock tree: an emptied group disappears: " + f.tree ());
     CHECK (f.dock.movePanel ("a", main, f.groupOf ("c"), Z::top), "dock tree: dock top accepted");
@@ -294,6 +294,7 @@ static void dockTest_mouseDrag()
         Application app (store);
         std::unique_ptr<MainWindow> win (new MainWindow (app, "dock drag test"));
         auto& dock = win->dockManager ();
+        dock.openPanel ("history");   // closed in the default workspace since #51
 
         // 1) History onto the right trapezoid of the Editor's group.
         auto* ed = dockGroupOf (dock, "editor");

@@ -3439,10 +3439,31 @@ bool DockManager::loadLayout (const juce::var& v)
         for (const auto& c : *arr) closed.add (c.toString());
 
     // Panels the layout does not know (added by a newer version) open next
-    // to their default buddy.
+    // to their default buddy - as a background tab: the group keeps the tab
+    // the layout made active. (The Model panel, new in a release, used to
+    // become the selected tab of Frequency Analysis's group, issue #51.)
     for (const auto& p : panels_)
         if (std::find (placed.begin(), placed.end(), p.id) == placed.end() && ! closed.contains (p.id))
+        {
+            Node* buddyGroup = nullptr;
+            juce::String keepActive;
+            if (const auto b = buddies_.find (p.id); b != buddies_.end())
+            {
+                const auto loc = locate (b->second);
+                if (loc.group != nullptr && juce::isPositiveAndBelow (loc.group->active, loc.group->tabs.size()))
+                {
+                    buddyGroup = loc.group;
+                    keepActive = loc.group->tabs[loc.group->active];
+                }
+            }
             openPanel (p.id);
+            if (buddyGroup != nullptr)
+            {
+                const auto loc = locate (keepActive);
+                if (loc.group == buddyGroup)
+                    buddyGroup->active = buddyGroup->tabs.indexOf (keepActive);
+            }
+        }
 
     const auto maxTab = v["maximized"].toString();
     if (maxTab.isNotEmpty())

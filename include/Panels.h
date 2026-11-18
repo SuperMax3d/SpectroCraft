@@ -2079,6 +2079,16 @@ public:
     // selects one row, Ctrl/Cmd toggles, Shift range-selects from the anchor.
     void onRowClicked (int row, const juce::MouseEvent& e);
 
+    /** Comment column (issue #51): the note of a row's table or parameter,
+        edited by double-clicking the cell. */
+    juce::String commentForRow (int row) const;
+    void setCommentForRow (int row, const juce::String& text);
+    /** A click on a Comment cell acts like a click on any other cell of the
+        row (select, preview, right-click menu). */
+    void commentCellClicked (int row, const juce::MouseEvent& e);
+    /** The list's column widths, "w1,w2,w3,w4" (saved with the settings). */
+    juce::String columnWidths() const;
+
     struct RowRef { int tableIdx = -1; int paramIdx = -1; };   // paramIdx<0 = the table itself
     RowRef rowRef (int row) const;
     bool isTableRow (int row) const;
@@ -2171,10 +2181,13 @@ private:
         void paintRowBackground (juce::Graphics& g, int rowNumber, int width, int height,
                                  bool selected) override;
         // Column 1 = visibility eye icon, column 2 = colour square, column 3
-        // = name (parameters indented).
+        // = name (parameters indented), column 4 = comment.
         void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
                         bool selected) override;
         void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+        // Column 4: an editable Comment label (double-click edits).
+        juce::Component* refreshComponentForCell (int rowNumber, int columnId, bool selected,
+                                                  juce::Component* existing) override;
 
     private:
         TablesPanel* owner;

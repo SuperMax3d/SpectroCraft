@@ -548,6 +548,203 @@ static void regrModel_app()
     sc::fileMetaSidecarPath (wav).deleteFile();
 }
 
+// ------------------------------------------------------- issue #51
+static void regrModel_issue51()
+{
+    progress ("regression model: #51 workspace, low-frequency tracking, table comments, panel");
+    using namespace scmodeltest;
+
+    // The default workspace: Frequency Analysis selected, Model next to
+    // Tables, History and Actions closed.
+    {
+        const juce::File store = makeTempFile ("model51.recent");
+        store.deleteFile();
+        Application app (store);
+        std::unique_ptr<MainWindow> win (new MainWindow (app, "model 51"));
+        auto& dock = win->dockManager();
+        CHECK (dock.isOpen ("model") && dock.groupTabs ("tables").contains ("model"),
+               "#51: Model sits next to Tables in the default workspace");
+        CHECK (! dock.isOpen ("history") && ! dock.isOpen ("actions"),
+               "#51: History and Actions start closed");
+        const auto fftLoc = dock.locate ("fft");
+        CHECK (fftLoc.group != nullptr && fftLoc.group->activeTab() == "fft",
+               "#51: Frequency Analysis is the selected tab");
+
+        // A saved layout from before the Model panel: it joins Frequency
+        // Analysis's group as a background tab, not as the selected one.
+        juce::var lay = juce::JSON::parse (juce::JSON::toString (win->builtInWorkspaceLayout ("analysis")));
+        if (auto* closed = lay["closed"].getArray())
+            closed->removeAllInstancesOf ("model");
+        CHECK (dock.loadLayout (lay), "#51: the old layout loads");
+        const auto loc = dock.locate ("fft");
+        CHECK (dock.isOpen ("model") && loc.group != nullptr && loc.group->activeTab() == "fft",
+               "#51: a panel the layout does not know opens without taking the selection");
+        win.reset();
+        store.deleteFile();
+    }
+
+    // Low-frequency tracking: a 140 -> 160 Hz sweep under a selection below
+    // 300 Hz. The frequency is no longer a staircase of 23 Hz bins and never
+    // drops to 0.
+    {
+        const double rate = 48000.0;
+        const juce::File wav = makeTempFile ("model51_sweep.wav");
+        double phase = 0.0;
+        std::vector<float> x ((size_t) (rate * 4.0));
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double t = (double) i / rate;
+            phase += 2.0 * juce::MathConstants<double>::pi * (140.0 + 5.0 * t) / rate;
+            x[i] = (float) (0.5 * std::sin (phase));
+        }
+        writeWav (wav, 1, rate, (int64_t) x.size(), [&x] (int, int64_t f, double) { return x[(size_t) f]; });
+        AudioEngine eng;
+        CHECK (eng.loadFile (wav), "#51: sweep loaded");
+        SpectralSelection sel;
+        sel.addRect (0.5, 3.5, 120.0, 180.0, false);
+        SpectralSelection upTo300;
+        upTo300.addRect (0.5, 3.5, 100.0, 300.0, false);
+        CHECK (sc::measures::timeCurveFftSize (rate, &upTo300, (int64_t) (3 * rate)) == 8192,
+               "#51: a selection up to 300 Hz gets 8192-point frames");
+        CHECK (sc::measures::timeCurveFftSize (rate, &sel, (int64_t) (3 * rate)) == 16384,
+               "#51: a selection up to 180 Hz gets 16384-point frames");
+        CHECK (sc::measures::timeCurveFftSize (rate, &sel, 5000) <= 5000,
+               "#51: never longer than the region");
+        SpectralSelection high;
+        high.addRect (0.5, 3.5, 2000.0, 5000.0, false);
+        CHECK (sc::measures::timeCurveFftSize (rate, &high, (int64_t) (3 * rate)) == sc::measures::kTimeModeFFT,
+               "#51: a high selection keeps the default size");
+        std::vector<sc::measures::CurveData> curves;
+        CHECK (sc::measures::timeCurve (eng, { 0 }, 0.5, 3.5, sc::measures::TrackMax, &sel, curves)
+                   && ! curves.empty() && curves[0].x.size() > 10,
+               "#51: the sweep is tracked");
+        if (! curves.empty())
+        {
+            double maxErr = 0.0, minF = 1e9;
+            for (size_t i = 0; i < curves[0].x.size(); ++i)
+            {
+                const double t = curves[0].x[i];
+                maxErr = std::max (maxErr, std::abs ((double) curves[0].freqHz[i] - (140.0 + 5.0 * t)));
+                minF = std::min (minF, (double) curves[0].freqHz[i]);
+            }
+            CHECK (maxErr < 1.0, "#51: the tracked frequency follows the sweep within 1 Hz (max error "
+                                     + juce::String (maxErr, 2) + " Hz)");
+            CHECK (minF > 100.0, "#51: no point drops to 0 Hz");
+        }
+        // A thin stroke between two bin centres gives no point, not 0 Hz.
+        SpectralSelection thin;
+        thin.addRect (0.5, 3.5, 150.1, 150.2, false);
+        std::vector<sc::measures::CurveData> c2;
+        sc::measures::timeCurve (eng, { 0 }, 0.5, 3.5, sc::measures::TrackMax, &thin, c2);
+        bool anyZero = false;
+        for (const auto& cd : c2)
+            for (float f : cd.freqHz) anyZero = anyZero || f <= 0.0f;
+        CHECK (! anyZero, "#51: frames with no bin in the selection give no point");
+        wav.deleteFile();
+    }
+
+    // Tables: comments round-trip, four columns, the resizable ones.
+    {
+        std::vector<sc::tables::TableData> ts (1);
+        ts[0].name = "T";
+        ts[0].comment = "table note";
+        ts[0].params.resize (1);
+        ts[0].params[0].name = "P";
+        ts[0].params[0].comment = "param note";
+        ts[0].params[0].values = { 1.0, 2.0 };
+        std::vector<sc::tables::TableData> back;
+        CHECK (sc::tables::parseTables (sc::tables::serialiseTables (ts, 0), back, nullptr)
+                   && back.size() == 1 && back[0].comment == "table note"
+                   && back[0].params.size() == 1 && back[0].params[0].comment == "param note",
+               "#51: table and parameter comments round-trip");
+
+        Application app;
+        const juce::File wav = makeTempFile ("model51_tables.wav");
+        writeWav (wav, 1, 8000.0, 8000, [] (int, int64_t, double) { return 0.0f; });
+        CHECK (app.openFile (wav), "#51: open a file for the tables");
+        std::string err;
+        CHECK (app.addTableFromCsv ("T", "t,v\n0,1\n1,2\n", &err), "#51: a table: " + err);
+        TablesPanel tp (app);
+        tp.setSize (480, 300);
+        tp.refresh();
+        auto& hdr = tp.listTable().getHeader();
+        CHECK (hdr.getNumColumns (true) == 4 && hdr.getColumnName (4) == "Comment",
+               "#51: the tables list has a Comment column");
+        CHECK (hdr.getColumnWidth (2) >= 60 && hdr.getColumnWidth (3) >= 150,
+               "#51: Colour and Name start wider");
+        hdr.setColumnWidth (3, 240);
+        CHECK (tp.columnWidths().contains ("240"), "#51: a resized column is remembered");
+        app.doc()->metaDirty = false;
+        tp.setCommentForRow (1, "speed in rpm");   // row 0 = the table, row 1 = its parameter
+        CHECK (tp.commentForRow (1) == "speed in rpm" && app.doc()->tables[0].params[0].comment == "speed in rpm"
+                   && app.doc()->metaDirty,
+               "#51: a parameter comment is stored with the file");
+        tp.setCommentForRow (0, "from the logger");
+        CHECK (app.doc()->tables[0].comment == "from the logger", "#51: a table comment");
+        wav.deleteFile();
+    }
+
+    // The Model panel: Compare analyses first, the bottom folds, rows reorder.
+    {
+        Signal s;
+        make (s);
+        const juce::File wav = makeTempFile ("model51_fan.wav");
+        wav.deleteFile();
+        sc::fileMetaSidecarPath (wav).deleteFile();
+        writeWav (wav, 1, kRate, (int64_t) s.x.size(), [&s] (int, int64_t f, double) { return s.x[(size_t) f]; });
+        Application app;
+        CHECK (app.openFile (wav), "#51: open the fan");
+        juce::String csv = "time,Speed\n";
+        for (int i = 0; i <= 400; ++i) csv << juce::String (i * 0.1, 1) << "," << juce::String (fanSpeed (i * 0.1), 3) << "\n";
+        std::string e;
+        CHECK (app.addTableFromCsv ("Fan", csv, &e), "#51: the speed table");
+        ModelPanel panel (app);
+        panel.setSize (380, 760);
+        app.setSelection ({ 11.0, 19.0 });
+        panel.addComponent (md::Kind::Noise);
+        app.setSelection ({ 21.0, 29.0 });
+        panel.addComponent (md::Kind::Noise);
+        auto* m = app.soundModel();
+        CHECK (m != nullptr && m->components.size() == 2 && ! m->components[0].analysed,
+               "#51: two components, not analysed");
+        if (m == nullptr || m->components.size() < 2) { wav.deleteFile(); return; }
+
+        const int docsBefore = app.numDocs();
+        panel.compare();
+        CHECK (m->components[0].analysed && m->components[1].analysed,
+               "#51: Compare analysed the model first (" + panel.statusText() + ")");
+        CHECK (app.numDocs() == docsBefore + 1, "#51: ...then compared");
+        if (app.numDocs() > docsBefore) { app.activate (0); m = app.soundModel(); }
+        if (m == nullptr) { wav.deleteFile(); return; }
+
+        std::function<juce::Component* (juce::Component&, const juce::String&)> byId;
+        byId = [&byId] (juce::Component& root, const juce::String& id) -> juce::Component*
+        {
+            if (root.getComponentID() == id) return &root;
+            for (auto* c : root.getChildren())
+                if (auto* f = byId (*c, id)) return f;
+            return nullptr;
+        };
+        panel.refresh();
+        panel.selectIndex (0);
+        auto* fft = byId (panel, "model-fft");
+        CHECK (fft != nullptr && fft->isVisible(), "#51: the analysis settings show");
+        panel.setBottomCollapsed (true);
+        CHECK (fft != nullptr && ! fft->isVisible() && panel.isBottomCollapsed(),
+               "#51: the chevron hides the plot and the settings");
+        CHECK (byId (panel, "model-collapse") != nullptr, "#51: the chevron is there");
+        panel.setBottomCollapsed (false);
+        CHECK (fft != nullptr && fft->isVisible(), "#51: ...and shows them again");
+
+        const juce::String first = m->components[0].id, second = m->components[1].id;
+        panel.moveComponent (0, 2);   // drop the first row below the second
+        CHECK (m->components[0].id == second && m->components[1].id == first,
+               "#51: dragging a row reorders the components");
+        CHECK (panel.selectedIndex() == 1, "#51: the moved component stays selected");
+        wav.deleteFile();
+    }
+}
+
 static void runRegression_model()
 {
     regrModel_app();
@@ -555,4 +752,5 @@ static void runRegression_model()
     regrModel_dynamics();
     regrModel_noise();
     regrModel_renderAndJson();
+    regrModel_issue51();
 }

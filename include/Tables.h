@@ -21,6 +21,7 @@ constexpr int kModePanelOnly   = 3;   // Inside Table Panel Only
 struct ParamData
 {
     juce::String name;
+    juce::String comment;         // free note, the panel's Comment column (issue #51)
     std::vector<double> values;   // one entry per sample row, in file order
 
     bool visible = true;          // eye icon on the panel row
@@ -52,6 +53,7 @@ struct ParamData
 struct TableData
 {
     juce::String name;           // file name or "Clipboard"
+    juce::String comment;        // free note, the panel's Comment column (issue #51)
     bool visible = true;         // master eye icon for the whole table
 
     double sampleRate = 1000.0;  // rows per second (changed by Downsample)

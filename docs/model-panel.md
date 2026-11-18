@@ -6,7 +6,13 @@ Tables panel such as fan speed or engine speed. It then renders that model as
 audio, to compare it with the recording or to drive it from other parameter
 values.
 
-Open it from **Window > Model**. It is closed in the built-in workspaces.
+Open it from **Window > Model**. The default workspace has it as a tab next
+to Tables, behind Frequency Analysis (issue #51); the other built-in workspaces
+have it closed.
+
+The **chevron** left of the analysis report (below Analyze) hides or shows the
+plot and the analysis settings at the bottom of the panel, like the Video
+panel's. The choice is remembered.
 
 Code:
 - `include/SoundModel.h`, `src/SoundModel.cpp`: data model, analysis, synthesis, JSON.
@@ -43,8 +49,8 @@ The example from the issue: a car's cooling fan, then the engine.
    - Harmonics above are **subtracted** from a harmonic's peak when they fall on it.
    - Noise above is **subtracted** from a noise spectrum, per band, after averaging.
 
-   So the engine, added below the fan and analysed over ranges where the fan also runs, is learned without it. Order matters: after **Move Up / Down**, analyse again.
-5. Use the model:
+   So the engine, added below the fan and analysed over ranges where the fan also runs, is learned without it. Order matters: after **Move Up / Down**, or after **dragging a row** to a new place in the list (a green line shows where it lands), analyse again.
+5. Use the model. **Compare**, **Render Selection**, **Render CSV...** and **Export...** first analyse every enabled component that is not analysed yet, so they never use a half-learned model:
    - **Compare** creates a new file:
      - channel 1 is the simulation, channel 2 the original;
      - it holds every range used for the analysis, merged and back to back;

@@ -54,6 +54,25 @@ public:
     void addTrack (const std::vector<juce::String>& selections);
     juce::TableListBox& list() { return table; }
 
+    /** Hides / shows the plot and the Analysis settings under the report
+        (the chevron left of the report, issue #51). Remembered. */
+    void setBottomCollapsed (bool collapsed);
+    bool isBottomCollapsed() const { return bottomCollapsed_; }
+    /** Moves component `from` so it lands at insertion index `to` (0..n):
+        what dragging a row of the list does (issue #51). */
+    void moveComponent (int from, int to);
+    /** Analyses the model first when an enabled component is not analysed
+        (Export, Compare and the Render buttons do this, issue #51). False,
+        with a message, when the analysis fails. */
+    bool ensureAnalysed();
+
+    // Dragging a row of the list reorders the components.
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void paintOverChildren (juce::Graphics&) override;
+    int dropIndexForTest() const { return dropIndex_; }
+
 private:
     // TableListBoxModel: the component list.
     int getNumRows() override;
@@ -101,6 +120,12 @@ private:
     juce::ToggleButton dynamicsTgl { "Rising / falling levels" }, variationTgl { "Reproduce variation" };
     juce::Label tracksText, report;
     std::unique_ptr<Plot> plot;
+    class CollapseButton;
+    std::unique_ptr<CollapseButton> collapseBtn;
+    bool bottomCollapsed_ = false;
+    int dragFromRow_ = -1, dropIndex_ = -1;
+    bool rowDragging_ = false;
+    int insertionIndexAt (juce::Point<int> inTable) const;
     juce::Label status;
 
     std::unique_ptr<juce::FileChooser> chooser_;

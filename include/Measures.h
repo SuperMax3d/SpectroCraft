@@ -261,10 +261,17 @@ namespace sc::measures
         (summed level + centroid), 2 = Weighted (level like Total, centroid). */
     enum Track { TrackMax = 0, TrackTotal = 1, TrackWeighted = 2 };
 
+    /** The FFT size timeCurve uses: kTimeModeFFT, or longer (up to 16384) when
+        the spectral selection lies low enough that 2048-point bins are too
+        coarse for it (about 40 bins below its top frequency); never longer
+        than the region. */
+    int timeCurveFftSize (double rate, const SpectralSelection* mask, int64_t regionSamples);
     /** Freq vs Time / Amp vs Time (was FFTAnalysisView::computeTimeCurveFrom):
-        fixed 2048-point Hann frames, one point per frame (curveFrameStarts).
-        `mask` = spectral selection (nullptr = every bin counts). Returns false
-        (out cleared) when cancelled. */
+        Hann frames of timeCurveFftSize(), one point per frame (curveFrameStarts).
+        `mask` = spectral selection (nullptr = every bin counts); a frame with
+        no bin inside it gives no point. Max refines the strongest bin with a
+        parabolic fit (sub-bin frequency). Returns false (out cleared) when
+        cancelled. */
     bool timeCurve (const AudioEngine& eng, const std::vector<int>& chans,
                     double t0, double t1, int track, const SpectralSelection* mask,
                     std::vector<CurveData>& out, const ProgressFn& progress = {});
