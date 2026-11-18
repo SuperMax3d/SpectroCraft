@@ -463,8 +463,9 @@ Built with **C++20**, **JUCE 9** (vendored in `extern/JUCE`) and **CMake**.
     by default and ends at the bottom of the panel; drag the bar between the
     buttons and Begin to make it taller (the list gets shorter) or shorter,
     down to one line. Add Marker (F8); Delete Selected removes
-    every selected row at once — DEL instead deletes the audio data of the active
-    selection (zeros a spectral selection or trims out a time range, undoable);
+    every selected row at once, and so does DEL in the list (issue #53); with no
+    row selected, DEL deletes the audio data of the active selection as on the
+    tracks (zeros a spectral selection or trims out a time range, undoable);
     right-click a row for Copy All Markers / Paste Markers from Clipboard,
     Export/Import CSV, Delete Selected,
     Fit View to Selected or Find (Ctrl+F searches titles and comments, F3 /
@@ -2460,9 +2461,11 @@ harmonics of whatever is currently selected.
   toggles additional rows in or out, Shift+click range-selects from the anchor
   row. Any change of the selected set makes the union of those saved selections
   the *actual* live spectral selection (drawn like any other mask) and fits both
-  views to its time range with the usual 10% margin; DEL deletes the audio data
-  of that active selection, while Delete Selected removes every selected entry
-  from the list.
+  views to its time range with the usual 10% margin; DEL in the list, like Delete
+  Selected, removes every selected entry (issue #53). DEL on the tracks deletes
+  the audio data of that active selection. The same goes for the Drawing,
+  Tables and Model panels: DEL in their list removes the selected drawings,
+  tables / parameters or model components.
 - Right-clicking a row offers **Recall**, **Edit...**, **Delete Selected**,
   **Group** / **Ungroup** / **Rename Group...** / **Collapse All Groups** /
   **Expand All Groups**, **Clone Harmonics by Numbers...**, **Clone Harmonics
@@ -2891,9 +2894,9 @@ delays the window from appearing.
     set becomes the time selection (markers) or the live spectral selection
     (Selection tab, union of the stored shapes — verified to be drawn as a real
     mask, never an amber overlay) and fits both views to it with the usual 10%
-    margin; bulk Delete Selected removes every selected row without touching
-    audio data; DEL deletes the audio data of the active selection (spectral
-    band zeroed / time range trimmed out, marker rows untouched); Edit... dialog
+    margin; bulk Delete Selected, and DEL in the list, remove every selected row
+    without touching audio data (issue #53); DEL on the tracks deletes the audio
+    data of the active selection (spectral band zeroed / time range trimmed out); Edit... dialog
     commit path for name/comment and the "Selection NN" auto-name pre-fill.
   - **Drawing panel**: bundle round-trip for all four drawing kinds (hidden flag
     and point lists included), sidecar load + SCMD payload, settings persistence

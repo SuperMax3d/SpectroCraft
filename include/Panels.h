@@ -1232,11 +1232,11 @@ public:
     // the time selection and fits in view (via onSelectionSetChanged).
     void onRowClicked (int row, const juce::MouseEvent& e);
     // Removes every marker whose row is selected; refreshes + notifies.
-    // The context menu's Delete Selected item does this - DEL no longer
-    // touches the list (it deletes audio data instead).
+    // The context menu's Delete Selected item and DEL in the list do this.
     void deleteSelected ();
-    // DEL key: actually deletes the WAV data of the active selection - zeros
-    // a spectral selection, or trims out a time range (app.del).
+    // DEL in the list with no row selected (and DEL on the tracks): deletes
+    // the WAV data of the active selection - zeros a spectral selection, or
+    // trims out a time range (app.del).
     void deleteAudioData ();
     // Set by MainWindow: runs the delete through its destructive-edit path
     // (streamed-file materialisation + view refresh). Unset (tests): app.del()
@@ -1534,11 +1534,12 @@ public:
     // recalls that row's stored selection.
     void onRowClicked (int row, const juce::MouseEvent& e);
     // Removes every stored selection whose row is selected; refreshes +
-    // notifies. The Delete button and the context-menu item do this - DEL no
-    // longer touches the list (it deletes audio data instead).
+    // notifies. The Delete button, the context-menu item and DEL in the list
+    // do this.
     void deleteSelected ();
-    // DEL key: actually deletes the WAV data of the active selection - zeros
-    // a spectral selection, or trims out a time range (app.del).
+    // DEL in the list with no row selected (and DEL on the tracks): deletes
+    // the WAV data of the active selection - zeros a spectral selection, or
+    // trims out a time range (app.del).
     void deleteAudioData ();
     // Set by MainWindow: runs the delete through its destructive-edit path
     // (streamed-file materialisation + view refresh). Unset (tests): app.del()
@@ -1812,6 +1813,8 @@ private:
         // Double-click selects the row and fits it into view.
         void cellDoubleClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
         void selectedRowsChanged (int) override;
+        // DEL with the list focused removes the selected drawings (issue #53).
+        void deleteKeyPressed (int) override;
 
     private:
         DrawingPanel* owner;
@@ -2194,6 +2197,9 @@ private:
         void paintCell (juce::Graphics& g, int rowNumber, int columnId, int width, int height,
                         bool selected) override;
         void cellClicked (int rowNumber, int columnId, const juce::MouseEvent&) override;
+        // DEL with the list focused removes the selected tables and
+        // parameters (issue #53).
+        void deleteKeyPressed (int) override;
 
     private:
         TablesPanel* owner;

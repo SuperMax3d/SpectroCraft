@@ -18507,6 +18507,95 @@ static void testPanelDelDeletesAudio()
     wav.deleteFile ();
 }
 
+// DEL with a panel's list focused removes the selected items: markers,
+// stored selections, drawings, tables / parameters, model components (issue
+// #53). The audio is left alone; DEL on the tracks (or in a list with no row
+// selected) still deletes the selected audio (testPanelDelDeletesAudio).
+static void testPanelDelDeletesSelectedItems()
+{
+    const juce::File wav = makeTempFile ("panel_del_items.wav");
+    writeWav (wav, 1, 8000.0, 32000, [] (int, int64_t, double) { return 0.5f; });   // 4 s
+
+    Application app;
+    CHECK (app.openFile (wav), "open wav for the DEL-items test");
+    auto* d = app.doc ();
+    if (!d) { wav.deleteFile (); return; }
+    const juce::KeyPress del (juce::KeyPress::deleteKey);
+    auto audioUntouched = [&]
+    {
+        float v = 0.0f;
+        app.audioEngine().readSamples (0, 12000, 1, &v);   // 1.5 s
+        return std::abs (app.audioEngine().duration() - 4.0) <= 1e-6 && std::abs (v - 0.5f) < 1e-3;
+    };
+
+    // Markers
+    app.markers().addRegionMarker (0.5, 0.6, "a");
+    app.markers().addRegionMarker (2.5, 2.6, "b");
+    MarkerListPanel mp (app);
+    mp.setSize (260, 300);
+    mp.refresh();
+    mp.listTable().selectRow (0);
+    CHECK (mp.listTable().keyPressed (del), "DEL: the marker list takes the key");
+    CHECK (app.markers().count() == 1 && app.markers().markers()[0].name == "b",
+           "DEL in the marker list removes the selected marker");
+    CHECK (audioUntouched(), "...and leaves the audio alone");
+
+    // Stored selections
+    SpectralSelection sa;
+    sa.addRect (1.0, 2.0, 0.0, 4000.0, false);
+    d->savedSelections.push_back ({ "A", sa });
+    d->savedSelections.push_back ({ "B", sa });
+    SelectionPanel sp (app);
+    sp.setSize (300, 240);
+    sp.refresh();
+    sp.listTable().selectRow (0);
+    CHECK (sp.listTable().keyPressed (del), "DEL: the selection list takes the key");
+    CHECK (d->savedSelections.size() == 1 && d->savedSelections[0].name == "B",
+           "DEL in the selection list removes the selected stored selection");
+    CHECK (audioUntouched(), "...without zeroing the audio under it");
+
+    // Drawings
+    DrawingItem r1;
+    r1.kind = DrawingItem::Kind::Rectangle;
+    r1.t0 = 1.0; r1.f0 = 50.0; r1.t1 = 1.2; r1.f1 = 80.0;
+    app.addDrawing (r1);
+    DrawingItem r2 = r1;
+    r2.t0 = 2.0; r2.t1 = 2.2;
+    app.addDrawing (r2);
+    DrawingPanel dp (app);
+    dp.setSize (300, 240);
+    dp.refresh();
+    dp.listTable().selectRow (0);
+    dp.listTable().keyPressed (del);
+    CHECK (d->drawings.size() == 1, "DEL in the drawing list removes the selected drawing");
+    CHECK (audioUntouched(), "...and leaves the audio alone");
+
+    // Tables and parameters
+    std::string err;
+    CHECK (app.addTableFromCsv ("T", "t,v\n0,1\n1,2\n", &err), "a table to delete: " + err);
+    TablesPanel tp (app);
+    tp.setSize (320, 260);
+    tp.refresh();
+    tp.listTable().selectRow (0);   // the table row
+    tp.listTable().keyPressed (del);
+    CHECK (d->tables.empty(), "DEL in the tables list removes the selected table");
+    CHECK (audioUntouched(), "...and leaves the audio alone");
+
+    // Model components
+    ModelPanel mdl (app);
+    mdl.setSize (420, 520);
+    mdl.addComponent (sc::model::Kind::Harmonic);
+    mdl.addComponent (sc::model::Kind::Noise);
+    mdl.selectIndex (0);
+    mdl.list().keyPressed (del);
+    CHECK (app.soundModel() != nullptr && app.soundModel()->components.size() == 1
+               && app.soundModel()->components[0].kind == sc::model::Kind::Noise,
+           "DEL in the model list removes the selected component");
+    CHECK (audioUntouched(), "...and leaves the audio alone");
+
+    wav.deleteFile ();
+}
+
 // ---------------- Saved-selection comments: serialisation round-trips -------
 static void testSavedSelectionComment()
 {
@@ -31224,6 +31313,7 @@ static int scRunUnitTestsImpl()
     SC_RUN_TEST ("right-click keeps selection", testRightClickKeepsMultiSelection);
     SC_RUN_TEST ("dead panel pending fit", testDestroyedPanelPendingFit);
     SC_RUN_TEST ("panel DEL deletes audio", testPanelDelDeletesAudio);
+    SC_RUN_TEST ("panel DEL deletes the selected items (#53)", testPanelDelDeletesSelectedItems);
     SC_RUN_TEST ("saved selection comment", testSavedSelectionComment);
     SC_RUN_TEST ("selection recall live", testSelectionRecallLive);
     SC_RUN_TEST ("python scripts", testPythonScripts);
